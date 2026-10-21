@@ -171,13 +171,18 @@ static bool bind_test_same_links(const Link* a, const Link* b)
         result = a->fixups.offset[fixup] == b->fixups.offset[fixup] && a->fixups.target[fixup] == b->fixups.target[fixup] && a->fixups.kind[fixup] == b->fixups.kind[fixup] &&
                  link_fixup_addend(a, fixup) == link_fixup_addend(b, fixup);
     }
+    result = result && a->priorities.count == b->priorities.count;
+    for (uint32_t entry = 1; result && entry < a->priorities.count; entry += 1)
+    {
+        result = a->priorities.atom[entry] == b->priorities.atom[entry] && a->priorities.priority[entry] == b->priorities.priority[entry];
+    }
     return result;
 }
 
 // Whether two bindings ended alike: the error and its name, the imports, the exports and the members that joined.
 static bool bind_test_same_binds(const Bind* a, const Bind* b)
 {
-    const uint32_t words = (a->runtime->nonshared.member_count + 63) / 64;
+    const uint32_t words = (a->runtime->member_count + 63) / 64;
     bool result = a->error == b->error && a->name == b->name && a->import_count == b->import_count && a->export_count == b->export_count &&
                   memcmp(a->imports, b->imports, a->import_count * sizeof(SymbolId)) == 0 && memcmp(a->exports, b->exports, a->export_count * sizeof(SymbolId)) == 0;
     for (uint32_t w = 0; result && w < words; w += 1)
@@ -219,7 +224,7 @@ static bool bind_test_bound(const Link* link, const Runtime* runtime, SymbolId s
     const uint32_t export = name != 0 ? import_library_find(&runtime->libc, link->names.bytes[name], link->names.length[name], link->names.hash[name]) : 0;
     const bool imported = source == BUSTER_LINK_SOURCE_RUNTIME_SHARED && export != 0 && runtime->libc.exports.version[export - 1] == symbols->version[symbol] &&
                           (runtime->libc.exports.flags[export - 1] & BUSTER_LINK_SYMBOL_TYPE) == (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_TYPE);
-    const bool linker = source == BUSTER_LINK_SOURCE_LINKER && name != 0 && runtime_linker_name(link->names.bytes[name], link->names.length[name]);
+    const bool linker = source == BUSTER_LINK_SOURCE_LINKER && name != 0 && runtime_linker_name(runtime->kind, link->names.bytes[name], link->names.length[name]);
     return symbols->atom[symbol] != 0 || imported || linker || (source == BUSTER_LINK_SOURCE_NONE && weak);
 }
 
@@ -505,7 +510,7 @@ static void bind_test_structure(BindTestTally* tally, const BindTestProgram* tes
         tail_first = tail && atom < tail_first ? atom : tail_first;
     }
     bind_test_expect(tally, head_ordered && head_last < program_first && program_last < tail_first, "the crt objects in GCC's order around the program", head_last);
-    const uint32_t member_count = runtime->nonshared.member_count;
+    const uint32_t member_count = runtime->member_count;
     bool pieces = true;
     for (uint32_t piece = 0; piece < RUNTIME_OBJECTS + member_count; piece += 1)
     {
@@ -935,12 +940,12 @@ static bool bind_test_rule_holds(const BindTestRuleLink* rule, const Runtime* ru
         result = rule->ended && atom != 0 && unit >= 1 + RUNTIME_OBJECTS && symbols->source[first] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE && weak &&
                  (flags & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_HIDDEN && atfork != 0 && symbols->source[atfork] == BUSTER_LINK_SOURCE_RUNTIME_SHARED;
         const uint32_t member = unit >= 1 + RUNTIME_OBJECTS ? unit - 1 - RUNTIME_OBJECTS : 0;
-        result = result && member < runtime->nonshared.member_count && (bind->members_joined[member / 64] >> (member % 64) & 1) != 0;
+        result = result && member < runtime->member_count && (bind->members_joined[member / 64] >> (member % 64) & 1) != 0;
     }
     else if (which == BIND_TEST_RULE_WEAK_ATFORK)
     {
         bool members = false;
-        for (uint32_t w = 0; w < (runtime->nonshared.member_count + 63) / 64; w += 1)
+        for (uint32_t w = 0; w < (runtime->member_count + 63) / 64; w += 1)
         {
             members = members || bind->members_joined[w] != 0;
         }
@@ -997,7 +1002,7 @@ static bool bind_test_rule_holds(const BindTestRuleLink* rule, const Runtime* ru
     {
         // A member is within the executable, so it defines the name.
         const uint32_t member = unit >= 1 + RUNTIME_OBJECTS ? unit - 1 - RUNTIME_OBJECTS : UINT32_MAX;
-        result = rule->ended && atom != 0 && symbols->source[first] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE && member < runtime->nonshared.member_count &&
+        result = rule->ended && atom != 0 && symbols->source[first] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE && member < runtime->member_count &&
                  (bind->members_joined[member / 64] >> (member % 64) & 1) != 0;
     }
     else if (which == BIND_TEST_RULE_ARRAY_BOUNDS)
@@ -1239,10 +1244,10 @@ static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, Bi
 // The index of libc_nonshared.a's member named `name`, or the member count.
 static uint32_t bind_test_member(const Runtime* runtime, const char* name)
 {
-    uint32_t result = runtime->nonshared.member_count;
-    for (uint32_t m = 0; m < runtime->nonshared.member_count; m += 1)
+    uint32_t result = runtime->member_count;
+    for (uint32_t m = 0; m < runtime->member_count; m += 1)
     {
-        result = result == runtime->nonshared.member_count && import_equal(runtime->nonshared.members[m].name, name) ? m : result;
+        result = result == runtime->member_count && import_equal(runtime->members[m].name, name) ? m : result;
     }
     return result;
 }
@@ -1254,7 +1259,7 @@ static void bind_test_atexit_checks(BindTestTally* tally, const BindTestAtexit* 
     const Bind* bind = &program->test.bind;
     const uint32_t member = bind_test_member(runtime, "atexit.oS");
     const AtomId atom = symbols->atom[program->atexit];
-    const bool joined = member < runtime->nonshared.member_count && (bind->members_joined[member / 64] >> (member % 64) & 1) != 0;
+    const bool joined = member < runtime->member_count && (bind->members_joined[member / 64] >> (member % 64) & 1) != 0;
     bind_test_expect(tally, program->bound, "the atexit program bound", bind->error);
     bind_test_expect(tally, joined, "atexit.oS joined", member);
     bind_test_expect(tally, atom != 0 && link->atoms.unit[atom] == 1 + RUNTIME_OBJECTS + member && symbols->source[program->atexit] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE,
@@ -1333,7 +1338,7 @@ static uint32_t bind_test_link_arguments(char** arguments, const char* linker, c
     {
         arguments[count++] = paths[unit];
     }
-    for (uint32_t m = 0; m < runtime->nonshared.member_count; m += 1)
+    for (uint32_t m = 0; m < runtime->member_count; m += 1)
     {
         if ((bind->members_joined[m / 64] >> (m % 64) & 1) != 0)
         {
@@ -1359,7 +1364,7 @@ static void bind_test_link_and_run(BindTestTally* tally, const Link* link, const
         "ld.bfd",
     };
     const uint64_t length = arena->length;
-    const uint32_t unit_count = units + RUNTIME_OBJECTS + runtime->nonshared.member_count;
+    const uint32_t unit_count = units + RUNTIME_OBJECTS + runtime->member_count;
     char** paths = BUSTER_ARENA_PUSH_ARRAY(arena, char*, unit_count);
     char* path_bytes = arena_push(arena, (uint64_t)unit_count * BUSTER_BIND_TEST_PATH_BYTES, 1);
     char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)unit_count + 16);
@@ -1537,13 +1542,13 @@ static bool bind_test_same_dynamic(const Link* link, const Bind* bind, const Run
 // of libc_nonshared.a, against those that joined.
 static bool bind_test_same_members(String8 text, const Bind* bind, const Runtime* runtime)
 {
-    const uint32_t words = (runtime->nonshared.member_count + 63) / 64;
+    const uint32_t words = (runtime->member_count + 63) / 64;
     uint64_t extracted[4] = { 0 };
     bool result = words <= BUSTER_ARRAY_LENGTH(extracted) && text.pointer != 0;
-    for (uint32_t m = 0; result && m < runtime->nonshared.member_count; m += 1)
+    for (uint32_t m = 0; result && m < runtime->member_count; m += 1)
     {
         char needle[512];
-        snprintf(needle, sizeof(needle), "libc_nonshared.a(%.*s)", (int)runtime->nonshared.members[m].name.length, runtime->nonshared.members[m].name.pointer);
+        snprintf(needle, sizeof(needle), "libc_nonshared.a(%.*s)", (int)runtime->members[m].name.length, runtime->members[m].name.pointer);
         if (strstr(text.pointer, needle) != 0)
         {
             extracted[m / 64] |= 1ull << (m % 64);

@@ -487,7 +487,7 @@ struct LinkBenchmarkBinding
 static bool link_benchmark_save(LinkBenchmarkBinding* saved, const Bind* bind, Arena* arena)
 {
     const Runtime* runtime = bind->runtime;
-    const uint32_t words = (runtime->nonshared.member_count + 63) / 64;
+    const uint32_t words = (runtime->member_count + 63) / 64;
     *saved = (LinkBenchmarkBinding){
         .bind = *bind,
         .name_symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->global_names.count),
@@ -510,7 +510,7 @@ static bool link_benchmark_save(LinkBenchmarkBinding* saved, const Bind* bind, A
 static void link_benchmark_load(const LinkBenchmarkBinding* saved, Bind* bind)
 {
     const Runtime* runtime = saved->bind.runtime;
-    const uint32_t words = (runtime->nonshared.member_count + 63) / 64;
+    const uint32_t words = (runtime->member_count + 63) / 64;
     *bind = saved->bind;
     memcpy(bind->name_symbols, saved->name_symbols, runtime->global_names.count * sizeof(SymbolId));
     memcpy(bind->named, saved->named, runtime->global_names.count * sizeof(uint32_t));

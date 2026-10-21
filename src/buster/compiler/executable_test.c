@@ -3362,7 +3362,8 @@ static bool executable_test_kernel(uint64_t seed)
         for (uint32_t i = 0; i < BUSTER_EXECUTABLE_TEST_KERNEL_FIXUPS; i += 1)
         {
             const uint64_t pick = executable_test_random(&state);
-            uint8_t kind = (uint8_t)(1 + pick % (BUSTER_LINK_FIXUP_KINDS - 1));
+            // The kinds up to SIZE64: an executable doesn't take the general- and local-dynamic ones yet.
+            uint8_t kind = (uint8_t)(1 + pick % BUSTER_LINK_FIXUP_SIZE64);
             kind = pick % 3 == 0 ? kind : (pick & 8) != 0 ? BUSTER_LINK_FIXUP_CALL : BUSTER_LINK_FIXUP_PC32;
             const bool wide = (pick >> 8) % 16 == 0;
             offsets[i] = 16 * i + (uint32_t)((pick >> 16) % 8);

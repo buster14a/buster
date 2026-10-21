@@ -11,15 +11,19 @@
 //     --functions workers each (200), like benchmark-object-writer's: about one of synth's translation units each;
 //   - function sections: the same objects with a section per function;
 //   - many sections: one unit of 33,000 functions in sections of their own, past SHN_LORESERVE sections;
-//   - runtime objects: this system's crt objects and libc_nonshared.a's members, as runtime_import finds them.
+//   - runtime objects: this system's crt objects and libc_nonshared.a's members, as runtime_import finds them;
+//   - static runtime objects: a static executable's crt objects and its archives' members (libgcc.a, libgcc_eh.a,
+//     libatomic.a where GCC has it, and libc.a), as runtime_import_static finds them.
 // Each run imports every object of its case into a link of its own (import_object_capacity's room), the paths taking
 // turns, and checks that both make the same records: the time per object, and per record (each symbol table entry and
 // relocation). Then the files: this system's libc.so.6 and each --library, read by import_library's two paths, per
 // .dynsym entry; libc_nonshared.a and each --archive, by import_archive's two paths, per index entry; and for each
 // library, the exports' index (import_library_index) against the open-addressing table it replaced, built and then
-// looked up for every export's name and every reference's; libc.so's script, which only the exact path reads; and
-// runtime_import end to end, as a link without the snapshot would run it. Each figure is the median of BUSTER_IMPORT_BENCHMARK_RUNS runs after a warm-up, with cycles and instructions from the
-// hardware counters (zero when unavailable).
+// looked up for every export's name and every reference's; libc.so's script, which only the exact path reads;
+// runtime_import end to end, as a link without the snapshot would run it; the static runtime's archives, by
+// import_archive's two paths; and runtime_import_static end to end. Each figure is the median of
+// BUSTER_IMPORT_BENCHMARK_RUNS runs after a warm-up, with cycles and instructions from the hardware counters (zero when
+// unavailable).
 // The exit status is 1 if the arguments are invalid, a case or a file can't be made or read, or the paths disagree.
 
 #include <stdint.h>
@@ -67,6 +71,7 @@ struct String8
 #define BUSTER_IMPORT_BENCHMARK_MAX_OBJECTS 4096
 #define BUSTER_IMPORT_BENCHMARK_ARENA_BYTES (1ull << 36)
 #define BUSTER_IMPORT_BENCHMARK_MAX_FILES 16
+#define BUSTER_IMPORT_BENCHMARK_CASES 5
 
 typedef enum ImportBenchmarkPath
 {
@@ -174,6 +179,7 @@ static bool import_benchmark_add(ImportBenchmarkCase* benchmark, const uint8_t* 
         benchmark->capacity.symbols += capacity.symbols;
         benchmark->capacity.fixups += capacity.fixups;
         benchmark->capacity.wide_addends += capacity.wide_addends;
+        benchmark->capacity.priorities += capacity.priorities;
         benchmark->records += (uint64_t)capacity.symbols + capacity.fixups;
     }
     return result;
@@ -209,17 +215,18 @@ static bool import_benchmark_program(ImportBenchmarkCase* benchmark, LinkProgram
     return result;
 }
 
-// This system's crt objects and libc_nonshared.a's members.
-static bool import_benchmark_runtime(ImportBenchmarkCase* benchmark, Runtime* runtime, Arena* arena)
+// This system's crt objects and archives' members, for a runtime of `kind`: libc_nonshared.a's for a dynamic PIE, and
+// libgcc.a's, libgcc_eh.a's, libatomic.a's and libc.a's for a static executable.
+static bool import_benchmark_runtime(ImportBenchmarkCase* benchmark, Runtime* runtime, RuntimeKind kind, Arena* arena)
 {
-    bool result = runtime_import(runtime) == RUNTIME_ERROR_NONE;
+    bool result = runtime_import_kind(runtime, kind) == RUNTIME_ERROR_NONE;
     for (uint32_t i = 0; result && i < RUNTIME_OBJECTS; i += 1)
     {
         result = import_benchmark_add(benchmark, (const uint8_t*)runtime->object_bytes[i].pointer, runtime->object_bytes[i].length, arena);
     }
-    for (uint32_t m = 0; result && m < runtime->nonshared.member_count; m += 1)
+    for (uint32_t m = 0; result && m < runtime->member_count; m += 1)
     {
-        const String8 member = runtime->nonshared.members[m].bytes;
+        const String8 member = runtime->members[m].bytes;
         result = import_benchmark_add(benchmark, (const uint8_t*)member.pointer, member.length, arena);
     }
     return result;
@@ -270,6 +277,8 @@ static bool import_benchmark_same(const Link* a, const Link* b)
     result = result && memcmp(a->fixups.offset, b->fixups.offset, fixups * sizeof(uint32_t)) == 0 && memcmp(a->fixups.target, b->fixups.target, fixups * sizeof(SymbolId)) == 0 &&
              memcmp(a->fixups.addend, b->fixups.addend, fixups * sizeof(int32_t)) == 0 && memcmp(a->fixups.kind, b->fixups.kind, fixups) == 0 &&
              memcmp(a->fixups.wide_addends, b->fixups.wide_addends, (uint64_t)a->fixups.wide_count * sizeof(int64_t)) == 0;
+    result = result && a->priorities.count == b->priorities.count && memcmp(a->priorities.atom, b->priorities.atom, a->priorities.count * sizeof(AtomId)) == 0 &&
+             memcmp(a->priorities.priority, b->priorities.priority, a->priorities.count * sizeof(uint16_t)) == 0;
     return result;
 }
 
@@ -644,22 +653,23 @@ static bool import_benchmark_script(String8 path, int cycles_counter, int instru
     return result;
 }
 
-// runtime_import end to end, as a link without a snapshot would run it: the search's probes, each file read, imported
-// and bound.
-static bool import_benchmark_runtime_import(int cycles_counter, int instructions_counter)
+// runtime_import (or runtime_import_static, for `kind`) end to end, as a link without a snapshot would run it: the
+// search's probes, each file read, imported and bound.
+static bool import_benchmark_runtime_import(RuntimeKind kind, int cycles_counter, int instructions_counter)
 {
     uint64_t nanoseconds[BUSTER_IMPORT_BENCHMARK_RUNS];
     uint64_t cycles[BUSTER_IMPORT_BENCHMARK_RUNS];
     uint64_t instructions[BUSTER_IMPORT_BENCHMARK_RUNS];
     bool result = true;
     uint32_t probes = 0;
+    uint32_t members = 0;
     for (uint32_t run = 0; result && run < BUSTER_IMPORT_BENCHMARK_RUNS + 1; run += 1)
     {
         Runtime runtime;
         const uint64_t cycles_before = import_benchmark_count(cycles_counter);
         const uint64_t instructions_before = import_benchmark_count(instructions_counter);
         const uint64_t start = import_benchmark_now();
-        result = runtime_import(&runtime) == RUNTIME_ERROR_NONE;
+        result = runtime_import_kind(&runtime, kind) == RUNTIME_ERROR_NONE;
         const uint64_t end = import_benchmark_now();
         // The first run is the warm-up.
         if (run != 0)
@@ -669,11 +679,12 @@ static bool import_benchmark_runtime_import(int cycles_counter, int instructions
             nanoseconds[run - 1] = end - start;
         }
         probes = runtime.probe_count;
+        members = runtime.member_count;
         runtime_release(&runtime);
     }
     if (result)
     {
-        printf("runtime_import, end to end: %u probes\n", probes);
+        printf("%s, end to end: %u probes, %u members\n", kind == RUNTIME_KIND_STATIC ? "runtime_import_static" : "runtime_import", probes, members);
         import_benchmark_print("vector", nanoseconds, cycles, instructions, 1, "import");
     }
     return result;
@@ -741,12 +752,14 @@ int run_import_benchmark(int argc, char** argv)
         printf("usage: benchmark-import [--units N] [--functions N] [--seed N] [--library PATH]... [--archive PATH]...\n");
     }
     Arena arena = arena_reserve(BUSTER_IMPORT_BENCHMARK_ARENA_BYTES);
-    ImportBenchmarkCase* cases = valid ? BUSTER_ARENA_PUSH_ARRAY(&arena, ImportBenchmarkCase, 4) : 0;
+    ImportBenchmarkCase* cases = valid ? BUSTER_ARENA_PUSH_ARRAY(&arena, ImportBenchmarkCase, BUSTER_IMPORT_BENCHMARK_CASES) : 0;
     Runtime runtime;
+    Runtime static_runtime;
     bool runtime_started = false;
+    bool static_started = false;
     if (cases != 0)
     {
-        memset(cases, 0, 4 * sizeof(ImportBenchmarkCase));
+        memset(cases, 0, BUSTER_IMPORT_BENCHMARK_CASES * sizeof(ImportBenchmarkCase));
         LinkProgramOptions options = link_program_default_options();
         options.seed = seed;
         // Program-wide counts, as benchmark-object-writer's: per unit, --functions workers, 8 globals, 2 thread-locals,
@@ -763,6 +776,7 @@ int run_import_benchmark(int argc, char** argv)
         cases[1].name = "function sections";
         cases[2].name = "many sections";
         cases[3].name = "runtime objects";
+        cases[4].name = "static runtime objects";
         result = import_benchmark_program(&cases[0], options, false, &arena) && import_benchmark_program(&cases[1], options, true, &arena);
         LinkProgramOptions many = options;
         many.units = 1;
@@ -770,9 +784,11 @@ int run_import_benchmark(int argc, char** argv)
         many.filler = 0;
         result = result && import_benchmark_program(&cases[2], many, true, &arena);
         runtime_started = result;
-        result = result && import_benchmark_runtime(&cases[3], &runtime, &arena);
+        result = result && import_benchmark_runtime(&cases[3], &runtime, RUNTIME_KIND_DYNAMIC, &arena);
+        static_started = result;
+        result = result && import_benchmark_runtime(&cases[4], &static_runtime, RUNTIME_KIND_STATIC, &arena);
     }
-    for (uint32_t c = 0; result && c < 4; c += 1)
+    for (uint32_t c = 0; result && c < BUSTER_IMPORT_BENCHMARK_CASES; c += 1)
     {
         const ImportBenchmarkCase* benchmark = &cases[c];
         printf("%s: %u objects, %llu records (%u symbol table entries, %u relocations)\n", benchmark->name, benchmark->object_count, (unsigned long long)benchmark->records,
@@ -786,10 +802,18 @@ int run_import_benchmark(int argc, char** argv)
     {
         result = import_benchmark_file(IMPORT_BENCHMARK_LIBRARY, "libc.so.6", runtime.libc_bytes, cycles_counter, instructions_counter, &arena) &&
                  import_benchmark_index("libc.so.6", runtime.libc_bytes, cycles_counter, instructions_counter, &arena);
-        result = result && import_benchmark_file(IMPORT_BENCHMARK_ARCHIVE, "libc_nonshared.a", runtime.nonshared_bytes, cycles_counter, instructions_counter, &arena);
+        result = result && import_benchmark_file(IMPORT_BENCHMARK_ARCHIVE, "libc_nonshared.a", runtime.archives[0].bytes, cycles_counter, instructions_counter, &arena);
         result = result && import_benchmark_script(runtime.libc_script, cycles_counter, instructions_counter, &arena);
-        result = result && import_benchmark_runtime_import(cycles_counter, instructions_counter);
+        result = result && import_benchmark_runtime_import(RUNTIME_KIND_DYNAMIC, cycles_counter, instructions_counter);
     }
+    // The static runtime's archives, then its import end to end.
+    for (uint32_t a = 0; result && a < static_runtime.archive_count; a += 1)
+    {
+        const char* name = strrchr(static_runtime.archives[a].path.pointer, '/');
+        result = import_benchmark_file(IMPORT_BENCHMARK_ARCHIVE, name != 0 ? name + 1 : static_runtime.archives[a].path.pointer, static_runtime.archives[a].bytes, cycles_counter,
+                                       instructions_counter, &arena);
+    }
+    result = result && import_benchmark_runtime_import(RUNTIME_KIND_STATIC, cycles_counter, instructions_counter);
     for (uint32_t i = 0; result && i < library_count + archive_count; i += 1)
     {
         const bool library = i < library_count;
@@ -816,6 +840,10 @@ int run_import_benchmark(int argc, char** argv)
     if (runtime_started)
     {
         runtime_release(&runtime);
+    }
+    if (static_started)
+    {
+        runtime_release(&static_runtime);
     }
     arena_release(&arena);
     return result ? 0 : 1;

@@ -1711,7 +1711,7 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
                                      const char* name, bool keep, Arena* arena)
 {
     const uint64_t length = arena->length;
-    const uint32_t unit_count = units + RUNTIME_OBJECTS + runtime->nonshared.member_count;
+    const uint32_t unit_count = units + RUNTIME_OBJECTS + runtime->member_count;
     char** paths = BUSTER_ARENA_PUSH_ARRAY(arena, char*, unit_count);
     char* path_bytes = arena_push(arena, (uint64_t)unit_count * BUSTER_BIND_TEST_PATH_BYTES, 1);
     char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)unit_count + 16);

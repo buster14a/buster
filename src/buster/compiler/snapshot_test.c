@@ -10,7 +10,8 @@
 // tests remove unless --keep says to leave it. The checks, in this order:
 //   - Round trip: the system's runtime, imported, written as a snapshot and loaded back, must have the same records as
 //     the import's (snapshot_test_same_runtime), and so must the loaded one after a new snapshot was renamed over the
-//     file it maps. The loaded runtime must use the file's mapping and no arena.
+//     file it maps. The loaded runtime must use the file's mapping and no arena. Then the same for a static
+//     executable's runtime (runtime_import_static), with its archives' members, their references and COMDAT groups.
 //   - Links: test-link's programs that call libc, and one of --functions workers (2,000 by default), bound by both of
 //     binding's paths against the imported runtime and against the loaded one: the same links and bindings, written as
 //     dynamic PIEs by 1 and 8 lanes into the same bytes, which run as their models predict.
@@ -120,19 +121,39 @@ static void snapshot_test_same_runtime(SnapshotTestTally* tally, const Runtime* 
         names_run = link->names.bytes[name] - loaded->names.base == imported->link.names.bytes[name] - imported->names.base;
     }
     snapshot_test_expect(tally, names_run, "the names run, each name where the import put it", index);
-    const uint64_t pieces = RUNTIME_OBJECTS + (uint64_t)imported->nonshared.member_count;
+    const uint64_t pieces = RUNTIME_OBJECTS + (uint64_t)imported->member_count;
     const uint64_t symbols = imported->link.symbols.count;
-    snapshot_test_expect(tally, loaded->nonshared.member_count == imported->nonshared.member_count && loaded->nonshared_unit == imported->nonshared_unit &&
+    snapshot_test_expect(tally, loaded->member_count == imported->member_count && loaded->member_unit == imported->member_unit &&
                                     snapshot_test_same_column(loaded->pieces, imported->pieces, pieces * sizeof(RuntimePiece)),
                          "the pieces", index);
+    bool archives = loaded->kind == imported->kind && loaded->archive_count == imported->archive_count;
+    for (uint32_t a = 0; archives && a < imported->archive_count; a += 1)
+    {
+        archives = snapshot_test_same_string(loaded->archives[a].path, imported->archives[a].path) && loaded->archives[a].first_member == imported->archives[a].first_member &&
+                   loaded->archives[a].archive.member_count == imported->archives[a].archive.member_count &&
+                   loaded->archives[a].archive.members == loaded->members + imported->archives[a].first_member;
+    }
+    snapshot_test_expect(tally, archives, "the kind and the archives", index);
+    // The pieces' references and COMDAT groups, which a static runtime's closure reads.
+    const uint64_t references = imported->reference_begin[pieces];
+    const uint64_t groups = imported->group_begin[pieces];
+    const uint64_t group_atoms = groups != 0 ? (uint64_t)imported->groups[groups - 1].first + imported->groups[groups - 1].count : 0;
+    snapshot_test_expect(tally, snapshot_test_same_column(loaded->reference_begin, imported->reference_begin, (pieces + 1) * sizeof(uint32_t)) &&
+                                    snapshot_test_same_column(loaded->references, imported->references, references * sizeof(uint32_t)),
+                         "the references", index);
+    snapshot_test_expect(tally, loaded->group_signatures == imported->group_signatures &&
+                                    snapshot_test_same_column(loaded->group_begin, imported->group_begin, (pieces + 1) * sizeof(uint32_t)) &&
+                                    snapshot_test_same_column(loaded->groups, imported->groups, groups * sizeof(RuntimeGroup)) &&
+                                    snapshot_test_same_column(loaded->group_atoms, imported->group_atoms, group_atoms * sizeof(AtomId)),
+                         "the groups", index);
     snapshot_test_expect(tally, snapshot_test_same_column(loaded->bindings, imported->bindings, symbols * sizeof(RuntimeBinding)) &&
                                     snapshot_test_same_column(loaded->symbol_names, imported->symbol_names, symbols * sizeof(uint32_t)),
                          "the bindings and the symbols' global names", index);
     bool members = true;
-    for (uint32_t m = 0; m < imported->nonshared.member_count; m += 1)
+    for (uint32_t m = 0; m < imported->member_count; m += 1)
     {
-        members = members && snapshot_test_same_string(loaded->nonshared.members[m].name, imported->nonshared.members[m].name) &&
-                  loaded->nonshared.members[m].offset == imported->nonshared.members[m].offset;
+        members = members && snapshot_test_same_string(loaded->members[m].name, imported->members[m].name) &&
+                  loaded->members[m].offset == imported->members[m].offset;
     }
     snapshot_test_expect(tally, members, "the members' names", index);
     const RuntimeNames* a = &imported->global_names;
@@ -141,7 +162,8 @@ static void snapshot_test_same_runtime(SnapshotTestTally* tally, const Runtime* 
     bool globals = a->count == b->count && a->strings_length == b->strings_length && memcmp(a->strings, b->strings, a->strings_length) == 0 &&
                    snapshot_test_same_column(a->offset, b->offset, count * sizeof(uint32_t)) && snapshot_test_same_column(a->length, b->length, count * sizeof(uint32_t)) &&
                    snapshot_test_same_column(a->hash, b->hash, count * sizeof(uint64_t)) && snapshot_test_same_column(a->definition, b->definition, count * sizeof(SymbolId)) &&
-                   snapshot_test_same_column(a->export, b->export, count * sizeof(uint32_t)) && snapshot_test_same_column(a->referenced, b->referenced, count) &&
+                   snapshot_test_same_column(a->member, b->member, count * sizeof(uint32_t)) && snapshot_test_same_column(a->export, b->export, count * sizeof(uint32_t)) &&
+                   snapshot_test_same_column(a->referenced, b->referenced, count) &&
                    snapshot_test_same_column(a->linker, b->linker, count);
     snapshot_test_expect(tally, globals, "the global names", index);
     const uint64_t starts = ((uint64_t)1 << a->index.bucket_bits) + 1;
@@ -171,8 +193,7 @@ static void snapshot_test_same_runtime(SnapshotTestTally* tally, const Runtime* 
                          "libc.so.6's exports' versions and types", index);
     bool paths = snapshot_test_same_string(imported->gcc_directory, loaded->gcc_directory) && snapshot_test_same_string(imported->gcc_versions, loaded->gcc_versions) &&
                  snapshot_test_same_string(imported->libc_script, loaded->libc_script) && snapshot_test_same_string(imported->libc_path, loaded->libc_path) &&
-                 snapshot_test_same_string(imported->nonshared_path, loaded->nonshared_path) && snapshot_test_same_string(imported->loader_path, loaded->loader_path) &&
-                 snapshot_test_same_string(imported->abi_note, loaded->abi_note);
+                 snapshot_test_same_string(imported->loader_path, loaded->loader_path) && snapshot_test_same_string(imported->abi_note, loaded->abi_note);
     for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
     {
         paths = paths && snapshot_test_same_string(imported->object_paths[i], loaded->object_paths[i]);
@@ -221,13 +242,14 @@ static SnapshotStatus snapshot_test_load(Runtime* runtime, const char* directory
     return snapshot_load(runtime, path, compiler, 0);
 }
 
-static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, const Runtime* imported, const RuntimeProbe* compiler)
+// The runtime written as a snapshot in a directory of its own, `name`, and loaded back, as the check `check`.
+static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, const Runtime* imported, const RuntimeProbe* compiler, const char* check, const char* name)
 {
     SnapshotTestTally tally = {
-        .check = "round trip",
+        .check = check,
     };
     char place[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
-    snapshot_test_path(place, directory->path, "round-trip");
+    snapshot_test_path(place, directory->path, name);
     const bool written = snapshot_test_write(imported, place, compiler);
     snapshot_test_expect(&tally, written, "the snapshot written", 0);
     Runtime loaded;
@@ -236,8 +258,8 @@ static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, c
     if (status == SNAPSHOT_STATUS_LOADED)
     {
         snapshot_test_same_runtime(&tally, imported, &loaded, 0);
-        printf("  %u probes, %u global names, %u exports, %u symbols: a %llu-byte snapshot\n", loaded.probe_count, loaded.global_names.count, loaded.libc.exports.count,
-               loaded.link.symbols.count - 1, (unsigned long long)loaded.snapshot_bytes);
+        printf("  %u probes, %u global names, %u exports, %u members, %u symbols: a %llu-byte snapshot\n", loaded.probe_count, loaded.global_names.count,
+               loaded.libc.exports.count, loaded.member_count, loaded.link.symbols.count - 1, (unsigned long long)loaded.snapshot_bytes);
         // Another snapshot renamed over the file: the loaded runtime keeps the one it maps.
         snapshot_test_expect(&tally, snapshot_test_write(imported, place, compiler), "a second snapshot written over the first", 0);
         snapshot_test_same_runtime(&tally, imported, &loaded, 1);
@@ -1017,7 +1039,13 @@ static int run_snapshot_tests(int argc, char** argv)
     }
     else
     {
-        bool passed = snapshot_test_round_trip(&directory, &runtime, &compiler);
+        bool passed = snapshot_test_round_trip(&directory, &runtime, &compiler, "round trip", "round-trip");
+        // A static executable's runtime, whose snapshot has the archives' members, references and groups.
+        Runtime static_runtime;
+        const RuntimeError static_imported = runtime_import_static(&static_runtime);
+        printf("%s", static_imported != RUNTIME_ERROR_NONE ? "static round trip: the static runtime didn't import\n" : "");
+        passed = static_imported == RUNTIME_ERROR_NONE && snapshot_test_round_trip(&directory, &static_runtime, &compiler, "static round trip", "static-round-trip") && passed;
+        runtime_release(&static_runtime);
         passed = snapshot_test_links(&directory, &runtime, &compiler, seed, (uint32_t)functions) && passed;
         passed = snapshot_test_opening(&directory, &runtime, &compiler) && passed;
         passed = snapshot_test_staleness(&directory, &runtime, &compiler) && passed;

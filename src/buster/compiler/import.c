@@ -17,12 +17,19 @@
 //     would give its output section, by type, flags and name (import_section_class). Its bytes point into the file's
 //     bytes, which the caller keeps for as long as the link and lets the link write: an executable patches atoms in
 //     place. Unallocated sections, notes and .sframe are dropped: GCC 16's crt objects have an .sframe, which lld copies
-//     and GNU ld merges, and which the representation has no class for. SHT_GROUP, SHT_REL and SHT_PREINIT_ARRAY
-//     sections, and a group's members, are unsupported.
+//     and GNU ld merges, and which the representation has no class for (libc.a's .gnu.warning.* and .note.stapsdt go
+//     too). An init or fini array's .init_array.N or .fini_array.N gets priority N (link_add_priority). SHT_REL and
+//     SHT_PREINIT_ARRAY sections, and .ctors and .dtors, which linkers would move into the arrays reversed, are
+//     unsupported.
+//   - COMDAT groups (libc.a's DW.ref.__gcc_personality_v0 and .stapsdt.base): each becomes an ImportGroup with its
+//     sections, which are imported as any others; the caller keeps the first group of each signature and discards the
+//     rest. A group without GRP_COMDAT, and a section with SHF_GROUP in no group or in two, are unsupported.
 //   - Symbols: each one defined in an atom becomes a symbol of the given source there, with its name, value, size,
-//     type, binding and visibility; each undefined one, a symbol of source NONE without an atom; and each section
+//     type (an IFUNC's among them), binding and visibility; each absolute one (SHN_ABS), a symbol of source ABSOLUTE
+//     with its value and without an atom; each undefined one, a symbol of source NONE without an atom; and each section
 //     symbol, an unnamed local at its atom's start, which relocations against the section refer to. FILE symbols, and
-//     locals defined in dropped sections, become none. Absolute, common, IFUNC and GNU_UNIQUE symbols are unsupported.
+//     locals defined in dropped sections, become none. Common and GNU_UNIQUE symbols, and absolute TLS symbols and
+//     IFUNCs, are unsupported.
 //   - Relocations: each entry of an atom's .rela section becomes one of its fixups, of the kind its type names (the
 //     inverse of the object writer's object_relocation_types), with its target and addend, in offset order: sorted
 //     if the file's aren't. Other types are unsupported.
@@ -105,8 +112,19 @@ struct ImportResult
     uint64_t offset;
 };
 
+// A COMDAT group (SHT_GROUP with GRP_COMDAT): its signature, the name of its symbol (or for a section symbol, of the
+// section), and its sections, `count` indices from `first` in ImportObject.group_sections. A link keeps one group of a
+// signature, the first, and discards its sections in the others.
+typedef struct ImportGroup ImportGroup;
+struct ImportGroup
+{
+    String8 signature;
+    uint32_t first;
+    uint32_t count;
+};
+
 // What import_object made of an object's sections and symbols, by their indices in the file: the atom each section
-// became and the symbol each symbol table entry became, 0 for none.
+// became and the symbol each symbol table entry became, 0 for none; and its COMDAT groups, in section order.
 typedef struct ImportObject ImportObject;
 struct ImportObject
 {
@@ -114,6 +132,9 @@ struct ImportObject
     uint32_t section_count;
     SymbolId* symbols;
     uint32_t symbol_count;
+    ImportGroup* groups;
+    uint32_t group_count;
+    uint32_t* group_sections;
 };
 
 typedef struct ImportMember ImportMember;
@@ -438,7 +459,7 @@ static bool import_table(const Elf64_Shdr* header, uint64_t entry_size, uint64_t
 #define BUSTER_IMPORT_PATTERN_BYTES 16
 
 // The section names the classes depend on (import_section_class), each with how many of its bytes a name must match:
-// all of them and the NUL, or for .data.rel.ro, a prefix.
+// all of them and the NUL, or for .data.rel.ro, .ctors and .dtors, a prefix.
 typedef enum ImportPattern
 {
     IMPORT_PATTERN_INIT,
@@ -446,6 +467,10 @@ typedef enum ImportPattern
     IMPORT_PATTERN_EH_FRAME,
     IMPORT_PATTERN_SFRAME,
     IMPORT_PATTERN_DATA_RELRO,
+    IMPORT_PATTERN_INIT_ARRAY,
+    IMPORT_PATTERN_FINI_ARRAY,
+    IMPORT_PATTERN_CTORS,
+    IMPORT_PATTERN_DTORS,
     IMPORT_PATTERNS,
 } ImportPattern;
 
@@ -455,6 +480,10 @@ static const char import_section_patterns[IMPORT_PATTERNS][BUSTER_IMPORT_PATTERN
     [IMPORT_PATTERN_EH_FRAME] = ".eh_frame",
     [IMPORT_PATTERN_SFRAME] = ".sframe",
     [IMPORT_PATTERN_DATA_RELRO] = ".data.rel.ro",
+    [IMPORT_PATTERN_INIT_ARRAY] = ".init_array",
+    [IMPORT_PATTERN_FINI_ARRAY] = ".fini_array",
+    [IMPORT_PATTERN_CTORS] = ".ctors",
+    [IMPORT_PATTERN_DTORS] = ".dtors",
 };
 
 static const uint8_t import_section_pattern_bytes[IMPORT_PATTERNS] = {
@@ -463,11 +492,43 @@ static const uint8_t import_section_pattern_bytes[IMPORT_PATTERNS] = {
     [IMPORT_PATTERN_EH_FRAME] = sizeof(".eh_frame"),
     [IMPORT_PATTERN_SFRAME] = sizeof(".sframe"),
     [IMPORT_PATTERN_DATA_RELRO] = sizeof(".data.rel.ro") - 1,
+    [IMPORT_PATTERN_INIT_ARRAY] = sizeof(".init_array"),
+    [IMPORT_PATTERN_FINI_ARRAY] = sizeof(".fini_array"),
+    [IMPORT_PATTERN_CTORS] = sizeof(".ctors") - 1,
+    [IMPORT_PATTERN_DTORS] = sizeof(".dtors") - 1,
 };
 
+// A section without an init or fini array's priority.
+#define BUSTER_IMPORT_NO_PRIORITY UINT32_MAX
+
+// An init or fini array's priority from its section's name: none for `base` itself (.init_array), N for base.N with N
+// of 1 to 5 decimal digits up to 65535 (GCC's .init_array.00101, clang's .init_array.101), and false for any other name.
+static bool import_array_priority(String8 name, const char* base, uint32_t* priority)
+{
+    const uint64_t length = strlen(base);
+    bool result = import_starts_with(name, base);
+    uint32_t value = 0;
+    *priority = BUSTER_IMPORT_NO_PRIORITY;
+    if (result && name.length > length)
+    {
+        const uint64_t digits = name.length - length - 1;
+        result = name.pointer[length] == '.' && digits >= 1 && digits <= 5;
+        for (uint64_t i = 0; result && i < digits; i += 1)
+        {
+            const char digit = name.pointer[length + 1 + i];
+            result = digit >= '0' && digit <= '9';
+            value = value * 10 + (uint32_t)(digit - '0');
+        }
+        result = result && value <= UINT16_MAX;
+        *priority = result ? value : BUSTER_IMPORT_NO_PRIORITY;
+    }
+    return result;
+}
+
 // The class lld would give an input section's output section, from its type, flags and name, or
-// BUSTER_LINK_CLASS_NONE for one that is dropped; *supported is false for one that can't be imported.
-static uint8_t import_section_class(const Elf64_Shdr* header, String8 name, bool* supported)
+// BUSTER_LINK_CLASS_NONE for one that is dropped (a group's own SHT_GROUP section among them); *supported is false for
+// one that can't be imported, and *priority is an init or fini array's priority, or BUSTER_IMPORT_NO_PRIORITY.
+static uint8_t import_section_class(const Elf64_Shdr* header, String8 name, bool* supported, uint32_t* priority)
 {
     const uint64_t flags = header->sh_flags;
     const uint32_t type = header->sh_type;
@@ -475,11 +536,13 @@ static uint8_t import_section_class(const Elf64_Shdr* header, String8 name, bool
     const bool contents = type == SHT_PROGBITS || type == SHT_NOBITS || type == SHT_INIT_ARRAY || type == SHT_FINI_ARRAY || type == SHT_X86_64_UNWIND;
     uint8_t result = BUSTER_LINK_CLASS_NONE;
     *supported = true;
-    if (type == SHT_GROUP || type == SHT_REL || type == SHT_PREINIT_ARRAY || (flags & SHF_GROUP) != 0)
+    *priority = BUSTER_IMPORT_NO_PRIORITY;
+    if (type == SHT_REL || type == SHT_PREINIT_ARRAY || import_starts_with(name, import_section_patterns[IMPORT_PATTERN_CTORS]) ||
+        import_starts_with(name, import_section_patterns[IMPORT_PATTERN_DTORS]))
     {
         *supported = false;
     }
-    else if (!allocated || type == SHT_NOTE || type == BUSTER_IMPORT_SHT_GNU_SFRAME || import_equal(name, import_section_patterns[IMPORT_PATTERN_SFRAME]))
+    else if (type == SHT_GROUP || !allocated || type == SHT_NOTE || type == BUSTER_IMPORT_SHT_GNU_SFRAME || import_equal(name, import_section_patterns[IMPORT_PATTERN_SFRAME]))
     {
         result = BUSTER_LINK_CLASS_NONE;
     }
@@ -493,10 +556,12 @@ static uint8_t import_section_class(const Elf64_Shdr* header, String8 name, bool
     }
     else if (type == SHT_INIT_ARRAY)
     {
+        *supported = import_array_priority(name, import_section_patterns[IMPORT_PATTERN_INIT_ARRAY], priority);
         result = BUSTER_LINK_CLASS_INIT_ARRAY;
     }
     else if (type == SHT_FINI_ARRAY)
     {
+        *supported = import_array_priority(name, import_section_patterns[IMPORT_PATTERN_FINI_ARRAY], priority);
         result = BUSTER_LINK_CLASS_FINI_ARRAY;
     }
     else if ((flags & SHF_TLS) != 0)
@@ -634,8 +699,10 @@ static ImportResult import_object_capacity(String8 bytes, LinkCapacity* capacity
     {
         const Elf64_Shdr header = import_section_header(&elf, index);
         uint64_t count = 0;
-        // At most an atom per section, and a fixup per relocation, each of which may need a wide addend.
+        // At most an atom per section, a priority per init or fini array, and a fixup per relocation, each of which may
+        // need a wide addend.
         capacity->atoms += 1;
+        capacity->priorities += header.sh_type == SHT_INIT_ARRAY || header.sh_type == SHT_FINI_ARRAY ? 1 : 0;
         if (header.sh_type == SHT_RELA && import_table(&header, sizeof(Elf64_Rela), &count) && count <= UINT32_MAX - capacity->fixups)
         {
             capacity->fixups += (uint32_t)count;
@@ -661,8 +728,9 @@ static ImportResult import_sections(Link* link, const ImportElf* elf, uint32_t u
         const uint64_t header_offset = elf->section_offset + (uint64_t)index * sizeof(Elf64_Shdr);
         String8 name = { 0 };
         bool supported = true;
+        uint32_t priority = BUSTER_IMPORT_NO_PRIORITY;
         const bool named = import_section_name(elf, &header, &name);
-        const uint8_t class = named ? import_section_class(&header, name, &supported) : BUSTER_LINK_CLASS_NONE;
+        const uint8_t class = named ? import_section_class(&header, name, &supported, &priority) : BUSTER_LINK_CLASS_NONE;
         const uint64_t alignment = header.sh_addralign == 0 ? 1 : header.sh_addralign;
         const uint32_t alignment_log2 = (uint32_t)__builtin_ctzll(alignment);
         if (!named || (alignment & (alignment - 1)) != 0 || alignment_log2 > BUSTER_LINK_MAX_ALIGNMENT_LOG2)
@@ -682,7 +750,8 @@ static ImportResult import_sections(Link* link, const ImportElf* elf, uint32_t u
             uint8_t* section_bytes = link_class_is_zero_fill(class) || header.sh_size == 0 ? 0 : (uint8_t*)contents.pointer;
             const bool zero_fill_matches = link_class_is_zero_fill(class) == (header.sh_type == SHT_NOBITS);
             const AtomId atom = zero_fill_matches ? link_add_atom(link, class, (uint8_t)alignment_log2, header.sh_size, section_bytes, unit) : 0;
-            if (atom == 0)
+            const bool prioritized = atom != 0 && (priority == BUSTER_IMPORT_NO_PRIORITY || link_add_priority(link, atom, priority));
+            if (atom == 0 || !prioritized)
             {
                 result = import_fail(zero_fill_matches ? IMPORT_ERROR_LINK : IMPORT_ERROR_UNSUPPORTED, header_offset);
                 result.section = index;
@@ -695,20 +764,20 @@ static ImportResult import_sections(Link* link, const ImportElf* elf, uint32_t u
 }
 
 // The symbol flags of an ELF symbol's type, binding and visibility, or false for a type or binding the representation
-// doesn't have (IFUNC, COMMON, GNU_UNIQUE).
+// doesn't have (COMMON, GNU_UNIQUE).
 static bool import_symbol_flags(const Elf64_Sym* symbol, uint8_t* flags)
 {
     const uint32_t type = ELF64_ST_TYPE(symbol->st_info);
     const uint32_t binding = ELF64_ST_BIND(symbol->st_info);
     const uint32_t visibility = ELF64_ST_VISIBILITY(symbol->st_other);
-    const bool type_known = type == STT_NOTYPE || type == STT_OBJECT || type == STT_FUNC || type == STT_TLS;
+    const bool type_known = type == STT_NOTYPE || type == STT_OBJECT || type == STT_FUNC || type == STT_TLS || type == STT_GNU_IFUNC;
     const bool binding_known = binding == STB_LOCAL || binding == STB_GLOBAL || binding == STB_WEAK;
     *flags = (uint8_t)((type & BUSTER_LINK_SYMBOL_TYPE) | (binding << 4) | (visibility << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT));
     return type_known && binding_known;
 }
 
-// Imports the symbols: one for each that names a place in an atom or a reference, none for FILE symbols and locals of
-// dropped sections.
+// Imports the symbols: one for each that names a place in an atom, a value (SHN_ABS) or a reference, none for FILE
+// symbols and locals of dropped sections.
 static ImportResult import_object_symbols(Link* link, const ImportElf* elf, const ImportSymbols* symbols, uint8_t source, ImportObject* object)
 {
     ImportResult result = { 0 };
@@ -721,6 +790,7 @@ static ImportResult import_object_symbols(Link* link, const ImportElf* elf, cons
         uint32_t section = SHN_UNDEF;
         const bool indexed = import_symbol_section(symbols, index, &symbol, &section);
         const bool reserved = section >= SHN_LORESERVE && symbol.st_shndx != SHN_XINDEX;
+        const bool absolute = reserved && section == SHN_ABS;
         const AtomId atom = section != SHN_UNDEF && !reserved && section < elf->section_count ? object->section_atoms[section] : 0;
         String8 name = { 0 };
         uint8_t flags = 0;
@@ -743,7 +813,8 @@ static ImportResult import_object_symbols(Link* link, const ImportElf* elf, cons
             added = link_add_symbol(link, 0, atom, 0, 0, (uint8_t)(BUSTER_LINK_SYMBOL_LOCAL | tls), source);
             failed = added == 0;
         }
-        else if (!known || reserved || (section != SHN_UNDEF && atom == 0) || (section == SHN_UNDEF && binding == STB_LOCAL))
+        else if (!known || (reserved && !absolute) || (absolute && !link_absolute_fits(0, flags)) || (section != SHN_UNDEF && !reserved && atom == 0) ||
+                 (section == SHN_UNDEF && binding == STB_LOCAL))
         {
             result = import_fail(IMPORT_ERROR_UNSUPPORTED, offset);
             result.type = type;
@@ -755,6 +826,10 @@ static ImportResult import_object_symbols(Link* link, const ImportElf* elf, cons
             if (!failed && atom != 0)
             {
                 added = link_add_symbol(link, name_id, atom, symbol.st_value, symbol.st_size, flags, source);
+            }
+            else if (!failed && absolute)
+            {
+                added = link_add_symbol(link, name_id, 0, symbol.st_value, symbol.st_size, flags, BUSTER_LINK_SOURCE_ABSOLUTE);
             }
             else if (!failed)
             {
@@ -875,6 +950,120 @@ static ImportResult import_relocations(Link* link, const ImportElf* elf, const I
     return result;
 }
 
+// Reads the object's COMDAT groups into object->groups and group_sections, in section order (see the orientation
+// comment): each SHT_GROUP section's flag word, which must be GRP_COMDAT alone; its sections, each within the table,
+// with SHF_GROUP and in no other group; and its signature, the name of its symbol (sh_info, in the symbol table sh_link
+// names), or for a section symbol, the section's. Every section with SHF_GROUP must be in a group. Both paths read the
+// groups this way: an object has a few.
+static ImportResult import_object_groups(const ImportElf* elf, const ImportSymbols* symbols, ImportObject* object, Arena* arena)
+{
+    ImportResult result = { 0 };
+    const uint32_t count = elf->section_count;
+    uint32_t group_count = 0;
+    uint64_t member_total = 0;
+    for (uint32_t index = 1; index < count; index += 1)
+    {
+        const Elf64_Shdr header = import_section_header(elf, index);
+        group_count += header.sh_type == SHT_GROUP ? 1 : 0;
+        member_total += header.sh_type == SHT_GROUP ? header.sh_size / sizeof(uint32_t) : 0;
+    }
+    object->groups = BUSTER_ARENA_PUSH_ARRAY(arena, ImportGroup, group_count);
+    object->group_sections = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, member_total);
+    object->group_count = 0;
+    Scratch scratch = scratch_begin(arena);
+    uint8_t* grouped = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, count);
+    if ((group_count != 0 && object->groups == 0) || (member_total != 0 && object->group_sections == 0) || grouped == 0)
+    {
+        result = import_fail(IMPORT_ERROR_MEMORY, 0);
+    }
+    else
+    {
+        memset(grouped, 0, count);
+    }
+    uint32_t placed = 0;
+    for (uint32_t index = 1; result.error == IMPORT_ERROR_NONE && index < count; index += 1)
+    {
+        const Elf64_Shdr header = import_section_header(elf, index);
+        const uint64_t header_offset = elf->section_offset + (uint64_t)index * sizeof(Elf64_Shdr);
+        if (header.sh_type == SHT_GROUP)
+        {
+            const String8 contents = import_section_bytes(elf, &header);
+            const uint64_t words = contents.length / sizeof(uint32_t);
+            const bool linked = symbols->section != 0 && header.sh_link == symbols->section && header.sh_info != 0 && header.sh_info < symbols->count;
+            uint32_t flags = 0;
+            if (contents.length >= sizeof(uint32_t))
+            {
+                memcpy(&flags, contents.pointer, sizeof(flags));
+            }
+            String8 signature = { 0 };
+            if (linked)
+            {
+                const Elf64_Sym symbol = import_symbol(symbols, header.sh_info);
+                uint32_t section = 0;
+                const bool section_symbol = ELF64_ST_TYPE(symbol.st_info) == STT_SECTION;
+                const bool indexed = import_symbol_section(symbols, header.sh_info, &symbol, &section);
+                if (section_symbol && indexed && section != 0 && section < count)
+                {
+                    const Elf64_Shdr named = import_section_header(elf, section);
+                    import_section_name(elf, &named, &signature);
+                }
+                else if (!section_symbol)
+                {
+                    import_string(symbols->names, symbol.st_name, &signature);
+                }
+            }
+            if (!linked || contents.length % sizeof(uint32_t) != 0 || words == 0 || signature.length == 0)
+            {
+                result = import_fail(IMPORT_ERROR_BOUNDS, header_offset);
+            }
+            else if (flags != GRP_COMDAT)
+            {
+                result = import_fail(IMPORT_ERROR_UNSUPPORTED, header_offset);
+                result.type = header.sh_type;
+            }
+            ImportGroup* group = &object->groups[object->group_count];
+            if (result.error == IMPORT_ERROR_NONE)
+            {
+                *group = (ImportGroup){
+                    .signature = signature,
+                    .first = placed,
+                    .count = 0,
+                };
+                object->group_count += 1;
+            }
+            for (uint64_t w = 1; result.error == IMPORT_ERROR_NONE && w < words; w += 1)
+            {
+                uint32_t member = 0;
+                memcpy(&member, contents.pointer + w * sizeof(uint32_t), sizeof(member));
+                const bool valid = member != 0 && member < count && member != index && grouped[member] == 0 &&
+                                   (import_section_header(elf, member).sh_flags & SHF_GROUP) != 0;
+                if (!valid)
+                {
+                    result = import_fail(IMPORT_ERROR_BOUNDS, header_offset);
+                }
+                else
+                {
+                    grouped[member] = 1;
+                    object->group_sections[placed] = member;
+                    placed += 1;
+                    group->count += 1;
+                }
+            }
+            result.section = result.error != IMPORT_ERROR_NONE ? index : 0;
+        }
+    }
+    for (uint32_t index = 1; result.error == IMPORT_ERROR_NONE && index < count; index += 1)
+    {
+        if ((import_section_header(elf, index).sh_flags & SHF_GROUP) != 0 && grouped[index] == 0)
+        {
+            result = import_fail(IMPORT_ERROR_BOUNDS, elf->section_offset + (uint64_t)index * sizeof(Elf64_Shdr));
+            result.section = index;
+        }
+    }
+    scratch_end(scratch);
+    return result;
+}
+
 static ImportResult import_object_scalar(Link* link, String8 bytes, uint32_t unit, uint8_t source, Arena* arena, ImportObject* object)
 {
     ImportElf elf;
@@ -918,6 +1107,10 @@ static ImportResult import_object_scalar(Link* link, String8 bytes, uint32_t uni
             scratch_end(scratch);
         }
     }
+    if (result.error == IMPORT_ERROR_NONE)
+    {
+        result = import_object_groups(&elf, &symbols, object, arena);
+    }
     return result;
 }
 
@@ -927,9 +1120,9 @@ static ImportResult import_object_scalar(Link* link, String8 bytes, uint32_t uni
 // import_object_vector reads the sections, the symbols and the relocations eight records at a time, one per 64-bit
 // lane, and writes the link's columns directly, past their counts: the records import_object_scalar adds one at a time,
 // in the same order. Each check the exact path makes is a lane mask here, and the path gives up on the whole object
-// when one fails or when it meets what it leaves to the exact path (relocations out of offset order, two relocation
-// sections for one section, a table without room for every record): import_object then takes back what it wrote and
-// runs the exact path, which reports the error, or imports the rest. Each pass:
+// when one fails or when it meets what it leaves to the exact path (two relocation sections for one section, fields
+// that overlap, a table without room for every record): import_object then takes back what it wrote and runs the exact
+// path, which reports the error, or imports the rest. Each pass:
 //   - Sections: 8 headers, a row each, transposed (link_transpose_words) so that a vector holds one field of 8
 //     sections; their bounds, alignments and classes as masks, the 16 first bytes of each name compared with the names
 //     the classes depend on (import_section_patterns); the atoms compressed into the columns (vpcompressq in registers,
@@ -941,15 +1134,17 @@ static ImportResult import_object_scalar(Link* link, String8 bytes, uint32_t uni
 //     one push from the name arena.
 //   - Relocations: 8 entries in 3 vectors the same way; each type's kind and field width from a 64-byte table in a
 //     register (vpermb); the order and overlap checks against the previous lane's field end (valignq); wide addends
-//     numbered in the side table by expanding their ranks; then each target, a scalar load per fixup.
+//     numbered in the side table by expanding their ranks; then each target, a scalar load per fixup. A section whose
+//     entries are out of offset order is read again from a copy sorted by an LSD radix sort of keys built 8 at a time.
 
 // The vector paths' batch: eight records, one per 64-bit lane.
 #define BUSTER_IMPORT_BATCH 8
 // The relocation types import_kind_table covers: every type a kind names is below it.
 #define BUSTER_IMPORT_KIND_TYPES 64
 // import_kind_table's entries: the kind in the low bits, and whether its field is 8 bytes rather than 4.
-#define BUSTER_IMPORT_KIND_BITS 0x0f
-#define BUSTER_IMPORT_KIND_WIDE_FIELD 0x10
+#define BUSTER_IMPORT_KIND_BITS 0x1f
+#define BUSTER_IMPORT_KIND_WIDE_SHIFT 5
+#define BUSTER_IMPORT_KIND_WIDE_FIELD (1u << BUSTER_IMPORT_KIND_WIDE_SHIFT)
 _Static_assert(BUSTER_LINK_FIXUP_KINDS <= BUSTER_IMPORT_KIND_BITS + 1, "a kind fits in import_kind_table's low bits");
 // The low 32 bits of a 64-bit lane.
 #define BUSTER_IMPORT_LOW32 0xffffffffull
@@ -963,12 +1158,13 @@ struct ImportMark
     uint32_t symbols;
     uint32_t fixups;
     uint32_t wide_addends;
+    uint32_t priorities;
     uint64_t name_bytes;
     uint64_t arena;
 };
 
 // What the section pass found besides the atoms: the symbol tables, the extended index tables and the relocation
-// sections, each a list of section indices in section order.
+// sections, each a list of section indices in section order, and whether a section is a group's or has SHF_GROUP.
 typedef struct ImportVectorSections ImportVectorSections;
 struct ImportVectorSections
 {
@@ -978,6 +1174,7 @@ struct ImportVectorSections
     uint32_t extended_count;
     uint32_t* relocations;
     uint32_t relocation_count;
+    bool grouped;
 };
 
 static ImportMark import_mark(const Link* link, const Arena* arena)
@@ -988,6 +1185,7 @@ static ImportMark import_mark(const Link* link, const Arena* arena)
         .symbols = link->symbols.count,
         .fixups = link->fixups.count,
         .wide_addends = link->fixups.wide_count,
+        .priorities = link->priorities.count,
         .name_bytes = link->name_arena != 0 ? link->name_arena->length : 0,
         .arena = arena->length,
     };
@@ -1001,6 +1199,7 @@ static void import_restore(Link* link, Arena* arena, ImportMark mark)
     link->symbols.count = mark.symbols;
     link->fixups.count = mark.fixups;
     link->fixups.wide_count = mark.wide_addends;
+    link->priorities.count = mark.priorities;
     if (link->name_arena != 0)
     {
         arena_pop_to(link->name_arena, mark.name_bytes);
@@ -1211,10 +1410,13 @@ static bool import_vector_sections(Link* link, const ImportElf* elf, uint32_t un
         const uint32_t init_array = import_lanes_equal(type, SHT_INIT_ARRAY);
         const uint32_t fini_array = import_lanes_equal(type, SHT_FINI_ARRAY);
         const uint32_t contents = import_lanes_equal(type, SHT_PROGBITS) | nobits | init_array | fini_array | unwind;
-        const uint32_t unsupported = import_lanes_equal(type, SHT_GROUP) | import_lanes_equal(type, SHT_REL) | import_lanes_equal(type, SHT_PREINIT_ARRAY) |
-                                     import_lanes_have(flags, SHF_GROUP);
-        const uint32_t dropped = ~import_lanes_have(flags, SHF_ALLOC) | import_lanes_equal(type, SHT_NOTE) | import_lanes_equal(type, BUSTER_IMPORT_SHT_GNU_SFRAME) |
+        const uint32_t group = import_lanes_equal(type, SHT_GROUP);
+        const uint32_t unsupported = import_lanes_equal(type, SHT_REL) | import_lanes_equal(type, SHT_PREINIT_ARRAY) | matches[IMPORT_PATTERN_CTORS] | matches[IMPORT_PATTERN_DTORS];
+        const uint32_t dropped = ~import_lanes_have(flags, SHF_ALLOC) | group | import_lanes_equal(type, SHT_NOTE) | import_lanes_equal(type, BUSTER_IMPORT_SHT_GNU_SFRAME) |
                                  matches[IMPORT_PATTERN_SFRAME];
+        // An init or fini array named other than .init_array and .fini_array has a priority, read below.
+        const uint32_t prioritized = (init_array & ~matches[IMPORT_PATTERN_INIT_ARRAY]) | (fini_array & ~matches[IMPORT_PATTERN_FINI_ARRAY]);
+        found->grouped = found->grouped || (active & (group | import_lanes_have(flags, SHF_GROUP))) != 0;
         const uint32_t merged_strings = _mm512_cmpeq_epi64_mask(_mm512_and_si512(flags, _mm512_set1_epi64(SHF_MERGE | SHF_STRINGS)), _mm512_set1_epi64(SHF_MERGE | SHF_STRINGS)) &
                                         import_lanes_equal(entry_size, 1);
         // import_section_class's order: each mask takes its lanes from what the ones before it left.
@@ -1271,6 +1473,19 @@ static bool import_vector_sections(Link* link, const ImportElf* elf, uint32_t un
             import_store64(atoms->address + at, zero, atom_count);
             import_store32(object->section_atoms + first, _mm512_maskz_expand_epi64((__mmask8)classed, _mm512_add_epi64(lane_index, _mm512_set1_epi64(at))), n);
             atoms->count += atom_count;
+            // The arrays with a priority, a section at a time: there are a few in a library's thousands of objects.
+            for (uint32_t rare = classed & prioritized; result && rare != 0; rare &= rare - 1)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctz(rare);
+                const Elf64_Shdr header = import_section_header(elf, first + lane);
+                const char* base = (init_array >> lane & 1) != 0 ? import_section_patterns[IMPORT_PATTERN_INIT_ARRAY] : import_section_patterns[IMPORT_PATTERN_FINI_ARRAY];
+                String8 name = { 0 };
+                uint32_t priority = BUSTER_IMPORT_NO_PRIORITY;
+                const AtomId atom = at + (AtomId)__builtin_popcount(classed & ((1u << lane) - 1));
+                // With room for it, link_add_priority can't fail, and leaves link->error as the exact path would find it.
+                result = import_section_name(elf, &header, &name) && import_array_priority(name, base, &priority) && link->priorities.count < link->priorities.capacity &&
+                         link_add_priority(link, atom, priority);
+            }
             const __m512i index = _mm512_add_epi64(lane_index, _mm512_set1_epi64(first));
             const uint32_t symbol_tables = active & import_lanes_equal(type, SHT_SYMTAB);
             const uint32_t extended = active & import_lanes_equal(type, SHT_SYMTAB_SHNDX);
@@ -1424,14 +1639,18 @@ static bool import_vector_symbols(Link* link, const ImportElf* elf, const Import
         const uint32_t skipped = import_lanes_equal(type, STT_FILE) | (section_type & ~has_atom) | (local & ordinary & ~has_atom);
         const uint32_t section_symbols = active & section_type & ~skipped;
         const uint32_t regular = active & ~skipped & ~section_type;
-        const uint32_t known = (import_lanes_equal(type, STT_NOTYPE) | import_lanes_equal(type, STT_OBJECT) | import_lanes_equal(type, STT_FUNC) | import_lanes_equal(type, STT_TLS)) &
+        const uint32_t tls_type = import_lanes_equal(type, STT_TLS);
+        const uint32_t ifunc_type = import_lanes_equal(type, STT_GNU_IFUNC);
+        const uint32_t known = (import_lanes_equal(type, STT_NOTYPE) | import_lanes_equal(type, STT_OBJECT) | import_lanes_equal(type, STT_FUNC) | tls_type | ifunc_type) &
                                _mm512_cmple_epu64_mask(binding, _mm512_set1_epi64(STB_WEAK));
-        const uint32_t unsupported = ~known | reserved | (ordinary & ~has_atom) | (undefined & local);
+        // An absolute symbol (SHN_ABS) is its value, and can't be a TLS variable or an IFUNC (link_absolute_fits).
+        const uint32_t absolute = reserved & import_lanes_equal(section, SHN_ABS);
+        const uint32_t unsupported = ~known | (reserved & ~absolute) | (absolute & (tls_type | ifunc_type)) | (ordinary & ~has_atom) | (undefined & local);
         const uint32_t tls_atom = import_lanes_equal(class, BUSTER_LINK_CLASS_TDATA) | import_lanes_equal(class, BUSTER_LINK_CLASS_TBSS);
         const uint32_t defined = regular & has_atom;
+        const uint32_t valued = defined | (regular & absolute);
         // link_symbol_fits: within the atom, and a TLS symbol exactly in a TLS atom.
-        const uint32_t fits = _mm512_cmple_epu64_mask(value, atom_size) & _mm512_cmple_epu64_mask(size, _mm512_sub_epi64(atom_size, value)) &
-                              ~(import_lanes_equal(type, STT_TLS) ^ tls_atom);
+        const uint32_t fits = _mm512_cmple_epu64_mask(value, atom_size) & _mm512_cmple_epu64_mask(size, _mm512_sub_epi64(atom_size, value)) & ~(tls_type ^ tls_atom);
         failed |= (regular & unsupported) | (defined & ~fits);
         const uint32_t records = section_symbols | regular;
         const uint32_t record_count = (uint32_t)__builtin_popcount(records);
@@ -1443,10 +1662,12 @@ static bool import_vector_symbols(Link* link, const ImportElf* elf, const Import
         import_store32(object->symbols + first, _mm512_maskz_expand_epi64(kept, _mm512_add_epi64(lane_index, _mm512_set1_epi64(at))), n);
         import_store32(table->name + at, zero, record_count);
         import_store32(table->atom + at, _mm512_maskz_compress_epi64(kept, _mm512_maskz_mov_epi64((__mmask8)in_atom, atom)), record_count);
-        import_store64(table->value + at, _mm512_maskz_compress_epi64(kept, _mm512_maskz_mov_epi64((__mmask8)defined, value)), record_count);
-        import_store64(table->size + at, _mm512_maskz_compress_epi64(kept, _mm512_maskz_mov_epi64((__mmask8)defined, size)), record_count);
+        import_store64(table->value + at, _mm512_maskz_compress_epi64(kept, _mm512_maskz_mov_epi64((__mmask8)valued, value)), record_count);
+        import_store64(table->size + at, _mm512_maskz_compress_epi64(kept, _mm512_maskz_mov_epi64((__mmask8)valued, size)), record_count);
         import_store8(table->flags + at, _mm512_maskz_compress_epi64(kept, flags), record_count);
-        import_store8(table->source + at, _mm512_maskz_compress_epi64(kept, _mm512_maskz_mov_epi64((__mmask8)in_atom, _mm512_set1_epi64(source))), record_count);
+        const __m512i sources = _mm512_mask_mov_epi64(_mm512_maskz_mov_epi64((__mmask8)in_atom, _mm512_set1_epi64(source)), (__mmask8)(regular & absolute),
+                                                      _mm512_set1_epi64(BUSTER_LINK_SOURCE_ABSOLUTE));
+        import_store8(table->source + at, _mm512_maskz_compress_epi64(kept, sources), record_count);
         import_store32(table->got_slot + at, zero, record_count);
         import_store32(table->dynamic_index + at, zero, record_count);
         import_store16(table->version + at, zero, record_count);
@@ -1523,8 +1744,156 @@ static bool import_vector_symbols(Link* link, const ImportElf* elf, const Import
     return result && failed == 0;
 }
 
-// The relocation pass for one .rela section: the checks and fixups of import_relocations, eight entries at a time.
-static bool import_vector_relocations(Link* link, const ImportElf* elf, const ImportSymbols* symbols, uint32_t index, const ImportObject* object, __m512i kinds)
+// What a pass of import_vector_fixups stored: the fixups up to `next`, the wide addends up to `wide`, and the lanes of
+// the entries that can't be fixups (`failed`) and of the fields that start before the end of the one before them
+// (`unordered`), each nonzero if any batch had one.
+typedef struct ImportVectorFixups ImportVectorFixups;
+struct ImportVectorFixups
+{
+    FixupId next;
+    uint32_t wide;
+    uint32_t failed;
+    uint32_t unordered;
+};
+
+// The batches of import_vector_relocations over `count` entries at `records`, the section's or their sorted copy: each
+// entry but R_X86_64_NONE's stored as a fixup from fixups->count, with its symbol's index as its target, until a batch
+// has an entry that can't be one or a field out of order. Nothing is committed: the caller decides.
+static ImportVectorFixups import_vector_fixups(LinkFixups* fixups, const char* records, uint64_t count, uint64_t atom_size, uint32_t symbol_count, __m512i kinds)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i lane_index = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+    const __m512i size = _mm512_set1_epi64((long long)atom_size);
+    const __m512i symbols = _mm512_set1_epi64(symbol_count);
+    ImportVectorFixups result = {
+        .next = fixups->count,
+        .wide = fixups->wide_count,
+    };
+    // The end of the last fixup's field, in every lane.
+    __m512i last_end = zero;
+    // The columns, in locals, which the stores can't change.
+    uint32_t* offsets = fixups->offset;
+    SymbolId* targets = fixups->target;
+    int32_t* addend_column = fixups->addend;
+    uint8_t* kinds_column = fixups->kind;
+    int64_t* wide_addends = fixups->wide_addends;
+    for (uint64_t first = 0; result.failed == 0 && result.unordered == 0 && first < count; first += BUSTER_IMPORT_BATCH)
+    {
+        const uint32_t n = (uint32_t)(count - first < BUSTER_IMPORT_BATCH ? count - first : BUSTER_IMPORT_BATCH);
+        __m512i words[3];
+        import_load_records3(records + first * sizeof(Elf64_Rela), n, words);
+        // Elf64_Rela's words: r_offset; r_info, the type in the low 32 bits and the symbol in the high 32; r_addend.
+        const __m512i offset = words[0];
+        const __m512i type = _mm512_and_si512(words[1], _mm512_set1_epi64(BUSTER_IMPORT_LOW32));
+        const __m512i symbol = _mm512_srli_epi64(words[1], 32);
+        // R_X86_64_NONE entries are skipped.
+        const uint32_t present = _mm512_test_epi64_mask(type, type) & import_lane_mask(n);
+        const __mmask8 kept = (__mmask8)present;
+        const __m512i entry = _mm512_maskz_and_epi64(_mm512_cmplt_epu64_mask(type, _mm512_set1_epi64(BUSTER_IMPORT_KIND_TYPES)), _mm512_permutexvar_epi8(type, kinds),
+                                                     _mm512_set1_epi64(0xff));
+        const __m512i kind = _mm512_and_si512(entry, _mm512_set1_epi64(BUSTER_IMPORT_KIND_BITS));
+        const __m512i width = _mm512_sllv_epi64(_mm512_set1_epi64(4), _mm512_srli_epi64(entry, BUSTER_IMPORT_KIND_WIDE_SHIFT));
+        const __m512i end = _mm512_add_epi64(offset, width);
+        result.failed |= present & (_mm512_testn_epi64_mask(kind, kind) | _mm512_testn_epi64_mask(symbol, symbol) | _mm512_cmpge_epu64_mask(symbol, symbols) |
+                                    _mm512_cmpgt_epu64_mask(offset, _mm512_set1_epi64(UINT32_MAX)) | _mm512_cmpgt_epu64_mask(end, size));
+        const uint32_t fixup_count = (uint32_t)__builtin_popcount(present);
+        // Most batches have neither R_X86_64_NONE entries, which the compression drops, nor wide addends.
+        __m512i fields = offset;
+        __m512i ends = end;
+        __m512i addends = words[2];
+        __m512i kept_kinds = kind;
+        __m512i kept_symbols = symbol;
+        if (present != import_lane_mask(n))
+        {
+            fields = _mm512_maskz_compress_epi64(kept, offset);
+            ends = _mm512_maskz_compress_epi64(kept, end);
+            addends = _mm512_maskz_compress_epi64(kept, words[2]);
+            kept_kinds = _mm512_maskz_compress_epi64(kept, kind);
+            kept_symbols = _mm512_maskz_compress_epi64(kept, symbol);
+        }
+        // Each field starts at or after the end of the one before it: the previous lane's, or the last batch's.
+        const __m512i previous = _mm512_alignr_epi64(ends, last_end, 7);
+        result.unordered |= _mm512_cmplt_epu64_mask(fields, previous) & import_lane_mask(fixup_count);
+        last_end = _mm512_mask_permutexvar_epi64(last_end, fixup_count != 0 ? 0xff : 0, _mm512_set1_epi64((long long)fixup_count - 1), ends);
+        // An addend outside int32 goes to the side table, and the fixup gets its index there.
+        const uint32_t wides = ~_mm512_cmpeq_epi64_mask(addends, _mm512_cvtepi32_epi64(_mm512_cvtepi64_epi32(addends))) & import_lane_mask(fixup_count);
+        __m512i field_addends = addends;
+        __m512i kind_bytes = kept_kinds;
+        if (wides != 0)
+        {
+            const uint32_t wide_count = (uint32_t)__builtin_popcount(wides);
+            field_addends = _mm512_mask_blend_epi64((__mmask8)wides, addends, _mm512_maskz_expand_epi64((__mmask8)wides, _mm512_add_epi64(lane_index, _mm512_set1_epi64(result.wide))));
+            kind_bytes = _mm512_mask_or_epi64(kept_kinds, (__mmask8)wides, kept_kinds, _mm512_set1_epi64(BUSTER_LINK_FIXUP_WIDE));
+            import_store64(wide_addends + result.wide, _mm512_maskz_compress_epi64((__mmask8)wides, addends), wide_count);
+            result.wide += wide_count;
+        }
+        import_store32(offsets + result.next, fields, fixup_count);
+        // The symbol's index for now: the target is its symbol's record, which the caller loads.
+        import_store32(targets + result.next, kept_symbols, fixup_count);
+        import_store32(addend_column + result.next, field_addends, fixup_count);
+        import_store8(kinds_column + result.next, kind_bytes, fixup_count);
+        result.next += fixup_count;
+    }
+    return result;
+}
+
+// A copy of `count` entries at `records` in offset order, stably, as import_sort_relocations orders them: each entry's
+// key, its offset above its index, built 8 at a time, then an LSD radix sort of the keys by the offset's bytes, as many
+// passes as the largest offset has bytes, and the entries copied in the keys' order. 0 if an offset is past
+// UINT32_MAX, which no fixup has, or the arena has no room.
+static const char* import_vector_sort_relocations(const char* records, uint64_t count, Arena* arena)
+{
+    uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, 2 * count);
+    char* sorted = BUSTER_ARENA_PUSH_ARRAY(arena, char, count * sizeof(Elf64_Rela));
+    const __m512i lane_index = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+    __m512i largest = _mm512_setzero_si512();
+    for (uint64_t first = 0; keys != 0 && first < count; first += BUSTER_IMPORT_BATCH)
+    {
+        const uint32_t n = (uint32_t)(count - first < BUSTER_IMPORT_BATCH ? count - first : BUSTER_IMPORT_BATCH);
+        __m512i words[3];
+        import_load_records3(records + first * sizeof(Elf64_Rela), n, words);
+        largest = _mm512_mask_max_epu64(largest, (__mmask8)import_lane_mask(n), largest, words[0]);
+        import_store64(keys + first, _mm512_or_si512(_mm512_slli_epi64(words[0], 32), _mm512_add_epi64(lane_index, _mm512_set1_epi64((long long)first))), n);
+    }
+    const uint64_t offset_limit = _mm512_reduce_max_epu64(largest);
+    const char* result = keys != 0 && sorted != 0 && offset_limit <= UINT32_MAX ? sorted : 0;
+    const uint32_t passes = (uint32_t)((64 - __builtin_clzll(offset_limit | 1) + 7) / 8);
+    uint64_t* from = keys;
+    uint64_t* to = keys != 0 ? keys + count : 0;
+    for (uint32_t pass = 0; result != 0 && pass < passes; pass += 1)
+    {
+        uint64_t starts[257] = { 0 };
+        const uint32_t shift = 32 + 8 * pass;
+        for (uint64_t e = 0; e < count; e += 1)
+        {
+            starts[((from[e] >> shift) & 0xff) + 1] += 1;
+        }
+        for (uint32_t digit = 0; digit < 256; digit += 1)
+        {
+            starts[digit + 1] += starts[digit];
+        }
+        for (uint64_t e = 0; e < count; e += 1)
+        {
+            const uint32_t digit = (uint32_t)((from[e] >> shift) & 0xff);
+            to[starts[digit]] = from[e];
+            starts[digit] += 1;
+        }
+        uint64_t* swapped = from;
+        from = to;
+        to = swapped;
+    }
+    for (uint64_t e = 0; result != 0 && e < count; e += 1)
+    {
+        memcpy(sorted + e * sizeof(Elf64_Rela), records + (from[e] & BUSTER_IMPORT_LOW32) * sizeof(Elf64_Rela), sizeof(Elf64_Rela));
+    }
+    return result;
+}
+
+// The relocation pass for one .rela section: the checks and fixups of import_relocations, eight entries at a time, in
+// the file's order when its fields are in offset order, as a compiler's objects have them, and otherwise from a copy
+// sorted by offset (GNU as writes a relaxed branch's relocation after the section's others, and glibc's and libgcc's
+// archives have a tenth of their members so). Sorted, the fields must not overlap.
+static bool import_vector_relocations(Link* link, const ImportElf* elf, const ImportSymbols* symbols, uint32_t index, const ImportObject* object, __m512i kinds, Arena* scratch)
 {
     LinkFixups* fixups = &link->fixups;
     LinkAtoms* atoms = &link->atoms;
@@ -1536,86 +1905,29 @@ static bool import_vector_relocations(Link* link, const ImportElf* elf, const Im
     if (result && atom != 0 && count != 0)
     {
         const String8 entries = import_section_bytes(elf, &header);
-        const __m512i zero = _mm512_setzero_si512();
-        const __m512i lane_index = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
-        const __m512i atom_size = _mm512_set1_epi64((long long)atoms->size[atom]);
-        const __m512i symbol_count = _mm512_set1_epi64(symbols->count);
         const FixupId begin = fixups->count;
-        FixupId next = begin;
-        uint32_t wide = fixups->wide_count;
-        // The end of the last fixup's field, in every lane.
-        __m512i last_end = zero;
-        uint32_t failed = 0;
-        uint32_t missing = 0;
-        // The columns, in locals, which the stores can't change.
-        uint32_t* offsets = fixups->offset;
-        SymbolId* targets = fixups->target;
-        int32_t* addend_column = fixups->addend;
-        uint8_t* kinds_column = fixups->kind;
-        int64_t* wide_addends = fixups->wide_addends;
-        const SymbolId* imported = object->symbols;
+        const uint64_t length = scratch->length;
         // Room for every entry, whether or not each becomes a fixup; the exact path decides when there isn't.
         result = count <= fixups->capacity - fixups->count && count <= fixups->wide_capacity - fixups->wide_count;
-        for (uint64_t first = 0; result && failed == 0 && first < count; first += BUSTER_IMPORT_BATCH)
+        ImportVectorFixups pass = { 0 };
+        if (result)
         {
-            const uint32_t n = (uint32_t)(count - first < BUSTER_IMPORT_BATCH ? count - first : BUSTER_IMPORT_BATCH);
-            __m512i words[3];
-            import_load_records3(entries.pointer + first * sizeof(Elf64_Rela), n, words);
-            // Elf64_Rela's words: r_offset; r_info, the type in the low 32 bits and the symbol in the high 32; r_addend.
-            const __m512i offset = words[0];
-            const __m512i type = _mm512_and_si512(words[1], _mm512_set1_epi64(BUSTER_IMPORT_LOW32));
-            const __m512i symbol = _mm512_srli_epi64(words[1], 32);
-            // R_X86_64_NONE entries are skipped.
-            const uint32_t present = _mm512_test_epi64_mask(type, type) & import_lane_mask(n);
-            const __mmask8 kept = (__mmask8)present;
-            const __m512i entry = _mm512_maskz_and_epi64(_mm512_cmplt_epu64_mask(type, _mm512_set1_epi64(BUSTER_IMPORT_KIND_TYPES)), _mm512_permutexvar_epi8(type, kinds),
-                                                         _mm512_set1_epi64(0xff));
-            const __m512i kind = _mm512_and_si512(entry, _mm512_set1_epi64(BUSTER_IMPORT_KIND_BITS));
-            const __m512i width = _mm512_sllv_epi64(_mm512_set1_epi64(4), _mm512_srli_epi64(entry, 4));
-            const __m512i end = _mm512_add_epi64(offset, width);
-            failed |= present & (_mm512_testn_epi64_mask(kind, kind) | _mm512_testn_epi64_mask(symbol, symbol) | _mm512_cmpge_epu64_mask(symbol, symbol_count) |
-                                 _mm512_cmpgt_epu64_mask(offset, _mm512_set1_epi64(UINT32_MAX)) | _mm512_cmpgt_epu64_mask(end, atom_size));
-            const uint32_t fixup_count = (uint32_t)__builtin_popcount(present);
-            // Most batches have neither R_X86_64_NONE entries, which the compression drops, nor wide addends.
-            __m512i fields = offset;
-            __m512i ends = end;
-            __m512i addends = words[2];
-            __m512i kept_kinds = kind;
-            __m512i kept_symbols = symbol;
-            if (present != import_lane_mask(n))
-            {
-                fields = _mm512_maskz_compress_epi64(kept, offset);
-                ends = _mm512_maskz_compress_epi64(kept, end);
-                addends = _mm512_maskz_compress_epi64(kept, words[2]);
-                kept_kinds = _mm512_maskz_compress_epi64(kept, kind);
-                kept_symbols = _mm512_maskz_compress_epi64(kept, symbol);
-            }
-            // Each field starts at or after the end of the one before it: the previous lane's, or the last batch's.
-            const __m512i previous = _mm512_alignr_epi64(ends, last_end, 7);
-            failed |= _mm512_cmplt_epu64_mask(fields, previous) & import_lane_mask(fixup_count);
-            last_end = _mm512_mask_permutexvar_epi64(last_end, fixup_count != 0 ? 0xff : 0, _mm512_set1_epi64((long long)fixup_count - 1), ends);
-            // An addend outside int32 goes to the side table, and the fixup gets its index there.
-            const uint32_t wides = ~_mm512_cmpeq_epi64_mask(addends, _mm512_cvtepi32_epi64(_mm512_cvtepi64_epi32(addends))) & import_lane_mask(fixup_count);
-            __m512i field_addends = addends;
-            __m512i kind_bytes = kept_kinds;
-            if (wides != 0)
-            {
-                const uint32_t wide_count = (uint32_t)__builtin_popcount(wides);
-                field_addends = _mm512_mask_blend_epi64((__mmask8)wides, addends, _mm512_maskz_expand_epi64((__mmask8)wides, _mm512_add_epi64(lane_index, _mm512_set1_epi64(wide))));
-                kind_bytes = _mm512_mask_or_epi64(kept_kinds, (__mmask8)wides, kept_kinds, _mm512_set1_epi64(BUSTER_LINK_FIXUP_WIDE));
-                import_store64(wide_addends + wide, _mm512_maskz_compress_epi64((__mmask8)wides, addends), wide_count);
-                wide += wide_count;
-            }
-            import_store32(offsets + next, fields, fixup_count);
-            // The symbol's index for now: the target is its symbol's record, which the loop below loads.
-            import_store32(targets + next, kept_symbols, fixup_count);
-            import_store32(addend_column + next, field_addends, fixup_count);
-            import_store8(kinds_column + next, kind_bytes, fixup_count);
-            next += fixup_count;
+            pass = import_vector_fixups(fixups, entries.pointer, count, atoms->size[atom], symbols->count, kinds);
         }
+        if (result && pass.failed == 0 && pass.unordered != 0)
+        {
+            const char* sorted = import_vector_sort_relocations(entries.pointer, count, scratch);
+            result = sorted != 0;
+            pass = result ? import_vector_fixups(fixups, sorted, count, atoms->size[atom], symbols->count, kinds) : pass;
+        }
+        arena_pop_to(scratch, length);
+        result = result && pass.failed == 0 && pass.unordered == 0;
         // Each target, a scalar load per fixup rather than a gather: every symbol index is within the table once
         // nothing failed.
-        const FixupId end = result && failed == 0 ? next : begin;
+        uint32_t missing = 0;
+        SymbolId* targets = fixups->target;
+        const SymbolId* imported = object->symbols;
+        const FixupId end = result ? pass.next : begin;
         for (FixupId f = begin; f < end; f += 1)
         {
             const SymbolId target = imported[targets[f]];
@@ -1623,16 +1935,16 @@ static bool import_vector_relocations(Link* link, const ImportElf* elf, const Im
             missing |= target == 0 ? 1 : 0;
         }
         // The atom's fixups: none before these, and bytes for them to patch.
-        result = result && failed == 0 && missing == 0 && (next == begin || (atoms->bytes[atom] != 0 && atoms->fixup_count[atom] == 0));
-        if (result && next != begin)
+        result = result && missing == 0 && (pass.next == begin || (atoms->bytes[atom] != 0 && atoms->fixup_count[atom] == 0));
+        if (result && pass.next != begin)
         {
             atoms->fixup_begin[atom] = begin;
-            atoms->fixup_count[atom] = next - begin;
+            atoms->fixup_count[atom] = pass.next - begin;
         }
         if (result)
         {
-            fixups->count = next;
-            fixups->wide_count = wide;
+            fixups->count = pass.next;
+            fixups->wide_count = pass.wide;
         }
     }
     return result;
@@ -1676,7 +1988,12 @@ static bool import_object_vector(Link* link, String8 bytes, uint32_t unit, uint8
     const __m512i kinds = import_kind_table();
     for (uint32_t i = 0; result && i < found.relocation_count; i += 1)
     {
-        result = import_vector_relocations(link, &elf, &symbols, found.relocations[i], object, kinds);
+        result = import_vector_relocations(link, &elf, &symbols, found.relocations[i], object, kinds, scratch.arena);
+    }
+    // The groups, which few objects have, as the exact path reads them.
+    if (result && found.grouped)
+    {
+        result = import_object_groups(&elf, &symbols, object, arena).error == IMPORT_ERROR_NONE;
     }
     scratch_end(scratch);
     return result;

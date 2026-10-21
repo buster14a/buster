@@ -39,10 +39,12 @@
 //     up to 2^BUSTER_LINK_MAX_ALIGNMENT_LOG2.
 //   - A symbol defined in an atom (with link_add_symbol or later with link_define_symbol) lies within it, and it is a
 //     TLS symbol exactly when the atom's class is TDATA or TBSS.
+//   - An absolute symbol (source ABSOLUTE) has no atom, and is neither a TLS variable nor an IFUNC.
 //   - An atom's fixups are one range of consecutive ids, sorted by offset, whose fields don't overlap and lie within
 //     the atom, which has bytes. The ranges of different atoms don't interleave: an atom's fixups are added together.
 //     The ranges are in the order the atoms' first fixups were added, which is atom order when atoms are built one
 //     after another.
+//   - The priorities are an init or fini array atom's each, by atom in id order.
 // link_check verifies what only the whole representation shows, once it is built: every program symbol is defined, a
 // TLS kind targets a TLS symbol and no other kind does, a local symbol is referred to only from its own unit, and a
 // shared library's symbol only by the kinds that can reach one from an executable: through the GOT (CALL_GOT, LOAD_GOT,
@@ -67,11 +69,11 @@
 // uses. Layout, in this order:
 //   - API: the ids, the classes (BUSTER_LINK_CLASS_*), the symbol flags (BUSTER_LINK_SYMBOL_*) and sources
 //     (BUSTER_LINK_SOURCE_*), the fixup kinds (BUSTER_LINK_FIXUP_*), the instruction fields they patch (LinkField) and
-//     their properties (LinkFixupKind and link_fixup_kinds), LinkError, the tables (LinkNames, LinkAtoms, LinkSymbols
-//     and LinkFixups), Link, LinkCapacity, LinkReference and the entry points' prototypes.
+//     their properties (LinkFixupKind and link_fixup_kinds), LinkError, the tables (LinkNames, LinkAtoms, LinkSymbols,
+//     LinkFixups and LinkPriorities), Link, LinkCapacity, LinkReference and the entry points' prototypes.
 //   - Names: link_hash, link_hash_rows, link_hash_names, link_add_name and link_add_name_hashed.
-//   - Tables: link_capacity_bytes, link_initialize, link_add_atom, link_add_symbol, link_define_symbol, link_add_fixup
-//     and link_fixup_addend.
+//   - Tables: link_capacity_bytes, link_initialize, link_add_atom, link_add_symbol, link_define_symbol, link_add_fixup,
+//     link_fixup_addend and link_add_priority.
 //   - Code: link_instruction_field, link_kind_fits and link_add_code_fixups.
 //   - Checks: link_check_fixups, link_check_target and link_check.
 
@@ -125,6 +127,9 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_SYMBOL_OBJECT 0x01
 #define BUSTER_LINK_SYMBOL_FUNCTION 0x02
 #define BUSTER_LINK_SYMBOL_TLS 0x06
+// STT_GNU_IFUNC: a function whose address its resolver, the code at the symbol, returns when the program starts (as
+// libc.a's memcpy and strlen are).
+#define BUSTER_LINK_SYMBOL_IFUNC 0x0a
 #define BUSTER_LINK_SYMBOL_BINDING 0x30
 #define BUSTER_LINK_SYMBOL_LOCAL 0x00
 #define BUSTER_LINK_SYMBOL_GLOBAL 0x10
@@ -138,9 +143,10 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT 6
 
 // Where a symbol is defined. A symbol of the program, of the C runtime's objects and archive members (RUNTIME_ARCHIVE:
-// the crt objects, libc_nonshared.a's members) or of a foreign object is defined in an atom; one of a shared library or
-// of the linker (__init_array_start, _GLOBAL_OFFSET_TABLE_) has none, and neither has one defined nowhere (NONE:
-// undefined, or a weak reference that binds to 0).
+// the crt objects, libc_nonshared.a's or libc.a's members) or of a foreign object is defined in an atom; one of a shared
+// library or of the linker (__init_array_start, _GLOBAL_OFFSET_TABLE_) has none, and neither has one defined nowhere
+// (NONE: undefined, or a weak reference that binds to 0) or an absolute one (ABSOLUTE: an object's SHN_ABS symbol, such
+// as libc.a's _nl_current_LC_CTYPE_used), which is its value wherever the executable loads.
 #define BUSTER_LINK_SOURCE_NONE 0
 #define BUSTER_LINK_SOURCE_PROGRAM 1
 #define BUSTER_LINK_SOURCE_RUNTIME_SHARED 2
@@ -148,7 +154,8 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_SOURCE_FOREIGN_OBJECT 4
 #define BUSTER_LINK_SOURCE_FOREIGN_SHARED 5
 #define BUSTER_LINK_SOURCE_LINKER 6
-#define BUSTER_LINK_SOURCE_COUNT 7
+#define BUSTER_LINK_SOURCE_ABSOLUTE 7
+#define BUSTER_LINK_SOURCE_COUNT 8
 
 // Fixup kinds: how the instruction or the data reaches the target S, with addend A, from the field at P. G is the
 // address of S's GOT slot. Each kind names the relocation an object gets and the value an executable gets (the table in
@@ -171,6 +178,19 @@ typedef uint32_t FixupId;
 //   - ABS32, ABS32S: a 32-bit immediate or displacement, or 4 bytes of data, non-PIE only: R_X86_64_32, R_X86_64_32S;
 //     S + A, checked to fit when zero- or sign-extended.
 //   - SIZE32, SIZE64: 4 or 8 bytes: R_X86_64_SIZE32, R_X86_64_SIZE64; S's size + A.
+//   - TLSGD: the displacement of a general-dynamic access's lea rdi, [rip + x@tlsgd], in the 16 bytes of data16 lea
+//     rdi, [rip + x@tlsgd]; data16 data16 rex.W call __tls_get_addr (or data16 rex.W call [rip + __tls_get_addr's
+//     slot]), whose call is the next fixup: R_X86_64_TLSGD; G + A - P for the pair of slots of x's module and offset.
+//     An executable relaxes the 16 bytes to mov rax, fs:0; lea rax, [rax + x's offset from the end of the TLS block],
+//     the call's fixup with them.
+//   - TLSLD: the displacement of a local-dynamic access's lea rdi, [rip + x@tlsld], in the 12 bytes of lea rdi,
+//     [rip + x@tlsld]; call __tls_get_addr (or the 13 with call [rip + slot]), whose call is the next fixup:
+//     R_X86_64_TLSLD; G + A - P for the pair of slots of x's module. An executable relaxes them to data16 data16
+//     data16 mov rax, fs:0 (or with four prefixes), the call's fixup with them.
+//   - DTPOFF32: 32 bits of S's offset in its module's TLS block, after a TLSLD (lea rax, [rax + x@dtpoff]):
+//     R_X86_64_DTPOFF32; that offset + A, which in an executable is TPOFF32's, from the end of the block.
+// Only imported objects have the last three (libgcc.a's decimal floating point and split-stack members, and GCC 16's
+// libgcc_eh.a's heap trampolines): the code generator makes local-exec and initial-exec accesses.
 #define BUSTER_LINK_FIXUP_NONE 0
 #define BUSTER_LINK_FIXUP_CALL 1
 #define BUSTER_LINK_FIXUP_CALL_GOT 2
@@ -185,7 +205,10 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_FIXUP_ABS32S 11
 #define BUSTER_LINK_FIXUP_SIZE32 12
 #define BUSTER_LINK_FIXUP_SIZE64 13
-#define BUSTER_LINK_FIXUP_KINDS 14
+#define BUSTER_LINK_FIXUP_TLSGD 14
+#define BUSTER_LINK_FIXUP_TLSLD 15
+#define BUSTER_LINK_FIXUP_DTPOFF32 16
+#define BUSTER_LINK_FIXUP_KINDS 17
 // A fixup's kind is its BUSTER_LINK_FIXUP_KIND bits, and BUSTER_LINK_FIXUP_WIDE says its addend is in the side table.
 #define BUSTER_LINK_FIXUP_KIND 0x7f
 #define BUSTER_LINK_FIXUP_WIDE 0x80
@@ -305,6 +328,24 @@ static const LinkFixupKind link_fixup_kinds[BUSTER_LINK_FIXUP_KINDS] = {
         .pc_relative = false,
         .fields = BUSTER_LINK_FIELDS_ABSOLUTE64,
     },
+    [BUSTER_LINK_FIXUP_TLSGD] = {
+        .name = "tlsgd",
+        .width = 4,
+        .pc_relative = true,
+        .fields = BUSTER_LINK_FIELDS_RIP,
+    },
+    [BUSTER_LINK_FIXUP_TLSLD] = {
+        .name = "tlsld",
+        .width = 4,
+        .pc_relative = true,
+        .fields = BUSTER_LINK_FIELDS_RIP,
+    },
+    [BUSTER_LINK_FIXUP_DTPOFF32] = {
+        .name = "dtpoff32",
+        .width = 4,
+        .pc_relative = false,
+        .fields = BUSTER_LINK_FIELDS_ABSOLUTE32,
+    },
 };
 
 typedef enum LinkError
@@ -315,8 +356,9 @@ typedef enum LinkError
     // A record names an id that doesn't exist, or 0 where it needs one.
     LINK_ERROR_ID,
     // A record breaks one of the rules above: a class, alignment, size or bytes an atom can't have, flags or a source
-    // that don't exist, a symbol outside its atom or defined twice, a fixup out of order, overlapping another or outside
-    // its atom, or a kind that doesn't exist.
+    // that don't exist, a symbol outside its atom, defined twice or absolute in an atom, a fixup out of order,
+    // overlapping another or outside its atom, a kind that doesn't exist, or a priority out of order, too high or for an
+    // atom that isn't an init or fini array's.
     LINK_ERROR_RECORD,
     // A code fixup's field isn't one its kind can patch, or the references don't match the marked instructions.
     LINK_ERROR_FIELD,
@@ -391,6 +433,18 @@ struct LinkFixups
     uint32_t wide_capacity;
 };
 
+// The init and fini array atoms that have a priority (an object's .init_array.N and .fini_array.N, N from 0 to
+// 65535), by atom in id order, entry 0 among them unused: the executable places them before those without one, in the
+// order of their priorities and then of their ids, as GNU ld's and lld's SORT_BY_INIT_PRIORITY lay them out.
+typedef struct LinkPriorities LinkPriorities;
+struct LinkPriorities
+{
+    AtomId* atom;
+    uint16_t* priority;
+    uint32_t count;
+    uint32_t capacity;
+};
+
 typedef struct Link Link;
 struct Link
 {
@@ -398,6 +452,7 @@ struct Link
     LinkAtoms atoms;
     LinkSymbols symbols;
     LinkFixups fixups;
+    LinkPriorities priorities;
     // Where link_add_name copies names' bytes.
     Arena* name_arena;
     // The first failure, or LINK_ERROR_NONE.
@@ -413,6 +468,7 @@ struct LinkCapacity
     uint32_t symbols;
     uint32_t fixups;
     uint32_t wide_addends;
+    uint32_t priorities;
 };
 
 // A symbolic field of a marked instruction, for link_add_code_fixups.
@@ -459,6 +515,9 @@ static __attribute__((unused)) bool link_define_symbol(Link* link, SymbolId symb
 static __attribute__((unused)) FixupId link_add_fixup(Link* link, AtomId atom, uint32_t offset, uint8_t kind, SymbolId target, int64_t addend);
 // A fixup's addend, from the side table if it is wide.
 static __attribute__((unused)) int64_t link_fixup_addend(const Link* link, FixupId fixup);
+// Gives `atom`, an init or fini array atom after every atom that has one, a priority up to 65535. Returns false if the
+// table is full, or the atom or the priority breaks those rules.
+static __attribute__((unused)) bool link_add_priority(Link* link, AtomId atom, uint32_t priority);
 // Adds the fixups of `atom`, whose bytes are x86_encode's output for `instructions` from the atom's start: one fixup
 // per reference. fixup_ends are the ends x86_encode reported for the instructions marked with BUSTER_X86_FORM_FIXUP, of
 // which there are `marked`. References are sorted by instruction, and an instruction's displacement comes before its
@@ -679,6 +738,7 @@ static uint64_t link_capacity_bytes(LinkCapacity capacity)
     result += ((uint64_t)capacity.symbols + 1) * BUSTER_LINK_SYMBOL_BYTES + BUSTER_LINK_SYMBOL_COLUMNS * padding;
     result += ((uint64_t)capacity.fixups + 1) * BUSTER_LINK_FIXUP_BYTES + BUSTER_LINK_FIXUP_COLUMNS * padding;
     result += ((uint64_t)capacity.wide_addends + 1) * sizeof(int64_t) + padding;
+    result += ((uint64_t)capacity.priorities + 1) * (sizeof(AtomId) + sizeof(uint16_t)) + 2 * padding;
     return result;
 }
 
@@ -707,7 +767,7 @@ static bool link_initialize(Link* link, Arena* arena, Arena* name_arena, LinkCap
         .error = LINK_ERROR_NONE,
     };
     bool fits = capacity.names < UINT32_MAX && capacity.atoms < UINT32_MAX && capacity.symbols < UINT32_MAX && capacity.fixups < UINT32_MAX &&
-                capacity.wide_addends < UINT32_MAX;
+                capacity.wide_addends < UINT32_MAX && capacity.priorities < UINT32_MAX;
     if (fits)
     {
         const uint32_t names = capacity.names + 1;
@@ -715,6 +775,7 @@ static bool link_initialize(Link* link, Arena* arena, Arena* name_arena, LinkCap
         const uint32_t symbols = capacity.symbols + 1;
         const uint32_t fixups = capacity.fixups + 1;
         const uint32_t wide_addends = capacity.wide_addends + 1;
+        const uint32_t priorities = capacity.priorities + 1;
         result.names.bytes = link_push_column(arena, names, sizeof(*result.names.bytes), &fits);
         result.names.length = link_push_column(arena, names, sizeof(*result.names.length), &fits);
         result.names.hash = link_push_column(arena, names, sizeof(*result.names.hash), &fits);
@@ -741,6 +802,8 @@ static bool link_initialize(Link* link, Arena* arena, Arena* name_arena, LinkCap
         result.fixups.addend = link_push_column(arena, fixups, sizeof(*result.fixups.addend), &fits);
         result.fixups.kind = link_push_column(arena, fixups, sizeof(*result.fixups.kind), &fits);
         result.fixups.wide_addends = link_push_column(arena, wide_addends, sizeof(*result.fixups.wide_addends), &fits);
+        result.priorities.atom = link_push_column(arena, priorities, sizeof(*result.priorities.atom), &fits);
+        result.priorities.priority = link_push_column(arena, priorities, sizeof(*result.priorities.priority), &fits);
         if (fits)
         {
             result.names.count = 1;
@@ -753,6 +816,8 @@ static bool link_initialize(Link* link, Arena* arena, Arena* name_arena, LinkCap
             result.fixups.capacity = fixups;
             result.fixups.wide_count = 1;
             result.fixups.wide_capacity = wide_addends;
+            result.priorities.count = 1;
+            result.priorities.capacity = priorities;
         }
     }
     if (!fits)
@@ -811,7 +876,8 @@ static AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, u
 static bool link_symbol_flags_are_valid(uint8_t flags)
 {
     const uint8_t type = flags & BUSTER_LINK_SYMBOL_TYPE;
-    const bool type_valid = type == BUSTER_LINK_SYMBOL_NOTYPE || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_TLS;
+    const bool type_valid = type == BUSTER_LINK_SYMBOL_NOTYPE || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_TLS ||
+                            type == BUSTER_LINK_SYMBOL_IFUNC;
     return type_valid && (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_BINDING;
 }
 
@@ -822,6 +888,13 @@ static bool link_symbol_fits(const Link* link, AtomId atom, uint64_t value, uint
     const uint64_t atom_size = link->atoms.size[atom];
     const bool tls = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
     return value <= atom_size && size <= atom_size - value && tls == link_class_is_tls(link->atoms.class[atom]);
+}
+
+// Whether a symbol with `flags` can be absolute: in no atom, and neither a TLS variable nor an IFUNC, which need one.
+static bool link_absolute_fits(AtomId atom, uint8_t flags)
+{
+    const uint8_t type = flags & BUSTER_LINK_SYMBOL_TYPE;
+    return atom == 0 && type != BUSTER_LINK_SYMBOL_TLS && type != BUSTER_LINK_SYMBOL_IFUNC;
 }
 
 static SymbolId link_add_symbol(Link* link, NameId name, AtomId atom, uint64_t value, uint64_t size, uint8_t flags, uint8_t source)
@@ -836,7 +909,8 @@ static SymbolId link_add_symbol(Link* link, NameId name, AtomId atom, uint64_t v
     {
         link_fail(link, LINK_ERROR_ID);
     }
-    else if (!link_symbol_flags_are_valid(flags) || source >= BUSTER_LINK_SOURCE_COUNT || (atom != 0 && !link_symbol_fits(link, atom, value, size, flags)))
+    else if (!link_symbol_flags_are_valid(flags) || source >= BUSTER_LINK_SOURCE_COUNT || (atom != 0 && !link_symbol_fits(link, atom, value, size, flags)) ||
+             (source == BUSTER_LINK_SOURCE_ABSOLUTE && !link_absolute_fits(atom, flags)))
     {
         link_fail(link, LINK_ERROR_RECORD);
     }
@@ -866,7 +940,7 @@ static bool link_define_symbol(Link* link, SymbolId symbol, AtomId atom, uint64_
     {
         link_fail(link, LINK_ERROR_ID);
     }
-    else if (symbols->atom[symbol] != 0 || !link_symbol_fits(link, atom, value, size, symbols->flags[symbol]))
+    else if (symbols->atom[symbol] != 0 || symbols->source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE || !link_symbol_fits(link, atom, value, size, symbols->flags[symbol]))
     {
         link_fail(link, LINK_ERROR_RECORD);
     }
@@ -954,6 +1028,39 @@ static int64_t link_fixup_addend(const Link* link, FixupId fixup)
     return result;
 }
 
+// Whether atoms of the class are an init or a fini array's.
+static bool link_class_is_array(uint8_t class)
+{
+    return class == BUSTER_LINK_CLASS_INIT_ARRAY || class == BUSTER_LINK_CLASS_FINI_ARRAY;
+}
+
+static bool link_add_priority(Link* link, AtomId atom, uint32_t priority)
+{
+    LinkPriorities* priorities = &link->priorities;
+    const uint32_t count = priorities->count;
+    bool result = false;
+    if (count == priorities->capacity)
+    {
+        link_fail(link, LINK_ERROR_FULL);
+    }
+    else if (atom == 0 || atom >= link->atoms.count)
+    {
+        link_fail(link, LINK_ERROR_ID);
+    }
+    else if (!link_class_is_array(link->atoms.class[atom]) || priority > UINT16_MAX || (count > 1 && priorities->atom[count - 1] >= atom))
+    {
+        link_fail(link, LINK_ERROR_RECORD);
+    }
+    else
+    {
+        priorities->atom[count] = atom;
+        priorities->priority[count] = (uint16_t)priority;
+        priorities->count += 1;
+        result = true;
+    }
+    return result;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Code
 
@@ -1012,6 +1119,11 @@ static bool link_kind_fits(uint8_t kind, const X86Instruction* instruction, X86F
     else if (kind == BUSTER_LINK_FIXUP_GOTTPOFF)
     {
         result = result && (form == X86_FORM_MOV_R64_RM64 || form == X86_FORM_ADD_R64_RM64);
+    }
+    else if (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32)
+    {
+        // Only imported objects have them (see the kinds above).
+        result = false;
     }
     return result;
 }
@@ -1104,14 +1216,16 @@ static bool link_check_fixups(const Link* link, AtomId atom, uint64_t* owned)
 }
 
 // Whether a fixup of `kind` in `atom` can refer to `target`: a TLS kind to a TLS symbol and no other kind to one (but
-// a size of either), a local symbol only from its own unit, and a shared library's symbol only through the GOT, by its
-// absolute address (which the executable relocates when it loads), or for a function by a call (through a stub).
+// a size of either), a local symbol only from its own unit (or an absolute one, which has none), and a shared library's
+// symbol only through the GOT, by its absolute address (which the executable relocates when it loads), or for a function
+// by a call (through a stub).
 static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, SymbolId target)
 {
     const uint8_t flags = link->symbols.flags[target];
     const uint8_t source = link->symbols.source[target];
     const AtomId target_atom = link->symbols.atom[target];
-    const bool tls_kind = kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
+    const bool tls_kind = kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD ||
+                          kind == BUSTER_LINK_FIXUP_DTPOFF32;
     const bool size_kind = kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64;
     const bool tls_target = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
     const bool local = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
@@ -1119,7 +1233,9 @@ static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, Symbo
     const bool through_got = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
     const bool call = kind == BUSTER_LINK_FIXUP_CALL && (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
     const bool reaches_shared = through_got || kind == BUSTER_LINK_FIXUP_ABS64 || call;
-    return (size_kind || tls_kind == tls_target) && (!local || (target_atom != 0 && link->atoms.unit[target_atom] == link->atoms.unit[atom])) && (!shared || reaches_shared);
+    const bool absolute = source == BUSTER_LINK_SOURCE_ABSOLUTE;
+    return (size_kind || tls_kind == tls_target) && (!local || absolute || (target_atom != 0 && link->atoms.unit[target_atom] == link->atoms.unit[atom])) &&
+           (!shared || reaches_shared);
 }
 
 static LinkError link_check(Link* link)
@@ -1132,16 +1248,32 @@ static LinkError link_check(Link* link)
         const uint8_t source = symbols->source[symbol];
         const AtomId atom = symbols->atom[symbol];
         const bool in_atom_source = source == BUSTER_LINK_SOURCE_PROGRAM || source == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE || source == BUSTER_LINK_SOURCE_FOREIGN_OBJECT;
+        const bool absolute = source == BUSTER_LINK_SOURCE_ABSOLUTE;
         const bool local = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
         if (symbols->name[symbol] >= link->names.count || atom >= atoms->count || source >= BUSTER_LINK_SOURCE_COUNT)
         {
             result = LINK_ERROR_ID;
         }
-        else if ((source == BUSTER_LINK_SOURCE_PROGRAM && atom == 0) || (!in_atom_source && atom != 0) || (local && !in_atom_source))
+        else if ((source == BUSTER_LINK_SOURCE_PROGRAM && atom == 0) || (!in_atom_source && atom != 0) || (local && !in_atom_source && !absolute))
         {
             result = LINK_ERROR_BINDING;
         }
-        else if (atom != 0 && !link_symbol_fits(link, atom, symbols->value[symbol], symbols->size[symbol], symbols->flags[symbol]))
+        else if ((atom != 0 && !link_symbol_fits(link, atom, symbols->value[symbol], symbols->size[symbol], symbols->flags[symbol])) ||
+                 (absolute && !link_absolute_fits(atom, symbols->flags[symbol])))
+        {
+            result = LINK_ERROR_RECORD;
+        }
+    }
+    // The priorities: by atom in id order, each an init or fini array's.
+    const LinkPriorities* priorities = &link->priorities;
+    for (uint32_t entry = 1; result == LINK_ERROR_NONE && entry < priorities->count; entry += 1)
+    {
+        const AtomId atom = priorities->atom[entry];
+        if (atom == 0 || atom >= atoms->count)
+        {
+            result = LINK_ERROR_ID;
+        }
+        else if (!link_class_is_array(atoms->class[atom]) || (entry > 1 && priorities->atom[entry - 1] >= atom))
         {
             result = LINK_ERROR_RECORD;
         }

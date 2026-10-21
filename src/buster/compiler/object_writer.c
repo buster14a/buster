@@ -307,6 +307,9 @@ static const uint32_t object_relocation_types[BUSTER_LINK_FIXUP_KINDS] = {
     [BUSTER_LINK_FIXUP_ABS32S] = R_X86_64_32S,
     [BUSTER_LINK_FIXUP_SIZE32] = R_X86_64_SIZE32,
     [BUSTER_LINK_FIXUP_SIZE64] = R_X86_64_SIZE64,
+    [BUSTER_LINK_FIXUP_TLSGD] = R_X86_64_TLSGD,
+    [BUSTER_LINK_FIXUP_TLSLD] = R_X86_64_TLSLD,
+    [BUSTER_LINK_FIXUP_DTPOFF32] = R_X86_64_DTPOFF32,
 };
 
 // The prefix of a relocation section's name: ".rela" and its section's, which .shstrtab shares.
@@ -604,7 +607,8 @@ struct ObjectBuilder
 static bool object_uses_section_symbol(uint8_t kind, bool in_pool, int64_t addend)
 {
     const bool kept = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_TPOFF32 ||
-                      kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64;
+                      kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64 || kind == BUSTER_LINK_FIXUP_TLSGD ||
+                      kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32;
     const bool pool = in_pool && (link_fixup_kinds[kind].pc_relative || addend != 0);
     return !kept && !pool;
 }

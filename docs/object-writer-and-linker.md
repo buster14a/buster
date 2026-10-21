@@ -328,7 +328,7 @@ as its output file: 1–4 µs on tmpfs, 3–12 µs on btrfs. On top of that:
 
 - a dozen `stat` calls, about 2 µs, to check the runtime snapshot (19 as
   built, 4.1 µs: "The runtime snapshot");
-- reading the snapshot, a few microseconds (mapping and hashing its 185 KB,
+- reading the snapshot, a few microseconds (mapping and hashing its 192 KB,
   4 µs as built);
 - layout, patching and writing the dynamic sections, a few microseconds more.
 
@@ -738,9 +738,10 @@ it once and keeps the result in a snapshot under `$XDG_CACHE_HOME/buster/`.
   indexed by the front end's name hash in buckets filled by a counting sort,
   with a blocked Bloom filter ("Step 5's phases, data-parallel"). The other
   shared libraries in the link will get the same.
-- **For `-static`, libc.a's 2,227 members:** each member's atoms and fixups,
+- **For `-static`, libc.a's 2,231 members:** each member's atoms and fixups,
   already converted; a table from symbol to defining member; and each member's
-  undefined names. libgcc.a and libgcc_eh.a get the same.
+  undefined names. libgcc.a, libgcc_eh.a and libatomic.a get the same ("A
+  static executable's runtime, as built", below).
 - **The search results** that led to each file: every path probed, in the
   search's order, found or absent, with its identity.
 
@@ -763,10 +764,12 @@ snapshot of their own.
 - **The file** is the runtime's records as the compiler lays them out in
   memory: a header (the counts, the paths and each region's place), the
   records that hold pointers from the second page, the strings they point
-  into, then the columns, each at a multiple of 64 bytes. It is 185 KB on the
+  into, then the columns, each at a multiple of 64 bytes. It is 192 KB on the
   9700X: 2,673 global names with their index and filter, and 2,630 exports.
   The "few tens of kilobytes" this section first expected were the exports'
-  columns alone.
+  columns alone. Its version 2 added what a static runtime's closure reads
+  (each member's references and COMDAT groups, the global names' members, the
+  archives), which took the dynamic runtime's from 185 KB.
 - **Loading** maps it privately. The runtime's columns point into the mapping
   and are used where they are, which is why the global names hold their bytes
   as offsets into one string pool rather than as pointers. Only the probes,
@@ -796,16 +799,16 @@ write):
 | `runtime_open` from the snapshot | 9.1–9.5 |
 | — the compiler's identity: `stat` of `/proc/self/exe` | 0.5 |
 | — `open`, `fstat`, `mmap` and `close` | 1.0–1.1 |
-| — the header and the hash, which reads all 185 KB | 2.7–3.1 |
+| — the header and the hash, which reads all 192 KB | 2.7–3.1 |
 | — the columns pointed into the mapping, the records rebased | 0.6–0.7 |
 | — the 19 probes' `stat` | 4.1 |
 | `runtime_release` of a loaded runtime (`munmap`) | 1.9–2.3 |
 | `snapshot_write`, on tmpfs / btrfs | 47 / 390–410 |
-| the 185 KB read with `pread` into new memory instead | 20 |
+| the 192 KB read with `pread` into new memory instead | 20–22 |
 | mapped without the hash, then 12 lookups | 7.7–8.1 |
 | binding one worker against the imported / the loaded runtime | 2.6 / 2.6 |
 
-- **Mapped, not read.** `pread` puts the 185 KB into new anonymous pages,
+- **Mapped, not read.** `pread` puts the 192 KB into new anonymous pages,
   whose first touches make it cost 20 µs; mapping the page cache's own pages
   costs 1 µs, and their first reads under the hash 2 µs more.
 - **The hash costs 1.3 µs** over a mapping read only where a hello world's
@@ -856,6 +859,62 @@ section, symbol or relocation and the byte offset, and the readers are run on
 every prefix of their test inputs and on every byte changed, ending at a
 `PROT_NONE` page, to show that they read nothing past the end.
 
+**A static executable's runtime, as built** (`runtime_import_static`, the
+first part of step 6). GCC's driver links `cc -static` as `crt1.o crti.o
+crtbeginT.o` before the program's objects and `crtend.o crtn.o` after them,
+with `--start-group -lgcc -lgcc_eh -latomic_asneeded -lc --end-group` between
+(GCC 16 installs `libatomic_asneeded.a` as a link to `libatomic.a`; GCC 13
+links neither). `-static-pie` takes `rcrt1.o`, `crtbeginS.o` and
+`crtendS.o` instead, with `-static -pie --no-dynamic-linker -z text`. The
+search finds the crt objects as for a dynamic PIE, and each archive where
+`-L` finds it: GCC's installation, then the library directories. The import
+makes the crt objects units 0 to 4 and each archive's members, in the
+group's order, the units after them. On the 9700X (GCC 16.2, glibc 2.44):
+2,622 members, 298 of `libgcc.a`'s, 6 of `libgcc_eh.a`'s, 87 of
+`libatomic.a`'s and 2,231 of `libc.a`'s, with 23,992 symbols, 40,954 fixups,
+5,800 global names, 10,621 references and 79 COMDAT groups. What the static
+runtime has that the dynamic one doesn't:
+
+- **COMDAT groups:** each member that uses C cleanups keeps
+  `DW.ref.__gcc_personality_v0`, the personality routine's address that its
+  CIE points to, in a group of its own, and each that has SystemTap probes
+  `.stapsdt.base`. The import reads each object's groups (only `GRP_COMDAT`
+  ones; a section with `SHF_GROUP` in no group or in two is refused), and the
+  runtime numbers their signatures among its distinct ones (2), so that
+  binding keeps the first group of each in link order and discards the rest.
+- **IFUNCs:** `libc.a`'s string and memory functions (100 names on the
+  9700X), whose resolvers the executable's IRELATIVE relocations call at
+  startup.
+- **Absolute symbols:** `_nl_current_LC_CTYPE_used` and the like, which
+  glibc's locale code reads through the GOT to see which categories are
+  linked in.
+- **The general-dynamic and local-dynamic TLS kinds** (`R_X86_64_TLSGD`,
+  `TLSLD` and `DTPOFF32`): `libgcc.a`'s decimal float and split-stack
+  members are built PIC (243 general-dynamic accesses in 24 members on the
+  9700X), and so are GCC 16's heap trampolines in `libgcc_eh.a`
+  (local-dynamic). They call `__tls_get_addr`, which nothing in a static
+  link defines: GNU ld and lld relax every such sequence to local-exec,
+  which consumes the call.
+- **Prioritized init and fini arrays** (`.init_array.NNNNN`), which the
+  linkers place before the plain ones, by priority: two of `libgcc.a`'s.
+- **The linker's names:** besides the arrays' bounds and the GOT's symbol,
+  the ELF header's address (`__ehdr_start`, through which `libc.a`'s startup
+  finds the program headers), `__executable_start`, the preinit array's
+  bounds, the IRELATIVE relocations' (`__rela_iplt_start` and
+  `__rela_iplt_end`), and the ends of the text, the data and the image.
+
+The runtime refers, without defining them, to `main`, to `__tls_get_addr`
+(from those 25 PIC members on the 9700X) and to `_DYNAMIC`, from
+`dl-reloc-static-pie.o`, which a link without `-static-pie` never loads:
+`crt1.o` defines `_dl_relocate_static_pie`, the one name it would be loaded
+for. For binding's closure, the global names say which member defines each
+name, and each member's strong references to names are listed; on both
+systems every name but two is defined by at most one member, and those two
+(`DW.ref.__gcc_personality_v0` in 52 members on the 9700X and
+`_.stapsdt.base` in 27) are weak definitions in COMDAT groups. The snapshot holds the static runtime as it
+holds the dynamic one (8.6 MB on the 9700X); a link of `-static` doesn't
+open one yet.
+
 **Static links.** The closure over libc.a is GNU ld's group semantics, which
 the driver asks for (`--start-group -lgcc -lgcc_eh -lc --end-group`):
 
@@ -900,10 +959,12 @@ against its exact path on the 9700X (`benchmark-import`, one CPU, medians of
 | the same with function sections | 231,670 | 0.71 ms, 3.07 ns | 3.13 ms, 13.5 ns | 4.4× |
 | one object of 33,000 functions in sections of their own | 430,617 | 1.06 ms, 2.45 ns | 6.17 ms, 14.3 ns | 5.8× |
 | the crt objects and `libc_nonshared.a`'s members | 94 | 1.36 µs | 1.74 µs | 1.3× |
+| a static executable's crt objects and archives' 2,622 members | 71,412 | 0.66 ms, 9.18 ns | 1.47 ms, 20.5 ns | 2.2× |
 | `libc.so.6` (glibc 2.44) | 2,651 names | 11.0 µs, 4.2 ns per name | 41.9 µs, 15.8 ns | 3.8× |
 | `libstdc++.so.6` | 6,345 names | 83 µs, 13.2 ns | 214 µs, 33.8 ns | 2.6× |
 | `libLLVM.so.23.1` | 48,048 names | 1.47 ms, 30.6 ns | 1.98 ms, 41.2 ns | 1.35× |
 | `libc.a` (2,231 members) | 4,880 index entries | 28 µs, 5.7 ns per entry | 111 µs, 22.7 ns | 4.0× |
+| `libgcc.a` (298 members) | 699 index entries | 3.2 µs, 4.5 ns | 10.4 µs, 14.9 ns | 3.3× |
 | `libc_nonshared.a` | 5 index entries | 0.12 µs | 0.16 µs | 1.3× |
 
 The records are an object's symbol table entries and relocations, and a
@@ -939,15 +1000,24 @@ the scalar hash.
     addends' ranks. `R_X86_64_NONE` entries are compressed away: a batch
     without them skips the compression, and one without a wide addend the side
     table. Each target is then a scalar load per fixup, in a tight pass.
+    A section whose fields aren't in offset order is read again from a copy
+    sorted by offset: a key per entry, its offset above its index, built eight
+    at a time, then an LSD radix sort of the keys by as many of the offset's
+    bytes as the largest offset has, which keeps equal offsets in the file's
+    order, as the exact path's merge sort does. GNU as writes a relaxed
+    branch's relocation after the section's others, so a tail call's `jmp`
+    to another function leaves its `.rela.text` out of order: 261 of Ubuntu
+    24.04's 2,481 members of the static runtime's archives and 221 of the
+    9700X's 2,622, which the exact path took until the sort.
 
   Anything out of the ordinary sends the whole object to
-  `import_object_scalar`: a malformed record, relocations out of offset
-  order (which the exact path sorts), two relocation sections for one
-  section, a string table without its final NUL, or a table without room for
-  every record. `import_object` then returns the link's counts and the
-  arenas to where they were before running it. On the 9700X the vector path
-  takes every object above, and GCC's and glibc's on the 9700X and on Ubuntu
-  24.04.
+  `import_object_scalar`: a malformed record, fields that overlap, two
+  relocation sections for one section, a string table without its final NUL,
+  or a table without room for every record. `import_object` then returns the
+  link's counts and the arenas to where they were before running it. On the
+  9700X the vector path takes every object above, and every crt object and
+  archive member of GCC's and glibc's, a static executable's among them, on
+  the 9700X and on Ubuntu 24.04.
 - **Archives** (`import_archive_vector`). The symbol index lists the header
   offset of each member that defines a global symbol, in archive order. Those
   members' headers are read on their own, from the index, rather than by
@@ -995,8 +1065,9 @@ the scalar hash.
   to a few thousand of them, under 2 µs either way.
 - **The runtime's binding** (`runtime_bind`). The runtime's definitions are
   found eight symbols at a time (a compress of the ids whose binding isn't
-  local, with an atom and a name) and indexed the same way. Each reference is
-  then looked up, rather than every reference scanning every symbol.
+  local, with an atom or absolute, and with a name) and indexed the same way.
+  Each reference is then looked up, rather than every reference scanning
+  every symbol.
 - **Linker scripts** (`import_script`) have no vector path: `libc.so`'s is
   255 bytes, read in 0.15 µs once per rebuild of the snapshot. A vector lexer
   would classify 64 bytes at a time into word, space and punctuation masks,
@@ -1007,7 +1078,13 @@ the scalar hash.
   `libc.so.6`'s 2.2 MB, of which the import reads only the dynamic sections.
   The snapshot saves all of it on a link. Reading only those sections, with
   `pread` after the section table, is what is left for the snapshot's
-  rebuild.
+  rebuild. A static executable's runtime (`runtime_import_static`) takes
+  1.75 ms: the search's 20 probes 20 µs, reading its 10.6 MB of files 0.37 ms,
+  the archives' indices and members 80 µs, sizing the link by each object's
+  headers 0.15 ms, the 2,627 objects 0.71 ms, binding the runtime 0.14 ms, its
+  5,800 global names 0.28 ms, and the members' references and groups 18 µs
+  (medians of 21 runs of each phase, one CPU). Each import starts from new
+  arenas, whose first touches are in these figures.
 
 Each vector path is tested against its exact path on every input the tests
 have: every unit's object of test-link's programs, the objects, archives and
@@ -2884,6 +2961,12 @@ and with this document updated with what was measured:
    `benchmark-floors`, the appendix's floors.
 6. **`-static`:** libc.a's closure, IRELATIVE for its IFUNCs, static TLS.
    Then `-static-pie` and `-shared`.
+
+   The first part is done: the static runtime's files found and imported
+   (`runtime_import_static`, with COMDAT groups, IFUNCs, absolute symbols, the
+   general- and local-dynamic TLS kinds and prioritized arrays in `import.c`
+   and `link.c`, and each member's references and groups for the closure:
+   "A static executable's runtime, as built").
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
    and the exchange. Done when the differential tests against lld and mold
    pass on a corpus.
