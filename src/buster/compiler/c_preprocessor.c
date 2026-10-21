@@ -77,6 +77,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <immintrin.h>
+#include "buster/compiler/x86_target.c"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // API
@@ -157,6 +158,9 @@ typedef struct PPOptions PPOptions;
 struct PPOptions
 {
     CLanguage language;
+    X86Target target;
+    // Retained independently for the future scheduler; it cannot enable an ISA feature.
+    X86Architecture tune;
     bool freestanding;
     bool optimize;
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
@@ -4489,6 +4493,10 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
     else if (pp_feature_name(pp, builtin, tokens, first, last, text, &length))
     {
         result = pp_feature(builtin, text, length, pp->options.language.standard);
+        if (builtin == PP_BUILTIN_HAS_BUILTIN && result == 0)
+        {
+            result = x86_target_has_builtin(&pp->options.target, text, length);
+        }
     }
     else
     {
@@ -4526,8 +4534,8 @@ static void pp_start_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint8
     }
 }
 
-// A builtin's operand is collected (`closed`: its ')' was read): _Pragma takes its string literal; a feature query takes
-// its operand expanded (through a capture, pp_finish_builtin), and __has_include its header name as written or expanded.
+// A builtin's operand is collected (`closed`: its ')' was read): _Pragma takes its string literal; attribute queries
+// expand their operand through pp_finish_builtin, name queries read it literally, and __has_include does either.
 // An unterminated or malformed operand is an error, and a query's answer then 0.
 static void pp_close_builtin(Preprocessor* pp, bool closed)
 {
@@ -4575,10 +4583,12 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
     else
     {
         const bool include = builtin == PP_BUILTIN_HAS_INCLUDE || builtin == PP_BUILTIN_HAS_INCLUDE_NEXT;
-        // A header name in <...> or a string literal is read as it is, and so is __is_identifier's operand (clang doesn't
-        // expand it); anything else is expanded first.
+        // Clang reads builtin, feature and target names literally, even when the name is itself a builtin macro.
+        // Attribute queries may expand their operand. Header names in <...> or a string literal are already complete.
+        const bool raw_name = builtin == PP_BUILTIN_HAS_BUILTIN || builtin == PP_BUILTIN_HAS_FEATURE || builtin == PP_BUILTIN_HAS_EXTENSION ||
+                              builtin == PP_BUILTIN_IS_IDENTIFIER || (builtin >= PP_BUILTIN_IS_TARGET_ARCH && builtin <= PP_BUILTIN_IS_TARGET_ENVIRONMENT);
         const bool direct = (include && begin < end && (tokens->kinds[begin] == C_TOKEN_LESS || tokens->kinds[begin] == C_TOKEN_STRING_LITERAL)) ||
-                            builtin == PP_BUILTIN_IS_IDENTIFIER;
+                            raw_name;
         const PPCapture capture = {
             .kind = BUSTER_PP_CAPTURE_BUILTIN,
             .history = invocation.history,
@@ -6399,7 +6409,12 @@ static const PPFeature pp_features_attribute[] = {
     { "artificial", 1 }, { "assume", 1 }, { "assume_aligned", 1 }, { "availability", 1 }, { "blocking", 1 }, { "btf_decl_tag", 1 },
     { "btf_type_tag", 1 }, { "callback", 1 }, { "cleanup", 1 }, { "cold", 1 }, { "common", 1 }, { "const", 1 }, { "constructor", 1 },
     { "convergent", 1 }, { "counted_by", 1 }, { "cpu_dispatch", 1 }, { "cpu_specific", 1 }, { "deprecated", 1 }, { "destructor", 1 },
-    { "diagnose_if", 1 }, { "disable_tail_calls", 1 }, { "enable_if", 1 }, { "enum_extensibility", 1 }, { "error", 1 }, { "fallthrough", 1 },
+    { "diagnose_if", 1 }, { "disable_tail_calls", 1 }, { "enable_if", 1 }, { "enum_extensibility", 1 }, { "error", 1 },
+    {
+        .name = "ext_vector_type",
+        .value = 1,
+    },
+    { "fallthrough", 1 },
     { "flag_enum", 1 }, { "flatten", 1 }, { "force_align_arg_pointer", 1 }, { "format", 1 }, { "format_arg", 1 }, { "gnu_inline", 1 }, { "hot", 1 },
     { "ifunc", 1 }, { "internal_linkage", 1 }, { "interrupt", 1 }, { "leaf", 1 }, { "lifetimebound", 1 }, { "malloc", 1 }, { "may_alias", 1 },
     { "mig_server_routine", 1 }, { "minsize", 1 }, { "mode", 1 }, { "ms_abi", 1 }, { "musttail", 1 }, { "naked", 1 }, { "no_builtin", 1 },
@@ -6962,8 +6977,6 @@ static const char pp_predefines_base[] =
     "#define __clang_wide_literal_encoding__ \"UTF-32\"\n"
     "#define __code_model_small__ 1\n"
     "#define __gnu_linux__ 1\n"
-    "#define __k8 1\n"
-    "#define __k8__ 1\n"
     "#define __linux 1\n"
     "#define __linux__ 1\n"
     "#define __llvm__ 1\n"
@@ -6971,7 +6984,6 @@ static const char pp_predefines_base[] =
     "#define __pie__ 2\n"
     "#define __seg_fs __attribute__((address_space(257)))\n"
     "#define __seg_gs __attribute__((address_space(256)))\n"
-    "#define __tune_k8__ 1\n"
     "#define __unix 1\n"
     "#define __unix__ 1\n"
     "#define __x86_64 1\n"
@@ -7015,13 +7027,16 @@ static const char pp_predefines_c23[] =
     "#define __UINT_LEAST8_FMTb__ \"hhb\"\n"
     ;
 
-// The predefines buffer for the options, into `buffer` (room for sizeof(pp_predefines_base) + 512 bytes). Returns its
-// length.
+// Includes room for target feature macros, language options and a terminating byte.
+#define BUSTER_PP_PREDEFINES_BYTES (sizeof(pp_predefines_base) + sizeof(pp_predefines_c23) + BUSTER_X86_TARGET_PREDEFINES_BYTES + 512)
+
+// The predefines buffer for the options, into `buffer` (BUSTER_PP_PREDEFINES_BYTES bytes). Returns its length.
 static uint32_t pp_predefines(const PPOptions* options, char* buffer)
 {
     uint32_t length = 0;
     memcpy(buffer, pp_predefines_base, sizeof(pp_predefines_base) - 1);
     length += sizeof(pp_predefines_base) - 1;
+    length += x86_target_predefines(&options->target, buffer + length);
     const CLanguage language = options->language;
     const char* version = language.standard >= 2023 ? "202311L" : language.standard >= 2017 ? "201710L" : language.standard >= 2011 ? "201112L" : language.standard >= 1999 ? "199901L" : 0;
     if (version != 0)
@@ -7448,7 +7463,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     }
     else
     {
-        char* text = arena_push(&pp->arena, sizeof(pp_predefines_base) + sizeof(pp_predefines_c23) + 512, 1);
+        char* text = arena_push(&pp->arena, BUSTER_PP_PREDEFINES_BYTES, 1);
         const uint32_t file = text != 0 ? pp_virtual_file(pp, "<built-in>", text, pp_predefines(&pp->options, text), BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
         result = file != BUSTER_PP_NONE;
         if (result)
@@ -7644,6 +7659,7 @@ struct PPMarkers
     const char* name;
     uint32_t name_length;
     uint8_t system;
+    bool keep_line;
     uint32_t root;
     uint32_t* cursors;
     uint32_t expansion;
@@ -7819,6 +7835,25 @@ static bool pp_print_start(const Preprocessor* pp, PPMarkers* markers)
     return result;
 }
 
+// Clang's assume_nonnull end callback supplies an invalid source location, so -E keeps its current presumed line.
+// Recognize that event only in the cold pragma path; the token stream's spelling and expansion locations stay intact.
+static __attribute__((noinline)) bool pp_print_keeps_line(const Preprocessor* pp, uint32_t token)
+{
+    const PPTokens* out = &pp->output;
+    bool result = out->count - token >= 6 && out->values[token + 1] == C_NAME_PRAGMA && out->kinds[token + 5] == BUSTER_PP_KIND_PRAGMA_END &&
+                  out->kinds[token + 2] == C_TOKEN_RAW_IDENTIFIER && out->kinds[token + 3] == C_TOKEN_RAW_IDENTIFIER && out->kinds[token + 4] == C_TOKEN_RAW_IDENTIFIER;
+    if (result)
+    {
+        const IdentId space = out->values[token + 2];
+        const IdentId name = out->values[token + 3];
+        const IdentId end = out->values[token + 4];
+        result = intern_length(pp->table, space) == 5 && memcmp(intern_bytes(pp->table, space), "clang", 5) == 0 &&
+                 intern_length(pp->table, name) == 14 && memcmp(intern_bytes(pp->table, name), "assume_nonnull", 14) == 0 &&
+                 intern_length(pp->table, end) == 3 && memcmp(intern_bytes(pp->table, end), "end", 3) == 0;
+    }
+    return result;
+}
+
 // Where -E places a token that starts an output line: at its own location; or for one a macro made, at the start of
 // the expansion it came from (the expansion starts are passed in the output's order), as clang places a token by its
 // expansion location; or for a #pragma's '#', which is in no source, at the directive (its name's location).
@@ -7832,7 +7867,9 @@ static uint32_t pp_print_location(const Preprocessor* pp, PPMarkers* markers, ui
     markers->expansion = at;
     const uint8_t flags = pp->output.flags[token];
     const uint32_t own = pp->output.locations[token];
-    const bool directive = pp->output.kinds[token] == C_TOKEN_HASH && own == pp->hash_location && !(flags & BUSTER_PP_FROM_MACRO);
+    const bool pragma = pp->output.kinds[token] == C_TOKEN_HASH && own == pp->hash_location;
+    const bool directive = pragma && !(flags & BUSTER_PP_FROM_MACRO);
+    markers->keep_line = pragma && pp_print_keeps_line(pp, token);
     return (flags & BUSTER_PP_FROM_MACRO) && at != 0 ? pp->expansion_starts[at - 1].location : directive ? pp->output.locations[token + 1] : own;
 }
 
@@ -7846,7 +7883,13 @@ static __attribute__((noinline)) uint32_t pp_print_place_marking(Preprocessor* p
                                                                  bool line_start, bool* written)
 {
     markers->length = 0;
-    const PPPresumed here = pp_print_presumed(pp, markers, range, location, physical);
+    const uint32_t previous_note = markers->cursors[range];
+    PPPresumed here = pp_print_presumed(pp, markers, range, location, physical);
+    if (markers->keep_line && range == markers->range && previous_note == markers->cursors[range] && here.name == markers->name &&
+        here.delta == markers->delta && here.system == markers->system)
+    {
+        here.line = markers->line;
+    }
     uint32_t result = 0;
     bool fits = true;
     if (range != markers->range)
@@ -7928,7 +7971,7 @@ BUSTER_INLINE uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint
     const uint32_t at = markers->cursors[range];
     const uint32_t next = at == BUSTER_PP_NONE ? pp->ranges[range].first_line_directive : pp->line_directives[at].next_in_range;
     const uint32_t line = (uint32_t)((int64_t)physical + markers->delta);
-    const bool same = range == markers->range && (at == BUSTER_PP_NONE || pp->line_directives[at].location <= location) &&
+    const bool same = !markers->keep_line && range == markers->range && (at == BUSTER_PP_NONE || pp->line_directives[at].location <= location) &&
                       (next == BUSTER_PP_NONE || pp->line_directives[next].location > location) && line > markers->line && line - markers->line <= 8;
     uint32_t result = line - markers->line;
     markers->length = 0;
@@ -8421,10 +8464,28 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             trigraphs = strcmp(argument, "-fno-trigraphs") != 0;
         }
-        else if (strncmp(argument, "-m", 2) == 0 || strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0 || strcmp(argument, "-g") == 0)
+        else if (strncmp(argument, "-march=", 7) == 0 || strncmp(argument, "-mtune=", 7) == 0)
         {
-            // Target, code generation and warning options: the target's macros (-march's features among them) only come
-            // through --predefines for now (test-preprocessor gives clang's for the same options).
+            X86Target target;
+            const bool tune = argument[2] == 't';
+            const bool generic = tune && strcmp(argument + 7, "generic") == 0;
+            result = generic || x86_target_parse(argument + 7, strlen(argument + 7), &target);
+            if (!result)
+            {
+                fprintf(stderr, "unsupported target option: %s (expected x86-64, x86-64-v2, x86-64-v3, x86-64-v4, znver5 or native)\n", argument);
+            }
+            else if (tune)
+            {
+                options->tune = generic ? X86_ARCH_BASELINE : target.architecture;
+            }
+            else
+            {
+                options->target = target;
+            }
+        }
+        else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0 || strcmp(argument, "-g") == 0)
+        {
+            // Code generation and warning options retain their existing preprocessing behavior.
         }
         else if (strncmp(argument, "-std=", 5) == 0)
         {
@@ -8530,7 +8591,7 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
-                        "[-include file] [-std=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
+                        "[-include file] [-std=...] [-march=...] [-mtune=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
     }
     else
     {

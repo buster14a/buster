@@ -100,7 +100,8 @@ old `buster14a/buster` links now address this compiler.
 Local checkout directories, `~/buster-fast-bench/`, the shared host lock,
 `~/llm-memory/projects/buster-fast/` and its memory symlinks retain their existing
 names. The repository-local `buster-fast-9700x` concurrency key is also retained.
-These are operational resources, not canonical repository URLs; do not rename
+Queues use that prefix per PR/ref; the runner hooks serialize every CI job with
+the shared host lock. These are operational resources, not canonical repository URLs; do not rename
 them by replacing text. Source paths, executable names and object-file metadata
 are unchanged by the repository rename.
 
@@ -157,6 +158,14 @@ in the "Data-parallel first" section of
 designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
+
+- `src/buster/compiler/x86_target.c` defines generated-code ISA profiles, with
+  x86-64 baseline as the default, independently of the compiler host.
+  `x86_target_forms.c` supplies explicit, fail-closed form eligibility and
+  scalar/vector table builders. `test-x86-target` checks the policy and Clang
+  predefines; `benchmark-x86-target` measures table construction.
+  `docs/x86-target.md` records the API, current catalogue coverage and the
+  selector/corpus acceptance still pending for #180.
 
 - `src/buster/compiler/assembler.c` is the callable GNU assembly frontend, with
   AVX-512 and scalar paths and shared form matching in `x86_match.c`.
@@ -439,8 +448,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
-`#error` without AVX-512's), which the preprocessor's built-in predefines don't
-have: `--predefines` gives it clang's for those options.
+`#error` without AVX-512's). The built-in predefines now follow `-march`;
+`--predefines` additionally supplies Clang's effects for the other host flags.
 
 ## Sharing the 9700X
 
@@ -581,6 +590,32 @@ selects C++ source/header extensions. The default 9700X job runs
 `benchmark-lexer src` after the tests, pinned to one allowed CPU. Measurements
 are informational: correctness failures fail CI, but throughput values are not
 yet compared against a performance baseline. Keep just one compiler executable.
+
+## x86-64 disassembler
+
+`src/buster/compiler/x86_64_disassembler.c` decodes bounded raw-byte slices into
+semantic records with actual encoded lengths. Its tests and raw-binary command
+adapter are included by `main.c`; the benchmark is a separate translation unit
+in the same executable. [The disassembler notes](docs/x86-64-disassembler.md)
+define the supported 64-bit catalogue subset and prefix restrictions.
+
+On the approved host, with the usual per-run lock:
+
+```sh
+./build/compiler test-x86-disassembler --objdump
+./build/compiler disassemble input.text
+./build/compiler benchmark-x86-disassembler
+./build/compiler benchmark-x86-disassembler --vector --after-scalar 200
+```
+
+The independent GNU tools check instruction boundaries and reassembled operands.
+Keep hand-written semantic fixtures and guarded tails: scalar/vector equality
+and re-encoding through the shared catalogue do not constitute an independent
+oracle. Benchmarks separate decode from decode plus formatting and include
+`--file raw.text` and `--only scalar|compact|avx512|batched`. `batched` is the
+default API path; `compact` isolates validation specialization with scalar
+matching. `--iterations N` and `--after-scalar MS` distinguish short bursts
+after scalar work from sustained runs.
 
 ## x86-64 encoder tests
 
@@ -1977,9 +2012,18 @@ the others its measurements are informational.
 
 ## Preprocessor tests
 
+`./build/compiler test-preprocessor --compare-clang [--clang PATH] [options]
+corpus...` is #125's real-source oracle. It accepts directories or
+`--files-from LIST --root DIR`, compares lexical kinds, spellings and locations,
+and reports every Clang rejection as an explicit skip. Process/configuration
+failures fail the run. `--report NEW.tsv` records every file's result and skip
+reason. `c_preprocessor_oracle.c` implements this interface;
+[the frozen oracle guide](docs/preprocessor-oracle.md) records the pinned
+headers/corpora, manifest identities, CI subset and on-demand commands.
+
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 88 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 92 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2008,8 +2052,8 @@ prints the first difference with the tokens around it. For files, our side
 reads clang's own predefines for the options through `--predefines`. Without
 files, `--clang` also checks the built-in predefines, the keywords and the
 features:
-- in 14 option sets (the ten modes from `c89` to `gnu23`, and `-ffreestanding`
-  and `-O2`), `pp_predefines` must give `clang -dM -E` line for line, but for
+- in 22 option sets (the ten modes from `c89` to `gnu23`, `-ffreestanding`,
+  `-O2`, the six ISA profiles and independent tuning), `pp_predefines` must give `clang -dM -E` line for line, but for
   the patch release's three macros;
 - in each mode, `__is_identifier` of every predefined name, and of clang's
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
@@ -2030,8 +2074,8 @@ per input token and per output token, IPC, each phase's share (read, lex,
 refine, directive tables, main loop) and what a run did (directives, runs,
 expansions, invocations, pastes, and the `#if` lines and their lengths).
 `--clang` also times `clang -E -P` with the same options, a process per file.
-Target options don't change our predefines: give `--predefines FILE` from
-`clang -dM -E` with the same options (the benchmark leaves it out of clang's
+`-march` selects the shared target's predefines. `--predefines FILE` can replace
+them with `clang -dM -E` output (the benchmark leaves this option out of clang's
 command line), as the smoke commands above do for `main.c`. The default 9700X
 job runs that one, pinned to one allowed CPU; like the others, its measurements
 are informational.

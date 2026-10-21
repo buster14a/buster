@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 88 | |
+| The built-in cases (`pp_test_cases`) | 92 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -520,9 +520,10 @@ semantics, `__STDC_HOSTED__`, `__OPTIMIZE__` or `__NO_INLINE__`, C23's
 additions, and `__BUSTER__`. The C23 additions are the difference between that
 command's output under `-std=c23` and under the default.
 
-Target options such as `-march` don't change them yet, though #117 asks for
-clang's macros for the same `-march`. Until then, `--predefines FILE` replaces
-the built-in predefines (`__BUSTER__` too) with a file of `#define` lines, such
+`-march=` selects the target feature and CPU identity macros described in
+[Generated-code instruction set](x86-target.md), with x86-64 baseline as the
+default. `-mtune=` is independent and changes no ISA macros. `--predefines FILE`
+replaces the built-in predefines (`__BUSTER__` too) with a file of `#define` lines, such
 as `clang -dM -E` gives for the same options. The oracle uses this, so its runs
 start from clang's macros alone.
 
@@ -873,9 +874,14 @@ the mispredictions it saves.
 
 ## The oracle
 
+The real-source command is `test-preprocessor --compare-clang [--clang PATH]`.
+[Frozen preprocessor oracle](preprocessor-oracle.md) records its token-kind
+and location checks, explicit skip/error accounting, pinned input manifests,
+full-corpus reproduction and frozen CI subset.
+
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 88 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 92 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -966,7 +972,8 @@ the mispredictions it saves.
 - **Predefines and keywords.** The cases and files under `--clang` give our side
   clang's predefines, so `--clang` checks our built-in ones separately:
   - In ten language modes (`c89` to `gnu23`), with `-ffreestanding` and with
-    `-O2`, 14 option sets in all, `pp_predefines` must give `clang -dM -E` line
+    `-O2`, the six target profiles and independent tuning, 22 option sets in all,
+    `pp_predefines` must give `clang -dM -E` line
     for line. Only the three macros that name clang's patch release are left
     out.
   - In each mode, `__is_identifier` of every predefined name (keywords,
@@ -988,7 +995,7 @@ the mispredictions it saves.
 In both, the two printers must give the same bytes, with line markers and
 without, and the text must lex back into the stream's spellings.
 
-So "token-identical" means the same sequence of token spellings. Whitespace
+So "token-identical" means the same sequence of lexical kinds and spellings. Whitespace
 and line breaks may differ: clang's `-E` spacing heuristics aren't part of the
 contract.
 
@@ -1009,10 +1016,10 @@ The configurations behind the results table:
 ../../build/compiler test-preprocessor --clang -std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX *.c
 ```
 
-The C library corpus (Zig 0.14.1's `lib/libc`) is a collection of headers and
-sources for many targets without their build configurations, so it isn't a set
-of translation units to preprocess. Refinement checks it file by file
-(`docs/c-refinement.md`), and musl stands for it here.
+The C library corpus (Zig 0.14.1's `lib/libc`) contains headers and sources for
+many targets without their build configurations. The corpus oracle tries each
+C/header input alone, compares every one Clang accepts and records every
+rejection's reason. Musl is also checked under its upstream build configuration.
 
 ## Where the time goes
 
@@ -1081,11 +1088,10 @@ cleared once and reused.
 ## Not yet
 
 - `#embed` is an error, and `__has_embed` isn't answered (C23).
-- Target options (`-march`, `-m*`, `-funsigned-char`) don't change the built-in
-  predefines; they come only through `--predefines`. #117's configuration asks
-  for clang's macros for the same `-march`.
-- The oracle uses the installed `/usr/include`, not the pinned copy of the
-  headers that #125's decision asks for (with its hashed manifest).
+- Individual feature switches (`-m*`, other than the supported `-march=` and
+  `-mtune=`) are rejected. Other options such as `-funsigned-char` still need
+  `--predefines` for their macro effects. The target-builtin query table remains
+  a bounded subset; see [the target contract](x86-target.md).
 - The feature tests (`__has_attribute` and the others) always answer from
   clang's table, which #117 and #125 keep for the oracle's mode. Outside it, they
   are to answer what the compiler implements (#123, #148).

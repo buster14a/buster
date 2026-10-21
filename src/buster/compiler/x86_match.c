@@ -4,7 +4,8 @@
 // External operands to selected encoder records (#221/#222). This is deliberately separate from X86Instruction:
 // a mathematical immediate is not the same thing as bits in an encoding field. The catalogue supplies encodings,
 // operand roles and widths; this consumer admits a documented subset whose immediate interpretation is known here.
-// Initialize one caller-owned index, then probe a mnemonic bucket, never the whole catalogue per instruction.
+// Initialize one caller-owned index for one X86Target, then probe a mnemonic bucket, never the whole catalogue
+// per instruction. Target-ineligible forms are excluded at initialization, including from the scalar path.
 // Candidate operand templates and immediate ranges are compared sixteen at a time, with an exact scalar twin.
 // Both paths run x86_validate at the frontend boundary. No compiler expression optimization is done here.
 
@@ -41,8 +42,6 @@ struct X86MatchRequest
     X86Operand operands[BUSTER_X86_MATCH_OPERANDS];
     uint8_t count;
     uint8_t width;
-    // 0: the documented x86-64/SSE2 subset; 1: also the documented AVX/AVX2 subset; 2: AVX-512F subset.
-    uint8_t isa;
     uint8_t decorations;
     uint8_t broadcast;
     bool rounding;
@@ -57,7 +56,7 @@ struct X86MatchIndex
     // Per-operand matching templates, contiguous within each bucket: kinds in bits 0..3, register class in 4..7,
     // memory width in 8..15, role in 16..23, and a required register plus one in 24..31 (zero means any).
     uint32_t operands[4][X86_FORM_COUNT];
-    uint32_t isa[X86_FORM_COUNT];
+    uint8_t allowed[X86_FORM_COUNT];
     uint32_t broadcast[X86_FORM_COUNT];
     int64_t immediate_min[X86_FORM_COUNT];
     uint64_t immediate_max[X86_FORM_COUNT];
@@ -194,9 +193,9 @@ static uint32_t x86_match_hash(String8 name)
     return hash & (BUSTER_X86_MATCH_BUCKETS - 1);
 }
 
-// The feature eligibility of this small frontend subset, not a competing all-ISA feature database. #180 can
-// replace this admission function without changing matching or final records. Unsupported catalogue rows stay out.
-static bool x86_match_admitted(const X86FormDescription* form, uint8_t isa)
+// Syntax and immediate semantics understood by this frontend. ISA eligibility is a separate intersection with
+// x86_target_forms at initialization. Adding an encoder form does not automatically admit its frontend syntax.
+static bool x86_match_supported(const X86FormDescription* form)
 {
     static const char* const integer[] =
         {
@@ -319,7 +318,7 @@ static bool x86_match_admitted(const X86FormDescription* form, uint8_t isa)
             allowed |= strcmp(suffix, conditions[i]) == 0;
         }
     }
-    else if (isa >= 1 && form->family == BUSTER_X86_FAMILY_VEX && name[0] == 'v')
+    else if (form->family == BUSTER_X86_FAMILY_VEX && name[0] == 'v')
     {
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sse); i += 1)
         {
@@ -327,7 +326,7 @@ static bool x86_match_admitted(const X86FormDescription* form, uint8_t isa)
         }
         allowed |= strcmp(name, "vzeroupper") == 0;
     }
-    else if (isa >= 2 && form->family == BUSTER_X86_FAMILY_EVEX && form->vector_length == 2 && name[0] == 'v')
+    else if (form->family == BUSTER_X86_FAMILY_EVEX && form->vector_length == 2 && name[0] == 'v')
     {
         // 512-bit floating arithmetic/moves and dword integer arithmetic are AVX-512F. No implicit VL/BW/DQ.
         for (uint32_t i = 0; i < 14; i += 1)
@@ -342,15 +341,16 @@ static bool x86_match_admitted(const X86FormDescription* form, uint8_t isa)
     return allowed;
 }
 
-static void x86_match_initialize(X86MatchIndex* index)
+static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
 {
     memset(index, 0, sizeof(*index));
+    x86_target_forms(target, index->allowed);
     bool admitted[BUSTER_X86_FORM_LEGACY_MODES];
     for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
     {
         const X86FormDescription* form = &x86_form_descriptions[f];
         uint8_t roles[4];
-        admitted[f] = x86_match_admitted(form, 2) && x86_match_roles(form->syntax, roles) <= 4;
+        admitted[f] = index->allowed[f] && x86_match_supported(form) && x86_match_roles(form->syntax, roles) <= 4;
         if (admitted[f])
         {
             const String8 name = {.pointer = (char*)form->mnemonic, .length = strlen(form->mnemonic)};
@@ -374,7 +374,6 @@ static void x86_match_initialize(X86MatchIndex* index)
             const uint32_t at = cursors[x86_match_hash(name)]++;
             index->forms[at] = f;
             index->counts[at] = count;
-            index->isa[at] = form->family;
             index->broadcast[at] = (form->evex & BUSTER_X86_EVEX_BROADCAST) ? 64 / form->disp8_scale : 0;
             const uint32_t bytes = form->immediate_bytes;
             const uint32_t opcode = form->opcode & 0xff;
@@ -457,8 +456,8 @@ static bool x86_match_candidate(const X86MatchRequest* request, uint32_t f, X86I
 {
     const X86FormDescription* form = &x86_form_descriptions[f];
     uint8_t roles[4];
-    // The index contains only admitted forms. Its family is the minimum ISA level of this documented subset.
-    bool result = (x86_match_name(request->mnemonic, form->mnemonic) || (x86_match_name(request->mnemonic, "mov") && strcmp(form->mnemonic, "movabs") == 0)) && form->family <= request->isa;
+    // The target-specific index contains only supported, eligible forms.
+    bool result = x86_match_name(request->mnemonic, form->mnemonic) || (x86_match_name(request->mnemonic, "mov") && strcmp(form->mnemonic, "movabs") == 0);
     result &= x86_match_roles(form->syntax, roles) == request->count;
     const bool implicit_qword = form->operand_bytes == 0 && (strcmp(form->mnemonic, "call") == 0 || strcmp(form->mnemonic, "jmp") == 0 || strcmp(form->mnemonic, "ret") == 0 || strcmp(form->mnemonic, "leave") == 0);
     result &= request->width == 0 || request->width == form->operand_bytes || (request->width == 8 && implicit_qword);
@@ -531,7 +530,6 @@ static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X8
 {
     const __mmask16 valid = (1u << count) - 1;
     __mmask16 mask = _mm512_mask_cmpeq_epi32_mask(valid, _mm512_maskz_loadu_epi32(valid, index->counts + first), _mm512_set1_epi32(request->count));
-    mask &= _mm512_mask_cmple_epu32_mask(valid, _mm512_maskz_loadu_epi32(valid, index->isa + first), _mm512_set1_epi32(request->isa));
     mask &= _mm512_mask_cmpeq_epi32_mask(valid, _mm512_maskz_loadu_epi32(valid, index->broadcast + first), _mm512_set1_epi32(request->broadcast));
     for (uint32_t operand = 0; operand < request->count; operand += 1)
     {

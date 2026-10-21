@@ -42,6 +42,10 @@ int run_c_lexer_benchmark(int argc, char** argv);
 // The x86-64 encoder and its tests, for the test-x86-encoder command. Its benchmark is another translation unit.
 #include "buster/compiler/x86_64_encoder.c"
 #include "buster/compiler/x86_64_encoder_test.c"
+#include "buster/compiler/x86_64_disassembler.c"
+#include "buster/compiler/x86_64_disassembler_test.c"
+#include "buster/compiler/x86_64_disassembler_cli.c"
+int run_x86_disassembler_benchmark(int argc, char** argv);
 int run_x86_encoder_benchmark(int argc, char** argv);
 
 // The lane base layer (groups of threads, and the arenas they allocate from) and its tests, for the test-lanes command.
@@ -73,6 +77,9 @@ int run_refinement_benchmark(int argc, char** argv);
 // The preprocessor (c_preprocessor.c) and its tests, for the -E and test-preprocessor commands.
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_preprocessor_test.c"
+#include "buster/compiler/c_preprocessor_oracle.c"
+#include "buster/compiler/x86_target_forms.c"
+#include "buster/compiler/x86_target_test.c"
 int run_preprocessor_benchmark(int argc, char** argv);
 
 // The parser (c_parser.c) and its tests, for the default command, which preprocesses and parses a file, and the
@@ -200,9 +207,29 @@ int main(int argc, char** argv)
     {
         result = run_x86_encoder_tests(argc - 2, argv + 2);
     }
+    else if (argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
+    {
+        result = run_x86_target_tests();
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
+    {
+        result = run_x86_target_benchmark(argc - 2, argv + 2);
+    }
     else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-encoder") == 0)
     {
         result = run_x86_encoder_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-x86-disassembler") == 0)
+    {
+        result = run_x86_disassembler_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "disassemble") == 0)
+    {
+        result = run_x86_disassembler(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-disassembler") == 0)
+    {
+        result = run_x86_disassembler_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-lanes") == 0)
     {
