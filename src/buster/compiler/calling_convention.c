@@ -164,10 +164,11 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 //   - LOW_INTEGER ... HIGH_SSE: the register class of each eightbyte passed in a register (none for a MEMORY or
 //     IGNORE type). A high eightbyte without a low one (the low one is padding) passes the high one alone.
 //   - VECTOR: SSE then SSEUP: one vector register holds the whole value (XMM, or a YMM or ZMM register when WIDE).
-//   - WIDE: a VECTOR of 32 or 64 bytes, which an unnamed (variadic) argument passes in memory, uncounted: LLVM never
-//     passes a variadic argument in a YMM or ZMM register. (clang classifies a WIDE union of a 16-byte member and a long
-//     array SSE, SSEUP as a variadic argument too, counts a vector register for it and puts it on the stack all the
-//     same, while its va_arg reads it from the save area: there is no convention there to follow but GCC's, memory.)
+//   - WIDE: a VECTOR of 32 or 64 bytes. LLVM passes it in a YMM or ZMM register only in a call that isn't variadic, and
+//     on the stack otherwise: named, after clang has counted a vector register for it; unnamed, MEMORY, uncounted.
+//     (clang classifies a WIDE union of a 16-byte member and a long array SSE, SSEUP as an unnamed argument too, counts
+//     a vector register for it and puts it on the stack all the same, while its va_arg reads it from the save area:
+//     there is no convention there to follow but GCC's, memory.)
 //   - MEMORY: on the stack as an argument (MEMORY, X87 and COMPLEX_X87). As a result: through a hidden pointer if
 //     AGGREGATE, otherwise in st0 (X87), st0 and st1 (COMPLEX_X87) or as UNCOUNTED says.
 //   - UNCOUNTED: MEMORY by its class, but a scalar clang passes as its value, in a register LLVM gives it (VALUE says
@@ -272,14 +273,17 @@ struct AbiCall
 _Static_assert(sizeof(AbiCall) == 16, "a call is 16 bytes");
 
 // Calls, as columns: call c returns results[c] (BUSTER_TYPE_VOID for none) and takes counts[c] arguments, the first
-// named[c] of them named (the rest are a variadic call's, after the default argument promotions). Its arguments' types
-// follow those of call c - 1 in `arguments`, which holds the sum of the counts.
+// named[c] of them named (the rest are a variadic call's, after the default argument promotions); variadic[c] says
+// whether the callee's type has "...", which LLVM's assignment depends on even where the call passes nothing past the
+// named arguments (a call with unnamed ones must say variadic). Its arguments' types follow those of call c - 1 in
+// `arguments`, which holds the sum of the counts. A function's entry is the call of its own type.
 typedef struct AbiSignatures AbiSignatures;
 struct AbiSignatures
 {
     const TypeId* results;
     const uint32_t* counts;
     const uint32_t* named;
+    const uint8_t* variadic;
     uint32_t count;
     const TypeId* arguments;
 };
@@ -1173,7 +1177,10 @@ static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
     const uint32_t alignment_log2 = aggregate || illegal_vector ? table->types.alignment_log2[index] : abi_value_alignment_log2(table, index);
     pass |= (alignment_log2 > BUSTER_ABI_SLOT_LOG2 ? alignment_log2 : BUSTER_ABI_SLOT_LOG2) << BUSTER_ABI_PASS_ALIGNMENT_SHIFT;
     abi->results[index] = abi_result(abi, table, index, pass);
-    abi->stack_bytes[index] = size > UINT32_MAX - (BUSTER_ABI_SLOT_BYTES - 1) ? UINT32_MAX : (uint32_t)((size + BUSTER_ABI_SLOT_BYTES - 1) & ~(uint64_t)(BUSTER_ABI_SLOT_BYTES - 1));
+    // A stack slot is a multiple of 8 bytes, and never empty: LLVM gives a byval argument of no size (a struct of a
+    // flexible array member alone) 8 bytes.
+    const uint64_t slot = size == 0 ? BUSTER_ABI_SLOT_BYTES : (size + BUSTER_ABI_SLOT_BYTES - 1) & ~(uint64_t)(BUSTER_ABI_SLOT_BYTES - 1);
+    abi->stack_bytes[index] = slot > UINT32_MAX ? UINT32_MAX : (uint32_t)slot;
     abi->pass[index] = pass;
 }
 
@@ -1788,7 +1795,7 @@ static uint32_t abi_stack_place(uint64_t* stack, uint8_t* area_alignment_log2, u
 // whether an argument's eightbytes go to registers, a count an UNCOUNTED argument doesn't lower; LLVM then gives each
 // value it gets the next register of its kind or, once there is none, a stack slot of its own. The two counts differ
 // only after an UNCOUNTED argument, where an eightbyte clang meant for a register can land on the stack.
-static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uint32_t count, uint32_t named, TypeId result, AbiLocation* locations)
+static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uint32_t count, uint32_t named, bool variadic, TypeId result, AbiLocation* locations)
 {
     AbiCall call = {
         .stack_bytes = 0,
@@ -1846,7 +1853,7 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
                 location.registers[1] = abi_integer_arguments[integers + 1];
                 integers += 2;
             }
-            else if (value == BUSTER_ABI_VALUE_VECTOR && vectors < BUSTER_ABI_VECTOR_ARGUMENTS && (!unnamed || bytes <= BUSTER_ABI_REGISTER_BYTES))
+            else if (value == BUSTER_ABI_VALUE_VECTOR && vectors < BUSTER_ABI_VECTOR_ARGUMENTS && (!variadic || bytes <= BUSTER_ABI_REGISTER_BYTES))
             {
                 location.registers[0] = (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | vectors);
                 vectors += 1;
@@ -1864,11 +1871,15 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
         }
         else if ((pass & (BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_PAIR)) != 0)
         {
-            // One value: a vector register, or two general ones; LLVM puts it on the stack whole if it hasn't them.
+            // One value: a vector register, or two general ones; LLVM puts it on the stack whole if it hasn't them, and a
+            // vector wider than 16 bytes in a variadic call always (its slot aligned to its size), clang having counted a
+            // register for it all the same (LLVM's FIXME on CCIfNotVarArg: the psABI, and GCC, pass a named one in a
+            // register).
+            const bool wide_on_stack = (pass & BUSTER_ABI_PASS_WIDE) != 0 && variadic;
             clang_integers -= need_integers;
             clang_vectors -= need_vectors;
             location.kind = BUSTER_ABI_LOCATION_REGISTERS;
-            if ((pass & BUSTER_ABI_PASS_VECTOR) != 0 && vectors < BUSTER_ABI_VECTOR_ARGUMENTS)
+            if ((pass & BUSTER_ABI_PASS_VECTOR) != 0 && !wide_on_stack && vectors < BUSTER_ABI_VECTOR_ARGUMENTS)
             {
                 location.registers[0] = (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | vectors);
                 vectors += 1;
@@ -1881,8 +1892,9 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
             }
             else
             {
+                const uint32_t slot_log2 = wide_on_stack ? (uint32_t)__builtin_ctz(bytes) : alignment_log2;
                 location.kind = BUSTER_ABI_LOCATION_STACK;
-                location.stack_offset = abi_stack_place(&stack, &call.stack_alignment_log2, bytes, alignment_log2);
+                location.stack_offset = abi_stack_place(&stack, &call.stack_alignment_log2, bytes, slot_log2);
             }
         }
         else
@@ -1934,7 +1946,7 @@ static void abi_assign_scalar(const AbiTable* abi, AbiSignatures signatures, Abi
     {
         const uint32_t count = signatures.counts[c];
         const uint32_t named = signatures.named[c] < count ? signatures.named[c] : count;
-        calls[c] = abi_assign_call(abi, signatures.arguments + first, count, named, signatures.results[c], locations + first);
+        calls[c] = abi_assign_call(abi, signatures.arguments + first, count, named, signatures.variadic[c] != 0, signatures.results[c], locations + first);
         first += count;
     }
 }
@@ -1945,6 +1957,7 @@ static void abi_assign_scalar(const AbiTable* abi, AbiSignatures signatures, Abi
 #define BUSTER_ABI_LANE_END 0x02
 #define BUSTER_ABI_LANE_UNNAMED 0x04
 #define BUSTER_ABI_LANE_HIDDEN 0x08
+#define BUSTER_ABI_LANE_VARIADIC 0x10
 #define BUSTER_ABI_LANES 16
 
 // A segmented scan's windows: steps[k] holds the lanes that add the lane 2^k below them (no segment starts between),
@@ -2000,7 +2013,8 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
 //   - an argument doesn't fit while a register it needs is still free (a two-eightbyte one with one free, or one of
 //     both classes with one class full), which the sums count as used though it stays free for the arguments after;
 //   - a stack argument's alignment doesn't divide the offset the sums give it, so the twin would pad before it;
-//   - an argument is UNCOUNTED, whose registers clang doesn't count but LLVM does;
+//   - an argument is UNCOUNTED, whose registers clang doesn't count but LLVM does, or a named WIDE one of a variadic
+//     call, the reverse;
 // and the calls with one of those (rare in compiled code) go to the twin, which assigns them one argument at a time.
 static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
 {
@@ -2042,9 +2056,9 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             {
                 flags[first] |= BUSTER_ABI_LANE_START | (hidden ? BUSTER_ABI_LANE_HIDDEN : 0);
                 flags[first + count - 1] |= BUSTER_ABI_LANE_END;
-                for (uint32_t i = named; i < count; i += 1)
+                for (uint32_t i = 0; i < count; i += 1)
                 {
-                    flags[first + i] |= BUSTER_ABI_LANE_UNNAMED;
+                    flags[first + i] |= (i >= named ? BUSTER_ABI_LANE_UNNAMED : 0) | (signatures.variadic[c] != 0 ? BUSTER_ABI_LANE_VARIADIC : 0);
                 }
                 for (uint32_t i = 0; i < count; i += 1)
                 {
@@ -2079,6 +2093,7 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __mmask16 ends = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_END));
             const __mmask16 unnamed = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_UNNAMED));
             const __mmask16 hidden = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_HIDDEN));
+            const __mmask16 variadic = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_VARIADIC));
             const __mmask16 ignore = _mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_IGNORE));
             const __mmask16 uncounted = _mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_UNCOUNTED));
             const __mmask16 in_memory = _mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_MEMORY)) |
@@ -2116,7 +2131,9 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             carry_alignment = _mm512_permutexvar_epi32(last_lane, alignment_inclusive);
             const __m512i stack_exclusive = _mm512_sub_epi32(stack_inclusive, slot_bytes);
             const __mmask16 padded = on_stack & _mm512_test_epi32_mask(stack_exclusive, _mm512_sub_epi32(slot_alignment, _mm512_set1_epi32(1)));
-            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded);
+            // A named wide vector in a variadic call: clang counts a register that LLVM doesn't give it.
+            const __mmask16 wide_named = _mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_WIDE)) & variadic & (__mmask16)~unnamed;
+            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | wide_named);
             // The registers: the low eightbyte's, then the high one's (first for a value whose low one is padding).
             const __mmask16 low_integer_lanes = _mm512_test_epi32_mask(low_integer, low_integer);
             const __mmask16 low_sse_lanes = _mm512_test_epi32_mask(low_sse, low_sse);
@@ -2179,7 +2196,7 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const uint32_t c = deferred[i];
             const uint32_t count = signatures.counts[c];
             const uint32_t named = signatures.named[c] < count ? signatures.named[c] : count;
-            calls[c] = abi_assign_call(abi, signatures.arguments + firsts[c], count, named, signatures.results[c], locations + firsts[c]);
+            calls[c] = abi_assign_call(abi, signatures.arguments + firsts[c], count, named, signatures.variadic[c] != 0, signatures.results[c], locations + firsts[c]);
         }
     }
     scratch_end(scratch);
@@ -2206,7 +2223,7 @@ static AbiVaArg abi_va_arg(const AbiTable* abi, const TypeTable* table, TypeId t
         },
         .flags = 0,
         .overflow_alignment_log2 = (uint8_t)(alignment_log2 > BUSTER_ABI_SLOT_LOG2 ? alignment_log2 : BUSTER_ABI_SLOT_LOG2),
-        .stack_bytes = abi->stack_bytes[index],
+        .stack_bytes = (uint32_t)((table->types.size[abi_resolved_index(table, type)] + BUSTER_ABI_SLOT_BYTES - 1) & ~(uint64_t)(BUSTER_ABI_SLOT_BYTES - 1)),
     };
     if ((pass & BUSTER_ABI_PASS_IGNORE) != 0)
     {

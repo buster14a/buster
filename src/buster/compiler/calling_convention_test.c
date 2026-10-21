@@ -38,6 +38,7 @@
 
 #define BUSTER_ABI_TEST_REPORTED 12
 #define BUSTER_ABI_TEST_DEFAULT_COUNT 2000
+#define BUSTER_ABI_TEST_DEFAULT_SIGNATURES 400
 #define BUSTER_ABI_TEST_ARENA_BYTES (1ull << 30)
 #define BUSTER_ABI_TEST_FRAMES 4096
 
@@ -1071,10 +1072,18 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         BUSTER_TYPE_VOID,
         big,
     };
+    const uint8_t variadic[] = {
+        0,
+        0,
+        0,
+        0,
+        0,
+    };
     const AbiSignatures signatures = {
         .results = results,
         .counts = counts,
         .named = named,
+        .variadic = variadic,
         .count = BUSTER_ARRAY_LENGTH(counts),
         .arguments = arguments,
     };
@@ -1165,8 +1174,14 @@ static bool abi_test_fixtures(void)
 // ---------------------------------------------------------------------------------------------------------------------
 // Worlds: random types for the calling convention, in a TypeTestWorld (c_types_test.c) so that the cross-check can
 // write them as C. Small aggregates mostly, which is where the classes are decided member by member; `gcc` leaves out
-// what only clang spells (clang's ext_vector_type, __fp16, complex _BitInts) and what GCC passes otherwise (_Atomic
-// types, flexible array members, vectors of 4 bytes or less of floating elements).
+// what only clang spells (clang's ext_vector_type, __fp16, complex _BitInts), what GCC passes otherwise (_Atomic
+// types, flexible array members, vectors of 4 bytes or less of floating elements, unnamed bit-fields of a nonzero
+// width, which GCC classifies and clang skips, a vector of one __int128, which GCC classifies as one eightbyte in an
+// aggregate, and records, unions and aligned typedefs packed off their alignment, abi_test_gcc_packable's) and what
+// GCC lays out otherwise: GCC applies a declarator's attributes before the vector_size of its declaration's
+// specifiers, so it drops the aligned of `typedef long __attribute__((vector_size(8))) *T __attribute__((aligned(32)))`
+// and the packed of a member `unsigned char __attribute__((vector_size(16))) m __attribute__((packed))`, which it sees
+// on an unsigned char.
 
 #define BUSTER_ABI_TEST_MEMBERS 8
 
@@ -1269,6 +1284,32 @@ static void abi_test_world_close(AbiTestWorld* world)
     arena_release(&world->text_arena);
 }
 
+// Whether a type's spelling writes a vector_size attribute out: a vector's, or a pointer's or an array's that leads to
+// one (an ALIGNED type, which is spelled by its name, ends the walk). GCC applies the declarator's attributes before it.
+static bool abi_test_spells_vector(const TypeTable* table, TypeId type)
+{
+    TypeId walk = type_strip_aligned(table, type);
+    while (type_kind(table, walk) == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(type_kind(table, walk)))
+    {
+        walk = type_element(table, walk);
+    }
+    return type_kind(table, walk) == BUSTER_TYPE_KIND_VECTOR;
+}
+
+// Whether packing may move a member of this type in a GCC world: clang checks that each member is at an offset its
+// type's alignment divides, and GCC that each scalar is at one its size divides, which agree for scalars and arrays of
+// them but not for a record, a union or an aligned typedef that packing moves off its alignment.
+static bool abi_test_gcc_packable(const TypeTable* table, TypeId type)
+{
+    TypeId walk = type;
+    while (type_kind_is_array(type_kind(table, walk)))
+    {
+        walk = type_element(table, walk);
+    }
+    const uint8_t kind = type_kind(table, walk);
+    return kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION && kind != BUSTER_TYPE_KIND_ALIGNED;
+}
+
 // A record of random members, completed: small ones mostly, bit-fields, arrays of small types, earlier records, and
 // now and then a flexible array member and attributes. Returns 0 if the table refused it.
 static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool big)
@@ -1277,6 +1318,7 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
     TypeMember members[BUSTER_ABI_TEST_MEMBERS];
     const bool is_union = type_test_below(random, 4) == 0;
     const uint32_t count = (uint32_t)type_test_below(random, big ? BUSTER_ABI_TEST_MEMBERS + 1 : 5);
+    bool packable = true;
     for (uint32_t m = 0; m < count; m += 1)
     {
         const uint64_t pick = type_test_below(random, 16);
@@ -1290,18 +1332,22 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
         {
             const TypeId element = abi_test_world_pick(world, random, true);
             const uint64_t element_size = type_size(table, element);
-            const uint64_t length = element_size == 0 ? type_test_below(random, 3) : type_test_below(random, element_size <= 4 ? 5 : 3);
+            // GCC refuses an array of length 0 before a struct's last member.
+            const uint64_t lengths = element_size == 0 ? 3 : element_size <= 4 ? 5 : 3;
+            const uint64_t length = world->gcc ? 1 + type_test_below(random, lengths - 1) : type_test_below(random, lengths);
             const TypeId array = type_array(table, type_unqualified(element), length);
             type = array != 0 ? array : type;
             table->last_error = TYPE_ERROR_NONE;
         }
-        const bool unnamed = width == 0 || (width != BUSTER_TYPE_NOT_BIT_FIELD && type_test_below(random, 4) == 0);
+        const bool unnamed = width == 0 || (width != BUSTER_TYPE_NOT_BIT_FIELD && type_test_below(random, 4) == 0 && !world->gcc);
+        const bool gcc_packable = !world->gcc || (!abi_test_spells_vector(table, type) && abi_test_gcc_packable(table, type));
+        packable = packable && (width != BUSTER_TYPE_NOT_BIT_FIELD || gcc_packable);
         members[m] = (TypeMember){
             .name = unnamed ? 0 : type_test_new_name(&world->types),
             .type = type,
             .bit_width = width,
             .alignment_log2 = !unnamed && type_test_below(random, 16) == 0 ? (uint8_t)(1 + type_test_below(random, 5)) : 0,
-            .packed = !unnamed && type_test_below(random, 16) == 0,
+            .packed = !unnamed && type_test_below(random, 16) == 0 && gcc_packable,
         };
     }
     uint32_t total = count;
@@ -1313,8 +1359,8 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
         table->last_error = TYPE_ERROR_NONE;
     }
     const TypeRecordAttributes attributes = {
-        .packed = type_test_below(random, 8) == 0,
-        .pack_log2 = type_test_below(random, 10) == 0 ? (uint8_t)(1 + type_test_below(random, 4)) : 0,
+        .packed = type_test_below(random, 8) == 0 && packable,
+        .pack_log2 = type_test_below(random, 10) == 0 && packable ? (uint8_t)(1 + type_test_below(random, 4)) : 0,
         .alignment_log2 = type_test_below(random, 10) == 0 ? (uint8_t)(1 + type_test_below(random, 6)) : 0,
     };
     const TypeId record = type_tag(table, is_union ? BUSTER_TYPE_KIND_UNION : BUSTER_TYPE_KIND_STRUCT, type_test_new_name(&world->types));
@@ -1336,7 +1382,7 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
     {
         const bool complex = code >= BUSTER_TYPE_CODE_COMPLEX;
         const bool spellable = !complex || (BUSTER_TYPE_COMPLEX_SPELLABLE >> (code - BUSTER_TYPE_CODE_COMPLEX) & 1) != 0;
-        const bool clang_only = code == BUSTER_TYPE_CODE_HALF || !spellable;
+        const bool clang_only = code == BUSTER_TYPE_CODE_HALF || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT128 || !spellable;
         if (type_is_valid(table, BUSTER_TYPE_BUILTIN(code)) && code != BUSTER_TYPE_CODE_NULLPTR && (!world->gcc || !clang_only))
         {
             abi_test_world_add(world, BUSTER_TYPE_BUILTIN(code));
@@ -1389,7 +1435,8 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         const bool floating = type_kind(table, elements[e]) == BUSTER_TYPE_KIND_FLOATING;
         for (uint64_t bytes = 2; bytes <= 64; bytes *= 2)
         {
-            if (bytes >= type_size(table, elements[e]) && !(world->gcc && floating && bytes <= 4))
+            const bool gcc_divergent = (floating && bytes <= 4) || (elements[e] == BUSTER_TYPE_INT128 && bytes == 16);
+            if (bytes >= type_size(table, elements[e]) && !(world->gcc && gcc_divergent))
             {
                 abi_test_world_add(world, type_vector_size(table, elements[e], bytes));
                 table->last_error = TYPE_ERROR_NONE;
@@ -1419,7 +1466,8 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         else if (pick < 12)
         {
             const TypeId base = abi_test_world_pick(world, &random, true);
-            abi_test_world_add(world, type_aligned(table, type_unqualified(base), (uint32_t)type_test_below(&random, 7)));
+            const uint32_t alignment_log2 = (uint32_t)type_test_below(&random, 7);
+            abi_test_world_add(world, world->gcc && abi_test_spells_vector(table, base) ? 0 : type_aligned(table, type_unqualified(base), alignment_log2));
             table->last_error = TYPE_ERROR_NONE;
         }
         else if (pick < 13 && !world->gcc)
@@ -1595,13 +1643,15 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
 // ---------------------------------------------------------------------------------------------------------------------
 // Assignment: random calls over a world's types, by the vector path and by the twin.
 
-// A type an argument or a result may have: not an array or a function, not UNSUPPORTED, nor too large to pass.
+// A type an argument or a result may have: not an array, a function or __fp16, not UNSUPPORTED, nor too large to pass.
 static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeId type)
 {
     const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
-    const uint8_t kind = table->types.kind[abi_resolved_index(table, type)];
+    const uint32_t resolved = abi_resolved_index(table, type);
+    const uint8_t kind = table->types.kind[resolved];
+    const bool half = kind == BUSTER_TYPE_KIND_FLOATING && table->types.code[resolved] == BUSTER_TYPE_CODE_HALF;
     return (abi->pass[index] & (BUSTER_ABI_PASS_CLASSIFIED | BUSTER_ABI_PASS_UNSUPPORTED)) == BUSTER_ABI_PASS_CLASSIFIED && abi->stack_bytes[index] <= (1u << 16) &&
-           kind != BUSTER_TYPE_KIND_VOID && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION;
+           kind != BUSTER_TYPE_KIND_VOID && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION && !half;
 }
 
 // Random calls: their results (void now and then), counts (mostly small, a few long ones past the registers), named
@@ -1612,6 +1662,7 @@ struct AbiTestCalls
     TypeId* results;
     uint32_t* counts;
     uint32_t* named;
+    uint8_t* variadic;
     TypeId* arguments;
     uint32_t count;
     uint64_t argument_count;
@@ -1629,6 +1680,7 @@ static void abi_test_random_calls(AbiTestCalls* calls, const TypeId* types, uint
         calls->results[c] = type_test_below(random, 4) == 0 ? BUSTER_TYPE_VOID : types[type_test_below(random, type_count)];
         calls->counts[c] = arguments;
         calls->named[c] = type_test_below(random, 5) == 0 ? (uint32_t)type_test_below(random, arguments + 1) : arguments;
+        calls->variadic[c] = calls->named[c] != arguments || type_test_below(random, 8) == 0 ? 1 : 0;
         for (uint32_t a = 0; a < arguments; a += 1)
         {
             calls->arguments[calls->argument_count + a] = types[type_test_below(random, type_count)];
@@ -1644,6 +1696,7 @@ static AbiSignatures abi_test_signatures(const AbiTestCalls* calls)
         .results = calls->results,
         .counts = calls->counts,
         .named = calls->named,
+        .variadic = calls->variadic,
         .count = calls->count,
         .arguments = calls->arguments,
     };
@@ -1688,6 +1741,7 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
         .results = malloc(sizeof(TypeId) * count),
         .counts = malloc(sizeof(uint32_t) * count),
         .named = malloc(sizeof(uint32_t) * count),
+        .variadic = malloc(count),
         .arguments = malloc(sizeof(TypeId) * capacity),
     };
     AbiLocation* vector_locations = malloc(sizeof(AbiLocation) * capacity);
@@ -1696,7 +1750,7 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
     AbiCall* scalar_calls = malloc(sizeof(AbiCall) * count);
     TypeId* passable = 0;
     uint64_t arguments = 0;
-    const bool memory = calls.results != 0 && calls.counts != 0 && calls.named != 0 && calls.arguments != 0 && vector_locations != 0 && scalar_locations != 0 &&
+    const bool memory = calls.results != 0 && calls.counts != 0 && calls.named != 0 && calls.variadic != 0 && calls.arguments != 0 && vector_locations != 0 && scalar_locations != 0 &&
                         vector_calls != 0 && scalar_calls != 0;
     for (uint32_t round = 0; memory && round < 3; round += 1)
     {
@@ -1739,10 +1793,12 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
                         memcpy(edge_arguments, calls.arguments, n * sizeof(TypeId));
                         const TypeId result = BUSTER_TYPE_VOID;
                         const uint32_t named = n;
+                        const uint8_t variadic = 0;
                         const AbiSignatures one = {
                             .results = &result,
                             .counts = &n,
                             .named = &named,
+                            .variadic = &variadic,
                             .count = 1,
                             .arguments = edge_arguments,
                         };
@@ -1763,6 +1819,7 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
     free(calls.results);
     free(calls.counts);
     free(calls.named);
+    free(calls.variadic);
     free(calls.arguments);
     free(vector_locations);
     free(scalar_locations);
@@ -1774,12 +1831,1261 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The cross-check (--cross-check, contract 4 on #135): random signatures over a world of types, each one's callee and
+// caller written as C and compiled by clang or GCC, and generated as encoder records from the module's locations
+// (abi_assign's): our caller calls the C callee, and the C caller calls our callee. Both sides take their values from
+// the same bytes, which the C file defines (each argument's in a 64-byte slot of its signature's array), and check
+// what arrives: the C callee its parameters and va_arg's, the C caller what our callee stored of its arguments and
+// what it returned, and main what our caller stored of the C callee's result (and the hidden pointer it got back).
+// Each value's bytes are a valid representation of its type (bool 0 or 1, _BitInts extended, long doubles normal),
+// and a mask says which of its bits mean something (not padding, nor a _BitInt's bits past its width). The records
+// pass through x86_encode, link_add_code_fixups and the object writer, and the C compiler's driver links the two
+// objects. It runs at each target vector width (no AVX, -mavx2, -mavx512f), with clang (every type) and with GCC (the
+// types GCC passes as clang does).
+
+#define BUSTER_ABI_TEST_SLOT 64
+#define BUSTER_ABI_TEST_FILL_ITEMS 4096
+#define BUSTER_ABI_TEST_PATH_BYTES 4096
+#define BUSTER_ABI_TEST_MAX_ARGUMENTS 32
+#define BUSTER_ABI_TEST_MAX_INSTRUCTIONS 1024
+
+typedef struct AbiTestFillItem AbiTestFillItem;
+struct AbiTestFillItem
+{
+    TypeId type;
+    uint64_t offset;
+};
+
+static void abi_test_random_bits(uint8_t* bytes, uint8_t* mask, uint64_t first, uint64_t count, uint64_t* random)
+{
+    for (uint64_t bit = first; bit < first + count; bit += 1)
+    {
+        const uint8_t value = (uint8_t)(type_test_random(random) & 1);
+        bytes[bit / 8] = (uint8_t)((bytes[bit / 8] & ~(1u << (bit % 8))) | value << (bit % 8));
+        mask[bit / 8] |= (uint8_t)(1u << (bit % 8));
+    }
+}
+
+// A value of `type` at `bytes`: random contents of a valid representation, padding random too, and in `mask` its
+// meaningful bits. A union holds one named member's value, picked at random.
+static void abi_test_fill(const TypeTable* table, TypeId type, uint8_t* bytes, uint8_t* mask, uint64_t* random, AbiTestFillItem* stack)
+{
+    const uint64_t size = table->types.size[abi_resolved_index(table, type)];
+    for (uint64_t i = 0; i < size; i += 1)
+    {
+        bytes[i] = (uint8_t)type_test_random(random);
+        mask[i] = 0;
+    }
+    stack[0] = (AbiTestFillItem){
+        .type = type,
+        .offset = 0,
+    };
+    uint32_t depth = 1;
+    while (depth != 0)
+    {
+        depth -= 1;
+        const AbiTestFillItem item = stack[depth];
+        uint32_t index = abi_resolved_index(table, item.type);
+        if (table->types.kind[index] == BUSTER_TYPE_KIND_ENUM)
+        {
+            index = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
+        }
+        const uint8_t kind = table->types.kind[index];
+        const uint8_t code = table->types.code[index];
+        const uint64_t item_size = table->types.size[index];
+        uint8_t* b = bytes + item.offset;
+        uint8_t* m = mask + item.offset;
+        if (kind == BUSTER_TYPE_KIND_INTEGER && code == BUSTER_TYPE_CODE_BOOL)
+        {
+            b[0] = (uint8_t)(type_test_random(random) & 1);
+            m[0] = 0xff;
+        }
+        else if (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE)
+        {
+            // A normal x87 value: the explicit integer bit set, the exponent neither 0 nor all ones.
+            const uint64_t mantissa = type_test_random(random) | 1ull << 63;
+            const uint16_t exponent = (uint16_t)(1 + type_test_below(random, 0x7ffe)) | (uint16_t)((type_test_random(random) & 1) << 15);
+            memcpy(b, &mantissa, 8);
+            memcpy(b + 8, &exponent, 2);
+            memset(m, 0xff, 10);
+        }
+        else if (kind == BUSTER_TYPE_KIND_NULLPTR)
+        {
+            memset(b, 0, 8);
+        }
+        else if (kind == BUSTER_TYPE_KIND_BIT_INT)
+        {
+            const uint64_t width = table->types.extent[index];
+            const bool is_unsigned = (table->types.flags[index] & BUSTER_TYPE_FLAG_UNSIGNED) != 0;
+            abi_test_random_bits(b, m, 0, width, random);
+            const uint8_t top = (uint8_t)(b[(width - 1) / 8] >> ((width - 1) % 8) & 1);
+            for (uint64_t bit = width; bit < item_size * 8; bit += 1)
+            {
+                const uint8_t value = is_unsigned ? 0 : top;
+                b[bit / 8] = (uint8_t)((b[bit / 8] & ~(1u << (bit % 8))) | value << (bit % 8));
+            }
+        }
+        else if (kind == BUSTER_TYPE_KIND_EXT_VECTOR)
+        {
+            const uint64_t element_size = table->types.size[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
+            memset(m, 0xff, table->types.extent[index] * element_size);
+        }
+        else if (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_VECTOR)
+        {
+            memset(m, 0xff, item_size);
+        }
+        else if (kind == BUSTER_TYPE_KIND_COMPLEX && depth + 2 <= BUSTER_ABI_TEST_FILL_ITEMS)
+        {
+            const TypeId element = table->types.base[index];
+            const uint64_t element_size = table->types.size[element >> BUSTER_TYPE_INDEX_SHIFT];
+            stack[depth] = (AbiTestFillItem){
+                .type = element,
+                .offset = item.offset,
+            };
+            stack[depth + 1] = (AbiTestFillItem){
+                .type = element,
+                .offset = item.offset + element_size,
+            };
+            depth += 2;
+        }
+        else if (kind == BUSTER_TYPE_KIND_ATOMIC && depth < BUSTER_ABI_TEST_FILL_ITEMS)
+        {
+            stack[depth] = (AbiTestFillItem){
+                .type = table->types.base[index],
+                .offset = item.offset,
+            };
+            depth += 1;
+        }
+        else if (kind == BUSTER_TYPE_KIND_ARRAY)
+        {
+            const TypeId element = table->types.base[index];
+            const uint64_t element_size = table->types.size[abi_resolved_index(table, element)];
+            for (uint64_t i = 0; i < table->types.extent[index] && depth < BUSTER_ABI_TEST_FILL_ITEMS; i += 1)
+            {
+                stack[depth] = (AbiTestFillItem){
+                    .type = element,
+                    .offset = item.offset + i * element_size,
+                };
+                depth += 1;
+            }
+        }
+        else if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
+        {
+            const uint32_t tag = table->types.index[index];
+            const uint32_t begin = table->tags.member_begin[tag];
+            const uint32_t end = begin + table->tags.member_count[tag];
+            uint32_t chosen = UINT32_MAX;
+            if (kind == BUSTER_TYPE_KIND_UNION)
+            {
+                uint32_t named = 0;
+                for (uint32_t member = begin; member < end; member += 1)
+                {
+                    named += table->members.name[member] != 0 ? 1 : 0;
+                }
+                uint32_t pick = (uint32_t)type_test_below(random, named);
+                for (uint32_t member = begin; member < end && chosen == UINT32_MAX; member += 1)
+                {
+                    if (table->members.name[member] != 0 && pick == 0)
+                    {
+                        chosen = member;
+                    }
+                    pick -= table->members.name[member] != 0 ? 1 : 0;
+                }
+            }
+            for (uint32_t member = begin; member < end; member += 1)
+            {
+                const TypeId member_type = table->members.type[member];
+                const uint8_t member_kind = table->types.kind[abi_resolved_index(table, member_type)];
+                const bool taken = kind == BUSTER_TYPE_KIND_STRUCT ? table->members.name[member] != 0 : member == chosen;
+                if (!taken || member_kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+                {
+                }
+                else if ((table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0)
+                {
+                    abi_test_random_bits(bytes, mask, item.offset * 8 + table->members.offset[member], table->members.bit_width[member], random);
+                }
+                else if (depth < BUSTER_ABI_TEST_FILL_ITEMS)
+                {
+                    stack[depth] = (AbiTestFillItem){
+                        .type = member_type,
+                        .offset = item.offset + table->members.offset[member] / 8,
+                    };
+                    depth += 1;
+                }
+            }
+        }
+    }
+}
+
+// A signature of the cross-check: its result, its arguments (from `first` in the arguments' column, the first `named` of
+// them named), each argument's offset in the signature's data, and the data's and the result's sizes.
+typedef struct AbiTestSignature AbiTestSignature;
+struct AbiTestSignature
+{
+    TypeId result;
+    uint32_t first;
+    uint32_t count;
+    uint32_t named;
+    bool variadic;
+    uint32_t data_bytes;
+    uint32_t result_bytes;
+};
+
+typedef struct AbiTestCross AbiTestCross;
+struct AbiTestCross
+{
+    AbiTestWorld* world;
+    AbiTable* abi;
+    AbiTestSignature* signatures;
+    uint32_t signature_count;
+    TypeId* arguments;
+    uint32_t* offsets;
+    uint32_t argument_count;
+    AbiLocation* locations;
+    AbiCall* calls;
+    // The bytes: every signature's data and masks one after another, and its result's and mask.
+    uint8_t* data;
+    uint8_t* data_mask;
+    uint64_t* data_begin;
+    uint8_t* results;
+    uint8_t* result_mask;
+    uint64_t* result_begin;
+    bool gcc;
+};
+
+// Whether a type may be an unnamed (variadic) argument here: unchanged by the default argument promotions, and one
+// clang passes and reads alike (not nullptr_t, whose call passes it in a register and whose va_arg reads memory, nor a
+// WIDE union of no vector).
+static bool abi_test_unnamed_ok(const AbiTable* abi, const TypeTable* table, TypeId type, AbiTestFrame* frames)
+{
+    const uint32_t index = abi_resolved_index(table, type);
+    const uint8_t kind = table->types.kind[index];
+    const uint8_t code = table->types.code[index];
+    const bool promoted = (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[index] < 4) || kind == BUSTER_TYPE_KIND_ENUM ||
+                          (kind == BUSTER_TYPE_KIND_FLOATING && code != BUSTER_TYPE_CODE_DOUBLE && code != BUSTER_TYPE_CODE_LONG_DOUBLE &&
+                           code != BUSTER_TYPE_CODE_FLOAT128);
+    const bool scalar_memory = kind == BUSTER_TYPE_KIND_NULLPTR || kind == BUSTER_TYPE_KIND_ATOMIC;
+    const bool wide_without_vector = abi_test_classify(table, abi->vector_bytes, false, type, 0, frames) == BUSTER_ABI_TEST_VECTOR &&
+                                     table->types.size[index] > BUSTER_ABI_REGISTER_BYTES;
+    // clang's call passes a value of no size in an 8-byte slot, and its va_arg skips none.
+    const bool empty = table->types.size[index] == 0;
+    return !promoted && !scalar_memory && !wide_without_vector && !empty;
+}
+
+// Whether GCC passes a type otherwise than clang as a result: a vector that is MEMORY by its size, which clang returns
+// in registers (xmm0 and on for one wider than the target's, xmm0 for <1 x double>) and GCC through a hidden pointer.
+static bool abi_test_gcc_result_differs(const AbiTable* abi, TypeId type)
+{
+    const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+    return abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES] == BUSTER_ABI_IN_MEMORY && abi->results[index].kind == BUSTER_ABI_RESULT_REGISTERS;
+}
+
+// Whether GCC passes a named argument of a variadic call otherwise than clang: a WIDE one, which LLVM puts on the stack
+// and GCC, as the psABI says, in a YMM or ZMM register.
+static bool abi_test_gcc_variadic_differs(const AbiTable* abi, TypeId type)
+{
+    return (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_WIDE) != 0;
+}
+
+// Whether GCC passes an unnamed argument otherwise than clang: a WIDE aggregate, as a union of vectors as wide as a
+// vector register, to which GCC gives an integer mode: its caller passes it in a register and its va_arg reads 32 or 64
+// bytes from the register save area, past the 16 a register has there (GCC 16 crashes calling itself so).
+static bool abi_test_gcc_unnamed_differs(const AbiTable* abi, TypeId type)
+{
+    const uint32_t pass = abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT];
+    return (pass & BUSTER_ABI_PASS_WIDE) != 0 && (pass & BUSTER_ABI_PASS_AGGREGATE) != 0;
+}
+
+static uint64_t abi_test_round(uint64_t value, uint64_t alignment)
+{
+    return (value + alignment - 1) / alignment * alignment;
+}
+
+// Random signatures over `types`, their bytes, and their locations (abi_assign's).
+static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, uint32_t type_count, const TypeId* unnamed_types, uint32_t unnamed_count, uint64_t* random,
+                                      AbiTestFillItem* stack)
+{
+    const TypeTable* table = &cross->world->types.test.table;
+    uint32_t argument = 0;
+    uint64_t data = 0;
+    uint64_t results = 0;
+    for (uint32_t n = 0; n < cross->signature_count; n += 1)
+    {
+        AbiTestSignature* signature = &cross->signatures[n];
+        const uint64_t shape = type_test_below(random, 16);
+        const uint32_t named = (uint32_t)(shape < 10 ? type_test_below(random, 6) : shape < 15 ? 4 + type_test_below(random, 10) : 12 + type_test_below(random, 10));
+        const uint32_t unnamed = unnamed_count != 0 && type_test_below(random, 4) == 0 ? (uint32_t)type_test_below(random, 7) : 0;
+        const bool variadic = unnamed != 0 || (unnamed_count != 0 && type_test_below(random, 16) == 0);
+        signature->result = type_test_below(random, 5) == 0 ? BUSTER_TYPE_VOID : types[type_test_below(random, type_count)];
+        for (uint32_t attempt = 0; cross->gcc && attempt < 64 && abi_test_gcc_result_differs(cross->abi, signature->result); attempt += 1)
+        {
+            signature->result = types[type_test_below(random, type_count)];
+        }
+        signature->result = cross->gcc && abi_test_gcc_result_differs(cross->abi, signature->result) ? BUSTER_TYPE_VOID : signature->result;
+        signature->first = argument;
+        signature->count = named + unnamed;
+        signature->named = named;
+        signature->variadic = variadic;
+        uint32_t offset = 0;
+        for (uint32_t a = 0; a < signature->count; a += 1)
+        {
+            TypeId type = a < named ? types[type_test_below(random, type_count)] : unnamed_types[type_test_below(random, unnamed_count)];
+            for (uint32_t attempt = 0; cross->gcc && variadic && a < named && attempt < 64 && abi_test_gcc_variadic_differs(cross->abi, type); attempt += 1)
+            {
+                type = types[type_test_below(random, type_count)];
+            }
+            type = cross->gcc && variadic && a < named && abi_test_gcc_variadic_differs(cross->abi, type) ? BUSTER_TYPE_LONG : type;
+            cross->arguments[argument + a] = type;
+            cross->offsets[argument + a] = offset;
+            // A slot of its own even for a type of no size, which the stack passes in 8 bytes.
+            const uint64_t size = table->types.size[abi_resolved_index(table, type)];
+            offset += (uint32_t)abi_test_round(size != 0 ? size : 1, BUSTER_ABI_TEST_SLOT);
+        }
+        signature->data_bytes = offset + BUSTER_ABI_TEST_SLOT;
+        signature->result_bytes = (uint32_t)abi_test_round(table->types.size[abi_resolved_index(table, signature->result)], BUSTER_ABI_TEST_SLOT) + BUSTER_ABI_TEST_SLOT;
+        cross->data_begin[n] = data;
+        cross->result_begin[n] = results;
+        for (uint32_t a = 0; a < signature->count; a += 1)
+        {
+            const uint64_t at = data + cross->offsets[argument + a];
+            abi_test_fill(table, cross->arguments[argument + a], cross->data + at, cross->data_mask + at, random, stack);
+        }
+        for (uint64_t i = data + offset; i < data + signature->data_bytes; i += 1)
+        {
+            cross->data[i] = (uint8_t)type_test_random(random);
+            cross->data_mask[i] = 0;
+        }
+        memset(cross->results + results, 0, signature->result_bytes);
+        memset(cross->result_mask + results, 0, signature->result_bytes);
+        if (signature->result != BUSTER_TYPE_VOID)
+        {
+            abi_test_fill(table, signature->result, cross->results + results, cross->result_mask + results, random, stack);
+        }
+        argument += signature->count;
+        data += signature->data_bytes;
+        results += signature->result_bytes;
+    }
+    cross->argument_count = argument;
+    TypeId* results_types = malloc(sizeof(TypeId) * cross->signature_count);
+    uint32_t* counts = malloc(sizeof(uint32_t) * cross->signature_count);
+    uint32_t* named = malloc(sizeof(uint32_t) * cross->signature_count);
+    uint8_t* variadic = malloc(cross->signature_count);
+    const bool result = results_types != 0 && counts != 0 && named != 0 && variadic != 0;
+    if (result)
+    {
+        for (uint32_t n = 0; n < cross->signature_count; n += 1)
+        {
+            results_types[n] = cross->signatures[n].result;
+            counts[n] = cross->signatures[n].count;
+            named[n] = cross->signatures[n].named;
+            variadic[n] = cross->signatures[n].variadic ? 1 : 0;
+        }
+        const AbiSignatures signatures = {
+            .results = results_types,
+            .counts = counts,
+            .named = named,
+            .variadic = variadic,
+            .count = cross->signature_count,
+            .arguments = cross->arguments,
+        };
+        abi_assign(cross->abi, signatures, cross->locations, cross->calls);
+    }
+    free(results_types);
+    free(counts);
+    free(named);
+    free(variadic);
+    return result;
+}
+// Appends bytes as C initializers.
+static void abi_test_hex(TypeTestText* text, const uint8_t* bytes, uint64_t count)
+{
+    static const char digits[] = "0123456789abcdef";
+    char buffer[1200];
+    uint32_t used = 0;
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        buffer[used] = '0';
+        buffer[used + 1] = 'x';
+        buffer[used + 2] = digits[bytes[i] >> 4];
+        buffer[used + 3] = digits[bytes[i] & 15];
+        buffer[used + 4] = ',';
+        used += 5;
+        if (used > sizeof(buffer) - 8 || i + 1 == count)
+        {
+            type_test_append(text, buffer, used);
+            used = 0;
+        }
+    }
+}
+
+// A type's name in the C file: its typedef, or its spelling (nullptr_t's, which the world doesn't spell, typeof's).
+static const char* abi_test_c_name(AbiTestWorld* world, TypeId type)
+{
+    const TypeTable* table = &world->types.test.table;
+    const char* result = "typeof(nullptr) ";
+    if (table->types.kind[type >> BUSTER_TYPE_INDEX_SHIFT] != BUSTER_TYPE_KIND_NULLPTR)
+    {
+        result = type_test_name_of(&world->types, type_unqualified(type));
+    }
+    return result;
+}
+
+// The parameter list of signature n: "(T0 a0, T1 a1, ...)", or the types alone, unnamed arguments past the named ones
+// left to "...".
+static void abi_test_parameters(AbiTestCross* cross, TypeTestText* text, uint32_t n, bool names)
+{
+    const AbiTestSignature* signature = &cross->signatures[n];
+    type_test_format(text, "(");
+    for (uint32_t a = 0; a < signature->named; a += 1)
+    {
+        type_test_format(text, "%s%s", a != 0 ? ", " : "", abi_test_c_name(cross->world, cross->arguments[signature->first + a]));
+        if (names)
+        {
+            type_test_format(text, "a%u", a);
+        }
+    }
+    if (signature->variadic)
+    {
+        type_test_format(text, "%s...", signature->named != 0 ? ", " : "");
+    }
+    else if (signature->count == 0)
+    {
+        type_test_format(text, "%s", "void");
+    }
+    type_test_format(text, ")");
+}
+
+static bool abi_test_variadic(const AbiTestSignature* signature)
+{
+    return signature->variadic;
+}
+
+// The C file: the world's types, every signature's bytes, its C callee (which our caller calls) and C caller (which
+// calls our callee), and main, which runs them all and prints how many checks failed.
+static void abi_test_write_c(AbiTestCross* cross, TypeTestText* text, bool* variadic_empty)
+{
+    AbiTestWorld* world = cross->world;
+    const TypeTable* table = &world->types.test.table;
+    type_test_format(text, "#include <stdarg.h>\n#include <stdio.h>\n#include <string.h>\n");
+    type_test_format(text, "static int abi_checks;\nstatic int abi_failures;\n");
+    type_test_format(text, "static void abi_check(const void* got, const void* want, const void* mask, unsigned long size, int signature, int argument, const char* what)\n{\n");
+    type_test_format(text, "    const unsigned char* g = got;\n    const unsigned char* w = want;\n    const unsigned char* m = mask;\n    int bad = 0;\n");
+    type_test_format(text, "    for (unsigned long i = 0; i < size; i += 1)\n    {\n        bad |= (g[i] ^ w[i]) & m[i];\n    }\n    abi_checks += 1;\n");
+    type_test_format(text, "    if (bad != 0 && abi_failures < 40)\n    {\n        printf(\"FAIL %%s signature %%d argument %%d:\", what, signature, argument);\n");
+    type_test_format(text, "        for (unsigned long i = 0; i < size; i += 1)\n        {\n            printf(\" %%02x/%%02x/%%02x\", g[i], w[i], m[i]);\n        }\n        printf(\"\\n\");\n    }\n");
+    type_test_format(text, "    abi_failures += bad != 0 ? 1 : 0;\n}\n");
+    // The types: their typedefs, which the oracle of c_types_test.c also prints (its expectations unused here).
+    TypeTestOracle oracle = {
+        .text = text,
+        .expected = BUSTER_ARENA_PUSH_ARRAY(&world->types.arena, char*, table->types.count * 4),
+        .what = BUSTER_ARENA_PUSH_ARRAY(&world->types.arena, const char*, table->types.count * 4),
+        .capacity = table->types.count * 4,
+    };
+    type_test_write_types(&world->types, &oracle);
+    for (uint32_t n = 0; n < cross->signature_count; n += 1)
+    {
+        const AbiTestSignature* signature = &cross->signatures[n];
+        const char* result = abi_test_c_name(world, signature->result);
+        const bool has_result = signature->result != BUSTER_TYPE_VOID;
+        const uint64_t data = cross->data_begin[n];
+        const uint64_t results = cross->result_begin[n];
+        type_test_format(text, "\n// signature %u: result classes %02x, %s; al %u, stack %u bytes aligned to %u\n", n,
+                         cross->abi->rows[(uint64_t)(signature->result >> BUSTER_TYPE_INDEX_SHIFT) * BUSTER_ABI_ROW_BYTES],
+                         cross->calls[n].result.kind == BUSTER_ABI_RESULT_MEMORY ? "in memory" : "in registers", cross->calls[n].vector_registers, cross->calls[n].stack_bytes,
+                         1u << cross->calls[n].stack_alignment_log2);
+        for (uint32_t a = 0; a < signature->count; a += 1)
+        {
+            const TypeId type = cross->arguments[signature->first + a];
+            const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+            const AbiLocation location = cross->locations[signature->first + a];
+            type_test_format(text, "//   a%u: %s(%" PRIu64 " bytes, classes %02x, pass %08x): kind %u, registers %02x %02x, flags %u, stack %u\n", a,
+                             abi_test_c_name(world, type), table->types.size[abi_resolved_index(table, type)], cross->abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES],
+                             cross->abi->pass[index], location.kind, location.registers[0], location.registers[1], location.flags, location.stack_offset);
+        }
+        type_test_format(text, "_Alignas(64) unsigned char abi_args_%u[%u] = {", n, signature->data_bytes);
+        abi_test_hex(text, cross->data + data, signature->data_bytes);
+        type_test_format(text, "};\nconst unsigned char abi_mask_args_%u[%u] = {", n, signature->data_bytes);
+        abi_test_hex(text, cross->data_mask + data, signature->data_bytes);
+        type_test_format(text, "};\n_Alignas(64) unsigned char abi_ret_%u[%u] = {", n, signature->result_bytes);
+        abi_test_hex(text, cross->results + results, signature->result_bytes);
+        type_test_format(text, "};\nconst unsigned char abi_mask_ret_%u[%u] = {", n, signature->result_bytes);
+        abi_test_hex(text, cross->result_mask + results, signature->result_bytes);
+        type_test_format(text, "};\n_Alignas(64) unsigned char abi_capture_%u[%u];\n_Alignas(64) unsigned char abi_result_%u[%u];\n", n, signature->data_bytes, n,
+                         signature->result_bytes);
+        type_test_format(text, "void* abi_result_pointer_%u;\nunsigned char abi_al_%u;\n", n, n);
+        // The C callee, which our caller calls.
+        type_test_format(text, "%sc_callee_%u", result, n);
+        abi_test_parameters(cross, text, n, true);
+        type_test_format(text, "\n{\n");
+        for (uint32_t a = 0; a < signature->named; a += 1)
+        {
+            const uint32_t offset = cross->offsets[signature->first + a];
+            type_test_format(text, "    abi_check(&a%u, abi_args_%u + %u, abi_mask_args_%u + %u, sizeof(a%u), %u, %u, \"A\");\n", a, n, offset, n, offset, a, n, a);
+        }
+        if (abi_test_variadic(signature))
+        {
+            type_test_format(text, "    va_list ap;\n");
+            if (signature->named != 0)
+            {
+                type_test_format(text, "    va_start(ap, a%u);\n", signature->named - 1);
+            }
+            else
+            {
+                type_test_format(text, "    va_start(ap);\n");
+                *variadic_empty = true;
+            }
+            for (uint32_t a = signature->named; a < signature->count; a += 1)
+            {
+                const uint32_t offset = cross->offsets[signature->first + a];
+                const char* type = abi_test_c_name(world, cross->arguments[signature->first + a]);
+                type_test_format(text, "    {\n        %sv = va_arg(ap, %s);\n", type, type);
+                type_test_format(text, "        abi_check(&v, abi_args_%u + %u, abi_mask_args_%u + %u, sizeof(v), %u, %u, \"A va_arg\");\n    }\n", n, offset, n, offset, n, a);
+            }
+            type_test_format(text, "    va_end(ap);\n");
+        }
+        if (has_result)
+        {
+            type_test_format(text, "    %sr;\n    memcpy(&r, abi_ret_%u, sizeof(r));\n    return r;\n", result, n);
+        }
+        type_test_format(text, "}\n");
+        // Our callee, and the C caller of it.
+        type_test_format(text, "%sbuster_callee_%u", result, n);
+        abi_test_parameters(cross, text, n, false);
+        type_test_format(text, ";\nvoid buster_call_%u(void);\nvoid c_call_%u(void)\n{\n", n, n);
+        for (uint32_t a = 0; a < signature->count; a += 1)
+        {
+            const uint32_t offset = cross->offsets[signature->first + a];
+            const TypeId type = cross->arguments[signature->first + a];
+            const char* name = abi_test_c_name(world, type);
+            // A _BitInt as wide as a vector register, copied into place with memcpy, crashes GCC 16's bitintlower
+            // before a call whose result is an aggregate; a load of the type doesn't (the slots are 64-byte aligned,
+            // and the program is built without strict aliasing).
+            if (type_kind(&world->types.test.table, type_strip_aligned(&world->types.test.table, type)) == BUSTER_TYPE_KIND_BIT_INT)
+            {
+                type_test_format(text, "    %sa%u = *(const %s*)(abi_args_%u + %u);\n", name, a, name, n, offset);
+            }
+            else
+            {
+                type_test_format(text, "    %sa%u;\n    memcpy(&a%u, abi_args_%u + %u, sizeof(a%u));\n", name, a, a, n, offset, a);
+            }
+        }
+        type_test_format(text, "    abi_al_%u = 0xff;\n    ", n);
+        if (has_result)
+        {
+            type_test_format(text, "%sr = ", result);
+        }
+        type_test_format(text, "buster_callee_%u(", n);
+        for (uint32_t a = 0; a < signature->count; a += 1)
+        {
+            type_test_format(text, "%sa%u", a != 0 ? ", " : "", a);
+        }
+        type_test_format(text, ");\n");
+        if (has_result)
+        {
+            type_test_format(text, "    abi_check(&r, abi_ret_%u, abi_mask_ret_%u, sizeof(r), %u, -1, \"B result\");\n", n, n, n);
+        }
+        for (uint32_t a = 0; a < signature->count; a += 1)
+        {
+            const uint32_t offset = cross->offsets[signature->first + a];
+            type_test_format(text, "    abi_check(abi_capture_%u + %u, abi_args_%u + %u, abi_mask_args_%u + %u, sizeof(a%u), %u, %u, \"B\");\n", n, offset, n, offset, n,
+                             offset, a, n, a);
+        }
+        if (abi_test_variadic(signature))
+        {
+            const uint8_t expected = cross->calls[n].vector_registers;
+            const uint8_t al = expected;
+            type_test_format(text, "    {\n        const unsigned char al = %u;\n        abi_check(&abi_al_%u, &al, \"\\xff\", 1, %u, -2, \"B al\");\n    }\n", al, n, n);
+        }
+        type_test_format(text, "}\n");
+    }
+    type_test_format(text, "\nint main(void)\n{\n");
+    for (uint32_t n = 0; n < cross->signature_count; n += 1)
+    {
+        const AbiTestSignature* signature = &cross->signatures[n];
+        type_test_format(text, "    buster_call_%u();\n", n);
+        if (signature->result != BUSTER_TYPE_VOID)
+        {
+            const uint64_t size = table->types.size[abi_resolved_index(table, signature->result)];
+            type_test_format(text, "    abi_check(abi_result_%u, abi_ret_%u, abi_mask_ret_%u, %" PRIu64 ", %u, -1, \"A result\");\n", n, n, n, size, n);
+            if (cross->calls[n].result.kind == BUSTER_ABI_RESULT_MEMORY)
+            {
+                type_test_format(text, "    {\n        void* expected = abi_result_%u;\n        abi_check(&abi_result_pointer_%u, &expected, \"\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\", 8, %u, -1, \"A hidden pointer\");\n    }\n", n, n, n);
+            }
+        }
+        type_test_format(text, "    c_call_%u();\n", n);
+    }
+    type_test_format(text, "    printf(\"checks %%d failures %%d\\n\", abi_checks, abi_failures);\n    return abi_failures != 0;\n}\n");
+}
+// A function of ours being built: its records and the references of their symbolic fields.
+typedef struct AbiTestCode AbiTestCode;
+struct AbiTestCode
+{
+    X86Instruction instructions[BUSTER_ABI_TEST_MAX_INSTRUCTIONS];
+    LinkReference references[BUSTER_ABI_TEST_MAX_INSTRUCTIONS];
+    uint32_t fixup_ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(BUSTER_ABI_TEST_MAX_INSTRUCTIONS)];
+    uint32_t count;
+    uint32_t reference_count;
+    bool overflow;
+};
+
+static void abi_test_add(AbiTestCode* code, X86Instruction instruction)
+{
+    if (code->count < BUSTER_ABI_TEST_MAX_INSTRUCTIONS)
+    {
+        code->instructions[code->count] = instruction;
+        code->count += 1;
+    }
+    else
+    {
+        code->overflow = true;
+    }
+}
+
+// An instruction with a RIP-relative memory operand at symbol + addend.
+static void abi_test_rip(AbiTestCode* code, uint32_t form, uint8_t reg, SymbolId symbol, int64_t addend)
+{
+    if (code->count < BUSTER_ABI_TEST_MAX_INSTRUCTIONS)
+    {
+        code->references[code->reference_count] = (LinkReference){
+            .instruction = code->count,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = BUSTER_LINK_FIXUP_PC32,
+            .target = symbol,
+            .addend = addend,
+        };
+        code->reference_count += 1;
+    }
+    X86Instruction instruction = link_program_rip(form, reg);
+    instruction.form |= BUSTER_X86_FORM_FIXUP;
+    abi_test_add(code, instruction);
+}
+
+static void abi_test_call(AbiTestCode* code, SymbolId symbol)
+{
+    if (code->count < BUSTER_ABI_TEST_MAX_INSTRUCTIONS)
+    {
+        code->references[code->reference_count] = (LinkReference){
+            .instruction = code->count,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = BUSTER_LINK_FIXUP_CALL,
+            .target = symbol,
+            .addend = 0,
+        };
+        code->reference_count += 1;
+    }
+    X86Instruction instruction = link_program_bare(X86_FORM_CALL_REL32);
+    instruction.form |= BUSTER_X86_FORM_FIXUP;
+    abi_test_add(code, instruction);
+}
+
+// A register's load of `bytes` bytes (a vector register's whole width past 8, or 8 with movq; a general register's 8,
+// or the extending load of a scalar of 1, 2 or 4 bytes), and its store of what a part holds.
+static uint32_t abi_test_load_form(uint8_t reg, uint32_t bytes, uint8_t extension)
+{
+    uint32_t result = X86_FORM_MOV_R64_RM64;
+    if ((reg & BUSTER_ABI_REGISTER_VECTOR) != 0)
+    {
+        result = bytes <= 8 ? X86_FORM_MOVQ_X_XM64 : bytes == 16 ? X86_FORM_MOVDQU_X_XM : bytes == 32 ? X86_FORM_VMOVDQU_Y_YM256 : X86_FORM_VMOVDQU64_Z_ZM512;
+    }
+    else if (extension == BUSTER_ABI_FLAG_SIGN)
+    {
+        result = bytes == 1 ? X86_FORM_MOVSX_R64_RM8 : bytes == 2 ? X86_FORM_MOVSX_R64_RM16 : X86_FORM_MOVSXD_R64_RM32;
+    }
+    else if (extension == BUSTER_ABI_FLAG_ZERO)
+    {
+        result = bytes == 1 ? X86_FORM_MOVZX_R32_RM8 : bytes == 2 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOV_R32_RM32;
+    }
+    return result;
+}
+
+static uint32_t abi_test_store_form(uint8_t reg, uint32_t bytes)
+{
+    uint32_t result = X86_FORM_MOV_RM64_R64;
+    if ((reg & BUSTER_ABI_REGISTER_VECTOR) != 0)
+    {
+        result = bytes <= 8 ? X86_FORM_MOVQ_XM64_X : bytes == 16 ? X86_FORM_MOVDQU_XM_X : bytes == 32 ? X86_FORM_VMOVDQU_YM256_Y : X86_FORM_VMOVDQU64_ZM512_Z;
+    }
+    return result;
+}
+
+// A value's parts in registers or 8-byte stack slots: which register (NONE for the slot of a SPLIT one), where in the
+// value it starts, how many bytes a load of it reads, and whether the load extends.
+typedef struct AbiTestPart AbiTestPart;
+struct AbiTestPart
+{
+    uint8_t reg;
+    uint8_t extension;
+    uint32_t offset;
+    uint32_t bytes;
+};
+
+static uint32_t abi_test_parts(const AbiTable* abi, const TypeTable* table, TypeId type, AbiLocation location, AbiTestPart* parts)
+{
+    const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+    const uint32_t pass = abi->pass[index];
+    const uint64_t size = table->types.size[abi_resolved_index(table, type)];
+    const uint32_t value = (pass & BUSTER_ABI_PASS_VALUE) >> BUSTER_ABI_PASS_VALUE_SHIFT;
+    const uint8_t extension = location.flags & (BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO);
+    uint32_t count = 0;
+    if (location.kind != BUSTER_ABI_LOCATION_REGISTERS && location.kind != BUSTER_ABI_LOCATION_SPLIT)
+    {
+    }
+    else if ((pass & BUSTER_ABI_PASS_VECTOR) != 0 || ((pass & BUSTER_ABI_PASS_UNCOUNTED) != 0 && value == BUSTER_ABI_VALUE_VECTOR))
+    {
+        parts[0] = (AbiTestPart){
+            .reg = location.registers[0],
+            .extension = 0,
+            .offset = 0,
+            .bytes = size <= 8 ? 8 : (uint32_t)size,
+        };
+        count = 1;
+    }
+    else if ((pass & BUSTER_ABI_PASS_UNCOUNTED) != 0)
+    {
+        for (uint32_t i = 0; i < (value == BUSTER_ABI_VALUE_PAIR ? 2u : 1u); i += 1)
+        {
+            parts[i] = (AbiTestPart){
+                .reg = location.registers[i],
+                .extension = 0,
+                .offset = 8 * i,
+                .bytes = 8,
+            };
+        }
+        count = value == BUSTER_ABI_VALUE_PAIR ? 2 : 1;
+    }
+    else
+    {
+        const bool halves[2] = {
+            (pass & (BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_LOW_SSE)) != 0,
+            (pass & (BUSTER_ABI_PASS_HIGH_INTEGER | BUSTER_ABI_PASS_HIGH_SSE)) != 0,
+        };
+        for (uint32_t half = 0; half < 2; half += 1)
+        {
+            if (halves[half])
+            {
+                // A scalar narrower than 8 bytes loads extended, as its flags ask.
+                const bool extend = extension != 0 && size < 8;
+                parts[count] = (AbiTestPart){
+                    .reg = location.registers[count],
+                    .extension = extend ? extension : 0,
+                    .offset = 8 * half,
+                    .bytes = extend ? (uint32_t)size : 8,
+                };
+                count += 1;
+            }
+        }
+    }
+    return count;
+}
+
+// The symbols of a signature: the C file's data and callee, our caller and callee.
+typedef struct AbiTestSymbols AbiTestSymbols;
+struct AbiTestSymbols
+{
+    SymbolId args;
+    SymbolId ret;
+    SymbolId capture;
+    SymbolId result;
+    SymbolId result_pointer;
+    SymbolId al;
+    SymbolId c_callee;
+    SymbolId caller;
+    SymbolId callee;
+};
+
+static SymbolId abi_test_symbol(Link* link, const char* prefix, uint32_t n, uint8_t flags)
+{
+    char name[64];
+    const int length = snprintf(name, sizeof(name), "%s%u", prefix, n);
+    const NameId id = link_add_name(link, (const uint8_t*)name, (uint32_t)length);
+    return id != 0 ? link_add_symbol(link, id, 0, 0, 0, flags, BUSTER_LINK_SOURCE_NONE) : 0;
+}
+
+// Our caller of the C callee: the stack arguments copied into the argument area (rep movsb takes rsi, rdi and rcx, so
+// first), then the register ones loaded, the hidden pointer and al set, the call, and the result stored.
+static void abi_test_emit_caller(AbiTestCross* cross, uint32_t n, AbiTestSymbols symbols, AbiTestCode* code)
+{
+    const TypeTable* table = &cross->world->types.test.table;
+    const AbiTestSignature* signature = &cross->signatures[n];
+    const AbiCall call = cross->calls[n];
+    const AbiLocation* locations = cross->locations + signature->first;
+    const uint32_t* offsets = cross->offsets + signature->first;
+    const uint64_t alignment = 1ull << call.stack_alignment_log2;
+    abi_test_add(code, link_program_registers(X86_FORM_PUSH_R64, 0, X86_REGISTER_RBP));
+    abi_test_add(code, link_program_registers(X86_FORM_MOV_R64_RM64, X86_REGISTER_RBP, X86_REGISTER_RSP));
+    abi_test_add(code, link_program_immediate(X86_FORM_SUB_RM64_IMM32, X86_REGISTER_RSP, (int32_t)abi_test_round(call.stack_bytes, 16)));
+    if (alignment > 16)
+    {
+        abi_test_add(code, link_program_immediate(X86_FORM_AND_RM64_IMM32, X86_REGISTER_RSP, (int32_t)-(int64_t)alignment));
+    }
+    AbiTestPart parts[2];
+    for (uint32_t a = 0; a < signature->count; a += 1)
+    {
+        const AbiLocation location = locations[a];
+        const TypeId type = cross->arguments[signature->first + a];
+        const uint32_t count = abi_test_parts(cross->abi, table, type, location, parts);
+        if (location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_HIGH) != 0)
+        {
+            abi_test_rip(code, X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, symbols.args, offsets[a] + 8);
+            abi_test_add(code, link_program_memory(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_RSP, (int32_t)location.stack_offset));
+        }
+        else if (location.kind == BUSTER_ABI_LOCATION_STACK)
+        {
+            abi_test_rip(code, X86_FORM_LEA_R64_M, X86_REGISTER_RSI, symbols.args, offsets[a]);
+            abi_test_add(code, link_program_memory(X86_FORM_LEA_R64_M, X86_REGISTER_RDI, X86_REGISTER_RSP, (int32_t)location.stack_offset));
+            abi_test_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RCX, (int32_t)cross->abi->stack_bytes[type >> BUSTER_TYPE_INDEX_SHIFT]));
+            abi_test_add(code, link_program_bare(X86_FORM_REP_MOVS_B));
+        }
+        for (uint32_t p = 0; p < count; p += 1)
+        {
+            if (parts[p].reg == BUSTER_ABI_REGISTER_NONE)
+            {
+                abi_test_rip(code, X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, symbols.args, offsets[a] + parts[p].offset);
+                abi_test_add(code, link_program_memory(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_RSP, (int32_t)location.stack_offset));
+            }
+        }
+    }
+    for (uint32_t a = 0; a < signature->count; a += 1)
+    {
+        const TypeId type = cross->arguments[signature->first + a];
+        const uint32_t count = abi_test_parts(cross->abi, table, type, locations[a], parts);
+        for (uint32_t p = 0; p < count; p += 1)
+        {
+            if (parts[p].reg != BUSTER_ABI_REGISTER_NONE)
+            {
+                const uint32_t form = abi_test_load_form(parts[p].reg, parts[p].bytes, parts[p].extension);
+                abi_test_rip(code, form, parts[p].reg & BUSTER_X86_REGISTER_NUMBER, symbols.args, offsets[a] + parts[p].offset);
+            }
+        }
+    }
+    if (call.result.kind == BUSTER_ABI_RESULT_MEMORY)
+    {
+        abi_test_rip(code, X86_FORM_LEA_R64_M, X86_REGISTER_RDI, symbols.result, 0);
+    }
+    abi_test_add(code, link_program_immediate(X86_FORM_MOV_R8_IMM8, X86_REGISTER_RAX, call.vector_registers));
+    abi_test_call(code, symbols.c_callee);
+    if (call.result.kind == BUSTER_ABI_RESULT_MEMORY)
+    {
+        abi_test_rip(code, X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, symbols.result_pointer, 0);
+    }
+    else if (call.result.kind == BUSTER_ABI_RESULT_REGISTERS)
+    {
+        const uint32_t high = (call.result.flags & BUSTER_ABI_FLAG_HIGH) != 0 ? 8 : 0;
+        for (uint32_t p = 0; p < BUSTER_ABI_RESULT_PARTS && call.result.registers[p] != BUSTER_ABI_REGISTER_NONE; p += 1)
+        {
+            const uint8_t reg = call.result.registers[p];
+            const uint32_t offset = high + p * call.result.part_bytes;
+            if ((reg & BUSTER_ABI_REGISTER_X87) != 0)
+            {
+                // st0 each time: the store pops st1 into st0.
+                abi_test_rip(code, X86_FORM_FSTP_M80, 0, symbols.result, p * 16);
+            }
+            else
+            {
+                abi_test_rip(code, abi_test_store_form(reg, call.result.part_bytes), reg & BUSTER_X86_REGISTER_NUMBER, symbols.result, offset);
+            }
+        }
+    }
+    abi_test_add(code, link_program_registers(X86_FORM_MOV_R64_RM64, X86_REGISTER_RSP, X86_REGISTER_RBP));
+    abi_test_add(code, link_program_registers(X86_FORM_POP_R64, 0, X86_REGISTER_RBP));
+    abi_test_add(code, link_program_bare(X86_FORM_RET));
+}
+
+// Our callee: the register arguments and al stored, then the stack ones copied from above the return address, then the
+// result loaded (or copied through the hidden pointer, kept in r11).
+static void abi_test_emit_callee(AbiTestCross* cross, uint32_t n, AbiTestSymbols symbols, AbiTestCode* code)
+{
+    const TypeTable* table = &cross->world->types.test.table;
+    const AbiTestSignature* signature = &cross->signatures[n];
+    const AbiCall call = cross->calls[n];
+    const AbiLocation* locations = cross->locations + signature->first;
+    const uint32_t* offsets = cross->offsets + signature->first;
+    if (call.result.kind == BUSTER_ABI_RESULT_MEMORY)
+    {
+        abi_test_add(code, link_program_registers(X86_FORM_MOV_R64_RM64, X86_REGISTER_R11, X86_REGISTER_RDI));
+    }
+    AbiTestPart parts[2];
+    for (uint32_t a = 0; a < signature->count; a += 1)
+    {
+        const TypeId type = cross->arguments[signature->first + a];
+        const uint32_t count = abi_test_parts(cross->abi, table, type, locations[a], parts);
+        for (uint32_t p = 0; p < count; p += 1)
+        {
+            if (parts[p].reg != BUSTER_ABI_REGISTER_NONE)
+            {
+                const uint32_t bytes = parts[p].bytes < 8 ? 8 : parts[p].bytes;
+                abi_test_rip(code, abi_test_store_form(parts[p].reg, bytes), parts[p].reg & BUSTER_X86_REGISTER_NUMBER, symbols.capture, offsets[a] + parts[p].offset);
+            }
+        }
+    }
+    abi_test_rip(code, X86_FORM_MOV_RM8_R8, X86_REGISTER_RAX, symbols.al, 0);
+    for (uint32_t a = 0; a < signature->count; a += 1)
+    {
+        const AbiLocation location = locations[a];
+        const TypeId type = cross->arguments[signature->first + a];
+        const uint32_t count = abi_test_parts(cross->abi, table, type, location, parts);
+        const int32_t slot = (int32_t)location.stack_offset + 8;
+        if (location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_HIGH) != 0)
+        {
+            abi_test_add(code, link_program_memory(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RSP, slot));
+            abi_test_rip(code, X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, symbols.capture, offsets[a] + 8);
+        }
+        else if (location.kind == BUSTER_ABI_LOCATION_STACK)
+        {
+            abi_test_add(code, link_program_memory(X86_FORM_LEA_R64_M, X86_REGISTER_RSI, X86_REGISTER_RSP, slot));
+            abi_test_rip(code, X86_FORM_LEA_R64_M, X86_REGISTER_RDI, symbols.capture, offsets[a]);
+            abi_test_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RCX, (int32_t)cross->abi->stack_bytes[type >> BUSTER_TYPE_INDEX_SHIFT]));
+            abi_test_add(code, link_program_bare(X86_FORM_REP_MOVS_B));
+        }
+        for (uint32_t p = 0; p < count; p += 1)
+        {
+            if (parts[p].reg == BUSTER_ABI_REGISTER_NONE)
+            {
+                abi_test_add(code, link_program_memory(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RSP, slot));
+                abi_test_rip(code, X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, symbols.capture, offsets[a] + parts[p].offset);
+            }
+        }
+    }
+    if (call.result.kind == BUSTER_ABI_RESULT_MEMORY)
+    {
+        const uint64_t size = table->types.size[abi_resolved_index(table, signature->result)];
+        abi_test_rip(code, X86_FORM_LEA_R64_M, X86_REGISTER_RSI, symbols.ret, 0);
+        abi_test_add(code, link_program_registers(X86_FORM_MOV_R64_RM64, X86_REGISTER_RDI, X86_REGISTER_R11));
+        abi_test_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RCX, (int32_t)size));
+        abi_test_add(code, link_program_bare(X86_FORM_REP_MOVS_B));
+        abi_test_add(code, link_program_registers(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_R11));
+    }
+    else if (call.result.kind == BUSTER_ABI_RESULT_REGISTERS)
+    {
+        const uint64_t size = table->types.size[abi_resolved_index(table, signature->result)];
+        const uint32_t high = (call.result.flags & BUSTER_ABI_FLAG_HIGH) != 0 ? 8 : 0;
+        const uint8_t extension = call.result.flags & (BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO);
+        uint32_t count = 0;
+        while (count < BUSTER_ABI_RESULT_PARTS && call.result.registers[count] != BUSTER_ABI_REGISTER_NONE)
+        {
+            count += 1;
+        }
+        // x87's parts are pushed last first, so that st0 is the first.
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t p = (call.result.registers[0] & BUSTER_ABI_REGISTER_X87) != 0 ? count - 1 - i : i;
+            const uint8_t reg = call.result.registers[p];
+            if ((reg & BUSTER_ABI_REGISTER_X87) != 0)
+            {
+                abi_test_rip(code, X86_FORM_FLD_M80, 0, symbols.ret, p * 16);
+            }
+            else
+            {
+                const bool extend = extension != 0 && size < 8;
+                const uint32_t form = abi_test_load_form(reg, extend ? (uint32_t)size : call.result.part_bytes, extend ? extension : 0);
+                abi_test_rip(code, form, reg & BUSTER_X86_REGISTER_NUMBER, symbols.ret, high + p * call.result.part_bytes);
+            }
+        }
+    }
+    abi_test_add(code, link_program_bare(X86_FORM_RET));
+}
+
+// Encodes a function into an atom of the link, with its fixups, and defines its symbol there.
+static bool abi_test_finish(Link* link, Arena* bytes, AbiTestCode* code, SymbolId symbol)
+{
+    uint32_t marked = 0;
+    for (uint32_t i = 0; i < code->count; i += 1)
+    {
+        marked += (code->instructions[i].form & BUSTER_X86_FORM_FIXUP) != 0 ? 1 : 0;
+    }
+    const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
+    uint8_t* output = arena_push(bytes, capacity, 16);
+    const bool valid = !code->overflow && output != 0 && x86_validate(code->instructions, code->count) == code->count;
+    const int64_t length = valid ? x86_encode(code->instructions, code->count, output, capacity, 0, code->fixup_ends) : -1;
+    bool result = false;
+    if (length >= 0)
+    {
+        const uint64_t padded = abi_test_round((uint64_t)length, 16);
+        memset(output + length, 0xcc, padded - (uint64_t)length);
+        arena_pop_to(bytes, (uint64_t)(output - bytes->base) + padded);
+        const AtomId atom = link_add_atom(link, BUSTER_LINK_CLASS_TEXT, 4, padded, output, 0);
+        result = atom != 0 && link_add_code_fixups(link, atom, code->instructions, code->count, code->fixup_ends, marked, code->references, code->reference_count) &&
+                 link_define_symbol(link, symbol, atom, 0, (uint64_t)length);
+    }
+    return result;
+}
+
+// Our object: every signature's caller and callee in one unit.
+static bool abi_test_write_object(AbiTestCross* cross, const char* path, AbiTestCode* code)
+{
+    const uint32_t count = cross->signature_count;
+    const LinkCapacity capacity = {
+        .names = 16 * count + 16,
+        .atoms = 2 * count + 2,
+        .symbols = 16 * count + 16,
+        .fixups = 2 * count * (6 * BUSTER_ABI_TEST_MAX_ARGUMENTS + 32) + 16,
+        .wide_addends = 2,
+        .priorities = 2,
+    };
+    Arena tables = arena_reserve(link_capacity_bytes(capacity));
+    Arena names = arena_reserve(64ull * capacity.names + 4096);
+    Arena bytes = arena_reserve(BUSTER_ABI_TEST_ARENA_BYTES);
+    Arena objects = arena_reserve(BUSTER_ABI_TEST_ARENA_BYTES);
+    Link link;
+    bool result = tables.base != 0 && names.base != 0 && bytes.base != 0 && objects.base != 0 && link_initialize(&link, &tables, &names, capacity);
+    for (uint32_t n = 0; result && n < count; n += 1)
+    {
+        const uint8_t data = BUSTER_LINK_SYMBOL_NOTYPE | BUSTER_LINK_SYMBOL_GLOBAL;
+        const uint8_t function = BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_GLOBAL;
+        AbiTestSymbols symbols = {
+            .args = abi_test_symbol(&link, "abi_args_", n, data),
+            .ret = abi_test_symbol(&link, "abi_ret_", n, data),
+            .capture = abi_test_symbol(&link, "abi_capture_", n, data),
+            .result = abi_test_symbol(&link, "abi_result_", n, data),
+            .result_pointer = abi_test_symbol(&link, "abi_result_pointer_", n, data),
+            .al = abi_test_symbol(&link, "abi_al_", n, data),
+            .c_callee = abi_test_symbol(&link, "c_callee_", n, data),
+            .caller = 0,
+            .callee = 0,
+        };
+        char name[64];
+        int length = snprintf(name, sizeof(name), "buster_call_%u", n);
+        symbols.caller = link_add_symbol(&link, link_add_name(&link, (const uint8_t*)name, (uint32_t)length), 0, 0, 0, function, BUSTER_LINK_SOURCE_PROGRAM);
+        length = snprintf(name, sizeof(name), "buster_callee_%u", n);
+        symbols.callee = link_add_symbol(&link, link_add_name(&link, (const uint8_t*)name, (uint32_t)length), 0, 0, 0, function, BUSTER_LINK_SOURCE_PROGRAM);
+        code->count = 0;
+        code->reference_count = 0;
+        code->overflow = false;
+        abi_test_emit_caller(cross, n, symbols, code);
+        result = symbols.callee != 0 && abi_test_finish(&link, &bytes, code, symbols.caller);
+        code->count = 0;
+        code->reference_count = 0;
+        code->overflow = false;
+        abi_test_emit_callee(cross, n, symbols, code);
+        result = result && abi_test_finish(&link, &bytes, code, symbols.callee);
+    }
+    ObjectUnits units;
+    ObjectSymbols object_symbols;
+    result = result && link_check(&link) == LINK_ERROR_NONE && object_prepare(&units, &link, 1, &objects) && object_map_symbols(&object_symbols, &link, &objects);
+    if (result)
+    {
+        const ObjectOptions options = {
+            .function_sections = false,
+        };
+        const Object object = object_build(&link, &units, &object_symbols, 0, options, BUSTER_S8("calling_convention.c"), &objects);
+        result = object.error == OBJECT_ERROR_NONE && object_write_file(path, object.bytes, object.size) == OBJECT_ERROR_NONE;
+    }
+    arena_release(&tables);
+    arena_release(&names);
+    arena_release(&bytes);
+    arena_release(&objects);
+    return result;
+}
+
+// One cross-check: a world for the compiler (GCC's without what GCC passes otherwise), `count` signatures over its
+// passable types, the C file and our object, compiled and linked by the compiler's driver, and run.
+static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, const char* compiler, bool gcc, uint32_t vector_bytes, const char* directory, bool keep)
+{
+    char detail[512];
+    AbiTestWorld world;
+    bool result = false;
+    if (abi_test_expect(tally, abi_test_world_open(&world, 8192), "cross-check", "the world can't be made"))
+    {
+        world.gcc = gcc;
+        abi_test_world_build(&world, seed, 600);
+        type_test_spell_world(&world.types);
+        // GCC has no __fp16 on x86-64, nor a spelling of _Complex __float128, and it passes a _Complex __bf16 in two
+        // SSE registers but counts one, as neither its va_arg nor clang reads it (nothing in its world is made of these).
+        world.types.spellings[BUSTER_TYPE_CODE_HALF].spellable = !gcc;
+        world.types.spellings[BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT128].spellable = !gcc;
+        world.types.spellings[BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_BF16].spellable = !gcc;
+        const TypeTable* table = &world.types.test.table;
+        Arena arena = arena_reserve(abi_capacity_bytes(table->types.capacity));
+        AbiTable abi;
+        AbiTestFrame* frames = malloc(sizeof(AbiTestFrame) * BUSTER_ABI_TEST_FRAMES);
+        AbiTestFillItem* stack = malloc(sizeof(AbiTestFillItem) * BUSTER_ABI_TEST_FILL_ITEMS);
+        TypeId* types = malloc(sizeof(TypeId) * table->types.count);
+        TypeId* unnamed_types = malloc(sizeof(TypeId) * table->types.count);
+        const uint32_t arguments = count * BUSTER_ABI_TEST_MAX_ARGUMENTS;
+        AbiTestCross cross = {
+            .world = &world,
+            .abi = &abi,
+            .signatures = malloc(sizeof(AbiTestSignature) * count),
+            .signature_count = count,
+            .arguments = malloc(sizeof(TypeId) * arguments),
+            .offsets = malloc(sizeof(uint32_t) * arguments),
+            .locations = malloc(sizeof(AbiLocation) * arguments),
+            .calls = malloc(sizeof(AbiCall) * count),
+            .data = malloc((uint64_t)count * BUSTER_ABI_TEST_MAX_ARGUMENTS * 320 + (uint64_t)count * 64),
+            .data_mask = malloc((uint64_t)count * BUSTER_ABI_TEST_MAX_ARGUMENTS * 320 + (uint64_t)count * 64),
+            .data_begin = malloc(sizeof(uint64_t) * count),
+            .results = malloc((uint64_t)count * 384),
+            .result_mask = malloc((uint64_t)count * 384),
+            .result_begin = malloc(sizeof(uint64_t) * count),
+            .gcc = gcc,
+        };
+        AbiTestCode* code = malloc(sizeof(AbiTestCode));
+        const bool memory = frames != 0 && stack != 0 && types != 0 && unnamed_types != 0 && cross.signatures != 0 && cross.arguments != 0 && cross.offsets != 0 &&
+                            cross.locations != 0 && cross.calls != 0 && cross.data != 0 && cross.data_mask != 0 && cross.data_begin != 0 && cross.results != 0 &&
+                            cross.result_mask != 0 && cross.result_begin != 0 && code != 0;
+        if (abi_test_expect(tally, memory && abi_initialize(&abi, &arena, table, vector_bytes), "cross-check", "no memory"))
+        {
+            abi_classify_all(&abi, table);
+            uint32_t type_count = 0;
+            uint32_t unnamed_count = 0;
+            // nullptr_t, which the world doesn't spell, as clang's C can.
+            if (!gcc)
+            {
+                types[type_count] = BUSTER_TYPE_NULLPTR;
+                type_count += 1;
+            }
+            for (uint32_t index = 1; index < table->types.count; index += 1)
+            {
+                const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+                const bool spelled = world.types.spellings[index].spellable && world.types.spellings[index].number != UINT32_MAX;
+                const bool small = table->types.size[abi_resolved_index(table, type)] <= 256;
+                const bool atomic_result = table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC;
+                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !atomic_result)
+                {
+                    types[type_count] = type;
+                    type_count += 1;
+                    if (abi_test_unnamed_ok(&abi, table, type, frames) && !(gcc && abi_test_gcc_unnamed_differs(&abi, type)))
+                    {
+                        unnamed_types[unnamed_count] = type;
+                        unnamed_count += 1;
+                    }
+                }
+            }
+            uint64_t random = seed * 0x9E3779B97F4A7C15ull + vector_bytes;
+            result = abi_test_cross_signatures(&cross, types, type_count, unnamed_types, unnamed_count, &random, stack);
+            Arena text_arena = arena_reserve(BUSTER_ABI_TEST_ARENA_BYTES);
+            TypeTestText text = {
+                .arena = &text_arena,
+                .valid = true,
+            };
+            bool variadic_empty = false;
+            abi_test_write_c(&cross, &text, &variadic_empty);
+            char source[BUSTER_ABI_TEST_PATH_BYTES];
+            char object[BUSTER_ABI_TEST_PATH_BYTES];
+            char program[BUSTER_ABI_TEST_PATH_BYTES];
+            char output[BUSTER_ABI_TEST_PATH_BYTES];
+            char errors[BUSTER_ABI_TEST_PATH_BYTES];
+            const char* name = gcc ? "gcc" : "clang";
+            snprintf(source, sizeof(source), "%s/%s_%u.c", directory, name, vector_bytes);
+            snprintf(object, sizeof(object), "%s/%s_%u_buster.o", directory, name, vector_bytes);
+            snprintf(program, sizeof(program), "%s/%s_%u", directory, name, vector_bytes);
+            snprintf(output, sizeof(output), "%s/%s_%u.out", directory, name, vector_bytes);
+            snprintf(errors, sizeof(errors), "%s/%s_%u.err", directory, name, vector_bytes);
+            result = result && text.valid && type_test_write_file(source, &text);
+            abi_test_expect(tally, result, "cross-check", "the C file can't be written");
+            const bool written = result && abi_test_write_object(&cross, object, code);
+            snprintf(detail, sizeof(detail), "%s, %u-byte vectors: our object can't be built", name, vector_bytes);
+            abi_test_expect(tally, !result || written, "cross-check", detail);
+            if (written)
+            {
+                const char* march = vector_bytes == 16 ? "-march=x86-64" : vector_bytes == 32 ? "-march=x86-64-v3" : "-march=x86-64-v4";
+                char* compile[] = {
+                    (char*)compiler,
+                    "-std=gnu23",
+                    "-O1",
+                    "-fno-strict-aliasing",
+                    (char*)march,
+                    "-w",
+                    "-o",
+                    program,
+                    source,
+                    object,
+                    "-latomic",
+                    0,
+                };
+                const int compiled = type_test_run(compile, output, errors);
+                const String8 complaints = type_test_read_file(&world.types.arena, errors);
+                snprintf(detail, sizeof(detail), "%s, %u-byte vectors: compiling and linking failed: %.300s", name, vector_bytes, complaints.length != 0 ? complaints.pointer : "");
+                if (abi_test_expect(tally, compiled == 0, "cross-check", detail))
+                {
+                    char* run[] = {
+                        program,
+                        0,
+                    };
+                    const int ran = type_test_run(run, output, errors);
+                    const String8 printed = type_test_read_file(&world.types.arena, output);
+                    const char* summary = printed.length != 0 ? strstr(printed.pointer, "checks ") : 0;
+                    snprintf(detail, sizeof(detail), "%s, %u-byte vectors: the program failed (status %d):\n%.4000s", name, vector_bytes, ran,
+                             printed.length != 0 ? printed.pointer : "");
+                    if (abi_test_expect(tally, ran == 0 && summary != 0, "cross-check", detail))
+                    {
+                        printf("%-34s %s, %u-byte vectors: %u signatures, %u arguments, %.*s", "cross-check", name, vector_bytes, count, cross.argument_count,
+                               (int)(printed.pointer + printed.length - summary), summary);
+                    }
+                }
+            }
+            if (!keep && tally->failures == 0)
+            {
+                unlink(source);
+                unlink(object);
+                unlink(program);
+                unlink(output);
+                unlink(errors);
+            }
+            arena_release(&text_arena);
+        }
+        free(frames);
+        free(stack);
+        free(types);
+        free(unnamed_types);
+        free(cross.signatures);
+        free(cross.arguments);
+        free(cross.offsets);
+        free(cross.locations);
+        free(cross.calls);
+        free(cross.data);
+        free(cross.data_mask);
+        free(cross.data_begin);
+        free(cross.results);
+        free(cross.result_mask);
+        free(cross.result_begin);
+        free(code);
+        arena_release(&arena);
+        abi_test_world_close(&world);
+    }
+    return result;
+}
+
+static bool abi_test_cross_check(uint64_t seed, uint32_t count, const char* clang, const char* gcc, bool keep)
+{
+    AbiTestTally tally = { 0 };
+    char directory[BUSTER_ABI_TEST_PATH_BYTES];
+    const char* temporary = getenv("TMPDIR");
+    snprintf(directory, sizeof(directory), "%s/buster-calling-convention-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    if (abi_test_expect(&tally, (x86_encoder_initialized || x86_encoder_initialize()) && mkdtemp(directory) != 0, "cross-check", "can't start"))
+    {
+        for (uint32_t compiler = 0; compiler < 2; compiler += 1)
+        {
+            for (uint32_t width = 16; width <= 64; width *= 2)
+            {
+                abi_test_cross(&tally, seed + width, count, compiler == 0 ? clang : gcc, compiler == 1, width, directory, keep);
+            }
+        }
+        if (keep || tally.failures != 0)
+        {
+            printf("the files are in %s\n", directory);
+        }
+        else
+        {
+            rmdir(directory);
+        }
+    }
+    abi_test_report("cross-check", tally);
+    return tally.failures == 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The command
 
 int run_calling_convention_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
     uint64_t count = BUSTER_ABI_TEST_DEFAULT_COUNT;
+    uint64_t signatures = BUSTER_ABI_TEST_DEFAULT_SIGNATURES;
+    const char* clang = "clang";
+    const char* gcc = "gcc";
+    bool cross_check = false;
+    bool keep = false;
     bool valid = true;
     for (int i = 0; i < argc; i += 1)
     {
@@ -1793,6 +3099,29 @@ int run_calling_convention_tests(int argc, char** argv)
             valid = valid && type_test_parse_u64(argv[i + 1], &count) && count >= 16 && count <= (1u << 20);
             i += 1;
         }
+        else if (strcmp(argv[i], "--signatures") == 0 && i + 1 < argc)
+        {
+            valid = valid && type_test_parse_u64(argv[i + 1], &signatures) && signatures >= 1 && signatures <= (1u << 16);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--clang") == 0 && i + 1 < argc)
+        {
+            clang = argv[i + 1];
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--gcc") == 0 && i + 1 < argc)
+        {
+            gcc = argv[i + 1];
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--cross-check") == 0)
+        {
+            cross_check = true;
+        }
+        else if (strcmp(argv[i], "--keep") == 0)
+        {
+            keep = true;
+        }
         else
         {
             valid = false;
@@ -1801,7 +3130,7 @@ int run_calling_convention_tests(int argc, char** argv)
     int result = 1;
     if (!valid)
     {
-        fprintf(stderr, "usage: test-calling-convention [--seed N] [--count N]\n");
+        fprintf(stderr, "usage: test-calling-convention [--seed N] [--count N] [--cross-check] [--signatures N] [--clang PATH] [--gcc PATH] [--keep]\n");
     }
     else
     {
@@ -1809,6 +3138,7 @@ int run_calling_convention_tests(int argc, char** argv)
         passed = abi_test_fixtures() && passed;
         passed = abi_test_worlds(seed, (uint32_t)count) && passed;
         passed = abi_test_assignment(seed, (uint32_t)count) && passed;
+        passed = (!cross_check || abi_test_cross_check(seed, (uint32_t)signatures, clang, gcc, keep)) && passed;
         result = passed ? 0 : 1;
     }
     return result;
