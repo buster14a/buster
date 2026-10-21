@@ -2055,7 +2055,9 @@ from random roles and with every block in the twin's loop), K1's second part,
 K4 (with the stack's top in registers and with windows of 1, 3 and 8 lanes),
 K5, and K6 (flags and classes, also with every second and every third block
 left to the twin); and the twins together with the fallback, whose tree must be
-the scalar parser's. On:
+the scalar parser's. Those checks put every array in an arena followed by 4 GB
+and its own size of address space that may not be touched, so that a load past
+an array, or through a 32-bit index that wrapped below 0, faults. On:
 
 - snippets: 94 of valid and invalid code, each with the first error clang gives
   (or none), which the parser must give at the same line and column with the
