@@ -888,8 +888,9 @@ static uint64_t executable_test_fde_at(const ExecutableTestFde* fdes, uint64_t c
 //   - Its table sorted by initial location, each entry an FDE's address and that FDE's initial location, each FDE
 //     once.
 //   - A lookup of each FDE's first and last byte, by libgcc's binary search, finds it; and one of each function of the
-//     program's (each TEXT atom of its units that have .eh_frame atoms) finds an FDE that starts there, whose range is
-//     the size of the symbol that the atom starts with.
+//     program's (each TEXT atom with bytes of its units that have .eh_frame atoms) finds an FDE that starts there, whose
+//     range is the size of the function that the atom starts with (not its section's symbol, which an imported object's
+//     atom starts with too).
 //   - The result's count, and whether the initial locations go up in .eh_frame's order, as fdes_in_order says.
 static const char* executable_test_unwind(const Link* link, String8 file, uint64_t base, uint32_t units, const ExecutableResult* result)
 {
@@ -1002,7 +1003,7 @@ static const char* executable_test_unwind(const Link* link, String8 file, uint64
                 found = found && entry != UINT64_MAX && (int64_t)header->sh_addr + fde == (int64_t)fdes[f].address;
             }
         }
-        // Each atom's first symbol's size, from the symbols that start one, and the program's units that have
+        // Each atom's first function's size, from the functions that start one, and the program's units that have
         // .eh_frame atoms, a byte each.
         uint64_t* sizes = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, link->atoms.count);
         for (AtomId atom = 0; sizes != 0 && atom < link->atoms.count; atom += 1)
@@ -1012,7 +1013,8 @@ static const char* executable_test_unwind(const Link* link, String8 file, uint64
         for (SymbolId symbol = link->symbols.count - 1; sizes != 0 && symbol >= 1; symbol -= 1)
         {
             const AtomId atom = link->symbols.atom[symbol];
-            if (atom != 0 && link->symbols.value[symbol] == 0)
+            const bool function = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
+            if (atom != 0 && function && link->symbols.value[symbol] == 0)
             {
                 sizes[atom] = link->symbols.size[symbol];
             }
@@ -1040,7 +1042,7 @@ static const char* executable_test_unwind(const Link* link, String8 file, uint64
         for (AtomId atom = 1; functions && atom < link->atoms.count; atom += 1)
         {
             const uint32_t unit = link->atoms.unit[atom];
-            if (link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT && unit < unit_count && framed[unit] != 0)
+            if (link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT && link->atoms.size[atom] != 0 && unit < unit_count && framed[unit] != 0)
             {
                 const int64_t pc = (int64_t)(base + link->atoms.address[atom]);
                 const uint64_t entry = executable_test_lookup(table, count, header->sh_addr, pc);

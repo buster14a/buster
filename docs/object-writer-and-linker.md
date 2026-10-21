@@ -1801,6 +1801,149 @@ for its 299,069 RELATIVE pointers and GOT slots, which `.rela.dyn` would take
   against 2.7 to 2.8, the dynamic sections having made the section table
   twice as long.
 
+#### The static executable with libc
+
+Step 6's third part: `executable_write` writes a static executable that links
+the C runtime when `ExecutableOptions.runtime` gives it what one without
+lacks (`ExecutableRuntime`, which `dynamic_static_inputs` in `dynamic.c`
+fills): `crt1.o`'s ABI note, and the link's `__tls_get_addr`, which nothing
+in a static link defines. The link is the program's bound against the static
+runtime ("Static links, as built"), so `crt1.o`'s `_start` is the entry and
+`libc.a`'s startup does what a loader would: it applies the IRELATIVE
+relocations, sets up TLS from `PT_TLS` and runs the init and fini arrays.
+`test-static` runs the generated programs, and ten compiled ones (hello,
+stdio, threads, `setjmp` and signals, a weak `puts`, prioritized
+constructors, decimal floating point from a thread, GCC 14's heap
+trampolines, and assembly of every TLS sequence and of local and global
+IFUNCs) as `cc -static`'s link of the same object runs, and with
+`--cross-check` as lld's.
+
+- **The file** is step 4's at 0x400000 (`ET_EXEC`), with `.note.ABI-tag` in
+  the R segment (one `PT_NOTE` with the build ID), `.init` and `.fini`
+  after `.text` from the crt objects' fragments in link order, as for a
+  PIE, and `.rela.iplt` in R and `.iplt` in RX for the IFUNCs. No
+  `PT_INTERP` or `PT_DYNAMIC`.
+- **IFUNCs** (glibc's string and memory functions): an IFUNC that a fixup
+  reaches other than through the GOT gets a stub in `.iplt`, `jmp [rip +
+  slot]` and a two-byte nop, which stands for its address everywhere, as
+  lld's canonical PLT entry does, so that `&f` is the same however it is
+  taken: its GOT slot, if it has one, holds the stub's address. Each stub's
+  slot comes after the GOT kinds' and an IRELATIVE relocation in
+  `.rela.iplt` fills it at startup from the IFUNC's resolver, its addend; an
+  IFUNC reached only through the GOT gets an IRELATIVE relocation of its GOT
+  slot instead. `__rela_iplt_start` and `__rela_iplt_end` are the section's
+  bounds. The generated programs have 18 stubs and 22 IRELATIVE
+  relocations, and each compiled one as many IRELATIVE relocations as lld's
+  link of it: one per IFUNC it reaches.
+- **TLS:** `libgcc.a`'s PIC members (decimal floating point, split stacks)
+  reach their thread-locals by general-dynamic accesses and GCC 14's heap
+  trampolines by local-dynamic ones, which call `__tls_get_addr`. As GNU ld
+  and lld do in an executable, the writer relaxes each to local-exec as it
+  patches: the general-dynamic sequence (`data16 lea x@tlsgd(%rip), %rdi`,
+  then a call through the PLT or the GOT, 16 bytes) becomes `mov %fs:0, %rax;
+  lea x@tpoff(%rax), %rax`, and the local-dynamic one `mov %fs:0, %rax` with
+  0x66 prefixes, so that its `DTPOFF32` fields, which then add to the thread
+  pointer, hold offsets from it. The call's fixup patches nothing, and
+  `__tls_get_addr` gets no slot. A sequence that isn't one the linkers take,
+  or a call of `__tls_get_addr` outside one, is refused (the count compares
+  the accesses with the calls). Binutils 2.42 writes the general-dynamic
+  access's prefixed call through the GOT as `GOTPCREL`, so the relaxation
+  takes it as it takes `CALL_GOT`. A chunk boundary never splits a sequence,
+  which starts before its fixup's field.
+- **Prioritized arrays** (`.init_array.N` and `.fini_array.N`, from the
+  priorities table): their atoms go first in their sections, by priority and
+  in id order for equal ones, as GNU ld and lld put them, then the others in
+  id order. The count leaves them out of the buckets, and lane 0 places them
+  after the other lanes' atoms by a stable radix sort.
+- **Names:** besides the arrays' bounds and `_GLOBAL_OFFSET_TABLE_`, the
+  linker defines the names `libc.a`'s startup looks for: `__ehdr_start` and
+  `__executable_start` (the ELF header), `__preinit_array_start` and
+  `__preinit_array_end` (at `.init_array`'s start: there is no
+  `.preinit_array`), the IRELATIVE
+  relocations' bounds, `_etext`, `etext` and `__etext` (the RX segment's
+  end), `_edata` and `edata` (the end of the sections with bytes in the
+  file, lld's), `__bss_start`, and `_end` and `end` (the image's end).
+- **Absolute symbols** (glibc's `_nl_current_LC_CTYPE_used` and the like) are
+  their values, as image offsets in the references column, which can't hold
+  one farther than int32 from the base: such a symbol is refused.
+
+The passes it adds, each data-parallel with an exact twin that
+`ExecutableOptions.exact` selects, which the tests compare byte for byte:
+
+| Pass (phase) | Vector path | Exact twin |
+| --- | --- | --- |
+| IFUNCs (count) | 64 symbols' types compared at a time, a word of a bitset of the IFUNCs, and a filter of them in four registers, two hashes | each symbol's type |
+| Stubs (count) | the targets of the fixups that don't read a GOT slot, 16 at a time, against the filter: a target is taken only if both its bits are set, and a hit is looked up in the bitset | every target's type |
+| TLS accesses (count) | the accesses by compares of 64 kinds, and the calls of `__tls_get_addr` by compares of 16 targets | the same compares, which are the check itself |
+| IRELATIVE relocations (dynamic) | each lane's range of the GOT's words, the IFUNCs' slots from the bitsets, at their places by the lanes' counts | each slot's type |
+
+With one hash, as a PIE's filter has, the IFUNC filter took a 46th of the
+largest program's 1.81 million targets for IFUNCs on the 9700X (39,664, in a
+link of 37 IFUNCs that 258 of them reach), each one's exact check a few
+nanoseconds of the count; with a second hash in two registers of its own it
+takes 1,613, and the count phase went from 1,588 to 1,309 µs on one lane and
+from 738 to 721 on eight. Restricting the test to the IFUNCs' range of symbol
+ids did nothing: binding gives one symbol per global name, so the program's
+own `strlen`, low in id order, is the IFUNC a member defines.
+
+Two parts stay scalar, measured on the 9700X with a probe of the compiled
+programs (one lane, medians of 41 runs):
+
+- **The relaxation** is a compare and a copy per access, in the patch's path
+  for the kinds other than `CALL` and `PC32`, which takes each fixup by its
+  kind anyway. The accesses are few: none in the generated programs or in
+  hello; the decimal program, which reaches the most, has 47, in five atoms,
+  whose 340 fixups the patch takes in 0.89 µs of its 125 µs write.
+- **The arrays' sort** is lane 0's, before the chunks: a stable radix sort of
+  the prioritized entries, three passes of eight bits. The static runtime's
+  2,622 members have two, and a program a few: the priorities program's six
+  take 0.24 µs of its 99.5 µs write.
+
+`benchmark-executable` writes the generated programs bound against the
+static runtime as static executables, with the static ones without libc and
+the PIEs of "The dynamic PIE" in the same session. Medians in µs on the
+9700X, the output on tmpfs, in place / as a new file, against the floor (one
+`pwrite` of the same bytes, opened and closed):
+
+| Program (file) | 1 lane | 2 lanes | 4 lanes | 8 lanes | Floor |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| static with libc, 1 worker (730 KB) | 106 / 129 | 64 / 104 | **52 / 107** | 52 / 116 | 18 / 44 |
+| static with libc, 64 workers (746 KB) | 100 / 130 | 65 / 102 | **55 / 114** | 55 / 117 | 19 / 45 |
+| static with libc, 2,000 workers (1.24 MB) | 173 / 215 | 117 / 180 | 81 / 181 | **76 / 173** | 31 / 75 |
+| static with libc, 180,000 workers (46.3 MB) | 9,980 / 11,690 | 6,600 / 7,710 | **6,160 / 7,850** | 6,300 / 8,140 | 3,240 / 5,640 |
+| static, 180,000 workers (45.6 MB) | 8,880 / 10,620 | 5,820 / 7,290 | **5,250 / 7,280** | 5,270 / 7,720 | 3,380 / 5,560 |
+| PIE, 180,000 workers (45.7 MB) | 9,220 / 10,960 | 6,020 / 7,040 | **5,400 / 7,630** | 5,670 / 8,080 | 3,160 / 5,540 |
+
+The programs join 442 of the static runtime's members: 2,323 atoms and
+12,062 fixups for one worker, 730 KB of the file. The phases in place, µs:
+
+| Program | Lanes | count | layout | symbols | dynamic | open | chunks | finish |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 worker | 1 | 15.7 | 6.7 | 3.7 | 4.3 | 4.8 | 67.5 | 0.5 |
+| 1 worker | 8 | 4.4 | 2.2 | 1.0 | 0.9 | 4.7 | 38.8 | 0.5 |
+| 180,000 workers | 1 | 1,309 | 307 | 331 | 163 | 622 | 7,234 | 2.6 |
+| 180,000 workers | 8 | 721 | 185 | 100 | 52 | 660 | 4,618 | 3.0 |
+
+- **libc's 730 KB are most of a small program's cost:** 106 µs on one lane in
+  place, the chunks 68 of it, where a PIE of one worker, with libc outside
+  the image, takes 4.7. Lanes pay from here: four write it in place in
+  52 µs. As a new file it takes 104 to 129 µs whatever the lanes, where the
+  floor's new file takes 44 µs against 18 in place.
+- **The unwind table is out of order, and lane 0 sorts it.** The static
+  runtime's members have their functions' hot parts in `.text` and the cold
+  ones in `.text.unlikely`, and GCC writes each function's two FDEs one after
+  the other, so a member's table entries interleave its two atoms. The sorted
+  check fails, and the radix sort (3.4 ns per entry) is most of the open
+  phase: 4 µs of one worker's write, 600 µs of 180,000 workers', on one lane
+  whatever the lane count. A partition of the entries by `.text`'s buckets,
+  the other cause of disorder, was tried before the sort: it leaves the
+  hot and cold parts interleaved within a bucket, so the radix sort still
+  ran, after it (open: 6.7 µs and 805 µs). Placing each entry by its
+  function's atom, a counting sort that the count and table passes could do
+  by lanes, would sort them without the radix sort, and is left for later.
+- **The largest program costs 8% more than its PIE** on one lane: the sort,
+  and the chunks' 700 KB more of libc.
+
 #### The unwind tables
 
 Step 5 compares the direct path with linkers on outputs of the same features,
@@ -1860,9 +2003,10 @@ Three passes, each with an exact twin:
   entries are sorted, 16 at a time (the initial locations are the even words
   of two vectors, a `vpermt2d` away, compared with themselves shifted by one,
   the last group's carried in a register). They are when the functions'
-  addresses go in their FDEs' order, as in a link of a compiler's objects.
-  Only if they aren't does it sort them, by an LSD radix sort, stable, 8 bits
-  a pass; the exact twin always sorts.
+  addresses go in their FDEs' order, as in a link of a compiler's objects
+  without cold parts (a static executable's libc has them: "The static
+  executable with libc"). Only if they aren't does it sort them, by an LSD
+  radix sort, stable, 8 bits a pass; the exact twin always sorts.
 
 On the 9700X (`benchmark-executable --only links`), each program in place,
 medians in µs, main's and then this one's (the median of three rounds,
@@ -2842,6 +2986,9 @@ Where the decisions stand:
 | Probing hash tables | memory latency | scalar loads with software prefetch: gathers measured no faster than scalar loads in the patch kernel |
 | Matching a program's names against the runtime's (binding) | the index's cache lines, for lookups that mostly miss | a blocked Bloom filter in L1 tested eight names at a time by two gathers, the index only behind it (done: 0.85 against 6.8 ns per global symbol; "Step 5's phases, data-parallel") |
 | A static link's closure over the archives' members (binding) | each member's references | rounds over a bitset of the members, references 16 at a time compressed onto a list that is marked after the round: marked per batch, each waited for its masked store (done: 1.43 against 2.44 µs, 3.24 against 5.51 ns per member; "Static links, as built") |
+| A static executable's IFUNCs and stubs (the writer's count) | the fixups' targets, against tens of IFUNCs | a filter by two hashes in four registers, 16 targets at a time: one hash took a 46th of them for IFUNCs (done: count 1,309 against 1,588 µs for 2.35 million fixups; "The static executable with libc") |
+| Relaxing general- and local-dynamic TLS accesses | a compare and a copy per access | scalar, in the patch's path for the other kinds: the most a test program has is 47 accesses, whose five atoms' patching takes 0.89 µs of a 125 µs write |
+| Ordering prioritized init and fini arrays | a few entries | scalar on lane 0, a stable radix sort: six entries take 0.24 µs of a 99.5 µs write |
 
 So on the direct path, most of the output is produced by a vector kernel that
 already exists (the encoder), and what is left for the linker is load/store
@@ -2925,7 +3072,13 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
   one that may be written but not read), a directory, and what a failed link
   leaves.
   It checks the refusals (each reported alike with any lane count) and a
-  lane short of scratch memory at every amount, from none up.
+  lane short of scratch memory at every amount, from none up. `test-static`
+  writes programs bound against the static runtime, generated and compiled
+  ones, which must run as `cc -static`'s links of the same objects do, and
+  checks their IFUNCs' stubs and IRELATIVE relocations, every relaxed TLS
+  access, the prioritized arrays' order and the linker's names; with
+  `--cross-check`, they must run as lld's links do too, with as many
+  IRELATIVE relocations, the same TLS alignment and the same arrays' sizes.
 - **Lane counts:** each phase with 1, 2, 3 and 8 lanes, outputs compared byte
   for byte. `test-executable` writes every program so, each time from zeroed
   fields over the last file scribbled over, so that a lane that skipped a
@@ -3043,6 +3196,14 @@ and with this document updated with what was measured:
    the members in rounds, their joins in archive order with COMDAT groups
    discarded, and every name bound without a shared library: "Static links,
    as built").
+   The third part is done: the static executable with libc (`executable.c`'s
+   mode with `ExecutableOptions.runtime`, `dynamic_static_inputs`,
+   `test-static` and `benchmark-executable`'s static rows: IFUNCs through
+   `.iplt` and IRELATIVE relocations, the general- and local-dynamic TLS
+   accesses relaxed, and the prioritized arrays: "The static executable with
+   libc"). The `__start_` and `__stop_` symbols wait for foreign inputs (step
+   7): neither system's static runtime refers to one. Next, the snapshot's
+   static part and `benchmark-link`'s `-static` rows.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
    and the exchange. Done when the differential tests against lld and mold
    pass on a corpus.

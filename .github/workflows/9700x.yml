@@ -159,6 +159,13 @@ jobs:
         # symbols and relocations.
         run: ./build/compiler test-dynamic --cross-check
 
+      - name: Test the static executables with libc
+        # Each program bound against the system's static runtime and written as a static executable by 1, 2, 3 and 8
+        # lanes and by the writer's exact twins must be the same file, run as cc -static's link of the same object does,
+        # and with --cross-check as lld's does, with as many IRELATIVE relocations and the same TLS segment's alignment
+        # and init and fini arrays' sizes.
+        run: ./build/compiler test-static --cross-check
+
       - name: Benchmark the direct path's executables
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
