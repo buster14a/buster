@@ -101,7 +101,6 @@ struct AsmOptions
 {
     bool vectorized;
     bool intel;
-    uint8_t isa;
 };
 
 typedef struct AsmResult AsmResult;
@@ -1288,7 +1287,6 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         AsmInstruction* instruction = &parser->instructions[parser->instruction_count++];
         *instruction = (AsmInstruction){.location = location};
         instruction->request.mnemonic = asm_token_text(parser, parser->at++);
-        instruction->request.isa = parser->options.isa;
         String8* name = &instruction->request.mnemonic;
         uint32_t width = 0;
         // A complete alias keeps its last letter: jnb, jnl and sal end in suffix letters.
@@ -1878,7 +1876,6 @@ static bool asm_parse_vector_batch(AsmParser* parser)
         AsmInstruction* instruction = &parser->instructions[parser->instruction_count++];
         *instruction = (AsmInstruction){.location = location};
         instruction->request.mnemonic = mnemonic;
-        instruction->request.isa = parser->options.isa;
         instruction->request.count = operand_begin[row + 1] - operand_begin[row];
         for (uint32_t word = operand_begin[row]; word < operand_begin[row + 1]; word += 1)
         {
@@ -2287,9 +2284,9 @@ static void asm_layout(AsmParser* parser)
                 instruction->record.displacement = (int32_t)distance;
             }
         }
-        if (x86_validate(&instruction->record, 1) != 1)
+        if (x86_target_validate(parser->index->allowed, &instruction->record, 1) != 1)
         {
-            asm_fail(parser, instruction->location, "resolved instruction is invalid");
+            asm_fail(parser, instruction->location, "resolved instruction is invalid for the target");
         }
     }
 }

@@ -35,17 +35,22 @@ the source. The `prefix`/`noprefix` arguments control register spelling.
 `--scalar` selects the reference path, and `--timing` prints initialization,
 read, frontend phase, object/write and total times plus arena usage.
 
-Output feature admission is separate from the host ISA:
+Output feature admission uses the shared [target policy](x86-target.md), separate
+from the host ISA. `-march=` accepts `x86-64` (the default), `x86-64-v2`,
+`x86-64-v3`, `x86-64-v4`, `znver5` and `native`. `-mtune=` does not enable
+instructions. The last target option wins. The earlier `--isa=x86-64`,
+`--isa=avx2` and `--isa=avx512f` spellings remain aliases for baseline, v3 and
+v4 respectively, within the same documented syntax subset.
 
-- `--isa=x86-64` (default): the integer and SSE2 subset below;
-- `--isa=avx2`: also its VEX families;
-- `--isa=avx512f`: also its 512-bit AVX-512F families.
-
-These are explicit subset levels, not a replacement feature database for
-[#180](https://github.com/buster14a/buster/issues/180).
+`x86_match_initialize(index, target)` intersects understood syntax with the
+target's allowed forms once, keeping unsupported instructions out of both
+matching paths. An index belongs to that target and can be reused for its
+inputs. Final resolved records also pass the shared target/operand validator
+before encoding. The encoder's hot loop has no new checks.
 
 An uppercase `.S` extension enables the shared preprocessor's explicit assembly
-mode before assembly. `-I`, `-D`, `-U`, `-include` and the preprocessor's include
+mode before assembly, using the same target for feature macros and form
+eligibility. `-I`, `-D`, `-U`, `-include` and the preprocessor's include
 directory options are available. It defines `__ASSEMBLER__`, expands `$MACRO`
 as an immediate, and accepts unknown `#` lines as assembly comments. As with
 GCC and Clang, a paste that doesn't form one token leaves both tokens without

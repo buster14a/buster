@@ -76,6 +76,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <immintrin.h>
+#include "buster/compiler/x86_target.c"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // API
@@ -156,6 +157,9 @@ typedef struct PPOptions PPOptions;
 struct PPOptions
 {
     CLanguage language;
+    X86Target target;
+    // Retained independently for the future scheduler; it cannot enable an ISA feature.
+    X86Architecture tune;
     bool freestanding;
     bool optimize;
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
@@ -4476,6 +4480,10 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
     else if (pp_feature_name(pp, builtin, tokens, first, last, text, &length))
     {
         result = pp_feature(builtin, text, length, pp->options.language.standard);
+        if (builtin == PP_BUILTIN_HAS_BUILTIN && result == 0)
+        {
+            result = x86_target_has_builtin(&pp->options.target, text, length);
+        }
     }
     else
     {
@@ -6945,8 +6953,6 @@ static const char pp_predefines_base[] =
     "#define __clang_wide_literal_encoding__ \"UTF-32\"\n"
     "#define __code_model_small__ 1\n"
     "#define __gnu_linux__ 1\n"
-    "#define __k8 1\n"
-    "#define __k8__ 1\n"
     "#define __linux 1\n"
     "#define __linux__ 1\n"
     "#define __llvm__ 1\n"
@@ -6954,7 +6960,6 @@ static const char pp_predefines_base[] =
     "#define __pie__ 2\n"
     "#define __seg_fs __attribute__((address_space(257)))\n"
     "#define __seg_gs __attribute__((address_space(256)))\n"
-    "#define __tune_k8__ 1\n"
     "#define __unix 1\n"
     "#define __unix__ 1\n"
     "#define __x86_64 1\n"
@@ -6998,13 +7003,16 @@ static const char pp_predefines_c23[] =
     "#define __UINT_LEAST8_FMTb__ \"hhb\"\n"
     ;
 
-// The predefines buffer for the options, into `buffer` (room for sizeof(pp_predefines_base) + 512 bytes). Returns its
-// length.
+// Includes room for target feature macros, language options and a terminating byte.
+#define BUSTER_PP_PREDEFINES_BYTES (sizeof(pp_predefines_base) + sizeof(pp_predefines_c23) + BUSTER_X86_TARGET_PREDEFINES_BYTES + 512)
+
+// The predefines buffer for the options, into `buffer` (BUSTER_PP_PREDEFINES_BYTES bytes). Returns its length.
 static uint32_t pp_predefines(const PPOptions* options, char* buffer)
 {
     uint32_t length = 0;
     memcpy(buffer, pp_predefines_base, sizeof(pp_predefines_base) - 1);
     length += sizeof(pp_predefines_base) - 1;
+    length += x86_target_predefines(&options->target, buffer + length);
     const CLanguage language = options->language;
     const char* version = language.standard >= 2023 ? "202311L" : language.standard >= 2017 ? "201710L" : language.standard >= 2011 ? "201112L" : language.standard >= 1999 ? "199901L" : 0;
     if (version != 0)
@@ -7419,7 +7427,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     }
     else
     {
-        char* text = arena_push(&pp->arena, sizeof(pp_predefines_base) + sizeof(pp_predefines_c23) + 512, 1);
+        char* text = arena_push(&pp->arena, BUSTER_PP_PREDEFINES_BYTES, 1);
         const uint32_t file = text != 0 ? pp_virtual_file(pp, "<built-in>", text, pp_predefines(&pp->options, text), BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
         result = file != BUSTER_PP_NONE;
         if (result)
@@ -8392,10 +8400,28 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             trigraphs = strcmp(argument, "-fno-trigraphs") != 0;
         }
-        else if (strncmp(argument, "-m", 2) == 0 || strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0 || strcmp(argument, "-g") == 0)
+        else if (strncmp(argument, "-march=", 7) == 0 || strncmp(argument, "-mtune=", 7) == 0)
         {
-            // Target, code generation and warning options: the target's macros (-march's features among them) only come
-            // through --predefines for now (test-preprocessor gives clang's for the same options).
+            X86Target target;
+            const bool tune = argument[2] == 't';
+            const bool generic = tune && strcmp(argument + 7, "generic") == 0;
+            result = generic || x86_target_parse(argument + 7, strlen(argument + 7), &target);
+            if (!result)
+            {
+                fprintf(stderr, "unsupported target option: %s (expected x86-64, x86-64-v2, x86-64-v3, x86-64-v4, znver5 or native)\n", argument);
+            }
+            else if (tune)
+            {
+                options->tune = generic ? X86_ARCH_BASELINE : target.architecture;
+            }
+            else
+            {
+                options->target = target;
+            }
+        }
+        else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0 || strcmp(argument, "-g") == 0)
+        {
+            // Code generation and warning options retain their existing preprocessing behavior.
         }
         else if (strncmp(argument, "-std=", 5) == 0)
         {
@@ -8497,7 +8523,7 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
-                        "[-include file] [-std=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
+                        "[-include file] [-std=...] [-march=...] [-mtune=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
     }
     else
     {
