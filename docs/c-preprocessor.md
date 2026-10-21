@@ -581,6 +581,156 @@ instructions per input token. The common line start (the same file, no new
 line note, and a jump of up to 8 lines) is decided inline. With that, `-E`
 costs fewer instructions than before markers gave presumed positions.
 
+### Expansion history and diagnostics
+
+`c_preprocessor_history.c` implements #108. The four output columns stay the
+same: `kinds`, `flags`, `values`, and spelling `locations`. Origin handles live
+only in temporary argument, capture and expansion buffers. Completed output
+keeps sorted, maximal eight-byte `(token index, origin)` runs. Ordinary file
+copies write no history; the preceding expansion records its closing boundary.
+Buffer copies build the runs outside their token-copy loop, comparing adjacent
+origins in groups of eight and compressing packed run records directly into the
+table (register compression, then a masked store). There is an exact
+scalar builder. `pp_history_at` finds one token's origin; `pp_history_lookup`
+runs 16 binary searches together, with scalar record loads to avoid Zen 5's
+expensive gathers, and has a scalar twin.
+
+The append-only tables belong to the translation unit:
+
+- `PPExpansion` (28 bytes) snapshots the macro name and definition, the name
+  and closing token of this invocation, and both endpoints' parent origins.
+  Redefining a macro cannot change an earlier expansion's definition.
+- `PPSubstitution` (12 bytes) retains the expansion, parameter occurrence and
+  source origin for each argument run. Reusing an expanded argument retains
+  its original expansion and creates distinct substitution occurrences.
+- `PPGenerated` (24 bytes) distinguishes pastes and stringifications.
+  A paste retains both operand locations and origins; a stringification keeps
+  its raw argument's token locations and origins in `PPSource` records (eight
+  bytes each). These survive reuse of the temporary argument buffers. Builtins
+  retain their identity through the expansion record, even when `0` and `1`
+  reuse the same scratch spelling; they need no duplicate generated record.
+
+Tagged handles distinguish these records from plain file tokens. Every table
+has a checked limit; exhausting it is a fatal diagnostic. The final stream has
+no per-token origin allocation. Temporary origin columns are released with
+their token buffers; all retained tables are released with `pp_release`.
+The eight tables/columns start with four-kilobyte slices in one 32 KiB arena
+of base pages. A slice that fills moves once to its own large reservation;
+origins are indices, so the move preserves links. The initial arena lives until
+release, including the old slices. Small translation units avoid reserving and
+advising eight separate mappings. Argument substitution writes its final
+origin wrappers directly, without first copying origins it would overwrite.
+
+`pp_diagnose_output` is the later parser's entry point: it takes an output token
+index. It uses the same renderer as preprocessor errors. The renderer walks
+history iteratively, prints the include stack, the presumed primary location,
+and expansion notes from outermost to innermost. Plain argument forwarding
+points through to the argument; a macro name expanded after substitution also
+shows the parameter it passed through, matching Clang. Generated spellings get
+an additional scratch-space note. Per-file physical line tables are built only
+when a diagnostic needs them, with scalar/vector builders; `#line` remains
+scoped to each inclusion. Source bytes, definition locations and scratch
+spellings remain alive for the whole unit. Source excerpts and carets are not
+implemented.
+
+`test-preprocessor --clang` compares 28 original diagnostic fixtures with
+Clang, including preprocessor failures and calls to the later-token renderer.
+It checks object/function expansions, arguments, nested and cross-context
+invocations, pastes, stringification, builtins, redefinition, `#line`, CRLF,
+and include stacks. Only scratch-buffer line numbers are normalized, since
+they depend on each compiler's allocation order. Real and presumed locations,
+columns, note order and text are compared exactly. Every existing case and
+corpus comparison also compares the complete scalar/vector history tables.
+Separate checks cover guarded input tails, maximal runs across split copies,
+batched lookups, generated-input lifetimes, growth of all eight initial slices,
+and recording-on/off token equality.
+
+`benchmark-preprocessor --history-cost [options] file...` interleaves the same
+vectorized preprocessor with recording enabled and disabled, reversing order
+each pass. It checks an output digest including spelling locations outside the
+timed interval. It reports retained record bytes per unit (mean and maximum)
+and temporary-origin high-water bytes separately. These are used bytes, not
+RSS or virtual reservations; unused/retired space in the initial 32 KiB arena,
+allocator page rounding and existing source/token storage are not included.
+
+Measured on 2026-10-21 UTC on the approved Ryzen 7 9700X, Clang 23.1.1,
+`./build.sh` (`-O3 -march=native`), CPU 2, with each run holding the shared
+exclusive lock. The measured source is `ffedfd316e4ddc6918272fbf97fffe8d60ff5856`.
+The later lookup-loop pragmas only prevent Clang from turning diagnostic
+record loads into gathers; those loops are not called by the benchmark.
+
+Each row below is a separate process, with one warmup and 21 measured pairs.
+Elapsed time includes initialization, file reads and preprocessing; release
+and the four-column digest check are outside the timed interval. Hardware
+cycles/instructions exclude the kernel. Both variants use the vectorized
+preprocessor; the control is `PPOptions.no_history`, not the scalar compiler.
+
+| Corpus | Run | Recording | No recording | Recording cost |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite 3.53.2 amalgamation, frozen GNU17 headers | 1 | 13.306 ms | 12.297 ms | +8.21% |
+| Same | 2 | 13.459 ms | 12.417 ms | +8.39% |
+| Same | 3 | 13.303 ms | 12.317 ms | +8.01% |
+| Zig 0.14.1 libc corpus: 1,587 ordinary musl C99 units | 1 | 612.994 ms | 586.330 ms | +4.55% |
+| Same | 2 | 604.719 ms | 578.853 ms | +4.47% |
+| Same | 3 | 616.932 ms | 590.376 ms | +4.50% |
+
+The under-5% target is met on this musl partition, **not on SQLite**. SQLite's
+8.0–8.4% remains a performance limitation. Reporting the cost does not imply
+that the target was achieved on both corpora. Output digests agree in every
+recording/control pass. SQLite has 1,242,311 input and 706,237 output tokens;
+musl has 19,068,706 input and 6,000,225 output tokens across its 1,587 units.
+
+| Corpus | Retained record payload, total | Mean per TU | Maximum per TU | Temporary origins, maximum per TU |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite | 2,933,720 B | 2,933,720 B | 2,933,720 B | 2,004 B |
+| Musl | 40,805,452 B | 25,712.3 B | 113,452 B | 1,988 B |
+
+These are logical payload sizes, with the allocation exclusions above. The
+initial arena has 32 KiB capacity per active unit, shared by the eight slices;
+some live payload counted above occupies it, while unused and retired slices
+add allocation overhead. SQLite retains 55,530 expansions, 44,280 argument runs, 3,573
+paste/stringification records, and 88,382 output runs. Musl retains 1,078,679
+expansions, 311,310 argument runs, 9,807 paste/stringification records, and
+809,597 output runs in total. Builtin identity is already in the expansion
+record, saving a second record for each builtin result.
+
+The frozen corpus is `~/buster-fast-bench/preprocessor-corpora-astra-01a158dd`.
+Its `MANIFESTS.sha256` hashes to
+`391e729af6587355050881752558e790299cfe638c7dc7803bd028a8535ebcbd`;
+`sqlite/sqlite3.c` hashes to
+`0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`;
+`config/musl-ordinary.txt` hashes to
+`bf47f8562fd1df039a81464164df642c0efb7653e7cb91b0be964978929bb4dc`.
+The full 5,129-file Clang-accepted C/header subset was also attempted, but
+stopped at the existing `__is_target_arch` handling in
+`include/any-macos-any/TargetConditionals.h`; it produced no valid timing.
+The table therefore covers the explicit musl partition, excluding the four
+separately configured crt/loader sources, not every libc file.
+
+Reproduce one process per corpus (repeat three times, releasing the lock each
+time). The frozen predefines and include directories are part of the input:
+
+```sh
+corpus="$HOME/buster-fast-bench/preprocessor-corpora-astra-01a158dd"
+history_binary="$PWD/build/compiler"
+EXCLUSIVE_OWNER=history-sqlite ~/buster-fast-bench/exclusive.sh \
+    env SOURCE_DATE_EPOCH=1792454400 taskset -c 2 "$history_binary" benchmark-preprocessor --history-cost \
+    -nostdinc --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" \
+    -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" \
+    -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+
+mapfile -t history_inputs < "$corpus/config/musl-ordinary.txt"
+cd "$corpus/libc/musl"
+EXCLUSIVE_OWNER=history-musl ~/buster-fast-bench/exclusive.sh \
+    env SOURCE_DATE_EPOCH=1792454400 taskset -c 2 "$history_binary" benchmark-preprocessor --history-cost \
+    -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+    --predefines "$corpus/provenance/musl-c99-predefines.txt" \
+    -I "$corpus/libc/musl/arch/x86_64" -I "$corpus/libc/musl/arch/generic" \
+    -I "$corpus/musl-generated/obj/src/internal" -I "$corpus/libc/musl/src/include" \
+    -I "$corpus/libc/musl/src/internal" -I "$corpus/musl-generated/obj/include" \
+    -I "$corpus/libc/musl/include" "${history_inputs[@]}"
+```
+
 ### Vectorized kernels and their scalar twins
 
 `PPOptions.scalar` selects the scalar twin of each vectorized kernel:
@@ -947,8 +1097,8 @@ cleared once and reused.
   to its column. Line markers differ in form but not in what they say: clang
   marks every file it enters, even one that gives no tokens, and we mark only
   where a token needs it.
-- Diagnostics give `file:line:column: error: message` (the presumed file and
-  line) and no more: no notes, no macro backtraces (#108), and no carets.
+- Diagnostics include presumed locations, include stacks and macro backtraces
+  (#108, above). Source excerpts and carets remain unimplemented.
 - C++ (`-x c++`), dependency output (`-M`) and `-dM` aren't supported.
 - Stringizing an identifier that pasting made from a UCN gives its UTF-8
   spelling, where clang keeps the UCN.
