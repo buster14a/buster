@@ -200,8 +200,10 @@ struct LinkBenchmarkSettings
     uint64_t runs;
     bool direct;
     bool linking;
-    // The runtime, opened once: the linkers' inputs come from its paths, and its records size the programs' room.
-    const Runtime* runtime;
+    // The kinds of link to measure, a dynamic PIE's and a static executable's (--kinds), and each one's runtime, opened
+    // once: the linkers' inputs come from its paths, and its records size the programs' room.
+    bool kinds[RUNTIME_KINDS];
+    const Runtime* runtimes[RUNTIME_KINDS];
     // The directory made under `directory`, and its files: the direct path's output, and what a program run prints, its
     // errors and the helper's counts (link_benchmark_rusage). With `keep`, they stay.
     char work[BUSTER_LINK_BENCHMARK_PATH_BYTES];
@@ -556,6 +558,8 @@ static const char* const link_benchmark_phase_names[EXECUTABLE_PHASES] = {
 typedef struct LinkBenchmarkDirect LinkBenchmarkDirect;
 struct LinkBenchmarkDirect
 {
+    // The kind of link: a dynamic PIE against libc.so.6, or a static executable against libc.a.
+    RuntimeKind kind;
     LinkProgram* program;
     // The program's symbols as they were before binding.
     const LinkBenchmarkMark* begun;
@@ -575,6 +579,7 @@ struct LinkBenchmarkDirect
     LinkBenchmarkBinding binding;
     uint64_t arena_length;
     ExecutableDynamic dynamic;
+    ExecutableRuntime static_inputs;
     ExecutableOptions options;
     // What lane 0 measured: each part's runs and executable_write's phases in its runs, and over the warm-ups the page
     // faults and how much the peak resident set grew.
@@ -596,10 +601,16 @@ struct LinkBenchmarkDirect
     bool succeeded;
 };
 
-// Lane 0's part before the program's atoms: the runs of runtime_open and bind_begin, each from the program's symbols as
-// they were before binding; then the runtime and binding the runs of bind_end start from, after the program's atoms
-// (its code generation), and the link checked once, by link_program_generate_end after a bind_end that those runs put
-// back. Returns whether all of it succeeded.
+// The kind's runtime from its snapshot in `cache`: runtime_open, or runtime_open_static.
+static SnapshotResult link_benchmark_open(Runtime* runtime, const char* cache, RuntimeKind kind)
+{
+    return kind == RUNTIME_KIND_STATIC ? runtime_open_static(runtime, cache) : runtime_open(runtime, cache);
+}
+
+// Lane 0's part before the program's atoms: the runs of runtime_open (or runtime_open_static) and bind_begin, each from
+// the program's symbols as they were before binding; then the runtime and binding the runs of bind_end start from, after
+// the program's atoms (its code generation), and the link checked once, by link_program_generate_end after a bind_end
+// that those runs put back. Returns whether all of it succeeded.
 static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
 {
     LinkProgram* program = direct->program;
@@ -617,7 +628,7 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
         Runtime runtime;
         Bind bind;
         const uint64_t start = executable_now();
-        const SnapshotResult opened = runtime_open(&runtime, direct->cache);
+        const SnapshotResult opened = link_benchmark_open(&runtime, direct->cache, direct->kind);
         const uint64_t opened_at = executable_now();
         const bool loaded = opened.status == SNAPSHOT_STATUS_LOADED;
         result = loaded && bind_begin(&bind, link, &runtime, BIND_PATH_VECTOR, &program->bytes, units, direct->arena);
@@ -637,7 +648,7 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
     link_benchmark_restore(direct->begun, link, &program->bytes);
     arena_pop_to(direct->arena, length);
     direct->opened = result;
-    const SnapshotStatus status = result ? runtime_open(&direct->runtime, direct->cache).status : SNAPSHOT_STATUS_MISSING;
+    const SnapshotStatus status = result ? link_benchmark_open(&direct->runtime, direct->cache, direct->kind).status : SNAPSHOT_STATUS_MISSING;
     result = result && status == SNAPSHOT_STATUS_LOADED;
     result = result && bind_begin(&direct->bind, link, &direct->runtime, BIND_PATH_VECTOR, &program->bytes, units, direct->arena);
     result = result && link_program_generate_atoms(program);
@@ -653,9 +664,10 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
     return result;
 }
 
-// The lanes' entry point: lane 0's part before the program's atoms, then the runs of bind_end and dynamic_inputs on
-// lane 0 and executable_write on every lane, each from the link and binding as they were after the atoms. The warm-up's
-// output decides how many runs follow it.
+// The lanes' entry point: lane 0's part before the program's atoms, then the runs of bind_end and dynamic_inputs (or
+// dynamic_static_inputs) on lane 0 and executable_write on every lane, each from the link and binding as they were after
+// the atoms, whose bytes bind_end copies again (a static executable's TLS relaxation rewrites them). The warm-up's output
+// decides how many runs follow it.
 static void link_benchmark_direct_main(void* argument)
 {
     LinkBenchmarkDirect* direct = argument;
@@ -677,7 +689,15 @@ static void link_benchmark_direct_main(void* argument)
             arena_pop_to(direct->arena, direct->arena_length);
             cost = run == 0 ? link_benchmark_cost_begin() : cost;
             start = executable_now();
-            bound = bind_end(&direct->bind, link) && dynamic_inputs(&direct->dynamic, &direct->runtime, &direct->bind, direct->arena);
+            bound = bind_end(&direct->bind, link);
+            if (bound && direct->kind == RUNTIME_KIND_STATIC)
+            {
+                dynamic_static_inputs(&direct->static_inputs, &direct->runtime, &direct->bind);
+            }
+            else
+            {
+                bound = bound && dynamic_inputs(&direct->dynamic, &direct->runtime, &direct->bind, direct->arena);
+            }
             direct->options.entry = bound ? dynamic_global(&direct->runtime, &direct->bind, "_start") : 0;
             bound_at = executable_now();
         }
@@ -758,15 +778,16 @@ static double link_benchmark_floor_median(const char* path, uint64_t size, uint3
     return read_whole ? link_benchmark_median(floors, runs) : 0.0;
 }
 
-// The direct path's link of the program: its parts' medians, its work and the floor, and its output run, which must
-// print the program's output. *total gets the link's time in microseconds, and `expected` the program's output.
-static bool link_benchmark_direct(const LinkBenchmarkSettings* settings, LinkBenchmarkProgram linked, uint8_t* expected, double* total)
+// The direct path's link of the program, as a dynamic PIE or as a static executable by `kind`: its parts' medians, its
+// work and the floor, and its output run, which must print the program's output. *total gets the link's time in
+// microseconds, and `expected` the program's output.
+static bool link_benchmark_direct(const LinkBenchmarkSettings* settings, RuntimeKind kind, LinkBenchmarkProgram linked, uint8_t* expected, double* total)
 {
     const char* path = settings->direct_path;
     const LinkProgramOptions options = link_benchmark_options(linked, settings->seed);
     uint64_t name_bytes = 0;
     uint64_t atom_bytes = 0;
-    const LinkCapacity extra = bind_capacity(settings->runtime, &name_bytes, &atom_bytes);
+    const LinkCapacity extra = bind_capacity(settings->runtimes[kind], &name_bytes, &atom_bytes);
     Arena arena = arena_reserve(BUSTER_LINK_BENCHMARK_ARENA_BYTES);
     Arena marks = arena_reserve(BUSTER_LINK_BENCHMARK_ARENA_BYTES);
     LinkBenchmarkDirect* direct = calloc(1, sizeof(LinkBenchmarkDirect));
@@ -781,6 +802,7 @@ static bool link_benchmark_direct(const LinkBenchmarkSettings* settings, LinkBen
         {
             direct->globals += symbols->name[symbol] != 0 && (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL ? 1 : 0;
         }
+        direct->kind = kind;
         direct->program = &program;
         direct->begun = &begun;
         direct->cache = settings->cache;
@@ -794,7 +816,8 @@ static bool link_benchmark_direct(const LinkBenchmarkSettings* settings, LinkBen
             .pointer = (char*)path,
             .length = strlen(path),
         };
-        direct->options.dynamic = &direct->dynamic;
+        direct->options.dynamic = kind == RUNTIME_KIND_STATIC ? 0 : &direct->dynamic;
+        direct->options.runtime = kind == RUNTIME_KIND_STATIC ? &direct->static_inputs : 0;
         const bool ran = lane_run(settings->lanes, link_benchmark_direct_main, direct, settings->cpus);
         result = ran && direct->succeeded && direct->same_files;
         if (!result)
@@ -957,12 +980,22 @@ static bool link_benchmark_object_counts(LinkBenchmarkObjects* objects, uint64_t
 // ---------------------------------------------------------------------------------------------------------------------
 // The linkers
 
-// The arguments of the objects' link by `linker` into `output`, the appendix's command with `one_thread` and `no_fork`
-// (each 0 for none) after the matched options; `search` holds the two -L options. `arguments` has room for
-// BUSTER_LINK_BENCHMARK_ARGUMENTS and the objects. Returns how many, without the null that ends them.
+// The arguments of the objects' link by `linker` into `output`, the appendix's command for a dynamic PIE, or for a
+// static executable with the static runtime `runtime`, with `one_thread` and `no_fork` (each 0 for none) after the
+// matched options; `search` holds the two -L options. `arguments` has room for BUSTER_LINK_BENCHMARK_ARGUMENTS and the
+// objects. Returns how many, without the null that ends them.
 static uint32_t link_benchmark_arguments(char** arguments, const char* linker, const char* one_thread, const char* no_fork, const Runtime* runtime, char* const* search,
                                          const char* const* objects, uint32_t object_count, const char* output)
 {
+    // The clang driver's group for -static, which links libc.a without libatomic.a: the programs need none of it.
+    static const char* const group[] = {
+        "--start-group",
+        "-lgcc",
+        "-lgcc_eh",
+        "-lc",
+        "--end-group",
+    };
+    const bool static_link = runtime->kind == RUNTIME_KIND_STATIC;
     static const char* const matched[] = {
         "--hash-style=gnu",
         "--build-id",
@@ -998,9 +1031,16 @@ static uint32_t link_benchmark_arguments(char** arguments, const char* linker, c
     {
         arguments[count++] = (char*)no_fork;
     }
-    arguments[count++] = "-pie";
-    arguments[count++] = "-dynamic-linker";
-    arguments[count++] = runtime->loader_path.pointer;
+    if (static_link)
+    {
+        arguments[count++] = "-static";
+    }
+    else
+    {
+        arguments[count++] = "-pie";
+        arguments[count++] = "-dynamic-linker";
+        arguments[count++] = runtime->loader_path.pointer;
+    }
     arguments[count++] = "-o";
     arguments[count++] = (char*)output;
     arguments[count++] = runtime->object_paths[RUNTIME_OBJECT_START].pointer;
@@ -1012,9 +1052,13 @@ static uint32_t link_benchmark_arguments(char** arguments, const char* linker, c
     {
         arguments[count++] = (char*)objects[i];
     }
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(libraries); i += 1)
+    for (uint32_t i = 0; !static_link && i < BUSTER_ARRAY_LENGTH(libraries); i += 1)
     {
         arguments[count++] = (char*)libraries[i];
+    }
+    for (uint32_t i = 0; static_link && i < BUSTER_ARRAY_LENGTH(group); i += 1)
+    {
+        arguments[count++] = (char*)group[i];
     }
     arguments[count++] = runtime->object_paths[RUNTIME_OBJECT_END].pointer;
     arguments[count++] = runtime->object_paths[RUNTIME_OBJECT_INIT_EPILOGUE].pointer;
@@ -1088,15 +1132,16 @@ static bool link_benchmark_count(const LinkBenchmarkSettings* settings, char** c
 // output, which must print the program's output. The calling thread's CPUs are the process's, or with `one_thread` the
 // first of --cpus, while it runs them. `arguments` has room for BUSTER_LINK_BENCHMARK_HELPER_ARGUMENTS before the
 // linker's.
-static bool link_benchmark_linker(const LinkBenchmarkSettings* settings, const LinkBenchmarkLinker* linker, bool one_thread, char** arguments, char* const* search,
-                                  const char* const* objects, uint32_t object_count, const char* output, const uint8_t* expected, LinkBenchmarkLinked* linked)
+static bool link_benchmark_linker(const LinkBenchmarkSettings* settings, const Runtime* runtime, const LinkBenchmarkLinker* linker, bool one_thread, char** arguments,
+                                  char* const* search, const char* const* objects, uint32_t object_count, const char* output, const uint8_t* expected,
+                                  LinkBenchmarkLinked* linked)
 {
     uint64_t pinned[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
     pinned[settings->cpus[0] / 64] = 1ull << (settings->cpus[0] % 64);
     bool result = link_benchmark_set_cpus(one_thread ? pinned : settings->allowed);
     const char* thread_option = one_thread ? linker->one_thread : 0;
     char** command = arguments + BUSTER_LINK_BENCHMARK_HELPER_ARGUMENTS;
-    link_benchmark_arguments(command, linker->name, thread_option, 0, settings->runtime, search, objects, object_count, output);
+    link_benchmark_arguments(command, linker->name, thread_option, 0, runtime, search, objects, object_count, output);
     int status = -1;
     link_benchmark_spawn(command, settings->output_path, settings->error_path, &status, 0);
     if (result && status != 0)
@@ -1119,7 +1164,7 @@ static bool link_benchmark_linker(const LinkBenchmarkSettings* settings, const L
         }
     }
     // The counts' run, through the helper.
-    link_benchmark_arguments(command, linker->name, thread_option, linker->no_fork, settings->runtime, search, objects, object_count, output);
+    link_benchmark_arguments(command, linker->name, thread_option, linker->no_fork, runtime, search, objects, object_count, output);
     if (result)
     {
         link_benchmark_sleep(pause);
@@ -1139,10 +1184,30 @@ static bool link_benchmark_linker(const LinkBenchmarkSettings* settings, const L
     return result;
 }
 
-// The program's objects written into the work directory's objects, and linked there by each linker of the settings,
-// with their figures against the direct path's `direct_total` microseconds (0 if it didn't run). With `known`, the
-// program's output must be `expected`, which otherwise it sets.
-static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, LinkBenchmarkProgram linked_program, uint8_t* expected, bool known, double direct_total)
+// Whether wild 0.10 links a program's static executable wrong: it starts the TLS segment at .tdata's alignment past a
+// multiple of the segment's when .tbss is more aligned than .tdata, and glibc's static startup, which takes the image
+// to start on the alignment, then faults (a C program with a 16-aligned zero thread-local beside an 8-aligned one shows
+// it; GNU ld, lld, mold and the direct path start the segment aligned). libc.a's .tdata is aligned to 8.
+static bool link_benchmark_wild_tls(const Link* link)
+{
+    uint32_t tdata = 3;
+    uint32_t tbss = 0;
+    for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+    {
+        const uint8_t class = link->atoms.class[atom];
+        const uint32_t log2 = link->atoms.alignment_log2[atom];
+        tdata = class == BUSTER_LINK_CLASS_TDATA && log2 > tdata ? log2 : tdata;
+        tbss = class == BUSTER_LINK_CLASS_TBSS && log2 > tbss ? log2 : tbss;
+    }
+    return tbss > tdata;
+}
+
+// The program's objects written into the work directory's objects, and linked there by each linker of the settings as
+// a dynamic PIE or a static executable by `kind`, with their figures against the direct path's `direct_total`
+// microseconds (0 if it didn't run). With `known`, the program's output must be `expected`, which otherwise it sets. A
+// static executable that wild links wrong (link_benchmark_wild_tls) isn't linked by it.
+static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, RuntimeKind kind, LinkBenchmarkProgram linked_program, uint8_t* expected, bool known,
+                                      double direct_total)
 {
     const char* directory = settings->work;
     const bool keep = settings->keep;
@@ -1213,15 +1278,16 @@ static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, Lin
             printf("  the objects: unit 0's error %d\n", (int)errors[0]);
         }
     }
+    const bool wild_wrong = result && kind == RUNTIME_KIND_STATIC && link_benchmark_wild_tls(&program.link);
     // The linkers get the memory the program had.
     link_program_release(&program);
-    // The -L options: GCC's directory and libc.so's.
-    const Runtime* runtime = settings->runtime;
+    // The -L options: GCC's directory and libc.so's, or for a static executable libc.a's.
+    const Runtime* runtime = settings->runtimes[kind];
     char* search[2] = {
         names,
         names + BUSTER_LINK_BENCHMARK_PATH_BYTES,
     };
-    const String8 script = runtime->libc_script;
+    const String8 script = kind == RUNTIME_KIND_STATIC ? runtime->archives[runtime->archive_count - 1].path : runtime->libc_script;
     uint64_t directory_length = script.length;
     while (directory_length > 0 && script.pointer[directory_length - 1] != '/')
     {
@@ -1239,10 +1305,15 @@ static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, Lin
         snprintf(output, sizeof(output), "%s/%s", directory, linker->name);
         // GNU ld links on one thread either way.
         const uint32_t ways = linker->one_thread != 0 ? 2 : 1;
-        for (uint32_t way = 0; result && (settings->linkers >> l & 1) != 0 && way < ways; way += 1)
+        const bool wrong = wild_wrong && strcmp(linker->name, "wild") == 0;
+        if (result && (settings->linkers >> l & 1) != 0 && wrong)
+        {
+            printf("  %-24s not run: its static executable of this program faults, its TLS segment off its alignment\n", "wild");
+        }
+        for (uint32_t way = 0; result && (settings->linkers >> l & 1) != 0 && !wrong && way < ways; way += 1)
         {
             const bool one_thread = way == 1 || linker->one_thread == 0;
-            result = link_benchmark_linker(settings, linker, one_thread, arguments, search, (const char* const*)paths, units, output, expected, linked);
+            result = link_benchmark_linker(settings, runtime, linker, one_thread, arguments, search, (const char* const*)paths, units, output, expected, linked);
             if (result)
             {
                 const double median = link_benchmark_median(linked->times, linked->runs);
@@ -1395,6 +1466,7 @@ int run_link_benchmark(int argc, char** argv)
         .linkers = (1u << BUSTER_LINK_BENCHMARK_LINKERS) - 1,
         .direct = true,
         .linking = true,
+        .kinds = { true, true },
     };
     settings.cpus[0] = 2;
     LinkBenchmarkProgram programs[BUSTER_LINK_BENCHMARK_MAX_PROGRAMS];
@@ -1461,6 +1533,14 @@ int run_link_benchmark(int argc, char** argv)
             valid = settings.direct || settings.linking;
             i += 1;
         }
+        else if (strcmp(argv[i], "--kinds") == 0 && has_value)
+        {
+            const char* kinds = argv[i + 1];
+            settings.kinds[RUNTIME_KIND_DYNAMIC] = strcmp(kinds, "dynamic") == 0 || strcmp(kinds, "dynamic,static") == 0 || strcmp(kinds, "static,dynamic") == 0;
+            settings.kinds[RUNTIME_KIND_STATIC] = strcmp(kinds, "static") == 0 || strcmp(kinds, "dynamic,static") == 0 || strcmp(kinds, "static,dynamic") == 0;
+            valid = settings.kinds[RUNTIME_KIND_DYNAMIC] || settings.kinds[RUNTIME_KIND_STATIC];
+            i += 1;
+        }
         else
         {
             settings.keep = settings.keep || strcmp(argv[i], "--keep") == 0;
@@ -1495,11 +1575,17 @@ int run_link_benchmark(int argc, char** argv)
     snprintf(settings.output_path, sizeof(settings.output_path), "%s/output", settings.work);
     snprintf(settings.error_path, sizeof(settings.error_path), "%s/errors", settings.work);
     snprintf(settings.usage_path, sizeof(settings.usage_path), "%s/usage", settings.work);
-    // A first open makes the snapshot this executable's, so that the direct path's runs load it.
-    Runtime runtime;
-    const SnapshotResult opened = made ? runtime_open(&runtime, settings.cache) : (SnapshotResult){ .error = RUNTIME_ERROR_NONE };
-    bool result = made && opened.error == RUNTIME_ERROR_NONE;
-    settings.runtime = &runtime;
+    // A first open of each kind's runtime makes its snapshot this executable's, so that the direct path's runs load it.
+    Runtime runtimes[RUNTIME_KINDS];
+    SnapshotResult opened[RUNTIME_KINDS] = { { .error = RUNTIME_ERROR_NONE }, { .error = RUNTIME_ERROR_NONE } };
+    bool result = made;
+    for (uint32_t kind = 0; kind < RUNTIME_KINDS; kind += 1)
+    {
+        const bool wanted = made && settings.kinds[kind];
+        opened[kind] = wanted ? link_benchmark_open(&runtimes[kind], settings.cache, (RuntimeKind)kind) : (SnapshotResult){ .error = RUNTIME_ERROR_NONE };
+        result = result && opened[kind].error == RUNTIME_ERROR_NONE;
+        settings.runtimes[kind] = wanted ? &runtimes[kind] : 0;
+    }
     if (helper)
     {
         result = link_benchmark_rusage(argc, argv) == 0;
@@ -1507,7 +1593,7 @@ int run_link_benchmark(int argc, char** argv)
     else if (!valid)
     {
         fprintf(stderr, "usage: benchmark-link [--functions LIST] [--filler N] [--seed N] [--directory PATH] [--cache PATH] [--cpus LIST] [--linkers LIST] [--runs N] "
-                        "[--only direct|linkers] [--keep]\n");
+                        "[--only direct|linkers] [--kinds dynamic|static|dynamic,static] [--keep]\n");
     }
     else if (!known_cpus || settings.cache == 0)
     {
@@ -1523,13 +1609,23 @@ int run_link_benchmark(int argc, char** argv)
     }
     else if (!result)
     {
-        fprintf(stderr, "benchmark-link: the runtime didn't import: error %d, %s\n", (int)opened.error, runtime.failed_file);
+        const uint32_t failed = opened[RUNTIME_KIND_DYNAMIC].error != RUNTIME_ERROR_NONE ? RUNTIME_KIND_DYNAMIC : RUNTIME_KIND_STATIC;
+        fprintf(stderr, "benchmark-link: the %s runtime didn't import: error %d, %s\n", failed == RUNTIME_KIND_STATIC ? "static" : "dynamic", (int)opened[failed].error,
+                runtimes[failed].failed_file);
     }
     if (made && result)
     {
-        printf("benchmark-link: the direct path on %u lane%s from CPU %u, the linkers on %u CPUs or CPU %u; outputs in %s; the snapshot in %s (%s)\n", settings.lanes,
-               settings.lanes == 1 ? "" : "s", settings.cpus[0], settings.allowed_count, settings.cpus[0], settings.work, settings.cache,
-               opened.status == SNAPSHOT_STATUS_LOADED ? "loaded" : opened.written ? "written" : "not written");
+        printf("benchmark-link: the direct path on %u lane%s from CPU %u, the linkers on %u CPUs or CPU %u; outputs in %s; the snapshots in %s", settings.lanes,
+               settings.lanes == 1 ? "" : "s", settings.cpus[0], settings.allowed_count, settings.cpus[0], settings.work, settings.cache);
+        for (uint32_t kind = 0; kind < RUNTIME_KINDS; kind += 1)
+        {
+            const SnapshotResult* open = &opened[kind];
+            if (settings.kinds[kind])
+            {
+                printf(" (%s: %s)", kind == RUNTIME_KIND_STATIC ? "static" : "dynamic", open->status == SNAPSHOT_STATUS_LOADED ? "loaded" : open->written ? "written" : "not written");
+            }
+        }
+        printf("\n");
     }
     for (uint32_t l = 0; made && result && settings.linking && l < BUSTER_LINK_BENCHMARK_LINKERS; l += 1)
     {
@@ -1553,17 +1649,26 @@ int run_link_benchmark(int argc, char** argv)
     }
     for (uint32_t i = 0; made && result && i < program_count; i += 1)
     {
-        const LinkProgramOptions options = link_benchmark_options(programs[i], settings.seed);
-        printf("%u worker%s in %u units, up to %u filler instructions each, linked as a dynamic PIE:\n", options.functions, options.functions == 1 ? "" : "s", options.units,
-               options.filler);
-        uint8_t expected[BUSTER_LINK_PROGRAM_OUTPUT_BYTES];
-        double direct_total = 0.0;
-        result = !settings.direct || link_benchmark_direct(&settings, programs[i], expected, &direct_total);
-        result = result && (!settings.linking || link_benchmark_linkers_on(&settings, programs[i], expected, settings.direct, direct_total));
+        for (uint32_t kind = 0; result && kind < RUNTIME_KINDS; kind += 1)
+        {
+            const LinkProgramOptions options = link_benchmark_options(programs[i], settings.seed);
+            if (settings.kinds[kind])
+            {
+                printf("%u worker%s in %u units, up to %u filler instructions each, linked as %s:\n", options.functions, options.functions == 1 ? "" : "s", options.units,
+                       options.filler, kind == RUNTIME_KIND_STATIC ? "a static executable" : "a dynamic PIE");
+                uint8_t expected[BUSTER_LINK_PROGRAM_OUTPUT_BYTES];
+                double direct_total = 0.0;
+                result = !settings.direct || link_benchmark_direct(&settings, (RuntimeKind)kind, programs[i], expected, &direct_total);
+                result = result && (!settings.linking || link_benchmark_linkers_on(&settings, (RuntimeKind)kind, programs[i], expected, settings.direct, direct_total));
+            }
+        }
     }
-    if (made && opened.error == RUNTIME_ERROR_NONE)
+    for (uint32_t kind = 0; made && kind < RUNTIME_KINDS; kind += 1)
     {
-        runtime_release(&runtime);
+        if (settings.kinds[kind] && opened[kind].error == RUNTIME_ERROR_NONE)
+        {
+            runtime_release(&runtimes[kind]);
+        }
     }
     if (made && !settings.keep)
     {

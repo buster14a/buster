@@ -282,11 +282,14 @@ designs and the compilers already built this way.
   (`./build/compiler test-static`); `main.c` includes all three, and
   `executable_benchmark.c` provides `benchmark-executable`.
 - `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
-  part): what `runtime_import` makes of the C runtime, kept in a file in the
-  cache directory (`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster`), which
-  `runtime_open` maps and uses in place when this executable wrote it and every
-  file the import probed is as it was, and otherwise rebuilds and renames into
-  place. `snapshot_test.c` holds its tests (`main.c` includes it;
+  part, and step 6's for the static runtime): what `runtime_import` (or
+  `runtime_import_static`) makes of the C runtime, kept in a file per kind in
+  the cache directory (`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster`),
+  which `runtime_open` (or `runtime_open_static`) maps and uses in place when
+  this executable wrote it, it is of the kind, its directory hashes right and
+  every file the import probed is as it was, and otherwise rebuilds and renames
+  into place. Binding checks each piece of it (a crt object or a member) when
+  it first reads it (`runtime_piece_current`). `snapshot_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-snapshot` runs them) and `snapshot_benchmark.c`
   provides `benchmark-snapshot`.
 - `src/buster/compiler/link_benchmark.c` provides `benchmark-link`, the whole
@@ -1518,38 +1521,58 @@ like the others, its measurements are informational.
 ## Snapshot tests
 
 `./build/compiler test-snapshot [--seed N] [--functions N] [--directory PATH]
-[--keep]` (about 0.07 s on the 9700X) checks `snapshot.c` with this system's
-runtime, in a directory of its own under `--directory` (`TMPDIR` or `/tmp` by
-default), which it removes unless `--keep`:
+[--keep]` (about 0.27 s on the 9700X) checks `snapshot.c` with this system's
+runtimes, a dynamic PIE's and a static executable's, in a directory of its own
+under `--directory` (`TMPDIR` or `/tmp` by default), which it removes unless
+`--keep`:
 
 - round trip: the imported runtime written as a snapshot and loaded back must
-  have the import's records, every one that binding and a dynamic PIE read,
-  and the loaded runtime must use the file's mapping and no arena; so must it
-  after another snapshot was renamed over the file it maps. Then the same for
-  the static runtime (`runtime_import_static`), with its kind, its archives,
-  its members' references (with the members they load) and COMDAT groups and
-  its global names' members;
-- links: test-link's two sets that call libc and a program of `--functions`
-  workers (2,000 by default), bound by both of binding's paths against the
-  imported runtime and against a loaded one: the same links and bindings,
-  written as dynamic PIEs by 1 and 8 lanes into the same bytes, which run;
+  have the import's records, every one that binding and a dynamic PIE read
+  (the names' and atoms' bytes and the members' names through the loaded
+  runtime's deltas), every piece current, and the loaded runtime must use the
+  file's mapping and no arena; so must it after another snapshot was renamed
+  over the file it maps. Then the same for the static runtime
+  (`runtime_import_static`), with its kind, its archives, its members'
+  references (with the members they load) and COMDAT groups and its global
+  names' members;
+- links and static links: test-link's two sets that call libc and a program
+  of `--functions` workers (2,000 by default), bound by both of binding's
+  paths against the imported runtime and against a loaded one: the same links
+  and bindings, written as dynamic PIEs, or against the static runtime as
+  static executables, by 1 and 8 lanes into the same bytes, which run;
 - opening: `runtime_open` in a directory two levels below one that exists,
   which it makes private: imported and written, then loaded; with no
   directory, or without an identity, imported and nothing written; and where
   the directory can't be made, the runtime still imported, the failure named;
+- kinds: `runtime_open_static` imported and written, then loaded, with the
+  static runtime's records; the dynamic runtime's snapshot beside it, the two
+  the directory's only files; and each kind's snapshot renamed to the other
+  kind's name, stale there, imported again and written over;
 - staleness: snapshots with probes of the test's own files, each changed one
   way (rewritten in place to the same size, its mode changed, replaced by a
   rename, removed, created where a probe found nothing, a file added to a
   probed directory, written with its times put back), and one written by
   another executable, must be stale, and `runtime_open` must rebuild them;
-- invalid files: 1,278 damaged copies (cut short, one byte longer, a byte
-  changed at sampled offsets and in every byte of the header) must be invalid,
-  and so must 9 whose header was changed and then rehashed (another version or
-  magic, a region misaligned, running or starting past the end or of the wrong
-  size, counts out of range), which only the header's own checks catch;
+- invalid files: 1,600 damaged copies (cut short, one byte longer, a byte of
+  the directory changed at sampled offsets and in every byte of the header)
+  must be invalid, and so must 10 whose header was changed and then rehashed
+  (another version or magic, a region misaligned, running or starting past
+  the end or of the wrong size, counts out of range, the directory ending
+  before its last region), which only the header's own checks catch;
   `runtime_open` must replace them; a directory and a FIFO at the snapshot's
   path must neither block a link (run in a child under an alarm) nor fail it,
   the FIFO replaced and the directory left with nothing beside it;
+- damaged pieces, of each kind's snapshot: a byte of the pieces' records
+  changed at 123 offsets (at each 1/61 of them, and the first and last of
+  each of their regions), each copy of which must load with every piece
+  current but the one whose records hold the byte, by the test's own reading
+  of the layout (none for a byte of padding or of a column no piece's hash
+  covers). Then a program bound against a snapshot with a damaged piece, by
+  each path: `crt1.o`'s (or `Scrt1.o`'s), `crtend.o`'s, or a member the
+  program joins must fail the binding with `BIND_ERROR_SNAPSHOT`, and a member
+  it doesn't join must bind as against the whole snapshot. After a failure,
+  `snapshot_discard` and `runtime_open` import the runtime and write a
+  snapshot that loads;
 - concurrency: eight processes opening the runtime at once in an empty
   directory must each get it and leave one snapshot, which loads, and no other
   file;
@@ -1560,15 +1583,20 @@ it after benchmark-executable.
 
 ## Snapshot benchmark
 
-`./build/compiler benchmark-snapshot [--directory PATH] [--runs N]` reports
-medians of `--runs` runs (41 by default) of the import without a snapshot,
-`snapshot_write` into a directory under `--directory` (`TMPDIR` or `/tmp`),
-`runtime_open` from the snapshot phase by phase (the compiler's identity, the
-mapping, the header and the hash, the view, the probes' `stat`s),
-`runtime_release` of a loaded runtime, the alternatives the design weighed
-(the snapshot read with `pread` into new memory, and mapped without the hash),
-and binding a program of one worker against the imported and the loaded
-runtime, which must make the same link. Run it under the 9700X's lock with
+`./build/compiler benchmark-snapshot [--directory PATH] [--runs N] [--only
+dynamic|static]` reports, for a dynamic PIE's runtime and a static
+executable's (`--only` one of them), medians of `--runs` runs (41 by default)
+of the import without a snapshot, `snapshot_write` into a directory under
+`--directory` (`TMPDIR` or `/tmp`), `runtime_open` (or
+`runtime_open_static`) from the snapshot phase by phase (the compiler's
+identity, the mapping, the header and the directory's hash, the view, the
+probes' `stat`s), `runtime_release` of a loaded runtime, the alternatives the
+design weighed (the snapshot read with `pread` into new memory, mapped without
+the hash, and mapped and hashed whole as format 3 checked it), and binding a
+program of one worker against the imported runtime, against one loaded afresh
+each time (as a link binds, its pieces faulted in and checked), against one
+loaded once, and the checks alone of the pieces it read. Every binding must
+make the same link. Run it under the 9700X's lock with
 `taskset -c 2`, with `--directory` on each file system to measure (the cache
 directory is under `$HOME`, btrfs there). `docs/object-writer-and-linker.md`
 ("The runtime snapshot") has the numbers. The default 9700X job runs it after
@@ -1579,19 +1607,21 @@ informational.
 
 `./build/compiler benchmark-link [--functions LIST [--filler N]] [--seed N]
 [--directory PATH] [--cache PATH] [--cpus LIST] [--linkers LIST] [--runs N]
-[--only direct|linkers] [--keep]` (about 50 s on the 9700X) links generated
-programs that call libc, without `SIZE32` and `SIZE64`, by the direct path and
-by each linker, and reports medians:
+[--only direct|linkers] [--kinds dynamic|static|dynamic,static] [--keep]`
+(about 81 s on the 9700X) links generated programs that call libc, without
+`SIZE32` and `SIZE64`, as dynamic PIEs and as static executables (`--kinds`,
+both by default), by the direct path and by each linker, and reports medians:
 
 - the programs: one worker and 2,000 workers (about hello world's and tcc's
   outputs), and one of synth's shape, 102,400 workers in 512 units with up to
   64 filler instructions each (44 MB); or with `--functions`, a program of
   each count of workers, of up to `--filler` (8) filler instructions each;
-- the direct path, on a lane per CPU of `--cpus` (CPU 2): `runtime_open`,
-  which must load the snapshot in `--cache` (the cache directory), and
-  `bind_begin`; then, after the program's atoms, `bind_end` and
-  `dynamic_inputs`, and `executable_write` over the file of the run before
-  into a directory under `--directory` (`TMPDIR` or `/tmp`). Each part is the
+- the direct path, on a lane per CPU of `--cpus` (CPU 2): `runtime_open` (or
+  `runtime_open_static`), which must load the kind's snapshot in `--cache` (the
+  cache directory), and `bind_begin`; then, after the program's atoms,
+  `bind_end` and `dynamic_inputs` (or `dynamic_static_inputs`), and
+  `executable_write` over the file of the run before into a directory under
+  `--directory` (`TMPDIR` or `/tmp`). Each part is the
   median of its runs after a warm-up, each run from the link as it was before
   the part, put back outside the time, and must write the warm-up's file again
   (its build ID); the link is the parts' sum. Then its work: the bytes
@@ -1601,7 +1631,9 @@ by each linker, and reports medians:
 - the objects, each unit's as `-c` writes them, on the same lanes;
 - each linker of `--linkers` (`ld.bfd`, `ld.lld`, `mold` and `wild`) linking
   them with the appendix's command, the clang driver's with the matched
-  options, with its own threads and on one (pinned to the first of `--cpus`):
+  options (its `-static` one for a static executable, with
+  `--start-group -lgcc -lgcc_eh -lc --end-group`), with its own threads and
+  on one (pinned to the first of `--cpus`):
   the wall time from `posix_spawn` to the wait's return, over the output of
   the run before, the median of 41 runs after a warm-up with a 20 ms pause
   before each, or past 4 MB of output 11 runs after 200 ms, and GNU ld's 5
@@ -1612,8 +1644,12 @@ by each linker, and reports medians:
   was higher, which Linux carries over at `exec`. The helper's own floor, a
   program that does nothing, is printed first.
 
-Every program written must run and print what its model predicts. `--only
-direct` and `--only linkers` run one side, and `--keep` leaves the directory.
+Every program written must run and print what its model predicts, but wild's
+static executable of a program whose `.tbss` is more aligned than its
+`.tdata`, which wild 0.10 links with the TLS segment off its alignment, so
+that it faults in glibc's startup: the benchmark doesn't run wild on such a
+program, and says so. `--only direct` and `--only linkers` run one side, and
+`--keep` leaves the directory.
 Run it under the 9700X's lock without `taskset`: it pins its lanes and the
 linkers' runs on one thread itself, and the linkers' other runs need every CPU.
 `docs/object-writer-and-linker.md` ("The whole link") has the numbers. The
