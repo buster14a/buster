@@ -367,6 +367,12 @@ designs and the compilers already built this way.
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
   `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`.
+- `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
+  records macro expansion history in cold records and compressed output runs;
+  `pp_diagnose_output` renders a diagnostic for an output-token index.
+  `c_preprocessor_history_test.c` is part of `test-preprocessor`, including its
+  Clang diagnostic comparisons. `benchmark-preprocessor --history-cost`
+  compares recording on/off and reports retained and temporary history bytes.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
