@@ -347,6 +347,7 @@ int run_type_benchmark(int argc, char** argv);
 // test-calling-convention command. Its benchmark is another translation unit.
 #include "buster/compiler/calling_convention.c"
 #include "buster/compiler/calling_convention_test.c"
+int run_calling_convention_benchmark(int argc, char** argv);
 
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
 // check-call-graph and test-call-graph commands.
@@ -495,6 +496,10 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "test-calling-convention") == 0)
     {
         result = run_calling_convention_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-calling-convention") == 0)
+    {
+        result = run_calling_convention_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
     {
