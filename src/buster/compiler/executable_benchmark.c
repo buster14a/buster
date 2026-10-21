@@ -6,7 +6,7 @@
 // build ID's chunk hash.
 //
 // Usage: build/compiler benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N]
-//                                            [--only kernels|hash|links|dynamic]
+//                                            [--only kernels|hash|links|dynamic|static]
 //
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...), or with --lanes N to N CPUs, one per core
 // (taskset -c 0-7 for 8), since the lanes' threads keep the affinity they start with. Each figure is a median:
@@ -24,7 +24,8 @@
 //     memory, in place and new; and with one lane, executable_patch_range over the program's atoms, with every kind in
 //     its mix, and the unwind tables' passes (executable_benchmark_unwind). Then the same sizes as programs that call
 //     libc, bound against the system's runtime (runtime.c and bind.c) and written as dynamic PIEs, the same way (--only
-//     dynamic for these alone).
+//     dynamic for these alone); and bound against its static runtime (runtime_import_static) and written as static
+//     executables (--only static).
 // The exit status is 1 if the arguments are invalid, a variant's bytes differ, the runtime doesn't import, or a link
 // fails.
 
@@ -56,8 +57,8 @@ struct String8
 #pragma clang diagnostic pop
 #include "buster/compiler/link.c"
 #include "buster/compiler/link_program.c"
-// The runtime, imported once, and binding, for the dynamic PIEs; the import's relocation types are the object
-// writer's.
+// The runtimes, each imported once, and binding, for the dynamic PIEs and the static executables with libc; the
+// import's relocation types are the object writer's.
 #include "buster/compiler/object_writer.c"
 #include "buster/compiler/import.c"
 #include "buster/compiler/runtime.c"
@@ -189,7 +190,7 @@ __attribute__((noinline)) static void executable_benchmark_kinds(const Executabl
         }
         else
         {
-            executable_patch_other(local, bytes, address, i);
+            executable_patch_other(local, bytes, address, 0, count, i);
         }
     }
 }
@@ -625,9 +626,11 @@ static const char* const executable_benchmark_phase_names[EXECUTABLE_PHASES] = {
     "finish",
 };
 
-// With `runtime`, the program calls libc: it is bound against the runtime (bind.c) and written as a dynamic PIE, its
-// inputs from dynamic.c; otherwise it is written as a static executable.
-static bool executable_benchmark_link(const char* directory, uint32_t functions, uint32_t lanes, uint64_t seed, const Runtime* runtime)
+// With `runtime`, the program calls libc: it is bound against the runtime (bind.c) and written as a dynamic PIE, or
+// with `static_runtime` (runtime_import_static's) as a static executable, its inputs from dynamic.c; otherwise it is
+// written as a static executable without libc. The programs that call libc have no general- or local-dynamic TLS
+// accesses, whose relaxation rewrites the atoms' bytes so that a write over them again would fail.
+static bool executable_benchmark_link(const char* directory, uint32_t functions, uint32_t lanes, uint64_t seed, const Runtime* runtime, bool static_runtime)
 {
     LinkProgramOptions options = link_program_default_options();
     options.seed = seed;
@@ -642,6 +645,7 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     Arena bind_arena = { 0 };
     Bind bind = { 0 };
     ExecutableDynamic dynamic = { 0 };
+    ExecutableRuntime static_inputs = { 0 };
     bool result = false;
     if (runtime != 0)
     {
@@ -654,7 +658,11 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
         result = result && link_program_generate_atoms(&program);
         result = result && bind_end(&bind, &program.link);
         result = result && link_program_generate_end(&program);
-        result = result && link_check(&program.link) == LINK_ERROR_NONE && dynamic_inputs(&dynamic, runtime, &bind, &bind_arena);
+        result = result && link_check(&program.link) == LINK_ERROR_NONE && (static_runtime || dynamic_inputs(&dynamic, runtime, &bind, &bind_arena));
+        if (result && static_runtime)
+        {
+            dynamic_static_inputs(&static_inputs, runtime, &bind);
+        }
     }
     else
     {
@@ -668,7 +676,8 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
                 .length = strlen(path),
             },
             .entry = runtime != 0 ? dynamic_global(runtime, &bind, "_start") : program.entry,
-            .dynamic = runtime != 0 ? &dynamic : 0,
+            .dynamic = runtime != 0 && !static_runtime ? &dynamic : 0,
+            .runtime = static_runtime ? &static_inputs : 0,
         },
         .path = path,
     };
@@ -676,7 +685,15 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     result = result && executable_benchmark_write(&write, lanes, 0, false);
     const uint64_t size = write.result.file_size;
     const uint32_t runs = size > BUSTER_EXECUTABLE_BENCHMARK_LARGE_BYTES ? BUSTER_EXECUTABLE_BENCHMARK_LARGE_RUNS : BUSTER_EXECUTABLE_BENCHMARK_LINK_RUNS;
-    if (result && runtime != 0)
+    if (result && static_runtime)
+    {
+        printf("%u workers, bound against the static runtime and written as a static executable: %u atoms, %u fixups, %llu bytes of code, %llu stubs, %llu IRELATIVE "
+               "relocations, %llu GOT slots, a %llu-byte file in %llu chunks, %u lane%s:\n",
+               functions, program.link.atoms.count - 1, program.link.fixups.count - 1, (unsigned long long)program.code_bytes, (unsigned long long)write.result.stubs,
+               (unsigned long long)write.result.relocations, (unsigned long long)write.result.got_slots, (unsigned long long)size, (unsigned long long)write.result.chunks,
+               lanes, lanes == 1 ? "" : "s");
+    }
+    else if (result && runtime != 0)
     {
         printf("%u workers, bound and written as a dynamic PIE: %u atoms, %u fixups, %llu bytes of code, %llu dynamic symbols, %llu relocations in .rela.dyn (%llu "
                "relative) and %llu in %llu words of .relr.dyn, %llu stubs, a %llu-byte file in %llu chunks, %u lane%s:\n",
@@ -809,7 +826,8 @@ int run_executable_benchmark(int argc, char** argv)
         else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
             only = argv[i + 1];
-            valid = valid && (strcmp(only, "kernels") == 0 || strcmp(only, "hash") == 0 || strcmp(only, "links") == 0 || strcmp(only, "dynamic") == 0);
+            valid = valid && (strcmp(only, "kernels") == 0 || strcmp(only, "hash") == 0 || strcmp(only, "links") == 0 || strcmp(only, "dynamic") == 0 ||
+                              strcmp(only, "static") == 0);
             i += 1;
         }
         else
@@ -820,7 +838,7 @@ int run_executable_benchmark(int argc, char** argv)
     int result = 1;
     if (!valid)
     {
-        fprintf(stderr, "usage: benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N] [--only kernels|hash|links|dynamic]\n");
+        fprintf(stderr, "usage: benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N] [--only kernels|hash|links|dynamic|static]\n");
     }
     else
     {
@@ -840,7 +858,7 @@ int run_executable_benchmark(int argc, char** argv)
         }
         for (uint32_t i = 0; (only == 0 || strcmp(only, "links") == 0) && i < program_count; i += 1)
         {
-            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, 0) && passed;
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, 0, false) && passed;
         }
         // The same sizes as dynamic PIEs, against the system's runtime.
         Runtime runtime;
@@ -853,11 +871,28 @@ int run_executable_benchmark(int argc, char** argv)
         }
         for (uint32_t i = 0; dynamic && imported == RUNTIME_ERROR_NONE && i < program_count; i += 1)
         {
-            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &runtime) && passed;
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &runtime, false) && passed;
         }
         if (dynamic)
         {
             runtime_release(&runtime);
+        }
+        // And as static executables, against the system's static runtime.
+        Runtime static_runtime;
+        const bool statics = only == 0 || strcmp(only, "links") == 0 || strcmp(only, "static") == 0;
+        const RuntimeError static_imported = statics ? runtime_import_static(&static_runtime) : RUNTIME_ERROR_NONE;
+        if (statics && static_imported != RUNTIME_ERROR_NONE)
+        {
+            fprintf(stderr, "the static runtime didn't import: error %d, %s\n", (int)static_imported, static_runtime.failed_file);
+            passed = false;
+        }
+        for (uint32_t i = 0; statics && static_imported == RUNTIME_ERROR_NONE && i < program_count; i += 1)
+        {
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &static_runtime, true) && passed;
+        }
+        if (statics)
+        {
+            runtime_release(&static_runtime);
         }
         result = passed ? 0 : 1;
     }
