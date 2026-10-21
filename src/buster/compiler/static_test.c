@@ -99,19 +99,46 @@ static bool static_test_report(const StaticTestTally* tally)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The kinds
+//
+// Each link is written as the kind its runtime is for: a static executable (RUNTIME_KIND_STATIC) at
+// BUSTER_EXECUTABLE_BASE, or a static PIE (RUNTIME_KIND_STATIC_PIE) at 0, whose cc links take -static-pie.
+
+static bool static_test_pie(const Runtime* runtime)
+{
+    return runtime->kind == RUNTIME_KIND_STATIC_PIE;
+}
+
+static uint64_t static_test_base(bool pie)
+{
+    return pie ? 0 : BUSTER_EXECUTABLE_BASE;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Writing
 
 // Writes a link bound against the static runtime to `path` as a static executable with a group of `lanes` lanes, from
-// _start, with dynamic_static_inputs's inputs: whether executable_write succeeded, and its result. `write` holds the
-// poison and starve options and whether the writer's exact twins write it.
+// _start, with dynamic_static_inputs's inputs, or against the static PIE's runtime as a static PIE, with
+// dynamic_static_pie_inputs's: whether executable_write succeeded, and its result. `write` holds the poison and starve
+// options and whether the writer's exact twins write it.
 static bool static_test_write_with(DynamicTestWrite* write, Link* link, const Bind* bind, const Runtime* runtime, String8 path, uint32_t lanes, ExecutableResult* result)
 {
     ExecutableRuntime inputs;
-    dynamic_static_inputs(&inputs, runtime, bind);
+    ExecutableDynamic dynamic;
+    const bool pie = runtime->kind == RUNTIME_KIND_STATIC_PIE;
+    if (pie)
+    {
+        dynamic_static_pie_inputs(&dynamic, &inputs, runtime, bind);
+    }
+    else
+    {
+        dynamic_static_inputs(&inputs, runtime, bind);
+    }
     write->link = link;
     write->options = (ExecutableOptions){
         .path = path,
         .entry = dynamic_global(runtime, bind, "_start"),
+        .dynamic = pie ? &dynamic : 0,
         .runtime = &inputs,
         .exact = write->exact,
     };
@@ -165,7 +192,8 @@ static uint32_t static_test_write_lanes(uint32_t write)
 // Writes the link BUSTER_STATIC_TEST_WRITES times, each from its bytes as binding left them (static_test_save) with
 // zeroed fields over the last file scribbled over, every other time over poisoned scratch memory: whether every write
 // succeeded with the same bytes and build ID, which `file` then holds, read into `arena`, with the first write's result
-// in `result`. The link is then as the last write left it, as every write leaves it.
+// in `result`. The link is then as the last write left it, but for its bytes, which are binding's again: the checks
+// read there the instructions a write rewrites.
 static bool static_test_lanes(StaticTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, const char* name, ExecutableResult* result,
                               String8* file, Arena* arena)
 {
@@ -198,21 +226,29 @@ static bool static_test_lanes(StaticTestTally* tally, Link* link, const Bind* bi
         *file = w == 0 ? bytes : *file;
         *result = w == 0 ? written : *result;
     }
+    if (saved != 0)
+    {
+        static_test_restore(link, saved);
+    }
     return same && saved != 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The structure
 //
-// What a static executable with the C runtime says, read back from its headers and sections and compared with the link
-// after the write (its atoms' addresses, its symbols' GOT slots and references) by rules of the test's own.
+// What a static executable with the C runtime, or a static PIE, says, read back from its headers and sections and
+// compared with the link after the write (its atoms' addresses, its symbols' GOT slots and references) by rules of the
+// test's own.
 
-// The file's IFUNC tables: .rela.iplt's IRELATIVE relocations, .iplt's stubs and .got.
+// The file's IFUNC tables: its IRELATIVE relocations (a static executable's .rela.iplt; a static PIE's in .rela.dyn,
+// after its RELATIVE ones, `relative`), .iplt's stubs and .got.
 typedef struct StaticTestIfuncs StaticTestIfuncs;
 struct StaticTestIfuncs
 {
     const Elf64_Rela* relocations;
     uint64_t relocation_count;
+    const Elf64_Rela* relative;
+    uint64_t relative_count;
     const uint8_t* stubs;
     uint64_t stubs_address;
     uint64_t stub_count;
@@ -221,17 +257,26 @@ struct StaticTestIfuncs
     uint64_t got_size;
 };
 
-static StaticTestIfuncs static_test_ifuncs(const ExecutableTestImage* image, String8 file)
+static StaticTestIfuncs static_test_ifuncs(const ExecutableTestImage* image, String8 file, bool pie)
 {
-    const Elf64_Shdr* relocations = executable_test_section(image, ".rela.iplt");
+    const Elf64_Shdr* relocations = executable_test_section(image, pie ? ".rela.dyn" : ".rela.iplt");
     const Elf64_Shdr* stubs = executable_test_section(image, ".iplt");
     const Elf64_Shdr* got = executable_test_section(image, ".got");
     const bool relocations_inside = relocations != 0 && relocations->sh_offset + relocations->sh_size <= file.length;
     const bool stubs_inside = stubs != 0 && stubs->sh_offset + stubs->sh_size <= file.length;
     const bool got_inside = got != 0 && got->sh_offset + got->sh_size <= file.length;
+    const Elf64_Rela* rela = relocations_inside ? (const Elf64_Rela*)(file.pointer + relocations->sh_offset) : 0;
+    const uint64_t count = relocations_inside ? relocations->sh_size / sizeof(Elf64_Rela) : 0;
+    uint64_t relative = 0;
+    while (pie && relative < count && ELF64_R_TYPE(rela[relative].r_info) == R_X86_64_RELATIVE)
+    {
+        relative += 1;
+    }
     const StaticTestIfuncs result = {
-        .relocations = relocations_inside ? (const Elf64_Rela*)(file.pointer + relocations->sh_offset) : 0,
-        .relocation_count = relocations_inside ? relocations->sh_size / sizeof(Elf64_Rela) : 0,
+        .relocations = rela != 0 ? rela + relative : 0,
+        .relocation_count = count - relative,
+        .relative = rela,
+        .relative_count = relative,
         .stubs = stubs_inside ? (const uint8_t*)file.pointer + stubs->sh_offset : 0,
         .stubs_address = stubs_inside ? stubs->sh_addr : 0,
         .stub_count = stubs_inside ? stubs->sh_size / BUSTER_EXECUTABLE_STUB_BYTES : 0,
@@ -294,11 +339,12 @@ static void static_test_stubbed(const Link* link, SymbolId tls_get_addr, uint8_t
     }
 }
 
-// The IFUNCs: each one with a stub at a stub's address, which jumps through a slot that an IRELATIVE relocation fills
-// from the IFUNC's resolver, its GOT slot, if it has one, holding the stub's address; each one without a stub but with
-// a GOT slot, an IRELATIVE relocation of the slot; and no relocation in .rela.iplt but those, each an IRELATIVE of a
-// slot of .got. Returns how many IRELATIVE relocations there must be.
-static uint64_t static_test_ifunc_checks(StaticTestTally* tally, const Link* link, const StaticTestIfuncs* ifuncs, const uint8_t* stubbed)
+// The IFUNCs, in an image at `base`: each one with a stub at a stub's address, which jumps through a slot that an
+// IRELATIVE relocation fills from the IFUNC's resolver, its GOT slot, if it has one, holding the stub's address; each
+// one without a stub but with a GOT slot, an IRELATIVE relocation of the slot; and no other relocation among them
+// (.rela.iplt's, or those after a static PIE's RELATIVE ones), each an IRELATIVE of a slot of .got. Returns how many
+// IRELATIVE relocations there must be.
+static uint64_t static_test_ifunc_checks(StaticTestTally* tally, const Link* link, const StaticTestIfuncs* ifuncs, const uint8_t* stubbed, uint64_t base)
 {
     uint64_t expected = 0;
     SymbolId wrong = 0;
@@ -306,8 +352,8 @@ static uint64_t static_test_ifunc_checks(StaticTestTally* tally, const Link* lin
     {
         if (static_test_is_ifunc(link, symbol))
         {
-            const uint64_t resolver = BUSTER_EXECUTABLE_BASE + link->atoms.address[link->symbols.atom[symbol]] + link->symbols.value[symbol];
-            const uint64_t stub = BUSTER_EXECUTABLE_BASE + link->symbols.reference[symbol];
+            const uint64_t resolver = base + link->atoms.address[link->symbols.atom[symbol]] + link->symbols.value[symbol];
+            const uint64_t stub = base + link->symbols.reference[symbol];
             const uint32_t got_slot = link->symbols.got_slot[symbol];
             const uint64_t slot = ifuncs->got_address + 8 * (uint64_t)got_slot;
             uint64_t held = 0;
@@ -366,11 +412,17 @@ static bool static_test_linker_value(const Link* link, const ExecutableTestImage
         const bool bytes = (section->sh_flags & SHF_ALLOC) != 0 && section->sh_type != SHT_NOBITS;
         data_end = bytes && section->sh_addr + section->sh_size > data_end ? section->sh_addr + section->sh_size : data_end;
     }
+    const Elf64_Shdr* dynamic = executable_test_section(image, ".dynamic");
     bool result = true;
     if (executable_named(link, symbol, "_GLOBAL_OFFSET_TABLE_"))
     {
         result = got != 0;
         *value = got != 0 ? got->sh_addr : 0;
+    }
+    else if (executable_named(link, symbol, "_DYNAMIC"))
+    {
+        result = dynamic != 0;
+        *value = dynamic != 0 ? dynamic->sh_addr : 0;
     }
     else if (executable_named(link, symbol, "__init_array_start") || executable_named(link, symbol, "__preinit_array_start") ||
              executable_named(link, symbol, "__preinit_array_end"))
@@ -422,17 +474,17 @@ static bool static_test_linker_value(const Link* link, const ExecutableTestImage
     return result;
 }
 
-// The value a fixup's target has in the file: an IFUNC with a stub its stub's address (its reference, which
-// static_test_ifunc_checks checked), a name of the linker's static_test_linker_value's, an absolute symbol its value,
-// and any other test-executable's (executable_test_symbol_value: a thread-local symbol its offset from the thread
-// pointer). False if the test can't tell.
-static bool static_test_symbol_value(const Link* link, const ExecutableTestImage* image, const uint8_t* stubbed, SymbolId symbol, uint64_t* value)
+// The value a fixup's target has in the file, in an image at `base`: an IFUNC with a stub its stub's address (its
+// reference, which static_test_ifunc_checks checked), a name of the linker's static_test_linker_value's, an absolute
+// symbol its value, and any other test-executable's (executable_test_symbol_value: a thread-local symbol its offset
+// from the thread pointer). False if the test can't tell.
+static bool static_test_symbol_value(const Link* link, const ExecutableTestImage* image, const uint8_t* stubbed, SymbolId symbol, uint64_t* value, uint64_t base)
 {
     const uint8_t source = link->symbols.source[symbol];
     bool result = true;
     if (stubbed[symbol] != 0)
     {
-        *value = BUSTER_EXECUTABLE_BASE + link->symbols.reference[symbol];
+        *value = base + link->symbols.reference[symbol];
     }
     else if (source == BUSTER_LINK_SOURCE_LINKER)
     {
@@ -444,17 +496,38 @@ static bool static_test_symbol_value(const Link* link, const ExecutableTestImage
     }
     else
     {
-        result = executable_test_symbol_value(link, image, symbol, value);
+        result = executable_test_symbol_value(link, image, symbol, value, base);
     }
     return result;
 }
 
-// The bytes fixup `fixup` of `holder` must leave there: `*length` bytes (up to 16) from `*start` in the atom. A general-
-// or local-dynamic access leaves its local-exec sequence over its lea and its call (whose own fixup leaves nothing), and
-// DTPOFF32 the offset from the thread pointer; the other kinds leave their field, as executable_test_expected works it
-// out. False if the test can't tell, or a value can't fit: a link the tests write has none.
+// Whether a symbol's value is an address in the image, by the test's own rule: one defined in an atom that isn't
+// thread-local, or one of the linker's names. A thread-local symbol's offset, an absolute symbol's value and a weak
+// symbol defined nowhere (0) aren't.
+static bool static_test_in_image(const Link* link, SymbolId symbol)
+{
+    const AtomId atom = link->symbols.atom[symbol];
+    return (atom != 0 && !link_class_is_tls(link->atoms.class[atom])) || link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER;
+}
+
+// Whether a static PIE's fixup reaches its target directly, as GNU ld and lld relax it there, by the test's own rule: a
+// CALL_GOT or LOAD_GOT with the addend -4 to a symbol of the image's (static_test_in_image) that isn't an IFUNC.
+static bool static_test_relaxes(const Link* link, FixupId fixup)
+{
+    const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+    const SymbolId target = link->fixups.target[fixup];
+    const bool loads = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT;
+    return loads && link_fixup_addend(link, fixup) == -4 && static_test_in_image(link, target) && !static_test_is_ifunc(link, target);
+}
+
+// The bytes fixup `fixup` of `holder` must leave there, in an image at `base`: `*length` bytes (up to 16) from `*start`
+// in the atom. A general- or local-dynamic access leaves its local-exec sequence over its lea and its call (whose own
+// fixup leaves nothing), and DTPOFF32 the offset from the thread pointer; in a static PIE (`pie`), a load or call that
+// relaxes (static_test_relaxes) its instruction rewritten from the one in the link's bytes (as binding left them):
+// mov to lea, call to addr32 call, jmp to jmp and a nop; the other kinds leave their field, as executable_test_expected
+// works it out. False if the test can't tell, or a value can't fit: a link the tests write has none.
 static bool static_test_expected(const Link* link, const ExecutableTestImage* image, const uint8_t* stubbed, SymbolId tls_get_addr, AtomId holder, FixupId fixup,
-                                 uint8_t* expected, uint32_t* length, uint64_t* start)
+                                 uint64_t base, bool pie, uint8_t* expected, uint32_t* length, uint64_t* start)
 {
     static const uint8_t gd_le[12] = { 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x80 };
     static const uint8_t ld_le[13] = { 0x66, 0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00 };
@@ -465,8 +538,8 @@ static bool static_test_expected(const Link* link, const ExecutableTestImage* im
     const uint8_t next_kind = fixup < last ? link->fixups.kind[fixup + 1] & BUSTER_LINK_FIXUP_KIND : 0;
     const Elf64_Shdr* got = executable_test_section(image, ".got");
     uint64_t symbol = 0;
-    bool result = static_test_symbol_value(link, image, stubbed, target, &symbol);
-    const uint64_t place = BUSTER_EXECUTABLE_BASE + link->atoms.address[holder] + offset;
+    bool result = static_test_symbol_value(link, image, stubbed, target, &symbol, base);
+    const uint64_t place = base + link->atoms.address[holder] + offset;
     const uint64_t slot = got != 0 ? got->sh_addr + 8 * (uint64_t)link->symbols.got_slot[target] : 0;
     const uint64_t addend = (uint64_t)link_fixup_addend(link, fixup);
     uint64_t value = 0;
@@ -495,6 +568,25 @@ static bool static_test_expected(const Link* link, const ExecutableTestImage* im
         width = (uint32_t)sizeof(ld_le) - prefixes;
         *start = offset - 3;
         result = result && offset >= 3;
+    }
+    else if (pie && static_test_relaxes(link, fixup))
+    {
+        // The 6 bytes from the instruction's opcode: lea's 8d and its ModRM, addr32 call's 67 e8, or jmp's e9 a byte
+        // earlier and a nop after its rel32, measured from its end.
+        const uint8_t* bytes = link->atoms.bytes[holder];
+        const uint8_t opcode = offset >= 2 ? bytes[offset - 2] : 0;
+        const uint8_t modrm = offset >= 2 ? bytes[offset - 1] : 0;
+        const bool load = kind == BUSTER_LINK_FIXUP_LOAD_GOT;
+        const bool jump = !load && opcode == 0xff && modrm == 0x25;
+        const int64_t distance = (int64_t)symbol - (int64_t)(place + 4) + (jump ? 1 : 0);
+        const int32_t field = (int32_t)distance;
+        expected[0] = load ? 0x8d : jump ? 0xe9 : 0x67;
+        expected[1] = load ? modrm : 0xe8;
+        memcpy(expected + (jump ? 1 : 2), &field, sizeof(field));
+        expected[5] = jump ? 0x90 : expected[5];
+        width = 6;
+        *start = offset - 2;
+        result = result && offset >= 2 && distance == field && (load ? opcode == 0x8b : opcode == 0xff && (modrm == 0x15 || modrm == 0x25));
     }
     else
     {
@@ -548,24 +640,26 @@ static bool static_test_expected(const Link* link, const ExecutableTestImage* im
 }
 
 // Every fixup's bytes in the file are static_test_expected's; and the GOT: a slot for each target of a GOT kind (but
-// __tls_get_addr, whose calls the accesses consumed) and no other symbol, numbered from 1 in symbol order, each holding
-// its symbol's value (an IFUNC's stub, a thread-local symbol's offset from the thread pointer) but an IFUNC's without a
-// stub, which an IRELATIVE relocation fills; then one per stub, which static_test_ifunc_checks counted.
+// __tls_get_addr, whose calls the accesses consumed, and in a static PIE the fixups that relax) and no other symbol,
+// numbered from 1 in symbol order, each holding its symbol's value (an IFUNC's stub, a thread-local symbol's offset from
+// the thread pointer) but an IFUNC's without a stub, which an IRELATIVE relocation fills; then one per stub, which
+// static_test_ifunc_checks counted.
 static void static_test_fields(StaticTestTally* tally, const Link* link, const ExecutableTestImage* image, String8 file, const uint8_t* stubbed, SymbolId tls_get_addr,
-                               uint64_t stubs, Arena* arena)
+                               uint64_t stubs, bool pie, Arena* arena)
 {
+    const uint64_t base = static_test_base(pie);
     uint64_t mismatched = 0;
     FixupId first = 0;
     for (AtomId atom = 1; image->valid && atom < link->atoms.count; atom += 1)
     {
         const FixupId begin = link->atoms.fixup_begin[atom];
-        const uint64_t atom_offset = executable_test_file_offset(image, BUSTER_EXECUTABLE_BASE + link->atoms.address[atom]);
+        const uint64_t atom_offset = executable_test_file_offset(image, base + link->atoms.address[atom]);
         for (FixupId fixup = begin; fixup < begin + link->atoms.fixup_count[atom]; fixup += 1)
         {
             uint8_t expected[16];
             uint32_t length = 0;
             uint64_t start = 0;
-            const bool known = static_test_expected(link, image, stubbed, tls_get_addr, atom, fixup, expected, &length, &start);
+            const bool known = static_test_expected(link, image, stubbed, tls_get_addr, atom, fixup, base, pie, expected, &length, &start);
             const bool readable = atom_offset != UINT64_MAX && atom_offset + start + length <= file.length;
             const bool same = known && readable && memcmp(file.pointer + atom_offset + start, expected, length) == 0;
             first = !same && mismatched == 0 ? fixup : first;
@@ -583,7 +677,8 @@ static void static_test_fields(StaticTestTally* tally, const Link* link, const E
         for (FixupId fixup = 1; fixup < link->fixups.count; fixup += 1)
         {
             const SymbolId target = link->fixups.target[fixup];
-            targets[target] |= static_test_reads_slot(link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) && target != tls_get_addr ? 1 : 0;
+            const bool relaxes = pie && static_test_relaxes(link, fixup);
+            targets[target] |= static_test_reads_slot(link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) && target != tls_get_addr && !relaxes ? 1 : 0;
         }
     }
     uint32_t next = 1;
@@ -593,7 +688,7 @@ static void static_test_fields(StaticTestTally* tally, const Link* link, const E
         const uint32_t slot = link->symbols.got_slot[symbol];
         uint64_t expected = 0;
         uint64_t actual = 0;
-        const bool known = static_test_symbol_value(link, image, stubbed, symbol, &expected);
+        const bool known = static_test_symbol_value(link, image, stubbed, symbol, &expected, base);
         const uint64_t offset = got != 0 ? got->sh_offset + 8 * (uint64_t)slot : 0;
         const bool inside = got != 0 && 8 * ((uint64_t)slot + 1) <= got->sh_size && offset + 8 <= file.length;
         if (slot != 0 && inside)
@@ -625,9 +720,10 @@ static int static_test_compare_entries(const void* a, const void* b)
     return x->key != y->key ? (x->key < y->key ? -1 : 1) : x->atom < y->atom ? -1 : x->atom > y->atom;
 }
 
-// The init and fini arrays: each class's atoms in the order GNU ld and lld put them, the prioritized ones by priority
-// and in id order for equal ones, then the others in id order, one after another from the section's start to its end.
-static void static_test_arrays(StaticTestTally* tally, const Link* link, const ExecutableTestImage* image, Arena* arena)
+// The init and fini arrays, in an image at `base`: each class's atoms in the order GNU ld and lld put them, the
+// prioritized ones by priority and in id order for equal ones, then the others in id order, one after another from the
+// section's start to its end.
+static void static_test_arrays(StaticTestTally* tally, const Link* link, const ExecutableTestImage* image, uint64_t base, Arena* arena)
 {
     static const char* const sections[2] = {
         ".init_array",
@@ -661,27 +757,34 @@ static void static_test_arrays(StaticTestTally* tally, const Link* link, const E
             qsort(entries, count, sizeof(StaticTestEntry), static_test_compare_entries);
         }
         const Elf64_Shdr* section = executable_test_section(image, sections[array]);
-        uint64_t address = section != 0 ? section->sh_addr - BUSTER_EXECUTABLE_BASE : 0;
+        uint64_t address = section != 0 ? section->sh_addr - base : 0;
         bool ordered = entries != 0 && (count == 0 || section != 0);
         for (uint32_t i = 0; ordered && i < count; i += 1)
         {
             ordered = link->atoms.address[entries[i].atom] == address;
             address += link->atoms.size[entries[i].atom];
         }
-        ordered = ordered && (count == 0 || address == section->sh_addr - BUSTER_EXECUTABLE_BASE + section->sh_size);
+        ordered = ordered && (count == 0 || address == section->sh_addr - base + section->sh_size);
         static_test_expect(tally, ordered, array == 0 ? ".init_array's atoms by priority, then in id order" : ".fini_array's atoms by priority, then in id order", count);
         arena_pop_to(arena, length);
     }
 }
 
-// The headers: an executable that starts at _start (`entry`), without a program interpreter or .dynamic, with crt1.o's
-// ABI note in a PT_NOTE, and PT_TLS over .tdata and .tbss.
+// The headers: an executable that starts at _start, without a program interpreter, with the start file's ABI note
+// (crt1.o's or rcrt1.o's) in a PT_NOTE, and PT_TLS over .tdata and .tbss; a static executable without .dynamic, and a
+// static PIE with PT_DYNAMIC over it and lld's tags there (static_test_dynamic).
 static void static_test_headers(StaticTestTally* tally, const Link* link, const ExecutableTestImage* image, String8 file, const Runtime* runtime, SymbolId entry)
 {
+    const bool pie = static_test_pie(runtime);
     const AtomId entry_atom = entry != 0 ? link->symbols.atom[entry] : 0;
-    static_test_expect(tally, image->valid && entry_atom != 0 && image->header->e_entry == BUSTER_EXECUTABLE_BASE + link->atoms.address[entry_atom] + link->symbols.value[entry],
-                       "an ET_EXEC that starts at _start", 0);
-    static_test_expect(tally, executable_test_segment(image, PT_INTERP) == 0 && executable_test_segment(image, PT_DYNAMIC) == 0, "no PT_INTERP or PT_DYNAMIC", 0);
+    static_test_expect(tally,
+                       image->valid && entry_atom != 0 && image->header->e_entry == static_test_base(pie) + link->atoms.address[entry_atom] + link->symbols.value[entry],
+                       "an executable that starts at _start", 0);
+    const Elf64_Phdr* dynamic = executable_test_segment(image, PT_DYNAMIC);
+    const Elf64_Shdr* dynamic_section = executable_test_section(image, ".dynamic");
+    const bool dynamic_right = pie ? dynamic != 0 && dynamic_section != 0 && dynamic->p_vaddr == dynamic_section->sh_addr && dynamic->p_filesz == dynamic_section->sh_size
+                                   : dynamic == 0 && dynamic_section == 0;
+    static_test_expect(tally, executable_test_segment(image, PT_INTERP) == 0 && dynamic_right, pie ? "no PT_INTERP, PT_DYNAMIC .dynamic" : "no PT_INTERP or PT_DYNAMIC", 0);
     bool note = false;
     for (uint32_t i = 0; image->valid && i < image->header->e_phnum; i += 1)
     {
@@ -692,7 +795,7 @@ static void static_test_headers(StaticTestTally* tally, const Link* link, const 
             note = note || memcmp(file.pointer + segment->p_offset + at, runtime->abi_note.pointer, runtime->abi_note.length) == 0;
         }
     }
-    static_test_expect(tally, note, "crt1.o's ABI note in a PT_NOTE", 0);
+    static_test_expect(tally, note, "the start file's ABI note in a PT_NOTE", 0);
     const Elf64_Shdr* tdata = executable_test_section(image, ".tdata");
     const Elf64_Shdr* tbss = executable_test_section(image, ".tbss");
     const Elf64_Phdr* tls = executable_test_segment(image, PT_TLS);
@@ -703,13 +806,147 @@ static void static_test_headers(StaticTestTally* tally, const Link* link, const 
     static_test_expect(tally, tls_right, "PT_TLS over .tdata and .tbss", 0);
 }
 
+// A static PIE's .dynamic, with lld's tags: DT_FLAGS_1 PIE, without DT_NEEDED or versions; .dynsym with the null
+// symbol alone and its empty strings; .gnu.hash; .rela.dyn's address and size, and DT_RELACOUNT its RELATIVE
+// relocations (`relative`); the init and fini arrays'; and DT_INIT and DT_FINI crti.o's functions.
+static void static_test_dynamic(StaticTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, String8 file, uint64_t relative)
+{
+    const DynamicTestImage image = dynamic_test_image(file);
+    uint64_t value = 0;
+    static_test_expect(tally, image.valid && dynamic_test_tag(&image, DT_FLAGS_1, &value) && value == DF_1_PIE, "DT_FLAGS_1 PIE", 0);
+    static_test_expect(tally, !dynamic_test_tag(&image, DT_NEEDED, &value) && !dynamic_test_tag(&image, DT_VERNEED, &value) && !dynamic_test_tag(&image, DT_VERSYM, &value),
+                       "no DT_NEEDED or versions", 0);
+    const struct
+    {
+        int64_t tag;
+        const char* section;
+        bool size;
+    } tables[] = {
+        { DT_SYMTAB, ".dynsym", false },
+        { DT_STRTAB, ".dynstr", false },
+        { DT_STRSZ, ".dynstr", true },
+        { DT_GNU_HASH, ".gnu.hash", false },
+        { DT_RELA, ".rela.dyn", false },
+        { DT_RELASZ, ".rela.dyn", true },
+        { DT_INIT_ARRAY, ".init_array", false },
+        { DT_INIT_ARRAYSZ, ".init_array", true },
+        { DT_FINI_ARRAY, ".fini_array", false },
+        { DT_FINI_ARRAYSZ, ".fini_array", true },
+    };
+    for (uint32_t t = 0; image.valid && t < BUSTER_ARRAY_LENGTH(tables); t += 1)
+    {
+        const Elf64_Shdr* section = dynamic_test_section(&image, tables[t].section);
+        const bool tagged = dynamic_test_tag(&image, tables[t].tag, &value);
+        static_test_expect(tally, section != 0 ? tagged && value == (tables[t].size ? section->sh_size : section->sh_addr) : !tagged, tables[t].section, t);
+    }
+    const Elf64_Shdr* dynsym = dynamic_test_section(&image, ".dynsym");
+    const Elf64_Shdr* dynstr = dynamic_test_section(&image, ".dynstr");
+    static const Elf64_Sym null = { 0 };
+    static_test_expect(tally,
+                       dynsym != 0 && dynsym->sh_size == sizeof(Elf64_Sym) && memcmp(dynamic_test_bytes(&image, dynsym), &null, sizeof(null)) == 0 && dynstr != 0 &&
+                           dynstr->sh_size == 1 && dynamic_test_bytes(&image, dynstr)[0] == 0,
+                       ".dynsym's null symbol alone", 0);
+    const bool counted = dynamic_test_tag(&image, DT_RELACOUNT, &value);
+    static_test_expect(tally, relative != 0 ? counted && value == relative : !counted, "DT_RELACOUNT", relative);
+    const SymbolId init = dynamic_global(runtime, bind, "_init");
+    const SymbolId fini = dynamic_global(runtime, bind, "_fini");
+    static_test_expect(tally, dynamic_test_tag(&image, DT_INIT, &value) && init != 0 && value == dynamic_test_address(link, init), "DT_INIT _init", 0);
+    static_test_expect(tally, dynamic_test_tag(&image, DT_FINI, &value) && fini != 0 && value == dynamic_test_address(link, fini), "DT_FINI _fini", 0);
+}
+
+// A relocation the test expects or the file has: where, and its addend.
+typedef struct StaticTestRelocation StaticTestRelocation;
+struct StaticTestRelocation
+{
+    uint64_t offset;
+    int64_t addend;
+};
+
+static int static_test_by_offset(const void* a, const void* b)
+{
+    const StaticTestRelocation* x = a;
+    const StaticTestRelocation* y = b;
+    return x->offset != y->offset ? (x->offset < y->offset ? -1 : 1) : x->addend < y->addend ? -1 : x->addend > y->addend;
+}
+
+// A static PIE's RELATIVE relocations (`ifuncs->relative`, first in .rela.dyn), by the test's own rules: one of each GOT
+// slot that holds an address in the image (a symbol of the image's, static_test_in_image, or an IFUNC's stub: an
+// IFUNC's slot without a stub has an IRELATIVE relocation instead), its addend the slot's value; one of each ABS64 field
+// of an atom the loader writes (.tdata, the init and fini arrays, .data.rel.ro and .data) whose target is in the image,
+// its addend the target's value and the fixup's addend; and no others.
+static void static_test_relative(StaticTestTally* tally, const Link* link, const ExecutableTestImage* image, const StaticTestIfuncs* ifuncs, const uint8_t* stubbed,
+                                 Arena* arena)
+{
+    const uint64_t length = arena->length;
+    StaticTestRelocation* expected = BUSTER_ARENA_PUSH_ARRAY(arena, StaticTestRelocation, (uint64_t)link->symbols.count + link->fixups.count);
+    StaticTestRelocation* actual = BUSTER_ARENA_PUSH_ARRAY(arena, StaticTestRelocation, ifuncs->relative_count + 1);
+    static_test_expect(tally, expected != 0 && actual != 0, "room for the relocations", 0);
+    uint64_t wanted = 0;
+    bool known = true;
+    for (SymbolId symbol = 1; expected != 0 && symbol < link->symbols.count; symbol += 1)
+    {
+        const uint32_t slot = link->symbols.got_slot[symbol];
+        const bool filled = static_test_is_ifunc(link, symbol) && stubbed[symbol] == 0;
+        uint64_t value = 0;
+        if (slot != 0 && static_test_in_image(link, symbol) && !filled)
+        {
+            known = known && static_test_symbol_value(link, image, stubbed, symbol, &value, 0);
+            expected[wanted] = (StaticTestRelocation){
+                .offset = ifuncs->got_address + 8 * (uint64_t)slot,
+                .addend = (int64_t)value,
+            };
+            wanted += 1;
+        }
+    }
+    for (AtomId atom = 1; expected != 0 && atom < link->atoms.count; atom += 1)
+    {
+        const uint8_t class = link->atoms.class[atom];
+        const bool written = class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_INIT_ARRAY || class == BUSTER_LINK_CLASS_FINI_ARRAY ||
+                             class == BUSTER_LINK_CLASS_DATA_RELRO || class == BUSTER_LINK_CLASS_DATA;
+        const FixupId begin = link->atoms.fixup_begin[atom];
+        for (FixupId fixup = begin; written && fixup < begin + link->atoms.fixup_count[atom]; fixup += 1)
+        {
+            const SymbolId target = link->fixups.target[fixup];
+            uint64_t value = 0;
+            if ((link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_ABS64 && static_test_in_image(link, target))
+            {
+                known = known && static_test_symbol_value(link, image, stubbed, target, &value, 0);
+                expected[wanted] = (StaticTestRelocation){
+                    .offset = link->atoms.address[atom] + link->fixups.offset[fixup],
+                    .addend = (int64_t)value + link_fixup_addend(link, fixup),
+                };
+                wanted += 1;
+            }
+        }
+    }
+    bool same = expected != 0 && actual != 0 && known && wanted == ifuncs->relative_count;
+    for (uint64_t i = 0; same && i < wanted; i += 1)
+    {
+        same = ELF64_R_SYM(ifuncs->relative[i].r_info) == 0;
+        actual[i] = (StaticTestRelocation){
+            .offset = ifuncs->relative[i].r_offset,
+            .addend = ifuncs->relative[i].r_addend,
+        };
+    }
+    if (same)
+    {
+        qsort(expected, wanted, sizeof(*expected), static_test_by_offset);
+        qsort(actual, wanted, sizeof(*actual), static_test_by_offset);
+        same = memcmp(expected, actual, wanted * sizeof(*expected)) == 0;
+    }
+    static_test_expect(tally, same, "a RELATIVE relocation of each slot and written ABS64 field that holds an address in the image, and no others", wanted);
+    arena_pop_to(arena, length);
+}
+
 // Every rule above, of a file `file` that executable_write (`result`) wrote of `link`, bound by `bind` against
-// `runtime`.
+// `runtime`: a static executable's, or a static PIE's.
 static void static_test_structure(StaticTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, String8 file, const ExecutableResult* result,
                                   Arena* arena)
 {
-    const ExecutableTestImage image = executable_test_image(file);
-    static_test_expect(tally, image.valid, "the file reads as an ET_EXEC", 0);
+    const bool pie = static_test_pie(runtime);
+    const uint64_t base = static_test_base(pie);
+    const ExecutableTestImage image = executable_test_image_of(file, pie ? ET_DYN : ET_EXEC);
+    static_test_expect(tally, image.valid, pie ? "the file reads as an ET_DYN" : "the file reads as an ET_EXEC", 0);
     ExecutableRuntime inputs;
     dynamic_static_inputs(&inputs, runtime, bind);
     const uint64_t length = arena->length;
@@ -719,13 +956,20 @@ static void static_test_structure(StaticTestTally* tally, const Link* link, cons
     {
         static_test_headers(tally, link, &image, file, runtime, dynamic_global(runtime, bind, "_start"));
         static_test_stubbed(link, inputs.tls_get_addr, stubbed);
-        const StaticTestIfuncs ifuncs = static_test_ifuncs(&image, file);
-        const uint64_t irelatives = static_test_ifunc_checks(tally, link, &ifuncs, stubbed);
-        static_test_expect(tally, result->relocations == irelatives && result->stubs == ifuncs.stub_count, "the result's counts of IRELATIVE relocations and stubs",
-                           result->relocations);
-        static_test_fields(tally, link, &image, file, stubbed, inputs.tls_get_addr, ifuncs.stub_count, arena);
-        // Each name of the linker's where its section or segment says, and __rela_iplt_start and __rela_iplt_end alike
-        // without IRELATIVE relocations.
+        const StaticTestIfuncs ifuncs = static_test_ifuncs(&image, file, pie);
+        const uint64_t irelatives = static_test_ifunc_checks(tally, link, &ifuncs, stubbed, base);
+        static_test_expect(tally,
+                           result->relocations == irelatives + ifuncs.relative_count && result->relative_relocations == ifuncs.relative_count &&
+                               result->stubs == ifuncs.stub_count,
+                           "the result's counts of relocations and stubs", result->relocations);
+        if (pie)
+        {
+            static_test_dynamic(tally, link, bind, runtime, file, ifuncs.relative_count);
+            static_test_relative(tally, link, &image, &ifuncs, stubbed, arena);
+        }
+        static_test_fields(tally, link, &image, file, stubbed, inputs.tls_get_addr, ifuncs.stub_count, pie, arena);
+        // Each name of the linker's where its section or segment says, and a static executable's __rela_iplt_start and
+        // __rela_iplt_end alike without IRELATIVE relocations.
         SymbolId wrong = 0;
         uint64_t iplt[2] = {
             UINT64_MAX,
@@ -736,13 +980,13 @@ static void static_test_structure(StaticTestTally* tally, const Link* link, cons
             uint64_t value = 0;
             const bool linker = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER;
             const bool known = linker && static_test_linker_value(link, &image, symbol, &value);
-            wrong = known && BUSTER_EXECUTABLE_BASE + link->symbols.reference[symbol] != value && wrong == 0 ? symbol : wrong;
+            wrong = known && base + link->symbols.reference[symbol] != value && wrong == 0 ? symbol : wrong;
             iplt[0] = linker && executable_named(link, symbol, "__rela_iplt_start") ? link->symbols.reference[symbol] : iplt[0];
             iplt[1] = linker && executable_named(link, symbol, "__rela_iplt_end") ? link->symbols.reference[symbol] : iplt[1];
         }
-        static_test_expect(tally, wrong == 0 && (ifuncs.relocation_count != 0 || iplt[0] == iplt[1]), "the linker's names where its sections and segments say", wrong);
-        static_test_arrays(tally, link, &image, arena);
-        const char* unwind = executable_test_unwind(link, file, BUSTER_EXECUTABLE_BASE, bind->unit_base, result);
+        static_test_expect(tally, wrong == 0 && (pie || ifuncs.relocation_count != 0 || iplt[0] == iplt[1]), "the linker's names where its sections and segments say", wrong);
+        static_test_arrays(tally, link, &image, base, arena);
+        const char* unwind = executable_test_unwind(link, file, base, bind->unit_base, result);
         static_test_expect(tally, unwind == 0, unwind != 0 ? unwind : "the unwind tables", 0);
     }
     arena_pop_to(arena, length);
@@ -757,7 +1001,7 @@ static void static_test_structure(StaticTestTally* tally, const Link* link, cons
 static bool static_test_programs(const ExecutableTestDirectory* directory, const Runtime* runtime, uint64_t seed, uint32_t functions)
 {
     StaticTestTally tally = {
-        .check = "programs",
+        .check = static_test_pie(runtime) ? "programs, static PIEs" : "programs",
     };
     LinkProgramOptions options[BUSTER_STATIC_TEST_PROGRAMS];
     link_test_program_options(options, seed, functions);
@@ -786,9 +1030,10 @@ static bool static_test_programs(const ExecutableTestDirectory* directory, const
             }
             const bool ran = written && executable_test_runs(path.pointer, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES);
             static_test_expect(&tally, ran, "the program runs as its model predicts", i);
-            printf("  %s: %u atoms, %u fixups, %llu stubs, %llu IRELATIVE relocations, %llu GOT slots, %llu FDEs, %llu bytes: %s\n", name,
+            printf("  %s: %u atoms, %u fixups, %llu stubs, %llu relocations (%llu RELATIVE), %llu GOT slots, %llu FDEs, %llu bytes: %s\n", name,
                    bound.program.link.atoms.count - 1, bound.program.link.fixups.count - 1, (unsigned long long)result.stubs, (unsigned long long)result.relocations,
-                   (unsigned long long)result.got_slots, (unsigned long long)result.fdes, (unsigned long long)result.file_size, ran ? "ran" : "didn't run");
+                   (unsigned long long)result.relative_relocations, (unsigned long long)result.got_slots, (unsigned long long)result.fdes,
+                   (unsigned long long)result.file_size, ran ? "ran" : "didn't run");
             scratch_end(scratch);
             if (!directory->keep)
             {
@@ -806,7 +1051,9 @@ static bool static_test_programs(const ExecutableTestDirectory* directory, const
 // A program that cc compiles, or assembles: its name, its source, an option for cc and for the link, a condition for
 // cc to meet, a preprocessor expression (0 for none), without which the program isn't compiled, assembly that defines
 // absolute symbols (0 for none), which an object of its own holds (static_test_combine), and whether lld links it
-// wrong, so that the cross-check only has lld link it.
+// wrong, so that the cross-check only has lld link it. As a static PIE: the status it must run with where GNU ld's
+// link runs otherwise (0 when they agree), or whether a static PIE refuses it (EXECUTABLE_ERROR_RELOCATION), as
+// cc -static-pie does.
 typedef struct StaticTestSource StaticTestSource;
 struct StaticTestSource
 {
@@ -817,6 +1064,8 @@ struct StaticTestSource
     const char* definitions;
     bool assembly;
     bool lld_wrong;
+    int pie_status;
+    bool pie_refused;
 };
 
 // test-bind's C programs come first (bind_test_static_sources), then these:
@@ -829,12 +1078,16 @@ struct StaticTestSource
 //   - tls: each general- and local-dynamic sequence, through the PLT and through the GOT, two local-dynamic offsets from
 //     one module's block among them: the sum, 31, is its status;
 //   - ifunc: a local IFUNC called directly, called through a pointer in .data and its address compared with the
-//     pointer's (a stub's address everywhere), and a global one called through its GOT slot: 21 + 21 + 10 + 1 = 53;
+//     pointer's (a stub's address everywhere), and a global one called through its GOT slot: 21 + 21 + 10 + 1 = 53.
+//     As a static PIE too, as lld's link runs; GNU ld's gives the pointer in .data the IFUNC's implementation, from an
+//     IRELATIVE relocation of its own, where a lea gives its .iplt entry, and the comparison fails: status 52;
 //   - weak-ifunc: a weak IFUNC defined nowhere, which has no resolver: loaded through its GOT slot, taken by a lea and
 //     pointed to from .data, each 0, and called by a function that never runs: status 0. lld 23 links it wrong: it
-//     makes an IRELATIVE relocation of the IFUNC with resolver 0, and its program faults at startup (GNU ld's runs);
+//     makes an IRELATIVE relocation of the IFUNC with resolver 0, and its program faults at startup (GNU ld's runs). A
+//     static PIE refuses its lea of address 0, as GNU ld does;
 //   - absolute: absolute symbols, one at 42 and one below the image, taken by a lea, through a GOT slot, as a 32-bit
-//     immediate and pointed to from .data, each its value: status 0.
+//     immediate and pointed to from .data, each its value: status 0. A static PIE refuses its lea of an absolute
+//     symbol, as GNU ld and lld do.
 static const StaticTestSource static_test_sources[] = {
     {
         .name = "priorities",
@@ -967,6 +1220,7 @@ static const StaticTestSource static_test_sources[] = {
                   "    .quad chosen\n"
                   "    .section .note.GNU-stack,\"\",@progbits\n",
         .assembly = true,
+        .pie_status = 53,
     },
     {
         .name = "weak-ifunc",
@@ -994,6 +1248,7 @@ static const StaticTestSource static_test_sources[] = {
                   "    .section .note.GNU-stack,\"\",@progbits\n",
         .assembly = true,
         .lld_wrong = true,
+        .pie_refused = true,
     },
     {
         .name = "absolute",
@@ -1030,6 +1285,7 @@ static const StaticTestSource static_test_sources[] = {
                        "    .set buster_low, 0x1000\n"
                        "    .section .note.GNU-stack,\"\",@progbits\n",
         .assembly = true,
+        .pie_refused = true,
     },
 };
 
@@ -1090,12 +1346,14 @@ static bool static_test_condition(const char* path, const char* condition, const
     return result;
 }
 
-// What the cross-check compares of two static executables of one program: their IRELATIVE relocations (in any
-// SHT_RELA section), whether they have a TLS segment and its alignment, and their init and fini arrays' sizes.
+// What the cross-check compares of two static executables, or two static PIEs (`pie`), of one program: their IRELATIVE
+// and RELATIVE relocations (in any SHT_RELA section), whether they have a TLS segment and its alignment, and their init
+// and fini arrays' sizes.
 typedef struct StaticTestShape StaticTestShape;
 struct StaticTestShape
 {
     uint64_t irelatives;
+    uint64_t relatives;
     uint64_t tls_alignment;
     uint64_t init_array;
     uint64_t fini_array;
@@ -1103,9 +1361,9 @@ struct StaticTestShape
     bool valid;
 };
 
-static StaticTestShape static_test_shape(String8 file)
+static StaticTestShape static_test_shape(String8 file, bool pie)
 {
-    const ExecutableTestImage image = executable_test_image(file);
+    const ExecutableTestImage image = executable_test_image_of(file, pie ? ET_DYN : ET_EXEC);
     StaticTestShape result = {
         .valid = image.valid,
     };
@@ -1117,6 +1375,7 @@ static StaticTestShape static_test_shape(String8 file)
         for (uint64_t r = 0; relocations && r < section->sh_size / sizeof(Elf64_Rela); r += 1)
         {
             result.irelatives += ELF64_R_TYPE(rela[r].r_info) == R_X86_64_IRELATIVE ? 1 : 0;
+            result.relatives += ELF64_R_TYPE(rela[r].r_info) == R_X86_64_RELATIVE ? 1 : 0;
         }
     }
     const Elf64_Phdr* tls = executable_test_segment(&image, PT_TLS);
@@ -1154,20 +1413,76 @@ static bool static_test_same_runs(const StaticTestRun* a, const StaticTestRun* b
     return a->exited && b->exited && a->status == b->status && a->length == b->length && memcmp(a->output, b->output, a->length) == 0;
 }
 
+// The link's symbol of a name, or 0.
+static SymbolId static_test_symbol(const Link* link, const char* name)
+{
+    SymbolId result = 0;
+    for (SymbolId symbol = 1; result == 0 && symbol < link->symbols.count; symbol += 1)
+    {
+        result = executable_named(link, symbol, name) ? symbol : 0;
+    }
+    return result;
+}
+
+// The link's first fixup of a kind, to a symbol named `target` if it isn't null, or 0.
+static FixupId static_test_first_fixup(const Link* link, uint8_t kind, const char* target)
+{
+    FixupId result = 0;
+    for (FixupId fixup = 1; result == 0 && fixup < link->fixups.count; fixup += 1)
+    {
+        const bool to = target == 0 || executable_named(link, link->fixups.target[fixup], target);
+        result = (link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == kind && to ? fixup : 0;
+    }
+    return result;
+}
+
+// Writes the link BUSTER_STATIC_TEST_WRITES times as static_test_lanes does (every lane count, then the exact twins),
+// each of which must fail with `error`, naming `symbol` if it isn't 0 and otherwise `fixup`, without an output: whether
+// every one did.
+static bool static_test_refuses(StaticTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, const char* name, ExecutableError error,
+                                SymbolId symbol, FixupId fixup)
+{
+    bool result = true;
+    for (uint32_t w = 0; w < BUSTER_STATIC_TEST_WRITES; w += 1)
+    {
+        const uint32_t lanes = static_test_write_lanes(w);
+        const bool exact = w >= BUSTER_ARRAY_LENGTH(static_test_lane_counts);
+        DynamicTestWrite write = {
+            .exact = exact,
+        };
+        ExecutableResult written;
+        unlink(path.pointer);
+        const bool succeeded = static_test_write_with(&write, link, bind, runtime, path, lanes, &written);
+        const bool named = symbol != 0 ? written.symbol == symbol : written.fixup == fixup;
+        const bool refused = !succeeded && written.error == error && named && access(path.pointer, F_OK) != 0;
+        if (!refused)
+        {
+            executable_test_print_failure(name, &written);
+        }
+        static_test_expect(tally, refused, name, (exact ? 100 : 0) + lanes);
+        result = result && refused;
+    }
+    return result;
+}
+
 // Each source compiled by cc, imported as the program's unit and bound by the vector path, then written by
 // static_test_lanes into a/NAME and checked by static_test_structure: it must run as cc -static's link of the same
 // object into b/NAME does, and with the cross-check as lld's into c/NAME does, which must have its shape
-// (static_test_shape).
+// (static_test_shape); as a static PIE, into d/NAME, e/NAME and f/NAME by cc -static-pie's links, but for one that runs
+// otherwise there with GNU ld (StaticTestSource.pie_status), and one that a static PIE refuses
+// (StaticTestSource.pie_refused), which every write must refuse, naming its first PC32, as cc -static-pie refuses it.
 static bool static_test_compiled(const ExecutableTestDirectory* directory, const Runtime* runtime, bool cross_check)
 {
+    const bool pie = static_test_pie(runtime);
+    char* const flag = pie ? "-static-pie" : "-static";
     StaticTestTally tally = {
-        .check = "compiled",
+        .check = pie ? "compiled, static PIEs" : "compiled",
     };
     char sides[3][BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     bool made = true;
     for (uint32_t side = 0; side < 3; side += 1)
     {
-        snprintf(sides[side], sizeof(sides[side]), "%s/%c", directory->path, 'a' + side);
+        snprintf(sides[side], sizeof(sides[side]), "%s/%c", directory->path, (pie ? 'd' : 'a') + side);
         made = made && mkdir(sides[side], 0700) == 0;
     }
     static_test_expect(&tally, made, "the links' directories made", 0);
@@ -1192,9 +1507,10 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
         const bool compiled = wanted && static_test_write_text(source_path, program.source) && object_test_run(compile, out, err) == 0 &&
                               (program.definitions == 0 || static_test_combine(object_path, program.definitions, out, err));
         static_test_expect(&tally, !wanted || compiled, program.name, s);
-        char* reference[] = { "cc", "-static", "-o", paths[1], object_path, (char*)program.option, 0 };
+        const bool refusing = pie && program.pie_refused;
+        char* reference[] = { "cc", flag, "-o", paths[1], object_path, (char*)program.option, 0 };
         const bool referenced = compiled && object_test_run(reference, out, err) == 0;
-        static_test_expect(&tally, !compiled || referenced, "cc -static links it", s);
+        static_test_expect(&tally, !compiled || referenced != refusing, refusing ? "cc -static-pie refuses it" : pie ? "cc -static-pie links it" : "cc -static links it", s);
         Scratch scratch = scratch_begin(0);
         const String8 object = compiled ? object_test_read_file(scratch.arena, object_path) : (String8){ 0 };
         BindTestLink test = { 0 };
@@ -1209,25 +1525,35 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
         };
         ExecutableResult result = { 0 };
         String8 file = { 0 };
-        const bool written = bound && static_test_lanes(&tally, &test.link, &test.bind, runtime, path, program.name, &result, &file, scratch.arena);
+        const bool refused = bound && refusing &&
+                             static_test_refuses(&tally, &test.link, &test.bind, runtime, path, program.name, EXECUTABLE_ERROR_RELOCATION, 0,
+                                                 static_test_first_fixup(&test.link, BUSTER_LINK_FIXUP_PC32, 0));
+        const bool written = bound && !refusing && static_test_lanes(&tally, &test.link, &test.bind, runtime, path, program.name, &result, &file, scratch.arena);
         if (written)
         {
             static_test_structure(&tally, &test.link, &test.bind, runtime, file, &result, scratch.arena);
         }
         const StaticTestRun ours = written ? static_test_run(paths[0]) : (StaticTestRun){ 0 };
         const StaticTestRun theirs = referenced ? static_test_run(paths[1]) : (StaticTestRun){ 0 };
-        static_test_expect(&tally, !written || !referenced || static_test_same_runs(&ours, &theirs), "runs as cc -static's link does", s);
-        char* lld[] = { "cc", "-static", "-fuse-ld=lld", "-o", paths[2], object_path, (char*)program.option, 0 };
-        const bool lld_linked = cross_check && compiled && object_test_run(lld, out, err) == 0;
-        static_test_expect(&tally, !cross_check || !compiled || lld_linked, "lld links it with -static", s);
+        const bool own_status = pie && program.pie_status != 0;
+        const bool runs_alike = own_status ? ours.exited && ours.status == program.pie_status : static_test_same_runs(&ours, &theirs);
+        static_test_expect(&tally, !written || !referenced || runs_alike,
+                           own_status ? "runs with its status, where GNU ld's static PIE differs" : pie ? "runs as cc -static-pie's link does" : "runs as cc -static's link does", s);
+        char* lld[] = { "cc", flag, "-fuse-ld=lld", "-o", paths[2], object_path, (char*)program.option, 0 };
+        const bool lld_linked = cross_check && compiled && !refusing && object_test_run(lld, out, err) == 0;
+        static_test_expect(&tally, !cross_check || !compiled || refusing || lld_linked, pie ? "lld links it with -static-pie" : "lld links it with -static", s);
         if (lld_linked && !program.lld_wrong)
         {
             const StaticTestRun lld_run = static_test_run(paths[2]);
             static_test_expect(&tally, !written || static_test_same_runs(&ours, &lld_run), "runs as lld's link does", s);
-            const StaticTestShape shape = written ? static_test_shape(file) : (StaticTestShape){ 0 };
-            const StaticTestShape lld_shape = static_test_shape(object_test_read_file(scratch.arena, paths[2]));
+            const StaticTestShape shape = written ? static_test_shape(file, pie) : (StaticTestShape){ 0 };
+            const StaticTestShape lld_shape = static_test_shape(object_test_read_file(scratch.arena, paths[2]), pie);
             static_test_expect(&tally, !written || (shape.valid && lld_shape.valid && shape.irelatives == lld_shape.irelatives), "as many IRELATIVE relocations as lld's",
                                shape.irelatives);
+            if (pie)
+            {
+                printf("  %s: %llu RELATIVE relocations, lld's link %llu\n", program.name, (unsigned long long)shape.relatives, (unsigned long long)lld_shape.relatives);
+            }
             static_test_expect(&tally, !written || (shape.tls == lld_shape.tls && shape.tls_alignment == lld_shape.tls_alignment), "lld's TLS segment's alignment",
                                shape.tls_alignment);
             static_test_expect(&tally, !written || (shape.init_array == lld_shape.init_array && shape.fini_array == lld_shape.fini_array), "lld's init and fini arrays' sizes",
@@ -1242,12 +1568,16 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
         {
             printf("  %s: skipped, cc doesn't meet %s\n", program.name, program.condition);
         }
+        else if (refusing)
+        {
+            printf("  %s: %s, as cc -static-pie refuses it\n", program.name, refused ? "refused" : "not refused");
+        }
         else
         {
-            printf("  %s: %u members joined, %u atoms, %u fixups, %llu stubs, %llu IRELATIVE relocations, %llu bytes: status %d (cc's %d), %s\n", program.name, joined,
-                   bound ? test.link.atoms.count - 1 : 0, bound ? test.link.fixups.count - 1 : 0, (unsigned long long)result.stubs,
-                   (unsigned long long)result.relocations, (unsigned long long)result.file_size, ours.status, theirs.status,
-                   written && static_test_same_runs(&ours, &theirs) ? "the same output" : "different");
+            printf("  %s: %u members joined, %u atoms, %u fixups, %llu stubs, %llu relocations (%llu RELATIVE), %llu bytes: status %d (cc's %d), %s\n", program.name,
+                   joined, bound ? test.link.atoms.count - 1 : 0, bound ? test.link.fixups.count - 1 : 0, (unsigned long long)result.stubs,
+                   (unsigned long long)result.relocations, (unsigned long long)result.relative_relocations, (unsigned long long)result.file_size, ours.status, theirs.status,
+                   written && runs_alike ? (own_status ? "its own status" : "the same output") : "different");
         }
         if (object.pointer != 0)
         {
@@ -1276,15 +1606,18 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
 // ---------------------------------------------------------------------------------------------------------------------
 // The refusals
 
-// Assembly that cc assembles and that binding binds, which a static executable refuses: the error, and the symbol it
-// names (by name) or the fixup (the first of its kind, or of its kind to `target`); and assembly that defines absolute
-// symbols in an object of its own (static_test_combine), or 0.
+// Assembly that cc assembles and that binding binds, which a static executable or a static PIE refuses: the error, and
+// the symbol it names (by name) or the fixup (the first of its kind, or of its kind to `target`); the error a static
+// PIE refuses it with, if another (`pie_error`), and whether only a static PIE refuses it; and assembly that defines
+// absolute symbols in an object of its own (static_test_combine), or 0.
 typedef struct StaticTestRefusal StaticTestRefusal;
 struct StaticTestRefusal
 {
     const char* name;
     const char* source;
     ExecutableError error;
+    ExecutableError pie_error;
+    bool pie_only;
     const char* symbol;
     uint8_t kind;
     const char* target;
@@ -1350,7 +1683,8 @@ static const StaticTestRefusal static_test_refusals[] = {
     },
     {
         // Its offset from the base is INT32_MIN, which a reference holds, but S + A - P is below it from anywhere in
-        // the image: GNU ld says the relocation is truncated to fit.
+        // the image: GNU ld says the relocation is truncated to fit. A static PIE refuses a PC32 to any absolute symbol,
+        // which no load address makes right.
         .name = "a lea of an absolute symbol farther than int32 from it",
         .source = "    .text\n"
                   "    .globl main\n"
@@ -1361,36 +1695,70 @@ static const StaticTestRefusal static_test_refusals[] = {
                   "    ret\n"
                   "    .section .note.GNU-stack,\"\",@progbits\n",
         .error = EXECUTABLE_ERROR_FIXUP,
+        .pie_error = EXECUTABLE_ERROR_RELOCATION,
         .kind = BUSTER_LINK_FIXUP_PC32,
         .target = "far_below",
         .definitions = "    .globl far_below\n"
                        "    .set far_below, 0xffffffff80400000\n"
                        "    .section .note.GNU-stack,\"\",@progbits\n",
     },
+    {
+        // A text relocation: -z text, which cc -static-pie passes, refuses it.
+        .name = "a pointer to main in .rodata",
+        .source = "    .section .rodata\n"
+                  "    .align 8\n"
+                  "table:\n"
+                  "    .quad main\n"
+                  "    .text\n"
+                  "    .globl main\n"
+                  "    .type main, @function\n"
+                  "main:\n"
+                  "    movq table(%rip), %rax\n"
+                  "    xorl %eax, %eax\n"
+                  "    ret\n"
+                  "    .section .note.GNU-stack,\"\",@progbits\n",
+        .error = EXECUTABLE_ERROR_RELOCATION,
+        .pie_only = true,
+        .kind = BUSTER_LINK_FIXUP_ABS64,
+    },
+    {
+        // No load address fits a 32-bit absolute field of an address in the image.
+        .name = "an ABS32 to main in .data",
+        .source = "    .data\n"
+                  "    .align 4\n"
+                  "word:\n"
+                  "    .long main\n"
+                  "    .text\n"
+                  "    .globl main\n"
+                  "    .type main, @function\n"
+                  "main:\n"
+                  "    movl word(%rip), %eax\n"
+                  "    xorl %eax, %eax\n"
+                  "    ret\n"
+                  "    .section .note.GNU-stack,\"\",@progbits\n",
+        .error = EXECUTABLE_ERROR_RELOCATION,
+        .pie_only = true,
+        .kind = BUSTER_LINK_FIXUP_ABS32,
+    },
+    {
+        // Address 0, which a static PIE's weak reference to nothing is wherever the image loads: no field measured
+        // from the image reaches it.
+        .name = "a lea of a weak reference to nothing",
+        .source = "    .weak absent\n"
+                  "    .text\n"
+                  "    .globl main\n"
+                  "    .type main, @function\n"
+                  "main:\n"
+                  "    leaq absent(%rip), %rax\n"
+                  "    xorl %eax, %eax\n"
+                  "    ret\n"
+                  "    .section .note.GNU-stack,\"\",@progbits\n",
+        .error = EXECUTABLE_ERROR_RELOCATION,
+        .pie_only = true,
+        .kind = BUSTER_LINK_FIXUP_PC32,
+        .target = "absent",
+    },
 };
-
-// The link's symbol of a name, or 0.
-static SymbolId static_test_symbol(const Link* link, const char* name)
-{
-    SymbolId result = 0;
-    for (SymbolId symbol = 1; result == 0 && symbol < link->symbols.count; symbol += 1)
-    {
-        result = executable_named(link, symbol, name) ? symbol : 0;
-    }
-    return result;
-}
-
-// The link's first fixup of a kind, to a symbol named `target` if it isn't null, or 0.
-static FixupId static_test_first_fixup(const Link* link, uint8_t kind, const char* target)
-{
-    FixupId result = 0;
-    for (FixupId fixup = 1; result == 0 && fixup < link->fixups.count; fixup += 1)
-    {
-        const bool to = target == 0 || executable_named(link, link->fixups.target[fixup], target);
-        result = (link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == kind && to ? fixup : 0;
-    }
-    return result;
-}
 
 // Assembles `source` into the directory as NAME.o, with `definitions` (if it isn't 0) combined into it
 // (static_test_combine), then imports and binds it into `test` by the vector path: whether it could. `test` holds
@@ -1491,18 +1859,24 @@ static void static_test_starved(StaticTestTally* tally, BindTestLink* test, cons
     static_test_restore(&test->link, saved);
 }
 
-// Each refusal refused by every lane count and by the exact twins with 1 and 8 lanes, naming its symbol or fixup,
-// without an output; then the starved lanes on the tls program, which runs with status 31.
+// Each refusal of the runtime's kind refused by every lane count and by the exact twins with 1 and 8 lanes, naming its
+// symbol or fixup, without an output; then the starved lanes on the tls program, which runs with status 31.
 static bool static_test_refused(const ExecutableTestDirectory* directory, const Runtime* runtime)
 {
+    const bool pie = static_test_pie(runtime);
     StaticTestTally tally = {
-        .check = "refusals",
+        .check = pie ? "refusals, static PIEs" : "refusals",
     };
     char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     const String8 path = executable_test_path(directory, "refused", path_bytes);
     for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(static_test_refusals); r += 1)
     {
         const StaticTestRefusal* refusal = &static_test_refusals[r];
+        const ExecutableError error = pie && refusal->pie_error != EXECUTABLE_ERROR_NONE ? refusal->pie_error : refusal->error;
+        if (refusal->pie_only && !pie)
+        {
+            continue;
+        }
         Scratch scratch = scratch_begin(0);
         BindTestLink test = { 0 };
         bool imported = false;
@@ -1513,26 +1887,7 @@ static bool static_test_refused(const ExecutableTestDirectory* directory, const 
         const SymbolId symbol = bound && refusal->symbol != 0 ? static_test_symbol(&test.link, refusal->symbol) : 0;
         const FixupId fixup = bound && refusal->kind != 0 ? static_test_first_fixup(&test.link, refusal->kind, refusal->target) : 0;
         static_test_expect(&tally, !bound || symbol != 0 || fixup != 0, "what the refusal names is in the link", r);
-        bool outcome = bound;
-        for (uint32_t w = 0; bound && w < BUSTER_STATIC_TEST_WRITES; w += 1)
-        {
-            const uint32_t lanes = static_test_write_lanes(w);
-            const bool exact = w >= BUSTER_ARRAY_LENGTH(static_test_lane_counts);
-            DynamicTestWrite write = {
-                .exact = exact,
-            };
-            ExecutableResult result;
-            unlink(path.pointer);
-            const bool written = static_test_write_with(&write, &test.link, &test.bind, runtime, path, lanes, &result);
-            const bool named = refusal->symbol != 0 ? result.symbol == symbol : result.fixup == fixup;
-            const bool refused = !written && result.error == refusal->error && named && access(path.pointer, F_OK) != 0;
-            if (!refused)
-            {
-                executable_test_print_failure(refusal->name, &result);
-            }
-            static_test_expect(&tally, refused, refusal->name, (exact ? 100 : 0) + lanes);
-            outcome = outcome && refused;
-        }
+        const bool outcome = bound && static_test_refuses(&tally, &test.link, &test.bind, runtime, path, refusal->name, error, symbol, fixup);
         printf("  %s: %s\n", refusal->name, outcome ? "refused" : "wrong");
         if (imported)
         {
@@ -1607,7 +1962,9 @@ static int run_static_tests(int argc, char** argv)
     const int length = snprintf(directory.path, sizeof(directory.path), "%s/buster-static-XXXXXX", parent);
     int result = 1;
     Runtime runtime;
+    Runtime pie;
     const RuntimeError imported = valid ? runtime_import_static(&runtime) : RUNTIME_ERROR_NONE;
+    const RuntimeError pie_imported = valid ? runtime_import_static_pie(&pie) : RUNTIME_ERROR_NONE;
     if (!valid)
     {
         fprintf(stderr, "usage: test-static [--seed N] [--functions N] [--directory PATH] [--cross-check] [--keep]\n");
@@ -1615,6 +1972,10 @@ static int run_static_tests(int argc, char** argv)
     else if (imported != RUNTIME_ERROR_NONE)
     {
         fprintf(stderr, "the static runtime didn't import: error %d, %s\n", (int)imported, runtime.failed_file);
+    }
+    else if (pie_imported != RUNTIME_ERROR_NONE)
+    {
+        fprintf(stderr, "the static PIE's runtime didn't import: error %d, %s\n", (int)pie_imported, pie.failed_file);
     }
     else if (length <= 0 || (uint64_t)length + 64 >= sizeof(directory.path) || mkdtemp(directory.path) == 0)
     {
@@ -1626,9 +1987,14 @@ static int run_static_tests(int argc, char** argv)
     }
     else
     {
-        bool passed = static_test_programs(&directory, &runtime, seed, (uint32_t)functions);
-        passed = static_test_compiled(&directory, &runtime, cross_check) && passed;
-        passed = static_test_refused(&directory, &runtime) && passed;
+        bool passed = true;
+        for (uint32_t kind = 0; kind < 2; kind += 1)
+        {
+            const Runtime* tested = kind == 0 ? &runtime : &pie;
+            passed = static_test_programs(&directory, tested, seed, (uint32_t)functions) && passed;
+            passed = static_test_compiled(&directory, tested, cross_check) && passed;
+            passed = static_test_refused(&directory, tested) && passed;
+        }
         result = passed ? 0 : 1;
         if (keep)
         {
@@ -1642,6 +2008,7 @@ static int run_static_tests(int argc, char** argv)
     if (valid)
     {
         runtime_release(&runtime);
+        runtime_release(&pie);
     }
     return result;
 }

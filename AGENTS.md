@@ -246,7 +246,12 @@ designs and the compilers already built this way.
   (`crt1.o`, `crtbeginT.o` and `crtend.o`, and the archives of GCC's group:
   `libgcc.a`, `libgcc_eh.a`, `libatomic.a` where GCC has it, and `libc.a`),
   with each member's strong references and COMDAT groups (step 6's first
-  part).
+  part), and `runtime_import_static_pie` for a static PIE's (`rcrt1.o`,
+  `crtbeginS.o` and `crtendS.o` with the same archives; step 6's fifth part).
+  The object reader gives `GOTPCRELX` and `REX_GOTPCRELX` relocations the
+  kinds a linker may rewrite (`CALL_GOT` and `LOAD_GOT`) only on the
+  instructions those kinds are (`call` or `jmp` through the slot, a `mov`
+  from it with `REX.W`), and `GOTPCREL` on any other.
   `import_test.c` holds their tests (`main.c` includes it; `./build/compiler
   test-import` runs them) and `import_benchmark.c` provides
   `benchmark-import`.
@@ -269,23 +274,30 @@ designs and the compilers already built this way.
   link in that representation laid out, patched and written with a build ID
   by every lane of a group, as a static executable without libc (step 4 of
   the design's plan), as a dynamic PIE against glibc (step 5's third part),
-  with its dynamic symbols, stubs and relocations, RELR among them, or as a
+  with its dynamic symbols, stubs and relocations, RELR among them, as a
   static executable with the C runtime (step 6's third part), with its
   IFUNCs' stubs and IRELATIVE relocations, its general- and local-dynamic
   TLS accesses relaxed to local-exec and its init and fini arrays' priorities,
-  from vector passes with exact twins. `dynamic.c` gives it what a PIE needs
-  from the C runtime and from binding (`dynamic_inputs`), and what a static
-  executable with the C runtime needs (`dynamic_static_inputs`).
-  `executable_test.c` holds the static executables' tests without libc
-  (`./build/compiler test-executable` runs them), `dynamic_test.c` the PIEs'
-  (`./build/compiler test-dynamic`) and `static_test.c` those with libc
-  (`./build/compiler test-static`); `main.c` includes all three, and
-  `executable_benchmark.c` provides `benchmark-executable`.
+  or as a static PIE (step 6's fifth part): the PIE's layout and RELATIVE
+  relocations without dynamic symbols, the static runtime's IFUNCs with their
+  IRELATIVE relocations last in `.rela.dyn`, and its loads and calls through
+  the GOT of the image's symbols relaxed; all from vector passes with exact
+  twins. `dynamic.c` gives it what a PIE needs from the C runtime and from
+  binding (`dynamic_inputs`), what a static executable with the C runtime
+  needs (`dynamic_static_inputs`) and what a static PIE needs
+  (`dynamic_static_pie_inputs`). `executable_test.c` holds the static
+  executables' tests without libc (`./build/compiler test-executable` runs
+  them), `dynamic_test.c` the PIEs' (`./build/compiler test-dynamic`) and
+  `static_test.c` those with libc and the static PIEs' (`./build/compiler
+  test-static`); `main.c` includes all three, and `executable_benchmark.c`
+  provides `benchmark-executable`.
 - `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
-  part, and step 6's for the static runtime): what `runtime_import` (or
-  `runtime_import_static`) makes of the C runtime, kept in a file per kind in
-  the cache directory (`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster`),
-  which `runtime_open` (or `runtime_open_static`) maps and uses in place when
+  part, and step 6's for the static runtimes): what `runtime_import` (or
+  `runtime_import_static`, or `runtime_import_static_pie`) makes of the C
+  runtime, kept in a file per kind in the cache directory
+  (`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster`), which `runtime_open`
+  (or `runtime_open_static`, or `runtime_open_static_pie`) maps and uses in
+  place when
   this executable wrote it, it is of the kind, its directory hashes right and
   every file the import probed is as it was, and otherwise rebuilds and renames
   into place. Binding checks each piece of it (a crt object or a member) when
@@ -997,7 +1009,10 @@ the 9700X, and 0.26 s with `--cross-check`) checks `import.c` and
   and every relocation type the representation has, out of order, with
   `R_X86_64_NONE` and addends past int32, a COMDAT group and prioritized init
   and fini arrays: each section, symbol, fixup, group and priority imported
-  exactly, the atoms' bytes in place in the file; the same with its
+  exactly, the atoms' bytes in place in the file; among them `GOTPCRELX` and
+  `REX_GOTPCRELX` relocations on a `call`, a `jmp` and a `mov` through the GOT,
+  which import as `CALL_GOT` and `LOAD_GOT`, and on a `push`, an `add` and a
+  `mov` whose addend isn't -4, which import as `GOTPCREL`; the same with its
   relocations in order, with `e_shnum` and `e_shstrndx` in section 0, with
   `.eh_frame` as `SHT_PROGBITS` and with tables' `sh_entsize` 0; and one
   without a symbol table, as `crtn.o` is. Then each check a well-formed object
@@ -1072,7 +1087,9 @@ the 9700X, and 0.26 s with `--cross-check`) checks `import.c` and
 version, type, binding and size) and references with `readelf -W --dyn-syms`,
 and every relocation of the crt objects and the archives' members, the static
 runtime's among them, with `readelf -W -r`: each one must be a fixup of its
-kind at its offset, against the symbol (or the section) readelf names, with
+kind at its offset (a `GOTPCRELX` or `REX_GOTPCRELX` one's by the instruction
+before it, as the test reads it: 379 of `libgcc.a`'s are `GOTPCREL` on the
+9700X, adds of slots), against the symbol (or the section) readelf names, with
 its addend, and there must be no other fixups. `--seed N` changes the programs
 and the random bytes. The default 9700X job runs it with `--cross-check` after
 the object writer's benchmark.
@@ -1413,30 +1430,48 @@ push saves at the CFA less the new offset, and one a pop restores as it was.
 ## Static executable tests
 
 `./build/compiler test-static [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 1.2 s on the 9700X, and 1.3 s with
+[--cross-check] [--keep]` (about 2.5 s on the 9700X, and 2.7 s with
 `--cross-check`) checks `executable.c`'s static executables with the C
-runtime against this system's static runtime (`runtime_import_static`), in a
+runtime against this system's static runtime (`runtime_import_static`), then
+its static PIEs against the static PIE's (`runtime_import_static_pie`), in a
 directory of its own under `--directory` (`TMPDIR` or `/tmp` by default),
 which it removes unless `--keep`. Each program is bound by `bind.c` and
 written by groups of 1, 2, 3 and 8 lanes and by the writer's exact twins with
 1 and 8 lanes, each time from the atoms' bytes as binding left them (the TLS
-relaxation rewrites them), with zeroed fields over the last file scribbled
-over, every other time over poisoned scratch memory: the files must be
-byte-identical. Each file is read back and checked by the test's own rules:
+relaxation and a static PIE's GOT relaxation rewrite them), with zeroed fields
+over the last file scribbled over, every other time over poisoned scratch
+memory: the files must be byte-identical. Each file is read back and checked
+by the test's own rules:
 
-- the headers: `ET_EXEC` from `_start`, no `PT_INTERP` or `PT_DYNAMIC`, a
-  `PT_NOTE` with `crt1.o`'s ABI note, and `PT_TLS` over `.tdata` and `.tbss`;
-- the IFUNCs: an `IRELATIVE` relocation in `.rela.iplt` for each stub's slot
-  and for each IFUNC's GOT slot without a stub, its addend the IFUNC's
-  resolver; each stub in `.iplt` a `jmp` through its own slot; an IFUNC with
-  a stub at its stub's address everywhere, its GOT slot too; and
+- the headers: `_start` the entry, no `PT_INTERP`, a `PT_NOTE` with the start
+  file's ABI note (`crt1.o`'s or `rcrt1.o`'s), and `PT_TLS` over `.tdata` and
+  `.tbss`; a static executable an `ET_EXEC` without `PT_DYNAMIC`, and a static
+  PIE an `ET_DYN` with `PT_DYNAMIC` over `.dynamic`, whose tags are lld's:
+  `DT_FLAGS_1` PIE, no `DT_NEEDED` or versions, `.dynsym` with the null
+  symbol alone, `.rela.dyn`'s address and size and `DT_RELACOUNT` its
+  RELATIVE relocations, the arrays', and `DT_INIT` and `DT_FINI` `crti.o`'s
+  functions;
+- the IFUNCs: an `IRELATIVE` relocation for each stub's slot and for each
+  IFUNC's GOT slot without a stub, its addend the IFUNC's resolver, in
+  `.rela.iplt` (a static PIE's after its RELATIVE ones in `.rela.dyn`); each
+  stub in `.iplt` a `jmp` through its own slot; an IFUNC with a stub at its
+  stub's address everywhere, its GOT slot too; and a static executable's
   `__rela_iplt_start` and `__rela_iplt_end` at `.rela.iplt`'s bounds;
+- a static PIE's RELATIVE relocations: one of each GOT slot that holds an
+  address in the image (an IFUNC's stub among them) and one of each `ABS64`
+  field of an atom the loader writes whose target is in the image, with the
+  value as its addend, and no others;
 - every fixup's field: test-executable's kinds' values, with an IFUNC's stub
   for its address, a general- or local-dynamic access as the local-exec
   sequence it relaxes to, `DTPOFF32` as an offset from the thread pointer, an
   absolute symbol's value, and nothing for a call of `__tls_get_addr`, which
-  the access consumed; the GOT's slots in symbol order, then the stubs'; and
-  every name of the linker's where its section or segment says;
+  the access consumed; in a static PIE, each `CALL_GOT` and `LOAD_GOT` with
+  the addend -4 to a symbol of the image's that isn't an IFUNC relaxed from
+  its instruction in the link's bytes (the test checks it is the `call`,
+  `jmp` or `REX.W` `mov` the kind says): `addr32 call`, `jmp` and a `nop`, or
+  `lea`; the GOT's slots in symbol order (but for the targets whose every
+  slot read relaxed), then the stubs'; and every name of the linker's where
+  its section or segment says (`_DYNAMIC` at `.dynamic`);
 - the init and fini arrays: their prioritized atoms first, by priority and in
   id order, then the others in id order, from their section's start to its
   end;
@@ -1446,7 +1481,7 @@ The checks:
 
 - programs: test-link's two sets that call libc, and one of `--functions`
   workers (2,000 by default): each must run and print what its model
-  predicts;
+  predicts, as a static executable and as a static PIE;
 - compiled: test-bind's C programs (hello, stdio, threads, jumps and
   weak-puts) and this file's: prioritized constructors and destructors beside
   libgcc's `cpuinfo.o`'s; decimal floating point, whose rounding mode and
@@ -1463,24 +1498,39 @@ The checks:
   taken by a `lea`, through the GOT, as an immediate and pointed to (status
   0). `cc` compiles each, and each must run as `cc -static`'s link of the
   same object does, with the same status and output, both from directories
-  of the same length (`argv[0]`);
+  of the same length (`argv[0]`). As static PIEs, each must run as
+  `cc -static-pie`'s link does, but the IFUNC program, which must run with
+  status 53, as lld's link does (GNU ld's gives the pointer in `.data` the
+  IFUNC's implementation, where a `lea` gives its `.iplt` entry, and the
+  comparison fails: 52), and the weak IFUNC's and the absolute symbols'
+  programs, whose `lea` of address 0 and of an absolute symbol a static PIE
+  refuses (`EXECUTABLE_ERROR_RELOCATION`, by every write), as
+  `cc -static-pie` refuses them;
 - refusals: assembly with a call of `__tls_get_addr` outside an access
   (refused naming the symbol), a general-dynamic access without its prefixes
   (its fixup), a pointer to an absolute symbol farther than int32 from the
   image's base (the symbol) and a `lea` of one whose offset from the base
   fits int32 but not its distance from the `lea` (its fixup, as GNU ld says
-  the relocation is truncated), each refused alike by every lane count and by
-  the exact twins, without an output; and on the TLS program a lane short of
+  the relocation is truncated; a static PIE refuses any `PC32` to an absolute
+  symbol, as a relocation), each refused alike by every lane count and by
+  the exact twins, without an output; as a static PIE, besides, a pointer to
+  `main` in `.rodata` (a text relocation), an `ABS32` to `main` in `.data`
+  and a `lea` of a weak reference to nothing, each refused as a relocation
+  naming its fixup; and on the TLS program a lane short of
   scratch memory (lane 0 of 1 and of 8 lanes, the last of 2 and of 8), with
   which every write that fails must fail with `EXECUTABLE_ERROR_MEMORY` and
   no output, and one with room enough must run.
 
 With `--cross-check`, which needs a `cc` that takes `-fuse-ld=lld`, each
-compiled program is linked by `cc -static -fuse-ld=lld` too, which must run
-alike and have as many `IRELATIVE` relocations, the same TLS segment's
-alignment and init and fini arrays of the same sizes; but lld 23 links the
-weak IFUNC's program wrong (an `IRELATIVE` relocation with resolver 0, which
-faults at startup), so that one only has to link. `--seed N` and
+compiled program is linked by `cc -static -fuse-ld=lld` too (and
+`-static-pie`), which must run alike and have as many `IRELATIVE`
+relocations, the same TLS segment's alignment and init and fini arrays of the
+same sizes; but lld 23 links the weak IFUNC's program wrong (an `IRELATIVE`
+relocation with resolver 0, which faults at startup), so that one only has to
+link, and the static PIEs that a static PIE refuses aren't linked. A static
+PIE's RELATIVE relocations are printed beside lld's: ours have 6 more for
+hello world, the GOT slots of IFUNCs that only calls give stubs, whose loads
+lld points at the stub's IRELATIVE slot. `--seed N` and
 `--functions N` change the generated programs. The default 9700X job runs it
 with `--cross-check` after test-dynamic.
 
