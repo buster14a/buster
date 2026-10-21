@@ -195,15 +195,19 @@ static int run_assembler_command(int count, char** arguments)
         }
         else if (strcmp(argument, "--isa=x86-64") == 0)
         {
-            options.isa = 0;
+            preprocess_arguments[preprocess_count++] = "-march=x86-64";
         }
         else if (strcmp(argument, "--isa=avx2") == 0)
         {
-            options.isa = 1;
+            preprocess_arguments[preprocess_count++] = "-march=x86-64-v3";
         }
         else if (strcmp(argument, "--isa=avx512f") == 0)
         {
-            options.isa = 2;
+            preprocess_arguments[preprocess_count++] = "-march=x86-64-v4";
+        }
+        else if (strncmp(argument, "-march=", 7) == 0 || strncmp(argument, "-mtune=", 7) == 0)
+        {
+            preprocess_arguments[preprocess_count++] = arguments[i];
         }
         else if (strcmp(argument, "-o") == 0 || strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-isystem") == 0 || strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0)
         {
@@ -232,7 +236,7 @@ static int run_assembler_command(int count, char** arguments)
     int status = 1;
     if (!valid || input == 0)
     {
-        fprintf(stderr, "usage: compiler assemble [--intel] [--scalar] [--isa=x86-64|avx2|avx512f] [--timing] [-I dir] [-D name[=value]] [-U name] -o output.o input.s|input.S\n");
+        fprintf(stderr, "usage: compiler assemble [--intel] [--scalar] [-march=x86-64|x86-64-v2|x86-64-v3|x86-64-v4|znver5|native] [-mtune=CPU] [--timing] [-I dir] [-D name[=value]] [-U name] -o output.o input.s|input.S\n");
     }
     else
     {
@@ -260,7 +264,7 @@ static int run_assembler_command(int count, char** arguments)
         }
         else
         {
-            x86_match_initialize(index);
+            x86_match_initialize(index, &preprocessing.target);
             const uint64_t initialized = asm_clock();
             AsmResult result = asm_assemble(source, index, options, &arena);
             if (result.error != 0)
