@@ -58,6 +58,15 @@ typedef enum AsmFragmentKind
     ASM_ALIGN,
 } AsmFragmentKind;
 
+// How an ASM_ALIGN fragment pads: with its fill byte, or in code (no fill, or 0x90) with GNU as's NOPs, which start
+// with a one-byte nop when the section's last statement was data.
+typedef enum AsmPadding
+{
+    ASM_PADDING_FILL,
+    ASM_PADDING_NOPS,
+    ASM_PADDING_NOPS_AFTER_DATA,
+} AsmPadding;
+
 typedef struct AsmFragment AsmFragment;
 struct AsmFragment
 {
@@ -72,6 +81,7 @@ struct AsmFragment
     uint8_t kind;
     uint8_t section;
     uint8_t fill;
+    uint8_t padding;
 };
 
 typedef struct AsmInstruction AsmInstruction;
@@ -132,6 +142,8 @@ struct AsmParser
     uint32_t numeric[10];
     uint32_t section_size[BUSTER_LINK_CLASS_COUNT];
     uint8_t section_alignment[BUSTER_LINK_CLASS_COUNT];
+    // Whether each section's last data or instruction statement was data, which code padding starts after with a nop.
+    bool section_data[BUSTER_LINK_CLASS_COUNT];
     uint8_t section;
     bool prefix;
 };
@@ -1007,7 +1019,9 @@ static void asm_intel_address(AsmParser* parser, uint32_t end, X86Operand* opera
         while (term_end < end)
         {
             const uint16_t kind = parser->tokens[term_end].kind;
-            if (depth == 0 && (kind == '+' || kind == '-' || kind == ']'))
+            // A '+' or '-' after an operand separates terms; at a term's start or after an operator, it is a sign.
+            const bool after_operand = term_end != parser->at && (parser->tokens[term_end - 1].kind == BUSTER_ASM_WORD || parser->tokens[term_end - 1].kind == ')');
+            if (depth == 0 && (kind == ']' || ((kind == '+' || kind == '-') && after_operand)))
             {
                 break;
             }
@@ -1019,7 +1033,31 @@ static void asm_intel_address(AsmParser* parser, uint32_t end, X86Operand* opera
             term_end += 1;
         }
         X86Operand reg;
-        if (asm_read_register(parser, term_end, &reg))
+        // A scaled index is written either way round: `rsi*4`, or `4*rsi` as LLVM's Intel printer writes it.
+        const uint32_t term = parser->at;
+        const uint32_t named = term_end - (parser->prefix ? 2 : 1);
+        bool scale_first = false;
+        if (term_end >= term + (parser->prefix ? 4 : 3) && parser->tokens[named - 1].kind == '*')
+        {
+            parser->at = named;
+            scale_first = asm_read_register(parser, term_end, &reg);
+            parser->at = term;
+        }
+        if (scale_first)
+        {
+            const uint32_t scale = asm_scale(parser, named - 1);
+            if (parser->at != named - 1)
+            {
+                asm_fail(parser, location, "unsupported address term");
+            }
+            if (negative)
+            {
+                asm_fail(parser, location, "address register cannot be subtracted");
+            }
+            parser->at = term_end;
+            asm_address_register(parser, operand, reg, scale, true, location);
+        }
+        else if (asm_read_register(parser, term_end, &reg))
         {
             const bool index = asm_take(parser, '*');
             const uint32_t scale = index ? asm_scale(parser, term_end) : 0;
@@ -1147,7 +1185,9 @@ static void asm_operand(AsmParser* parser, uint32_t end, bool branch, X86Operand
     {
         *expression = asm_expression(parser, end);
         operand->kind = X86_OPERAND_IMMEDIATE;
-        if (parser->options.intel && !immediate && !branch && (width != 0 || segment != 0 || expression->plus != 0 || expression->minus != 0))
+        // A bare symbol is a branch's destination but any other instruction's memory; a width or a segment always
+        // asks for memory (`call qword ptr callback` calls through the pointer at callback).
+        if (parser->options.intel && !immediate && (width != 0 || segment != 0 || (!branch && (expression->plus != 0 || expression->minus != 0))))
         {
             operand->kind = X86_OPERAND_MEMORY;
             operand->mode = BUSTER_X86_MEMORY_ABSOLUTE;
@@ -1202,6 +1242,39 @@ static void asm_decorations(AsmParser* parser, uint32_t end, X86MatchRequest* re
     }
 }
 
+// Replaces a common condition or shift alias with the canonical catalogue name it shares an identity with.
+static bool asm_alias(String8* name)
+{
+    static const char* const aliases[][2] =
+        {
+            {"jz", "je"},
+            {"jnz", "jne"},
+            {"jc", "jb"},
+            {"jnc", "jae"},
+            {"jna", "jbe"},
+            {"jnbe", "ja"},
+            {"jnae", "jb"},
+            {"jnb", "jae"},
+            {"jnge", "jl"},
+            {"jnl", "jge"},
+            {"jng", "jle"},
+            {"jnle", "jg"},
+            {"jpe", "jp"},
+            {"jpo", "jnp"},
+            {"sal", "shl"},
+    };
+    bool found = false;
+    for (uint32_t i = 0; !found && i < BUSTER_ARRAY_LENGTH(aliases); i += 1)
+    {
+        found = x86_match_name(*name, aliases[i][0]);
+        if (found)
+        {
+            *name = (String8){.pointer = (char*)aliases[i][1], .length = strlen(aliases[i][1])};
+        }
+    }
+    return found;
+}
+
 static void asm_instruction(AsmParser* parser, uint32_t end)
 {
     const uint32_t location = parser->tokens[parser->at].start;
@@ -1216,10 +1289,11 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         instruction->request.mnemonic = asm_token_text(parser, parser->at++);
         String8* name = &instruction->request.mnemonic;
         uint32_t width = 0;
-        if (!parser->options.intel && name->length > 1)
+        // A complete alias keeps its last letter: jnb, jnl and sal end in suffix letters.
+        bool known = asm_alias(name);
+        if (!parser->options.intel && !known && name->length > 1)
         {
             // Strip integer suffixes only when the full mnemonic has no catalogue candidate.
-            bool known = false;
             const uint32_t bucket = x86_match_hash(*name);
             for (uint32_t i = parser->index->begin[bucket]; i < parser->index->begin[bucket + 1]; i += 1)
             {
@@ -1233,36 +1307,12 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
                                         : suffix == 'q'   ? 8
                                                           : 0;
                 name->length -= width != 0;
+                asm_alias(name);
             }
         }
-        instruction->request.width = width;
-        // Common condition aliases share the canonical catalogue's identities.
-        static const char* const aliases[][2] =
-            {
-                {"jz", "je"},
-                {"jnz", "jne"},
-                {"jc", "jb"},
-                {"jnc", "jae"},
-                {"jna", "jbe"},
-                {"jnbe", "ja"},
-                {"jnae", "jb"},
-                {"jnb", "jae"},
-                {"jnge", "jl"},
-                {"jnl", "jge"},
-                {"jng", "jle"},
-                {"jnle", "jg"},
-                {"jpe", "jp"},
-                {"jpo", "jnp"},
-                {"sal", "shl"},
-        };
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(aliases); i += 1)
-        {
-            if (x86_match_name(*name, aliases[i][0]))
-            {
-                *name = (String8){.pointer = (char*)aliases[i][1], .length = strlen(aliases[i][1])};
-                break;
-            }
-        }
+        // LEA's memory operand is an address, not a load: its suffix sizes the destination register alone.
+        const bool address = x86_match_name(*name, "lea");
+        instruction->request.width = address ? 0 : width;
         instruction->branch = name->pointer[0] == 'j' || x86_match_name(*name, "call") || (name->length >= 4 && memcmp(name->pointer, "loop", 4) == 0);
         uint32_t begins[4];
         uint32_t ends[4];
@@ -1310,7 +1360,7 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
             X86Operand* operand = &instruction->request.operands[i];
             const bool shift = x86_match_name(*name, "shl") || x86_match_name(*name, "shr") || x86_match_name(*name, "sar") || x86_match_name(*name, "rol") || x86_match_name(*name, "ror") || x86_match_name(*name, "shld") || x86_match_name(*name, "shrd");
             const bool count_register = !parser->options.intel && i == 0 && shift && operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_GPR8 && operand->reg == 1;
-            if (width != 0 && operand->kind != X86_OPERAND_IMMEDIATE && !count_register)
+            if (width != 0 && operand->kind != X86_OPERAND_IMMEDIATE && !count_register && !(address && operand->kind == X86_OPERAND_MEMORY))
             {
                 if (operand->width != 0 && operand->width != width)
                 {
@@ -1338,6 +1388,7 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         }
         instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
         parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
+        parser->section_data[parser->section] = false;
         parser->at = end;
     }
 }
@@ -1552,14 +1603,18 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                                                                                                    : 8;
         do
         {
+            // `.` is the address of this datum, so it is bound before the datum takes its place.
+            const AsmExpr expression = asm_expression(parser, end);
             const uint32_t fragment = asm_fragment(parser, ASM_VALUE, location);
-            parser->fragments[fragment].expression = asm_expression(parser, end);
+            parser->fragments[fragment].expression = expression;
             parser->fragments[fragment].size = width;
         } while (parser->result.error == 0 && asm_take(parser, ','));
+        parser->section_data[parser->section] = true;
     }
     else if (asm_is(parser, token, ".ascii") || asm_is(parser, token, ".asciz") || asm_is(parser, token, ".string"))
     {
         asm_string(parser, end, !asm_is(parser, token, ".ascii"));
+        parser->section_data[parser->section] = true;
     }
     else if (asm_is(parser, token, ".zero") || asm_is(parser, token, ".balign") || asm_is(parser, token, ".p2align"))
     {
@@ -1583,7 +1638,8 @@ static void asm_directive(AsmParser* parser, uint32_t end)
         output->size = align ? 0 : (uint32_t)value;
         output->alignment = align ? (uint32_t)value : 0;
         output->maximum = BUSTER_ASM_MAX_SECTION;
-        output->fill = align && parser->section == BUSTER_LINK_CLASS_TEXT ? 0x90 : 0;
+        output->fill = 0;
+        output->padding = !align || parser->section != BUSTER_LINK_CLASS_TEXT ? ASM_PADDING_FILL : parser->section_data[parser->section] ? ASM_PADDING_NOPS_AFTER_DATA : ASM_PADDING_NOPS;
         if (asm_take(parser, ','))
         {
             if (parser->tokens[parser->at].kind != ',')
@@ -1594,6 +1650,8 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                     asm_fail(parser, location, "fill must fit in a byte");
                 }
                 output->fill = (uint8_t)fill;
+                // As in GNU as, code is padded with NOPs for a fill of 0x90 too, and with any other fill byte as given.
+                output->padding = output->fill == 0x90 ? output->padding : ASM_PADDING_FILL;
             }
             if (align && asm_take(parser, ','))
             {
@@ -1602,9 +1660,11 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                 {
                     asm_fail(parser, location, "invalid alignment maximum");
                 }
-                output->maximum = (uint32_t)maximum;
+                // A maximum of 0 is no maximum, as in GNU as.
+                output->maximum = maximum == 0 ? BUSTER_ASM_MAX_SECTION : (uint32_t)maximum;
             }
         }
+        parser->section_data[parser->section] |= !align;
         if (align && value > 0)
         {
             const uint32_t log = __builtin_ctzll((uint64_t)value);
@@ -1834,6 +1894,7 @@ static bool asm_parse_vector_batch(AsmParser* parser)
         }
         instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
         parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
+        parser->section_data[parser->section] = false;
         parser->at = row_end[row];
         parser->at += parser->at < parser->token_count;
         done += 1;
@@ -2124,7 +2185,14 @@ static void asm_fragment_offsets(AsmParser* parser, const uint32_t* order, const
                 }
                 if (total > BUSTER_ASM_MAX_SECTION)
                 {
-                    asm_fail(parser, fragment->location, "section exceeds the 256 MiB layout limit");
+                    // Name the fragment that crosses the limit, as the exact path does, not the group's first.
+                    uint64_t crossed = offset;
+                    uint32_t i = 0;
+                    while ((crossed += sizes[i]) <= BUSTER_ASM_MAX_SECTION)
+                    {
+                        i += 1;
+                    }
+                    asm_fail(parser, parser->fragments[order[at + i]].location, "section exceeds the 256 MiB layout limit");
                 }
                 offset = total;
                 at += count;
@@ -2300,15 +2368,71 @@ static void asm_instruction_fixups(AsmParser* parser, AtomId atom, AsmInstructio
                 }
                 else
                 {
-                    const uint8_t kind = instruction->branch ? BUSTER_LINK_FIXUP_CALL : pc_relative           ? BUSTER_LINK_FIXUP_PC32
-                                                                                    : width == 8              ? BUSTER_LINK_FIXUP_ABS64
-                                                                                    : displacement || form->w ? BUSTER_LINK_FIXUP_ABS32S
-                                                                                                              : BUSTER_LINK_FIXUP_ABS32;
+                    // A disp32 and an immediate the form sign-extends (REX.W's, and PUSH's) take 32S, other imm32s 32.
+                    const bool signed_field = displacement || x86_match_sign_extends(form);
+                    const uint8_t kind = instruction->branch ? BUSTER_LINK_FIXUP_CALL : pc_relative ? BUSTER_LINK_FIXUP_PC32
+                                                                                    : width == 8    ? BUSTER_LINK_FIXUP_ABS64
+                                                                                    : signed_field  ? BUSTER_LINK_FIXUP_ABS32S
+                                                                                                    : BUSTER_LINK_FIXUP_ABS32;
                     memset(bytes, 0, width);
                     link_add_fixup(&parser->result.link, atom, offset, kind, parser->symbols[expression.plus].link, addend);
                 }
             }
         }
+    }
+}
+
+// GNU as's code padding (binutils 2.47, 64-bit code): after data, a one-byte nop first; past seven NOPs' worth, a jump
+// over the rest (rel8 while it reaches); then the remainder's NOP and 11-byte ones. Executed padding before an aligned
+// loop head then costs a few instructions instead of one per byte, and objects compare with GNU as's byte for byte.
+static void asm_code_padding(uint8_t* bytes, uint32_t count, bool after_data)
+{
+    static const uint8_t nops[11][11] =
+        {
+            {0x90},
+            {0x66, 0x90},
+            {0x0f, 0x1f, 0x00},
+            {0x0f, 0x1f, 0x40, 0x00},
+            {0x0f, 0x1f, 0x44, 0x00, 0x00},
+            {0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00},
+            {0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00},
+            {0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00},
+            {0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00},
+            {0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00},
+            {0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00},
+    };
+    uint32_t at = 0;
+    if (after_data && count != 0)
+    {
+        bytes[at++] = 0x90;
+        count -= 1;
+    }
+    if (count / 11 > 7)
+    {
+        if (count - 2 <= 127)
+        {
+            count -= 2;
+            bytes[at++] = 0xeb;
+            bytes[at++] = (uint8_t)count;
+        }
+        else
+        {
+            count -= 5;
+            bytes[at++] = 0xe9;
+            memcpy(bytes + at, &count, 4);
+            at += 4;
+        }
+    }
+    const uint32_t first = count % 11;
+    if (first != 0)
+    {
+        memcpy(bytes + at, nops[first - 1], first);
+        at += first;
+    }
+    for (uint32_t i = first; i < count; i += 11)
+    {
+        memcpy(bytes + at, nops[10], 11);
+        at += 11;
     }
 }
 
@@ -2455,7 +2579,11 @@ static void asm_emit(AsmParser* parser)
             }
             else if (fragment->kind == ASM_FILL || fragment->kind == ASM_ALIGN)
             {
-                if (bytes != 0)
+                if (bytes != 0 && fragment->padding != ASM_PADDING_FILL)
+                {
+                    asm_code_padding(bytes + fragment->offset, fragment->size, fragment->padding == ASM_PADDING_NOPS_AFTER_DATA);
+                }
+                else if (bytes != 0)
                 {
                     memset(bytes + fragment->offset, fragment->fill, fragment->size);
                 }

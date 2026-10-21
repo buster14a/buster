@@ -269,13 +269,13 @@ static void asm_test_preprocessing(AsmTest* test, const char* directory)
     snprintf(output, sizeof(output), "%s/output", directory);
     snprintf(errors, sizeof(errors), "%s/errors", directory);
     static const char definitions[] =
-        "#define VALUE 200\n#define IMM(x) $x\n#define CAT(a,b) a ## b\n#define STR(x) #x\n"
+        "#define VALUE 200\n#define IMM(x) $x\n#define CAT(a,b) a ## b\n#define STR(x) #x\n#define PASTE(x) $ ## x\n#define REG(x) % ## x\n"
         "#if !defined(__ASSEMBLER__) || defined(REMOVE) || OVERRIDE != 7\n#error assembly options\n#endif\n";
     static const char source[] =
         "#include <values.h>\n# ordinary assembly comment VALUE\n"
         ".text\n.globl cpp_function\n.type cpp_function,@function\ncpp_function:\n"
         "movl $VALUE, %eax # inline comment VALUE\naddl IMM(OVERRIDE), %eax\n"
-        "addl $\\\nVALUE, %eax\njmp 1f\n1: ret\n.size cpp_function, .-cpp_function\n"
+        "addl $\\\nVALUE, %eax\nmovl PASTE(OVERRIDE), REG(ecx) # 1$e+5 cost\njmp 1f\n1: ret\n.size cpp_function, .-cpp_function\n"
         ".data\nCAT(data_,label): .quad external+5\n"
         ".ascii STR(VALUE), \"$VALUE # /* still a string */\"\n"
         ".intel_syntax noprefix\n.text\nmov eax, OVERRIDE\n.att_syntax prefix\nret\n";
@@ -460,6 +460,137 @@ static void asm_test_valid_batches(AsmTest* test, uint64_t* random)
     }
 }
 
+// A source through both paths, then the bytes of one of its atoms: 1 is .text, 2 the next section the source opens.
+static void asm_test_bytes(AsmTest* test, const char* source, AtomId atom, const uint8_t* expected, uint32_t size, const char* name)
+{
+    const AsmResult result = asm_test_pair(test, (String8){.pointer = (char*)source, .length = strlen(source)}, 1, 0);
+    const bool same = result.error == 0 && atom < result.link.atoms.count && result.link.atoms.size[atom] == size && memcmp(result.link.atoms.bytes[atom], expected, size) == 0;
+    asm_test_check(test, same, name, result.error);
+}
+
+// Code padding of every length to 135 bytes, and of 200 and 255, after an instruction and after data: GNU as pads with
+// its NOPs, starts with a nop after data and jumps over the rest past 87 bytes. Then fills of 0x90 and 0xcc, maximum
+// skips, padding that follows padding, and each section keeping its own last statement across section changes.
+static String8 asm_test_padding_source(char* source, uint32_t capacity)
+{
+    uint32_t length = snprintf(source, capacity, ".text\npadding:\n");
+    for (uint32_t padding = 1; padding <= 137; padding += 1)
+    {
+        const uint32_t bytes = padding <= 135 ? padding : padding == 136 ? 200 : 255;
+        for (uint32_t data = 0; data < 2; data += 1)
+        {
+            length += snprintf(source + length, capacity - length, ".p2align 8\n.zero %u\n%s\n.p2align 8\n", 255 - bytes, data != 0 ? ".byte 0x90" : "nop");
+        }
+    }
+    length += snprintf(source + length, capacity - length,
+                       "nop\n.p2align 4,,7\nnop\n.p2align 4,0x90,15\n.byte 1\n.p2align 4,0x90\nnop\n.p2align 4,0xcc\n"
+                       ".byte 1\n.data\nnop\n.text\n.p2align 4\nnop\n.data\n.byte 1\n.text\n.p2align 4\n.byte 1\n.balign 2\n.balign 16\nret\n");
+    return (String8){.pointer = source, .length = length < capacity ? length : 0};
+}
+
+// The driver reads a pipe, which has no size, to its end, and refuses a file one byte past the limit.
+static void asm_test_reader(AsmTest* test, const char* directory)
+{
+    static const char text[] = "nop\nret\n";
+    Arena arena = arena_reserve(1ull << 26);
+    int ends[2];
+    bool okay = pipe(ends) == 0;
+    if (okay)
+    {
+        okay = write(ends[1], text, sizeof(text) - 1) == sizeof(text) - 1;
+        close(ends[1]);
+        String8 source;
+        okay = okay && asm_read_descriptor(ends[0], &arena, &source) && source.length == sizeof(text) - 1 && memcmp(source.pointer, text, source.length) == 0;
+        okay = okay && arena.length == (uint64_t)((uint8_t*)source.pointer - arena.base) + source.length + 1;
+        close(ends[0]);
+    }
+    asm_test_check(test, okay, "assembly input read from a pipe to its end", 0);
+    // A pipe has no size to refuse beforehand: a child writes one byte past the limit into one, and the read refuses it.
+    okay = pipe(ends) == 0;
+    if (okay)
+    {
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            static const uint8_t chunk[1u << 16];
+            close(ends[0]);
+            uint64_t left = BUSTER_ASM_MAX_SOURCE + 1;
+            ssize_t written = 1;
+            while (left != 0 && written > 0)
+            {
+                written = write(ends[1], chunk, left < sizeof(chunk) ? left : sizeof(chunk));
+                left -= written > 0 ? (uint64_t)written : 0;
+            }
+            _exit(0);
+        }
+        close(ends[1]);
+        String8 source;
+        const uint64_t before = arena.length;
+        okay = child > 0 && !asm_read_descriptor(ends[0], &arena, &source) && arena.length == before && source.pointer == 0;
+        close(ends[0]);
+        if (child > 0)
+        {
+            waitpid(child, 0, 0);
+        }
+    }
+    asm_test_check(test, okay, "assembly input past the limit refused from a pipe", 0);
+    char large[PATH_MAX];
+    snprintf(large, sizeof(large), "%s/large.s", directory);
+    const int fd = open(large, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    okay = fd >= 0 && ftruncate(fd, BUSTER_ASM_MAX_SOURCE + 1) == 0;
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    String8 source;
+    const uint64_t before = arena.length;
+    okay = okay && !asm_read_file(large, &arena, &source) && arena.length == before && source.pointer == 0;
+    asm_test_check(test, okay, "assembly input past the limit refused", 0);
+    unlink(large);
+    arena_release(&arena);
+}
+
+// .S pastes and '$' as assembler-with-cpp has them, through both preprocessor kernels and without external tools:
+// `$ ## X` is $7 and `% ## eax` is %eax, as in GCC and Clang. A comment holds 20,000 pp-numbers whose '$' splits each
+// into five tokens, more than their dollars would bound.
+static void asm_test_preprocessed(AsmTest* test, const char* directory)
+{
+    char input[PATH_MAX];
+    snprintf(input, sizeof(input), "%s/dollars.S", directory);
+    Arena files = arena_reserve(1ull << 28);
+    const uint32_t capacity = 1u << 20;
+    char* text = arena_push(&files, capacity, 1);
+    bool okay = text != 0;
+    if (okay)
+    {
+        uint32_t length = snprintf(text, capacity, "#define X 7\n#define IMM(x) $ ## x\n#define REG(x) %% ## x\nmovl IMM(X), REG(eax)\nret #");
+        for (uint32_t i = 0; i < 20000; i += 1)
+        {
+            length += snprintf(text + length, capacity - length, " 1$e+5");
+        }
+        length += snprintf(text + length, capacity - length, "\n");
+        okay = length < capacity && object_write_file(input, (const uint8_t*)text, length) == OBJECT_ERROR_NONE;
+    }
+    static const uint8_t expected[] = {0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3};
+    for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
+    {
+        char* arguments[] = {input};
+        PPOptions options = {0};
+        const char* path = 0;
+        const char* output = 0;
+        bool markers = false;
+        String8 source = {0};
+        bool assembled = okay && pp_parse_options(1, arguments, &options, &files, &path, &output, &markers);
+        options.scalar = vectorized == 0;
+        assembled = assembled && asm_preprocess_file(input, options, &files, &source);
+        const AsmResult result = assembled ? asm_assemble(source, test->index, (AsmOptions){.vectorized = vectorized != 0}, &files) : (AsmResult){.error = "preprocessing failed"};
+        assembled = result.error == 0 && result.link.atoms.count == 2 && result.link.atoms.size[1] == sizeof(expected) && memcmp(result.link.atoms.bytes[1], expected, sizeof(expected)) == 0;
+        asm_test_check(test, assembled, ".S pastes and '$' splits as assembler-with-cpp has them", result.error);
+    }
+    unlink(input);
+    arena_release(&files);
+}
+
 static int run_assembler_tests(int count, char** arguments)
 {
     uint64_t seed = 1;
@@ -570,14 +701,50 @@ static int run_assembler_tests(int count, char** arguments)
                 ".intel_syntax noprefix\nmov eax,1,\n",
                 ".ascii \"unterminated\n",
                 "/*unterminated",
+                "leal (%rdi),%rax\n",
+                "pushw %eax\n",
+                ".intel_syntax noprefix\ncall dword ptr callback\n",
+                ".intel_syntax noprefix\nmov eax,[rax-4*rbx]\n",
+                ".data\nfirst: .byte 1\n.zero 200000000\n.byte 2\n.zero 200000000\n",
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bad); i += 1)
         {
             asm_test_pair(&test, (String8){.pointer = (char*)bad[i], .length = strlen(bad[i])}, 0, 0);
         }
-        AsmResult padding = asm_test_pair(&test, BUSTER_S8("nop\n.p2align 2\nret\n"), 1, 0);
-        static const uint8_t padding_bytes[] = {0x90, 0x90, 0x90, 0x90, 0xc3};
-        asm_test_check(&test, padding.error == 0 && padding.link.atoms.count == 2 && padding.link.atoms.size[1] == sizeof(padding_bytes) && memcmp(padding.link.atoms.bytes[1], padding_bytes, sizeof(padding_bytes)) == 0, "default text alignment uses executable NOP padding", 0);
+        // The defects #227's review found (#235), each also compared with GNU as by --cross-check.
+        static const char* const reviewed[] =
+            {
+                ".intel_syntax noprefix\ncall qword ptr callback\njmp qword ptr callback\ncall qword ptr [rax]\n.data\ncallback: .quad external\n",
+                ".data\nstart: .long .-start\n.quad ., .\n.long 1f - .\n.byte 0\n1:\n",
+                "pushq $external\npush $external+8\n.intel_syntax noprefix\npush offset external\n",
+                ".data\nd: .byte 1\n.p2align 2,0,0\n.byte 2\n.balign 8,0,0\n.byte 3\n",
+                "f: leaq (%rdi),%rax\nleal 4(%rdi,%rsi,2),%eax\nleaw 8(%rdi),%ax\nlea (%rdi),%rax\n",
+                "t: jnb t\njnl t\nsal %cl,%rax\nsalq $2,%rax\njnz t\n",
+                "f: pushw %ax\npushw (%rax)\npushw $200\npopw %ax\npush %ax\n",
+                ".intel_syntax noprefix\nf: mov eax,dword ptr [rdi+4*rsi]\nlea rax,[8*rcx+rdx+16]\nmov ecx,dword ptr [rbx+2*r12-4]\nmov eax,dword ptr [rax+-8]\nmov eax,dword ptr [rax - -8]\nmov eax,dword ptr [rax+4*-2]\n",
+                ".intel_syntax prefix\nf: mov %eax,dword ptr [%rdi+4*%rsi]\n",
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(reviewed); i += 1)
+        {
+            asm_test_pair(&test, (String8){.pointer = (char*)reviewed[i], .length = strlen(reviewed[i])}, 1, 0);
+        }
+        static const uint8_t indirect[] = {0xff, 0x14, 0x25, 0, 0, 0, 0, 0xff, 0x24, 0x25, 0, 0, 0, 0};
+        asm_test_bytes(&test, ".intel_syntax noprefix\ncall qword ptr callback\njmp qword ptr callback\n.data\ncallback: .quad 0\n", 1, indirect, sizeof(indirect), "an explicit memory width makes a branch indirect");
+        static const uint8_t dots[] = {0, 0, 0, 0, 4, 0, 0, 0};
+        asm_test_bytes(&test, ".data\nstart: .long .-start, .-start\n", 2, dots, sizeof(dots), "'.' in data is the address of its own datum");
+        static const uint8_t unlimited[] = {1, 0, 0, 0, 2};
+        asm_test_bytes(&test, ".data\n.byte 1\n.p2align 2,0,0\n.byte 2\n", 2, unlimited, sizeof(unlimited), "an alignment maximum of 0 is no maximum");
+        static const uint8_t after_instruction[] = {0x90, 0x0f, 0x1f, 0x00, 0xc3};
+        asm_test_bytes(&test, "nop\n.p2align 2\nret\n", 1, after_instruction, sizeof(after_instruction), "code padding is GNU as's NOPs");
+        static const uint8_t after_data[] = {0x01, 0x90, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0xc3};
+        asm_test_bytes(&test, ".byte 1\n.p2align 3\nret\n", 1, after_data, sizeof(after_data), "code padding after data starts with a nop");
+        const AsmResult pushed = asm_test_pair(&test, BUSTER_S8("push $external\n"), 1, 0);
+        asm_test_check(&test, pushed.error == 0 && pushed.link.fixups.count == 2 && pushed.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32S, "PUSH's sign-extended imm32 relocates as 32S", pushed.error);
+        const uint32_t padding_capacity = 64u << 10;
+        char* padding_text = arena_push(&arena, padding_capacity, 1);
+        const String8 padding = padding_text != 0 ? asm_test_padding_source(padding_text, padding_capacity) : (String8){0};
+        asm_test_check(&test, padding.length != 0, "padding source", 0);
+        asm_test_pair(&test, padding, 1, 0);
         static const int64_t boundaries[] = {-129, -128, 127, 128, 200, 255, 256, INT32_MIN, INT32_MAX};
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(boundaries); i += 1)
         {
@@ -600,10 +767,12 @@ static int run_assembler_tests(int count, char** arguments)
             asm_test_pair(&test, (String8){.pointer = source, .length = length}, -1, X86_ARCH_V4);
         }
         asm_test_lex_guard(&test);
-        if (cross_check)
+        char directory[] = "/tmp/buster-assembler-XXXXXX";
+        if (mkdtemp(directory) != 0)
         {
-            char directory[] = "/tmp/buster-assembler-XXXXXX";
-            if (mkdtemp(directory) != 0)
+            asm_test_reader(&test, directory);
+            asm_test_preprocessed(&test, directory);
+            if (cross_check)
             {
                 asm_test_oracle(&test, asm_test_function, directory, 0);
                 asm_test_oracle(&test, ".intel_syntax noprefix\nfixture: test al,200\ntest ax,200\ntest eax,200\ntest rax,200\nnop dword ptr [rax]\n", directory, 0);
@@ -612,23 +781,31 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_oracle(&test, ".intel_syntax noprefix\nf: jmp done\n.zero 120\njmp f\n.zero 20\n.p2align 5,0,31\ndone: ret\n.data\n.long external+7\n.quad f-8\n", directory, 0);
                 asm_test_oracle(&test, ".text\nf: movq %rdi,%rax\naddq $200,%rax\nmovl 4(%rdi,%rcx,4),%edx\nshlq %cl,%rax\nshrdq %cl,%rbx,%rax\nret\n.size f,.-f\n", directory, 0);
                 asm_test_oracle(&test, ".data\nexpr:\n.byte ~0,~1,~0+256\n.long -1|0,~0&0xffffffff\n.quad ~0xffffffffffffffff\n", directory, 0);
+                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(reviewed); i += 1)
+                {
+                    asm_test_oracle(&test, reviewed[i], directory, 0);
+                }
+                if (padding.length != 0)
+                {
+                    asm_test_oracle(&test, padding.pointer, directory, 0);
+                }
                 asm_test_execution(&test, directory);
                 asm_test_driver(&test, directory);
                 asm_test_target_driver(&test, directory);
                 asm_test_preprocessing(&test, directory);
-                const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "scalar.o", "values.h", "preprocessed.s"};
-                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)
-                {
-                    char path[PATH_MAX];
-                    snprintf(path, sizeof(path), "%s/%s", directory, files[i]);
-                    unlink(path);
-                }
-                rmdir(directory);
             }
-            else
+            const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "scalar.o", "values.h", "preprocessed.s"};
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)
             {
-                asm_test_check(&test, false, "temporary directory", 0);
+                char path[PATH_MAX];
+                snprintf(path, sizeof(path), "%s/%s", directory, files[i]);
+                unlink(path);
             }
+            rmdir(directory);
+        }
+        else
+        {
+            asm_test_check(&test, false, "temporary directory", 0);
         }
     }
     printf("assembler: %llu checks, %llu failures (seed %llu, fuzz %u)\n", (unsigned long long)test.checks, (unsigned long long)test.failures, (unsigned long long)seed, fuzz);
