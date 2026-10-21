@@ -4218,7 +4218,7 @@ static void parse_bracket_block(const uint8_t* codes, const int8_t* deltas, cons
 }
 
 // Every block's, as parse_brackets_avx512 writes them, from the twin's depths and enclosing openers.
-static void parse_bracket_blocks(const uint8_t* codes, const int8_t* deltas, const uint32_t* depths, const uint32_t* enclosing, uint32_t count, ParseBracketBlock* blocks)
+static __attribute__((unused)) void parse_bracket_blocks(const uint8_t* codes, const int8_t* deltas, const uint32_t* depths, const uint32_t* enclosing, uint32_t count, ParseBracketBlock* blocks)
 {
     for (uint32_t block = 0; block < count; block += 64)
     {
@@ -5178,7 +5178,7 @@ static ParseStatementContext parse_statement_context_block(const ParseKernels* k
 }
 
 // Every block's statement contexts, one per 64 tokens.
-static void parse_statement_contexts(const ParseKernels* kernels, uint32_t count, ParseStatementContext* contexts)
+static __attribute__((unused)) void parse_statement_contexts(const ParseKernels* kernels, uint32_t count, ParseStatementContext* contexts)
 {
     for (uint32_t block = 0; block < count; block += 64)
     {
@@ -9411,7 +9411,7 @@ static void parse_top_parents8_avx512(const uint8_t* roles, const uint32_t* node
 
 // The same with a window of `reach` lanes, fewer than BUSTER_PARSE_TOP_LANES, so that the check takes the paths through
 // memory (deep lanes, reloads, pops under the window) that real stacks never need.
-static void parse_top_parents8_reach(const uint8_t* roles, const uint32_t* node_depths, uint32_t count, uint32_t* lefts, uint16_t* left_keys, ParseBlockWork* works,
+static __attribute__((unused)) void parse_top_parents8_reach(const uint8_t* roles, const uint32_t* node_depths, uint32_t count, uint32_t* lefts, uint16_t* left_keys, ParseBlockWork* works,
                                      uint32_t* parents, const ParseSlots* slots, uint32_t reach, uint64_t* wide_blocks)
 {
     parse_top_prepare8_avx512(roles, node_depths, count, works);
