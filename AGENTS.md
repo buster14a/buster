@@ -369,6 +369,12 @@ designs and the compilers already built this way.
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
   `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`.
+- `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
+  records macro expansion history in cold records and compressed output runs;
+  `pp_diagnose_output` renders a diagnostic for an output-token index.
+  `c_preprocessor_history_test.c` is part of `test-preprocessor`, including its
+  Clang diagnostic comparisons. `benchmark-preprocessor --history-cost`
+  compares recording on/off and reports retained and temporary history bytes.
 - `src/buster/compiler/profile.c` is the profiling tools: `ab` (builds of
   several trees run in turn, under the 9700X's lock) and the reports of perf's
   and objdump's text, `hot-loops`, `label-spills`, `spill-report` and
