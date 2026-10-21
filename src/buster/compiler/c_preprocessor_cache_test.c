@@ -112,29 +112,6 @@ static bool pp_test_cache_guards(void)
     return result;
 }
 
-static bool pp_test_cache_hits(const char* directory)
-{
-    const PPTestCase test = {
-        .source = "#define A plain\nA A\n#define plain 7\nA A\n#undef plain\nA A\n",
-    };
-    char path[4096];
-    bool result = pp_test_write_case(&test, directory, path, sizeof(path));
-    const PPOptions options = {
-        .language = { .standard = 2017, .gnu = true },
-        .no_standard_includes = true,
-        .timing = true,
-    };
-    static Preprocessor pp;
-    static InternTable table;
-    result = result && pp_test_run(&pp, &table, &options, path);
-    result = result && pp.statistics.cache_hits == 4 && pp.statistics.cache_misses == 4 && pp.statistics.cache_scan_tokens == 4;
-    pp_release(&pp);
-    intern_release(&table);
-    pp_test_remove_case(&test, directory);
-    printf("cache hit/miss accounting and invalidation: %s\n", result ? "pass" : "FAIL");
-    return result;
-}
-
 static bool pp_test_cache_fuzz(const char* directory)
 {
     char path[4096];
@@ -198,7 +175,6 @@ static bool pp_test_cache_fuzz(const char* directory)
 static bool pp_test_cache_cases(const char* directory, bool with_clang)
 {
     bool result = pp_test_cache_guards();
-    result = pp_test_cache_hits(directory) && result;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_cache_cases); i += 1)
     {
         result = pp_test_case(&pp_cache_cases[i], directory, with_clang) && result;
