@@ -25,8 +25,12 @@
 #define BUSTER_DATAFLOW_VECTOR_WORDS 8
 #define BUSTER_DATAFLOW_VECTOR_BYTES 64
 
+// Aligned to a 64-byte line, so that the counts and the bases of the columns, use and def share its first line, and in
+// and out its second, wherever a caller keeps it. Where def and in shared a line whose low 12 address bits an in or out
+// row shares, a solve after one that stored that row took longer, with more loads held by older stores: up to 2.5
+// cycles more on the benchmark's small diamond (docs/dataflow.md, "Where the caller's Dataflow falls").
 typedef struct Dataflow Dataflow;
-struct Dataflow
+struct __attribute__((aligned(64))) Dataflow
 {
     uint32_t block_count;
     uint32_t value_count;
