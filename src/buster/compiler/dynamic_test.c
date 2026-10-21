@@ -161,10 +161,10 @@ static bool dynamic_test_write_with(DynamicTestWrite* write, Link* link, const B
     return ran && write->succeeded;
 }
 
-// Writes the link with every lane count, each from zeroed fields over the last file scribbled over, and but for the
-// first over the instructions the last write relaxed, which a write takes for its own: whether every write succeeded
-// with the same bytes and build ID, which `file` then holds, read into `arena`. The link's bytes are then as binding left
-// them again (executable_test_save), as the checks and an object written from the link want them.
+// Writes the link with every lane count, each from zeroed fields over the last file scribbled over, and each but the
+// first over the instructions that the last write relaxed, which a write takes for its own: whether every write
+// succeeded with the same bytes and build ID, which `file` then holds, read into `arena`. The link's bytes are then as
+// binding left them again (executable_test_save), as the checks and an object written from the link want them.
 static bool dynamic_test_lanes(DynamicTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, const char* name, ExecutableResult* result,
                                String8* file, Arena* arena)
 {
@@ -927,9 +927,11 @@ static void dynamic_test_headers(DynamicTestTally* tally, const Link* link, cons
     }
 }
 
-// All of the structure's checks of one file, written with `relr` or without.
-static void dynamic_test_structure(DynamicTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, String8 file, bool relr, uint64_t index)
+// All of the structure's checks of one file, written with `relr` or without. Returns how many loads and calls through
+// the GOT relaxed.
+static uint64_t dynamic_test_structure(DynamicTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, String8 file, bool relr, uint64_t index)
 {
+    uint64_t relaxed = 0;
     Scratch scratch = scratch_begin(0);
     const DynamicTestImage image = dynamic_test_image(file);
     uint32_t* indices = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, link->symbols.count);
@@ -940,11 +942,12 @@ static void dynamic_test_structure(DynamicTestTally* tally, const Link* link, co
         dynamic_test_symbols(tally, link, bind, runtime, &image, indices, index);
         dynamic_test_gnu_hash(tally, &image, index);
         dynamic_test_relocations(tally, link, &image, indices, relr, scratch.arena, index);
-        dynamic_test_got(tally, link, &image, scratch.arena, index);
+        relaxed = dynamic_test_got(tally, link, &image, scratch.arena, index);
         const char* unwind = executable_test_unwind(link, file, 0, bind->unit_base, 0);
         dynamic_test_expect(tally, unwind == 0, unwind != 0 ? unwind : "the unwind tables", index);
     }
     scratch_end(scratch);
+    return relaxed;
 }
 
 // Whether the runtime's libc.so.6 defines GLIBC_ABI_DT_RELR, with which the writer puts RELATIVE relocations in
@@ -2026,9 +2029,10 @@ static bool dynamic_test_programs(const ExecutableTestDirectory* directory, cons
             ExecutableResult result = { 0 };
             String8 file = { 0 };
             const bool written = built && dynamic_test_lanes(&tally, &bound.program.link, &bound.bind, runtime, path, name, &result, &file, scratch.arena);
+            uint64_t relaxed = 0;
             if (written)
             {
-                dynamic_test_structure(&tally, &bound.program.link, &bound.bind, runtime, file, dynamic_test_relr_supported(runtime), i);
+                relaxed = dynamic_test_structure(&tally, &bound.program.link, &bound.bind, runtime, file, dynamic_test_relr_supported(runtime), i);
                 const char* unwind = executable_test_unwind(&bound.program.link, file, 0, bound.bind.unit_base, &result);
                 dynamic_test_expect(&tally, unwind == 0 && result.fdes != 0 && result.fdes_in_order, unwind != 0 ? unwind : "FDEs in order", i);
             }
@@ -2049,11 +2053,11 @@ static bool dynamic_test_programs(const ExecutableTestDirectory* directory, cons
                 dynamic_test_variants(&tally, &bound.program.link, &bound.bind, runtime, path, file, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES, 0, i);
             }
             printf("  %s: %u atoms, %u fixups, %llu dynamic symbols, %llu relocations in .rela.dyn (%llu relative) and %llu in %llu words of .relr.dyn, %llu stubs, %llu "
-                   "GOT slots, %llu FDEs, %llu bytes: %s\n",
+                   "loads and calls relaxed, %llu GOT slots, %llu FDEs, %llu bytes: %s\n",
                    name, bound.program.link.atoms.count - 1, bound.program.link.fixups.count - 1, (unsigned long long)result.dynamic_symbols,
                    (unsigned long long)result.relocations, (unsigned long long)result.relative_relocations, (unsigned long long)result.relr_relocations,
-                   (unsigned long long)result.relr_words, (unsigned long long)result.stubs, (unsigned long long)result.got_slots, (unsigned long long)result.fdes,
-                   (unsigned long long)result.file_size, ran ? "ran" : "didn't run");
+                   (unsigned long long)result.relr_words, (unsigned long long)result.stubs, (unsigned long long)relaxed, (unsigned long long)result.got_slots,
+                   (unsigned long long)result.fdes, (unsigned long long)result.file_size, ran ? "ran" : "didn't run");
             scratch_end(scratch);
             if (!directory->keep)
             {

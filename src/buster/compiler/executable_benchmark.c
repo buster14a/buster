@@ -26,8 +26,8 @@
 //     libc, bound against the system's runtime (runtime.c and bind.c) and written as dynamic PIEs, the same way (--only
 //     dynamic for these alone); bound against its static runtime (runtime_import_static) and written as static
 //     executables (--only static); and bound against the static PIE's runtime (runtime_import_static_pie) and written
-//     as static PIEs (--only static-pie), whose GOT relaxation takes the forms it writes, so that a write over them
-//     again writes the same file.
+//     as static PIEs (--only static-pie). Every kind's GOT relaxation takes the forms it writes, so that a write over
+//     them again writes the same file.
 // The exit status is 1 if the arguments are invalid, a variant's bytes differ, the runtime doesn't import, or a link
 // fails.
 

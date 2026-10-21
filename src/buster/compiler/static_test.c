@@ -1453,6 +1453,45 @@ static StaticTestShape static_test_shape(String8 file, bool pie)
     return result;
 }
 
+// How many of a link's symbols only a test or a binop reads through the GOT (adc, add, and, cmp, or, sbb, sub and xor),
+// with a REX prefix and the addend -4: lld writes those instructions with immediates in an executable that isn't a PIE
+// (its R_RELAX_GOT_PC_NOPIC for R_X86_64_REX_GOTPCRELX, which GNU as writes for them), where the import gives them
+// GOTPCREL and the writer keeps a slot. A symbol of the image's that isn't an IFUNC, read by no other fixup through the
+// GOT unrelaxed.
+static uint64_t static_test_immediate_slots(const Link* link, Arena* arena)
+{
+    const uint64_t length = arena->length;
+    uint8_t* reads = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, link->symbols.count);
+    uint64_t result = 0;
+    if (reads != 0)
+    {
+        memset(reads, 0, link->symbols.count);
+    }
+    for (AtomId atom = 1; reads != 0 && atom < link->atoms.count; atom += 1)
+    {
+        const uint8_t* bytes = link->atoms.bytes[atom];
+        const FixupId begin = link->atoms.fixup_begin[atom];
+        for (FixupId fixup = begin; fixup < begin + link->atoms.fixup_count[atom]; fixup += 1)
+        {
+            const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+            const SymbolId target = link->fixups.target[fixup];
+            const uint32_t offset = link->fixups.offset[fixup];
+            const uint8_t opcode = offset >= 2 ? bytes[offset - 2] : 0;
+            const bool rex = offset >= 3 && (bytes[offset - 3] & 0xf0) == 0x40;
+            const bool immediate = kind == BUSTER_LINK_FIXUP_GOTPCREL && rex && (opcode == 0x85 || (opcode & 0xc7) == 0x03) && link_fixup_addend(link, fixup) == -4 &&
+                                   executable_test_in_image(link, target) && !executable_test_is_ifunc(link, target);
+            // 1: read by such an instruction, 2: through the GOT by another fixup that doesn't relax.
+            reads[target] |= immediate ? 1 : static_test_reads_slot(kind) && !executable_test_relaxes(link, fixup) ? 2 : 0;
+        }
+    }
+    for (SymbolId symbol = 1; reads != 0 && symbol < link->symbols.count; symbol += 1)
+    {
+        result += reads[symbol] == 1 ? 1 : 0;
+    }
+    arena_pop_to(arena, length);
+    return result;
+}
+
 // How a program ran: whether it exited, its status, and what it wrote to standard output.
 typedef struct StaticTestRun StaticTestRun;
 struct StaticTestRun
@@ -1622,20 +1661,22 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
                                shape.irelatives);
             static_test_expect(&tally, !written || !pie || shape.relatives == lld_shape.relatives, "as many RELATIVE relocations as lld's", shape.relatives);
             // The GOT's slots: lld's, its .got's and its IFUNCs' (.got.plt's that IRELATIVE relocations fill), against
-            // ours but those holding thread-locals' offsets, whose initial-exec accesses lld relaxes to local-exec. In a
-            // static PIE they must be as many: lld relaxes the same loads and calls, and shares an IFUNC's slot with its
-            // stub alike. A static executable's are at least lld's, which (without PIC) writes adds and tests through the
-            // GOT with immediates too.
+            // ours but those of thread-locals' offsets, whose initial-exec accesses lld relaxes to local-exec, and in a
+            // static executable those that only tests and binops read through the GOT, which lld writes with immediates
+            // without PIC (static_test_immediate_slots). They must be as many: lld relaxes the same loads and calls, and
+            // shares an IFUNC's slot with its stub alike.
             const ExecutableTestGot got = written ? executable_test_got(file, pie ? ET_DYN : ET_EXEC) : (ExecutableTestGot){ 0 };
             const ExecutableTestGot lld_got = executable_test_got(object_test_read_file(scratch.arena, paths[2]), pie ? ET_DYN : ET_EXEC);
             const uint64_t tls_slots = written ? executable_test_tls_slots(&test.link) : 0;
-            const uint64_t slots = result.got_slots - tls_slots;
-            static_test_expect(&tally, !written || (got.valid && lld_got.valid && (pie ? slots == lld_got.slots : slots >= lld_got.slots)),
-                               pie ? "as many GOT slots as lld's, but for thread-locals' offsets" : "at least lld's GOT slots, but for thread-locals' offsets",
+            const uint64_t immediates = written && !pie ? static_test_immediate_slots(&test.link, scratch.arena) : 0;
+            const uint64_t slots = result.got_slots - tls_slots - immediates;
+            static_test_expect(&tally, !written || (got.valid && lld_got.valid && slots == lld_got.slots),
+                               pie ? "as many GOT slots as lld's, but for thread-locals' offsets" : "as many GOT slots as lld's, but for thread-locals' offsets and its immediates",
                                slots * 1000 + lld_got.slots);
-            printf("  %s: %llu GOT slots (%llu of thread-locals' offsets), lld's link %llu; %llu RELATIVE relocations, lld's link %llu\n", program.name,
-                   (unsigned long long)result.got_slots, (unsigned long long)tls_slots, (unsigned long long)lld_got.slots, (unsigned long long)shape.relatives,
-                   (unsigned long long)lld_shape.relatives);
+            printf("  %s: %llu GOT slots (%llu of thread-locals' offsets, %llu that lld's immediates replace), lld's link %llu; %llu RELATIVE relocations, lld's link "
+                   "%llu\n",
+                   program.name, (unsigned long long)result.got_slots, (unsigned long long)tls_slots, (unsigned long long)immediates, (unsigned long long)lld_got.slots,
+                   (unsigned long long)shape.relatives, (unsigned long long)lld_shape.relatives);
             static_test_expect(&tally, !written || (shape.tls == lld_shape.tls && shape.tls_alignment == lld_shape.tls_alignment), "lld's TLS segment's alignment",
                                shape.tls_alignment);
             static_test_expect(&tally, !written || (shape.init_array == lld_shape.init_array && shape.fini_array == lld_shape.fini_array), "lld's init and fini arrays' sizes",

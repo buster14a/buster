@@ -3781,8 +3781,8 @@ static void executable_reduce_got(const Link* link, ExecutableShared* shared, ui
         }
         marks |= candidates != 0 ? executable_unrelaxed(link, shared, word, candidates) : 0;
         // An IFUNC whose stub only calls reach reads the stub's slot through the GOT, as lld's reads its .got.plt entry:
-        // nothing takes the stub for its address, so the slot's IFUNC's code, which its IRELATIVE relocation fills, is
-        // the address every load through the GOT gets.
+        // nothing takes the stub for the IFUNC's address, so every load through the GOT may get the IFUNC's code, which
+        // the stub's slot holds once its IRELATIVE relocation fills it.
         const uint64_t stub_slots = shared->runtime ? marks & stub_marks & ~canonical : 0;
         marks &= ~stub_slots;
         if (shared->runtime)
