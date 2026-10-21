@@ -1057,16 +1057,26 @@ the 9700X, and 0.26 s with `--cross-check`) checks `import.c` and
   `__dso_handle` and `__TMC_END__`, and `crt1.o`'s ABI note; the archives in
   GCC's group order, each one's members one after another; `main` bound to
   the program, `__libc_start_main` to `libc.a`'s member,
-  `__gmon_start__` to nothing, `__TMC_END__` to `crtend.o`, and
+  `__gmon_start__` to nothing, `__TMC_END__` to `crtend.o`,
+  `_dl_relocate_static_pie` to `crt1.o`'s empty one, and
   `_GLOBAL_OFFSET_TABLE_` and the IRELATIVE relocations' bounds to the
-  linker, and nothing to a shared library; `memcpy` an IFUNC of `libc.a`'s,
-  `_nl_current_LC_CTYPE_used` absolute, and `libgcc.a`'s priorities; each
-  object's COMDAT groups as its `ImportObject` has them, with the same
-  signature numbers for groups of the same signature and different ones
-  otherwise; each piece's strong references as a scan of its symbols finds
-  them, with the member each loads, and each global name's defining member;
-  `link_check` on the whole runtime; and every crt object and member taking
-  the vector path.
+  linker, and nothing to a shared library; the names its linker defines
+  among the global names, the linker's, and no other; `memcpy` an IFUNC of
+  `libc.a`'s, `_nl_current_LC_CTYPE_used` absolute, and `libgcc.a`'s
+  priorities; each object's COMDAT groups as its `ImportObject` has them,
+  with the same signature numbers for groups of the same signature and
+  different ones otherwise; each piece's strong references as a scan of its
+  symbols finds them, with the member each loads, and each global name's
+  defining member; `link_check` on the whole runtime; and every crt object
+  and member taking the vector path;
+- the static PIE's runtime: `runtime_import_static_pie`, checked as the
+  static runtime is: `rcrt1.o`, `crtbeginS.o` and `crtendS.o`, with the
+  same archives; `_dl_relocate_static_pie` bound to `libc.a`'s
+  `dl-reloc-static-pie.o`, which relocates the executable, and its
+  `_DYNAMIC` to the linker; the IRELATIVE relocations' bounds, which
+  `libc.a` refers to weakly and a static PIE's linker doesn't define, to
+  nothing; and with `--cross-check`, every relocation compared with
+  readelf's, as the static runtime's are.
 
 `--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
 version, type, binding and size) and references with `readelf -W --dyn-syms`,
