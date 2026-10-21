@@ -161,14 +161,18 @@ static bool dynamic_test_write_with(DynamicTestWrite* write, Link* link, const B
     return ran && write->succeeded;
 }
 
-// Writes the link with every lane count, each from zeroed fields over the last file scribbled over: whether every
-// write succeeded with the same bytes and build ID, which `file` then holds, read into `arena`.
+// Writes the link with every lane count, each from zeroed fields over the last file scribbled over, and but for the
+// first over the instructions the last write relaxed, which a write takes for its own: whether every write succeeded
+// with the same bytes and build ID, which `file` then holds, read into `arena`. The link's bytes are then as binding left
+// them again (executable_test_save), as the checks and an object written from the link want them.
 static bool dynamic_test_lanes(DynamicTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, const char* name, ExecutableResult* result,
                                String8* file, Arena* arena)
 {
     bool same = true;
     *file = (String8){ 0 };
-    for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts); l += 1)
+    const uint8_t* saved = executable_test_save(link, arena);
+    dynamic_test_expect(tally, saved != 0, "room for the atoms' bytes", 0);
+    for (uint32_t l = 0; saved != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts); l += 1)
     {
         const uint32_t lanes = dynamic_test_lane_counts[l];
         ExecutableResult written;
@@ -191,7 +195,11 @@ static bool dynamic_test_lanes(DynamicTestTally* tally, Link* link, const Bind* 
         *file = l == 0 ? bytes : *file;
         *result = l == 0 ? written : *result;
     }
-    return same;
+    if (saved != 0)
+    {
+        executable_test_restore(link, saved);
+    }
+    return same && saved != 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -769,9 +777,14 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
             const SymbolId target = fixups->target[fixup];
             if ((fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_CALL && dynamic_test_is_dynamic(link, target))
             {
-                int32_t distance = 0;
-                memcpy(&distance, atoms->bytes[atom] + fixups->offset[fixup], sizeof(distance));
+                // The field from the file: the link's bytes are binding's again (dynamic_test_lanes).
                 const uint64_t place = atoms->address[atom] + fixups->offset[fixup];
+                const uint64_t field = dynamic_test_file_offset(image, place);
+                int32_t distance = 0;
+                if (field != UINT64_MAX && field + sizeof(distance) <= image->file.length)
+                {
+                    memcpy(&distance, image->file.pointer + field, sizeof(distance));
+                }
                 const uint64_t stub = place + (uint64_t)(int64_t)distance - (uint64_t)link_fixup_addend(link, fixup);
                 const bool inside = stubs != 0 && stub >= stubs_section->sh_addr && stub + BUSTER_EXECUTABLE_STUB_BYTES <= stubs_section->sh_addr + stubs_section->sh_size &&
                                     (stub - stubs_section->sh_addr) % BUSTER_EXECUTABLE_STUB_BYTES == 0;
@@ -788,6 +801,71 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
             }
         }
     }
+}
+
+// The loads and calls through the GOT, by the test's own rule (executable_test_relaxes): each that relaxes rewritten in
+// the file (executable_test_relaxed), and each other keeping its instruction; and a GOT slot for each symbol that a
+// fixup reads unrelaxed or that a call reaches as a dynamic symbol (through its stub, which reads the slot), and for no
+// other, numbered from 1 in symbol order, after slot 0, which holds 0. Returns how many relaxed.
+static uint64_t dynamic_test_got(DynamicTestTally* tally, const Link* link, const DynamicTestImage* image, Arena* arena, uint64_t index)
+{
+    const LinkAtoms* atoms = &link->atoms;
+    const LinkFixups* fixups = &link->fixups;
+    const uint64_t length = arena->length;
+    uint8_t* targets = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, link->symbols.count);
+    dynamic_test_expect(tally, targets != 0, "room for the GOT's targets", index);
+    uint64_t relaxed = 0;
+    uint64_t mismatched = 0;
+    FixupId first = 0;
+    if (targets != 0)
+    {
+        memset(targets, 0, link->symbols.count);
+    }
+    for (AtomId atom = 1; targets != 0 && atom < atoms->count; atom += 1)
+    {
+        const FixupId begin = atoms->fixup_begin[atom];
+        const uint64_t atom_offset = dynamic_test_file_offset(image, atoms->address[atom]);
+        for (FixupId fixup = begin; fixup < begin + atoms->fixup_count[atom]; fixup += 1)
+        {
+            const uint8_t kind = fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+            const SymbolId target = fixups->target[fixup];
+            const bool reads = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
+            const bool relaxes = executable_test_relaxes(link, fixup);
+            const bool stub = kind == BUSTER_LINK_FIXUP_CALL && dynamic_test_is_dynamic(link, target);
+            targets[target] |= (reads && !relaxes) || stub ? 1 : 0;
+            const uint64_t offset = fixups->offset[fixup];
+            const bool readable = atom_offset != UINT64_MAX && atom_offset + offset + 4 <= image->file.length;
+            const uint8_t* bytes = readable ? (const uint8_t*)image->file.pointer + atom_offset : 0;
+            uint8_t expected[6];
+            const bool same = relaxes ? readable && executable_test_relaxed(link, atom, fixup, dynamic_test_address(link, target), atoms->address[atom] + offset, expected) &&
+                                            memcmp(bytes + offset - 2, expected, sizeof(expected)) == 0
+                                      : !reads || (readable && executable_test_unrelaxed(kind, bytes, offset));
+            first = !same && mismatched == 0 ? fixup : first;
+            mismatched += same ? 0 : 1;
+            relaxed += relaxes ? 1 : 0;
+        }
+    }
+    dynamic_test_expect(tally, mismatched == 0, "each load and call through the GOT relaxed by the test's rule, and each other kept", first);
+    const Elf64_Shdr* got_section = dynamic_test_section(image, ".got");
+    const uint8_t* got = dynamic_test_bytes(image, got_section);
+    uint32_t next = 1;
+    SymbolId wrong = 0;
+    for (SymbolId symbol = 1; targets != 0 && symbol < link->symbols.count; symbol += 1)
+    {
+        const uint32_t slot = link->symbols.got_slot[symbol];
+        const bool right = (slot != 0) == (targets[symbol] != 0) && (slot == 0 || slot == next);
+        wrong = !right && wrong == 0 ? symbol : wrong;
+        next += slot != 0 ? 1 : 0;
+    }
+    uint64_t zero = UINT64_MAX;
+    if (got != 0 && got_section->sh_size >= 8)
+    {
+        memcpy(&zero, got, sizeof(zero));
+    }
+    const bool sized = got_section == 0 ? next == 1 : got_section->sh_size == 8 * (uint64_t)next && zero == 0;
+    dynamic_test_expect(tally, targets != 0 && wrong == 0 && sized, "a GOT slot for each symbol an unrelaxed GOT kind or a dynamic call reaches, in symbol order", wrong);
+    arena_pop_to(arena, length);
+    return relaxed;
 }
 
 // The headers and .dynamic: ET_DYN from _start, PT_INTERP the interpreter, PT_DYNAMIC .dynamic; DT_NEEDED libc.so.6
@@ -862,6 +940,7 @@ static void dynamic_test_structure(DynamicTestTally* tally, const Link* link, co
         dynamic_test_symbols(tally, link, bind, runtime, &image, indices, index);
         dynamic_test_gnu_hash(tally, &image, index);
         dynamic_test_relocations(tally, link, &image, indices, relr, scratch.arena, index);
+        dynamic_test_got(tally, link, &image, scratch.arena, index);
         const char* unwind = executable_test_unwind(link, file, 0, bind->unit_base, 0);
         dynamic_test_expect(tally, unwind == 0, unwind != 0 ? unwind : "the unwind tables", index);
     }
@@ -1812,6 +1891,20 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
         }
         dynamic_test_expect(tally, same_references, "lld's relocations against dynamic symbols", our_references_count);
         dynamic_test_expect(tally, our_pointers == their_pointers, "as many RELATIVE pointers as lld's", our_pointers * 100000 + their_pointers);
+        // The GOT: as many slots of the image's symbols (RELATIVE) as lld's, which relaxes the same loads and calls, and
+        // as many that hold values the loader leaves alone, but for our slot 0 and the thread-locals' offsets, whose
+        // initial-exec accesses lld relaxes to local-exec. Its slots of dynamic symbols are the references above (lld's
+        // PLT has a slot of its own for a call, which ours reads the symbol's slot for).
+        const ExecutableTestGot our_got = executable_test_got(file, ET_DYN);
+        const ExecutableTestGot their_got = executable_test_got(lld_file, ET_DYN);
+        const uint64_t tls_slots = executable_test_tls_slots(link);
+        dynamic_test_expect(tally, our_got.valid && their_got.valid && our_got.relative == their_got.relative, "as many RELATIVE GOT slots as lld's",
+                            our_got.relative * 100000 + their_got.relative);
+        dynamic_test_expect(tally, our_got.plain >= 1 + tls_slots && our_got.plain - 1 - tls_slots == their_got.plain, "as many GOT slots without relocations as lld's",
+                            our_got.plain * 100000 + their_got.plain);
+        printf("  %s: GOT slots %llu RELATIVE, %llu by a dynamic symbol, %llu without relocations (%llu of thread-locals' offsets); lld's %llu, %llu and %llu\n", name,
+               (unsigned long long)our_got.relative, (unsigned long long)our_got.symbolic, (unsigned long long)(our_got.plain - 1), (unsigned long long)tls_slots,
+               (unsigned long long)their_got.relative, (unsigned long long)their_got.symbolic, (unsigned long long)their_got.plain);
         static const int64_t sizes[] = {
             DT_INIT_ARRAYSZ,
             DT_FINI_ARRAYSZ,
@@ -2393,8 +2486,9 @@ static bool dynamic_test_imports(const ExecutableTestDirectory* directory, const
 // relocation), an ABS32 or a PC32 in .data to main or to a weak reference to nothing with default visibility, which is
 // dynamic; a call to that weak reference, which goes to a stub (in a function that never runs); a pointer to it in
 // .data, which the loader leaves 0 since nothing defines it, and which main returns whether it isn't; loads through the
-// GOT of it and of the program's data, whose slots share a word of the bitsets, the dynamic one first, so that the
-// GOT's RELR words start past the word's first slot; a pointer to main at an odd address, after a byte of .data, which
+// GOT of it and of the program's data (by GOTPCREL, which doesn't relax), whose slots share a word of the bitsets, the
+// dynamic one first, so that the GOT's RELR words start past the word's first slot, and a load of the data that relaxes
+// to a lea; a pointer to main at an odd address, after a byte of .data, which
 // RELR can't hold, so .rela.dyn does, and which main returns whether it isn't main's address; and a hidden weak
 // reference to nothing, at address 0 wherever the program loads: main's lea of it and a PC64 to it in .data, which no
 // load address makes right (GNU ld refuses the lea), a call to it in the function that never runs, and a pointer to
@@ -2537,18 +2631,24 @@ static void dynamic_test_small(DynamicTestSmallProgram* program, const Runtime* 
                       : (LinkReference){ .instruction = 0, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_PC32, .target = data, .addend = 0 },
         { .instruction = 1, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_PC32, .target = !lea ? main : absolute_case ? absolute : hidden, .addend = 0 },
     };
-    // Or for the loads through the GOT: mov rdx, [rip + buster_weak's slot] (0); mov rax, [rip + buster_data's slot];
-    // mov rax, [rax] (0); add rax, rdx; ret. A slot relocated wrong exits with another status, or faults.
+    // Or for the loads through the GOT: mov rdx, [rip + buster_weak's slot] (0); mov rax, [rip + buster_data's slot],
+    // which GOTPCREL reads, so that it doesn't relax; mov rcx, [rip + buster_data's slot], which relaxes to lea rcx,
+    // [rip + buster_data]; sub rax, rcx (0); mov rcx, [rcx] (0); add rax, rcx; add rax, rdx; ret. A slot relocated wrong,
+    // or a load relaxed wrong, exits with another status, or faults.
     const X86Instruction got_code[] = {
         { .reg = X86_REGISTER_RDX, .mode = BUSTER_X86_MEMORY_RIP, .form = X86_FORM_MOV_R64_RM64 | BUSTER_X86_FORM_FIXUP },
         { .reg = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_RIP, .form = X86_FORM_MOV_R64_RM64 | BUSTER_X86_FORM_FIXUP },
-        { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 },
+        { .reg = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_RIP, .form = X86_FORM_MOV_R64_RM64 | BUSTER_X86_FORM_FIXUP },
+        { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_REGISTER_DIRECT, .form = X86_FORM_SUB_R64_RM64 },
+        { .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 },
+        { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_REGISTER_DIRECT, .form = X86_FORM_ADD_R64_RM64 },
         { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDX, .mode = BUSTER_X86_REGISTER_DIRECT, .form = X86_FORM_ADD_R64_RM64 },
         { .form = X86_FORM_RET },
     };
     const LinkReference got_references[] = {
         { .instruction = 0, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_LOAD_GOT, .target = weak, .addend = 0 },
-        { .instruction = 1, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_LOAD_GOT, .target = data, .addend = 0 },
+        { .instruction = 1, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_GOTPCREL, .target = data, .addend = 0 },
+        { .instruction = 2, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_LOAD_GOT, .target = data, .addend = 0 },
     };
     const bool loads = which == DYNAMIC_TEST_SMALL_GOT_ORDER;
     built = built && (loads ? bind_test_code(test, got_code, BUSTER_ARRAY_LENGTH(got_code), got_references, BUSTER_ARRAY_LENGTH(got_references), main)

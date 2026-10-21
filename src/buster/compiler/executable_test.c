@@ -342,6 +342,39 @@ static bool executable_test_reset(Link* link, const char* path)
     return result;
 }
 
+// The atoms' bytes as the link's maker left them, all in one copy on `arena`, or null if it has no room. A write
+// patches them in place, and its relaxations rewrite instructions (a TLS access's sequence, a load's or a call's
+// through the GOT), which a TLS access's next write would no longer find, and which an object written from the link
+// must not have: executable_test_restore puts them back.
+static uint8_t* executable_test_save(const Link* link, Arena* arena)
+{
+    uint64_t total = 0;
+    for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+    {
+        total += link->atoms.bytes[atom] != 0 ? link->atoms.size[atom] : 0;
+    }
+    uint8_t* result = arena_push(arena, total + 1, 64);
+    uint64_t at = 0;
+    for (AtomId atom = 1; result != 0 && atom < link->atoms.count; atom += 1)
+    {
+        const uint64_t size = link->atoms.bytes[atom] != 0 ? link->atoms.size[atom] : 0;
+        memcpy(result + at, link->atoms.bytes[atom], size);
+        at += size;
+    }
+    return result;
+}
+
+static void executable_test_restore(Link* link, const uint8_t* saved)
+{
+    uint64_t at = 0;
+    for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+    {
+        const uint64_t size = link->atoms.bytes[atom] != 0 ? link->atoms.size[atom] : 0;
+        memcpy(link->atoms.bytes[atom], saved + at, size);
+        at += size;
+    }
+}
+
 static const char* const executable_test_error_names[] = {
     [EXECUTABLE_ERROR_NONE] = "none",
     [EXECUTABLE_ERROR_MEMORY] = "memory",
@@ -421,6 +454,89 @@ static const Elf64_Phdr* executable_test_segment(const ExecutableTestImage* imag
     for (uint32_t i = 0; image->valid && i < image->header->e_phnum; i += 1)
     {
         result = result == 0 && image->program_headers[i].p_type == type ? &image->program_headers[i] : result;
+    }
+    return result;
+}
+
+// What fills an executable's GOT, ours or another linker's, read from its sections: its slots, .got's entries and the
+// entries of .got.plt that IRELATIVE relocations fill (lld's IFUNCs' slots: its header and its PLT's slots aren't the
+// GOT's), and of .got's entries, those that relocations fill, RELATIVE ones (.rela.dyn's and .relr.dyn's), IRELATIVE
+// ones and a dynamic symbol's, and those none fills, which hold the link's values. False `valid` for a file that doesn't
+// read as an executable of `type`.
+typedef struct ExecutableTestGot ExecutableTestGot;
+struct ExecutableTestGot
+{
+    uint64_t slots;
+    uint64_t relative;
+    uint64_t irelative;
+    uint64_t symbolic;
+    uint64_t plain;
+    bool valid;
+};
+
+static ExecutableTestGot executable_test_got(String8 file, uint16_t type)
+{
+    const ExecutableTestImage image = executable_test_image_of(file, type);
+    const Elf64_Shdr* got = executable_test_section(&image, ".got");
+    const Elf64_Shdr* got_plt = executable_test_section(&image, ".got.plt");
+    ExecutableTestGot result = {
+        .valid = image.valid,
+    };
+    uint64_t relocated = 0;
+    uint64_t igot = 0;
+    for (uint32_t i = 1; image.valid && i < image.header->e_shnum; i += 1)
+    {
+        const Elf64_Shdr* section = &image.section_headers[i];
+        const bool rela = section->sh_type == SHT_RELA && section->sh_offset + section->sh_size <= file.length;
+        const bool relr = section->sh_type == SHT_RELR && section->sh_offset + section->sh_size <= file.length;
+        const uint64_t count = rela ? section->sh_size / sizeof(Elf64_Rela) : relr ? section->sh_size / 8 : 0;
+        uint64_t where = 0;
+        for (uint64_t r = 0; r < count; r += 1)
+        {
+            Elf64_Rela relocation = { 0 };
+            uint64_t word = 0;
+            if (rela)
+            {
+                memcpy(&relocation, file.pointer + section->sh_offset + r * sizeof(Elf64_Rela), sizeof(relocation));
+            }
+            else
+            {
+                memcpy(&word, file.pointer + section->sh_offset + 8 * r, sizeof(word));
+            }
+            // A RELR word: an even one an address, an odd one a bitmap of the 63 words after the last address's.
+            const uint32_t type_of = rela ? (uint32_t)ELF64_R_TYPE(relocation.r_info) : R_X86_64_RELATIVE;
+            const uint64_t addresses = rela || (word & 1) == 0 ? 1 : 63;
+            for (uint64_t a = 0; a < addresses; a += 1)
+            {
+                const bool present = rela || (word & 1) == 0 || (word >> (a + 1) & 1) != 0;
+                const uint64_t address = rela ? relocation.r_offset : (word & 1) == 0 ? word : where + 8 * a;
+                const bool in_got = present && got != 0 && address >= got->sh_addr && address < got->sh_addr + got->sh_size;
+                const bool in_got_plt = present && got_plt != 0 && address >= got_plt->sh_addr && address < got_plt->sh_addr + got_plt->sh_size;
+                result.relative += in_got && type_of == R_X86_64_RELATIVE ? 1 : 0;
+                result.irelative += in_got && type_of == R_X86_64_IRELATIVE ? 1 : 0;
+                result.symbolic += in_got && type_of != R_X86_64_RELATIVE && type_of != R_X86_64_IRELATIVE ? 1 : 0;
+                relocated += in_got ? 1 : 0;
+                igot += in_got_plt && type_of == R_X86_64_IRELATIVE ? 1 : 0;
+            }
+            where = relr && (word & 1) == 0 ? word + 8 : relr ? where + 8 * 63 : where;
+        }
+    }
+    const uint64_t entries = got != 0 ? got->sh_size / 8 : 0;
+    result.slots = entries + igot;
+    result.plain = entries - relocated;
+    return result;
+}
+
+// How many of a link's symbols have GOT slots that hold their offsets from the thread pointer (initial-exec accesses'),
+// which lld relaxes to local-exec in an executable where the writer doesn't (yet).
+static uint64_t executable_test_tls_slots(const Link* link)
+{
+    uint64_t result = 0;
+    for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+    {
+        const AtomId atom = link->symbols.atom[symbol];
+        const bool tls = atom != 0 ? link_class_is_tls(link->atoms.class[atom]) : (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
+        result += link->symbols.got_slot[symbol] != 0 && tls ? 1 : 0;
     }
     return result;
 }
@@ -539,6 +655,66 @@ static bool executable_test_symbol_value(const Link* link, const ExecutableTestI
     return result;
 }
 
+// Whether a symbol's value is an address in the image, by the test's own rule: one defined in an atom that isn't
+// thread-local, or one of the linker's names. A thread-local symbol's offset, an absolute symbol's value, an import and
+// a weak symbol defined nowhere (0) aren't.
+static bool executable_test_in_image(const Link* link, SymbolId symbol)
+{
+    const AtomId atom = link->symbols.atom[symbol];
+    return (atom != 0 && !link_class_is_tls(link->atoms.class[atom])) || link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER;
+}
+
+// Whether a symbol is an IFUNC with a resolver, the code at it.
+static bool executable_test_is_ifunc(const Link* link, SymbolId symbol)
+{
+    return link->symbols.atom[symbol] != 0 && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_IFUNC;
+}
+
+// Whether a fixup reaches its target directly, as GNU ld and lld relax it in an executable of any kind, by the test's
+// own rule: a CALL_GOT or LOAD_GOT with the addend -4 to a symbol of the image's (executable_test_in_image) that isn't
+// an IFUNC.
+static bool executable_test_relaxes(const Link* link, FixupId fixup)
+{
+    const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+    const SymbolId target = link->fixups.target[fixup];
+    const bool loads = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT;
+    return loads && link_fixup_addend(link, fixup) == -4 && executable_test_in_image(link, target) && !executable_test_is_ifunc(link, target);
+}
+
+// The 6 bytes that a relaxed load or call (executable_test_relaxes), fixup `fixup` of `holder`, leaves from 2 bytes
+// before its field, for its target at address `symbol` and its field at `place`: for a mov, lea's 8d and its ModRM;
+// for a call, addr32 call's 67 e8; for a jmp, e9 and its rel32 a byte earlier, measured from its end, and a nop; and the
+// distance to the target. The instruction comes from the link's bytes, as their maker left them (call or jmp
+// [rip + slot], ff 15 or ff 25, and REX.W mov, 8b) or as a write left them (67 e8, e9 and 8d, which a write takes for
+// theirs). False if they are neither, or the distance doesn't fit.
+static bool executable_test_relaxed(const Link* link, AtomId holder, FixupId fixup, uint64_t symbol, uint64_t place, uint8_t* expected)
+{
+    const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+    const uint64_t offset = link->fixups.offset[fixup];
+    const uint8_t* bytes = link->atoms.bytes[holder];
+    const uint8_t opcode = offset >= 2 ? bytes[offset - 2] : 0;
+    const uint8_t modrm = offset >= 2 ? bytes[offset - 1] : 0;
+    const bool load = kind == BUSTER_LINK_FIXUP_LOAD_GOT;
+    const bool jump = !load && ((opcode == 0xff && modrm == 0x25) || opcode == 0xe9);
+    const bool call = !load && ((opcode == 0xff && modrm == 0x15) || (opcode == 0x67 && modrm == 0xe8));
+    const int64_t distance = (int64_t)symbol - (int64_t)(place + 4) + (jump ? 1 : 0);
+    const int32_t field = (int32_t)distance;
+    expected[0] = load ? 0x8d : jump ? 0xe9 : 0x67;
+    expected[1] = load ? modrm : 0xe8;
+    memcpy(expected + (jump ? 1 : 2), &field, sizeof(field));
+    expected[5] = jump ? 0x90 : expected[5];
+    return offset >= 2 && distance == field && (load ? opcode == 0x8b || opcode == 0x8d : jump || call);
+}
+
+// Whether a load or call through the GOT that doesn't relax keeps its instruction in `bytes`, its field at `offset`: a
+// CALL_GOT its call or jmp [rip + slot] (ff 15 or ff 25), a LOAD_GOT its mov (8b). Every other kind keeps its own.
+static bool executable_test_unrelaxed(uint8_t kind, const uint8_t* bytes, uint64_t offset)
+{
+    const bool call = kind == BUSTER_LINK_FIXUP_CALL_GOT;
+    const bool load = kind == BUSTER_LINK_FIXUP_LOAD_GOT;
+    return (!call && !load) || (offset >= 2 && (call ? bytes[offset - 2] == 0xff && (bytes[offset - 1] == 0x15 || bytes[offset - 1] == 0x25) : bytes[offset - 2] == 0x8b));
+}
+
 // The value a fixup's field must hold, from the reference arithmetic of its kind (link_test_load's), with its target's
 // value from executable_test_symbol_value. `holder` is the atom whose fixup it is, and width gets the field's width. A
 // value that can't fit is a failure: a generated program never has one.
@@ -599,13 +775,16 @@ static ExecutableTestField executable_test_expected(const Link* link, const Exec
     return !known ? EXECUTABLE_TEST_FIELD_UNKNOWN : fits ? EXECUTABLE_TEST_FIELD_FITS : EXECUTABLE_TEST_FIELD_DOESNT_FIT;
 }
 
-// Every fixup's field in the file holds the reference's value; the GOT has a slot for each GOT kind's target, numbered
-// from 1 in symbol order and holding its value; and an empty init or fini array starts where it ends.
-static void executable_test_fields(ExecutableTestTally* tally, const Link* link, String8 file, uint64_t index)
+// Every fixup's field in the file holds the reference's value, and a relaxed load's or call's instruction is rewritten
+// (executable_test_relaxed) where another keeps its own; the GOT has a slot for each target of a GOT kind that a fixup
+// reads unrelaxed, numbered from 1 in symbol order and holding its value; and an empty init or fini array starts where
+// it ends. Returns how many loads and calls relaxed.
+static uint64_t executable_test_fields(ExecutableTestTally* tally, const Link* link, String8 file, uint64_t index)
 {
     const ExecutableTestImage image = executable_test_image(file);
     executable_test_headers(tally, &image, index);
     uint64_t mismatched = 0;
+    uint64_t relaxed_count = 0;
     FixupId first = 0;
     for (AtomId atom = 1; image.valid && atom < link->atoms.count; atom += 1)
     {
@@ -624,12 +803,24 @@ static void executable_test_fields(ExecutableTestTally* tally, const Link* link,
                 memcpy(&actual, file.pointer + offset, width);
             }
             const uint64_t mask = width == 8 ? UINT64_MAX : UINT32_MAX;
-            const bool same = field == EXECUTABLE_TEST_FIELD_UNKNOWN || (field == EXECUTABLE_TEST_FIELD_FITS && readable && (actual & mask) == (expected & mask));
+            const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+            bool same = field == EXECUTABLE_TEST_FIELD_UNKNOWN ||
+                        (field == EXECUTABLE_TEST_FIELD_FITS && readable && (actual & mask) == (expected & mask) &&
+                         executable_test_unrelaxed(kind, (const uint8_t*)file.pointer + atom_offset, link->fixups.offset[fixup]));
+            if (executable_test_relaxes(link, fixup))
+            {
+                uint8_t relaxed[6];
+                uint64_t symbol = 0;
+                const bool known = executable_test_symbol_value(link, &image, link->fixups.target[fixup], &symbol, BUSTER_EXECUTABLE_BASE);
+                const uint64_t place = BUSTER_EXECUTABLE_BASE + link->atoms.address[atom] + link->fixups.offset[fixup];
+                same = known && readable && executable_test_relaxed(link, atom, fixup, symbol, place, relaxed) && memcmp(file.pointer + offset - 2, relaxed, sizeof(relaxed)) == 0;
+                relaxed_count += 1;
+            }
             first = !same && mismatched == 0 ? fixup : first;
             mismatched += same ? 0 : 1;
         }
     }
-    executable_test_expect(tally, mismatched == 0, "every field holds its kind's value", first);
+    executable_test_expect(tally, mismatched == 0, "every field holds its kind's value, a relaxed load or call's instruction rewritten", first);
     // The GOT: a slot for each target of a GOT kind and no other symbol, numbered from 1 in symbol order, each holding
     // its symbol's value, after slot 0, which holds 0.
     Scratch scratch = scratch_begin(0);
@@ -643,7 +834,7 @@ static void executable_test_fields(ExecutableTestTally* tally, const Link* link,
         {
             const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
             const bool reads_slot = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
-            targets[link->fixups.target[fixup]] |= reads_slot ? 1 : 0;
+            targets[link->fixups.target[fixup]] |= reads_slot && !executable_test_relaxes(link, fixup) ? 1 : 0;
         }
     }
     uint32_t next = 1;
@@ -670,7 +861,7 @@ static void executable_test_fields(ExecutableTestTally* tally, const Link* link,
         memcpy(&zero, file.pointer + got->sh_offset, sizeof(zero));
     }
     slots = slots && wrong == 0 && (got == 0 ? next == 1 : got->sh_size == 8 * (uint64_t)next && zero == 0);
-    executable_test_expect(tally, slots, "a GOT slot for each GOT kind's target, in symbol order, holding its value", wrong);
+    executable_test_expect(tally, slots, "a GOT slot for each target of an unrelaxed GOT kind, in symbol order, holding its value", wrong);
     scratch_end(scratch);
     // An empty init or fini array starts where it ends.
     for (uint32_t list = 0; list < 2; list += 1)
@@ -685,6 +876,7 @@ static void executable_test_fields(ExecutableTestTally* tally, const Link* link,
         const bool present = executable_test_section(&image, list == 0 ? ".init_array" : ".fini_array") != 0;
         executable_test_expect(tally, present || start == end, "an empty array's start and end", list);
     }
+    return relaxed_count;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1186,8 +1378,10 @@ static bool executable_test_boundaries(const Link* link, String8 file, const uin
         for (FixupId fixup = begin; result && fixup < begin + link->atoms.fixup_count[atom]; fixup += 1)
         {
             const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
-            const uint64_t field = atom_offset + link->fixups.offset[fixup];
-            const uint64_t field_end = field + link_fixup_kinds[kind].width;
+            // A load's or call's through the GOT from its instruction's opcode, which its relaxation may rewrite.
+            const bool relaxing = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT;
+            const uint64_t field = atom_offset + link->fixups.offset[fixup] - (relaxing ? 2 : 0);
+            const uint64_t field_end = atom_offset + link->fixups.offset[fixup] + link_fixup_kinds[kind].width;
             // The boundaries are sorted: the last one at or before the field must be at or past its end... or before it.
             uint64_t low = 0;
             uint64_t high = chunks + 1;
@@ -1274,14 +1468,14 @@ static bool executable_test_programs(const ExecutableTestDirectory* directory, u
             {
                 first = file;
                 first_result = result;
-                executable_test_fields(&tally, &program.link, file, i);
+                const uint64_t relaxed = executable_test_fields(&tally, &program.link, file, i);
                 executable_test_expect(&tally, written && executable_test_build_id(scratch.arena, file, boundaries, result.chunks), "the build ID is the tree of the file's chunks", i);
                 executable_test_expect(&tally, written && executable_test_boundaries(&program.link, file, boundaries, result.chunks), "no boundary splits a field", i);
                 const char* unwind = written ? executable_test_unwind(&program.link, file, BUSTER_EXECUTABLE_BASE, UINT32_MAX, &result) : "executable_write";
                 executable_test_expect(&tally, unwind == 0 && result.fdes != 0 && result.fdes_in_order, unwind != 0 ? unwind : "FDEs in order", i);
-                printf("  %s: %u atoms, %u fixups, %llu GOT slots, %llu FDEs, %llu bytes in %llu chunks: %s\n", names[i], program.link.atoms.count - 1,
-                       program.link.fixups.count - 1, (unsigned long long)result.got_slots, (unsigned long long)result.fdes, (unsigned long long)result.file_size,
-                       (unsigned long long)result.chunks, ran ? "ran" : "failed");
+                printf("  %s: %u atoms, %u fixups, %llu loads and calls relaxed, %llu GOT slots, %llu FDEs, %llu bytes in %llu chunks: %s\n", names[i],
+                       program.link.atoms.count - 1, program.link.fixups.count - 1, (unsigned long long)relaxed, (unsigned long long)result.got_slots,
+                       (unsigned long long)result.fdes, (unsigned long long)result.file_size, (unsigned long long)result.chunks, ran ? "ran" : "failed");
             }
             else
             {
@@ -1503,7 +1697,9 @@ static void executable_test_exit(ExecutableTestCode* code, int32_t status)
 // before the first one (a chunk's bytes into the file), and a large table aligned to a byte whose ABS64 starts
 // `pointer_before` bytes before the second, which the call's target writes. With 1 to 3 bytes before, the rel32
 // crosses the boundary, and with 1 to 7 the pointer does: the boundary must move to the field's end. With 0 the field
-// starts there, and with its width before it ends there: the boundary stays.
+// starts there, and with its width before it ends there: the boundary stays. Then the call is through the GOT, call
+// [rip + slot], which relaxes to addr32 call (67 e8) and so rewrites the 2 bytes before its field: with 1 to 5 of its 6
+// bytes before the boundary, the boundary must move to the field's end, with 0 or 6 it stays.
 
 #define BUSTER_EXECUTABLE_TEST_LARGE_BYTES (BUSTER_EXECUTABLE_CHUNK_BYTES + 8192)
 
@@ -1518,8 +1714,9 @@ struct ExecutableTestStraddle
     AtomId table;
 };
 
-// Builds the program with the call at `call` in the function and the pointer at `pointer` in the table.
-static bool executable_test_straddle(ExecutableTestStraddle* straddle, uint64_t call, uint64_t pointer)
+// Builds the program with the call at `call` in the function, through the GOT if `relaxing`, and the pointer at
+// `pointer` in the table.
+static bool executable_test_straddle(ExecutableTestStraddle* straddle, uint64_t call, uint64_t pointer, bool relaxing)
 {
     ExecutableTestLink* test = &straddle->test;
     bool result = executable_test_link_begin(test, 4 * BUSTER_EXECUTABLE_TEST_LARGE_BYTES);
@@ -1544,7 +1741,12 @@ static bool executable_test_straddle(ExecutableTestStraddle* straddle, uint64_t 
     jump.displacement = (int32_t)call - 12;
     executable_test_add(&runs[0], jump);
     runs[1].offset = call;
-    executable_test_refer(&runs[1], executable_test_bare(X86_FORM_CALL_REL32), BUSTER_LINK_FIXUP_CALL, writer, 0);
+    const X86Instruction through_slot = {
+        .mode = BUSTER_X86_MEMORY_RIP,
+        .form = X86_FORM_CALL_RM64,
+    };
+    executable_test_refer(&runs[1], relaxing ? through_slot : executable_test_bare(X86_FORM_CALL_REL32), relaxing ? BUSTER_LINK_FIXUP_CALL_GOT : BUSTER_LINK_FIXUP_CALL, writer,
+                          0);
     executable_test_exit(&runs[1], 0);
     result = result && call >= 16 && executable_test_code(test, BUSTER_EXECUTABLE_TEST_LARGE_BYTES, runs, 2, straddle->start) != 0;
     straddle->code = result ? link->atoms.count - 1 : 0;
@@ -1576,7 +1778,7 @@ static bool executable_test_chunks(const ExecutableTestDirectory* directory)
     // Where the function and the table go: their places don't depend on where the call and the pointer are in them.
     ExecutableTestStraddle probe;
     ExecutableResult result;
-    bool placed = boundaries != 0 && executable_test_straddle(&probe, 16, 0) && executable_test_write(&probe.test.link, probe.start, path, 1, &result, 0, 0);
+    bool placed = boundaries != 0 && executable_test_straddle(&probe, 16, 0, false) && executable_test_write(&probe.test.link, probe.start, path, 1, &result, 0, 0);
     const String8 probe_file = placed ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
     const ExecutableTestImage probe_image = executable_test_image(probe_file);
     const uint64_t code_offset = placed ? executable_test_file_offset(&probe_image, BUSTER_EXECUTABLE_BASE + probe.test.link.atoms.address[probe.code]) : 0;
@@ -1588,16 +1790,18 @@ static bool executable_test_chunks(const ExecutableTestDirectory* directory)
              table_offset + BUSTER_EXECUTABLE_TEST_LARGE_BYTES > second + 16 && table_offset > first;
     executable_test_expect(&tally, placed, "the large atoms cross the nominal boundaries", 0);
     // Each place of the rel32 from 0 to 4 bytes before the first boundary, and of the pointer from 0 to 8 before the
-    // second.
-    for (uint32_t before = 0; placed && before <= 8; before += 1)
+    // second; then of the call through the GOT's 6 bytes from 0 to 6 before the first.
+    for (uint32_t before = 0; placed && before <= 8 + 7; before += 1)
     {
-        const uint32_t call_before = before < 4 ? before : before % 5;
-        const uint32_t pointer_before = before;
-        // The call's rel32 is a byte after its opcode.
-        const uint64_t call = first - call_before - 1 - code_offset;
+        const bool relaxing = before > 8;
+        const uint32_t call_before = relaxing ? before - 9 : before < 4 ? before : before % 5;
+        const uint32_t pointer_before = relaxing ? 0 : before;
+        // The call's rel32 is a byte after its opcode; the call through the GOT's field 2 bytes after its opcode, and
+        // `call_before` counts its instruction's bytes before the boundary.
+        const uint64_t call = first - call_before - (relaxing ? 0 : 1) - code_offset;
         const uint64_t pointer = second - pointer_before - table_offset;
         ExecutableTestStraddle straddle;
-        const bool built = executable_test_straddle(&straddle, call, pointer);
+        const bool built = executable_test_straddle(&straddle, call, pointer, relaxing);
         executable_test_expect(&tally, built, "the program is built", before);
         String8 first_file = { 0 };
         for (uint32_t l = 0; built && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
@@ -1610,8 +1814,10 @@ static bool executable_test_chunks(const ExecutableTestDirectory* directory)
             executable_test_expect(&tally, ran, "the program runs through both fields", before * 10 + l);
             executable_test_expect(&tally, written && executable_test_boundaries(&straddle.test.link, file, boundaries, result.chunks), "no boundary splits a field",
                                    before * 10 + l);
-            // The cut: at the field's end when the field crosses the nominal boundary, there otherwise.
-            const uint64_t first_cut = call_before > 0 && call_before < 4 ? first - call_before + 4 : first;
+            // The cut: at the field's end when the field (or the instruction a relaxation rewrites) crosses the nominal
+            // boundary, there otherwise.
+            const uint32_t width = relaxing ? 6 : 4;
+            const uint64_t first_cut = call_before > 0 && call_before < width ? first - call_before + width : first;
             const uint64_t second_cut = pointer_before > 0 && pointer_before < 8 ? second - pointer_before + 8 : second;
             executable_test_expect(&tally, written && result.chunks >= 3 && boundaries[1] == first_cut && boundaries[2] == second_cut, "the boundaries move past the fields",
                                    before * 10 + l);

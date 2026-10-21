@@ -348,7 +348,7 @@ static bool snapshot_test_write_link(Link* link, const Bind* bind, const Runtime
     bool written = false;
     if (reset && runtime->kind == RUNTIME_KIND_STATIC)
     {
-        static_test_restore(link, saved);
+        executable_test_restore(link, saved);
         written = static_test_write_with(&write, link, bind, runtime, snapshot_test_string(path), lanes, result);
     }
     else if (reset)
@@ -376,8 +376,8 @@ static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDir
     snapshot_test_path(path_a, directory->path, "imported");
     snapshot_test_path(path_b, directory->path, "loaded");
     Scratch saved = scratch_begin(0);
-    const uint8_t* saved_a = bound ? static_test_save(&a.program.link, saved.arena) : 0;
-    const uint8_t* saved_b = bound ? static_test_save(&b.program.link, saved.arena) : 0;
+    const uint8_t* saved_a = bound ? executable_test_save(&a.program.link, saved.arena) : 0;
+    const uint8_t* saved_b = bound ? executable_test_save(&b.program.link, saved.arena) : 0;
     snapshot_test_expect(tally, !bound || (saved_a != 0 && saved_b != 0), "room for the atoms' bytes", index);
     const uint32_t lane_counts[] = { 1, 8 };
     for (uint32_t l = 0; bound && saved_a != 0 && saved_b != 0 && l < BUSTER_ARRAY_LENGTH(lane_counts); l += 1)
