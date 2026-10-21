@@ -74,6 +74,8 @@ static uint64_t x86_decode_benchmark_pass(const uint8_t* source, uint32_t size, 
         else
         {
             const X86DecodeResult result = variant == 2 ? x86_disassemble_batched(source, size, decoded, capacity) : variant == 1 ? x86_disassemble(source, size, decoded, capacity) : x86_disassemble_scalar(source, size, decoded, capacity);
+            // Retain every published record store even in the decode-only phase.
+            __asm__ volatile("" : : "r"(decoded) : "memory");
             checksum += result.consumed + result.count + result.status;
             if (phase == 2)
             {
@@ -236,7 +238,8 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
         const int cycles = x86_decode_benchmark_counter(PERF_COUNT_HW_CPU_CYCLES);
         const int instructions = x86_decode_benchmark_counter(PERF_COUNT_HW_INSTRUCTIONS);
         printf("disassembler stream=%s bytes=%u instructions=%llu passes=21 after-scalar=%ums\n", file != 0 ? file : vectors ? "synthetic-vector" : "synthetic-compiler", size, (unsigned long long)result.count, after_scalar);
-        const uint64_t table_bytes = sizeof(x86_decode_buckets) + sizeof(x86_decode_keys) + sizeof(x86_decode_masks) + sizeof(x86_decode_forms) + sizeof(x86_decode_length_table);
+        const uint64_t table_bytes = sizeof(x86_decode_buckets) + sizeof(x86_decode_keys) + sizeof(x86_decode_masks) + sizeof(x86_decode_forms) +
+                                     sizeof(x86_decode_length_table) + sizeof(x86_decode_checks) + sizeof(x86_decode_simple);
         printf("initialization=%.3fms (includes encoder validation templates) decoder-tables=%llu bytes entries=%u\n", initialization_ns / 1000000.0, (unsigned long long)table_bytes, x86_decode_entry_count);
         for (uint32_t phase = 0; phase < 3; phase += 1)
         {

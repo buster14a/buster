@@ -35,7 +35,9 @@ decoded as complete instructions. A two-byte `0f ff` or `0f b9` is truncated.
 Legacy prefixes must match a catalogue sequence, followed by at most one REX.
 FS/GS and address-size overrides are extracted separately. Repeated overrides,
 arbitrary legacy prefix reordering and REX before a later legacy prefix are
-unsupported even when hardware would accept them. A failure can therefore mean
+unsupported even when hardware would accept them. One bounded exception accepts
+Clang's long alignment NOPs: repeated `66` and ignored `2e` prefixes before
+`0f 1f`, with a total instruction length of at most 15 bytes. A failure can therefore mean
 valid machine code outside this supported subset. No byte-skipping recovery is
 attempted; `consumed` identifies the first undecodable instruction.
 
@@ -54,6 +56,7 @@ the independent C corpus uses ordinary loop control, AVX2, AVX-512 and BMI:
 clang -O3 -march=znver5 -c examples/disassembler/corpus.c -o /tmp/disassembler.o
 objcopy -O binary -j .text /tmp/disassembler.o /tmp/disassembler.text
 ./build/compiler disassemble /tmp/disassembler.text
+./build/compiler test-x86-disassembler --file /tmp/disassembler.text
 ./build/compiler benchmark-x86-disassembler --file /tmp/disassembler.text
 ```
 
@@ -98,7 +101,10 @@ The design follows uops.info's measured Zen 5 costs:
 [VPSHUFB](https://uops.info/html-instr/VPSHUFB_ZMM_ZMM_ZMM.html#ZEN5) is one
 executed uop with one-cycle measured latency and 0.5-cycle throughput;
 [VPERMI2B](https://uops.info/html-instr/VPERMI2B_ZMM_ZMM_ZMM.html#ZEN5) is one
-uop with four-cycle latency and 0.5-cycle throughput. Both use FP1/FP2.
+uop with four-cycle latency and 0.5-cycle throughput.
+[VPERMB](https://uops.info/html-instr/VPERMB_ZMM_ZMM_ZMM.html#ZEN5), used to extract
+fields at known offsets, has the same four-cycle latency and 0.5-cycle throughput.
+All three use FP1/FP2.
 [VPGATHERDD](https://uops.info/html-instr/VPGATHERDD_ZMM_K_VSIB_ZMM.html#ZEN5)
 costs 64 executed uops and about 12.6 cycles per instruction. The decoder uses
 contiguous loads and in-register tables, with no gather. These measurements

@@ -18,7 +18,7 @@ static int run_x86_disassembler(int argc, char** argv)
         {
             assembly = true;
         }
-        else if (path == 0)
+        else if (path == 0 && strncmp(argv[i], "--", 2) != 0)
         {
             path = argv[i];
         }
@@ -33,14 +33,14 @@ static int run_x86_disassembler(int argc, char** argv)
     valid = valid && fd >= 0 && fstat(fd, &info) == 0 && info.st_size >= 0 && (uint64_t)info.st_size <= UINT32_MAX;
     const uint64_t size = valid ? (uint64_t)info.st_size : 0;
     uint8_t* bytes = valid && size != 0 ? mmap(0, size, PROT_READ, MAP_PRIVATE, fd, 0) : 0;
-    valid = valid && bytes != MAP_FAILED && x86_encoder_initialize() && x86_encoder_initialize_address32() && x86_disassembler_initialize();
+    valid = valid && bytes != MAP_FAILED && x86_disassembler_initialize();
     if (fd >= 0)
     {
         close(fd);
     }
     if (valid && assembly)
     {
-        printf(".intel_syntax noprefix\n.text\n");
+        printf(".intel_syntax noprefix\n.arch .mpx\n.arch .amx_transpose\n.arch .amx_tf32\n.text\n");
     }
     uint64_t consumed = 0;
     X86DecodeStatus status = X86_DECODE_OK;
