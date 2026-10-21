@@ -28,6 +28,10 @@ subset into ELF objects with AVX-512 and scalar paths. Try
 `./build/compiler assemble -o /tmp/sum.o examples/assembler/sum.s`;
 the assembly notes include a runnable caller and validation commands.
 
+The [x86-64 disassembler](docs/x86-64-disassembler.md) decodes its documented
+catalogue subset from raw bytes with AVX-512 and scalar paths. Run
+`./build/compiler disassemble input.text` for an Intel-syntax listing.
+
 ## License and contributions
 
 Except where component-specific terms apply, original material is licensed

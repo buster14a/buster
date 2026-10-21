@@ -80,6 +80,14 @@ jobs:
       - name: Test generated-code ISA policy
         run: ./build/compiler test-x86-target
 
+      - name: Test the x86-64 disassembler against GNU tools
+        run: ./build/compiler test-x86-disassembler --objdump
+
+      - name: Benchmark x86-64 disassembly
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-x86-disassembler
+
       - name: Benchmark the x86-64 encoder
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
