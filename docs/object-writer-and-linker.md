@@ -2422,44 +2422,45 @@ static-pie`): the direct path opens the static PIE's runtime's snapshot
 both set; the linkers take the driver's `-static-pie` command (`-static -pie
 --no-dynamic-linker -z text`, `rcrt1.o`, `crti.o` and `crtbeginS.o`, the
 static executable's group, then `crtendS.o` and `crtn.o`). Medians on the
-9700X in µs, one lane, at 5cd1e31, in a run whose static executables came
-within 6% of the table above (a second run gave the totals within 2%, and
-every figure within 7%):
+9700X in µs, one lane, with RELR ("The static PIE"), in one run with the
+static executables (`--kinds static,static-pie`), whose figures came within
+4% of the table above (the totals within 1.5%):
 
 | | 1 worker | 2,000 workers | 102,400 workers |
 | --- | ---: | ---: | ---: |
-| **Direct path, 1 lane** | **304** | **410** | **9,177** |
-| `runtime_open_static_pie` | 22.5 | 22.4 | 25.1 |
-| `bind_begin` | 14.1 | 15.7 | 102 |
-| `bind_end` and `dynamic_static_pie_inputs` | 130 | 135 | 379 |
-| `executable_write` | 138 | 237 | 8,670 |
-| One `pwrite` of the output | 20.5 | 33.4 | 3,136 |
-| GNU ld | 13,210 | 16,860 | 336,600 |
-| lld, its threads / 1 | 8,830 / 6,870 | 9,790 / 8,310 | 59,700 / 103,000 |
-| mold, its threads / 1 | 8,700 / 6,180 | 10,010 / 7,630 | 42,800 / 103,300 |
-| wild, its threads / 1 | — | 4,120 / 5,110 | 26,600 / 103,300 |
+| **Direct path, 1 lane** | **298** | **379** | **7,894** |
+| `runtime_open_static_pie` | 22.3 | 22.6 | 25.2 |
+| `bind_begin` | 13.9 | 15.6 | 103 |
+| `bind_end` and `dynamic_static_pie_inputs` | 128 | 132 | 379 |
+| `executable_write` | 134 | 209 | 7,388 |
+| One `pwrite` of the output | 19.1 | 31.9 | 2,911 |
+| GNU ld | 13,090 | 17,020 | 336,600 |
+| lld, its threads / 1 | 8,820 / 6,790 | 9,760 / 8,310 | 59,900 / 102,600 |
+| mold, its threads / 1 | 8,670 / 6,220 | 10,040 / 7,630 | 42,500 / 106,000 |
+| wild, its threads / 1 | — | 4,100 / 5,100 | 26,800 / 103,700 |
 
 - **A static PIE's link costs a static executable's and a little more:** in
-  the same run the static executables took 284, 369 and 7,788 µs. Binding
-  joins one member more ("Static links, as built"), and the write does a PIE's
-  work besides the static runtime's. Against the linkers it is a static
-  executable's link: 20 times faster than mold on one thread at hello world's
-  size, 43 times faster than GNU ld, and 2.9 times faster than wild with its
-  threads at synth's shape.
-- **At synth's shape the write takes 1.4 ms longer** (8.67 ms against the
-  static executable's 7.27), where the linkers' static PIEs cost them 0–11%
-  more than their static executables:
-  - the count takes 1.45 ms, against 0.73 for the static executable and 0.79
-    for the dynamic PIE: it marks the static runtime's IFUNCs and the PIE's
-    symbols, counts with both filters, and classifies the ABS64 fixups;
-  - its 105,077 RELATIVE relocations are 2.5 MB of `.rela.dyn`, which the
-    dynamic phase writes (0.38 ms against 0.14) and the chunks hash and write
-    (6.19 ms against 5.72), where the dynamic PIE's are RELR words. GNU ld,
-    lld and mold write them in `.rela.dyn` too with the driver's command, but
-    glibc's static-PIE startup takes RELR: lld's link of the 2,000-worker
-    program with `-z pack-relative-relocs` runs, 75 KB smaller, its
-    `.rela.dyn` left with the IFUNCs' 22 IRELATIVE relocations beside a
-    552-byte `.relr.dyn`.
+  the same run the static executables took 291, 362 and 7,664 µs, 2% to 5%
+  less. Binding joins one member more ("Static links, as built"), and the
+  write does a PIE's work besides the static runtime's. Against the linkers
+  it is a static executable's link: 21 times faster than mold on one thread
+  at hello world's size, 44 times faster than GNU ld, and 3.4 times faster
+  than wild with its threads at synth's shape.
+- **At synth's shape the write takes 0.23 ms longer** (7.39 ms against the
+  static executable's 7.16), where the linkers' static PIEs cost them from
+  1% less (mold with its threads) to 11% more (GNU ld) than their static
+  executables. The count takes 0.82 ms against 0.72: it marks the static
+  runtime's IFUNCs and the PIE's symbols, counts with both filters, finds the
+  loads through the GOT that relax and classifies the ABS64 fixups. The
+  dynamic phase takes 0.16 ms against 0.14, and the chunks 5.77 against 5.61.
+- **RELR and the relaxed loads make the static PIE the smaller file:**
+  44.15 MB against the static executable's 44.66. Its 105,077 relative
+  relocations are 1,767 RELR words (14 KB), and its 22 IRELATIVE relocations
+  stay in `.rela.dyn`. The linkers' static PIEs carry the relative ones in
+  `.rela.dyn` with the driver's command (2.5 MB), and are 2.5 to 4.1 MB
+  larger than their static executables. And the loads through the GOT of the
+  image's symbols relax, so the GOT keeps 66 slots, where the static
+  executable's keeps 66,335 (531 KB).
 - **wild's static PIEs have its static executables' flaw.** wild 0.10 starts
   a static PIE's TLS segment at `.tdata`'s alignment as it does a static
   executable's, and glibc's static-PIE startup then faults alike. Whether a

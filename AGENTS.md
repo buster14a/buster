@@ -1001,8 +1001,8 @@ one allowed CPU; like the others, its measurements are informational.
 
 ## Import tests
 
-`./build/compiler test-import [--seed N] [--cross-check]` (about 0.19 s on
-the 9700X, and 0.26 s with `--cross-check`) checks `import.c` and
+`./build/compiler test-import [--seed N] [--cross-check]` (about 0.21 s on
+the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
 `runtime.c`:
 
 - round trips: each unit's object of `test-link`'s seven programs (with 500
@@ -1146,7 +1146,7 @@ informational.
 ## Bind tests
 
 `./build/compiler test-bind [--seed N] [--cross-check] [--keep]` (about
-34 ms on the 9700X, and 0.57 s with `--cross-check`) checks `bind.c` against
+44 ms on the 9700X, and 0.89 s with `--cross-check`) checks `bind.c` against
 this system's runtime (`runtime_import`). Every check binds by both paths,
 which must make the same link, column by column, and the same imports,
 exports and members:
@@ -1620,7 +1620,7 @@ like the others, its measurements are informational.
 ## Snapshot tests
 
 `./build/compiler test-snapshot [--seed N] [--functions N] [--directory PATH]
-[--keep]` (about 0.27 s on the 9700X) checks `snapshot.c` with this system's
+[--keep]` (about 0.31 s on the 9700X) checks `snapshot.c` with this system's
 runtimes, a dynamic PIE's, a static executable's and a static PIE's, in a
 directory of its own under `--directory` (`TMPDIR` or `/tmp` by default),
 which it removes unless `--keep`:
