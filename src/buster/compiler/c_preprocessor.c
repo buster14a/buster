@@ -1391,12 +1391,13 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
         // needs room for a token per byte, but a file has about one per six: with the columns of every file in one
         // arena, the room between them would be cleared too wherever a huge page holds a used byte, which for sqlite3.c
         // and its headers was 9 bytes per input byte. The leading-space words, whose count is now known, need no room
-        // of their own: a word past the last token's, for pp_store_file_tokens.
+        // of their own: a word past the last token's, for pp_store_file_tokens. They go after the kinds, where the
+        // lexer's writes have most likely touched their page already (refinement then needn't fault a fresh one in).
         const uint64_t kept = (uint64_t)count + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
         arena_pop_to(&columns[0], (uint64_t)(data->kinds - columns[0].base) + kept);
         arena_pop_to(&columns[1], (uint64_t)((uint8_t*)data->starts - columns[1].base) + kept * sizeof(uint32_t));
         arena_pop_to(&columns[2], (uint64_t)((uint8_t*)data->values - columns[2].base) + kept * sizeof(uint32_t));
-        data->space = arena_push_array(&pp->arena, (uint64_t)count / 64 + 2, sizeof(uint64_t), 64);
+        data->space = arena_push_array(&columns[0], (uint64_t)count / 64 + 2, sizeof(uint64_t), 64);
         result = data->space != 0;
         if (result && pp->vectorized)
         {
