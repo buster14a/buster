@@ -21,9 +21,10 @@
 // With files, each is preprocessed with the options (-I, -isystem, -D, -std=, -ffreestanding, ... as for -E) by both
 // kernels, which must agree, and with --clang compared with `clang -E` and the same options, spellings and line
 // markers: our side then reads clang's own predefines (`clang -dM -E` with the options, as --predefines), so that both
-// start from the same macros. The first difference is printed with the tokens around it. In both, the vectorized
-// printer's text must be the scalar printer's byte for byte, with line markers and without, and must lex back into
-// the stream's tokens.
+// start from the same macros. The first difference is printed with the tokens around it. Then, with our own
+// predefines, the macros defined at the file's end (-dM) must be `clang -dM -E`'s (pp_test_macros). In both, the
+// vectorized printer's text must be the scalar printer's byte for byte, with line markers and without, and must lex
+// back into the stream's tokens.
 //
 // main.c includes this file after c_preprocessor.c. Layout: the token spellings of a stream and of a text, the
 // comparison, clang's side (pp_test_clang), the line markers' places (PPPlaced), the cases, the files, the predefines,
@@ -315,51 +316,39 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
     return result;
 }
 
-// Runs `clang -E` with the options' arguments on `path`: its output, with line markers, or null. Also writes clang's
-// predefines for the same arguments to `predefines_path` (when it isn't null), as `clang -dM -E` gives them.
-static char* pp_test_clang(char** arguments, int argument_count, const char* path, const char* predefines_path, size_t* length)
+// Runs `clang [arguments] -E [extra...]` (`extra` ends with a null) with CPATH and C_INCLUDE_PATH unset: its standard
+// output, or null.
+static char* pp_test_clang_output(char** arguments, int argument_count, const char* const* extra, size_t* length)
 {
     char* result = 0;
     *length = 0;
-    // The command: env -u CPATH clang [arguments] -E path. The arguments are passed through a temporary argv.
-    for (int pass = predefines_path != 0 ? 0 : 1; pass < 2; pass += 1)
+    int pipe_fds[2];
+    const pid_t child = pipe(pipe_fds) == 0 ? fork() : -1;
+    if (child == 0)
     {
-        int pipe_fds[2];
-        if (pipe(pipe_fds) != 0)
+        char* argv[256];
+        int n = 0;
+        argv[n++] = "clang";
+        for (int i = 0; i < argument_count && n < 240; i += 1)
         {
-            break;
+            argv[n++] = arguments[i];
         }
-        const pid_t child = fork();
-        if (child == 0)
+        argv[n++] = "-E";
+        for (uint32_t i = 0; extra[i] != 0 && n < 255; i += 1)
         {
-            char* argv[256];
-            int n = 0;
-            argv[n++] = "clang";
-            for (int i = 0; i < argument_count && n < 240; i += 1)
-            {
-                argv[n++] = arguments[i];
-            }
-            argv[n++] = "-E";
-            if (pass == 0)
-            {
-                argv[n++] = "-dM";
-                argv[n++] = "-x";
-                argv[n++] = "c";
-                argv[n++] = "/dev/null";
-            }
-            else
-            {
-                argv[n++] = (char*)path;
-            }
-            argv[n] = 0;
-            unsetenv("CPATH");
-            unsetenv("C_INCLUDE_PATH");
-            dup2(pipe_fds[1], STDOUT_FILENO);
-            close(pipe_fds[0]);
-            close(pipe_fds[1]);
-            execvp("clang", argv);
-            _exit(127);
+            argv[n++] = (char*)extra[i];
         }
+        argv[n] = 0;
+        unsetenv("CPATH");
+        unsetenv("C_INCLUDE_PATH");
+        dup2(pipe_fds[1], STDOUT_FILENO);
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        execvp("clang", argv);
+        _exit(127);
+    }
+    if (child > 0)
+    {
         close(pipe_fds[1]);
         FILE* stream = fdopen(pipe_fds[0], "r");
         char* text = 0;
@@ -381,23 +370,31 @@ static char* pp_test_clang(char** arguments, int argument_count, const char* pat
         }
         int status = 0;
         waitpid(child, &status, 0);
-        if (pass == 0)
-        {
-            FILE* out = fopen(predefines_path, "w");
-            if (out != 0 && text != 0)
-            {
-                fwrite(text, 1, text_length, out);
-                fclose(out);
-            }
-            free(text);
-        }
-        else
-        {
-            result = text;
-            *length = text_length;
-        }
+        result = text;
+        *length = text_length;
     }
     return result;
+}
+
+// Runs `clang -E` with the options' arguments on `path`: its output, with line markers, or null. Also writes clang's
+// predefines for the same arguments to `predefines_path` (when it isn't null), as `clang -dM -E` gives them.
+static char* pp_test_clang(char** arguments, int argument_count, const char* path, const char* predefines_path, size_t* length)
+{
+    if (predefines_path != 0)
+    {
+        static const char* const extra[] = { "-dM", "-x", "c", "/dev/null", 0 };
+        size_t predefines_length;
+        char* text = pp_test_clang_output(arguments, argument_count, extra, &predefines_length);
+        FILE* out = text != 0 ? fopen(predefines_path, "w") : 0;
+        if (out != 0)
+        {
+            fwrite(text, 1, predefines_length, out);
+            fclose(out);
+        }
+        free(text);
+    }
+    const char* const extra[] = { path, 0 };
+    return pp_test_clang_output(arguments, argument_count, extra, length);
 }
 
 // The tokens of a text -E printed with line markers, and where the markers put each, as a compiler reading the text
@@ -1100,6 +1097,70 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     return result;
 }
 
+// c_predefines_test.c's: drops the -dM lines of clang's patch release's version macros and of __BUSTER__.
+static void predefines_test_drop_versions(char* text);
+
+// The macros defined at the end of a file's translation unit (#121), with our own predefines for the options: -dM
+// against `clang -dM -E` with the same arguments, byte for byte but for the version macros of clang's patch release
+// and our __BUSTER__. So the whole table is clang's, the predefines and every definition and #undef.
+static bool pp_test_macros(int argument_count, char** arguments, const PPOptions* base, const char* path)
+{
+    PPOptions options = *base;
+    options.predefines_path = 0;
+    static InternTable table;
+    static Preprocessor pp;
+    char* ours = 0;
+    size_t ours_length = 0;
+    FILE* stream = open_memstream(&ours, &ours_length);
+    bool result = stream != 0 && intern_initialize(&table);
+    if (result)
+    {
+        result = pp_initialize(&pp, &options, &table) && pp_run(&pp, path) && pp_print_macros(&pp, stream);
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    if (stream != 0)
+    {
+        fclose(stream);
+    }
+    const char* const extra[] = { "-dM", path, 0 };
+    size_t theirs_length = 0;
+    char* theirs = result ? pp_test_clang_output(arguments, argument_count, extra, &theirs_length) : 0;
+    result = theirs != 0 && ours != 0;
+    if (result)
+    {
+        predefines_test_drop_versions(ours);
+        predefines_test_drop_versions(theirs);
+        result = strcmp(ours, theirs) == 0;
+    }
+    if (!result && ours != 0 && theirs != 0)
+    {
+        // The first line that differs.
+        uint32_t line = 1;
+        size_t at = 0;
+        for (; ours[at] != 0 && ours[at] == theirs[at]; at += 1)
+        {
+            line += ours[at] == '\n';
+        }
+        const char* our_line = ours + at;
+        const char* their_line = theirs + at;
+        while (our_line > ours && our_line[-1] != '\n')
+        {
+            our_line -= 1;
+            their_line -= 1;
+        }
+        printf("%s: -dM differs from clang's at line %u:\n  ours:  %.*s\n  clang: %.*s\n", path, line, (int)strcspn(our_line, "\n"), our_line,
+               (int)strcspn(their_line, "\n"), their_line);
+    }
+    else if (!result)
+    {
+        printf("%s: -dM failed (ours %s, clang %s)\n", path, ours != 0 ? "ran" : "failed", theirs != 0 ? "ran" : "failed");
+    }
+    free(ours);
+    free(theirs);
+    return result;
+}
+
 // One file, by both kernels, and with --clang against clang with the same options.
 static bool pp_test_file(int argument_count, char** arguments, const PPOptions* base, const char* path, bool with_clang, const char* directory, uint64_t* tokens)
 {
@@ -1131,6 +1192,7 @@ static bool pp_test_file(int argument_count, char** arguments, const PPOptions* 
         result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, runs[0].split_kinds, &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
                  pp_test_placed(&runs[0], &theirs, path);
         pp_placed_release(&theirs);
+        result = result && pp_test_macros(argument_count, arguments, base, path);
     }
     arena_release(&ours.arena);
     free(text);

@@ -1153,7 +1153,11 @@ the mispredictions it saves.
   from the same macros. clang's `-E` text, without its line markers' lines, is
   lexed with `c_tokenize` and compared with our stream's spellings, token for
   token. Then the places its markers give the tokens are compared with ours.
-  The first difference is printed with the tokens around it.
+  The first difference is printed with the tokens around it. Last, with our own
+  predefines, the macros defined at the file's end must be `clang -dM -E`'s
+  byte for byte, but for the patch release's three macros and `__BUSTER__`
+  (`pp_test_macros`, #121): the whole table, predefines, definitions and
+  `#undef`s. `main.c` ends with 10,894 macros, `sqlite3.c` with 5,596.
 
 In both, the two printers must give the same bytes, with line markers and
 without, and the text must lex back into the stream's spellings.

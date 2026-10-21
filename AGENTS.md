@@ -2013,7 +2013,9 @@ options, token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
 prints the first difference with the tokens around it. For files, our side
 reads clang's own predefines for the options through `--predefines`, so that
-only preprocessing is compared (the 9700X's clang names another patch release).
+only preprocessing is compared (the 9700X's clang names another patch release);
+then, with our own predefines, the macros defined at the file's end must be
+`clang -dM -E`'s byte for byte, but for those three macros and `__BUSTER__`.
 Without files, `--clang` also checks the built-in predefines, the keywords and
 the features:
 - in 22 option sets (the ten modes from `c89` to `gnu23`, `-ffreestanding`,
