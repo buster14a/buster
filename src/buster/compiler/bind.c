@@ -111,6 +111,9 @@ typedef enum BindError
     BIND_ERROR_FULL,
     // A fixup of an atom that joined refers to a local symbol of a COMDAT group that was discarded.
     BIND_ERROR_DISCARDED,
+    // A piece of a runtime loaded from a snapshot that binding was about to read doesn't hash as when the snapshot was
+    // written (runtime_piece_current): the snapshot is damaged, and the runtime must be imported again.
+    BIND_ERROR_SNAPSHOT,
 } BindError;
 
 typedef enum BindPath
@@ -455,12 +458,13 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     const uint32_t fixup_delta = fixup_first - begin.fixups;
     const uint32_t wide_delta = link->fixups.wide_count - begin.wide_addends;
 
-    // Names: the piece's bytes are one run in the runtime's name arena, copied at once, and the pointers moved with them.
+    // Names: the piece's bytes are one run in the runtime's name arena, copied at once, and the pointers moved with them
+    // (a loaded runtime's offsets by its delta too: Runtime.byte_delta).
     const uint64_t name_bytes = end.name_bytes - begin.name_bytes;
     const uint8_t* source = runtime->names.base + begin.name_bytes;
     uint8_t* copy = arena_push(link->name_arena, name_bytes, 1);
     memcpy(copy, source, name_bytes);
-    const __m512i moved = _mm512_set1_epi64((long long)((uintptr_t)copy - (uintptr_t)source));
+    const __m512i moved = _mm512_set1_epi64((long long)((uintptr_t)copy - (uintptr_t)source + runtime->byte_delta));
     for (uint32_t i = 0; i < name_count; i += BUSTER_BIND_BATCH)
     {
         const __mmask8 lanes = (__mmask8)bind_lane_mask(name_count - i < BUSTER_BIND_BATCH ? name_count - i : BUSTER_BIND_BATCH);
@@ -491,7 +495,7 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     for (uint32_t i = 0; i < atom_count; i += 1)
     {
         const AtomId atom = begin.atoms + i;
-        const uint8_t* bytes = from->atoms.bytes[atom];
+        const uint8_t* bytes = runtime_atom_bytes(runtime, atom);
         uint8_t* placed = bytes != 0 ? arena_push(bind->bytes, from->atoms.size[atom], (uint64_t)1 << from->atoms.alignment_log2[atom]) : 0;
         if (bytes != 0)
         {
@@ -614,7 +618,7 @@ static void bind_join_records(Bind* bind, Link* link, uint32_t piece, const uint
     bool result = true;
     for (NameId name = begin.names; result && name < end.names; name += 1)
     {
-        result = link_add_name_hashed(link, from->names.bytes[name], from->names.length[name], from->names.hash[name]) == name_first + (name - begin.names);
+        result = link_add_name_hashed(link, runtime_name_bytes(runtime, name), from->names.length[name], from->names.hash[name]) == name_first + (name - begin.names);
     }
     // Each of the piece's atoms' atom in the link, or 0 for a discarded one.
     Scratch scratch = scratch_begin(bind->bytes);
@@ -623,7 +627,7 @@ static void bind_join_records(Bind* bind, Link* link, uint32_t piece, const uint
     for (AtomId atom = begin.atoms; result && atom < end.atoms; atom += 1)
     {
         const bool dropped = discarded != 0 && discarded[atom - begin.atoms] != 0;
-        const uint8_t* bytes = from->atoms.bytes[atom];
+        const uint8_t* bytes = runtime_atom_bytes(runtime, atom);
         uint8_t* placed = bytes != 0 && !dropped ? arena_push(bind->bytes, from->atoms.size[atom], (uint64_t)1 << from->atoms.alignment_log2[atom]) : 0;
         if (placed != 0)
         {
@@ -731,14 +735,20 @@ static uint8_t* bind_discards(Bind* bind, uint32_t piece, Arena* arena)
     return result;
 }
 
-// Joins piece `piece` of the runtime (a crt object, or RUNTIME_OBJECTS + m for member m) to the link, if it has room.
-// A piece with a COMDAT group to discard, which few have, joins one record at a time on either path.
+// Joins piece `piece` of the runtime (a crt object, or RUNTIME_OBJECTS + m for member m) to the link, if it has room,
+// once a loaded runtime's piece is found as it was written (runtime_piece_current): binding reads none of a piece's
+// records before. A piece with a COMDAT group to discard, which few have, joins one record at a time on either path.
 static bool bind_join(Bind* bind, Link* link, uint32_t piece)
 {
-    const bool fits = bind_piece_fits(bind, link, piece);
+    const bool current = runtime_piece_current(bind->runtime, piece);
+    const bool fits = current && bind_piece_fits(bind, link, piece);
     Scratch scratch = scratch_begin(bind->bytes);
     const uint8_t* discarded = fits ? bind_discards(bind, piece, scratch.arena) : 0;
-    if (!fits)
+    if (!current)
+    {
+        bind_fail(bind, BIND_ERROR_SNAPSHOT, 0);
+    }
+    else if (!fits)
     {
         bind_fail(bind, BIND_ERROR_FULL, 0);
     }
@@ -780,8 +790,11 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     const NameId name = symbols->name[symbol];
     const uint32_t entry = runtime_find_global_name(names, link->names.bytes[name], link->names.length[name], link->names.hash[name]);
     const SymbolId definition = entry != 0 ? names->definition[entry - 1] : 0;
-    const uint32_t unit = definition != 0 ? runtime->link.atoms.unit[runtime->link.symbols.atom[definition]] : 0;
-    const bool after = definition != 0 && !bind->tail_joined && (unit == RUNTIME_OBJECT_END || unit == RUNTIME_OBJECT_INIT_EPILOGUE);
+    // A definition in an atom of crtendS.o or crtn.o (crtend.o or crtn.o), whose pieces bind_begin found current: the
+    // pieces say which symbols are theirs, so that no other piece's records are read before it joins.
+    const RuntimePiece* pieces = runtime->pieces;
+    const bool tail_piece = definition >= pieces[RUNTIME_OBJECT_END].begin.symbols && definition < pieces[RUNTIME_OBJECT_INIT_EPILOGUE].end.symbols;
+    const bool after = definition != 0 && !bind->tail_joined && tail_piece && runtime->link.symbols.atom[definition] != 0;
     const uint32_t export = entry != 0 ? names->export[entry - 1] : 0;
     const uint32_t member = entry != 0 ? names->member[entry - 1] : 0;
     const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
@@ -1147,18 +1160,9 @@ static LinkCapacity bind_capacity(const Runtime* runtime, uint64_t* name_bytes, 
         .wide_addends = link->fixups.wide_count - 1,
         .priorities = link->priorities.count - 1,
     };
-    uint64_t names = 0;
-    for (NameId name = 1; name < link->names.count; name += 1)
-    {
-        names += (uint64_t)link->names.length[name] + 1;
-    }
-    uint64_t atoms = 0;
-    for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
-    {
-        atoms += link->atoms.bytes[atom] != 0 ? link->atoms.size[atom] + ((uint64_t)1 << link->atoms.alignment_log2[atom]) - 1 : 0;
-    }
-    *name_bytes = names;
-    *atom_bytes = atoms;
+    // The import's sums (Runtime.name_room and atom_room), so that no link reads every piece for them.
+    *name_bytes = runtime->name_room;
+    *atom_bytes = runtime->atom_room;
     return result;
 }
 
@@ -1212,6 +1216,18 @@ static bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath 
     for (uint32_t i = 0; bind->error == BIND_ERROR_NONE && i < BUSTER_ARRAY_LENGTH(head); i += 1)
     {
         bind_join(bind, link, head[i]);
+    }
+    // crtendS.o and crtn.o join last, but binding reads which of their symbols are in atoms before (bind_resolve_symbol).
+    const uint32_t tail[] = {
+        RUNTIME_OBJECT_END,
+        RUNTIME_OBJECT_INIT_EPILOGUE,
+    };
+    for (uint32_t i = 0; bind->error == BIND_ERROR_NONE && i < BUSTER_ARRAY_LENGTH(tail); i += 1)
+    {
+        if (!runtime_piece_current(runtime, tail[i]))
+        {
+            bind_fail(bind, BIND_ERROR_SNAPSHOT, 0);
+        }
     }
     bind->symbols_begun = link->symbols.count;
     return bind->error == BIND_ERROR_NONE;
