@@ -188,6 +188,10 @@ struct PPOptions
     // Replace trigraphs (translation phase 1): clang's default in the ISO modes before C23, and -trigraphs,
     // -ftrigraphs or -fno-trigraphs.
     bool trigraphs;
+    // Recording is on by default; the benchmark's control disables it without changing preprocessing.
+    bool no_history;
+    // Null means stderr. Tests use a memory stream for the same renderer as the command line.
+    FILE* diagnostics;
 };
 
 // A column array of tokens: an output stream, or a stack of buffers.
@@ -203,6 +207,10 @@ struct PPTokens
     // A column per arena, so that each one's first pages are base pages (lane.c): a stack that holds a few tokens touches
     // a few kilobytes, where columns side by side would each start in a 2 MB huge page the kernel clears.
     Arena arenas[4];
+    // Temporary buffers only. The final output has no origin column, just PPHistoryRun records.
+    uint32_t* origins;
+    uint32_t origin_capacity;
+    Arena origin_arena;
 };
 
 typedef struct Preprocessor Preprocessor;
@@ -281,6 +289,9 @@ struct PPFileData
     // as it goes (__LINE__, diagnostics), so each file's lines are counted about once.
     uint32_t line_cursor;
     uint32_t line_cursor_line;
+    // Built on the first diagnostic in this file, then shared by all of its inclusions.
+    uint32_t* diagnostic_lines;
+    uint32_t diagnostic_line_count;
 };
 
 // A path to a file, as found: what __FILE__, line markers and the quoted includes it holds go by.
@@ -501,6 +512,7 @@ typedef struct PPInvocation PPInvocation;
 struct PPInvocation
 {
     PPMacroId macro;
+    uint32_t history;
     uint32_t arguments; // Index of its first PPArgument.
     uint32_t argument_count;
     uint32_t next; // The next argument to expand.
@@ -531,6 +543,7 @@ typedef struct PPCapture PPCapture;
 struct PPCapture
 {
     uint8_t kind;
+    uint32_t history;
     // The capture's tokens start here in pp->captures.
     uint32_t begin;
     // An argument's: its invocation.
@@ -556,6 +569,65 @@ struct PPFeature
     // The C standard's year from which clang gives the answer (a C11 feature's from 2011), or 0 for every mode.
     uint32_t standard;
 };
+
+// Origins are tagged indices: 0 is a file token, otherwise an expansion, a substitution or a generated token.
+#define BUSTER_PP_ORIGIN_ARGUMENT (1u << 30)
+#define BUSTER_PP_ORIGIN_GENERATED (2u << 30)
+#define BUSTER_PP_ORIGIN_INDEX ((1u << 30) - 1)
+#define BUSTER_PP_MAX_HISTORY (1u << 26)
+#define BUSTER_PP_INITIAL_HISTORY_BYTES 4096u
+
+typedef struct PPExpansion PPExpansion;
+struct PPExpansion
+{
+    IdentId name;
+    uint32_t definition;
+    uint32_t begin;
+    uint32_t end;
+    uint32_t parent;
+    uint32_t end_origin;
+    uint32_t builtin;
+};
+
+typedef struct PPSubstitution PPSubstitution;
+struct PPSubstitution
+{
+    uint32_t expansion;
+    uint32_t source;
+    uint32_t parameter;
+};
+
+typedef struct PPSource PPSource;
+struct PPSource
+{
+    uint32_t location;
+    uint32_t origin;
+};
+
+typedef enum PPGeneratedKind
+{
+    PP_GENERATED_PASTE,
+    PP_GENERATED_STRING,
+} PPGeneratedKind;
+
+typedef struct PPGenerated PPGenerated;
+struct PPGenerated
+{
+    uint32_t expansion;
+    uint32_t location;
+    uint32_t anchor;
+    uint32_t first;
+    uint32_t count;
+    PPGeneratedKind kind;
+};
+
+typedef struct PPHistoryRun PPHistoryRun;
+struct PPHistoryRun
+{
+    uint32_t token;
+    uint32_t origin;
+};
+_Static_assert(sizeof(PPHistoryRun) == 8, "an output history run is eight bytes");
 
 struct Preprocessor
 {
@@ -601,6 +673,29 @@ struct Preprocessor
     PPExpansionStart* expansion_starts;
     uint32_t expansion_start_count;
     uint32_t expansion_location;
+    PPExpansion* history;
+    uint32_t history_count;
+    uint32_t history_capacity;
+    PPSubstitution* substitutions;
+    uint32_t substitution_count;
+    uint32_t substitution_capacity;
+    PPGenerated* generated;
+    uint32_t generated_count;
+    uint32_t generated_capacity;
+    PPSource* history_sources;
+    uint32_t history_source_count;
+    uint32_t history_source_capacity;
+    PPHistoryRun* history_runs;
+    uint32_t history_run_count;
+    uint32_t history_run_capacity;
+    Arena history_initial;
+    // Only set around synchronous expansion/substitution work; never inferred from a spelling location.
+    uint32_t history_current;
+    uint32_t history_anchor;
+    uint32_t history_spelling;
+    uint32_t diagnostic_origin;
+    uint32_t diagnostic_include_range;
+    uint32_t origin_peak[3];
     // Scratch spellings, per kind (raw, as source to be read again, or clean, which are final: pp_scratch_clean): the
     // arena, the range of the chunk being filled (BUSTER_PP_NONE before the first) and how much of it is used. A clean
     // spelling is known by its arena (pp_without_splices).
@@ -679,6 +774,7 @@ static bool pp_tokens_reserve(PPTokens* tokens, uint32_t capacity)
 
 static void pp_tokens_release(PPTokens* tokens)
 {
+    arena_release(&tokens->origin_arena);
     for (uint32_t i = 0; i < 4; i += 1)
     {
         arena_release(&tokens->arenas[i]);
@@ -707,31 +803,25 @@ typedef enum PPSeverity
 static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location);
 static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, uint32_t* column);
 static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** name, uint32_t* name_length);
+static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range);
+static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const char* format, va_list arguments);
 
 // Prints "file:line:column: error: message" to stderr for `location` (0 for none): the presumed file and line, as #line
 // gives them, and the column.
 static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, PPSeverity severity, uint32_t location, const char* format, ...)
 {
-    const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
-    if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
-    {
-        uint32_t column;
-        pp_line_of(pp, range, location, &column);
-        const char* name;
-        uint32_t name_length;
-        const uint32_t line = pp_presumed(pp, location, &name, &name_length);
-        fprintf(stderr, "%.*s:%u:%u: ", (int)name_length, name, line, column);
-    }
-    fprintf(stderr, "%s: ", severity == PP_SEVERITY_WARNING ? "warning" : severity == PP_SEVERITY_ERROR ? "error" : "fatal error");
     va_list arguments;
     va_start(arguments, format);
-    vfprintf(stderr, format, arguments);
+    pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, format, arguments);
     va_end(arguments);
-    fputc('\n', stderr);
     pp->warnings += severity == PP_SEVERITY_WARNING;
     pp->errors += severity != PP_SEVERITY_WARNING;
     pp->fatal |= severity == PP_SEVERITY_FATAL;
 }
+
+static void* pp_array(Preprocessor* pp, uint64_t count, uint64_t size);
+
+#include "c_preprocessor_history.c"
 
 // Room for `more` tokens in a stack, or a fatal error.
 static bool pp_room(Preprocessor* pp, PPTokens* tokens, uint32_t more)
@@ -1581,6 +1671,44 @@ static uint32_t pp_count_lines(const PPFileData* data, uint32_t begin, uint32_t 
     return result;
 }
 
+static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range)
+{
+    PPFileData* data = &pp->datas[pp->files[pp->ranges[range].file].data];
+    if (data->diagnostic_lines == 0)
+    {
+        const uint32_t count = pp_count_lines(data, 0, data->length) + 1;
+        uint32_t* lines = arena_push_array(&pp->arena, count, sizeof(uint32_t), 4);
+        if (lines != 0)
+        {
+            uint32_t used = 1;
+            lines[0] = 0;
+            for (uint32_t i = 0; i < data->length; i += pp->vectorized ? 64 : 1)
+            {
+                if (pp->vectorized)
+                {
+                    const uint32_t remaining = data->length - i;
+                    const __mmask64 valid = _bzhi_u64(~0ull, remaining < 64 ? remaining : 64);
+                    const __m512i bytes = _mm512_maskz_loadu_epi8(valid, data->bytes + i);
+                    const uint64_t nl = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\n'));
+                    const uint64_t cr = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\r'));
+                    const uint64_t next = remaining > 64 && data->bytes[i + 64] == '\n';
+                    for (uint64_t bits = (nl | (cr & ~((nl >> 1) | (next << 63)))) & valid; bits != 0; bits &= bits - 1)
+                    {
+                        lines[used++] = i + (uint32_t)__builtin_ctzll(bits) + 1;
+                    }
+                }
+                else if (data->bytes[i] == '\n' || (data->bytes[i] == '\r' && (i + 1 == data->length || data->bytes[i + 1] != '\n')))
+                {
+                    lines[used++] = i + 1;
+                }
+            }
+            data->diagnostic_lines = lines;
+            data->diagnostic_line_count = used;
+        }
+        // Allocation failure keeps the existing cursor-based location lookup available.
+    }
+}
+
 // The physical line and column of `location` in its range's file: lines counted from the file's cursor (or from its
 // start, for a place before the cursor), and the column from the line's start before it.
 static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, uint32_t* column)
@@ -1592,20 +1720,42 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
     {
         PPFileData* data = &pp->datas[pp->files[record->file].data];
         const uint32_t offset = location - record->base < data->length ? location - record->base : data->length;
-        if (data->line_cursor_line == 0 || offset < data->line_cursor)
+        if (data->diagnostic_lines != 0)
         {
-            data->line_cursor = 0;
-            data->line_cursor_line = 1;
+            uint32_t low = 0;
+            uint32_t high = data->diagnostic_line_count;
+            while (high - low > 1)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                if (data->diagnostic_lines[middle] <= offset)
+                {
+                    low = middle;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+            result = low + 1;
+            *column = offset - data->diagnostic_lines[low] + 1;
         }
-        result = data->line_cursor_line + pp_count_lines(data, data->line_cursor, offset);
-        data->line_cursor = offset;
-        data->line_cursor_line = result;
-        uint32_t line_start = offset;
-        while (line_start > 0 && data->bytes[line_start - 1] != '\n' && data->bytes[line_start - 1] != '\r')
+        else
         {
-            line_start -= 1;
+            if (data->line_cursor_line == 0 || offset < data->line_cursor)
+            {
+                data->line_cursor = 0;
+                data->line_cursor_line = 1;
+            }
+            result = data->line_cursor_line + pp_count_lines(data, data->line_cursor, offset);
+            data->line_cursor = offset;
+            data->line_cursor_line = result;
+            uint32_t line_start = offset;
+            while (line_start > 0 && data->bytes[line_start - 1] != '\n' && data->bytes[line_start - 1] != '\r')
+            {
+                line_start -= 1;
+            }
+            *column = offset - line_start + 1;
         }
-        *column = offset - line_start + 1;
     }
     return result;
 }
@@ -2300,6 +2450,7 @@ struct PPToken
     uint8_t flags;
     uint32_t value;
     uint32_t location;
+    uint32_t origin;
 };
 
 // Where tokens go: the innermost capture, or the output.
@@ -2314,6 +2465,7 @@ static void pp_emit(Preprocessor* pp, PPToken token)
     if (pp_room(pp, target, 1))
     {
         pp_tokens_set(target, target->count, token.kind, token.flags, token.value, token.location);
+        pp_history_fill(pp, target, target->count, target->count + 1, token.origin);
         target->count += 1;
     }
 }
@@ -2347,6 +2499,7 @@ static PPToken pp_context_token(const Preprocessor* pp, const PPContext* context
             .flags = tokens->flags[position],
             .value = tokens->values[position],
             .location = tokens->locations[position],
+            .origin = tokens->origins != 0 ? tokens->origins[position] : 0,
         };
     }
     return result;
@@ -2471,6 +2624,7 @@ static bool pp_append_file_tokens(Preprocessor* pp, PPTokens* out, const PPFileD
             pp_store_file_tokens(out, count, data, base, p, available, _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, available), data->kinds + p), from_macro);
             count += available;
         }
+        pp_history_fill(pp, out, out->count, count, from_macro ? pp->history_current : 0);
         out->count = count;
     }
     return result;
@@ -2497,6 +2651,7 @@ static bool pp_append_stack_tokens(Preprocessor* pp, PPTokens* out, const PPToke
             _mm512_storeu_si512(out->locations + count, locations);
             count += (uint32_t)__builtin_popcount(valid);
         }
+        pp_history_copy(pp, out, out->count, tokens, begin, end);
         out->count = count;
     }
     return result;
@@ -2719,6 +2874,7 @@ static bool pp_push_token(Preprocessor* pp, PPTokens* tokens, PPToken token)
     if (result)
     {
         pp_tokens_set(tokens, tokens->count, token.kind, token.flags, token.value, token.location);
+        pp_history_fill(pp, tokens, tokens->count, tokens->count + 1, token.origin != 0 ? token.origin : pp->history_current);
         tokens->count += 1;
     }
     return result;
@@ -2731,6 +2887,7 @@ BUSTER_INLINE PPToken pp_stack_token(const PPTokens* tokens, uint32_t index)
         .flags = tokens->flags[index],
         .value = tokens->values[index],
         .location = tokens->locations[index],
+        .origin = tokens->origins != 0 ? tokens->origins[index] : 0,
     };
 }
 
@@ -2764,6 +2921,7 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
         const bool space = i == 0 ? (first_flags & BUSTER_PP_SPACE) != 0 : starts[i] != ends[i - 1];
         const PPToken token = { .kind = kind, .flags = (uint8_t)((space ? BUSTER_PP_SPACE : 0) | BUSTER_PP_FROM_MACRO), .value = value, .location = location + starts[i] };
         pp_tokens_set(into, into->count, token.kind, token.flags, token.value, token.location);
+        pp_history_fill(pp, into, into->count, into->count + 1, pp->history_current);
         into->count += 1;
     }
     scratch_end(scratch);
@@ -2832,12 +2990,20 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
                 value = refine_intern_identifier(pp->table, joined, length, 0, length, pp->refine_flags);
             }
             *result = (PPToken){ .kind = kind, .flags = (uint8_t)((left.flags & BUSTER_PP_SPACE) | BUSTER_PP_FROM_MACRO), .value = value, .location = location };
+            const PPSource sources[] = {
+                { .location = left.location, .origin = left.origin },
+                { .location = right.location, .origin = right.origin },
+            };
+            result->origin = pp_history_generated(pp, PP_GENERATED_PASTE, location, pp->history_spelling, sources, 2);
         }
         else if (!pp->options.assembly)
         {
             // Assembler-with-cpp has no invalid paste: as in GCC and Clang, the two tokens stay, so `% ## eax` is
             // `%eax`, and in `$ ## X` the X is rescanned, which expands a macro X.
-            pp_diagnose(pp, PP_SEVERITY_ERROR, left.location, "pasting formed '%.*s', an invalid preprocessing token", (int)length, (const char*)joined);
+            const uint32_t saved = pp->diagnostic_origin;
+            pp->diagnostic_origin = pp->history_current;
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp->history_anchor, "pasting formed '%.*s', an invalid preprocessing token", (int)length, (const char*)joined);
+            pp->diagnostic_origin = saved;
         }
     }
     scratch_end(scratch);
@@ -2846,7 +3012,7 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
 
 // Stringizes tokens [begin, end) of a stack (C 6.10.4.2): their spellings with one space wherever whitespace separated
 // them, quotes and backslashes in literals escaped, in a new string literal.
-static PPToken pp_stringize(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint8_t flags)
+static PPToken pp_stringize(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint8_t flags, uint32_t anchor)
 {
     // An identifier written with UCNs may be up to 10 times as long as its interned spelling (\U00000024 is `$`).
     uint64_t room = 3;
@@ -2907,6 +3073,22 @@ static PPToken pp_stringize(Preprocessor* pp, const PPTokens* tokens, uint32_t b
         length += 1;
         result.location = pp_scratch_clean(pp, text, (uint32_t)length);
         result.value = result.location + (uint32_t)length;
+        if (!pp->options.no_history)
+        {
+            PPSource* sources = arena_push_array(scratch.arena, (uint64_t)(end - begin), sizeof(PPSource), 8);
+            if (sources != 0 || begin == end)
+            {
+                for (uint32_t i = begin; i < end; i += 1)
+                {
+                    sources[i - begin] = (PPSource){ .location = tokens->locations[i], .origin = tokens->origins[i] };
+                }
+                result.origin = pp_history_generated(pp, PP_GENERATED_STRING, result.location, anchor, sources, end - begin);
+            }
+            else
+            {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory retaining stringification inputs");
+            }
+        }
     }
     scratch_end(scratch);
     return result;
@@ -2935,6 +3117,7 @@ BUSTER_INLINE PPToken pp_body_token(const Preprocessor* pp, const PPMacro* macro
 {
     PPToken result = pp_file_token(&pp->datas[macro->data], macro->base, item->token);
     result.flags = (uint8_t)((item->flags & BUSTER_PP_SPACE) | BUSTER_PP_FROM_MACRO);
+    result.origin = pp->history_current;
     return result;
 }
 
@@ -2970,6 +3153,7 @@ static void pp_append_tokens(Preprocessor* pp, const PPTokens* tokens, uint32_t 
             out_locations[count] = locations[i];
             count += 1;
         }
+        pp_history_argument(pp, tokens, begin, end, out->count, pp->history_anchor);
         out->count = count;
     }
 }
@@ -2999,9 +3183,14 @@ static void pp_paste_in_place(Preprocessor* pp, PPTokens* out, uint32_t at, uint
     if (joined)
     {
         pp_tokens_set(out, at - 1, result.kind, result.flags, result.value, result.location);
+        pp_history_fill(pp, out, at - 1, at, result.origin);
         for (uint32_t i = at + 1; i < out->count; i += 1)
         {
             pp_tokens_set(out, i - 1, out->kinds[i], out->flags[i], out->values[i], out->locations[i]);
+            if (out->origins != 0)
+            {
+                out->origins[i - 1] = out->origins[i];
+            }
         }
         out->count -= 1;
         *space_at = *space_at == at ? BUSTER_PP_NONE : *space_at - (*space_at != BUSTER_PP_NONE && *space_at > at);
@@ -3038,6 +3227,8 @@ static void pp_pend_space(PPTokens* out, uint32_t* space_at)
 // `*trailing` gets the space left over after the last token, which the token after the expansion takes.
 static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint32_t* begin, uint8_t* trailing)
 {
+    const uint32_t saved_history = pp->history_current;
+    pp->history_current = invocation->history;
     const PPMacro* macro = &pp->macros[invocation->macro];
     const PPItem* items = pp->items + macro->items_begin;
     const uint32_t count = macro->item_count;
@@ -3059,6 +3250,9 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
     uint32_t va_opt_begin = 0; // where its tokens start in `out`,
     uint32_t va_opt_mark = BUSTER_PP_NONE; // and for # __VA_OPT__, where its tokens start
     uint8_t va_opt_flags = 0;
+    uint32_t va_opt_string_location = 0;
+    uint32_t va_opt_paste_location = 0;
+    uint32_t va_opt_paste_spelling = 0;
     bool va_opt_pasted_after = false; // Whether ## follows the open __VA_OPT__.
     bool va_opt_paste_left = false; // Whether ## precedes the next __VA_OPT__ (set by the ##).
     uint32_t space_at = BUSTER_PP_NONE; // Where the token that takes a pending leading space goes (pp_pend_space).
@@ -3078,7 +3272,7 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     space_at = BUSTER_PP_NONE;
                 }
                 const bool space_after = space_at != BUSTER_PP_NONE;
-                PPToken string = pp_stringize(pp, out, va_opt_mark, out->count, va_opt_flags);
+                PPToken string = pp_stringize(pp, out, va_opt_mark, out->count, va_opt_flags, va_opt_string_location);
                 string.flags |= va_opt_string_space ? BUSTER_PP_SPACE : 0;
                 out->count = va_opt_mark;
                 pp_push_token(pp, out, string);
@@ -3105,6 +3299,8 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
             }
             else if (va_opt_paste_left)
             {
+                pp->history_anchor = va_opt_paste_location;
+                pp->history_spelling = va_opt_paste_spelling;
                 pp_paste_in_place(pp, out, va_opt_begin, &space_at);
             }
             va_opt_paste_left = false;
@@ -3116,6 +3312,8 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
             break;
         }
         const PPItem* item = &items[i];
+        pp->history_anchor = macro->base + pp->datas[macro->data].starts[item->token];
+        pp->history_spelling = item->kind == PP_ITEM_PASTE && i != 0 ? macro->base + pp->datas[macro->data].starts[items[i - 1].token] : pp->history_anchor;
         // ## after the item, in the same __VA_OPT__'s content when it is in one.
         const bool pasted_after = i + 1 < count && i + 1 != va_opt_end && items[i + 1].kind == PP_ITEM_PASTE;
         switch (item->kind)
@@ -3171,7 +3369,7 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 uint32_t first;
                 uint32_t last;
                 pp_argument_range(pp, invocation, item->parameter, false, &tokens, &first, &last);
-                pp_push_token(pp, out, pp_stringize(pp, tokens, first, last, item->flags));
+                pp_push_token(pp, out, pp_stringize(pp, tokens, first, last, item->flags, pp->history_anchor));
                 break;
             }
             case PP_ITEM_VA_OPT:
@@ -3190,6 +3388,7 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     va_opt_first = i + 1;
                     va_opt_begin = out->count;
                     va_opt_flags = item->flags;
+                    va_opt_string_location = pp->history_anchor;
                     va_opt_pasted_after = content_pasted_after;
                     va_opt_mark = item->kind == PP_ITEM_STRINGIZE_VA_OPT ? out->count : BUSTER_PP_NONE;
                     // A space pending before #__VA_OPT__ goes to its string, as clang saves it there, not to the
@@ -3201,9 +3400,11 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 {
                     if (item->kind == PP_ITEM_STRINGIZE_VA_OPT)
                     {
-                        pp_push_token(pp, out, pp_stringize(pp, out, out->count, out->count, item->flags));
+                        pp_push_token(pp, out, pp_stringize(pp, out, out->count, out->count, item->flags, pp->history_anchor));
                         if (va_opt_paste_left)
                         {
+                            pp->history_anchor = va_opt_paste_location;
+                            pp->history_spelling = va_opt_paste_spelling;
                             pp_paste_in_place(pp, out, out->count - 1, &space_at);
                         }
                     }
@@ -3240,7 +3441,7 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     uint32_t argument_first;
                     uint32_t argument_last;
                     pp_argument_range(pp, invocation, next->parameter, false, &argument_tokens, &argument_first, &argument_last);
-                    right_token = pp_stringize(pp, argument_tokens, argument_first, argument_last, next->flags);
+                    right_token = pp_stringize(pp, argument_tokens, argument_first, argument_last, next->flags, macro->base + pp->datas[macro->data].starts[next->token]);
                     right_single = true;
                 }
                 else if (next->kind == PP_ITEM_TOKEN)
@@ -3258,6 +3459,7 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     }
                     else
                     {
+                        pp->history_anchor = macro->base + pp->datas[macro->data].starts[next->token];
                         pp_append_tokens(pp, tokens, first, last, true, next->flags);
                     }
                     i += 1;
@@ -3267,6 +3469,8 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     // `## __VA_OPT__(...)`: the __VA_OPT__ pastes its first token onto the left operand when its tokens
                     // are known (above).
                     va_opt_paste_left = true;
+                    va_opt_paste_location = pp->history_anchor;
+                    va_opt_paste_spelling = pp->history_spelling;
                 }
                 else if (next->kind == PP_ITEM_PASTE)
                 {
@@ -3286,6 +3490,10 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                             out->count -= 1;
                             PPToken moved = right;
                             moved.flags = (uint8_t)((moved.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (left.flags & BUSTER_PP_SPACE) | BUSTER_PP_FROM_MACRO);
+                            if (!right_single)
+                            {
+                                moved.origin = pp_history_substitution(pp, right.origin, macro->base + pp->datas[macro->data].starts[next->token]);
+                            }
                             pp_push_token(pp, out, moved);
                         }
                         else
@@ -3300,11 +3508,16 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                             {
                                 PPToken kept = right;
                                 kept.flags = (uint8_t)((kept.flags & ~BUSTER_PP_START_OF_LINE) | BUSTER_PP_FROM_MACRO);
+                                if (!right_single)
+                                {
+                                    kept.origin = pp_history_substitution(pp, right.origin, macro->base + pp->datas[macro->data].starts[next->token]);
+                                }
                                 pp_push_token(pp, out, kept);
                             }
                         }
                         if (!right_single && last - first > 1)
                         {
+                            pp->history_anchor = macro->base + pp->datas[macro->data].starts[next->token];
                             pp_append_tokens(pp, tokens, first + 1, last, false, 0);
                         }
                     }
@@ -3329,11 +3542,16 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
             if (out->kinds[i] != BUSTER_PP_KIND_PLACEMARKER)
             {
                 pp_tokens_set(out, kept, out->kinds[i], out->flags[i], out->values[i], out->locations[i]);
+                if (out->origins != 0)
+                {
+                    out->origins[kept] = out->origins[i];
+                }
                 kept += 1;
             }
         }
         out->count = kept;
     }
+    pp->history_current = saved_history;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3593,6 +3811,11 @@ static bool pp_collect_arguments(Preprocessor* pp, PPInvocation* invocation, boo
             records[record] = (PPArgument){ .raw_begin = at + separators[i] - open, .raw_end = at + separators[i] - open };
         }
         records[record].raw_end = at + close - (open + 1);
+        if (invocation->history != 0)
+        {
+            pp->history[invocation->history - 1].end = file ? pp->ranges[context->range].base + data->starts[close] : context->tokens->locations[close];
+            pp->history[invocation->history - 1].end_origin = !file && context->tokens->origins != 0 ? context->tokens->origins[close] : 0;
+        }
         pp->argument_record_count = record + 1;
         context->position = close + 1;
     }
@@ -3607,6 +3830,8 @@ static void pp_close_builtin(Preprocessor* pp, bool closed);
 static void pp_close_invocation(Preprocessor* pp, bool closed)
 {
     PPInvocation* invocation = &pp->invocations[pp->invocation_count - 1];
+    const uint32_t saved_origin = pp->diagnostic_origin;
+    pp->diagnostic_origin = invocation->history != 0 ? pp->history[invocation->history - 1].parent : 0;
     invocation->collecting = false;
     if (invocation->builtin)
     {
@@ -3646,11 +3871,33 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
             }
             if (valid && count != parameter_count)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, invocation->name_location, "too %s arguments provided to function-like macro invocation",
+                uint32_t where = invocation->name_location;
+                if (count < parameter_count && invocation->history != 0)
+                {
+                    where = pp->history[invocation->history - 1].end;
+                    pp->diagnostic_origin = pp->history[invocation->history - 1].end_origin;
+                }
+                else if (count > parameter_count)
+                {
+                    const uint32_t first = pp->argument_records[invocation->arguments + parameter_count].raw_begin;
+                    if (first < pp->arguments.count)
+                    {
+                        where = pp->arguments.locations[first];
+                        pp->diagnostic_origin = pp->arguments.origins != 0 ? pp->arguments.origins[first] : 0;
+                    }
+                }
+                pp_diagnose(pp, PP_SEVERITY_ERROR, where, "too %s arguments provided to function-like macro invocation",
                             count > parameter_count ? "many" : "few");
                 valid = false;
             }
         }
+        if (!valid && !pp->fatal)
+        {
+            FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
+            pp_diagnostic_place(pp, stream, macro->location);
+            fprintf(stream, "note: macro '%.*s' defined here\n", (int)intern_length(pp->table, macro->name), intern_bytes(pp->table, macro->name));
+        }
+        pp->diagnostic_origin = saved_origin;
         invocation->argument_count = count;
         if (pp->options.timing)
         {
@@ -3668,6 +3915,7 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
             pp->invocation_count -= 1;
         }
     }
+    pp->diagnostic_origin = saved_origin;
 }
 
 // What a collected token does: nothing more, close the invocation, or (a builtin's first token that isn't '(') end it.
@@ -3694,6 +3942,11 @@ static PPCollected pp_collect_token(Preprocessor* pp, PPInvocation* invocation, 
     else if (token.kind == C_TOKEN_R_PAREN && invocation->depth == 0)
     {
         invocation->expansion_end = expansion_end;
+        if (invocation->history != 0)
+        {
+            pp->history[invocation->history - 1].end = token.location;
+            pp->history[invocation->history - 1].end_origin = token.origin;
+        }
         result = PP_COLLECTED_CLOSED;
     }
     else if (!invocation->builtin && token.kind == C_TOKEN_COMMA && invocation->depth == 0 && !(variadic && current + 1 >= macro->parameter_count))
@@ -3819,6 +4072,7 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
     const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0;
     PPInvocation invocation = {
         .macro = id,
+        .history = pp_history_expansion(pp, id, name.location, name.origin),
         .arguments = pp->argument_record_count,
         .arguments_begin = pp->arguments.count,
         .captures_begin = pp->captures.count,
@@ -3856,6 +4110,8 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
 // target (the main loop's commonest expansion: a constant); any other is built in a buffer and pushed as a context.
 static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint32_t expansion_end)
 {
+    const uint32_t saved_history = pp->history_current;
+    pp->history_current = pp_history_expansion(pp, id, name.location, name.origin);
     PPMacro* macro = &pp->macros[id];
     const PPFileData* data = &pp->datas[macro->data];
     bool direct = (macro->flags & BUSTER_PP_MACRO_PASTES) == 0;
@@ -3869,7 +4125,7 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
     {
         if ((macro->flags & BUSTER_PP_MACRO_COMPILED) || pp_compile_macro(pp, id))
         {
-            const PPInvocation invocation = { .macro = id };
+            const PPInvocation invocation = { .macro = id, .history = pp->history_current };
             uint32_t substituted;
             uint8_t trailing;
             pp_substitute(pp, &invocation, &substituted, &trailing);
@@ -3888,6 +4144,7 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
             pp_tokens_set(tokens, tokens->count, token.kind, token.flags, token.value, token.location);
             tokens->count += 1;
         }
+        pp_history_fill(pp, tokens, begin, tokens->count, pp->history_current);
     }
     const bool empty = begin == tokens->count;
     if (!empty)
@@ -3909,6 +4166,7 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
         pp->statistics.direct_expansions += direct;
         pp->statistics.buffered_expansions += !direct;
     }
+    pp->history_current = saved_history;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3923,7 +4181,8 @@ static PPToken pp_number_token(Preprocessor* pp, uint64_t value, uint8_t flags)
     char digits[24];
     const uint32_t length = (uint32_t)snprintf(digits, sizeof(digits), "%lu", (unsigned long)value);
     const uint32_t location = value == 0 ? pp->zero_location : value == 1 ? pp->one_location : pp_scratch_clean(pp, (const uint8_t*)digits, length);
-    return (PPToken){ .kind = C_TOKEN_NUMERIC_CONSTANT, .flags = (uint8_t)(flags | BUSTER_PP_FROM_MACRO), .value = location + length, .location = location };
+    return (PPToken){ .kind = C_TOKEN_NUMERIC_CONSTANT, .flags = (uint8_t)(flags | BUSTER_PP_FROM_MACRO), .value = location + length, .location = location,
+                      .origin = pp->history_current };
 }
 
 // A string literal of `bytes`, with quotes and backslashes escaped, spelled in the scratch space.
@@ -3956,6 +4215,7 @@ static PPToken pp_string_token(Preprocessor* pp, const uint8_t* bytes, uint32_t 
         n += 1;
         result.location = pp_scratch_clean(pp, text, n);
         result.value = result.location + n;
+        result.origin = pp->history_current;
     }
     scratch_end(scratch);
     return result;
@@ -4235,6 +4495,7 @@ static void pp_start_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint8
     }
     const PPInvocation invocation = {
         .macro = id,
+        .history = pp->history_current,
         .arguments = pp->argument_record_count,
         .arguments_begin = pp->arguments.count,
         .captures_begin = pp->captures.count,
@@ -4258,6 +4519,11 @@ static void pp_start_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint8
 static void pp_close_builtin(Preprocessor* pp, bool closed)
 {
     const PPInvocation invocation = pp->invocations[pp->invocation_count - 1];
+    const uint32_t saved_history = pp->history_current;
+    const uint32_t saved_origin = pp->diagnostic_origin;
+    pp->history_current = invocation.history;
+    pp->history_anchor = invocation.name_location;
+    pp->diagnostic_origin = invocation.history != 0 ? pp->history[invocation.history - 1].parent : 0;
     pp->invocation_count -= 1;
     pp->argument_record_count = invocation.arguments;
     const PPBuiltin builtin = (PPBuiltin)pp->macros[invocation.macro].builtin;
@@ -4279,6 +4545,7 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
             // pp_finish_builtin takes the string literal it must give.
             const PPCapture capture = {
                 .kind = BUSTER_PP_CAPTURE_BUILTIN,
+                .history = invocation.history,
                 .arguments_begin = begin,
                 .builtin = (uint8_t)builtin,
                 .flags = invocation.name_flags,
@@ -4301,6 +4568,7 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
                             builtin == PP_BUILTIN_IS_IDENTIFIER;
         const PPCapture capture = {
             .kind = BUSTER_PP_CAPTURE_BUILTIN,
+            .history = invocation.history,
             .arguments_begin = begin,
             .builtin = (uint8_t)builtin,
             .flags = invocation.name_flags,
@@ -4326,12 +4594,19 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
             pp_emit(pp, pp_number_token(pp, value, invocation.name_flags));
         }
     }
+    pp->history_current = saved_history;
+    pp->diagnostic_origin = saved_origin;
 }
 
 // The barrier over a feature query's (or __has_include's) operand ended: the capture is the operand expanded.
 static void pp_finish_builtin(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
+    const uint32_t saved_history = pp->history_current;
+    const uint32_t saved_origin = pp->diagnostic_origin;
+    pp->history_current = capture.history;
+    pp->history_anchor = capture.location;
+    pp->diagnostic_origin = capture.history != 0 ? pp->history[capture.history - 1].parent : 0;
     pp->capture_count -= 1;
     if (capture.builtin == PP_BUILTIN_PRAGMA)
     {
@@ -4358,6 +4633,8 @@ static void pp_finish_builtin(Preprocessor* pp)
         pp->arguments.count = capture.arguments_begin;
         pp_emit(pp, pp_number_token(pp, value, capture.flags));
     }
+    pp->history_current = saved_history;
+    pp->diagnostic_origin = saved_origin;
 }
 
 // __TIMESTAMP__'s text for a time: "Sun Jan  1 00:00:00 2000" (strftime's "%a %b %e %T %Y" in the C locale).
@@ -4373,6 +4650,11 @@ static void pp_format_timestamp(char* text, uint32_t capacity, const struct tm* 
 // pp_expansion_end, for __LINE__ and __FILE__ in a token a macro made).
 static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint32_t expansion_end)
 {
+    const uint32_t saved_history = pp->history_current;
+    const uint32_t saved_origin = pp->diagnostic_origin;
+    pp->history_current = pp_history_expansion(pp, id, name.location, name.origin);
+    pp->history_anchor = name.location;
+    pp->diagnostic_origin = name.origin;
     const PPBuiltin builtin = (PPBuiltin)pp->macros[id].builtin;
     const uint8_t flags = name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE);
     const uint32_t where = (name.flags & BUSTER_PP_FROM_MACRO) ? expansion_end : name.location;
@@ -4454,12 +4736,12 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             break;
         case PP_BUILTIN_POISONED:
             pp_diagnose(pp, PP_SEVERITY_ERROR, name.location, "attempt to use a poisoned identifier");
-            pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = name.flags | BUSTER_PP_NO_EXPAND, .value = name.value, .location = name.location });
+            pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = name.flags | BUSTER_PP_NO_EXPAND, .value = name.value, .location = name.location, .origin = name.origin });
             break;
         case PP_BUILTIN_DEFINED:
             if (!pp_in_expression(pp))
             {
-                pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = name.flags | BUSTER_PP_NO_EXPAND, .value = name.value, .location = name.location });
+                pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = name.flags | BUSTER_PP_NO_EXPAND, .value = name.value, .location = name.location, .origin = name.origin });
             }
             else
             {
@@ -4488,6 +4770,8 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             pp_start_builtin(pp, id, name, flags, expansion_end);
             break;
     }
+    pp->history_current = saved_history;
+    pp->diagnostic_origin = saved_origin;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -4575,6 +4859,10 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
     {
         const uint32_t base = pp->ranges[context->range].base;
         const uint32_t stop = pp->vectorized ? pp_copy_file_run_vector(pp, data, base, context->position, limit) : pp_copy_file_run_scalar(pp, data, base, context->position, limit);
+        if (pp->capture_count != 0)
+        {
+            pp_history_fill(pp, &pp->captures, pp->captures.count - (stop - context->position), pp->captures.count, 0);
+        }
         pp_take_pending_flags(pp, context, stop - context->position);
         if (pp->options.timing)
         {
@@ -4601,6 +4889,8 @@ static void pp_step_buffer(Preprocessor* pp, PPContext* context)
 {
     const uint32_t stop = pp->vectorized ? pp_copy_buffer_run_vector(pp, context->tokens, context->position, context->end)
                                          : pp_copy_buffer_run_scalar(pp, context->tokens, context->position, context->end);
+    PPTokens* target = pp_target(pp);
+    pp_history_copy(pp, target, target->count - (stop - context->position), context->tokens, context->position, stop);
     pp_take_pending_flags(pp, context, stop - context->position);
     if (pp->options.timing)
     {
@@ -4690,6 +4980,7 @@ static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t be
     {
         const PPToken token = pp_file_token(data, base, t);
         pp_tokens_set(&pp->arguments, pp->arguments.count, token.kind, (uint8_t)(token.flags & ~BUSTER_PP_START_OF_LINE), token.value, token.location);
+        pp_history_fill(pp, &pp->arguments, pp->arguments.count, pp->arguments.count + 1, 0);
         pp->arguments.count += 1;
     }
     return result;
@@ -5905,6 +6196,7 @@ static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, 
 // an identifier left after expansion is 0 (true is 1 from C23 on). Returns false for zero or an error.
 static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location)
 {
+    const uint32_t saved_origin = pp->diagnostic_origin;
     PPValue values[BUSTER_PP_EXPRESSION_DEPTH];
     uint8_t operators[BUSTER_PP_EXPRESSION_DEPTH];
     uint32_t value_count = 0;
@@ -5915,6 +6207,7 @@ static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin
     {
         const uint8_t kind = tokens->kinds[i];
         const uint32_t token_location = tokens->locations[i];
+        pp->diagnostic_origin = tokens->origins != 0 ? tokens->origins[i] : 0;
         valid = value_count < BUSTER_PP_EXPRESSION_DEPTH && operator_count < BUSTER_PP_EXPRESSION_DEPTH;
         if (!valid)
         {
@@ -6043,6 +6336,7 @@ static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin
             }
         }
     }
+    pp->diagnostic_origin = saved_origin;
     if (valid && expect_operand)
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, value_count == 0 && operator_count == 0 ? "#if with no expression" : "expected value in expression");
@@ -6906,6 +7200,7 @@ static void* pp_array(Preprocessor* pp, uint64_t count, uint64_t size)
 static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table)
 {
     *pp = (Preprocessor){ 0 };
+    pp->diagnostic_include_range = BUSTER_PP_NONE;
     pp->options = *options;
     pp->table = table;
     pp->vectorized = !options->scalar;
@@ -6944,6 +7239,25 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->invocations = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPInvocation));
     pp->argument_records = pp_array(pp, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
     pp->capture_frames = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
+    if (!options->no_history)
+    {
+        // Five retained tables and three temporary columns share base pages for their first few records. Only a
+        // table that outgrows its slice reserves a large arena, avoiding eight mappings/advice calls on small units.
+        pp->history_initial = arena_reserve(8 * BUSTER_PP_INITIAL_HISTORY_BYTES);
+        pp->history = pp_history_initial(pp, sizeof(PPExpansion), &pp->history_capacity);
+        pp->substitutions = pp_history_initial(pp, sizeof(PPSubstitution), &pp->substitution_capacity);
+        pp->generated = pp_history_initial(pp, sizeof(PPGenerated), &pp->generated_capacity);
+        pp->history_sources = pp_history_initial(pp, sizeof(PPSource), &pp->history_source_capacity);
+        pp->history_runs = pp_history_initial(pp, sizeof(PPHistoryRun), &pp->history_run_capacity);
+        PPTokens* buffers[] = { &pp->arguments, &pp->captures, &pp->expansions };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(buffers); i += 1)
+        {
+            PPTokens* tokens = buffers[i];
+            tokens->origins = pp_history_initial(pp, sizeof(uint32_t), &tokens->origin_capacity);
+            result = result && tokens->origins != 0;
+        }
+        result = result && pp->history != 0 && pp->substitutions != 0 && pp->generated != 0 && pp->history_sources != 0 && pp->history_runs != 0;
+    }
     result = result && pp->ranges != 0 && pp->datas != 0 && pp->files != 0 && pp->file_slots != 0 && pp->directories != 0 && pp->directory_lengths != 0 &&
              pp->directory_system != 0 && pp->line_directives != 0 && pp->expansion_starts != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->macros != 0 && pp->items != 0 &&
              pp->parameters != 0 && pp->pushed_names != 0 && pp->pushed_macros != 0 && pp->contexts != 0 && pp->conditionals != 0 && pp->invocations != 0 &&
@@ -7069,6 +7383,7 @@ static void pp_release(Preprocessor* pp)
     }
     arena_release(&pp->scratch[0]);
     arena_release(&pp->scratch[1]);
+    arena_release(&pp->history_initial);
     arena_release(&pp->arena);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {
