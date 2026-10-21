@@ -835,9 +835,12 @@ static bool predefines_test_print_tables(const char* directory)
     if (result)
     {
         static const char* const flag_names[] = { "PREDEFINES_FLAG_NONE", "PREDEFINES_FLAG_PLAIN", "PREDEFINES_FLAG_APX" };
+        // clang's version number, from its first line ("clang version 23.1.3 ..."), so that every build of it writes the same.
         char* version = predefines_test_shell("clang --version 2>&1 | head -1");
-        printf("// GENERATED: %.*s's x86-64 features and CPUs, by `./build/compiler test-preprocessor --generate-targets`\n",
-               (int)(version != 0 ? strcspn(version, "\n") : 0), version != 0 ? version : "");
+        const char* found = version != 0 ? strstr(version, "version ") : 0;
+        const char* number = found != 0 ? found + 8 : version != 0 ? version : "";
+        printf("// GENERATED: clang %.*s's x86-64 features and CPUs, by `./build/compiler test-preprocessor --generate-targets`\n",
+               (int)strcspn(number, " \n"), number);
         free(version);
         printf("// (docs/c-preprocessor.md, \"The predefined macros\"). Each feature, sorted by name: how the command line names it, its\n");
         printf("// `implies` and `implied_by` closures and its own macros. Each -march CPU of x86-64: its macros' name and its features.\n");
