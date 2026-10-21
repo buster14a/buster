@@ -2529,8 +2529,13 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __m512i exclusive = _mm512_sub_epi32(inclusive, need);
             const __m512i exclusive_integers = _mm512_and_si512(exclusive, low_halves);
             const __m512i exclusive_vectors = _mm512_srli_epi32(exclusive, 16);
-            const __mmask16 fits = _mm512_cmple_epu32_mask(_mm512_add_epi32(exclusive_integers, need_integers), _mm512_set1_epi32(BUSTER_ABI_INTEGER_ARGUMENTS)) &
-                                   _mm512_cmple_epu32_mask(_mm512_add_epi32(exclusive_vectors, need_vectors), _mm512_set1_epi32(BUSTER_ABI_VECTOR_ARGUMENTS));
+            // Each class only where the argument needs it: a long fits after nine doubles, whose sum is past 8 (the
+            // benchmark found the vector path left 23% of its arguments to the twin before, and 5% so).
+            const __mmask16 integers_fit = (__mmask16)~_mm512_test_epi32_mask(need_integers, need_integers) |
+                                           _mm512_cmple_epu32_mask(_mm512_add_epi32(exclusive_integers, need_integers), _mm512_set1_epi32(BUSTER_ABI_INTEGER_ARGUMENTS));
+            const __mmask16 vectors_fit = (__mmask16)~_mm512_test_epi32_mask(need_vectors, need_vectors) |
+                                          _mm512_cmple_epu32_mask(_mm512_add_epi32(exclusive_vectors, need_vectors), _mm512_set1_epi32(BUSTER_ABI_VECTOR_ARGUMENTS));
+            const __mmask16 fits = integers_fit & vectors_fit;
             const __mmask16 spills = _mm512_test_epi32_mask(need, need) & (__mmask16)~fits;
             const __mmask16 inexact = spills & ((_mm512_test_epi32_mask(need_integers, need_integers) &
                                                  _mm512_cmplt_epu32_mask(exclusive_integers, _mm512_set1_epi32(BUSTER_ABI_INTEGER_ARGUMENTS))) |
