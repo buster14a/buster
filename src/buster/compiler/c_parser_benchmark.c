@@ -334,8 +334,8 @@ typedef struct ParseBenchmarkFile ParseBenchmarkFile;
 struct ParseBenchmarkFile
 {
     const char* path;
-    InternTable table;
-    Preprocessor pp;
+    // The preprocessor's output, which the input's conversion reads, and the parser with the file's tokens.
+    PPTokens output;
     Parser parser;
     ParseFallback fallback;
 };
@@ -485,8 +485,8 @@ static void parse_benchmark_run_path(ParseBenchmark* bench, ParseBenchmarkTimed 
         uint32_t diagnostic_count = 0;
         switch (which)
         {
-            case PARSE_TIMED_INPUT_TWIN: parse_tokens_from_output_scalar(&file->pp.output, &bench->converted); break;
-            case PARSE_TIMED_INPUT: parse_tokens_from_output(&file->pp.output, &bench->converted); break;
+            case PARSE_TIMED_INPUT_TWIN: parse_tokens_from_output_scalar(&file->output, &bench->converted); break;
+            case PARSE_TIMED_INPUT: parse_tokens_from_output(&file->output, &bench->converted); break;
             case PARSE_TIMED_SCALAR_PARSER:
                 parse_scalar(input.kinds, input.names, input.flags, input.count, input.language, input.meanings, &bench->tree, &bench->scratch, bench->diagnostics,
                              bench->diagnostic_capacity, &diagnostic_count);
@@ -762,8 +762,8 @@ int run_parser_benchmark(int argc, char** argv)
         valid = pp_parse_options(passed_count + 1, passed, &options, &arena, &input_path, &output_path, &markers);
     }
     ParseBenchmark bench = { 0 };
-    // At the files' own alignment (the preprocessor's is 64 bytes), which calloc doesn't give: clang's aligned stores
-    // into a misaligned Preprocessor fault.
+    // At the files' own alignment, which calloc promises only to 16 bytes: clang's aligned stores into a member aligned
+    // past that fault when it isn't (a Preprocessor's, 64 bytes, when the files held one).
     bench.files = valid && path_count != 0 ? aligned_alloc(_Alignof(ParseBenchmarkFile), path_count * sizeof(ParseBenchmarkFile)) : 0;
     if (bench.files != 0)
     {
@@ -781,11 +781,15 @@ int run_parser_benchmark(int argc, char** argv)
         bool loaded = true;
         for (uint32_t f = 0; loaded && f < path_count; f += 1)
         {
+            // A file's intern table and preprocessor are needed only to load it: the stages read its output and its
+            // tokens.
+            static InternTable table;
+            static Preprocessor pp;
             ParseBenchmarkFile* file = &bench.files[f];
             const ParseOptions parse_options = { .scalar = false };
             file->path = paths[f];
-            loaded = intern_initialize(&file->table) && pp_initialize(&file->pp, &options, &file->table) &&
-                     parse_initialize(&file->parser, &parse_options, options.language) && pp_run(&file->pp, file->path);
+            loaded = intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&file->parser, &parse_options, options.language) &&
+                     pp_run(&pp, file->path);
             if (!loaded)
             {
                 fprintf(stderr, "%s: doesn't preprocess\n", file->path);
@@ -794,8 +798,8 @@ int run_parser_benchmark(int argc, char** argv)
             {
                 static Parser scalar;
                 const ParseOptions scalar_options = { .scalar = true };
-                const bool vector_ok = parse_translation_unit(&file->parser, &file->pp);
-                const bool scalar_ok = parse_initialize(&scalar, &scalar_options, options.language) && parse_translation_unit(&scalar, &file->pp);
+                const bool vector_ok = parse_translation_unit(&file->parser, &pp);
+                const bool scalar_ok = parse_initialize(&scalar, &scalar_options, options.language) && parse_translation_unit(&scalar, &pp);
                 bool same = vector_ok == scalar_ok && file->parser.tokens.count == scalar.tokens.count;
                 for (uint32_t t = 0; same && vector_ok && t < scalar.tokens.count; t += 1)
                 {
@@ -815,6 +819,14 @@ int run_parser_benchmark(int argc, char** argv)
                 bench.token_count += file->parser.tokens.count;
                 largest = file->parser.tokens.count > largest ? file->parser.tokens.count : largest;
             }
+            // What the stages don't read goes, the reservations of hundreds of gigabytes a preprocessor and a parser
+            // make among them: kept for every file, a corpus of hundreds of files would exhaust the address space.
+            file->output = pp.output;
+            pp.output = (PPTokens){ 0 };
+            pp_release(&pp);
+            intern_release(&table);
+            arena_release(&file->parser.scratch);
+            arena_release(&file->parser.vector_arena);
         }
         bench.file_count = path_count;
         // The shared arrays, for the largest file and every file's names.
@@ -868,8 +880,7 @@ int run_parser_benchmark(int argc, char** argv)
         for (uint32_t f = 0; f < path_count; f += 1)
         {
             parse_release(&bench.files[f].parser);
-            pp_release(&bench.files[f].pp);
-            intern_release(&bench.files[f].table);
+            pp_tokens_release(&bench.files[f].output);
         }
         arena_release(&shared);
         arena_release(&bench.scratch);
