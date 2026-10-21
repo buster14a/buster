@@ -20,9 +20,10 @@
 //   - memory: BUSTER_FLOORS_BENCHMARK_FAULT_BYTES of anonymous memory touched a page at a time for the first time, with
 //     base pages and with MADV_HUGEPAGE; then memcpy, non-temporal stores and memset at each of
 //     floors_benchmark_copy_sizes, BUSTER_FLOORS_BENCHMARK_COPY_BYTES a run.
-//   - teardown: a child, on another CPU, touches each of floors_benchmark_teardown_sizes of anonymous memory, with base
-//     pages and with MADV_HUGEPAGE, tells this process through a pipe and exits: the time from the message to waitpid's
-//     return, which a linker that forks hides from its caller.
+//   - teardown: a child, on another CPU when this process may use one, touches each of
+//     floors_benchmark_teardown_sizes of anonymous memory, with base pages and with MADV_HUGEPAGE, sends this process
+//     the time through a pipe and exits: the time from then to waitpid's return, which a linker that forks hides from
+//     its caller.
 // The exit status is 1 if the arguments are invalid or a call fails.
 
 #include <stdint.h>
@@ -319,9 +320,14 @@ struct FloorsBenchmarkParallel
     // The first lane's file and mapping, of which each lane writes its share.
     int file;
     uint8_t* map;
-    // What the first lane measured.
+    // Each lane's run: whether it wrote its share, and its errno if not. Every lane reads all of them after a sync, so
+    // that the lanes stop together and no lane's failure is lost.
+    bool wrote[BUSTER_FLOORS_BENCHMARK_MAX_THREADS];
+    int errors[BUSTER_FLOORS_BENCHMARK_MAX_THREADS];
+    // What the first lane measured, whether every run succeeded, and if not, the errno of the first lane that failed.
     uint64_t times[BUSTER_FLOORS_BENCHMARK_LARGE_RUNS];
     bool succeeded;
+    int error;
 };
 
 // The lanes' entry point: the runs of one way, size and lane count. The first lane opens and sizes the file (and maps
@@ -335,11 +341,13 @@ static void floors_benchmark_parallel_main(void* argument)
     const FloorsBenchmarkMethod method = parallel->method;
     const bool mapped = method == FLOORS_BENCHMARK_MAP || method == FLOORS_BENCHMARK_MAP_FALLOCATE || method == FLOORS_BENCHMARK_MAP_IN_PLACE;
     bool succeeded = true;
+    int error = 0;
     for (uint32_t run = 0; succeeded && run < BUSTER_FLOORS_BENCHMARK_LARGE_RUNS; run += 1)
     {
         uint64_t start = 0;
         uint64_t opened = 0;
         bool ready = false;
+        int failure = 0;
         if (first)
         {
             if (method == FLOORS_BENCHMARK_NEW_FILE || method == FLOORS_BENCHMARK_MAP || method == FLOORS_BENCHMARK_MAP_FALLOCATE)
@@ -351,6 +359,7 @@ static void floors_benchmark_parallel_main(void* argument)
             ready = parallel->file >= 0 && floors_benchmark_size(parallel->file, method, parallel->size);
             parallel->map = ready && mapped ? mmap(0, parallel->size, PROT_READ | PROT_WRITE, MAP_SHARED, parallel->file, 0) : MAP_FAILED;
             ready = ready && (!mapped || parallel->map != MAP_FAILED);
+            failure = ready ? 0 : errno;
             if (ready && method == FLOORS_BENCHMARK_MAP_FALLOCATE)
             {
                 madvise(parallel->map, parallel->size, MADV_HUGEPAGE);
@@ -367,8 +376,17 @@ static void floors_benchmark_parallel_main(void* argument)
         else if (ready)
         {
             wrote = floors_benchmark_pwrite(parallel->file, parallel->source, begin, end);
+            failure = wrote ? 0 : errno;
         }
-        succeeded = lane_broadcast(lane_broadcast(wrote ? 1 : 0, lane_index()) != 0 ? 1 : 0, 0) != 0;
+        // A lane rewrites its slot only after the next run's broadcast, which every lane reaches after reading them.
+        parallel->wrote[lane_index()] = wrote;
+        parallel->errors[lane_index()] = failure;
+        lane_sync();
+        for (uint32_t lane = 0; lane < lane_count(); lane += 1)
+        {
+            error = succeeded && !parallel->wrote[lane] ? parallel->errors[lane] : error;
+            succeeded = succeeded && parallel->wrote[lane];
+        }
         if (first)
         {
             if (parallel->map != MAP_FAILED)
@@ -382,11 +400,11 @@ static void floors_benchmark_parallel_main(void* argument)
             parallel->times[run] = (opened - start) + (floors_benchmark_now() - released);
             floors_benchmark_sync(parallel->directory);
         }
-        succeeded = lane_broadcast(succeeded ? 1 : 0, 0) != 0;
     }
     if (first)
     {
         parallel->succeeded = succeeded;
+        parallel->error = error;
     }
 }
 
@@ -395,6 +413,8 @@ static bool floors_benchmark_threads(const char* directory, const uint8_t* sourc
     char path[BUSTER_FLOORS_BENCHMARK_PATH_BYTES];
     snprintf(path, sizeof(path), "%s/buster-floors-output", directory);
     bool result = true;
+    // The errno of a lane that failed, which isn't this thread's.
+    int lane_error = 0;
     for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(floors_benchmark_parallel_sizes); s += 1)
     {
         const uint64_t size = floors_benchmark_parallel_sizes[s];
@@ -428,6 +448,7 @@ static bool floors_benchmark_threads(const char* directory, const uint8_t* sourc
                     result = floors_benchmark_write(FLOORS_BENCHMARK_NEW_FILE, path, path, source, size);
                     floors_benchmark_sync(directory);
                     result = result && lane_run(threads, floors_benchmark_parallel_main, &parallel, cpus) && parallel.succeeded;
+                    lane_error = parallel.error;
                 }
                 const uint64_t median = runs && result ? floors_benchmark_median(parallel.times, BUSTER_FLOORS_BENCHMARK_LARGE_RUNS) : 0;
                 if (runs)
@@ -445,7 +466,7 @@ static bool floors_benchmark_threads(const char* directory, const uint8_t* sourc
     }
     if (!result)
     {
-        printf("  a write from several threads failed: %s\n", strerror(errno));
+        printf("  a write from several threads failed: %s\n", strerror(lane_error != 0 ? lane_error : errno));
     }
     unlink(path);
     return result;
@@ -664,13 +685,13 @@ static bool floors_benchmark_memory(const uint8_t* source)
 // ---------------------------------------------------------------------------------------------------------------------
 // Teardown
 
-// The child runs on `other_cpu`, not on this process's: on one CPU, it would exit before this process read its message.
-static bool floors_benchmark_teardown(uint32_t other_cpu)
+// The child runs on `other_cpu`, another CPU than this process's `cpu` when it may use one, as a linker's caller waits
+// beside it. Its message is the time it sent it: on one CPU, the child may tear down its memory and exit before this
+// process reads the message.
+static bool floors_benchmark_teardown(uint32_t cpu, uint32_t other_cpu)
 {
-    uint64_t other[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
-    other[other_cpu / 64] = 1ull << (other_cpu % 64);
     bool result = true;
-    printf("Teardown, from a child's last message to waitpid's return, the child on CPU %u, ms:\n", other_cpu);
+    printf("Teardown, from a child's last message to waitpid's return, the child on CPU %u%s, ms:\n", other_cpu, other_cpu == cpu ? " (this process's too)" : "");
     for (uint32_t huge = 0; result && huge < 2; huge += 1)
     {
         printf("  %-14s", huge != 0 ? "MADV_HUGEPAGE" : "base pages");
@@ -680,31 +701,36 @@ static bool floors_benchmark_teardown(uint32_t other_cpu)
             uint64_t times[BUSTER_FLOORS_BENCHMARK_LARGE_RUNS];
             for (uint32_t run = 0; result && run < BUSTER_FLOORS_BENCHMARK_LARGE_RUNS; run += 1)
             {
-                int pipes[2];
+                int pipes[2] = { -1, -1 };
                 result = pipe(pipes) == 0;
                 const pid_t child = result ? fork() : -1;
                 if (child == 0)
                 {
-                    syscall(SYS_sched_setaffinity, 0, sizeof(other), other);
+                    close(pipes[0]);
+                    lane_pin(other_cpu);
                     uint8_t* bytes = floors_benchmark_map(size, huge != 0 ? MADV_HUGEPAGE : MADV_NOHUGEPAGE);
                     for (uint64_t offset = 0; bytes != 0 && offset < size; offset += BUSTER_FLOORS_BENCHMARK_PAGE_BYTES)
                     {
                         bytes[offset] = 1;
                     }
-                    const char done = bytes != 0 ? 1 : 0;
-                    const ssize_t told = write(pipes[1], &done, 1);
-                    _exit(told == 1 && done == 1 ? 0 : 1);
+                    // 0 if it had no memory.
+                    const uint64_t sent = bytes != 0 ? floors_benchmark_now() : 0;
+                    const ssize_t told = write(pipes[1], &sent, sizeof(sent));
+                    _exit(told == sizeof(sent) && sent != 0 ? 0 : 1);
                 }
-                char done = 0;
-                result = child > 0 && read(pipes[0], &done, 1) == 1 && done == 1;
-                const uint64_t start = floors_benchmark_now();
+                // Without this process's write end, the read sees the end of file if the child dies before its message.
+                if (pipes[1] >= 0)
+                {
+                    close(pipes[1]);
+                }
+                uint64_t sent = 0;
+                result = child > 0 && read(pipes[0], &sent, sizeof(sent)) == sizeof(sent) && sent != 0;
                 int status = 0;
                 result = child > 0 && waitpid(child, &status, 0) == child && result && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-                times[run] = floors_benchmark_now() - start;
+                times[run] = floors_benchmark_now() - sent;
                 if (pipes[0] >= 0)
                 {
                     close(pipes[0]);
-                    close(pipes[1]);
                 }
             }
             const uint64_t median = result ? floors_benchmark_median(times, BUSTER_FLOORS_BENCHMARK_LARGE_RUNS) : 0;
@@ -715,7 +741,7 @@ static bool floors_benchmark_teardown(uint32_t other_cpu)
     }
     if (!result)
     {
-        printf("  a child couldn't touch its memory, or didn't exit\n");
+        printf("  a child couldn't touch its memory, or died before its message or its exit\n");
     }
     return result;
 }
@@ -781,7 +807,7 @@ int run_floors_benchmark(int argc, char** argv)
     }
     // The CPUs this process may use, in order: the threads' writes take the first ones.
     uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
-    uint32_t cpus[BUSTER_FLOORS_BENCHMARK_MAX_THREADS];
+    uint32_t cpus[BUSTER_FLOORS_BENCHMARK_MAX_THREADS] = { 0 };
     uint32_t cpu_count = 0;
     const bool known = valid && syscall(SYS_sched_getaffinity, 0, sizeof(allowed), allowed) > 0;
     for (uint32_t c = 0; known && c < BUSTER_LANE_CPU_MASK_WORDS * 64; c += 1)
@@ -790,9 +816,8 @@ int run_floors_benchmark(int argc, char** argv)
         cpus[usable ? cpu_count : 0] = usable ? c : cpus[0];
         cpu_count += usable ? 1 : 0;
     }
-    uint64_t pinned[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
-    pinned[cpu / 64] = 1ull << (cpu % 64);
-    const bool pin = known && syscall(SYS_sched_setaffinity, 0, sizeof(pinned), pinned) == 0;
+    // Only valid arguments have --cpu in range.
+    const bool pin = known && lane_pin((uint32_t)cpu);
     // The output's bytes, in memory touched beforehand, which the copies read too.
     const bool sourced = (sections & ~(1u << FLOORS_BENCHMARK_TEARDOWN)) != 0;
     uint8_t* source = pin && sourced ? floors_benchmark_map(BUSTER_FLOORS_BENCHMARK_SOURCE_BYTES, MADV_HUGEPAGE) : 0;
@@ -832,7 +857,7 @@ int run_floors_benchmark(int argc, char** argv)
     {
         munmap(source, BUSTER_FLOORS_BENCHMARK_SOURCE_BYTES);
     }
-    // The first CPU this process may use but --cpu, for the teardown's children.
+    // The first CPU this process may use but --cpu, for the teardown's children, or --cpu if there is none.
     uint32_t other_cpu = (uint32_t)cpu;
     for (uint32_t c = 0; c < cpu_count; c += 1)
     {
@@ -840,7 +865,7 @@ int run_floors_benchmark(int argc, char** argv)
     }
     if (result && (sections >> FLOORS_BENCHMARK_TEARDOWN & 1) != 0)
     {
-        result = floors_benchmark_teardown(other_cpu);
+        result = floors_benchmark_teardown((uint32_t)cpu, other_cpu);
     }
     return result ? 0 : 1;
 }

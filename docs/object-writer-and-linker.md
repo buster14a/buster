@@ -3050,8 +3050,10 @@ medians of 15 runs (5 at 64 MB and above).
   contiguous Nth of the file.
 - **Teardown:** a child touches N MiB of anonymous memory, tells the parent
   through a pipe and exits. The time is from the message to `waitpid`'s
-  return. `benchmark-floors` runs the child on another CPU than the parent's:
-  on the same one, the child can exit before the parent reads the message.
+  return. `benchmark-floors`'s child sends the time it sends the message, from
+  which the parent measures: on the parent's CPU, the child can exit before
+  the parent reads the message. It runs the child on another CPU than the
+  parent's when the parent may use one.
 - **Small calls:** 1,000 of each, timed together.
 
 **The object writer.** `benchmark-object-writer` pinned to CPU 2, with the

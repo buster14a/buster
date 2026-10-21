@@ -1462,9 +1462,13 @@ each figure a median, pinned to `--cpu` (CPU 2):
 - memory: 256 MB of anonymous memory touched for the first time with base
   pages and with `MADV_HUGEPAGE`, and `memcpy`, non-temporal stores and
   `memset` from 256 KB to 256 MB;
-- teardown: a child on another CPU touches 64 MB, 1 GB and 4 GB, tells this
-  process through a pipe and exits: the time from the message to `waitpid`'s
-  return, which a linker that forks hides from its caller.
+- teardown: a child, on another CPU when this process may use one, touches
+  64 MB, 1 GB and 4 GB, sends this process the time through a pipe and exits:
+  the time from then to `waitpid`'s return, which a linker that forks hides
+  from its caller.
+
+It exits with status 1 on invalid arguments and when a call fails: any lane's
+write, naming its `errno`, or a child that dies before its message or its exit.
 
 Run it under the 9700X's lock without `taskset`, and with `--directory` on each
 file system to measure. `docs/object-writer-and-linker.md` ("The floors") has
