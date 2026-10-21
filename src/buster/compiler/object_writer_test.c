@@ -1173,6 +1173,7 @@ static const ObjectTestName readelf_section_types[] = {
     { "INIT_ARRAY", SHT_INIT_ARRAY },
     { "FINI_ARRAY", SHT_FINI_ARRAY },
     { "SYMTAB SECTION INDICES", SHT_SYMTAB_SHNDX },
+    { "X86_64_UNWIND", SHT_X86_64_UNWIND },
 };
 
 static const ObjectTestName readelf_symbol_types[] = {

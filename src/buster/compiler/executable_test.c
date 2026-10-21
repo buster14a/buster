@@ -12,13 +12,15 @@
 //     50,000 workers in 38 chunks, several for each of 8 lanes to write. Each is written by executable_write with
 //     groups of 1, 2, 3 and 8 lanes (lane_run), each time from zeroed fields over the last file scribbled over
 //     (executable_test_reset), so that every write has all of it to do: the files must be byte-identical, and run, each
-//     must exit with status 0 having written LinkProgram.output. A copy with one fixup 8 bytes off must write
-//     something else. The sets that call libc, step 5's, must fail with an import named, without creating the output.
+//     must exit with status 0 having written LinkProgram.output; and the exact twins must write the same file with 1
+//     and 8 lanes. A copy with one fixup 8 bytes off must write something else. The sets that call libc, step 5's, must
+//     fail with an import named, without creating the output.
 //   - Fields: in each program's file, every fixup's field against a scalar reference of its kind's arithmetic
 //     (executable_test_expected), from the atoms' addresses and the symbols' definitions, with the TLS segment and the
 //     linker's sections read back from the file's headers; the GOT, a slot for each GOT kind's target, numbered from 1
 //     in symbol order and holding its value; and the headers themselves: the segments in lld's order, 4 KB-congruent,
-//     with contiguous file offsets.
+//     with contiguous file offsets; and the unwind tables, .eh_frame_hdr read back as an unwinder reads it against the
+//     test's own walk of .eh_frame (executable_test_unwind), which test-dynamic shares.
 //   - Chunks: every chunk boundary of every program, and of programs built to put 4-byte fields (a call's rel32) and
 //     8-byte fields (an ABS64 at an odd offset) across each place around a nominal boundary
 //     (executable_test_straddle): no boundary splits a field, the lanes write the same file (each from zeroed fields
@@ -35,10 +37,14 @@
 //     every lane count (among them the first of two symbols defined nowhere in different lanes' ranges), and a lane
 //     short of scratch memory at every amount from none up (executable_test_limits).
 //   - Build IDs: the lanes' (the files are identical), another program's, and the tree's root recomputed from the file.
+//   - Unwind tables: the scanner against its twin and what the test knows of .eh_frame atoms built here, the sort
+//     against a stable sort, and links whose tables must come out sorted, or are refused (see "Unwind tables").
+//   - The patch kernel: the fast path against the checked one (executable_test_kernel).
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
-// Layout, in this order: the tally, running and reading files, writing with lanes, the programs, the fields and
-// headers, the chunks, the files, and run_executable_tests.
+// Layout, in this order: the tally, running and reading files, writing with lanes, the fields and headers, the unwind
+// tables read back, the build IDs, the programs, hand-made links, the chunks, the files, the limits, the unwind tables,
+// the patch kernel, and run_executable_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -129,8 +135,9 @@ static String8 executable_test_path(const ExecutableTestDirectory* directory, co
     return result;
 }
 
-// Runs the executable at `path` without arguments: what it writes to standard output, and how it ended.
-static bool executable_test_run(const char* path, uint8_t* output, uint64_t* output_length, int* status)
+// Runs the executable at `path` without arguments, in `environment`: what it writes to standard output, and how it
+// ended.
+static bool executable_test_run_with(const char* path, char** environment, uint8_t* output, uint64_t* output_length, int* status)
 {
     int ends[2];
     bool result = pipe(ends) == 0;
@@ -148,7 +155,6 @@ static bool executable_test_run(const char* path, uint8_t* output, uint64_t* out
             close(ends[1]);
             alarm(BUSTER_EXECUTABLE_TEST_RUN_SECONDS);
             char* arguments[] = { (char*)path, 0 };
-            char* environment[] = { "BUSTER=1", 0 };
             execve(path, arguments, environment);
             _exit(127);
         }
@@ -164,6 +170,14 @@ static bool executable_test_run(const char* path, uint8_t* output, uint64_t* out
         result = result && waitpid(child, status, 0) == child;
     }
     return result;
+}
+
+// Runs the executable at `path` without arguments, in an environment of its own: what it writes to standard output, and
+// how it ended.
+static bool executable_test_run(const char* path, uint8_t* output, uint64_t* output_length, int* status)
+{
+    char* environment[] = { "BUSTER=1", 0 };
+    return executable_test_run_with(path, environment, output, output_length, status);
 }
 
 // Whether the executable at `path` exits with status 0 having written exactly `expected`.
@@ -276,6 +290,24 @@ static bool executable_test_write(Link* link, SymbolId entry, String8 path, uint
     return ran && write.succeeded;
 }
 
+// Writes the link to `path` with a group of `lanes` lanes by the passes' exact twins (ExecutableOptions.exact): whether
+// executable_write succeeded, and its result.
+static bool executable_test_write_exact(Link* link, SymbolId entry, String8 path, uint32_t lanes, ExecutableResult* result)
+{
+    ExecutableTestWrite write = {
+        .link = link,
+        .options = {
+            .path = path,
+            .entry = entry,
+            .exact = true,
+        },
+        .succeeded = false,
+    };
+    const bool ran = lane_run(lanes, executable_test_lane_main, &write, 0);
+    *result = write.result;
+    return ran && write.succeeded;
+}
+
 // Undoes what a write left, so that the next write has all of it to do again: every fixup's field in the atoms' bytes
 // back to zeros, as the generator leaves them, and the output, if it exists, overwritten with 0x5a over its whole
 // length, so that a write in place over it must write every byte. Returns whether the output could be overwritten.
@@ -318,8 +350,9 @@ static const char* const executable_test_error_names[] = {
     [EXECUTABLE_ERROR_RELOCATION] = "relocation",
     [EXECUTABLE_ERROR_FIXUP] = "fixup",
     [EXECUTABLE_ERROR_FILE] = "file",
+    [EXECUTABLE_ERROR_UNWIND] = "unwind",
 };
-_Static_assert(BUSTER_ARRAY_LENGTH(executable_test_error_names) == EXECUTABLE_ERROR_FILE + 1, "every error has a name");
+_Static_assert(BUSTER_ARRAY_LENGTH(executable_test_error_names) == EXECUTABLE_ERROR_UNWIND + 1, "every error has a name");
 
 static void executable_test_print_failure(const char* what, const ExecutableResult* result)
 {
@@ -646,6 +679,394 @@ static void executable_test_fields(ExecutableTestTally* tally, const Link* link,
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Unwind tables, read back
+//
+// A file's .eh_frame_hdr read as an unwinder reads it, against the test's own walk of .eh_frame (executable_test_unwind),
+// which test-dynamic's checks of its PIEs share.
+
+// An FDE that the test's walk of .eh_frame finds: its address, and the initial location and range that its pc_begin and
+// pc_range give.
+typedef struct ExecutableTestFde ExecutableTestFde;
+struct ExecutableTestFde
+{
+    uint64_t address;
+    int64_t initial;
+    uint64_t range;
+};
+
+// Reads the LEB128 at *at, before `end`, past it, as unsigned. False if it runs past `end`.
+static bool executable_test_leb128(const uint8_t* bytes, uint64_t end, uint64_t* at, uint64_t* value)
+{
+    uint64_t result = 0;
+    uint32_t shift = 0;
+    bool more = true;
+    while (more && *at < end)
+    {
+        result |= shift < 64 ? (uint64_t)(bytes[*at] & 0x7f) << shift : 0;
+        more = (bytes[*at] & 0x80) != 0;
+        shift += 7;
+        *at += 1;
+    }
+    *value = result;
+    return !more;
+}
+
+// The FDE pointers' encoding of the CIE at `cie` among .eh_frame's `size` bytes, from its augmentation's 'R', or 0xff
+// if it isn't a CIE the test reads: version 1 or 3, and an augmentation of 'z' then 'R', 'P', 'L' and 'S'.
+static uint8_t executable_test_cie_encoding(const uint8_t* bytes, uint64_t size, uint64_t cie)
+{
+    uint32_t length = 0;
+    uint32_t id = UINT32_MAX;
+    bool valid = cie + 8 <= size;
+    if (valid)
+    {
+        memcpy(&length, bytes + cie, sizeof(length));
+        memcpy(&id, bytes + cie + 4, sizeof(id));
+    }
+    const uint64_t end = cie + 4 + (uint64_t)length;
+    valid = valid && id == 0 && length >= 5 && end <= size;
+    uint64_t at = cie + 9;
+    const uint8_t version = valid ? bytes[cie + 8] : 0;
+    const uint64_t augmentation = at;
+    while (valid && at < end && bytes[at] != 0)
+    {
+        at += 1;
+    }
+    valid = valid && (version == 1 || version == 3) && at < end && bytes[augmentation] == 'z';
+    at += 1;
+    // The code and data alignments (a signed LEB128 has an unsigned one's bytes), then the return address's register.
+    uint64_t value = 0;
+    valid = valid && executable_test_leb128(bytes, end, &at, &value) && executable_test_leb128(bytes, end, &at, &value);
+    if (valid && version == 1)
+    {
+        valid = at < end;
+        at += 1;
+    }
+    else if (valid)
+    {
+        valid = executable_test_leb128(bytes, end, &at, &value);
+    }
+    uint64_t data_length = 0;
+    valid = valid && executable_test_leb128(bytes, end, &at, &data_length) && data_length <= end - at;
+    const uint64_t data_end = valid ? at + data_length : 0;
+    uint8_t result = 0xff;
+    for (uint64_t letter = augmentation + 1; valid && bytes[letter] != 0; letter += 1)
+    {
+        const uint8_t which = bytes[letter];
+        valid = which == 'S' || at < data_end;
+        const uint8_t encoding = valid && which != 'S' ? bytes[at] : 0;
+        at += which == 'S' ? 0 : 1;
+        if (valid && which == 'R')
+        {
+            result = encoding;
+        }
+        else if (valid && which == 'P')
+        {
+            // The personality's pointer, by its encoding's format: absptr, udata2, udata4, udata8, sdata2, sdata4,
+            // sdata8, or a LEB128.
+            const uint8_t format = encoding & 0x0f;
+            const uint64_t pointer = format == 0 || format == 4 || format == 12 ? 8 : format == 2 || format == 10 ? 2 : format == 3 || format == 11 ? 4 : 0;
+            valid = pointer != 0 || format == 1 || format == 9;
+            if (valid && pointer == 0)
+            {
+                valid = executable_test_leb128(bytes, data_end, &at, &value);
+            }
+            at += pointer;
+        }
+        else
+        {
+            valid = valid && (which == 'L' || which == 'S');
+        }
+    }
+    return valid && at <= data_end ? result : 0xff;
+}
+
+// Walks .eh_frame's records, `size` bytes at `address`, one after another: each FDE into `fdes` (room for `capacity`),
+// which must point back to a CIE met before it with pc-relative sdata4 pointers. A zero length is a terminator, which
+// must be the last record, as it is where an unwinder that walks the records stops. Returns how many FDEs, or
+// UINT64_MAX if a record isn't one the test reads.
+static uint64_t executable_test_walk_frames(const uint8_t* bytes, uint64_t size, uint64_t address, uint64_t* cies, ExecutableTestFde* fdes, uint64_t capacity)
+{
+    uint64_t cie_count = 0;
+    uint64_t count = 0;
+    uint64_t offset = 0;
+    bool valid = true;
+    while (valid && offset < size)
+    {
+        uint32_t length = 0;
+        uint32_t id = 0;
+        valid = size - offset >= 4;
+        if (valid)
+        {
+            memcpy(&length, bytes + offset, sizeof(length));
+        }
+        const bool terminator = valid && length == 0;
+        valid = valid && (terminator ? size - offset == 4 : length >= 4 && length != UINT32_MAX && (uint64_t)length <= size - offset - 4);
+        if (valid && !terminator)
+        {
+            memcpy(&id, bytes + offset + 4, sizeof(id));
+        }
+        if (valid && !terminator && id == 0)
+        {
+            valid = executable_test_cie_encoding(bytes, size, offset) == 0x1b && cie_count < capacity;
+            cies[valid ? cie_count : 0] = offset;
+            cie_count += valid ? 1 : 0;
+        }
+        else if (valid && !terminator)
+        {
+            // Its CIE, by a binary search of the ones met, which the walk met in offset order.
+            const uint64_t pointed = offset + 4 >= id ? offset + 4 - id : UINT64_MAX;
+            uint64_t low = 0;
+            uint64_t high = cie_count;
+            while (low < high)
+            {
+                const uint64_t middle = low + (high - low) / 2;
+                low = cies[middle] < pointed ? middle + 1 : low;
+                high = cies[middle] < pointed ? high : middle;
+            }
+            valid = low < cie_count && cies[low] == pointed && length >= 12 && count < capacity;
+            int32_t begin = 0;
+            uint32_t range = 0;
+            if (valid)
+            {
+                memcpy(&begin, bytes + offset + 8, sizeof(begin));
+                memcpy(&range, bytes + offset + 12, sizeof(range));
+                fdes[count] = (ExecutableTestFde){
+                    .address = address + offset,
+                    .initial = (int64_t)(address + offset + 8) + begin,
+                    .range = range,
+                };
+                count += 1;
+            }
+        }
+        offset += terminator ? 4 : 4 + (uint64_t)length;
+    }
+    return valid ? count : UINT64_MAX;
+}
+
+// The table's entry for `pc`, as libgcc's unwinder looks it up: a binary search for the last initial location at or
+// before it. Returns its index, or UINT64_MAX if every one is after it.
+static uint64_t executable_test_lookup(const uint8_t* table, uint64_t count, uint64_t header, int64_t pc)
+{
+    uint64_t low = 0;
+    uint64_t high = count;
+    while (low < high)
+    {
+        const uint64_t middle = low + (high - low) / 2;
+        int32_t initial = 0;
+        memcpy(&initial, table + 8 * middle, sizeof(initial));
+        const bool at_or_before = (int64_t)header + initial <= pc;
+        low = at_or_before ? middle + 1 : low;
+        high = at_or_before ? high : middle;
+    }
+    return low == 0 ? UINT64_MAX : low - 1;
+}
+
+// The walked FDE at `address`, by a binary search of `fdes` (in address order), or UINT64_MAX.
+static uint64_t executable_test_fde_at(const ExecutableTestFde* fdes, uint64_t count, uint64_t address)
+{
+    uint64_t low = 0;
+    uint64_t high = count;
+    while (low < high)
+    {
+        const uint64_t middle = low + (high - low) / 2;
+        low = fdes[middle].address < address ? middle + 1 : low;
+        high = fdes[middle].address < address ? high : middle;
+    }
+    return low < count && fdes[low].address == address ? low : UINT64_MAX;
+}
+
+// The first rule that `file`'s unwind tables break, or 0 if they keep them all. The file is an executable of `link`
+// whose image starts at `base` (BUSTER_EXECUTABLE_BASE, or 0 for a PIE); the program's own atoms are its units' below
+// `units`; `result` is its write's, or null.
+//   - With EH_FRAME atoms of bytes in the link, .eh_frame_hdr and .eh_frame, and PT_GNU_EH_FRAME exactly over the
+//     header; without, neither the header nor its segment.
+//   - The header's version and encodings, its pointer to .eh_frame, its count of the FDEs that the test's walk of
+//     .eh_frame finds, and its size.
+//   - Its table sorted by initial location, each entry an FDE's address and that FDE's initial location, each FDE
+//     once.
+//   - A lookup of each FDE's first and last byte, by libgcc's binary search, finds it; and one of each function of the
+//     program's (each TEXT atom of its units that have .eh_frame atoms) finds an FDE that starts there, whose range is
+//     the size of the symbol that the atom starts with.
+//   - The result's count, and whether the initial locations go up in .eh_frame's order, as fdes_in_order says.
+static const char* executable_test_unwind(const Link* link, String8 file, uint64_t base, uint32_t units, const ExecutableResult* result)
+{
+    const Elf64_Ehdr* elf = (const Elf64_Ehdr*)file.pointer;
+    bool valid = file.length >= sizeof(Elf64_Ehdr) && elf->e_shoff + (uint64_t)elf->e_shnum * sizeof(Elf64_Shdr) <= file.length &&
+                 elf->e_phoff + (uint64_t)elf->e_phnum * sizeof(Elf64_Phdr) <= file.length && elf->e_shstrndx < elf->e_shnum;
+    const Elf64_Shdr* sections = valid ? (const Elf64_Shdr*)(file.pointer + elf->e_shoff) : 0;
+    const Elf64_Phdr* segments = valid ? (const Elf64_Phdr*)(file.pointer + elf->e_phoff) : 0;
+    valid = valid && sections[elf->e_shstrndx].sh_offset + sections[elf->e_shstrndx].sh_size <= file.length;
+    const Elf64_Shdr* header = 0;
+    const Elf64_Shdr* frames = 0;
+    const Elf64_Phdr* segment = 0;
+    for (uint32_t i = 1; valid && i < elf->e_shnum; i += 1)
+    {
+        const char* name = file.pointer + sections[elf->e_shstrndx].sh_offset + sections[i].sh_name;
+        const bool inside = sections[i].sh_name < sections[elf->e_shstrndx].sh_size && sections[i].sh_offset + sections[i].sh_size <= file.length;
+        header = inside && strcmp(name, ".eh_frame_hdr") == 0 ? &sections[i] : header;
+        frames = inside && strcmp(name, ".eh_frame") == 0 ? &sections[i] : frames;
+    }
+    for (uint32_t i = 0; valid && i < elf->e_phnum; i += 1)
+    {
+        segment = segment == 0 && segments[i].p_type == PT_GNU_EH_FRAME ? &segments[i] : segment;
+    }
+    bool unwind = false;
+    for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+    {
+        unwind = unwind || (link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME && link->atoms.size[atom] != 0);
+    }
+    const char* failed = 0;
+    if (!valid)
+    {
+        failed = "the ELF headers";
+    }
+    else if (!unwind)
+    {
+        failed = header != 0 || segment != 0 ? "no index without unwind tables" : 0;
+    }
+    else if (header == 0 || frames == 0 || segment == 0)
+    {
+        failed = ".eh_frame_hdr, .eh_frame and PT_GNU_EH_FRAME";
+    }
+    else if (segment->p_offset != header->sh_offset || segment->p_vaddr != header->sh_addr || segment->p_filesz != header->sh_size ||
+             segment->p_memsz != header->sh_size || segment->p_flags != PF_R || segment->p_align != 4)
+    {
+        failed = "PT_GNU_EH_FRAME over .eh_frame_hdr";
+    }
+    const uint8_t* index = unwind && failed == 0 ? (const uint8_t*)file.pointer + header->sh_offset : 0;
+    uint32_t count = 0;
+    if (index != 0)
+    {
+        int32_t pointer = 0;
+        const bool fields = header->sh_size >= 12 && index[0] == 1 && index[1] == 0x1b && index[2] == 0x03 && index[3] == 0x3b;
+        if (fields)
+        {
+            memcpy(&pointer, index + 4, sizeof(pointer));
+            memcpy(&count, index + 8, sizeof(count));
+        }
+        failed = !fields                                                            ? "the header's version and encodings"
+                 : (int64_t)header->sh_addr + 4 + pointer != (int64_t)frames->sh_addr ? "the header's pointer to .eh_frame"
+                 : header->sh_size != 12 + 8 * (uint64_t)count                      ? "the header's size"
+                                                                                    : 0;
+    }
+    Scratch scratch = scratch_begin(0);
+    const uint64_t capacity = index != 0 ? frames->sh_size / 8 + 1 : 0;
+    uint64_t* cies = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, capacity);
+    ExecutableTestFde* fdes = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ExecutableTestFde, capacity);
+    uint8_t* seen = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, capacity);
+    const bool room = cies != 0 && fdes != 0 && seen != 0;
+    const uint64_t walked = failed == 0 && index != 0 && room ? executable_test_walk_frames((const uint8_t*)file.pointer + frames->sh_offset, frames->sh_size, frames->sh_addr, cies, fdes, capacity)
+                                                               : UINT64_MAX;
+    if (failed == 0 && index != 0)
+    {
+        failed = !room ? "room for the walk" : walked == UINT64_MAX ? "the records of .eh_frame" : walked != count ? "the header's count of .eh_frame's FDEs" : 0;
+    }
+    const uint8_t* table = index != 0 ? index + 12 : 0;
+    if (failed == 0 && index != 0)
+    {
+        memset(seen, 0, capacity);
+        bool sorted = true;
+        bool matched = true;
+        bool once = true;
+        int32_t last = INT32_MIN;
+        for (uint64_t i = 0; i < count; i += 1)
+        {
+            int32_t entry[2];
+            memcpy(entry, table + 8 * i, sizeof(entry));
+            sorted = sorted && entry[0] >= last;
+            last = entry[0];
+            const uint64_t fde = executable_test_fde_at(fdes, walked, (uint64_t)((int64_t)header->sh_addr + entry[1]));
+            matched = matched && fde != UINT64_MAX && fdes[fde].initial == (int64_t)header->sh_addr + entry[0];
+            once = once && (fde == UINT64_MAX || seen[fde] == 0);
+            seen[fde != UINT64_MAX ? fde : 0] = 1;
+        }
+        failed = !sorted ? "the table sorted by initial location" : !matched ? "each entry an FDE and its initial location" : !once ? "each FDE once" : 0;
+    }
+    if (failed == 0 && index != 0)
+    {
+        bool found = true;
+        for (uint64_t f = 0; f < walked; f += 1)
+        {
+            for (uint64_t end = 0; end < 2 && fdes[f].range != 0; end += 1)
+            {
+                const int64_t pc = fdes[f].initial + (end == 0 ? 0 : (int64_t)fdes[f].range - 1);
+                const uint64_t entry = executable_test_lookup(table, count, header->sh_addr, pc);
+                int32_t fde = 0;
+                if (entry != UINT64_MAX)
+                {
+                    memcpy(&fde, table + 8 * entry + 4, sizeof(fde));
+                }
+                found = found && entry != UINT64_MAX && (int64_t)header->sh_addr + fde == (int64_t)fdes[f].address;
+            }
+        }
+        // Each atom's first symbol's size, from the symbols that start one, and the program's units that have
+        // .eh_frame atoms, a byte each.
+        uint64_t* sizes = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, link->atoms.count);
+        for (AtomId atom = 0; sizes != 0 && atom < link->atoms.count; atom += 1)
+        {
+            sizes[atom] = UINT64_MAX;
+        }
+        for (SymbolId symbol = link->symbols.count - 1; sizes != 0 && symbol >= 1; symbol -= 1)
+        {
+            const AtomId atom = link->symbols.atom[symbol];
+            if (atom != 0 && link->symbols.value[symbol] == 0)
+            {
+                sizes[atom] = link->symbols.size[symbol];
+            }
+        }
+        uint32_t unit_count = 0;
+        for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+        {
+            const uint32_t unit = link->atoms.unit[atom];
+            unit_count = unit < units && unit + 1 > unit_count ? unit + 1 : unit_count;
+        }
+        uint8_t* framed = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, unit_count);
+        bool functions = framed != 0 && sizes != 0;
+        for (uint32_t unit = 0; framed != 0 && unit < unit_count; unit += 1)
+        {
+            framed[unit] = 0;
+        }
+        for (AtomId atom = 1; framed != 0 && atom < link->atoms.count; atom += 1)
+        {
+            const uint32_t unit = link->atoms.unit[atom];
+            if (link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME && unit < unit_count)
+            {
+                framed[unit] = 1;
+            }
+        }
+        for (AtomId atom = 1; functions && atom < link->atoms.count; atom += 1)
+        {
+            const uint32_t unit = link->atoms.unit[atom];
+            if (link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT && unit < unit_count && framed[unit] != 0)
+            {
+                const int64_t pc = (int64_t)(base + link->atoms.address[atom]);
+                const uint64_t entry = executable_test_lookup(table, count, header->sh_addr, pc);
+                int32_t fde = 0;
+                if (entry != UINT64_MAX)
+                {
+                    memcpy(&fde, table + 8 * entry + 4, sizeof(fde));
+                }
+                const uint64_t walked_fde = entry != UINT64_MAX ? executable_test_fde_at(fdes, walked, (uint64_t)((int64_t)header->sh_addr + fde)) : UINT64_MAX;
+                functions = functions && walked_fde != UINT64_MAX && fdes[walked_fde].initial == pc && fdes[walked_fde].range == sizes[atom];
+            }
+        }
+        failed = !found ? "a lookup of each FDE's first and last byte finds it" : !functions ? "a lookup of each function finds its FDE, of its size" : 0;
+    }
+    if (failed == 0 && result != 0)
+    {
+        bool in_order = true;
+        for (uint64_t f = 1; index != 0 && f < walked; f += 1)
+        {
+            in_order = in_order && fdes[f].initial >= fdes[f - 1].initial;
+        }
+        failed = result->fdes != (index != 0 ? count : 0) || result->fdes_in_order != in_order ? "the result's count of FDEs and their order" : 0;
+    }
+    scratch_end(scratch);
+    return failed;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Build IDs
 
 // Whether the file's build ID is the hash of its chunks' hashes, each chunk hashed with the note's hash zeroed.
@@ -845,8 +1266,11 @@ static bool executable_test_programs(const ExecutableTestDirectory* directory, u
                 executable_test_fields(&tally, &program.link, file, i);
                 executable_test_expect(&tally, written && executable_test_build_id(scratch.arena, file, boundaries, result.chunks), "the build ID is the tree of the file's chunks", i);
                 executable_test_expect(&tally, written && executable_test_boundaries(&program.link, file, boundaries, result.chunks), "no boundary splits a field", i);
-                printf("  %s: %u atoms, %u fixups, %llu GOT slots, %llu bytes in %llu chunks: %s\n", names[i], program.link.atoms.count - 1, program.link.fixups.count - 1,
-                       (unsigned long long)result.got_slots, (unsigned long long)result.file_size, (unsigned long long)result.chunks, ran ? "ran" : "failed");
+                const char* unwind = written ? executable_test_unwind(&program.link, file, BUSTER_EXECUTABLE_BASE, UINT32_MAX, &result) : "executable_write";
+                executable_test_expect(&tally, unwind == 0 && result.fdes != 0 && result.fdes_in_order, unwind != 0 ? unwind : "FDEs in order", i);
+                printf("  %s: %u atoms, %u fixups, %llu GOT slots, %llu FDEs, %llu bytes in %llu chunks: %s\n", names[i], program.link.atoms.count - 1,
+                       program.link.fixups.count - 1, (unsigned long long)result.got_slots, (unsigned long long)result.fdes, (unsigned long long)result.file_size,
+                       (unsigned long long)result.chunks, ran ? "ran" : "failed");
             }
             else
             {
@@ -854,6 +1278,17 @@ static bool executable_test_programs(const ExecutableTestDirectory* directory, u
                                        "the same file with every lane count", i * 10 + lanes);
                 executable_test_expect(&tally, memcmp(result.build_id, first_result.build_id, BUSTER_EXECUTABLE_BUILD_ID_BYTES) == 0, "the same build ID", i * 10 + lanes);
             }
+        }
+        // The exact twins write the same file, with 1 and 8 lanes.
+        static const uint32_t exact_lanes[] = { 1, 8 };
+        for (uint32_t l = 0; generated && !libc && first.pointer != 0 && l < BUSTER_ARRAY_LENGTH(exact_lanes); l += 1)
+        {
+            ExecutableResult result;
+            const bool written = executable_test_reset(&program.link, path.pointer) && executable_test_write_exact(&program.link, program.entry, path, exact_lanes[l], &result);
+            const String8 file = written ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
+            executable_test_expect(&tally, file.pointer != 0 && file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0 &&
+                                               result.fdes == first_result.fdes && result.fdes_in_order == first_result.fdes_in_order,
+                                   "the exact twins write the same file", i * 10 + exact_lanes[l]);
         }
         // buster_globals' first pointer, 8 bytes off: the program must print something else.
         if (generated && i == 0)
@@ -897,6 +1332,14 @@ struct ExecutableTestLink
     Arena bytes;
 };
 
+static bool executable_test_link_begin_with(ExecutableTestLink* test, uint64_t bytes, LinkCapacity capacity)
+{
+    test->tables = arena_reserve(link_capacity_bytes(capacity));
+    test->names = arena_reserve(BUSTER_EXECUTABLE_PAGE_BYTES);
+    test->bytes = arena_reserve(bytes);
+    return link_initialize(&test->link, &test->tables, &test->names, capacity) && test->names.base != 0 && test->bytes.base != 0;
+}
+
 static bool executable_test_link_begin(ExecutableTestLink* test, uint64_t bytes)
 {
     const LinkCapacity capacity = {
@@ -906,10 +1349,7 @@ static bool executable_test_link_begin(ExecutableTestLink* test, uint64_t bytes)
         .fixups = 64,
         .wide_addends = 4,
     };
-    test->tables = arena_reserve(link_capacity_bytes(capacity));
-    test->names = arena_reserve(BUSTER_EXECUTABLE_PAGE_BYTES);
-    test->bytes = arena_reserve(bytes);
-    return link_initialize(&test->link, &test->tables, &test->names, capacity) && test->names.base != 0 && test->bytes.base != 0;
+    return executable_test_link_begin_with(test, bytes, capacity);
 }
 
 static void executable_test_link_end(ExecutableTestLink* test)
@@ -1777,7 +2217,8 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
     // Refusals reported alike with any number of lanes: the entry point checked before the symbols (a DATA symbol, with
     // a symbol defined nowhere beside it), the first of two symbols defined nowhere in different lanes' ranges, the
     // smallest failing fixup though another comes first in the file, an atom aligned past a page, an init array's atom
-    // of 12 bytes, and an atom of each of the C runtime's classes, which step 4's executables don't have.
+    // of 12 bytes, and an atom of each of the C runtime's classes, .init's and .fini's, which step 4's executables don't
+    // have.
     ExecutableTestLink refusal;
     SymbolId refusal_start = 0;
     SymbolId data = 0;
@@ -1821,7 +2262,6 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
     }
     executable_test_link_end(&refusal);
     static const uint8_t runtime_classes[] = {
-        BUSTER_LINK_CLASS_EH_FRAME,
         BUSTER_LINK_CLASS_INIT,
         BUSTER_LINK_CLASS_FINI,
     };
@@ -1861,6 +2301,848 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
     if (generated)
     {
         link_program_release(&program);
+    }
+    unlink(path.pointer);
+    scratch_end(scratch);
+    return executable_test_report(&tally);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Unwind tables
+//
+// The scanner and the sort against their twins and references, and links whose unwind tables must be sorted, or are
+// refused:
+//   - The scanner: .eh_frame atoms built here (ExecutableTestFrames) from every kind of CIE the header indexes and
+//     some it doesn't, with and without a terminator, then changed in each way a record can be wrong, or right but not
+//     as the vector path reads: the exact walk must count the FDEs that the test knows they have, or refuse the atom,
+//     the vector path must count the same or leave the atom to the walk (and take every atom of one CIE and its FDEs),
+//     and with table entries, both must give a reference's, or refuse an entry outside int32.
+//   - The sort: tables sorted, sorted but for one pair, reversed, random and of equal locations, of every count to 200
+//     and some larger: the sorted check must say whether they are sorted, and the sort (always with `exact`) give a
+//     stable sort's order.
+//   - Links: functions aligned apart so that their FDEs' order isn't their addresses', in .eh_frame atoms of each CIE
+//     the header indexes, written by every lane count and by the exact twins into the same file, whose table must be
+//     sorted and the program run; an FDE's initial location at INT32_MAX from the header and at one more (refused), and
+//     one from a wide addend; and atoms the header can't index, the first of two named, by every lane count, and before
+//     a symbol defined nowhere, which only the symbols' phase after the layout refuses: by the count, before it.
+
+// The CIEs the scanner's atoms start from: the ones the header indexes, GCC's ("zR", in versions 1 and 3), with a
+// personality, an LSDA and a signal frame, and with a personality's pointer absolute or a LEB128; then ones it doesn't
+// index: without 'z', with absolute FDE pointers, with a letter it doesn't know, of version 2, with augmentation data
+// past the record, without 'R', and with two, absolute then pc-relative (unwinders don't agree on which one counts).
+typedef enum ExecutableTestCie
+{
+    EXECUTABLE_TEST_CIE_ZR,
+    EXECUTABLE_TEST_CIE_ZR_VERSION_3,
+    EXECUTABLE_TEST_CIE_ZPLR,
+    EXECUTABLE_TEST_CIE_ZRS,
+    EXECUTABLE_TEST_CIE_ZPR_ABSOLUTE,
+    EXECUTABLE_TEST_CIE_ZPR_LEB128,
+    EXECUTABLE_TEST_CIES_INDEXED,
+    EXECUTABLE_TEST_CIE_NO_Z = EXECUTABLE_TEST_CIES_INDEXED,
+    EXECUTABLE_TEST_CIE_R_ABSOLUTE,
+    EXECUTABLE_TEST_CIE_UNKNOWN_LETTER,
+    EXECUTABLE_TEST_CIE_VERSION_2,
+    EXECUTABLE_TEST_CIE_DATA_PAST_END,
+    EXECUTABLE_TEST_CIE_Z_ONLY,
+    EXECUTABLE_TEST_CIE_R_TWICE,
+    EXECUTABLE_TEST_CIES,
+} ExecutableTestCie;
+
+#define BUSTER_EXECUTABLE_TEST_FRAMES_BYTES 8192
+#define BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS 256
+#define BUSTER_EXECUTABLE_TEST_FRAMES_SYMBOLS 8
+
+// An .eh_frame atom being built: its bytes and fixups, its FDEs in order (each one's offset and pc_begin's fixup), the
+// last CIE's offset and whether its FDEs have an LSDA pointer.
+typedef struct ExecutableTestFrames ExecutableTestFrames;
+struct ExecutableTestFrames
+{
+    uint8_t bytes[BUSTER_EXECUTABLE_TEST_FRAMES_BYTES];
+    uint32_t size;
+    uint32_t offsets[BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS];
+    uint8_t kinds[BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS];
+    SymbolId targets[BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS];
+    int64_t addends[BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS];
+    uint32_t fixup_count;
+    uint32_t fdes[BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS];
+    uint32_t fde_fixups[BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS];
+    uint32_t fde_count;
+    uint32_t cie;
+    bool lsda;
+};
+
+static void executable_test_frames_put(ExecutableTestFrames* frames, const void* bytes, uint32_t count)
+{
+    memcpy(frames->bytes + frames->size, bytes, count);
+    frames->size += count;
+}
+
+static void executable_test_frames_byte(ExecutableTestFrames* frames, uint8_t byte)
+{
+    executable_test_frames_put(frames, &byte, 1);
+}
+
+static void executable_test_frames_fixup(ExecutableTestFrames* frames, uint8_t kind, SymbolId target, int64_t addend)
+{
+    const uint32_t width = link_fixup_kinds[kind].width;
+    frames->offsets[frames->fixup_count] = frames->size;
+    frames->kinds[frames->fixup_count] = kind;
+    frames->targets[frames->fixup_count] = target;
+    frames->addends[frames->fixup_count] = addend;
+    frames->fixup_count += 1;
+    memset(frames->bytes + frames->size, 0, width);
+    frames->size += width;
+}
+
+// Ends the record that starts at `start`: DW_CFA_nops to a multiple of 4 bytes, and its length.
+static void executable_test_frames_end(ExecutableTestFrames* frames, uint32_t start)
+{
+    while ((frames->size - start) % 4 != 0)
+    {
+        executable_test_frames_byte(frames, 0);
+    }
+    const uint32_t length = frames->size - start - 4;
+    memcpy(frames->bytes + start, &length, sizeof(length));
+}
+
+// Appends a CIE of `kind`, whose personality, if it has one, is `personality`.
+static void executable_test_frames_cie(ExecutableTestFrames* frames, ExecutableTestCie kind, SymbolId personality)
+{
+    static const char* const augmentations[EXECUTABLE_TEST_CIES] = {
+        [EXECUTABLE_TEST_CIE_ZR] = "zR",
+        [EXECUTABLE_TEST_CIE_ZR_VERSION_3] = "zR",
+        [EXECUTABLE_TEST_CIE_ZPLR] = "zPLR",
+        [EXECUTABLE_TEST_CIE_ZRS] = "zRS",
+        [EXECUTABLE_TEST_CIE_ZPR_ABSOLUTE] = "zPR",
+        [EXECUTABLE_TEST_CIE_ZPR_LEB128] = "zPR",
+        [EXECUTABLE_TEST_CIE_NO_Z] = "",
+        [EXECUTABLE_TEST_CIE_R_ABSOLUTE] = "zR",
+        [EXECUTABLE_TEST_CIE_UNKNOWN_LETTER] = "zRX",
+        [EXECUTABLE_TEST_CIE_VERSION_2] = "zR",
+        [EXECUTABLE_TEST_CIE_DATA_PAST_END] = "zR",
+        [EXECUTABLE_TEST_CIE_Z_ONLY] = "z",
+        [EXECUTABLE_TEST_CIE_R_TWICE] = "zRR",
+    };
+    const uint32_t start = frames->size;
+    const uint32_t zero = 0;
+    executable_test_frames_put(frames, &zero, 4);
+    executable_test_frames_put(frames, &zero, 4);
+    const bool version_3 = kind == EXECUTABLE_TEST_CIE_ZR_VERSION_3;
+    executable_test_frames_byte(frames, version_3 ? 3 : kind == EXECUTABLE_TEST_CIE_VERSION_2 ? 2 : 1);
+    executable_test_frames_put(frames, augmentations[kind], (uint32_t)strlen(augmentations[kind]) + 1);
+    // Code alignment 1, data alignment -8, and the return address's register, 16: in version 3 a LEB128, two bytes.
+    executable_test_frames_byte(frames, 0x01);
+    executable_test_frames_byte(frames, 0x78);
+    if (version_3)
+    {
+        executable_test_frames_byte(frames, 0x90);
+        executable_test_frames_byte(frames, 0x00);
+    }
+    else
+    {
+        executable_test_frames_byte(frames, 0x10);
+    }
+    // The augmentation data's length, then its bytes.
+    const uint8_t fde_encoding = kind == EXECUTABLE_TEST_CIE_R_ABSOLUTE ? 0x00 : 0x1b;
+    if (kind == EXECUTABLE_TEST_CIE_ZPLR)
+    {
+        executable_test_frames_byte(frames, 7);
+        executable_test_frames_byte(frames, 0x9b);
+        executable_test_frames_fixup(frames, BUSTER_LINK_FIXUP_PC32, personality, 0);
+        executable_test_frames_byte(frames, 0x1b);
+        executable_test_frames_byte(frames, 0x1b);
+    }
+    else if (kind == EXECUTABLE_TEST_CIE_ZPR_ABSOLUTE)
+    {
+        executable_test_frames_byte(frames, 10);
+        executable_test_frames_byte(frames, 0x00);
+        executable_test_frames_fixup(frames, BUSTER_LINK_FIXUP_ABS64, personality, 0);
+        executable_test_frames_byte(frames, 0x1b);
+    }
+    else if (kind == EXECUTABLE_TEST_CIE_ZPR_LEB128)
+    {
+        executable_test_frames_byte(frames, 4);
+        executable_test_frames_byte(frames, 0x01);
+        executable_test_frames_byte(frames, 0x80);
+        executable_test_frames_byte(frames, 0x01);
+        executable_test_frames_byte(frames, 0x1b);
+    }
+    else if (kind == EXECUTABLE_TEST_CIE_Z_ONLY)
+    {
+        executable_test_frames_byte(frames, 0);
+    }
+    else if (kind == EXECUTABLE_TEST_CIE_DATA_PAST_END)
+    {
+        executable_test_frames_byte(frames, 0x7f);
+        executable_test_frames_byte(frames, 0x1b);
+    }
+    else if (kind == EXECUTABLE_TEST_CIE_R_TWICE)
+    {
+        executable_test_frames_byte(frames, 2);
+        executable_test_frames_byte(frames, 0x00);
+        executable_test_frames_byte(frames, 0x1b);
+    }
+    else if (kind != EXECUTABLE_TEST_CIE_NO_Z)
+    {
+        executable_test_frames_byte(frames, 1);
+        executable_test_frames_byte(frames, fde_encoding);
+    }
+    // DW_CFA_def_cfa rsp + 8, and DW_CFA_offset rip at CFA - 8.
+    static const uint8_t instructions[] = { 0x0c, 0x07, 0x08, 0x90, 0x01 };
+    executable_test_frames_put(frames, instructions, sizeof(instructions));
+    executable_test_frames_end(frames, start);
+    frames->cie = start;
+    frames->lsda = kind == EXECUTABLE_TEST_CIE_ZPLR;
+}
+
+// Appends an FDE for `target` + `addend` of `range` bytes, pointing back to the last CIE, with `instructions` bytes of
+// call frame instructions (DW_CFA_advance_locs), and an LSDA pointer to `lsda` if the CIE says so.
+static void executable_test_frames_fde(ExecutableTestFrames* frames, SymbolId target, int64_t addend, uint32_t range, uint32_t instructions, SymbolId lsda)
+{
+    const uint32_t start = frames->size;
+    const uint32_t pointer = start + 4 - frames->cie;
+    const uint32_t zero = 0;
+    executable_test_frames_put(frames, &zero, 4);
+    executable_test_frames_put(frames, &pointer, 4);
+    frames->fdes[frames->fde_count] = start;
+    frames->fde_fixups[frames->fde_count] = frames->fixup_count;
+    frames->fde_count += 1;
+    executable_test_frames_fixup(frames, BUSTER_LINK_FIXUP_PC32, target, addend);
+    executable_test_frames_put(frames, &range, 4);
+    executable_test_frames_byte(frames, frames->lsda ? 4 : 0);
+    if (frames->lsda)
+    {
+        executable_test_frames_fixup(frames, BUSTER_LINK_FIXUP_PC32, lsda, 0);
+    }
+    for (uint32_t i = 0; i < instructions; i += 1)
+    {
+        executable_test_frames_byte(frames, (uint8_t)(0x40 | (1 + i % 63)));
+    }
+    executable_test_frames_end(frames, start);
+}
+
+// Adds the atom to the link, with its fixups: its id, or 0.
+static AtomId executable_test_frames_atom(Link* link, Arena* arena, const ExecutableTestFrames* frames)
+{
+    uint8_t* bytes = arena_push(arena, frames->size, 8);
+    if (bytes != 0)
+    {
+        memcpy(bytes, frames->bytes, frames->size);
+    }
+    AtomId atom = bytes != 0 ? link_add_atom(link, BUSTER_LINK_CLASS_EH_FRAME, 3, frames->size, bytes, 0) : 0;
+    for (uint32_t i = 0; atom != 0 && i < frames->fixup_count; i += 1)
+    {
+        atom = link_add_fixup(link, atom, frames->offsets[i], frames->kinds[i], frames->targets[i], frames->addends[i]) != 0 ? atom : 0;
+    }
+    return atom;
+}
+
+// The ways the scanner's checks change an atom of one CIE and its FDEs (FDE `at` of them), and what the walk must then
+// find: an FDE too short, cut after its pc_begin with the next record there, or too long, pointing into its CIE or past
+// itself, without its pc_begin's fixup or with an ABS32 there, a record too short after the last FDE, and one CIE more
+// than BUSTER_EXECUTABLE_EH_FRAME_CIES (all refused); a terminator at the end (the same FDEs); a terminator before the
+// FDE (the FDEs before it); a second CIE that the FDE and the ones after it point to, as many CIEs as the walk keeps, a
+// fixup among the FDE's instructions, and a wide addend (the same FDEs, for the walk alone); and initial locations at
+// int32's limits from the header, and one past each (refused with entries).
+typedef enum ExecutableTestChange
+{
+    EXECUTABLE_TEST_CHANGE_NONE,
+    EXECUTABLE_TEST_CHANGE_SHORT_FDE,
+    EXECUTABLE_TEST_CHANGE_TRUNCATED,
+    EXECUTABLE_TEST_CHANGE_LONG_FDE,
+    EXECUTABLE_TEST_CHANGE_INTO_CIE,
+    EXECUTABLE_TEST_CHANGE_AHEAD,
+    EXECUTABLE_TEST_CHANGE_NO_FIXUP,
+    EXECUTABLE_TEST_CHANGE_ABS32,
+    EXECUTABLE_TEST_CHANGE_TRAILING,
+    EXECUTABLE_TEST_CHANGE_CIES_PAST_LIMIT,
+    EXECUTABLE_TEST_CHANGE_TERMINATOR,
+    EXECUTABLE_TEST_CHANGE_MIDDLE_TERMINATOR,
+    EXECUTABLE_TEST_CHANGE_SECOND_CIE,
+    EXECUTABLE_TEST_CHANGE_CIES_AT_LIMIT,
+    EXECUTABLE_TEST_CHANGE_EXTRA_FIXUP,
+    EXECUTABLE_TEST_CHANGE_WIDE,
+    EXECUTABLE_TEST_CHANGE_ENTRY_MAX,
+    EXECUTABLE_TEST_CHANGE_ENTRY_MIN,
+    EXECUTABLE_TEST_CHANGE_ENTRY_ABOVE,
+    EXECUTABLE_TEST_CHANGE_ENTRY_BELOW,
+    EXECUTABLE_TEST_CHANGES,
+} ExecutableTestChange;
+
+// The header and the atom's addresses the scanner's checks give, and the symbols' references.
+#define BUSTER_EXECUTABLE_TEST_FRAMES_HEADER 0x1000ull
+#define BUSTER_EXECUTABLE_TEST_FRAMES_ADDRESS 0x2000ull
+
+// Builds an atom of a CIE of `cie` and `fdes` FDEs, changed by `change` at FDE `at`: into `frames`, with how many FDEs
+// the walk must find (UINT32_MAX for none), whether the vector path must take it and whether the entries must be
+// refused. FDE j is for symbol 1 + j % BUSTER_EXECUTABLE_TEST_FRAMES_SYMBOLS, whose reference is `references`'s.
+static void executable_test_frames_build(ExecutableTestFrames* frames, ExecutableTestCie cie, uint32_t fdes, ExecutableTestChange change, uint32_t at, bool terminator,
+                                         const uint32_t* references, uint64_t* state, uint32_t* walked, bool* vector, bool* refused)
+{
+    memset(frames, 0, sizeof(*frames));
+    const SymbolId personality = BUSTER_EXECUTABLE_TEST_FRAMES_SYMBOLS;
+    const uint32_t extra_cies = change == EXECUTABLE_TEST_CHANGE_CIES_PAST_LIMIT ? BUSTER_EXECUTABLE_EH_FRAME_CIES
+                                : change == EXECUTABLE_TEST_CHANGE_CIES_AT_LIMIT ? BUSTER_EXECUTABLE_EH_FRAME_CIES - 1
+                                                                                 : 0;
+    for (uint32_t c = 0; c < extra_cies; c += 1)
+    {
+        executable_test_frames_cie(frames, EXECUTABLE_TEST_CIE_ZR, personality);
+    }
+    executable_test_frames_cie(frames, cie, personality);
+    uint32_t before_terminator = fdes;
+    for (uint32_t j = 0; j < fdes; j += 1)
+    {
+        if (j == at && change == EXECUTABLE_TEST_CHANGE_MIDDLE_TERMINATOR)
+        {
+            const uint32_t zero = 0;
+            executable_test_frames_put(frames, &zero, 4);
+            before_terminator = j;
+        }
+        if (j == at && change == EXECUTABLE_TEST_CHANGE_SECOND_CIE)
+        {
+            executable_test_frames_cie(frames, EXECUTABLE_TEST_CIE_ZR, personality);
+        }
+        // The changed FDE's target: symbol 1, whose reference is below the header, for an initial location below
+        // int32's, and the last, far above it, for one above or a wide addend that fits.
+        const bool low = change == EXECUTABLE_TEST_CHANGE_ENTRY_MIN || change == EXECUTABLE_TEST_CHANGE_ENTRY_BELOW;
+        const SymbolId target = j != at ? 1 + j % BUSTER_EXECUTABLE_TEST_FRAMES_SYMBOLS : low ? 1 : BUSTER_EXECUTABLE_TEST_FRAMES_SYMBOLS;
+        const int64_t reference = references[target];
+        const int64_t header = (int64_t)BUSTER_EXECUTABLE_TEST_FRAMES_HEADER;
+        int64_t addend = (int64_t)(executable_test_random(state) % 8192) - 4096;
+        addend = j != at                                         ? addend
+                 : change == EXECUTABLE_TEST_CHANGE_WIDE        ? (int64_t)INT32_MIN - 1
+                 : change == EXECUTABLE_TEST_CHANGE_ENTRY_MAX   ? INT32_MAX - reference + header
+                 : change == EXECUTABLE_TEST_CHANGE_ENTRY_MIN   ? INT32_MIN - reference + header
+                 : change == EXECUTABLE_TEST_CHANGE_ENTRY_ABOVE ? (int64_t)INT32_MAX + 1 - reference + header
+                 : change == EXECUTABLE_TEST_CHANGE_ENTRY_BELOW ? (int64_t)INT32_MIN - 1 - reference + header
+                                                                : addend;
+        const uint32_t fde = frames->size;
+        const uint32_t range = 16 + (uint32_t)(executable_test_random(state) % 4096);
+        const uint32_t instructions = (uint32_t)(executable_test_random(state) % 24);
+        if (j == at && change == EXECUTABLE_TEST_CHANGE_TRUNCATED)
+        {
+            // Its length, CIE pointer and pc_begin alone: 12 bytes, of length 8.
+            const uint32_t pointer = fde + 4 - frames->cie;
+            const uint32_t eight = 8;
+            executable_test_frames_put(frames, &eight, 4);
+            executable_test_frames_put(frames, &pointer, 4);
+            frames->fdes[frames->fde_count] = fde;
+            frames->fde_fixups[frames->fde_count] = frames->fixup_count;
+            frames->fde_count += 1;
+            executable_test_frames_fixup(frames, BUSTER_LINK_FIXUP_PC32, target, addend);
+        }
+        else
+        {
+            executable_test_frames_fde(frames, target, addend, range, instructions, personality);
+        }
+        uint32_t length = 0;
+        memcpy(&length, frames->bytes + fde, sizeof(length));
+        uint32_t pointer = 0;
+        memcpy(&pointer, frames->bytes + fde + 4, sizeof(pointer));
+        if (j == at && change == EXECUTABLE_TEST_CHANGE_SHORT_FDE)
+        {
+            length = 8;
+        }
+        else if (j == at && change == EXECUTABLE_TEST_CHANGE_TRUNCATED)
+        {
+            length = 8;
+        }
+        else if (j == at && change == EXECUTABLE_TEST_CHANGE_LONG_FDE)
+        {
+            length = BUSTER_EXECUTABLE_TEST_FRAMES_BYTES;
+        }
+        else if (j == at && change == EXECUTABLE_TEST_CHANGE_INTO_CIE)
+        {
+            pointer -= 4;
+        }
+        else if (j == at && change == EXECUTABLE_TEST_CHANGE_AHEAD)
+        {
+            pointer = fde + 8;
+        }
+        else if (j == at && change == EXECUTABLE_TEST_CHANGE_NO_FIXUP)
+        {
+            // pc_begin's fixup, the FDE's first.
+            const uint32_t fixup = frames->fde_fixups[frames->fde_count - 1];
+            memmove(&frames->offsets[fixup], &frames->offsets[fixup + 1], (frames->fixup_count - fixup - 1) * sizeof(frames->offsets[0]));
+            memmove(&frames->kinds[fixup], &frames->kinds[fixup + 1], (frames->fixup_count - fixup - 1) * sizeof(frames->kinds[0]));
+            memmove(&frames->targets[fixup], &frames->targets[fixup + 1], (frames->fixup_count - fixup - 1) * sizeof(frames->targets[0]));
+            memmove(&frames->addends[fixup], &frames->addends[fixup + 1], (frames->fixup_count - fixup - 1) * sizeof(frames->addends[0]));
+            frames->fixup_count -= 1;
+        }
+        else if (j == at && change == EXECUTABLE_TEST_CHANGE_ABS32)
+        {
+            frames->kinds[frames->fde_fixups[frames->fde_count - 1]] = BUSTER_LINK_FIXUP_ABS32;
+        }
+        else if (j == at && change == EXECUTABLE_TEST_CHANGE_EXTRA_FIXUP)
+        {
+            // An ABS32 over the FDE's range, after pc_begin's fixup.
+            const uint32_t fixup = frames->fde_fixups[frames->fde_count - 1] + 1;
+            memmove(&frames->offsets[fixup + 1], &frames->offsets[fixup], (frames->fixup_count - fixup) * sizeof(frames->offsets[0]));
+            memmove(&frames->kinds[fixup + 1], &frames->kinds[fixup], (frames->fixup_count - fixup) * sizeof(frames->kinds[0]));
+            memmove(&frames->targets[fixup + 1], &frames->targets[fixup], (frames->fixup_count - fixup) * sizeof(frames->targets[0]));
+            memmove(&frames->addends[fixup + 1], &frames->addends[fixup], (frames->fixup_count - fixup) * sizeof(frames->addends[0]));
+            frames->offsets[fixup] = fde + 12;
+            frames->kinds[fixup] = BUSTER_LINK_FIXUP_ABS32;
+            frames->targets[fixup] = target;
+            frames->addends[fixup] = 0;
+            frames->fixup_count += 1;
+        }
+        memcpy(frames->bytes + fde, &length, sizeof(length));
+        memcpy(frames->bytes + fde + 4, &pointer, sizeof(pointer));
+    }
+    if (change == EXECUTABLE_TEST_CHANGE_TRAILING)
+    {
+        const uint32_t four = 4;
+        executable_test_frames_put(frames, &four, 4);
+    }
+    if (terminator || change == EXECUTABLE_TEST_CHANGE_TERMINATOR)
+    {
+        const uint32_t zero = 0;
+        executable_test_frames_put(frames, &zero, 4);
+    }
+    const bool indexed = cie < EXECUTABLE_TEST_CIES_INDEXED;
+    const bool changed = fdes != 0 && change != EXECUTABLE_TEST_CHANGE_NONE;
+    // What breaks the records, and what the vector path doesn't read.
+    const bool broken = changed && change <= EXECUTABLE_TEST_CHANGE_CIES_PAST_LIMIT;
+    const bool every_time = change == EXECUTABLE_TEST_CHANGE_TRAILING || change == EXECUTABLE_TEST_CHANGE_CIES_PAST_LIMIT;
+    const bool other_layout = (changed && change >= EXECUTABLE_TEST_CHANGE_MIDDLE_TERMINATOR && change <= EXECUTABLE_TEST_CHANGE_WIDE) || change == EXECUTABLE_TEST_CHANGE_CIES_AT_LIMIT;
+    const bool simple = cie == EXECUTABLE_TEST_CIE_ZR || cie == EXECUTABLE_TEST_CIE_ZR_VERSION_3 || cie == EXECUTABLE_TEST_CIE_ZRS || cie == EXECUTABLE_TEST_CIE_ZPR_LEB128;
+    *walked = !indexed || broken || every_time ? UINT32_MAX : before_terminator;
+    *vector = *walked != UINT32_MAX && simple && !other_layout;
+    *refused = changed && (change == EXECUTABLE_TEST_CHANGE_ENTRY_ABOVE || change == EXECUTABLE_TEST_CHANGE_ENTRY_BELOW);
+}
+
+static bool executable_test_frames(uint64_t seed)
+{
+    ExecutableTestTally tally = {
+        .check = "unwind scanner",
+    };
+    Scratch scratch = scratch_begin(0);
+    ExecutableTestFrames* frames = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ExecutableTestFrames, 1);
+    int32_t* walk_entries = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, int32_t, 2 * BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS);
+    int32_t* vector_entries = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, int32_t, 2 * BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS);
+    int32_t* expected = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, int32_t, 2 * BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS);
+    uint64_t state = seed * 0x9E3779B97F4A7C15ull + 11;
+    uint32_t references[BUSTER_EXECUTABLE_TEST_FRAMES_SYMBOLS + 1] = { 0 };
+    // Atom by atom, each in a link of its own whose arenas a round reuses.
+    const LinkCapacity capacity = {
+        .names = 16,
+        .atoms = 4,
+        .symbols = BUSTER_EXECUTABLE_TEST_FRAMES_SYMBOLS + 4,
+        .fixups = BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS + 4,
+        .wide_addends = 8,
+    };
+    Arena tables = arena_reserve(link_capacity_bytes(capacity));
+    Arena names = arena_reserve(BUSTER_EXECUTABLE_PAGE_BYTES);
+    Arena bytes = arena_reserve(2 * BUSTER_EXECUTABLE_TEST_FRAMES_BYTES);
+    bool ready = frames != 0 && walk_entries != 0 && vector_entries != 0 && expected != 0 && tables.base != 0 && names.base != 0 && bytes.base != 0;
+    executable_test_expect(&tally, ready, "room for the atoms", 0);
+    uint64_t vector_taken = 0;
+    uint64_t walk_taken = 0;
+    uint64_t round = 0;
+    for (uint32_t cie = 0; ready && cie < EXECUTABLE_TEST_CIES; cie += 1)
+    {
+        for (uint32_t change = 0; change < EXECUTABLE_TEST_CHANGES; change += 1)
+        {
+            for (uint32_t trial = 0; trial < 12; trial += 1)
+            {
+                // From none to 40 FDEs, across the vector path's groups of 16, the change at a random one.
+                const uint32_t fdes = trial < 3 ? trial : (uint32_t)(executable_test_random(&state) % 41);
+                const uint32_t at = fdes != 0 ? (uint32_t)(executable_test_random(&state) % fdes) : 0;
+                const bool terminator = (executable_test_random(&state) & 1) != 0;
+                // Symbol 1's reference below the header, the last's at least 2^28, and the others' anywhere below 2^30.
+                for (uint32_t s = 1; s <= BUSTER_EXECUTABLE_TEST_FRAMES_SYMBOLS; s += 1)
+                {
+                    const uint64_t random = executable_test_random(&state);
+                    references[s] = s == 1 ? (uint32_t)(random % BUSTER_EXECUTABLE_TEST_FRAMES_HEADER)
+                                    : s == BUSTER_EXECUTABLE_TEST_FRAMES_SYMBOLS ? (uint32_t)((1u << 28) + random % (1u << 29))
+                                                                                 : (uint32_t)(random % (1u << 30));
+                }
+                uint32_t walked = 0;
+                bool vector = false;
+                bool refused = false;
+                executable_test_frames_build(frames, (ExecutableTestCie)cie, fdes, (ExecutableTestChange)change, at, terminator, references, &state, &walked, &vector, &refused);
+                tables.length = 0;
+                names.length = 0;
+                bytes.length = 0;
+                Link link;
+                bool built = link_initialize(&link, &tables, &names, capacity);
+                for (uint32_t s = 1; built && s <= BUSTER_EXECUTABLE_TEST_FRAMES_SYMBOLS; s += 1)
+                {
+                    char name[16];
+                    snprintf(name, sizeof(name), "function_%u", s);
+                    built = executable_test_symbol(&link, name, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) == s;
+                    link.symbols.reference[s] = references[s];
+                }
+                const AtomId atom = built ? executable_test_frames_atom(&link, &bytes, frames) : 0;
+                executable_test_expect(&tally, atom != 0, "the atom", round);
+                if (atom != 0)
+                {
+                    const uint64_t header = BUSTER_EXECUTABLE_TEST_FRAMES_HEADER;
+                    const uint64_t address = BUSTER_EXECUTABLE_TEST_FRAMES_ADDRESS;
+                    const uint32_t walk = executable_eh_frame_walk(&link, atom, 0, 0, 0);
+                    const uint32_t fast = executable_eh_frame_fdes(&link, atom);
+                    executable_test_expect(&tally, walk == walked, "the walk's count", round);
+                    executable_test_expect(&tally, vector ? fast == walked : fast == UINT32_MAX, vector ? "the vector path's count" : "the vector path leaves it to the walk",
+                                           round);
+                    bool walked_vector = false;
+                    bool walked_exact = false;
+                    const bool either = executable_eh_frame(&link, atom, false, &walked_vector) == walked && executable_eh_frame(&link, atom, true, &walked_exact) == walked;
+                    executable_test_expect(&tally, either && walked_vector == !vector && walked_exact, "either way's count, and which read it", round);
+                    // With entries: the reference's, from the FDEs before any terminator, or refused.
+                    for (uint32_t j = 0; walked != UINT32_MAX && j < walked; j += 1)
+                    {
+                        const uint32_t fixup = frames->fde_fixups[j];
+                        expected[2 * j] = (int32_t)((int64_t)references[frames->targets[fixup]] + frames->addends[fixup] - (int64_t)header);
+                        expected[2 * j + 1] = (int32_t)(address + frames->fdes[j] - header);
+                    }
+                    memset(walk_entries, 0x5a, 2 * BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS * sizeof(int32_t));
+                    memset(vector_entries, 0x5a, 2 * BUSTER_EXECUTABLE_TEST_FRAMES_FIXUPS * sizeof(int32_t));
+                    const uint32_t walk_with = executable_eh_frame_walk(&link, atom, walk_entries, header, address);
+                    const uint32_t entries = walked != UINT32_MAX && !refused ? walked : UINT32_MAX;
+                    executable_test_expect(&tally, walk_with == entries && (entries == UINT32_MAX || memcmp(walk_entries, expected, 8 * (uint64_t)entries) == 0),
+                                           refused ? "the walk refuses an entry outside int32" : "the walk's entries", round);
+                    // The vector path's entries, from the fixups of an atom it read.
+                    const bool fits = vector && executable_eh_frame_entries(&link, atom, vector_entries, header, address);
+                    executable_test_expect(&tally, !vector || (fits == !refused && (refused || memcmp(vector_entries, expected, 8 * (uint64_t)walked) == 0)),
+                                           refused ? "the vector path refuses an entry outside int32" : "the vector path's entries", round);
+                    vector_taken += vector ? 1 : 0;
+                    walk_taken += !vector && walked != UINT32_MAX ? 1 : 0;
+                }
+                round += 1;
+            }
+        }
+    }
+    printf("  %llu atoms: %llu the vector path takes, %llu only the walk, %llu refused\n", (unsigned long long)round, (unsigned long long)vector_taken,
+           (unsigned long long)walk_taken, (unsigned long long)(round - vector_taken - walk_taken));
+    arena_release(&tables);
+    arena_release(&names);
+    arena_release(&bytes);
+    scratch_end(scratch);
+    return executable_test_report(&tally);
+}
+
+// The sort's tables: sorted with equal neighbors, sorted but for one pair, reversed, random, all equal, and sorted from
+// INT32_MIN to INT32_MAX; and the counts besides 0 to 200.
+#define BUSTER_EXECUTABLE_TEST_SORT_PATTERNS 6
+#define BUSTER_EXECUTABLE_TEST_SORT_MOST 5000
+
+static const uint32_t executable_test_sort_counts[] = { 255, 256, 257, 1000, 4999, BUSTER_EXECUTABLE_TEST_SORT_MOST };
+
+static bool executable_test_sort(uint64_t seed)
+{
+    ExecutableTestTally tally = {
+        .check = "unwind sort",
+    };
+    Scratch scratch = scratch_begin(0);
+    uint8_t* bytes = arena_push(scratch.arena, BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES + 8 * BUSTER_EXECUTABLE_TEST_SORT_MOST, 8);
+    uint64_t* input = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, BUSTER_EXECUTABLE_TEST_SORT_MOST);
+    uint64_t* reference = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, BUSTER_EXECUTABLE_TEST_SORT_MOST);
+    const bool ready = bytes != 0 && input != 0 && reference != 0;
+    executable_test_expect(&tally, ready, "room for the tables", 0);
+    uint64_t state = seed * 0x9E3779B97F4A7C15ull + 13;
+    const uint32_t extra = BUSTER_ARRAY_LENGTH(executable_test_sort_counts);
+    for (uint32_t c = 0; ready && c < 201 + extra; c += 1)
+    {
+        const uint64_t count = c < 201 ? c : executable_test_sort_counts[c - 201];
+        for (uint32_t pattern = 0; pattern < BUSTER_EXECUTABLE_TEST_SORT_PATTERNS; pattern += 1)
+        {
+            // Each entry as the table holds it, its initial location in the low 32 bits and its FDE's (its index, so
+            // that a sort that isn't stable shows) in the high.
+            int64_t initial = (int64_t)(executable_test_random(&state) % 1000) - 500;
+            const uint64_t swapped = count >= 2 ? executable_test_random(&state) % (count - 1) : 0;
+            for (uint64_t e = 0; e < count; e += 1)
+            {
+                const uint64_t random = executable_test_random(&state);
+                int64_t value = initial;
+                if (pattern == 0)
+                {
+                    initial += (int64_t)(random % 4);
+                    value = initial;
+                }
+                else if (pattern == 1)
+                {
+                    initial += 1 + (int64_t)(random % 4);
+                    value = initial;
+                }
+                else if (pattern == 2)
+                {
+                    value = 1000000 - (int64_t)e * 3;
+                }
+                else if (pattern == 3)
+                {
+                    value = (int32_t)(uint32_t)random;
+                }
+                else if (pattern == 5)
+                {
+                    value = count > 1 ? INT32_MIN + (int64_t)(((uint64_t)UINT32_MAX * e) / (count - 1)) : 0;
+                }
+                input[e] = (uint32_t)(int32_t)value | (e << 32);
+            }
+            if (pattern == 1 && count >= 2)
+            {
+                const uint64_t held = input[swapped];
+                input[swapped] = (input[swapped + 1] & 0xffffffffull) | (held & ~0xffffffffull);
+                input[swapped + 1] = (held & 0xffffffffull) | (input[swapped + 1] & ~0xffffffffull);
+            }
+            // The reference, by a stable insertion sort.
+            bool sorted = true;
+            for (uint64_t e = 0; e < count; e += 1)
+            {
+                sorted = sorted && (e == 0 || (int32_t)input[e - 1] <= (int32_t)input[e]);
+                uint64_t place = e;
+                while (place > 0 && (int32_t)reference[place - 1] > (int32_t)input[e])
+                {
+                    reference[place] = reference[place - 1];
+                    place -= 1;
+                }
+                reference[place] = input[e];
+            }
+            for (uint32_t exact = 0; exact < 2; exact += 1)
+            {
+                memcpy(bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES, input, 8 * count);
+                bool in_order = !sorted;
+                const uint64_t mark = scratch.arena->length;
+                const bool done = executable_eh_frame_sort(bytes, count, exact != 0, scratch.arena, &in_order);
+                arena_pop_to(scratch.arena, mark);
+                const uint64_t index = (count * BUSTER_EXECUTABLE_TEST_SORT_PATTERNS + pattern) * 2 + exact;
+                executable_test_expect(&tally, done && in_order == sorted, "whether the table is sorted", index);
+                executable_test_expect(&tally, done && memcmp(bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES, reference, 8 * count) == 0, "a stable sort's order", index);
+            }
+        }
+    }
+    scratch_end(scratch);
+    return executable_test_report(&tally);
+}
+
+// The unwind links' program: _start, which exits 0, then `functions` functions of 16 bytes, aligned to 16, 64, 32,
+// 16, 128 and so on, so that the layout's buckets put them out of their order, and .eh_frame atoms of the CIEs the
+// header indexes in turn, each after the functions it has FDEs for (_start's first), the last ending with a
+// terminator, so that every lane's range has some. The personality and the LSDA pointers are to `data`.
+#define BUSTER_EXECUTABLE_TEST_UNWIND_FUNCTIONS 40
+#define BUSTER_EXECUTABLE_TEST_UNWIND_ATOMS 12
+
+static bool executable_test_unwind_program(ExecutableTestLink* test, SymbolId* start, ExecutableTestFrames* frames)
+{
+    const LinkCapacity capacity = {
+        .names = BUSTER_EXECUTABLE_TEST_UNWIND_FUNCTIONS + 8,
+        .atoms = BUSTER_EXECUTABLE_TEST_UNWIND_FUNCTIONS + BUSTER_EXECUTABLE_TEST_UNWIND_ATOMS + 8,
+        .symbols = BUSTER_EXECUTABLE_TEST_UNWIND_FUNCTIONS + 8,
+        .fixups = 4 * BUSTER_EXECUTABLE_TEST_UNWIND_FUNCTIONS + 64,
+        .wide_addends = 4,
+    };
+    bool result = executable_test_link_begin_with(test, 16 * BUSTER_EXECUTABLE_PAGE_BYTES, capacity);
+    Link* link = &test->link;
+    *start = result ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    const SymbolId data = result ? executable_test_symbol(link, "data", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT) : 0;
+    result = result && *start != 0 && data != 0 && executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, data) != 0;
+    ExecutableTestCode code = { 0 };
+    executable_test_exit(&code, 0);
+    result = result && executable_test_code(test, 32, &code, 1, *start) != 0;
+    static const uint8_t alignments[] = { 4, 6, 5, 4, 7 };
+    uint8_t body[16];
+    memset(body, BUSTER_EXECUTABLE_INT3, sizeof(body));
+    const uint32_t per_atom = (BUSTER_EXECUTABLE_TEST_UNWIND_FUNCTIONS + BUSTER_EXECUTABLE_TEST_UNWIND_ATOMS) / BUSTER_EXECUTABLE_TEST_UNWIND_ATOMS;
+    for (uint32_t a = 0; result && a < BUSTER_EXECUTABLE_TEST_UNWIND_ATOMS; a += 1)
+    {
+        memset(frames, 0, sizeof(*frames));
+        executable_test_frames_cie(frames, (ExecutableTestCie)(a % EXECUTABLE_TEST_CIES_INDEXED), data);
+        // Function f's FDE, _start's for f = 0.
+        for (uint32_t f = a * per_atom; result && f < (a + 1) * per_atom && f <= BUSTER_EXECUTABLE_TEST_UNWIND_FUNCTIONS; f += 1)
+        {
+            char name[32];
+            snprintf(name, sizeof(name), "function_%u", f);
+            const SymbolId function = f == 0 ? *start : executable_test_symbol(link, name, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION);
+            result = function != 0 &&
+                     (f == 0 || executable_test_data(test, BUSTER_LINK_CLASS_TEXT, alignments[f % BUSTER_ARRAY_LENGTH(alignments)], sizeof(body), body, function) != 0);
+            executable_test_frames_fde(frames, function, 0, f == 0 ? 32 : 16, f % 7, data);
+        }
+        if (a + 1 == BUSTER_EXECUTABLE_TEST_UNWIND_ATOMS)
+        {
+            const uint32_t zero = 0;
+            executable_test_frames_put(frames, &zero, 4);
+        }
+        result = result && executable_test_frames_atom(link, &test->bytes, frames) != 0;
+    }
+    return result && link_check(link) == LINK_ERROR_NONE;
+}
+
+// A program of _start, which exits 0, and a function after it, with an .eh_frame atom of GCC's CIE and FDEs for both,
+// the function's to it plus `addend`; or with `broken`, two such atoms whose function's FDE has no pc_begin's fixup,
+// 12 atoms of data between them, so that they lie in different lanes' ranges. *frame_atom gets the (first) .eh_frame
+// atom.
+static bool executable_test_unwind_small(ExecutableTestLink* test, SymbolId* start, ExecutableTestFrames* frames, int64_t addend, bool broken, AtomId* frame_atom)
+{
+    const LinkCapacity capacity = {
+        .names = 8,
+        .atoms = 24,
+        .symbols = 8,
+        .fixups = 16,
+        .wide_addends = 4,
+    };
+    bool result = executable_test_link_begin_with(test, 4 * BUSTER_EXECUTABLE_PAGE_BYTES, capacity);
+    Link* link = &test->link;
+    *start = result ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    const SymbolId function = result ? executable_test_symbol(link, "function", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    result = result && *start != 0 && function != 0;
+    ExecutableTestCode code = { 0 };
+    executable_test_exit(&code, 0);
+    uint8_t body[16];
+    memset(body, BUSTER_EXECUTABLE_INT3, sizeof(body));
+    result = result && executable_test_code(test, 32, &code, 1, *start) != 0 && executable_test_data(test, BUSTER_LINK_CLASS_TEXT, 4, sizeof(body), body, function) != 0;
+    *frame_atom = 0;
+    for (uint32_t copy = 0; result && copy < (broken ? 2 : 1); copy += 1)
+    {
+        for (uint32_t filler = 0; result && copy == 1 && filler < 12; filler += 1)
+        {
+            result = executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, 0) != 0;
+        }
+        memset(frames, 0, sizeof(*frames));
+        executable_test_frames_cie(frames, EXECUTABLE_TEST_CIE_ZR, 0);
+        executable_test_frames_fde(frames, *start, 0, 32, 3, 0);
+        executable_test_frames_fde(frames, function, addend, 16, 2, 0);
+        if (broken)
+        {
+            frames->fixup_count -= 1;
+        }
+        const AtomId atom = result ? executable_test_frames_atom(link, &test->bytes, frames) : 0;
+        *frame_atom = copy == 0 ? atom : *frame_atom;
+        result = atom != 0;
+    }
+    return result && link_check(link) == LINK_ERROR_NONE;
+}
+
+// Writes `link` with every lane count and by the exact twins with 1 and 8, each from zeroed fields over the last file
+// scribbled over: whether every write succeeded into the same file, which runs, and whose unwind tables keep
+// executable_test_unwind's rules (with the functions of units below `units`). *result gets the first write's.
+static bool executable_test_unwind_writes(ExecutableTestTally* tally, Link* link, SymbolId entry, String8 path, uint32_t units, const char* what, ExecutableResult* result)
+{
+    Scratch scratch = scratch_begin(0);
+    String8 first = { 0 };
+    bool same = true;
+    for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(executable_test_lane_counts) + 2; w += 1)
+    {
+        const bool exact = w >= BUSTER_ARRAY_LENGTH(executable_test_lane_counts);
+        const uint32_t lanes = exact ? (w == BUSTER_ARRAY_LENGTH(executable_test_lane_counts) ? 1 : 8) : executable_test_lane_counts[w];
+        ExecutableResult written;
+        const bool reset = executable_test_reset(link, path.pointer);
+        const bool succeeded = reset && (exact ? executable_test_write_exact(link, entry, path, lanes, &written) : executable_test_write(link, entry, path, lanes, &written, 0, 0));
+        if (!succeeded)
+        {
+            executable_test_print_failure(what, &written);
+        }
+        const String8 file = succeeded ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
+        if (w == 0)
+        {
+            first = file;
+            *result = written;
+        }
+        same = same && file.pointer != 0 && first.pointer != 0 && file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0 &&
+               written.fdes == result->fdes && written.fdes_in_order == result->fdes_in_order;
+    }
+    executable_test_expect(tally, same, what, 0);
+    const char* failed = first.pointer != 0 ? executable_test_unwind(link, first, BUSTER_EXECUTABLE_BASE, units, result) : "the first write";
+    executable_test_expect(tally, failed == 0, failed != 0 ? failed : what, 0);
+    const bool ran = first.pointer != 0 && executable_test_runs(path.pointer, (const uint8_t*)"", 0);
+    executable_test_expect(tally, ran, "the program runs", 0);
+    scratch_end(scratch);
+    return same && failed == 0 && ran;
+}
+
+static bool executable_test_unwind_links(const ExecutableTestDirectory* directory)
+{
+    ExecutableTestTally tally = {
+        .check = "unwind links",
+    };
+    Scratch scratch = scratch_begin(0);
+    char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, "unwind", path_bytes);
+    ExecutableTestFrames* frames = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ExecutableTestFrames, 1);
+    executable_test_expect(&tally, frames != 0, "room for the atoms", 0);
+    ExecutableResult result = { 0 };
+
+    // Functions out of their FDEs' order, in atoms of every CIE the header indexes, some of which only the walk reads:
+    // the table must come out sorted, and fdes_in_order false.
+    ExecutableTestLink test;
+    SymbolId start = 0;
+    bool built = frames != 0 && executable_test_unwind_program(&test, &start, frames);
+    executable_test_expect(&tally, built, "the functions' program", 0);
+    if (built)
+    {
+        executable_test_unwind_writes(&tally, &test.link, start, path, UINT32_MAX, "functions out of their FDEs' order", &result);
+        executable_test_expect(&tally, result.fdes == BUSTER_EXECUTABLE_TEST_UNWIND_FUNCTIONS + 1 && !result.fdes_in_order, "every FDE, out of order", result.fdes);
+        printf("  functions out of their FDEs' order: %llu FDEs in %u atoms, %s\n", (unsigned long long)result.fdes, BUSTER_EXECUTABLE_TEST_UNWIND_ATOMS,
+               result.fdes_in_order ? "in order" : "sorted");
+    }
+    if (frames != 0)
+    {
+        executable_test_link_end(&test);
+    }
+
+    // An FDE's initial location at INT32_MAX from the header links, and one more is refused, naming the atom; and one
+    // from a wide addend links. The first write, with the function's own address, says where the header and the
+    // function are, which the addend doesn't change.
+    AtomId frame_atom = 0;
+    built = frames != 0 && executable_test_unwind_small(&test, &start, frames, 0, false, &frame_atom);
+    const bool learned = built && executable_test_unwind_writes(&tally, &test.link, start, path, UINT32_MAX, "an FDE for each function", &result);
+    String8 file = learned ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
+    const ExecutableTestImage image = executable_test_image(file);
+    const Elf64_Shdr* header = executable_test_section(&image, ".eh_frame_hdr");
+    int64_t function = 0;
+    for (SymbolId symbol = 1; learned && symbol < test.link.symbols.count; symbol += 1)
+    {
+        function = executable_named(&test.link, symbol, "function") ? (int64_t)(BUSTER_EXECUTABLE_BASE + test.link.atoms.address[test.link.symbols.atom[symbol]]) : function;
+    }
+    executable_test_expect(&tally, header != 0 && function != 0, "the header and the function's address", 0);
+    if (frames != 0)
+    {
+        executable_test_link_end(&test);
+    }
+    if (header != 0 && function != 0)
+    {
+        const int64_t at_limit = (int64_t)INT32_MAX + (int64_t)header->sh_addr - function;
+        built = executable_test_unwind_small(&test, &start, frames, at_limit, false, &frame_atom);
+        executable_test_expect(&tally, built && executable_test_unwind_writes(&tally, &test.link, start, path, 0, "an initial location at INT32_MAX", &result), "at INT32_MAX", 0);
+        executable_test_link_end(&test);
+        built = executable_test_unwind_small(&test, &start, frames, at_limit + 1, false, &frame_atom);
+        if (built)
+        {
+            executable_test_refused(&tally, &test.link, start, path, EXECUTABLE_ERROR_UNWIND, frame_atom, 0, 0, "an initial location past INT32_MAX");
+        }
+        executable_test_link_end(&test);
+        built = executable_test_unwind_small(&test, &start, frames, (int64_t)INT32_MIN - 1, false, &frame_atom);
+        executable_test_expect(&tally, built && test.link.fixups.wide_count > 1, "a wide addend", 0);
+        executable_test_expect(&tally, built && executable_test_unwind_writes(&tally, &test.link, start, path, 0, "an initial location from a wide addend", &result),
+                               "from a wide addend", 0);
+        executable_test_link_end(&test);
+    }
+
+    // Records the header can't index: an FDE without its pc_begin's fixup, in the first of two such atoms, which lie in
+    // different lanes' ranges.
+    built = frames != 0 && executable_test_unwind_small(&test, &start, frames, 0, true, &frame_atom);
+    executable_test_expect(&tally, built, "the broken atoms' program", 0);
+    if (built)
+    {
+        executable_test_refused(&tally, &test.link, start, path, EXECUTABLE_ERROR_UNWIND, frame_atom, 0, 0, "the first of two atoms the header can't index");
+    }
+    if (frames != 0)
+    {
+        executable_test_link_end(&test);
+    }
+    // And with a symbol defined nowhere, which the symbols' phase would refuse after the layout: the count refuses the
+    // atom before it.
+    built = frames != 0 && executable_test_unwind_small(&test, &start, frames, 0, true, &frame_atom);
+    const NameId nowhere = built ? link_add_name(&test.link, (const uint8_t*)"nowhere", 7) : 0;
+    built = nowhere != 0 && link_add_symbol(&test.link, nowhere, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL, BUSTER_LINK_SOURCE_NONE) != 0 && link_check(&test.link) == LINK_ERROR_NONE;
+    executable_test_expect(&tally, built, "the broken atoms' program with a symbol defined nowhere", 0);
+    if (built)
+    {
+        executable_test_refused(&tally, &test.link, start, path, EXECUTABLE_ERROR_UNWIND, frame_atom, 0, 0, "an atom the header can't index, before a symbol defined nowhere");
+    }
+    if (frames != 0)
+    {
+        executable_test_link_end(&test);
     }
     unlink(path.pointer);
     scratch_end(scratch);
@@ -2031,6 +3313,9 @@ static int run_executable_tests(int argc, char** argv)
         passed = executable_test_chunks(&directory) && passed;
         passed = executable_test_files(&directory, seed) && passed;
         passed = executable_test_limits(&directory, seed) && passed;
+        passed = executable_test_frames(seed) && passed;
+        passed = executable_test_sort(seed) && passed;
+        passed = executable_test_unwind_links(&directory) && passed;
         passed = executable_test_kernel(seed) && passed;
         result = passed ? 0 : 1;
         if (keep)

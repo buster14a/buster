@@ -256,6 +256,14 @@ designs and the compilers already built this way.
   runs them) and `dynamic_test.c` the PIEs' (`./build/compiler
   test-dynamic`); `main.c` includes both, and `executable_benchmark.c`
   provides `benchmark-executable`.
+- `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
+  part): what `runtime_import` makes of the C runtime, kept in a file in the
+  cache directory (`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster`), which
+  `runtime_open` maps and uses in place when this executable wrote it and every
+  file the import probed is as it was, and otherwise rebuilds and renames into
+  place. `snapshot_test.c` holds its tests (`main.c` includes it;
+  `./build/compiler test-snapshot` runs them) and `snapshot_benchmark.c`
+  provides `benchmark-snapshot`.
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_encode`'s offsets and rounds over the branches alone
@@ -334,6 +342,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-executable
 ./build/compiler test-dynamic --cross-check
 ./build/compiler benchmark-executable
+./build/compiler test-snapshot
+./build/compiler benchmark-snapshot
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
 ./build/compiler test-preprocessor --clang
@@ -798,11 +808,15 @@ informational.
   child does what the C runtime does around `main`. Each must exit with status
   0 having printed the output the generator's model predicts, and again with
   its TLS segment starting half its alignment past a multiple of it, as a
-  linker may start `.tdata` when `.tbss` is more aligned. Every set with
-  two thread-locals, an init function and a fini function must have every
-  class but the C runtime's (`EH_FRAME`, `INIT` and `FINI`) and every kind
-  its options allow, and a copy of the defaults' program with the
-  hexadecimal digits' fixup one byte off must print something else.
+  linker may start `.tdata` when `.tbss` is more aligned. Each unit's
+  functions come one after another, as a compiler's object has them, with an
+  FDE each in the unit's `.eh_frame` atom: GCC's CIE, the function's range and
+  the call frame instructions its pushes and pops give, `_start`'s saying it
+  is the outermost frame. Every set with two thread-locals, an init function
+  and a fini function must have every class but the C runtime's (`INIT` and
+  `FINI`) and every kind its options allow, and a copy of the defaults'
+  program with the hexadecimal digits' fixup one byte off must print
+  something else.
 
 `--seed N` changes the random records and programs. The programs check is
 what scales: `--functions 1000000` builds three programs of a million workers
@@ -856,7 +870,7 @@ segment off its alignment when told where: seed 1's `static-defaults` with
   field, and every call through the GOT an `R_X86_64_GOTPCRELX`. Then an arena
   too small for an object (`OBJECT_ERROR_FULL`) and an addend past int64
   (`OBJECT_ERROR_RANGE`);
-- many sections: one unit of 33,000 functions in sections of their own, 66,039
+- many sections: one unit of 33,000 functions in sections of their own, 66,041
   sections: `e_shnum` and `e_shstrndx` in section 0, and symbols' indices
   through `SHN_XINDEX` and `.symtab_shndx`;
 - lanes: every unit's object of a program of 24 units and a 25th without
@@ -1089,7 +1103,8 @@ exports and members:
 - with `--cross-check`, which needs `ld.lld`, `ld.bfd`, `cc` and `readelf`:
   each bound program written as objects, one per unit, linked by ld.lld and
   ld.bfd as a PIE with only `libc.so.6` and the loader besides, in GCC's
-  order, without errors or warnings, must run and print what its model
+  order and with `--eh-frame-hdr` as GCC's driver asks, without errors or
+  warnings, must run and print what its model
   predicts (the atexit program must exit with 0); and the program's own
   objects, linked by `cc` with lld, must have in readelf's `.dynsym` the
   imports at their versions and with their types, the weak references with
@@ -1118,7 +1133,7 @@ measurements are informational.
 
 ## Direct executable tests
 
-`./build/compiler test-executable` (about 0.1 s on the 9700X) checks
+`./build/compiler test-executable` (about 0.2 s on the 9700X) checks
 `executable.c` in a directory of its own under `--directory` (`TMPDIR` or
 `/tmp` by default), which it removes unless `--keep` says to leave it:
 
@@ -1133,10 +1148,18 @@ measurements are informational.
   hold its kind's value, the GOT must have a slot for each target of a GOT
   kind (numbered from 1 in symbol order, holding its value), the headers must
   have lld's layout, no chunk boundary may split a field, and the build ID
-  must be the tree of the file's chunks. A copy of the defaults' program with
-  one pointer 8 bytes off must print something else, and the two sets that
-  call libc (step 5's) must be refused, an import named, without creating the
-  output;
+  must be the tree of the file's chunks. The unwind tables, read back as an
+  unwinder reads them (`executable_test_unwind`): `PT_GNU_EH_FRAME` exactly
+  over `.eh_frame_hdr`; its version, encodings, pointer to `.eh_frame` and
+  count of the FDEs that a walk of `.eh_frame` finds (a terminator only last);
+  its table sorted, each entry an FDE and its initial location, each FDE
+  once; a lookup of each FDE's first and last byte, by libgcc's binary
+  search, finding it, and one of each function finding its FDE, of the
+  function's size; and the write's count of FDEs, which must have come in
+  order. The exact twins must write the same file with 1 and 8 lanes. A copy
+  of the defaults' program with one pointer 8 bytes off must print something
+  else, and the two sets that call libc (step 5's) must be refused, an import
+  named, without creating the output;
 - chunk boundaries: programs with a call's rel32 0 to 4 bytes before the
   nominal 256 KB boundary and an `ABS64` 0 to 8 bytes before 512 KB, both in
   atoms larger than a chunk. A boundary must move to the end of a field that
@@ -1163,10 +1186,38 @@ measurements are informational.
   and one whose padding wraps (refused); a bad entry point, the first of two
   symbols defined nowhere in different lanes' ranges, the smallest failing
   fixup, an atom aligned past a page, a bad init array atom and an atom of
-  each of the C runtime's classes, which step 4's executables have no section
-  for, each reported alike with every lane count; and a lane with no scratch
-  memory to spare, then 64 bytes more at a time, until the link succeeds:
-  every failure must be `EXECUTABLE_ERROR_MEMORY` and leave no output;
+  each of the C runtime's classes (`.init` and `.fini`), which step 4's
+  executables have no section for, each reported alike with every lane count;
+  and a lane with no scratch memory to spare, then 64 bytes more at a time,
+  until the link succeeds: every failure must be `EXECUTABLE_ERROR_MEMORY` and
+  leave no output;
+- the unwind scanner: `.eh_frame` atoms of each CIE `.eh_frame_hdr` indexes
+  (GCC's in versions 1 and 3, with a personality, an LSDA and a signal frame,
+  and with a personality's pointer absolute or a LEB128) and of seven it
+  doesn't, with up to 40 FDEs and with or without a terminator, each as built
+  and changed in each of 19 ways: records too short, cut after `pc_begin`, too long,
+  pointing into their CIE or past themselves, without `pc_begin`'s fixup or
+  with an `ABS32` there, trailing bytes and one CIE past the walk's eight
+  (refused); a terminator at the end or before an FDE, a second CIE, eight
+  CIEs, a fixup among the instructions and a wide addend; and initial
+  locations at int32's limits from the header and one past each. The walk
+  must count the FDEs the test knows of, or refuse the atom; the vector path
+  must count the same or leave the atom to the walk, and take every atom of
+  one CIE and its FDEs; and with table entries, both must give a reference's,
+  or refuse an entry outside int32;
+- the sort: tables sorted with equal neighbors, sorted but for one pair,
+  reversed, random, all equal, and from `INT32_MIN` to `INT32_MAX`, of every
+  count to 200 and some to 5,000: the check must say whether they are sorted,
+  and the sort (always, for the exact twin) give a stable sort's order;
+- unwind links: 40 functions aligned so that the layout's buckets put them
+  out of their FDEs' order, in 12 `.eh_frame` atoms of the CIEs the header
+  indexes, written by every lane count and by the exact twins into the same
+  file, whose table must come out sorted and whose program must run; an
+  initial location at `INT32_MAX` from the header (linked) and one past it
+  (refused, naming its atom), and one from a wide addend (linked); and the
+  first of two atoms the header can't index, in different lanes' ranges,
+  refused alike by every lane count, and one before a symbol defined nowhere,
+  refused for the atom: by the count, before the layout;
 - the patch kernel: the fast path against the checked one, on random fixups
   of every kind with wide addends, at every count from 0 to 199 from four
   starts, with the kind column ending at a `PROT_NONE` page.
@@ -1177,7 +1228,7 @@ the workers of the set named after it (2,000 by default).
 ## Dynamic PIE tests
 
 `./build/compiler test-dynamic [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 0.4 s on the 9700X, and 0.5 s with
+[--cross-check] [--keep]` (about 0.6 s on the 9700X, and 0.8 s with
 `--cross-check`) checks `executable.c`'s dynamic PIEs against this system's
 runtime (`runtime_import`), in a directory of its own under `--directory`
 (`TMPDIR` or `/tmp` by default), which it removes unless `--keep`. Each
@@ -1191,9 +1242,10 @@ before the exports, and each export at its address, found through
 `.gnu.hash` as glibc's loader looks it up); `.gnu.hash`'s shape (lld's); and
 every relocation the loader needs, from `.rela.dyn` and `.relr.dyn` decoded,
 against the GOT's slots and the `ABS64` fields of the atoms the loader writes,
-with each slot's bytes and each call's stub. The writer's exact twins must
-write the same file with 1 and 8 lanes, and a write without RELR must have the
-same relocations in `.rela.dyn` alone and run alike. The checks:
+with each slot's bytes and each call's stub; and the unwind tables, by
+test-executable's rules (the runtime's FDEs among them). The writer's exact
+twins must write the same file with 1 and 8 lanes, and a write without RELR
+must have the same relocations in `.rela.dyn` alone and run alike. The checks:
 
 - programs: test-link's two sets that call libc, and one of `--functions`
   workers (2,000 by default) whose table of pointers has targets that the
@@ -1219,14 +1271,25 @@ same relocations in `.rela.dyn` alone and run alike. The checks:
   which every link that fails must fail with `EXECUTABLE_ERROR_MEMORY` and no
   output, and one with room enough must run.
 
-With `--cross-check`, which needs `ld.lld`, the bound link's objects (the
-object writer's) are linked by lld as a PIE against `libc.so.6` and the
-loader alone (with `-z pack-relative-relocs` when libc defines
-`GLIBC_ABI_DT_RELR`), and the two files must have the same dynamic symbols
-(name, binding, type, whether defined, version), the same symbols with a GOT
-slot the loader fills, the same `R_X86_64_64`s with their addends, as many
-RELATIVE pointers outside the GOT, the same init and fini arrays' sizes, and
-the same `DT_NEEDED`, `DT_INIT`, `DT_FINI`, `DT_GNU_HASH` and `DT_VERNEED`.
+With `--cross-check`, which needs `ld.lld`, `cc`, `objdump` and `readelf`, the
+bound link's objects (the object writer's) are linked by lld as a PIE against
+`libc.so.6` and the loader alone (with `-z pack-relative-relocs` when libc
+defines `GLIBC_ABI_DT_RELR`), and the two files must have the same dynamic
+symbols (name, binding, type, whether defined, version), the same symbols with
+a GOT slot the loader fills, the same `R_X86_64_64`s with their addends, as
+many RELATIVE pointers outside the GOT, the same init and fini arrays' sizes,
+the same `DT_NEEDED`, `DT_INIT`, `DT_FINI`, `DT_GNU_HASH` and `DT_VERNEED`,
+and `.eh_frame_hdr` tables (lld's with `--eh-frame-hdr`, as GCC's driver asks)
+that index the same functions with the same ranges. And each program runs
+again with a library preloaded, which `cc` builds: its `write` walks the stack
+with libgcc's `_Unwind_Backtrace`, which finds each frame's FDE through
+`PT_GNU_EH_FRAME` and the table, and the walk must go through `main` and end
+at `_start`, the outermost frame. And `readelf -wF`'s reading of each of the
+program's functions' FDEs (the CFA's rule and each saved register's, from each
+location on) must be, row for row, what `objdump -d`'s disassembly of the
+function's pushes and pops gives as GCC's CFI: the CFA 8 bytes further from
+`rsp` after each push and 8 nearer after each pop, a callee-saved register a
+push saves at the CFA less the new offset, and one a pop restores as it was.
 `--seed N` changes the programs. The default 9700X job runs it with
 `--cross-check` after test-executable.
 
@@ -1246,7 +1309,9 @@ reports medians of:
   `/tmp`) by a group of `--lanes` lanes that runs every write of a case, as a
   compiler runs its phases on one group: in place and as a new file, phase by
   phase, against the floor, one `pwrite` of the same bytes; and with one lane,
-  the patch kernel on each program's own mix of kinds;
+  the patch kernel on each program's own mix of kinds, and the unwind tables'
+  passes: the FDEs counted by the vector path and by the walk, their table
+  entries both ways, and the table's sorted check and sort;
 - the same sizes as programs that call libc, bound against the system's
   runtime and written as dynamic PIEs the same way, with their dynamic
   symbols, relocations, RELR words and stubs (`--only dynamic` runs these
@@ -1258,6 +1323,63 @@ affinity they start with. `docs/object-writer-and-linker.md` ("Patching and
 writing", "The first executables" and "The dynamic PIE") has the numbers.
 The default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
+
+## Snapshot tests
+
+`./build/compiler test-snapshot [--seed N] [--functions N] [--directory PATH]
+[--keep]` (about 0.05 s on the 9700X) checks `snapshot.c` with this system's
+runtime, in a directory of its own under `--directory` (`TMPDIR` or `/tmp` by
+default), which it removes unless `--keep`:
+
+- round trip: the imported runtime written as a snapshot and loaded back must
+  have the import's records, every one that binding and a dynamic PIE read,
+  and the loaded runtime must use the file's mapping and no arena; so must it
+  after another snapshot was renamed over the file it maps;
+- links: test-link's two sets that call libc and a program of `--functions`
+  workers (2,000 by default), bound by both of binding's paths against the
+  imported runtime and against a loaded one: the same links and bindings,
+  written as dynamic PIEs by 1 and 8 lanes into the same bytes, which run;
+- opening: `runtime_open` in a directory two levels below one that exists,
+  which it makes private: imported and written, then loaded; with no
+  directory, or without an identity, imported and nothing written; and where
+  the directory can't be made, the runtime still imported, the failure named;
+- staleness: snapshots with probes of the test's own files, each changed one
+  way (rewritten in place to the same size, its mode changed, replaced by a
+  rename, removed, created where a probe found nothing, a file added to a
+  probed directory, written with its times put back), and one written by
+  another executable, must be stale, and `runtime_open` must rebuild them;
+- invalid files: 1,278 damaged copies (cut short, one byte longer, a byte
+  changed at sampled offsets and in every byte of the header) must be invalid,
+  and so must 9 whose header was changed and then rehashed (another version or
+  magic, a region misaligned, running or starting past the end or of the wrong
+  size, counts out of range), which only the header's own checks catch;
+  `runtime_open` must replace them; a directory and a FIFO at the snapshot's
+  path must neither block a link (run in a child under an alarm) nor fail it,
+  the FIFO replaced and the directory left with nothing beside it;
+- concurrency: eight processes opening the runtime at once in an empty
+  directory must each get it and leave one snapshot, which loads, and no other
+  file;
+- the cache directory: `snapshot_directory` from `XDG_CACHE_HOME` and `HOME`.
+
+`--seed N` and `--functions N` change the programs. The default 9700X job runs
+it after benchmark-executable.
+
+## Snapshot benchmark
+
+`./build/compiler benchmark-snapshot [--directory PATH] [--runs N]` reports
+medians of `--runs` runs (41 by default) of the import without a snapshot,
+`snapshot_write` into a directory under `--directory` (`TMPDIR` or `/tmp`),
+`runtime_open` from the snapshot phase by phase (the compiler's identity, the
+mapping, the header and the hash, the view, the probes' `stat`s),
+`runtime_release` of a loaded runtime, the alternatives the design weighed
+(the snapshot read with `pread` into new memory, and mapped without the hash),
+and binding a program of one worker against the imported and the loaded
+runtime, which must make the same link. Run it under the 9700X's lock with
+`taskset -c 2`, with `--directory` on each file system to measure (the cache
+directory is under `$HOME`, btrfs there). `docs/object-writer-and-linker.md`
+("The runtime snapshot") has the numbers. The default 9700X job runs it after
+the tests, pinned to one allowed CPU; like the others, its measurements are
+informational.
 
 ## Dataflow tests
 

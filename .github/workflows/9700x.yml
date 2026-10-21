@@ -164,6 +164,14 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-executable
 
+      - name: Test the runtime snapshot
+        run: ./build/compiler test-snapshot
+
+      - name: Benchmark the runtime snapshot
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-snapshot
+
       - name: Test token refinement
         run: ./build/compiler test-refinement src
 

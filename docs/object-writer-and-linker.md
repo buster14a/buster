@@ -38,8 +38,9 @@ can bring that close to what the kernel needs to put a file in the page cache.
   libgcc are the same for every link, and reading them is most of what a small
   link costs mold and wild (0.59 of wild's 1.09 ms on hello world go to
   opening them and reading their symbols). The compiler digests them once into
-  a *runtime snapshot*, a small cache file checked on each link with one `stat`
-  per file.
+  a *runtime snapshot*, a cache file mapped and checked on each link with one
+  `stat` per file it was made from: 9.2 µs on the 9700X, against 146 µs for
+  importing the runtime.
 - **One representation serves every path.** Atoms, symbols, fixups and names,
   each a column array indexed by a 32-bit id, carry the direct path, the object
   writer and imported ELF inputs alike.
@@ -75,7 +76,10 @@ place on tmpfs (3.4 µs, 87 µs and 9.9 ms as new files), and the largest
 against glibc and written as dynamic PIEs take 4.4 µs, 73 µs and 8.6 ms
 (5.4 µs, 89 µs and 10.0 ms as new files), and the largest 4.2 ms with eight
 lanes ("The dynamic PIE"): a few percent over the static executables, all of
-it before the file is written.
+it before the file is written. With unwind tables, as a compiler's objects
+have them, the static executables are 4.6 KB, 510 KB and 45.6 MB and take
+3.1 µs, 75 µs and 10.0 ms, and the largest 5.8 ms with eight lanes ("The
+unwind tables"), most of the difference spent writing 10 MB more.
 
 Orders of magnitude are there for programs up to a few megabytes, where
 fixed costs dominate. For a 46 MB output both sides spend their time in the
@@ -308,8 +312,10 @@ gets shorter:
 **Direct path, small programs.** A hello world's link should cost about as much
 as its output file: 1–4 µs on tmpfs, 3–12 µs on btrfs. On top of that:
 
-- a dozen `stat` calls, about 2 µs, to check the runtime snapshot;
-- reading the snapshot, a few microseconds;
+- a dozen `stat` calls, about 2 µs, to check the runtime snapshot (19 as
+  built, 4.1 µs: "The runtime snapshot");
+- reading the snapshot, a few microseconds (mapping and hashing its 185 KB,
+  4 µs as built);
 - layout, patching and writing the dynamic sections, a few microseconds more.
 
 That is 130–270× faster than wild and mold at their defaults, and 64–120×
@@ -710,31 +716,94 @@ it once and keeps the result in a snapshot under `$XDG_CACHE_HOME/buster/`.
   through the GOT, `_init`/`_fini`, `__dso_handle`, the `.init_array` entries
   (`frame_dummy`), and weak undefined references (`__gmon_start__`, the
   `_ITM_*` clone table functions) that resolve to 0.
-- **libc.so.6's exports:** columns of each name's default version, type and
-  size, indexed by the front end's name hash in buckets filled by a counting
-  sort ("Step 5's phases, data-parallel"), and the library's undefined names,
-  which decide the program's exports. It is a few tens of kilobytes. The other
-  shared libraries in the link get the same.
+- **libc.so.6's exports:** each name's default version and type, and the
+  runtime's *global names*: each distinct name of the runtime objects' global
+  symbols and of libc.so.6's exports and undefined names, with what binding
+  needs of it (its definition, its export, whether libc.so.6 refers to it,
+  which decides the program's exports, and whether the linker defines it),
+  indexed by the front end's name hash in buckets filled by a counting sort,
+  with a blocked Bloom filter ("Step 5's phases, data-parallel"). The other
+  shared libraries in the link will get the same.
 - **For `-static`, libc.a's 2,227 members:** each member's atoms and fixups,
   already converted; a table from symbol to defining member; and each member's
   undefined names. libgcc.a and libgcc_eh.a get the same.
-- **The search results** that led to each file: the paths probed in the `-L`
-  order and which ones were absent.
+- **The search results** that led to each file: every path probed, in the
+  search's order, found or absent, with its identity.
 
-**Validation.** The key is the compiler's version, the options that change the
-runtime (`-static`, `-pie`, `-nostdlib`, the search paths) and the identity of
+**Validation.** The key is the identity of the compiler's executable and of
 each file: `st_dev`, `st_ino`, `st_size`, `st_mtim` and `st_ctim`. A package
 upgrade replaces the inode and changes all of these. `st_ctim` changes on any
-write, and no system call sets it.
+write, and no system call sets it. The compiler's own identity stands for its
+version and for the snapshot's layout: a rebuild of the compiler changes it,
+so a snapshot is only ever read by the executable that wrote it, with the same
+struct layouts. The absent candidates are checked so that a library newly
+placed earlier in the search path is noticed. The options that change the
+runtime (`-static`, `-pie`, `-nostdlib`, the search paths) will each get a
+snapshot of their own.
 
-Checking costs one `stat` per file and per absent candidate: about ten calls
-at 0.18 µs. The absent candidates are checked so that a library newly placed
-earlier in the search path is noticed. Reading the snapshot is one `pread` of
-a few kilobytes (or more for `-static`).
+**As built** (`snapshot.c`: `runtime_open`, with `test-snapshot` and
+`benchmark-snapshot`). The snapshot is `runtime.snapshot` in
+`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster` without it, made private
+(mode 0700) when it is missing.
 
-A stale or missing snapshot is rebuilt by the import path (the same code as a
-full link), written to a temporary file and renamed into place. Two compilers
-rebuilding it at once write identical files, so no lock is needed.
+- **The file** is the runtime's records as the compiler lays them out in
+  memory: a header (the counts, the paths and each region's place), the
+  records that hold pointers from the second page, the strings they point
+  into, then the columns, each at a multiple of 64 bytes. It is 185 KB on the
+  9700X: 2,673 global names with their index and filter, and 2,630 exports.
+  The "few tens of kilobytes" this section first expected were the exports'
+  columns alone.
+- **Loading** maps it privately. The runtime's columns point into the mapping
+  and are used where they are, which is why the global names hold their bytes
+  as offsets into one string pool rather than as pointers. Only the probes,
+  libc.so.6's versions, `libc_nonshared.a`'s members and the link's names' and
+  atoms' bytes hold pointers, stored as offsets plus 1 (0 for none) and
+  rebased where they are, which copies their page alone.
+- **It is trusted only whole:** its magic, version and size must be right,
+  its 128-bit hash (the build ID's chunk hash, over the file with the hash's
+  field as zeros) must be its bytes', the executable that wrote it must be
+  this one, and every probe must be as it was. A torn, truncated or corrupt
+  file is rebuilt rather than trusted, so the writer needs no `fsync`.
+- **A stale or missing snapshot** is rebuilt by the import (the same code as a
+  link without a snapshot), written into a new file under a random name beside
+  it and renamed into place. A process that has the old one mapped keeps it
+  whole, and two compilers rebuilding it at once write identical files, the
+  last rename winning, so no lock is needed. A snapshot that can't be written
+  (a directory at its path, a cache directory that can't be made) doesn't fail
+  the link, which goes on with the imported runtime.
+
+On the 9700X (`benchmark-snapshot`, one CPU, medians of 41 runs, on tmpfs; on
+btrfs, the cache directory's file system there, within 0.4 µs but for the
+write):
+
+| Step | µs |
+| --- | ---: |
+| `runtime_import` and `runtime_release`, without a snapshot | 146 |
+| `runtime_open` from the snapshot | 9.1–9.5 |
+| — the compiler's identity: `stat` of `/proc/self/exe` | 0.5 |
+| — `open`, `fstat`, `mmap` and `close` | 1.0–1.1 |
+| — the header and the hash, which reads all 185 KB | 2.7–3.1 |
+| — the columns pointed into the mapping, the records rebased | 0.6–0.7 |
+| — the 19 probes' `stat` | 4.1 |
+| `runtime_release` of a loaded runtime (`munmap`) | 1.9–2.3 |
+| `snapshot_write`, on tmpfs / btrfs | 47 / 390–410 |
+| the 185 KB read with `pread` into new memory instead | 20 |
+| mapped without the hash, then 12 lookups | 7.7–8.1 |
+| binding one worker against the imported / the loaded runtime | 2.6 / 2.6 |
+
+- **Mapped, not read.** `pread` puts the 185 KB into new anonymous pages,
+  whose first touches make it cost 20 µs; mapping the page cache's own pages
+  costs 1 µs, and their first reads under the hash 2 µs more.
+- **The hash costs 1.3 µs** over a mapping read only where a hello world's
+  binding reads it. It is what lets the loader trust the file without checking
+  each record: what the hash passes is what this executable wrote.
+- **The probes are the largest part:** 19 `stat` calls at 0.215 µs. Eight are
+  absent candidates in directories the 9700X doesn't have (Debian's multiarch
+  ones). A probe of each directory instead would leave 13, about 2.8 µs, since
+  a directory's times change when a file is added to it; it is left for later.
+  `statx` costs 0.24 µs a call, more than `stat`.
+- **Binding is as fast against a loaded runtime as against an imported one:**
+  the hash has already read the columns it reads.
 
 **Finding and importing the files** (`runtime.c`, with the readers of
 `import.c`). GCC's installation is the highest version under
@@ -1036,12 +1105,10 @@ byte, is a chain within a name but a dot product in closed form, `5381 *
 four `vpmulld` of its bytes widened to dwords by a vector of powers of 33
 right-aligned to its length, and a reduction.
 
-The phase still to come is designed the same way:
-
-- **The snapshot** (part 4): the runtime's link written as its columns are,
-  without a record at a time, and read back with one `pread`. It is
-  validated by one `statx` per probe (19 here, 0.18 µs each), which can go
-  through one `io_uring` submission if that measures faster.
+The snapshot (part 4) holds the runtime's columns as they are, written without
+a record at a time and mapped back rather than read, the link's columns of
+pointers rebased eight at a time, and validated by one `stat` per probe (19
+here, 0.215 µs each, faster than `statx`): "The runtime snapshot".
 
 #### Layout
 
@@ -1408,8 +1475,8 @@ compares each with lld's link of the same objects.
   `.eh_frame` after `.rodata`; RX `.init`, `.fini` and `.plt.got`; RELRO
   `.dynamic` before `.got`. `PT_INTERP` and `PT_DYNAMIC` join the program
   headers. `.init`'s and `.fini`'s fragments and `.eh_frame`'s records keep
-  link order, one after another as lld writes them. `.eh_frame_hdr` waits for
-  part 4, which gives the generated programs their FDEs, and `.symtab` for
+  link order, one after another as lld writes them. `.eh_frame_hdr` came with
+  the generated programs' FDEs ("The unwind tables"); `.symtab` waits for
   debuggers.
 - **Relocation classes.** Each symbol is RELATIVE (the image's: the load
   address adds to it), SYMBOLIC (an import, or a weak reference to nothing
@@ -1537,6 +1604,129 @@ for its 299,069 RELATIVE pointers and GOT slots, which `.rela.dyn` would take
   against 2.7 to 2.8, the dynamic sections having made the section table
   twice as long.
 
+#### The unwind tables
+
+Step 5 compares the direct path with linkers on outputs of the same features,
+and a compiler's objects carry unwind tables, so the generated programs do too
+(`link_program.c`). Each unit's `.eh_frame` atom holds GCC's CIE for x86-64
+(`zR`, data alignment -8, the return address in register 16, FDE pointers
+pc-relative `sdata4`) and an FDE per function of the unit: its `pc_begin` a
+`PC32` fixup to the function, its range the function's length, and its call
+frame instructions what the function's pushes and pops give, as GCC's CFI says
+them. `_start`'s says that the return address is undefined, as glibc's does:
+it is the outermost frame. The functions go unit by unit, as a compiler's
+objects have them, so their addresses go in the order of their FDEs.
+
+Both kinds of executable get `.eh_frame` and `.eh_frame_hdr` (step 4's static
+ones too), with lld's layout: `.eh_frame_hdr`, then `.eh_frame`, after
+`.rodata`, with `PT_GNU_EH_FRAME` over the header. `.eh_frame`'s atoms keep
+link order, one after another, so that a terminator (`crtendS.o`'s) is only
+ever last, where an unwinder that walks the records stops. The header is the
+LSB's, what lld writes with `--eh-frame-hdr`: version 1, `.eh_frame`'s address
+pc-relative, the count, and a table of `(initial location, FDE)` pairs from
+the header's address, sorted by initial location, which unwinders search
+(libgcc finds it through `dl_iterate_phdr`). An atom's records must be ones
+the header can index: CIEs of a `z` augmentation with `R`, `P`, `L` or `S`,
+FDE pointers pc-relative `sdata4` (GCC's and clang's for every x86-64 CIE),
+and FDEs that point back to one of the atom's CIEs (eight at most, which a
+compiler's object never reaches), each `pc_begin` a `PC32` fixup's field.
+Other records fail the link (`EXECUTABLE_ERROR_UNWIND`, naming the atom), and
+so does an initial location farther from the header than an int32 reaches,
+which GNU ld and lld refuse too.
+
+Three passes, each with an exact twin:
+
+- **The count, before the layout**, in the count phase. The lanes share the
+  `.eh_frame` atoms by cost, an atom's fixups plus one, each lane taking a
+  run of them in id order as `lane_range_by_cost` cuts: a generated program's
+  atoms are a cluster after its code, which ranges of atom ids gave to one
+  lane. An atom's FDEs are read from its fixups, 16 at a time. Each fixup is
+  a candidate FDE 8 bytes before its field, whose length and CIE pointer are
+  one 8-byte load, made for all 16 before any is compared, where a walk's
+  next record waits on the last one's length. Then compares: each candidate
+  must start where the one before it ends (the first where the CIE does, the
+  one before a group's first where the last group's last ended, a `valignd`
+  carrying it in a register), point back to the CIE and be long enough, the
+  fixups must all be `PC32`s of an addend in the column, and the last must end
+  at the atom's end or its terminator's start. An atom laid out otherwise
+  (other CIEs or fixups among its records, a CIE with a personality) goes to
+  the exact walk, record by record, which is also what `exact` runs.
+- **The table, once every symbol's reference is known**, in the dynamic
+  phase (a static executable now has one too): each lane writes its share's
+  entries, in `.eh_frame`'s order, from the lanes' counts before it. For an
+  atom the vector path read, they come from its fixups' columns alone, 16 at
+  a time: each initial location its target's reference plus its addend, each
+  FDE its field's address less 8, both from the header, the first checked in
+  64 bits against int32's range and the two interleaved by `vpermt2d`. An
+  atom the walk read is walked again.
+- **The sort**, on lane 0 before it opens the output: a check that the
+  entries are sorted, 16 at a time (the initial locations are the even words
+  of two vectors, a `vpermt2d` away, compared with themselves shifted by one,
+  the last group's carried in a register). They are when the functions'
+  addresses go in their FDEs' order, as in a link of a compiler's objects.
+  Only if they aren't does it sort them, by an LSD radix sort, stable, 8 bits
+  a pass; the exact twin always sorts.
+
+On the 9700X (`benchmark-executable --only links`), each program in place,
+medians in µs, main's and then this one's (the median of three rounds,
+taken alternately with main's in one session; on eight lanes the smallest
+programs vary by more than they differ):
+
+| Program (file) | 1 lane | 8 lanes |
+| --- | ---: | ---: |
+| static, 1 worker (3.9 → 4.6 KB) | 2.9 → 3.1 | 7.2 → 8.3 |
+| static, 64 workers (16 → 21 KB) | 5.0 → 5.5 | 7.7 → 8.0 |
+| static, 2,000 workers (397 → 510 KB) | 68 → 75 | 44 → 44 |
+| static, 180,000 workers (35.5 → 45.6 MB) | 8,340 → 10,030 | 4,070 → 5,780 |
+| PIE, 1 worker (6.6 → 7.2 KB) | 4.4 → 4.5 | 8.9 → 7.3 |
+| PIE, 64 workers (19 → 23 KB) | 6.5 → 6.8 | 8.9 → 9.3 |
+| PIE, 2,000 workers (401 → 513 KB) | 73 → 80 | 44 → 45 |
+| PIE, 180,000 workers (35.6 → 45.7 MB) | 8,740 → 10,370 | 4,270 → 5,640 |
+
+The largest static executable's phases, in place (the table is the dynamic
+phase's, and the sorted check is in the open's):
+
+| Lanes | count | layout | symbols | table | open | chunks | floor |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 840 → 1,220 | 387 → 387 | 473 → 479 | 156 | 8.1 → 22.9 | 6,630 → 7,750 | 2,610 → 3,250 |
+| 8 | 289 → 637 | 91 → 174 | 70 → 87 | 59 | 8.0 → 25.0 | 3,640 → 4,690 | 2,320 → 3,110 |
+
+The passes on their own (`benchmark-executable`'s rows, one lane, over the
+180,000 workers' 180,010 FDEs in 900 atoms, which stay in L3 from one run to
+the next), per FDE: the count 0.70 ns by the vector path and 2.09 by the walk;
+the entries 1.00 and 3.14; the sorted check 0.073, and the sort 3.40.
+
+- **Most of the cost is the bytes.** `.eh_frame` and its header are 10.1 MB
+  of the largest program's 45.6 MB, 56 bytes a function (48 of FDE and 8 of
+  table entry), and writing them is most of what the link pays for them: the
+  chunks take 1,120 µs more on one lane and 1,050 on eight, and the floor 640
+  and 800 more. Per MB of output, one lane now writes the largest program in
+  220 µs where main's took 235, and eight lanes in 127 where main's took 115.
+- **The count reads `.eh_frame` from DRAM.** On one lane it takes 380 µs
+  more: about 70 for the 180,010 more fixups that `executable_count` reads,
+  and about 310 for the FDEs, 1.7 ns each where the benchmark's row, from
+  L3, takes 0.70. An experiment that counted each atom's fixups instead,
+  reading none of its bytes and checking nothing, took the count phase from
+  1,226 to 913 µs on one lane and from 529 to 376 on eight, but the whole
+  link only 1.3 to 2.2% less: the phases after it took longer by most of the
+  difference (layout and symbols on one lane, the chunks on eight). So the
+  checks stay in the count. Moving them to the chunks, where the bytes pass
+  through the cache anyway, would save less than that, and a record the
+  header can't index would then fail the link after the output is written.
+- **What the measurements changed.** The first version's count split the
+  `.eh_frame` atoms by id, as the other counts split theirs, and a generated
+  program's come after its code, so on eight lanes the last lane counted all
+  180,010 FDEs: 838 to 1,091 µs of count phase, which shares by cost made 516
+  to 609. Its table checked each atom's records again while writing their
+  entries, 1.7 to 2.5 ns per FDE: 467 to 503 µs on one lane, and 570 to 619
+  on eight, which entries from the fixups' columns, in the count's shares,
+  made 155 and 46 to 63. And
+  the count loaded each candidate's length and CIE pointer separately and
+  stored and reloaded the last group's end, as the sorted check did its last
+  initial location: one 8-byte load per candidate and both carried in
+  registers made the count 0.70 ns per FDE (from 1.0 to 1.8) and the sorted
+  check 0.072 (from 0.287), 13 µs instead of 52 for the largest program.
+
 #### Synthetic sections
 
 | Section | Contents |
@@ -1552,8 +1742,9 @@ for its 299,069 RELATIVE pointers and GOT slots, which `.rela.dyn` would take
 | `.eh_frame`, `.eh_frame_hdr` | a CIE and an FDE per function from the code generator, merged with the runtime's |
 | `.symtab`, `.strtab`, `.shstrtab` and section headers | for debuggers and profilers, after the loaded segments |
 
-`.eh_frame_hdr`'s table is already sorted, because functions are laid out in
-order. `.strtab` is the needed names copied from the name arena.
+`.eh_frame_hdr`'s table comes out sorted when functions are laid out in their
+FDEs' order, as they are; the writer checks, and sorts it only if not ("The
+unwind tables"). `.strtab` is the needed names copied from the name arena.
 
 There is no `.note.gnu.property`. The output's property is the AND of its
 inputs', and the program's code carries no IBT or shadow stack markers.
@@ -1675,9 +1866,11 @@ In a section, each atom starts at the next multiple of its alignment, in id
 order, with `int3` between code atoms and zeros elsewhere. A section's
 contents start in the file at a multiple of its alignment, as GNU as places
 them, up to 4 KB: linkers copy contents from any offset, and more would only
-pad the file. Not yet: `.eh_frame` and `.debug_*`, which wait for unwind tables
-and DWARF (step 9), and priorities in `.init_array`'s and `.fini_array`'s
-names, which the representation doesn't have.
+pad the file. The generated programs' `.eh_frame` atoms ("The unwind
+tables") give each object a `.eh_frame` and its `.rela.eh_frame`. Not yet:
+`.debug_*`, which waits for DWARF (step 9), and priorities in
+`.init_array`'s and `.fini_array`'s names, which the representation doesn't
+have.
 
 **Symbols:**
 
@@ -2525,8 +2718,10 @@ and with this document updated with what was measured:
    bound (`bind.c`, `test-bind` and `benchmark-bind`, done: "Step 5's phases,
    data-parallel"); the dynamic PIE (`executable.c`'s dynamic mode,
    `dynamic.c`, `test-dynamic` and `benchmark-executable`'s PIE rows, done:
-   "The dynamic PIE"); then the snapshot itself, `.eh_frame` for the
-   generated programs and `benchmark-link`.
+   "The dynamic PIE"); the snapshot itself (`snapshot.c`, `test-snapshot`
+   and `benchmark-snapshot`, done: "The runtime snapshot"); `.eh_frame` for
+   the generated programs and `.eh_frame_hdr` (done: "The unwind tables");
+   then `benchmark-link`.
 6. **`-static`:** libc.a's closure, IRELATIVE for its IFUNCs, static TLS.
    Then `-static-pie` and `-shared`.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
