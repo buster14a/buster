@@ -602,7 +602,10 @@ The independent GNU tools check instruction boundaries and reassembled operands.
 Keep hand-written semantic fixtures and guarded tails: scalar/vector equality
 and re-encoding through the shared catalogue do not constitute an independent
 oracle. Benchmarks separate decode from decode plus formatting and include
-`--file raw.text` and `--only scalar|avx512|batched`.
+`--file raw.text` and `--only scalar|compact|avx512|batched`. `batched` is the
+default API path; `compact` isolates validation specialization with scalar
+matching. `--iterations N` and `--after-scalar MS` distinguish short bursts
+after scalar work from sustained runs.
 
 ## x86-64 encoder tests
 

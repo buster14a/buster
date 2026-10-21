@@ -86,7 +86,7 @@ Embedded-rounding forms mask the length bits used for rounding. Missing trailing
 bytes are excluded from signature comparison so an incomplete candidate still
 receives the correct truncation result.
 
-The vector path classifies 64 input bytes at once using two nibble-table byte
+The basic AVX-512 matcher classifies 64 input bytes at once using two nibble-table byte
 shuffles and a mask intersection. It reuses the prefix mask across instructions
 and matches eight candidate signatures in one vector comparison. Scalar lookup
 walks the same bucket and exits on the first complete match. Both paths produce
@@ -148,8 +148,10 @@ an independent boundary/mnemonic oracle; GNU as reassembles formatted operands
 for a generated stream whose encoding choices are pinned independently of the
 decoder. Scalar/vector agreement alone cannot validate shared catalogue facts.
 
-The benchmark reports decode, prefix classification, and decode plus formatting
-separately. The ordinary stream mixes arithmetic, loads/stores, addressing,
+The benchmark reports decode, a standalone prefix-classification diagnostic,
+and decode plus formatting separately. The classification diagnostic scans
+nonoverlapping 64-byte chunks; it is not a measurement of all header/boundary
+work inside the decoder. The ordinary stream mixes arithmetic, loads/stores, addressing,
 branches, stack operations and SSE. The vector stream adds masked AVX-512
 arithmetic, broadcasts, FMA, compares, permutations, compression, AVX2 and BMI
 with ordinary loop instructions. `--file` uses an actual raw-byte corpus and

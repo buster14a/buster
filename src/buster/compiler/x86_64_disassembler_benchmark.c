@@ -1,5 +1,7 @@
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+// SPDX-License-Identifier: (Apache-2.0 WITH LLVM-exception) AND MIT
+// Original material Copyright (c) 2026 David Gonzalez Martin.
+// Counter/timing/sort helpers follow the encoder/lexer harness and retain MIT and the upstream notice:
+// Copyright (c) 2023 Niles Salter. See THIRD_PARTY_NOTICES.md and LICENSES/Accelerated-Zig-Parser.txt.
 //
 // Original decoder benchmark. Generation and initialization are excluded. Twenty-one alternating passes measure
 // raw-byte decoding, prefix classification, and decoding plus Intel formatting. Each retained batch lasts >= 2 ms.
@@ -21,6 +23,7 @@
 
 static volatile uint64_t x86_decode_benchmark_sink;
 
+// These counter/timing/sort helpers retain the existing benchmark harness's MIT terms.
 static uint64_t x86_decode_benchmark_time(void)
 {
     struct timespec now;
@@ -58,6 +61,7 @@ static int x86_decode_benchmark_compare(const void* left, const void* right)
     return (a > b) - (a < b);
 }
 
+// The disassembly workloads, phases and state-conditioned measurement loop are original project code.
 static uint64_t x86_decode_benchmark_pass(const uint8_t* source, uint32_t size, X86Decoded* decoded, uint32_t capacity, uint32_t phase, uint32_t variant, uint32_t repeats)
 {
     uint64_t checksum = 0;
