@@ -18,7 +18,9 @@
 // (RuntimeNames) once, and each of the runtime's that joins without a match becomes its name's symbol. Two of the
 // link's global symbols with one of those names are an error. Two definitions of a name resolve as GNU ld and lld
 // resolve them: a strong one takes a weak one's place, of two weak ones the first in link order stays (Scrt1.o's,
-// crti.o's and crtbeginS.o's come before the program's, the others' after it), and two strong ones are an error. A
+// crti.o's and crtbeginS.o's come before the program's, the others' after it), and two strong ones are an error. The
+// program's definitions are its symbols of source PROGRAM and the absolute ones the link had before bind_begin, whose
+// source says only that they are absolute (Bind.program_symbols). A
 // definition of the runtime's takes the link's symbol with its atom, value, size, type, binding and source, whether the
 // symbol only referred to the name or had a weak definition; one that takes the program's definition's place waits in
 // Bind.overrides until bind_end, since the program defines its symbols as its atoms join, after bind_begin. Two
@@ -159,7 +161,9 @@ struct Bind
     uint32_t* loads;
     uint8_t* marks;
     uint32_t* queue;
-    // The link's symbols count after bind_begin: bind_end matches those from there to its own start.
+    // The link's symbols count when bind_begin began, below which every symbol is the program's (an absolute one's source
+    // says only that it is absolute); and after bind_begin, from which bind_end matches those up to its own start.
+    uint32_t program_symbols;
     uint32_t symbols_begun;
     // Whether bind_end has begun, after the program's atoms joined; whether names have been bound, after which a link
     // symbol with source NONE is a weak reference to nothing (a static runtime's members all join before); and whether
@@ -333,9 +337,11 @@ static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId sy
     const uint8_t flags = symbols->flags[symbol];
     const bool from_absolute = from->source[from_symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
     const bool from_defined = !discarded && (from->atom[from_symbol] != 0 || from_absolute);
-    // A program symbol is the program's definition, before or after its atom joins. A definition of the runtime's that
-    // took it over in bind_begin waits in Bind.overrides for bind_end, and stands for the link's definition meanwhile.
-    const bool program = symbols->source[symbol] == BUSTER_LINK_SOURCE_PROGRAM;
+    // A program symbol is the program's definition, before or after its atom joins: of source PROGRAM, or an absolute
+    // one the link had before bind_begin. A definition of the runtime's that took it over in bind_begin waits in
+    // Bind.overrides for bind_end, and stands for the link's definition meanwhile.
+    const uint8_t source = symbols->source[symbol];
+    const bool program = source == BUSTER_LINK_SOURCE_PROGRAM || (source == BUSTER_LINK_SOURCE_ABSOLUTE && symbol < bind->program_symbols);
     const bool waiting = program && !bind->resolving;
     const uint32_t entry = waiting ? bind->runtime->symbol_names[from_symbol] - 1 : 0;
     uint32_t found = bind->override_count;
@@ -345,7 +351,7 @@ static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId sy
     }
     const SymbolId pending = found < bind->override_count ? bind->overrides[found].symbol : 0;
     const uint8_t defining_flags = pending != 0 ? from->flags[pending] : flags;
-    const bool defined = symbols->atom[symbol] != 0 || program || symbols->source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
+    const bool defined = symbols->atom[symbol] != 0 || program || source == BUSTER_LINK_SOURCE_ABSOLUTE;
     const bool from_weak = (from_flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
     const bool link_weak = (defining_flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
     // In link order, Scrt1.o, crti.o and crtbeginS.o come before the program, and the rest after everything that has
@@ -1165,6 +1171,7 @@ static bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath 
         .path = path,
         .bytes = bytes,
         .unit_base = unit_base,
+        .program_symbols = link->symbols.count,
         .capacity = link->symbols.capacity,
     };
     bind->name_symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->global_names.count);

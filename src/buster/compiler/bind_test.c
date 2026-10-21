@@ -21,7 +21,8 @@
 //   - Names: every global name of the programs and every export of libc.so.6 found by the runtime's index as a scan of
 //     the runtime's names finds it.
 //   - Rules: links made by hand that each exercise one rule: a strong definition of _start (a duplicate); one of
-//     data_start, which Scrt1.o defines weakly, and a weak one, which Scrt1.o's takes over as the first in link order;
+//     data_start, which Scrt1.o defines weakly, and a weak one and a weak absolute one, which Scrt1.o's takes over as
+//     the first in link order;
 //     weak definitions of _init, before and after bind_begin, which crti.o's strong one takes over; a reference to
 //     __dso_handle, which crtbeginS.o defines; names nothing defines, strong and weak; definitions that libc.so.6
 //     defines too or refers to, hidden or not (exports); two symbols named write; references added after bind_begin,
@@ -55,10 +56,11 @@
 //   - Static rules, on links made by hand: a strong reference to a name nothing defines (an error naming it); strong
 //     and weak references to __tls_get_addr (left undefined); the static linker's names (the linker's); weak and
 //     strong references to puts (the weak one binds to its member only if the closure loads it for another reason);
-//     a weak definition of __libc_start_main (crt1.o's reference takes it, and its member doesn't join); a reference
-//     to a name a member defines absolutely; and weak definitions of 4 and of 24 names the members refer to (none
-//     thread-local), which the vector path's closure compares with, or past BUSTER_BIND_BLOCKED leaves to the exact
-//     path's.
+//     a weak definition of __libc_start_main (crt1.o's reference takes it, and its member doesn't join); a weak
+//     absolute definition of data_start (crt1.o's, first in link order, takes its place: data_start is __data_start, as
+//     with GNU ld and lld); a reference to a name a member defines absolutely; and weak definitions of 4 and of 24 names
+//     the members refer to (none thread-local), which the vector path's closure compares with, or past
+//     BUSTER_BIND_BLOCKED leaves to the exact path's.
 //   - With --cross-check: each static program's own objects linked by cc -static with GNU ld (its --trace given twice)
 //     and with lld (--why-extract), which must load the members that joined and no others, and run printing what the
 //     model predicts. And five C programs that cc compiles (hello, stdio, threads, jumps and weak-puts), each
@@ -676,6 +678,25 @@ static SymbolId bind_test_symbol(BindTestLink* test, const char* name, uint8_t f
     return id != 0 ? link_add_symbol(&test->link, id, 0, 0, 0, flags, source) : 0;
 }
 
+// A weak absolute definition of `name` at 123 in the program, as an object's `.weak name` and `.set name, 123` give it:
+// its source says only that it is absolute.
+static SymbolId bind_test_weak_absolute(BindTestLink* test, const char* name)
+{
+    const SymbolId result = bind_test_symbol(test, name, BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_ABSOLUTE);
+    if (result != 0)
+    {
+        test->link.symbols.value[result] = 123;
+    }
+    return result;
+}
+
+// Whether `symbol` is at the place of the link's global symbol named `name`: the same atom, defined, and value.
+static bool bind_test_same_place(const Link* link, SymbolId symbol, const char* name)
+{
+    const SymbolId other = bind_test_global(link, name);
+    return other != 0 && link->symbols.atom[symbol] != 0 && link->symbols.atom[symbol] == link->symbols.atom[other] && link->symbols.value[symbol] == link->symbols.value[other];
+}
+
 // A data atom of 8 bytes in unit 0 that defines `symbol`, which has no atom yet.
 static bool bind_test_define(BindTestLink* test, SymbolId symbol)
 {
@@ -709,6 +730,7 @@ typedef enum BindTestRule
     BIND_TEST_RULE_LOCAL_INIT,
     BIND_TEST_RULE_PROGRAM_UNDEFINED,
     BIND_TEST_RULE_WEAK_DATA_START,
+    BIND_TEST_RULE_WEAK_ABSOLUTE_DATA_START,
     BIND_TEST_RULE_WEAK_INIT,
     BIND_TEST_RULE_WEAK_INIT_DEFINED,
     BIND_TEST_RULE_HIDDEN_REFERENCE,
@@ -737,6 +759,7 @@ static const char* const bind_test_rule_names[] = {
     "a local symbol named _init, which crti.o defines globally",
     "a symbol of the program's that it never defines",
     "a weak definition of data_start, which Scrt1.o, before the program in link order, defines weakly",
+    "a weak absolute definition of data_start, which Scrt1.o defines weakly before it",
     "a weak definition of _init, which crti.o defines strongly",
     "a weak definition of _init with its atom before bind_begin",
     "a hidden reference to puts, which only libc.so.6 defines",
@@ -833,6 +856,10 @@ static void bind_test_rule_link(BindTestRuleLink* rule, const Runtime* runtime, 
     else if (which == BIND_TEST_RULE_WEAK_DATA_START)
     {
         symbols[0] = bind_test_symbol(test, "data_start", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_OBJECT, program);
+    }
+    else if (which == BIND_TEST_RULE_WEAK_ABSOLUTE_DATA_START)
+    {
+        symbols[0] = bind_test_weak_absolute(test, "data_start");
     }
     else if (which == BIND_TEST_RULE_WEAK_INIT || which == BIND_TEST_RULE_WEAK_INIT_DEFINED)
     {
@@ -996,6 +1023,13 @@ static bool bind_test_rule_holds(const BindTestRuleLink* rule, const Runtime* ru
         // Scrt1.o's weak definition comes first in link order, and takes the program's symbol.
         result = rule->ended && bind_test_global(link, "data_start") == first && unit == 1 + RUNTIME_OBJECT_START && symbols->source[first] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE &&
                  weak;
+    }
+    else if (which == BIND_TEST_RULE_WEAK_ABSOLUTE_DATA_START)
+    {
+        // So does it over a weak absolute one, which keeps no value of its own: data_start is __data_start, as with GNU ld
+        // and lld.
+        result = rule->ended && bind_test_global(link, "data_start") == first && unit == 1 + RUNTIME_OBJECT_START && symbols->source[first] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE &&
+                 weak && bind_test_same_place(link, first, "__data_start");
     }
     else if (which == BIND_TEST_RULE_WEAK_INIT || which == BIND_TEST_RULE_WEAK_INIT_DEFINED)
     {
@@ -2799,6 +2833,8 @@ static bool bind_test_static_compiled(const Runtime* runtime, const char* direct
 //     ld's archive scan, bind_test_static_expected, says), and otherwise to nothing, without the member; and a strong
 //     one, which loads it;
 //   - a weak definition of __libc_start_main: crt1.o's strong reference takes it, and its member doesn't join;
+//   - a weak absolute definition of data_start: crt1.o's weak one, before the program in link order, takes its place,
+//     so that data_start is __data_start, as with GNU ld and lld;
 //   - a strong reference to a name a member defines absolutely: the member joins, and the name is absolute;
 //   - weak definitions of 4 and of 24 names that the members of a link of main alone refer to (none thread-local),
 //     which the vector path's closure compares references with (BUSTER_BIND_BLOCKED) or, past 16, leaves to the exact
@@ -2811,6 +2847,7 @@ typedef enum BindTestStaticRule
     BIND_TEST_STATIC_WEAK_PUTS,
     BIND_TEST_STATIC_STRONG_PUTS,
     BIND_TEST_STATIC_WEAK_START_MAIN,
+    BIND_TEST_STATIC_WEAK_ABSOLUTE,
     BIND_TEST_STATIC_ABSOLUTE,
     BIND_TEST_STATIC_BLOCKED,
     BIND_TEST_STATIC_BLOCKED_MANY,
@@ -2828,6 +2865,7 @@ static const char* const bind_test_static_rule_names[BIND_TEST_STATIC_RULES] = {
     [BIND_TEST_STATIC_WEAK_PUTS] = "a weak reference to puts",
     [BIND_TEST_STATIC_STRONG_PUTS] = "a strong reference to puts",
     [BIND_TEST_STATIC_WEAK_START_MAIN] = "a weak definition of __libc_start_main",
+    [BIND_TEST_STATIC_WEAK_ABSOLUTE] = "a weak absolute definition of data_start, which crt1.o defines weakly before it",
     [BIND_TEST_STATIC_ABSOLUTE] = "a strong reference to a member's absolute name",
     [BIND_TEST_STATIC_BLOCKED] = "weak definitions of 4 names that the members refer to",
     [BIND_TEST_STATIC_BLOCKED_MANY] = "weak definitions of 24 names that the members refer to",
@@ -2923,6 +2961,10 @@ static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtim
             symbols[0] = c == 0 ? defined : symbols[0];
         }
     }
+    else if (result && rule == BIND_TEST_STATIC_WEAK_ABSOLUTE)
+    {
+        symbols[0] = bind_test_weak_absolute(test, "data_start");
+    }
     else if (result && rule == BIND_TEST_STATIC_ABSOLUTE)
     {
         const SymbolId absolute = bind_test_static_absolute(runtime);
@@ -3009,6 +3051,13 @@ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
         else if (rule == BIND_TEST_STATIC_BLOCKED || rule == BIND_TEST_STATIC_BLOCKED_MANY)
         {
             holds = vector.bind.error == BIND_ERROR_NONE && members && link_check(&vector.link) == LINK_ERROR_NONE;
+        }
+        else if (rule == BIND_TEST_STATIC_WEAK_ABSOLUTE)
+        {
+            const AtomId atom = columns->atom[symbol];
+            holds = vector.bind.error == BIND_ERROR_NONE && members && atom != 0 && link->atoms.unit[atom] == 1 + RUNTIME_OBJECT_START &&
+                    columns->source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE && (columns->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK &&
+                    bind_test_same_place(link, symbol, "__data_start") && link_check(&vector.link) == LINK_ERROR_NONE;
         }
         else
         {

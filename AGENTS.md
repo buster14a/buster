@@ -1114,8 +1114,9 @@ exports and members:
   finds;
 - rules: links made by hand, each exercising one rule, with what binding
   reports: a strong definition of `_start` (a duplicate); one of `data_start`,
-  which Scrt1.o defines weakly (the program's wins), and a weak one (Scrt1.o's
-  wins, first in link order); weak definitions of `_init`, with their atoms
+  which Scrt1.o defines weakly (the program's wins), and a weak one and a weak
+  absolute one (Scrt1.o's wins, first in link order, at `__data_start`'s place
+  over the absolute one); weak definitions of `_init`, with their atoms
   before and after `bind_begin` (crti.o's strong one takes the symbol, with
   its atom in `.init` and its visibility); a reference to
   `__dso_handle` (defined by crtbeginS.o's atom, hidden); strong and weak
@@ -1179,7 +1180,9 @@ paths, which must make the same link and join the same members:
   linker's); weak and strong references to `puts` (the weak one binds to its
   member only if the closure loads it for another reason); a weak definition
   of `__libc_start_main` (crt1.o's reference takes it, and its member doesn't
-  join); a reference to a name a member defines absolutely; and weak
+  join); a weak absolute definition of `data_start` (crt1.o's weak one, first
+  in link order, takes its place, at `__data_start`'s, as GNU ld and lld
+  bind it); a reference to a name a member defines absolutely; and weak
   definitions of 4 and of 24 names the members refer to (none thread-local),
   which the vector path's closure compares with, or past 16 leaves to the
   exact path's;
