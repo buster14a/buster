@@ -876,17 +876,20 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 - objects: each unit's object of `test-link`'s seven programs (with 500 workers
   in the one that takes `--functions`), of a link made by hand (gaps between
   atoms, an atom of no size, weak, hidden and protected symbols, pointers into
-  a string pool, units without atoms between and after the others) and of a
-  link without atoms, with and without function sections.
+  a string pool, a call to and a pointer to a local IFUNC, units without atoms
+  between and after the others) and of a link without atoms, with and without
+  function sections.
   Each is built twice, the second time over poisoned memory, and must come out
   the same; the test's own ELF reader reads it back and checks the rules every
-  object keeps; and it is compared with the representation, from which the test
-  works out every section, symbol and relocation again, with its own tables of
-  section formats and relocation types. Among them, every local-exec TLS
-  reference must be an `R_X86_64_TPOFF32` against its TLS symbol over a zero
-  field, and every call through the GOT an `R_X86_64_GOTPCRELX`. Then an arena
-  too small for an object (`OBJECT_ERROR_FULL`) and an addend past int64
-  (`OBJECT_ERROR_RANGE`);
+  object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC`);
+  and it is compared with the representation, from which the test works out
+  every section, symbol and relocation again, with its own tables of section
+  formats and relocation types. Among them, every local-exec TLS reference
+  must be an `R_X86_64_TPOFF32` against its TLS symbol over a zero field, every
+  call through the GOT an `R_X86_64_GOTPCRELX`, and every reference to a local
+  IFUNC against the IFUNC. Then an arena too small for an object
+  (`OBJECT_ERROR_FULL`), an addend past int64 (`OBJECT_ERROR_RANGE`), and links
+  with an absolute symbol, referenced and not, which `object_prepare` refuses;
 - many sections: one unit of 33,000 functions in sections of their own, 66,041
   sections: `e_shnum` and `e_shstrndx` in section 0, and symbols' indices
   through `SHN_XINDEX` and `.symtab_shndx`;
@@ -902,15 +905,19 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 - with `--cross-check`, which needs `readelf`, `llvm-readobj`, `as`,
   `ld.bfd`, `ld.lld`, `mold` and `wild` on `PATH`, and a `cc` that takes
   `-fuse-ld=wild` (GCC 16 on the 9700X):
-  - `readelf -W` and `llvm-readobj` list every object's sections, symbols and
-    relocations, which must be what the test's reader read, field by field;
+  - `readelf -W` and `llvm-readobj` list every object's OS ABI, sections,
+    symbols and relocations, which must be what the test's reader read, field
+    by field;
   - GNU ld, lld, mold and wild link each program's objects, without errors or
     warnings: the static programs with `-static -e _start`, and the ones that
     call libc through `cc` as a PIE, with `-no-pie` and with `-static`. The
     executable must exit with status 0 having printed what the program's model
     predicts. wild links only the programs without `SIZE32` and `SIZE64`, which
     wild 0.10 refuses, and among them one of 33,000 functions past
-    `SHN_LORESERVE` sections;
+    `SHN_LORESERVE` sections. The same linkers link, the same three ways, a
+    program whose `main` calls a local IFUNC directly and through a pointer,
+    which must exit with status 42, 21 from each call (calling the resolver
+    itself would return its implementation's address);
   - GNU as assembles each unit as `test-link --print-assembly` writes it, and
     its object must match the writer's: the same sections and bytes, symbols
     and relocations. They may differ where GNU as does: it orders sections as
@@ -927,7 +934,7 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
 removed at the end unless `--keep`. `--seed N` changes the programs. On the
 9700X (binutils 2.47, LLVM 23.1.1, mold 3.0.0, wild 0.10.0 and GCC 16.2.1)
-the checks take about 0.03 s, and 3.5 s with `--cross-check`.
+the checks take about 0.04 s, and 3.7 s with `--cross-check`.
 
 ## Object writer benchmark
 

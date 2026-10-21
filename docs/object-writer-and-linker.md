@@ -2158,13 +2158,22 @@ with the target's offset in its section added to the addend:
 - a global, weak or undefined target is named itself;
 - a local target is named through its section's symbol, except
   - for the GOT kinds (`CALL_GOT`, `LOAD_GOT` and `GOTPCREL`), the TLS kinds
-    (`TPOFF32` and `GOTTPOFF`) and the size kinds, whose linkers need the
-    symbol itself;
+    (`TPOFF32`, `GOTTPOFF`, `TLSGD`, `TLSLD` and `DTPOFF32`) and the size
+    kinds, whose linkers need the symbol itself;
+  - for an IFUNC, which linkers resolve through the symbol: a call or a
+    pointer through its section's symbol would reach the resolver itself;
   - in a string pool, for a PC-relative kind or any addend. Linkers split a
     pool into its strings and send a reference through the section's symbol
     to the string its offset and addend land in, which is the target's only
     for an absolute reference without an addend: `lea rax, [rip + .LC0]`'s
     addend is −4, which would land in the string before.
+
+An object that defines an IFUNC is `ELFOSABI_GNU`, as GNU as and LLVM mark
+it, and the others `ELFOSABI_SYSV`. An absolute symbol is in no unit, so no
+object could define it as the link does: `object_prepare` refuses a link
+that has one, rather than write objects that leave it undefined. The
+program's units have none; only imported objects (the static runtime's) do,
+and no object is written for them.
 
 The scalar kernels decide the per-record costs. Writing `Elf64_Rela` from
 columns takes 0.18 ns per record in L1 and 0.61 ns from DRAM, and the AVX-512
