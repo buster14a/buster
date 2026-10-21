@@ -271,6 +271,19 @@ scalar assembly measured 2.121 ms. This experiment showed no large transition
 penalty on this workload; it does not establish that Zen 5 transition state is
 irrelevant for other workloads.
 
+For attribution, a separate 2,048-function vector benchmark (79,872 instructions
+per assembly) under `perf stat` recorded 2,475,482,186 cycles, 11,880,699,707
+instructions, 2,092,414,844 branches, 3,286,114 branch misses and 6,583,238 cache
+misses over the entire 0.447 s benchmark process. These counts include its
+initialization, warmups and output checks, rather than just a timed kernel.
+At 999 Hz, a separate profile collected 415 samples with none lost: approximately
+25% were in `asm_assemble` (including inlined matching/layout), 16% in
+`asm_parse`, 11% in `encode_one`, and 24% combined in `instruction_is_valid`,
+`mode_register_is_valid` and `template_checks`. Candidate validation and scalar
+length encoding are visible remaining costs. The generated lexer code contains
+masked ZMM byte comparisons and register-form `vpcompressd`; source intrinsics
+were not optimized into a scalar byte loop.
+
 The implementation is original; the syntax references are the GNU assembler's
 [x86 syntax](https://sourceware.org/binutils/docs/as/i386_002dVariations.html),
 [expressions](https://sourceware.org/binutils/docs/as/Expressions.html) and
