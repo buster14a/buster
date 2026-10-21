@@ -1958,7 +1958,14 @@ static PPPrepareStatus file_cache_prepare(FileCache* cache, uint32_t record, uin
     return result;
 }
 
-// How this unit prepares files: its flags, the literal prefixes its language mode splits, and its kernels.
+// How a unit with these options prepares files: trigraphs or not, the literal prefixes its language mode splits, and its
+// kernels. A file cache that units share is made with it (file_cache_initialize).
+static PPPrepare pp_prepare_options(const PPOptions* options)
+{
+    return (PPPrepare){ .refine_flags = options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0, .split_kinds = pp_split_kinds(options->language), .vectorized = !options->scalar };
+}
+
+// How this unit prepares files (pp_prepare_options of its options).
 static PPPrepare pp_prepare_config(const Preprocessor* pp)
 {
     return (PPPrepare){ .refine_flags = pp->refine_flags, .split_kinds = pp->split_kinds, .vectorized = pp->vectorized };
@@ -7377,9 +7384,10 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     *pp = (Preprocessor){ 0 };
     pp->options = *options;
     pp->table = table;
-    pp->vectorized = !options->scalar;
-    pp->refine_flags = options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0;
-    pp->split_kinds = pp_split_kinds(options->language);
+    const PPPrepare prepare = pp_prepare_options(options);
+    pp->vectorized = prepare.vectorized;
+    pp->refine_flags = prepare.refine_flags;
+    pp->split_kinds = prepare.split_kinds;
     pp->arena = arena_reserve(BUSTER_PP_ARENA_BYTES);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {
