@@ -762,7 +762,13 @@ int run_parser_benchmark(int argc, char** argv)
         valid = pp_parse_options(passed_count + 1, passed, &options, &arena, &input_path, &output_path, &markers);
     }
     ParseBenchmark bench = { 0 };
-    bench.files = valid && path_count != 0 ? calloc(path_count, sizeof(ParseBenchmarkFile)) : 0;
+    // At the files' own alignment (the preprocessor's is 64 bytes), which calloc doesn't give: clang's aligned stores
+    // into a misaligned Preprocessor fault.
+    bench.files = valid && path_count != 0 ? aligned_alloc(_Alignof(ParseBenchmarkFile), path_count * sizeof(ParseBenchmarkFile)) : 0;
+    if (bench.files != 0)
+    {
+        memset(bench.files, 0, path_count * sizeof(ParseBenchmarkFile));
+    }
     if (!valid || path_count == 0 || bench.files == 0)
     {
         fprintf(stderr, "usage: compiler benchmark-parser [--passes N] [--only NAME|stages] [--repeat N] [--counters pipeline|branches|memory|stalls] "
