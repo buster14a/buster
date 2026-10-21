@@ -188,9 +188,22 @@ static bool pp_same_streams(const Preprocessor* a, const Preprocessor* b, const 
     {
         i += 1;
     }
-    const bool result = i == x->count && i == y->count;
+    const bool history = a->history_count == b->history_count && a->substitution_count == b->substitution_count && a->generated_count == b->generated_count &&
+                         a->history_source_count == b->history_source_count && a->history_run_count == b->history_run_count &&
+                         memcmp(a->history, b->history, (uint64_t)a->history_count * sizeof(PPExpansion)) == 0 &&
+                         memcmp(a->substitutions, b->substitutions, (uint64_t)a->substitution_count * sizeof(PPSubstitution)) == 0 &&
+                         memcmp(a->generated, b->generated, (uint64_t)a->generated_count * sizeof(PPGenerated)) == 0 &&
+                         memcmp(a->history_sources, b->history_sources, (uint64_t)a->history_source_count * sizeof(PPSource)) == 0 &&
+                         memcmp(a->history_runs, b->history_runs, (uint64_t)a->history_run_count * sizeof(PPHistoryRun)) == 0;
+    const bool result = i == x->count && i == y->count && history;
     if (!result)
     {
+        if (!history)
+        {
+            printf("%s: scalar/vector expansion history differs (expansions %u/%u, substitutions %u/%u, generated %u/%u, runs %u/%u)\n", name,
+                   a->history_count, b->history_count, a->substitution_count, b->substitution_count, a->generated_count, b->generated_count,
+                   a->history_run_count, b->history_run_count);
+        }
         printf("%s: the vectorized and scalar kernels differ at token %u of %u/%u", name, i, x->count, y->count);
         if (i < x->count && i < y->count)
         {
@@ -1552,6 +1565,8 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
     return result;
 }
 
+#include "c_preprocessor_history_test.c"
+
 static int run_preprocessor_tests(int argument_count, char** arguments)
 {
     bool with_clang = false;
@@ -1603,6 +1618,7 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
         printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
         passed_all = failures == 0;
         passed_all &= pp_test_timestamps(directory, with_clang);
+        passed_all &= pp_test_history(directory, with_clang);
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);

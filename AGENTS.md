@@ -370,6 +370,12 @@ designs and the compilers already built this way.
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
   `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`.
+- `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
+  records macro expansion history in cold records and compressed output runs;
+  `pp_diagnose_output` renders a diagnostic for an output-token index.
+  `c_preprocessor_history_test.c` is part of `test-preprocessor`, including its
+  Clang diagnostic comparisons. `benchmark-preprocessor --history-cost`
+  compares recording on/off and reports retained and temporary history bytes.
 - `src/buster/compiler/c_parser.c` is the parser (#127): the preprocessor's
   token stream to a tree, a parent, a role and a node depth for every token,
   and for a unit without errors its postorder with each subtree's size. The
@@ -2068,7 +2074,7 @@ the scalar parser's. On:
   the preprocessor's size limit, no file and an unknown option), 16 runs of
   each, after which the address space and the descriptors must be as they were;
   then every reservation and mapping of a run on a valid and on an invalid file
-  failed in turn (60 and 61), in children whose address space may grow a page
+  failed in turn (61 and 62), in children whose address space may grow a page
   less than a run reached: the last fails, then, a page below the peak that run
   reached, the one before it, down to the first. Each run must exit with status
   1 having said why in a fatal error, and leave nothing behind;
