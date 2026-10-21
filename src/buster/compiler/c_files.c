@@ -16,17 +16,23 @@
 //   1. each lane looks its round's new spellings up in the shared table (read-only): those there get their ids, and the
 //      others are candidates, counted by partition of their hashes (files_find_new);
 //   2. each lane places its candidates in the partitions' array, after every partition before theirs and, within it,
-//      every lane before it (files_place_candidates);
+//      every lane before it, each with the order of its occurrence: its file, then its lane-local id
+//      (files_place_candidates);
 //   3. each lane takes partitions, and finds each distinct spelling's first occurrence among its candidates: the lowest
 //      file, then the lowest lane-local id, since a lane refines its files in order and gives its new spellings ids in
 //      token order (files_find_first);
-//   4. per file, its first occurrences and their bytes; one lane sums them in file order, which gives each file its
-//      first new id and record offset, and makes room in the shared table (intern_bulk_begin);
-//   5. each lane adds the first occurrences it found with their ids (intern_bulk_add, every spelling the table had
-//      placed again if it grew), and the partitions' owners give every other candidate its spelling's id;
+//   4. each lane reads which of its candidates are first occurrences, and counts them and their bytes per file; one
+//      lane sums the counts in file order, which gives each file its first new id and record offset, and makes room in
+//      the shared table (intern_bulk_begin);
+//   5. each lane adds its first occurrences with their ids (intern_bulk_add, every spelling the table had placed again
+//      if it grew), then reads every other candidate's id from its spelling's first (files_take_ids);
 //   6. each lane rewrites its files' identifiers from its ids to the shared table's (files_remap).
-// For the ids to follow the file order, a lane takes the round's parts in order (by lane_take's numbers, not by
-// lane_parts_by_cost's costliest-first order), so that it refines its files in order.
+// A lane writes only its own spellings and its own segments of the partitions, and reads the others' through the
+// candidates, so that no two lanes write one line but at a segment's edge (rule 2). For the ids to follow the file
+// order, a lane prepares its files in order: it takes the round's parts by lane_take's numbers, not by
+// lane_parts_by_cost's costliest-first order. A round is prepared by one lane per BUSTER_FILES_LANE_BYTES of its bytes, up
+// to every lane: one of few bytes, or of one file, by lane 0 alone, straight into the shared table, as with one lane,
+// which gives the same ids without a merge.
 //
 // Running ahead (files_run_ahead), a frontier walk in rounds: round 0 prepares the roots (the units' main files), and
 // each later round reads the literal header names in the new files' directive tables (#include "x.h" and <x.h>,
@@ -41,7 +47,7 @@
 //
 // main.c includes this file after c_preprocessor.c; every function is static. Layout: FilesSpelling, FilesLane and
 // FilesRun; the merge (files_find_new, files_make_candidates, files_place_candidates, files_find_first,
-// files_count_first, files_sum_first, files_add_first, files_give_ids, files_remap); a round's preparation
+// files_count_first, files_sum_first, files_add_first, files_take_ids, files_remap); a round's preparation
 // (files_prepare); the walk's requests and searches (files_read_requests, files_search_requests, files_advance,
 // files_collect_probes, files_add_probes, files_search, files_next_round); files_run_ahead, files_run_initialize and
 // files_run_release; and the sources under a path, for the tests' and the benchmark's corpora (files_list_sources).
@@ -54,51 +60,86 @@
 #include <sys/stat.h>
 #include <immintrin.h>
 
-// The exchange's partitions per lane: enough that each lane's share of the candidates is about even, few enough that
-// the counts (lanes by partitions) stay small.
-#define BUSTER_FILES_PARTITIONS_PER_LANE 64
+// The exchange's partitions per lane: enough that each lane's share of the candidates is about even, few enough that a
+// lane placing its candidates writes to few places at once.
+#define BUSTER_FILES_PARTITIONS_PER_LANE 16
 // A spelling's first occurrence, in the top bit of FilesSpelling.file.
 #define BUSTER_FILES_FIRST (1u << 31)
+// A round is prepared by one lane per BUSTER_FILES_LANE_BYTES of its files' bytes, up to every lane of the group: a lane
+// that joins a round pays for the fresh memory of its own arenas and table (their first huge pages), which a round of
+// little more than that doesn't pay back on the 9700X. With all the group's lanes, a round of fewer bytes per lane than
+// BUSTER_FILES_SPLIT_BYTES is split once (lane_range_by_cost) rather than cut into parts (rule 1): preparing takes about
+// 3 cycles a byte, so 128 KB is about the 64 µs a phase needs per lane to pay for taking parts.
+#define BUSTER_FILES_LANE_BYTES (1u << 20)
+#define BUSTER_FILES_SPLIT_BYTES (128u << 10)
+// A lane's own table starts with a bucket for every this many bytes of its share of its first round (at least
+// BUSTER_FILES_MIN_BUCKETS), about what the C library's files need, so that it rarely grows.
+#define BUSTER_FILES_BYTES_PER_BUCKET 320
+#define BUSTER_FILES_MIN_BUCKETS 1024
+// Shared-table slots a lane prefetches before it takes them (files_add_first).
+#define BUSTER_FILES_PLACE_BATCH 32
+// How lanes get files' bytes (FileCacheBytes, file_cache_probe).
+#define BUSTER_FILES_BYTES FILE_CACHE_MAP
 // Most files a round can have, and items, requests and paths a walk can have.
 #define BUSTER_FILES_MAX_FILES (1u << 20)
 #define BUSTER_FILES_MAX_ITEMS (1u << 22)
 #define BUSTER_FILES_MAX_REQUESTS (1u << 24)
 #define BUSTER_FILES_ARENA_BYTES (64ull << 30)
 
-// The phases a lane's time goes to (FilesLane.ticks): preparing its files, the merge, reading the files' include lines,
-// the searches (and probing paths), and the work one lane does alone while the others wait.
+// The phases a lane's time goes to (FilesLane.ticks): preparing its files; the merge's steps, the lookups in the shared
+// table (step 1), the exchange (steps 2 to 4), adding to the shared table and taking ids (step 5) and rewriting the
+// files' identifiers (step 6); reading the files' include lines; the searches (and probing paths); the work one lane
+// does alone while the others wait; and waiting at syncs.
 typedef enum FilesPhase
 {
     FILES_PHASE_PREPARE,
-    FILES_PHASE_MERGE,
+    FILES_PHASE_LOOKUP,
+    FILES_PHASE_EXCHANGE,
+    FILES_PHASE_ADD,
+    FILES_PHASE_REMAP,
     FILES_PHASE_REQUESTS,
     FILES_PHASE_SEARCH,
     FILES_PHASE_ALONE,
+    FILES_PHASE_WAIT,
     FILES_PHASE_COUNT,
 } FilesPhase;
 
-// What a lane knows of a spelling of its table, by its lane-local id: its hash, the shared table's id the merge gave it
-// (0 until then), and the round's file it first occurred in, with BUSTER_FILES_FIRST if the merge took this lane's
-// occurrence as the spelling's first.
+// What a lane knows of a spelling of its table, by its lane-local id: its hash, the round's file it first occurred in
+// (with BUSTER_FILES_FIRST once the merge took this lane's occurrence as the spelling's first), and its candidate in the
+// exchange. The shared table's id the merge gives it is in an array of its own (FilesLane.shared), which the rewrite of
+// every identifier reads.
 typedef struct FilesSpelling FilesSpelling;
 struct FilesSpelling
 {
     uint64_t hash;
-    IdentId shared;
     uint32_t file;
+    uint32_t candidate;
 };
 
-// A candidate of the exchange: a spelling new to the shared table, by its hash, its first 16 bytes (zero past its end),
-// its length, and the lane and lane-local id it is at.
+// A candidate of the exchange: a spelling new to the shared table, by its first 16 bytes (zero past its end) and its
+// hash, and its key: the round's file it first occurred in (bits 36 to 55), its lane-local id (bits 8 to 35) and its lane
+// (bits 0 to 7). Comparing keys orders the occurrences by file, then by lane-local id: a file is one lane's, so the lane
+// never decides.
 typedef struct FilesCandidate FilesCandidate;
 struct FilesCandidate
 {
     __m128i first;
     uint64_t hash;
-    uint32_t length;
-    uint32_t lane;
-    IdentId local;
+    uint64_t key;
 };
+
+_Static_assert(BUSTER_LANE_MAX_COUNT <= 256 && BUSTER_INTERN_MAX_IDS <= (1u << 28) && BUSTER_FILES_MAX_FILES <= (1u << 20),
+               "a candidate's key holds its lane, its lane-local id and its file");
+
+BUSTER_INLINE uint32_t files_key_lane(uint64_t key)
+{
+    return (uint32_t)(key & 0xFF);
+}
+
+BUSTER_INLINE IdentId files_key_local(uint64_t key)
+{
+    return (IdentId)((key >> 8) & ((1u << 28) - 1));
+}
 
 // An include line of a file the walk reached, with a literal header name (in a lane's arena), and the item that holds it:
 // the includer, or BUSTER_PP_NONE for a root, whose "name" is its path.
@@ -121,23 +162,28 @@ struct FilesPath
     uint64_t hash;
 };
 
-// What a lane keeps through a run: its intern table, what it knows of each of its spellings, and per round the files
-// it prepared and its lists for the walk.
+// What a lane keeps through a run: its intern table, what it knows of each of its spellings and their shared ids (0
+// until the merge gives them), and per round the files it prepared and its lists for the walk. Each array that grows is
+// in an arena of its own, so that one used for a few kilobytes stays in the arena's first pages, which are base pages
+// (lane.c): a lane that touched a huge page for each would have the kernel clear 2 MB for each.
 typedef struct FilesLane FilesLane;
 struct FilesLane
 {
     InternTable table;
     FilesSpelling* spellings;
+    IdentId* shared;
     Arena spelling_arena;
+    Arena shared_arena;
     // The table's count when the round started: the round's new spellings are the ids from it on.
     IdentId round_begin;
-    // The round's files this lane prepared, in order, and lane_parts_by_cost's order, which the lane takes no part by
-    // (see the top of the file) but gives room to.
+    // Where the lane's next candidate of each partition goes, lane_parts_by_cost's order, which the lane takes no part
+    // by (see the top of the file) but gives room to, and the round's files this lane prepared, in order: in `lists`,
+    // whose files are given back each round.
+    uint64_t* offsets;
+    uint32_t* order;
     uint32_t* files;
     uint32_t file_count;
-    uint32_t* order;
-    // Where the lane's next candidate of each partition goes.
-    uint64_t* offsets;
+    Arena lists;
     // The walk: the requests the lane read this round (in `request_list`) and the paths its searches need probed this
     // wave (in `path_list`), each list contiguous from its arena's start, and their bytes (in `names`, for the round).
     FilesRequest* requests;
@@ -147,8 +193,10 @@ struct FilesLane
     Arena names;
     Arena request_list;
     Arena path_list;
-    // The TSC ticks of each phase, the records it prepared and their tokens, and its system calls.
+    // The TSC ticks of each phase (and when the current one started), the records it prepared and their tokens, and its
+    // system calls.
     uint64_t ticks[FILES_PHASE_COUNT];
+    uint64_t tick;
     uint64_t prepared;
     uint64_t tokens;
     FileCacheCounts counts;
@@ -188,6 +236,13 @@ struct FilesRun
     const char* const* roots;
     uint32_t root_count;
     bool follow;
+    // A round's bytes per lane that prepares it (0 for every lane, whatever the bytes), and the bytes per lane under which
+    // it is split once rather than cut into parts: BUSTER_FILES_LANE_BYTES and BUSTER_FILES_SPLIT_BYTES, which the tests
+    // change to reach every way of preparing a round.
+    uint64_t lane_bytes;
+    uint64_t split_bytes;
+    // How lanes get files' bytes when there is more than one (FileCacheBytes): BUSTER_FILES_BYTES.
+    FileCacheBytes bytes;
     // The lanes' state, by lane index.
     FilesLane* lanes;
     uint32_t lane_count;
@@ -203,13 +258,14 @@ struct FilesRun
     uint8_t* file_status;
     uint32_t* file_ids;
     uint64_t* file_bytes;
-    // The exchange: the candidates' counts by lane and partition, the candidates by partition, and each one's first
-    // occurrence (an index of the candidates).
+    // The exchange: the candidates' counts by lane and partition, the candidates by partition, each one's first
+    // occurrence (an index of the candidates), and a first occurrence's shared id.
     uint32_t partition_count;
     uint32_t* counts;
     uint64_t* partition_starts;
     FilesCandidate* candidates;
     uint32_t* firsts;
+    IdentId* candidate_ids;
     uint64_t candidate_count;
     InternBulk bulk;
     bool bulk_ok;
@@ -234,7 +290,8 @@ struct FilesRun
     uint32_t probe_count;
     uint32_t* probe_slots;
     uint32_t probe_slot_mask;
-    // What the run did.
+    // What the run did, and lane 0's TSC when round 0 (the roots') was prepared (for the benchmark).
+    uint64_t roots_prepared;
     uint32_t rounds;
     uint32_t waves;
     uint64_t requests_read;
@@ -242,9 +299,13 @@ struct FilesRun
     uint64_t absent;
     uint64_t candidates_exchanged;
     uint64_t shared_found;
-    // Memory: the run's arrays (`arena`, which lasts the run), the round's files and their arrays (`files`, made for
-    // each round), and the round's exchange, requests and searches (`round`, reset each round).
+    // Memory: the run's arrays (`arena`, which lasts the run, and an arena each for the items, their table and the queued
+    // records), the round's files and their arrays (`files`, made for each round), and the round's exchange, requests
+    // and searches (`round`, reset each round).
     Arena arena;
+    Arena item_arena;
+    Arena item_slot_arena;
+    Arena queued_arena;
     Arena files;
     Arena round;
     bool failed;
@@ -269,6 +330,23 @@ BUSTER_INLINE uint32_t files_partition(uint64_t hash, uint32_t partitions)
     return (uint32_t)(((hash >> 32) * partitions) >> 32);
 }
 
+// This lane's share of the 4 KB pages of [begin, begin + bytes), each touched for writing: an atomic OR of 0 into its first
+// byte, which changes nothing, even in a page that holds other data at a range's edge. The lanes touch fresh memory they
+// are about to share this way, each a range of its own, followed by a sync: a page that lanes fault at once is cleared
+// by one while the others wait, so lanes that write a fresh shared array where it falls would take its faults one
+// after another.
+static void files_touch(void* begin, uint64_t bytes)
+{
+    const uintptr_t first = (uintptr_t)begin & ~(uintptr_t)4095;
+    const uint64_t pages = bytes != 0 ? ((uintptr_t)begin + bytes - 1 - first) / 4096 + 1 : 0;
+    const Range64 mine = lane_range(pages);
+    for (uint64_t page = mine.begin; page < mine.end; page += 1)
+    {
+        uint8_t* byte = (uint8_t*)(page == 0 ? (uintptr_t)begin : first + page * 4096);
+        __atomic_fetch_or(byte, 0, __ATOMIC_RELAXED);
+    }
+}
+
 // Step 1: this lane's new spellings of the round (ids from round_begin on) are looked up in the shared table: the ones
 // it has get its ids, and the others are candidates, counted by partition.
 static void files_find_new(FilesRun* run, FilesLane* mine, uint32_t lane)
@@ -283,9 +361,9 @@ static void files_find_new(FilesRun* run, FilesLane* mine, uint32_t lane)
         const uint32_t length = intern_length(&mine->table, id);
         FilesSpelling* spelling = &mine->spellings[id];
         spelling->hash = intern_hash_bytes(bytes, length);
-        spelling->shared = intern_find_hashed(shared, bytes, length, spelling->hash);
-        counts[files_partition(spelling->hash, run->partition_count)] += spelling->shared == 0;
-        found += spelling->shared != 0;
+        mine->shared[id] = intern_find_hashed(shared, bytes, length, spelling->hash);
+        counts[files_partition(spelling->hash, run->partition_count)] += mine->shared[id] == 0;
+        found += mine->shared[id] != 0;
     }
     __atomic_add_fetch(&run->shared_found, found, __ATOMIC_RELAXED);
 }
@@ -307,7 +385,8 @@ static void files_make_candidates(FilesRun* run)
     run->candidates_exchanged += total;
     run->candidates = arena_push_array(&run->round, total + 1, sizeof(FilesCandidate), 64);
     run->firsts = arena_push_array(&run->round, total + 1, sizeof(uint32_t), 64);
-    run->candidates = run->firsts != 0 ? run->candidates : 0;
+    run->candidate_ids = arena_push_array(&run->round, total + 1, sizeof(IdentId), 64);
+    run->candidates = run->firsts != 0 && run->candidate_ids != 0 ? run->candidates : 0;
     files_fail(run, run->candidates == 0);
 }
 
@@ -327,18 +406,17 @@ static void files_place_candidates(FilesRun* run, FilesLane* mine, uint32_t lane
     }
     for (IdentId id = mine->round_begin; id < mine->table.count; id += 1)
     {
-        const FilesSpelling* spelling = &mine->spellings[id];
-        if (spelling->shared == 0)
+        FilesSpelling* spelling = &mine->spellings[id];
+        if (mine->shared[id] == 0)
         {
             const uint32_t length = intern_length(&mine->table, id);
             const uint64_t at = mine->offsets[files_partition(spelling->hash, partitions)];
             mine->offsets[files_partition(spelling->hash, partitions)] = at + 1;
+            spelling->candidate = (uint32_t)at;
             run->candidates[at] = (FilesCandidate){
                 .first = intern_first_bytes(intern_bytes(&mine->table, id), length),
                 .hash = spelling->hash,
-                .length = length,
-                .lane = lane,
-                .local = id,
+                .key = ((uint64_t)spelling->file << 36) | ((uint64_t)id << 8) | lane,
             };
         }
     }
@@ -351,29 +429,25 @@ static void files_partition_range(const FilesRun* run, uint32_t p, uint64_t* beg
     *end = run->partition_starts[p + 1];
 }
 
-// Are two candidates the same spelling? Their hashes, lengths and first 16 bytes, and past 16 bytes their records.
+// Are two candidates the same spelling? Their hashes and first 16 bytes; those bytes hold a spelling of up to 15 bytes
+// whole, with its terminating zero (identifiers have no NUL), and a longer one's lengths and records are compared.
 static bool files_same_spelling(const FilesRun* run, const FilesCandidate* a, const FilesCandidate* b)
 {
-    bool result = a->hash == b->hash && a->length == b->length && _mm_movemask_epi8(_mm_cmpeq_epi8(a->first, b->first)) == 0xFFFF;
-    if (result && a->length > 16)
+    bool result = a->hash == b->hash && _mm_movemask_epi8(_mm_cmpeq_epi8(a->first, b->first)) == 0xFFFF;
+    if (result && _mm_movemask_epi8(_mm_cmpeq_epi8(a->first, _mm_setzero_si128())) == 0)
     {
-        const uint8_t* x = intern_bytes(&run->lanes[a->lane].table, a->local);
-        const uint8_t* y = intern_bytes(&run->lanes[b->lane].table, b->local);
-        result = memcmp(x + 16, y + 16, a->length - 16) == 0;
+        const InternTable* x = &run->lanes[files_key_lane(a->key)].table;
+        const InternTable* y = &run->lanes[files_key_lane(b->key)].table;
+        const IdentId i = files_key_local(a->key);
+        const IdentId j = files_key_local(b->key);
+        result = intern_length(x, i) == intern_length(y, j) && memcmp(intern_bytes(x, i), intern_bytes(y, j), intern_length(x, i)) == 0;
     }
     return result;
 }
 
-// The order of a candidate's occurrence: its file, then its lane-local id.
-BUSTER_INLINE uint64_t files_key(const FilesRun* run, const FilesCandidate* candidate)
-{
-    const uint32_t file = run->lanes[candidate->lane].spellings[candidate->local].file & ~BUSTER_FILES_FIRST;
-    return ((uint64_t)file << 32) | candidate->local;
-}
-
 // Step 3, for the partitions this lane takes: each distinct spelling's first occurrence among its candidates, through a
 // table of the partition's spellings (by the low bits of their hashes) that keeps each one's first so far. Every
-// candidate gets its spelling's first in `firsts`, and the first is marked in its lane's spellings.
+// candidate gets its spelling's first in `firsts`.
 static void files_find_first(FilesRun* run, uint32_t p, Arena* scratch)
 {
     uint64_t begin;
@@ -405,7 +479,7 @@ static void files_find_first(FilesRun* run, uint32_t p, Arena* scratch)
                 }
                 else if (files_same_spelling(run, &run->candidates[begin + entry - 1], candidate))
                 {
-                    if (files_key(run, candidate) < files_key(run, &run->candidates[begin + entry - 1]))
+                    if (candidate->key < run->candidates[begin + entry - 1].key)
                     {
                         table[slot] = (uint32_t)(c - begin) + 1;
                     }
@@ -421,19 +495,14 @@ static void files_find_first(FilesRun* run, uint32_t p, Arena* scratch)
         }
         for (uint64_t c = begin; c < end; c += 1)
         {
-            const uint64_t first = begin + table[run->firsts[c]] - 1;
-            run->firsts[c] = (uint32_t)first;
-            if (first == c)
-            {
-                const FilesCandidate* candidate = &run->candidates[c];
-                run->lanes[candidate->lane].spellings[candidate->local].file |= BUSTER_FILES_FIRST;
-            }
+            run->firsts[c] = begin + table[run->firsts[c]] - 1;
         }
     }
     arena_pop_to(scratch, mark);
 }
 
-// Step 4, per file this lane prepared: its first occurrences, and their bytes (each length + 1).
+// Step 4, per file this lane prepared: which of its candidates are their spellings' first occurrences, and their count
+// and bytes (each length + 1).
 static void files_count_first(FilesRun* run, FilesLane* mine)
 {
     for (uint32_t f = 0; f < mine->file_count; f += 1)
@@ -443,7 +512,9 @@ static void files_count_first(FilesRun* run, FilesLane* mine)
         uint64_t bytes = 0;
         for (IdentId id = run->file_first[file]; id < run->file_end[file]; id += 1)
         {
-            const bool first = (mine->spellings[id].file & BUSTER_FILES_FIRST) != 0;
+            FilesSpelling* spelling = &mine->spellings[id];
+            const bool first = mine->shared[id] == 0 && run->firsts[spelling->candidate] == spelling->candidate;
+            spelling->file |= first ? BUSTER_FILES_FIRST : 0;
             ids += first;
             bytes += first ? (uint64_t)intern_length(&mine->table, id) + 1 : 0;
         }
@@ -470,48 +541,66 @@ static void files_sum_first(FilesRun* run)
     run->bulk_ok = intern_bulk_begin(run->cache->table, ids, bytes, &run->bulk);
 }
 
-// Step 5: this lane's first occurrences, file by file in order, with their ids and records.
+// Step 5: this lane's first occurrences, file by file in order, with their ids and records, in batches whose buckets in
+// the shared table are prefetched for writing first: a slot is taken with a lock cmpxchg, which can't overlap one miss
+// with the next. Each first's id also goes to its candidate, from which the others of its spelling take it.
 static void files_add_first(FilesRun* run, FilesLane* mine)
 {
     InternTable* shared = run->cache->table;
+    IdentId batch[BUSTER_FILES_PLACE_BATCH];
+    IdentId batch_ids[BUSTER_FILES_PLACE_BATCH];
+    uint32_t batch_offsets[BUSTER_FILES_PLACE_BATCH];
+    uint32_t batched = 0;
     for (uint32_t f = 0; f < mine->file_count; f += 1)
     {
         const uint32_t file = mine->files[f];
         IdentId next = run->bulk.first + run->file_ids[file];
         uint64_t offset = run->bulk.records + run->file_bytes[file];
-        for (IdentId id = run->file_first[file]; id < run->file_end[file]; id += 1)
+        const IdentId end = run->file_end[file];
+        for (IdentId id = run->file_first[file]; id <= end; id += 1)
         {
-            FilesSpelling* spelling = &mine->spellings[id];
-            if ((spelling->file & BUSTER_FILES_FIRST) != 0)
+            const bool first = id < end && (mine->spellings[id].file & BUSTER_FILES_FIRST) != 0;
+            if (first)
             {
-                const uint32_t length = intern_length(&mine->table, id);
-                intern_bulk_add(shared, next, intern_bytes(&mine->table, id), length, (uint32_t)offset, spelling->hash);
-                spelling->shared = next;
+                _mm_prefetch((const char*)(shared->buckets + (mine->spellings[id].hash & shared->bucket_mask) * BUSTER_INTERN_BUCKET_BYTES), _MM_HINT_ET0);
+                batch[batched] = id;
+                batch_ids[batched] = next;
+                batch_offsets[batched] = (uint32_t)offset;
+                batched += 1;
                 next += 1;
-                offset += (uint64_t)length + 1;
+                offset += (uint64_t)intern_length(&mine->table, id) + 1;
             }
+            const bool last = f + 1 == mine->file_count && id == end;
+            for (uint32_t b = 0; (batched == BUSTER_FILES_PLACE_BATCH || last) && b < batched; b += 1)
+            {
+                const IdentId local = batch[b];
+                const FilesSpelling* spelling = &mine->spellings[local];
+                intern_bulk_add(shared, batch_ids[b], intern_bytes(&mine->table, local), intern_length(&mine->table, local), batch_offsets[b], spelling->hash);
+                mine->shared[local] = batch_ids[b];
+                run->candidate_ids[spelling->candidate] = batch_ids[b];
+            }
+            batched = batched == BUSTER_FILES_PLACE_BATCH || last ? 0 : batched;
         }
     }
 }
 
-// Step 5 for the partitions this lane takes: every candidate gets its spelling's id, from its first occurrence.
-static void files_give_ids(FilesRun* run, uint32_t p)
+// Step 5, after every lane added its first occurrences: this lane's other candidates (the round's spellings it has and
+// another lane, or an earlier file of its own, had first) take their spellings' ids from their firsts' candidates.
+static void files_take_ids(FilesRun* run, FilesLane* mine)
 {
-    uint64_t begin;
-    uint64_t end;
-    files_partition_range(run, p, &begin, &end);
-    for (uint64_t c = begin; c < end; c += 1)
+    for (IdentId id = mine->round_begin; id < mine->table.count; id += 1)
     {
-        const FilesCandidate* candidate = &run->candidates[c];
-        const FilesCandidate* first = &run->candidates[run->firsts[c]];
-        run->lanes[candidate->lane].spellings[candidate->local].shared = run->lanes[first->lane].spellings[first->local].shared;
+        if (mine->shared[id] == 0)
+        {
+            mine->shared[id] = run->candidate_ids[run->firsts[mine->spellings[id].candidate]];
+        }
     }
 }
 
 // Step 6: a prepared file's identifiers (and its guard) from the lane's ids to the shared table's, 64 tokens at a time:
 // one compare finds the identifiers, and those that aren't predefined names (whose ids every table shares) take their
 // shared ids.
-static void files_remap(PPFileData* data, const FilesSpelling* spellings)
+static void files_remap(PPFileData* data, const IdentId* shared)
 {
     for (uint32_t i = 0; i < data->token_count; i += 64)
     {
@@ -522,53 +611,101 @@ static void files_remap(PPFileData* data, const FilesSpelling* spellings)
         {
             const uint32_t t = i + (uint32_t)__builtin_ctzll(identifiers);
             const IdentId id = data->values[t];
-            data->values[t] = id >= C_NAME_COUNT ? spellings[id].shared : id;
+            data->values[t] = id >= C_NAME_COUNT ? shared[id] : id;
         }
     }
-    data->guard = data->guard >= C_NAME_COUNT ? spellings[data->guard].shared : data->guard;
+    data->guard = data->guard >= C_NAME_COUNT ? shared[data->guard] : data->guard;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // A round's preparation
 
-// The TSC ticks since `*tick` go to this lane's phase, and `*tick` becomes now.
-BUSTER_INLINE void files_tick(FilesLane* mine, FilesPhase phase, uint64_t* tick)
+// The TSC ticks since the lane's current phase started go to `phase`, and a phase starts now.
+BUSTER_INLINE void files_tick(FilesLane* mine, FilesPhase phase)
 {
     const uint64_t now = __rdtsc();
-    mine->ticks[phase] += now - *tick;
-    *tick = now;
+    mine->ticks[phase] += now - mine->tick;
+    mine->tick = now;
 }
 
-// Prepares the round's records (run->records, none prepared yet, in order) on every lane of the group, which all call it:
-// with one lane, one after another straight into the shared table; with more, rule 1's parts of them by their bytes,
-// each lane into its own table, then the merge.
+// A sync of the lanes, after a part of `phase`: the wait goes to FILES_PHASE_WAIT.
+static void files_sync(FilesLane* mine, FilesPhase phase)
+{
+    files_tick(mine, phase);
+    lane_sync();
+    files_tick(mine, FILES_PHASE_WAIT);
+}
+
+// lane_broadcast of lane 0's `value`, timed as files_sync is.
+static uint64_t files_broadcast(FilesLane* mine, FilesPhase phase, uint64_t value)
+{
+    files_tick(mine, phase);
+    const uint64_t result = lane_broadcast(value, 0);
+    files_tick(mine, FILES_PHASE_WAIT);
+    return result;
+}
+
+// Prepares the round's records (run->records, none prepared yet, in order) on every lane of the group, which all call it.
+// The lanes that work on it are one per run->lane_bytes of its bytes, up to all of them, but never more than its files:
+// one works alone on lane 0, one file after another straight into the shared table; several take rule 1's parts of the
+// files by their bytes (or one range each, when fewer than all or for few bytes), each into its own table, and then
+// merge. Every way gives the same ids, so which one runs is only a matter of speed: a lane alone needs no merge.
 static void files_prepare(FilesRun* run)
 {
     const uint32_t lane = lane_index();
     FilesLane* mine = &run->lanes[lane];
     FileCache* cache = run->cache;
-    uint64_t tick = __rdtsc();
-    if (run->lane_count == 1)
+    const uint64_t bytes = run->record_count != 0 ? run->costs[run->record_count - 1] : 0;
+    const uint64_t wanted = run->lane_bytes != 0 ? bytes / run->lane_bytes : run->lane_count;
+    const uint32_t working = (uint32_t)(wanted < 1 ? 1 : wanted < run->lane_count ? wanted : run->lane_count);
+    const uint32_t lanes = working < run->record_count ? working : run->record_count;
+    if (lanes <= 1)
     {
         FileCacheArenas* arenas = file_cache_arenas(cache, lane);
-        for (uint32_t file = 0; file < run->record_count; file += 1)
+        for (uint32_t file = 0; lane == 0 && file < run->record_count; file += 1)
         {
             PPFileData* data = &cache->records[run->records[file]];
             run->file_status[file] = (uint8_t)pp_prepare_into(&cache->prepare, cache->table, arenas->columns, &arenas->arena, data, 0);
             mine->prepared += run->file_status[file] == PP_PREPARE_DONE;
             mine->tokens += run->file_status[file] == PP_PREPARE_DONE ? data->token_count : 0;
         }
-        files_tick(mine, FILES_PHASE_PREPARE, &tick);
+        files_sync(mine, FILES_PHASE_PREPARE);
     }
     else
     {
+        // A lane's own table is made at its first round of several lanes, the size of its share of the round's bytes.
+        if (mine->table.records == 0)
+        {
+            uint64_t buckets = BUSTER_FILES_MIN_BUCKETS;
+            while (buckets * BUSTER_FILES_BYTES_PER_BUCKET < bytes / run->lane_count)
+            {
+                buckets *= 2;
+            }
+            files_fail(run, !intern_initialize_with(&mine->table, buckets));
+        }
         mine->round_begin = mine->table.count;
+        // The files follow the lists that last the run.
+        arena_pop_to(&mine->lists, (uint64_t)((uint8_t*)mine->files - mine->lists.base));
         mine->file_count = 0;
         FileCacheArenas* arenas = file_cache_arenas(cache, lane);
-        const uint64_t parts = lane_parts_by_cost(run->costs, run->record_count, run->boundaries, mine->order);
-        for (uint64_t part = lane_take(parts); part < parts; part = lane_take(parts))
+        // Rule 1: parts by cost taken in order, or with fewer than every lane or few bytes per lane, one range for each
+        // working lane (and none for the others).
+        const bool split = lanes < run->lane_count || bytes / lanes < run->split_bytes;
+        const Range64 range = !split ? (Range64){ 0 } : lane < lanes ? range_part_by_cost(run->costs, run->record_count, lane, lanes) : (Range64){ 0 };
+        uint64_t parts = 1;
+        if (!split)
         {
-            for (uint64_t file = run->boundaries[part]; file < run->boundaries[part + 1]; file += 1)
+            files_tick(mine, FILES_PHASE_PREPARE);
+            parts = lane_parts_by_cost(run->costs, run->record_count, run->boundaries, mine->order);
+            files_tick(mine, FILES_PHASE_WAIT);
+        }
+        // Every lane takes until it runs out (lane_take's counter needs it), and after a failure prepares nothing more.
+        for (uint64_t part = split ? 0 : lane_take(parts); part < parts; part = split ? parts : lane_take(parts))
+        {
+            const bool failed = __atomic_load_n(&run->failed, __ATOMIC_RELAXED);
+            const uint64_t first_file = split ? range.begin : run->boundaries[part];
+            const uint64_t last_file = failed ? first_file : split ? range.end : run->boundaries[part + 1];
+            for (uint64_t file = first_file; file < last_file; file += 1)
             {
                 PPFileData* data = &cache->records[run->records[file]];
                 const IdentId first = mine->table.count;
@@ -579,25 +716,37 @@ static void files_prepare(FilesRun* run)
                 {
                     mine->spellings[id].file = (uint32_t)file;
                 }
-                mine->files[mine->file_count] = (uint32_t)file;
-                mine->file_count += 1;
+                uint32_t* slot = arena_push_array(&mine->lists, 1, sizeof(uint32_t), _Alignof(uint32_t));
+                files_fail(run, slot == 0);
+                if (slot != 0)
+                {
+                    *slot = (uint32_t)file;
+                    mine->file_count += 1;
+                }
             }
         }
-        files_tick(mine, FILES_PHASE_PREPARE, &tick);
-        lane_sync();
+        files_sync(mine, FILES_PHASE_PREPARE);
         files_find_new(run, mine, lane);
-        lane_sync();
+        files_sync(mine, FILES_PHASE_LOOKUP);
         if (lane == 0)
         {
             files_make_candidates(run);
+            files_tick(mine, FILES_PHASE_ALONE);
         }
         // A broadcast's value is lane 0's: the others don't read what lane 0 is writing.
-        const bool placed = lane_broadcast(lane == 0 && run->candidates != 0, 0) != 0;
+        const bool placed = files_broadcast(mine, FILES_PHASE_EXCHANGE, lane == 0 && run->candidates != 0) != 0;
+        if (placed)
+        {
+            files_touch(run->candidates, run->candidate_count * sizeof(FilesCandidate));
+            files_touch(run->firsts, run->candidate_count * sizeof(uint32_t));
+            files_touch(run->candidate_ids, run->candidate_count * sizeof(IdentId));
+        }
+        files_sync(mine, FILES_PHASE_EXCHANGE);
         if (placed)
         {
             files_place_candidates(run, mine, lane);
         }
-        lane_sync();
+        files_sync(mine, FILES_PHASE_EXCHANGE);
         const Range64 partitions = lane_range(run->partition_count);
         Scratch scratch = scratch_begin(0);
         for (uint64_t p = partitions.begin; placed && p < partitions.end; p += 1)
@@ -605,28 +754,39 @@ static void files_prepare(FilesRun* run)
             files_find_first(run, (uint32_t)p, scratch.arena);
         }
         scratch_end(scratch);
-        lane_sync();
+        files_sync(mine, FILES_PHASE_EXCHANGE);
         files_count_first(run, mine);
-        files_tick(mine, FILES_PHASE_MERGE, &tick);
-        lane_sync();
+        files_sync(mine, FILES_PHASE_EXCHANGE);
         if (lane == 0 && placed)
         {
             files_sum_first(run);
-            files_tick(mine, FILES_PHASE_ALONE, &tick);
+            files_tick(mine, FILES_PHASE_ALONE);
         }
-        const bool room = lane_broadcast(lane == 0 && placed && run->bulk_ok, 0) != 0;
+        const bool room = files_broadcast(mine, FILES_PHASE_ADD, lane == 0 && placed && run->bulk_ok) != 0;
+        if (room)
+        {
+            // The fresh parts of the shared table the lanes write: its buckets and spans if it grew, else the new ids'
+            // spans, and the new records.
+            InternTable* table = cache->table;
+            const uint64_t bucket_bytes = run->bulk.grew ? (table->bucket_mask + 1) * BUSTER_INTERN_BUCKET_BYTES : 0;
+            const uint32_t first_span = run->bulk.grew ? 0 : run->bulk.first;
+            files_touch(table->buckets, bucket_bytes);
+            files_touch(table->spans + first_span, (uint64_t)(run->bulk.first + run->bulk.count - first_span) * sizeof(InternSpan));
+            files_touch(table->records + run->bulk.records, run->bulk.bytes);
+        }
+        files_sync(mine, FILES_PHASE_ADD);
         if (room)
         {
             const Range64 old = lane_range(run->bulk.first);
             intern_bulk_replace(cache->table, &run->bulk, (uint32_t)old.begin, (uint32_t)old.end);
             files_add_first(run, mine);
         }
-        lane_sync();
-        for (uint64_t p = partitions.begin; room && p < partitions.end; p += 1)
+        files_sync(mine, FILES_PHASE_ADD);
+        if (room)
         {
-            files_give_ids(run, (uint32_t)p);
+            files_take_ids(run, mine);
         }
-        lane_sync();
+        files_sync(mine, FILES_PHASE_ADD);
         if (lane == 0 && room)
         {
             intern_bulk_end(cache->table, &run->bulk);
@@ -639,7 +799,7 @@ static void files_prepare(FilesRun* run)
             PPFileData* data = &cache->records[run->records[file]];
             if (run->file_status[file] == PP_PREPARE_DONE && room)
             {
-                files_remap(data, mine->spellings);
+                files_remap(data, mine->shared);
                 mine->prepared += 1;
                 mine->tokens += data->token_count;
             }
@@ -649,8 +809,7 @@ static void files_prepare(FilesRun* run)
                 run->file_status[file] = room ? run->file_status[file] : (uint8_t)PP_PREPARE_NO_MEMORY;
             }
         }
-        files_tick(mine, FILES_PHASE_MERGE, &tick);
-        lane_sync();
+        files_sync(mine, FILES_PHASE_REMAP);
     }
 }
 
@@ -970,33 +1129,33 @@ static void files_search(FilesRun* run)
 {
     const uint32_t lane = lane_index();
     FilesLane* mine = &run->lanes[lane];
-    uint64_t tick = __rdtsc();
     uint32_t probes = 1;
     while (probes != 0)
     {
         files_advance(run, mine);
-        files_tick(mine, FILES_PHASE_SEARCH, &tick);
-        lane_sync();
+        files_sync(mine, FILES_PHASE_SEARCH);
         if (lane == 0)
         {
             files_collect_probes(run);
             run->waves += 1;
-            files_tick(mine, FILES_PHASE_ALONE, &tick);
+            files_tick(mine, FILES_PHASE_ALONE);
         }
-        probes = (uint32_t)lane_broadcast(lane == 0 && !run->failed ? run->probe_count : 0, 0);
+        probes = (uint32_t)files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && !run->failed ? run->probe_count : 0);
+        // How the lanes get the files' bytes (file_cache_probe): with one lane, mapped with MAP_POPULATE; with more, as
+        // run->bytes says.
         const Range64 range = lane_range(probes);
+        const FileCacheBytes how = run->lane_count > 1 ? run->bytes : FILE_CACHE_MAP_POPULATED;
         for (uint64_t p = range.begin; p < range.end; p += 1)
         {
-            file_cache_probe(run->cache, run->probes[p].path, &run->found[p], &mine->counts);
+            file_cache_probe(run->cache, run->probes[p].path, how, &run->cache->lanes[lane].bytes, &run->found[p], &mine->counts);
         }
-        files_tick(mine, FILES_PHASE_SEARCH, &tick);
-        lane_sync();
+        files_sync(mine, FILES_PHASE_SEARCH);
         if (lane == 0 && probes != 0)
         {
             files_add_probes(run);
-            files_tick(mine, FILES_PHASE_ALONE, &tick);
+            files_tick(mine, FILES_PHASE_ALONE);
         }
-        lane_sync();
+        files_sync(mine, FILES_PHASE_SEARCH);
     }
 }
 
@@ -1075,7 +1234,7 @@ static void files_next_round(FilesRun* run)
     }
     const uint64_t count = run->record_count;
     run->costs = arena_push_array(&run->files, count + 1, sizeof(uint64_t), 64);
-    run->boundaries = arena_push_array(&run->files, (uint64_t)BUSTER_LANE_MAX_PARTS + 1, sizeof(uint64_t), 64);
+    run->boundaries = arena_push_array(&run->files, (uint64_t)BUSTER_LANE_PARTS_PER_LANE * run->lane_count + 1, sizeof(uint64_t), 64);
     run->file_first = arena_push_array(&run->files, count + 1, sizeof(IdentId), 64);
     run->file_end = arena_push_array(&run->files, count + 1, sizeof(IdentId), 64);
     run->file_status = arena_push_array(&run->files, count + 1, sizeof(uint8_t), 64);
@@ -1124,17 +1283,20 @@ static bool files_lane_begin(FilesRun* run, FilesLane* mine)
     if (run->lane_count > 1)
     {
         mine->spelling_arena = arena_reserve((uint64_t)BUSTER_INTERN_MAX_IDS * sizeof(FilesSpelling) + 64);
+        mine->shared_arena = arena_reserve((uint64_t)BUSTER_INTERN_MAX_IDS * sizeof(IdentId) + 64);
         mine->spellings = arena_push_array(&mine->spelling_arena, BUSTER_INTERN_MAX_IDS, sizeof(FilesSpelling), 64);
-        result = mine->spellings != 0 && intern_initialize(&mine->table);
+        mine->shared = arena_push_array(&mine->shared_arena, BUSTER_INTERN_MAX_IDS, sizeof(IdentId), 64);
+        result = mine->spellings != 0 && mine->shared != 0;
     }
+    mine->lists = arena_reserve((uint64_t)BUSTER_FILES_MAX_FILES * sizeof(uint32_t) + (uint64_t)BUSTER_LANE_MAX_PARTS * sizeof(uint32_t) + 4096 * sizeof(uint64_t));
     mine->names = arena_reserve(BUSTER_FILES_ARENA_BYTES);
     mine->request_list = arena_reserve((uint64_t)BUSTER_FILES_MAX_REQUESTS * sizeof(FilesRequest));
     mine->path_list = arena_reserve((uint64_t)BUSTER_FILES_MAX_REQUESTS * sizeof(FilesPath));
-    mine->files = arena_push_array(&mine->names, BUSTER_FILES_MAX_FILES, sizeof(uint32_t), 64);
-    mine->order = arena_push_array(&mine->names, BUSTER_LANE_MAX_PARTS, sizeof(uint32_t), 64);
-    mine->offsets = arena_push_array(&mine->names, run->partition_count, sizeof(uint64_t), 64);
-    // The names start after these lists, which last the run.
-    return result && mine->files != 0 && mine->order != 0 && mine->offsets != 0 && mine->request_list.base != 0 && mine->path_list.base != 0;
+    mine->offsets = arena_push_array(&mine->lists, run->partition_count, sizeof(uint64_t), 64);
+    mine->order = arena_push_array(&mine->lists, (uint64_t)BUSTER_LANE_PARTS_PER_LANE * run->lane_count, sizeof(uint32_t), 64);
+    // The round's files go after these, which last the run.
+    mine->files = mine->order != 0 ? (uint32_t*)(mine->lists.base + mine->lists.length) : 0;
+    return result && mine->files != 0 && mine->offsets != 0 && mine->names.base != 0 && mine->request_list.base != 0 && mine->path_list.base != 0;
 }
 
 // Runs ahead on every lane of the group, which all call it: the roots are looked up, then prepared in round 0, and while
@@ -1145,17 +1307,17 @@ static void files_run_ahead(FilesRun* run)
 {
     const uint32_t lane = lane_index();
     FilesLane* mine = &run->lanes[lane];
+    mine->tick = __rdtsc();
     files_fail(run, !files_lane_begin(run, mine));
-    // The names' arena keeps the lane's lists from its start: each round gives back only what came after them.
-    const uint64_t kept = mine->names.length;
-    lane_sync();
+    files_sync(mine, FILES_PHASE_ALONE);
     const bool ready = !run->failed;
     if (ready && lane == 0)
     {
         files_root_requests(run);
         files_search_requests(run);
+        files_tick(mine, FILES_PHASE_ALONE);
     }
-    lane_sync();
+    files_sync(mine, FILES_PHASE_SEARCH);
     if (ready)
     {
         files_search(run);
@@ -1163,36 +1325,40 @@ static void files_run_ahead(FilesRun* run)
     if (ready && lane == 0)
     {
         files_next_round(run);
+        files_tick(mine, FILES_PHASE_ALONE);
     }
-    bool more = lane_broadcast(lane == 0 && ready && !run->failed && run->item_count > run->round_items, 0) != 0;
+    bool more = files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && ready && !run->failed && run->item_count > run->round_items) != 0;
     while (more)
     {
         if (run->record_count != 0)
         {
             files_prepare(run);
         }
-        uint64_t tick = __rdtsc();
-        arena_pop_to(&mine->names, kept);
+        if (lane == 0 && run->roots_prepared == 0)
+        {
+            run->roots_prepared = __rdtsc();
+        }
+        arena_pop_to(&mine->names, 0);
         files_read_requests(run, mine);
-        files_tick(mine, FILES_PHASE_REQUESTS, &tick);
-        lane_sync();
+        files_sync(mine, FILES_PHASE_REQUESTS);
         if (lane == 0)
         {
             files_search_requests(run);
-            files_tick(mine, FILES_PHASE_ALONE, &tick);
+            files_tick(mine, FILES_PHASE_ALONE);
         }
-        lane_sync();
+        files_sync(mine, FILES_PHASE_SEARCH);
         files_search(run);
         if (lane == 0)
         {
             files_next_round(run);
+            files_tick(mine, FILES_PHASE_ALONE);
         }
-        more = lane_broadcast(lane == 0 && !run->failed && run->item_count > run->round_items, 0) != 0;
+        more = files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && !run->failed && run->item_count > run->round_items) != 0;
     }
 }
 
 // The entry point lane_run runs on each lane.
-static void files_run_lane(void* argument)
+static __attribute__((unused)) void files_run_lane(void* argument)
 {
     files_run_ahead(argument);
 }
@@ -1210,6 +1376,9 @@ static __attribute__((unused)) bool files_run_initialize(FilesRun* run, FileCach
         .roots = roots,
         .root_count = root_count,
         .follow = follow,
+        .lane_bytes = BUSTER_FILES_LANE_BYTES,
+        .split_bytes = BUSTER_FILES_SPLIT_BYTES,
+        .bytes = BUSTER_FILES_BYTES,
         .lane_count = lane_count,
         .partition_count = BUSTER_FILES_PARTITIONS_PER_LANE * lane_count,
     };
@@ -1219,10 +1388,17 @@ static __attribute__((unused)) bool files_run_initialize(FilesRun* run, FileCach
     run->lanes = arena_push_array(&run->arena, lane_count, sizeof(FilesLane), 64);
     run->counts = arena_push_array(&run->arena, (uint64_t)lane_count * run->partition_count, sizeof(uint32_t), 64);
     run->partition_starts = arena_push_array(&run->arena, (uint64_t)run->partition_count + 1, sizeof(uint64_t), 64);
-    run->items = arena_push_array(&run->arena, BUSTER_FILES_MAX_ITEMS, sizeof(FilesItem), 64);
-    run->item_slots = arena_push_array(&run->arena, 2ull * BUSTER_FILES_MAX_ITEMS, sizeof(uint32_t), 64);
-    run->queued = arena_push(&run->arena, BUSTER_PP_MAX_FILES, 64);
+    run->item_arena = arena_reserve((uint64_t)BUSTER_FILES_MAX_ITEMS * sizeof(FilesItem) + 64);
+    run->item_slot_arena = arena_reserve(2ull * BUSTER_FILES_MAX_ITEMS * sizeof(uint32_t) + 64);
+    run->queued_arena = arena_reserve(BUSTER_PP_MAX_FILES + 64);
+    run->items = arena_push_array(&run->item_arena, BUSTER_FILES_MAX_ITEMS, sizeof(FilesItem), 64);
+    run->item_slots = arena_push_array(&run->item_slot_arena, 2ull * BUSTER_FILES_MAX_ITEMS, sizeof(uint32_t), 64);
+    run->queued = arena_push(&run->queued_arena, BUSTER_PP_MAX_FILES, 64);
     run->item_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
+    for (uint32_t lane = 0; lane < lane_count && lane < BUSTER_LANE_MAX_COUNT; lane += 1)
+    {
+        file_cache_arenas(cache, lane);
+    }
     bool result = lane_count >= 1 && lane_count <= BUSTER_LANE_MAX_COUNT && run->lanes != 0 && run->counts != 0 && run->partition_starts != 0 && run->items != 0 &&
                   run->item_slots != 0 &&
                   run->queued != 0 && run->files.base != 0 && run->round.base != 0;
@@ -1243,11 +1419,16 @@ static __attribute__((unused)) void files_run_release(FilesRun* run)
         run->cache->prepared_tokens += lane->tokens;
         intern_release(&lane->table);
         arena_release(&lane->spelling_arena);
+        arena_release(&lane->shared_arena);
+        arena_release(&lane->lists);
         arena_release(&lane->names);
         arena_release(&lane->request_list);
         arena_release(&lane->path_list);
     }
     arena_release(&run->arena);
+    arena_release(&run->item_arena);
+    arena_release(&run->item_slot_arena);
+    arena_release(&run->queued_arena);
     arena_release(&run->files);
     arena_release(&run->round);
     *run = (FilesRun){ 0 };

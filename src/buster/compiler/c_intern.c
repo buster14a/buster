@@ -47,7 +47,7 @@
 //     (intern_bucket_key, intern_bucket_matches, intern_bucket_empties, intern_slot_id, intern_first_bytes),
 //     intern_layout_bytes, intern_lay_out, intern_place, intern_slot, intern_grow, intern_reserve_record, intern_insert, intern_find_hashed,
 //     intern_find_or_add_hashed, intern_find_or_add, intern_find_or_add_vector, intern_find, intern_bytes,
-//     intern_length, intern_add_names, intern_initialize, intern_release and intern_reset.
+//     intern_length, intern_add_names, intern_initialize_with, intern_initialize, intern_release and intern_reset.
 //   - Spellings added from several lanes: InternBulk, intern_place_shared, intern_bulk_begin, intern_bulk_replace,
 //     intern_bulk_add and intern_bulk_end.
 
@@ -829,13 +829,15 @@ static bool intern_add_names(InternTable* table)
     return result;
 }
 
-// Reserves the table's memory and adds the predefined names. Returns false if the memory can't be reserved.
-static __attribute__((unused)) bool intern_initialize(InternTable* table)
+// Reserves the table's memory, with `buckets` buckets (a power of two) to start with, and adds the predefined names.
+// Returns false if the memory can't be reserved. c_files.c starts each lane's table at the size of the lane's share of
+// the files, so that it grows little or not at all.
+static __attribute__((unused)) bool intern_initialize_with(InternTable* table, uint64_t buckets)
 {
     uint32_t capacity;
     *table = (InternTable){ 0 };
-    table->record_arena = arena_reserve(intern_layout_bytes(BUSTER_INTERN_INITIAL_BUCKETS, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX);
-    bool result = intern_lay_out(table, &table->record_arena, BUSTER_INTERN_INITIAL_BUCKETS);
+    table->record_arena = arena_reserve(intern_layout_bytes(buckets, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX);
+    bool result = intern_lay_out(table, &table->record_arena, buckets);
     table->records = result ? table->record_arena.base + table->record_arena.length : 0;
     // Id 0's spelling: an empty one, so that no other spelling is at offset 0.
     uint8_t* none = result ? arena_push(&table->record_arena, 1, 1) : 0;
@@ -848,6 +850,12 @@ static __attribute__((unused)) bool intern_initialize(InternTable* table)
         result = intern_add_names(table);
     }
     return result;
+}
+
+// intern_initialize_with the table's usual first size.
+static __attribute__((unused)) bool intern_initialize(InternTable* table)
+{
+    return intern_initialize_with(table, BUSTER_INTERN_INITIAL_BUCKETS);
 }
 
 static __attribute__((unused)) void intern_release(InternTable* table)
@@ -886,10 +894,12 @@ static __attribute__((unused)) bool intern_reset(InternTable* table)
 typedef struct InternBulk InternBulk;
 struct InternBulk
 {
-    // The first new id, how many there are, and the offset of the first one's record (the others follow in id order).
+    // The first new id, how many there are, and the offset of the first one's record (the others follow in id order) and
+    // their bytes.
     IdentId first;
     uint32_t count;
     uint32_t records;
+    uint64_t bytes;
     // If the table grew: the spans it had, whose spellings intern_bulk_replace places again, and the arena of their
     // layout, which intern_bulk_end releases (none for the first layout, which is in the record arena).
     bool grew;
@@ -933,7 +943,7 @@ static void intern_place_shared(InternTable* table, __m128i slot, uint64_t hash)
 // (intern_bulk_replace). One lane. Returns false, leaving the table as it was, if the ids or the memory don't fit.
 static __attribute__((unused)) bool intern_bulk_begin(InternTable* table, uint32_t count, uint64_t bytes, InternBulk* bulk)
 {
-    *bulk = (InternBulk){ .first = table->count, .count = count };
+    *bulk = (InternBulk){ .first = table->count, .count = count, .bytes = bytes };
     bool result = (uint64_t)table->count + count <= BUSTER_INTERN_MAX_IDS;
     uint64_t buckets = table->bucket_mask + 1;
     uint32_t capacity = table->capacity;

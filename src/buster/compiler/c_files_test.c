@@ -94,6 +94,10 @@ struct FilesTestWork
     bool follow;
     // The roots in two runs, the second from root `split` on (0 for one run).
     uint32_t split;
+    // The runs' FilesRun.lane_bytes and split_bytes, if `thresholds`.
+    bool thresholds;
+    uint64_t lane_bytes;
+    uint64_t split_bytes;
     const char* const* units;
     uint32_t unit_count;
 };
@@ -175,6 +179,8 @@ static bool files_test_run(const FilesTestWork* work, uint32_t lanes, const char
         const uint32_t end = runs == 2 && r == 0 ? work->split : work->root_count;
         FilesRun files;
         result = files_run_initialize(&files, &run->cache, &search, work->roots + begin, end - begin, work->follow, lanes);
+        files.lane_bytes = work->thresholds ? work->lane_bytes : files.lane_bytes;
+        files.split_bytes = work->thresholds ? work->split_bytes : files.split_bytes;
         char path[4200];
         const int saved = files_test_quiet_begin(directory, path, sizeof(path));
         result = result && lane_run(lanes, files_run_lane, &files, 0);
@@ -447,8 +453,9 @@ static void files_test_remove_tree(const char* directory)
     }
 }
 
-// The tree's check: its units, on every lane count, and its exact counts.
-static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32_t lane_count, bool vectorized)
+// The tree's check: its units, on every lane count, and its exact counts. Its rounds are small, so that lane 0 would
+// prepare them alone: they are prepared on every lane instead, cut into parts (`split` false) or one range per lane.
+static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32_t lane_count, bool vectorized, bool split)
 {
     char path[4200];
     bool result = true;
@@ -483,7 +490,10 @@ static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32
     const char* includes[3] = { directories[0], directories[1], directories[2] };
     const char* systems[1] = { directories[3] };
     FilesTestWork work = {
-        .name = vectorized ? "tree" : "tree (scalar kernels)",
+        .name = vectorized && split ? "tree, split once" : vectorized ? "tree" : split ? "tree, split once (scalar kernels)" : "tree (scalar kernels)",
+        .thresholds = true,
+        .lane_bytes = 0,
+        .split_bytes = split ? UINT64_MAX : 0,
         .options = {
             .language = { .standard = 2017, .gnu = true },
             .scalar = !vectorized,
@@ -568,6 +578,7 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
     char (*paths)[4200] = calloc(BUSTER_FILES_TEST_SPELLING_FILES, sizeof(*paths));
     const char** roots = calloc(BUSTER_FILES_TEST_SPELLING_FILES, sizeof(char*));
     char* text = malloc(1u << 20);
+    uint64_t written = 0;
     bool result = vocabulary != 0 && paths != 0 && roots != 0 && text != 0;
     for (uint32_t v = 0; result && v < BUSTER_FILES_TEST_VOCABULARY; v += 1)
     {
@@ -618,6 +629,7 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
         snprintf(paths[f], sizeof(paths[f]), "%s/s%u.c", directory, f);
         roots[f] = paths[f];
         result = files_test_write(paths[f], text);
+        written += length;
     }
     FilesTestWork work = {
         .name = "spellings",
@@ -628,11 +640,31 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
     };
     FilesTestRun reference = { 0 };
     result = result && files_test_work(&work, lanes, lane_count, directory, &reference);
+    // And with one range per lane, then with two lanes working (one range each) and the others idle, on every lane
+    // count, against the same reference.
+    FilesTestWork once = work;
+    once.name = "spellings, split once";
+    once.thresholds = true;
+    once.lane_bytes = 0;
+    once.split_bytes = UINT64_MAX;
+    FilesTestWork two = work;
+    two.name = "spellings, two lanes working";
+    two.thresholds = true;
+    two.lane_bytes = written / 2;
+    two.split_bytes = 0;
+    for (uint32_t l = 1; result && l < lane_count; l += 1)
+    {
+        FilesTestRun other;
+        result = files_test_run(&once, lanes[l], directory, &other) && files_test_same(&once, &reference, &other);
+        files_test_release_run(&other);
+        result = result && files_test_run(&two, lanes[l], directory, &other) && files_test_same(&two, &reference, &other);
+        files_test_release_run(&other);
+    }
     const bool grew = result && reference.table.count > 40960;
     if (result)
     {
-        printf("spellings: %u files, %u ids, %lu tokens, the same on every lane count\n", BUSTER_FILES_TEST_SPELLING_FILES, reference.table.count,
-               (unsigned long)reference.cache.prepared_tokens);
+        printf("spellings: %u files, %u ids, %lu tokens, the same on every lane count, in parts, split once and on two lanes\n",
+               BUSTER_FILES_TEST_SPELLING_FILES, reference.table.count, (unsigned long)reference.cache.prepared_tokens);
     }
     if (result && !grew)
     {
@@ -798,15 +830,13 @@ static int run_files_tests(int argument_count, char** arguments)
     }
     if (passed_all && file_count == 0)
     {
-        passed_all &= files_test_tree(directory, lanes, lane_count, true);
-        if (!keep)
+        for (uint32_t way = 0; way < 4; way += 1)
         {
-            files_test_remove_tree(directory);
-        }
-        passed_all &= files_test_tree(directory, lanes, lane_count, false);
-        if (!keep)
-        {
-            files_test_remove_tree(directory);
+            passed_all &= files_test_tree(directory, lanes, lane_count, way < 2, (way & 1) != 0);
+            if (!keep)
+            {
+                files_test_remove_tree(directory);
+            }
         }
         passed_all &= files_test_spellings(directory, lanes, lane_count, seed);
     }

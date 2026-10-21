@@ -329,17 +329,18 @@ struct PPFile
 // it writes (c_files.c).
 
 // The system calls lookups made, counted for whoever made them: the opens (one per path probed, whether or not a file
-// is there) and the files mapped.
+// is there), and the files mapped and the files read.
 typedef struct FileCacheCounts FileCacheCounts;
 struct FileCacheCounts
 {
     uint64_t opens;
     uint64_t maps;
+    uint64_t reads;
 };
 
 // What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
 // modification time, and either the record that already had that identity when it looked (BUSTER_PP_NONE if none) or
-// its bytes, mapped by the probe.
+// its bytes, which the probe mapped (`mapped`) or read into an arena.
 typedef struct FileProbe FileProbe;
 struct FileProbe
 {
@@ -352,6 +353,16 @@ struct FileProbe
     bool found;
     bool mapped;
 };
+
+// How a probe gets a file's bytes: mapped with MAP_POPULATE (a translation unit's, and one lane's), mapped without it
+// (its pages are faulted in as they are first read, without the process's memory map lock that the mapping itself
+// holds), or read into an arena.
+typedef enum FileCacheBytes
+{
+    FILE_CACHE_MAP_POPULATED,
+    FILE_CACHE_MAP,
+    FILE_CACHE_READ,
+} FileCacheBytes;
 
 // A path entry's record from its probe until file_cache_identify gives it one.
 #define BUSTER_FILE_CACHE_PENDING (UINT32_MAX - 1)
@@ -368,12 +379,13 @@ struct FileCachePath
 };
 
 // The arenas a lane prepares records into: the token columns (kinds, starts, values), each in an arena of its own as a
-// translation unit's are, and the leading-space words and directive tables.
+// translation unit's are, the leading-space words and directive tables, and the bytes of the files it reads.
 typedef struct FileCacheArenas FileCacheArenas;
 struct FileCacheArenas
 {
     Arena columns[3];
     Arena arena;
+    Arena bytes;
 };
 
 // How files are prepared: the lexer's and refinement's flags (trigraphs), the literal prefixes the language mode splits
@@ -1700,6 +1712,7 @@ static __attribute__((unused)) void file_cache_release(FileCache* cache)
             arena_release(&arenas->columns[i]);
         }
         arena_release(&arenas->arena);
+        arena_release(&arenas->bytes);
     }
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
     {
@@ -1709,7 +1722,8 @@ static __attribute__((unused)) void file_cache_release(FileCache* cache)
     *cache = (FileCache){ 0 };
 }
 
-// The arenas lane `lane` prepares records into, reserved the first time.
+// The arenas lane `lane` prepares records into, reserved the first time. Reserving takes the process's memory map lock,
+// which the lanes of a group are better off taking one after another: c_files.c reserves them before its lanes start.
 static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
 {
     FileCacheArenas* result = &cache->lanes[lane];
@@ -1720,6 +1734,7 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
             result->columns[i] = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
         }
         result->arena = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+        result->bytes = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
     }
     return result;
 }
@@ -1819,11 +1834,13 @@ static FileCachePath* file_cache_find_path(FileCache* cache, const char* path, u
     return result;
 }
 
-// Probes the file system for a regular file at `path` (NUL-terminated): opens it and reads its identity, and maps its
-// bytes (read-only: the page cache's pages, which costs neither a copy nor clearing new pages) unless a record already
-// has that identity. A file too big for 32-bit positions, or that can't be mapped, is none. The probe reads the identity
-// table only, so lanes probe at once while no lane adds records; the system calls go to `counts`.
-static void file_cache_probe(const FileCache* cache, const char* path, FileProbe* probe, FileCacheCounts* counts)
+// Probes the file system for a regular file at `path` (NUL-terminated): opens it and reads its identity, and unless a
+// record already has that identity, gets its bytes as `how` says. A mapping is read-only: the page cache's pages, which
+// costs neither a copy nor clearing new pages, but each mapping holds the process's memory map lock, on which lanes that
+// map at once queue; FILE_CACHE_READ reads the bytes into `bytes_arena` instead, followed by 64 zero bytes. A file too
+// big for 32-bit positions, or that can't be mapped or read whole, is none. The probe reads the identity table only, so
+// lanes probe at once while no lane adds records; the system calls go to `counts`.
+static void file_cache_probe(const FileCache* cache, const char* path, FileCacheBytes how, Arena* bytes_arena, FileProbe* probe, FileCacheCounts* counts)
 {
     static const uint8_t empty[1] = { 0 };
     *probe = (FileProbe){ .record = BUSTER_PP_NONE };
@@ -1838,12 +1855,29 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileProbe
         probe->length = (uint32_t)stats.st_size;
         probe->record = file_cache_find_identity(cache, probe->device, probe->inode);
         const uint8_t* bytes = empty;
-        if (probe->record == BUSTER_PP_NONE && probe->length != 0)
+        if (probe->record == BUSTER_PP_NONE && probe->length != 0 && how != FILE_CACHE_READ)
         {
-            void* mapped = mmap(0, probe->length, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+            void* mapped = mmap(0, probe->length, PROT_READ, MAP_PRIVATE | (how == FILE_CACHE_MAP_POPULATED ? MAP_POPULATE : 0), fd, 0);
             bytes = mapped != MAP_FAILED ? mapped : 0;
             probe->mapped = bytes != 0;
             counts->maps += 1;
+        }
+        else if (probe->record == BUSTER_PP_NONE && probe->length != 0)
+        {
+            uint8_t* buffer = arena_push(bytes_arena, (uint64_t)probe->length + 64, 64);
+            uint64_t done = 0;
+            int64_t got = 1;
+            while (buffer != 0 && done < probe->length && got > 0)
+            {
+                got = pread(fd, buffer + done, probe->length - done, (off_t)done);
+                done += got > 0 ? (uint64_t)got : 0;
+            }
+            if (buffer != 0 && done == probe->length)
+            {
+                memset(buffer + done, 0, 64);
+            }
+            bytes = buffer != 0 && done == probe->length ? buffer : 0;
+            counts->reads += 1;
         }
         probe->bytes = bytes;
         probe->found = bytes != 0;
@@ -1928,7 +1962,7 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
     if (entry == 0)
     {
         FileProbe probe;
-        file_cache_probe(cache, path, &probe, counts);
+        file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, 0, &probe, counts);
         entry = file_cache_add_path(cache, path, length, hash, &probe);
         if (entry != 0)
         {
