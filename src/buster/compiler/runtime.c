@@ -34,9 +34,9 @@
 // else to the program (main): RuntimeBinding, by symbol.
 //
 // What binding's closure over the members needs (bind.c), from the global names (RuntimeNames): the member whose
-// definition each name has; each piece's strong references to names (Runtime.references, a range per piece); and its
-// COMDAT groups (RuntimeGroup, a range per piece, each with its atoms and its signature's number among the runtime's
-// distinct signatures), whose first in link order the link keeps.
+// definition each name has; each piece's strong references to names (Runtime.references, a range per piece), with the
+// member each loads (Runtime.reference_members); and its COMDAT groups (RuntimeGroup, a range per piece, each with its
+// atoms and its signature's number among the runtime's distinct signatures), whose first in link order the link keeps.
 //
 // main.c includes this file after import.c. Layout, in this order:
 //   - API: RuntimeError, RuntimeObject, RuntimeProbe, RuntimeBinding, Runtime and the entry points' prototypes.
@@ -247,10 +247,13 @@ struct Runtime
     // Each object's records: the crt objects' in RuntimeObject order, then each member's.
     RuntimePiece* pieces;
     // By piece (RUNTIME_OBJECTS + member_count of them, and one more for the end): where its strong references to
-    // global names start in `references` (each an entry of global_names), and its COMDAT groups in `groups`. The groups'
-    // atoms are in `group_atoms`, and their signatures are `group_signatures` distinct ones.
+    // global names start in `references` (each an entry of global_names), and its COMDAT groups in `groups`. By
+    // reference, the member plus 1 that it loads unless the link defines its name (the name's member, 0 for a name the
+    // linker defines). The groups' atoms are in `group_atoms`, and their signatures are `group_signatures` distinct
+    // ones.
     uint32_t* reference_begin;
     uint32_t* references;
+    uint32_t* reference_members;
     uint32_t* group_begin;
     RuntimeGroup* groups;
     AtomId* group_atoms;
@@ -1131,14 +1134,17 @@ static const uint8_t* runtime_global_name(const RuntimeNames* names, uint32_t en
 
 // The strong references of each piece to global names (Runtime.reference_begin and references): eight symbols at a time,
 // a compress of the global names' entries of those that have no atom, aren't absolute and are global rather than weak,
-// a piece's after the last piece's.
+// a piece's after the last piece's. Then the member each loads (Runtime.reference_members), a scalar load of its name's
+// member per reference, in a pass of its own.
 static RuntimeError runtime_references(Runtime* runtime)
 {
     const LinkSymbols* symbols = &runtime->link.symbols;
+    const RuntimeNames* names = &runtime->global_names;
     const uint32_t piece_count = RUNTIME_OBJECTS + runtime->member_count;
     runtime->reference_begin = BUSTER_ARENA_PUSH_ARRAY(&runtime->tables, uint32_t, (uint64_t)piece_count + 1);
     runtime->references = BUSTER_ARENA_PUSH_ARRAY(&runtime->tables, uint32_t, (uint64_t)symbols->count + BUSTER_IMPORT_BATCH);
-    RuntimeError result = runtime->reference_begin != 0 && runtime->references != 0 ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MEMORY;
+    runtime->reference_members = BUSTER_ARENA_PUSH_ARRAY(&runtime->tables, uint32_t, (uint64_t)symbols->count + BUSTER_IMPORT_BATCH);
+    RuntimeError result = runtime->reference_begin != 0 && runtime->references != 0 && runtime->reference_members != 0 ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MEMORY;
     uint32_t total = 0;
     for (uint32_t p = 0; result == RUNTIME_ERROR_NONE && p < piece_count; p += 1)
     {
@@ -1163,6 +1169,11 @@ static RuntimeError runtime_references(Runtime* runtime)
     if (result == RUNTIME_ERROR_NONE)
     {
         runtime->reference_begin[piece_count] = total;
+    }
+    for (uint32_t r = 0; result == RUNTIME_ERROR_NONE && r < total; r += 1)
+    {
+        const uint32_t entry = runtime->references[r];
+        runtime->reference_members[r] = names->linker[entry] ? 0 : names->member[entry];
     }
     return result;
 }

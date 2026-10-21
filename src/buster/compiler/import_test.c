@@ -52,8 +52,8 @@
 //     the bindings of main, __libc_start_main, __gmon_start__, __TMC_END__, _GLOBAL_OFFSET_TABLE_ and the IRELATIVE
 //     relocations' bounds, and none to a shared library; memcpy an IFUNC, _nl_current_LC_CTYPE_used absolute, and
 //     libgcc.a's priorities; each object's COMDAT groups as its ImportObject has them, numbered alike by signature;
-//     each piece's strong references against a scan of its symbols, and each global name's defining member; link_check
-//     on the whole runtime; and every crt object and member taking the vector path.
+//     each piece's strong references against a scan of its symbols, with the member each loads, and each global name's
+//     defining member; link_check on the whole runtime; and every crt object and member taking the vector path.
 //   - With --cross-check, which needs readelf: libc.so.6's exports against `readelf -W --dyn-syms` (name, version,
 //     type, binding and size; IFUNC as a function, GNU_UNIQUE as global) and its references, and the relocations of
 //     the crt objects and the archives' members, the static runtime's among them, against `readelf -W -r`: each one a
@@ -3098,6 +3098,18 @@ static bool import_test_static_runtime(bool cross_check, Arena* arena)
             references = references && at == runtime.reference_begin[p + 1];
         }
         import_test_expect(&tally, references, "each piece's strong references to global names", runtime.reference_begin[piece_count]);
+        // The member each reference loads: the member whose piece holds its name's first definition, unless the linker
+        // defines the name; and none for a name the crt objects or no one defines.
+        bool loads = true;
+        for (uint32_t r = 0; loads && r < runtime.reference_begin[piece_count]; r += 1)
+        {
+            const uint32_t entry = runtime.references[r];
+            const SymbolId definition = runtime.global_names.definition[entry];
+            const uint32_t piece = definition != 0 ? import_test_symbol_piece(&runtime, definition) : 0;
+            const uint32_t member = definition != 0 && piece >= RUNTIME_OBJECTS && !runtime.global_names.linker[entry] ? piece - RUNTIME_OBJECTS + 1 : 0;
+            loads = runtime.reference_members[r] == member;
+        }
+        import_test_expect(&tally, loads, "the member each reference loads", 0);
         // Each global name found by its bytes, with the first symbol that defines it, in an atom or absolute, and the
         // member that symbol is in.
         const RuntimeNames* names = &runtime.global_names;

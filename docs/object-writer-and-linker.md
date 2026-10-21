@@ -767,9 +767,10 @@ snapshot of their own.
   into, then the columns, each at a multiple of 64 bytes. It is 192 KB on the
   9700X: 2,673 global names with their index and filter, and 2,630 exports.
   The "few tens of kilobytes" this section first expected were the exports'
-  columns alone. Its version 2 added what a static runtime's closure reads
-  (each member's references and COMDAT groups, the global names' members, the
-  archives), which took the dynamic runtime's from 185 KB.
+  columns alone. Its versions 2 and 3 added what a static runtime's closure
+  reads (each member's references, with the member each loads, and its COMDAT
+  groups, the global names' members, the archives), which took the dynamic
+  runtime's from 185 KB.
 - **Loading** maps it privately. The runtime's columns point into the mapping
   and are used where they are, which is why the global names hold their bytes
   as offsets into one string pool rather than as pointers. Only the probes,
@@ -911,25 +912,86 @@ for. For binding's closure, the global names say which member defines each
 name, and each member's strong references to names are listed; on both
 systems every name but two is defined by at most one member, and those two
 (`DW.ref.__gcc_personality_v0` in 52 members on the 9700X and
-`_.stapsdt.base` in 27) are weak definitions in COMDAT groups. The snapshot holds the static runtime as it
-holds the dynamic one (8.6 MB on the 9700X); a link of `-static` doesn't
-open one yet.
+`_.stapsdt.base` in 27) are weak definitions in COMDAT groups. The snapshot
+holds the static runtime as it holds the dynamic one (8.6 MB on the 9700X); a
+link of `-static` doesn't open one yet.
 
-**Static links.** The closure over libc.a is GNU ld's group semantics, which
-the driver asks for (`--start-group -lgcc -lgcc_eh -lc --end-group`):
+**Static links, as built** (`bind.c`, the second part of step 6). Binding
+against the static runtime is binding against the dynamic one with the
+archives' members in place of `libc.so.6`. `bind_begin` joins `crt1.o`,
+`crti.o` and `crtbeginT.o` after the program's symbols, as for a PIE. Then
+`bind_end`, after the program's atoms, finds the members the link needs (the
+closure), joins them in archive order, binds every name and joins `crtend.o`
+and `crtn.o`. No name binds to a shared library.
 
-1. Start from the program's undefined names that aren't weak.
-2. For each one, find the defining member in the snapshot's table.
-3. Load that member, and add its own undefined names that aren't weak and that
-   nothing defines yet.
-4. Repeat until nothing is added.
+- **The closure** is GNU ld's for the driver's group. A strong reference to a
+  name that nothing in the link defines (the program, a crt object before it,
+  a member that joined, or the linker) loads the member that defines it. A
+  weak reference loads nothing, and binds to a definition loaded for another
+  reason or to nothing: a program that tests a weak `puts` sees it null
+  unless something else loads `puts`'s member. A weak definition satisfies
+  references, so a program's weak `__libc_start_main` keeps its member out.
+  Only the two COMDAT names have more than one member defining them, so the
+  members don't depend on the order the walk visits them in. They are the
+  members GNU ld 2.47 and lld 23.1 load for the same objects, which
+  `test-bind --cross-check` reads from their traces.
+- **Two paths.** The exact path is a queue of members, each reference tested
+  against the link's symbols and the members needed so far, one at a time.
+  The vector path works in rounds over a bitset of the members. A round takes
+  each member of its frontier and the member each of its references loads,
+  16 references at a time (the first 16 of a member's without a branch:
+  most members have fewer). That member comes from a column made at import
+  (`Runtime.reference_members`), a load rather than a gather. The members
+  loaded are compressed onto the round's list, which is marked after the
+  round, a byte per member; the marks, 64 at a time, less the members needed
+  already, are the next frontier's word. A name the program defines that a
+  member defines too must not load the member: the vector path compares each
+  batch's references with up to 16 such names in registers, and with more
+  leaves the closure to the exact path's. The generated programs define
+  none.
+- **COMDAT groups:** the first group of each signature in link order joins. A
+  later one's atoms don't, its definitions join as references of their names,
+  and a fixup of an atom that joins to one of its local symbols is an error
+  (`BIND_ERROR_DISCARDED`), as GNU ld's reference to a discarded section is.
+  A member with a group to discard joins a record at a time on either path.
+- **What nothing defines:** `__tls_get_addr`, which the PIC members' general-
+  and local-dynamic accesses call, stays undefined for the writer, whose
+  relaxation to local-exec consumes the call. Any other strong reference to a
+  name nothing defines is an error.
 
-Weak references load no member, as with GNU ld. They bind to a definition that
-was loaded for another reason, or to 0: a program that tests `puts` declared
-weak must see it null under `-static` unless something else pulls `puts` in.
-A member defining a name the program also defines is only pulled in by another
-of its names, and then the duplicate is an error, as with GNU ld. Members are
-laid out in their archive order, whatever order the walk visited them in.
+Measured on the 9700X (`benchmark-bind`, one CPU, medians of 21 runs), for
+the generated programs that call libc: each joins 442 of the 2,622 members,
+with 2,248 atoms and their 707 KB of bytes, 5,844 symbols, 11,942 fixups and
+5,270 names. The closure takes 12 rounds over the members' 2,459 references,
+384 batches of them.
+
+| Workers | `bind_begin`, vector / exact | Closure, vector / exact | `bind_end`, vector / exact |
+| --- | ---: | ---: | ---: |
+| 1 | 1.02 / 0.92 µs | 1.43 µs, 3.24 ns per member / 2.44 µs, 5.51 ns | 74.5 / 121.5 µs |
+| 2,000 | 2.52 / 5.50 µs | 1.63 / 2.44 µs | 74.1 / 117.6 µs |
+| 102,400 | 92.5 / 810.5 µs | 1.81 / 3.61 µs | 97.9 / 158.8 µs |
+
+The vector closure first marked each batch's members as soon as it had
+compressed them, and was slower than the exact path (3.15 µs against 2.42):
+the byte stores read the members back from the batch's masked store, which
+doesn't forward to a load, so every batch waited for its store to commit.
+Marking the round's list after the round, when its stores have left the
+store queue, cut it to 1.43 µs.
+
+`bind_begin` is the dynamic runtime's, with `crt1.o`, `crti.o` and
+`crtbeginT.o` for `Scrt1.o`, `crti.o` and `crtbeginS.o`. `bind_end` is the
+members' joins, and at 102,400 workers the scan of the program's symbols for
+the names nothing defines too (24 µs, as for the dynamic runtime). Timed with
+the TSC around each join, the 419 members that join as blocks take about
+61 µs, 145 ns each, and the 23 that discard a group about 17 µs, a record at
+a time; the closure, binding the names and the tail objects take the rest. A
+block join's cost is per record more than per member, and no phase of it
+stands out: copying the atoms' bytes is the largest, about a fifth (the
+writer patches atoms in place, so the bytes must be the link's own). Copying
+a member's dozen small columns by masked 64-byte stores rather than calls of
+`memcpy` changed nothing. Per record, the 23 members' joins cost 15.5 TSC
+ticks against a block join's 10.8, so joining them as blocks would save
+about 5 µs: they stay the rare case, left to the exact join.
 
 **What the snapshot buys.** Synthetic sections and patching for the runtime
 are a few dozen records. `__libc_start_main`, `__cxa_finalize` and the
@@ -2779,6 +2841,7 @@ Where the decisions stand:
 | Build ID | arithmetic | AES rounds on each chunk while it is in L2 (done: 260 GB/s, as fast as reading it; "Patching and writing") |
 | Probing hash tables | memory latency | scalar loads with software prefetch: gathers measured no faster than scalar loads in the patch kernel |
 | Matching a program's names against the runtime's (binding) | the index's cache lines, for lookups that mostly miss | a blocked Bloom filter in L1 tested eight names at a time by two gathers, the index only behind it (done: 0.85 against 6.8 ns per global symbol; "Step 5's phases, data-parallel") |
+| A static link's closure over the archives' members (binding) | each member's references | rounds over a bitset of the members, references 16 at a time compressed onto a list that is marked after the round: marked per batch, each waited for its masked store (done: 1.43 against 2.44 µs, 3.24 against 5.51 ns per member; "Static links, as built") |
 
 So on the direct path, most of the output is produced by a vector kernel that
 already exists (the encoder), and what is left for the linker is load/store
@@ -2976,6 +3039,10 @@ and with this document updated with what was measured:
    general- and local-dynamic TLS kinds and prioritized arrays in `import.c`
    and `link.c`, and each member's references and groups for the closure:
    "A static executable's runtime, as built").
+   The second part is done: binding against it (`bind.c`: the closure over
+   the members in rounds, their joins in archive order with COMDAT groups
+   discarded, and every name bound without a shared library: "Static links,
+   as built").
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
    and the exchange. Done when the differential tests against lld and mold
    pass on a corpus.
