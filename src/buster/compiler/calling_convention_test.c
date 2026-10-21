@@ -897,6 +897,29 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
     abi_test_in_registers(builder, "union {long, __int128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS,
                           BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    // clang stores a _BitInt of 65 to 128 bits in a record as an i128 (alone, it passes as two i64s), and a union as its
+    // member LLVM aligns most: an i128 (16) over _Complex long long and an aligned(16) struct of longs (8 to LLVM). A
+    // union's bit-field is an integer of its width (i70: two i64s); a struct's wider than an eightbyte, an i128.
+    const TypeId bits100 = type_bit_int(table, 100, false);
+    m[0] = abi_test_member(builder, bits100);
+    abi_test_in_registers(builder, "{_BitInt(100)}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), BUSTER_ABI_TEST_INTEGERS,
+                          BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    m[0] = abi_test_bits(builder, bits100, 70, true);
+    abi_test_in_registers(builder, "{_BitInt(100) : 70}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), BUSTER_ABI_TEST_INTEGERS,
+                          BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_COMPLEX(BUSTER_TYPE_CODE_LLONG));
+    m[1] = abi_test_member(builder, bits100);
+    abi_test_in_registers(builder, "union {_Complex long long, _BitInt(100)}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    m[1] = abi_test_bits(builder, bits100, 70, true);
+    abi_test_in_registers(builder, "union {_Complex long long, _BitInt(100) : 70}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, 0, BUSTER_ABI_PASS_PAIR, rax, rdx);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 5));
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {aligned(16) {long, long}, __int128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
     // A struct of 32 bytes: MEMORY, unless it is one vector the target passes in a register.
     m[0] = abi_test_member(builder, type_vector_size(table, BUSTER_TYPE_FLOAT, 16));
     m[1] = abi_test_member(builder, type_vector_size(table, BUSTER_TYPE_FLOAT, 16));
@@ -960,8 +983,9 @@ static bool abi_test_same_location(AbiLocation got, AbiTestLocation expected)
 }
 
 // Calls whose locations clang and LLVM give: f(long x4, nullptr_t, struct {long, long}, long) splits the struct;
-// f(long x5, __int128, long) puts the __int128 on the stack and the long in r9; and a result in memory shifts the
-// general registers by one.
+// f(long x5, __int128, long) puts the __int128 on the stack and the long in r9; a result in memory shifts the general
+// registers by one; and a struct of a flexible array member alone takes an 8-byte slot while a general register is
+// free, and none after (clang's i0).
 static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t vector_bytes, bool vector)
 {
     TypeTable* table = &tables->types.table;
@@ -988,6 +1012,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     m[0] = abi_test_member(&builder, big_members[0]);
     const TypeId big = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
     const TypeId atomic_double = type_atomic(table, BUSTER_TYPE_DOUBLE);
+    m[0] = abi_test_member(&builder, type_incomplete_array(table, BUSTER_TYPE_LONG));
+    const TypeId flexible = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
     if (vector)
     {
         abi_classify_all(&tables->abi, table);
@@ -1001,15 +1027,60 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     const TypeId D = BUSTER_TYPE_DOUBLE;
     const TypeId arguments[] = {
         // 0: long x4, nullptr_t, {long, long}, long
-        L, L, L, L, BUSTER_TYPE_NULLPTR, longs, L,
+        L,
+        L,
+        L,
+        L,
+        BUSTER_TYPE_NULLPTR,
+        longs,
+        L,
         // 7: long x5, __int128, long
-        L, L, L, L, L, BUSTER_TYPE_INT128, L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        BUSTER_TYPE_INT128,
+        L,
         // 14: long x5, nullptr_t, the high eightbyte alone, long
-        L, L, L, L, L, BUSTER_TYPE_NULLPTR, high, L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        BUSTER_TYPE_NULLPTR,
+        high,
+        L,
         // 22: double x7, _Atomic double, {long, double}, long
-        D, D, D, D, D, D, D, atomic_double, mixed, L,
+        D,
+        D,
+        D,
+        D,
+        D,
+        D,
+        D,
+        atomic_double,
+        mixed,
+        L,
         // 32: a result in memory; long x6
-        L, L, L, L, L, L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        // 38: the flexible array member's struct, long
+        flexible,
+        L,
+        // 40: long x6, the flexible array member's struct, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        flexible,
+        L,
     };
     const AbiTestLocation expected[] = {
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
@@ -1050,6 +1121,16 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_IGNORE, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
     };
     const uint32_t counts[] = {
         7,
@@ -1057,6 +1138,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         8,
         10,
         6,
+        2,
+        8,
     };
     const uint32_t named[] = {
         7,
@@ -1064,6 +1147,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         8,
         10,
         6,
+        2,
+        8,
     };
     const TypeId results[] = {
         BUSTER_TYPE_VOID,
@@ -1071,8 +1156,12 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         BUSTER_TYPE_VOID,
         BUSTER_TYPE_VOID,
         big,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
     };
     const uint8_t variadic[] = {
+        0,
+        0,
         0,
         0,
         0,
@@ -1110,6 +1199,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     abi_test_expect(tally, calls[3].stack_bytes == 8 && calls[3].vector_registers == 8 && calls[3].integer_registers == 2, "fixtures", "call 3's totals");
     abi_test_expect(tally, calls[4].result.kind == BUSTER_ABI_RESULT_MEMORY && calls[4].integer_registers == 6 && calls[4].stack_bytes == 8, "fixtures",
                     "call 4's hidden pointer");
+    abi_test_expect(tally, calls[5].stack_bytes == 8 && calls[5].integer_registers == 1, "fixtures", "call 5's totals");
+    abi_test_expect(tally, calls[6].stack_bytes == 8 && calls[6].integer_registers == 6, "fixtures", "call 6's totals");
 }
 
 static bool abi_test_fixtures(void)
@@ -1173,15 +1264,17 @@ static bool abi_test_fixtures(void)
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Worlds: random types for the calling convention, in a TypeTestWorld (c_types_test.c) so that the cross-check can
-// write them as C. Small aggregates mostly, which is where the classes are decided member by member; `gcc` leaves out
-// what only clang spells (clang's ext_vector_type, __fp16, complex _BitInts), what GCC passes otherwise (_Atomic
-// types, flexible array members, vectors of 4 bytes or less of floating elements, unnamed bit-fields of a nonzero
-// width, which GCC classifies and clang skips, a vector of one __int128, which GCC classifies as one eightbyte in an
-// aggregate, and records, unions and aligned typedefs packed off their alignment, abi_test_gcc_packable's) and what
-// GCC lays out otherwise: GCC applies a declarator's attributes before the vector_size of its declaration's
-// specifiers, so it drops the aligned of `typedef long __attribute__((vector_size(8))) *T __attribute__((aligned(32)))`
-// and the packed of a member `unsigned char __attribute__((vector_size(16))) m __attribute__((packed))`, which it sees
-// on an unsigned char.
+// write them as C. Small aggregates mostly, which is where the classes are decided member by member. `gcc` leaves out
+// what only clang spells (clang's ext_vector_type, __fp16, complex _BitInts) and what GCC passes otherwise: _Atomic
+// types, flexible array members, vectors of 4 bytes or less of floating elements, a vector of one __int128 (one
+// eightbyte to GCC in an aggregate), unnamed bit-fields of a nonzero width (GCC classifies them, clang skips them),
+// members of no size (GCC ignores them where clang makes a wide record or offset 16 MEMORY), misaligned members (GCC
+// checks a member's scalars against their sizes, and no _BitInt, where clang checks each member's alignment), so no
+// packing and no alignment a typedef lowers; and what GCC lays out otherwise: arrays whose element's size isn't a
+// multiple of its alignment (GCC refuses them), bit-fields of aligned typedefs, abi_test_gcc_enum_differs's enums, and
+// aligned typedefs whose declaration spells a vector: GCC applies a declarator's attributes before the vector_size of
+// its specifiers, so it drops the aligned of `typedef long __attribute__((vector_size(8))) *T
+// __attribute__((aligned(32)))`.
 
 #define BUSTER_ABI_TEST_MEMBERS 8
 
@@ -1284,8 +1377,32 @@ static void abi_test_world_close(AbiTestWorld* world)
     arena_release(&world->text_arena);
 }
 
+// Whether GCC gives an enum another type than clang: one with an aligned attribute, which GCC ignores, or one whose
+// values no 64-bit type holds (a negative one and one past INT64_MAX), to which GCC gives __int128 and clang long.
+static bool abi_test_gcc_enum_differs(const AbiTestWorld* world, TypeId type)
+{
+    const TypeTable* table = &world->types.test.table;
+    const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+    bool result = false;
+    if (table->types.kind[index] == BUSTER_TYPE_KIND_ENUM)
+    {
+        const uint32_t tag = table->types.index[index];
+        const uint32_t begin = world->types.enum_begin[tag];
+        const uint32_t end = begin + world->types.enum_count[tag];
+        bool negative = false;
+        bool huge = false;
+        for (uint32_t i = begin; i < end; i += 1)
+        {
+            negative = negative || (world->types.enum_unsigned[i] == 0 && world->types.enum_values[i] < 0);
+            huge = huge || world->types.enum_unsigned[i] != 0;
+        }
+        result = table->tags.alignment_log2[tag] != 0 || (negative && huge);
+    }
+    return result;
+}
+
 // Whether a type's spelling writes a vector_size attribute out: a vector's, or a pointer's or an array's that leads to
-// one (an ALIGNED type, which is spelled by its name, ends the walk). GCC applies the declarator's attributes before it.
+// one (an ALIGNED type, which is spelled by its name, ends the walk).
 static bool abi_test_spells_vector(const TypeTable* table, TypeId type)
 {
     TypeId walk = type_strip_aligned(table, type);
@@ -1296,20 +1413,6 @@ static bool abi_test_spells_vector(const TypeTable* table, TypeId type)
     return type_kind(table, walk) == BUSTER_TYPE_KIND_VECTOR;
 }
 
-// Whether packing may move a member of this type in a GCC world: clang checks that each member is at an offset its
-// type's alignment divides, and GCC that each scalar is at one its size divides, which agree for scalars and arrays of
-// them but not for a record, a union or an aligned typedef that packing moves off its alignment.
-static bool abi_test_gcc_packable(const TypeTable* table, TypeId type)
-{
-    TypeId walk = type;
-    while (type_kind_is_array(type_kind(table, walk)))
-    {
-        walk = type_element(table, walk);
-    }
-    const uint8_t kind = type_kind(table, walk);
-    return kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION && kind != BUSTER_TYPE_KIND_ALIGNED;
-}
-
 // A record of random members, completed: small ones mostly, bit-fields, arrays of small types, earlier records, and
 // now and then a flexible array member and attributes. Returns 0 if the table refused it.
 static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool big)
@@ -1318,13 +1421,14 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
     TypeMember members[BUSTER_ABI_TEST_MEMBERS];
     const bool is_union = type_test_below(random, 4) == 0;
     const uint32_t count = (uint32_t)type_test_below(random, big ? BUSTER_ABI_TEST_MEMBERS + 1 : 5);
-    bool packable = true;
     for (uint32_t m = 0; m < count; m += 1)
     {
         const uint64_t pick = type_test_below(random, 16);
         TypeId type = abi_test_world_pick(world, random, !big);
         uint32_t width = BUSTER_TYPE_NOT_BIT_FIELD;
-        if (pick < 3 && type_test_bit_field_type(table, type) && (type_qualifiers(type) & BUSTER_TYPE_CONST) == 0)
+        // GCC places a bit-field of an aligned typedef by the typedef's alignment, and clang by its type's.
+        const bool aligned = type_kind(table, type) == BUSTER_TYPE_KIND_ALIGNED;
+        if (pick < 3 && type_test_bit_field_type(table, type) && (type_qualifiers(type) & BUSTER_TYPE_CONST) == 0 && !(world->gcc && aligned))
         {
             width = (uint32_t)type_test_below(random, type_integer_width(table, type) + 1);
         }
@@ -1335,19 +1439,20 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
             // GCC refuses an array of length 0 before a struct's last member.
             const uint64_t lengths = element_size == 0 ? 3 : element_size <= 4 ? 5 : 3;
             const uint64_t length = world->gcc ? 1 + type_test_below(random, lengths - 1) : type_test_below(random, lengths);
-            const TypeId array = type_array(table, type_unqualified(element), length);
+            // GCC refuses an array whose element's size isn't a multiple of its alignment.
+            const bool divisible = element_size % type_alignment(table, element) == 0;
+            const TypeId array = !world->gcc || divisible ? type_array(table, type_unqualified(element), length) : 0;
             type = array != 0 ? array : type;
             table->last_error = TYPE_ERROR_NONE;
         }
+        type = world->gcc && type_size(table, type) == 0 ? BUSTER_TYPE_CHAR : type;
         const bool unnamed = width == 0 || (width != BUSTER_TYPE_NOT_BIT_FIELD && type_test_below(random, 4) == 0 && !world->gcc);
-        const bool gcc_packable = !world->gcc || (!abi_test_spells_vector(table, type) && abi_test_gcc_packable(table, type));
-        packable = packable && (width != BUSTER_TYPE_NOT_BIT_FIELD || gcc_packable);
         members[m] = (TypeMember){
             .name = unnamed ? 0 : type_test_new_name(&world->types),
             .type = type,
             .bit_width = width,
             .alignment_log2 = !unnamed && type_test_below(random, 16) == 0 ? (uint8_t)(1 + type_test_below(random, 5)) : 0,
-            .packed = !unnamed && type_test_below(random, 16) == 0 && gcc_packable,
+            .packed = !unnamed && type_test_below(random, 16) == 0 && !world->gcc,
         };
     }
     uint32_t total = count;
@@ -1359,8 +1464,8 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
         table->last_error = TYPE_ERROR_NONE;
     }
     const TypeRecordAttributes attributes = {
-        .packed = type_test_below(random, 8) == 0 && packable,
-        .pack_log2 = type_test_below(random, 10) == 0 && packable ? (uint8_t)(1 + type_test_below(random, 4)) : 0,
+        .packed = type_test_below(random, 8) == 0 && !world->gcc,
+        .pack_log2 = type_test_below(random, 10) == 0 && !world->gcc ? (uint8_t)(1 + type_test_below(random, 4)) : 0,
         .alignment_log2 = type_test_below(random, 10) == 0 ? (uint8_t)(1 + type_test_below(random, 6)) : 0,
     };
     const TypeId record = type_tag(table, is_union ? BUSTER_TYPE_KIND_UNION : BUSTER_TYPE_KIND_STRUCT, type_test_new_name(&world->types));
@@ -1391,7 +1496,8 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
     for (uint32_t i = 0; i < 12; i += 1)
     {
         type_test_world_enum(&world->types, &random);
-        abi_test_world_add(world, world->types.pool.types[world->types.pool.count - 1]);
+        const TypeId enumeration = world->types.pool.types[world->types.pool.count - 1];
+        abi_test_world_add(world, world->gcc && abi_test_gcc_enum_differs(world, enumeration) ? 0 : enumeration);
     }
     const uint32_t widths[] = {
         2,
@@ -1467,7 +1573,9 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         {
             const TypeId base = abi_test_world_pick(world, &random, true);
             const uint32_t alignment_log2 = (uint32_t)type_test_below(&random, 7);
-            abi_test_world_add(world, world->gcc && abi_test_spells_vector(table, base) ? 0 : type_aligned(table, type_unqualified(base), alignment_log2));
+            const bool lowered = alignment_log2 <= type_alignment_log2(table, type_strip_aligned(table, base));
+            const bool gcc_divergent = lowered || abi_test_spells_vector(table, base);
+            abi_test_world_add(world, world->gcc && gcc_divergent ? 0 : type_aligned(table, type_unqualified(base), alignment_log2));
             table->last_error = TYPE_ERROR_NONE;
         }
         else if (pick < 13 && !world->gcc)
@@ -2087,6 +2195,29 @@ static bool abi_test_gcc_variadic_differs(const AbiTable* abi, TypeId type)
     return (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_WIDE) != 0;
 }
 
+// Whether a type is a vector wrapped in records of one member its size (struct { V v; }, and so on), which GCC passes
+// as clang does when it is WIDE: clang classifies an array wider than 16 bytes in a union as nothing (its size check
+// returns before it is classified), so `union { __m128 v; char c[24]; }` is SSE, SSEUP to clang and MEMORY to GCC.
+static bool abi_test_single_vector(const TypeTable* table, TypeId type)
+{
+    uint32_t index = abi_resolved_index(table, type);
+    bool walking = true;
+    while (walking)
+    {
+        const uint8_t kind = table->types.kind[index];
+        walking = false;
+        if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
+        {
+            const uint32_t tag = table->types.index[index];
+            const uint32_t member = table->tags.member_begin[tag];
+            const uint32_t inner = table->tags.member_count[tag] == 1 ? abi_resolved_index(table, table->members.type[member]) : index;
+            walking = inner != index && table->types.size[inner] == table->types.size[index] && table->members.bit_width[member] == BUSTER_TYPE_NOT_BIT_FIELD;
+            index = walking ? inner : index;
+        }
+    }
+    return table->types.kind[index] == BUSTER_TYPE_KIND_VECTOR;
+}
+
 // Whether GCC passes an unnamed argument otherwise than clang: a WIDE aggregate, as a union of vectors as wide as a
 // vector register, to which GCC gives an integer mode: its caller passes it in a register and its va_arg reads 32 or 64
 // bytes from the register save area, past the 16 a register has there (GCC 16 crashes calling itself so).
@@ -2099,6 +2230,23 @@ static bool abi_test_gcc_unnamed_differs(const AbiTable* abi, TypeId type)
 static uint64_t abi_test_round(uint64_t value, uint64_t alignment)
 {
     return (value + alignment - 1) / alignment * alignment;
+}
+
+// What clang passes of a value in registers: no byte of an eightbyte that is NO_CLASS, padding or the part of a scalar
+// past the eightbyte it starts in, which clang classifies by its start alone (an 8-byte enum at offset 4 of a record
+// passes its low half). Clears those bytes' mask.
+static void abi_test_mask_unpassed(const AbiTable* abi, const TypeTable* table, TypeId type, uint8_t* mask)
+{
+    const uint8_t classes = abi->rows[(uint64_t)(type >> BUSTER_TYPE_INDEX_SHIFT) * BUSTER_ABI_ROW_BYTES];
+    const uint64_t size = table->types.size[abi_resolved_index(table, type)];
+    if ((classes & 7) == BUSTER_ABI_NO_CLASS)
+    {
+        memset(mask, 0, size < 8 ? size : 8);
+    }
+    if ((classes >> 4) == BUSTER_ABI_NO_CLASS && size > 8)
+    {
+        memset(mask + 8, 0, (size < 16 ? size : 16) - 8);
+    }
 }
 
 // Random signatures over `types`, their bytes, and their locations (abi_assign's).
@@ -2189,6 +2337,47 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
             .arguments = cross->arguments,
         };
         abi_assign(cross->abi, signatures, cross->locations, cross->calls);
+        // clang passes a type of no size in memory as an i0 once no general register is free (see EMPTY), which its own
+        // passes crash on now and then (LowerArguments, ADCE): the fixtures check that case, and here such an argument
+        // becomes a long, which leaves the other arguments where they were.
+        bool replaced = false;
+        for (uint32_t n = 0; n < cross->signature_count; n += 1)
+        {
+            const AbiTestSignature* signature = &cross->signatures[n];
+            for (uint32_t a = 0; a < signature->count; a += 1)
+            {
+                const uint32_t i = signature->first + a;
+                const uint32_t pass = cross->abi->pass[cross->arguments[i] >> BUSTER_TYPE_INDEX_SHIFT];
+                if ((pass & (BUSTER_ABI_PASS_EMPTY | BUSTER_ABI_PASS_IGNORE)) == BUSTER_ABI_PASS_EMPTY && cross->locations[i].kind == BUSTER_ABI_LOCATION_IGNORE)
+                {
+                    const uint64_t at = cross->data_begin[n] + cross->offsets[i];
+                    cross->arguments[i] = BUSTER_TYPE_LONG;
+                    abi_test_fill(table, BUSTER_TYPE_LONG, cross->data + at, cross->data_mask + at, random, stack);
+                    replaced = true;
+                }
+            }
+        }
+        if (replaced)
+        {
+            abi_assign(cross->abi, signatures, cross->locations, cross->calls);
+        }
+        for (uint32_t n = 0; n < cross->signature_count; n += 1)
+        {
+            const AbiTestSignature* signature = &cross->signatures[n];
+            for (uint32_t a = 0; a < signature->count; a += 1)
+            {
+                const uint32_t i = signature->first + a;
+                const uint8_t kind = cross->locations[i].kind;
+                if (kind == BUSTER_ABI_LOCATION_REGISTERS || kind == BUSTER_ABI_LOCATION_SPLIT)
+                {
+                    abi_test_mask_unpassed(cross->abi, table, cross->arguments[i], cross->data_mask + cross->data_begin[n] + cross->offsets[i]);
+                }
+            }
+            if (cross->calls[n].result.kind == BUSTER_ABI_RESULT_REGISTERS)
+            {
+                abi_test_mask_unpassed(cross->abi, table, signature->result, cross->result_mask + cross->result_begin[n]);
+            }
+        }
     }
     free(results_types);
     free(counts);
@@ -2317,10 +2506,13 @@ static void abi_test_write_c(AbiTestCross* cross, TypeTestText* text, bool* vari
         type_test_format(text, "%sc_callee_%u", result, n);
         abi_test_parameters(cross, text, n, true);
         type_test_format(text, "\n{\n");
+        // Each argument is checked through a copy: clang 23 crashes eliding the copy of an argument whose address is
+        // taken when a byval argument of no size (a record of a flexible array member alone) is on the stack before it.
         for (uint32_t a = 0; a < signature->named; a += 1)
         {
             const uint32_t offset = cross->offsets[signature->first + a];
-            type_test_format(text, "    abi_check(&a%u, abi_args_%u + %u, abi_mask_args_%u + %u, sizeof(a%u), %u, %u, \"A\");\n", a, n, offset, n, offset, a, n, a);
+            type_test_format(text, "    {\n        %sc = a%u;\n", abi_test_c_name(world, cross->arguments[signature->first + a]), a);
+            type_test_format(text, "        abi_check(&c, abi_args_%u + %u, abi_mask_args_%u + %u, sizeof(c), %u, %u, \"A\");\n    }\n", n, offset, n, offset, n, a);
         }
         if (abi_test_variadic(signature))
         {
@@ -2940,7 +3132,9 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 const bool spelled = world.types.spellings[index].spellable && world.types.spellings[index].number != UINT32_MAX;
                 const bool small = table->types.size[abi_resolved_index(table, type)] <= 256;
                 const bool atomic_result = table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC;
-                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !atomic_result)
+                const bool wide_aggregate = (abi.pass[index] & (BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_AGGREGATE)) == (BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_AGGREGATE);
+                const bool gcc_differs = gcc && (abi_test_gcc_enum_differs(&world, type) || (wide_aggregate && !abi_test_single_vector(table, type)));
+                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !atomic_result && !gcc_differs)
                 {
                     types[type_count] = type;
                     type_count += 1;
