@@ -9,12 +9,12 @@
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...). For each count of workers in --functions (1, 64,
 // 2000 and 102400 by default), a generated program that calls libc, of 200 workers per unit as synth's translation
 // units have (one unit below 200), with 8 globals and 2 thread-locals per unit, is bound by each path, against the
-// dynamic PIE's runtime and against a static executable's. Each figure is the median of BUSTER_BIND_BENCHMARK_RUNS runs
-// after a warm-up, each path's on a program of its own, each run on the same link put back as it was before (its
-// counts, arenas and the symbol columns binding writes, and binding's own state):
+// dynamic PIE's runtime, a static executable's and a static PIE's. Each figure is the median of
+// BUSTER_BIND_BENCHMARK_RUNS runs after a warm-up, each path's on a program of its own, each run on the same link put
+// back as it was before (its counts, arenas and the symbol columns binding writes, and binding's own state):
 //   - match: the program's global symbols looked up in the runtime's names (bind_match), per global symbol;
 //   - begin: bind_begin, the match and the crt objects before the program joined;
-//   - closure (the static runtime's): the members the link needs found (bind_closure_vector or bind_closure_exact), per
+//   - closure (the static runtimes'): the members the link needs found (bind_closure_vector or bind_closure_exact), per
 //     member found;
 //   - end: bind_end, after the program's atoms: the members joined (for the static runtime, the closure among it),
 //     every name bound, the crt objects after the program joined, and the exports found.
@@ -413,7 +413,7 @@ static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime,
     // The closure alone, from binding's state after bind_begin: the program defines its names before it, so the names it
     // has are all matched.
     const uint32_t words = (runtime->member_count + 63) / 64;
-    for (uint32_t run = 0; result && runtime->kind == RUNTIME_KIND_STATIC && run < BUSTER_BIND_BENCHMARK_RUNS + 1; run += 1)
+    for (uint32_t run = 0; result && runtime_kind_is_static(runtime->kind) && run < BUSTER_BIND_BENCHMARK_RUNS + 1; run += 1)
     {
         bind_benchmark_restore(&atoms_added, link, &program->bytes);
         bind_benchmark_load(&state, &bind);
@@ -507,7 +507,8 @@ int run_bind_benchmark(int argc, char** argv)
     Runtime runtimes[RUNTIME_KINDS];
     const bool imported = valid && runtime_import(&runtimes[RUNTIME_KIND_DYNAMIC]) == RUNTIME_ERROR_NONE;
     const bool static_imported = imported && runtime_import_static(&runtimes[RUNTIME_KIND_STATIC]) == RUNTIME_ERROR_NONE;
-    bool result = static_imported && x86_encoder_initialize();
+    const bool pie_imported = static_imported && runtime_import_static_pie(&runtimes[RUNTIME_KIND_STATIC_PIE]) == RUNTIME_ERROR_NONE;
+    bool result = pie_imported && x86_encoder_initialize();
     if (!valid)
     {
         printf("usage: benchmark-bind [--functions LIST] [--seed N]\n");
@@ -540,7 +541,8 @@ int run_bind_benchmark(int argc, char** argv)
             {
                 const Link* link = &programs[BIND_PATH_VECTOR].link;
                 printf("%u workers, %s runtime (%u members joined): %u units, %u symbols (%u global), %u atoms, %u fixups%s\n", functions[p],
-                       kind == RUNTIME_KIND_STATIC ? "the static" : "the dynamic PIE's", members, programs[BIND_PATH_VECTOR].options.units, link->symbols.count - 1, globals,
+                       kind == RUNTIME_KIND_STATIC ? "the static" : kind == RUNTIME_KIND_STATIC_PIE ? "the static PIE's" : "the dynamic PIE's", members,
+                       programs[BIND_PATH_VECTOR].options.units, link->symbols.count - 1, globals,
                        link->atoms.count - 1, link->fixups.count - 1, same ? "" : "; the paths' links differ");
                 for (uint32_t path = 0; path < 2; path += 1)
                 {
@@ -549,7 +551,7 @@ int run_bind_benchmark(int argc, char** argv)
                         char what[64];
                         snprintf(what, sizeof(what), "%s %s", bind_benchmark_path_names[path], bind_benchmark_phase_names[phase]);
                         const uint64_t items = phase == BIND_BENCHMARK_MATCH ? globals : phase == BIND_BENCHMARK_CLOSURE ? members : 0;
-                        if (phase != BIND_BENCHMARK_CLOSURE || kind == RUNTIME_KIND_STATIC)
+                        if (phase != BIND_BENCHMARK_CLOSURE || runtime_kind_is_static((RuntimeKind)kind))
                         {
                             bind_benchmark_print(what, &figures[BIND_BENCHMARK_PHASES * path + phase], items, phase == BIND_BENCHMARK_MATCH ? "global" : "member");
                         }
@@ -570,6 +572,10 @@ int run_bind_benchmark(int argc, char** argv)
     if (static_imported)
     {
         runtime_release(&runtimes[RUNTIME_KIND_STATIC]);
+    }
+    if (pie_imported)
+    {
+        runtime_release(&runtimes[RUNTIME_KIND_STATIC_PIE]);
     }
     return result ? 0 : 1;
 }
