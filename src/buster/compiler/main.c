@@ -285,6 +285,11 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/c_preprocessor_test.c"
 int run_preprocessor_benchmark(int argc, char** argv);
 
+// The parser (c_parser.c) and its tests, for the default command, which preprocesses and parses a file, and the
+// test-parser command.
+#include "buster/compiler/c_parser.c"
+#include "buster/compiler/c_parser_test.c"
+
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test
 // programs generated in it, and their tests, for the test-link command.
 #include "buster/compiler/link.c"
@@ -362,6 +367,10 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-preprocessor") == 0)
     {
         result = run_preprocessor_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-parser") == 0)
+    {
+        result = run_parser_tests(argc - 2, argv + 2);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
     {
@@ -494,6 +503,10 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "test-call-graph") == 0)
     {
         result = run_call_graph_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2)
+    {
+        result = run_parse_command(argc - 1, argv + 1);
     }
     else
     {
