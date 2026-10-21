@@ -42,6 +42,8 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/bind.c`, `src/buster/compiler/bind_test.c`, `src/buster/compiler/bind_benchmark.c` | Original binding of the C runtime into a program's link, its vector and exact paths, and its tests and benchmark; Default. GNU ld's and lld's symbol resolution are described from their documented behavior and observed output, not copied. The tests make their programs themselves and read the system's C runtime at run time without copying it; `ld.lld`, `ld.bfd`, `cc` and `readelf` are external oracles for `--cross-check`, not vendored. The benchmark's clock, counter and median helpers are its own. |
 | `src/buster/compiler/c_intern.c`, `src/buster/compiler/c_refine.c`, `src/buster/compiler/c_refine_test.c` | Original intern table, token refinement and tests; Default. The hash's constants are wyhash's public-domain ones, and the keyword list is clang-generated data; both are noted below. |
 | `src/buster/compiler/c_preprocessor.c` | Original preprocessor; Default, with the clang-generated predefined macros and feature tables noted below. |
+| `src/buster/compiler/c_predefines.c` | Original predefined macros of the target and the options; Default, with the clang-generated tables noted below. The options' rules follow clang 23's driver (`clang/lib/Driver/ToolChains/Clang.cpp`, `CommonArgs.cpp`, `Arch/X86.cpp`) and frontend (`InitPreprocessor.cpp`, `Basic/Targets/X86.cpp`), and `-march=native`'s detection LLVM 23's `llvm/lib/TargetParser/Host.cpp`: read for their rules (which option wins, which CPUID bit names which feature, which family and model name which CPU) and written again in C, none of their code copied. |
+| `src/buster/compiler/c_predefines_test.c` | Original tests and table generator; Default. clang runs externally as the oracle and the generator's source of answers, and is not vendored. |
 | `src/buster/compiler/c_preprocessor_test.c` | Original preprocessor tests; Default. Some expected texts are clang 23's `-E` output for the cases' own inputs. `pp_test_keyword_candidates` and `pp_test_feature_names` list names from clang 23's `TokenKinds.def` and companions and from its `Features.def` (names only, noted below). |
 | `src/buster/compiler/c_preprocessor_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
@@ -255,6 +257,15 @@ compiler's own. LLVM's terms are retained in [LICENSES/LLVM.txt](LICENSES/LLVM.t
   `Features.def`.
 - A local script ran the queries; `docs/c-preprocessor.md` records its
   procedure.
+- `c_predefines.c`'s generated block (`predefines_features`, `predefines_cpus`,
+  `predefines_tunes`) is clang 23.1.3's answers, printed by
+  `./build/compiler test-preprocessor --generate-targets` (`c_predefines_test.c`):
+  the x86-64 CPUs of `-march` and `-mtune` from clang's errors, the features and
+  their closures from the IR's `"target-features"` of each CPU and flag, each
+  feature's own macros from `clang -dM -E` with exactly its features, and each
+  CPU's macro name from its `__tune_*__`. Its long double, wide character and
+  `TARGET_OS_*` texts are `clang -dM -E`'s for `-mlong-double-*`,
+  `-fshort-wchar` and `-fdefine-target-os-macros`.
 
 SQLite, musl, Lua and the system's headers are test oracle inputs only (the
 tests read them where they are installed): none of their code is included.

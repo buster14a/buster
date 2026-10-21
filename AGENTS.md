@@ -341,10 +341,15 @@ designs and the compilers already built this way.
   provides `benchmark-refinement`.
 - `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
   unit's token stream from its files' refined tokens, and `./build/compiler -E`
-  (as `clang -E`). `docs/c-preprocessor.md` explains the design, the `clang -E`
-  oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
-  (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
+  (as `clang -E`, with `-dM`). `docs/c-preprocessor.md` explains the design, the
+  `clang -E` oracle and the 9700X measurements. `c_preprocessor_test.c` holds its
+  tests (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
   `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`.
+  `c_predefines.c` gives the predefined macros the target and the options decide,
+  as clang does (`-march`, the `-m` feature flags, `-march=native` from CPUID,
+  `-O`, `-f...`, `-g`), from tables generated from clang 23; `c_predefines_test.c`
+  checks them against clang under `test-preprocessor --clang` and regenerates the
+  tables (`test-preprocessor --generate-targets`).
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -386,16 +391,15 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
 ./build/compiler test-preprocessor --clang
-clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
-./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
-./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+./build/compiler -E -march=native -Isrc -fwrapv -funsigned-char -o build/main.i src/buster/compiler/main.c
+./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 ./build/compiler test-types
 ./build/compiler benchmark-types
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
-`#error` without AVX-512's), which the preprocessor's built-in predefines don't
-have: `--predefines` gives it clang's for those options.
+`#error` without AVX-512's), which the preprocessor's predefines give as clang's
+do for the same options (`c_predefines.c`).
 
 ## Sharing the 9700X
 
@@ -1918,12 +1922,24 @@ spellings.
 options, token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
 prints the first difference with the tokens around it. For files, our side
-reads clang's own predefines for the options through `--predefines`. Without
-files, `--clang` also checks the built-in predefines, the keywords and the
-features:
+reads clang's own predefines for the options through `--predefines`, so that
+only preprocessing is compared (the 9700X's clang names another patch release).
+Without files, `--clang` also checks the built-in predefines, the keywords and
+the features:
 - in 14 option sets (the ten modes from `c89` to `gnu23`, and `-ffreestanding`
   and `-O2`), `pp_predefines` must give `clang -dM -E` line for line, but for
   the patch release's three macros;
+- `c_predefines.c`'s generated tables (each x86-64 feature's flag, closures and
+  macros, each `-march` CPU's macro name and features, the `-mtune` names) must
+  be what `c_predefines_test.c`'s generator learns from clang now;
+- about 1,300 option sets must give `clang -dM -E`'s macros, and be accepted or
+  refused alike: every `-march` CPU and `native`, every feature flag on and off
+  on x86-64 and on the CPUs with the most features, each `-O`, `-f`, `-g` and
+  `-m` option `c_predefines.c` reads, alone and in the orders that matter, and
+  400 random combinations (`--seed N` changes them);
+- `-E -dM` of a file with every kind of definition must be clang's byte for byte
+  (but `__BUSTER__`), and `__FLT_EVAL_METHOD__` clang's under
+  `-ffp-eval-method=` and without SSE;
 - in each mode, `__is_identifier` of every predefined name, and of clang's
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
   must give clang's answer;
@@ -1932,6 +1948,10 @@ features:
 Lua 5.4.8 and this repository's translation units are token-identical;
 `docs/c-preprocessor.md` has the configurations. The 9700X job runs the cases
 and the repository's translation units with `--clang`.
+
+`./build/compiler test-preprocessor --generate-targets` prints `c_predefines.c`'s
+generated block from clang 23 (on `PATH`), to paste over the old one when clang
+changes; `docs/c-preprocessor.md` ("The predefined macros") has the procedure.
 
 ## Preprocessor benchmark
 
@@ -1943,11 +1963,10 @@ per input token and per output token, IPC, each phase's share (read, lex,
 refine, directive tables, main loop) and what a run did (directives, runs,
 expansions, invocations, pastes, and the `#if` lines and their lengths).
 `--clang` also times `clang -E -P` with the same options, a process per file.
-Target options don't change our predefines: give `--predefines FILE` from
-`clang -dM -E` with the same options (the benchmark leaves it out of clang's
-command line), as the smoke commands above do for `main.c`. The default 9700X
-job runs that one, pinned to one allowed CPU; like the others, its measurements
-are informational.
+Our predefines follow the target options as clang's do; `--predefines FILE`
+still replaces them (the benchmark leaves it out of clang's command line). The
+default 9700X job runs the smoke command above on `main.c`, pinned to one allowed
+CPU; like the others, its measurements are informational.
 
 ## Type tests
 

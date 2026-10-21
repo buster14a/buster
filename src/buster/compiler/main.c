@@ -280,9 +280,12 @@ int run_preprocessor_fuzz_benchmark(int argc, char** argv);
 #include "buster/compiler/c_refine_test.c"
 int run_refinement_benchmark(int argc, char** argv);
 
-// The preprocessor (c_preprocessor.c) and its tests, for the -E and test-preprocessor commands.
+// The preprocessor (c_preprocessor.c, with the predefined macros of c_predefines.c) and its tests, for the -E and
+// test-preprocessor commands.
+#include "buster/compiler/c_predefines.c"
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_preprocessor_test.c"
+#include "buster/compiler/c_predefines_test.c"
 int run_preprocessor_benchmark(int argc, char** argv);
 
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test

@@ -208,11 +208,10 @@ jobs:
           ./build/compiler test-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: Benchmark the preprocessor on main.c
-        # Target options don't change the preprocessor's own predefines yet: it reads clang's for them.
+        # The preprocessor's own predefines follow -march=native as clang's do (c_predefines.c).
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 
       - name: Test the C type table
         # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a

@@ -353,20 +353,146 @@ corpora query:
    mode.
 
 The configuration is clang's (the owner's decision in #117): `-std=gnu17` by
-default, clang's include search, and clang's predefined macros plus
-`__BUSTER__` defined to 1. The predefined macros are clang 23.1.3's for
-`x86_64-pc-linux-gnu` in gnu17 (`clang -dM -E -x c /dev/null`), without the
-ones the language mode and options decide. `pp_predefines` adds those:
-`__STDC_VERSION__`, `__STRICT_ANSI__` or `linux` and `unix`, the inline
-semantics, `__STDC_HOSTED__`, `__OPTIMIZE__` or `__NO_INLINE__`, C23's
-additions, and `__BUSTER__`. The C23 additions are the difference between that
-command's output under `-std=c23` and under the default.
+default, clang's include search, and clang's predefined macros for the same
+options plus `__BUSTER__` defined to 1. `pp_predefines` writes them in three
+parts:
 
-Target options such as `-march` don't change them yet, though #117 asks for
-clang's macros for the same `-march`. Until then, `--predefines FILE` replaces
-the built-in predefines (`__BUSTER__` too) with a file of `#define` lines, such
-as `clang -dM -E` gives for the same options. The oracle uses this, so its runs
-start from clang's macros alone.
+- the fixed part, `pp_predefines_base`: clang 23.1.3's for
+  `x86_64-pc-linux-gnu` in gnu17 (`clang -dM -E -x c /dev/null`), without the
+  ones the language mode and the options decide, and clang's two
+  `#pragma push_macro` of `__GCC_DESTRUCTIVE_SIZE` and
+  `__GCC_CONSTRUCTIVE_SIZE`, so that `#pragma pop_macro` gets them back;
+- the language mode's: `__STDC_VERSION__` (`199409L` for
+  `-std=iso9899:199409`), `__STRICT_ANSI__` or `linux` and `unix`,
+  `__STDC_HOSTED__` and C23's additions (the difference between that command's
+  output under `-std=c23` and under the default);
+- the target's and the other options', from `c_predefines.c`
+  (`predefines_text`, "The predefined macros" below), and `__BUSTER__`.
+
+`--predefines FILE` still replaces all of them (`__BUSTER__` too) with a file of
+`#define` lines, such as `clang -dM -E` gives for the same options. The oracle's
+file runs use it, so that they start from clang's macros alone and compare only
+preprocessing: the 9700X's clang is 23.1.1, whose `__clang_patchlevel__` and
+`__clang_version__` differ from the generator's.
+
+`__FLT_EVAL_METHOD__` is a builtin, as in clang: 0, or 1 and 2 with
+`-ffp-eval-method=double` and `extended`, and 2 when SSE is off (x87 math).
+Under `-E`, clang's `#pragma clang fp eval_method` doesn't change it, and it
+doesn't here.
+
+`-E -dM` prints every macro defined at the end instead of the tokens, as
+`clang -dM -E` does (`pp_print_macros`): sorted by name, the parameters as
+written without spaces (`__VA_ARGS__` as `...`, GNU's `x...`), one space before
+the replacement list and one before each token that had whitespace before it,
+each token spelled as clang spells it (an identifier's interned name, or its
+spelling as written when it has a UCN). On an empty file it prints clang's
+output byte for byte, but `__BUSTER__`.
+
+### The predefined macros
+
+`c_predefines.c` gives the macros that the target and the command-line options
+decide, as clang 23 gives them for x86-64 Linux: `-march`, the `-m` feature
+flags, `-march=native`, and `-O`, `-f...`, `-g`, `-pthread`, `-mcmodel` and
+`-mlong-double`.
+
+**The target.** clang's model, read from its driver and LLVM's
+`X86TargetParser`:
+
+- A CPU has a set of features. `-march` picks it (x86-64 by default), and
+  x86-64 always has `sse2`.
+- The `-m` flags turn features on and off, in command-line order. The driver
+  keeps only each feature's last flag (a later `-mavx2` drops an earlier
+  `-mno-avx2`, so `-mavx2 -mno-avx2` leaves `avx` as the CPU has it).
+- Turning a feature on turns on everything it implies (its `implies` closure).
+  Turning it off turns off everything that implies it (`implied_by`).
+- Then four soft rules: `popcnt` and `crc32` come with `sse4.2`, `mmx` with
+  `sse` and `xsave` with `avx`, unless the list turned them off.
+- Special flags:
+  - `-msse4` is `-msse4.2`, and `-mno-sse4` is `-mno-sse4.1`;
+  - `-m80387` is `-mx87`;
+  - `-mgeneral-regs-only` is `-mno-x87 -mno-mmx -mno-sse` in its place;
+  - `-mapxf` turns on APX's features but `cf`, and `-mapx-features=` and
+    `-mno-apx-features=` name them one by one;
+  - `-mapx-inline-asm-use-gpr32` comes after the others.
+- Each feature has its own macros (`avx512f` has `__AVX512F__`, `sse2` has
+  `__SSE2__`, `__SSE2_MATH__` and the `__FLT16_*` macros, `cx16` has
+  `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16`), but two need several:
+  - `__APX_F__` needs the eight features `-mapxf` turns on;
+  - `__APX_INLINE_ASM_USE_GPR32__` needs `egpr` and
+    `-mapx-inline-asm-use-gpr32`.
+- A CPU has macros of its own (`__znver5`, `__znver5__`, `__tune_znver5__`;
+  most Intel CPUs are `corei7`), which `-mtune` doesn't change.
+
+**The generated tables.** The CPUs, the features and their closures and macros
+are clang's answers, and `./build/compiler test-preprocessor --generate-targets`
+prints them as `c_predefines.c`'s generated block (`predefines_features`,
+`predefines_cpus`, `predefines_tunes`). It asks clang 23 (on `PATH`, with
+`CPATH` unset) these questions:
+
+- The CPUs: from its errors for an unknown `-march` (the 79 of x86-64) and an
+  unknown `-mtune` (105).
+- The features: the IR's `"target-features"` of a function, which lists the
+  whole feature map. That is every CPU's features, the names `-march=native`
+  passes, `x87` and `inline-asm-use-gpr32` (117 in all).
+- Each feature's closures: its `implies` from a configuration that turns
+  nothing else on, then `-mFEATURE` (or `-mapx-features=`); its `implied_by`
+  from `-mno-FEATURE`'s list. The two must agree.
+- Each CPU's features, without what only a soft rule adds. That is checked by
+  turning each rule's trigger off: none of clang 23's CPUs needs it.
+- Each feature's own macros: those that `config(implies)` defines and
+  `config(implies without it)` doesn't. config(T) is `-march=x86-64` with
+  exactly the features T: `-mno-` of x86-64's features and of the soft rules'
+  features outside T, then T's flags. The macros that no feature owns, in the
+  configuration with every feature, must be the two above.
+
+**`-march=native`** finds the host's CPU and features from CPUID and XCR0, by
+LLVM 23's rules (`Host.cpp`'s `getHostCPUName` and `getHostCPUFeatures`, read
+for their rules and written again here):
+
+- the CPU from the vendor, family and model, with LLVM's guesses from the
+  features for unknown Intel models;
+- each feature from its CPUID bit, with AVX's, AVX-512's, AMX's and APX's
+  state saved by the OS (XCR0).
+
+The driver passes the host's features before the `-m` flags, so a later flag
+for one of them wins. An unknown host is x86-64, as in clang's driver.
+
+**The other options**, each read as clang's driver reads it:
+
+| Options | Macros |
+| --- | --- |
+| `-O0` to `-O3` (higher is 3), `-O`, `-Og`, `-Os`, `-Oz`, `-Ofast`; `-fno-inline`, `-finline`, `-f[no-]inline-functions`, `-finline-hint-functions` | `__OPTIMIZE__`, `__OPTIMIZE_SIZE__`, `__NO_INLINE__` (at -O0, or when only always-inline functions inline) |
+| The floating-point options, through clang's state machine (`RenderFloatingPointOptions`): `-f[no-]fast-math`, `-ffp-model=`, `-f[no-]finite-math-only`, `-f[no-]math-errno`, `-f[no-]honor-infinities`, `-f[no-]honor-nans`, `-f[no-]signed-zeros`, `-f[no-]associative-math`, `-f[no-]reciprocal-math`, `-f[no-]approx-func`, `-f[no-]trapping-math`, `-ffp-exception-behavior=`, `-f[no-]rounding-math`, `-f[no-]unsafe-math-optimizations`, `-Ofast` (when it is the last `-O`) | `__FAST_MATH__`, `__FINITE_MATH_ONLY__`, `__NO_MATH_ERRNO__` |
+| `-ffp-eval-method=` | `__FLT_EVAL_METHOD__`'s value |
+| `-f[no-]signed-char`, `-f[no-]unsigned-char` | `__CHAR_UNSIGNED__` |
+| `-f[no-]short-wchar` | the `wchar_t` macros |
+| `-f[no-]pic`, `-f[no-]PIC`, `-f[no-]pie`, `-f[no-]PIE` (level 2 PIE by default) | `__pic__`, `__PIC__`, `__pie__`, `__PIE__` |
+| `-f[no-]stack-protector[-strong\|-all]` (this clang's default is `-strong`, which `-fstack-protector` keeps) | `__SSP__`, `__SSP_STRONG__`, `__SSP_ALL__` |
+| `-f[no-]asynchronous-unwind-tables`, `-f[no-]unwind-tables`, `-f[no-]dwarf2-cfi-asm`, `-f[no-]exceptions`, the `-g` options, `-ffreestanding` | `__GCC_HAVE_DWARF2_CFI_ASM` |
+| `-f[no-]exceptions`; `-fsjlj-exceptions`, `-fseh-exceptions`, `-fdwarf-exceptions`, `-fwasm-exceptions` | `__EXCEPTIONS`; `__USING_SJLJ_EXCEPTIONS__`, `__SEH__` |
+| `-fgnuc-version=` (0 turns them off); `-f[no-]gnu89-inline` | `__GNUC__` and the others, GCC's atomics; `__GNUC_GNU_INLINE__` or `__GNUC_STDC_INLINE__` |
+| `-pthread` | `_REENTRANT` |
+| `-fcf-protection[=]` | `__CET__` |
+| `-f[no-]sanitize=` (address, hwaddress, thread, alloc-token, and their kernel forms; the others change no macro) | `__SANITIZE_*__` |
+| `-f[no-]blocks`; `-f[no-]openmp[=]`, `-fopenmp-version=`; `-fopenacc` | `__block`, `__BLOCKS__`; `_OPENMP`; `_OPENACC` |
+| `-f[no-]define-target-os-macros`, `-f[no-]pascal-strings`, `-f[no-]constant-cfstrings`, the profile-generating options | `TARGET_OS_*`, `__PASCAL_STRINGS__`, `__CONSTANT_CFSTRINGS__`, `__LLVM_INSTR_PROFILE_GENERATE` |
+| `-mcmodel=`, `-mlong-double-64`/`80`/`128` | `__code_model_*__`, the `long double` macros |
+| `-mfpmath=` | none, but it must agree with SSE |
+
+The options that would make clang predefine or compile something buster doesn't
+follow are refused by name: `-m32`, `-mx32`, `-m16`, `-mcpu=`, `-mkernel`,
+`-fapple-kext`, `-fms-compatibility`, `-ffixed-point`, `-fdefer-ts`,
+`-foffload-via-llvm`, the profile-using and pointer-field-protection options,
+and the CUDA, HIP, SYCL and pointer-authentication ones. So are a `--target`
+other than x86-64 Linux with glibc, and values clang refuses (an unknown CPU, a
+bad `-fcf-protection=`, `-fsanitize=address,thread`, ...). Any other `-f` or `-m`
+option changes no macro and is accepted.
+
+This is cold code: it runs once per translation unit, on a few dozen options
+and two-word feature sets, so it has no vector path. Generating the text costs
+about 13,000 instructions (an empty file's `-E` run is 1.6 million, mostly
+preprocessing the 470 `#define` lines), and `-march=native`'s CPUID adds a few
+microseconds.
 
 ### Tokens, locations and the output
 
@@ -661,6 +787,18 @@ the mispredictions it saves.
     `-O2`, 14 option sets in all, `pp_predefines` must give `clang -dM -E` line
     for line. Only the three macros that name clang's patch release are left
     out.
+  - `c_predefines.c`'s generated tables must be what the generator learns from
+    clang now, field by field (`c_predefines_test.c`).
+  - About 1,300 option sets must give `clang -dM -E`'s macros, and both must
+    accept or refuse each. They are every `-march` CPU and `native`; every
+    feature flag on and off, on x86-64 and on the CPUs with the most features
+    (`diamondrapids`, `znver5`, `native`); each option of the table above,
+    alone and in the orders that matter (last-wins families, the floating-point
+    state machine, the soft rules, a feature's last flag); and 400 random
+    combinations of them (`--seed N`).
+  - `-E -dM` of a file with every kind of definition must be clang's byte for
+    byte (but `__BUSTER__`), and `__FLT_EVAL_METHOD__` clang's under
+    `-ffp-eval-method=` and without SSE.
   - In each mode, `__is_identifier` of every predefined name (keywords,
     directive names, the preprocessor's names) must give clang's answer, and so
     must that of 568 candidates chosen apart from them, so that a keyword
@@ -773,9 +911,6 @@ cleared once and reused.
 ## Not yet
 
 - `#embed` is an error, and `__has_embed` isn't answered (C23).
-- Target options (`-march`, `-m*`, `-funsigned-char`) don't change the built-in
-  predefines; they come only through `--predefines`. #117's configuration asks
-  for clang's macros for the same `-march`.
 - The oracle uses the installed `/usr/include`, not the pinned copy of the
   headers that #125's decision asks for (with its hashed manifest).
 - The feature tests (`__has_attribute` and the others) always answer from
@@ -788,7 +923,7 @@ cleared once and reused.
   where a token needs it.
 - Diagnostics give `file:line:column: error: message` (the presumed file and
   line) and no more: no notes, no macro backtraces (#108), and no carets.
-- C++ (`-x c++`), dependency output (`-M`) and `-dM` aren't supported.
+- C++ (`-x c++`) and dependency output (`-M`) aren't supported.
 - Stringizing an identifier that pasting made from a UCN gives its UTF-8
   spelling, where clang keeps the UCN.
 - `defined` that a macro's argument brings into a `#if` line (`ID(defined X)`)
@@ -828,10 +963,10 @@ cleared once and reused.
 ./build/compiler test-preprocessor --clang
 ./build/compiler test-preprocessor --clang path/to/sqlite3.c
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang path/to/sqlite3.c
-clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char \
-    --predefines build/predefines.h src/buster/compiler/main.c
-./build/compiler -E [-P] [-o file] [options] file.c
+    src/buster/compiler/main.c
+./build/compiler -E [-P] [-dM] [-o file] [options] file.c
+./build/compiler test-preprocessor --generate-targets   # c_predefines.c's generated tables, from clang
 ```
 
 On the 9700X, run each one under `EXCLUSIVE_OWNER=<name>

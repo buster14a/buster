@@ -157,7 +157,9 @@ struct PPOptions
 {
     CLanguage language;
     bool freestanding;
-    bool optimize;
+    // The target's and the other options' predefined macros (c_predefines.c): -march, the -m feature flags, -O, -f...,
+    // -g. All zero is clang's defaults with no option.
+    PredefinesOptions target;
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
     bool scalar;
     bool no_standard_includes;
@@ -186,6 +188,8 @@ struct PPOptions
     // Replace trigraphs (translation phase 1): clang's default in the ISO modes before C23, and -trigraphs,
     // -ftrigraphs or -fno-trigraphs.
     bool trigraphs;
+    // -dM: -E prints the macros defined at the end (pp_print_macros) instead of the tokens.
+    bool dump_macros;
 };
 
 // A column array of tokens: an output stream, or a stack of buffers.
@@ -366,6 +370,7 @@ typedef enum PPBuiltin
     PP_BUILTIN_BASE_FILE,
     PP_BUILTIN_FILE_NAME,
     PP_BUILTIN_INCLUDE_LEVEL,
+    PP_BUILTIN_FLT_EVAL_METHOD,
     PP_BUILTIN_PRAGMA,
     PP_BUILTIN_DEFINED,
     PP_BUILTIN_HAS_INCLUDE,
@@ -608,7 +613,6 @@ struct Preprocessor
     // Macros: by IdentId (macro_of, and is_macro's bits), and the records.
     PPMacroId* macro_of;
     uint64_t* is_macro;
-    uint32_t macro_capacity; // Ids that macro_of has room for.
     PPMacro* macros;
     uint32_t macro_count;
     PPItem* items;
@@ -643,6 +647,8 @@ struct Preprocessor
     char time[16];
     char timestamp[32]; // __TIMESTAMP__'s with SOURCE_DATE_EPOCH (`has_epoch`); else each file's modification time.
     bool has_epoch;
+    // The builtin __FLT_EVAL_METHOD__'s value (predefines_text).
+    uint32_t flt_eval_method;
     // The phases' TSC ticks, the tokens the prepared files have, and what the run did, when PPOptions.timing is set.
     uint64_t ticks[PP_PHASE_COUNT];
     uint64_t input_tokens;
@@ -4307,6 +4313,10 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
         case PP_BUILTIN_INCLUDE_LEVEL:
             pp_emit(pp, pp_number_token(pp, pp->include_depth, flags));
             break;
+        case PP_BUILTIN_FLT_EVAL_METHOD:
+            // The translation unit's: under -E, clang's `#pragma clang fp eval_method` doesn't change it.
+            pp_emit(pp, pp_number_token(pp, pp->flt_eval_method, flags));
+            break;
         case PP_BUILTIN_DATE:
             pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->date, (uint32_t)strlen(pp->date), flags));
             break;
@@ -6143,7 +6153,8 @@ static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t leng
 }
 
 // clang 23's predefined macros for x86_64-pc-linux-gnu in gnu17 (`clang -dM -E -x c /dev/null`), without the ones the
-// language mode and options decide (pp_predefines adds those).
+// language mode decides (pp_predefines adds those) and the ones the target and the other options decide
+// (c_predefines.c's predefines_text).
 static const char pp_predefines_base[] =
     "#define _LP64 1\n"
     "#define __ATOMIC_ACQUIRE 2\n"
@@ -6169,7 +6180,6 @@ static const char pp_predefines_base[] =
     "#define __CLANG_ATOMIC_POINTER_LOCK_FREE 2\n"
     "#define __CLANG_ATOMIC_SHORT_LOCK_FREE 2\n"
     "#define __CLANG_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
-    "#define __CONSTANT_CFSTRINGS__ 1\n"
     "#define __DBL_DECIMAL_DIG__ 17\n"
     "#define __DBL_DENORM_MIN__ 4.9406564584124654e-324\n"
     "#define __DBL_DIG__ 15\n"
@@ -6187,23 +6197,7 @@ static const char pp_predefines_base[] =
     "#define __DBL_NORM_MAX__ 1.7976931348623157e+308\n"
     "#define __DECIMAL_DIG__ __LDBL_DECIMAL_DIG__\n"
     "#define __ELF__ 1\n"
-    "#define __FINITE_MATH_ONLY__ 0\n"
     "#define __FLOAT128__ 1\n"
-    "#define __FLT16_DECIMAL_DIG__ 5\n"
-    "#define __FLT16_DENORM_MIN__ 5.9604644775390625e-8F16\n"
-    "#define __FLT16_DIG__ 3\n"
-    "#define __FLT16_EPSILON__ 9.765625e-4F16\n"
-    "#define __FLT16_HAS_DENORM__ 1\n"
-    "#define __FLT16_HAS_INFINITY__ 1\n"
-    "#define __FLT16_HAS_QUIET_NAN__ 1\n"
-    "#define __FLT16_MANT_DIG__ 11\n"
-    "#define __FLT16_MAX_10_EXP__ 4\n"
-    "#define __FLT16_MAX_EXP__ 16\n"
-    "#define __FLT16_MAX__ 6.5504e+4F16\n"
-    "#define __FLT16_MIN_10_EXP__ (-4)\n"
-    "#define __FLT16_MIN_EXP__ (-13)\n"
-    "#define __FLT16_MIN__ 6.103515625e-5F16\n"
-    "#define __FLT16_NORM_MAX__ 6.5504e+4F16\n"
     "#define __FLT_DECIMAL_DIG__ 9\n"
     "#define __FLT_DENORM_MIN__ 1.40129846e-45F\n"
     "#define __FLT_DIG__ 6\n"
@@ -6230,29 +6224,13 @@ static const char pp_predefines_base[] =
     "#define __FPCLASS_POSZERO 0x0040\n"
     "#define __FPCLASS_QNAN 0x0002\n"
     "#define __FPCLASS_SNAN 0x0001\n"
-    "#define __FXSR__ 1\n"
     "#define __GCC_ASM_FLAG_OUTPUTS__ 1\n"
-    "#define __GCC_ATOMIC_BOOL_LOCK_FREE 2\n"
-    "#define __GCC_ATOMIC_CHAR16_T_LOCK_FREE 2\n"
-    "#define __GCC_ATOMIC_CHAR32_T_LOCK_FREE 2\n"
-    "#define __GCC_ATOMIC_CHAR_LOCK_FREE 2\n"
-    "#define __GCC_ATOMIC_INT_LOCK_FREE 2\n"
-    "#define __GCC_ATOMIC_LLONG_LOCK_FREE 2\n"
-    "#define __GCC_ATOMIC_LONG_LOCK_FREE 2\n"
-    "#define __GCC_ATOMIC_POINTER_LOCK_FREE 2\n"
-    "#define __GCC_ATOMIC_SHORT_LOCK_FREE 2\n"
-    "#define __GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n"
-    "#define __GCC_ATOMIC_WCHAR_T_LOCK_FREE 2\n"
     "#define __GCC_CONSTRUCTIVE_SIZE 64\n"
     "#define __GCC_DESTRUCTIVE_SIZE 64\n"
     "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 1\n"
     "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_2 1\n"
     "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_4 1\n"
     "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8 1\n"
-    "#define __GNUC_MINOR__ 2\n"
-    "#define __GNUC_PATCHLEVEL__ 1\n"
-    "#define __GNUC__ 4\n"
-    "#define __GXX_ABI_VERSION 1002\n"
     "#define __INT16_C(c) c\n"
     "#define __INT16_C_SUFFIX__\n"
     "#define __INT16_FMTd__ \"hd\"\n"
@@ -6331,21 +6309,6 @@ static const char pp_predefines_base[] =
     "#define __INT_LEAST8_WIDTH__ 8\n"
     "#define __INT_MAX__ 2147483647\n"
     "#define __INT_WIDTH__ 32\n"
-    "#define __LDBL_DECIMAL_DIG__ 21\n"
-    "#define __LDBL_DENORM_MIN__ 3.64519953188247460253e-4951L\n"
-    "#define __LDBL_DIG__ 18\n"
-    "#define __LDBL_EPSILON__ 1.08420217248550443401e-19L\n"
-    "#define __LDBL_HAS_DENORM__ 1\n"
-    "#define __LDBL_HAS_INFINITY__ 1\n"
-    "#define __LDBL_HAS_QUIET_NAN__ 1\n"
-    "#define __LDBL_MANT_DIG__ 64\n"
-    "#define __LDBL_MAX_10_EXP__ 4932\n"
-    "#define __LDBL_MAX_EXP__ 16384\n"
-    "#define __LDBL_MAX__ 1.18973149535723176502e+4932L\n"
-    "#define __LDBL_MIN_10_EXP__ (-4931)\n"
-    "#define __LDBL_MIN_EXP__ (-16381)\n"
-    "#define __LDBL_MIN__ 3.36210314311209350626e-4932L\n"
-    "#define __LDBL_NORM_MAX__ 1.18973149535723176502e+4932L\n"
     "#define __LITTLE_ENDIAN__ 1\n"
     "#define __LLONG_WIDTH__ 64\n"
     "#define __LONG_LONG_MAX__ 9223372036854775807LL\n"
@@ -6358,7 +6321,6 @@ static const char pp_predefines_base[] =
     "#define __MEMORY_SCOPE_SYSTEM 0\n"
     "#define __MEMORY_SCOPE_WRKGRP 2\n"
     "#define __MEMORY_SCOPE_WVFRNT 3\n"
-    "#define __MMX__ 1\n"
     "#define __NO_MATH_INLINES 1\n"
     "#define __OBJC_BOOL_IS_BOOL 0\n"
     "#define __OPENCL_MEMORY_SCOPE_ALL_SVM_DEVICES 3\n"
@@ -6369,8 +6331,6 @@ static const char pp_predefines_base[] =
     "#define __ORDER_BIG_ENDIAN__ 4321\n"
     "#define __ORDER_LITTLE_ENDIAN__ 1234\n"
     "#define __ORDER_PDP_ENDIAN__ 3412\n"
-    "#define __PIC__ 2\n"
-    "#define __PIE__ 2\n"
     "#define __POINTER_WIDTH__ 64\n"
     "#define __PRAGMA_REDEFINE_EXTNAME 1\n"
     "#define __PTRDIFF_FMTd__ \"ld\"\n"
@@ -6393,14 +6353,12 @@ static const char pp_predefines_base[] =
     "#define __SIZEOF_FLOAT__ 4\n"
     "#define __SIZEOF_INT128__ 16\n"
     "#define __SIZEOF_INT__ 4\n"
-    "#define __SIZEOF_LONG_DOUBLE__ 16\n"
     "#define __SIZEOF_LONG_LONG__ 8\n"
     "#define __SIZEOF_LONG__ 8\n"
     "#define __SIZEOF_POINTER__ 8\n"
     "#define __SIZEOF_PTRDIFF_T__ 8\n"
     "#define __SIZEOF_SHORT__ 2\n"
     "#define __SIZEOF_SIZE_T__ 8\n"
-    "#define __SIZEOF_WCHAR_T__ 4\n"
     "#define __SIZEOF_WINT_T__ 4\n"
     "#define __SIZE_FMTX__ \"lX\"\n"
     "#define __SIZE_FMTo__ \"lo\"\n"
@@ -6409,11 +6367,6 @@ static const char pp_predefines_base[] =
     "#define __SIZE_MAX__ 18446744073709551615UL\n"
     "#define __SIZE_TYPE__ long unsigned int\n"
     "#define __SIZE_WIDTH__ 64\n"
-    "#define __SSE2_MATH__ 1\n"
-    "#define __SSE2__ 1\n"
-    "#define __SSE_MATH__ 1\n"
-    "#define __SSE__ 1\n"
-    "#define __SSP_STRONG__ 2\n"
     "#define __STDC_EMBED_EMPTY__ 2\n"
     "#define __STDC_EMBED_FOUND__ 1\n"
     "#define __STDC_EMBED_NOT_FOUND__ 0\n"
@@ -6518,10 +6471,6 @@ static const char pp_predefines_base[] =
     "#define __UINT_LEAST8_TYPE__ unsigned char\n"
     "#define __USER_LABEL_PREFIX__\n"
     "#define __VERSION__ \"Clang 23.1.3\"\n"
-    "#define __WCHAR_MAX__ 2147483647\n"
-    "#define __WCHAR_MIN__ (-__WCHAR_MAX__ - 1)\n"
-    "#define __WCHAR_TYPE__ int\n"
-    "#define __WCHAR_WIDTH__ 32\n"
     "#define __WINT_MAX__ 4294967295U\n"
     "#define __WINT_MIN__ 0U\n"
     "#define __WINT_TYPE__ unsigned int\n"
@@ -6535,19 +6484,12 @@ static const char pp_predefines_base[] =
     "#define __clang_minor__ 1\n"
     "#define __clang_patchlevel__ 3\n"
     "#define __clang_version__ \"23.1.3 \"\n"
-    "#define __clang_wide_literal_encoding__ \"UTF-32\"\n"
-    "#define __code_model_small__ 1\n"
     "#define __gnu_linux__ 1\n"
-    "#define __k8 1\n"
-    "#define __k8__ 1\n"
     "#define __linux 1\n"
     "#define __linux__ 1\n"
     "#define __llvm__ 1\n"
-    "#define __pic__ 2\n"
-    "#define __pie__ 2\n"
     "#define __seg_fs __attribute__((address_space(257)))\n"
     "#define __seg_gs __attribute__((address_space(256)))\n"
-    "#define __tune_k8__ 1\n"
     "#define __unix 1\n"
     "#define __unix__ 1\n"
     "#define __x86_64 1\n"
@@ -6558,7 +6500,6 @@ static const char pp_predefines_base[] =
 static const char pp_predefines_c23[] =
     "#define __CHAR8_TYPE__ unsigned char\n"
     "#define __CLANG_ATOMIC_CHAR8_T_LOCK_FREE 2\n"
-    "#define __GCC_ATOMIC_CHAR8_T_LOCK_FREE 2\n"
     "#define __SIZE_FMTB__ \"lB\"\n"
     "#define __SIZE_FMTb__ \"lb\"\n"
     "#define __UINT16_FMTB__ \"hB\"\n"
@@ -6591,15 +6532,28 @@ static const char pp_predefines_c23[] =
     "#define __UINT_LEAST8_FMTb__ \"hhb\"\n"
     ;
 
-// The predefines buffer for the options, into `buffer` (room for sizeof(pp_predefines_base) + 512 bytes). Returns its
-// length.
-static uint32_t pp_predefines(const PPOptions* options, char* buffer)
+// The most bytes pp_predefines writes.
+#define BUSTER_PP_PREDEFINES_BYTES (sizeof(pp_predefines_base) + sizeof(pp_predefines_c23) + 512 + BUSTER_PREDEFINES_TEXT_BYTES)
+
+// The predefines buffer for the options, into `buffer` (room for BUSTER_PP_PREDEFINES_BYTES): the fixed part, the
+// language mode's, the target's and the other options' (predefines_text) and __BUSTER__. *flt_eval_method gets
+// __FLT_EVAL_METHOD__'s value. Returns its length, or BUSTER_PP_PREDEFINES_BYTES + 1 after an error in the options,
+// reported on stderr.
+static uint32_t pp_predefines(const PPOptions* options, char* buffer, uint32_t* flt_eval_method)
 {
     uint32_t length = 0;
     memcpy(buffer, pp_predefines_base, sizeof(pp_predefines_base) - 1);
     length += sizeof(pp_predefines_base) - 1;
+    // clang pushes these two after defining them, so that a #pragma pop_macro gets them back and -D redefines them
+    // without a warning.
+    length += (uint32_t)sprintf(buffer + length, "#pragma push_macro(\"__GCC_DESTRUCTIVE_SIZE\")\n#pragma push_macro(\"__GCC_CONSTRUCTIVE_SIZE\")\n");
     const CLanguage language = options->language;
-    const char* version = language.standard >= 2023 ? "202311L" : language.standard >= 2017 ? "201710L" : language.standard >= 2011 ? "201112L" : language.standard >= 1999 ? "199901L" : 0;
+    const char* version = language.standard >= 2023   ? "202311L"
+                          : language.standard >= 2017 ? "201710L"
+                          : language.standard >= 2011 ? "201112L"
+                          : language.standard >= 1999 ? "199901L"
+                          : language.standard >= 1994 ? "199409L"
+                                                      : 0;
     if (version != 0)
     {
         length += (uint32_t)sprintf(buffer + length, "#define __STDC_VERSION__ %s\n", version);
@@ -6612,21 +6566,17 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer)
     {
         length += (uint32_t)sprintf(buffer + length, "#define linux 1\n#define unix 1\n");
     }
-    length += (uint32_t)sprintf(buffer + length, language.standard >= 1999 ? "#define __GNUC_STDC_INLINE__ 1\n" : "#define __GNUC_GNU_INLINE__ 1\n");
     length += (uint32_t)sprintf(buffer + length, "#define __STDC_HOSTED__ %d\n", options->freestanding ? 0 : 1);
-    if (!options->freestanding)
-    {
-        length += (uint32_t)sprintf(buffer + length, "#define __GCC_HAVE_DWARF2_CFI_ASM 1\n");
-    }
-    length += (uint32_t)sprintf(buffer + length, options->optimize ? "#define __OPTIMIZE__ 1\n" : "#define __NO_INLINE__ 1\n");
     if (language.standard >= 2023)
     {
         memcpy(buffer + length, pp_predefines_c23, sizeof(pp_predefines_c23) - 1);
         length += sizeof(pp_predefines_c23) - 1;
     }
+    const uint32_t target = predefines_text(&options->target, language, options->freestanding, buffer + length, BUSTER_PREDEFINES_TEXT_BYTES, flt_eval_method);
+    length = target <= BUSTER_PREDEFINES_TEXT_BYTES ? length + target : BUSTER_PP_PREDEFINES_BYTES + 1;
     // The one macro that isn't clang's (#117: clang's configuration, plus this). --predefines replaces it too, so that
     // test-preprocessor --clang starts from clang's own macros alone.
-    length += (uint32_t)sprintf(buffer + length, "#define __BUSTER__ 1\n");
+    length += length <= BUSTER_PP_PREDEFINES_BYTES ? (uint32_t)sprintf(buffer + length, "#define __BUSTER__ 1\n") : 0;
     return length;
 }
 
@@ -6906,6 +6856,15 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         {
             pp_define_builtin(pp, builtins[i].name, builtins[i].builtin, builtins[i].function_like);
         }
+        // __FLT_EVAL_METHOD__ is a builtin in clang too (its value follows -ffp-eval-method and SSE), but not one of
+        // c_intern.c's predefined names.
+        static const char flt_eval_method[] = "__FLT_EVAL_METHOD__";
+        const IdentId flt_eval_method_id = result ? intern_find_or_add(table, (const uint8_t*)flt_eval_method, sizeof(flt_eval_method) - 1) : 0;
+        result = result && flt_eval_method_id != 0;
+        if (result)
+        {
+            pp_define_builtin(pp, flt_eval_method_id, PP_BUILTIN_FLT_EVAL_METHOD, false);
+        }
         // __DATE__ and __TIME__ from SOURCE_DATE_EPOCH if it is set (reproducible builds), else now; __TIMESTAMP__ from
         // SOURCE_DATE_EPOCH too, else each file's modification time (pp_expand_builtin).
         static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
@@ -6975,6 +6934,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     if (pp->options.predefines_path != 0)
     {
         const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), BUSTER_PP_SYSTEM_FILE);
+        pp->flt_eval_method = predefines_eval_method(&pp->options.target);
         result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE;
         if (result)
         {
@@ -6987,12 +6947,17 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     }
     else
     {
-        char* text = arena_push(&pp->arena, sizeof(pp_predefines_base) + sizeof(pp_predefines_c23) + 512, 1);
-        const uint32_t file = text != 0 ? pp_virtual_file(pp, "<built-in>", text, pp_predefines(&pp->options, text), BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
+        char* text = arena_push(&pp->arena, BUSTER_PP_PREDEFINES_BYTES, 1);
+        const uint32_t length = text != 0 ? pp_predefines(&pp->options, text, &pp->flt_eval_method) : BUSTER_PP_PREDEFINES_BYTES + 1;
+        const uint32_t file = length <= BUSTER_PP_PREDEFINES_BYTES ? pp_virtual_file(pp, "<built-in>", text, length, BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
         result = file != BUSTER_PP_NONE;
         if (result)
         {
             pp_run_file(pp, file);
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the predefined macros for these options");
         }
     }
     // The command line: -D and -U in order, then -include.
@@ -7880,6 +7845,126 @@ static bool pp_print(Preprocessor* pp, FILE* stream, bool markers)
     return pp->vectorized ? pp_print_vector(pp, stream, markers) : pp_print_scalar(pp, stream, markers);
 }
 
+// Orders two macro names as clang's -dM does: bytewise, a prefix first.
+static int pp_compare_names(const Preprocessor* pp, IdentId a, IdentId b)
+{
+    const uint32_t a_length = intern_length(pp->table, a);
+    const uint32_t b_length = intern_length(pp->table, b);
+    const int compared = memcmp(intern_bytes(pp->table, a), intern_bytes(pp->table, b), a_length < b_length ? a_length : b_length);
+    return compared != 0 ? compared : a_length < b_length ? -1 : a_length > b_length ? 1 : 0;
+}
+
+// -dM: every macro defined at the end of the translation unit but the builtins, as `clang -dM -E` prints them
+// (PrintMacroDefinition): sorted by name, `#define NAME`, a function-like macro's parameters (`(a,b,...)`, GNU's
+// `x...`), a space, and the replacement list's tokens, each after a space where whitespace was before it. A token's
+// spelling is clang's: an identifier's interned name (UTF-8), or its spelling as written when that has a UCN, and any
+// other token's bytes without their line splices. Returns false if memory runs out or the stream fails.
+static __attribute__((unused)) bool pp_print_macros(Preprocessor* pp, FILE* stream)
+{
+    Scratch scratch = scratch_begin(0);
+    // The names, then sorted by a bottom-up merge sort (between `names` and `other`).
+    // The macros are the set bits of is_macro, over the ids the intern table has.
+    const uint32_t words = (pp->table->count + 63) / 64;
+    uint32_t count = 0;
+    for (uint32_t w = 0; w < words; w += 1)
+    {
+        count += (uint32_t)__builtin_popcountll(pp->is_macro[w]);
+    }
+    IdentId* names = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, IdentId, (uint64_t)count + 1);
+    IdentId* other = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, IdentId, (uint64_t)count + 1);
+    bool result = names != 0 && other != 0;
+    count = 0;
+    for (uint32_t w = 0; result && w < words; w += 1)
+    {
+        for (uint64_t bits = pp->is_macro[w]; bits != 0; bits &= bits - 1)
+        {
+            const IdentId id = w * 64 + (uint32_t)__builtin_ctzll(bits);
+            names[count] = id;
+            count += !(pp->macros[pp->macro_of[id]].flags & BUSTER_PP_MACRO_BUILTIN);
+        }
+    }
+    for (uint32_t width = 1; result && width < count; width *= 2)
+    {
+        for (uint32_t begin = 0; begin < count; begin += 2 * width)
+        {
+            const uint32_t middle = begin + width < count ? begin + width : count;
+            const uint32_t end = begin + 2 * width < count ? begin + 2 * width : count;
+            uint32_t i = begin;
+            uint32_t j = middle;
+            for (uint32_t k = begin; k < end; k += 1)
+            {
+                const bool left = i < middle && (j == end || pp_compare_names(pp, names[i], names[j]) <= 0);
+                other[k] = left ? names[i] : names[j];
+                i += left;
+                j += !left;
+            }
+        }
+        IdentId* swap = names;
+        names = other;
+        other = swap;
+    }
+    for (uint32_t m = 0; result && m < count; m += 1)
+    {
+        const PPMacro* macro = &pp->macros[pp->macro_of[names[m]]];
+        const PPFileData* data = &pp->datas[macro->data];
+        fprintf(stream, "#define %.*s", (int)intern_length(pp->table, names[m]), intern_bytes(pp->table, names[m]));
+        if (macro->flags & BUSTER_PP_MACRO_FUNCTION)
+        {
+            // The parameter list as written, without its spaces: names, commas and `...`, up to the ')'.
+            fputc('(', stream);
+            for (uint32_t t = macro->parameters_begin; t + 1 < macro->body_begin; t += 1)
+            {
+                const uint8_t kind = data->kinds[t] & 0x7F;
+                if (kind == C_TOKEN_RAW_IDENTIFIER)
+                {
+                    fprintf(stream, "%.*s", (int)intern_length(pp->table, data->values[t]), intern_bytes(pp->table, data->values[t]));
+                }
+                else
+                {
+                    fputs(kind == C_TOKEN_ELLIPSIS ? "..." : ",", stream);
+                }
+            }
+            fputc(')', stream);
+        }
+        if (macro->body_begin == macro->body_end || !pp_file_space(data, macro->body_begin))
+        {
+            fputc(' ', stream);
+        }
+        for (uint32_t t = macro->body_begin; result && t < macro->body_end; t += 1)
+        {
+            const uint8_t kind = data->kinds[t] & 0x7F;
+            const uint32_t location = macro->base + data->starts[t];
+            const uint32_t end = kind == C_TOKEN_RAW_IDENTIFIER ? location + refine_identifier_end(data->bytes, data->length, data->starts[t], pp->refine_flags) - data->starts[t]
+                                                                : macro->base + data->values[t];
+            const uint64_t mark = scratch.arena->length;
+            uint8_t* buffer = arena_push(scratch.arena, (uint64_t)(end - location) + 24, 1);
+            result = buffer != 0;
+            const uint8_t* spelling = 0;
+            uint32_t length = 0;
+            if (result && kind == C_TOKEN_RAW_IDENTIFIER)
+            {
+                length = pp_identifier_as_written(pp, location, buffer, &spelling);
+                if (memchr(spelling, '\\', length) == 0)
+                {
+                    length = pp_spelling(pp, kind, data->values[t], location, buffer, &spelling);
+                }
+            }
+            else if (result)
+            {
+                length = pp_spelling(pp, kind, macro->base + data->values[t], location, buffer, &spelling);
+            }
+            if (result)
+            {
+                fprintf(stream, "%s%.*s", pp_file_space(data, t) ? " " : "", (int)length, spelling);
+            }
+            arena_pop_to(scratch.arena, mark);
+        }
+        fputc('\n', stream);
+    }
+    scratch_end(scratch);
+    return result && !ferror(stream);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The -E command
 
@@ -7896,7 +7981,8 @@ static bool pp_parse_standard(const char* value, CLanguage* language)
         { "c99", 1999, false }, { "iso9899:1999", 1999, false }, { "gnu99", 1999, true }, { "c11", 2011, false }, { "iso9899:2011", 2011, false },
         { "gnu11", 2011, true }, { "c17", 2017, false }, { "c18", 2017, false }, { "iso9899:2017", 2017, false }, { "iso9899:2018", 2017, false },
         { "gnu17", 2017, true }, { "gnu18", 2017, true }, { "c23", 2023, false }, { "c2x", 2023, false }, { "iso9899:2024", 2023, false },
-        { "gnu23", 2023, true }, { "gnu2x", 2023, true },
+        { "gnu23", 2023, true }, { "gnu2x", 2023, true }, { "c9x", 1999, false }, { "iso9899:199x", 1999, false }, { "gnu9x", 1999, true },
+        { "c1x", 2011, false }, { "iso9899:201x", 2011, false }, { "gnu1x", 2011, true }, { "iso9899:199409", 1994, false },
     };
     bool result = false;
     for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(standards); i += 1)
@@ -7928,17 +8014,29 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     // -trigraphs, -ftrigraphs and -fno-trigraphs override the mode's default (-1 for none).
     int trigraphs = -1;
     result = quote != 0 && include != 0 && system != 0 && after != 0 && macros != 0 && includes != 0;
+    result = result && predefines_options_initialize(&options->target, arena, (uint32_t)count);
     for (int i = 0; result && i < count; i += 1)
     {
         const char* argument = arguments[i];
         const char* next = i + 1 < count ? arguments[i + 1] : 0;
-        if (strcmp(argument, "-E") == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-fhosted") == 0)
+        // The target's options and the others that change the predefined macros (c_predefines.c) come first.
+        const PredefinesParse predefined = predefines_option(&options->target, argument, next);
+        if (predefined != PREDEFINES_PARSE_UNKNOWN)
+        {
+            result = predefined != PREDEFINES_PARSE_ERROR;
+            i += predefined == PREDEFINES_PARSE_TAKEN_TWO;
+        }
+        else if (strcmp(argument, "-E") == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-fhosted") == 0)
         {
             options->freestanding &= strcmp(argument, "-fhosted") != 0;
         }
         else if (strcmp(argument, "-P") == 0)
         {
             *markers = false;
+        }
+        else if (strcmp(argument, "-dM") == 0)
+        {
+            options->dump_macros = true;
         }
         else if (strcmp(argument, "-ffreestanding") == 0)
         {
@@ -7952,22 +8050,19 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             options->scalar = true;
         }
-        else if (strncmp(argument, "-O", 2) == 0)
-        {
-            options->optimize = strcmp(argument, "-O0") != 0;
-        }
         else if (strcmp(argument, "-trigraphs") == 0 || strcmp(argument, "-ftrigraphs") == 0 || strcmp(argument, "-fno-trigraphs") == 0)
         {
             trigraphs = strcmp(argument, "-fno-trigraphs") != 0;
         }
-        else if (strncmp(argument, "-m", 2) == 0 || strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0 || strcmp(argument, "-g") == 0)
+        else if (strncmp(argument, "-m", 2) == 0 || strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0)
         {
-            // Target, code generation and warning options: the target's macros (-march's features among them) only come
-            // through --predefines for now (test-preprocessor gives clang's for the same options).
+            // The other target, code generation and warning options: none changes what -E gives (predefines_option
+            // takes the ones that do, and refuses those buster doesn't follow).
         }
-        else if (strncmp(argument, "-std=", 5) == 0)
+        else if (strncmp(argument, "-std=", 5) == 0 || strcmp(argument, "-ansi") == 0)
         {
-            result = pp_parse_standard(argument + 5, &options->language);
+            // -ansi is -std=c89 in C.
+            result = pp_parse_standard(argument[1] == 'a' ? "c89" : argument + 5, &options->language);
         }
         else if (strcmp(argument, "-x") == 0 && next != 0 && strcmp(next, "c") == 0)
         {
@@ -8064,7 +8159,8 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
-                        "[-include file] [-std=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
+                        "[-include file] [-dM] [-std=...] [-ansi] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-march=cpu] [-m[no-]feature] [-O...] [-f...] "
+                        "[-g...] [-pthread] [-nostdinc] [--predefines file] [--scalar] file\n");
     }
     else
     {
@@ -8078,7 +8174,7 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
         {
             const bool preprocessed = pp_run(&pp, input);
             FILE* stream = output != 0 ? fopen(output, "w") : stdout;
-            const bool printed = stream != 0 && pp_print(&pp, stream, markers);
+            const bool printed = stream != 0 && (options.dump_macros ? pp_print_macros(&pp, stream) : pp_print(&pp, stream, markers));
             if (stream != 0 && stream != stdout)
             {
                 fclose(stream);

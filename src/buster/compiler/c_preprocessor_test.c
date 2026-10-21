@@ -1132,8 +1132,8 @@ static int pp_test_compare_lines(const void* a, const void* b)
     return strcmp(*(char* const*)a, *(char* const*)b);
 }
 
-// The lines of a predefines text, sorted, without the macros that name clang's patch release (which the 9700X's and
-// the generator's clang differ in) and our own __BUSTER__: `lines` gets pointers into `text`, whose newlines become
+// The #define lines of a predefines text, sorted, without the macros that name clang's patch release (which the 9700X's
+// and the generator's clang differ in) and our own __BUSTER__: `lines` gets pointers into `text`, whose newlines become
 // NULs. Returns the count.
 static uint32_t pp_test_predefine_lines(char* text, size_t length, char** lines, uint32_t capacity)
 {
@@ -1150,7 +1150,8 @@ static uint32_t pp_test_predefine_lines(char* text, size_t length, char** lines,
             {
                 text[k - 1] = 0;
             }
-            bool kept = *line != 0;
+            // Only the definitions: the predefines also push two of them (#pragma push_macro), which -dM doesn't list.
+            bool kept = strncmp(line, "#define ", 8) == 0;
             for (uint32_t k = 0; kept && k < BUSTER_ARRAY_LENGTH(skipped); k += 1)
             {
                 kept = strncmp(line, skipped[k], strlen(skipped[k])) != 0;
@@ -1195,8 +1196,11 @@ static bool pp_test_predefines(const char* directory)
         const char* output;
         bool markers;
         bool passed = pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
-        char* ours = malloc(sizeof(pp_predefines_base) + sizeof(pp_predefines_c23) + 512);
-        size_t ours_length = passed && ours != 0 ? pp_predefines(&options, ours) : 0;
+        char* ours = malloc(BUSTER_PP_PREDEFINES_BYTES);
+        uint32_t flt_eval_method;
+        const uint32_t made = passed && ours != 0 ? pp_predefines(&options, ours, &flt_eval_method) : BUSTER_PP_PREDEFINES_BYTES + 1;
+        passed &= made <= BUSTER_PP_PREDEFINES_BYTES;
+        size_t ours_length = passed ? made : 0;
         size_t clang_length = 0;
         free(pp_test_clang(arguments, count, empty_path, clang_path, &clang_length));
         FILE* file = fopen(clang_path, "r");
@@ -1552,10 +1556,16 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
     return result;
 }
 
+// c_predefines_test.c's checks and generator: main.c includes it after this file.
+static bool predefines_test_run(const char* directory, uint64_t seed);
+static bool predefines_test_print_tables(const char* directory);
+
 static int run_preprocessor_tests(int argument_count, char** arguments)
 {
     bool with_clang = false;
     bool keep = false;
+    bool generate_targets = false;
+    uint64_t seed = 1;
     // The arguments without ours, for clang and pp_parse_options; the files are those that don't start with '-' and
     // aren't an option's value.
     char** passed = calloc((size_t)argument_count + 1, sizeof(char*));
@@ -1575,6 +1585,15 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
         {
             keep = true;
         }
+        else if (strcmp(argument, "--generate-targets") == 0)
+        {
+            generate_targets = true;
+        }
+        else if (strcmp(argument, "--seed") == 0 && i + 1 < argument_count)
+        {
+            i += 1;
+            seed = strtoull(arguments[i], 0, 10);
+        }
         else if (argument[0] == '-')
         {
             passed[passed_count++] = arguments[i];
@@ -1593,7 +1612,12 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
     bool passed_all = passed != 0 && files != 0 && mkdtemp(directory) != 0;
-    if (passed_all && file_count == 0)
+    if (passed_all && generate_targets)
+    {
+        // c_predefines.c's generated tables, from clang (c_predefines_test.c).
+        passed_all = predefines_test_print_tables(directory);
+    }
+    else if (passed_all && file_count == 0)
     {
         uint32_t failures = 0;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_test_cases); i += 1)
@@ -1606,6 +1630,7 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);
+            passed_all &= predefines_test_run(directory, seed);
             passed_all &= pp_test_keywords(directory);
             passed_all &= pp_test_features(directory);
         }
