@@ -16,11 +16,12 @@ on:
 permissions:
   contents: read
 
-# Repository-local serialization. The runner's job hooks also take the host's benchmark lock, which other
-# repositories' jobs and interactive benchmark sessions share (see AGENTS.md).
+# Repository-local serialization. Retain pending runs so a new PR cannot discard an oracle qualification before it
+# starts. The runner's job hooks also take the shared host benchmark lock (see AGENTS.md).
 concurrency:
   group: buster-fast-9700x
   cancel-in-progress: false
+  queue: max
 
 jobs:
   test:

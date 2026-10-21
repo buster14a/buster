@@ -92,3 +92,7 @@ series. The 9700X workflow verifies the manifests and every source/header byte,
 then compares SQLite, four musl sources and four libc headers. The libc subset
 must produce two identical files and two explicit skips. Its input lists live
 under `tests/preprocessor-oracle/`. The runner hooks hold the lock for the job.
+The existing concurrency group uses `queue: max` to retain pending runs, as
+[GitHub documents](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
+while still running one at a time; the default single pending slot discarded
+this PR's first two attempts before either created a job.
