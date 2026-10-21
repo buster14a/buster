@@ -1081,6 +1081,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     m[0] = abi_test_member(&builder, type_bit_int(table, 32, true));
     m[1] = abi_test_bits(&builder, type_bit_int(table, 128, true), 127, false);
     const TypeId stored = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
+    const TypeId aligned_long = type_aligned(table, BUSTER_TYPE_LONG, 5);
     if (vector)
     {
         abi_classify_all(&tables->abi, table);
@@ -1300,6 +1301,10 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     abi_test_expect(tally, calls[6].stack_bytes == 8 && calls[6].integer_registers == 6, "fixtures", "call 6's totals");
     abi_test_expect(tally, calls[7].stack_bytes == 0 && calls[7].integer_registers == 3 && calls[7].vector_registers == 1, "fixtures", "call 7's totals");
     abi_test_expect(tally, calls[8].stack_bytes == 16 && calls[8].integer_registers == 6, "fixtures", "call 8's totals");
+    // va_arg aligns the overflow area as the canonical type is aligned (EmitVAArg): long aligned(32) reads from 8.
+    const AbiVaArg plan = abi_va_arg(&tables->abi, table, aligned_long);
+    abi_test_expect(tally, plan.kind == BUSTER_ABI_LOCATION_REGISTERS && plan.overflow_alignment_log2 == 3 && plan.stack_bytes == 8, "fixtures",
+                    "va_arg of long aligned(32)");
 }
 
 static bool abi_test_fixtures(void)

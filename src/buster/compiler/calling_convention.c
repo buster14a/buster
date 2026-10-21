@@ -2637,7 +2637,8 @@ static AbiVaArg abi_va_arg(const AbiTable* abi, const TypeTable* table, TypeId t
 {
     const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
     const uint32_t pass = abi->pass[index];
-    const uint32_t alignment_log2 = table->types.alignment_log2[index];
+    // EmitVAArg aligns the overflow area to the canonical type's alignment: an aligned typedef's attribute doesn't count.
+    const uint32_t alignment_log2 = table->types.alignment_log2[abi_resolved_index(table, type)];
     AbiVaArg result = {
         .kind = BUSTER_ABI_LOCATION_STACK,
         .integer_registers = 0,
