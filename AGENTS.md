@@ -10,6 +10,15 @@ AMD Zen 5**, with heavy, deliberate use of SIMD intrinsics. Optimize both
 single-threaded compile throughput and useful multicore scaling while preserving
 C correctness and generated-program quality.
 
+Code should aim for the **target machine's maximum achievable throughput** on
+the actual workload, measured as useful work completed per second, both per core
+and across cores. Design algorithms and data layouts around the relevant
+execution, dependency, cache, memory-bandwidth and I/O limits; eliminate
+unnecessary computation, passes, copies, allocation and synchronization. Use
+representative end-to-end measurements, hardware counters and generated assembly
+to identify the limiting resource and validate progress toward that ceiling,
+while preserving correctness and generated-program quality.
+
 This is a fresh compiler, not a compatibility branch of `buster14a/buster-legacy`.
 Do not inherit that repository's frameworks, historical token parsers, CI
 matrices, benchmark services, or acceptance bureaucracy. Reuse an idea only when
