@@ -205,10 +205,10 @@ static bool dataflow_postorder(Dataflow* dataflow, Arena* scratch)
 // Rows of one vector (up to 512 values). Without the word loop, this loop keeps every pointer and counter in registers,
 // where the general loop spills some to the stack and reloads them in every block: where those slots share their low 12
 // bits with an in or out row that the sweep stores (about half of the places the frame can take in a page), the loads
-// wait on those stores, and some processes fall into states 10% to 150% slower. Neither of its loops is unrolled:
-// unrolled, either takes registers, and Clang moves some of the loop's state back to the stack (docs/dataflow.md,
-// "Where the AVX-512 solver's frame falls").
-static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_one(Dataflow* dataflow)
+// wait on those stores, and some processes fall into states 10% to 150% slower. Neither of its sweep's loops is
+// unrolled: unrolled, either takes registers, and Clang moves some of the loop's state back to the stack
+// (docs/dataflow.md, "Where the AVX-512 solver's frame falls").
+static __attribute__((noinline, aligned(64), no_builtin("memset"))) uint64_t dataflow_liveness_vector_one(Dataflow* dataflow)
 {
     uint64_t iterations = 1;
     const uint32_t block_count = dataflow->block_count;
@@ -219,10 +219,18 @@ static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_
     const uint64_t* restrict def_rows = dataflow->def;
     uint64_t* restrict in_rows = dataflow->in;
     uint64_t* restrict out_rows = dataflow->out;
-    const uint64_t matrix_bytes = (uint64_t)block_count * BUSTER_DATAFLOW_VECTOR_BYTES;
     // Only in is cleared: every sweep stores every block's out row (the postorder holds every block) and nothing reads
     // out, so clearing it too was only stores, up to 18% of a solve (docs/dataflow.md, "Clearing and storing out").
-    memset(in_rows, 0, matrix_bytes);
+    // The clearing is this function's own stores, not a call of memset (no_builtin keeps Clang from making it one):
+    // with the call, and the spills and reloads around it, between the loads of *dataflow and the first sweep, a
+    // solve took about 2% longer wherever the caller's Dataflow put its def and in bases on a 64-byte line sharing
+    // its low 12 address bits with an in or out row. Unrolled 8 times, since a row at a time took up to 2.4% more
+    // cycles than memset at 256 blocks (docs/dataflow.md, "Where the caller's Dataflow falls").
+    #pragma clang loop unroll_count(8)
+    for (uint32_t block = 0; block < block_count; block += 1)
+    {
+        _mm512_store_si512(in_rows + (uint64_t)block * BUSTER_DATAFLOW_VECTOR_WORDS, _mm512_setzero_si512());
+    }
     bool changed;
     do
     {
