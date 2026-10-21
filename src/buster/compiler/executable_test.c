@@ -39,8 +39,8 @@
 //   - Build IDs: the lanes' (the files are identical), another program's, and the tree's root recomputed from the file.
 //   - Unwind tables: the scanner against its twin and what the test knows of .eh_frame atoms built here, the sort
 //     against a stable sort, and links whose tables must come out sorted, or are refused (see "Unwind tables").
-//   - Blocks: random links for the vector passes over blocks of 16 atoms and symbols, written by every lane count and
-//     by the exact twins into the same file, which runs (executable_test_blocks).
+//   - Blocks: random links for the vector passes over blocks of 16 atoms and symbols, from the seed and from seed 116,
+//     written by every lane count and by the exact twins into the same file, which runs (executable_test_blocks).
 //   - The patch kernel: the fast path against the checked one (executable_test_kernel).
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
@@ -3177,8 +3177,14 @@ static bool executable_test_unwind_links(const ExecutableTestDirectory* director
 
 #define BUSTER_EXECUTABLE_TEST_BLOCK_LINKS 24
 #define BUSTER_EXECUTABLE_TEST_BLOCK_ATOMS 200
+// The largest atom's size, and _start's.
+#define BUSTER_EXECUTABLE_TEST_BLOCK_SIZE 200
+#define BUSTER_EXECUTABLE_TEST_BLOCK_CODE_BYTES 512
 // The loads through the GOT in _start: 3 runs of up to 15 each.
 #define BUSTER_EXECUTABLE_TEST_BLOCK_LOADS 45
+// A seed whose links once outgrew their bytes' arena, which reserved 64 pages for up to 200 page-aligned atoms: the
+// check runs it besides the one it is given.
+#define BUSTER_EXECUTABLE_TEST_BLOCK_REGRESSION_SEED 116
 
 static const uint8_t executable_test_block_classes[] = {
     BUSTER_LINK_CLASS_RODATA, BUSTER_LINK_CLASS_STRINGS, BUSTER_LINK_CLASS_TEXT,       BUSTER_LINK_CLASS_TDATA, BUSTER_LINK_CLASS_TBSS,
@@ -3196,7 +3202,11 @@ static bool executable_test_block_link(ExecutableTestLink* test, uint64_t* state
         .fixups = 2 * atom_count + BUSTER_EXECUTABLE_TEST_BLOCK_LOADS + 8,
         .wide_addends = 4,
     };
-    bool result = executable_test_link_begin_with(test, 64 * BUSTER_EXECUTABLE_PAGE_BYTES, capacity);
+    // The bytes at most: every atom of the largest size after the most padding a page's alignment takes, then _start's
+    // code (aligned to 16) and the table (8 bytes per symbol, aligned to 8).
+    const uint64_t byte_capacity = (uint64_t)atom_count * (BUSTER_EXECUTABLE_TEST_BLOCK_SIZE + BUSTER_EXECUTABLE_PAGE_BYTES - 1) + BUSTER_EXECUTABLE_TEST_BLOCK_CODE_BYTES + 15 +
+                                   8 * (uint64_t)capacity.symbols + 7;
+    bool result = executable_test_link_begin_with(test, byte_capacity, capacity);
     Link* link = &test->link;
     *start = result ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
     result = result && *start != 0;
@@ -3217,7 +3227,7 @@ static bool executable_test_block_link(ExecutableTestLink* test, uint64_t* state
         const uint64_t pick = executable_test_random(state);
         const bool zero_fill = link_class_is_zero_fill(run_class);
         const bool array = run_class == BUSTER_LINK_CLASS_INIT_ARRAY || run_class == BUSTER_LINK_CLASS_FINI_ARRAY;
-        const uint64_t size = array ? 8 * (pick % 4) : pick % 5 == 0 ? 0 : 1 + (pick >> 4) % 200;
+        const uint64_t size = array ? 8 * (pick % 4) : pick % 5 == 0 ? 0 : 1 + (pick >> 4) % BUSTER_EXECUTABLE_TEST_BLOCK_SIZE;
         uint8_t* bytes = !zero_fill && size != 0 ? arena_push(&test->bytes, size, 1ull << run_alignment) : 0;
         for (uint64_t b = 0; bytes != 0 && b < size; b += 1)
         {
@@ -3270,7 +3280,7 @@ static bool executable_test_block_link(ExecutableTestLink* test, uint64_t* state
         runs[run].offset = runs[run - 1].offset + 7 * (uint64_t)runs[run - 1].instruction_count;
     }
     executable_test_exit(&runs[3], 0);
-    result = result && executable_test_code(test, 512, runs, 4, *start) != 0;
+    result = result && executable_test_code(test, BUSTER_EXECUTABLE_TEST_BLOCK_CODE_BYTES, runs, 4, *start) != 0;
     // The table: each symbol's address, or a thread-local's offset from the thread pointer, 8 bytes each.
     const uint64_t table_size = 8 * (uint64_t)symbol_count;
     const AtomId table = result ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, table_size, 0, 0) : 0;
@@ -3290,19 +3300,23 @@ static bool executable_test_blocks(const ExecutableTestDirectory* directory, uin
     };
     char buffer[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     const String8 path = executable_test_path(directory, "blocks", buffer);
-    uint64_t state = seed * 0x9E3779B97F4A7C15ull + 7;
-    for (uint32_t i = 0; i < BUSTER_EXECUTABLE_TEST_BLOCK_LINKS; i += 1)
+    const uint64_t seeds[2] = { seed, BUSTER_EXECUTABLE_TEST_BLOCK_REGRESSION_SEED };
+    for (uint32_t s = 0; s < (seed == BUSTER_EXECUTABLE_TEST_BLOCK_REGRESSION_SEED ? 1 : 2); s += 1)
     {
-        ExecutableTestLink test;
-        SymbolId start = 0;
-        const bool built = executable_test_block_link(&test, &state, i % 2 == 1, &start);
-        executable_test_expect(&tally, built, "the link", i);
-        ExecutableResult result;
-        if (built)
+        uint64_t state = seeds[s] * 0x9E3779B97F4A7C15ull + 7;
+        for (uint32_t i = 0; i < BUSTER_EXECUTABLE_TEST_BLOCK_LINKS; i += 1)
         {
-            executable_test_unwind_writes(&tally, &test.link, start, path, 0, "the vector passes and the exact twins write the same file", &result);
+            ExecutableTestLink test;
+            SymbolId start = 0;
+            const bool built = executable_test_block_link(&test, &state, i % 2 == 1, &start);
+            executable_test_expect(&tally, built, "the link", (uint64_t)s * BUSTER_EXECUTABLE_TEST_BLOCK_LINKS + i);
+            ExecutableResult result;
+            if (built)
+            {
+                executable_test_unwind_writes(&tally, &test.link, start, path, 0, "the vector passes and the exact twins write the same file", &result);
+            }
+            executable_test_link_end(&test);
         }
-        executable_test_link_end(&test);
     }
     if (!directory->keep)
     {
