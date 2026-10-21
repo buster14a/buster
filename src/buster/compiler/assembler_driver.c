@@ -14,34 +14,47 @@ static Object asm_object(AsmResult* result, String8 name, Arena* arena)
     return object;
 }
 
-static bool asm_read_file(const char* path, Arena* arena, String8* source)
+// Reads to the end of the file rather than st_size bytes, which is 0 for a pipe, /dev/stdin or a /proc file. The
+// buffer is a reservation: only the pages the input fills are touched, and the arena keeps only the input afterwards.
+static bool asm_read_descriptor(int fd, Arena* arena, String8* source)
 {
-    bool result = false;
-    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    const uint64_t saved = arena->length;
     struct stat stats;
-    if (fd >= 0 && fstat(fd, &stats) == 0 && stats.st_size >= 0 && (uint64_t)stats.st_size <= BUSTER_ASM_MAX_SOURCE)
+    const bool sized = fstat(fd, &stats) == 0 && (!S_ISREG(stats.st_mode) || (uint64_t)stats.st_size <= BUSTER_ASM_MAX_SOURCE);
+    *source = (String8){.pointer = sized ? arena_push(arena, BUSTER_ASM_MAX_SOURCE + 2, 1) : 0};
+    bool result = source->pointer != 0;
+    bool done = false;
+    while (result && !done)
     {
-        source->length = stats.st_size;
-        source->pointer = arena_push(arena, source->length + 1, 1);
-        uint64_t read_bytes = 0;
-        result = source->pointer != 0;
-        while (result && read_bytes < source->length)
+        // One byte past the limit is room to see that the input exceeds it.
+        const ssize_t count = read(fd, source->pointer + source->length, BUSTER_ASM_MAX_SOURCE + 1 - source->length);
+        if (count > 0)
         {
-            const ssize_t count = read(fd, source->pointer + read_bytes, source->length - read_bytes);
-            if (count > 0)
-            {
-                read_bytes += count;
-            }
-            else if (count == 0 || errno != EINTR)
-            {
-                result = false;
-            }
+            source->length += count;
+            result = source->length <= BUSTER_ASM_MAX_SOURCE;
         }
-        if (result)
+        else
         {
-            source->pointer[source->length] = 0;
+            done = count == 0;
+            result = done || errno == EINTR;
         }
     }
+    if (result)
+    {
+        source->pointer[source->length] = 0;
+    }
+    else
+    {
+        *source = (String8){0};
+    }
+    arena_pop_to(arena, result ? (uint64_t)((uint8_t*)source->pointer - arena->base) + source->length + 1 : saved);
+    return result;
+}
+
+static bool asm_read_file(const char* path, Arena* arena, String8* source)
+{
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    bool result = fd >= 0 && asm_read_descriptor(fd, arena, source);
     if (fd >= 0 && close(fd) != 0)
     {
         result = false;
