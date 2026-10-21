@@ -2,11 +2,14 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Target policy tests. CPUID inputs are synthetic as well as live; Clang is an independent preprocessor oracle.
 // The encoder's random-record generator supplies valid operands, not ISA expectations.
+#include <linux/perf_event.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
 
 static bool x86_target_test_cpuid(void)
 {
     X86CpuId cpu = { .xcr0 = 0xe6, .znver5 = true };
-    for (uint32_t i = 0; i < 6; i += 1)
+    for (uint32_t i = 0; i < sizeof(cpu.words) / sizeof(cpu.words[0]); i += 1)
     {
         for (uint32_t j = 0; j < 4; j += 1)
         {
@@ -22,6 +25,7 @@ static bool x86_target_test_cpuid(void)
         const X86Target target = x86_target_from_cpuid(&cpu);
         passed &= (target.features & BUSTER_X86_FEATURE(AVX512F)) == 0;
         passed &= ((target.features & BUSTER_X86_FEATURE(AVX)) != 0) == ((disabled[i] & 6) == 6);
+        passed &= ((target.features & BUSTER_X86_FEATURE(XSAVE)) != 0) == ((disabled[i] & 6) == 6);
         passed &= (target.features & (BUSTER_X86_FEATURE(BMI) | BUSTER_X86_FEATURE(BMI2))) == (BUSTER_X86_FEATURE(BMI) | BUSTER_X86_FEATURE(BMI2));
     }
     cpu.xcr0 = 0xe6;
@@ -29,10 +33,15 @@ static bool x86_target_test_cpuid(void)
     {
         cpu.words[0][2] = UINT32_MAX ^ (1u << bit);
         const X86Target target = x86_target_from_cpuid(&cpu);
-        passed &= (target.features & (BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(FMA) | BUSTER_X86_FEATURE(AVX512F))) == 0;
+        passed &= (target.features & (BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(FMA) | BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(XSAVE) | BUSTER_X86_FEATURE(XSAVEC) | BUSTER_X86_FEATURE(XSAVEOPT) | BUSTER_X86_FEATURE(XSAVES))) == 0;
     }
     cpu = (X86CpuId){0};
     passed &= x86_target_from_cpuid(&cpu).features == 0;
+    cpu.words[6][0] = 1u << 20;
+    passed &= x86_target_from_cpuid(&cpu).features == BUSTER_X86_FEATURE(PREFETCHI);
+    cpu.words[6][0] = 0;
+    cpu.words[2][3] = 1u << 14;
+    passed &= x86_target_from_cpuid(&cpu).features == BUSTER_X86_FEATURE(PREFETCHI);
     X86Target unchanged = { .features = 123 };
     passed &= !x86_target_parse("x86-64-v5", 9, &unchanged) && unchanged.features == 123;
     passed &= !x86_target_parse("", 0, &unchanged) && unchanged.features == 123;
@@ -267,22 +276,100 @@ static uint64_t x86_target_clock(void)
     return (uint64_t)time.tv_sec * 1000000000 + (uint64_t)time.tv_nsec;
 }
 
-static int run_x86_target_benchmark(void)
+static double x86_target_benchmark_median(double values[21])
 {
+    for (uint32_t i = 1; i < 21; i += 1)
+    {
+        const double value = values[i];
+        uint32_t j = i;
+        while (j != 0 && values[j - 1] > value)
+        {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = value;
+    }
+    return values[10];
+}
+
+static int run_x86_target_benchmark(int count, char** arguments)
+{
+    int only = -1;
+    uint32_t after_predefines = 0;
+    uint32_t iterations = 10000;
+    bool valid = true;
+    for (int i = 0; i < count && valid; i += 1)
+    {
+        if (strcmp(arguments[i], "--only") == 0 && i + 1 < count)
+        {
+            i += 1;
+            only = strcmp(arguments[i], "scalar") == 0 ? 0 : strcmp(arguments[i], "avx512") == 0 ? 1 : -1;
+            valid = only >= 0;
+        }
+        else if ((strcmp(arguments[i], "--after-predefines") == 0 || strcmp(arguments[i], "--iterations") == 0) && i + 1 < count)
+        {
+            const bool conditioning = strcmp(arguments[i], "--after-predefines") == 0;
+            char* end;
+            i += 1;
+            const unsigned long value = strtoul(arguments[i], &end, 10);
+            valid = end != arguments[i] && *end == 0 && value != 0 && value <= (conditioning ? 300 : 10000000);
+            if (conditioning)
+            {
+                after_predefines = (uint32_t)value;
+            }
+            else
+            {
+                iterations = (uint32_t)value;
+            }
+        }
+        else
+        {
+            valid = false;
+        }
+    }
     X86Target target;
     const bool parsed = x86_target_parse("znver5", 6, &target);
     uint8_t scalar[X86_FORM_COUNT];
     uint8_t vector[X86_FORM_COUNT];
     x86_target_forms_scalar(&target, scalar);
     x86_target_forms(&target, vector);
-    const bool passed = parsed && memcmp(scalar, vector, sizeof(scalar)) == 0;
-    uint64_t times[2][21];
-    const uint32_t iterations = 10000;
+    const bool passed = valid && parsed && memcmp(scalar, vector, sizeof(scalar)) == 0;
+    double times[2][21];
+    double cycles[2][21];
+    struct perf_event_attr event = {0};
+    event.size = sizeof(event);
+    event.type = PERF_TYPE_HARDWARE;
+    event.config = PERF_COUNT_HW_CPU_CYCLES;
+    event.disabled = 1;
+    event.exclude_kernel = 1;
+    event.exclude_hv = 1;
+    event.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
+    const int fd = (int)syscall(SYS_perf_event_open, &event, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
+    bool counters = fd >= 0;
+    char predefines[BUSTER_X86_TARGET_PREDEFINES_BYTES];
     for (uint32_t pass = 0; passed && pass < 21; pass += 1)
     {
         for (uint32_t order = 0; order < 2; order += 1)
         {
             const uint32_t variant = (order + pass) & 1;
+            if (only >= 0 && variant != (uint32_t)only)
+            {
+                continue;
+            }
+            if (after_predefines != 0)
+            {
+                const uint64_t until = x86_target_clock() + (uint64_t)after_predefines * 1000000;
+                do
+                {
+                    x86_target_predefines(&target, predefines);
+                    __asm__ volatile("" : : "r"(predefines) : "memory");
+                } while (x86_target_clock() < until);
+            }
+            uint64_t before[3] = {0};
+            if (counters)
+            {
+                counters = read(fd, before, sizeof(before)) == sizeof(before) && ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) == 0;
+            }
             const uint64_t start = x86_target_clock();
             if (variant == 0)
             {
@@ -300,23 +387,33 @@ static int run_x86_target_benchmark(void)
                     __asm__ volatile("" : : "r"(vector) : "memory");
                 }
             }
-            times[variant][pass] = x86_target_clock() - start;
+            times[variant][pass] = (double)(x86_target_clock() - start) / iterations;
+            uint64_t readout[3] = {0};
+            if (counters)
+            {
+                counters = ioctl(fd, PERF_EVENT_IOC_DISABLE, 0) == 0 && read(fd, readout, sizeof(readout)) == sizeof(readout) && readout[2] > before[2];
+            }
+            cycles[variant][pass] = counters ? (double)(readout[0] - before[0]) * (readout[1] - before[1]) / (readout[2] - before[2]) / iterations : 0;
         }
     }
     for (uint32_t variant = 0; passed && variant < 2; variant += 1)
     {
-        for (uint32_t i = 1; i < 21; i += 1)
+        if (only < 0 || variant == (uint32_t)only)
         {
-            const uint64_t value = times[variant][i];
-            uint32_t j = i;
-            while (j != 0 && times[variant][j - 1] > value)
-            {
-                times[variant][j] = times[variant][j - 1];
-                j -= 1;
-            }
-            times[variant][j] = value;
+            printf("target form table (%u rows), %s: %.2f ns/table, %.2f cycles/table; 21 medians, %u tables/sample, preceding predefines %u ms\n", X86_FORM_COUNT, variant == 0 ? "scalar source" : "AVX-512", x86_target_benchmark_median(times[variant]), counters ? x86_target_benchmark_median(cycles[variant]) : 0, iterations, after_predefines);
         }
-        printf("target form table (%u rows), %s: %.2f ns/table, 21 interleaved medians\n", X86_FORM_COUNT, variant == 0 ? "scalar source" : "AVX-512", (double)times[variant][10] / iterations);
+    }
+    if (!counters)
+    {
+        printf("target benchmark: hardware cycles unavailable\n");
+    }
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    if (!valid)
+    {
+        fprintf(stderr, "usage: benchmark-x86-target [--only scalar|avx512] [--after-predefines MS] [--iterations N]\n");
     }
     return passed && memcmp(scalar, vector, sizeof(scalar)) == 0 ? 0 : 1;
 }

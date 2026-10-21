@@ -5,7 +5,7 @@ The default is **x86-64 baseline**, as the owner chose for #180 on
 `build.sh` builds for. Its host intrinsics do not enable instructions in an
 output program.
 
-The preprocessor accepts:
+The preprocessor and assembler accept the same target options:
 
 ```sh
 ./build/compiler -E -march=x86-64 input.c
@@ -14,6 +14,7 @@ The preprocessor accepts:
 ./build/compiler -E -march=x86-64-v4 input.c
 ./build/compiler -E -march=znver5 input.c
 ./build/compiler -E -march=native input.c
+./build/compiler assemble -march=x86-64-v3 -o output.o input.S
 ```
 
 The last `-march=` wins. Unknown names and individual `-m` switches are errors;
@@ -49,6 +50,13 @@ It visits eight contiguous feature-mask rows at once, using AVX-512 on the host;
 `x86_target_forms_scalar` is its exact twin. There is no gather, allocation or
 change to the 16-byte `X86Instruction` or the encoder's templates.
 
+The assembler builds its mnemonic index for one target, excluding ineligible
+forms before either matching path runs. Its syntax subset remains separate:
+ISA support does not imply that the frontend understands every encoding. Its
+final resolved records pass `x86_target_validate` at the external-input
+boundary. Tests cover every indexed form, all six profiles, `.S` macro-driven
+instruction choices, option order and independent tuning.
+
 `x86_target_form_allowed` tests a form including its FS/GS and fixup flags.
 `x86_target_validate` checks both ISA eligibility and `x86_validate`'s operands,
 returning the first failing record index, or the count on success. Initialize
@@ -57,7 +65,7 @@ at external-input boundaries and in every selector test; the trusted encoder
 and branch-sizing loops retain their existing contract.
 
 The requirement table is deliberately explicit and incomplete. It starts with
-common scalar integer/control/SSE2 forms and representative v2, BMI/BMI2, AVX,
+the assembler's admitted forms, common scalar integer/control/SSE2 forms and representative v2, BMI/BMI2, AVX,
 AVX2, FMA, AVX-512 and mask-move families. A zero row means **unclassified and
 unavailable**, including on `native`; it never means baseline. A newly added
 form therefore cannot silently become eligible. The table is not a claim that
@@ -81,6 +89,14 @@ options, all 65,536 encoded form values at six targets, random valid operands
 for every admitted form, scalar/vector table identity and protected page edges.
 The benchmark checks table equality before reporting 21 interleaved medians
 for building a whole table, including the scalar source as optimized by Clang.
+`--only scalar|avx512` isolates one path. `--after-predefines MS` emits target
+macros for 100–300 ms before each sample, modeling the lighter configuration
+work preceding selection. `--iterations 1` isolates the initial table after
+that conditioning; the default 10,000 measures sustained repetition. Output
+includes nanoseconds and hardware cycles (zero with an explicit notice if
+unavailable). Both include timing/counter overhead, most visible with one table.
+Compare several independent processes under the lock; a single interleaved
+run does not establish both power states.
 This is configuration work, not an end-to-end compiler speed claim.
 
 ## Remaining acceptance for #180

@@ -198,7 +198,9 @@ static int run_assembler_benchmark(int count, char** arguments)
     okay = okay && index != 0 && x86_encoder_initialize();
     if (okay)
     {
-        x86_match_initialize(index);
+        X86Target target;
+        okay = x86_target_parse("x86-64-v4", 9, &target);
+        x86_match_initialize(index, &target);
     }
     const uint64_t initialization_ns = asm_clock() - initialization_start;
     const String8 source = okay ? asm_benchmark_source(&source_arena, functions, workload) : (String8){0};
@@ -223,13 +225,13 @@ static int run_assembler_benchmark(int count, char** arguments)
                 while (asm_clock() < until && okay)
                 {
                     work.length = 0;
-                    const AsmResult warm = asm_assemble(source, index, (AsmOptions){ .isa = 2 }, &work);
+                    const AsmResult warm = asm_assemble(source, index, (AsmOptions){0}, &work);
                     okay = warm.error == 0;
                 }
             }
             work.length = 0;
             const uint64_t start = asm_clock();
-            AsmResult result = asm_assemble(source, index, (AsmOptions){.vectorized = path != 0, .isa = 2}, &work);
+            AsmResult result = asm_assemble(source, index, (AsmOptions){.vectorized = path != 0}, &work);
             const uint64_t assembled = asm_clock();
             const Object object = asm_object(&result, BUSTER_S8("benchmark.s"), &work);
             const uint64_t finished = asm_clock();

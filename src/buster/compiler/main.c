@@ -408,7 +408,7 @@ int main(int argc, char** argv)
     }
     else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
     {
-        result = run_x86_target_benchmark();
+        result = run_x86_target_benchmark(argc - 2, argv + 2);
     }
     else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-encoder") == 0)
     {

@@ -6,6 +6,7 @@ typedef struct AsmTest AsmTest;
 struct AsmTest
 {
     X86MatchIndex* index;
+    X86Architecture architecture;
     Arena scalar;
     Arena vector;
     uint64_t checks;
@@ -25,8 +26,17 @@ static void asm_test_check(AsmTest* test, bool accepted, const char* name, const
     }
 }
 
-static AsmResult asm_test_pair(AsmTest* test, String8 source, int expected, uint8_t isa)
+static AsmResult asm_test_pair(AsmTest* test, String8 source, int expected, X86Architecture architecture)
 {
+    if (test->architecture != architecture)
+    {
+        static const char* const names[] = {"x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "znver5", "native"};
+        X86Target target;
+        const bool parsed = x86_target_parse(names[architecture], strlen(names[architecture]), &target);
+        asm_test_check(test, parsed, "target configuration", 0);
+        x86_match_initialize(test->index, &target);
+        test->architecture = architecture;
+    }
     test->scalar.length = 0;
     test->vector.length = 0;
     AsmParser lex_scalar =
@@ -52,8 +62,8 @@ static AsmResult asm_test_pair(AsmTest* test, String8 source, int expected, uint
     }
     test->scalar.length = 0;
     test->vector.length = 0;
-    const AsmOptions scalar_options = {.isa = isa};
-    const AsmOptions vector_options = {.vectorized = true, .isa = isa};
+    const AsmOptions scalar_options = {0};
+    const AsmOptions vector_options = {.vectorized = true};
     AsmResult scalar = asm_assemble(source, test->index, scalar_options, &test->scalar);
     AsmResult vector = asm_assemble(source, test->index, vector_options, &test->vector);
     const bool same_error = (scalar.error == 0) == (vector.error == 0) && (scalar.error == 0 || (strcmp(scalar.error, vector.error) == 0 && scalar.location == vector.location));
@@ -89,10 +99,10 @@ static const char asm_test_function[] =
     ".section .rodata\n.balign 8\n.type bias,@object\n"
     "bias: .quad 3\n.size bias, 8\n";
 
-static bool asm_test_oracle(AsmTest* test, const char* source, const char* directory, uint8_t isa)
+static bool asm_test_oracle(AsmTest* test, const char* source, const char* directory, X86Architecture architecture)
 {
     const String8 text = {.pointer = (char*)source, .length = strlen(source)};
-    AsmResult result = asm_test_pair(test, text, 1, isa);
+    AsmResult result = asm_test_pair(test, text, 1, architecture);
     bool passed = result.error == 0;
     char assembly[PATH_MAX];
     char theirs_path[PATH_MAX];
@@ -331,6 +341,69 @@ static uint64_t asm_test_random(uint64_t* state)
     return *state;
 }
 
+static void asm_test_targets(AsmTest* test)
+{
+    // Every syntax-admitted row needs explicit ISA metadata, independently of the index's own filtering.
+    for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
+    {
+        uint8_t roles[4];
+        const X86FormDescription* form = &x86_form_descriptions[f];
+        if (x86_match_supported(form) && x86_match_roles(form->syntax, roles) <= 4)
+        {
+            asm_test_check(test, x86_target_requirements[f] != 0, "matched form has ISA metadata", form->mnemonic);
+        }
+    }
+    const X86Target native = x86_target_native();
+    for (X86Architecture architecture = X86_ARCH_BASELINE; architecture <= X86_ARCH_NATIVE; architecture += 1)
+    {
+        const bool avx2 = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(AVX2)) != 0 : architecture >= X86_ARCH_V3;
+        const bool avx512 = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(AVX512F)) != 0 : architecture >= X86_ARCH_V4;
+        asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nmov rax,200\naddps xmm0,xmm1\nret\n"), 1, architecture);
+        asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvpaddd ymm0,ymm1,ymm2\n"), avx2, architecture);
+        asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvaddps zmm0,zmm1,zmm2\n"), avx512, architecture);
+        asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvmovdqa32 zmm0,[rax]\nvpsubd zmm0,zmm1,zmm2\n"), avx512, architecture);
+        for (uint32_t i = 0; i < test->index->begin[BUSTER_X86_MATCH_BUCKETS]; i += 1)
+        {
+            asm_test_check(test, x86_target_form_allowed(test->index->allowed, test->index->forms[i]), "all indexed records eligible", 0);
+        }
+    }
+}
+
+static void asm_test_target_driver(AsmTest* test, const char* directory)
+{
+    char input[PATH_MAX];
+    char object[PATH_MAX];
+    char output[PATH_MAX];
+    char errors[PATH_MAX];
+    snprintf(input, sizeof(input), "%s/target.S", directory);
+    snprintf(object, sizeof(object), "%s/target.o", directory);
+    snprintf(output, sizeof(output), "%s/output", directory);
+    snprintf(errors, sizeof(errors), "%s/errors", directory);
+    static const char* const targets[] = {"-march=x86-64", "-march=x86-64-v2", "-march=x86-64-v3", "-march=x86-64-v4", "-march=znver5", "-march=native"};
+    static const char source[] =
+        ".intel_syntax noprefix\n"
+        "#if defined(__AVX512F__)\nvaddps zmm0,zmm1,zmm2\n"
+        "#elif defined(__AVX2__)\nvpaddd ymm0,ymm1,ymm2\n"
+        "#else\naddps xmm0,xmm1\n#endif\n";
+    bool okay = object_write_file(input, (const uint8_t*)source, sizeof(source) - 1) == OBJECT_ERROR_NONE;
+    for (uint32_t i = 0; okay && i < BUSTER_ARRAY_LENGTH(targets); i += 1)
+    {
+        char* arguments[] = {"/proc/self/exe", "assemble", (char*)targets[i], "-mtune=znver5", "-o", object, input, 0};
+        asm_test_check(test, object_test_run(arguments, output, errors) == 0, ".S macros agree with instruction eligibility", targets[i]);
+    }
+    static const char vector_source[] = ".intel_syntax noprefix\nvpaddd ymm0,ymm1,ymm2\n";
+    okay = okay && object_write_file(input, (const uint8_t*)vector_source, sizeof(vector_source) - 1) == OBJECT_ERROR_NONE;
+    char* baseline[] = {"/proc/self/exe", "assemble", "-mtune=znver5", "-o", object, input, 0};
+    char* v3[] = {"/proc/self/exe", "assemble", "-march=x86-64-v3", "-o", object, input, 0};
+    char* order[] = {"/proc/self/exe", "assemble", "--isa=avx2", "-march=x86-64", "-o", object, input, 0};
+    char* alias[] = {"/proc/self/exe", "assemble", "-march=x86-64", "--isa=avx2", "-o", object, input, 0};
+    okay = okay && object_test_run(baseline, output, errors) == 1 && object_test_run(v3, output, errors) == 0;
+    okay = okay && object_test_run(order, output, errors) == 1 && object_test_run(alias, output, errors) == 0;
+    asm_test_check(test, okay, "driver default, independent tuning and last target option", 0);
+    unlink(input);
+    unlink(object);
+}
+
 static void asm_test_lex_guard(AsmTest* test)
 {
     const long page = sysconf(_SC_PAGESIZE);
@@ -422,7 +495,9 @@ static int run_assembler_tests(int count, char** arguments)
     valid = valid && test.index != 0 && x86_encoder_initialize();
     if (valid)
     {
-        x86_match_initialize(test.index);
+        const X86Target baseline = {0};
+        x86_match_initialize(test.index, &baseline);
+        asm_test_targets(&test);
         Arena tiny = arena_reserve(4096);
         tiny.length = 16;
         char oversized[1024];
@@ -453,7 +528,7 @@ static int run_assembler_tests(int count, char** arguments)
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(good); i += 1)
         {
-            asm_test_pair(&test, (String8){.pointer = (char*)good[i], .length = strlen(good[i])}, 1, 2);
+            asm_test_pair(&test, (String8){.pointer = (char*)good[i], .length = strlen(good[i])}, 1, X86_ARCH_V4);
         }
         static const char* const bad[] =
             {
@@ -522,7 +597,7 @@ static int run_assembler_tests(int count, char** arguments)
                 const uint64_t value = asm_test_random(&random);
                 source[j] = i % 11 == 0 ? value & 255 : alphabet[value % (sizeof(alphabet) - 1)];
             }
-            asm_test_pair(&test, (String8){.pointer = source, .length = length}, -1, 2);
+            asm_test_pair(&test, (String8){.pointer = source, .length = length}, -1, X86_ARCH_V4);
         }
         asm_test_lex_guard(&test);
         if (cross_check)
@@ -532,12 +607,13 @@ static int run_assembler_tests(int count, char** arguments)
             {
                 asm_test_oracle(&test, asm_test_function, directory, 0);
                 asm_test_oracle(&test, ".intel_syntax noprefix\n.text\nf: mov rax,200\nadd rax,200\nsub rcx,-129\nret\n.data\n.globl x\n.type x,@object\nx: .quad f+4, ext-8\n.size x,16\n", directory, 0);
-                asm_test_oracle(&test, ".intel_syntax noprefix\nsimd:\nmov ah,bl\nmov r8,[r12+r9*4-129]\nmov eax,dword ptr fs:[8]\naddps xmm1,xmm2\nvaddps ymm1,ymm2,ymm3\nvaddps zmm1{k2}{z},zmm2,zmm3\nvaddps zmm1,zmm2,dword ptr [rax]{1to16}\n", directory, 2);
+                asm_test_oracle(&test, ".intel_syntax noprefix\nsimd:\nmov ah,bl\nmov r8,[r12+r9*4-129]\nmov eax,dword ptr fs:[8]\naddps xmm1,xmm2\nvaddps ymm1,ymm2,ymm3\nvaddps zmm1{k2}{z},zmm2,zmm3\nvaddps zmm1,zmm2,dword ptr [rax]{1to16}\n", directory, X86_ARCH_V4);
                 asm_test_oracle(&test, ".intel_syntax noprefix\nf: jmp done\n.zero 120\njmp f\n.zero 20\n.p2align 5,0,31\ndone: ret\n.data\n.long external+7\n.quad f-8\n", directory, 0);
                 asm_test_oracle(&test, ".text\nf: movq %rdi,%rax\naddq $200,%rax\nmovl 4(%rdi,%rcx,4),%edx\nshlq %cl,%rax\nshrdq %cl,%rbx,%rax\nret\n.size f,.-f\n", directory, 0);
                 asm_test_oracle(&test, ".data\nexpr:\n.byte ~0,~1,~0+256\n.long -1|0,~0&0xffffffff\n.quad ~0xffffffffffffffff\n", directory, 0);
                 asm_test_execution(&test, directory);
                 asm_test_driver(&test, directory);
+                asm_test_target_driver(&test, directory);
                 asm_test_preprocessing(&test, directory);
                 const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "scalar.o", "values.h", "preprocessed.s"};
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)

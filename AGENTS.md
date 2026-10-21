@@ -412,8 +412,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
-`#error` without AVX-512's), which the preprocessor's built-in predefines don't
-have: `--predefines` gives it clang's for those options.
+`#error` without AVX-512's). The built-in predefines now follow `-march`;
+`--predefines` additionally supplies Clang's effects for the other host flags.
 
 ## Sharing the 9700X
 
@@ -1961,8 +1961,8 @@ per input token and per output token, IPC, each phase's share (read, lex,
 refine, directive tables, main loop) and what a run did (directives, runs,
 expansions, invocations, pastes, and the `#if` lines and their lengths).
 `--clang` also times `clang -E -P` with the same options, a process per file.
-Target options don't change our predefines: give `--predefines FILE` from
-`clang -dM -E` with the same options (the benchmark leaves it out of clang's
+`-march` selects the shared target's predefines. `--predefines FILE` can replace
+them with `clang -dM -E` output (the benchmark leaves this option out of clang's
 command line), as the smoke commands above do for `main.c`. The default 9700X
 job runs that one, pinned to one allowed CPU; like the others, its measurements
 are informational.

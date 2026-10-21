@@ -15,7 +15,7 @@
 #include <cpuid.h>
 
 // name, macro, first profile (2/3/4 or 5 for znver5), CPUID group, register (eax..edx), bit.
-// Groups: 0=1:0, 1=7:0, 2=7:1, 3=80000001:0, 4=80000008:0, 5=D:1.
+// Groups: 0=1:0, 1=7:0, 2=7:1, 3=80000001:0, 4=80000008:0, 5=D:1, 6=80000021:0.
 #define BUSTER_X86_TARGET_FEATURES(X) \
     X(SSE3, "__SSE3__", 2, 0, 2, 0) \
     X(SSSE3, "__SSSE3__", 2, 0, 2, 9) \
@@ -126,7 +126,7 @@ struct X86Target
 typedef struct X86CpuId X86CpuId;
 struct X86CpuId
 {
-    uint32_t words[6][4];
+    uint32_t words[7][4];
     uint64_t xcr0;
     bool znver5;
 };
@@ -140,18 +140,17 @@ static X86Target x86_target_from_cpuid(const X86CpuId* cpu)
         const uint64_t present = (cpu->words[feature.group][feature.reg] >> feature.bit) & 1;
         result.features |= present << i;
     }
+    // AMD reports PREFETCHI in an extended leaf; Intel reports it in 7:1 EDX.
+    result.features |= (uint64_t)((cpu->words[6][0] >> 20) & 1) << X86_FEATURE_PREFETCHI;
     const bool xsave = (cpu->words[0][2] & (3u << 26)) == (3u << 26);
     const bool avx = xsave && (cpu->words[0][2] & (1u << 28)) != 0 && (cpu->xcr0 & 6) == 6;
     const bool avx512 = avx && (result.features & BUSTER_X86_FEATURE(AVX512F)) != 0 && (cpu->xcr0 & 0xe6) == 0xe6;
     const uint64_t avx_bits = BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(F16C) | BUSTER_X86_FEATURE(FMA) | BUSTER_X86_FEATURE(AVXVNNI) | BUSTER_X86_FEATURE(VAES) | BUSTER_X86_FEATURE(VPCLMULQDQ);
     const uint64_t avx512_bits = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512CD) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BF16) | BUSTER_X86_FEATURE(AVX512BITALG) | BUSTER_X86_FEATURE(AVX512IFMA) | BUSTER_X86_FEATURE(AVX512VBMI) | BUSTER_X86_FEATURE(AVX512VBMI2) | BUSTER_X86_FEATURE(AVX512VNNI) | BUSTER_X86_FEATURE(AVX512VP2INTERSECT) | BUSTER_X86_FEATURE(AVX512VPOPCNTDQ);
-    if (!xsave)
-    {
-        result.features &= ~(BUSTER_X86_FEATURE(XSAVE) | BUSTER_X86_FEATURE(XSAVEC) | BUSTER_X86_FEATURE(XSAVEOPT) | BUSTER_X86_FEATURE(XSAVES));
-    }
     if (!avx)
     {
-        result.features &= ~avx_bits;
+        // Match Clang's native policy: it exposes the XSAVE family only with usable AVX save state too.
+        result.features &= ~(avx_bits | BUSTER_X86_FEATURE(XSAVE) | BUSTER_X86_FEATURE(XSAVEC) | BUSTER_X86_FEATURE(XSAVEOPT) | BUSTER_X86_FEATURE(XSAVES));
     }
     if (!avx512)
     {
@@ -166,9 +165,9 @@ static X86Target x86_target_native(void)
     uint32_t vendor[4];
     __cpuid_count(0, 0, vendor[0], vendor[1], vendor[2], vendor[3]);
     const uint32_t extended = __get_cpuid_max(0x80000000, 0);
-    static const uint32_t leaves[] = { 1, 7, 7, 0x80000001, 0x80000008, 0xd };
-    static const uint32_t subleaves[] = { 0, 0, 1, 0, 0, 1 };
-    for (uint32_t i = 0; i < 6; i += 1)
+    static const uint32_t leaves[] = { 1, 7, 7, 0x80000001, 0x80000008, 0xd, 0x80000021 };
+    static const uint32_t subleaves[] = { 0, 0, 1, 0, 0, 1, 0 };
+    for (uint32_t i = 0; i < sizeof(leaves) / sizeof(leaves[0]); i += 1)
     {
         const uint32_t maximum = leaves[i] >= 0x80000000 ? extended : vendor[0];
         if (leaves[i] <= maximum && (i != 2 || cpu.words[1][0] >= 1))
