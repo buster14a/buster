@@ -142,7 +142,28 @@ static bool parse_test_clang(const char* clang_path, const char* const* argument
             posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0);
             posix_spawn_file_actions_addclose(&actions, pipe_fds[0]);
             posix_spawn_file_actions_addclose(&actions, pipe_fds[1]);
-            result = posix_spawnp(&child, clang_path, &actions, 0, argv, environ) == 0;
+            // clang reads CPATH and C_INCLUDE_PATH, which the preprocessor doesn't: without them, both search alike.
+            uint32_t variables = 0;
+            while (environ[variables] != 0)
+            {
+                variables += 1;
+            }
+            char** environment = malloc(sizeof(char*) * (variables + 1));
+            uint32_t kept = 0;
+            for (uint32_t v = 0; environment != 0 && v < variables; v += 1)
+            {
+                if (strncmp(environ[v], "CPATH=", 6) != 0 && strncmp(environ[v], "C_INCLUDE_PATH=", 15) != 0)
+                {
+                    environment[kept] = environ[v];
+                    kept += 1;
+                }
+            }
+            if (environment != 0)
+            {
+                environment[kept] = 0;
+            }
+            result = environment != 0 && posix_spawnp(&child, clang_path, &actions, 0, argv, environment) == 0;
+            free(environment);
             posix_spawn_file_actions_destroy(&actions);
             free(argv);
         }
