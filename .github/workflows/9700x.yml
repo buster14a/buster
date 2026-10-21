@@ -63,6 +63,9 @@ jobs:
           ./build/compiler test-call-graph
           ./build.sh check-call-graph
 
+      - name: Test the profiling tools
+        run: ./build/compiler test-profile
+
       - name: Test the C lexer
         run: |
           ./build/compiler test-lexer

@@ -15,6 +15,12 @@
 // pinned to one CPU (`taskset -c 2 ...`) for stable numbers. The exit status is 1 if a path can't be read or a file
 // tokenizes differently on the vectorized and scalar paths.
 //
+// A build made by `./build.sh lexer-variant NAME=SOURCE...` has other lexers compiled in (c_lexer_variant.c, each from
+// its own copy of c_lexer.c): the corpus check then compares each with c_tokenize too, and the benchmark times them
+// beside it, in an order that rotates by pass, and prints each one's change from c_tokenize, of the median cycles and
+// the median of the passes' ratios. Variants in one process differ by about 0.6% when their code is the same (where
+// the code lands), against about 2% between processes.
+//
 // Layout, in this order:
 //   - Arena: all memory, reserved up front and committed as it's written.
 //   - Corpus loading: source_kind, add_file and add_path. add_path walks a directory tree with a stack of open
@@ -23,8 +29,8 @@
 //     BUSTER_BENCHMARK_BUFFER_ALIGNMENT, as upstream's aligned_alloc does.
 //   - The corpus check: compare, print_token and check_corpus.
 //   - The benchmark: open_counter, sample_now, tokenize_corpus and benchmark, which runs a warm-up pass and then
-//     BUSTER_BENCHMARK_PASSES passes with c_tokenize and c_tokenize_scalar taking turns, each with its own output
-//     arrays, and reports the medians of wall time and of user-space cycles and instructions (perf_event_open).
+//     BUSTER_BENCHMARK_PASSES passes with c_tokenize, the variants and c_tokenize_scalar taking turns, each with its own
+//     output arrays, and reports the medians of wall time and of user-space cycles and instructions (perf_event_open).
 //   - run_c_lexer_benchmark, called by main.c.
 
 #include <stdint.h>
@@ -60,6 +66,38 @@
 #define BUSTER_BENCHMARK_REPORTED_FILES 10
 #define BUSTER_BENCHMARK_CONTEXT_TOKENS 2
 #define BUSTER_BENCHMARK_TOKEN_PREVIEW_BYTES 40
+// The variants a build can have.
+#define BUSTER_BENCHMARK_MAX_VARIANTS 16
+
+// The variants `./build.sh lexer-variant` compiled in: BUSTER_LEXER_VARIANTS is a BUSTER_LEXER_VARIANT(name) for each.
+#ifndef BUSTER_LEXER_VARIANTS
+#define BUSTER_LEXER_VARIANTS
+#endif
+
+typedef int64_t LexerVariantFunction(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
+
+#define BUSTER_LEXER_VARIANT(variant) LexerVariantFunction c_lexer_variant_##variant;
+BUSTER_LEXER_VARIANTS
+#undef BUSTER_LEXER_VARIANT
+
+typedef struct LexerVariant LexerVariant;
+struct LexerVariant
+{
+    const char* name;
+    // The variants are other translation units, reached through these pointers: this command's only indirect calls.
+    LexerVariantFunction* tokenize;
+};
+
+// The variants, then an entry without a function that ends the list.
+static const LexerVariant lexer_variants[] = {
+#define BUSTER_LEXER_VARIANT(variant) { .name = #variant, .tokenize = c_lexer_variant_##variant },
+    BUSTER_LEXER_VARIANTS
+#undef BUSTER_LEXER_VARIANT
+    { .name = 0, .tokenize = 0 },
+};
+
+#define BUSTER_LEXER_VARIANT_COUNT (BUSTER_ARRAY_LENGTH(lexer_variants) - 1)
+_Static_assert(BUSTER_LEXER_VARIANT_COUNT <= BUSTER_BENCHMARK_MAX_VARIANTS, "too many lexer variants");
 
 typedef struct String8 String8;
 struct String8
@@ -452,9 +490,19 @@ static Comparison compare(String8 source, TokenArrays* vectorized, TokenArrays* 
     return result;
 }
 
-// Compares the two paths on every file, and returns how many files they differ on.
-static uint64_t check_corpus(const Corpus* corpus, TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
+// Whether variant `v` tokenizes `source` as c_tokenize did into `reference`, whose count is reference_count.
+static bool variant_agrees(String8 source, uint64_t v, const TokenArrays* reference, int64_t reference_count, TokenArrays* tokens, uint32_t flags)
 {
+    const int64_t count = lexer_variants[v].tokenize((const uint8_t*)source.pointer, source.length, tokens->kinds, tokens->starts, tokens->ends, flags);
+    const uint64_t n = count > 0 ? (uint64_t)count : 0;
+    return count == reference_count && memcmp(tokens->kinds, reference->kinds, n * sizeof(*tokens->kinds)) == 0 &&
+           memcmp(tokens->starts, reference->starts, n * sizeof(*tokens->starts)) == 0 && memcmp(tokens->ends, reference->ends, n * sizeof(*tokens->ends)) == 0;
+}
+
+// Compares the two paths, and c_tokenize with each variant, on every file, and returns how many files differ.
+static uint64_t check_corpus(const Corpus* corpus, TokenArrays* vectorized, TokenArrays* scalar, TokenArrays* variant, uint32_t flags)
+{
+    uint64_t variant_different[BUSTER_BENCHMARK_MAX_VARIANTS + 1] = { 0 };
     uint64_t different = 0;
     uint64_t fell_back = 0;
     uint64_t fell_back_bytes = 0;
@@ -464,6 +512,17 @@ static uint64_t check_corpus(const Corpus* corpus, TokenArrays* vectorized, Toke
         const char* name = different < BUSTER_BENCHMARK_REPORTED_FILES ? source->path.pointer : 0;
         Comparison comparison = compare(source->bytes, vectorized, scalar, flags, name);
         different += comparison == COMPARISON_DIFFERENT;
+        // compare left c_tokenize's tokens in `vectorized`.
+        const int64_t count = c_tokenize((const uint8_t*)source->bytes.pointer, source->bytes.length, vectorized->kinds, vectorized->starts, vectorized->ends, flags);
+        for (uint64_t v = 0; v < BUSTER_LEXER_VARIANT_COUNT; v += 1)
+        {
+            const bool agrees = variant_agrees(source->bytes, v, vectorized, count, variant, flags);
+            if (!agrees && variant_different[v] < BUSTER_BENCHMARK_REPORTED_FILES)
+            {
+                printf("variant %s: %s tokenizes differently from c_tokenize\n", lexer_variants[v].name, source->path.pointer);
+            }
+            variant_different[v] += !agrees;
+        }
         if (comparison == COMPARISON_FELL_BACK)
         {
             fell_back += 1;
@@ -472,20 +531,36 @@ static uint64_t check_corpus(const Corpus* corpus, TokenArrays* vectorized, Toke
     }
     printf("corpus: %lu files differ, %lu files (%.2f%% of bytes) need the scalar lexer for a part\n", (unsigned long)different,
            (unsigned long)fell_back, corpus->total_bytes ? 100.0 * (double)fell_back_bytes / (double)corpus->total_bytes : 0.0);
-    return different;
+    uint64_t result = different;
+    for (uint64_t v = 0; v < BUSTER_LEXER_VARIANT_COUNT; v += 1)
+    {
+        printf("variant %s: %lu files differ from c_tokenize\n", lexer_variants[v].name, (unsigned long)variant_different[v]);
+        result += variant_different[v];
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The benchmark
 
-typedef enum Implementation
-{
-    IMPLEMENTATION_VECTORIZED,
-    IMPLEMENTATION_SCALAR,
-    IMPLEMENTATION_COUNT,
-} Implementation;
+// The implementations are c_tokenize, the variants, then c_tokenize_scalar.
+#define IMPLEMENTATION_VECTORIZED 0
+#define IMPLEMENTATION_SCALAR (BUSTER_LEXER_VARIANT_COUNT + 1)
+#define IMPLEMENTATION_COUNT (BUSTER_LEXER_VARIANT_COUNT + 2)
 
-static const char* const implementation_names[IMPLEMENTATION_COUNT] = { "c_tokenize", "c_tokenize_scalar" };
+static const char* implementation_name(uint64_t implementation)
+{
+    const char* result = "c_tokenize";
+    if (implementation == IMPLEMENTATION_SCALAR)
+    {
+        result = "c_tokenize_scalar";
+    }
+    else if (implementation != IMPLEMENTATION_VECTORIZED)
+    {
+        result = lexer_variants[implementation - 1].name;
+    }
+    return result;
+}
 
 typedef struct PerfCounters PerfCounters;
 struct PerfCounters
@@ -554,7 +629,7 @@ static void sort_u64(uint64_t* values, uint64_t count)
 }
 
 // Tokenizes every file of the corpus with one implementation, and returns the number of tokens.
-static uint64_t tokenize_corpus(const Corpus* corpus, Implementation implementation, TokenArrays* tokens, uint32_t flags)
+static uint64_t tokenize_corpus(const Corpus* corpus, uint64_t implementation, TokenArrays* tokens, uint32_t flags)
 {
     uint64_t result = 0;
     for (uint64_t i = 0; i < corpus->count; i += 1)
@@ -566,9 +641,13 @@ static uint64_t tokenize_corpus(const Corpus* corpus, Implementation implementat
         {
             count = c_tokenize(bytes, length, tokens->kinds, tokens->starts, tokens->ends, flags);
         }
-        else
+        else if (implementation == IMPLEMENTATION_SCALAR)
         {
             count = c_tokenize_scalar(bytes, length, tokens->kinds, tokens->starts, tokens->ends, flags);
+        }
+        else
+        {
+            count = lexer_variants[implementation - 1].tokenize(bytes, length, tokens->kinds, tokens->starts, tokens->ends, flags);
         }
         result += (uint64_t)count;
     }
@@ -589,10 +668,12 @@ static void benchmark(const Corpus* corpus, TokenArrays* outputs, uint32_t flags
     uint64_t tokens = 0;
     for (uint64_t pass = 0; pass <= BUSTER_BENCHMARK_PASSES; pass += 1)
     {
-        for (uint64_t implementation = 0; implementation < IMPLEMENTATION_COUNT; implementation += 1)
+        for (uint64_t turn = 0; turn < IMPLEMENTATION_COUNT; turn += 1)
         {
+            // With variants, the order rotates by pass, so that each runs after each other; without, it stays upstream's.
+            const uint64_t implementation = BUSTER_LEXER_VARIANT_COUNT != 0 ? (turn + pass) % IMPLEMENTATION_COUNT : turn;
             Sample before = sample_now(&counters);
-            tokens = tokenize_corpus(corpus, (Implementation)implementation, &outputs[implementation], flags);
+            tokens = tokenize_corpus(corpus, implementation, &outputs[implementation], flags);
             Sample after = sample_now(&counters);
             if (pass > 0)
             {
@@ -606,8 +687,27 @@ static void benchmark(const Corpus* corpus, TokenArrays* outputs, uint32_t flags
     }
 
     printf("%d interleaved passes over %lu tokens, medians (cycles/B also min-max):\n", BUSTER_BENCHMARK_PASSES, (unsigned long)tokens);
+    double reference_cycles = 0.0;
     for (uint64_t implementation = 0; implementation < IMPLEMENTATION_COUNT; implementation += 1)
     {
+        // Each pass's cycles against c_tokenize's in the same pass, before the samples are sorted.
+        double ratios[BUSTER_BENCHMARK_PASSES];
+        for (uint64_t pass = 0; pass < BUSTER_BENCHMARK_PASSES; pass += 1)
+        {
+            const uint64_t reference = samples[IMPLEMENTATION_VECTORIZED][pass].cycles;
+            ratios[pass] = reference != 0 ? (double)samples[implementation][pass].cycles / (double)reference : 1.0;
+        }
+        for (uint64_t i = 1; i < BUSTER_BENCHMARK_PASSES; i += 1)
+        {
+            const double ratio = ratios[i];
+            uint64_t j = i;
+            while (j > 0 && ratios[j - 1] > ratio)
+            {
+                ratios[j] = ratios[j - 1];
+                j -= 1;
+            }
+            ratios[j] = ratio;
+        }
         uint64_t nanoseconds[BUSTER_BENCHMARK_PASSES];
         uint64_t cycles[BUSTER_BENCHMARK_PASSES];
         uint64_t instructions[BUSTER_BENCHMARK_PASSES];
@@ -624,9 +724,17 @@ static void benchmark(const Corpus* corpus, TokenArrays* outputs, uint32_t flags
         double median_nanoseconds = (double)nanoseconds[BUSTER_BENCHMARK_PASSES / 2];
         double median_cycles = (double)cycles[BUSTER_BENCHMARK_PASSES / 2];
         double median_instructions = (double)instructions[BUSTER_BENCHMARK_PASSES / 2];
-        printf("  %-18s %8.3f ms  %6.2f GB/s  %6.3f cycles/B [%.3f-%.3f]  %6.3f instructions/B  IPC %.2f\n", implementation_names[implementation],
+        printf("  %-18s %8.3f ms  %6.2f GB/s  %6.3f cycles/B [%.3f-%.3f]  %6.3f instructions/B  IPC %.2f", implementation_name(implementation),
                median_nanoseconds / 1e6, bytes / median_nanoseconds, median_cycles / bytes, (double)cycles[0] / bytes,
                (double)cycles[BUSTER_BENCHMARK_PASSES - 1] / bytes, median_instructions / bytes, median_cycles != 0 ? median_instructions / median_cycles : 0.0);
+        reference_cycles = implementation == IMPLEMENTATION_VECTORIZED ? median_cycles : reference_cycles;
+        // A variant's change from c_tokenize: positive is faster.
+        if (BUSTER_LEXER_VARIANT_COUNT != 0 && implementation != IMPLEMENTATION_VECTORIZED && median_cycles != 0)
+        {
+            printf("  vs c_tokenize %+6.2f%% (pass ratios' median %+6.2f%%)", 100.0 * (reference_cycles / median_cycles - 1.0),
+                   100.0 * (1.0 / ratios[BUSTER_BENCHMARK_PASSES / 2] - 1.0));
+        }
+        printf("\n");
     }
 
     if (counters.cycles_fd >= 0)
@@ -680,8 +788,9 @@ int run_c_lexer_benchmark(int argc, char** argv)
             }
         }
 
-        TokenArrays outputs[IMPLEMENTATION_COUNT];
-        for (uint64_t implementation = 0; loaded && implementation < IMPLEMENTATION_COUNT; implementation += 1)
+        // An output per implementation, and one more for the variants' check.
+        TokenArrays outputs[IMPLEMENTATION_COUNT + 1];
+        for (uint64_t implementation = 0; loaded && implementation <= IMPLEMENTATION_COUNT; implementation += 1)
         {
             outputs[implementation] = allocate_token_arrays(&loader.memory, loader.max_length);
             if (outputs[implementation].kinds == 0)
@@ -701,7 +810,7 @@ int run_c_lexer_benchmark(int argc, char** argv)
             };
             const uint32_t flags = loader.cplusplus ? C_TOKENIZER_CPLUSPLUS : 0;
             printf("%lu files, %lu bytes\n", (unsigned long)corpus.count, (unsigned long)corpus.total_bytes);
-            uint64_t different = check_corpus(&corpus, &outputs[IMPLEMENTATION_VECTORIZED], &outputs[IMPLEMENTATION_SCALAR], flags);
+            uint64_t different = check_corpus(&corpus, &outputs[IMPLEMENTATION_VECTORIZED], &outputs[IMPLEMENTATION_SCALAR], &outputs[IMPLEMENTATION_COUNT], flags);
             if (corpus.total_bytes != 0)
             {
                 benchmark(&corpus, outputs, flags);
