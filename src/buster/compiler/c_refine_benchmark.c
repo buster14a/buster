@@ -6,7 +6,7 @@
 // The token refinement benchmark: refines every file of a corpus of C (or C++) sources with refine_tokens and
 // refine_tokens_scalar (c_refine.c), and lexes it with c_tokenize for scale, and reports per token what each costs.
 //
-// Usage: build/compiler benchmark-refinement [--cplusplus] [--trigraphs] [--only NAME] path...
+// Usage: build/compiler benchmark-refinement [--cplusplus] [--trigraphs] [--after-scalar MS] [--only NAME] path...
 //
 // Paths are files or directories, searched for .c and .h files (with --cplusplus, C++ sources and headers, lexed as
 // C++). Every file is lexed once and its tokens kept. The check refines every file with both paths, one intern table
@@ -19,8 +19,11 @@
 // each file, as the compiler runs them: what that costs more than c_tokenize alone is what refinement costs when the
 // file's tokens are still in the caches, which a pass over the whole corpus's tokens (for a large corpus, from memory)
 // doesn't show. It reports the medians of wall time and of user-space cycles and instructions (perf_event_open; zero
-// when unavailable), per token and per identifier. --only NAME runs one implementation (for profiles). Run it pinned
-// to one CPU (taskset -c 2 ...). The exit status is 1 if a path can't be read or the paths refine a file differently.
+// when unavailable), per token and per identifier. --only NAME runs one implementation (for profiles, and for its passes
+// back to back). --after-scalar MS runs the scalar path over the corpus for MS milliseconds before each timed pass of a
+// vectorized one (refine_benchmark_after_scalar): the state a compiler runs its vector phases in, after lighter code
+// that lets the clock boost, where a heavy AVX-512 loop runs under the 9700X's power cap (#199). Run it pinned to one CPU
+// (taskset -c 2 ...). The exit status is 1 if a path can't be read or the paths refine a file differently.
 //
 // Layout, in this order: the corpus (CorpusFile, the loader), the check, the clock and counters, the passes and
 // run_refinement_benchmark.
@@ -49,6 +52,7 @@
 #include "buster/compiler/c_refine.c"
 
 #define BUSTER_REFINE_BENCHMARK_PASSES 21
+#define BUSTER_REFINE_BENCHMARK_AFTER_SCALAR_MAX_MS 10000
 #define BUSTER_REFINE_BENCHMARK_MEMORY (64ull << 30)
 #define BUSTER_REFINE_BENCHMARK_MAX_FILES (1u << 20)
 #define BUSTER_REFINE_BENCHMARK_MAX_DEPTH 64
@@ -419,9 +423,32 @@ static void refine_benchmark_sort(uint64_t* values, uint64_t count)
 // ---------------------------------------------------------------------------------------------------------------------
 // The passes
 
-// One implementation over the whole corpus. The refinements' working ends are restored before the clock starts.
-static RefineSample refine_benchmark_pass(Corpus* corpus, uint32_t implementation, InternTable* table, int cycles_fd, int instructions_fd)
+// --after-scalar: the scalar path over the corpus's files, again and again, for `milliseconds`, before a timed pass of a
+// vectorized one. A compiler runs its vector phases in bursts after lighter ones, which let the clock boost, and at that
+// clock a heavy vector loop runs under the core's power cap for 5 to 20 ms (#199; docs/x86-64-encoder.md, "Zen 5's
+// costs, measured"). Back-to-back passes miss that state. It writes the working ends and words, which the pass restores.
+static void refine_benchmark_after_scalar(Corpus* corpus, InternTable* table, uint64_t milliseconds)
 {
+    const uint64_t end = refine_benchmark_now(-1, -1).nanoseconds + milliseconds * 1000000;
+    intern_reset(table);
+    for (uint64_t f = 0; refine_benchmark_now(-1, -1).nanoseconds < end; f = f + 1 < corpus->file_count ? f + 1 : 0)
+    {
+        CorpusFile* file = &corpus->files[f];
+        if (!refine_tokens_scalar(table, file->bytes, file->length, file->kinds, file->starts, file->pristine_ends, file->count, file->ends, file->space, corpus->flags))
+        {
+            intern_reset(table);
+        }
+    }
+}
+
+// One implementation over the whole corpus, after `after_scalar` ms of the scalar path for a vectorized one. The
+// refinements' working ends are restored before the clock starts.
+static RefineSample refine_benchmark_pass(Corpus* corpus, uint32_t implementation, InternTable* table, int cycles_fd, int instructions_fd, uint64_t after_scalar)
+{
+    if (after_scalar != 0 && (implementation < REFINE_VARIANT_COUNT || implementation == BUSTER_REFINE_IMPLEMENTATION_PIPELINE))
+    {
+        refine_benchmark_after_scalar(corpus, table, after_scalar);
+    }
     if (implementation != BUSTER_REFINE_IMPLEMENTATION_LEXER)
     {
         for (uint64_t f = 0; f < corpus->file_count; f += 1)
@@ -468,7 +495,7 @@ static RefineSample refine_benchmark_pass(Corpus* corpus, uint32_t implementatio
     };
 }
 
-static void refine_benchmark_run(Corpus* corpus, InternTable* table, uint32_t only)
+static void refine_benchmark_run(Corpus* corpus, InternTable* table, uint32_t only, uint64_t after_scalar)
 {
     const int cycles_fd = refine_benchmark_open_counter(PERF_COUNT_HW_CPU_CYCLES);
     const int instructions_fd = refine_benchmark_open_counter(PERF_COUNT_HW_INSTRUCTIONS);
@@ -481,7 +508,7 @@ static void refine_benchmark_run(Corpus* corpus, InternTable* table, uint32_t on
     {
         for (uint32_t implementation = 0; implementation < BUSTER_REFINE_IMPLEMENTATION_COUNT; implementation += 1)
         {
-            const RefineSample sample = (only >> implementation) & 1 ? refine_benchmark_pass(corpus, implementation, table, cycles_fd, instructions_fd)
+            const RefineSample sample = (only >> implementation) & 1 ? refine_benchmark_pass(corpus, implementation, table, cycles_fd, instructions_fd, after_scalar)
                                                                       : (RefineSample){ 0 };
             if (pass > 0)
             {
@@ -489,8 +516,13 @@ static void refine_benchmark_run(Corpus* corpus, InternTable* table, uint32_t on
             }
         }
     }
-    printf("%d interleaved passes over %lu tokens (%lu identifiers, %u distinct), medians (cycles/token also min-max):\n", BUSTER_REFINE_BENCHMARK_PASSES,
-           (unsigned long)corpus->tokens, (unsigned long)corpus->identifiers, table->count - 1);
+    char after_text[64] = "";
+    if (after_scalar != 0)
+    {
+        snprintf(after_text, sizeof(after_text), ", the vectorized ones each after %lu ms of the scalar path", (unsigned long)after_scalar);
+    }
+    printf("%d interleaved passes over %lu tokens (%lu identifiers, %u distinct)%s, medians (cycles/token also min-max):\n", BUSTER_REFINE_BENCHMARK_PASSES,
+           (unsigned long)corpus->tokens, (unsigned long)corpus->identifiers, table->count - 1, after_text);
     for (uint32_t implementation = 0; implementation < BUSTER_REFINE_IMPLEMENTATION_COUNT; implementation += 1)
     {
         if (((only >> implementation) & 1) == 0)
@@ -535,9 +567,17 @@ int run_refinement_benchmark(int argc, char** argv)
     bool valid = true;
     uint64_t paths = 0;
     uint32_t only = (1u << BUSTER_REFINE_IMPLEMENTATION_COUNT) - 1;
+    uint64_t after_scalar = 0;
     for (int i = 1; i < argc; i += 1)
     {
-        if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
+        {
+            i += 1;
+            char* end = 0;
+            after_scalar = strtoull(argv[i], &end, 10);
+            valid = valid && argv[i][0] >= '0' && argv[i][0] <= '9' && *end == 0 && after_scalar <= BUSTER_REFINE_BENCHMARK_AFTER_SCALAR_MAX_MS;
+        }
+        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
             i += 1;
             only = 0;
@@ -567,7 +607,7 @@ int run_refinement_benchmark(int argc, char** argv)
     static InternTable tables[BUSTER_REFINE_IMPLEMENTATION_COUNT];
     if (!valid || paths == 0)
     {
-        fprintf(stderr, "usage: %s [--cplusplus] [--trigraphs] [--only NAME] path...\n", argv[0]);
+        fprintf(stderr, "usage: %s [--cplusplus] [--trigraphs] [--after-scalar MS] [--only NAME] path...\n", argv[0]);
     }
     else
     {
@@ -580,7 +620,7 @@ int run_refinement_benchmark(int argc, char** argv)
         }
         for (int i = 1; loaded && i < argc; i += 1)
         {
-            if (strcmp(argv[i], "--only") == 0)
+            if (strcmp(argv[i], "--only") == 0 || strcmp(argv[i], "--after-scalar") == 0)
             {
                 i += 1;
             }
@@ -602,7 +642,7 @@ int run_refinement_benchmark(int argc, char** argv)
             printf("%lu files, %lu bytes, %lu tokens, %lu identifiers\n", (unsigned long)corpus.file_count, (unsigned long)corpus.bytes,
                    (unsigned long)corpus.tokens, (unsigned long)corpus.identifiers);
             const uint64_t different = refine_benchmark_check(&corpus, tables);
-            refine_benchmark_run(&corpus, &tables[0], only);
+            refine_benchmark_run(&corpus, &tables[0], only, after_scalar);
             result = different == 0 ? 0 : 1;
         }
     }

@@ -42,7 +42,8 @@
 //   - The predefined names: BUSTER_C_NAMES (keywords, then directive names, then the preprocessor's names), IdentId,
 //     the C_NAME_* ids, CLanguage and c_keyword_kind (which keyword kinds a language mode has).
 //   - The table: InternSpan, InternTable, the hash (intern_lane_rounds, intern_chain, intern_hash_bytes_scalar,
-//     intern_fold, intern_with_length, intern_hash_vector, intern_chain_chunks, intern_hash_bytes), the bucket helpers
+//     intern_fold, intern_with_length, intern_hash_vector, intern_hash_zero_lanes, intern_hash_vectors4_short,
+//     intern_chain_chunks, intern_hash_bytes), the bucket helpers
 //     (intern_bucket_key, intern_bucket_matches, intern_bucket_empties, intern_slot_id, intern_first_bytes),
 //     intern_layout_bytes, intern_lay_out, intern_place, intern_slot, intern_grow, intern_reserve_record, intern_insert, intern_find_hashed,
 //     intern_find_or_add_hashed, intern_find_or_add, intern_find_or_add_vector, intern_find, intern_bytes,
@@ -494,33 +495,32 @@ BUSTER_INLINE uint64_t intern_hash_vector(__m512i v, uint64_t length)
     return (uint64_t)_mm_cvtsi128_si64(intern_fold(intern_with_length(v, length)));
 }
 
-// The hashes of four spellings of up to 64 bytes each, `a` to `d` (each zero past its length), at once: hash i in qword
-// 2i, intern_hash_vector's of each. `lengths` has spelling i's length in dword 4i and zeros elsewhere. The spellings'
-// 16-byte lanes are transposed (eight lane shuffles), so that vector k holds lane k of the four: then each is whitened
-// with lane k's constants (lane 0 with the lengths too) and goes through its two AES rounds, and the four spellings'
-// folds are one three-way XOR and an XOR, in place of a fold's four shuffles and XORs per spelling. `*firsts` gets the
-// transposed first lanes: spelling i's first 16 bytes in lane i.
-BUSTER_INLINE __m512i intern_hash_vectors4(__m512i a, __m512i b, __m512i c, __m512i d, __m512i lengths, __m512i* firsts)
+// What a spelling's lanes 2 and 3 add to its chunk's fold when they are zero (it has at most 32 bytes): their rounds of
+// their whitening alone, in each 128-bit lane. intern_hash_vectors4_short adds it in place of the two lanes.
+BUSTER_INLINE __m512i intern_hash_zero_lanes(void)
 {
-    const __m512i ab_low = _mm512_shuffle_i64x2(a, b, _MM_SHUFFLE(1, 0, 1, 0));
-    const __m512i ab_high = _mm512_shuffle_i64x2(a, b, _MM_SHUFFLE(3, 2, 3, 2));
-    const __m512i cd_low = _mm512_shuffle_i64x2(c, d, _MM_SHUFFLE(1, 0, 1, 0));
-    const __m512i cd_high = _mm512_shuffle_i64x2(c, d, _MM_SHUFFLE(3, 2, 3, 2));
+    return _mm512_broadcast_i32x4(_mm_xor_si128(intern_lane_rounds(_mm_setzero_si128(), 2), intern_lane_rounds(_mm_setzero_si128(), 3)));
+}
+
+// The hashes of four spellings of up to 32 bytes each, at once: the 32 bytes of the first two in `ab` (the first's in the
+// low half) and of the other two in `cd`, each zero past its length; hash i in qword 2i, intern_hash_vector's of each.
+// `lengths` has spelling i's length in dword 4i and zeros elsewhere. The spellings' two 16-byte lanes are transposed (two
+// lane shuffles), so that one vector holds the four first lanes and another the four second ones: each is whitened with
+// its lane's constants (the first with the lengths too) and goes through its two AES rounds, and the four folds are one
+// three-way XOR, with `zero_lanes` (intern_hash_zero_lanes) for the zero lanes 2 and 3. That replaces a fold's four
+// shuffles and XORs per spelling, and half the rounds. `*firsts` gets the first lanes: spelling i's first 16 bytes in
+// lane i.
+BUSTER_INLINE __m512i intern_hash_vectors4_short(__m512i ab, __m512i cd, __m512i lengths, __m512i zero_lanes, __m512i* firsts)
+{
     const __m512i zero = _mm512_setzero_si512();
-    __m512i lanes[4] = {
-        _mm512_shuffle_i64x2(ab_low, cd_low, _MM_SHUFFLE(2, 0, 2, 0)),
-        _mm512_shuffle_i64x2(ab_low, cd_low, _MM_SHUFFLE(3, 1, 3, 1)),
-        _mm512_shuffle_i64x2(ab_high, cd_high, _MM_SHUFFLE(2, 0, 2, 0)),
-        _mm512_shuffle_i64x2(ab_high, cd_high, _MM_SHUFFLE(3, 1, 3, 1)),
-    };
-    *firsts = lanes[0];
-    lanes[0] = _mm512_xor_si512(lanes[0], lengths);
-    for (uint32_t lane = 0; lane < 4; lane += 1)
-    {
-        const __m512i whitening = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i*)(intern_lane_whitening + 2 * lane)));
-        lanes[lane] = _mm512_aesenc_epi128(_mm512_aesenc_epi128(_mm512_xor_si512(lanes[lane], whitening), zero), zero);
-    }
-    return _mm512_xor_si512(_mm512_ternarylogic_epi64(lanes[0], lanes[1], lanes[2], 0x96), lanes[3]);
+    const __m512i first_lanes = _mm512_shuffle_i64x2(ab, cd, _MM_SHUFFLE(2, 0, 2, 0));
+    const __m512i second_lanes = _mm512_shuffle_i64x2(ab, cd, _MM_SHUFFLE(3, 1, 3, 1));
+    const __m512i whitening0 = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i*)intern_lane_whitening));
+    const __m512i whitening1 = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i*)(intern_lane_whitening + 2)));
+    *firsts = first_lanes;
+    const __m512i lane0 = _mm512_aesenc_epi128(_mm512_aesenc_epi128(_mm512_ternarylogic_epi64(first_lanes, lengths, whitening0, 0x96), zero), zero);
+    const __m512i lane1 = _mm512_aesenc_epi128(_mm512_aesenc_epi128(_mm512_xor_si512(second_lanes, whitening1), zero), zero);
+    return _mm512_ternarylogic_epi64(lane0, lane1, zero_lanes, 0x96);
 }
 
 // The state after the chunks past a spelling's first 64 bytes, chained onto the first's (`state`): out of line, since

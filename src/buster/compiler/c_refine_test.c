@@ -460,11 +460,11 @@ static bool refine_check_hash(uint64_t* random)
 {
     uint8_t bytes[BUSTER_REFINE_TEST_HASH_LENGTHS] __attribute__((aligned(64)));
     uint64_t failures = 0;
-    // The last four spellings of up to 64 bytes, for intern_hash_vectors4: their vectors, lengths and hashes.
-    __m512i group[4];
-    uint32_t group_lengths[16] __attribute__((aligned(64))) = { 0 };
-    uint64_t group_hashes[4];
-    uint32_t grouped = 0;
+    // The last four spellings of up to 32 bytes, for intern_hash_vectors4_short: their vectors, lengths and hashes.
+    __m256i short_group[4];
+    uint32_t short_lengths[16] __attribute__((aligned(64))) = { 0 };
+    uint64_t short_hashes[4];
+    uint32_t short_grouped = 0;
     for (uint64_t round = 0; round < BUSTER_REFINE_TEST_HASH_ROUNDS; round += 1)
     {
         const uint32_t length = (uint32_t)(round % BUSTER_REFINE_TEST_HASH_LENGTHS);
@@ -478,23 +478,28 @@ static bool refine_check_hash(uint64_t* random)
         {
             const __m512i vector = _mm512_maskz_loadu_epi8(length >= 64 ? ~0ull : _bzhi_u64(~0ull, length), bytes);
             failures += intern_hash_vector(vector, length) != expected;
-            group[grouped] = vector;
-            group_lengths[4 * grouped] = length;
-            group_hashes[grouped] = expected;
-            grouped += 1;
-            if (grouped == 4)
+        }
+        if (length <= 32)
+        {
+            short_group[short_grouped] = _mm256_maskz_loadu_epi8(_bzhi_u32(~0u, length), bytes);
+            short_lengths[4 * short_grouped] = length;
+            short_hashes[short_grouped] = expected;
+            short_grouped += 1;
+            if (short_grouped == 4)
             {
                 uint64_t hashes[8];
                 __m128i firsts[4];
                 __m512i first_lanes;
-                _mm512_storeu_si512(hashes, intern_hash_vectors4(group[0], group[1], group[2], group[3], _mm512_load_si512(group_lengths), &first_lanes));
+                const __m512i ab = _mm512_inserti64x4(_mm512_castsi256_si512(short_group[0]), short_group[1], 1);
+                const __m512i cd = _mm512_inserti64x4(_mm512_castsi256_si512(short_group[2]), short_group[3], 1);
+                _mm512_storeu_si512(hashes, intern_hash_vectors4_short(ab, cd, _mm512_load_si512(short_lengths), intern_hash_zero_lanes(), &first_lanes));
                 _mm512_storeu_si512(firsts, first_lanes);
                 for (uint32_t i = 0; i < 4; i += 1)
                 {
-                    failures += hashes[2 * i] != group_hashes[i];
-                    failures += _mm_movemask_epi8(_mm_cmpeq_epi8(firsts[i], _mm512_castsi512_si128(group[i]))) != 0xFFFF;
+                    failures += hashes[2 * i] != short_hashes[i];
+                    failures += _mm_movemask_epi8(_mm_cmpeq_epi8(firsts[i], _mm256_castsi256_si128(short_group[i]))) != 0xFFFF;
                 }
-                grouped = 0;
+                short_grouped = 0;
             }
         }
     }

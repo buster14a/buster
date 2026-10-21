@@ -526,8 +526,8 @@ BUSTER_INLINE bool refine_intern_batch(InternTable* table, const uint8_t* source
     const uint32_t* const starts = identifiers->starts + begin;
     const uint32_t* const lengths = identifiers->lengths + begin;
     uint32_t* const ids = identifiers->ids + begin;
-    // Each identifier's bucket offset, in every other qword (stage 1 stores four at a time from intern_hash_vectors4), and
-    // its key (refine_key).
+    // Each identifier's bucket offset, in every other qword (stage 1 stores four at a time from
+    // intern_hash_vectors4_short), and its key (refine_key).
     uint64_t offsets[2 * 64] __attribute__((aligned(64)));
     __m128i firsts[64] __attribute__((aligned(64)));
     // Per byte position, the least of every loaded byte XORed with '\\' (and with '?'): a zero byte means some identifier
@@ -537,25 +537,30 @@ BUSTER_INLINE bool refine_intern_batch(InternTable* table, const uint8_t* source
 
     // 1. Load and hash; prefetch the bucket. bzhi keeps every bit for an index of 64 to 255 and the low bits of a longer
     // one's, so a load never reads past its identifier; a length past BUSTER_INTERN_FAST_LENGTH makes the identifier
-    // slow, and its hash is unused. Four identifiers at a time (intern_hash_vectors4), then the rest one at a time.
+    // slow, and its hash is unused.
+    // Four at a time, each identifier's first 32 bytes are hashed (intern_hash_vectors4_short): all of it but in the rare
+    // longer ones, which are hashed again from all their bytes after.
+    const __m512i zero_lanes = intern_hash_zero_lanes();
     uint32_t j = 0;
     for (; !fused && j + 4 <= count; j += 4)
     {
-        __m512i bytes[4];
+        __m256i bytes[4];
         for (uint32_t k = 0; k < 4; k += 1)
         {
-            bytes[k] = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, lengths[j + k]), source + starts[j + k]);
-            backslashes = _mm512_min_epu8(backslashes, _mm512_xor_si512(bytes[k], _mm512_set1_epi8('\\')));
-            if (trigraphs)
-            {
-                questions = _mm512_min_epu8(questions, _mm512_xor_si512(bytes[k], _mm512_set1_epi8('?')));
-            }
+            bytes[k] = _mm256_maskz_loadu_epi8(_bzhi_u32(~0u, lengths[j + k]), source + starts[j + k]);
+        }
+        const __m512i ab = _mm512_inserti64x4(_mm512_castsi256_si512(bytes[0]), bytes[1], 1);
+        const __m512i cd = _mm512_inserti64x4(_mm512_castsi256_si512(bytes[2]), bytes[3], 1);
+        backslashes = _mm512_min_epu8(backslashes, _mm512_min_epu8(_mm512_xor_si512(ab, _mm512_set1_epi8('\\')), _mm512_xor_si512(cd, _mm512_set1_epi8('\\'))));
+        if (trigraphs)
+        {
+            questions = _mm512_min_epu8(questions, _mm512_min_epu8(_mm512_xor_si512(ab, _mm512_set1_epi8('?')), _mm512_xor_si512(cd, _mm512_set1_epi8('?'))));
         }
         // The four lengths in dwords 0, 4, 8 and 12.
         const __m512i spread = _mm512_setr_epi32(0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0);
         const __m512i group_lengths = _mm512_maskz_permutexvar_epi32(0x1111, spread, _mm512_castsi128_si512(_mm_loadu_si128((const __m128i*)(lengths + j))));
         __m512i first_lanes;
-        const __m512i hashes = intern_hash_vectors4(bytes[0], bytes[1], bytes[2], bytes[3], group_lengths, &first_lanes);
+        const __m512i hashes = intern_hash_vectors4_short(ab, cd, group_lengths, zero_lanes, &first_lanes);
         _mm512_store_si512(firsts + j, _mm512_or_si512(first_lanes, _mm512_set4_epi32(-1, 0, 0, 0)));
         const __m512i group_offsets = _mm512_and_si512(_mm512_slli_epi64(hashes, 6), _mm512_set1_epi64((long long)offset_mask));
         _mm512_store_si512(offsets + 2 * j, group_offsets);
@@ -565,6 +570,27 @@ BUSTER_INLINE bool refine_intern_batch(InternTable* table, const uint8_t* source
         _mm_prefetch((const char*)(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 1))), _MM_HINT_T0);
         _mm_prefetch((const char*)(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 2))), _MM_HINT_T0);
         _mm_prefetch((const char*)(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 3))), _MM_HINT_T0);
+    }
+    // Those of 33 bytes or more among them: their whole loads, hashes and prefetches (a longer one than
+    // BUSTER_INTERN_FAST_LENGTH is slow, and its hash unused, but its bytes are checked all the same).
+    uint64_t longer_than_32 = 0;
+    for (uint32_t group = 0; group < j; group += BUSTER_REFINE_LANES)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xFFFF, j - group);
+        longer_than_32 |= (uint64_t)_mm512_mask_cmpgt_epu32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, lengths + group), _mm512_set1_epi32(32)) << group;
+    }
+    for (; longer_than_32 != 0; longer_than_32 &= longer_than_32 - 1)
+    {
+        const uint32_t i = (uint32_t)__builtin_ctzll(longer_than_32);
+        const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, lengths[i]), source + starts[i]);
+        backslashes = _mm512_min_epu8(backslashes, _mm512_xor_si512(bytes, _mm512_set1_epi8('\\')));
+        if (trigraphs)
+        {
+            questions = _mm512_min_epu8(questions, _mm512_xor_si512(bytes, _mm512_set1_epi8('?')));
+        }
+        const uint64_t offset = (intern_hash_vector(bytes, lengths[i]) * BUSTER_INTERN_BUCKET_BYTES) & offset_mask;
+        offsets[2 * i] = offset;
+        _mm_prefetch((const char*)(buckets + offset), _MM_HINT_T0);
     }
     for (; j < count; j += 1)
     {
