@@ -16,29 +16,39 @@
 // compares it with), refine_identifier_key (an identifier's lookup key), refine_identifier_end (an identifier's
 // physical end, which refinement overwrote with its id) and refine_gap_is_splices.
 //
-// refine_tokens works on blocks of BUSTER_REFINE_BLOCK_TOKENS tokens, in two passes:
-//   A. Per 16 tokens: the gap bits (starts[i] != ends[i - 1], one compare). A gap that is only line splices needs a
-//      backslash, so a step of 64 tokens whose gaps lie in 64-byte chunks without one (refine_backslash_chunks marks
-//      them for the whole source first) is done; in the others, the byte before each start comes from a 128-byte
-//      window of the source with one vpermi2b. A non-first-of-line token whose gap ends in a newline byte can only
-//      follow a line splice (a newline outside comments starts a logical line, and a comment ends with "*/"), so those
-//      rare tokens have the scalar refine_gap_is_splices decide their bit. The identifiers' starts, lengths and
-//      token indices are compressed (vpcompressd) into dense arrays.
-//   B. The block's identifiers are interned in batches of 64 (refine_tokens; RefineVariant has the others the benchmark
-//      compares). Stage 1 reads each with one masked 64-byte load (never outside the token, so never outside the
-//      source), sends any with a backslash (a splice or a UCN; with trigraphs, any '?') or longer than
-//      BUSTER_INTERN_FAST_LENGTH to the scalar path, hashes the others (intern_hash_vector) and prefetches their
-//      buckets. Stage 2 compares each bucket's four slots with the identifier's first 12 bytes (zero-padded) in one
-//      compare, which identifies a spelling of up to 11 bytes outright; a longer one's first candidate is confirmed in
-//      stage 2b with one masked compare of its record's bytes and terminating zero. Nothing branches on the outcome:
-//      an identifier that isn't found this way (a new spelling, a second candidate, a probe past its first bucket, or
-//      the scalar path) is deferred, and stage 3 interns the deferred ones in token order with intern_find_or_add, so
-//      that new spellings get the same ids as refine_tokens_scalar gives them.
+// refine_tokens works on blocks of BUSTER_REFINE_BLOCK_TOKENS tokens. Before a block, refine_scan_chunks marks the
+// 64-byte chunks of its source bytes that hold a backslash (with trigraphs, a '?' too), 4 KB at a time and just before
+// the block's passes read those bytes. Then three passes:
+//   A. Per 16 tokens: the gap bits (starts[i] != ends[i - 1], one compare), the identifiers' starts and lengths
+//      compressed (vpcompressd) into dense arrays, and per 64 a mask of the identifiers. A gap that is only line splices
+//      needs a backslash, so a step of 64 tokens whose gaps lie in chunks without one is done; the others go to
+//      refine_step_splices, where a non-first-of-line token whose gap ends in a newline byte (only a line splice can do
+//      that) has the scalar refine_gap_is_splices decide its bit. Each step also prefetches the next block's step of
+//      the columns and some source bytes past the scan: the lexer's pass over a whole file has evicted them.
+//   B. refine_pass_b interns the block's identifiers in batches of 64 (RefineVariant has the other sizes the benchmark
+//      compares), pipelined: a batch's stage 1 runs in the middle of the batch before's stages 2 to 3.
+//      1. refine_hash_batch reads each identifier's first 32 bytes with a masked load (never outside the token, so
+//         never outside the source), hashes four at a time (intern_hash_vectors4_short; the rare longer ones again,
+//         whole) and prefetches their buckets. A batch whose loads had a backslash checks each identifier for one
+//         (refine_batch_specials): those, and identifiers past BUSTER_INTERN_FAST_LENGTH, go to the scalar key.
+//      2. Each bucket's four slots are compared with the identifier's first 12 bytes in one compare (refine_probe),
+//         which identifies a spelling of up to 11 bytes outright. The bookkeeping (slow, unmatched, longer) is 16
+//         identifiers at a time from their lengths and ids, as bits of masks.
+//      2b. A longer identifier's match is confirmed with one masked compare of its record's bytes and terminating
+//         zero, its record prefetched from its span before the next batch's stage 1 and compared after it.
+//      3. Nothing above branches on an identifier's outcome: one not found this way (a new spelling, a second
+//         candidate, a probe past its first bucket, or the scalar path) is deferred, and the deferred ones are interned
+//         in token order (intern_find_or_add_vector, from stage 1's bucket), so that new spellings get the same ids
+//         as refine_tokens_scalar gives them.
+//   C. The block's ids, from the dense array, into its identifiers' values (vpexpandd, a masked store per 16 tokens).
 //
 // main.c includes this file after c_lexer.c (whose scalar lexer it uses for splices and UCNs), lane.c and
 // c_intern.c; every function is static. Layout, in this order: the identifier key and end (refine_encode_utf8,
-// refine_identifier_key, refine_identifier_end, refine_gap_is_splices), refine_tokens_scalar, then the vectorized
-// path (refine_byte_before_newlines, refine_pass_a, refine_intern_batch, refine_tokens).
+// refine_identifier_key, refine_identifier_end, refine_gap_is_splices, refine_intern_identifier),
+// refine_tokens_scalar, then the vectorized path (RefineIdentifiers, refine_newlines_before, refine_scan_chunks,
+// refine_chunks_have_backslash, refine_step_splices, refine_pass_a, refine_key, refine_probe, refine_batch_specials,
+// refine_intern_batch (the fused variant's pass B), RefineHashes, refine_hash_batch, refine_pass_b, refine_pass_c,
+// the instantiations, refine_tokens_with, RefineVariant, refine_tokens_variant and refine_tokens).
 
 #include <stdint.h>
 #include <stdbool.h>
