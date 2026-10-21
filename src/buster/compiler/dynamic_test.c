@@ -34,11 +34,12 @@
 //   - Imports: BUSTER_DYNAMIC_TEST_IMPORTS of libc.so.6's functions, each called through a stub and pointed to, which
 //     the loader must bind at their versions.
 //   - Refusals: small programs with what a dynamic PIE refuses (a text relocation, an ABS32 to the image, a PC32 to a
-//     dynamic symbol, and a lea of and a PC64 to a hidden weak reference to nothing, at address 0), refused by every
-//     lane count and by the exact twins with their fixup and without an output, or handles (a call to and a pointer to
-//     a weak reference to nothing, and to a hidden one, loads through GOT slots whose word starts with that dynamic
-//     symbol's, and a pointer at an odd address, which .rela.dyn holds); and lanes short of scratch memory, which must
-//     fail the link cleanly.
+//     dynamic symbol, a lea of and a PC64 to a hidden weak reference to nothing, at address 0, and a lea of, a call to
+//     and a PC64 to an absolute symbol), refused by every lane count and by the exact twins with their fixup and
+//     without an output, or handles (a call to and a pointer to a weak reference to nothing, and to a hidden one, loads
+//     through GOT slots whose word starts with that dynamic symbol's, a pointer at an odd address, which .rela.dyn
+//     holds, and pointers in .data and .rodata to, a load through the GOT of and an ABS32 to an absolute symbol, which
+//     stay its value without a relocation); and lanes short of scratch memory, which must fail the link cleanly.
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, writing, the structure, the variants, unwinding, against lld, the programs and the
@@ -145,6 +146,7 @@ static bool dynamic_test_write_with(DynamicTestWrite* write, Link* link, const B
     ExecutableDynamic dynamic;
     const bool prepared = dynamic_inputs(&dynamic, runtime, bind, scratch.arena);
     dynamic.relr_version = write->rela_only ? 0 : dynamic.relr_version;
+    dynamic.relr = dynamic.relr && !write->rela_only;
     write->link = link;
     write->options = (ExecutableOptions){
         .path = path,
@@ -335,18 +337,19 @@ static uint64_t dynamic_test_relr(const DynamicTestImage* image, uint64_t* addre
 }
 
 // A symbol's address in the image (at base 0), or a TLS symbol's offset in the TLS segment; 0 for one defined nowhere,
-// and for one of the linker's its reference.
+// for one of the linker's its reference, and for an absolute one its value.
 static uint64_t dynamic_test_address(const Link* link, SymbolId symbol)
 {
     const AtomId atom = link->symbols.atom[symbol];
-    const uint64_t address = atom != 0 ? link->atoms.address[atom] + link->symbols.value[symbol] : 0;
-    return atom == 0 && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER ? (uint64_t)(int64_t)(int32_t)link->symbols.reference[symbol] : address;
+    const uint8_t source = link->symbols.source[symbol];
+    const uint64_t address = atom != 0 ? link->atoms.address[atom] + link->symbols.value[symbol] : source == BUSTER_LINK_SOURCE_ABSOLUTE ? link->symbols.value[symbol] : 0;
+    return atom == 0 && source == BUSTER_LINK_SOURCE_LINKER ? (uint64_t)(int64_t)(int32_t)link->symbols.reference[symbol] : address;
 }
 
 // The test's own rules. A symbol is dynamic, and the loader looks it up, if it is an import or a weak reference to
 // nothing with default visibility, a name and a type other than TLS; the loader relocates a dynamic symbol's address
-// and a defined one's that isn't TLS (RELATIVE), but not a TLS symbol's offset or a weak reference to nothing that
-// isn't dynamic, which are the executable's to know.
+// and a defined one's that isn't TLS (RELATIVE), but not a TLS symbol's offset, a weak reference to nothing that isn't
+// dynamic or an absolute symbol's value, which are the executable's to know.
 static bool dynamic_test_is_dynamic(const Link* link, SymbolId symbol)
 {
     const uint8_t flags = link->symbols.flags[symbol];
@@ -362,7 +365,8 @@ static bool dynamic_test_is_relative(const Link* link, SymbolId symbol)
     const AtomId atom = link->symbols.atom[symbol];
     const bool tls = atom != 0 ? link_class_is_tls(link->atoms.class[atom]) : (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
     const bool nowhere = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE && atom == 0;
-    return !dynamic_test_is_dynamic(link, symbol) && !tls && !nowhere;
+    const bool absolute = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
+    return !dynamic_test_is_dynamic(link, symbol) && !tls && !nowhere && !absolute;
 }
 
 // A relocation the loader needs: where, its type, its symbol's .dynsym name (or 0) and its addend.
@@ -659,10 +663,13 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
             };
             wanted += 1;
         }
-        // The slot's own bytes: the RELATIVE addend, 0 for a dynamic symbol, or a TLS offset, which the patch's
-        // references give.
+        // The slot's own bytes: the RELATIVE addend, 0 for a dynamic symbol, an absolute symbol's value, or a TLS
+        // offset, which the patch's references give.
         int64_t value = 0;
-        const int64_t expected_value = dynamic ? 0 : relative ? (int64_t)dynamic_test_address(link, symbol) : (int64_t)(int32_t)link->symbols.reference[symbol];
+        const bool absolute = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
+        const int64_t expected_value = dynamic                ? 0
+                                       : relative || absolute ? (int64_t)dynamic_test_address(link, symbol)
+                                                              : (int64_t)(int32_t)link->symbols.reference[symbol];
         if (slot != 0 && got != 0 && 8 * (uint64_t)slot + 8 <= got_section->sh_size)
         {
             memcpy(&value, got + 8 * (uint64_t)slot, sizeof(value));
@@ -2391,7 +2398,11 @@ static bool dynamic_test_imports(const ExecutableTestDirectory* directory, const
 // RELR can't hold, so .rela.dyn does, and which main returns whether it isn't main's address; and a hidden weak
 // reference to nothing, at address 0 wherever the program loads: main's lea of it and a PC64 to it in .data, which no
 // load address makes right (GNU ld refuses the lea), a call to it in the function that never runs, and a pointer to
-// it, which needs no relocation, and which main returns whether it isn't 0.
+// it, which needs no relocation, and which main returns whether it isn't 0. Then an absolute symbol at 42, which is its
+// value wherever the program loads, as lld leaves it: a pointer to it in .data and in .rodata, a load of it through the
+// GOT and an ABS32 to it in .data, none of which needs a relocation, each of which main returns whether it isn't 42;
+// and main's lea of it, a call to it and a PC64 to it in .data, which no load address makes right (GNU ld and lld refuse
+// them).
 typedef enum DynamicTestSmall
 {
     DYNAMIC_TEST_SMALL_TEXT_POINTER,
@@ -2405,6 +2416,13 @@ typedef enum DynamicTestSmall
     DYNAMIC_TEST_SMALL_HIDDEN_PC64,
     DYNAMIC_TEST_SMALL_HIDDEN_CALL,
     DYNAMIC_TEST_SMALL_HIDDEN_POINTER,
+    DYNAMIC_TEST_SMALL_ABSOLUTE_POINTER,
+    DYNAMIC_TEST_SMALL_ABSOLUTE_TEXT_POINTER,
+    DYNAMIC_TEST_SMALL_ABSOLUTE_GOT,
+    DYNAMIC_TEST_SMALL_ABSOLUTE_ABS32,
+    DYNAMIC_TEST_SMALL_ABSOLUTE_LEA,
+    DYNAMIC_TEST_SMALL_ABSOLUTE_CALL,
+    DYNAMIC_TEST_SMALL_ABSOLUTE_PC64,
     DYNAMIC_TEST_SMALLS,
 } DynamicTestSmall;
 
@@ -2420,7 +2438,17 @@ static const char* const dynamic_test_small_names[DYNAMIC_TEST_SMALLS] = {
     [DYNAMIC_TEST_SMALL_HIDDEN_PC64] = "a PC64 to a hidden weak reference to nothing in .data",
     [DYNAMIC_TEST_SMALL_HIDDEN_CALL] = "a call to a hidden weak reference to nothing",
     [DYNAMIC_TEST_SMALL_HIDDEN_POINTER] = "a pointer to a hidden weak reference to nothing",
+    [DYNAMIC_TEST_SMALL_ABSOLUTE_POINTER] = "a pointer to an absolute symbol in .data",
+    [DYNAMIC_TEST_SMALL_ABSOLUTE_TEXT_POINTER] = "a pointer to an absolute symbol in .rodata",
+    [DYNAMIC_TEST_SMALL_ABSOLUTE_GOT] = "a load of an absolute symbol through the GOT",
+    [DYNAMIC_TEST_SMALL_ABSOLUTE_ABS32] = "an ABS32 to an absolute symbol in .data",
+    [DYNAMIC_TEST_SMALL_ABSOLUTE_LEA] = "a lea of an absolute symbol",
+    [DYNAMIC_TEST_SMALL_ABSOLUTE_CALL] = "a call to an absolute symbol",
+    [DYNAMIC_TEST_SMALL_ABSOLUTE_PC64] = "a PC64 to an absolute symbol in .data",
 };
+
+// The absolute symbol's value in the small programs that have one.
+#define BUSTER_DYNAMIC_TEST_ABSOLUTE_VALUE 42
 
 // Whether some word of 64 symbols has GOT slots, by the test's own rules, whose first isn't relocated RELATIVE and a
 // later one that is.
@@ -2472,27 +2500,42 @@ static void dynamic_test_small(DynamicTestSmallProgram* program, const Runtime* 
     const SymbolId never = built ? bind_test_symbol(test, "buster_never", BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION, program_source) : 0;
     const SymbolId hidden =
         built ? bind_test_symbol(test, "buster_hidden", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_HIDDEN | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_NONE) : 0;
-    built = main != 0 && weak != 0 && data != 0 && never != 0 && hidden != 0 &&
+    // The absolute symbol, last, so that the other programs' symbols keep their numbers.
+    const bool absolute_case = which >= DYNAMIC_TEST_SMALL_ABSOLUTE_POINTER;
+    const SymbolId absolute =
+        built && absolute_case ? bind_test_symbol(test, "buster_absolute", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_ABSOLUTE) : 0;
+    if (absolute != 0)
+    {
+        test->link.symbols.value[absolute] = BUSTER_DYNAMIC_TEST_ABSOLUTE_VALUE;
+    }
+    built = main != 0 && weak != 0 && data != 0 && never != 0 && hidden != 0 && (!absolute_case || absolute != 0) &&
             bind_begin(&test->bind, &test->link, runtime, BIND_PATH_VECTOR, &test->bytes, 1, &test->arena);
-    // main: return 0, or for the weak pointers whether they aren't 0, or for the odd pointer whether it isn't main's
-    // address: mov rdx, [rip + buster_data]; lea rax, [rip + main] (for the lea, of buster_hidden); sub rdx, rax (for
-    // the odd pointer, a nop otherwise); mov eax, 1; mov ecx, 0; test rdx, rdx; cmove rax, rcx; ret.
-    const bool reads = which == DYNAMIC_TEST_SMALL_WEAK_POINTER || which == DYNAMIC_TEST_SMALL_ODD_POINTER || which == DYNAMIC_TEST_SMALL_HIDDEN_POINTER;
-    const bool lea = which == DYNAMIC_TEST_SMALL_HIDDEN_LEA;
+    // main: return 0, or for the weak pointers whether they aren't 0, for the odd pointer whether it isn't main's
+    // address, or for the absolute symbol's whether it isn't its value: mov rdx, [rip + buster_data] (for the load
+    // through the GOT, [rip + buster_absolute's slot]); lea rax, [rip + main] (for the leas, of buster_hidden or
+    // buster_absolute); sub rdx, rax for the odd pointer, sub rdx, 42 for the absolute symbol, and a nop otherwise;
+    // mov eax, 1; mov ecx, 0; test rdx, rdx; cmove rax, rcx; ret.
+    const bool reads = which == DYNAMIC_TEST_SMALL_WEAK_POINTER || which == DYNAMIC_TEST_SMALL_ODD_POINTER || which == DYNAMIC_TEST_SMALL_HIDDEN_POINTER || absolute_case;
+    const bool lea = which == DYNAMIC_TEST_SMALL_HIDDEN_LEA || which == DYNAMIC_TEST_SMALL_ABSOLUTE_LEA;
     const bool odd = which == DYNAMIC_TEST_SMALL_ODD_POINTER;
+    const X86Instruction difference = odd             ? (X86Instruction){ .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_REGISTER_DIRECT, .form = X86_FORM_SUB_R64_RM64 }
+                                      : absolute_case ? (X86Instruction){ .immediate = BUSTER_DYNAMIC_TEST_ABSOLUTE_VALUE, .rm = X86_REGISTER_RDX, .mode = BUSTER_X86_REGISTER_DIRECT, .form = X86_FORM_SUB_RM64_IMM8 }
+                                                      : (X86Instruction){ .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RDX, .mode = BUSTER_X86_REGISTER_DIRECT, .form = X86_FORM_MOV_R64_RM64 };
     const X86Instruction main_code[] = {
         { .reg = X86_REGISTER_RDX, .mode = BUSTER_X86_MEMORY_RIP, .form = X86_FORM_MOV_R64_RM64 | BUSTER_X86_FORM_FIXUP },
         { .reg = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_RIP, .form = X86_FORM_LEA_R64_M | BUSTER_X86_FORM_FIXUP },
-        { .reg = X86_REGISTER_RDX, .rm = odd ? X86_REGISTER_RAX : X86_REGISTER_RDX, .mode = BUSTER_X86_REGISTER_DIRECT, .form = odd ? X86_FORM_SUB_R64_RM64 : X86_FORM_MOV_R64_RM64 },
+        difference,
         { .immediate = reads ? 1 : 0, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOV_R32_IMM32 },
         { .immediate = 0, .rm = X86_REGISTER_RCX, .form = X86_FORM_MOV_R32_IMM32 },
         { .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RDX, .mode = BUSTER_X86_REGISTER_DIRECT, .form = X86_FORM_TEST_RM64_R64 },
         { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_REGISTER_DIRECT, .form = X86_FORM_CMOVE_R64_RM64 },
         { .form = X86_FORM_RET },
     };
+    const bool absolute_slot = which == DYNAMIC_TEST_SMALL_ABSOLUTE_GOT;
     const LinkReference main_references[] = {
-        { .instruction = 0, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_PC32, .target = data, .addend = 0 },
-        { .instruction = 1, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_PC32, .target = lea ? hidden : main, .addend = 0 },
+        absolute_slot ? (LinkReference){ .instruction = 0, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_LOAD_GOT, .target = absolute, .addend = 0 }
+                      : (LinkReference){ .instruction = 0, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_PC32, .target = data, .addend = 0 },
+        { .instruction = 1, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_PC32, .target = !lea ? main : absolute_case ? absolute : hidden, .addend = 0 },
     };
     // Or for the loads through the GOT: mov rdx, [rip + buster_weak's slot] (0); mov rax, [rip + buster_data's slot];
     // mov rax, [rax] (0); add rax, rdx; ret. A slot relocated wrong exits with another status, or faults.
@@ -2517,16 +2560,20 @@ static void dynamic_test_small(DynamicTestSmallProgram* program, const Runtime* 
         { .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP },
         { .form = X86_FORM_RET },
     };
+    const SymbolId callee = which == DYNAMIC_TEST_SMALL_HIDDEN_CALL ? hidden : which == DYNAMIC_TEST_SMALL_ABSOLUTE_CALL ? absolute : weak;
     const LinkReference never_references[] = {
-        { .instruction = 0, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_CALL, .target = which == DYNAMIC_TEST_SMALL_HIDDEN_CALL ? hidden : weak, .addend = 0 },
+        { .instruction = 0, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_CALL, .target = callee, .addend = 0 },
     };
-    const bool calls = which == DYNAMIC_TEST_SMALL_CALL_WEAK || which == DYNAMIC_TEST_SMALL_HIDDEN_CALL;
+    const bool calls = which == DYNAMIC_TEST_SMALL_CALL_WEAK || which == DYNAMIC_TEST_SMALL_HIDDEN_CALL || which == DYNAMIC_TEST_SMALL_ABSOLUTE_CALL;
     built = built && bind_test_code(test, never_code, BUSTER_ARRAY_LENGTH(never_code), never_references, calls ? 1 : 0, never);
-    // buster_data: 8 bytes in .rodata for the text relocation, in .data otherwise, with the case's fixup; for the odd
+    // The call's fixup, buster_never's only one.
+    const FixupId call_fixup = built && calls ? test->link.atoms.fixup_begin[test->link.symbols.atom[never]] : 0;
+    // buster_data: 8 bytes in .rodata for the text relocations, in .data otherwise, with the case's fixup; for the odd
     // pointer aligned to a byte, after an atom of a byte, so that it lands an odd address past the even end of the
     // larger alignments' atoms.
     uint8_t* bytes = built ? arena_push(&test->bytes, 9, 8) : 0;
-    const uint8_t class = which == DYNAMIC_TEST_SMALL_TEXT_POINTER ? BUSTER_LINK_CLASS_RODATA : BUSTER_LINK_CLASS_DATA;
+    const bool text = which == DYNAMIC_TEST_SMALL_TEXT_POINTER || which == DYNAMIC_TEST_SMALL_ABSOLUTE_TEXT_POINTER;
+    const uint8_t class = text ? BUSTER_LINK_CLASS_RODATA : BUSTER_LINK_CLASS_DATA;
     const AtomId pad = bytes != 0 && odd ? link_add_atom(&test->link, BUSTER_LINK_CLASS_DATA, 0, 1, bytes + 8, 0) : 0;
     const AtomId atom = bytes != 0 && (!odd || pad != 0) ? link_add_atom(&test->link, class, odd ? 0 : 3, 8, bytes, 0) : 0;
     if (bytes != 0)
@@ -2547,14 +2594,25 @@ static void dynamic_test_small(DynamicTestSmallProgram* program, const Runtime* 
         [DYNAMIC_TEST_SMALL_HIDDEN_PC64] = BUSTER_LINK_FIXUP_PC64,
         [DYNAMIC_TEST_SMALL_HIDDEN_CALL] = 0,
         [DYNAMIC_TEST_SMALL_HIDDEN_POINTER] = BUSTER_LINK_FIXUP_ABS64,
+        [DYNAMIC_TEST_SMALL_ABSOLUTE_POINTER] = BUSTER_LINK_FIXUP_ABS64,
+        [DYNAMIC_TEST_SMALL_ABSOLUTE_TEXT_POINTER] = BUSTER_LINK_FIXUP_ABS64,
+        [DYNAMIC_TEST_SMALL_ABSOLUTE_GOT] = 0,
+        [DYNAMIC_TEST_SMALL_ABSOLUTE_ABS32] = BUSTER_LINK_FIXUP_ABS32,
+        [DYNAMIC_TEST_SMALL_ABSOLUTE_LEA] = 0,
+        [DYNAMIC_TEST_SMALL_ABSOLUTE_CALL] = 0,
+        [DYNAMIC_TEST_SMALL_ABSOLUTE_PC64] = BUSTER_LINK_FIXUP_PC64,
     };
     const bool to_hidden = which == DYNAMIC_TEST_SMALL_HIDDEN_PC64 || which == DYNAMIC_TEST_SMALL_HIDDEN_POINTER;
-    const SymbolId target = which == DYNAMIC_TEST_SMALL_PC32_DYNAMIC || which == DYNAMIC_TEST_SMALL_WEAK_POINTER ? weak : to_hidden ? hidden : main;
+    const SymbolId target = which == DYNAMIC_TEST_SMALL_PC32_DYNAMIC || which == DYNAMIC_TEST_SMALL_WEAK_POINTER ? weak
+                            : to_hidden                                                                         ? hidden
+                            : absolute_case                                                                     ? absolute
+                                                                                                                : main;
     const FixupId fixup = built && kinds[which] != 0 ? link_add_fixup(&test->link, atom, 0, kinds[which], target, 0) : 0;
     built = built && (kinds[which] == 0 || fixup != 0);
+    const bool absolute_runs = absolute_case && which != DYNAMIC_TEST_SMALL_ABSOLUTE_LEA && which != DYNAMIC_TEST_SMALL_ABSOLUTE_CALL && which != DYNAMIC_TEST_SMALL_ABSOLUTE_PC64;
     const bool runs = which == DYNAMIC_TEST_SMALL_CALL_WEAK || which == DYNAMIC_TEST_SMALL_WEAK_POINTER || which == DYNAMIC_TEST_SMALL_GOT_ORDER || odd ||
-                      which == DYNAMIC_TEST_SMALL_HIDDEN_CALL || which == DYNAMIC_TEST_SMALL_HIDDEN_POINTER;
-    program->refused = runs ? 0 : lea ? lea_fixup : fixup;
+                      which == DYNAMIC_TEST_SMALL_HIDDEN_CALL || which == DYNAMIC_TEST_SMALL_HIDDEN_POINTER || absolute_runs;
+    program->refused = runs ? 0 : lea ? lea_fixup : which == DYNAMIC_TEST_SMALL_ABSOLUTE_CALL ? call_fixup : fixup;
     program->bound = built && bind_end(&test->bind, &test->link) && link_check(&test->link) == LINK_ERROR_NONE;
 }
 

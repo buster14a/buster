@@ -4,20 +4,33 @@
 // The runtime snapshot (docs/object-writer-and-linker.md, "The runtime snapshot"): what runtime_import makes of the C
 // runtime, kept in a file in the cache directory, so that a link maps one file instead of finding, reading and
 // importing the runtime's. runtime_open loads the snapshot if it still describes the system, and otherwise imports the
-// runtime and writes a new snapshot.
+// runtime and writes a new snapshot; runtime_open_static and runtime_open_static_pie do the same for a static
+// executable's runtime and a static PIE's (runtime_import_static and runtime_import_static_pie), each in a file of its
+// own. Each kind's file holds that kind, which the loader checks.
 //
-// The file holds the runtime's records as this executable lays them out in memory: a header, the records that hold
-// pointers (from the second page), the strings they point into, then the columns, each at a multiple of 64 bytes.
-//   - Validation: the file must have this format's magic, version and header, and the size its header gives; its hash
-//     must be its bytes' (executable.c's chunk hash, over the file with the hash's field as zeros); this very
-//     executable must have written it (the identity of /proc/self/exe: st_dev, st_ino, st_size, st_mtim and st_ctim,
-//     which a rebuild changes); and every path the import probed must be as it was (runtime_probes_current). So the
-//     layouts it holds are this executable's own, and since the hash covers every byte, a file that passes is what it
-//     wrote: a torn, truncated or corrupt one is rebuilt rather than trusted, and none needs an fsync before its rename.
-//   - Loading: the file is mapped privately, and the runtime's columns point into the mapping. The records with pointers
-//     (the probes, libc.so.6's versions, libc_nonshared.a's members, and the link's names' and atoms' bytes) hold
-//     offsets into the strings plus 1, 0 for none, and are rebased where they are, which copies only their pages; the
-//     rest is only read.
+// The file holds the runtime's records as this executable lays them out in memory, each region at a multiple of 64
+// bytes: a header, then the directory, which every link reads (from the second page: the probes, libc.so.6's versions,
+// the members, the strings, the pieces, the global names with their index and filter, libc.so.6's exports, the pieces'
+// references and COMDAT groups), then the pieces' records, of which a link reads only those of the pieces it joins (the
+// link's columns, the bindings and the symbols' global names, and the data: the names run, then each piece's atoms'
+// bytes). A piece is a crt object or a member, as Runtime.pieces has them.
+//   - Validation: the file must have this format's magic, version and header, and the size its header gives; the
+//     directory's hash must be its bytes' (executable.c's chunk hash, over the file up to the pieces' records, with the
+//     hash's field as zeros); this very executable must have written it (the identity of /proc/self/exe: st_dev,
+//     st_ino, st_size, st_mtim and st_ctim, which a rebuild changes); its kind must be the one asked for; and every
+//     path the import probed must be as it was (runtime_probes_current). A piece's records are checked by binding,
+//     when it first reads them: their hash must be the one the directory holds (runtime_piece_current). So the layouts
+//     it holds are this executable's own, a link reads only what it wrote, and checks only what it reads: a static
+//     hello world reads 442 of the static runtime's 2,622 pieces, and hashing all 8.6 MB took three quarters of the
+//     load on the 9700X (docs/object-writer-and-linker.md, "The runtime snapshot"). A torn, truncated or corrupt file is
+//     rebuilt rather than trusted, and none needs an fsync before its rename: a damaged directory makes the file
+//     invalid, and a damaged piece fails the link that joins it (BIND_ERROR_SNAPSHOT), whose caller discards the file
+//     (snapshot_discard) and opens the runtime again.
+//   - Loading: the file is mapped privately, and the runtime's columns point into the mapping. The probes and libc.so.6's
+//     versions hold offsets into the strings plus 1, 0 for none, and are rebased where they are, which copies their
+//     page; the members' names and the link's names' and atoms' bytes hold such offsets too, into the strings and the
+//     data, which the runtime's deltas make pointers where they are read (runtime_name_bytes, runtime_atom_bytes and
+//     runtime_member_name), so that loading writes none of their pages. The rest is only read.
 //   - Writing: into a new file beside the snapshot, under a random name, then renamed over it: a process that has the
 //     old one mapped keeps it whole, and two compilers that rebuild it at once write the same bytes, the last rename
 //     winning.
@@ -90,15 +103,25 @@ struct SnapshotResult
 static __attribute__((unused)) bool snapshot_directory(char* path, uint64_t capacity);
 // The runtime: loaded from the snapshot in `directory` if it describes the system, otherwise imported and its snapshot
 // written there, the directory made if it is missing. With no directory (0), imported. A snapshot that can't be written
-// doesn't fail the import. runtime_release frees the runtime either way.
+// doesn't fail the import. runtime_release frees the runtime either way. runtime_open_static and runtime_open_static_pie
+// do the same for a static executable's runtime and a static PIE's.
 static __attribute__((unused)) SnapshotResult runtime_open(Runtime* runtime, const char* directory);
+static __attribute__((unused)) SnapshotResult runtime_open_static(Runtime* runtime, const char* directory);
+static __attribute__((unused)) SnapshotResult runtime_open_static_pie(Runtime* runtime, const char* directory);
+// Removes a kind's snapshot from `directory`, as the caller of a link whose binding found a piece of a loaded runtime
+// damaged does (BIND_ERROR_SNAPSHOT), before it releases the runtime and opens it again, which then imports it and
+// writes a new snapshot: whether no snapshot of the kind is there now.
+static __attribute__((unused)) bool snapshot_discard(const char* directory, RuntimeKind kind);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The file
 
 #define BUSTER_SNAPSHOT_MAGIC 0x504e535254535542ull
-#define BUSTER_SNAPSHOT_VERSION 3
+#define BUSTER_SNAPSHOT_VERSION 4
+// Each kind's file: a dynamic PIE's runtime's, a static executable's and a static PIE's.
 #define BUSTER_SNAPSHOT_NAME "runtime.snapshot"
+#define BUSTER_SNAPSHOT_STATIC_NAME "runtime-static.snapshot"
+#define BUSTER_SNAPSHOT_STATIC_PIE_NAME "runtime-static-pie.snapshot"
 #define BUSTER_SNAPSHOT_ALIGNMENT 64
 // The records with pointers start a page of their own, so that rebasing them copies a page (or as few as they need),
 // and not the header's.
@@ -127,42 +150,20 @@ typedef enum SnapshotPath
     SNAPSHOT_PATHS,
 } SnapshotPath;
 
-// The file's regions, in its order: the records with pointers, the strings, then the columns.
+// The file's regions, in its order: the directory, which every link reads (the records with pointers, the strings, the
+// pieces and their hashes, and the columns the closure and the lookups read), then the pieces' records, which a link
+// reads only of the pieces it joins: the link's columns, the bindings and the symbols' global names, and the data (the
+// names run, then each piece's atoms' bytes). The directory's hash covers the file up to the first of the pieces'
+// regions (SnapshotHeader.directory_bytes), each piece's hash its records (runtime_piece_hash).
 typedef enum SnapshotRegion
 {
     SNAPSHOT_REGION_PROBES,
     SNAPSHOT_REGION_VERSIONS,
     SNAPSHOT_REGION_MEMBERS,
-    SNAPSHOT_REGION_NAME_BYTES,
-    SNAPSHOT_REGION_ATOM_BYTES,
     SNAPSHOT_REGION_STRINGS,
-    SNAPSHOT_REGION_NAME_LENGTH,
-    SNAPSHOT_REGION_NAME_HASH,
-    SNAPSHOT_REGION_ATOM_CLASS,
-    SNAPSHOT_REGION_ATOM_ALIGNMENT,
-    SNAPSHOT_REGION_ATOM_UNIT,
-    SNAPSHOT_REGION_ATOM_SIZE,
-    SNAPSHOT_REGION_ATOM_FIXUP_BEGIN,
-    SNAPSHOT_REGION_ATOM_FIXUP_COUNT,
-    SNAPSHOT_REGION_ATOM_ADDRESS,
-    SNAPSHOT_REGION_SYMBOL_NAME,
-    SNAPSHOT_REGION_SYMBOL_ATOM,
-    SNAPSHOT_REGION_SYMBOL_VALUE,
-    SNAPSHOT_REGION_SYMBOL_SIZE,
-    SNAPSHOT_REGION_SYMBOL_FLAGS,
-    SNAPSHOT_REGION_SYMBOL_SOURCE,
-    SNAPSHOT_REGION_SYMBOL_GOT_SLOT,
-    SNAPSHOT_REGION_SYMBOL_DYNAMIC_INDEX,
-    SNAPSHOT_REGION_SYMBOL_VERSION,
-    SNAPSHOT_REGION_SYMBOL_REFERENCE,
-    SNAPSHOT_REGION_FIXUP_OFFSET,
-    SNAPSHOT_REGION_FIXUP_TARGET,
-    SNAPSHOT_REGION_FIXUP_ADDEND,
-    SNAPSHOT_REGION_FIXUP_KIND,
-    SNAPSHOT_REGION_WIDE_ADDENDS,
     SNAPSHOT_REGION_PIECES,
-    SNAPSHOT_REGION_BINDINGS,
-    SNAPSHOT_REGION_SYMBOL_NAMES,
+    SNAPSHOT_REGION_PIECE_HASHES,
+    SNAPSHOT_REGION_PIECE_DATA,
     SNAPSHOT_REGION_GLOBAL_OFFSET,
     SNAPSHOT_REGION_GLOBAL_LENGTH,
     SNAPSHOT_REGION_GLOBAL_HASH,
@@ -183,13 +184,42 @@ typedef enum SnapshotRegion
     SNAPSHOT_REGION_GROUP_BEGIN,
     SNAPSHOT_REGION_GROUPS,
     SNAPSHOT_REGION_GROUP_ATOMS,
+    SNAPSHOT_REGION_NAME_BYTES,
+    SNAPSHOT_REGION_NAME_LENGTH,
+    SNAPSHOT_REGION_NAME_HASH,
+    SNAPSHOT_REGION_ATOM_CLASS,
+    SNAPSHOT_REGION_ATOM_ALIGNMENT,
+    SNAPSHOT_REGION_ATOM_UNIT,
+    SNAPSHOT_REGION_ATOM_SIZE,
+    SNAPSHOT_REGION_ATOM_BYTES,
+    SNAPSHOT_REGION_ATOM_FIXUP_BEGIN,
+    SNAPSHOT_REGION_ATOM_FIXUP_COUNT,
+    SNAPSHOT_REGION_ATOM_ADDRESS,
+    SNAPSHOT_REGION_SYMBOL_NAME,
+    SNAPSHOT_REGION_SYMBOL_ATOM,
+    SNAPSHOT_REGION_SYMBOL_VALUE,
+    SNAPSHOT_REGION_SYMBOL_SIZE,
+    SNAPSHOT_REGION_SYMBOL_FLAGS,
+    SNAPSHOT_REGION_SYMBOL_SOURCE,
+    SNAPSHOT_REGION_SYMBOL_GOT_SLOT,
+    SNAPSHOT_REGION_SYMBOL_DYNAMIC_INDEX,
+    SNAPSHOT_REGION_SYMBOL_VERSION,
+    SNAPSHOT_REGION_SYMBOL_REFERENCE,
+    SNAPSHOT_REGION_FIXUP_OFFSET,
+    SNAPSHOT_REGION_FIXUP_TARGET,
+    SNAPSHOT_REGION_FIXUP_ADDEND,
+    SNAPSHOT_REGION_FIXUP_KIND,
+    SNAPSHOT_REGION_WIDE_ADDENDS,
     SNAPSHOT_REGION_PRIORITY_ATOM,
     SNAPSHOT_REGION_PRIORITY_VALUE,
+    SNAPSHOT_REGION_BINDINGS,
+    SNAPSHOT_REGION_SYMBOL_NAMES,
+    SNAPSHOT_REGION_DATA,
     SNAPSHOT_REGIONS,
 } SnapshotRegion;
 
-// The records with pointers, which the loader rebases: the regions before the strings.
-#define BUSTER_SNAPSHOT_POINTER_REGIONS SNAPSHOT_REGION_STRINGS
+// The first of the pieces' regions: the directory is the file before it.
+#define BUSTER_SNAPSHOT_PIECE_REGIONS SNAPSHOT_REGION_NAME_BYTES
 
 // A string, by its offset in the strings plus 1 (0 for none) and its length. Each is followed by a NUL there.
 typedef struct SnapshotString SnapshotString;
@@ -206,8 +236,8 @@ struct SnapshotPlace
     uint64_t bytes;
 };
 
-// How many records of each kind the runtime has, and where the names run and the global names' strings are in the
-// strings.
+// How many records of each kind the runtime has, where the names run is in the data and the global names' strings in
+// the strings, and the room a link that binds against it needs (Runtime.name_room and atom_room).
 typedef struct SnapshotCounts SnapshotCounts;
 struct SnapshotCounts
 {
@@ -240,6 +270,8 @@ struct SnapshotCounts
     uint64_t names_run_bytes;
     uint64_t global_strings;
     uint64_t global_strings_bytes;
+    uint64_t name_room;
+    uint64_t atom_room;
 };
 
 typedef struct SnapshotHeader SnapshotHeader;
@@ -249,6 +281,8 @@ struct SnapshotHeader
     uint32_t version;
     uint32_t header_bytes;
     uint64_t file_bytes;
+    // The directory's bytes, from the file's start: what its hash covers.
+    uint64_t directory_bytes;
     uint8_t hash[16];
     // The executable that wrote it: an identity alone, without a path.
     RuntimeProbe compiler;
@@ -268,8 +302,8 @@ struct SnapshotColumn
     uint64_t count;
 };
 
-// Each region's column in `runtime`, with `counts`' numbers of elements. The strings have no column of their own: their
-// bytes come from several.
+// Each region's column in `runtime`, with `counts`' numbers of elements. The strings and the data have no column of
+// their own: their bytes come from several.
 static void snapshot_columns(Runtime* runtime, const SnapshotCounts* counts, SnapshotColumn* columns)
 {
     Link* link = &runtime->link;
@@ -280,36 +314,10 @@ static void snapshot_columns(Runtime* runtime, const SnapshotCounts* counts, Sna
     columns[SNAPSHOT_REGION_PROBES] = (SnapshotColumn){ (void**)&runtime->probes, sizeof(RuntimeProbe), counts->probes };
     columns[SNAPSHOT_REGION_VERSIONS] = (SnapshotColumn){ (void**)&runtime->libc.versions, sizeof(ImportVersion), counts->versions };
     columns[SNAPSHOT_REGION_MEMBERS] = (SnapshotColumn){ (void**)&runtime->members, sizeof(ImportMember), counts->members };
-    columns[SNAPSHOT_REGION_NAME_BYTES] = (SnapshotColumn){ (void**)&link->names.bytes, sizeof(*link->names.bytes), counts->names };
-    columns[SNAPSHOT_REGION_ATOM_BYTES] = (SnapshotColumn){ (void**)&link->atoms.bytes, sizeof(*link->atoms.bytes), counts->atoms };
     columns[SNAPSHOT_REGION_STRINGS] = (SnapshotColumn){ 0, 1, 0 };
-    columns[SNAPSHOT_REGION_NAME_LENGTH] = (SnapshotColumn){ (void**)&link->names.length, sizeof(*link->names.length), counts->names };
-    columns[SNAPSHOT_REGION_NAME_HASH] = (SnapshotColumn){ (void**)&link->names.hash, sizeof(*link->names.hash), counts->names };
-    columns[SNAPSHOT_REGION_ATOM_CLASS] = (SnapshotColumn){ (void**)&link->atoms.class, sizeof(*link->atoms.class), counts->atoms };
-    columns[SNAPSHOT_REGION_ATOM_ALIGNMENT] = (SnapshotColumn){ (void**)&link->atoms.alignment_log2, sizeof(*link->atoms.alignment_log2), counts->atoms };
-    columns[SNAPSHOT_REGION_ATOM_UNIT] = (SnapshotColumn){ (void**)&link->atoms.unit, sizeof(*link->atoms.unit), counts->atoms };
-    columns[SNAPSHOT_REGION_ATOM_SIZE] = (SnapshotColumn){ (void**)&link->atoms.size, sizeof(*link->atoms.size), counts->atoms };
-    columns[SNAPSHOT_REGION_ATOM_FIXUP_BEGIN] = (SnapshotColumn){ (void**)&link->atoms.fixup_begin, sizeof(*link->atoms.fixup_begin), counts->atoms };
-    columns[SNAPSHOT_REGION_ATOM_FIXUP_COUNT] = (SnapshotColumn){ (void**)&link->atoms.fixup_count, sizeof(*link->atoms.fixup_count), counts->atoms };
-    columns[SNAPSHOT_REGION_ATOM_ADDRESS] = (SnapshotColumn){ (void**)&link->atoms.address, sizeof(*link->atoms.address), counts->atoms };
-    columns[SNAPSHOT_REGION_SYMBOL_NAME] = (SnapshotColumn){ (void**)&link->symbols.name, sizeof(*link->symbols.name), counts->symbols };
-    columns[SNAPSHOT_REGION_SYMBOL_ATOM] = (SnapshotColumn){ (void**)&link->symbols.atom, sizeof(*link->symbols.atom), counts->symbols };
-    columns[SNAPSHOT_REGION_SYMBOL_VALUE] = (SnapshotColumn){ (void**)&link->symbols.value, sizeof(*link->symbols.value), counts->symbols };
-    columns[SNAPSHOT_REGION_SYMBOL_SIZE] = (SnapshotColumn){ (void**)&link->symbols.size, sizeof(*link->symbols.size), counts->symbols };
-    columns[SNAPSHOT_REGION_SYMBOL_FLAGS] = (SnapshotColumn){ (void**)&link->symbols.flags, sizeof(*link->symbols.flags), counts->symbols };
-    columns[SNAPSHOT_REGION_SYMBOL_SOURCE] = (SnapshotColumn){ (void**)&link->symbols.source, sizeof(*link->symbols.source), counts->symbols };
-    columns[SNAPSHOT_REGION_SYMBOL_GOT_SLOT] = (SnapshotColumn){ (void**)&link->symbols.got_slot, sizeof(*link->symbols.got_slot), counts->symbols };
-    columns[SNAPSHOT_REGION_SYMBOL_DYNAMIC_INDEX] = (SnapshotColumn){ (void**)&link->symbols.dynamic_index, sizeof(*link->symbols.dynamic_index), counts->symbols };
-    columns[SNAPSHOT_REGION_SYMBOL_VERSION] = (SnapshotColumn){ (void**)&link->symbols.version, sizeof(*link->symbols.version), counts->symbols };
-    columns[SNAPSHOT_REGION_SYMBOL_REFERENCE] = (SnapshotColumn){ (void**)&link->symbols.reference, sizeof(*link->symbols.reference), counts->symbols };
-    columns[SNAPSHOT_REGION_FIXUP_OFFSET] = (SnapshotColumn){ (void**)&link->fixups.offset, sizeof(*link->fixups.offset), counts->fixups };
-    columns[SNAPSHOT_REGION_FIXUP_TARGET] = (SnapshotColumn){ (void**)&link->fixups.target, sizeof(*link->fixups.target), counts->fixups };
-    columns[SNAPSHOT_REGION_FIXUP_ADDEND] = (SnapshotColumn){ (void**)&link->fixups.addend, sizeof(*link->fixups.addend), counts->fixups };
-    columns[SNAPSHOT_REGION_FIXUP_KIND] = (SnapshotColumn){ (void**)&link->fixups.kind, sizeof(*link->fixups.kind), counts->fixups };
-    columns[SNAPSHOT_REGION_WIDE_ADDENDS] = (SnapshotColumn){ (void**)&link->fixups.wide_addends, sizeof(*link->fixups.wide_addends), counts->wide_addends };
     columns[SNAPSHOT_REGION_PIECES] = (SnapshotColumn){ (void**)&runtime->pieces, sizeof(RuntimePiece), counts->pieces };
-    columns[SNAPSHOT_REGION_BINDINGS] = (SnapshotColumn){ (void**)&runtime->bindings, sizeof(RuntimeBinding), counts->symbols };
-    columns[SNAPSHOT_REGION_SYMBOL_NAMES] = (SnapshotColumn){ (void**)&runtime->symbol_names, sizeof(*runtime->symbol_names), counts->symbols };
+    columns[SNAPSHOT_REGION_PIECE_HASHES] = (SnapshotColumn){ (void**)&runtime->piece_hashes, 16, counts->pieces };
+    columns[SNAPSHOT_REGION_PIECE_DATA] = (SnapshotColumn){ (void**)&runtime->piece_data, sizeof(*runtime->piece_data), (uint64_t)counts->pieces + 1 };
     columns[SNAPSHOT_REGION_GLOBAL_OFFSET] = (SnapshotColumn){ (void**)&names->offset, sizeof(*names->offset), counts->globals };
     columns[SNAPSHOT_REGION_GLOBAL_LENGTH] = (SnapshotColumn){ (void**)&names->length, sizeof(*names->length), counts->globals };
     columns[SNAPSHOT_REGION_GLOBAL_HASH] = (SnapshotColumn){ (void**)&names->hash, sizeof(*names->hash), counts->globals };
@@ -330,8 +338,37 @@ static void snapshot_columns(Runtime* runtime, const SnapshotCounts* counts, Sna
     columns[SNAPSHOT_REGION_GROUP_BEGIN] = (SnapshotColumn){ (void**)&runtime->group_begin, sizeof(*runtime->group_begin), (uint64_t)counts->pieces + 1 };
     columns[SNAPSHOT_REGION_GROUPS] = (SnapshotColumn){ (void**)&runtime->groups, sizeof(RuntimeGroup), counts->groups };
     columns[SNAPSHOT_REGION_GROUP_ATOMS] = (SnapshotColumn){ (void**)&runtime->group_atoms, sizeof(*runtime->group_atoms), counts->group_atoms };
+    columns[SNAPSHOT_REGION_NAME_BYTES] = (SnapshotColumn){ (void**)&link->names.bytes, sizeof(*link->names.bytes), counts->names };
+    columns[SNAPSHOT_REGION_NAME_LENGTH] = (SnapshotColumn){ (void**)&link->names.length, sizeof(*link->names.length), counts->names };
+    columns[SNAPSHOT_REGION_NAME_HASH] = (SnapshotColumn){ (void**)&link->names.hash, sizeof(*link->names.hash), counts->names };
+    columns[SNAPSHOT_REGION_ATOM_CLASS] = (SnapshotColumn){ (void**)&link->atoms.class, sizeof(*link->atoms.class), counts->atoms };
+    columns[SNAPSHOT_REGION_ATOM_ALIGNMENT] = (SnapshotColumn){ (void**)&link->atoms.alignment_log2, sizeof(*link->atoms.alignment_log2), counts->atoms };
+    columns[SNAPSHOT_REGION_ATOM_UNIT] = (SnapshotColumn){ (void**)&link->atoms.unit, sizeof(*link->atoms.unit), counts->atoms };
+    columns[SNAPSHOT_REGION_ATOM_SIZE] = (SnapshotColumn){ (void**)&link->atoms.size, sizeof(*link->atoms.size), counts->atoms };
+    columns[SNAPSHOT_REGION_ATOM_BYTES] = (SnapshotColumn){ (void**)&link->atoms.bytes, sizeof(*link->atoms.bytes), counts->atoms };
+    columns[SNAPSHOT_REGION_ATOM_FIXUP_BEGIN] = (SnapshotColumn){ (void**)&link->atoms.fixup_begin, sizeof(*link->atoms.fixup_begin), counts->atoms };
+    columns[SNAPSHOT_REGION_ATOM_FIXUP_COUNT] = (SnapshotColumn){ (void**)&link->atoms.fixup_count, sizeof(*link->atoms.fixup_count), counts->atoms };
+    columns[SNAPSHOT_REGION_ATOM_ADDRESS] = (SnapshotColumn){ (void**)&link->atoms.address, sizeof(*link->atoms.address), counts->atoms };
+    columns[SNAPSHOT_REGION_SYMBOL_NAME] = (SnapshotColumn){ (void**)&link->symbols.name, sizeof(*link->symbols.name), counts->symbols };
+    columns[SNAPSHOT_REGION_SYMBOL_ATOM] = (SnapshotColumn){ (void**)&link->symbols.atom, sizeof(*link->symbols.atom), counts->symbols };
+    columns[SNAPSHOT_REGION_SYMBOL_VALUE] = (SnapshotColumn){ (void**)&link->symbols.value, sizeof(*link->symbols.value), counts->symbols };
+    columns[SNAPSHOT_REGION_SYMBOL_SIZE] = (SnapshotColumn){ (void**)&link->symbols.size, sizeof(*link->symbols.size), counts->symbols };
+    columns[SNAPSHOT_REGION_SYMBOL_FLAGS] = (SnapshotColumn){ (void**)&link->symbols.flags, sizeof(*link->symbols.flags), counts->symbols };
+    columns[SNAPSHOT_REGION_SYMBOL_SOURCE] = (SnapshotColumn){ (void**)&link->symbols.source, sizeof(*link->symbols.source), counts->symbols };
+    columns[SNAPSHOT_REGION_SYMBOL_GOT_SLOT] = (SnapshotColumn){ (void**)&link->symbols.got_slot, sizeof(*link->symbols.got_slot), counts->symbols };
+    columns[SNAPSHOT_REGION_SYMBOL_DYNAMIC_INDEX] = (SnapshotColumn){ (void**)&link->symbols.dynamic_index, sizeof(*link->symbols.dynamic_index), counts->symbols };
+    columns[SNAPSHOT_REGION_SYMBOL_VERSION] = (SnapshotColumn){ (void**)&link->symbols.version, sizeof(*link->symbols.version), counts->symbols };
+    columns[SNAPSHOT_REGION_SYMBOL_REFERENCE] = (SnapshotColumn){ (void**)&link->symbols.reference, sizeof(*link->symbols.reference), counts->symbols };
+    columns[SNAPSHOT_REGION_FIXUP_OFFSET] = (SnapshotColumn){ (void**)&link->fixups.offset, sizeof(*link->fixups.offset), counts->fixups };
+    columns[SNAPSHOT_REGION_FIXUP_TARGET] = (SnapshotColumn){ (void**)&link->fixups.target, sizeof(*link->fixups.target), counts->fixups };
+    columns[SNAPSHOT_REGION_FIXUP_ADDEND] = (SnapshotColumn){ (void**)&link->fixups.addend, sizeof(*link->fixups.addend), counts->fixups };
+    columns[SNAPSHOT_REGION_FIXUP_KIND] = (SnapshotColumn){ (void**)&link->fixups.kind, sizeof(*link->fixups.kind), counts->fixups };
+    columns[SNAPSHOT_REGION_WIDE_ADDENDS] = (SnapshotColumn){ (void**)&link->fixups.wide_addends, sizeof(*link->fixups.wide_addends), counts->wide_addends };
     columns[SNAPSHOT_REGION_PRIORITY_ATOM] = (SnapshotColumn){ (void**)&link->priorities.atom, sizeof(*link->priorities.atom), counts->priorities };
     columns[SNAPSHOT_REGION_PRIORITY_VALUE] = (SnapshotColumn){ (void**)&link->priorities.priority, sizeof(*link->priorities.priority), counts->priorities };
+    columns[SNAPSHOT_REGION_BINDINGS] = (SnapshotColumn){ (void**)&runtime->bindings, sizeof(RuntimeBinding), counts->symbols };
+    columns[SNAPSHOT_REGION_SYMBOL_NAMES] = (SnapshotColumn){ (void**)&runtime->symbol_names, sizeof(*runtime->symbol_names), counts->symbols };
+    columns[SNAPSHOT_REGION_DATA] = (SnapshotColumn){ 0, 1, 0 };
 }
 
 // The runtime's strings that the header points to, by SnapshotPath.
@@ -354,6 +391,17 @@ static void snapshot_paths(Runtime* runtime, String8** paths)
     paths[SNAPSHOT_PATH_ABI_NOTE] = &runtime->abi_note;
 }
 
+// The file name of a kind's snapshot, in the cache directory.
+static const char* snapshot_name(RuntimeKind kind)
+{
+    static const char* const names[RUNTIME_KINDS] = {
+        [RUNTIME_KIND_DYNAMIC] = BUSTER_SNAPSHOT_NAME,
+        [RUNTIME_KIND_STATIC] = BUSTER_SNAPSHOT_STATIC_NAME,
+        [RUNTIME_KIND_STATIC_PIE] = BUSTER_SNAPSHOT_STATIC_PIE_NAME,
+    };
+    return names[kind];
+}
+
 static bool snapshot_same_identity(const RuntimeProbe* a, const RuntimeProbe* b)
 {
     return a->found == b->found && a->device == b->device && a->inode == b->inode && a->size == b->size && a->modified_seconds == b->modified_seconds &&
@@ -373,7 +421,7 @@ static bool snapshot_compiler(RuntimeProbe* compiler)
     return found;
 }
 
-// The hash of a snapshot's bytes, with its header's hash as zeros.
+// The hash of a snapshot's directory, its first `bytes` bytes, with its header's hash as zeros.
 static void snapshot_hash(const uint8_t* file, uint64_t bytes, uint8_t* hash)
 {
     static const uint8_t zeros[sizeof(((SnapshotHeader*)0)->hash)] = { 0 };
@@ -384,6 +432,92 @@ static void snapshot_hash(const uint8_t* file, uint64_t bytes, uint8_t* hash)
     executable_hash_bytes(&state, zeros, sizeof(zeros));
     executable_hash_bytes(&state, file + field + sizeof(zeros), bytes - field - sizeof(zeros));
     executable_hash_end(&state, hash);
+}
+
+// A string of the strings, from its offset plus 1.
+static String8 snapshot_string(uint8_t* strings, SnapshotString string)
+{
+    String8 result = {
+        .pointer = string.offset != 0 ? (char*)strings + string.offset - 1 : 0,
+        .length = string.length,
+    };
+    return result;
+}
+
+// Points the runtime's columns into a snapshot's bytes (a mapped file, or the writer's image) and fills what its header
+// counts, as a loaded runtime has them, writing nothing there: the members' names and the link's names' and atoms' bytes
+// stay offsets, which the runtime's deltas make pointers (Runtime.byte_delta and string_delta). The probes and versions
+// keep theirs until snapshot_rebase.
+static void snapshot_view(Runtime* runtime, uint8_t* file, uint64_t bytes)
+{
+    const SnapshotHeader* header = (const SnapshotHeader*)file;
+    const SnapshotCounts counts = header->counts;
+    *runtime = (Runtime){ 0 };
+    SnapshotColumn columns[SNAPSHOT_REGIONS];
+    snapshot_columns(runtime, &counts, columns);
+    for (uint32_t r = 0; r < SNAPSHOT_REGIONS; r += 1)
+    {
+        if (r != SNAPSHOT_REGION_STRINGS && r != SNAPSHOT_REGION_DATA)
+        {
+            *columns[r].column = file + header->regions[r].offset;
+        }
+    }
+    uint8_t* strings = file + header->regions[SNAPSHOT_REGION_STRINGS].offset;
+    uint8_t* data = file + header->regions[SNAPSHOT_REGION_DATA].offset;
+    runtime->snapshot_data = data;
+    runtime->byte_delta = (uintptr_t)data - 1;
+    runtime->string_delta = (uintptr_t)strings - 1;
+    String8* paths[SNAPSHOT_PATHS];
+    snapshot_paths(runtime, paths);
+    for (uint32_t i = 0; i < SNAPSHOT_PATHS; i += 1)
+    {
+        *paths[i] = snapshot_string(strings, header->paths[i]);
+    }
+    Link* link = &runtime->link;
+    link->names.count = counts.names;
+    link->names.capacity = counts.names;
+    link->atoms.count = counts.atoms;
+    link->atoms.capacity = counts.atoms;
+    link->symbols.count = counts.symbols;
+    link->symbols.capacity = counts.symbols;
+    link->fixups.count = counts.fixups;
+    link->fixups.capacity = counts.fixups;
+    link->fixups.wide_count = counts.wide_addends;
+    link->fixups.wide_capacity = counts.wide_addends;
+    link->name_arena = &runtime->names;
+    runtime->names = (Arena){
+        .base = data + counts.names_run,
+        .length = counts.names_run_bytes,
+        .capacity = counts.names_run_bytes,
+    };
+    runtime->probe_count = counts.probes;
+    runtime->probe_capacity = counts.probes;
+    runtime->libc.version_count = counts.versions;
+    runtime->libc.exports.count = counts.exports;
+    runtime->member_count = counts.members;
+    runtime->member_unit = counts.member_unit;
+    runtime->kind = (RuntimeKind)counts.kind;
+    runtime->archive_count = counts.archives;
+    for (uint32_t a = 0; a < counts.archives; a += 1)
+    {
+        RuntimeArchive* archive = &runtime->archives[a];
+        const uint32_t end = a + 1 < counts.archives ? counts.first_members[a + 1] : counts.members;
+        archive->first_member = counts.first_members[a];
+        archive->archive.members = runtime->members + counts.first_members[a];
+        archive->archive.member_count = end - counts.first_members[a];
+    }
+    runtime->group_signatures = counts.group_signatures;
+    link->priorities.count = counts.priorities;
+    link->priorities.capacity = counts.priorities;
+    runtime->global_names.strings = strings + counts.global_strings;
+    runtime->global_names.strings_length = counts.global_strings_bytes;
+    runtime->global_names.count = counts.globals;
+    runtime->global_names.index.bucket_bits = counts.bucket_bits;
+    runtime->global_names.filter_bits = counts.filter_bits;
+    runtime->name_room = counts.name_room;
+    runtime->atom_room = counts.atom_room;
+    runtime->snapshot = file;
+    runtime->snapshot_bytes = bytes;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -426,12 +560,44 @@ static SnapshotCounts snapshot_counts(const Runtime* runtime)
         .member_unit = runtime->member_unit,
         .names_run_bytes = runtime->names.length,
         .global_strings_bytes = runtime->global_names.strings_length,
+        .name_room = runtime->name_room,
+        .atom_room = runtime->atom_room,
     };
     for (uint32_t a = 0; a < runtime->archive_count; a += 1)
     {
         result.first_members[a] = runtime->archives[a].first_member;
     }
     return result;
+}
+
+// Whether each table's records from record 1 on, and the names run, are the pieces' one after another, in piece order
+// and none left over: a piece's records are then ranges of the columns, and its atoms' bytes a range of the data.
+static bool snapshot_pieces_contiguous(const Runtime* runtime)
+{
+    const Link* link = &runtime->link;
+    const uint32_t pieces = RUNTIME_OBJECTS + runtime->member_count;
+    const ImportMark first = runtime->pieces[0].begin;
+    const ImportMark last = runtime->pieces[pieces - 1].end;
+    bool result = first.names == 1 && first.atoms == 1 && first.symbols == 1 && first.fixups == 1 && first.wide_addends == 1 && first.priorities == 1 &&
+                  last.names == link->names.count && last.atoms == link->atoms.count && last.symbols == link->symbols.count && last.fixups == link->fixups.count &&
+                  last.wide_addends == link->fixups.wide_count && last.priorities == link->priorities.count && last.name_bytes == runtime->names.length;
+    for (uint32_t p = 0; result && p + 1 < pieces; p += 1)
+    {
+        const ImportMark end = runtime->pieces[p].end;
+        const ImportMark next = runtime->pieces[p + 1].begin;
+        result = end.names == next.names && end.atoms == next.atoms && end.symbols == next.symbols && end.fixups == next.fixups && end.wide_addends == next.wide_addends &&
+                 end.priorities == next.priorities && end.name_bytes == next.name_bytes;
+    }
+    return result;
+}
+
+// Whether the writer copies a region from the runtime's column as it is: every one but the records with pointers, the
+// strings, the pieces' hashes and data, the names' and atoms' bytes and the data, which it fills itself.
+static bool snapshot_region_copied(uint32_t region)
+{
+    return region != SNAPSHOT_REGION_PROBES && region != SNAPSHOT_REGION_VERSIONS && region != SNAPSHOT_REGION_MEMBERS && region != SNAPSHOT_REGION_STRINGS &&
+           region != SNAPSHOT_REGION_PIECE_HASHES && region != SNAPSHOT_REGION_PIECE_DATA && region != SNAPSHOT_REGION_NAME_BYTES &&
+           region != SNAPSHOT_REGION_ATOM_BYTES && region != SNAPSHOT_REGION_DATA;
 }
 
 // The strings, as the writer builds them in the file's image: room for `capacity` bytes, of which `length` are used.
@@ -464,7 +630,7 @@ static uint64_t snapshot_strings_bytes(const Runtime* runtime)
 {
     String8* paths[SNAPSHOT_PATHS];
     snapshot_paths((Runtime*)runtime, paths);
-    uint64_t result = runtime->names.length + 1 + runtime->global_names.strings_length + 1;
+    uint64_t result = runtime->global_names.strings_length + 1;
     for (uint32_t i = 0; i < SNAPSHOT_PATHS; i += 1)
     {
         result += paths[i]->pointer != 0 ? paths[i]->length + 1 : 0;
@@ -481,15 +647,24 @@ static uint64_t snapshot_strings_bytes(const Runtime* runtime)
     {
         result += runtime->members[m].name.length + 1;
     }
+    return result;
+}
+
+// The bytes the data needs: the names run, then every atom's bytes, without NULs.
+static uint64_t snapshot_data_bytes(const Runtime* runtime)
+{
+    uint64_t result = runtime->names.length;
     for (AtomId atom = 1; atom < runtime->link.atoms.count; atom += 1)
     {
-        result += runtime->link.atoms.bytes[atom] != 0 ? runtime->link.atoms.size[atom] + 1 : 0;
+        result += runtime->link.atoms.bytes[atom] != 0 ? runtime->link.atoms.size[atom] : 0;
     }
     return result;
 }
 
-// The file's image of the runtime, from `arena`: its bytes and size, or 0 if the arena has no room or a pointer of the
-// runtime's isn't in what it should point into.
+// The file's image of the runtime, from `arena`: its bytes and size, or 0 if the arena has no room, a pointer of the
+// runtime's isn't in what it should point into, or its pieces' records aren't one after another
+// (snapshot_pieces_contiguous). The pieces' hashes come last, over the image as a loaded runtime sees it
+// (snapshot_view), then the directory's.
 static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compiler, Arena* arena, uint64_t* file_bytes)
 {
     Runtime source = *runtime;
@@ -502,35 +677,35 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
     };
     snapshot_columns(&source, &header.counts, columns);
     const uint64_t strings_bytes = snapshot_strings_bytes(runtime);
+    const uint64_t data_bytes = snapshot_data_bytes(runtime);
     uint64_t end = sizeof(SnapshotHeader);
     for (uint32_t r = 0; r < SNAPSHOT_REGIONS; r += 1)
     {
         const uint64_t alignment = r == 0 ? BUSTER_SNAPSHOT_PAGE_BYTES : BUSTER_SNAPSHOT_ALIGNMENT;
         const uint64_t offset = (end + alignment - 1) & ~(alignment - 1);
-        const uint64_t bytes = r == SNAPSHOT_REGION_STRINGS ? strings_bytes : columns[r].element * columns[r].count;
+        const uint64_t bytes = r == SNAPSHOT_REGION_STRINGS ? strings_bytes : r == SNAPSHOT_REGION_DATA ? data_bytes : columns[r].element * columns[r].count;
         header.regions[r] = (SnapshotPlace){ offset, bytes };
         end = offset + bytes;
     }
+    header.directory_bytes = header.regions[BUSTER_SNAPSHOT_PIECE_REGIONS].offset;
     uint8_t* image = arena_push(arena, end, BUSTER_SNAPSHOT_ALIGNMENT);
-    bool fits = image != 0;
+    bool fits = image != 0 && snapshot_pieces_contiguous(runtime);
     if (fits)
     {
         memset(image, 0, end);
-        // The columns without pointers, as they are.
-        for (uint32_t r = SNAPSHOT_REGION_STRINGS + 1; r < SNAPSHOT_REGIONS; r += 1)
+        for (uint32_t r = 0; r < SNAPSHOT_REGIONS; r += 1)
         {
-            if (header.regions[r].bytes != 0)
+            if (snapshot_region_copied(r) && header.regions[r].bytes != 0)
             {
                 memcpy(image + header.regions[r].offset, *columns[r].column, header.regions[r].bytes);
             }
         }
-        // The strings: the names run and the global names' strings first, so that their offsets are the counts', then the
-        // paths, then the records' strings, each written in its record as it goes in.
+        // The strings: the global names' first, so that their offset is the counts', then the paths, then the records'
+        // strings, each written in its record as it goes in.
         SnapshotStrings strings = {
             .bytes = image + header.regions[SNAPSHOT_REGION_STRINGS].offset,
             .capacity = strings_bytes,
         };
-        header.counts.names_run = snapshot_add_string(&strings, runtime->names.base, runtime->names.length, &fits) - 1;
         header.counts.global_strings = snapshot_add_string(&strings, runtime->global_names.strings, runtime->global_names.strings_length, &fits) - 1;
         String8* paths[SNAPSHOT_PATHS];
         snapshot_paths(&source, paths);
@@ -570,27 +745,47 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
         ImportMember* members = (ImportMember*)(image + header.regions[SNAPSHOT_REGION_MEMBERS].offset);
         for (uint32_t m = 0; m < header.counts.members; m += 1)
         {
-            const ImportMember* member = &runtime->members[m];
-            members[m].name.pointer = (char*)(uintptr_t)snapshot_add_string(&strings, member->name.pointer, member->name.length, &fits);
-            members[m].name.length = member->name.length;
-            members[m].offset = member->offset;
+            const String8 name = runtime_member_name(runtime, m);
+            members[m].name.pointer = (char*)(uintptr_t)snapshot_add_string(&strings, name.pointer, name.length, &fits);
+            members[m].name.length = name.length;
+            members[m].offset = runtime->members[m].offset;
         }
-        // The names' bytes: in the names run, which the strings start with.
+        fits = fits && strings.length == strings_bytes;
+        // The data: the names run, then each piece's atoms' bytes in atom order, where each piece's start is recorded;
+        // the names' and atoms' columns hold their offsets there plus 1.
+        uint8_t* data = image + header.regions[SNAPSHOT_REGION_DATA].offset;
+        memcpy(data, runtime->names.base, runtime->names.length);
+        header.counts.names_run = 0;
         const Link* link = &runtime->link;
         uint64_t* name_bytes = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_NAME_BYTES].offset);
         for (NameId name = 1; name < header.counts.names; name += 1)
         {
-            const uintptr_t place = (uintptr_t)link->names.bytes[name] - (uintptr_t)runtime->names.base;
-            const bool inside = link->names.bytes[name] != 0 && place <= runtime->names.length && runtime->names.length - place >= link->names.length[name];
+            const uint8_t* bytes = runtime_name_bytes(runtime, name);
+            const uintptr_t place = (uintptr_t)bytes - (uintptr_t)runtime->names.base;
+            const bool inside = bytes != 0 && place <= runtime->names.length && runtime->names.length - place >= link->names.length[name];
             fits = fits && inside;
-            name_bytes[name] = inside ? header.counts.names_run + place + 1 : 0;
+            name_bytes[name] = inside ? place + 1 : 0;
         }
         uint64_t* atom_bytes = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_ATOM_BYTES].offset);
-        for (AtomId atom = 1; atom < header.counts.atoms; atom += 1)
+        uint64_t* piece_data = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_PIECE_DATA].offset);
+        uint64_t at = runtime->names.length;
+        for (uint32_t p = 0; p < header.counts.pieces; p += 1)
         {
-            atom_bytes[atom] = snapshot_add_string(&strings, link->atoms.bytes[atom], link->atoms.size[atom], &fits);
+            piece_data[p] = at;
+            for (AtomId atom = runtime->pieces[p].begin.atoms; atom < runtime->pieces[p].end.atoms; atom += 1)
+            {
+                const uint8_t* bytes = runtime_atom_bytes(runtime, atom);
+                const uint64_t size = bytes != 0 ? link->atoms.size[atom] : 0;
+                atom_bytes[atom] = bytes != 0 ? at + 1 : 0;
+                if (bytes != 0)
+                {
+                    memcpy(data + at, bytes, size);
+                }
+                at += size;
+            }
         }
-        fits = fits && strings.length == strings_bytes;
+        piece_data[header.counts.pieces] = at;
+        fits = fits && at == data_bytes;
     }
     if (fits)
     {
@@ -598,7 +793,14 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
         header.compiler = *compiler;
         header.compiler.path = (String8){ 0 };
         memcpy(image, &header, sizeof(header));
-        snapshot_hash(image, end, header.hash);
+        Runtime view;
+        snapshot_view(&view, image, end);
+        uint8_t* hashes = image + header.regions[SNAPSHOT_REGION_PIECE_HASHES].offset;
+        for (uint32_t p = 0; p < header.counts.pieces; p += 1)
+        {
+            runtime_piece_hash(&view, p, hashes + 16 * (uint64_t)p);
+        }
+        snapshot_hash(image, header.directory_bytes, header.hash);
         memcpy(image + offsetof(SnapshotHeader, hash), header.hash, sizeof(header.hash));
     }
     *file_bytes = fits ? end : 0;
@@ -689,11 +891,11 @@ static bool snapshot_write_file(const char* directory, const char* path, const u
     return done;
 }
 
-// Writes the runtime's snapshot into `directory` as `compiler` wrote it.
+// Writes the runtime's snapshot into `directory` as `compiler` wrote it, under its kind's name (snapshot_name).
 static bool snapshot_write(const Runtime* runtime, const char* directory, const RuntimeProbe* compiler, SnapshotResult* result)
 {
     char path[BUSTER_RUNTIME_PATH_BYTES];
-    const int length = snprintf(path, sizeof(path), "%s/" BUSTER_SNAPSHOT_NAME, directory);
+    const int length = snprintf(path, sizeof(path), "%s/%s", directory, snapshot_name(runtime->kind));
     const bool named = length > 0 && (uint64_t)length < sizeof(path);
     if (!named)
     {
@@ -714,36 +916,34 @@ static bool snapshot_write(const Runtime* runtime, const char* directory, const 
 // ---------------------------------------------------------------------------------------------------------------------
 // Loading
 
-// A string of the strings, from its offset plus 1.
-static String8 snapshot_string(uint8_t* strings, SnapshotString string)
+// The records with pointers the loader writes, a few dozen: the probes' paths and libc.so.6's versions' names, offsets
+// into the strings plus 1 until now.
+static void snapshot_rebase(Runtime* runtime)
 {
-    String8 result = {
-        .pointer = string.offset != 0 ? (char*)strings + string.offset - 1 : 0,
-        .length = string.length,
-    };
-    return result;
-}
-
-// A column of pointers held as offsets into the strings plus 1, rebased where it is, eight at a time.
-static void snapshot_rebase(uint64_t* words, uint64_t count, const uint8_t* strings)
-{
-    const __m512i base = _mm512_set1_epi64((long long)((uintptr_t)strings - 1));
-    for (uint64_t i = 0; i < count; i += 8)
+    const SnapshotHeader* header = (const SnapshotHeader*)runtime->snapshot;
+    uint8_t* strings = runtime->snapshot + header->regions[SNAPSHOT_REGION_STRINGS].offset;
+    for (uint32_t p = 0; p < runtime->probe_count; p += 1)
     {
-        const __mmask8 lanes = (__mmask8)_bzhi_u32(0xff, count - i < 8 ? (uint32_t)(count - i) : 8);
-        const __m512i word = _mm512_maskz_loadu_epi64(lanes, words + i);
-        _mm512_mask_storeu_epi64(words + i, lanes, _mm512_mask_add_epi64(word, _mm512_test_epi64_mask(word, word), word, base));
+        runtime->probes[p].path = snapshot_string(strings, (SnapshotString){ (uint64_t)(uintptr_t)runtime->probes[p].path.pointer, runtime->probes[p].path.length });
+    }
+    for (uint32_t v = 0; v < runtime->libc.version_count; v += 1)
+    {
+        ImportVersion* version = &runtime->libc.versions[v];
+        version->name = snapshot_string(strings, (SnapshotString){ (uint64_t)(uintptr_t)version->name.pointer, version->name.length });
     }
 }
 
 // Whether the header describes a file of this format and of `bytes` bytes, with each region inside it, aligned and of
-// its column's size (`runtime` only gives the columns' places, which this doesn't touch).
+// its column's size, the directory's before its end and the pieces' after it (`runtime` only gives the columns' places,
+// which this doesn't touch).
 static bool snapshot_valid_header(const SnapshotHeader* header, uint64_t bytes, Runtime* runtime)
 {
     const SnapshotCounts* counts = &header->counts;
     bool result = header->magic == BUSTER_SNAPSHOT_MAGIC && header->version == BUSTER_SNAPSHOT_VERSION && header->header_bytes == sizeof(SnapshotHeader) &&
                   header->file_bytes == bytes && counts->bucket_bits < 32 && counts->filter_bits < 32 && counts->kind < RUNTIME_KINDS &&
-                  counts->archives <= BUSTER_RUNTIME_ARCHIVES && counts->pieces < UINT32_MAX;
+                  counts->archives <= BUSTER_RUNTIME_ARCHIVES && counts->pieces < UINT32_MAX && counts->pieces >= RUNTIME_OBJECTS &&
+                  header->directory_bytes == header->regions[BUSTER_SNAPSHOT_PIECE_REGIONS].offset && header->directory_bytes <= bytes &&
+                  header->directory_bytes >= sizeof(SnapshotHeader);
     // The archives' members, one after another.
     for (uint32_t a = 0; result && a < counts->archives; a += 1)
     {
@@ -754,97 +954,16 @@ static bool snapshot_valid_header(const SnapshotHeader* header, uint64_t bytes, 
     for (uint32_t r = 0; result && r < SNAPSHOT_REGIONS; r += 1)
     {
         const SnapshotPlace place = header->regions[r];
-        const bool sized = r == SNAPSHOT_REGION_STRINGS || place.bytes == columns[r].element * columns[r].count;
-        result = place.offset % BUSTER_SNAPSHOT_ALIGNMENT == 0 && place.offset >= sizeof(SnapshotHeader) && place.offset <= bytes && place.bytes <= bytes - place.offset && sized;
+        const bool sized = r == SNAPSHOT_REGION_STRINGS || r == SNAPSHOT_REGION_DATA || place.bytes == columns[r].element * columns[r].count;
+        const bool side = r < BUSTER_SNAPSHOT_PIECE_REGIONS ? place.offset + place.bytes <= header->directory_bytes : place.offset >= header->directory_bytes;
+        result = place.offset % BUSTER_SNAPSHOT_ALIGNMENT == 0 && place.offset >= sizeof(SnapshotHeader) && place.offset <= bytes && place.bytes <= bytes - place.offset && sized &&
+                 side;
     }
+    const SnapshotPlace data = header->regions[SNAPSHOT_REGION_DATA];
     const SnapshotPlace strings = header->regions[SNAPSHOT_REGION_STRINGS];
-    result = result && header->counts.names_run_bytes <= strings.bytes && header->counts.names_run <= strings.bytes - header->counts.names_run_bytes &&
+    result = result && header->counts.names_run_bytes <= data.bytes && header->counts.names_run <= data.bytes - header->counts.names_run_bytes &&
              header->counts.global_strings_bytes <= strings.bytes && header->counts.global_strings <= strings.bytes - header->counts.global_strings_bytes;
     return result;
-}
-
-// Points the runtime's columns into the mapped snapshot and rebases its records with pointers.
-static void snapshot_view(Runtime* runtime, uint8_t* file, uint64_t bytes)
-{
-    const SnapshotHeader* header = (const SnapshotHeader*)file;
-    const SnapshotCounts counts = header->counts;
-    SnapshotColumn columns[SNAPSHOT_REGIONS];
-    snapshot_columns(runtime, &counts, columns);
-    for (uint32_t r = 0; r < SNAPSHOT_REGIONS; r += 1)
-    {
-        if (r != SNAPSHOT_REGION_STRINGS)
-        {
-            *columns[r].column = file + header->regions[r].offset;
-        }
-    }
-    uint8_t* strings = file + header->regions[SNAPSHOT_REGION_STRINGS].offset;
-    // The records with pointers: the columns' eight at a time, and one field of each of the others' records, of which
-    // there are a few dozen.
-    snapshot_rebase((uint64_t*)runtime->link.names.bytes, counts.names, strings);
-    snapshot_rebase((uint64_t*)runtime->link.atoms.bytes, counts.atoms, strings);
-    for (uint32_t p = 0; p < counts.probes; p += 1)
-    {
-        runtime->probes[p].path = snapshot_string(strings, (SnapshotString){ (uint64_t)(uintptr_t)runtime->probes[p].path.pointer, runtime->probes[p].path.length });
-    }
-    for (uint32_t v = 0; v < counts.versions; v += 1)
-    {
-        ImportVersion* version = &runtime->libc.versions[v];
-        version->name = snapshot_string(strings, (SnapshotString){ (uint64_t)(uintptr_t)version->name.pointer, version->name.length });
-    }
-    for (uint32_t m = 0; m < counts.members; m += 1)
-    {
-        ImportMember* member = &runtime->members[m];
-        member->name = snapshot_string(strings, (SnapshotString){ (uint64_t)(uintptr_t)member->name.pointer, member->name.length });
-    }
-    String8* paths[SNAPSHOT_PATHS];
-    snapshot_paths(runtime, paths);
-    for (uint32_t i = 0; i < SNAPSHOT_PATHS; i += 1)
-    {
-        *paths[i] = snapshot_string(strings, header->paths[i]);
-    }
-    Link* link = &runtime->link;
-    link->names.count = counts.names;
-    link->names.capacity = counts.names;
-    link->atoms.count = counts.atoms;
-    link->atoms.capacity = counts.atoms;
-    link->symbols.count = counts.symbols;
-    link->symbols.capacity = counts.symbols;
-    link->fixups.count = counts.fixups;
-    link->fixups.capacity = counts.fixups;
-    link->fixups.wide_count = counts.wide_addends;
-    link->fixups.wide_capacity = counts.wide_addends;
-    link->name_arena = &runtime->names;
-    runtime->names = (Arena){
-        .base = strings + counts.names_run,
-        .length = counts.names_run_bytes,
-        .capacity = counts.names_run_bytes,
-    };
-    runtime->probe_count = counts.probes;
-    runtime->probe_capacity = counts.probes;
-    runtime->libc.version_count = counts.versions;
-    runtime->libc.exports.count = counts.exports;
-    runtime->member_count = counts.members;
-    runtime->member_unit = counts.member_unit;
-    runtime->kind = (RuntimeKind)counts.kind;
-    runtime->archive_count = counts.archives;
-    for (uint32_t a = 0; a < counts.archives; a += 1)
-    {
-        RuntimeArchive* archive = &runtime->archives[a];
-        const uint32_t end = a + 1 < counts.archives ? counts.first_members[a + 1] : counts.members;
-        archive->first_member = counts.first_members[a];
-        archive->archive.members = runtime->members + counts.first_members[a];
-        archive->archive.member_count = end - counts.first_members[a];
-    }
-    runtime->group_signatures = counts.group_signatures;
-    link->priorities.count = counts.priorities;
-    link->priorities.capacity = counts.priorities;
-    runtime->global_names.strings = strings + counts.global_strings;
-    runtime->global_names.strings_length = counts.global_strings_bytes;
-    runtime->global_names.count = counts.globals;
-    runtime->global_names.index.bucket_bits = counts.bucket_bits;
-    runtime->global_names.filter_bits = counts.filter_bits;
-    runtime->snapshot = file;
-    runtime->snapshot_bytes = bytes;
 }
 
 // The time from `*start` to now, added to `times[phase]` if there are times, and now as the next phase's start.
@@ -858,9 +977,11 @@ static void snapshot_time(uint64_t* times, SnapshotPhase phase, uint64_t* start)
     }
 }
 
-// Loads the runtime from the snapshot at `path` if `compiler` wrote it and it still describes the system. The runtime is
-// left empty otherwise. With `times`, each phase's nanoseconds are added to it, by SnapshotPhase.
-static SnapshotStatus snapshot_load(Runtime* runtime, const char* path, const RuntimeProbe* compiler, uint64_t* times)
+// Loads the runtime from the snapshot at `path` if `compiler` wrote it, it is of `kind` and it still describes the
+// system: its header and its directory's hash checked, its columns pointed into the mapping and its probes compared.
+// Its pieces are checked later, each when binding first reads it (runtime_piece_current). The runtime is left empty
+// otherwise. With `times`, each phase's nanoseconds are added to it, by SnapshotPhase.
+static SnapshotStatus snapshot_load(Runtime* runtime, const char* path, RuntimeKind kind, const RuntimeProbe* compiler, uint64_t* times)
 {
     uint64_t start = times != 0 ? executable_now() : 0;
     *runtime = (Runtime){ 0 };
@@ -884,14 +1005,16 @@ static SnapshotStatus snapshot_load(Runtime* runtime, const char* path, const Ru
         bool valid = snapshot_valid_header(header, bytes, runtime);
         if (valid)
         {
-            snapshot_hash(file, bytes, hash);
+            snapshot_hash(file, header->directory_bytes, hash);
             valid = memcmp(hash, header->hash, sizeof(hash)) == 0;
         }
-        result = !valid ? SNAPSHOT_STATUS_INVALID : snapshot_same_identity(&header->compiler, compiler) ? SNAPSHOT_STATUS_LOADED : SNAPSHOT_STATUS_STALE;
+        const bool current = snapshot_same_identity(&header->compiler, compiler) && header->counts.kind == (uint32_t)kind;
+        result = !valid ? SNAPSHOT_STATUS_INVALID : current ? SNAPSHOT_STATUS_LOADED : SNAPSHOT_STATUS_STALE;
         snapshot_time(times, SNAPSHOT_PHASE_HASH, &start);
         if (result == SNAPSHOT_STATUS_LOADED)
         {
             snapshot_view(runtime, file, bytes);
+            snapshot_rebase(runtime);
             snapshot_time(times, SNAPSHOT_PHASE_VIEW, &start);
             result = runtime_probes_current(runtime) ? result : SNAPSHOT_STATUS_STALE;
             snapshot_time(times, SNAPSHOT_PHASE_PROBES, &start);
@@ -922,20 +1045,21 @@ static bool snapshot_directory(char* path, uint64_t capacity)
     return result;
 }
 
-// runtime_open, as `compiler` (0 for an executable without an identity, which never loads or writes a snapshot).
-static SnapshotResult runtime_open_as(Runtime* runtime, const char* directory, const RuntimeProbe* compiler)
+// runtime_open of a kind's runtime, as `compiler` (0 for an executable without an identity, which never loads or writes
+// a snapshot).
+static SnapshotResult runtime_open_as(Runtime* runtime, const char* directory, RuntimeKind kind, const RuntimeProbe* compiler)
 {
     SnapshotResult result = { .status = SNAPSHOT_STATUS_MISSING };
     char path[BUSTER_RUNTIME_PATH_BYTES];
-    const int length = directory != 0 ? snprintf(path, sizeof(path), "%s/" BUSTER_SNAPSHOT_NAME, directory) : -1;
+    const int length = directory != 0 ? snprintf(path, sizeof(path), "%s/%s", directory, snapshot_name(kind)) : -1;
     const bool cached = compiler != 0 && length > 0 && (uint64_t)length < sizeof(path);
     if (cached)
     {
-        result.status = snapshot_load(runtime, path, compiler, 0);
+        result.status = snapshot_load(runtime, path, kind, compiler, 0);
     }
     if (result.status != SNAPSHOT_STATUS_LOADED)
     {
-        result.error = runtime_import(runtime);
+        result.error = runtime_import_kind(runtime, kind);
         result.written = result.error == RUNTIME_ERROR_NONE && cached && snapshot_write(runtime, directory, compiler, &result);
     }
     return result;
@@ -945,5 +1069,26 @@ static SnapshotResult runtime_open(Runtime* runtime, const char* directory)
 {
     RuntimeProbe compiler;
     const bool identified = snapshot_compiler(&compiler);
-    return runtime_open_as(runtime, directory, identified ? &compiler : 0);
+    return runtime_open_as(runtime, directory, RUNTIME_KIND_DYNAMIC, identified ? &compiler : 0);
+}
+
+static SnapshotResult runtime_open_static(Runtime* runtime, const char* directory)
+{
+    RuntimeProbe compiler;
+    const bool identified = snapshot_compiler(&compiler);
+    return runtime_open_as(runtime, directory, RUNTIME_KIND_STATIC, identified ? &compiler : 0);
+}
+
+static SnapshotResult runtime_open_static_pie(Runtime* runtime, const char* directory)
+{
+    RuntimeProbe compiler;
+    const bool identified = snapshot_compiler(&compiler);
+    return runtime_open_as(runtime, directory, RUNTIME_KIND_STATIC_PIE, identified ? &compiler : 0);
+}
+
+static bool snapshot_discard(const char* directory, RuntimeKind kind)
+{
+    char path[BUSTER_RUNTIME_PATH_BYTES];
+    const int length = snprintf(path, sizeof(path), "%s/%s", directory, snapshot_name(kind));
+    return length > 0 && (uint64_t)length < sizeof(path) && (unlink(path) == 0 || errno == ENOENT);
 }
