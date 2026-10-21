@@ -43,11 +43,33 @@
 //     binding found in readelf's .dynsym, and the members that lld's --why-extract lists. Each of the linkers' cases'
 //     own objects, linked by cc with GNU ld and with lld, must link, or fail to, as binding did, and run with the
 //     case's status, as the bound link must.
+// Then the same against this system's static runtime (runtime_import_static), by both paths, which must make the same
+// link and join the same members:
+//   - Static programs: test-link's two sets that call libc. The members that join must be those GNU ld's archive scan
+//     loads, and no others: an oracle of the test's own (bind_test_static_expected) that scans the archives' symbol
+//     indices in the group's order until a pass loads nothing, rather than reading binding's references. Then
+//     link_check; one symbol per global name and none of a shared library; every fixup's target defined, absolute,
+//     the static linker's, a weak reference to nothing, or __tls_get_addr, left to the relaxation; main the program's,
+//     __libc_start_main a member's, _init crti.o's and __dso_handle crtbeginT.o's; each joined object's atoms, in
+//     link order, but those of a COMDAT group whose signature an object before it has; and their priorities.
+//   - Static rules, on links made by hand: a strong reference to a name nothing defines (an error naming it); strong
+//     and weak references to __tls_get_addr (left undefined); the static linker's names (the linker's); weak and
+//     strong references to puts (the weak one binds to its member only if the closure loads it for another reason);
+//     a weak definition of __libc_start_main (crt1.o's reference takes it, and its member doesn't join); a reference
+//     to a name a member defines absolutely; and weak definitions of 4 and of 24 names the members refer to (none
+//     thread-local), which the vector path's closure compares with, or past BUSTER_BIND_BLOCKED leaves to the exact
+//     path's.
+//   - With --cross-check: each static program's own objects linked by cc -static with GNU ld (its --trace given twice)
+//     and with lld (--why-extract), which must load the members that joined and no others, and run printing what the
+//     model predicts. And five C programs that cc compiles (hello, stdio, threads, jumps and weak-puts), each
+//     imported as the program, bound and checked as the static programs are, and linked by both linkers, with the
+//     same members, to run with the program's status.
 // The objects and programs go in a new directory under $TMPDIR (or /tmp), removed at the end unless --keep. The exit
 // status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, the programs and their comparisons, the programs' checks, the names, links made by
-// hand, the rules, the atexit program, the cross-check, the linkers' cases, and run_bind_tests.
+// hand, the rules, the atexit program, the cross-check, the linkers' cases, the checks, the static runtime, and
+// run_bind_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -101,6 +123,7 @@ static const char* const bind_test_errors[] = {
     [BIND_ERROR_DUPLICATE] = "duplicate",
     [BIND_ERROR_SYMBOLS] = "symbols",
     [BIND_ERROR_FULL] = "full",
+    [BIND_ERROR_DISCARDED] = "discarded",
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -621,6 +644,7 @@ static bool bind_test_link_begin(BindTestLink* test, const Runtime* runtime, uin
         .symbols = symbol_room,
         .fixups = extra.fixups + BUSTER_BIND_TEST_OWN_RECORDS,
         .wide_addends = extra.wide_addends + BUSTER_BIND_TEST_OWN_RECORDS,
+        .priorities = extra.priorities + BUSTER_BIND_TEST_OWN_RECORDS,
     };
     *test = (BindTestLink){ 0 };
     test->tables = arena_reserve(link_capacity_bytes(capacity));
@@ -1044,19 +1068,21 @@ static bool bind_test_strong_after_weak(void)
     Bind bind = {
         .runtime = &runtime,
         .resolving = false,
+        .bound = false,
     };
     result = from_symbol != 0 && symbol != 0;
     // Before binding begins, the references join without an error; after, the strong one is an error.
-    bind_merge(&bind, &link, from_symbol, symbol, 0);
+    bind_merge(&bind, &link, from_symbol, symbol, 0, false);
     result = result && bind.error == BIND_ERROR_NONE && (link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
     link.symbols.flags[symbol] = BUSTER_LINK_SYMBOL_WEAK;
     bind.resolving = true;
-    bind_merge(&bind, &link, from_symbol, symbol, 0);
+    bind.bound = true;
+    bind_merge(&bind, &link, from_symbol, symbol, 0, false);
     result = result && bind.error == BIND_ERROR_UNDEFINED && bind.name == name;
     bind.error = BIND_ERROR_NONE;
     link.symbols.flags[symbol] = BUSTER_LINK_SYMBOL_WEAK;
     link.symbols.source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
-    bind_merge(&bind, &link, from_symbol, symbol, 0);
+    bind_merge(&bind, &link, from_symbol, symbol, 0, false);
     result = result && bind.error == BIND_ERROR_NONE;
     arena_release(&tables);
     arena_release(&names);
@@ -1079,6 +1105,7 @@ static bool bind_test_steps(const Runtime* runtime)
     if (tmc != 0)
     {
         bind->resolving = true;
+        bind->bound = true;
         bind_resolve(bind, link, 1, link->symbols.count, true);
     }
     result = tmc != 0 && bind->error == BIND_ERROR_NONE && link->symbols.atom[tmc] == 0 && link->symbols.source[tmc] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
@@ -2052,7 +2079,7 @@ static bool bind_test_linker_cases(const Runtime* runtime, bool cross_check, con
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The checks and run_bind_tests
+// The checks
 
 static bool bind_test_programs(const Runtime* runtime, uint64_t seed, bool cross_check, const char* directory, bool keep, Arena* arena)
 {
@@ -2111,6 +2138,893 @@ static bool bind_test_atexit_cross_check(const Runtime* runtime, const char* dir
     bind_test_link_end(&own.test);
     return bind_test_report(&tally);
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The static runtime
+
+// Whether bit `index` of a set is set, and setting it.
+static bool bind_test_has(const uint64_t* bits, uint32_t index)
+{
+    return (bits[index / 64] >> (index % 64) & 1) != 0;
+}
+
+static void bind_test_add(uint64_t* bits, uint32_t index)
+{
+    bits[index / 64] |= 1ull << (index % 64);
+}
+
+// The global and weak symbols of `link` from `first` to `end` whose names are the runtime's global names, as GNU ld's
+// archive scan counts them: one in an atom, absolute, the program's or the linker's defines its name, and another
+// strong one refers to it.
+static void bind_test_static_note(const Runtime* runtime, const Link* link, SymbolId first, SymbolId end, uint64_t* defined, uint64_t* referenced)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    for (SymbolId symbol = first; symbol < end; symbol += 1)
+    {
+        const NameId name = symbols->name[symbol];
+        const uint8_t binding = symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING;
+        const bool global = name != 0 && binding != BUSTER_LINK_SYMBOL_LOCAL;
+        const uint32_t entry = global ? runtime_find_global_name(&runtime->global_names, link->names.bytes[name], link->names.length[name], link->names.hash[name]) : 0;
+        const uint8_t source = symbols->source[symbol];
+        const bool definition = symbols->atom[symbol] != 0 || source == BUSTER_LINK_SOURCE_PROGRAM || source == BUSTER_LINK_SOURCE_ABSOLUTE || source == BUSTER_LINK_SOURCE_LINKER;
+        if (entry != 0 && definition)
+        {
+            bind_test_add(defined, entry - 1);
+        }
+        else if (entry != 0 && binding == BUSTER_LINK_SYMBOL_GLOBAL)
+        {
+            bind_test_add(referenced, entry - 1);
+        }
+    }
+}
+
+// The members GNU ld loads for `program`, a link not bound, from the static runtime (the closure's oracle, which reads
+// the archives' symbol indices rather than binding's references and members): the indices scanned in the group's
+// order, again and again until a whole pass loads nothing, each entry whose name the link refers to strongly and
+// nothing in it defines loading its member, whose definitions and strong references then count too, as GNU ld's
+// elf_link_add_archive_symbols scans. The link is the program, crt1.o, crti.o and crtbeginT.o, and the linker's names.
+// A bit per member in `loaded`.
+static void bind_test_static_expected(const Runtime* runtime, const Link* program, uint64_t* loaded, Arena* arena)
+{
+    const RuntimeNames* names = &runtime->global_names;
+    const uint64_t length = arena->length;
+    const uint32_t name_words = (names->count + 63) / 64;
+    uint64_t* defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, name_words + 1);
+    uint64_t* referenced = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, name_words + 1);
+    memset(loaded, 0, ((runtime->member_count + 63) / 64) * sizeof(uint64_t));
+    if (defined != 0 && referenced != 0)
+    {
+        memset(defined, 0, name_words * sizeof(uint64_t));
+        memset(referenced, 0, name_words * sizeof(uint64_t));
+        for (uint32_t e = 0; e < names->count; e += 1)
+        {
+            if (names->linker[e])
+            {
+                bind_test_add(defined, e);
+            }
+        }
+        bind_test_static_note(runtime, program, 1, program->symbols.count, defined, referenced);
+        const uint32_t head[] = {
+            RUNTIME_OBJECT_START,
+            RUNTIME_OBJECT_INIT_PROLOGUE,
+            RUNTIME_OBJECT_BEGIN,
+        };
+        for (uint32_t h = 0; h < BUSTER_ARRAY_LENGTH(head); h += 1)
+        {
+            const RuntimePiece* piece = &runtime->pieces[head[h]];
+            bind_test_static_note(runtime, &runtime->link, piece->begin.symbols, piece->end.symbols, defined, referenced);
+        }
+        bool scanning = true;
+        while (scanning)
+        {
+            scanning = false;
+            for (uint32_t a = 0; a < runtime->archive_count; a += 1)
+            {
+                const RuntimeArchive* archive = &runtime->archives[a];
+                for (uint32_t i = 0; i < archive->archive.symbol_count; i += 1)
+                {
+                    const ImportArchiveSymbol* indexed = &archive->archive.symbols[i];
+                    const uint8_t* bytes = (const uint8_t*)indexed->name.pointer;
+                    const uint32_t entry = runtime_find_global_name(names, bytes, (uint32_t)indexed->name.length, link_hash(bytes, indexed->name.length));
+                    const uint32_t member = archive->first_member + indexed->member;
+                    if (entry != 0 && !bind_test_has(loaded, member) && bind_test_has(referenced, entry - 1) && !bind_test_has(defined, entry - 1))
+                    {
+                        const RuntimePiece* piece = &runtime->pieces[RUNTIME_OBJECTS + member];
+                        bind_test_add(loaded, member);
+                        bind_test_static_note(runtime, &runtime->link, piece->begin.symbols, piece->end.symbols, defined, referenced);
+                        scanning = true;
+                    }
+                }
+            }
+        }
+    }
+    arena_pop_to(arena, length);
+}
+
+// Whether no two global or weak symbols of the link have one name: an open-addressing table of them by name hash.
+static bool bind_test_unique_globals(const Link* link, Arena* arena)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    const uint64_t length = arena->length;
+    uint64_t slots = 16;
+    while (slots < 2ull * symbols->count)
+    {
+        slots *= 2;
+    }
+    SymbolId* table = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, slots);
+    bool result = table != 0;
+    if (result)
+    {
+        memset(table, 0, slots * sizeof(SymbolId));
+    }
+    for (SymbolId symbol = 1; result && symbol < symbols->count; symbol += 1)
+    {
+        const NameId name = symbols->name[symbol];
+        const bool global = name != 0 && (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
+        uint64_t place = link->names.hash[name] & (slots - 1);
+        for (; global && table[place] != 0; place = (place + 1) & (slots - 1))
+        {
+            const NameId other = symbols->name[table[place]];
+            result = result && (link->names.length[other] != link->names.length[name] || memcmp(link->names.bytes[other], link->names.bytes[name], link->names.length[name]) != 0);
+        }
+        table[place] = global ? symbol : table[place];
+    }
+    arena_pop_to(arena, length);
+    return result;
+}
+
+// What a fixup's target can be in a link bound against the static runtime: defined in an atom, absolute, a name the
+// static linker defines, a weak reference to nothing, or __tls_get_addr, left to the relaxation.
+static bool bind_test_static_bound(const Link* link, SymbolId symbol)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    const uint8_t source = symbols->source[symbol];
+    const NameId name = symbols->name[symbol];
+    const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    const bool linker = source == BUSTER_LINK_SOURCE_LINKER && name != 0 && runtime_linker_name(RUNTIME_KIND_STATIC, link->names.bytes[name], link->names.length[name]);
+    const bool relaxed = source == BUSTER_LINK_SOURCE_NONE && name != 0 && bind_relaxed_name(link, name);
+    return symbols->atom[symbol] != 0 || source == BUSTER_LINK_SOURCE_ABSOLUTE || linker || (source == BUSTER_LINK_SOURCE_NONE && weak) || relaxed;
+}
+
+// Checks a link bound against the static runtime, whose program's units come before `unit_base`: the members the
+// oracle (`expected`) loads joined, and no others; link_check; one symbol per global name, and none of a shared
+// library's; every fixup's target bound (bind_test_static_bound); main the program's, and __libc_start_main, _init and
+// __dso_handle bound as GNU ld binds them; each joined object's atoms but those of the COMDAT groups of a signature
+// that an object before it in link order has (the program has none), and their priorities.
+static void bind_test_static_structure(BindTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, const uint64_t* expected, uint32_t unit_base,
+                                       uint32_t program_priorities, Arena* arena)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    const uint32_t words = (runtime->member_count + 63) / 64;
+    bool members = true;
+    for (uint32_t w = 0; w < words; w += 1)
+    {
+        members = members && bind->members_joined[w] == expected[w] && bind->members_needed[w] == expected[w];
+    }
+    bind_test_expect(tally, members, "the members GNU ld's archive scan loads joined, and no others", 0);
+    bind_test_expect(tally, link_check(link) == LINK_ERROR_NONE, "link_check", link->error);
+    bind_test_expect(tally, bind_test_unique_globals(link, arena), "one symbol per global name", 0);
+    uint64_t shared = 0;
+    for (SymbolId symbol = 1; symbol < symbols->count; symbol += 1)
+    {
+        shared += symbols->source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED || symbols->source[symbol] == BUSTER_LINK_SOURCE_FOREIGN_SHARED ? 1 : 0;
+    }
+    bind_test_expect(tally, shared == 0, "no symbol of a shared library", shared);
+    uint64_t unbound = 0;
+    for (FixupId fixup = 1; fixup < link->fixups.count; fixup += 1)
+    {
+        unbound += bind_test_static_bound(link, link->fixups.target[fixup]) ? 0 : 1;
+    }
+    bind_test_expect(tally, unbound == 0, "every fixup's target bound", unbound);
+    const SymbolId main_symbol = bind_test_global(link, "main");
+    const AtomId main_atom = main_symbol != 0 ? symbols->atom[main_symbol] : 0;
+    bind_test_expect(tally, main_atom != 0 && link->atoms.unit[main_atom] < unit_base, "main, the program's", main_symbol);
+    const SymbolId start_main = bind_test_global(link, "__libc_start_main");
+    const AtomId start_atom = start_main != 0 ? symbols->atom[start_main] : 0;
+    bind_test_expect(tally, start_atom != 0 && link->atoms.unit[start_atom] >= unit_base + runtime->member_unit &&
+                                symbols->source[start_main] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE,
+                     "__libc_start_main, a member's", start_main);
+    const SymbolId init = bind_test_global(link, "_init");
+    bind_test_expect(tally, init != 0 && symbols->atom[init] != 0 && link->atoms.unit[symbols->atom[init]] == unit_base + RUNTIME_OBJECT_INIT_PROLOGUE, "_init, crti.o's", init);
+    const SymbolId dso = bind_test_global(link, "__dso_handle");
+    bind_test_expect(tally, dso == 0 || (symbols->atom[dso] != 0 && link->atoms.unit[symbols->atom[dso]] == unit_base + RUNTIME_OBJECT_BEGIN), "__dso_handle, crtbeginT.o's", dso);
+    // Each joined object's atoms, in link order: crt1.o, crti.o and crtbeginT.o, the members in archive order, crtend.o
+    // and crtn.o.
+    const uint64_t length = arena->length;
+    const uint32_t piece_count = RUNTIME_OBJECTS + runtime->member_count;
+    uint32_t* atoms = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)piece_count + 1);
+    uint64_t* signatures = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, runtime->group_signatures / 64 + 1);
+    uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)piece_count + 1);
+    bool placed = atoms != 0 && signatures != 0 && order != 0;
+    uint32_t discarded = 0;
+    uint32_t priorities = program_priorities;
+    if (placed)
+    {
+        memset(atoms, 0, ((uint64_t)piece_count + 1) * sizeof(uint32_t));
+        memset(signatures, 0, (runtime->group_signatures / 64 + 1) * sizeof(uint64_t));
+        // The program's atoms count in the spare last entry.
+        for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+        {
+            const uint32_t unit = link->atoms.unit[atom];
+            const bool runtime_unit = unit >= unit_base && unit - unit_base < piece_count;
+            atoms[runtime_unit ? unit - unit_base : piece_count] += 1;
+        }
+        uint32_t count = 0;
+        order[count++] = RUNTIME_OBJECT_START;
+        order[count++] = RUNTIME_OBJECT_INIT_PROLOGUE;
+        order[count++] = RUNTIME_OBJECT_BEGIN;
+        for (uint32_t m = 0; m < runtime->member_count; m += 1)
+        {
+            order[count] = RUNTIME_OBJECTS + m;
+            count += bind_test_has(bind->members_joined, m) ? 1 : 0;
+        }
+        order[count++] = RUNTIME_OBJECT_END;
+        order[count++] = RUNTIME_OBJECT_INIT_EPILOGUE;
+        for (uint32_t i = 0; placed && i < count; i += 1)
+        {
+            const uint32_t piece = order[i];
+            const RuntimePiece* records = &runtime->pieces[piece];
+            uint32_t kept = records->end.atoms - records->begin.atoms;
+            for (uint32_t g = runtime->group_begin[piece]; g < runtime->group_begin[piece + 1]; g += 1)
+            {
+                const RuntimeGroup* group = &runtime->groups[g];
+                const bool first = !bind_test_has(signatures, group->signature);
+                bind_test_add(signatures, group->signature);
+                kept -= first ? 0 : group->count;
+                discarded += first ? 0 : 1;
+            }
+            priorities += records->end.priorities - records->begin.priorities;
+            placed = atoms[piece] == kept;
+        }
+    }
+    bind_test_expect(tally, placed, "each joined object's atoms, but its COMDAT groups' after the first of their signatures", discarded);
+    bind_test_expect(tally, link->priorities.count - 1 == priorities, "the program's priorities and the joined objects'", link->priorities.count - 1);
+    arena_pop_to(arena, length);
+}
+
+// The key a linker's trace gives a member, its archive's file name and its own: "libc.a(printf.o)".
+static void bind_test_member_key(char* key, uint64_t capacity, const Runtime* runtime, uint32_t member)
+{
+    uint32_t archive = 0;
+    for (uint32_t a = 1; a < runtime->archive_count; a += 1)
+    {
+        archive = runtime->archives[a].first_member <= member ? a : archive;
+    }
+    const String8 path = runtime->archives[archive].path;
+    uint64_t base = path.length;
+    while (base > 0 && path.pointer[base - 1] != '/')
+    {
+        base -= 1;
+    }
+    snprintf(key, capacity, "%.*s(%.*s)", (int)(path.length - base), path.pointer + base, (int)runtime->members[member].name.length, runtime->members[member].name.pointer);
+}
+
+// The member a line of a linker's list names, as "libc.a(printf.o)" in `key`: lld's --why-extract has
+// "path/libc.a(printf.o)" in its second column (the first names what referred to it), and GNU ld's --trace given twice
+// "(path/libc.a)printf.o". False for a line that names none.
+static bool bind_test_line_member(const char* line, uint64_t length, char* key, uint64_t capacity)
+{
+    const char* tab = memchr(line, '\t', length);
+    const char* column = tab != 0 ? tab + 1 : line + length;
+    const char* column_end = memchr(column, '\t', (uint64_t)(line + length - column));
+    const uint64_t column_length = (uint64_t)((column_end != 0 ? column_end : line + length) - column);
+    const char* close = line[0] == '(' ? memchr(line, ')', length) : memchr(column, ')', column_length);
+    const char* archive = memmem(column, column_length, ".a(", 3);
+    bool result = false;
+    if (length != 0 && line[0] == '(' && close != 0)
+    {
+        // GNU ld's: the archive's path in the parentheses, then the member.
+        const char* base = close;
+        while (base > line + 1 && base[-1] != '/')
+        {
+            base -= 1;
+        }
+        snprintf(key, capacity, "%.*s(%.*s)", (int)(close - base), base, (int)(length - (uint64_t)(close + 1 - line)), close + 1);
+        result = true;
+    }
+    else if (archive != 0 && close != 0 && close > archive)
+    {
+        // lld's: the archive's path and the member in parentheses, in the second column.
+        const char* base = archive;
+        while (base > column && base[-1] != '/')
+        {
+            base -= 1;
+        }
+        snprintf(key, capacity, "%.*s", (int)(close + 1 - base), base);
+        result = true;
+    }
+    return result;
+}
+
+// Whether a linker's list of the members it loaded (GNU ld's --trace given twice, or lld's --why-extract) has the
+// members that joined and no others.
+static bool bind_test_same_static_members(String8 text, const Bind* bind, const Runtime* runtime, Arena* arena)
+{
+    const uint64_t length = arena->length;
+    const uint32_t capacity = runtime->member_count + 1;
+    char* keys = BUSTER_ARENA_PUSH_ARRAY(arena, char, (uint64_t)capacity * 256);
+    bool result = text.pointer != 0 && keys != 0;
+    uint32_t listed = 0;
+    for (const char* line = text.pointer; result && line != 0 && *line != 0;)
+    {
+        const char* end = strchr(line, '\n');
+        const uint64_t line_length = end != 0 ? (uint64_t)(end - line) : strlen(line);
+        char key[256];
+        if (bind_test_line_member(line, line_length, key, sizeof(key)))
+        {
+            result = listed < capacity;
+            if (result)
+            {
+                memcpy(keys + (uint64_t)listed * 256, key, sizeof(key));
+                listed += 1;
+            }
+        }
+        line = end != 0 ? end + 1 : 0;
+    }
+    uint32_t joined = 0;
+    for (uint32_t m = 0; result && m < runtime->member_count; m += 1)
+    {
+        if (bind_test_has(bind->members_joined, m))
+        {
+            char key[256];
+            bind_test_member_key(key, sizeof(key), runtime, m);
+            bool found = false;
+            for (uint32_t i = 0; !found && i < listed; i += 1)
+            {
+                found = strcmp(keys + (uint64_t)i * 256, key) == 0;
+            }
+            if (!found)
+            {
+                printf("  %s joined, which the linker didn't load\n", key);
+            }
+            result = found;
+            joined += 1;
+        }
+    }
+    if (result && listed != joined)
+    {
+        printf("  the linker loaded %u members, binding joined %u\n", listed, joined);
+    }
+    arena_pop_to(arena, length);
+    return result && listed == joined;
+}
+
+// Links the objects at `paths` with `cc -static` by GNU ld (with --trace twice) and by lld (with --why-extract): each must
+// link, load the members that joined and no others, and run with `status`, or print `output` if it isn't 0.
+static void bind_test_static_linkers(BindTestTally* tally, const Bind* bind, const Runtime* runtime, char** paths, uint32_t count, const char* directory, const char* name,
+                                     const char* extra, int status, const uint8_t* output, uint64_t output_bytes, bool keep, Arena* arena)
+{
+    const uint64_t length = arena->length;
+    for (uint32_t linker = 0; linker < 2; linker += 1)
+    {
+        const bool lld = linker == 1;
+        char program[BUSTER_BIND_TEST_PATH_BYTES];
+        char listing[BUSTER_BIND_TEST_PATH_BYTES];
+        char option[BUSTER_BIND_TEST_PATH_BYTES + 32];
+        char out[BUSTER_BIND_TEST_PATH_BYTES];
+        char err[BUSTER_BIND_TEST_PATH_BYTES];
+        snprintf(program, sizeof(program), "%s/%s-%s", directory, name, lld ? "lld" : "bfd");
+        snprintf(listing, sizeof(listing), "%s.members", program);
+        snprintf(option, sizeof(option), "-Wl,--why-extract=%s", listing);
+        snprintf(out, sizeof(out), "%s.out", program);
+        snprintf(err, sizeof(err), "%s.err", program);
+        char* arguments[BUSTER_BIND_TEST_PATH_BYTES];
+        uint32_t used = 0;
+        arguments[used++] = "cc";
+        arguments[used++] = "-static";
+        arguments[used++] = lld ? "-fuse-ld=lld" : "-Wl,--trace,--trace";
+        arguments[used++] = lld ? option : "-o";
+        arguments[used++] = lld ? "-o" : program;
+        arguments[used] = program;
+        used += lld ? 1 : 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            arguments[used++] = paths[i];
+        }
+        arguments[used] = (char*)extra;
+        used += extra != 0 ? 1 : 0;
+        arguments[used] = 0;
+        // GNU ld's trace goes to standard output.
+        const int linked = object_test_run(arguments, lld ? out : listing, err);
+        bind_test_expect(tally, linked == 0, lld ? "lld links it with -static" : "GNU ld links it with -static", (uint64_t)linked);
+        const String8 members = linked == 0 ? object_test_read_file(arena, listing) : (String8){ 0 };
+        bind_test_expect(tally, bind_test_same_static_members(members, bind, runtime, arena), lld ? "lld's members" : "GNU ld's members", 0);
+        char* run[] = { program, 0 };
+        const int ran = linked == 0 ? object_test_run(run, out, err) : -1;
+        const String8 printed = ran >= 0 ? object_test_read_file(arena, out) : (String8){ 0 };
+        const bool printed_right = output == 0 || (printed.pointer != 0 && printed.length == output_bytes && memcmp(printed.pointer, output, output_bytes) == 0);
+        bind_test_expect(tally, ran == status && printed_right, "the static program runs", (uint64_t)ran);
+        if (!keep)
+        {
+            unlink(program);
+            unlink(listing);
+            unlink(out);
+            unlink(err);
+        }
+        arena_pop_to(arena, length);
+    }
+}
+
+// test-link's sets that call libc, bound against the static runtime by both paths: the same links and members, which
+// must be the oracle's, checked as bind_test_static_structure does; with the cross-check, the program's own objects
+// linked by GNU ld and lld with -static, which must load the same members and run as the model predicts.
+static bool bind_test_static_programs(const Runtime* runtime, uint64_t seed, bool cross_check, const char* directory, bool keep, Arena* arena)
+{
+    BindTestTally tally = {
+        .check = "static programs",
+    };
+    LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
+    link_test_program_options(options, seed, 1);
+    const uint32_t words = (runtime->member_count + 63) / 64;
+    uint64_t* expected = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
+    for (uint32_t i = 0; expected != 0 && i < BUSTER_LINK_TEST_PROGRAMS; i += 1)
+    {
+        if (options[i].libc)
+        {
+            BindTestProgram vector;
+            BindTestProgram exact;
+            LinkProgram own;
+            const bool vector_bound = bind_test_program(&vector, runtime, options[i], BIND_PATH_VECTOR);
+            const bool exact_bound = bind_test_program(&exact, runtime, options[i], BIND_PATH_EXACT);
+            const bool generated = link_program_generate(&own, options[i]);
+            bind_test_expect(&tally, vector_bound && exact_bound && generated, link_test_program_names[i], vector.bind.error);
+            bind_test_expect(&tally, bind_test_same_links(&vector.program.link, &exact.program.link), "the paths' links the same", i);
+            bind_test_expect(&tally, bind_test_same_binds(&vector.bind, &exact.bind), "the paths' members the same", i);
+            if (vector_bound && generated)
+            {
+                bind_test_static_expected(runtime, &own.link, expected, arena);
+                bind_test_static_structure(&tally, &vector.program.link, &vector.bind, runtime, expected, options[i].units, 0, arena);
+                uint32_t joined = 0;
+                for (uint32_t m = 0; m < runtime->member_count; m += 1)
+                {
+                    joined += bind_test_has(vector.bind.members_joined, m) ? 1 : 0;
+                }
+                printf("  %s: %u of %u members joined; %u atoms, %u symbols, %u fixups\n", link_test_program_names[i], joined, runtime->member_count,
+                       vector.program.link.atoms.count - 1, vector.program.link.symbols.count - 1, vector.program.link.fixups.count - 1);
+            }
+            if (cross_check && vector_bound && generated)
+            {
+                const uint64_t length = arena->length;
+                char** paths = BUSTER_ARENA_PUSH_ARRAY(arena, char*, options[i].units);
+                char* path_bytes = arena_push(arena, (uint64_t)options[i].units * BUSTER_BIND_TEST_PATH_BYTES, 1);
+                bool written = paths != 0 && path_bytes != 0;
+                for (uint32_t unit = 0; written && unit < options[i].units; unit += 1)
+                {
+                    paths[unit] = path_bytes + (uint64_t)unit * BUSTER_BIND_TEST_PATH_BYTES;
+                }
+                char name[BUSTER_BIND_TEST_PATH_BYTES];
+                snprintf(name, sizeof(name), "static-%s", link_test_program_directories[i]);
+                written = written && bind_test_write_objects(&own.link, options[i].units, directory, name, paths, arena);
+                bind_test_expect(&tally, written, "the program's objects written", i);
+                if (written)
+                {
+                    bind_test_static_linkers(&tally, &vector.bind, runtime, paths, options[i].units, directory, name, 0, 0, own.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES, keep, arena);
+                }
+                for (uint32_t unit = 0; written && !keep && unit < options[i].units; unit += 1)
+                {
+                    unlink(paths[unit]);
+                }
+                arena_pop_to(arena, length);
+            }
+            link_program_release(&own);
+            bind_test_release(&vector);
+            bind_test_release(&exact);
+        }
+    }
+    return bind_test_report(&tally);
+}
+
+// A link of a compiled object's records as the program's unit 0 (source PROGRAM), with room for the static runtime.
+static bool bind_test_static_import(BindTestLink* test, const Runtime* runtime, String8 object)
+{
+    LinkCapacity own = { 0 };
+    const bool counted = import_object_capacity(object, &own).error == IMPORT_ERROR_NONE;
+    uint64_t name_bytes = 0;
+    uint64_t atom_bytes = 0;
+    const LinkCapacity extra = bind_capacity(runtime, &name_bytes, &atom_bytes);
+    const LinkCapacity capacity = {
+        .names = extra.names + own.names,
+        .atoms = extra.atoms + own.atoms,
+        .symbols = extra.symbols + own.symbols,
+        .fixups = extra.fixups + own.fixups,
+        .wide_addends = extra.wide_addends + own.wide_addends,
+        .priorities = extra.priorities + own.priorities,
+    };
+    *test = (BindTestLink){ 0 };
+    test->tables = arena_reserve(link_capacity_bytes(capacity));
+    test->names = arena_reserve(name_bytes + object.length + 4096);
+    test->bytes = arena_reserve(atom_bytes + 65536);
+    test->arena = arena_reserve(BUSTER_BIND_TEST_BIND_BYTES);
+    ImportObject imported;
+    bool result = counted && test->names.base != 0 && test->bytes.base != 0 && test->arena.base != 0 && link_initialize(&test->link, &test->tables, &test->names, capacity);
+    result = result && import_object(&test->link, object, 0, BUSTER_LINK_SOURCE_PROGRAM, &test->arena, &imported).error == IMPORT_ERROR_NONE;
+    return result;
+}
+
+// The C programs the cross-check compiles: each one's name, source, an option for cc, and the status it exits with
+// (for weak-puts, whether puts's member joined).
+typedef struct BindTestStaticSource BindTestStaticSource;
+struct BindTestStaticSource
+{
+    const char* name;
+    const char* source;
+    const char* option;
+    int status;
+};
+
+static const BindTestStaticSource bind_test_static_sources[] = {
+    {
+        .name = "hello",
+        .source = "#include <stdio.h>\n"
+                  "int main(void) { puts(\"hello\"); return 0; }\n",
+    },
+    {
+        .name = "stdio",
+        .source = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
+                  "static int compare(const void* a, const void* b) { return *(const double*)a < *(const double*)b ? -1 : 1; }\n"
+                  "int main(int argc, char** argv) {\n"
+                  "    double* values = malloc(16 * sizeof(double));\n"
+                  "    for (int i = 0; i < 16; i += 1) values[i] = strtod(\"2.5\", 0) * (16 - i);\n"
+                  "    qsort(values, 16, sizeof(double), compare);\n"
+                  "    char line[128];\n"
+                  "    snprintf(line, sizeof(line), \"%s %.3f %g %s\", argv[0], values[0], values[15], getenv(\"HOME\") != 0 ? \"home\" : \"none\");\n"
+                  "    printf(\"%zu %s\\n\", strlen(line), line + strlen(argv[0]));\n"
+                  "    free(values);\n"
+                  "    return argc - 1;\n"
+                  "}\n",
+    },
+    {
+        .name = "threads",
+        .source = "#include <pthread.h>\n#include <stdio.h>\n"
+                  "static __thread int counter;\n"
+                  "static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;\n"
+                  "static int total;\n"
+                  "static void* work(void* argument) { counter += (int)(long)argument; pthread_mutex_lock(&lock); total += counter; pthread_mutex_unlock(&lock); return 0; }\n"
+                  "int main(void) {\n"
+                  "    pthread_t threads[4];\n"
+                  "    for (long i = 0; i < 4; i += 1) pthread_create(&threads[i], 0, work, (void*)(i + 1));\n"
+                  "    for (int i = 0; i < 4; i += 1) pthread_join(threads[i], 0);\n"
+                  "    printf(\"%d\\n\", total);\n"
+                  "    return total == 10 ? 0 : 1;\n"
+                  "}\n",
+        .option = "-pthread",
+    },
+    {
+        .name = "jumps",
+        .source = "#include <setjmp.h>\n#include <signal.h>\n#include <stdlib.h>\n#include <unistd.h>\n"
+                  "static jmp_buf place;\n"
+                  "static void handler(int signal) { longjmp(place, signal); }\n"
+                  "static void finish(void) { _exit(0); }\n"
+                  "int main(void) {\n"
+                  "    atexit(finish);\n"
+                  "    signal(SIGUSR1, handler);\n"
+                  "    if (setjmp(place) == 0) raise(SIGUSR1);\n"
+                  "    return 3;\n"
+                  "}\n",
+    },
+    {
+        .name = "weak-puts",
+        .source = "extern int puts(const char*) __attribute__((weak));\n"
+                  "int main(void) { return puts != 0; }\n",
+    },
+};
+
+static bool bind_test_static_compiled(const Runtime* runtime, const char* directory, bool keep, Arena* arena)
+{
+    BindTestTally tally = {
+        .check = "static compiled programs",
+    };
+    const uint32_t words = (runtime->member_count + 63) / 64;
+    uint64_t* expected = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
+    for (uint32_t s = 0; expected != 0 && s < BUSTER_ARRAY_LENGTH(bind_test_static_sources); s += 1)
+    {
+        const BindTestStaticSource* program = &bind_test_static_sources[s];
+        const uint64_t length = arena->length;
+        char source_path[BUSTER_BIND_TEST_PATH_BYTES];
+        char object_path[BUSTER_BIND_TEST_PATH_BYTES];
+        char out[BUSTER_BIND_TEST_PATH_BYTES];
+        char err[BUSTER_BIND_TEST_PATH_BYTES];
+        snprintf(source_path, sizeof(source_path), "%s/static-%s.c", directory, program->name);
+        snprintf(object_path, sizeof(object_path), "%s/static-%s.o", directory, program->name);
+        snprintf(out, sizeof(out), "%s/static-%s.cc.out", directory, program->name);
+        snprintf(err, sizeof(err), "%s/static-%s.cc.err", directory, program->name);
+        FILE* file = fopen(source_path, "w");
+        const bool written = file != 0 && fputs(program->source, file) >= 0;
+        if (file != 0)
+        {
+            fclose(file);
+        }
+        char* compile[] = { "cc", "-O2", "-c", "-o", object_path, source_path, (char*)program->option, 0 };
+        const bool compiled = written && object_test_run(compile, out, err) == 0;
+        bind_test_expect(&tally, compiled, program->name, s);
+        const String8 object = compiled ? object_test_read_file(arena, object_path) : (String8){ 0 };
+        BindTestLink vector;
+        BindTestLink exact;
+        const bool vector_imported = object.pointer != 0 && bind_test_static_import(&vector, runtime, object);
+        const bool exact_imported = object.pointer != 0 && bind_test_static_import(&exact, runtime, object);
+        bind_test_expect(&tally, vector_imported && exact_imported, "the object imported", s);
+        const uint32_t priorities = vector_imported ? vector.link.priorities.count - 1 : 0;
+        if (vector_imported)
+        {
+            bind_test_static_expected(runtime, &vector.link, expected, arena);
+        }
+        const bool vector_bound = vector_imported && bind_begin(&vector.bind, &vector.link, runtime, BIND_PATH_VECTOR, &vector.bytes, 1, &vector.arena) &&
+                                  bind_end(&vector.bind, &vector.link);
+        const bool exact_bound = exact_imported && bind_begin(&exact.bind, &exact.link, runtime, BIND_PATH_EXACT, &exact.bytes, 1, &exact.arena) &&
+                                 bind_end(&exact.bind, &exact.link);
+        bind_test_expect(&tally, vector_bound && exact_bound, "bound by both paths", vector.bind.error);
+        if (vector_bound && exact_bound)
+        {
+            bind_test_expect(&tally, bind_test_same_links(&vector.link, &exact.link), "the paths' links the same", s);
+            bind_test_expect(&tally, bind_test_same_binds(&vector.bind, &exact.bind), "the paths' members the same", s);
+            bind_test_static_structure(&tally, &vector.link, &vector.bind, runtime, expected, 1, priorities, arena);
+            const uint32_t puts_entry = runtime_find_global_name(&runtime->global_names, (const uint8_t*)"puts", 4, link_hash((const uint8_t*)"puts", 4));
+            const uint32_t puts_member = puts_entry != 0 ? runtime->global_names.member[puts_entry - 1] : 0;
+            const bool puts_joined = puts_member != 0 && bind_test_has(vector.bind.members_joined, puts_member - 1);
+            const int status = strcmp(program->name, "weak-puts") == 0 ? (puts_joined ? 1 : 0) : program->status;
+            uint32_t joined = 0;
+            for (uint32_t m = 0; m < runtime->member_count; m += 1)
+            {
+                joined += bind_test_has(vector.bind.members_joined, m) ? 1 : 0;
+            }
+            printf("  %s: %u members joined; %u atoms, %u symbols, %u fixups\n", program->name, joined, vector.link.atoms.count - 1, vector.link.symbols.count - 1,
+                   vector.link.fixups.count - 1);
+            char* paths[] = { object_path };
+            bind_test_static_linkers(&tally, &vector.bind, runtime, paths, 1, directory, program->name, program->option, status, 0, 0, keep, arena);
+        }
+        // bind_test_static_import made both links, whether or not they imported.
+        if (object.pointer != 0)
+        {
+            bind_test_link_end(&vector);
+            bind_test_link_end(&exact);
+        }
+        if (!keep)
+        {
+            unlink(source_path);
+            unlink(object_path);
+            unlink(out);
+            unlink(err);
+        }
+        arena_pop_to(arena, length);
+    }
+    return bind_test_report(&tally);
+}
+
+// The rules a static runtime adds, on links made by hand, each bound by both paths, which must make the same link:
+//   - a strong reference to a name nothing defines: an error naming it;
+//   - strong and weak references to __tls_get_addr: bound, the strong one left undefined for the relaxation;
+//   - references to the static linker's names (__ehdr_start, __rela_iplt_start and __rela_iplt_end, _end, etext): the
+//     linker's;
+//   - a weak reference to puts: bound to puts's member's definition if the closure loads it for another reason (GNU
+//     ld's archive scan, bind_test_static_expected, says), and otherwise to nothing, without the member; and a strong
+//     one, which loads it;
+//   - a weak definition of __libc_start_main: crt1.o's strong reference takes it, and its member doesn't join;
+//   - a strong reference to a name a member defines absolutely: the member joins, and the name is absolute;
+//   - weak definitions of 4 and of 24 names that the members of a link of main alone refer to (none thread-local),
+//     which the vector path's closure compares references with (BUSTER_BIND_BLOCKED) or, past 16, leaves to the exact
+//     path's: GNU ld's members.
+typedef enum BindTestStaticRule
+{
+    BIND_TEST_STATIC_NOWHERE,
+    BIND_TEST_STATIC_TLS_GET_ADDR,
+    BIND_TEST_STATIC_LINKER_NAMES,
+    BIND_TEST_STATIC_WEAK_PUTS,
+    BIND_TEST_STATIC_STRONG_PUTS,
+    BIND_TEST_STATIC_WEAK_START_MAIN,
+    BIND_TEST_STATIC_ABSOLUTE,
+    BIND_TEST_STATIC_BLOCKED,
+    BIND_TEST_STATIC_BLOCKED_MANY,
+    BIND_TEST_STATIC_RULES,
+} BindTestStaticRule;
+
+// How many names the two rules of weak definitions define.
+#define BUSTER_BIND_TEST_STATIC_BLOCKED 4
+#define BUSTER_BIND_TEST_STATIC_BLOCKED_MANY 24
+
+static const char* const bind_test_static_rule_names[BIND_TEST_STATIC_RULES] = {
+    [BIND_TEST_STATIC_NOWHERE] = "a strong reference to a name nothing defines",
+    [BIND_TEST_STATIC_TLS_GET_ADDR] = "strong and weak references to __tls_get_addr",
+    [BIND_TEST_STATIC_LINKER_NAMES] = "references to the static linker's names",
+    [BIND_TEST_STATIC_WEAK_PUTS] = "a weak reference to puts",
+    [BIND_TEST_STATIC_STRONG_PUTS] = "a strong reference to puts",
+    [BIND_TEST_STATIC_WEAK_START_MAIN] = "a weak definition of __libc_start_main",
+    [BIND_TEST_STATIC_ABSOLUTE] = "a strong reference to a member's absolute name",
+    [BIND_TEST_STATIC_BLOCKED] = "weak definitions of 4 names that the members refer to",
+    [BIND_TEST_STATIC_BLOCKED_MANY] = "weak definitions of 24 names that the members refer to",
+};
+
+static const char* const bind_test_static_linker_names[] = {
+    "__ehdr_start",
+    "__rela_iplt_start",
+    "__rela_iplt_end",
+    "_end",
+    "etext",
+};
+
+// The first global symbol of a member that is absolute, or 0.
+static SymbolId bind_test_static_absolute(const Runtime* runtime)
+{
+    const LinkSymbols* symbols = &runtime->link.symbols;
+    SymbolId result = 0;
+    for (SymbolId symbol = runtime->pieces[RUNTIME_OBJECTS].begin.symbols; result == 0 && symbol < symbols->count; symbol += 1)
+    {
+        const bool global = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL && symbols->name[symbol] != 0;
+        result = global && symbols->source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE ? symbol : 0;
+    }
+    return result;
+}
+
+// Builds the rule's link (main and the rule's symbols), works out GNU ld's members for it, then binds it by `path`.
+static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtime, BindTestStaticRule rule, BindPath path, uint64_t* expected, Arena* arena, SymbolId* symbols)
+{
+    bool result = bind_test_link_begin(test, runtime, bind_test_room(runtime));
+    const SymbolId main = result ? bind_test_symbol(test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+    result = main != 0 && bind_test_define(test, main);
+    const uint8_t strong = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE;
+    const uint8_t weak = BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_NOTYPE;
+    memset(symbols, 0, BUSTER_ARRAY_LENGTH(bind_test_static_linker_names) * sizeof(SymbolId));
+    if (result && rule == BIND_TEST_STATIC_NOWHERE)
+    {
+        symbols[0] = bind_test_symbol(test, "buster_static_nowhere", strong, BUSTER_LINK_SOURCE_NONE);
+    }
+    else if (result && rule == BIND_TEST_STATIC_TLS_GET_ADDR)
+    {
+        symbols[0] = bind_test_symbol(test, "__tls_get_addr", strong, BUSTER_LINK_SOURCE_NONE);
+    }
+    else if (result && rule == BIND_TEST_STATIC_LINKER_NAMES)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bind_test_static_linker_names); i += 1)
+        {
+            symbols[i] = bind_test_symbol(test, bind_test_static_linker_names[i], strong, BUSTER_LINK_SOURCE_NONE);
+        }
+    }
+    else if (result && (rule == BIND_TEST_STATIC_WEAK_PUTS || rule == BIND_TEST_STATIC_STRONG_PUTS))
+    {
+        symbols[0] = bind_test_symbol(test, "puts", rule == BIND_TEST_STATIC_WEAK_PUTS ? weak : strong, BUSTER_LINK_SOURCE_NONE);
+    }
+    else if (result && rule == BIND_TEST_STATIC_WEAK_START_MAIN)
+    {
+        symbols[0] = bind_test_symbol(test, "__libc_start_main", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM);
+        result = symbols[0] != 0 && bind_test_define(test, symbols[0]);
+    }
+    else if (result && (rule == BIND_TEST_STATIC_BLOCKED || rule == BIND_TEST_STATIC_BLOCKED_MANY))
+    {
+        // The names the members GNU ld loads for main alone refer to that members define, the first `count` of them, but
+        // not thread-local ones, which the program's functions can't define (__libc_errno, on the 9700X).
+        const uint32_t count = rule == BIND_TEST_STATIC_BLOCKED ? BUSTER_BIND_TEST_STATIC_BLOCKED : BUSTER_BIND_TEST_STATIC_BLOCKED_MANY;
+        const RuntimeNames* names = &runtime->global_names;
+        bind_test_static_expected(runtime, &test->link, expected, arena);
+        uint32_t chosen[BUSTER_BIND_TEST_STATIC_BLOCKED_MANY];
+        uint32_t chosen_count = 0;
+        for (uint32_t m = 0; chosen_count < count && m < runtime->member_count; m += 1)
+        {
+            const uint32_t piece = RUNTIME_OBJECTS + m;
+            for (uint32_t r = runtime->reference_begin[piece]; bind_test_has(expected, m) && chosen_count < count && r < runtime->reference_begin[piece + 1]; r += 1)
+            {
+                const uint32_t entry = runtime->references[r];
+                const SymbolId definition = names->definition[entry];
+                const bool tls = definition != 0 && (runtime->link.symbols.flags[definition] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
+                bool skipped = names->member[entry] == 0 || names->linker[entry] || tls;
+                for (uint32_t c = 0; !skipped && c < chosen_count; c += 1)
+                {
+                    skipped = chosen[c] == entry;
+                }
+                chosen[chosen_count] = entry;
+                chosen_count += skipped ? 0 : 1;
+            }
+        }
+        result = chosen_count == count;
+        for (uint32_t c = 0; result && c < chosen_count; c += 1)
+        {
+            char text[256];
+            snprintf(text, sizeof(text), "%.*s", (int)names->length[chosen[c]], (const char*)runtime_global_name(names, chosen[c]));
+            const SymbolId defined = bind_test_symbol(test, text, BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM);
+            result = defined != 0 && bind_test_define(test, defined);
+            symbols[0] = c == 0 ? defined : symbols[0];
+        }
+    }
+    else if (result && rule == BIND_TEST_STATIC_ABSOLUTE)
+    {
+        const SymbolId absolute = bind_test_static_absolute(runtime);
+        const NameId name = absolute != 0 ? runtime->link.symbols.name[absolute] : 0;
+        char text[256];
+        snprintf(text, sizeof(text), "%.*s", name != 0 ? (int)runtime->link.names.length[name] : 0, name != 0 ? (const char*)runtime->link.names.bytes[name] : "");
+        symbols[0] = name != 0 ? bind_test_symbol(test, text, strong, BUSTER_LINK_SOURCE_NONE) : 0;
+    }
+    result = result && symbols[0] != 0;
+    if (result)
+    {
+        bind_test_static_expected(runtime, &test->link, expected, arena);
+    }
+    result = result && bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena);
+    if (result)
+    {
+        bind_end(&test->bind, &test->link);
+    }
+}
+
+static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
+{
+    BindTestTally tally = {
+        .check = "static rules",
+    };
+    const uint32_t words = (runtime->member_count + 63) / 64;
+    uint64_t* expected = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
+    uint64_t* exact_expected = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
+    const RuntimeNames* names = &runtime->global_names;
+    for (uint32_t r = 0; expected != 0 && exact_expected != 0 && r < BIND_TEST_STATIC_RULES; r += 1)
+    {
+        const BindTestStaticRule rule = (BindTestStaticRule)r;
+        const char* what = bind_test_static_rule_names[r];
+        BindTestLink vector;
+        BindTestLink exact;
+        SymbolId symbols[BUSTER_ARRAY_LENGTH(bind_test_static_linker_names)];
+        SymbolId exact_symbols[BUSTER_ARRAY_LENGTH(bind_test_static_linker_names)];
+        bind_test_static_rule_link(&vector, runtime, rule, BIND_PATH_VECTOR, expected, arena, symbols);
+        bind_test_static_rule_link(&exact, runtime, rule, BIND_PATH_EXACT, exact_expected, arena, exact_symbols);
+        const Link* link = &vector.link;
+        const LinkSymbols* columns = &link->symbols;
+        const SymbolId symbol = symbols[0];
+        bind_test_expect(&tally, bind_test_same_links(&vector.link, &exact.link) && bind_test_same_binds(&vector.bind, &exact.bind), what, r);
+        bool members = true;
+        for (uint32_t w = 0; w < words; w += 1)
+        {
+            members = members && vector.bind.members_joined[w] == expected[w];
+        }
+        bool holds = false;
+        if (rule == BIND_TEST_STATIC_NOWHERE)
+        {
+            holds = vector.bind.error == BIND_ERROR_UNDEFINED && symbol != 0 && vector.bind.name == columns->name[symbol];
+        }
+        else if (rule == BIND_TEST_STATIC_TLS_GET_ADDR)
+        {
+            holds = vector.bind.error == BIND_ERROR_NONE && members && columns->source[symbol] == BUSTER_LINK_SOURCE_NONE && columns->atom[symbol] == 0 &&
+                    (columns->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
+        }
+        else if (rule == BIND_TEST_STATIC_LINKER_NAMES)
+        {
+            holds = vector.bind.error == BIND_ERROR_NONE && members;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bind_test_static_linker_names); i += 1)
+            {
+                holds = holds && symbols[i] != 0 && columns->source[symbols[i]] == BUSTER_LINK_SOURCE_LINKER && columns->atom[symbols[i]] == 0;
+            }
+        }
+        else if (rule == BIND_TEST_STATIC_WEAK_PUTS || rule == BIND_TEST_STATIC_STRONG_PUTS)
+        {
+            const uint32_t entry = runtime_find_global_name(names, (const uint8_t*)"puts", 4, link_hash((const uint8_t*)"puts", 4));
+            const uint32_t member = entry != 0 ? names->member[entry - 1] : 0;
+            const bool loaded = member != 0 && bind_test_has(expected, member - 1);
+            const AtomId atom = columns->atom[symbol];
+            const bool defined = atom != 0 && link->atoms.unit[atom] == 1 + runtime->member_unit + member - 1;
+            holds = vector.bind.error == BIND_ERROR_NONE && members && member != 0 && (rule == BIND_TEST_STATIC_WEAK_PUTS || loaded) &&
+                    (loaded ? defined : columns->source[symbol] == BUSTER_LINK_SOURCE_NONE && atom == 0);
+        }
+        else if (rule == BIND_TEST_STATIC_WEAK_START_MAIN)
+        {
+            const uint32_t entry = runtime_find_global_name(names, (const uint8_t*)"__libc_start_main", 17, link_hash((const uint8_t*)"__libc_start_main", 17));
+            const uint32_t member = entry != 0 ? names->member[entry - 1] : 0;
+            holds = vector.bind.error == BIND_ERROR_NONE && members && member != 0 && !bind_test_has(vector.bind.members_joined, member - 1) &&
+                    columns->source[symbol] == BUSTER_LINK_SOURCE_PROGRAM && columns->atom[symbol] != 0 && link->atoms.unit[columns->atom[symbol]] == 0;
+        }
+        else if (rule == BIND_TEST_STATIC_BLOCKED || rule == BIND_TEST_STATIC_BLOCKED_MANY)
+        {
+            holds = vector.bind.error == BIND_ERROR_NONE && members && link_check(&vector.link) == LINK_ERROR_NONE;
+        }
+        else
+        {
+            const SymbolId absolute = bind_test_static_absolute(runtime);
+            holds = vector.bind.error == BIND_ERROR_NONE && members && absolute != 0 && columns->source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE && columns->atom[symbol] == 0 &&
+                    columns->value[symbol] == runtime->link.symbols.value[absolute];
+        }
+        bind_test_expect(&tally, holds, what, vector.bind.error);
+        bind_test_link_end(&vector);
+        bind_test_link_end(&exact);
+    }
+    return bind_test_report(&tally);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// run_bind_tests
 
 static int run_bind_tests(int argc, char** argv)
 {
@@ -2171,6 +3085,21 @@ static int run_bind_tests(int argc, char** argv)
             passed = bind_test_atexit_cross_check(&runtime, directory, keep, &arena) && passed;
         }
         passed = bind_test_linker_cases(&runtime, cross_check, directory, keep, &arena) && passed;
+        // The static runtime.
+        Runtime static_runtime;
+        const RuntimeError static_imported = runtime_import_static(&static_runtime);
+        printf("%s", static_imported != RUNTIME_ERROR_NONE ? "static programs: the static runtime didn't import\n" : "");
+        passed = static_imported == RUNTIME_ERROR_NONE && passed;
+        if (static_imported == RUNTIME_ERROR_NONE)
+        {
+            passed = bind_test_static_programs(&static_runtime, seed, cross_check, directory, keep, &arena) && passed;
+            passed = bind_test_static_rules(&static_runtime, &arena) && passed;
+        }
+        if (static_imported == RUNTIME_ERROR_NONE && cross_check)
+        {
+            passed = bind_test_static_compiled(&static_runtime, directory, keep, &arena) && passed;
+        }
+        runtime_release(&static_runtime);
         if (keep)
         {
             printf("the files are in %s\n", directory);

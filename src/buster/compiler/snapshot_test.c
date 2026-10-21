@@ -139,8 +139,9 @@ static void snapshot_test_same_runtime(SnapshotTestTally* tally, const Runtime* 
     const uint64_t groups = imported->group_begin[pieces];
     const uint64_t group_atoms = groups != 0 ? (uint64_t)imported->groups[groups - 1].first + imported->groups[groups - 1].count : 0;
     snapshot_test_expect(tally, snapshot_test_same_column(loaded->reference_begin, imported->reference_begin, (pieces + 1) * sizeof(uint32_t)) &&
-                                    snapshot_test_same_column(loaded->references, imported->references, references * sizeof(uint32_t)),
-                         "the references", index);
+                                    snapshot_test_same_column(loaded->references, imported->references, references * sizeof(uint32_t)) &&
+                                    snapshot_test_same_column(loaded->reference_members, imported->reference_members, references * sizeof(uint32_t)),
+                         "the references and the members they load", index);
     snapshot_test_expect(tally, loaded->group_signatures == imported->group_signatures &&
                                     snapshot_test_same_column(loaded->group_begin, imported->group_begin, (pieces + 1) * sizeof(uint32_t)) &&
                                     snapshot_test_same_column(loaded->groups, imported->groups, groups * sizeof(RuntimeGroup)) &&

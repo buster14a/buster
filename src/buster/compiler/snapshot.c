@@ -97,7 +97,7 @@ static __attribute__((unused)) SnapshotResult runtime_open(Runtime* runtime, con
 // The file
 
 #define BUSTER_SNAPSHOT_MAGIC 0x504e535254535542ull
-#define BUSTER_SNAPSHOT_VERSION 2
+#define BUSTER_SNAPSHOT_VERSION 3
 #define BUSTER_SNAPSHOT_NAME "runtime.snapshot"
 #define BUSTER_SNAPSHOT_ALIGNMENT 64
 // The records with pointers start a page of their own, so that rebasing them copies a page (or as few as they need),
@@ -179,6 +179,7 @@ typedef enum SnapshotRegion
     SNAPSHOT_REGION_EXPORT_FLAGS,
     SNAPSHOT_REGION_REFERENCE_BEGIN,
     SNAPSHOT_REGION_REFERENCES,
+    SNAPSHOT_REGION_REFERENCE_MEMBERS,
     SNAPSHOT_REGION_GROUP_BEGIN,
     SNAPSHOT_REGION_GROUPS,
     SNAPSHOT_REGION_GROUP_ATOMS,
@@ -325,6 +326,7 @@ static void snapshot_columns(Runtime* runtime, const SnapshotCounts* counts, Sna
     columns[SNAPSHOT_REGION_EXPORT_FLAGS] = (SnapshotColumn){ (void**)&runtime->libc.exports.flags, sizeof(*runtime->libc.exports.flags), counts->exports };
     columns[SNAPSHOT_REGION_REFERENCE_BEGIN] = (SnapshotColumn){ (void**)&runtime->reference_begin, sizeof(*runtime->reference_begin), (uint64_t)counts->pieces + 1 };
     columns[SNAPSHOT_REGION_REFERENCES] = (SnapshotColumn){ (void**)&runtime->references, sizeof(*runtime->references), counts->references };
+    columns[SNAPSHOT_REGION_REFERENCE_MEMBERS] = (SnapshotColumn){ (void**)&runtime->reference_members, sizeof(*runtime->reference_members), counts->references };
     columns[SNAPSHOT_REGION_GROUP_BEGIN] = (SnapshotColumn){ (void**)&runtime->group_begin, sizeof(*runtime->group_begin), (uint64_t)counts->pieces + 1 };
     columns[SNAPSHOT_REGION_GROUPS] = (SnapshotColumn){ (void**)&runtime->groups, sizeof(RuntimeGroup), counts->groups };
     columns[SNAPSHOT_REGION_GROUP_ATOMS] = (SnapshotColumn){ (void**)&runtime->group_atoms, sizeof(*runtime->group_atoms), counts->group_atoms };

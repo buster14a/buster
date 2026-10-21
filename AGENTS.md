@@ -250,6 +250,10 @@ designs and the compilers already built this way.
   the link's imports and exports listed. It has a vector path and an exact
   one, its twin, which make the same link. `link_program.c`'s programs leave
   room for it (`link_program_generate_begin`, `_atoms` and `_end`).
+  It binds against the static runtime too (step 6's second part): the
+  archives' members the link needs, found as GNU ld's group finds them, joined
+  in archive order with the COMDAT groups after the first of each signature
+  discarded, and no name bound to a shared library.
   `bind_test.c` holds its tests (`main.c` includes it; `./build/compiler
   test-bind` runs them) and `bind_benchmark.c` provides `benchmark-bind`.
 - `src/buster/compiler/executable.c` writes the direct path's executables: a
@@ -1042,17 +1046,18 @@ the 9700X, and 0.26 s with `--cross-check`) checks `import.c` and
   object's COMDAT groups as its `ImportObject` has them, with the same
   signature numbers for groups of the same signature and different ones
   otherwise; each piece's strong references as a scan of its symbols finds
-  them, and each global name's defining member; `link_check` on the whole
-  runtime; and every crt object and member taking the vector path.
+  them, with the member each loads, and each global name's defining member;
+  `link_check` on the whole runtime; and every crt object and member taking
+  the vector path.
 
 `--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
 version, type, binding and size) and references with `readelf -W --dyn-syms`,
 and every relocation of the crt objects and the archives' members, the static
 runtime's among them, with `readelf -W -r`: each one must be a fixup of its
 kind at its offset, against the symbol (or the section) readelf names, with
-its addend, and there must be no other fixups. `--seed N` changes the programs and the random bytes. The
-default 9700X job runs it with `--cross-check` after the object writer's
-benchmark.
+its addend, and there must be no other fixups. `--seed N` changes the programs
+and the random bytes. The default 9700X job runs it with `--cross-check` after
+the object writer's benchmark.
 
 ## Import benchmark
 
@@ -1084,7 +1089,7 @@ informational.
 ## Bind tests
 
 `./build/compiler test-bind [--seed N] [--cross-check] [--keep]` (about
-5 ms on the 9700X, and 0.25 s with `--cross-check`) checks `bind.c` against
+34 ms on the 9700X, and 0.57 s with `--cross-check`) checks `bind.c` against
 this system's runtime (`runtime_import`). Every check binds by both paths,
 which must make the same link, column by column, and the same imports,
 exports and members:
@@ -1154,6 +1159,38 @@ exports and members:
   with GNU ld and with lld, must link, or fail to, as binding did, and run
   with the case's status (0), and so must its bound link.
 
+Then the same against the static runtime (`runtime_import_static`), by both
+paths, which must make the same link and join the same members:
+
+- static programs: test-link's two sets that call libc. The members that
+  join must be those GNU ld's archive scan loads, and no others: an oracle of
+  the test's own that scans the archives' symbol indices in the group's order
+  until a pass loads nothing, rather than reading binding's references. Then
+  `link_check`; one symbol per global name and none of a shared library;
+  every fixup's target defined, absolute, the static linker's, a weak
+  reference to nothing, or `__tls_get_addr`, left to the relaxation; `main`
+  the program's, `__libc_start_main` a member's, `_init` crti.o's and
+  `__dso_handle` crtbeginT.o's; and each joined object's atoms, in link
+  order, but those of a COMDAT group whose signature an object before it
+  has, with their priorities;
+- static rules, on links made by hand: a strong reference to a name nothing
+  defines (an error naming it); strong and weak references to
+  `__tls_get_addr` (left undefined); the static linker's names (the
+  linker's); weak and strong references to `puts` (the weak one binds to its
+  member only if the closure loads it for another reason); a weak definition
+  of `__libc_start_main` (crt1.o's reference takes it, and its member doesn't
+  join); a reference to a name a member defines absolutely; and weak
+  definitions of 4 and of 24 names the members refer to (none thread-local),
+  which the vector path's closure compares with, or past 16 leaves to the
+  exact path's;
+- with `--cross-check`: each static program's own objects linked by
+  `cc -static` with GNU ld (its `--trace` given twice) and with lld
+  (`--why-extract`), which must load the members that joined and no others,
+  and run printing what the model predicts; and five C programs that `cc`
+  compiles (hello, stdio, threads, jumps and weak-puts), each imported as the
+  program, bound and checked as the static programs are, and linked by both
+  linkers, with the same members, to run with the program's status.
+
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
 removed at the end unless `--keep`. The default 9700X job runs it with
 `--cross-check` after the import benchmark.
@@ -1163,14 +1200,16 @@ removed at the end unless `--keep`. The default 9700X job runs it with
 `./build/compiler benchmark-bind [--functions LIST] [--seed N]` binds
 generated programs that call libc, of 1, 64, 2,000 and 102,400 workers by
 default (`--functions` takes a list), 200 workers per unit as synth's
-translation units have, by each path, and reports 21-run medians (time,
-cycles, instructions, IPC) of the match (the program's global symbols looked
-up in the runtime's names, per global symbol), `bind_begin` and `bind_end`,
-each run on the same link put back as it was. The paths must make the same
-links. Run it under the 9700X's lock with `taskset -c 2`; the design's "Step
-5's phases, data-parallel" has the numbers. The default 9700X job runs it
-after the bind tests, pinned to one allowed CPU; like the others, its
-measurements are informational.
+translation units have, by each path, against the dynamic PIE's runtime and
+against the static one, and reports 21-run medians (time, cycles,
+instructions, IPC) of the match (the program's global symbols looked up in
+the runtime's names, per global symbol), `bind_begin`, the static runtime's
+closure (the members the link needs, per member) and `bind_end`, each run on
+the same link put back as it was. The paths must make the same links. Run it
+under the 9700X's lock with `taskset -c 2`; the design's "Step 5's phases,
+data-parallel" and "Static links, as built" have the numbers. The default
+9700X job runs it after the bind tests, pinned to one allowed CPU; like the
+others, its measurements are informational.
 
 ## Direct executable tests
 
@@ -1389,7 +1428,8 @@ default), which it removes unless `--keep`:
   and the loaded runtime must use the file's mapping and no arena; so must it
   after another snapshot was renamed over the file it maps. Then the same for
   the static runtime (`runtime_import_static`), with its kind, its archives,
-  its members' references and COMDAT groups and its global names' members;
+  its members' references (with the members they load) and COMDAT groups and
+  its global names' members;
 - links: test-link's two sets that call libc and a program of `--functions`
   workers (2,000 by default), bound by both of binding's paths against the
   imported runtime and against a loaded one: the same links and bindings,
