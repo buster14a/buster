@@ -39,12 +39,14 @@
 //   - Build IDs: the lanes' (the files are identical), another program's, and the tree's root recomputed from the file.
 //   - Unwind tables: the scanner against its twin and what the test knows of .eh_frame atoms built here, the sort
 //     against a stable sort, and links whose tables must come out sorted, or are refused (see "Unwind tables").
+//   - Blocks: random links for the vector passes over blocks of 16 atoms and symbols, from the seed and from seed 116,
+//     written by every lane count and by the exact twins into the same file, which runs (executable_test_blocks).
 //   - The patch kernel: the fast path against the checked one (executable_test_kernel).
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, running and reading files, writing with lanes, the fields and headers, the unwind
 // tables read back, the build IDs, the programs, hand-made links, the chunks, the files, the limits, the unwind tables,
-// the patch kernel, and run_executable_tests.
+// the blocks, the patch kernel, and run_executable_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -3160,6 +3162,169 @@ static bool executable_test_unwind_links(const ExecutableTestDirectory* director
 #define BUSTER_EXECUTABLE_TEST_KERNEL_FIXUPS 512
 #define BUSTER_EXECUTABLE_TEST_KERNEL_SYMBOLS 64
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Blocks
+//
+// Links for the vector passes over blocks of 16 (executable_atom_block's atoms in executable_count and
+// executable_place, and executable_resolve's symbols), against their exact twins: atoms of every class a static
+// executable takes, in runs of one class and alignment of random lengths, so that blocks change bucket at every lane,
+// of sizes from 0, with zero-fill ones, entry arrays' 8 bytes at a time, alignments from 0 to 6 and a page's; symbols
+// in half of them at random places, thread-local, functions or objects, local or global, and weak ones defined nowhere;
+// GOT slots for some (loads through the GOT in _start, which runs them), and a table with a pointer to (or a
+// thread-local's offset of) every one. Every other link's atom table is just as large as its atoms, so that its last
+// atoms are past the class gather's limit. Each link is written by every lane count and by the exact twins into the
+// same file, which runs.
+
+#define BUSTER_EXECUTABLE_TEST_BLOCK_LINKS 24
+#define BUSTER_EXECUTABLE_TEST_BLOCK_ATOMS 200
+// The largest atom's size, and _start's.
+#define BUSTER_EXECUTABLE_TEST_BLOCK_SIZE 200
+#define BUSTER_EXECUTABLE_TEST_BLOCK_CODE_BYTES 512
+// The loads through the GOT in _start: 3 runs of up to 15 each.
+#define BUSTER_EXECUTABLE_TEST_BLOCK_LOADS 45
+// A seed whose links once outgrew their bytes' arena, which reserved 64 pages for up to 200 page-aligned atoms: the
+// check runs it besides the one it is given.
+#define BUSTER_EXECUTABLE_TEST_BLOCK_REGRESSION_SEED 116
+
+static const uint8_t executable_test_block_classes[] = {
+    BUSTER_LINK_CLASS_RODATA, BUSTER_LINK_CLASS_STRINGS, BUSTER_LINK_CLASS_TEXT,       BUSTER_LINK_CLASS_TDATA, BUSTER_LINK_CLASS_TBSS,
+    BUSTER_LINK_CLASS_INIT_ARRAY, BUSTER_LINK_CLASS_FINI_ARRAY, BUSTER_LINK_CLASS_DATA_RELRO, BUSTER_LINK_CLASS_DATA,  BUSTER_LINK_CLASS_BSS,
+};
+
+// Builds one link from `state`, its atom table only as large as its atoms if `tight`. *start gets _start.
+static bool executable_test_block_link(ExecutableTestLink* test, uint64_t* state, bool tight, SymbolId* start)
+{
+    const uint32_t atom_count = BUSTER_EXECUTABLE_TEST_BLOCK_ATOMS;
+    const LinkCapacity capacity = {
+        .names = 2 * atom_count + 8,
+        .atoms = atom_count + 2 + (tight ? 0 : 64),
+        .symbols = 2 * atom_count + 8,
+        .fixups = 2 * atom_count + BUSTER_EXECUTABLE_TEST_BLOCK_LOADS + 8,
+        .wide_addends = 4,
+    };
+    // The bytes at most: every atom of the largest size after the most padding a page's alignment takes, then _start's
+    // code (aligned to 16) and the table (8 bytes per symbol, aligned to 8).
+    const uint64_t byte_capacity = (uint64_t)atom_count * (BUSTER_EXECUTABLE_TEST_BLOCK_SIZE + BUSTER_EXECUTABLE_PAGE_BYTES - 1) + BUSTER_EXECUTABLE_TEST_BLOCK_CODE_BYTES + 15 +
+                                   8 * (uint64_t)capacity.symbols + 7;
+    bool result = executable_test_link_begin_with(test, byte_capacity, capacity);
+    Link* link = &test->link;
+    *start = result ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    result = result && *start != 0;
+    uint8_t run_class = BUSTER_LINK_CLASS_TEXT;
+    uint8_t run_alignment = 0;
+    uint32_t run_left = 0;
+    for (uint32_t i = 0; result && i < atom_count; i += 1)
+    {
+        if (run_left == 0)
+        {
+            const uint64_t pick = executable_test_random(state);
+            run_class = executable_test_block_classes[pick % BUSTER_ARRAY_LENGTH(executable_test_block_classes)];
+            const bool array = run_class == BUSTER_LINK_CLASS_INIT_ARRAY || run_class == BUSTER_LINK_CLASS_FINI_ARRAY;
+            run_alignment = array ? 3 : (pick >> 8) % 16 == 0 ? BUSTER_EXECUTABLE_PAGE_LOG2 : (uint8_t)((pick >> 12) % 7);
+            run_left = 1 + (uint32_t)((pick >> 16) % 40);
+        }
+        run_left -= 1;
+        const uint64_t pick = executable_test_random(state);
+        const bool zero_fill = link_class_is_zero_fill(run_class);
+        const bool array = run_class == BUSTER_LINK_CLASS_INIT_ARRAY || run_class == BUSTER_LINK_CLASS_FINI_ARRAY;
+        const uint64_t size = array ? 8 * (pick % 4) : pick % 5 == 0 ? 0 : 1 + (pick >> 4) % BUSTER_EXECUTABLE_TEST_BLOCK_SIZE;
+        uint8_t* bytes = !zero_fill && size != 0 ? arena_push(&test->bytes, size, 1ull << run_alignment) : 0;
+        for (uint64_t b = 0; bytes != 0 && b < size; b += 1)
+        {
+            bytes[b] = (uint8_t)(pick >> (8 * (b % 8)));
+        }
+        const AtomId atom = zero_fill || size == 0 || bytes != 0 ? link_add_atom(link, run_class, run_alignment, size, bytes, 0) : 0;
+        result = atom != 0;
+        // A symbol in half of them, at a random place, of up to the rest of the atom.
+        if (result && (pick >> 32) % 2 == 0)
+        {
+            char name[32];
+            const int length = snprintf(name, sizeof(name), "a%u", i);
+            const uint64_t value = size != 0 ? (pick >> 33) % (size + 1) : 0;
+            const uint8_t type = link_class_is_tls(run_class) ? BUSTER_LINK_SYMBOL_TLS : run_class == BUSTER_LINK_CLASS_TEXT ? BUSTER_LINK_SYMBOL_FUNCTION : BUSTER_LINK_SYMBOL_OBJECT;
+            const uint8_t binding = (pick >> 40) % 2 == 0 ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_LOCAL;
+            const NameId id = link_add_name(link, (const uint8_t*)name, (uint32_t)length);
+            result = id != 0 && link_add_symbol(link, id, atom, value, 0, type | binding, BUSTER_LINK_SOURCE_PROGRAM) != 0;
+        }
+        // And now and then a weak one defined nowhere, thread-local or not.
+        if (result && (pick >> 48) % 8 == 0)
+        {
+            char name[32];
+            const int length = snprintf(name, sizeof(name), "w%u", i);
+            const uint8_t type = (pick >> 52) % 2 == 0 ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
+            const NameId id = link_add_name(link, (const uint8_t*)name, (uint32_t)length);
+            result = id != 0 && link_add_symbol(link, id, 0, 0, 0, type | BUSTER_LINK_SYMBOL_WEAK, BUSTER_LINK_SOURCE_NONE) != 0;
+        }
+    }
+    // _start: loads through the GOT of some of the symbols (GOTTPOFF for a thread-local), then exit_group(0), each run
+    // where the one before ends (a load is 7 bytes: REX.W, the opcode, ModRM and a 32-bit displacement).
+    ExecutableTestCode runs[4] = { 0 };
+    const SymbolId symbol_count = link->symbols.count;
+    uint32_t loads = 0;
+    for (SymbolId symbol = 2; result && symbol < symbol_count && loads < BUSTER_EXECUTABLE_TEST_BLOCK_LOADS; symbol += 1)
+    {
+        if (executable_test_random(state) % 4 == 0)
+        {
+            const X86Instruction load = {
+                .reg = X86_REGISTER_RAX,
+                .mode = BUSTER_X86_MEMORY_RIP,
+                .form = X86_FORM_MOV_R64_RM64,
+            };
+            const bool tls = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
+            executable_test_refer(&runs[loads / 15], load, tls ? BUSTER_LINK_FIXUP_GOTTPOFF : BUSTER_LINK_FIXUP_LOAD_GOT, symbol, 0);
+            loads += 1;
+        }
+    }
+    for (uint32_t run = 1; run < 4; run += 1)
+    {
+        runs[run].offset = runs[run - 1].offset + 7 * (uint64_t)runs[run - 1].instruction_count;
+    }
+    executable_test_exit(&runs[3], 0);
+    result = result && executable_test_code(test, BUSTER_EXECUTABLE_TEST_BLOCK_CODE_BYTES, runs, 4, *start) != 0;
+    // The table: each symbol's address, or a thread-local's offset from the thread pointer, 8 bytes each.
+    const uint64_t table_size = 8 * (uint64_t)symbol_count;
+    const AtomId table = result ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, table_size, 0, 0) : 0;
+    result = result && table != 0;
+    for (SymbolId symbol = 2; result && symbol < symbol_count; symbol += 1)
+    {
+        const bool tls = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
+        result = link_add_fixup(link, table, 8 * symbol, tls ? BUSTER_LINK_FIXUP_TPOFF32 : BUSTER_LINK_FIXUP_ABS64, symbol, 0) != 0;
+    }
+    return result && link_check(link) == LINK_ERROR_NONE;
+}
+
+static bool executable_test_blocks(const ExecutableTestDirectory* directory, uint64_t seed)
+{
+    ExecutableTestTally tally = {
+        .check = "blocks",
+    };
+    char buffer[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, "blocks", buffer);
+    const uint64_t seeds[2] = { seed, BUSTER_EXECUTABLE_TEST_BLOCK_REGRESSION_SEED };
+    for (uint32_t s = 0; s < (seed == BUSTER_EXECUTABLE_TEST_BLOCK_REGRESSION_SEED ? 1 : 2); s += 1)
+    {
+        uint64_t state = seeds[s] * 0x9E3779B97F4A7C15ull + 7;
+        for (uint32_t i = 0; i < BUSTER_EXECUTABLE_TEST_BLOCK_LINKS; i += 1)
+        {
+            ExecutableTestLink test;
+            SymbolId start = 0;
+            const bool built = executable_test_block_link(&test, &state, i % 2 == 1, &start);
+            executable_test_expect(&tally, built, "the link", (uint64_t)s * BUSTER_EXECUTABLE_TEST_BLOCK_LINKS + i);
+            ExecutableResult result;
+            if (built)
+            {
+                executable_test_unwind_writes(&tally, &test.link, start, path, 0, "the vector passes and the exact twins write the same file", &result);
+            }
+            executable_test_link_end(&test);
+        }
+    }
+    if (!directory->keep)
+    {
+        unlink(path.pointer);
+    }
+    return executable_test_report(&tally);
+}
+
 static bool executable_test_kernel(uint64_t seed)
 {
     ExecutableTestTally tally = {
@@ -3316,6 +3481,7 @@ static int run_executable_tests(int argc, char** argv)
         passed = executable_test_frames(seed) && passed;
         passed = executable_test_sort(seed) && passed;
         passed = executable_test_unwind_links(&directory) && passed;
+        passed = executable_test_blocks(&directory, seed) && passed;
         passed = executable_test_kernel(seed) && passed;
         result = passed ? 0 : 1;
         if (keep)
