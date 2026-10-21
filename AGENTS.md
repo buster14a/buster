@@ -166,6 +166,16 @@ designs and the compilers already built this way.
   `docs/x86-target.md` records the API, current catalogue coverage and the
   selector/corpus acceptance still pending for #180.
 
+- `src/buster/compiler/assembler.c` is the callable GNU assembly frontend, with
+  AVX-512 and scalar paths and shared form matching in `x86_match.c`.
+  `./build/compiler assemble -o output.o input.s` uses it through the existing
+  executable. `test-assembler --cross-check` compares both paths and GNU as,
+  and links/runs fixtures; `benchmark-assembler [--external]` reports phases,
+  initialization/memory and optionally fresh-process GNU as/Clang comparisons.
+  Run these through the shared lock; pin benchmarks to CPU 2. The supported
+  syntax, limitations, example and measurement method are in
+  [docs/assembler.md](docs/assembler.md). `.S` uses the shared preprocessor's
+  explicit assembly mode, including `-I`, `-D`, `-U` and source line markers.
 - `src/buster/compiler/main.c` is the executable entry point
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
   `-march=native`, so the machine executing the build determines the host ISA.

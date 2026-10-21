@@ -165,6 +165,8 @@ struct PPOptions
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
     bool scalar;
     bool no_standard_includes;
+    // Opt-in assembler-with-cpp input: '$' is punctuation, and unknown # lines are assembly comments.
+    bool assembly;
     // -iquote, -I and -isystem directories, and -idirafter ones after the standard directories.
     const char* const* quote_directories;
     uint32_t quote_directory_count;
@@ -911,6 +913,18 @@ static uint32_t pp_spelling(Preprocessor* pp, uint8_t kind, uint32_t value, uint
     return result;
 }
 
+// Recover a refined identifier's end, respecting the assembly adapter's '$' boundary.
+static uint32_t pp_identifier_end(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint32_t start)
+{
+    uint32_t result = refine_identifier_end(bytes, length, start, pp->refine_flags);
+    if (pp->options.assembly)
+    {
+        const uint8_t* dollar = memchr(bytes + start, '$', result - start);
+        result = dollar != 0 ? (uint32_t)(dollar - bytes) : result;
+    }
+    return result;
+}
+
 // The spelling an identifier at `location` was written with, without its line splices but with its UCNs as written:
 // what stringizing it gives, as in clang ("caf\u00e9" for caf\u00e9, whose interned spelling is café). `buffer` needs
 // room for the identifier's bytes. Returns the length, or 0 if the location is in no range.
@@ -922,7 +936,7 @@ static uint32_t pp_identifier_as_written(Preprocessor* pp, uint32_t location, ui
     {
         const PPRange* bytes_range = &pp->ranges[range];
         const uint32_t start = location - bytes_range->base;
-        const uint32_t end = refine_identifier_end(bytes_range->bytes, bytes_range->length, start, pp->refine_flags);
+        const uint32_t end = pp_identifier_end(pp, bytes_range->bytes, bytes_range->length, start);
         result = pp_without_splices(pp, bytes_range->bytes + start, end - start, buffer, spelling);
     }
     return result;
@@ -1349,15 +1363,102 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
     return count + splits;
 }
 
-// The prefixed literals among `count` freshly lexed tokens that the mode doesn't have, split (pp_split_prefixes): a scan
-// of the kinds, and the rare split. Returns the new count.
-static uint32_t pp_lex_for_mode(const Preprocessor* pp, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, bool vectorized)
+// C's GNU identifier grammar includes '$'. Assembly instead needs $MACRO to expand MACRO. Only tokens containing
+// '$' take this adapter; literals stay opaque. Re-lex the intervening slices with the shared lexer, including line
+// splices and numeric local references. Scratch columns leave the original columns intact on allocation failure.
+static int64_t pp_split_dollars(const Preprocessor* pp, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count)
 {
-    uint32_t result = count;
+    uint64_t dollars = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint8_t kind = kinds[i] & 0x7F;
+        if (kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT)
+        {
+            for (uint32_t at = starts[i]; at < ends[i]; at += 1)
+            {
+                dollars += bytes[at] == '$';
+            }
+        }
+    }
+    int64_t result = count;
+    if (dollars != 0)
+    {
+        Scratch scratch = scratch_begin(0);
+        const uint64_t capacity = (uint64_t)count + 2 * dollars + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
+        uint8_t* split_kinds = arena_push(scratch.arena, capacity, 64);
+        uint32_t* split_starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
+        uint32_t* split_ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
+        result = split_kinds != 0 && split_starts != 0 && split_ends != 0 ? 0 : -1;
+        for (uint32_t i = 0; result >= 0 && i < count; i += 1)
+        {
+            const uint8_t kind = kinds[i] & 0x7F;
+            const bool word = kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT;
+            if (word && memchr(bytes + starts[i], '$', ends[i] - starts[i]) != 0)
+            {
+                const uint32_t first = (uint32_t)result;
+                for (uint32_t at = starts[i]; result >= 0 && at < ends[i];)
+                {
+                    if (bytes[at] == '$')
+                    {
+                        split_kinds[result] = C_TOKEN_UNKNOWN;
+                        split_starts[result] = at;
+                        split_ends[result] = at + 1;
+                        result += 1;
+                        at += 1;
+                    }
+                    else
+                    {
+                        const uint32_t begin = at;
+                        while (at < ends[i] && bytes[at] != '$')
+                        {
+                            at += 1;
+                        }
+                        const int64_t added = c_tokenize_scalar(bytes + begin, at - begin, split_kinds + result, split_starts + result, split_ends + result, pp->refine_flags);
+                        for (int64_t n = 0; n < added; n += 1)
+                        {
+                            split_kinds[result + n] &= 0x7F;
+                            split_starts[result + n] += begin;
+                            split_ends[result + n] += begin;
+                        }
+                        result = added >= 0 ? result + added : -1;
+                    }
+                }
+                if (result > first)
+                {
+                    split_kinds[first] |= kinds[i] & BUSTER_C_TOKEN_START_OF_LINE;
+                }
+            }
+            else
+            {
+                split_kinds[result] = kinds[i];
+                split_starts[result] = starts[i];
+                split_ends[result] = ends[i];
+                result += 1;
+            }
+        }
+        if (result >= 0)
+        {
+            memcpy(kinds, split_kinds, result);
+            memcpy(starts, split_starts, (uint64_t)result * sizeof(uint32_t));
+            memcpy(ends, split_ends, (uint64_t)result * sizeof(uint32_t));
+        }
+        scratch_end(scratch);
+    }
+    return result;
+}
+
+// Split unsupported literal prefixes, then assembly '$' punctuation. Returns the new count, or -1 on allocation failure.
+static int64_t pp_lex_for_mode(const Preprocessor* pp, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, bool vectorized)
+{
+    int64_t result = count;
     if (pp->split_kinds != 0)
     {
         const uint32_t splits = vectorized ? pp_count_splits_vector(kinds, count, pp->split_kinds) : pp_count_splits_scalar(kinds, count, pp->split_kinds);
         result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, count, splits, pp->split_kinds) : count;
+    }
+    if (pp->options.assembly)
+    {
+        result = pp_split_dollars(pp, bytes, kinds, starts, ends, (uint32_t)result);
     }
     return result;
 }
@@ -1374,7 +1475,11 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
     bool result = data->kinds != 0 && data->starts != 0 && data->values != 0;
     const bool timing = pp->options.timing;
     uint64_t tick = timing ? __rdtsc() : 0;
-    int64_t count = result ? c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, pp->refine_flags) : -1;
+    int64_t count = -1;
+    if (result)
+    {
+        count = pp->options.assembly && !pp->vectorized ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, pp->refine_flags) : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, pp->refine_flags);
+    }
     count = count > 0 ? pp_lex_for_mode(pp, data->bytes, data->kinds, data->starts, data->values, (uint32_t)count, pp->vectorized) : count;
     if (timing)
     {
@@ -1750,7 +1855,7 @@ static uint32_t pp_file_token_end(const Preprocessor* pp, const PPFileData* data
     uint32_t result = data->values[token];
     if ((data->kinds[token] & 0x7F) == C_TOKEN_RAW_IDENTIFIER)
     {
-        result = refine_identifier_end(data->bytes, data->length, data->starts[token], pp->refine_flags);
+        result = pp_identifier_end(pp, data->bytes, data->length, data->starts[token]);
     }
     return result;
 }
@@ -5362,7 +5467,10 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
             break;
         case PP_DIRECTIVE_ASSERT:
         case PP_DIRECTIVE_UNKNOWN:
-            pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid preprocessing directive");
+            if (!pp->options.assembly)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid preprocessing directive");
+            }
             break;
     }
 }
@@ -6635,6 +6743,10 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer)
     // The one macro that isn't clang's (#117: clang's configuration, plus this). --predefines replaces it too, so that
     // test-preprocessor --clang starts from clang's own macros alone.
     length += (uint32_t)sprintf(buffer + length, "#define __BUSTER__ 1\n");
+    if (options->assembly)
+    {
+        length += (uint32_t)sprintf(buffer + length, "#define __ASSEMBLER__ 1\n");
+    }
     return length;
 }
 
@@ -7995,8 +8107,9 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             result = pp_parse_standard(argument + 5, &options->language);
         }
-        else if (strcmp(argument, "-x") == 0 && next != 0 && strcmp(next, "c") == 0)
+        else if (strcmp(argument, "-x") == 0 && next != 0 && (strcmp(next, "c") == 0 || strcmp(next, "assembler-with-cpp") == 0))
         {
+            options->assembly = strcmp(next, "assembler-with-cpp") == 0;
             i += 1;
         }
         else if ((strcmp(argument, "-o") == 0 || strcmp(argument, "--predefines") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-isystem") == 0 ||
