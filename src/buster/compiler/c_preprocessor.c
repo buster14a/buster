@@ -7667,8 +7667,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     const uint32_t* out_locations = pp->output.locations;
     const uint32_t count = pp->output.count;
     const uint8_t* records = pp->table->records;
-    const uint32_t* record_of = pp->table->record_of;
-    const uint32_t* length_of = pp->table->length_of;
+    const InternSpan* spans = pp->table->spans;
     const bool trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
     Scratch scratch = scratch_begin(0);
     const uint32_t* directory = pp_build_directory(pp, scratch.arena);
@@ -7719,8 +7718,8 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
             uint32_t length = 0;
             if (kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT))
             {
-                spelling = records + record_of[value];
-                length = length_of[value];
+                spelling = records + spans[value].offset;
+                length = spans[value].length;
             }
             else if (kind != BUSTER_PP_KIND_PRAGMA_END && kind != BUSTER_PP_KIND_INTEGER)
             {

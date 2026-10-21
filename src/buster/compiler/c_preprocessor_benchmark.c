@@ -324,6 +324,15 @@ int run_preprocessor_benchmark(int argc, char** argv)
                        median_instructions / (double)input_tokens, median_cycles != 0 ? median_instructions / median_cycles : 0.0);
                 uint64_t total = 0;
                 uint64_t medians[PP_PHASE_COUNT + 1];
+                // The phases are timed with the time stamp counter: its ticks per nanosecond, over the passes' whole runs.
+                uint64_t run_ticks = 0;
+                uint64_t run_nanoseconds = 0;
+                for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
+                {
+                    run_ticks += samples[implementation][pass].ticks[PP_PHASE_COUNT];
+                    run_nanoseconds += samples[implementation][pass].nanoseconds;
+                }
+                const double milliseconds_per_tick = run_ticks != 0 ? (double)run_nanoseconds / (double)run_ticks / 1e6 : 0.0;
                 for (uint32_t phase = 0; phase <= PP_PHASE_COUNT; phase += 1)
                 {
                     pp_benchmark_sort(phases[phase], BUSTER_PP_BENCHMARK_PASSES);
@@ -334,6 +343,11 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 for (uint32_t phase = 0; phase <= PP_PHASE_COUNT; phase += 1)
                 {
                     printf("  %s %.1f%%", phase_names[phase], total != 0 ? 100.0 * (double)medians[phase] / (double)total : 0.0);
+                }
+                printf("\n             ");
+                for (uint32_t phase = 0; phase <= PP_PHASE_COUNT; phase += 1)
+                {
+                    printf("  %s %.3f ms", phase_names[phase], (double)medians[phase] * milliseconds_per_tick);
                 }
                 printf("\n");
             }

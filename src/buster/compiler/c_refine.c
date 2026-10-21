@@ -255,13 +255,17 @@ static bool refine_tokens_scalar(InternTable* table, const uint8_t* source, uint
 // ---------------------------------------------------------------------------------------------------------------------
 // The vectorized path
 
-// What pass A collects about a block's identifiers, for pass B.
+// What pass A collects about a block's identifiers for pass B, and what pass B gives back for pass C: dense arrays with
+// an entry per identifier, in token order.
 typedef struct RefineIdentifiers RefineIdentifiers;
 struct RefineIdentifiers
 {
     uint32_t starts[BUSTER_REFINE_BLOCK_TOKENS + BUSTER_REFINE_DENSE_SLACK] __attribute__((aligned(64)));
     uint32_t lengths[BUSTER_REFINE_BLOCK_TOKENS + BUSTER_REFINE_DENSE_SLACK] __attribute__((aligned(64)));
-    uint32_t tokens[BUSTER_REFINE_BLOCK_TOKENS + BUSTER_REFINE_DENSE_SLACK] __attribute__((aligned(64)));
+    // Pass B's ids, which pass C stores into the identifiers' values.
+    uint32_t ids[BUSTER_REFINE_BLOCK_TOKENS + BUSTER_REFINE_DENSE_SLACK] __attribute__((aligned(64)));
+    // A word per step of BUSTER_REFINE_STEP_TOKENS tokens: bit i is set when the step's token i is an identifier.
+    uint64_t masks[BUSTER_REFINE_BLOCK_TOKENS / BUSTER_REFINE_STEP_TOKENS];
     uint32_t count;
 };
 
@@ -300,33 +304,69 @@ BUSTER_INLINE uint32_t refine_newlines_before(const uint8_t* source, uint64_t le
     return result & valid & ~(uint32_t)(first == 0);
 }
 
-// The source's 64-byte chunks that hold a backslash (or, with trigraphs, a '?': "??/" is one): bit c % 64 of
+// The source's 64-byte chunks that hold a backslash (or, with trigraphs, a '?': "??/" is one), a word of 64 chunks (4 KB
+// of the source) at a time from word `word` on, until the words cover the source's first `end` bytes: bit c % 64 of
 // `chunks[c / 64]` for chunk c. A line splice needs a backslash, so a gap in chunks without one isn't only splices.
-// `chunks` needs (length + 4095) / 4096 words.
-BUSTER_INLINE void refine_backslash_chunks(const uint8_t* source, uint64_t length, uint64_t* chunks, const bool trigraphs)
+// `chunks` needs (length + 4095) / 4096 words. Returns the next word to scan. refine_tokens_with scans each block's
+// bytes just before the block, so that its passes find them in the caches. A run of 8 chunks is first tested whole, by
+// the least of its bytes XORed with '\\' (and with '?'), and only a run that has one (5% of sqlite3.c's) is tested chunk
+// by chunk.
+BUSTER_INLINE uint64_t refine_scan_chunks(const uint8_t* source, uint64_t length, uint64_t* chunks, uint64_t word, uint64_t end, const bool trigraphs)
 {
-    uint64_t word = 0;
-    uint64_t chunk = 0;
-    for (; chunk * 64 < length; chunk += 1)
+    const uint64_t words = (end + 4095) / 4096;
+    for (; word < words; word += 1)
     {
-        const uint64_t remaining = length - chunk * 64;
-        const __m512i bytes = _mm512_maskz_loadu_epi8(remaining >= 64 ? ~0ull : _bzhi_u64(~0ull, (uint32_t)remaining), source + chunk * 64);
-        uint64_t found = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\\'));
-        if (trigraphs)
+        const uint8_t* bytes = source + word * 4096;
+        const uint64_t available = length - word * 4096;
+        uint64_t found = 0;
+        if (available >= 4096)
         {
-            found |= _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('?'));
+            for (uint32_t run = 0; run < 64; run += 8)
+            {
+                const uint8_t* run_bytes = bytes + run * 64;
+                __m512i least = _mm512_set1_epi8(-1);
+                for (uint32_t chunk = 0; chunk < 8; chunk += 1)
+                {
+                    const __m512i chunk_bytes = _mm512_loadu_si512(run_bytes + chunk * 64);
+                    least = _mm512_min_epu8(least, _mm512_xor_si512(chunk_bytes, _mm512_set1_epi8('\\')));
+                    if (trigraphs)
+                    {
+                        least = _mm512_min_epu8(least, _mm512_xor_si512(chunk_bytes, _mm512_set1_epi8('?')));
+                    }
+                }
+                if (BUSTER_UNLIKELY(_mm512_testn_epi8_mask(least, least) != 0))
+                {
+                    for (uint32_t chunk = 0; chunk < 8; chunk += 1)
+                    {
+                        const __m512i chunk_bytes = _mm512_loadu_si512(run_bytes + chunk * 64);
+                        uint64_t special = _mm512_cmpeq_epi8_mask(chunk_bytes, _mm512_set1_epi8('\\'));
+                        if (trigraphs)
+                        {
+                            special |= _mm512_cmpeq_epi8_mask(chunk_bytes, _mm512_set1_epi8('?'));
+                        }
+                        found |= (uint64_t)(special != 0) << (run + chunk);
+                    }
+                }
+            }
         }
-        word |= (uint64_t)(found != 0) << (chunk % 64);
-        if (chunk % 64 == 63)
+        else
         {
-            chunks[chunk / 64] = word;
-            word = 0;
+            // The source's last word: masked loads, which read nothing past its end.
+            for (uint32_t chunk = 0; (uint64_t)chunk * 64 < available; chunk += 1)
+            {
+                const uint64_t remaining = available - (uint64_t)chunk * 64;
+                const __m512i chunk_bytes = _mm512_maskz_loadu_epi8(remaining >= 64 ? ~0ull : _bzhi_u64(~0ull, (uint32_t)remaining), bytes + chunk * 64);
+                uint64_t special = _mm512_cmpeq_epi8_mask(chunk_bytes, _mm512_set1_epi8('\\'));
+                if (trigraphs)
+                {
+                    special |= _mm512_cmpeq_epi8_mask(chunk_bytes, _mm512_set1_epi8('?'));
+                }
+                found |= (uint64_t)(special != 0) << chunk;
+            }
         }
+        chunks[word] = found;
     }
-    if (chunk % 64 != 0)
-    {
-        chunks[chunk / 64] = word;
-    }
+    return word;
 }
 
 // Does any chunk of source[begin, end) hold a backslash?
@@ -347,17 +387,47 @@ BUSTER_INLINE bool refine_chunks_have_backslash(const uint64_t* chunks, uint64_t
     return found != 0;
 }
 
+// The leading-space bits of a step of 64 tokens from `step` (`step_count` of them) whose gaps may hold line splices (a
+// chunk they lie in has a backslash): the gap bits `gaps`, less those of the tokens whose gap is only splices. Those are
+// the tokens that aren't the first of their line whose gap ends in a newline byte (a newline outside comments starts a
+// logical line, and a comment ends with "*/"), and the scalar refine_gap_is_splices decides each. `gaps_begin` is the
+// end of the token before the step. Out of line: most steps' gaps have no backslash.
+static __attribute__((noinline)) uint64_t refine_step_splices(const uint8_t* source, uint64_t length, const uint32_t* starts, const uint32_t* ends, uint64_t step,
+                                                              uint64_t step_count, uint32_t gaps_begin, uint64_t start_of_line, uint64_t gaps, uint32_t flags)
+{
+    uint64_t result = gaps;
+    for (uint32_t group = 0; (uint64_t)group * BUSTER_REFINE_LANES < step_count; group += 1)
+    {
+        const uint64_t first = step + group * BUSTER_REFINE_LANES;
+        const __mmask16 lanes = (__mmask16)(_bzhi_u64(~0ull, (uint32_t)step_count) >> (group * BUSTER_REFINE_LANES));
+        const uint32_t continued = (uint32_t)(uint16_t)((gaps & ~start_of_line) >> (group * BUSTER_REFINE_LANES));
+        uint32_t splices = 0;
+        if (continued != 0)
+        {
+            const __m512i start_vector = _mm512_maskz_loadu_epi32(lanes, starts + first);
+            splices = continued & refine_newlines_before(source, length, start_vector, starts + first, lanes);
+        }
+        for (; splices != 0; splices &= splices - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(splices);
+            const uint32_t gap_start = first + lane == step ? gaps_begin : ends[first + lane - 1];
+            const bool only_splices = refine_gap_is_splices(source, length, gap_start, starts[first + lane], flags);
+            result &= ~((uint64_t)only_splices << (group * BUSTER_REFINE_LANES + lane));
+        }
+    }
+    return result;
+}
+
 // Pass A over tokens [begin, end) of the block (a multiple of 64 from `begin`, but at the source's last tokens):
-// the leading-space words, `values` for every token when it isn't `ends` (the ends; pass B overwrites the
-// identifiers'), and the dense identifier arrays. `previous_ends` carries the ends of the 16 tokens before `begin`
-// (lane 15 is the last one's), read before pass B could overwrite them in place. A step of 64 tokens whose gaps hold
-// no backslash (most: `backslash_chunks`, from refine_backslash_chunks) needs no byte before a start.
+// the leading-space words, `values` for every token when it isn't `ends` (`separate`: the ends; pass C overwrites the
+// identifiers'), the dense identifier arrays and the steps' identifier masks. `previous_ends` carries the ends of the 16
+// tokens before `begin` (lane 15 is the last one's), read before pass C could overwrite them in place. A step of 64
+// tokens whose gaps hold no backslash (most: `backslash_chunks`, from refine_scan_chunks) is done with its gap bits; the
+// others go to refine_step_splices.
 BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint64_t begin,
                                     uint64_t end, uint32_t* values, uint64_t* space, uint32_t flags, const uint64_t* backslash_chunks, __m512i previous_ends,
-                                    RefineIdentifiers* identifiers)
+                                    RefineIdentifiers* identifiers, const bool separate)
 {
-    const __m512i iota = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    const bool separate_values = values != ends;
     uint32_t identifier_count = 0;
     for (uint64_t step = begin; step < end; step += BUSTER_REFINE_STEP_TOKENS)
     {
@@ -366,138 +436,203 @@ BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, cons
         const __mmask64 valid = _bzhi_u64(~0ull, (uint32_t)step_count);
         const __m512i kind_vector = _mm512_maskz_loadu_epi8(valid, kinds + step);
         const __mmask64 identifier = _mm512_mask_cmpeq_epi8_mask(valid, _mm512_and_si512(kind_vector, _mm512_set1_epi8(0x7F)), _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
-        const __mmask64 start_of_line = _mm512_movepi8_mask(kind_vector);
+        identifiers->masks[(step - begin) / BUSTER_REFINE_STEP_TOKENS] = identifier;
         // The step's gaps lie between the end of the token before it and the start of its last token.
         const uint32_t gaps_begin = (uint32_t)_mm_extract_epi32(_mm512_extracti32x4_epi32(previous_ends, 3), 3);
-        const bool splices_possible = refine_chunks_have_backslash(backslash_chunks, gaps_begin, starts[step + step_count - 1]);
-        uint64_t space_word = 0;
+        uint64_t gaps = 0;
+        // Groups past the source's last token load nothing and add nothing (their lanes are 0).
         for (uint32_t group = 0; group < 4; group += 1)
         {
             const uint64_t first = step + group * BUSTER_REFINE_LANES;
             const __mmask16 lanes = (__mmask16)(valid >> (group * BUSTER_REFINE_LANES));
-            if (lanes != 0)
+            const __m512i start_vector = _mm512_maskz_loadu_epi32(lanes, starts + first);
+            const __m512i end_vector = _mm512_maskz_loadu_epi32(lanes, ends + first);
+            const __m512i before_ends = _mm512_alignr_epi32(end_vector, previous_ends, 15);
+            gaps |= (uint64_t)_mm512_mask_cmpneq_epi32_mask(lanes, start_vector, before_ends) << (group * BUSTER_REFINE_LANES);
+            if (separate)
             {
-                const __m512i start_vector = _mm512_maskz_loadu_epi32(lanes, starts + first);
-                const __m512i end_vector = _mm512_maskz_loadu_epi32(lanes, ends + first);
-                const __m512i before_ends = _mm512_alignr_epi32(end_vector, previous_ends, 15);
-                const uint32_t gaps = _mm512_mask_cmpneq_epi32_mask(lanes, start_vector, before_ends);
-                uint32_t space_bits = gaps;
-                if (BUSTER_UNLIKELY(splices_possible))
-                {
-                    // Gaps that end in a newline byte, after a token that isn't the first of its line: line splices.
-                    const uint32_t continued = gaps & ~(uint32_t)(uint16_t)(start_of_line >> (group * BUSTER_REFINE_LANES));
-                    uint32_t splices = continued != 0 ? continued & refine_newlines_before(source, length, start_vector, starts + first, lanes) : 0;
-                    for (; splices != 0; splices &= splices - 1)
-                    {
-                        const uint32_t lane = (uint32_t)__builtin_ctz(splices);
-                        const uint32_t gap_start = lane != 0 ? ends[first + lane - 1] : (uint32_t)_mm_extract_epi32(_mm512_extracti32x4_epi32(previous_ends, 3), 3);
-                        const bool only_splices = refine_gap_is_splices(source, length, gap_start, starts[first + lane], flags);
-                        space_bits &= ~((uint32_t)only_splices << lane);
-                    }
-                }
-                space_word |= (uint64_t)space_bits << (group * BUSTER_REFINE_LANES);
-                if (separate_values)
-                {
-                    _mm512_mask_storeu_epi32(values + first, lanes, end_vector);
-                }
-                const __mmask16 identifiers_here = (__mmask16)(identifier >> (group * BUSTER_REFINE_LANES));
-                const __m512i lengths = _mm512_sub_epi32(end_vector, start_vector);
-                const __m512i indices = _mm512_add_epi32(iota, _mm512_set1_epi32((int)first));
-                _mm512_storeu_si512(identifiers->starts + identifier_count, _mm512_maskz_compress_epi32(identifiers_here, start_vector));
-                _mm512_storeu_si512(identifiers->lengths + identifier_count, _mm512_maskz_compress_epi32(identifiers_here, lengths));
-                _mm512_storeu_si512(identifiers->tokens + identifier_count, _mm512_maskz_compress_epi32(identifiers_here, indices));
-                identifier_count += (uint32_t)__builtin_popcount(identifiers_here);
-                previous_ends = end_vector;
+                _mm512_mask_storeu_epi32(values + first, lanes, end_vector);
             }
+            const __mmask16 identifiers_here = (__mmask16)(identifier >> (group * BUSTER_REFINE_LANES));
+            const __m512i lengths = _mm512_sub_epi32(end_vector, start_vector);
+            _mm512_storeu_si512(identifiers->starts + identifier_count, _mm512_maskz_compress_epi32(identifiers_here, start_vector));
+            _mm512_storeu_si512(identifiers->lengths + identifier_count, _mm512_maskz_compress_epi32(identifiers_here, lengths));
+            identifier_count += (uint32_t)__builtin_popcount(identifiers_here);
+            previous_ends = end_vector;
         }
-        space[step / 64] = space_word;
+        if (BUSTER_UNLIKELY(refine_chunks_have_backslash(backslash_chunks, gaps_begin, starts[step + step_count - 1])))
+        {
+            gaps = refine_step_splices(source, length, starts, ends, step, step_count, gaps_begin, _mm512_movepi8_mask(kind_vector), gaps, flags);
+        }
+        space[step / 64] = gaps;
     }
     identifiers->count = identifier_count;
     return previous_ends;
 }
 
-// Pass B for identifiers [begin, begin + count) of the dense arrays (count <= `batch`, at most 64): stages 1 to 3.
-// `fused` merges stages 1 and 2 (each identifier probed right after it is hashed, without a prefetch). The table's
-// arrays are read once per batch into locals (stage 3 may grow it), so that the stores of ids can't make Clang read
-// them again for every identifier. Deferred identifiers are bits of a mask, which stage 3 goes through in token order.
-// Returns false if the intern table runs out of room.
-BUSTER_INLINE bool refine_intern_batch(InternTable* table, const uint8_t* source, uint64_t length, const RefineIdentifiers* identifiers, uint32_t begin,
-                                       uint32_t count, uint32_t* values, uint32_t flags, const bool trigraphs, const uint32_t batch, const bool fused)
+// A probe's key: the spelling's first 16 bytes (zero past its end) with the last dword all ones, which no slot's id is
+// (ids are below BUSTER_INTERN_MAX_IDS), so that a compare of every dword finds only the prefixes' matches.
+BUSTER_INLINE __m128i refine_key(__m128i first)
 {
-    const uint8_t* const buckets = table->buckets;
-    const uint8_t* const records = table->records;
-    const uint32_t* const record_of = table->record_of;
-    const uint64_t bucket_mask = table->bucket_mask;
-    const uint32_t* const starts = identifiers->starts + begin;
-    const uint32_t* const lengths = identifiers->lengths + begin;
-    const uint32_t* const tokens = identifiers->tokens + begin;
-    uint64_t hashes[64];
-    __m128i firsts[64];
-    uint64_t slow = 0;
-    uint64_t deferred = 0;
-    uint64_t long_candidates = 0;
-    (void)batch;
+    return _mm_or_si128(first, _mm_setr_epi32(0, 0, 0, -1));
+}
 
+// The id in the slot of `bucket` whose prefix is the key's (refine_key's), or 0 if no slot's is: the first match, which
+// identifies a spelling of up to BUSTER_INTERN_SHORT_LENGTH bytes and is a candidate for a longer one. The matches are
+// intern_bucket_matches', from a compare without its mask. No branch depends on the outcome: without a match, the id
+// read (the first slot's first dword, tzcnt's 32 masked to 0) is discarded.
+BUSTER_INLINE IdentId refine_probe(const uint8_t* bucket, __m128i key)
+{
+    const uint32_t matches = (_mm512_cmpeq_epi32_mask(_mm512_load_si512(bucket), intern_bucket_key(key)) + 0x1111) & 0x8888;
+    IdentId id = intern_slot_id(bucket, _tzcnt_u32(matches) & 15);
+    // A select after the load, not a branch around it, which Clang makes of a plain `?:` (with the matches' zero as the
+    // result): a branch on the outcome would mispredict for every new spelling.
+    __asm__("" : "+r"(id));
+    return id & (uint32_t)-(int32_t)(matches != 0);
+}
+
+// The identifiers of a batch that have a backslash (or, with trigraphs, a '?'): bit j for identifier j. Out of line,
+// since stage 1 calls it only when one of the batch's loads had such a byte, which no identifier in the C corpora has.
+static __attribute__((noinline)) uint64_t refine_batch_specials(const uint8_t* source, const uint32_t* starts, const uint32_t* lengths, uint32_t count, bool trigraphs)
+{
+    uint64_t result = 0;
     for (uint32_t j = 0; j < count; j += 1)
     {
-        // 1. Load, check and hash; prefetch the bucket. A length past 64 loads 64 bytes (bzhi keeps every bit for an index
-        // of 64 or more, and the length is capped below 256), whose hash is unused: the identifier is slow.
-        const uint32_t capped = lengths[j] < BUSTER_INTERN_VECTOR_BYTES ? lengths[j] : BUSTER_INTERN_VECTOR_BYTES;
-        const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, capped), source + starts[j]);
-        __mmask64 special = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\\'));
+        const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, lengths[j]), source + starts[j]);
+        uint64_t special = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\\'));
         if (trigraphs)
         {
             special |= _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('?'));
         }
-        const uint64_t is_slow = (special != 0) | (capped > BUSTER_INTERN_FAST_LENGTH);
-        slow |= is_slow << j;
-        const uint64_t hash = intern_hash_vector(bytes, capped);
-        hashes[j] = hash;
-        firsts[j] = _mm512_castsi512_si128(bytes);
+        result |= (uint64_t)(special != 0) << j;
+    }
+    return result;
+}
+
+// Pass B for identifiers [begin, begin + count) of the dense arrays (count <= `batch`, at most 64): stages 1 to 3, with
+// each identifier's id in `identifiers->ids`. `fused` merges stages 1 and 2 (each identifier probed right after it is
+// hashed, without a prefetch). The table's arrays are read once per batch into locals (stage 3 may grow it), so that the
+// stores of ids can't make Clang read them again for every identifier. The bookkeeping (which identifiers are slow,
+// unmatched or candidates) is done 16 identifiers at a time, from their lengths and ids, as bits of masks; stage 3 goes
+// through the deferred ones in token order. Returns false if the intern table runs out of room.
+BUSTER_INLINE bool refine_intern_batch(InternTable* table, const uint8_t* source, uint64_t length, RefineIdentifiers* identifiers, uint32_t begin, uint32_t count,
+                                       uint32_t flags, const bool trigraphs, const bool fused)
+{
+    const uint8_t* const buckets = table->buckets;
+    const uint8_t* const records = table->records;
+    const InternSpan* const spans = table->spans;
+    const uint64_t bucket_mask = table->bucket_mask;
+    const uint64_t offset_mask = bucket_mask * BUSTER_INTERN_BUCKET_BYTES;
+    const uint32_t* const starts = identifiers->starts + begin;
+    const uint32_t* const lengths = identifiers->lengths + begin;
+    uint32_t* const ids = identifiers->ids + begin;
+    // Each identifier's bucket offset, in every other qword (stage 1 stores four at a time from intern_hash_vectors4), and
+    // its key (refine_key).
+    uint64_t offsets[2 * 64] __attribute__((aligned(64)));
+    __m128i firsts[64] __attribute__((aligned(64)));
+    // Per byte position, the least of every loaded byte XORed with '\\' (and with '?'): a zero byte means some identifier
+    // has one.
+    __m512i backslashes = _mm512_set1_epi8(-1);
+    __m512i questions = _mm512_set1_epi8(-1);
+
+    // 1. Load and hash; prefetch the bucket. bzhi keeps every bit for an index of 64 to 255 and the low bits of a longer
+    // one's, so a load never reads past its identifier; a length past BUSTER_INTERN_FAST_LENGTH makes the identifier
+    // slow, and its hash is unused. Four identifiers at a time (intern_hash_vectors4), then the rest one at a time.
+    uint32_t j = 0;
+    for (; !fused && j + 4 <= count; j += 4)
+    {
+        __m512i bytes[4];
+        for (uint32_t k = 0; k < 4; k += 1)
+        {
+            bytes[k] = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, lengths[j + k]), source + starts[j + k]);
+            backslashes = _mm512_min_epu8(backslashes, _mm512_xor_si512(bytes[k], _mm512_set1_epi8('\\')));
+            if (trigraphs)
+            {
+                questions = _mm512_min_epu8(questions, _mm512_xor_si512(bytes[k], _mm512_set1_epi8('?')));
+            }
+        }
+        // The four lengths in dwords 0, 4, 8 and 12.
+        const __m512i spread = _mm512_setr_epi32(0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0);
+        const __m512i group_lengths = _mm512_maskz_permutexvar_epi32(0x1111, spread, _mm512_castsi128_si512(_mm_loadu_si128((const __m128i*)(lengths + j))));
+        __m512i first_lanes;
+        const __m512i hashes = intern_hash_vectors4(bytes[0], bytes[1], bytes[2], bytes[3], group_lengths, &first_lanes);
+        _mm512_store_si512(firsts + j, _mm512_or_si512(first_lanes, _mm512_set4_epi32(-1, 0, 0, 0)));
+        const __m512i group_offsets = _mm512_and_si512(_mm512_slli_epi64(hashes, 6), _mm512_set1_epi64((long long)offset_mask));
+        _mm512_store_si512(offsets + 2 * j, group_offsets);
+        // The prefetches' offsets come from the vector's lanes: loads of them from the store just made would wait for it
+        // to commit (it doesn't forward to them), and hold up the batch.
+        _mm_prefetch((const char*)(buckets + _mm_cvtsi128_si64(_mm512_castsi512_si128(group_offsets))), _MM_HINT_T0);
+        _mm_prefetch((const char*)(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 1))), _MM_HINT_T0);
+        _mm_prefetch((const char*)(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 2))), _MM_HINT_T0);
+        _mm_prefetch((const char*)(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 3))), _MM_HINT_T0);
+    }
+    for (; j < count; j += 1)
+    {
+        const uint32_t identifier_length = lengths[j];
+        const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, identifier_length), source + starts[j]);
+        backslashes = _mm512_min_epu8(backslashes, _mm512_xor_si512(bytes, _mm512_set1_epi8('\\')));
+        if (trigraphs)
+        {
+            questions = _mm512_min_epu8(questions, _mm512_xor_si512(bytes, _mm512_set1_epi8('?')));
+        }
+        const uint64_t offset = (intern_hash_vector(bytes, identifier_length) * BUSTER_INTERN_BUCKET_BYTES) & offset_mask;
+        offsets[2 * j] = offset;
         if (fused)
         {
             // 2, at once.
-            const uint8_t* bucket_bytes = buckets + (hash & bucket_mask) * BUSTER_INTERN_BUCKET_BYTES;
-            const uint32_t matches = intern_bucket_matches(_mm512_load_si512(bucket_bytes), intern_bucket_key(_mm512_castsi512_si128(bytes)));
-            const uint32_t bit = (uint32_t)__builtin_ctz(matches | 0x10000) & 15;
-            values[tokens[j]] = intern_slot_id(bucket_bytes, bit);
-            const uint64_t candidate = (matches != 0) & !is_slow;
-            long_candidates |= (candidate & (capped > BUSTER_INTERN_SHORT_LENGTH)) << j;
-            deferred |= (candidate ^ 1) << j;
+            ids[j] = refine_probe(buckets + offset, refine_key(_mm512_castsi512_si128(bytes)));
         }
         else
         {
-            _mm_prefetch((const char*)(buckets + (hash & bucket_mask) * BUSTER_INTERN_BUCKET_BYTES), _MM_HINT_T0);
+            firsts[j] = refine_key(_mm512_castsi512_si128(bytes));
+            _mm_prefetch((const char*)(buckets + offset), _MM_HINT_T0);
         }
     }
 
-    // 2. Probe each identifier's bucket for its prefix, with one compare. No branch depends on the outcome: a match of a
-    // short identifier is found, a match of a longer one is a candidate for 2b, and no match is deferred.
-    for (uint32_t j = 0; !fused && j < count; j += 1)
+    // 2. Probe each identifier's bucket for its prefix, with one compare.
+    for (uint32_t i = 0; !fused && i < count; i += 1)
     {
-        const uint8_t* bucket_bytes = buckets + (hashes[j] & bucket_mask) * BUSTER_INTERN_BUCKET_BYTES;
-        const uint32_t capped = lengths[j] < BUSTER_INTERN_VECTOR_BYTES ? lengths[j] : BUSTER_INTERN_VECTOR_BYTES;
-        const uint32_t matches = intern_bucket_matches(_mm512_load_si512(bucket_bytes), intern_bucket_key(firsts[j]));
-        const uint32_t bit = (uint32_t)__builtin_ctz(matches | 0x10000) & 15;
-        values[tokens[j]] = intern_slot_id(bucket_bytes, bit);
-        const uint64_t candidate = (matches != 0) & !((slow >> j) & 1);
-        long_candidates |= (candidate & (capped > BUSTER_INTERN_SHORT_LENGTH)) << j;
-        deferred |= (candidate ^ 1) << j;
+        ids[i] = refine_probe(buckets + offsets[2 * i], firsts[i]);
     }
 
+    // Slow: longer than BUSTER_INTERN_FAST_LENGTH, or with a backslash (or, with trigraphs, a '?'). Unmatched: no
+    // slot had the prefix. Longer: past BUSTER_INTERN_SHORT_LENGTH, so that a match is only a candidate.
+    uint64_t slow = 0;
+    uint64_t unmatched = 0;
+    uint64_t longer = 0;
+    for (uint32_t group = 0; group < count; group += BUSTER_REFINE_LANES)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xFFFF, count - group);
+        const __m512i group_lengths = _mm512_maskz_loadu_epi32(lanes, lengths + group);
+        const __m512i group_ids = _mm512_maskz_loadu_epi32(lanes, ids + group);
+        slow |= (uint64_t)_mm512_mask_cmpgt_epu32_mask(lanes, group_lengths, _mm512_set1_epi32(BUSTER_INTERN_FAST_LENGTH)) << group;
+        longer |= (uint64_t)_mm512_mask_cmpgt_epu32_mask(lanes, group_lengths, _mm512_set1_epi32(BUSTER_INTERN_SHORT_LENGTH)) << group;
+        unmatched |= (uint64_t)_mm512_mask_testn_epi32_mask(lanes, group_ids, group_ids) << group;
+    }
+    uint64_t special = _mm512_testn_epi8_mask(backslashes, backslashes);
+    if (trigraphs)
+    {
+        special |= _mm512_testn_epi8_mask(questions, questions);
+    }
+    if (BUSTER_UNLIKELY(special != 0))
+    {
+        slow |= refine_batch_specials(source, starts, lengths, count, trigraphs);
+    }
+    uint64_t deferred = slow | unmatched;
+
     // 2b. A longer identifier whose prefix matched: one masked compare of its bytes and terminating zero with its record.
-    for (uint64_t candidates = long_candidates; candidates != 0; candidates &= candidates - 1)
+    for (uint64_t candidates = longer & ~deferred; candidates != 0; candidates &= candidates - 1)
     {
         const uint32_t j = (uint32_t)__builtin_ctzll(candidates);
-        const uint32_t capped = lengths[j];
-        const __mmask64 compare_mask = _bzhi_u64(~0ull, capped + 1);
-        const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, capped), source + starts[j]);
-        const __m512i record = _mm512_maskz_loadu_epi8(compare_mask, records + record_of[values[tokens[j]]]);
+        const uint32_t identifier_length = lengths[j];
+        const __mmask64 compare_mask = _bzhi_u64(~0ull, identifier_length + 1);
+        const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, identifier_length), source + starts[j]);
+        const __m512i record = _mm512_maskz_loadu_epi8(compare_mask, records + spans[ids[j]].offset);
         deferred |= (uint64_t)(_mm512_mask_cmpneq_epi8_mask(compare_mask, bytes, record) != 0) << j;
     }
 
-    // 3. The deferred ones, in token order: new spellings get the ids the scalar reference gives them. A fast one reuses
-    // its hash.
+    // 3. The deferred ones, in token order: new spellings get the ids the scalar reference gives them. Each starts its
+    // probe at the bucket stage 1 found (unless an insert has grown the table since).
     bool result = true;
     for (; result && deferred != 0; deferred &= deferred - 1)
     {
@@ -509,16 +644,45 @@ BUSTER_INLINE bool refine_intern_batch(InternTable* table, const uint8_t* source
         }
         else
         {
-            id = intern_find_or_add_hashed(table, source + starts[j], lengths[j], hashes[j]);
+            id = intern_find_or_add_vector(table, source + starts[j], lengths[j], bucket_mask, offsets[2 * j] / BUSTER_INTERN_BUCKET_BYTES);
         }
-        values[tokens[j]] = id;
+        ids[j] = id;
         result = id != 0;
     }
     return result;
 }
 
-// The vectorized path: an instantiation per trigraph setting (so that neither tests the flag per identifier), batch size
-// and form of pass B.
+// Pass C over tokens [begin, end) of the block: each identifier's id, from the dense array, into its token's value, 16
+// tokens at a time (an expand of the next ids by the identifier mask, and a masked store).
+BUSTER_INLINE void refine_pass_c(const RefineIdentifiers* identifiers, uint64_t begin, uint64_t end, uint32_t* values)
+{
+    uint32_t position = 0;
+    for (uint64_t first = begin; first < end; first += BUSTER_REFINE_LANES)
+    {
+        const uint64_t index = first - begin;
+        const __mmask16 lanes = (__mmask16)(identifiers->masks[index / BUSTER_REFINE_STEP_TOKENS] >> (index % BUSTER_REFINE_STEP_TOKENS));
+        const __m512i group_ids = _mm512_maskz_expand_epi32(lanes, _mm512_loadu_si512(identifiers->ids + position));
+        _mm512_mask_storeu_epi32(values + first, lanes, group_ids);
+        position += (uint32_t)__builtin_popcount(lanes);
+    }
+}
+
+// Pass B's instantiations, a function each, so that the block loop's state doesn't take the batch's registers: per
+// trigraph setting (so that neither tests the flag per identifier) and form.
+#define BUSTER_REFINE_BATCH_INSTANTIATE(name, trigraphs, fused) \
+    __attribute__((noinline)) static bool name(InternTable* table, const uint8_t* source, uint64_t length, RefineIdentifiers* identifiers, uint32_t begin, \
+                                               uint32_t count, uint32_t flags) \
+    { \
+        return refine_intern_batch(table, source, length, identifiers, begin, count, flags, trigraphs, fused); \
+    }
+
+BUSTER_REFINE_BATCH_INSTANTIATE(refine_intern_batch_plain, false, false)
+BUSTER_REFINE_BATCH_INSTANTIATE(refine_intern_batch_trigraphs, true, false)
+BUSTER_REFINE_BATCH_INSTANTIATE(refine_intern_batch_fused_plain, false, true)
+BUSTER_REFINE_BATCH_INSTANTIATE(refine_intern_batch_fused_trigraphs, true, true)
+
+// The vectorized path: an instantiation per trigraph setting, batch size and form of pass B. Each block's source bytes
+// are scanned for backslashes just before its passes.
 BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends,
                                       uint64_t count, uint32_t* values, uint64_t* space, uint32_t flags, const bool trigraphs, const uint32_t batch, const bool fused)
 {
@@ -526,19 +690,36 @@ BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source,
     __m512i previous_ends = _mm512_setzero_si512();
     Scratch scratch = scratch_begin(0);
     uint64_t* backslash_chunks = arena_push_array(scratch.arena, (length + 4095) / 4096 + 1, sizeof(uint64_t), 64);
+    uint64_t scanned = 0;
     bool result = backslash_chunks != 0;
-    if (result)
-    {
-        refine_backslash_chunks(source, length, backslash_chunks, trigraphs);
-    }
     for (uint64_t block = 0; result && block < count; block += BUSTER_REFINE_BLOCK_TOKENS)
     {
         const uint64_t block_end = count - block < BUSTER_REFINE_BLOCK_TOKENS ? count : block + BUSTER_REFINE_BLOCK_TOKENS;
-        previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers);
+        // The block's gaps and identifiers end by its last token's end.
+        scanned = refine_scan_chunks(source, length, backslash_chunks, scanned, ends[block_end - 1], trigraphs);
+        if (values != ends)
+        {
+            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, true);
+        }
+        else
+        {
+            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, false);
+        }
         for (uint32_t first = 0; result && first < identifiers.count; first += batch)
         {
             const uint32_t batch_count = identifiers.count - first < batch ? identifiers.count - first : batch;
-            result = refine_intern_batch(table, source, length, &identifiers, first, batch_count, values, flags, trigraphs, batch, fused);
+            if (fused)
+            {
+                result = (trigraphs ? refine_intern_batch_fused_trigraphs : refine_intern_batch_fused_plain)(table, source, length, &identifiers, first, batch_count, flags);
+            }
+            else
+            {
+                result = (trigraphs ? refine_intern_batch_trigraphs : refine_intern_batch_plain)(table, source, length, &identifiers, first, batch_count, flags);
+            }
+        }
+        if (result)
+        {
+            refine_pass_c(&identifiers, block, block_end, values);
         }
     }
     scratch_end(scratch);
