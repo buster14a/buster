@@ -21,9 +21,10 @@
 // library, the exports' index (import_library_index) against the open-addressing table it replaced, built and then
 // looked up for every export's name and every reference's; libc.so's script, which only the exact path reads;
 // runtime_import end to end, as a link without the snapshot would run it; the static runtime's archives, by
-// import_archive's two paths; and runtime_import_static end to end. Each figure is the median of
-// BUSTER_IMPORT_BENCHMARK_RUNS runs after a warm-up, with cycles and instructions from the hardware counters (zero when
-// unavailable).
+// import_archive's two paths; and runtime_import_static and runtime_import_static_pie end to end (a static PIE's runtime
+// is the static executable's archives with rcrt1.o, crtbeginS.o and crtendS.o for crt1.o, crtbeginT.o and crtend.o, so
+// the static rows above are its too). Each figure is the median of BUSTER_IMPORT_BENCHMARK_RUNS runs after a warm-up,
+// with cycles and instructions from the hardware counters (zero when unavailable).
 // The exit status is 1 if the arguments are invalid, a case or a file can't be made or read, or the paths disagree.
 
 #include <stdint.h>
@@ -653,10 +654,15 @@ static bool import_benchmark_script(String8 path, int cycles_counter, int instru
     return result;
 }
 
-// runtime_import (or runtime_import_static, for `kind`) end to end, as a link without a snapshot would run it: the
-// search's probes, each file read, imported and bound.
+// runtime_import (or runtime_import_static or runtime_import_static_pie, for `kind`) end to end, as a link without a
+// snapshot would run it: the search's probes, each file read, imported and bound.
 static bool import_benchmark_runtime_import(RuntimeKind kind, int cycles_counter, int instructions_counter)
 {
+    static const char* const names[RUNTIME_KINDS] = {
+        [RUNTIME_KIND_DYNAMIC] = "runtime_import",
+        [RUNTIME_KIND_STATIC] = "runtime_import_static",
+        [RUNTIME_KIND_STATIC_PIE] = "runtime_import_static_pie",
+    };
     uint64_t nanoseconds[BUSTER_IMPORT_BENCHMARK_RUNS];
     uint64_t cycles[BUSTER_IMPORT_BENCHMARK_RUNS];
     uint64_t instructions[BUSTER_IMPORT_BENCHMARK_RUNS];
@@ -684,7 +690,7 @@ static bool import_benchmark_runtime_import(RuntimeKind kind, int cycles_counter
     }
     if (result)
     {
-        printf("%s, end to end: %u probes, %u members\n", kind == RUNTIME_KIND_STATIC ? "runtime_import_static" : "runtime_import", probes, members);
+        printf("%s, end to end: %u probes, %u members\n", names[kind], probes, members);
         import_benchmark_print("vector", nanoseconds, cycles, instructions, 1, "import");
     }
     return result;
@@ -806,7 +812,7 @@ int run_import_benchmark(int argc, char** argv)
         result = result && import_benchmark_script(runtime.libc_script, cycles_counter, instructions_counter, &arena);
         result = result && import_benchmark_runtime_import(RUNTIME_KIND_DYNAMIC, cycles_counter, instructions_counter);
     }
-    // The static runtime's archives, then its import end to end.
+    // The static runtime's archives, then its import end to end, and the static PIE's, of the same archives.
     for (uint32_t a = 0; result && a < static_runtime.archive_count; a += 1)
     {
         const char* name = strrchr(static_runtime.archives[a].path.pointer, '/');
@@ -814,6 +820,7 @@ int run_import_benchmark(int argc, char** argv)
                                        instructions_counter, &arena);
     }
     result = result && import_benchmark_runtime_import(RUNTIME_KIND_STATIC, cycles_counter, instructions_counter);
+    result = result && import_benchmark_runtime_import(RUNTIME_KIND_STATIC_PIE, cycles_counter, instructions_counter);
     for (uint32_t i = 0; result && i < library_count + archive_count; i += 1)
     {
         const bool library = i < library_count;
