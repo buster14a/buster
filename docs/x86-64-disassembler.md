@@ -130,7 +130,9 @@ executed uop with one-cycle measured latency and 0.5-cycle throughput;
 uop with four-cycle latency and 0.5-cycle throughput.
 [VPERMB](https://uops.info/html-instr/VPERMB_ZMM_ZMM_ZMM.html#ZEN5), used to extract
 fields at known offsets, has the same four-cycle latency and 0.5-cycle throughput.
-All three use FP1/FP2.
+The register form of
+[VPERMT2B](https://uops.info/html-instr/VPERMT2B_ZMM_ZMM_ZMM.html#ZEN5)
+has the same cost. These permutations use FP1/FP2.
 [VPGATHERDD](https://uops.info/html-instr/VPGATHERDD_ZMM_K_VSIB_ZMM.html#ZEN5)
 costs 64 executed uops and about 12.6 cycles per instruction. The decoder uses
 contiguous loads and in-register tables, with no gather. These measurements
@@ -168,3 +170,121 @@ this is a transition-sensitive burst measurement, distinct from sustained
 back-to-back runs. Hardware counters are zero when unavailable. Initialization,
 input generation and file I/O are excluded; the decode-plus-format phase
 includes formatting but excludes terminal I/O.
+
+## Recorded validation
+
+The controlled host used Clang 23.1.1 and GNU binutils 2.47. The optimized
+decoder harness at `0d547ff` passed seeds 1, 7 and 99. Each seed checks 11,609
+catalogue/address-size instances, 100,000 generated instructions, 100,000 random
+byte inputs, truncations and mutations, and 4,096 streams of 32 ordinary
+instructions drawn from 368 directly admitted forms. Independent fixtures cover
+all 64 alignments; readable slices and output capacities are surrounded by
+guard pages. The generated oracle reassembled 10,000 formatted instructions
+per seed to identical bytes and checked every objdump boundary and mnemonic:
+30,000 independent operand roundtrips in total. Mnemonic aliases are normalized
+using the decoded predicate or immediate where necessary.
+
+The original C corpus compiled with `clang -O3 -march=znver5` produces 662 bytes
+and 152 instructions on this toolchain. All three paths decode the whole slice
+and match objdump, including its original long alignment NOPs. This is a small
+compiler-generated corpus, not a claim of complete ELF or arbitrary x86 coverage.
+An `-O1 -fsanitize=address,undefined -fno-omit-frame-pointer` harness with the
+unchanged `d2c7561` decoder also passed seed 7, dense streams, guards and the raw
+Clang corpus without sanitizer findings.
+
+## Zen 5 measurements
+
+These results use the production `build/compiler` built at `d2c7561` on the
+Ryzen 7 9700X with Clang 23.1.1, `-O3 -march=native`, pinned to CPU 2 and taking
+the shared exclusive lock separately for every process. Its SHA-256 is
+`c6dd637855ef4f24ee9a1ae8b34e8bed6036d40f0b66aa64ee77da34f10d982b`.
+Subsequent changes before submission normalize test-oracle spellings, remove a
+redundant raw-path comparison, and add comments/documentation/provenance; decoder
+and benchmark executable statements are unchanged. PR CI builds the submitted
+head, including its integration with newer main changes.
+
+The table is the median of three process medians, each containing 21 interleaved
+passes. The two synthetic streams contain 16,384 instructions: 55,852 ordinary
+bytes and 91,105 vector-mix bytes. The Clang corpus has 662 bytes/152 instructions.
+Time and counters exclude initialization and I/O. All four implementations
+produce identical complete records before timing begins.
+
+| Stream | Implementation | Decode ns/insn | Cycles/insn | Retired instructions/insn | Decode + format ns/insn |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Ordinary | Full scalar reference | 31.931 | 177.009 | 929.864 | 66.305 |
+| Ordinary | Compact scalar control | 23.217 | 128.646 | 597.769 | 57.935 |
+| Ordinary | Basic AVX-512 matcher | 23.548 | 130.442 | 554.677 | 58.286 |
+| Ordinary | Default batched AVX-512 | 7.579 | 42.012 | 135.500 | 42.056 |
+| Vector mix | Full scalar reference | 37.502 | 207.874 | 1051.187 | 85.678 |
+| Vector mix | Compact scalar control | 27.290 | 151.304 | 679.222 | 75.494 |
+| Vector mix | Basic AVX-512 matcher | 26.420 | 146.484 | 602.634 | 74.908 |
+| Vector mix | Default batched AVX-512 | 28.468 | 157.817 | 651.553 | 76.902 |
+| Clang corpus | Full scalar reference | 27.643 | 152.999 | 975.627 | 55.168 |
+| Clang corpus | Compact scalar control | 17.459 | 96.696 | 629.318 | 45.017 |
+| Clang corpus | Basic AVX-512 matcher | 17.242 | 95.447 | 574.528 | 44.751 |
+| Clang corpus | Default batched AVX-512 | 14.681 | 81.313 | 407.996 | 41.946 |
+
+Compact validation explains much of the improvement before batching. The SIMD
+matcher alone is slightly slower than the compact scalar control on ordinary
+code, and slightly faster on the other two streams. Lane construction then
+reduces ordinary decode time by another factor of 3.06 versus compact scalar.
+The selected default is 4.21 times as fast as the full scalar reference on the
+ordinary mix, and 1.88 times on the Clang corpus. Its vector-heavy result is
+7.8% slower than the basic SIMD matcher and 4.3% slower than compact scalar;
+this is an explicit workload tradeoff, not a universal batching win.
+
+Formatting remains a scalar bounded writer. Adding it changes ordinary default
+time from 7.579 to 42.056 ns/instruction, so decode-only speedups do not describe
+the full command. Replacing repeated formatted-print calls with bounded text and
+integer writers reduced that cost during development. Signature comparison and
+speculative lengths without lane construction did not improve full decode;
+reusing each window across unsupported hints was also necessary on vector code.
+
+Initialization took 1.365–1.644 ms in these 27 processes, including both encoder
+validation-template prerequisites. Each instantiated decoder reserves 2,467,968
+bytes of tables, excluding the encoder's tables, with 12,224 active padded
+signature entries. The command and benchmark translation units each instantiate
+their own tables; only the invoked path initializes its decoder instance.
+Initialization is excluded from every throughput number.
+
+### Back-to-back and after scalar work
+
+These are separate processes using `--only batched --phase decode`. Sustained
+samples use `--iterations 512`, keeping each sample active for roughly 63 ms
+(ordinary) or 238 ms (vector). The warm-batch samples use `--after-scalar 100`
+and the automatic minimum 2 ms batch. Warm-burst samples also use
+`--iterations 1`: one complete stream immediately after 100 ms of scalar decode,
+roughly 125 microseconds or 470 microseconds. Each cell lists all three process
+medians, in run order; these are observations, not confidence intervals.
+
+| Stream and state | ns/instruction, three processes | Cycles/instruction, three processes |
+| --- | --- | --- |
+| Ordinary, sustained | 7.543 / 7.557 / 7.545 | 41.804 / 41.891 / 41.812 |
+| Ordinary, warm batch | 8.371 / 7.588 / 7.570 | 46.394 / 42.080 / 41.968 |
+| Ordinary, warm burst | 7.648 / 7.642 / 8.050 | 42.429 / 42.400 / 44.673 |
+| Vector mix, sustained | 28.367 / 28.408 / 28.436 | 157.198 / 157.466 / 157.658 |
+| Vector mix, warm batch | 28.397 / 28.389 / 28.398 | 156.964 / 157.350 / 157.349 |
+| Vector mix, warm burst | 28.625 / 28.637 / 28.845 | 158.620 / 158.562 / 159.840 |
+
+The ordinary warm-batch process at 8.371 ns is retained, rather than discarded;
+it has a corresponding cycle increase. These measurements do not establish a
+power-cap mechanism or a universal transition penalty. Warm-burst medians are
+slightly above sustained medians in both streams, with greater process variation
+on ordinary code.
+
+### Emitted code and profile
+
+The production assembly retains the complete 24-byte record stores in the
+decode-only benchmark. The default loop has five `VPERMB` field extractions and
+two `VPERMT2B` metadata lookups, masked source loads, scalar direct-table loads
+and scalar record stores unrolled four at a time. It has no gather/scatter.
+Clang keeps some lookup halves and lane arrays on the stack; register-only
+permutation costs do not account for these additional loads and stores.
+
+A CPU-2 cycles profile of ordinary default decode (`--iterations 512`, 2,687
+samples) places 62.59% in the default wrapper, including the inlined length and
+lane work, 23.30% in `x86_decode_one`, and 13.91% in candidate construction and
+validation. This is function-level sampling, not a precise decomposition of
+individual instruction latency. The retained scalar boundary walk, admission
+loads, stores, complex-form fallback and formatting are measured limitations;
+no llvm-mca prediction is used as acceptance evidence.

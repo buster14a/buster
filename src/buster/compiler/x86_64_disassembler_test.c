@@ -201,9 +201,9 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
         valid = valid && actual != 0;
         if (valid)
         {
-            const X86DecodeResult vectorized = x86_disassemble(bytes, size, actual, count);
+            const X86DecodeResult vectorized = x86_disassemble_impl(bytes, size, actual, count, true, true);
             valid = vectorized.status == X86_DECODE_OK && vectorized.count == reference.count && memcmp(actual, expected, reference.count * sizeof(*actual)) == 0;
-            const X86DecodeResult batched = x86_disassemble_batched(bytes, size, actual, count);
+            const X86DecodeResult batched = x86_disassemble(bytes, size, actual, count);
             valid = valid && batched.status == X86_DECODE_OK && batched.count == reference.count && memcmp(actual, expected, reference.count * sizeof(*actual)) == 0;
         }
         free(actual);
