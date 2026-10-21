@@ -1,4 +1,7 @@
 glibc/bits/byteswap.h
 glibc/stdlib/stdlib.h
 include/generic-musl/stdint.h
+include/any-macos-any/TargetConditionals.h
+include/any-macos-any/pthread/pthread_impl.h
+include/any-macos-any/simd/base.h
 include/x86_64-linux-gnu/sys/ucontext.h

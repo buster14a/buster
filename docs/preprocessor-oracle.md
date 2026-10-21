@@ -40,6 +40,21 @@ and refuses to overwrite a report. Full Clang diagnostics go to stderr.
 `--keep` retains the temporary macro dump. The older fixture interface,
 `test-preprocessor --clang`, still takes `--clang` as a flag without a path.
 
+The first full libc pass exposed three differences. Builtin/feature/target
+query names now remain unexpanded, while attribute queries still expand
+macros. The Clang table now includes `ext_vector_type`, queried in both its
+ordinary and underscored spellings in C99, GNU17 and C23 on Clang 23.1.1, and
+cross-checked with local Clang 23.1.3 (`clang 23.1.3-5`).
+
+Clang's closing nullability callback supplies an invalid location, so its
+printer keeps the current presumed line. Both printers reproduce that placement
+within the current presumed context; token locations retain their source
+positions. The behavior references are Clang 23.1.1's
+[pragma handler](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Lex/Pragma.cpp#L1843)
+and [output callback](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Frontend/PrintPreprocessedOutput.cpp#L691).
+The regression inputs are original, including macro operands and both forms of
+the pragma, with ordinary tokens and a presumed-file change between them.
+
 ## Inputs and reproduction
 
 The [completed frozen-input handoff](https://github.com/buster14a/buster/issues/125#issuecomment-6290654388)
@@ -56,6 +71,7 @@ use the chosen root explicitly. Neither corpora nor system headers are committed
 | `manifests/libc.sha256` | `bf593a94954f3ed9431dd12e60233ec0229f7226a1fc270a701614a20f86baeb` |
 | `manifests/musl-generated.sha256` | `89dbe35f0324cf08d0cb9cf31ecf15092fc20783a9e470e80e5f41b1d48251d3` |
 | `manifests/headers.sha256` | `8e6e646951cbd08c07bbc76ff46d6796a83a58e9b1c4959278b60193718cd10c` |
+| `manifests/headers-bundle.sha256` (headers and package provenance) | `e307b836448ef20e603a617a4b5023831c72ff5f307f614c50f4f8833088717c` |
 
 These identify SQLite **3.53.2**, Zig **0.14.1**'s libc tree and patched musl
 **1.2.5**, its copy-only x86-64 generated-header overlay, and **778** reached
@@ -65,7 +81,7 @@ util-linux-libs `2.42.4-1`. The bundle's `README.txt`,
 `headers/package-owners.txt` and `headers/provenance.tsv` record exact origins.
 The reference is `/usr/bin/clang` **23.1.1**, SHA-256
 `939a882527432ec23b094c289e7f170bf2d6ec282e74dde75e31b08602fa3eae`.
-CI checks that hash too, so a tool update requires an explicit reference update.
+CI checks that reference binary's hash too.
 
 For an on-demand libc run, `bundle` names the original bundle, `compiler` an
 absolute executable path, and `report` a new TSV path:
@@ -84,15 +100,17 @@ Use the same flags for `config/sqlite-c.txt` relative to `sqlite/` and
 `musl-crt-pic.txt`/`musl-crt-pic.args` and `musl-ldso.txt`/`musl-ldso.args`,
 all under `config/`, with source paths relative to `libc/musl/`. They preserve
 upstream's include order, C99, freestanding mode, `_XOPEN_SOURCE=700` and the
-CRT/PIC options. The libc inventory is the **8,983 C/header files**; the
+CRT/PIC options. The libc inventory is the **8,983 C/header files** recorded by
+[the lexer benchmark](c-lexer.md); the
 handoff's forced-C scan of non-C files is supplemental evidence.
 
 Every build and comparison takes the shared lock separately, never around a
-series. The 9700X workflow verifies the manifests and every source/header byte,
-then compares SQLite, four musl sources and four libc headers. The libc subset
-must produce two identical files and two explicit skips. Its input lists live
+series. The 9700X workflow verifies the manifests, package provenance and every
+source/header byte, and rejects additional files or nonregular entries,
+then compares SQLite, four musl sources and seven libc headers, including the
+three regressions. The libc subset must produce five identical files and two
+explicit skips. Its input lists live
 under `tests/preprocessor-oracle/`. The runner hooks hold the lock for the job.
 The existing concurrency group uses `queue: max` to retain pending runs, as
 [GitHub documents](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
-while still running one at a time; the default single pending slot discarded
-this PR's first two attempts before either created a job.
+while still running one at a time.

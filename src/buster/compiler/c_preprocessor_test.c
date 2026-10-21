@@ -938,6 +938,36 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "\"\?\?=\"\nL\"#\"\n", false, 0, 0, 0 },
     { "#include of a missing absolute path", "#include \"/buster-missing-directory/absent.h\"\nafter\n", 0, "c17", "", true },
     { "-include of a missing absolute path", "x\n", 0, "c17", "", true, 0, "-include /buster-missing-directory/absent.h", 0 },
+    {
+        .name = "builtin and feature names are raw, attribute names may expand",
+        .source = "#define BUILTIN_NAME __builtin_expect\n#define FEATURE_NAME c_atomic\n#define ATTRIBUTE_NAME __const__\n"
+                  "#if __has_builtin(__is_target_arch) && __has_builtin(__is_target_os)\nbuiltin_names\n#endif\n"
+                  "#if __has_builtin(BUILTIN_NAME) || __has_feature(FEATURE_NAME) || __has_extension(FEATURE_NAME)\nwrong_expansion\n#else\nraw_names\n#endif\n"
+                  "#if __has_attribute(ATTRIBUTE_NAME) && __is_target_arch(x86_64) && __is_target_os(linux)\nattribute_and_target\n#endif\n",
+        .standard = "gnu17",
+        .expected = "builtin_names raw_names attribute_and_target",
+    },
+    {
+        .name = "the oracle recognizes ext_vector_type with either attribute spelling",
+        .source = "#if __has_attribute(ext_vector_type) && __has_attribute(__ext_vector_type__)\nvector_attribute\n#endif\n",
+        .standard = "gnu17",
+        .expected = "vector_attribute",
+    },
+    {
+        .name = "assume_nonnull end uses the printer's current line",
+        .source = "_Pragma(\"clang assume_nonnull begin\")\n#define SILENT 1\n_Pragma(\"clang assume_nonnull end\")\nint first = __LINE__;\n"
+                  "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint last = __LINE__;\n",
+        .standard = "gnu17",
+        .expected = "#pragma clang assume_nonnull begin\n#pragma clang assume_nonnull end\nint first = 4;\n"
+                    "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint last = 8;\n",
+    },
+    {
+        .name = "assume_nonnull end after a presumed-file change",
+        .source = "#pragma clang assume_nonnull begin\n#line 500 \"logical-nullability.h\"\nint *pointer;\n#define SILENT 1\n"
+                  "_Pragma(\"clang assume_nonnull end\")\nint after = __LINE__;\n",
+        .standard = "gnu17",
+        .expected = "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint after = 503;\n",
+    },
 };
 
 // Writes a text to a file; returns whether it could.

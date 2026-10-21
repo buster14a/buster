@@ -259,6 +259,15 @@ compiler's own. LLVM's terms are retained in [LICENSES/LLVM.txt](LICENSES/LLVM.t
 SQLite, musl, Lua and the system's headers are test oracle inputs only (the
 tests read them where they are installed): none of their code is included.
 
+The `ext_vector_type` attribute-table entry was added for the frozen #125
+corpus after querying Clang 23.1.1 (the recorded 9700X reference) in C99,
+GNU17 and C23, and Clang 23.1.3 (local package `clang 23.1.3-5`) in GNU17.
+Only the attribute name was read from the corpus. The original regression
+inputs and queries are described in `docs/preprocessor-oracle.md`; the entry
+retains the existing LLVM terms. The pragma-printer correction follows
+observable Clang 23.1.1 behavior, with its source references recorded there;
+no Clang or corpus implementation is copied.
+
 ## Review limits and distribution
 
 The record covers the pinned tree and this adoption's changes. Unmerged PRs,
