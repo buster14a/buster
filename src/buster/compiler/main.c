@@ -343,6 +343,12 @@ int run_floors_benchmark(int argc, char** argv);
 #include "buster/compiler/branch_sizing_test.c"
 int run_branch_sizing_benchmark(int argc, char** argv);
 
+#include "buster/compiler/x86_match.c"
+#include "buster/compiler/assembler.c"
+#include "buster/compiler/assembler_driver.c"
+#include "buster/compiler/assembler_test.c"
+#include "buster/compiler/assembler_benchmark.c"
+
 // The C type table (TypeIds, hash-consing, layout, conversions, compatibility and printing) and its tests, for the
 // test-types command. Its benchmark is another translation unit.
 #include "buster/compiler/c_types.c"
@@ -357,7 +363,19 @@ int run_type_benchmark(int argc, char** argv);
 int main(int argc, char** argv)
 {
     int result = 0;
-    if (argc >= 2 && strcmp(argv[1], "-E") == 0)
+    if (argc >= 2 && (strcmp(argv[1], "assemble") == 0 || strcmp(argv[1], "-c") == 0))
+    {
+        result = run_assembler_command(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-assembler") == 0)
+    {
+        result = run_assembler_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-assembler") == 0)
+    {
+        result = run_assembler_benchmark(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "-E") == 0)
     {
         result = run_preprocessor_command(argc - 1, argv + 1);
     }

@@ -87,6 +87,14 @@ jobs:
         # relaxation of them must give the bytes of the sized records.
         run: ./build/compiler test-branch-sizing --cross-check
 
+      - name: Test the scalar and AVX-512 assembly frontends
+        run: ./build/compiler test-assembler --cross-check
+
+      - name: Benchmark assembly phases
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-assembler
+
       - name: Benchmark branch sizing
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"

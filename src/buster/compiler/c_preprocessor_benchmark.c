@@ -57,6 +57,14 @@ struct PPBenchmarkSample
     uint64_t cycles;
     uint64_t instructions;
     uint64_t ticks[PP_PHASE_COUNT + 1]; // The phases', and the whole runs'.
+    uint64_t history_bytes;
+    uint64_t history_max_bytes;
+    uint64_t temporary_max_bytes;
+    uint64_t expansions;
+    uint64_t substitutions;
+    uint64_t generated;
+    uint64_t runs;
+    uint64_t digest;
 };
 
 static int pp_benchmark_open_counter(uint64_t config)
@@ -105,13 +113,14 @@ static void pp_benchmark_sort(uint64_t* values, uint64_t count)
 
 // One pass of one implementation over the files: each preprocessed from nothing. Adds the files' input and output
 // tokens to `tokens` (the first time).
-static bool pp_benchmark_pass(const PPOptions* base, bool scalar, char** files, int file_count, int cycles_fd, int instructions_fd, PPBenchmarkSample* sample,
+static bool pp_benchmark_pass(const PPOptions* base, bool scalar, bool no_history, char** files, int file_count, int cycles_fd, int instructions_fd, PPBenchmarkSample* sample,
                               uint64_t* input_tokens, uint64_t* output_tokens)
 {
     static InternTable table;
     static Preprocessor pp;
     PPOptions options = *base;
     options.scalar = scalar;
+    options.no_history = no_history;
     options.timing = true;
     bool result = true;
     *sample = (PPBenchmarkSample){ 0 };
@@ -134,6 +143,24 @@ static bool pp_benchmark_pass(const PPOptions* base, bool scalar, char** files, 
         }
         *input_tokens += pp.input_tokens;
         *output_tokens += pp.output.count;
+        const uint64_t history_bytes = (uint64_t)pp.history_count * sizeof(PPExpansion) + (uint64_t)pp.substitution_count * sizeof(PPSubstitution) +
+                                       (uint64_t)pp.generated_count * sizeof(PPGenerated) + (uint64_t)pp.history_source_count * sizeof(PPSource) +
+                                       (uint64_t)pp.history_run_count * sizeof(PPHistoryRun);
+        const uint64_t temporary_bytes = ((uint64_t)pp.origin_peak[0] + pp.origin_peak[1] + pp.origin_peak[2]) * sizeof(uint32_t);
+        sample->history_bytes += history_bytes;
+        sample->history_max_bytes = history_bytes > sample->history_max_bytes ? history_bytes : sample->history_max_bytes;
+        sample->temporary_max_bytes = temporary_bytes > sample->temporary_max_bytes ? temporary_bytes : sample->temporary_max_bytes;
+        sample->expansions += pp.history_count;
+        sample->substitutions += pp.substitution_count;
+        sample->generated += pp.generated_count;
+        sample->runs += pp.history_run_count;
+        // Outside the timed interval: every history/control pass must preprocess identically, including locations.
+        for (uint32_t i = 0; i < pp.output.count; i += 1)
+        {
+            sample->digest = (sample->digest ^ pp.output.locations[i]) * 1099511628211ull;
+            sample->digest = (sample->digest ^ pp.output.values[i]) * 1099511628211ull;
+            sample->digest = (sample->digest ^ pp.output.kinds[i] ^ ((uint64_t)pp.output.flags[i] << 8)) * 1099511628211ull;
+        }
         const uint64_t* from = (const uint64_t*)&pp.statistics;
         uint64_t* to = (uint64_t*)&sample->statistics;
         const uint64_t longest = sample->statistics.longest_condition;
@@ -187,6 +214,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
 {
     int result = 1;
     bool with_clang = false;
+    bool history_cost = false;
     uint32_t only = 3;
     char** passed = calloc((size_t)argc + 1, sizeof(char*));
     char** clang_passed = calloc((size_t)argc + 1, sizeof(char*));
@@ -205,6 +233,10 @@ int run_preprocessor_benchmark(int argc, char** argv)
         if (strcmp(argument, "--clang") == 0)
         {
             with_clang = true;
+        }
+        else if (strcmp(argument, "--history-cost") == 0)
+        {
+            history_cost = true;
         }
         else if (strcmp(argument, "--only") == 0 && i + 1 < argc)
         {
@@ -246,7 +278,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
     }
     if (file_count == 0 || with_input == 0 || only == 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
     {
-        fprintf(stderr, "usage: %s [--clang] [--only vectorized|scalar] [-E's options] file...\n", argv[0]);
+        fprintf(stderr, "usage: %s [--clang] [--history-cost] [--only vectorized|scalar] [-E's options] file...\n", argv[0]);
     }
     else
     {
@@ -263,16 +295,30 @@ int run_preprocessor_benchmark(int argc, char** argv)
         uint64_t input_tokens = 0;
         uint64_t output_tokens = 0;
         bool ran = true;
+        uint64_t expected_digest = 0;
+        bool have_digest = false;
         for (uint32_t pass = 0; ran && pass <= BUSTER_PP_BENCHMARK_PASSES; pass += 1)
         {
-            for (uint32_t implementation = 0; ran && implementation < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; implementation += 1)
+            for (uint32_t order = 0; ran && order < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; order += 1)
             {
+                const uint32_t implementation = order ^ (pass & 1);
                 if (((only >> implementation) & 1) == 0)
                 {
                     continue;
                 }
                 PPBenchmarkSample sample;
-                ran = pp_benchmark_pass(&options, implementation == 1, files, file_count, cycles_fd, instructions_fd, &sample, &input_tokens, &output_tokens);
+                ran = pp_benchmark_pass(&options, !history_cost && implementation == 1, history_cost && implementation == 1, files, file_count, cycles_fd,
+                                        instructions_fd, &sample, &input_tokens, &output_tokens);
+                if (!have_digest)
+                {
+                    expected_digest = sample.digest;
+                    have_digest = true;
+                }
+                else if (history_cost && sample.digest != expected_digest)
+                {
+                    fprintf(stderr, "recording changed the output token digest\n");
+                    ran = false;
+                }
                 if (pass > 0)
                 {
                     samples[implementation][pass - 1] = sample;
@@ -322,7 +368,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 pp_benchmark_sort(instructions, BUSTER_PP_BENCHMARK_PASSES);
                 const double median_cycles = (double)cycles[BUSTER_PP_BENCHMARK_PASSES / 2];
                 const double median_instructions = (double)instructions[BUSTER_PP_BENCHMARK_PASSES / 2];
-                printf("  %-10s %8.3f ms  %6.2f cycles/input token  %6.2f cycles/output token  %6.2f instructions/input token  IPC %.2f\n", names[implementation],
+                const char* name = history_cost ? (implementation == 0 ? "history" : "no-history") : names[implementation];
+                printf("  %-10s %8.3f ms  %6.2f cycles/input token  %6.2f cycles/output token  %6.2f instructions/input token  IPC %.2f\n", name,
                        (double)nanoseconds[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6, median_cycles / (double)input_tokens, median_cycles / (double)output_tokens,
                        median_instructions / (double)input_tokens, median_cycles != 0 ? median_instructions / median_cycles : 0.0);
                 uint64_t total = 0;
@@ -339,6 +386,12 @@ int run_preprocessor_benchmark(int argc, char** argv)
                     printf("  %s %.1f%%", phase_names[phase], total != 0 ? 100.0 * (double)medians[phase] / (double)total : 0.0);
                 }
                 printf("\n");
+                const PPBenchmarkSample* memory = &samples[implementation][0];
+                printf("             history: %lu bytes total, %.1f bytes/TU mean, %lu bytes/TU maximum; temporary origins peak %lu bytes/TU\n",
+                       (unsigned long)memory->history_bytes, (double)memory->history_bytes / file_count, (unsigned long)memory->history_max_bytes,
+                       (unsigned long)memory->temporary_max_bytes);
+                printf("             records: %lu expansions, %lu argument runs, %lu generated tokens, %lu output runs\n", (unsigned long)memory->expansions,
+                       (unsigned long)memory->substitutions, (unsigned long)memory->generated, (unsigned long)memory->runs);
             }
             const PPStatistics* statistics = &samples[only == 2 ? 1 : 0][0].statistics;
             printf("  per pass: %lu directives, %lu file runs (%lu tokens), %lu buffer runs (%lu tokens), %lu object-like expansions copied out and %lu "
