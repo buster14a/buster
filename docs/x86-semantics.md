@@ -190,7 +190,7 @@ the width) exactly when the form takes `v`. The issue's boundaries:
 
 The assembler's matcher (`x86_match.c`, #222) keeps ranges of its own.
 `test-x86-semantics` checks that they agree with this rule on the 112 forms it
-admits whose immediate is a value. The one difference: the matcher refuses the
+supports whose immediate is a value. The one difference: the matcher refuses the
 unsigned spelling of a sign-extended pattern that this rule takes. One case is
 `add eax, 0xffffffff` with an imm8; the test counts 18 such pairs. Switching
 `x86_match.c` to `x86_immediate_encodes` would remove its copy; that is #222's
@@ -266,10 +266,12 @@ gives their constraints.
 ### ISA and costs
 
 Legality and profitability are separate. Every form in the rows is baseline
-x86-64. The effects cover popcnt, lzcnt, tzcnt and roundsd too, since
-describing a form doesn't permit emitting it. Which forms a target may use is
-#180's target policy, and which sequence is faster is #181's cost model; both
-key their tables by the same `X86Form`.
+x86-64: `test-x86-semantics` checks each against #180's baseline
+(`x86_target_forms` of a zero `X86Target`), and each chosen record with
+`x86_target_validate`. The effects cover popcnt, lzcnt, tzcnt and roundsd too,
+since describing a form doesn't permit emitting it. Which forms a target may
+use is #180's target policy (`x86_target.c`), and which sequence is faster is
+#181's cost model; both key their tables by the same `X86Form`.
 
 ## Data-parallel design
 
@@ -355,6 +357,18 @@ and one that doesn't can't.
   The two must leave the same registers, memory and live flags. The check is
   sensitive: a record with an imm8 of `0xc8` standing for 200 must fail it;
 - every candidate of every row must be chosen by some request.
+
+**#180's target:** every candidate of every row must be allowed at the baseline
+target, and each chosen record must pass `x86_target_validate` there. #180's
+table fails closed, so the test lists the 142 covered forms it doesn't allow at
+the baseline. These are of two kinds:
+
+- forms that need a feature: popcnt, lzcnt, tzcnt, roundss and roundsd;
+- baseline forms its rows don't classify yet: xchg, bt, the locked forms,
+  comiss and comisd, the SSE logic, movd and movq, cmpss and cmpsd, and
+  endbr64.
+
+A selector that emits the second kind adds them to #180's rows.
 
 **The twins:**
 
@@ -496,7 +510,8 @@ movabs are faster too. Whole-program run time waits for the code generators
   to the subset as they grow, with the selector integration tests the issue
   lists: single-use and multi-use loads, interfering writes, volatile and
   atomic accesses.
-- **#180:** apply its levels' check to the chosen records, and cover the VEX
-  and EVEX forms it allows.
+- **#180:** add rows for forms beyond the baseline where the target allows
+  them (BMI2's shlx, VEX's three-operand scalar arithmetic), and cover their
+  effects, including VEX's merges from vvvv and zeroed upper lanes.
 - **#181:** key its latencies by the same forms, and decide inc and dec.
 - **#222:** may switch `x86_match.c`'s immediate ranges to the shared rule.

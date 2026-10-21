@@ -21,7 +21,8 @@
 //     flags (and a record with an imm8 of 0xc8 for 200 must not: the check is sensitive to it);
 //   - the vector paths against their scalar twins (x86_choose_forms and x86_instructions_effects) on random inputs, and
 //     with their columns ending at a PROT_NONE page;
-//   - x86_match.c's immediate ranges against the shared rule on the forms the assembler admits;
+//   - x86_match.c's immediate ranges against the shared rule on the forms the assembler's syntax supports;
+//   - #180's check: every row's forms allowed at the baseline target, and every chosen record valid there;
 //   - with --cross-check, GNU as: the chosen records printed (x86_print_instruction) must assemble to the bytes of the
 //     chosen forms.
 // Usage: build/compiler test-x86-semantics [--seed N] [--runs N] [--cross-check] [--keep]. Exits with status 1 on any
@@ -236,6 +237,9 @@ struct X86SemanticsMachine
 
 // What the fault handler prints: the record being run.
 static char x86_semantics_test_case[256];
+
+// The forms #180's baseline target (a zero X86Target) allows (x86_target_forms), which run_x86_semantics_tests fills.
+static uint8_t x86_semantics_test_baseline[X86_FORM_COUNT];
 
 static void x86_semantics_test_fault(int signal_number)
 {
@@ -1872,8 +1876,11 @@ static bool x86_semantics_check_request(X86SemanticsTally* tally, X86SemanticsMa
     const uint32_t reference_count = x86_semantics_reference(operation, choice->width, value, target, references);
     snprintf(x86_semantics_test_case, sizeof(x86_semantics_test_case), "choice %s for operation %u at %u bytes, value %lld, context %#x", x86_semantics_test_name(form),
              operation, choice->width, (long long)value, context);
-    bool result = x86_semantics_expect(tally, x86_validate(&record, 1) == 1 && x86_validate(references, reference_count) == reference_count, "%s: a record doesn't validate",
-                                       x86_semantics_test_case);
+    // The chosen record must be one the baseline target allows (#180's check, which x86_validate's is part of).
+    bool result = x86_semantics_expect(tally,
+                                       x86_target_validate(x86_semantics_test_baseline, &record, 1) == 1 &&
+                                           x86_validate(references, reference_count) == reference_count,
+                                       "%s: a record isn't valid at the baseline target", x86_semantics_test_case);
     static X86SemanticsState input;
     static X86SemanticsState chosen;
     static X86SemanticsState reference;
@@ -2155,9 +2162,45 @@ static bool x86_semantics_check_twins(uint64_t seed, uint32_t count)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// #180's target
+
+// Every candidate of every row must be a form the baseline target allows (x86_target_forms of a zero X86Target), so a
+// chosen record passes x86_target_validate at every target. #180's table fails closed (a form its rows don't classify is
+// unavailable), so the covered forms it doesn't allow at the baseline are listed: those that need a feature (popcnt,
+// lzcnt, tzcnt, roundss, roundsd) and the baseline ones its rows don't classify yet, which a selector that emits them
+// adds there.
+static bool x86_semantics_check_target(void)
+{
+    X86SemanticsTally tally = {
+        .check = "target: the rows' forms at the baseline",
+    };
+    for (uint32_t row = 0; row < x86_choice_row_count; row += 1)
+    {
+        for (uint32_t candidate = 0; candidate < BUSTER_X86_CHOICE_CANDIDATES; candidate += 1)
+        {
+            const uint16_t form = x86_choice_rows[row].forms[candidate];
+            x86_semantics_expect(&tally, form == X86_FORM_NONE || x86_target_form_allowed(x86_semantics_test_baseline, form), "row %u's %s isn't a baseline form", row,
+                                 x86_semantics_test_name(form));
+        }
+    }
+    uint32_t beyond = 0;
+    printf("target: covered forms #180's table doesn't allow at the baseline:");
+    for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
+    {
+        if (x86_effects(form)->operation != X86_OPERATION_NONE && !x86_semantics_test_baseline[form])
+        {
+            printf(" %s", x86_semantics_test_name(form));
+            beyond += 1;
+        }
+    }
+    printf(" (%u)\n", beyond);
+    return x86_semantics_report(&tally);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // x86_match's agreement
 
-// The assembler's matcher (x86_match.c) keeps immediate ranges of its own: on the forms it admits whose immediate is a
+// The assembler's matcher (x86_match.c) keeps immediate ranges of its own: on the forms its syntax supports whose immediate is a
 // value, the shared rule must take every value it takes. It takes fewer: not the unsigned spelling of a sign-extended
 // pattern (0xffffffff for an imm8 at 32 bits, which is -1), which the shared rule takes. Those are counted, not failed.
 static bool x86_semantics_check_match(void)
@@ -2172,7 +2215,7 @@ static bool x86_semantics_check_match(void)
     {
         const X86FormDescription* description = &x86_form_descriptions[form];
         const X86Effects* effects = x86_effects(form);
-        if (x86_match_admitted(description, 2) && description->immediate_bytes != 0 && x86_effects_immediate_kind(effects) == BUSTER_X86_IMMEDIATE_VALUE)
+        if (x86_match_supported(description) && description->immediate_bytes != 0 && x86_effects_immediate_kind(effects) == BUSTER_X86_IMMEDIATE_VALUE)
         {
             forms += 1;
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_semantics_values); i += 1)
@@ -2192,7 +2235,7 @@ static bool x86_semantics_check_match(void)
             }
         }
     }
-    printf("x86_match: %llu forms it admits with a value immediate, %llu value pairs agree, %llu unsigned spellings it refuses and the shared rule takes\n",
+    printf("x86_match: %llu forms it supports with a value immediate, %llu value pairs agree, %llu unsigned spellings it refuses and the shared rule takes\n",
            (unsigned long long)forms, (unsigned long long)agreed, (unsigned long long)unsigned_spellings);
     return x86_semantics_report(&tally);
 }
@@ -2371,6 +2414,8 @@ static int run_x86_semantics_tests(int argc, char** argv)
     else
     {
         const bool initialized = x86_encoder_initialize() && x86_semantics_initialize();
+        const X86Target baseline = { 0 };
+        x86_target_forms(&baseline, x86_semantics_test_baseline);
         printf("x86 semantics: seed %llu, %u choice rows, initialization %s\n", (unsigned long long)seed, x86_choice_row_count, initialized ? "ok" : "failed");
         result = initialized;
         X86SemanticsMachine machine = { 0 };
@@ -2387,6 +2432,7 @@ static int run_x86_semantics_tests(int argc, char** argv)
             result = x86_semantics_check_immediates() && result;
             result = x86_semantics_check_choice_fixtures() && result;
             result = x86_semantics_check_twins(seed, 20000) && result;
+            result = x86_semantics_check_target() && result;
             result = x86_semantics_check_match() && result;
             result = x86_semantics_check_table(&machine, seed, (uint32_t)runs) && result;
             result = x86_semantics_check_stack(&machine, seed) && result;

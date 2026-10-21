@@ -872,8 +872,11 @@ and a fault names the record. The checks:
 - `x86_choose_forms` and `x86_instructions_effects` against their scalar
   twins on random inputs, and with every column ending at a `PROT_NONE` page at
   every count to 100;
+- #180's check: every row's forms allowed at the baseline target
+  (`x86_target_forms`), every chosen record valid there
+  (`x86_target_validate`);
 - `x86_match.c`'s immediate ranges against the shared rule on the forms the
-  assembler admits. It refuses the unsigned spellings of sign-extended
+  assembler's syntax supports. It refuses the unsigned spellings of sign-extended
   patterns, which the shared rule takes; those are counted, not failed.
 
 `--cross-check` also prints every chosen record with the encoder tests'
