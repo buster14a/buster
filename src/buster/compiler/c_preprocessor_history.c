@@ -114,7 +114,7 @@ static void pp_history_change(Preprocessor* pp, uint32_t token, uint32_t origin)
     pp->history_run_count = count;
 }
 
-BUSTER_INLINE void pp_history_fill(Preprocessor* pp, PPTokens* target, uint32_t begin, uint32_t end, uint32_t origin)
+static void pp_history_fill(Preprocessor* pp, PPTokens* target, uint32_t begin, uint32_t end, uint32_t origin)
 {
     if (!pp->options.no_history && begin < end && !pp->fatal && (target == &pp->output || pp_history_origin_room(pp, target, end)))
     {
@@ -125,32 +125,8 @@ BUSTER_INLINE void pp_history_fill(Preprocessor* pp, PPTokens* target, uint32_t 
         }
         if (target == &pp->output)
         {
-            // Every appended output range closes itself with zero. Plain output therefore needs no work, and a
-            // nonzero range can append its start/end together with one capacity check instead of two generic edits.
-            if (origin != 0)
-            {
-                uint32_t count = pp->history_run_count;
-                count -= count != 0 && pp->history_runs[count - 1].token == begin;
-                const bool start = count == 0 || pp->history_runs[count - 1].origin != origin;
-                if (pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, count + start + 1, BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPHistoryRun)))
-                {
-                    if (start)
-                    {
-                        pp->history_runs[count] = (PPHistoryRun)
-                        {
-                            .token = begin,
-                            .origin = origin,
-                        };
-                        count += 1;
-                    }
-                    pp->history_runs[count] = (PPHistoryRun)
-                    {
-                        .token = end,
-                        .origin = 0,
-                    };
-                    pp->history_run_count = count + 1;
-                }
-            }
+            pp_history_change(pp, begin, origin);
+            pp_history_change(pp, end, 0);
         }
         else if (end - begin == 1)
         {

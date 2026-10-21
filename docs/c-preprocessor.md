@@ -651,7 +651,84 @@ timed interval. It reports retained record bytes per unit (mean and maximum)
 and temporary-origin high-water bytes separately. These are used bytes, not
 RSS or virtual reservations; unused/retired space in the initial 32 KiB arena,
 allocator page rounding and existing source/token storage are not included.
-Target-host measurements are pending.
+
+Measured on 2026-10-21 UTC on the approved Ryzen 7 9700X, Clang 23.1.1,
+`./build.sh` (`-O3 -march=native`), CPU 2, with each run holding the shared
+exclusive lock. The measured source is `ffedfd316e4ddc6918272fbf97fffe8d60ff5856`.
+The later lookup-loop pragmas only prevent Clang from turning diagnostic
+record loads into gathers; those loops are not called by the benchmark.
+
+Each row below is a separate process, with one warmup and 21 measured pairs.
+Elapsed time includes initialization, file reads and preprocessing; release
+and the four-column digest check are outside the timed interval. Hardware
+cycles/instructions exclude the kernel. Both variants use the vectorized
+preprocessor; the control is `PPOptions.no_history`, not the scalar compiler.
+
+| Corpus | Run | Recording | No recording | Recording cost |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite 3.53.2 amalgamation, frozen GNU17 headers | 1 | 13.306 ms | 12.297 ms | +8.21% |
+| Same | 2 | 13.459 ms | 12.417 ms | +8.39% |
+| Same | 3 | 13.303 ms | 12.317 ms | +8.01% |
+| Zig 0.14.1 libc corpus: 1,587 ordinary musl C99 units | 1 | 612.994 ms | 586.330 ms | +4.55% |
+| Same | 2 | 604.719 ms | 578.853 ms | +4.47% |
+| Same | 3 | 616.932 ms | 590.376 ms | +4.50% |
+
+The under-5% target is met on this musl partition, **not on SQLite**. SQLite's
+8.0–8.4% remains a performance limitation. Reporting the cost does not imply
+that the target was achieved on both corpora. Output digests agree in every
+recording/control pass. SQLite has 1,242,311 input and 706,237 output tokens;
+musl has 19,068,706 input and 6,000,225 output tokens across its 1,587 units.
+
+| Corpus | Retained record payload, total | Mean per TU | Maximum per TU | Temporary origins, maximum per TU |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite | 2,933,720 B | 2,933,720 B | 2,933,720 B | 2,004 B |
+| Musl | 40,805,452 B | 25,712.3 B | 113,452 B | 1,988 B |
+
+These are logical payload sizes, with the allocation exclusions above. The
+initial arena has 32 KiB capacity per active unit, shared by the eight slices;
+some live payload counted above occupies it, while unused and retired slices
+add allocation overhead. SQLite retains 55,530 expansions, 44,280 argument runs, 3,573
+paste/stringification records, and 88,382 output runs. Musl retains 1,078,679
+expansions, 311,310 argument runs, 9,807 paste/stringification records, and
+809,597 output runs in total. Builtin identity is already in the expansion
+record, saving a second record for each builtin result.
+
+The frozen corpus is `~/buster-fast-bench/preprocessor-corpora-astra-01a158dd`.
+Its `MANIFESTS.sha256` hashes to
+`391e729af6587355050881752558e790299cfe638c7dc7803bd028a8535ebcbd`;
+`sqlite/sqlite3.c` hashes to
+`0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`;
+`config/musl-ordinary.txt` hashes to
+`bf47f8562fd1df039a81464164df642c0efb7653e7cb91b0be964978929bb4dc`.
+The full 5,129-file Clang-accepted C/header subset was also attempted, but
+stopped at the existing `__is_target_arch` handling in
+`include/any-macos-any/TargetConditionals.h`; it produced no valid timing.
+The table therefore covers the explicit musl partition, excluding the four
+separately configured crt/loader sources, not every libc file.
+
+Reproduce one process per corpus (repeat three times, releasing the lock each
+time). The frozen predefines and include directories are part of the input:
+
+```sh
+corpus="$HOME/buster-fast-bench/preprocessor-corpora-astra-01a158dd"
+history_binary="$PWD/build/compiler"
+EXCLUSIVE_OWNER=history-sqlite ~/buster-fast-bench/exclusive.sh \
+    env SOURCE_DATE_EPOCH=1792454400 taskset -c 2 "$history_binary" benchmark-preprocessor --history-cost \
+    -nostdinc --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" \
+    -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" \
+    -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+
+mapfile -t history_inputs < "$corpus/config/musl-ordinary.txt"
+cd "$corpus/libc/musl"
+EXCLUSIVE_OWNER=history-musl ~/buster-fast-bench/exclusive.sh \
+    env SOURCE_DATE_EPOCH=1792454400 taskset -c 2 "$history_binary" benchmark-preprocessor --history-cost \
+    -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+    --predefines "$corpus/provenance/musl-c99-predefines.txt" \
+    -I "$corpus/libc/musl/arch/x86_64" -I "$corpus/libc/musl/arch/generic" \
+    -I "$corpus/musl-generated/obj/src/internal" -I "$corpus/libc/musl/src/include" \
+    -I "$corpus/libc/musl/src/internal" -I "$corpus/musl-generated/obj/include" \
+    -I "$corpus/libc/musl/include" "${history_inputs[@]}"
+```
 
 ### Vectorized kernels and their scalar twins
 
