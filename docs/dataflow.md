@@ -197,7 +197,13 @@ instructions in both builds, main's build took within 0.1% of these medians on
 the three larger CFGs. On the small diamond, whose AVX-512 loop is the same in
 both builds too, it took 274.70 [272.8-284.5] cycles with AVX-512 and 437.45
 [426.7-450.0] with the scalar twin; there both solvers vary from process to
-process (below, and "Where the scalar twin's code falls").
+process (below, and "Where the scalar twin's code falls"). Merged with main
+(0077380), whose new commits touch no dataflow file, the four timed functions
+are the measured build's instructions at the same offsets in their lines, and
+ten processes of each build in turns took 19,916.95, 2,412,642.65 and
+1,402,808.60 cycles per function with AVX-512 on the three larger CFGs against
+20,898.70, 2,493,222.20 and 1,487,464.60 for main: 4.7%, 3.2% and 5.7% fewer,
+fewer in every pair.
 
 `dataflow_liveness` selects AVX-512. Ratios of the cycle medians above are
 1.56x, 2.88x, 2.99x and 3.01x. On the three larger CFGs AVX-512 is 2.82 to
@@ -279,15 +285,18 @@ passed 20,684, and seed 99 with the same count passed 20,668, on both builds.
 Both solvers agreed on all rows and sweep counts. All documented test commands
 in `AGENTS.md` and `./build.sh check-call-graph` passed on the same host, on
 the committed tree; the latter reported 17 translation units, 6,061 functions
-and zero call-graph cycles.
+and zero call-graph cycles. They passed again on the change merged with main
+(0077380), `test-static --cross-check` among them, with 17 translation units,
+6,155 functions and zero cycles.
 
 Raw logs are retained on `benchpress` in `~/buster-fast-bench/rows-claude/`
 (`r1-default.txt` for the twenty processes above and main's twenty,
 `r1-build.txt` for both builds' functions and the comparison of their
 instructions, `r1-tests.txt` for both builds' dataflow tests, `r1-only.txt` and
 `r1-after.txt` for "The power cap's state", `h1.txt` for the harness in
-"Clearing and storing out", and `f-tests.txt` for every test of the committed
-tree). The measured executable's SHA-256 is
+"Clearing and storing out", `f-tests.txt` for every test of the committed tree,
+and `m-build.txt`, `m-tests.txt` and `m-default.txt` for the change merged
+with main). The measured executable's SHA-256 is
 `81d6aa2e3489e448409c497dd9495b58767da7ce0ee83a59f391995867b583c3`, and that of
 main's build in the same turns
 `d760af7b0df5df2db6d362594e9ac6223b4f60780427f7e136d2878bb418e4d6`. The committed
