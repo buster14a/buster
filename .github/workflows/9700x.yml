@@ -78,6 +78,9 @@ jobs:
       - name: Test the x86-64 encoder
         run: ./build/compiler test-x86-encoder
 
+      - name: Test generated-code ISA policy
+        run: ./build/compiler test-x86-target
+
       - name: Benchmark the x86-64 encoder
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
@@ -87,6 +90,14 @@ jobs:
         # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
         # relaxation of them must give the bytes of the sized records.
         run: ./build/compiler test-branch-sizing --cross-check
+
+      - name: Test the scalar and AVX-512 assembly frontends
+        run: ./build/compiler test-assembler --cross-check
+
+      - name: Benchmark assembly phases
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-assembler
 
       - name: Benchmark branch sizing
         run: |
@@ -209,7 +220,7 @@ jobs:
           ./build/compiler test-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: Benchmark the preprocessor on main.c
-        # Target options don't change the preprocessor's own predefines yet: it reads clang's for them.
+        # --predefines also supplies the macro effects of flags such as -funsigned-char.
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h

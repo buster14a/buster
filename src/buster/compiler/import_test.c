@@ -1075,7 +1075,7 @@ typedef enum ImportTestObjectSection
     IMPORT_TEST_SECTIONS,
 } ImportTestObjectSection;
 
-#define BUSTER_IMPORT_TEST_TEXT_BYTES 0x68
+#define BUSTER_IMPORT_TEST_TEXT_BYTES 0x80
 // The priorities of IMPORT_TEST_INIT_PRIORITY and IMPORT_TEST_FINI_PRIORITY, by their names.
 #define BUSTER_IMPORT_TEST_INIT_PRIORITY 101
 #define BUSTER_IMPORT_TEST_FINI_PRIORITY 42
@@ -1199,6 +1199,23 @@ static bool import_test_object(ImportTestObject* test, Arena* arena)
     {
         text[i] = (uint8_t)(0x40 + i);
     }
+    // The instructions of the relocations that GOTPCRELX and REX_GOTPCRELX mark, before their fields: call [rip + slot]
+    // (CALL_GOT) at 0x05, mov rax, [rip + slot] (LOAD_GOT) at 0x0b, add rcx, [rip + slot] at 0x60 and push [rip + slot] at
+    // 0x67 (GOTPCREL: linkers don't rewrite them), jmp [rip + slot] at 0x6d (CALL_GOT), and mov rax, [rip + slot - 4] at
+    // 0x73, whose addend isn't the -4 of a field at the instruction's end (GOTPCREL).
+    static const uint8_t instructions[][4] = {
+        { 0x05, 0xff, 0x15 },
+        { 0x0b, 0x48, 0x8b, 0x05 },
+        { 0x60, 0x48, 0x03, 0x0d },
+        { 0x67, 0xff, 0x35 },
+        { 0x6d, 0xff, 0x25 },
+        { 0x73, 0x48, 0x8b, 0x05 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(instructions); i += 1)
+    {
+        const uint32_t length = instructions[i][3] != 0 ? 3 : 2;
+        memcpy(text + instructions[i][0], instructions[i] + 1, length);
+    }
     memset(rodata, 0x11, sizeof(rodata));
     memset(data, 0x22, sizeof(data));
     memset(relro, 0x33, sizeof(relro));
@@ -1284,7 +1301,11 @@ static bool import_test_object(ImportTestObject* test, Arena* arena)
     import_test_add_relocation(r, 0x40, local_object, R_X86_64_32S, 0, BUSTER_LINK_FIXUP_ABS32S);
     import_test_add_relocation(r, 0x15, weak_reference, R_X86_64_GOTPCREL, -4, BUSTER_LINK_FIXUP_GOTPCREL);
     import_test_add_relocation(r, 0x2c, tls_global, R_X86_64_GOTTPOFF, -4, BUSTER_LINK_FIXUP_GOTTPOFF);
+    import_test_add_relocation(r, 0x6f, got_function, R_X86_64_GOTPCRELX, -4, BUSTER_LINK_FIXUP_CALL_GOT);
+    import_test_add_relocation(r, 0x63, test->global_object, R_X86_64_REX_GOTPCRELX, -4, BUSTER_LINK_FIXUP_GOTPCREL);
     import_test_add_relocation(r, 0x58, tls_local, R_X86_64_TLSLD, -4, BUSTER_LINK_FIXUP_TLSLD);
+    import_test_add_relocation(r, 0x76, test->global_object, R_X86_64_REX_GOTPCRELX, -8, BUSTER_LINK_FIXUP_GOTPCREL);
+    import_test_add_relocation(r, 0x69, weak_reference, R_X86_64_GOTPCRELX, -4, BUSTER_LINK_FIXUP_GOTPCREL);
     import_test_add_relocation(&test->relocations[IMPORT_TEST_RELA_GROUP_DATA], 0, test->callee, R_X86_64_64, 0, BUSTER_LINK_FIXUP_ABS64);
     import_test_add_relocation(&test->relocations[IMPORT_TEST_RELA_INIT_PRIORITY], 0, local_function, R_X86_64_64, 0, BUSTER_LINK_FIXUP_ABS64);
     r = &test->relocations[IMPORT_TEST_RELA_DATA];
@@ -2843,20 +2864,22 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         // other name.
         uint32_t linker_found = 0;
         uint32_t linker_marked = 0;
-        const uint32_t linker_count = runtime_linker_name_counts[runtime.kind];
-        for (uint32_t i = 0; i < linker_count; i += 1)
+        uint32_t linker_count = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
         {
-            const uint8_t* bytes = (const uint8_t*)runtime_linker_names[i];
-            const uint32_t length = (uint32_t)strlen(runtime_linker_names[i]);
+            const uint8_t* bytes = (const uint8_t*)runtime_linker_names[i].name;
+            const uint32_t length = (uint32_t)strlen(runtime_linker_names[i].name);
             const uint32_t entry = runtime_find_global_name(global_names, bytes, length, link_hash(bytes, length));
-            linker_found += entry != 0 && global_names->linker[entry - 1] ? 1 : 0;
+            const bool defined = (runtime_linker_names[i].kinds & BUSTER_RUNTIME_KIND_BIT(runtime.kind)) != 0;
+            linker_count += defined ? 1 : 0;
+            linker_found += defined && entry != 0 && global_names->linker[entry - 1] ? 1 : 0;
         }
         for (uint32_t e = 0; e < global_names->count; e += 1)
         {
             linker_marked += global_names->linker[e] ? 1 : 0;
         }
         import_test_expect(&tally, linker_found == linker_count && linker_marked == linker_found,
-                           "_GLOBAL_OFFSET_TABLE_ and the arrays' bounds: the linker's", linker_found);
+                           "_GLOBAL_OFFSET_TABLE_, _DYNAMIC and the arrays' bounds: the linker's", linker_found);
         uint32_t referenced = 0;
         for (uint32_t e = 0; e < global_names->count; e += 1)
         {
@@ -3345,7 +3368,8 @@ static bool import_test_names(const Link* link, String8 bytes, const ImportObjec
 }
 
 // What the relocations' cross-check is reading: the object (a crt object or an archive member), the atom of the
-// relocation section it is in, and the tallies.
+// relocation section it is in, and the tallies, the GOTPCRELX and REX_GOTPCRELX relocations whose instructions make
+// them GOTPCREL fixups among them.
 typedef struct ImportTestRelocationCheck ImportTestRelocationCheck;
 struct ImportTestRelocationCheck
 {
@@ -3355,8 +3379,29 @@ struct ImportTestRelocationCheck
     AtomId atom;
     uint64_t compared;
     uint64_t dropped;
+    uint64_t read_through;
     bool same;
 };
+
+// The kind of the fixup of a GOTPCRELX or REX_GOTPCRELX relocation (`named`, CALL_GOT or LOAD_GOT) at `offset` in an
+// atom's bytes, by the instruction before its field, as the psABI says a linker may rewrite them: the call or the jmp
+// through the slot (ff 15 or ff 25 before it), or the mov of the slot into a 64-bit register (a REX prefix with W, 8b
+// and a ModRM with mod 0 and r/m 5 before it), each with the addend -4, and GOTPCREL for any other.
+static uint8_t import_test_got_kind(uint8_t named, const uint8_t* bytes, uint64_t offset, int64_t addend)
+{
+    uint8_t result = named;
+    if (named == BUSTER_LINK_FIXUP_CALL_GOT || named == BUSTER_LINK_FIXUP_LOAD_GOT)
+    {
+        const uint8_t opcode = offset >= 2 ? bytes[offset - 2] : 0;
+        const uint8_t modrm = offset >= 2 ? bytes[offset - 1] : 0;
+        const uint8_t rex = offset >= 3 ? bytes[offset - 3] : 0;
+        const bool through = opcode == 0xff && (modrm == 0x15 || modrm == 0x25);
+        const bool load = rex >= 0x48 && rex <= 0x4f && opcode == 0x8b && (modrm >> 6) == 0 && (modrm & 7) == 5;
+        const bool rewritable = addend == -4 && (named == BUSTER_LINK_FIXUP_CALL_GOT ? through : load);
+        result = rewritable ? named : BUSTER_LINK_FIXUP_GOTPCREL;
+    }
+    return result;
+}
 
 // One line of `readelf -W -r`: a relocation section's header, which picks the atom, or a relocation, which must be
 // that atom's fixup at its offset.
@@ -3399,7 +3444,9 @@ static void import_test_relocation_line(ImportTestRelocationCheck* check, char* 
             const Link* link = check->link;
             const FixupId fixup = import_test_fixup_at(link, check->atom, offset);
             const int64_t want = sign == '-' ? -(int64_t)addend : (int64_t)addend;
-            const bool same = fields == 7 && fixup != 0 && (link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == kind && link_fixup_addend(link, fixup) == want &&
+            const uint8_t expected = import_test_got_kind(kind, link->atoms.bytes[check->atom], offset, want);
+            check->read_through += expected != kind ? 1 : 0;
+            const bool same = fields == 7 && fixup != 0 && (link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == expected && link_fixup_addend(link, fixup) == want &&
                               import_test_names(link, check->bytes, check->object, link->fixups.target[fixup], symbol);
             if (!same && check->same)
             {
@@ -3478,8 +3525,9 @@ static void import_test_cross_check_relocations(ImportTestTally* tally, const Ru
         fixups += link->atoms.fixup_count[atom];
     }
     import_test_expect(tally, check.same && fixups == check.compared, "every relocation of the crt objects and the archives' members, as readelf lists them", check.compared);
-    printf("  readelf: %llu relocations of the crt objects and the archives' %u members, and %llu in sections the import drops\n", (unsigned long long)check.compared,
-           runtime->member_count, (unsigned long long)check.dropped);
+    printf("  readelf: %llu relocations of the crt objects and the archives' %u members (%llu GOTPCRELX and REX_GOTPCRELX ones on other instructions, "
+           "GOTPCREL), and %llu in sections the import drops\n",
+           (unsigned long long)check.compared, runtime->member_count, (unsigned long long)check.read_through, (unsigned long long)check.dropped);
 }
 
 static void import_test_cross_check(ImportTestTally* tally, const Runtime* runtime, Arena* arena)

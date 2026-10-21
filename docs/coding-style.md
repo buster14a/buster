@@ -110,6 +110,27 @@ inherit its portability layers, build system, or performance-acceptance machiner
   Register-form `vpcompress*` and `vpexpand*` are 2 uops, but `vpcompress*` to
   memory is 8. `vpermb`, `vpermw`, `vpermd`, and `vpermi2b` (a 128-byte table)
   are 1 uop each, and `vpmullq` is 1 uop with a 2-cycle latency.
+- Account for energy per unit of useful work as well as µops and latency in
+  hot vector loops. [#199's 9700X measurements](https://github.com/buster14a/buster/issues/199#issuecomment-6297314071)
+  are consistent with a per-core power cap slowing heavy AVX-512 work after
+  lighter phases, including light vector code, have let the clock boost.
+  Reduce unnecessary 512-bit loads and stores, spills and reloads, and repeated
+  or overlapping stores. Keep loop-carried state in registers, and choose batch
+  widths and unrolling from measured throughput in that workload; extra ILP
+  can lose if it adds spills. The inferred mechanism and measured power levels
+  are not an AMD specification or a universal threshold.
+- Measure vector stages both back to back and immediately after 100–300 ms
+  of warm lighter work, using a scalar twin or a representative preceding
+  phase. Report nanoseconds as well as cycles, compare across several
+  processes, and distinguish the initial transition from sustained execution.
+  The encoder and dataflow benchmarks provide `--only` for isolated runs
+  and `--after-scalar MS` for conditioning before each timed vector sample;
+  their default interleaved runs do not establish either state alone.
+  Follow [the encoder's methodology](x86-64-encoder.md#both-states) and
+  [the dataflow measurements](dataflow.md#the-power-caps-state). Interpret
+  raw event `0x1000008a0` only as an empirical indicator alongside clock,
+  energy and temperature measurements; its throttle interpretation is
+  inferred, and a zero reading can mean the counter was unavailable.
 - Choose data layout and batch boundaries before choosing instructions.
   Prefer vectorized classification, masks, population counts, and compaction
   when they eliminate useful work, not just when they look branchless.
