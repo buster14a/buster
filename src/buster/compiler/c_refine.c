@@ -54,6 +54,8 @@
 #define BUSTER_REFINE_WINDOW_BYTES 128
 // The dense arrays get whole-vector stores past their last entry.
 #define BUSTER_REFINE_DENSE_SLACK BUSTER_REFINE_LANES
+// The source bytes pass A prefetches per step, ahead of the scan: 16 steps' worth, 8 KB, is about a block's.
+#define BUSTER_REFINE_PREFETCH_SOURCE 512
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Identifier keys and ends
@@ -426,11 +428,29 @@ static __attribute__((noinline)) uint64_t refine_step_splices(const uint8_t* sou
 // others go to refine_step_splices.
 BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint64_t begin,
                                     uint64_t end, uint32_t* values, uint64_t* space, uint32_t flags, const uint64_t* backslash_chunks, __m512i previous_ends,
-                                    RefineIdentifiers* identifiers, const bool separate)
+                                    RefineIdentifiers* identifiers, uint64_t count, uint64_t scanned_bytes, const bool separate)
 {
     uint32_t identifier_count = 0;
     for (uint64_t step = begin; step < end; step += BUSTER_REFINE_STEP_TOKENS)
     {
+        // The next block's step in the token columns, and BUSTER_REFINE_PREFETCH_SOURCE bytes of the source past what the
+        // scan has read: fetched from memory while this block's pass B runs, so that the next block finds them in the
+        // caches (the columns were written a whole file before, and the lexer's pass over the source evicted them).
+        const uint64_t ahead = step + BUSTER_REFINE_BLOCK_TOKENS;
+        if (ahead < count)
+        {
+            _mm_prefetch((const char*)(kinds + ahead), _MM_HINT_T0);
+            for (uint32_t line = 0; line < BUSTER_REFINE_STEP_TOKENS * sizeof(uint32_t); line += 64)
+            {
+                _mm_prefetch((const char*)starts + ahead * sizeof(uint32_t) + line, _MM_HINT_T0);
+                _mm_prefetch((const char*)ends + ahead * sizeof(uint32_t) + line, _MM_HINT_T0);
+            }
+        }
+        const uint64_t source_ahead = scanned_bytes + (step - begin) / BUSTER_REFINE_STEP_TOKENS * BUSTER_REFINE_PREFETCH_SOURCE;
+        for (uint64_t line = 0; line < BUSTER_REFINE_PREFETCH_SOURCE && source_ahead + line < length; line += 64)
+        {
+            _mm_prefetch((const char*)(source + source_ahead + line), _MM_HINT_T0);
+        }
         const uint64_t remaining = end - step;
         const uint64_t step_count = remaining >= BUSTER_REFINE_STEP_TOKENS ? BUSTER_REFINE_STEP_TOKENS : remaining;
         const __mmask64 valid = _bzhi_u64(~0ull, (uint32_t)step_count);
@@ -615,10 +635,18 @@ BUSTER_INLINE bool refine_intern_batch(InternTable* table, const uint8_t* source
         }
     }
 
-    // 2. Probe each identifier's bucket for its prefix, with one compare.
-    for (uint32_t i = 0; !fused && i < count; i += 1)
+    // 2. Probe each identifier's bucket for its prefix, with one compare: four per iteration, then the rest.
+    uint32_t probed = 0;
+    for (; !fused && probed + 4 <= count; probed += 4)
     {
-        ids[i] = refine_probe(buckets + offsets[2 * i], firsts[i]);
+        ids[probed] = refine_probe(buckets + offsets[2 * probed], firsts[probed]);
+        ids[probed + 1] = refine_probe(buckets + offsets[2 * probed + 2], firsts[probed + 1]);
+        ids[probed + 2] = refine_probe(buckets + offsets[2 * probed + 4], firsts[probed + 2]);
+        ids[probed + 3] = refine_probe(buckets + offsets[2 * probed + 6], firsts[probed + 3]);
+    }
+    for (; !fused && probed < count; probed += 1)
+    {
+        ids[probed] = refine_probe(buckets + offsets[2 * probed], firsts[probed]);
     }
 
     // Slow: longer than BUSTER_INTERN_FAST_LENGTH, or with a backslash (or, with trigraphs, a '?'). Unmatched: no
@@ -725,11 +753,13 @@ BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source,
         scanned = refine_scan_chunks(source, length, backslash_chunks, scanned, ends[block_end - 1], trigraphs);
         if (values != ends)
         {
-            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, true);
+            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, count,
+                                          scanned * 4096, true);
         }
         else
         {
-            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, false);
+            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, count,
+                                          scanned * 4096, false);
         }
         for (uint32_t first = 0; result && first < identifiers.count; first += batch)
         {
