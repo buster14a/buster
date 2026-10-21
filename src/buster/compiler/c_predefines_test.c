@@ -236,6 +236,34 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
     return result;
 }
 
+// Removes, in place, the lines of a -dM text (if it isn't null) that define the version macros of clang's patch release
+// or our __BUSTER__.
+static void predefines_test_drop_versions(char* text)
+{
+    static const char* const dropped[] = { "#define __clang_patchlevel__ ", "#define __clang_version__ ", "#define __VERSION__ ", "#define __BUSTER__ " };
+    char* to = text;
+    for (const char* line = text; line != 0 && *line != 0;)
+    {
+        const char* end = strchr(line, '\n');
+        const size_t length = end != 0 ? (size_t)(end - line) + 1 : strlen(line);
+        bool kept = true;
+        for (uint32_t i = 0; kept && i < BUSTER_ARRAY_LENGTH(dropped); i += 1)
+        {
+            kept = strncmp(line, dropped[i], strlen(dropped[i])) != 0;
+        }
+        if (kept)
+        {
+            memmove(to, line, length);
+            to += length;
+        }
+        line += length;
+    }
+    if (to != 0)
+    {
+        *to = 0;
+    }
+}
+
 // The #define lines of a -dM text, sorted, without trailing spaces (clang writes one after a macro without a body), and
 // without the version macros of clang's patch release (which the generator's and the 9700X's clang differ in) and
 // our __BUSTER__. `lines` gets pointers into a copy in `arena`. Returns the count, or BUSTER_PP_NONE if it doesn't fit.
@@ -1273,15 +1301,15 @@ static bool predefines_test_dump(const char* directory)
         {
             fclose(stream);
         }
-        // Ours has __BUSTER__ where clang has nothing: drop that line.
+        // Ours has __BUSTER__ where clang has nothing, and the version macros of clang's patch release differ between the
+        // clangs the tables were generated with (23.1.3) and the 9700X's (23.1.1): the -dM texts are compared without them.
         char* ours = text != 0 ? text : calloc(1, 1);
-        static const char buster_line[] = "#define __BUSTER__ 1\n";
-        char* buster = run == 0 && ours != 0 ? strstr(ours, buster_line) : 0;
-        if (buster != 0)
+        PredefinesTestJob* clang = &jobs.jobs[run];
+        if (run == 0)
         {
-            memmove(buster, buster + sizeof(buster_line) - 1, strlen(buster + sizeof(buster_line) - 1) + 1);
+            predefines_test_drop_versions(ours);
+            predefines_test_drop_versions(clang->output);
         }
-        const PredefinesTestJob* clang = &jobs.jobs[run];
         // -E -P's text: compared without its blank lines and trailing spaces.
         const bool same = done && clang->status == 0 && clang->output != 0 &&
                           (run == 0 ? strcmp(ours, clang->output) == 0 : predefines_test_same_words(ours, clang->output));
