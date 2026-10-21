@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// test-parser: c_parser.c's checks (AGENTS.md, "Parser tests"):
+// test-parser: c_parser.c's checks (AGENTS.md, "Parser tests"). Every unit goes through both paths, the vector path
+// (with its fallback) and the scalar parser alone, which must agree: on a valid unit the same tree, which must keep the
+// tree's invariants and whose postorder must be a depth-first walk's; and each kernel against its scalar twin. On:
 //   - snippets (parse_test_snippets): valid and invalid code, each with the first error clang gives (or none), which our
 //     parser must give at the same line and column with the same message; with --clang, each expectation is checked
 //     against clang too.
+//   - without files, generated inputs: random streams of tokens, the snippets at every block alignment, and deep
+//     nesting; and the driver (run_parse_command): its statuses and messages, runs that must leave nothing behind, and
+//     every reservation of a run failed in turn, in children whose address space is limited.
 //   - files: every .c file under each path, preprocessed and parsed, must be accepted; with --clang, clang decides,
 //     and the parser must accept exactly what `clang -fsyntax-only` accepts.
 //   - mutations (--mutations N): N mutated copies of the files (a token deleted, duplicated, or swapped with the next,
@@ -13,8 +18,9 @@
 //     the same line. Without, each goes through both paths, which must agree as on any file.
 //
 // main.c includes this file after c_parser.c. Layout: running the parser on a file (ParseTestOutcome,
-// parse_test_parse_file), running clang (parse_test_clang), the snippets, the files and the mutations, then
-// run_parser_tests.
+// parse_test_parse_file), running clang (parse_test_clang), the snippets, the trees, the kernels, the paths on one
+// file, K6's failures on valid code (--explain), a look at a tree (--print-tree), the files and the mutations, the
+// generated inputs, the driver, then run_parser_tests.
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -24,6 +30,8 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
 
 extern char** environ;
 
@@ -1423,39 +1431,63 @@ static uint32_t parse_test_print_tree(const char* path, const PPOptions* options
 // ---------------------------------------------------------------------------------------------------------------------
 // The files and the mutations
 
-// The .c files under `path` (or `path` itself), appended to `paths` (up to `capacity`, each malloc'd), in sorted order
-// within each directory. Returns how many there are now.
+// The .c files under `path` (or `path` itself), appended to `paths` (up to `capacity`, each malloc'd): depth first, in
+// sorted order within each directory, from a stack of the paths still to visit. Returns how many there are now.
 static uint32_t parse_test_collect(const char* path, char** paths, uint32_t count, uint32_t capacity)
 {
-    struct stat status;
     uint32_t result = count;
-    if (stat(path, &status) == 0 && S_ISDIR(status.st_mode))
+    uint32_t stack_capacity = 64;
+    char** stack = malloc(sizeof(char*) * stack_capacity);
+    uint32_t depth = stack != 0;
+    if (stack != 0)
     {
-        DIR* directory = opendir(path);
-        struct dirent** entries = 0;
-        const int n = directory != 0 ? scandir(path, &entries, 0, alphasort) : 0;
-        for (int i = 0; i < n; i += 1)
+        stack[0] = strdup(path);
+    }
+    while (depth != 0)
+    {
+        depth -= 1;
+        char* current = stack[depth];
+        struct stat status;
+        if (current != 0 && stat(current, &status) == 0 && S_ISDIR(status.st_mode))
         {
-            const char* name = entries[i]->d_name;
-            if (name[0] != '.')
+            struct dirent** entries = 0;
+            const int n = scandir(current, &entries, 0, alphasort);
+            // In reverse, so that the first entry is the next visited.
+            for (int i = n - 1; i >= 0; i -= 1)
             {
-                char child[4096];
-                snprintf(child, sizeof(child), "%s/%s", path, name);
-                result = parse_test_collect(child, paths, result, capacity);
+                const char* name = entries[i]->d_name;
+                if (name[0] != '.')
+                {
+                    if (depth == stack_capacity)
+                    {
+                        char** grown = realloc(stack, sizeof(char*) * 2 * stack_capacity);
+                        stack = grown != 0 ? grown : stack;
+                        stack_capacity *= grown != 0 ? 2 : 1;
+                    }
+                    if (depth < stack_capacity)
+                    {
+                        char child[4096];
+                        snprintf(child, sizeof(child), "%s/%s", current, name);
+                        stack[depth] = strdup(child);
+                        depth += 1;
+                    }
+                }
+                free(entries[i]);
             }
-            free(entries[i]);
+            free(entries);
+            free(current);
         }
-        free(entries);
-        if (directory != 0)
+        else if (current != 0 && strlen(current) > 2 && strcmp(current + strlen(current) - 2, ".c") == 0 && result < capacity)
         {
-            closedir(directory);
+            paths[result] = current;
+            result += 1;
+        }
+        else
+        {
+            free(current);
         }
     }
-    else if (strlen(path) > 2 && strcmp(path + strlen(path) - 2, ".c") == 0 && result < capacity)
-    {
-        paths[result] = strdup(path);
-        result += 1;
-    }
+    free(stack);
     return result;
 }
 
@@ -1943,6 +1975,312 @@ static uint32_t parse_test_nesting(const PPOptions* options, const char* directo
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The driver
+
+// A figure of /proc/self/status (`key` with its colon, as "VmSize:"), in bytes, or 0 if it can't be read.
+static uint64_t parse_test_status_bytes(const char* key)
+{
+    char text[8192];
+    const int fd = open("/proc/self/status", O_RDONLY | O_CLOEXEC);
+    const ssize_t length = fd >= 0 ? read(fd, text, sizeof(text) - 1) : -1;
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    text[length > 0 ? length : 0] = 0;
+    const char* at = strstr(text, key);
+    return at != 0 ? 1024 * strtoull(at + strlen(key), 0, 10) : 0;
+}
+
+// The lowest free descriptor: one the run left open shows as a higher one.
+static int parse_test_lowest_descriptor(void)
+{
+    const int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    return fd;
+}
+
+// Reads what a run printed to `capture` into `text`, and empties `capture` for the next run.
+static void parse_test_read_capture(int capture, char* text, size_t capacity)
+{
+    const ssize_t length = pread(capture, text, capacity - 1, 0);
+    text[length > 0 ? length : 0] = 0;
+    if (ftruncate(capture, 0) != 0 || lseek(capture, 0, SEEK_SET) != 0)
+    {
+        text[0] = 0;
+    }
+}
+
+// Runs the driver on `arguments` with its stderr in `capture` (an empty file, which it leaves empty), and what it
+// printed in `text`. Returns its exit status.
+static int parse_test_drive(char** arguments, int count, int capture, char* text, size_t capacity)
+{
+    const int saved = dup(2);
+    int result = -1;
+    if (saved >= 0 && dup2(capture, 2) == 2)
+    {
+        result = run_parse_command(count, arguments);
+        dup2(saved, 2);
+    }
+    if (saved >= 0)
+    {
+        close(saved);
+    }
+    parse_test_read_capture(capture, text, capacity);
+    return result;
+}
+
+// What the driver gets: a file with `text`, no file by the name, a directory, a file past what the preprocessor maps,
+// or no argument at all.
+typedef enum ParseTestDriverInput
+{
+    PARSE_TEST_DRIVER_TEXT,
+    PARSE_TEST_DRIVER_MISSING,
+    PARSE_TEST_DRIVER_DIRECTORY,
+    PARSE_TEST_DRIVER_LARGE,
+    PARSE_TEST_DRIVER_NOTHING,
+} ParseTestDriverInput;
+
+// The driver's cases: its input, an option before it (or none), and what it must do: its exit status and exactly what
+// it prints (with %s for the input's path), or with `prefix`, what it prints first.
+typedef struct ParseTestDriverCase ParseTestDriverCase;
+struct ParseTestDriverCase
+{
+    ParseTestDriverInput input;
+    const char* text;
+    const char* option;
+    int status;
+    const char* message;
+    bool prefix;
+};
+
+static const ParseTestDriverCase parse_test_driver_cases[] =
+{
+    { PARSE_TEST_DRIVER_TEXT, "int x;\n", 0, 0, "", false },
+    { PARSE_TEST_DRIVER_TEXT, "", 0, 0, "", false },
+    { PARSE_TEST_DRIVER_TEXT, "int x\n", 0, 1, "%s:1:6: error: expected ';' after top level declarator\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "int x\n", "--scalar", 1, "%s:1:6: error: expected ';' after top level declarator\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#error stop\n", 0, 1, "%s:1:2: error: stop\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#include \"driver-none.h\"\n", 0, 1, "%s:1:10: fatal error: 'driver-none.h' file not found\n", false },
+    { PARSE_TEST_DRIVER_MISSING, 0, 0, 1, "fatal error: can't read '%s': No such file or directory\n", false },
+    { PARSE_TEST_DRIVER_DIRECTORY, 0, 0, 1, "fatal error: can't read '%s': Is a directory\n", false },
+    { PARSE_TEST_DRIVER_LARGE, 0, 0, 1, "fatal error: can't read '%s': File too large\n", false },
+    { PARSE_TEST_DRIVER_NOTHING, 0, 0, 1, "usage: compiler [-fsyntax-only] ", true },
+    { PARSE_TEST_DRIVER_TEXT, "int x;\n", "--bogus", 1, "unknown argument: --bogus\nusage: compiler [-fsyntax-only] ", true },
+};
+
+// Whether a run of case `c` did what it must.
+static bool parse_test_driver_expected(const ParseTestDriverCase* c, const char* path, int status, const char* text)
+{
+    char expected[1024];
+    snprintf(expected, sizeof(expected), c->message, path);
+    return status == c->status && (c->prefix ? strncmp(text, expected, strlen(expected)) == 0 : strcmp(text, expected) == 0);
+}
+
+// A run in a child whose address space may grow `limit` bytes past `base` (the parent's): its exit status (-1 if it
+// didn't report), how far past `base` its address space grew, and whether it left the address space and the
+// descriptors as they were. The child writes them to `shared`, a page both see.
+typedef struct ParseTestProbe ParseTestProbe;
+struct ParseTestProbe
+{
+    int status;
+    uint64_t peak;
+    bool clean;
+    char text[1024];
+};
+
+static ParseTestProbe parse_test_probe(char** arguments, int count, int capture, uint64_t base, uint64_t limit, ParseTestProbe* shared)
+{
+    *shared = (ParseTestProbe){ .status = -1 };
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        struct rlimit space;
+        bool limited = getrlimit(RLIMIT_AS, &space) == 0 && base + limit <= space.rlim_max;
+        space.rlim_cur = base + limit;
+        limited = limited && setrlimit(RLIMIT_AS, &space) == 0 && dup2(capture, 2) == 2;
+        const int before = parse_test_lowest_descriptor();
+        const int status = limited ? run_parse_command(count, arguments) : -1;
+        const int after = parse_test_lowest_descriptor();
+        shared->peak = parse_test_status_bytes("VmPeak:") - base;
+        shared->clean = parse_test_status_bytes("VmSize:") == base && after == before;
+        shared->status = status;
+        _exit(0);
+    }
+    int child_status = 0;
+    pid_t waited = child;
+    while (child > 0 && (waited = waitpid(child, &child_status, 0)) < 0 && errno == EINTR)
+    {
+    }
+    ParseTestProbe result = *shared;
+    result.status = child > 0 && waited == child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0 ? result.status : -1;
+    parse_test_read_capture(capture, result.text, sizeof(result.text));
+    return result;
+}
+
+// Checks a run with a limit, in which a reservation failed: it must fail with status 1 having said why (a fatal error),
+// before its address space reached the limit, and leave the address space and the descriptors as they were.
+static uint32_t parse_test_check_probe(const ParseTestProbe* probe, uint64_t limit, const char* name)
+{
+    const bool failed = probe->status == 1 && strstr(probe->text, "fatal error: ") != 0 && probe->peak <= limit;
+    const uint32_t result = !failed || !probe->clean;
+    if (result != 0)
+    {
+        parse_test_report("driver: %s with %llu bytes of address space: status %d, peak %llu, %s, printed \"%s\"\n", name, (unsigned long long)limit,
+                          probe->status, (unsigned long long)probe->peak, probe->clean ? "clean" : "left memory or a descriptor behind", probe->text);
+    }
+    return result;
+}
+
+// Every reservation and mapping a run of the driver on `arguments` makes, failed in turn, from the last to the first:
+// a run stops at the first that fails, so in a child whose address space may grow a page less than a run reached, the
+// last fails, and the child's peak is what the run had before it; a page less than that, the one before fails; and so
+// on, a run each, down to the first.
+static uint32_t parse_test_driver_limits(char** arguments, int count, int capture, ParseTestProbe* shared, const char* name)
+{
+    uint32_t failures = 0;
+    char text[1024];
+    // A run without a limit, which also grows the stack as far as a run takes it, and one in a child, for its peak.
+    const int status = parse_test_drive(arguments, count, capture, text, sizeof(text));
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t base = parse_test_status_bytes("VmSize:");
+    const ParseTestProbe whole = parse_test_probe(arguments, count, capture, base, 1ull << 46, shared);
+    const bool same = whole.status == status && strcmp(whole.text, text) == 0 && whole.clean && whole.peak != 0 && base != 0;
+    if (!same)
+    {
+        parse_test_report("driver: %s: a run in a child gave status %d and \"%s\" (peak %llu), not %d and \"%s\"\n", name, whole.status, whole.text,
+                          (unsigned long long)whole.peak, status, text);
+    }
+    failures += !same;
+    uint32_t runs = 0;
+    uint64_t peak = whole.peak;
+    while (failures == 0 && peak != 0 && runs < 10000)
+    {
+        const uint64_t limit = peak - page;
+        const ParseTestProbe probe = parse_test_probe(arguments, count, capture, base, limit, shared);
+        failures += parse_test_check_probe(&probe, limit, name);
+        peak = probe.peak;
+        runs += 1;
+    }
+    failures += runs >= 10000;
+    printf("driver: %s: %u reservations and mappings failed in turn, each reported and released\n", name, runs);
+    return failures;
+}
+
+// The driver (run_parse_command, the compiler's default command): each case's status and text, 16 runs of each that
+// must leave the process's address space and descriptors as they were, and every reservation of a run on a valid and
+// an invalid file failed in turn (parse_test_driver_limits).
+static uint32_t parse_test_driver(const char* directory)
+{
+    uint32_t failures = 0;
+    enum { CASES = BUSTER_ARRAY_LENGTH(parse_test_driver_cases) };
+    char paths[CASES][4096];
+    char capture_path[4096];
+    snprintf(capture_path, sizeof(capture_path), "%s/driver-stderr", directory);
+    const int capture = open(capture_path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    failures += capture < 0;
+    for (uint32_t c = 0; c < CASES; c += 1)
+    {
+        const ParseTestDriverCase* driver_case = &parse_test_driver_cases[c];
+        snprintf(paths[c], sizeof(paths[c]), "%s/driver-%u.c", directory, c);
+        if (driver_case->input == PARSE_TEST_DRIVER_TEXT)
+        {
+            failures += !parse_test_write(paths[c], driver_case->text, strlen(driver_case->text));
+        }
+        else if (driver_case->input == PARSE_TEST_DRIVER_DIRECTORY)
+        {
+            failures += mkdir(paths[c], 0700) != 0;
+        }
+        else if (driver_case->input == PARSE_TEST_DRIVER_LARGE)
+        {
+            // A sparse file one byte past the preprocessor's limit: nothing is written or mapped.
+            const int fd = open(paths[c], O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+            failures += fd < 0 || ftruncate(fd, (off_t)(UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK) + 1) != 0;
+            if (fd >= 0)
+            {
+                close(fd);
+            }
+        }
+    }
+    ParseTestProbe* shared = mmap(0, sizeof(ParseTestProbe), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    failures += shared == MAP_FAILED;
+    // Each case once to warm up (the stack, the C library's first calls), then 16 times each.
+    uint64_t base = 0;
+    int lowest = -1;
+    uint32_t runs = 0;
+    for (uint32_t round = 0; failures == 0 && round < 17; round += 1)
+    {
+        for (uint32_t c = 0; c < CASES; c += 1)
+        {
+            const ParseTestDriverCase* driver_case = &parse_test_driver_cases[c];
+            char* arguments[2];
+            int count = 0;
+            if (driver_case->option != 0)
+            {
+                arguments[count] = (char*)driver_case->option;
+                count += 1;
+            }
+            if (driver_case->input != PARSE_TEST_DRIVER_NOTHING)
+            {
+                arguments[count] = paths[c];
+                count += 1;
+            }
+            char text[1024];
+            const int status = parse_test_drive(arguments, count, capture, text, sizeof(text));
+            const bool expected = parse_test_driver_expected(driver_case, paths[c], status, text);
+            const uint64_t size = parse_test_status_bytes("VmSize:");
+            const int descriptor = parse_test_lowest_descriptor();
+            const bool clean = round == 0 || (size == base && descriptor == lowest);
+            if (!expected || !clean)
+            {
+                parse_test_report("driver: case %u (%s%s%s), run %u: status %d, %s, printed \"%s\"\n", c, driver_case->option != 0 ? driver_case->option : "",
+                                  driver_case->option != 0 ? " " : "", driver_case->input == PARSE_TEST_DRIVER_NOTHING ? "no file" : paths[c], round, status,
+                                  clean ? "clean" : "left memory or a descriptor behind", text);
+                failures += 1;
+            }
+            runs += round != 0;
+        }
+        if (round == 0)
+        {
+            base = parse_test_status_bytes("VmSize:");
+            lowest = parse_test_lowest_descriptor();
+        }
+    }
+    printf("driver: %u cases, %u runs: the expected statuses and messages, nothing left behind\n", (unsigned)CASES, runs);
+    if (failures == 0)
+    {
+        char* valid[] = { paths[0] };
+        char* invalid[] = { paths[2] };
+        failures += parse_test_driver_limits(valid, 1, capture, shared, "a valid file");
+        failures += parse_test_driver_limits(invalid, 1, capture, shared, "an invalid file");
+    }
+    if (shared != MAP_FAILED)
+    {
+        munmap(shared, sizeof(ParseTestProbe));
+    }
+    for (uint32_t c = 0; c < CASES; c += 1)
+    {
+        if (parse_test_driver_cases[c].input == PARSE_TEST_DRIVER_DIRECTORY)
+        {
+            rmdir(paths[c]);
+        }
+        else
+        {
+            unlink(paths[c]);
+        }
+    }
+    if (capture >= 0)
+    {
+        close(capture);
+    }
+    unlink(capture_path);
+    return failures;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The command
 
 // `test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [--reports N] [options] [file or directory...]`, with
@@ -2086,6 +2424,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             failures += parse_test_streams(streams, seed, &plain, directory, keep);
             failures += parse_test_alignments(0, &plain, directory);
             failures += parse_test_nesting(&plain, directory);
+            failures += parse_test_driver(directory);
         }
         char** files = malloc(sizeof(char*) * (1u << 20));
         uint32_t file_count = 0;

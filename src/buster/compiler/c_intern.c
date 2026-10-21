@@ -701,8 +701,9 @@ static bool intern_add_names(InternTable* table)
 static __attribute__((unused)) bool intern_initialize(InternTable* table)
 {
     *table = (InternTable){ 0 };
+    // The reservations stop at the first that fails (intern_release releases what was).
     table->record_arena = arena_reserve(BUSTER_INTERN_RECORD_BYTES_MAX);
-    table->column_arena = arena_reserve(2 * (uint64_t)BUSTER_INTERN_MAX_IDS * sizeof(uint32_t) + 2 * BUSTER_INTERN_VECTOR_BYTES);
+    table->column_arena = table->record_arena.base != 0 ? arena_reserve(2 * (uint64_t)BUSTER_INTERN_MAX_IDS * sizeof(uint32_t) + 2 * BUSTER_INTERN_VECTOR_BYTES) : (Arena){ 0 };
     table->records = table->record_arena.base;
     table->record_of = arena_push_array(&table->column_arena, BUSTER_INTERN_MAX_IDS, sizeof(uint32_t), BUSTER_INTERN_VECTOR_BYTES);
     table->length_of = arena_push_array(&table->column_arena, BUSTER_INTERN_MAX_IDS, sizeof(uint32_t), BUSTER_INTERN_VECTOR_BYTES);

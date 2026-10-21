@@ -55,7 +55,10 @@ jobs:
           test "$(find build -type f -executable | wc -l)" -eq 1
 
       - name: Execute compiler
-        run: ./build/compiler
+        # The driver, on the compiler's own main.c: preprocessed with clang's predefines for its options, and parsed.
+        run: |
+          clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
+          ./build/compiler -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 
       - name: Check the no-recursion rule on the call graph
         # Writes the translation units' LLVM IR to a temporary directory and fails on any cycle not in the allowlist.
@@ -221,6 +224,20 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+
+      - name: Test the parser
+        # The snippets, each also checked against clang, the generated inputs and the driver's checks; then the
+        # repository's translation units through both paths, which must agree, kernel by kernel, and accept them as
+        # clang -fsyntax-only does.
+        run: |
+          ./build/compiler test-parser --clang
+          sources="$(sed -n 's/^sources=(\(.*\))$/\1/p' build.sh)"
+          ./build/compiler test-parser --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h $sources
+
+      - name: Benchmark the parser on main.c
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 
       - name: Test the C type table
         # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a

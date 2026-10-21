@@ -1004,7 +1004,8 @@ static const uint8_t parse_closer_roles[PARSE_ROLE_COUNT] =
     X(MEMBER_FUNCTION_SPECIFIER, "type name does not allow function specifier to be specified") \
     X(UNEXPECTED_TOKEN, "unexpected token") \
     X(TOO_DEEP, "nesting too deep for the parser") \
-    X(OUT_OF_MEMORY, "out of memory for the parser")
+    X(OUT_OF_MEMORY, "out of memory for the parser") \
+    X(TOO_MANY_TOKENS, "too many tokens for the parser")
 
 typedef enum ParseMessage
 {
@@ -10603,6 +10604,9 @@ struct Parser
     uint32_t diagnostic_count;
     uint32_t diagnostic_capacity;
     uint32_t errors;
+    // What stopped the parse where no diagnostic says it: PARSE_MESSAGE_OUT_OF_MEMORY or PARSE_MESSAGE_TOO_MANY_TOKENS,
+    // or PARSE_MESSAGE_NONE.
+    ParseMessage fatal;
     ParseStatistics statistics;
     // The token columns and the tree's, each in an arena of its own, so that their first pages are base pages
     // (lane.c), and the scalar parser's stacks.
@@ -10655,6 +10659,7 @@ static void parse_release(Parser* parser)
     }
     arena_release(&parser->scratch);
     arena_release(&parser->vector_arena);
+    *parser = (Parser){ 0 };
 }
 
 // A padded column of `count` entries of `size` bytes in arena `column`, from its token 0 (the padding is before it).
@@ -10693,7 +10698,7 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
 }
 
 // Parses the unit the preprocessor `pp` produced (pp_run's output). Returns false if it has errors or the parser ran out
-// of memory; the diagnostics are in parser->diagnostics (parse_print_diagnostics prints them).
+// of memory (parser->fatal); the diagnostics are in parser->diagnostics (parse_print_diagnostics prints them).
 static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
 {
     const PPTokens* output = &pp->output;
@@ -10701,19 +10706,21 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
     const uint64_t capacity = 2 * (uint64_t)output->count + 64;
     parser->diagnostic_count = 0;
     parser->errors = 0;
+    parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_TOO_MANY_TOKENS;
     parser->statistics = (ParseStatistics){ 0 };
     if (result)
     {
+        // The columns, reserved in turn until one can't be.
         ParseTokens* tokens = &parser->tokens;
         tokens->kinds = parse_column(parser, 0, capacity, 1);
-        tokens->names = parse_column(parser, 1, capacity, 4);
-        tokens->sources = parse_column(parser, 2, capacity, 4);
-        tokens->pragma_sources = parse_column(parser, 3, (uint64_t)output->count + 1, 4);
-        tokens->pragma_positions = parse_column(parser, 4, (uint64_t)output->count + 1, 4);
-        tokens->flags = parse_column(parser, 10, capacity, 1);
+        tokens->names = tokens->kinds != 0 ? parse_column(parser, 1, capacity, 4) : 0;
+        tokens->sources = tokens->names != 0 ? parse_column(parser, 2, capacity, 4) : 0;
+        tokens->pragma_sources = tokens->sources != 0 ? parse_column(parser, 3, (uint64_t)output->count + 1, 4) : 0;
+        tokens->pragma_positions = tokens->pragma_sources != 0 ? parse_column(parser, 4, (uint64_t)output->count + 1, 4) : 0;
+        tokens->flags = tokens->pragma_positions != 0 ? parse_column(parser, 10, capacity, 1) : 0;
         tokens->capacity = (uint32_t)capacity;
-        result = tokens->kinds != 0 && tokens->names != 0 && tokens->sources != 0 && tokens->pragma_sources != 0 && tokens->pragma_positions != 0 &&
-                 tokens->flags != 0;
+        result = tokens->flags != 0;
+        parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }
     if (result)
     {
@@ -10729,6 +10736,7 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
         parser->diagnostic_capacity = count + 16;
         parser->diagnostics = parse_column(parser, 8, parser->diagnostic_capacity, sizeof(ParseDiagnostic));
         result = parser->diagnostics != 0 && parse_prepare_meanings(parser, pp->table);
+        parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }
     bool scalar = result && parser->options.scalar;
     if (result && !scalar)
@@ -10764,6 +10772,7 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
         else
         {
             parser->errors += 1;
+            parser->fatal = PARSE_MESSAGE_OUT_OF_MEMORY;
             result = false;
         }
     }
@@ -10771,17 +10780,19 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
     {
         // The fallback's declarations may have left typedef names' meanings changed: the scalar parser starts afresh.
         result = parse_prepare_meanings(parser, pp->table);
+        parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }
     if (result && scalar)
     {
         parser->tree.roles = parse_column(parser, 5, parser->tokens.count, 1);
-        parser->tree.parents = parse_column(parser, 6, parser->tokens.count, 4);
-        parser->tree.depths = parse_column(parser, 7, parser->tokens.count, 4);
-        const ParseScalarResult parsed = parser->tree.roles != 0 && parser->tree.parents != 0 && parser->tree.depths != 0 ?
+        parser->tree.parents = parser->tree.roles != 0 ? parse_column(parser, 6, parser->tokens.count, 4) : 0;
+        parser->tree.depths = parser->tree.parents != 0 ? parse_column(parser, 7, parser->tokens.count, 4) : 0;
+        const ParseScalarResult parsed = parser->tree.depths != 0 ?
             parse_scalar(parser->tokens.kinds, parser->tokens.names, parser->tokens.flags, parser->tokens.count, parser->language, &parser->meanings, &parser->tree,
                          &parser->scratch, parser->diagnostics, parser->diagnostic_capacity, &parser->diagnostic_count) :
             (ParseScalarResult){ .errors = 0, .out_of_memory = true, .retyped = false };
         parser->errors = parsed.errors + parsed.out_of_memory;
+        parser->fatal = parsed.out_of_memory ? PARSE_MESSAGE_OUT_OF_MEMORY : PARSE_MESSAGE_NONE;
         result = parser->errors == 0;
     }
     else if (result)
@@ -10794,7 +10805,7 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
         const uint32_t count = parser->tokens.count;
         const uint64_t mark = parser->scratch.length;
         parser->postorder = parse_column(parser, 11, count, 4);
-        parser->sizes = parse_column(parser, 12, count, 4);
+        parser->sizes = parser->postorder != 0 ? parse_column(parser, 12, count, 4) : 0;
         uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
         uint32_t* first_children = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
         uint32_t* ends = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
@@ -10808,6 +10819,7 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
         else
         {
             parser->errors += 1;
+            parser->fatal = PARSE_MESSAGE_OUT_OF_MEMORY;
         }
         arena_pop_to(&parser->scratch, mark);
     }
@@ -10887,7 +10899,7 @@ static void parse_diagnostic_message(const Parser* parser, const Preprocessor* p
     snprintf(text, capacity, parse_messages[diagnostic->message], spelling);
 }
 
-// Prints the parse's diagnostics, as clang does: "file:line:column: error: message".
+// Prints the parse's diagnostics, as clang does: "file:line:column: error: message", then what stopped it, if anything did.
 static void parse_print_diagnostics(const Parser* parser, Preprocessor* pp)
 {
     for (uint32_t d = 0; d < parser->diagnostic_count; d += 1)
@@ -10897,10 +10909,15 @@ static void parse_print_diagnostics(const Parser* parser, Preprocessor* pp)
         parse_diagnostic_message(parser, pp, diagnostic, text, sizeof(text));
         pp_diagnose(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parse_diagnostic_location(parser, pp, diagnostic), "%s", text);
     }
+    if (parser->fatal != PARSE_MESSAGE_NONE)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "%s", parse_messages[parser->fatal]);
+    }
 }
 
-// `compiler [-fsyntax-only] [options] file.c`: preprocesses and parses the file, with -E's options. For now that is all
-// the compiler does: nothing is written.
+// `compiler [-fsyntax-only] [options] file.c`: preprocesses and parses the file, with -E's options, and prints the
+// diagnostics as clang does. For now that is all the compiler does: nothing is written. Returns the exit status: 0 for
+// a unit without errors, 1 otherwise. A reservation that fails is reported, and what was reserved is released.
 static __attribute__((unused)) int run_parse_command(int count, char** arguments)
 {
     int result = 1;
@@ -10915,8 +10932,12 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
     {
         scalar |= strcmp(arguments[i], "--scalar") == 0;
     }
-    const bool parsed = pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
-    if (!parsed)
+    const bool parsed = arena.base != 0 && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
+    if (arena.base == 0)
+    {
+        fprintf(stderr, "fatal error: can't reserve memory\n");
+    }
+    else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [-fsyntax-only] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
                         "[-include file] [-std=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
@@ -10929,7 +10950,7 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
         const ParseOptions parse_options = { .scalar = scalar };
         if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table) || !parse_initialize(&parser, &parse_options, options.language))
         {
-            fprintf(stderr, "can't reserve memory\n");
+            fprintf(stderr, "fatal error: can't reserve memory\n");
         }
         else
         {
@@ -10940,10 +10961,11 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
                 parse_print_diagnostics(&parser, &pp);
             }
             result = parsed_unit ? 0 : 1;
-            parse_release(&parser);
-            pp_release(&pp);
-            intern_release(&table);
         }
+        // What a failed reservation left reserved too.
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&table);
     }
     arena_release(&arena);
     return result;
