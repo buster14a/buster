@@ -302,25 +302,35 @@ typedef enum ExecutablePhase
 } ExecutablePhase;
 
 // What a dynamic PIE has that a static executable doesn't, from binding (bind.c) and the C runtime (runtime.c), as
-// plain data: the program interpreter, the library that the imports come from (libc.so.6) with its versions, a note to
-// repeat (Scrt1.o's .note.ABI-tag), DT_INIT's and DT_FINI's functions (crti.o's _init and _fini) and the definitions to
-// export (Bind.exports). The imports are the link's symbols of source RUNTIME_SHARED, each at the version its column
-// holds (an ExecutableVersion's index, or 0 for none).
+// plain data: the program interpreter, the libraries that the imports come from (libc.so.6, and the loader that
+// libc.so's script names as needed) with their versions, a note to repeat (Scrt1.o's .note.ABI-tag), DT_INIT's and
+// DT_FINI's functions (crti.o's _init and _fini) and the definitions to export (Bind.exports). The imports are the
+// link's symbols of source RUNTIME_SHARED, each at the version its column holds (an ExecutableVersion's index, or 0 for
+// none).
 typedef struct ExecutableVersion ExecutableVersion;
 struct ExecutableVersion
 {
     String8 name;
     // The name's ELF hash: the library's vd_hash, which the executable's vna_hash repeats.
     uint32_t hash;
-    // Its index among the library's version definitions.
+    // Its index among the libraries' version definitions, which runtime.c numbers apart (the loader's after
+    // libc.so.6's).
     uint16_t index;
+    // The library it is a version of: its place in ExecutableDynamic.needed.
+    uint8_t library;
 };
+
+// The most libraries an executable needs: libc.so.6 and the loader.
+#define BUSTER_EXECUTABLE_LIBRARIES 2
 
 typedef struct ExecutableDynamic ExecutableDynamic;
 struct ExecutableDynamic
 {
     String8 interpreter;
-    String8 needed;
+    // The libraries the imports come from, in DT_NEEDED's order, empty for none: the first is needed whenever it is
+    // named, and each other only when one of its versions is (libc.so's AS_NEEDED, as GNU ld and lld take it), which an
+    // import from it is: glibc's exports all have versions. `versions` has each library's together, in this order.
+    String8 needed[BUSTER_EXECUTABLE_LIBRARIES];
     const ExecutableVersion* versions;
     uint32_t version_count;
     String8 note;
@@ -2659,7 +2669,8 @@ struct ExecutableDynamicTotals
     uint64_t undefined;
     uint64_t exports;
     uint64_t export_names;
-    uint64_t needed_name;
+    // Each needed library's name in .dynstr.
+    uint64_t needed_names[BUSTER_EXECUTABLE_LIBRARIES];
     uint64_t version_names;
     uint64_t got_relative;
     uint64_t got_symbolic;
@@ -2670,12 +2681,15 @@ struct ExecutableDynamicTotals
     // With the static runtime, the IRELATIVE relocations: a static executable's, in .rela.iplt, and a static PIE's, in
     // .rela.dyn after the others.
     uint64_t irelatives;
+    // The needed versions, each library's, and the libraries with one (.gnu.version_r's entries).
     uint64_t versions;
+    uint64_t library_versions[BUSTER_EXECUTABLE_LIBRARIES];
+    uint64_t verneed_files;
     uint64_t buckets;
     uint64_t bloom_words;
     uint32_t dynamic_entries;
-    // Whether there is a library to name (a dynamic PIE's DT_NEEDED).
-    bool needed;
+    // Whether each library is needed (a dynamic PIE's DT_NEEDED entries; see ExecutableDynamic.needed).
+    bool needed[BUSTER_EXECUTABLE_LIBRARIES];
     bool has_init_array;
     bool has_fini_array;
     bool has_init;
@@ -4035,7 +4049,8 @@ static uint32_t executable_dynamic_entries(const ExecutableLayout* layout, const
     const ExecutableSectionLayout* init_array = sections != 0 ? &sections[EXECUTABLE_SECTION_INIT_ARRAY] : 0;
     const ExecutableSectionLayout* fini_array = sections != 0 ? &sections[EXECUTABLE_SECTION_FINI_ARRAY] : 0;
     const Elf64_Dyn all[BUSTER_EXECUTABLE_MAX_DYNAMIC_ENTRIES] = {
-        { .d_tag = totals->needed ? DT_NEEDED : DT_NULL, .d_un.d_val = totals->needed_name },
+        { .d_tag = totals->needed[0] ? DT_NEEDED : DT_NULL, .d_un.d_val = totals->needed_names[0] },
+        { .d_tag = totals->needed[1] ? DT_NEEDED : DT_NULL, .d_un.d_val = totals->needed_names[1] },
         { .d_tag = DT_FLAGS_1, .d_un.d_val = DF_1_PIE },
         { .d_tag = DT_DEBUG, .d_un.d_val = 0 },
         { .d_tag = relocations != 0 ? DT_RELA : DT_NULL, .d_un.d_ptr = rela },
@@ -4058,7 +4073,7 @@ static uint32_t executable_dynamic_entries(const ExecutableLayout* layout, const
         { .d_tag = totals->has_fini ? DT_FINI : DT_NULL, .d_un.d_ptr = fini },
         { .d_tag = totals->versions != 0 ? DT_VERSYM : DT_NULL, .d_un.d_ptr = versym },
         { .d_tag = totals->versions != 0 ? DT_VERNEED : DT_NULL, .d_un.d_ptr = verneed },
-        { .d_tag = totals->versions != 0 ? DT_VERNEEDNUM : DT_NULL, .d_un.d_val = 1 },
+        { .d_tag = totals->versions != 0 ? DT_VERNEEDNUM : DT_NULL, .d_un.d_val = totals->verneed_files },
     };
     // The entries that apply, in order, then DT_NULL.
     uint32_t count = 0;
@@ -4116,9 +4131,16 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
     uint64_t version_name_bytes = 0;
     for (uint32_t v = 0; v < dynamic->version_count; v += 1)
     {
-        const uint16_t index = dynamic->versions[v].index;
-        totals->versions += shared->version_numbers[index] != 0 ? 1 : 0;
-        version_name_bytes += shared->version_numbers[index] != 0 ? dynamic->versions[v].name.length + 1 : 0;
+        const ExecutableVersion* version = &dynamic->versions[v];
+        const bool used = shared->version_numbers[version->index] != 0;
+        totals->versions += used ? 1 : 0;
+        totals->library_versions[version->library] += used ? 1 : 0;
+        version_name_bytes += used ? version->name.length + 1 : 0;
+    }
+    for (uint32_t l = 0; l < BUSTER_EXECUTABLE_LIBRARIES; l += 1)
+    {
+        totals->needed[l] = dynamic->needed[l].length != 0 && (l == 0 || totals->library_versions[l] != 0);
+        totals->verneed_files += totals->library_versions[l] != 0 ? 1 : 0;
     }
     uint64_t export_bytes = 0;
     for (uint32_t e = 0; e < dynamic->export_count; e += 1)
@@ -4128,11 +4150,11 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
     totals->irelatives += shared->runtime ? totals->stubs : 0;
     totals->has_init = dynamic->init != 0;
     totals->has_fini = dynamic->fini != 0;
-    totals->needed = dynamic->needed.length != 0;
     totals->exports = dynamic->export_count;
     totals->export_names = 1 + name_bytes;
-    totals->needed_name = totals->export_names + export_bytes;
-    totals->version_names = totals->needed_name + (totals->needed ? dynamic->needed.length + 1 : 0);
+    totals->needed_names[0] = totals->export_names + export_bytes;
+    totals->needed_names[1] = totals->needed_names[0] + (totals->needed[0] ? dynamic->needed[0].length + 1 : 0);
+    totals->version_names = totals->needed_names[1] + (totals->needed[1] ? dynamic->needed[1].length + 1 : 0);
     totals->buckets = totals->exports / 4 > 1 ? totals->exports / 4 : 1;
     uint64_t words = 1;
     while (totals->exports != 0 && words <= totals->exports * 12 / 64)
@@ -4146,7 +4168,7 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
     bytes[EXECUTABLE_SECTION_ABI_NOTE] = dynamic->note.length;
     bytes[EXECUTABLE_SECTION_DYNSYM] = entries * sizeof(Elf64_Sym);
     bytes[EXECUTABLE_SECTION_VERSYM] = totals->versions != 0 ? entries * sizeof(Elf64_Half) : 0;
-    bytes[EXECUTABLE_SECTION_VERNEED] = totals->versions != 0 ? sizeof(Elf64_Verneed) + totals->versions * sizeof(Elf64_Vernaux) : 0;
+    bytes[EXECUTABLE_SECTION_VERNEED] = totals->verneed_files * sizeof(Elf64_Verneed) + totals->versions * sizeof(Elf64_Vernaux);
     bytes[EXECUTABLE_SECTION_GNU_HASH] = 16 + 8 * totals->bloom_words + 4 * totals->buckets + 4 * totals->exports;
     bytes[EXECUTABLE_SECTION_DYNSTR] = totals->version_names + version_name_bytes;
     bytes[EXECUTABLE_SECTION_RELA_DYN] = (totals->got_relative + totals->got_symbolic + totals->abs64_relative + totals->abs64_symbolic + totals->irelatives) * sizeof(Elf64_Rela);
@@ -4992,27 +5014,41 @@ static bool executable_dynamic_sections(Arena* arena, Link* link, ExecutableShar
             name_offset += length + 1;
         }
 
-        // The library's name, then the needed versions' names, each with its NUL, and .gnu.version_r: one entry, for the
-        // library, and an auxiliary entry per needed version, in ExecutableDynamic's order.
-        if (totals->needed)
+        // The needed libraries' names, then the needed versions' names, each with its NUL, and .gnu.version_r as lld lays
+        // it out: an entry per library with a needed version, in ExecutableDynamic's order, then the auxiliary entries,
+        // one per needed version, in ExecutableDynamic's order, which has each library's together.
+        for (uint32_t l = 0; l < BUSTER_EXECUTABLE_LIBRARIES; l += 1)
         {
-            memcpy(dynstr + totals->needed_name, dynamic->needed.pointer, dynamic->needed.length);
-            dynstr[totals->needed_name + dynamic->needed.length] = 0;
+            if (totals->needed[l])
+            {
+                memcpy(dynstr + totals->needed_names[l], dynamic->needed[l].pointer, dynamic->needed[l].length);
+                dynstr[totals->needed_names[l] + dynamic->needed[l].length] = 0;
+            }
         }
         uint8_t* verneed = shared->section_bytes[EXECUTABLE_SECTION_VERNEED];
+        const uint64_t files = totals->verneed_files;
+        uint64_t file = 0;
+        uint64_t first_auxiliary = 0;
+        for (uint32_t l = 0; l < BUSTER_EXECUTABLE_LIBRARIES; l += 1)
+        {
+            if (totals->library_versions[l] != 0)
+            {
+                // vn_aux is from this entry to its library's first auxiliary entry, after every library's entry.
+                const Elf64_Verneed needed = {
+                    .vn_version = VER_NEED_CURRENT,
+                    .vn_cnt = (uint16_t)totals->library_versions[l],
+                    .vn_file = (uint32_t)totals->needed_names[l],
+                    .vn_aux = (uint32_t)((files - file) * sizeof(Elf64_Verneed) + first_auxiliary * sizeof(Elf64_Vernaux)),
+                    .vn_next = file + 1 < files ? sizeof(Elf64_Verneed) : 0,
+                };
+                memcpy(verneed + file * sizeof(Elf64_Verneed), &needed, sizeof(needed));
+                file += 1;
+                first_auxiliary += totals->library_versions[l];
+            }
+        }
         uint64_t version_name = totals->version_names;
         uint32_t auxiliary = 0;
-        if (totals->versions != 0)
-        {
-            const Elf64_Verneed needed = {
-                .vn_version = VER_NEED_CURRENT,
-                .vn_cnt = (uint16_t)totals->versions,
-                .vn_file = (uint32_t)totals->needed_name,
-                .vn_aux = sizeof(Elf64_Verneed),
-                .vn_next = 0,
-            };
-            memcpy(verneed, &needed, sizeof(needed));
-        }
+        uint64_t library_auxiliaries[BUSTER_EXECUTABLE_LIBRARIES] = { 0 };
         for (uint32_t v = 0; v < dynamic->version_count; v += 1)
         {
             const ExecutableVersion* version = &dynamic->versions[v];
@@ -5023,14 +5059,15 @@ static bool executable_dynamic_sections(Arena* arena, Link* link, ExecutableShar
             {
                 memcpy(dynstr + version_name, version->name.pointer, version->name.length);
                 dynstr[version_name + version->name.length] = 0;
+                library_auxiliaries[version->library] += 1;
                 const Elf64_Vernaux entry = {
                     .vna_hash = version->hash,
                     .vna_flags = 0,
                     .vna_other = number,
                     .vna_name = (uint32_t)version_name,
-                    .vna_next = auxiliary + 1 < totals->versions ? sizeof(Elf64_Vernaux) : 0,
+                    .vna_next = library_auxiliaries[version->library] < totals->library_versions[version->library] ? sizeof(Elf64_Vernaux) : 0,
                 };
-                memcpy(verneed + sizeof(Elf64_Verneed) + auxiliary * sizeof(Elf64_Vernaux), &entry, sizeof(entry));
+                memcpy(verneed + files * sizeof(Elf64_Verneed) + auxiliary * sizeof(Elf64_Vernaux), &entry, sizeof(entry));
                 version_name += version->name.length + 1;
                 auxiliary += 1;
             }

@@ -30,9 +30,11 @@
 // bind_end binds each name that nothing in the link defines, in the order GNU ld resolves the driver's link line:
 //   - to the linker, for a name it defines (_GLOBAL_OFFSET_TABLE_): source LINKER;
 //   - to a crt object after the program (__TMC_END__), which defines it when it joins;
-//   - to libc.so.6's export: an import, with source RUNTIME_SHARED, the export's type, and its version in the linker's
-//     column, listed in Bind.imports; but not for a hidden, internal or protected reference, which needs a definition
-//     within the executable, as GNU ld and lld bind one;
+//   - to libc.so.6's export, or else to the loader's (ld-linux-x86-64.so.2, which libc.so's script names as needed:
+//     __tls_get_addr, _r_debug, __libc_stack_end): an import, with source RUNTIME_SHARED, the export's type, and its
+//     version in the linker's column (the loader's indices follow libc.so.6's, runtime.c), listed in Bind.imports; but
+//     not for a hidden, internal or protected reference, which needs a definition within the executable, as GNU ld and
+//     lld bind one;
 //   - for a strong reference, to a member of libc_nonshared.a (atexit), which joins the link;
 //   - for a weak reference, to nothing: source NONE. As with GNU ld, a weak reference loads no member.
 // Anything else is an error naming it. Members that join can refer to names nothing else does, so binding goes in
@@ -40,8 +42,9 @@
 // members. crtendS.o's and crtn.o's references bind without members, as GNU ld scans libc's group before them. A
 // member's strong reference to a name that a weak one left to nothing is an error, where GNU ld would scan the archive
 // again; libc_nonshared.a's members refer only to libc.so.6 and crtbeginS.o. Last, each definition with default or
-// protected visibility of a name that libc.so.6 defines too or refers to is an export (Bind.exports), as GNU ld and lld
-// export them: those among the names that took a link symbol, which binding lists as they do.
+// protected visibility of a name that libc.so.6 or the loader defines too, or that libc.so.6 refers to, is an export
+// (Bind.exports), as GNU ld and lld export them, the loader's names even when it isn't needed: those among the names
+// that took a link symbol, which binding lists as they do.
 //
 // A static executable's runtime (runtime_import_static) joins the same way: bind_begin appends crt1.o, crti.o and
 // crtbeginT.o, and bind_end the members of libgcc.a, libgcc_eh.a, libatomic.a and libc.a that the link needs, then
@@ -100,8 +103,8 @@
 typedef enum BindError
 {
     BIND_ERROR_NONE,
-    // A name that nothing defines, referred to without being weak, or that only libc.so.6 defines and a reference with a
-    // visibility other than default refers to: Bind.name.
+    // A name that nothing defines, referred to without being weak, or that only a library (libc.so.6, the loader)
+    // defines and a reference with a visibility other than default refers to: Bind.name.
     BIND_ERROR_UNDEFINED,
     // A name that the link and the runtime both define, neither of them weakly: Bind.name.
     BIND_ERROR_DUPLICATE,
@@ -174,7 +177,7 @@ struct Bind
     bool resolving;
     bool bound;
     bool tail_joined;
-    // The link's imports from libc.so.6 and the definitions it exports, room for `capacity` of each.
+    // The link's imports from libc.so.6 and the loader, and the definitions it exports, room for `capacity` of each.
     SymbolId* imports;
     uint32_t import_count;
     SymbolId* exports;
@@ -798,7 +801,7 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     const uint32_t export = entry != 0 ? names->export[entry - 1] : 0;
     const uint32_t member = entry != 0 ? names->member[entry - 1] : 0;
     const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
-    // A reference with a visibility other than default needs a definition within the executable: libc.so.6's can't be
+    // A reference with a visibility other than default needs a definition within the executable: a library's can't be
     // one, as GNU ld and lld resolve it.
     const bool shareable = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT;
     if (entry != 0 && names->linker[entry - 1])
@@ -812,10 +815,11 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     }
     else if (export != 0 && shareable)
     {
-        const ImportExports* exports = &runtime->libc.exports;
+        uint32_t index = 0;
+        const ImportExports* exports = &runtime_export_library(runtime, export - 1, &index)->exports;
         symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_SHARED;
-        symbols->version[symbol] = exports->version[export - 1];
-        symbols->flags[symbol] = (uint8_t)((symbols->flags[symbol] & ~BUSTER_LINK_SYMBOL_TYPE) | (exports->flags[export - 1] & BUSTER_LINK_SYMBOL_TYPE));
+        symbols->version[symbol] = exports->version[index];
+        symbols->flags[symbol] = (uint8_t)((symbols->flags[symbol] & ~BUSTER_LINK_SYMBOL_TYPE) | (exports->flags[index] & BUSTER_LINK_SYMBOL_TYPE));
         if (bind->import_count < bind->capacity)
         {
             bind->imports[bind->import_count] = symbol;
@@ -941,8 +945,8 @@ static void bind_keep_imports(Bind* bind, const Link* link)
     bind->import_count = kept;
 }
 
-// The link's definitions of names that libc.so.6 defines too or refers to, with default or protected visibility: among
-// the runtime's names that took a link symbol, in the order they took it.
+// The link's definitions of names that libc.so.6 or the loader defines too, or libc.so.6 refers to, with default or
+// protected visibility: among the runtime's names that took a link symbol, in the order they took it.
 static void bind_find_exports(Bind* bind, const Link* link)
 {
     const RuntimeNames* names = &bind->runtime->global_names;

@@ -248,10 +248,12 @@ designs and the compilers already built this way.
   takes what the vector path leaves to it (the design's "Step 5's phases,
   data-parallel"). `runtime.c` finds the C runtime's files as GCC's driver
   does (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o` and `crtn.o`, and the
-  `libc.so.6` and `libc_nonshared.a` that `libc.so` names) and imports them
-  into a link of their own, with what each name they refer to binds to (the
-  first part of step 5 of the design's plan), each object's records as a
-  piece, and an index and a filter of their global names and libc's;
+  `libc.so.6`, `libc_nonshared.a` and loader that `libc.so` names, the loader
+  as needed) and imports them into a link of their own, with what each name
+  they refer to binds to (the first part of step 5 of the design's plan), each
+  object's records as a piece, and an index and a filter of their global
+  names and the libraries' (the loader's version indices numbered after
+  `libc.so.6`'s);
   `runtime_import_static` does the same for a static executable's runtime
   (`crt1.o`, `crtbeginT.o` and `crtend.o`, and the archives of GCC's group:
   `libgcc.a`, `libgcc_eh.a`, `libatomic.a` where GCC has it, and `libc.a`),
@@ -1065,8 +1067,10 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   `.fini` atoms, crti.o's fragment first, `__dso_handle`, `__TMC_END__`),
   `libc.so.6` with its soname, `write`, `strlen`, `environ` and
   `__errno_location` at `GLIBC_2.2.5`, `__libc_start_main` at `GLIBC_2.34`
-  and `GLIBC_ABI_DT_RELR`, `libc_nonshared.a` with `atexit` in its index, and
-  every reference to each name bound: `main` to the program,
+  and `GLIBC_ABI_DT_RELR`, the loader with its soname, `__tls_get_addr` at
+  `GLIBC_2.3` and `_r_debug` and `__libc_stack_end` at `GLIBC_2.2.5`, its
+  version indices past `libc.so.6`'s, `libc_nonshared.a` with `atexit` in its
+  index, and every reference to each name bound: `main` to the program,
   `__libc_start_main` and `__cxa_finalize` to libc, `__gmon_start__` and the
   `_ITM_` functions to nothing, `__TMC_END__` to `crtendS.o`, and
   `_GLOBAL_OFFSET_TABLE_`, which the crt objects that use the GOT name, to the
@@ -1074,9 +1078,10 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   its own unit and its names' bytes one run, and the global names (binding's
   index of the runtime's names and libc's) must hold each name once, found by
   its bytes and in its filter, each global symbol's its own: `main` defined by
-  none of them, `__libc_start_main` libc.so.6's, `__dso_handle` crtbeginS.o's,
-  `atexit` a member's, and `_GLOBAL_OFFSET_TABLE_` and the init and fini
-  arrays' bounds the linker's, whether or not the runtime refers to them;
+  none of them, `__libc_start_main` libc.so.6's, `_r_debug` the loader's,
+  numbered after `libc.so.6`'s exports, `__dso_handle` crtbeginS.o's, `atexit`
+  a member's, and `_GLOBAL_OFFSET_TABLE_` and the init and fini arrays' bounds
+  the linker's, whether or not the runtime refers to them;
 - the static runtime: `runtime_import_static` on this system's files.
   `crt1.o`, `crtbeginT.o` and `crtend.o` with `_start`, `_init`,
   `__dso_handle` and `__TMC_END__`, and `crt1.o`'s ABI note; the archives in
@@ -1103,14 +1108,15 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   nothing; and with `--cross-check`, every relocation compared with
   readelf's, as the static runtime's are.
 
-`--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
-version, type, binding and size) and references with `readelf -W --dyn-syms`,
-and every relocation of the crt objects and the archives' members, the static
-runtime's among them, with `readelf -W -r`: each one must be a fixup of its
-kind at its offset (a `GOTPCRELX` or `REX_GOTPCRELX` one's by the instruction
-before it, as the test reads it: 379 of `libgcc.a`'s are `GOTPCREL` on the
-9700X, adds of slots), against the symbol (or the section) readelf names, with
-its addend, and there must be no other fixups. `--seed N` changes the programs
+`--cross-check`, which needs `readelf`, compares `libc.so.6`'s and the
+loader's exports (name, version, type, binding and size) and references with
+`readelf -W --dyn-syms`, and every relocation of the crt objects and the
+archives' members, the static runtime's among them, with `readelf -W -r`:
+each one must be a fixup of its kind at its offset (a `GOTPCRELX` or
+`REX_GOTPCRELX` one's by the instruction before it, as the test reads it: 379
+of `libgcc.a`'s are `GOTPCREL` on the 9700X, adds of slots), against the
+symbol (or the section) readelf names, with its addend, and there must be no
+other fixups. `--seed N` changes the programs
 and the random bytes. The default 9700X job runs it with `--cross-check` after
 the object writer's benchmark.
 
@@ -1202,14 +1208,16 @@ exports and members:
   themselves: a weak `_init` that exits with 7 if it runs, against crti.o's;
   `main` returning a weak `data_start` of 7, after Scrt1.o's of 0; a call
   through the GOT to a hidden `puts` (refused); `main` returning whether a
-  weak hidden `puts` isn't 0; and references to the arrays' bounds. Each must
-  bind, or fail to, as the linkers link it;
+  weak hidden `puts` isn't 0; references to the arrays' bounds; and `main`
+  returning `_r_debug`'s `r_version` plus 10 when `__libc_stack_end` isn't 0,
+  which only the loader exports (status 11). Each must bind, or fail to, as
+  the linkers link it;
 - with `--cross-check`, which needs `ld.lld`, `ld.bfd`, `cc` and `readelf`:
   each bound program written as objects, one per unit, linked by ld.lld and
-  ld.bfd as a PIE with only `libc.so.6` and the loader besides, in GCC's
-  order and with `--eh-frame-hdr` as GCC's driver asks, without errors or
-  warnings, must run and print what its model
-  predicts (the atexit program must exit with 0); and the program's own
+  ld.bfd as a PIE with only `libc.so.6` and, as needed, the loader besides,
+  in GCC's order and with `--eh-frame-hdr` as GCC's driver asks, without
+  errors or warnings, must run and print what its model predicts (the atexit
+  program must exit with 0, the loader's case with 11); and the program's own
   objects, linked by `cc` with lld, must have in readelf's `.dynsym` the
   imports at their versions and with their types, the weak references with
   default visibility and the exports binding found, and lld's `--why-extract`
@@ -1394,7 +1402,7 @@ the workers of the set named after it (2,000 by default).
 ## Dynamic PIE tests
 
 `./build/compiler test-dynamic [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 0.6 s on the 9700X, and 0.8 s with
+[--cross-check] [--keep]` (about 0.75 s on the 9700X, and 0.93 s with
 `--cross-check`) checks `executable.c`'s dynamic PIEs against this system's
 runtime (`runtime_import`), in a directory of its own under `--directory`
 (`TMPDIR` or `/tmp` by default), which it removes unless `--keep`. Each
@@ -1418,7 +1426,9 @@ must have the same relocations in `.rela.dyn` alone and run alike. The checks:
   writer's filter takes for symbols outside the image. Each must run under
   the system's loader, without stand-ins, and print what its model predicts;
 - cases: test-bind's atexit program and linkers' cases, each bound or refused
-  as GNU ld and lld link it, and run with their links' status;
+  as GNU ld and lld link it, and run with their links' status; the loader's
+  case with `DT_NEEDED` the loader after `libc.so.6`, and `.gnu.version_r` an
+  entry for each, each import's version in its library's;
 - exports: sixteen functions whose names `libc.so.6` defines too, which
   binding exports and `main` finds with `dlsym` through the executable's
   `.gnu.hash`;
@@ -1449,8 +1459,9 @@ must have the same segments (the program headers' types in order, their flags
 and the `PT_LOAD`s' alignments), the same dynamic symbols (name, binding, type,
 whether defined, version), the same symbols with a GOT slot the loader fills,
 the same `R_X86_64_64`s with their addends, as many RELATIVE pointers outside
-the GOT, the same init and fini arrays' sizes, the same `DT_NEEDED`, `DT_INIT`,
-`DT_FINI`, `DT_GNU_HASH` and `DT_VERNEED`, and `.eh_frame_hdr` tables (lld's
+the GOT, the same init and fini arrays' sizes, the same `DT_NEEDED` libraries
+in order, each with the same needed versions, the same `DT_INIT`, `DT_FINI`,
+`DT_GNU_HASH` and `DT_VERNEED`, and `.eh_frame_hdr` tables (lld's
 with `--eh-frame-hdr`, as GCC's driver asks) that index the same functions with
 the same ranges. And each program runs
 again with a library preloaded, which `cc` builds: its `write` walks the stack
@@ -1639,7 +1650,9 @@ which it removes unless `--keep`:
   both of binding's paths against the imported runtime and against a loaded
   one: the same links and bindings, written as dynamic PIEs, or against the
   static runtime as static executables and against the static PIE's as static
-  PIEs, by 1 and 8 lanes into the same bytes, which run;
+  PIEs, by 1 and 8 lanes into the same bytes, which run; and test-bind's
+  loader case bound both ways too, the loaded runtime's PIE running with its
+  status (11);
 - opening: `runtime_open` in a directory two levels below one that exists,
   which it makes private: imported and written, then loaded; with no
   directory, or without an identity, imported and nothing written; and where

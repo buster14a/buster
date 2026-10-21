@@ -276,6 +276,100 @@ static bool dynamic_test_tag(const DynamicTestImage* image, int64_t tag, uint64_
     return found;
 }
 
+// The names of .dynamic's DT_NEEDED entries, in order, up to `capacity` of them: how many there are.
+static uint32_t dynamic_test_needed(const DynamicTestImage* image, const char** names, uint32_t capacity)
+{
+    const Elf64_Shdr* section = dynamic_test_section(image, ".dynamic");
+    const Elf64_Shdr* dynstr = dynamic_test_section(image, ".dynstr");
+    const Elf64_Dyn* entries = (const Elf64_Dyn*)dynamic_test_bytes(image, section);
+    const char* strings = (const char*)dynamic_test_bytes(image, dynstr);
+    const uint64_t count = section != 0 ? section->sh_size / sizeof(Elf64_Dyn) : 0;
+    uint32_t result = 0;
+    for (uint64_t i = 0; strings != 0 && i < count && entries[i].d_tag != DT_NULL; i += 1)
+    {
+        const bool needed = entries[i].d_tag == DT_NEEDED && entries[i].d_un.d_val < dynstr->sh_size;
+        if (needed && result < capacity)
+        {
+            names[result] = strings + entries[i].d_un.d_val;
+        }
+        result += needed ? 1 : 0;
+    }
+    return result;
+}
+
+// .gnu.version_r as text, to compare two files': each entry's library and its needed versions' names, sorted (GNU ld
+// and lld order them differently), as "library:version,version;", into `text` of `capacity` bytes. False if it doesn't
+// fit or the section is malformed.
+static bool dynamic_test_version_needs(const DynamicTestImage* image, char* text, uint64_t capacity)
+{
+    const Elf64_Shdr* section = dynamic_test_section(image, ".gnu.version_r");
+    const Elf64_Shdr* dynstr = dynamic_test_section(image, ".dynstr");
+    const uint8_t* bytes = dynamic_test_bytes(image, section);
+    const char* strings = (const char*)dynamic_test_bytes(image, dynstr);
+    const uint64_t size = section != 0 ? section->sh_size : 0;
+    uint64_t length = 0;
+    bool result = capacity != 0;
+    text[0] = 0;
+    uint64_t record = 0;
+    bool more = bytes != 0 && strings != 0 && size >= sizeof(Elf64_Verneed);
+    while (result && more)
+    {
+        Elf64_Verneed needed;
+        memcpy(&needed, bytes + record, sizeof(needed));
+        // More than libc.so.6 defines.
+        const char* names[128];
+        uint32_t count = 0;
+        uint64_t at = record + needed.vn_aux;
+        for (uint32_t a = 0; result && a < needed.vn_cnt; a += 1)
+        {
+            Elf64_Vernaux auxiliary;
+            result = at + sizeof(auxiliary) <= size && count < BUSTER_ARRAY_LENGTH(names);
+            if (result)
+            {
+                memcpy(&auxiliary, bytes + at, sizeof(auxiliary));
+                result = auxiliary.vna_name < dynstr->sh_size;
+                names[count] = result ? strings + auxiliary.vna_name : "";
+                count += 1;
+                at += auxiliary.vna_next;
+            }
+        }
+        // An insertion sort of a library's few names.
+        for (uint32_t i = 1; i < count; i += 1)
+        {
+            const char* name = names[i];
+            uint32_t j = i;
+            while (j > 0 && strcmp(names[j - 1], name) > 0)
+            {
+                names[j] = names[j - 1];
+                j -= 1;
+            }
+            names[j] = name;
+        }
+        result = result && needed.vn_file < dynstr->sh_size;
+        const int written = result ? snprintf(text + length, capacity - length, "%s:", strings + needed.vn_file) : -1;
+        result = written >= 0 && length + (uint64_t)written < capacity;
+        length += result ? (uint64_t)written : 0;
+        for (uint32_t i = 0; result && i < count; i += 1)
+        {
+            const int name_written = snprintf(text + length, capacity - length, "%s%s", names[i], i + 1 < count ? "," : ";");
+            result = name_written >= 0 && length + (uint64_t)name_written < capacity;
+            length += result ? (uint64_t)name_written : 0;
+        }
+        more = needed.vn_next != 0 && record + needed.vn_next + sizeof(Elf64_Verneed) <= size;
+        record += needed.vn_next;
+    }
+    return result;
+}
+
+// Whether an import of the link's comes from the loader rather than libc.so.6: whether its version is the loader's
+// (runtime.c numbers the two libraries' apart).
+static bool dynamic_test_from_loader(const Runtime* runtime, const Link* link, SymbolId symbol)
+{
+    const bool import = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED;
+    return import && import_test_version_name(&runtime->libc, link->symbols.version[symbol]).length == 0 &&
+           import_test_version_name(&runtime->loader, link->symbols.version[symbol]).length != 0;
+}
+
 // The file offset of an address, from the PT_LOAD whose file bytes have it, or UINT64_MAX.
 static uint64_t dynamic_test_file_offset(const DynamicTestImage* image, uint64_t address)
 {
@@ -569,33 +663,45 @@ static void dynamic_test_symbols(DynamicTestTally* tally, const Link* link, cons
         const bool kind = entry->st_info == (flags & (BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_TYPE)) && entry->st_other == flags >> 6;
         if (i <= undefined)
         {
-            // An import at its export's version, through .gnu.version_r; a weak reference to nothing unversioned (0).
+            // An import at its export's version, through .gnu.version_r's entry for its library (libc.so.6, or the
+            // loader); a weak reference to nothing unversioned (0).
             const bool import = found != 0 && link->symbols.source[found] == BUSTER_LINK_SOURCE_RUNTIME_SHARED;
-            const String8 expected = import ? import_test_version_name(&runtime->libc, link->symbols.version[found]) : (String8){ 0 };
+            const String8 expected = import ? import_test_runtime_version_name(runtime, link->symbols.version[found]) : (String8){ 0 };
+            const String8 library = found != 0 && dynamic_test_from_loader(runtime, link, found) ? runtime->loader.soname : runtime->libc.soname;
             String8 version = { 0 };
+            String8 file = { 0 };
             const uint16_t number = versym != 0 ? versym[i] : 0;
             const uint8_t* verneed = dynamic_test_bytes(image, verneed_section);
-            uint64_t at = 0;
-            Elf64_Verneed needed = { 0 };
-            if (verneed != 0 && verneed_section->sh_size >= sizeof(needed))
+            const uint64_t verneed_bytes = verneed_section != 0 ? verneed_section->sh_size : 0;
+            uint64_t record = 0;
+            bool more = verneed != 0 && verneed_bytes >= sizeof(Elf64_Verneed);
+            while (more)
             {
-                memcpy(&needed, verneed, sizeof(needed));
-                at = needed.vn_aux;
-            }
-            for (uint32_t a = 0; verneed != 0 && a < needed.vn_cnt && at + sizeof(Elf64_Vernaux) <= verneed_section->sh_size; a += 1)
-            {
-                Elf64_Vernaux auxiliary;
-                memcpy(&auxiliary, verneed + at, sizeof(auxiliary));
-                if (auxiliary.vna_other == number && auxiliary.vna_name < dynstr_section->sh_size)
+                Elf64_Verneed needed;
+                memcpy(&needed, verneed + record, sizeof(needed));
+                uint64_t at = record + needed.vn_aux;
+                for (uint32_t a = 0; a < needed.vn_cnt && at + sizeof(Elf64_Vernaux) <= verneed_bytes; a += 1)
                 {
-                    version = (String8){
-                        .pointer = (char*)dynstr + auxiliary.vna_name,
-                        .length = strlen(dynstr + auxiliary.vna_name),
-                    };
+                    Elf64_Vernaux auxiliary;
+                    memcpy(&auxiliary, verneed + at, sizeof(auxiliary));
+                    if (auxiliary.vna_other == number && auxiliary.vna_name < dynstr_section->sh_size && needed.vn_file < dynstr_section->sh_size)
+                    {
+                        version = (String8){
+                            .pointer = (char*)dynstr + auxiliary.vna_name,
+                            .length = strlen(dynstr + auxiliary.vna_name),
+                        };
+                        file = (String8){
+                            .pointer = (char*)dynstr + needed.vn_file,
+                            .length = strlen(dynstr + needed.vn_file),
+                        };
+                    }
+                    at += auxiliary.vna_next;
                 }
-                at += auxiliary.vna_next;
+                more = needed.vn_next != 0 && record + needed.vn_next + sizeof(Elf64_Verneed) <= verneed_bytes;
+                record += needed.vn_next;
             }
-            const bool versioned = import ? version.length == expected.length && version.length != 0 && memcmp(version.pointer, expected.pointer, version.length) == 0
+            const bool versioned = import ? version.length == expected.length && version.length != 0 && memcmp(version.pointer, expected.pointer, version.length) == 0 &&
+                                                file.length == library.length && memcmp(file.pointer, library.pointer, file.length) == 0
                                           : number == VER_NDX_LOCAL;
             dynamic_test_expect(tally, found != 0 && dynamic_test_is_dynamic(link, found), "an undefined entry a dynamic symbol's", i);
             dynamic_test_expect(tally, kind && entry->st_shndx == SHN_UNDEF && entry->st_value == 0 && entry->st_size == 0, "an undefined entry as its symbol is", i);
@@ -790,8 +896,10 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
     }
 }
 
-// The headers and .dynamic: ET_DYN from _start, PT_INTERP the interpreter, PT_DYNAMIC .dynamic; DT_NEEDED libc.so.6
-// and the tags lld writes, each with its section's address or size, DT_INIT and DT_FINI crti.o's functions.
+// The headers and .dynamic: ET_DYN from _start, PT_INTERP the interpreter, PT_DYNAMIC .dynamic; DT_NEEDED libc.so.6,
+// then the loader exactly when an import is its, as GNU ld and lld take libc.so's AS_NEEDED, and DT_VERNEEDNUM those
+// with a needed version; and the tags lld writes, each with its section's address or size, DT_INIT and DT_FINI crti.o's
+// functions.
 static void dynamic_test_headers(DynamicTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, const DynamicTestImage* image, uint64_t index)
 {
     dynamic_test_expect(tally, image->valid, "a PIE's ELF header", index);
@@ -836,16 +944,24 @@ static void dynamic_test_headers(DynamicTestTally* tally, const Link* link, cons
             dynamic_test_expect(tally, matches, tables[t].section, t);
         }
         uint64_t value = 0;
-        const Elf64_Shdr* dynstr = dynamic_test_section(image, ".dynstr");
-        const bool needed = dynamic_test_tag(image, DT_NEEDED, &value) && dynstr != 0 && value < dynstr->sh_size &&
-                            strcmp((const char*)dynamic_test_bytes(image, dynstr) + value, "libc.so.6") == 0;
-        dynamic_test_expect(tally, needed, "DT_NEEDED libc.so.6", index);
+        bool loader = false;
+        for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+        {
+            loader = loader || dynamic_test_from_loader(runtime, link, symbol);
+        }
+        const char* names[3] = { 0 };
+        const uint32_t needed = dynamic_test_needed(image, names, BUSTER_ARRAY_LENGTH(names));
+        const uint32_t libraries = loader ? 2 : 1;
+        const bool libc = needed >= 1 && strcmp(names[0], "libc.so.6") == 0;
+        const bool ld = !loader || (needed >= 2 && runtime->loader.soname.length == strlen(names[1]) &&
+                                    memcmp(names[1], runtime->loader.soname.pointer, runtime->loader.soname.length) == 0);
+        dynamic_test_expect(tally, needed == libraries && libc && ld, "DT_NEEDED libc.so.6, and the loader as needed", index);
         dynamic_test_expect(tally, dynamic_test_tag(image, DT_FLAGS_1, &value) && value == DF_1_PIE, "DT_FLAGS_1 PIE", index);
         dynamic_test_expect(tally, dynamic_test_tag(image, DT_INIT, &value) && value == dynamic_test_address(link, dynamic_global(runtime, bind, "_init")), "DT_INIT _init",
                             index);
         dynamic_test_expect(tally, dynamic_test_tag(image, DT_FINI, &value) && value == dynamic_test_address(link, dynamic_global(runtime, bind, "_fini")), "DT_FINI _fini",
                             index);
-        dynamic_test_expect(tally, dynamic_test_tag(image, DT_VERNEEDNUM, &value) && value == 1, "DT_VERNEEDNUM", index);
+        dynamic_test_expect(tally, dynamic_test_tag(image, DT_VERNEEDNUM, &value) && value == libraries, "DT_VERNEEDNUM", index);
     }
 }
 
@@ -1836,6 +1952,28 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
             uint64_t value = 0;
             dynamic_test_expect(tally, dynamic_test_tag(&ours, present[t], &value) == dynamic_test_tag(&theirs, present[t], &value), "lld's tags", t);
         }
+        // DT_NEEDED's libraries in order (libc.so.6, and the loader when an import is its), and each one's needed
+        // versions.
+        const char* our_needed[4] = { 0 };
+        const char* their_needed[4] = { 0 };
+        const uint32_t our_needed_count = dynamic_test_needed(&ours, our_needed, BUSTER_ARRAY_LENGTH(our_needed));
+        const uint32_t their_needed_count = dynamic_test_needed(&theirs, their_needed, BUSTER_ARRAY_LENGTH(their_needed));
+        bool same_needed = our_needed_count == their_needed_count && our_needed_count <= BUSTER_ARRAY_LENGTH(our_needed);
+        for (uint32_t n = 0; same_needed && n < our_needed_count; n += 1)
+        {
+            same_needed = strcmp(our_needed[n], their_needed[n]) == 0;
+        }
+        dynamic_test_expect(tally, same_needed, "lld's DT_NEEDED libraries, in order", our_needed_count * 100 + their_needed_count);
+        char our_versions[4096];
+        char their_versions[4096];
+        const bool versions_read = dynamic_test_version_needs(&ours, our_versions, sizeof(our_versions)) &&
+                                   dynamic_test_version_needs(&theirs, their_versions, sizeof(their_versions));
+        const bool same_versions = versions_read && strcmp(our_versions, their_versions) == 0;
+        if (versions_read && !same_versions)
+        {
+            printf("  %s: .gnu.version_r: %s, against lld's %s\n", name, our_versions, their_versions);
+        }
+        dynamic_test_expect(tally, same_versions, "lld's needed versions, by library", 0);
         // .eh_frame_hdr: the same functions' FDEs, with the same ranges.
         const uint64_t fde_capacity = link->fixups.count + 16;
         DynamicTestFde* our_fdes = BUSTER_ARENA_PUSH_ARRAY(arena, DynamicTestFde, fde_capacity);
