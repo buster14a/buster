@@ -193,6 +193,9 @@ static uint64_t snapshot_benchmark_bind(const Runtime* runtime, LinkProgram* ref
     return result ? (begin_end - begin_start) + (end_end - end_start) : 0;
 }
 
+// What the whole-file hash computes, which a store keeps the compiler from leaving out.
+static volatile uint8_t snapshot_benchmark_sink;
+
 // The whole snapshot hashed, as format 3's loader checked it (format 4's checks the directory, and each piece as binding
 // reads it): the nanoseconds the mapping and the hash of every byte take, or 0 if it can't be mapped.
 static uint64_t snapshot_benchmark_whole_hash(const char* path)
@@ -211,13 +214,14 @@ static uint64_t snapshot_benchmark_whole_hash(const char* path)
     if (file != MAP_FAILED)
     {
         snapshot_hash(file, bytes, hash);
+        snapshot_benchmark_sink ^= hash[0];
     }
     const uint64_t end = executable_now();
     if (file != MAP_FAILED)
     {
         munmap(file, bytes);
     }
-    return file != MAP_FAILED && hash[0] != 1 ? end - start : 0;
+    return file != MAP_FAILED ? end - start : 0;
 }
 
 // The pieces that a program bound against `runtime` read, the crt objects and the members that joined, checked again

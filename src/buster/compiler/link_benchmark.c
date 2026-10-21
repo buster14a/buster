@@ -484,20 +484,25 @@ struct LinkBenchmarkBinding
     uint32_t* named;
     SymbolId* symbols;
     uint64_t* members;
+    // The COMDAT signatures that have joined: a static link's bind_end sets the bit of each group it keeps, and a run
+    // that started with them set would discard the first group of each signature too.
+    uint64_t* signatures;
 };
 
 static bool link_benchmark_save(LinkBenchmarkBinding* saved, const Bind* bind, Arena* arena)
 {
     const Runtime* runtime = bind->runtime;
     const uint32_t words = (runtime->member_count + 63) / 64;
+    const uint32_t signature_words = (runtime->group_signatures + 63) / 64;
     *saved = (LinkBenchmarkBinding){
         .bind = *bind,
         .name_symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->global_names.count),
         .named = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, runtime->global_names.count),
         .symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->link.symbols.count),
         .members = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, 2 * words + 1),
+        .signatures = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, signature_words + 1),
     };
-    const bool result = saved->name_symbols != 0 && saved->named != 0 && saved->symbols != 0 && saved->members != 0;
+    const bool result = saved->name_symbols != 0 && saved->named != 0 && saved->symbols != 0 && saved->members != 0 && saved->signatures != 0;
     if (result)
     {
         memcpy(saved->name_symbols, bind->name_symbols, runtime->global_names.count * sizeof(SymbolId));
@@ -505,6 +510,7 @@ static bool link_benchmark_save(LinkBenchmarkBinding* saved, const Bind* bind, A
         memcpy(saved->symbols, bind->symbols, runtime->link.symbols.count * sizeof(SymbolId));
         memcpy(saved->members, bind->members_needed, words * sizeof(uint64_t));
         memcpy(saved->members + words, bind->members_joined, words * sizeof(uint64_t));
+        memcpy(saved->signatures, bind->signatures, signature_words * sizeof(uint64_t));
     }
     return result;
 }
@@ -519,6 +525,7 @@ static void link_benchmark_load(const LinkBenchmarkBinding* saved, Bind* bind)
     memcpy(bind->symbols, saved->symbols, runtime->link.symbols.count * sizeof(SymbolId));
     memcpy(bind->members_needed, saved->members, words * sizeof(uint64_t));
     memcpy(bind->members_joined, saved->members + words, words * sizeof(uint64_t));
+    memcpy(bind->signatures, saved->signatures, (runtime->group_signatures + 63) / 64 * sizeof(uint64_t));
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -590,9 +597,14 @@ struct LinkBenchmarkDirect
     uint64_t faults;
     uint64_t growth;
     bool growth_known;
-    // The program's global names, which bind_begin looks up, and the bound link's fixups.
+    // The program's global names, which bind_begin looks up, and the bound link's fixups; and the atoms and symbols of the
+    // first binding, fresh, which every run's must make again.
     uint32_t globals;
     uint64_t fixups;
+    uint32_t bound_atoms;
+    uint32_t bound_symbols;
+    // Whether a binding failed with BIND_ERROR_SNAPSHOT: a piece of the runtime's snapshot is damaged.
+    bool damaged;
     ExecutableResult result;
     // The warm-up's build ID, which every run's must repeat: each writes the same link.
     uint8_t build_id[BUSTER_EXECUTABLE_BUILD_ID_BYTES];
@@ -626,13 +638,14 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
         arena_pop_to(direct->arena, length);
         const LinkBenchmarkCost cost = run == 0 ? link_benchmark_cost_begin() : (LinkBenchmarkCost){ 0 };
         Runtime runtime;
-        Bind bind;
+        Bind bind = { 0 };
         const uint64_t start = executable_now();
         const SnapshotResult opened = link_benchmark_open(&runtime, direct->cache, direct->kind);
         const uint64_t opened_at = executable_now();
         const bool loaded = opened.status == SNAPSHOT_STATUS_LOADED;
         result = loaded && bind_begin(&bind, link, &runtime, BIND_PATH_VECTOR, &program->bytes, units, direct->arena);
         const uint64_t end = executable_now();
+        direct->damaged = direct->damaged || bind.error == BIND_ERROR_SNAPSHOT;
         if (run == 0)
         {
             link_benchmark_cost_end(&cost, &direct->faults, &direct->growth, &direct->growth_known);
@@ -657,10 +670,14 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
     direct->arena_length = direct->arena->length;
     result = result && bind_end(&direct->bind, link) && link_program_generate_end(program);
     direct->fixups = link->fixups.count - 1;
+    direct->bound_atoms = link->atoms.count;
+    direct->bound_symbols = link->symbols.count;
+    direct->damaged = direct->damaged || direct->bind.error == BIND_ERROR_SNAPSHOT;
     if (!result && direct->problem == 0)
     {
         direct->problem = program->problem != 0 ? program->problem : "the program didn't bind";
     }
+    direct->problem = direct->damaged ? "binding found a piece of the runtime's snapshot damaged" : direct->problem;
     return result;
 }
 
@@ -690,6 +707,7 @@ static void link_benchmark_direct_main(void* argument)
             cost = run == 0 ? link_benchmark_cost_begin() : cost;
             start = executable_now();
             bound = bind_end(&direct->bind, link);
+            direct->damaged = direct->damaged || direct->bind.error == BIND_ERROR_SNAPSHOT;
             if (bound && direct->kind == RUNTIME_KIND_STATIC)
             {
                 dynamic_static_inputs(&direct->static_inputs, &direct->runtime, &direct->bind);
@@ -700,6 +718,10 @@ static void link_benchmark_direct_main(void* argument)
             }
             direct->options.entry = bound ? dynamic_global(&direct->runtime, &direct->bind, "_start") : 0;
             bound_at = executable_now();
+            // The link the first binding made, fresh: a run that restored less than binding writes would make another.
+            const bool same = link->atoms.count == direct->bound_atoms && link->symbols.count == direct->bound_symbols && link->fixups.count - 1 == direct->fixups;
+            direct->problem = bound && !same ? "a run's binding made another link than the first" : direct->problem;
+            bound = bound && same;
         }
         bound = lane_broadcast(bound ? 1 : 0, 0) != 0;
         succeeded = bound && executable_write(link, &direct->options, &direct->result);
@@ -731,6 +753,7 @@ static void link_benchmark_direct_main(void* argument)
         direct->end_runs = runs;
         direct->succeeded = succeeded;
         direct->problem = !succeeded && direct->problem == 0 ? "bind_end or executable_write failed" : direct->problem;
+        direct->problem = direct->damaged ? "binding found a piece of the runtime's snapshot damaged" : direct->problem;
     }
 }
 
@@ -780,8 +803,10 @@ static double link_benchmark_floor_median(const char* path, uint64_t size, uint3
 
 // The direct path's link of the program, as a dynamic PIE or as a static executable by `kind`: its parts' medians, its
 // work and the floor, and its output run, which must print the program's output. *total gets the link's time in
-// microseconds, and `expected` the program's output.
-static bool link_benchmark_direct(const LinkBenchmarkSettings* settings, RuntimeKind kind, LinkBenchmarkProgram linked, uint8_t* expected, double* total)
+// microseconds, and `expected` the program's output. *damaged says whether a binding failed because a piece of the
+// kind's snapshot is damaged (BIND_ERROR_SNAPSHOT), which the measurement can't go on from.
+static bool link_benchmark_direct_attempt(const LinkBenchmarkSettings* settings, RuntimeKind kind, LinkBenchmarkProgram linked, uint8_t* expected, double* total,
+                                          bool* damaged)
 {
     const char* path = settings->direct_path;
     const LinkProgramOptions options = link_benchmark_options(linked, settings->seed);
@@ -830,6 +855,7 @@ static bool link_benchmark_direct(const LinkBenchmarkSettings* settings, Runtime
     {
         printf("  the direct path: %s\n", program.problem != 0 ? program.problem : "out of memory");
     }
+    *damaged = direct != 0 && direct->damaged;
     if (result)
     {
         const ExecutableResult* written = &direct->result;
@@ -875,6 +901,31 @@ static bool link_benchmark_direct(const LinkBenchmarkSettings* settings, Runtime
     arena_release(&marks);
     arena_release(&arena);
     free(direct);
+    return result;
+}
+
+// link_benchmark_direct_attempt, again once if a binding found a piece of the kind's snapshot damaged
+// (BIND_ERROR_SNAPSHOT), which runtime_open's checks of the directory don't see, as a link's caller recovers from it:
+// the measurement is thrown away, the snapshot discarded (snapshot_discard) and written again by an open outside any
+// measurement, and the program generated and measured again from the start, its runs loading the new snapshot. Without
+// it, the damaged snapshot would stay in the cache and fail every later run.
+static bool link_benchmark_direct(const LinkBenchmarkSettings* settings, RuntimeKind kind, LinkBenchmarkProgram linked, uint8_t* expected, double* total)
+{
+    bool damaged = false;
+    bool result = link_benchmark_direct_attempt(settings, kind, linked, expected, total, &damaged);
+    if (!result && damaged)
+    {
+        Runtime runtime;
+        const bool discarded = snapshot_discard(settings->cache, kind);
+        const SnapshotResult reopened = discarded ? link_benchmark_open(&runtime, settings->cache, kind) : (SnapshotResult){ .status = SNAPSHOT_STATUS_MISSING };
+        if (discarded)
+        {
+            runtime_release(&runtime);
+        }
+        const bool written = discarded && reopened.error == RUNTIME_ERROR_NONE && reopened.written;
+        printf("  the direct path: %s\n", written ? "the snapshot discarded and written again, and the program measured again" : "the snapshot couldn't be written again");
+        result = written && link_benchmark_direct_attempt(settings, kind, linked, expected, total, &damaged);
+    }
     return result;
 }
 

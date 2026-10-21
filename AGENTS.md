@@ -1622,9 +1622,14 @@ both by default), by the direct path and by each linker, and reports medians:
   `bind_end` and `dynamic_inputs` (or `dynamic_static_inputs`), and
   `executable_write` over the file of the run before into a directory under
   `--directory` (`TMPDIR` or `/tmp`). Each part is the
-  median of its runs after a warm-up, each run from the link as it was before
-  the part, put back outside the time, and must write the warm-up's file again
-  (its build ID); the link is the parts' sum. Then its work: the bytes
+  median of its runs after a warm-up, each run from the link and binding as
+  they were before the part, put back outside the time (a static link's
+  COMDAT signatures among them), and must bind the link the first binding
+  made (its atoms, symbols and fixups) and write the warm-up's file again (its
+  build ID); the link is the parts' sum. A binding that finds a piece of the
+  snapshot damaged (`BIND_ERROR_SNAPSHOT`) throws the measurement away: the
+  snapshot is discarded and written again, outside any measurement, and the
+  program measured again from the start, once. Then its work: the bytes
   written, the fixups applied, the names looked up, and over the warm-ups the
   page faults and how much the peak resident set grew; and the floor, one
   `pwrite` of the output;
