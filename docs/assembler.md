@@ -225,6 +225,52 @@ the same object path. All include startup, input and output I/O; none preprocess
 the input. The component benchmark excludes file I/O and reusable initialization,
 so its numbers must not be compared directly to those subprocess times.
 
+### 9700X measurements, 2026-10-21
+
+Revision `83291a2a7e96489b714266f04d3429b97f4c6746`, production `build.sh`
+(`-O3 -march=native`), Clang 23.1.1, GNU binutils 2.47, Linux 6.18.50-2-lts,
+Ryzen 7 9700X, CPU 2. Each command held the shared exclusive lock separately.
+The following are 21-pass medians with 256 generated functions:
+
+| Workload | Instructions | Source bytes | Scalar total ms | Vector total ms | Scalar / vector |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mixed Intel | 9,984 | 153,295 | 3.519 | 2.145 | 1.64 |
+| Intel registers/immediates | 8,448 | 115,261 | 3.118 | 1.718 | 1.81 |
+| AVX-512 masks/broadcasts | 8,448 | 317,029 | 3.684 | 3.384 | 1.09 |
+| AT&T | 9,984 | 177,355 | 3.325 | 2.581 | 1.29 |
+
+Mixed Intel phase medians, in milliseconds:
+
+| Path | Lex | Parse | Match | Layout | Encode/link | Object |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Scalar | 0.107 | 1.373 | 1.584 | 0.167 | 0.276 | 0.010 |
+| Vector | 0.052 | 0.864 | 0.968 | 0.167 | 0.082 | 0.010 |
+
+The mixed run's one-time encoder/index initialization was 0.939 ms. Its index
+used 401,928 bytes, work arena 16,816,496 bytes and ELF output 99,760 bytes.
+Work-arena usage is allocated space, not total RSS: source/reference buffers,
+shared encoder tables and unused virtual arena reservations are separate.
+Register, SIMD and AT&T work arenas used 13,039,928, 28,538,736 and 20,633,968
+bytes respectively. Memory remains a useful optimization target.
+
+The common Intel batch parser reduces register/immediate parsing from 1.162
+to 0.523 ms. Decorated SIMD still uses the exact grammar (2.230 ms scalar,
+2.302 ms vector), as does AT&T (1.291 versus 1.292 ms). Those are measured
+remaining costs, not claims that these grammars cannot be vectorized. Layout
+also remains essentially equal at these sizes; ordered symbol/fragment work
+and frequent alignment boundaries limit the benefit of its prefix scans.
+
+For the mixed input, fresh-process medians were 4.222 ms Buster vector,
+5.436 ms Buster scalar, 4.772 ms GNU as and 12.872 ms Clang integrated assembler.
+These include the same warm input/output file boundary and each tool's startup;
+Clang's driver cost is included. This is one synthetic workload, not a general
+assembler throughput ranking or a `.S` preprocessing measurement.
+
+Back-to-back vector mixed runs measured 2.111 ms; runs following 100 ms of
+scalar assembly measured 2.121 ms. This experiment showed no large transition
+penalty on this workload; it does not establish that Zen 5 transition state is
+irrelevant for other workloads.
+
 The implementation is original; the syntax references are the GNU assembler's
 [x86 syntax](https://sourceware.org/binutils/docs/as/i386_002dVariations.html),
 [expressions](https://sourceware.org/binutils/docs/as/Expressions.html) and

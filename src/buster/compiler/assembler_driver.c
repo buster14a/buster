@@ -205,9 +205,24 @@ static int run_assembler_command(int count, char** arguments)
         {
             options.isa = 2;
         }
-        else
+        else if (strcmp(argument, "-o") == 0 || strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-isystem") == 0 || strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0)
+        {
+            valid = i + 1 < count;
+            if (valid)
+            {
+                preprocess_arguments[preprocess_count++] = arguments[i];
+                preprocess_arguments[preprocess_count++] = arguments[++i];
+            }
+        }
+        else if (argument[0] != '-' || strcmp(argument, "-nostdinc") == 0 || (argument[1] != 0 && (argument[1] == 'I' || argument[1] == 'D' || argument[1] == 'U') && argument[2] != 0))
         {
             preprocess_arguments[preprocess_count++] = arguments[i];
+        }
+        else
+        {
+            // The C preprocessor deliberately ignores code-generation flags. The assembler must not silently
+            // accept -m32 or another output-mode request it cannot honor.
+            valid = false;
         }
     }
     bool markers;

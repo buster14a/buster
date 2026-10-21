@@ -213,6 +213,8 @@ static void asm_test_driver(AsmTest* test, const char* directory)
     const String8 b = object_test_read_file(&test->scalar, scalar_object);
     okay = okay && a.length != 0 && a.length == b.length && memcmp(a.pointer, b.pointer, a.length) == 0;
     asm_test_check(test, okay, "driver assemble/-c scalar and vector", 0);
+    char* unsupported[] = {"/proc/self/exe", "assemble", "-m32", "-o", object, input, 0};
+    asm_test_check(test, object_test_run(unsupported, output, errors) == 1, "unsupported output-mode flag is rejected", 0);
     static const char invalid[] = ".intel_syntax noprefix\nadd rax,0x80000000\n";
     okay = object_write_file(input, (const uint8_t*)invalid, sizeof(invalid) - 1) == OBJECT_ERROR_NONE;
     okay = okay && object_test_run(vector, output, errors) == 1;
