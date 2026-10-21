@@ -46,6 +46,13 @@ macros. The Clang table now includes `ext_vector_type`, queried in both its
 ordinary and underscored spellings in C99, GNU17 and C23 on Clang 23.1.1, and
 cross-checked with local Clang 23.1.3 (`clang 23.1.3-5`).
 
+The table-entry query, repeated with `-std=c99` and `-std=c23`, prints `1 1`:
+
+```sh
+printf '%s\n' '__has_attribute(ext_vector_type) __has_attribute(__ext_vector_type__)' | \
+    /usr/bin/clang --no-default-config --target=x86_64-linux-gnu -std=gnu17 -E -P -x c -
+```
+
 Clang's closing nullability callback supplies an invalid location, so its
 printer keeps the current presumed line. Both printers reproduce that placement
 within the current presumed context; token locations retain their source
