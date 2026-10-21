@@ -606,6 +606,7 @@ static int run_assembler_tests(int count, char** arguments)
             if (mkdtemp(directory) != 0)
             {
                 asm_test_oracle(&test, asm_test_function, directory, 0);
+                asm_test_oracle(&test, ".intel_syntax noprefix\ntest al,200\ntest ax,200\ntest eax,200\ntest rax,200\nnop dword ptr [rax]\n", directory, 0);
                 asm_test_oracle(&test, ".intel_syntax noprefix\n.text\nf: mov rax,200\nadd rax,200\nsub rcx,-129\nret\n.data\n.globl x\n.type x,@object\nx: .quad f+4, ext-8\n.size x,16\n", directory, 0);
                 asm_test_oracle(&test, ".intel_syntax noprefix\nsimd:\nmov ah,bl\nmov r8,[r12+r9*4-129]\nmov eax,dword ptr fs:[8]\naddps xmm1,xmm2\nvaddps ymm1,ymm2,ymm3\nvaddps zmm1{k2}{z},zmm2,zmm3\nvaddps zmm1,zmm2,dword ptr [rax]{1to16}\n", directory, X86_ARCH_V4);
                 asm_test_oracle(&test, ".intel_syntax noprefix\nf: jmp done\n.zero 120\njmp f\n.zero 20\n.p2align 5,0,31\ndone: ret\n.data\n.long external+7\n.quad f-8\n", directory, 0);
