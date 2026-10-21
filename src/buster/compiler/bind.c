@@ -46,6 +46,13 @@
 // (Bind.exports), as GNU ld and lld export them, the loader's names even when it isn't needed: those among the names
 // that took a link symbol, which binding lists as they do.
 //
+// A shared library's runtime (runtime_import_shared) joins as a dynamic PIE's, without a start object: bind_begin
+// appends crti.o and crtbeginS.o, and nothing refers to main. A name nothing defines binds as a dynamic PIE's, but a
+// strong reference with default visibility that no library exports stays undefined (source NONE), a dynamic symbol for
+// the loader to bind in the libraries the program loads, as GNU ld and lld leave it with -shared (-z undefs). And every
+// definition with default or protected visibility is an export (bind_shared_exports), not only those of names the
+// libraries define or libc.so.6 refers to.
+//
 // A static executable's runtime (runtime_import_static) joins the same way: bind_begin appends crt1.o, crti.o and
 // crtbeginT.o, and bind_end the members of libgcc.a, libgcc_eh.a, libatomic.a and libc.a that the link needs, then
 // crtend.o and crtn.o. Which members the link needs comes first (the closure), as GNU ld finds them scanning the
@@ -85,7 +92,7 @@
 //   - Joining an object: bind_visibility, bind_install, bind_merge, bind_piece_fits, bind_join_block, bind_join_records,
 //     bind_discards and bind_join.
 //   - Binding: bind_relaxed_name, bind_resolve_symbol, bind_resolve_vector, bind_resolve_exact, bind_resolve,
-//     bind_members, bind_keep_imports and bind_find_exports.
+//     bind_members, bind_keep_imports, bind_find_exports, bind_exported_lanes and bind_shared_exports.
 //   - The static closure: bind_symbol_defined, bind_entry_defined, bind_closure_need, bind_closure_vector,
 //     bind_closure_exact and bind_static_members.
 //   - Entry points: bind_capacity, bind_begin and bind_end.
@@ -843,6 +850,12 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     {
         // Left undefined, to the relaxation (bind_relaxed_name).
     }
+    else if (runtime->kind == RUNTIME_KIND_SHARED && shareable)
+    {
+        // A shared library's reference that nothing defines stays undefined, a dynamic symbol for the loader to bind in
+        // the libraries the program loads, as GNU ld and lld leave it (-shared allows it: -z undefs).
+        symbols->source[symbol] = BUSTER_LINK_SOURCE_NONE;
+    }
     else
     {
         bind_fail(bind, BIND_ERROR_UNDEFINED, name);
@@ -963,6 +976,68 @@ static void bind_find_exports(Bind* bind, const Link* link)
             bind->export_count += 1;
         }
     }
+}
+
+// Whether each of 16 symbols' flags, atoms and sources make it a shared library's export: global or weak, with default
+// or protected visibility, and defined, in an atom or absolutely.
+static __mmask16 bind_exported_lanes(__m512i flags, __m512i atoms, __m512i sources)
+{
+    const __m512i binding = _mm512_and_si512(flags, _mm512_set1_epi32(BUSTER_LINK_SYMBOL_BINDING));
+    const __m512i visibility = _mm512_and_si512(flags, _mm512_set1_epi32(BUSTER_LINK_SYMBOL_VISIBILITY));
+    const __mmask16 global = _mm512_cmpneq_epi32_mask(binding, _mm512_set1_epi32(BUSTER_LINK_SYMBOL_LOCAL));
+    const __mmask16 visible = _mm512_cmpeq_epi32_mask(visibility, _mm512_set1_epi32(BUSTER_LINK_SYMBOL_DEFAULT)) |
+                              _mm512_cmpeq_epi32_mask(visibility, _mm512_set1_epi32(BUSTER_LINK_SYMBOL_PROTECTED));
+    const __mmask16 defined = _mm512_test_epi32_mask(atoms, atoms) | _mm512_cmpeq_epi32_mask(sources, _mm512_set1_epi32(BUSTER_LINK_SOURCE_ABSOLUTE));
+    return global & visible & defined;
+}
+
+// A shared library's exports (Bind.exports): every definition of the link's that is global or weak, with default or
+// protected visibility, in an atom or absolute, as GNU ld and lld export them with -shared: the program's, since the
+// crt objects and libc_nonshared.a's members define only hidden names. In symbol order: by the vector path 16 symbols
+// at a time, compressed from their flags, atoms and sources, by the exact one a symbol at a time.
+static void bind_shared_exports(Bind* bind, const Link* link)
+{
+    // The columns and the count in locals: with the build's -fno-strict-aliasing, each store into the exports would make
+    // clang load them from the structures again.
+    const uint8_t* flags_column = link->symbols.flags;
+    const AtomId* atom_column = link->symbols.atom;
+    const uint8_t* source_column = link->symbols.source;
+    const uint32_t count = link->symbols.count;
+    SymbolId* exports = bind->exports;
+    uint32_t export_count = bind->export_count;
+    if (bind->path == BIND_PATH_VECTOR)
+    {
+        const __m512i lane_index = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+        for (SymbolId batch = 1; batch < count; batch += 16)
+        {
+            const uint32_t n = count - batch < 16 ? count - batch : 16;
+            const __mmask16 loaded = (__mmask16)((1u << n) - 1);
+            const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, flags_column + batch));
+            const __m512i atoms = _mm512_maskz_loadu_epi32(loaded, atom_column + batch);
+            const __m512i sources = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, source_column + batch));
+            const __mmask16 exported = bind_exported_lanes(flags, atoms, sources) & loaded;
+            // Compressed in a register and stored with a mask of its count.
+            const uint32_t taken = (uint32_t)__builtin_popcount(exported);
+            const __m512i ids = _mm512_maskz_compress_epi32(exported, _mm512_add_epi32(lane_index, _mm512_set1_epi32((int)batch)));
+            _mm512_mask_storeu_epi32(exports + export_count, (__mmask16)((1u << taken) - 1), ids);
+            export_count += taken;
+        }
+    }
+    else
+    {
+        for (SymbolId symbol = 1; symbol < count; symbol += 1)
+        {
+            const uint8_t flags = flags_column[symbol];
+            const bool global = (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
+            const bool defined = atom_column[symbol] != 0 || source_column[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
+            if (global && bind_visibility_rank(flags) <= 1 && defined)
+            {
+                exports[export_count] = symbol;
+                export_count += 1;
+            }
+        }
+    }
+    bind->export_count = export_count;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1283,6 +1358,13 @@ static bool bind_end(Bind* bind, Link* link)
         bind_resolve(bind, link, before_tail, link->symbols.count, false);
     }
     bind_keep_imports(bind, link);
-    bind_find_exports(bind, link);
+    if (bind->error == BIND_ERROR_NONE && bind->runtime->kind == RUNTIME_KIND_SHARED)
+    {
+        bind_shared_exports(bind, link);
+    }
+    else
+    {
+        bind_find_exports(bind, link);
+    }
     return bind->error == BIND_ERROR_NONE;
 }

@@ -81,6 +81,7 @@ static const char* const bind_benchmark_kind_names[RUNTIME_KINDS] = {
     [RUNTIME_KIND_DYNAMIC] = "the dynamic PIE's",
     [RUNTIME_KIND_STATIC] = "the static",
     [RUNTIME_KIND_STATIC_PIE] = "the static PIE's",
+    [RUNTIME_KIND_SHARED] = "the shared library's",
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -511,7 +512,8 @@ int run_bind_benchmark(int argc, char** argv)
             valid = false;
         }
     }
-    // Each kind's runtime, imported: runtime_import, runtime_import_static and runtime_import_static_pie.
+    // Each kind's runtime, imported: runtime_import, runtime_import_static, runtime_import_static_pie and
+    // runtime_import_shared.
     Runtime runtimes[RUNTIME_KINDS];
     uint32_t started = 0;
     bool result = valid;
