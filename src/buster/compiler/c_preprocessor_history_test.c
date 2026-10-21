@@ -164,10 +164,12 @@ static bool pp_test_history_runs(void)
     {
         .vectorized = true,
         .history_runs = vector_runs,
+        .history_run_capacity = BUSTER_ARRAY_LENGTH(vector_runs),
     };
     scalar = (Preprocessor)
     {
         .history_runs = scalar_runs,
+        .history_run_capacity = BUSTER_ARRAY_LENGTH(scalar_runs),
     };
     for (uint32_t length = 0; result && length <= 200; length += 1)
     {
@@ -257,7 +259,7 @@ static bool pp_test_history_lifetimes(const char* directory)
             const PPSubstitution* y = &pp->substitutions[(second & BUSTER_PP_ORIGIN_INDEX) - 1];
             const PPExpansion* expansion = &pp->history[x->expansion - 1];
             result = x->source == y->source && x->parameter != y->parameter && x->expansion == y->expansion &&
-                     (x->source & ~BUSTER_PP_ORIGIN_INDEX) == BUSTER_PP_ORIGIN_GENERATED &&
+                     x->source != 0 && (x->source & ~BUSTER_PP_ORIGIN_INDEX) == 0 && pp->history[x->source - 1].builtin == PP_BUILTIN_LINE &&
                      expansion->definition != pp->macros[pp->macro_of[expansion->name]].location &&
                      memcmp(pp_location_bytes(pp, expansion->begin), "TWICE(", 6) == 0 && *pp_location_bytes(pp, expansion->end) == ')';
         }
@@ -280,11 +282,10 @@ static bool pp_test_history_lifetimes(const char* directory)
         for (uint32_t token = 6; result && token < 8; token += 1)
         {
             const uint32_t id = pp_history_at(pp, token);
-            result = (id & ~BUSTER_PP_ORIGIN_INDEX) == BUSTER_PP_ORIGIN_GENERATED;
+            result = id != 0 && (id & ~BUSTER_PP_ORIGIN_INDEX) == 0;
             if (result)
             {
-                const PPGenerated* generated = &pp->generated[(id & BUSTER_PP_ORIGIN_INDEX) - 1];
-                result = generated->kind == PP_GENERATED_BUILTIN && pp->history[generated->expansion - 1].builtin == PP_BUILTIN_COUNTER;
+                result = pp->history[id - 1].builtin == PP_BUILTIN_COUNTER && (token == 6 || id != pp_history_at(pp, token - 1));
             }
         }
     }
@@ -295,6 +296,53 @@ static bool pp_test_history_lifetimes(const char* directory)
     }
     unlink(path);
     printf("history lifetimes: %s (redefinition, repeated parameters, retained generated inputs, builtins, recording control)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
+// Exceed every initial history slice, including all three temporary columns. Repeated arguments also read earlier
+// origins after their owning buffer moves, and stringification must retain its source records after that buffer dies.
+static bool pp_test_history_growth(const char* directory, bool with_clang)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/history-growth.c", directory);
+    FILE* file = fopen(path, "w");
+    bool result = file != 0;
+    if (result)
+    {
+        fputs("#define I(x) x x\n#define A 1\n#define S(x) #x\n#define C(a,b) a##b\nI(", file);
+        for (uint32_t i = 0; i < 1100; i += 1)
+        {
+            fputs(" A", file);
+        }
+        fputs(") S(", file);
+        for (uint32_t i = 0; i < 1100; i += 1)
+        {
+            fputs(" a", file);
+        }
+        fputs(")\n", file);
+        for (uint32_t i = 0; i < 600; i += 1)
+        {
+            fputs("C(mis,sing)\n", file);
+        }
+        result = !ferror(file);
+        result = fclose(file) == 0 && result;
+    }
+    const PPOptions options =
+    {
+        .language =
+        {
+            .standard = 2017,
+            .gnu = true,
+        },
+    };
+    char* arguments[] =
+    {
+        "-std=gnu17",
+    };
+    uint64_t tokens = 0;
+    result = result && pp_test_file(1, arguments, &options, path, with_clang, directory, &tokens) && tokens == 2801;
+    unlink(path);
+    printf("history growth: %s (all eight initial slices, repeated arguments, generated sources)\n", result ? "pass" : "FAIL");
     return result;
 }
 
@@ -437,5 +485,6 @@ static bool pp_test_history(const char* directory, bool with_clang)
     printf("history diagnostics: %u of %lu fail%s\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(cases), with_clang ? " (Clang oracle)" : "");
     const bool runs = pp_test_history_runs();
     const bool lifetimes = pp_test_history_lifetimes(directory);
-    return runs && lifetimes && failures == 0;
+    const bool growth = pp_test_history_growth(directory, with_clang);
+    return runs && lifetimes && growth && failures == 0;
 }

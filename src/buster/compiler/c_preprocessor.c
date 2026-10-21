@@ -209,6 +209,7 @@ struct PPTokens
     Arena arenas[4];
     // Temporary buffers only. The final output has no origin column, just PPHistoryRun records.
     uint32_t* origins;
+    uint32_t origin_capacity;
     Arena origin_arena;
 };
 
@@ -574,6 +575,7 @@ struct PPFeature
 #define BUSTER_PP_ORIGIN_GENERATED (2u << 30)
 #define BUSTER_PP_ORIGIN_INDEX ((1u << 30) - 1)
 #define BUSTER_PP_MAX_HISTORY (1u << 26)
+#define BUSTER_PP_INITIAL_HISTORY_BYTES 4096u
 
 typedef struct PPExpansion PPExpansion;
 struct PPExpansion
@@ -606,7 +608,6 @@ typedef enum PPGeneratedKind
 {
     PP_GENERATED_PASTE,
     PP_GENERATED_STRING,
-    PP_GENERATED_BUILTIN,
 } PPGeneratedKind;
 
 typedef struct PPGenerated PPGenerated;
@@ -674,14 +675,20 @@ struct Preprocessor
     uint32_t expansion_location;
     PPExpansion* history;
     uint32_t history_count;
+    uint32_t history_capacity;
     PPSubstitution* substitutions;
     uint32_t substitution_count;
+    uint32_t substitution_capacity;
     PPGenerated* generated;
     uint32_t generated_count;
+    uint32_t generated_capacity;
     PPSource* history_sources;
     uint32_t history_source_count;
+    uint32_t history_source_capacity;
     PPHistoryRun* history_runs;
     uint32_t history_run_count;
+    uint32_t history_run_capacity;
+    Arena history_initial;
     // Only set around synchronous expansion/substitution work; never inferred from a spelling location.
     uint32_t history_current;
     uint32_t history_anchor;
@@ -811,6 +818,8 @@ static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, 
     pp->errors += severity != PP_SEVERITY_WARNING;
     pp->fatal |= severity == PP_SEVERITY_FATAL;
 }
+
+static void* pp_array(Preprocessor* pp, uint64_t count, uint64_t size);
 
 #include "c_preprocessor_history.c"
 
@@ -4168,7 +4177,7 @@ static PPToken pp_number_token(Preprocessor* pp, uint64_t value, uint8_t flags)
     const uint32_t length = (uint32_t)snprintf(digits, sizeof(digits), "%lu", (unsigned long)value);
     const uint32_t location = value == 0 ? pp->zero_location : value == 1 ? pp->one_location : pp_scratch_clean(pp, (const uint8_t*)digits, length);
     return (PPToken){ .kind = C_TOKEN_NUMERIC_CONSTANT, .flags = (uint8_t)(flags | BUSTER_PP_FROM_MACRO), .value = location + length, .location = location,
-                      .origin = pp_history_generated(pp, PP_GENERATED_BUILTIN, location, pp->history_anchor, 0, 0) };
+                      .origin = pp->history_current };
 }
 
 // A string literal of `bytes`, with quotes and backslashes escaped, spelled in the scratch space.
@@ -4201,7 +4210,7 @@ static PPToken pp_string_token(Preprocessor* pp, const uint8_t* bytes, uint32_t 
         n += 1;
         result.location = pp_scratch_clean(pp, text, n);
         result.value = result.location + n;
-        result.origin = pp_history_generated(pp, PP_GENERATED_BUILTIN, result.location, pp->history_anchor, 0, 0);
+        result.origin = pp->history_current;
     }
     scratch_end(scratch);
     return result;
@@ -7227,18 +7236,19 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->capture_frames = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
     if (!options->no_history)
     {
-        pp->history = pp_array(pp, BUSTER_PP_MAX_HISTORY, sizeof(PPExpansion));
-        pp->substitutions = pp_array(pp, BUSTER_PP_MAX_HISTORY, sizeof(PPSubstitution));
-        pp->generated = pp_array(pp, BUSTER_PP_MAX_HISTORY, sizeof(PPGenerated));
-        pp->history_sources = pp_array(pp, BUSTER_PP_MAX_HISTORY, sizeof(PPSource));
-        pp->history_runs = pp_array(pp, (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPHistoryRun));
+        // Five retained tables and three temporary columns share base pages for their first few records. Only a
+        // table that outgrows its slice reserves a large arena, avoiding eight mappings/advice calls on small units.
+        pp->history_initial = arena_reserve(8 * BUSTER_PP_INITIAL_HISTORY_BYTES);
+        pp->history = pp_history_initial(pp, sizeof(PPExpansion), &pp->history_capacity);
+        pp->substitutions = pp_history_initial(pp, sizeof(PPSubstitution), &pp->substitution_capacity);
+        pp->generated = pp_history_initial(pp, sizeof(PPGenerated), &pp->generated_capacity);
+        pp->history_sources = pp_history_initial(pp, sizeof(PPSource), &pp->history_source_capacity);
+        pp->history_runs = pp_history_initial(pp, sizeof(PPHistoryRun), &pp->history_run_capacity);
         PPTokens* buffers[] = { &pp->arguments, &pp->captures, &pp->expansions };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(buffers); i += 1)
         {
             PPTokens* tokens = buffers[i];
-            const uint64_t bytes = ((uint64_t)tokens->capacity + BUSTER_PP_TOKEN_SLACK) * sizeof(uint32_t);
-            tokens->origin_arena = arena_reserve(bytes);
-            tokens->origins = arena_push(&tokens->origin_arena, bytes, 64);
+            tokens->origins = pp_history_initial(pp, sizeof(uint32_t), &tokens->origin_capacity);
             result = result && tokens->origins != 0;
         }
         result = result && pp->history != 0 && pp->substitutions != 0 && pp->generated != 0 && pp->history_sources != 0 && pp->history_runs != 0;
@@ -7368,6 +7378,7 @@ static void pp_release(Preprocessor* pp)
     }
     arena_release(&pp->scratch[0]);
     arena_release(&pp->scratch[1]);
+    arena_release(&pp->history_initial);
     arena_release(&pp->arena);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {

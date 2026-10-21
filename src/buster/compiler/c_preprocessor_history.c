@@ -7,16 +7,74 @@
 // live for the translation unit, including after a definition is replaced or an argument buffer is reclaimed.
 // All links point to older records; diagnostics walk them iteratively, never through recursive calls.
 
+static void* pp_history_initial(Preprocessor* pp, uint32_t size, uint32_t* capacity)
+{
+    *capacity = BUSTER_PP_INITIAL_HISTORY_BYTES / size;
+    return arena_push_array(&pp->history_initial, *capacity, size, 64);
+}
+
+// Grow once from the shared small slice to a table's full virtual reservation. Origins are indices, not pointers,
+// and no caller retains a record pointer across an append, so moving the initial records preserves every link.
+static bool pp_history_grow(Preprocessor* pp, void** records, uint32_t* capacity, uint32_t needed, uint32_t maximum, uint32_t size)
+{
+    bool result = needed <= *capacity;
+    if (!result && needed <= maximum)
+    {
+        void* grown = pp_array(pp, maximum, size);
+        if (grown != 0)
+        {
+            memcpy(grown, *records, (uint64_t)*capacity * size);
+            *records = grown;
+            *capacity = maximum;
+            result = true;
+        }
+    }
+    if (!result)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, needed > maximum ? "expansion history capacity exceeded" : "out of memory for expansion history");
+    }
+    return result;
+}
+
+BUSTER_INLINE bool pp_history_room(Preprocessor* pp, void** records, uint32_t* capacity, uint32_t needed, uint32_t maximum, uint32_t size)
+{
+    return needed <= *capacity || pp_history_grow(pp, records, capacity, needed, maximum, size);
+}
+
+static bool pp_history_origin_grow(Preprocessor* pp, PPTokens* tokens, uint32_t needed)
+{
+    bool result = needed <= tokens->origin_capacity;
+    if (!result)
+    {
+        const uint64_t bytes = ((uint64_t)tokens->capacity + BUSTER_PP_TOKEN_SLACK) * sizeof(uint32_t);
+        tokens->origin_arena = arena_reserve(bytes);
+        uint32_t* grown = arena_push(&tokens->origin_arena, bytes, 64);
+        if (grown != 0)
+        {
+            memcpy(grown, tokens->origins, (uint64_t)tokens->origin_capacity * sizeof(uint32_t));
+            tokens->origins = grown;
+            tokens->origin_capacity = tokens->capacity + BUSTER_PP_TOKEN_SLACK;
+            result = true;
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory for temporary expansion origins");
+        }
+    }
+    return result;
+}
+
+BUSTER_INLINE bool pp_history_origin_room(Preprocessor* pp, PPTokens* tokens, uint32_t needed)
+{
+    return needed <= tokens->origin_capacity || pp_history_origin_grow(pp, tokens, needed);
+}
+
 static uint32_t pp_history_expansion(Preprocessor* pp, PPMacroId macro, uint32_t location, uint32_t parent)
 {
     uint32_t result = 0;
     if (!pp->options.no_history && !pp->fatal)
     {
-        if (pp->history_count == BUSTER_PP_MAX_HISTORY)
-        {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many expansion history records");
-        }
-        else
+        if (pp_history_room(pp, (void**)&pp->history, &pp->history_capacity, pp->history_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPExpansion)))
         {
             const PPMacro* definition = &pp->macros[macro];
             result = ++pp->history_count;
@@ -43,7 +101,7 @@ static void pp_history_change(Preprocessor* pp, uint32_t token, uint32_t origin)
     const uint32_t previous = count != 0 ? pp->history_runs[count - 1].origin : 0;
     if (previous != origin)
     {
-        if (count <= BUSTER_PP_MAX_OUTPUT_TOKENS)
+        if (pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, count + 1, BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPHistoryRun)))
         {
             pp->history_runs[count] = (PPHistoryRun)
             {
@@ -52,17 +110,13 @@ static void pp_history_change(Preprocessor* pp, uint32_t token, uint32_t origin)
             };
             count += 1;
         }
-        else
-        {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many output history runs");
-        }
     }
     pp->history_run_count = count;
 }
 
 static void pp_history_fill(Preprocessor* pp, PPTokens* target, uint32_t begin, uint32_t end, uint32_t origin)
 {
-    if (!pp->options.no_history && begin < end && !pp->fatal)
+    if (!pp->options.no_history && begin < end && !pp->fatal && (target == &pp->output || pp_history_origin_room(pp, target, end)))
     {
         if (target != &pp->output)
         {
@@ -100,7 +154,7 @@ static void pp_history_fill(Preprocessor* pp, PPTokens* target, uint32_t begin, 
 // Copy history alongside a completed token copy, or compress it directly into the output run table.
 static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, const PPTokens* source, uint32_t begin, uint32_t end)
 {
-    if (!pp->options.no_history && begin < end && !pp->fatal)
+    if (!pp->options.no_history && begin < end && !pp->fatal && (target == &pp->output || pp_history_origin_room(pp, target, at + end - begin)))
     {
         if (target != &pp->output)
         {
@@ -122,17 +176,13 @@ static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, con
                 const __m256i before = _mm256_mask_set1_epi32(_mm256_permutexvar_epi32(shifted, values), 1, (int)previous);
                 const __mmask8 changes = _mm256_mask_cmpneq_epi32_mask(valid, values, before);
                 const uint32_t added = (uint32_t)__builtin_popcount(changes);
-                if (added != 0 && added <= (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1 - pp->history_run_count)
+                if (added != 0 && pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, pp->history_run_count + added, BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPHistoryRun)))
                 {
                     const __m256i positions = _mm256_add_epi32(lanes, _mm256_set1_epi32((int)(at + i - begin)));
                     const __m512i records = _mm512_or_si512(_mm512_cvtepu32_epi64(positions), _mm512_slli_epi64(_mm512_cvtepu32_epi64(values), 32));
                     const __m512i packed = _mm512_maskz_compress_epi64(changes, records);
                     _mm512_mask_storeu_epi64(pp->history_runs + pp->history_run_count, (__mmask8)_bzhi_u32(~0u, added), packed);
                     pp->history_run_count += added;
-                }
-                else if (added != 0)
-                {
-                    pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many output history runs");
                 }
                 previous = source->origins[i + count - 1];
             }
@@ -160,11 +210,7 @@ static uint32_t pp_history_substitution(Preprocessor* pp, uint32_t source, uint3
     uint32_t result = 0;
     if (!pp->options.no_history && !pp->fatal)
     {
-        if (pp->substitution_count == BUSTER_PP_MAX_HISTORY)
-        {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many argument history records");
-        }
-        else
+        if (pp_history_room(pp, (void**)&pp->substitutions, &pp->substitution_capacity, pp->substitution_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPSubstitution)))
         {
             const uint32_t id = ++pp->substitution_count;
             pp->substitutions[id - 1] = (PPSubstitution)
@@ -203,11 +249,8 @@ static uint32_t pp_history_generated(Preprocessor* pp, PPGeneratedKind kind, uin
     uint32_t result = 0;
     if (!pp->options.no_history && !pp->fatal)
     {
-        if (pp->generated_count == BUSTER_PP_MAX_HISTORY || count > BUSTER_PP_MAX_HISTORY - pp->history_source_count)
-        {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many generated-token history records");
-        }
-        else
+        if (pp_history_room(pp, (void**)&pp->generated, &pp->generated_capacity, pp->generated_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPGenerated)) &&
+            pp_history_room(pp, (void**)&pp->history_sources, &pp->history_source_capacity, pp->history_source_count + count, BUSTER_PP_MAX_HISTORY, sizeof(PPSource)))
         {
             const uint32_t id = ++pp->generated_count;
             pp->generated[id - 1] = (PPGenerated){
@@ -384,14 +427,13 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
         else
         {
             const PPExpansion* expansion = &pp->history[index];
-            if (expansion->builtin == PP_BUILTIN_NONE)
+            // Builtins already have their identity and invocation in this expansion record. Their spelling is the
+            // token's location, so they need no duplicate PPGenerated record, just the scratch-space note here.
+            notes[count++] = (PPSource)
             {
-                notes[count++] = (PPSource)
-                {
-                    .location = location,
-                    .origin = origin,
-                };
-            }
+                .location = location,
+                .origin = expansion->builtin == PP_BUILTIN_NONE ? origin : 0,
+            };
             location = expansion->begin;
             origin = expansion->parent;
         }

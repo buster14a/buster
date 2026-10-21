@@ -444,17 +444,23 @@ The append-only tables belong to the translation unit:
 - `PPSubstitution` (12 bytes) retains the expansion, parameter occurrence and
   source origin for each argument run. Reusing an expanded argument retains
   its original expansion and creates distinct substitution occurrences.
-- `PPGenerated` (24 bytes) distinguishes pastes, stringifications and builtins.
+- `PPGenerated` (24 bytes) distinguishes pastes and stringifications.
   A paste retains both operand locations and origins; a stringification keeps
   its raw argument's token locations and origins in `PPSource` records (eight
   bytes each). These survive reuse of the temporary argument buffers. Builtins
   retain their identity through the expansion record, even when `0` and `1`
-  reuse the same scratch spelling.
+  reuse the same scratch spelling; they need no duplicate generated record.
 
 Tagged handles distinguish these records from plain file tokens. Every table
 has a checked limit; exhausting it is a fatal diagnostic. The final stream has
 no per-token origin allocation. Temporary origin columns are released with
 their token buffers; all retained tables are released with `pp_release`.
+The eight tables/columns start with four-kilobyte slices in one 32 KiB arena
+of base pages. A slice that fills moves once to its own large reservation;
+origins are indices, so the move preserves links. The initial arena lives until
+release, including the old slices. Small translation units avoid reserving and
+advising eight separate mappings. Argument substitution writes its final
+origin wrappers directly, without first copying origins it would overwrite.
 
 `pp_diagnose_output` is the later parser's entry point: it takes an output token
 index. It uses the same renderer as preprocessor errors. The renderer walks
@@ -477,15 +483,17 @@ they depend on each compiler's allocation order. Real and presumed locations,
 columns, note order and text are compared exactly. Every existing case and
 corpus comparison also compares the complete scalar/vector history tables.
 Separate checks cover guarded input tails, maximal runs across split copies,
-batched lookups, generated-input lifetimes and recording-on/off token equality.
+batched lookups, generated-input lifetimes, growth of all eight initial slices,
+and recording-on/off token equality.
 
 `benchmark-preprocessor --history-cost [options] file...` interleaves the same
 vectorized preprocessor with recording enabled and disabled, reversing order
 each pass. It checks an output digest including spelling locations outside the
 timed interval. It reports retained record bytes per unit (mean and maximum)
 and temporary-origin high-water bytes separately. These are used bytes, not
-RSS or virtual reservations; allocator page rounding and existing source/token
-storage are not included. Target-host measurements are pending.
+RSS or virtual reservations; unused/retired space in the initial 32 KiB arena,
+allocator page rounding and existing source/token storage are not included.
+Target-host measurements are pending.
 
 ### Vectorized kernels and their scalar twins
 
