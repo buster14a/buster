@@ -15,10 +15,11 @@ method, so that the next stage can be tuned the same way. The commands are `buil
 - **One run at a time.** Every build, test, benchmark and `perf` run there goes through
   `EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND...`, one lock per run (AGENTS.md, "Sharing the
   9700X"), pinned to CPU 2 (`taskset -c 2`), the CPU with the `performance` governor and its SMT sibling offline.
-- **Measure in time as well as cycles.** After 30–300 ms of lighter code the clock boosts, and heavy AVX-512 loops then
-  run 5–50% slower for 5–20 ms under the core's power cap (#199). The encoder's and dataflow's benchmarks take
-  `--after-scalar MS` for that state and `--only NAME` for the back-to-back one; measure both
-  (x86-64-encoder.md, "Both states").
+- **Measure in time as well as cycles, in both states.** After 30–300 ms of lighter code the clock boosts, and heavy
+  AVX-512 loops then run 5–50% slower for 5–20 ms, which #199's measurements are consistent with a per-core power cap
+  causing. The encoder's and dataflow's benchmarks take `--after-scalar MS` for that state and `--only NAME` for the
+  back-to-back one; [the coding style](coding-style.md) ("SIMD and Zen 5") says how to measure both, and
+  x86-64-encoder.md ("Both states") has the encoder's.
 - **Measure again after merging main.** In #35, a change of 16 ANDs per group that had measured free cost 2.4% once main's
   register allocation changed under it.
 
@@ -26,8 +27,11 @@ method, so that the next stage can be tuned the same way. The commands are `buil
 
 The noise sets which comparison to use.
 
-- **Variants in one process: about 0.6%.** Two identical copies of the lexer in one process differ by about 0.6%, from
-  where their code lands. `./build.sh lexer-variant NAME=SOURCE...` builds `build/compiler` with each SOURCE, a copy
+- **Variants in one process: up to about 1.5%, with a control.** Variants that take turns in one process see the same
+  clock, caches and corpus, but not the same placement: a copy of the tree's own lexer built as a variant measured
+  1.3–1.5% faster than `c_tokenize` on the 9700X (the C library corpus, 2026-10-22), where two copies in the old harness
+  differed by about 0.6%. So build a copy of the reference as one of the variants and read the others against it.
+  `./build.sh lexer-variant NAME=SOURCE...` builds `build/compiler` with each SOURCE, a copy
   of `c_lexer.c`, as a translation unit of its own (`c_lexer_variant.c`, exporting `c_lexer_variant_NAME`), and
   `benchmark-lexer` then checks each against the tree's `c_tokenize` on every file and times them all in 21 passes,
   in an order that rotates by pass. Each variant's line ends with its change from `c_tokenize`, of the median cycles and
@@ -36,13 +40,12 @@ The noise sets which comparison to use.
 
   ```sh
   cp src/buster/compiler/c_lexer.c ../variants/k1.c   # then edit k1.c
-  EXCLUSIVE_OWNER=me ~/buster-fast-bench/exclusive.sh ./build.sh lexer-variant k1=../variants/k1.c main=../main/src/buster/compiler/c_lexer.c
+  EXCLUSIVE_OWNER=me ~/buster-fast-bench/exclusive.sh ./build.sh lexer-variant control=src/buster/compiler/c_lexer.c k1=../variants/k1.c
   EXCLUSIVE_OWNER=me ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-lexer ~/azp-bench/c-tokenizer/corpus/libc
   EXCLUSIVE_OWNER=me ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-lexer --cplusplus ~/azp-bench/c-tokenizer/corpus-cpp
   ```
 
-  A variant from another tree must keep `c_tokenize`'s interface. Treat differences under 1% as noise; a copy of the
-  reference as a variant tells how much the placement moves.
+  A variant from another tree must keep `c_tokenize`'s interface. Treat a difference within the control's gap as noise.
 - **Builds in turn: about 2%.** The same encoder build measured +2.3% to +5.3% against main over five runs of 7 rounds,
   and a single round can be 5–10% off. `build/compiler ab` runs several trees' builds in turn:
 
@@ -73,7 +76,7 @@ AMD's raw configurations put the event's low byte in bits 0–7, the unit mask i
 | `de_no_dispatch_per_slot.no_ops_from_frontend` | `0x1000001a0` |
 | `de_no_dispatch_per_slot.backend_stalls` | `0x100001ea0` |
 | `ex_ret_brn`, `ex_ret_brn_misp`, `ex_ret_brn_tkn` | `0xc2`, `0xc3`, `0xc4` |
-| the power cap's dispatch slots (PMCx1A0 umask 0x08, #199) | `0x1000008a0` |
+| PMCx1A0 umask 0x08, read as the dispatch slots the power cap takes (inferred, #199) | `0x1000008a0` |
 
 Zen 5 has 8 dispatch slots per cycle (Zen 4 has 6). `perf stat -e de_dispatch_stall_cycle_dynamic_tokens_part1.fp_sch_rsrc_stall`
 counts cycles the FP scheduler was full, and `..._part2.retq` cycles the reorder buffer was: these told the encoder's
@@ -136,7 +139,8 @@ spills and reloads, about 80 64-byte spill stores per 512-byte chunk; two change
 with a memory clobber, after which the masks are read again from their buffer (clang otherwise copied them into new
 spill slots), and forcing the rare paths' helpers inline (a call clobbers every vector register, so clang spilled the
 live bitstrings on the hot path around it). The static counts (`-Rpass-missed=regalloc`, the assembly's comments)
-didn't predict the gains; the runs did.
+didn't predict the gains; the runs did. The commands above, on the 9700X on 2026-10-22, found 6.8% of the current lexer's sampled
+operations at its 560 spills and reloads on the C library corpus.
 
 ### Mispredictions: `branch-misses`
 

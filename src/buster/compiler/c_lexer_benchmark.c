@@ -18,8 +18,8 @@
 // A build made by `./build.sh lexer-variant NAME=SOURCE...` has other lexers compiled in (c_lexer_variant.c, each from
 // its own copy of c_lexer.c): the corpus check then compares each with c_tokenize too, and the benchmark times them
 // beside it, in an order that rotates by pass, and prints each one's change from c_tokenize, of the median cycles and
-// the median of the passes' ratios. Variants in one process differ by about 0.6% when their code is the same (where
-// the code lands), against about 2% between processes.
+// the median of the passes' ratios. Where its code lands moves a variant by up to about 1.5% even when its code is
+// c_tokenize's, so a copy of the reference among the variants is the comparison's control.
 //
 // Layout, in this order:
 //   - Arena: all memory, reserved up front and committed as it's written.

@@ -14,8 +14,8 @@
 // - ab runs `TREE/build/compiler ARGUMENT...` (or TREE itself, when it is a file) for every tree, every argument list
 //   and every round, the trees in an order that rotates by round, each run pinned to --cpu and under --lock (the
 //   9700X's exclusive.sh), which a CI job can then take between two runs. Comparing builds in separate processes has
-//   about 2% of noise on the 9700X; comparing variants inside one process (benchmark-lexer's, build.sh lexer-variant)
-//   has about 0.6%.
+//   about 2% of noise on the 9700X, a single round more; variants inside one process (benchmark-lexer's, build.sh
+//   lexer-variant) take turns in each pass, and a copy of the reference among them measures what placement alone moves.
 // - hot-loops reads `objdump -d --no-show-raw-insn` of the executable and `perf script -F ip,sym,symoff,dsoff` of its
 //   samples, finds each sample of the function by its offset in the file (a static function has a copy in every
 //   translation unit that includes it, and objdump 2.47's --disassemble=NAME prints only one), takes the copy with the

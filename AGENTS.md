@@ -583,9 +583,10 @@ lexers in it, each SOURCE a copy of `c_lexer.c` (or its assembly, from
 `c_lexer_variant_NAME`. `benchmark-lexer` then also compares each with
 `c_tokenize` on every file (a difference fails it), times them in an order
 that rotates by pass, and prints each one's change from `c_tokenize`.
-Variants in one process differ by about 0.6% when their code is the same,
-builds in separate processes by about 2%: `docs/profiling.md` ("Comparing two
-versions") has how to use both.
+Where its code lands moves a variant by up to about 1.5% even when its code
+is `c_tokenize`'s (a copy of it as a variant is the comparison's control), and
+builds in separate processes differ by about 2%: `docs/profiling.md`
+("Comparing two versions") has how to use both.
 
 ## Profiling tools
 
