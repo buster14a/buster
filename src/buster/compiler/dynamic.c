@@ -13,7 +13,9 @@
 //     them by name;
 //   - binding's exports.
 // A static executable's with the C runtime (ExecutableRuntime, dynamic_static_inputs) are crt1.o's ABI note and the
-// link's __tls_get_addr.
+// link's __tls_get_addr. A static PIE's (dynamic_static_pie_inputs) are both: an ExecutableDynamic without an
+// interpreter, a library, versions or exports, with rcrt1.o's ABI note and crti.o's _init and _fini, and the static
+// executable's ExecutableRuntime.
 //
 // main.c includes this file after bind.c and executable.c.
 
@@ -44,6 +46,20 @@ static __attribute__((unused)) void dynamic_static_inputs(ExecutableRuntime* inp
     *inputs = (ExecutableRuntime){
         .note = runtime->abi_note,
         .tls_get_addr = dynamic_global(runtime, bind, "__tls_get_addr"),
+    };
+}
+
+// Fills `dynamic` and `inputs` for a link that `bind` bound against a static PIE's runtime (runtime_import_static_pie),
+// which executable_write takes together for a static PIE: no interpreter, library, versions or exports, rcrt1.o's ABI
+// note, and crti.o's _init and _fini for DT_INIT and DT_FINI, as GNU ld and lld give a static PIE them; and the link's
+// __tls_get_addr, as for a static executable.
+static __attribute__((unused)) void dynamic_static_pie_inputs(ExecutableDynamic* dynamic, ExecutableRuntime* inputs, const Runtime* runtime, const Bind* bind)
+{
+    dynamic_static_inputs(inputs, runtime, bind);
+    *dynamic = (ExecutableDynamic){
+        .note = runtime->abi_note,
+        .init = dynamic_global(runtime, bind, "_init"),
+        .fini = dynamic_global(runtime, bind, "_fini"),
     };
 }
 

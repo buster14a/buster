@@ -835,7 +835,7 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     {
         symbols->source[symbol] = BUSTER_LINK_SOURCE_NONE;
     }
-    else if (runtime->kind == RUNTIME_KIND_STATIC && bind_relaxed_name(link, name))
+    else if (runtime_kind_is_static(runtime->kind) && bind_relaxed_name(link, name))
     {
         // Left undefined, to the relaxation (bind_relaxed_name).
     }
@@ -1249,7 +1249,7 @@ static bool bind_end(Bind* bind, Link* link)
     bind->resolving = true;
     // A static runtime's members all join before anything binds: GNU ld's group scan, then archive order.
     // libc_nonshared.a's join round by round, each after the names that need it bind.
-    const bool static_runtime = bind->runtime->kind == RUNTIME_KIND_STATIC;
+    const bool static_runtime = runtime_kind_is_static(bind->runtime->kind);
     bind->bound = !static_runtime;
     if (bind->error == BIND_ERROR_NONE && static_runtime)
     {
