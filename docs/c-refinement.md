@@ -108,8 +108,11 @@ before, and 11 to 13% over the budget. The rest is here:
   `benchmark-refinement`, 0.12 ms less than the phase.
 - **The kernel itself.** With everything in the caches, it takes 6.9 cycles
   per token on those files, at an IPC of 3.4. That is 23.3 instructions per
-  token, or 59 per identifier counting every pass. Even warm, it is 3% over
-  the budget.
+  token. A profile of its instructions by function (`perf record -e
+  instructions:u`) puts 77% of them in pass B, about 46 per identifier: the
+  hash, the probe, the confirmation of longer spellings, the deferred
+  identifiers and the bookkeeping. The scan and the passes over tokens take
+  the rest, 5.3 per token. Even warm, it is 3% over the budget.
 
 "Next steps" has what would close it: refinement fed a block at a time by the
 lexer (a change to `c_tokenize`'s interface), and a table kept across
