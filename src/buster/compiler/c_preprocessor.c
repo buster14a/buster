@@ -3139,8 +3139,7 @@ static void pp_append_tokens(Preprocessor* pp, const PPTokens* tokens, uint32_t 
             out_locations[count] = locations[i];
             count += 1;
         }
-        pp_history_copy(pp, out, out->count, tokens, begin, end);
-        pp_history_argument(pp, out->count, count, pp->history_anchor);
+        pp_history_argument(pp, tokens, begin, end, out->count, pp->history_anchor);
         out->count = count;
     }
 }

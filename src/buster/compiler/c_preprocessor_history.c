@@ -74,6 +74,10 @@ static void pp_history_fill(Preprocessor* pp, PPTokens* target, uint32_t begin, 
             pp_history_change(pp, begin, origin);
             pp_history_change(pp, end, 0);
         }
+        else if (end - begin == 1)
+        {
+            target->origins[begin] = origin;
+        }
         else if (pp->vectorized)
         {
             const __m512i value = _mm512_set1_epi32((int)origin);
@@ -176,18 +180,20 @@ static uint32_t pp_history_substitution(Preprocessor* pp, uint32_t source, uint3
 }
 
 // One wrapper per contiguous origin run in an argument substitution, including repeated uses of the same parameter.
-static void pp_history_argument(Preprocessor* pp, uint32_t begin, uint32_t end, uint32_t parameter)
+// Read the source directly: copying its origins first would only write values that this pass immediately replaces.
+// A source in expansions is below its current count, so appending wrappers cannot overwrite unread source origins.
+static void pp_history_argument(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t at, uint32_t parameter)
 {
     PPTokens* out = &pp->expansions;
     for (uint32_t i = begin; !pp->options.no_history && i < end && !pp->fatal;)
     {
-        const uint32_t source = out->origins[i];
+        const uint32_t source = tokens->origins[i];
         uint32_t stop = i + 1;
-        while (stop < end && out->origins[stop] == source)
+        while (stop < end && tokens->origins[stop] == source)
         {
             stop += 1;
         }
-        pp_history_fill(pp, out, i, stop, pp_history_substitution(pp, source, parameter));
+        pp_history_fill(pp, out, at + i - begin, at + stop - begin, pp_history_substitution(pp, source, parameter));
         i = stop;
     }
 }
