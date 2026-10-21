@@ -76,6 +76,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <immintrin.h>
+#include "buster/compiler/x86_target.c"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // API
@@ -156,10 +157,15 @@ typedef struct PPOptions PPOptions;
 struct PPOptions
 {
     CLanguage language;
+    // The generated code's instruction set (x86_target.c), from -march and the -m flags (predefines_target): for the
+    // assembler's forms and __has_builtin's target builtins.
+    X86Target target;
+    // Retained independently for the future scheduler; it cannot enable an ISA feature.
+    X86Architecture tune;
     bool freestanding;
     // The target's and the other options' predefined macros (c_predefines.c): -march, the -m feature flags, -O, -f...,
     // -g. All zero is clang's defaults with no option.
-    PredefinesOptions target;
+    PredefinesOptions predefines;
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
     bool scalar;
     bool no_standard_includes;
@@ -4482,6 +4488,11 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
     else if (pp_feature_name(pp, builtin, tokens, first, last, text, &length))
     {
         result = pp_feature(builtin, text, length, pp->options.language.standard, pp->options.clang_features);
+        // The target's builtins (x86_target.c) as clang answers them, in the oracle's mode: buster implements none yet (#148).
+        if (builtin == PP_BUILTIN_HAS_BUILTIN && result == 0 && pp->options.clang_features)
+        {
+            result = x86_target_has_builtin(&pp->options.target, text, length);
+        }
     }
     else
     {
@@ -7014,7 +7025,7 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer, uint32_t* 
         memcpy(buffer + length, pp_predefines_c23, sizeof(pp_predefines_c23) - 1);
         length += sizeof(pp_predefines_c23) - 1;
     }
-    const uint32_t target = predefines_text(&options->target, language, options->freestanding, buffer + length, BUSTER_PREDEFINES_TEXT_BYTES, flt_eval_method);
+    const uint32_t target = predefines_text(&options->predefines, language, options->freestanding, buffer + length, BUSTER_PREDEFINES_TEXT_BYTES, flt_eval_method);
     length = target <= BUSTER_PREDEFINES_TEXT_BYTES ? length + target : BUSTER_PP_PREDEFINES_BYTES + 1;
     // The one macro that isn't clang's (#117: clang's configuration, plus this). --predefines replaces it too, so that
     // test-preprocessor --clang starts from clang's own macros alone.
@@ -7412,7 +7423,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     if (pp->options.predefines_path != 0)
     {
         const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), BUSTER_PP_SYSTEM_FILE);
-        pp->flt_eval_method = predefines_eval_method(&pp->options.target);
+        pp->flt_eval_method = predefines_eval_method(&pp->options.predefines);
         result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE;
         if (result)
         {
@@ -8492,13 +8503,13 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     // -trigraphs, -ftrigraphs and -fno-trigraphs override the mode's default (-1 for none).
     int trigraphs = -1;
     result = quote != 0 && include != 0 && system != 0 && after != 0 && macros != 0 && includes != 0;
-    result = result && predefines_options_initialize(&options->target, arena, (uint32_t)count);
+    result = result && predefines_options_initialize(&options->predefines, arena, (uint32_t)count);
     for (int i = 0; result && i < count; i += 1)
     {
         const char* argument = arguments[i];
         const char* next = i + 1 < count ? arguments[i + 1] : 0;
         // The target's options and the others that change the predefined macros (c_predefines.c) come first.
-        const PredefinesParse predefined = predefines_option(&options->target, argument, next);
+        const PredefinesParse predefined = predefines_option(&options->predefines, argument, next);
         if (predefined != PREDEFINES_PARSE_UNKNOWN)
         {
             result = predefined != PREDEFINES_PARSE_ERROR;
@@ -8625,6 +8636,9 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     options->trigraphs = trigraphs >= 0 ? trigraphs != 0 : !options->language.gnu && options->language.standard < 2023;
     options->macros = macros;
     options->includes = includes;
+    // The generated code's instruction set, from the target options as clang resolves them; it reports what doesn't
+    // resolve (an unknown CPU, -mfpmath against the features), as clang's driver does.
+    result = result && predefines_target(&options->predefines, &options->target, &options->tune);
     return result && *input != 0;
 }
 

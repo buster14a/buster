@@ -77,6 +77,9 @@ jobs:
       - name: Test the x86-64 encoder
         run: ./build/compiler test-x86-encoder
 
+      - name: Test generated-code ISA policy
+        run: ./build/compiler test-x86-target
+
       - name: Benchmark the x86-64 encoder
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
@@ -216,7 +219,8 @@ jobs:
           ./build/compiler test-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: Benchmark the preprocessor on main.c
-        # The preprocessor's own predefines follow -march=native as clang's do (c_predefines.c).
+        # The preprocessor's own predefines follow the options as clang's do (c_predefines.c): -march=native's and
+        # -funsigned-char's among them.
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c

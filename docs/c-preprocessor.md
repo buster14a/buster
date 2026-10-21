@@ -674,6 +674,15 @@ about 13,000 instructions (an empty file's `-E` run is 1.6 million, mostly
 preprocessing the 470 `#define` lines), and `-march=native`'s CPUID adds a few
 microseconds.
 
+**The generated code's instruction set.** `predefines_target` gives
+`x86_target.c`'s `X86Target` from the same resolution
+([Generated-code instruction set](x86-target.md)): the features it knows by
+name, with RDTSCP and CLFLUSH, which clang has no feature for, from its profile
+where `-march` names one of its six (`native`'s from CPUID), and the profile's
+architecture (`X86_ARCH_OTHER` for clang's other CPUs). The assembler's forms
+and `__has_builtin`'s target builtins follow it, and the test checks the map
+against the generated tables (each name a feature, with `x86_target.c`'s macro).
+
 ### Tokens, locations and the output
 
 A token in a buffer or the output has four parts:
@@ -1114,7 +1123,8 @@ the mispredictions it saves.
 - **Predefines and keywords.** The cases and files under `--clang` give our side
   clang's predefines, so `--clang` checks our built-in ones separately:
   - In ten language modes (`c89` to `gnu23`), with `-ffreestanding` and with
-    `-O2`, 14 option sets in all, `pp_predefines` must give `clang -dM -E` line
+    `-O2`, the six target profiles and independent tuning, 22 option sets in all,
+    `pp_predefines` must give `clang -dM -E` line
     for line. Only the three macros that name clang's patch release are left
     out.
   - `c_predefines.c`'s generated tables must be what the generator learns from

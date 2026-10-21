@@ -1328,6 +1328,74 @@ static bool predefines_test_dump(const char* directory)
     return result && failures == 0;
 }
 
+// predefines_target, without clang: the map to x86_target.c's features names, for each, a feature with its macro;
+// x86_target_parse's six profiles give its targets bit for bit; and -m switches, clang's other CPUs and -mtune give
+// what they resolve to.
+static bool predefines_test_target(void)
+{
+    bool result = true;
+    for (uint32_t f = 0; f < X86_FEATURE_COUNT; f += 1)
+    {
+        const char* name = predefines_x86_features[f];
+        const char* macro = x86_features[f].macro;
+        const int32_t index = name != 0 ? predefines_feature_index(name, strlen(name)) : -1;
+        char line[128];
+        snprintf(line, sizeof(line), "#define %s 1\n", macro != 0 ? macro : "");
+        const bool named = name != 0 ? index >= 0 && macro != 0 && strstr(predefines_features[index].macros, line) != 0 : macro == 0;
+        if (!named)
+        {
+            printf("predefines target: x86_target.c's feature %u (%s) isn't clang's %s\n", f, macro != 0 ? macro : "no macro", name != 0 ? name : "(none)");
+        }
+        result &= named;
+    }
+    static const char* const profiles[] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "znver5", "native" };
+    for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(profiles); p += 1)
+    {
+        const PredefinesOptions options = { .march = profiles[p] };
+        X86Target expected;
+        X86Target target;
+        X86Architecture tune;
+        const bool same = x86_target_parse(profiles[p], strlen(profiles[p]), &expected) && predefines_target(&options, &target, &tune) &&
+                          target.features == expected.features && target.architecture == expected.architecture &&
+                          target.native_znver5 == expected.native_znver5 && tune == X86_ARCH_BASELINE;
+        if (!same)
+        {
+            printf("predefines target: -march=%s gives features %#llx (architecture %u), x86_target_parse %#llx (%u)\n", profiles[p], (unsigned long long)target.features,
+                   target.architecture, (unsigned long long)expected.features, expected.architecture);
+        }
+        result &= same;
+    }
+    // -mavx2 on x86-64 (with what avx2 implies and the soft rules add), -mno-avx512f on znver5, skylake, and -mtune.
+    const uint64_t avx512 = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512CD) | BUSTER_X86_FEATURE(AVX512DQ) |
+                            BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BF16) | BUSTER_X86_FEATURE(AVX512BITALG) | BUSTER_X86_FEATURE(AVX512IFMA) |
+                            BUSTER_X86_FEATURE(AVX512VBMI) | BUSTER_X86_FEATURE(AVX512VBMI2) | BUSTER_X86_FEATURE(AVX512VNNI) |
+                            BUSTER_X86_FEATURE(AVX512VP2INTERSECT) | BUSTER_X86_FEATURE(AVX512VPOPCNTDQ);
+    uint16_t avx2[1] = { (uint16_t)(predefines_feature("avx2") << 1 | 1) };
+    uint16_t no_avx512f[1] = { (uint16_t)(predefines_feature("avx512f") << 1) };
+    const PredefinesOptions with_avx2 = { .features = avx2, .feature_count = 1, .mtune = "znver5" };
+    const PredefinesOptions without_avx512f = { .march = "znver5", .features = no_avx512f, .feature_count = 1, .mtune = "skylake" };
+    const PredefinesOptions skylake = { .march = "skylake", .mtune = "generic" };
+    X86Target target;
+    X86Architecture tune;
+    const uint64_t v2 = BUSTER_X86_FEATURE(SSE3) | BUSTER_X86_FEATURE(SSSE3) | BUSTER_X86_FEATURE(SSE41) | BUSTER_X86_FEATURE(SSE42) |
+                        BUSTER_X86_FEATURE(POPCNT) | BUSTER_X86_FEATURE(CRC32);
+    bool switches = predefines_target(&with_avx2, &target, &tune) &&
+                    target.features == (v2 | BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(XSAVE)) &&
+                    target.architecture == X86_ARCH_BASELINE && tune == X86_ARCH_ZNVER5;
+    X86Target znver5;
+    switches = switches && x86_target_parse("znver5", 6, &znver5) && predefines_target(&without_avx512f, &target, &tune) &&
+               target.features == (znver5.features & ~avx512) && target.architecture == X86_ARCH_ZNVER5 && tune == X86_ARCH_OTHER;
+    switches = switches && predefines_target(&skylake, &target, &tune) && target.architecture == X86_ARCH_OTHER && tune == X86_ARCH_BASELINE &&
+               (target.features & BUSTER_X86_FEATURE(AVX2)) != 0 && (target.features & (avx512 | BUSTER_X86_FEATURE(RDTSCP) | BUSTER_X86_FEATURE(CLFLUSH))) == 0;
+    if (!switches)
+    {
+        printf("predefines target: -mavx2, -march=znver5 -mno-avx512f, -march=skylake or -mtune give the wrong target\n");
+    }
+    result &= switches;
+    printf("predefines target: %s (x86_target.c's features, its six profiles, -m switches, other CPUs and -mtune)\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
 // The checks --clang runs (see the file's comment).
 static bool predefines_test_run(const char* directory, uint64_t seed)
 {

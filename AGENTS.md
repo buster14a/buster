@@ -158,6 +158,14 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/x86_target.c` defines generated-code ISA profiles, with
+  x86-64 baseline as the default, independently of the compiler host.
+  `x86_target_forms.c` supplies explicit, fail-closed form eligibility and
+  scalar/vector table builders. `test-x86-target` checks the policy and Clang
+  predefines; `benchmark-x86-target` measures table construction.
+  `docs/x86-target.md` records the API, current catalogue coverage and the
+  selector/corpus acceptance still pending for #180.
+
 - `src/buster/compiler/assembler.c` is the callable GNU assembly frontend, with
   AVX-512 and scalar paths and shared form matching in `x86_match.c`.
   `./build/compiler assemble -o output.o input.s` uses it through the existing
@@ -2008,8 +2016,9 @@ reads clang's own predefines for the options through `--predefines`, so that
 only preprocessing is compared (the 9700X's clang names another patch release).
 Without files, `--clang` also checks the built-in predefines, the keywords and
 the features:
-- in 14 option sets (the ten modes from `c89` to `gnu23`, and `-ffreestanding`
-  and `-O2`), `pp_predefines` must give `clang -dM -E` line for line, but for
+- in 22 option sets (the ten modes from `c89` to `gnu23`, `-ffreestanding`,
+  `-O2`, two combinations, the six ISA profiles of `docs/x86-target.md` and two
+  with `-mtune`), `pp_predefines` must give `clang -dM -E` line for line, but for
   the patch release's three macros;
 - `c_predefines.c`'s generated tables (each x86-64 feature's flag, closures and
   macros, each `-march` CPU's macro name and features, the `-mtune` names) must

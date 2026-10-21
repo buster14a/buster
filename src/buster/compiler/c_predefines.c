@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <cpuid.h>
 #include <immintrin.h>
+#include "buster/compiler/x86_target.c"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Features and the generated tables
@@ -794,8 +795,10 @@ typedef enum PredefinesFloat
 typedef struct PredefinesOptions PredefinesOptions;
 struct PredefinesOptions
 {
-    // -march's value (a predefines_cpus name or "native"), or null for x86-64.
+    // -march's value (a predefines_cpus name or "native"), or null for x86-64; -mtune's (a predefines_tunes name), or
+    // null for none.
     const char* march;
+    const char* mtune;
     // The -m feature flags in order: (feature << 1) | on, with -mapx-inline-asm-use-gpr32's feature apart, as the
     // driver puts it after the others. `features` has room for BUSTER_PREDEFINES_FLAGS_PER_ARGUMENT per argument.
     uint16_t* features;
@@ -1088,6 +1091,7 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     }
     else if (predefines_starts(argument, "-mtune="))
     {
+        options->mtune = argument + 7;
         if (!predefines_tune_valid(argument + 7))
         {
             fprintf(stderr, "error: unknown target CPU '%s'\n", argument + 7);
@@ -1590,6 +1594,112 @@ static bool predefines_resolve(const PredefinesOptions* options, PredefinesFeatu
         fprintf(stderr, "error: the '%s' unit is not supported with this instruction set\n", options->fpmath == BUSTER_PREDEFINES_FPMATH_387 ? "387" : "sse");
         result = false;
     }
+    return result;
+}
+
+// The clang feature behind each of x86_target.c's features (X86Feature), by which predefines_target finds it among the
+// resolved ones: none for RDTSCP and CLFLUSH, which clang has no feature for.
+static const char* const predefines_x86_features[X86_FEATURE_COUNT] = {
+    [X86_FEATURE_SSE3] = "sse3",
+    [X86_FEATURE_SSSE3] = "ssse3",
+    [X86_FEATURE_SSE41] = "sse4.1",
+    [X86_FEATURE_SSE42] = "sse4.2",
+    [X86_FEATURE_CRC32] = "crc32",
+    [X86_FEATURE_POPCNT] = "popcnt",
+    [X86_FEATURE_CX16] = "cx16",
+    [X86_FEATURE_SAHF] = "sahf",
+    [X86_FEATURE_AVX] = "avx",
+    [X86_FEATURE_AVX2] = "avx2",
+    [X86_FEATURE_BMI] = "bmi",
+    [X86_FEATURE_BMI2] = "bmi2",
+    [X86_FEATURE_F16C] = "f16c",
+    [X86_FEATURE_FMA] = "fma",
+    [X86_FEATURE_LZCNT] = "lzcnt",
+    [X86_FEATURE_MOVBE] = "movbe",
+    [X86_FEATURE_XSAVE] = "xsave",
+    [X86_FEATURE_AVX512F] = "avx512f",
+    [X86_FEATURE_AVX512BW] = "avx512bw",
+    [X86_FEATURE_AVX512CD] = "avx512cd",
+    [X86_FEATURE_AVX512DQ] = "avx512dq",
+    [X86_FEATURE_AVX512VL] = "avx512vl",
+    [X86_FEATURE_ADX] = "adx",
+    [X86_FEATURE_AES] = "aes",
+    [X86_FEATURE_AVX512BF16] = "avx512bf16",
+    [X86_FEATURE_AVX512BITALG] = "avx512bitalg",
+    [X86_FEATURE_AVX512IFMA] = "avx512ifma",
+    [X86_FEATURE_AVX512VBMI] = "avx512vbmi",
+    [X86_FEATURE_AVX512VBMI2] = "avx512vbmi2",
+    [X86_FEATURE_AVX512VNNI] = "avx512vnni",
+    [X86_FEATURE_AVX512VP2INTERSECT] = "avx512vp2intersect",
+    [X86_FEATURE_AVX512VPOPCNTDQ] = "avx512vpopcntdq",
+    [X86_FEATURE_AVXVNNI] = "avxvnni",
+    [X86_FEATURE_CLFLUSHOPT] = "clflushopt",
+    [X86_FEATURE_CLWB] = "clwb",
+    [X86_FEATURE_CLZERO] = "clzero",
+    [X86_FEATURE_FSGSBASE] = "fsgsbase",
+    [X86_FEATURE_GFNI] = "gfni",
+    [X86_FEATURE_INVPCID] = "invpcid",
+    [X86_FEATURE_MOVDIR64B] = "movdir64b",
+    [X86_FEATURE_MOVDIRI] = "movdiri",
+    [X86_FEATURE_MWAITX] = "mwaitx",
+    [X86_FEATURE_PCLMUL] = "pclmul",
+    [X86_FEATURE_PKU] = "pku",
+    [X86_FEATURE_PREFETCHI] = "prefetchi",
+    [X86_FEATURE_PRFCHW] = "prfchw",
+    [X86_FEATURE_RDPID] = "rdpid",
+    [X86_FEATURE_RDPRU] = "rdpru",
+    [X86_FEATURE_RDRND] = "rdrnd",
+    [X86_FEATURE_RDSEED] = "rdseed",
+    [X86_FEATURE_SHA] = "sha",
+    [X86_FEATURE_SHSTK] = "shstk",
+    [X86_FEATURE_SSE4A] = "sse4a",
+    [X86_FEATURE_VAES] = "vaes",
+    [X86_FEATURE_VPCLMULQDQ] = "vpclmulqdq",
+    [X86_FEATURE_WBNOINVD] = "wbnoinvd",
+    [X86_FEATURE_XSAVEC] = "xsavec",
+    [X86_FEATURE_XSAVEOPT] = "xsaveopt",
+    [X86_FEATURE_XSAVES] = "xsaves",
+};
+
+// x86_target.c's architecture for a -march or -mtune name: one of its six profiles, or X86_ARCH_OTHER for clang's other
+// CPUs. "generic" (-mtune's default) is the baseline's.
+static X86Architecture predefines_x86_architecture(const char* name)
+{
+    static const char* const profiles[] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "znver5", "native" };
+    X86Architecture result = strcmp(name, "generic") == 0 ? X86_ARCH_BASELINE : X86_ARCH_OTHER;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(profiles); i += 1)
+    {
+        result = strcmp(name, profiles[i]) == 0 ? (X86Architecture)i : result;
+    }
+    return result;
+}
+
+// The generated code's instruction set for the options (#180): x86_target.c's features that the resolved ones have, as
+// predefines_x86_features names them, with RDTSCP and CLFLUSH from x86_target_parse's profile where -march names one
+// (native's from CPUID), and that profile's architecture (X86_ARCH_OTHER for clang's other CPUs). `tune` gets
+// -mtune's architecture (the baseline's without one). Returns false if the options don't resolve (reported on stderr).
+static bool predefines_target(const PredefinesOptions* options, X86Target* target, X86Architecture* tune)
+{
+    PredefinesFeatures features;
+    int32_t cpu;
+    const bool result = predefines_resolve(options, &features, &cpu);
+    const char* march = options->march != 0 ? options->march : "x86-64";
+    X86Target profile = { .architecture = predefines_x86_architecture(march) };
+    if (profile.architecture != X86_ARCH_OTHER)
+    {
+        x86_target_parse(march, strlen(march), &profile);
+    }
+    *target = (X86Target){
+        .features = profile.features & (BUSTER_X86_FEATURE(RDTSCP) | BUSTER_X86_FEATURE(CLFLUSH)),
+        .architecture = profile.architecture,
+        .native_znver5 = profile.native_znver5,
+    };
+    for (uint32_t f = 0; f < X86_FEATURE_COUNT; f += 1)
+    {
+        const char* name = predefines_x86_features[f];
+        target->features |= (uint64_t)(name != 0 && predefines_has(features, predefines_feature(name))) << f;
+    }
+    *tune = options->mtune != 0 ? predefines_x86_architecture(options->mtune) : X86_ARCH_BASELINE;
     return result;
 }
 
