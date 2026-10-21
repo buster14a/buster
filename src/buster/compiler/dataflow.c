@@ -272,9 +272,10 @@ static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_
     // the current block, so derived pointers into in_rows must retain their possible overlap.
     if (row_words != 0 && block_count != 0)
     {
+        // Only in is cleared, as in the loop for one-vector rows: every sweep stores every word of every block's out
+        // row, padding included, and nothing reads out (docs/dataflow.md, "Clearing and storing out").
         const uint64_t matrix_bytes = (uint64_t)block_count * row_words * sizeof(uint64_t);
         memset(in_rows, 0, matrix_bytes);
-        memset(out_rows, 0, matrix_bytes);
         bool changed;
         do
         {
