@@ -191,8 +191,10 @@ designs and the compilers already built this way.
   linker, with the 9700X measurements of mold, wild, lld and the kernel's file
   costs behind it, and the order to build it in. The lane base layer, the
   encoder's fixups, the representation, the object writer, the direct path's
-  executables (static ones and dynamic PIEs) and the import and binding of the
-  C runtime below are implemented; the rest of the linker isn't yet.
+  executables (static ones and dynamic PIEs) and the import, binding and
+  snapshot of the C runtime below are implemented, and `benchmark-link`
+  measures the direct path against the linkers; the rest of the linker isn't
+  yet.
 - `src/buster/compiler/lane.c` is the lane base layer that every phase of the
   object writer and the linker runs on (groups of threads that run the same
   code, their barrier and broadcast, `lane_range`, and arenas).
@@ -264,6 +266,14 @@ designs and the compilers already built this way.
   place. `snapshot_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-snapshot` runs them) and `snapshot_benchmark.c`
   provides `benchmark-snapshot`.
+- `src/buster/compiler/link_benchmark.c` provides `benchmark-link`, the whole
+  link (step 5's last part): generated programs that call libc linked by the
+  direct path (the runtime opened from its snapshot, binding and the dynamic
+  PIE's write) and, from the object writer's objects, by GNU ld, lld, mold and
+  wild as the design's appendix links them, with the work each does.
+  `floors_benchmark.c` provides `benchmark-floors`: what the machine and the
+  kernel charge a linker (the design's "The floors"). The two take over the
+  appendix's harness and floor programs.
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_encode`'s offsets and rounds over the branches alone
@@ -344,6 +354,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler benchmark-executable
 ./build/compiler test-snapshot
 ./build/compiler benchmark-snapshot
+./build/compiler benchmark-link
+./build/compiler benchmark-floors
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
 ./build/compiler test-preprocessor --clang
@@ -1273,14 +1285,16 @@ must have the same relocations in `.rela.dyn` alone and run alike. The checks:
 
 With `--cross-check`, which needs `ld.lld`, `cc`, `objdump` and `readelf`, the
 bound link's objects (the object writer's) are linked by lld as a PIE against
-`libc.so.6` and the loader alone (with `-z pack-relative-relocs` when libc
-defines `GLIBC_ABI_DT_RELR`), and the two files must have the same dynamic
-symbols (name, binding, type, whether defined, version), the same symbols with
-a GOT slot the loader fills, the same `R_X86_64_64`s with their addends, as
-many RELATIVE pointers outside the GOT, the same init and fini arrays' sizes,
-the same `DT_NEEDED`, `DT_INIT`, `DT_FINI`, `DT_GNU_HASH` and `DT_VERNEED`,
-and `.eh_frame_hdr` tables (lld's with `--eh-frame-hdr`, as GCC's driver asks)
-that index the same functions with the same ranges. And each program runs
+`libc.so.6` and the loader alone (with `--build-id`, and with `-z
+pack-relative-relocs` when libc defines `GLIBC_ABI_DT_RELR`), and the two files
+must have the same segments (the program headers' types in order, their flags
+and the `PT_LOAD`s' alignments), the same dynamic symbols (name, binding, type,
+whether defined, version), the same symbols with a GOT slot the loader fills,
+the same `R_X86_64_64`s with their addends, as many RELATIVE pointers outside
+the GOT, the same init and fini arrays' sizes, the same `DT_NEEDED`, `DT_INIT`,
+`DT_FINI`, `DT_GNU_HASH` and `DT_VERNEED`, and `.eh_frame_hdr` tables (lld's
+with `--eh-frame-hdr`, as GCC's driver asks) that index the same functions with
+the same ranges. And each program runs
 again with a library preloaded, which `cc` builds: its `write` walks the stack
 with libgcc's `_Unwind_Backtrace`, which finds each frame's FDE through
 `PT_GNU_EH_FRAME` and the table, and the walk must go through `main` and end
@@ -1380,6 +1394,82 @@ directory is under `$HOME`, btrfs there). `docs/object-writer-and-linker.md`
 ("The runtime snapshot") has the numbers. The default 9700X job runs it after
 the tests, pinned to one allowed CPU; like the others, its measurements are
 informational.
+
+## Link benchmark
+
+`./build/compiler benchmark-link [--functions LIST [--filler N]] [--seed N]
+[--directory PATH] [--cache PATH] [--cpus LIST] [--linkers LIST] [--runs N]
+[--only direct|linkers] [--keep]` (about 50 s on the 9700X) links generated
+programs that call libc, without `SIZE32` and `SIZE64`, by the direct path and
+by each linker, and reports medians:
+
+- the programs: one worker and 2,000 workers (about hello world's and tcc's
+  outputs), and one of synth's shape, 102,400 workers in 512 units with up to
+  64 filler instructions each (44 MB); or with `--functions`, a program of
+  each count of workers, of up to `--filler` (8) filler instructions each;
+- the direct path, on a lane per CPU of `--cpus` (CPU 2): `runtime_open`,
+  which must load the snapshot in `--cache` (the cache directory), and
+  `bind_begin`; then, after the program's atoms, `bind_end` and
+  `dynamic_inputs`, and `executable_write` over the file of the run before
+  into a directory under `--directory` (`TMPDIR` or `/tmp`). Each part is the
+  median of its runs after a warm-up, each run from the link as it was before
+  the part, put back outside the time, and must write the warm-up's file again
+  (its build ID); the link is the parts' sum. Then its work: the bytes
+  written, the fixups applied, the names looked up, and over the warm-ups the
+  page faults and how much the peak resident set grew; and the floor, one
+  `pwrite` of the output;
+- the objects, each unit's as `-c` writes them, on the same lanes;
+- each linker of `--linkers` (`ld.bfd`, `ld.lld`, `mold` and `wild`) linking
+  them with the appendix's command, the clang driver's with the matched
+  options, with its own threads and on one (pinned to the first of `--cpus`):
+  the wall time from `posix_spawn` to the wait's return, over the output of
+  the run before, the median of 41 runs after a warm-up with a 20 ms pause
+  before each, or past 4 MB of output 11 runs after 200 ms, and GNU ld's 5
+  after 500 ms (`--runs N` sets every count). Then one run more without
+  forking, through the command itself as a helper (`--rusage`), whose rusage
+  gives its page faults and peak resident set: a program spawned from the
+  benchmark would have the benchmark's peak resident set as its own when that
+  was higher, which Linux carries over at `exec`. The helper's own floor, a
+  program that does nothing, is printed first.
+
+Every program written must run and print what its model predicts. `--only
+direct` and `--only linkers` run one side, and `--keep` leaves the directory.
+Run it under the 9700X's lock without `taskset`: it pins its lanes and the
+linkers' runs on one thread itself, and the linkers' other runs need every CPU.
+`docs/object-writer-and-linker.md` ("The whole link") has the numbers. The
+default 9700X job runs it after benchmark-snapshot, with its lane on the job's
+first allowed CPU; like the others, its measurements are informational.
+
+## Floors benchmark
+
+`./build/compiler benchmark-floors [--directory PATH] [--cpu N] [--only
+files|threads|calls|memory|teardown]` (about 26 s on the 9700X's tmpfs)
+measures what the machine and the kernel charge a linker however it works,
+each figure a median, pinned to `--cpu` (CPU 2):
+
+- files: the output written from memory into `--directory` (`TMPDIR` or
+  `/tmp`) at 16 KB, 256 KB, 4 MB, 64 MB and 512 MB, as a new file, with
+  `O_TRUNC`, in place, as a temporary file renamed over it, and through a
+  shared mapping (new, with `fallocate` and `MADV_HUGEPAGE`, and in place),
+  each time with its open and its close, 15 runs, or 5 with a `syncfs` after
+  each from 64 MB;
+- threads: 64 MB and 512 MB written by 1, 2, 4 and 8 threads on the first
+  CPUs this process may use, each a contiguous share, by `pwrite` (new and in
+  place) and through a shared mapping, starting the threads outside the time;
+- calls: what a linker pays per input file, on this process's `libc.so.6`:
+  `open` and `close`, `stat`, `mmap` and `munmap` with and without touching
+  every page, and `pread` of the whole file;
+- memory: 256 MB of anonymous memory touched for the first time with base
+  pages and with `MADV_HUGEPAGE`, and `memcpy`, non-temporal stores and
+  `memset` from 256 KB to 256 MB;
+- teardown: a child on another CPU touches 64 MB, 1 GB and 4 GB, tells this
+  process through a pipe and exits: the time from the message to `waitpid`'s
+  return, which a linker that forks hides from its caller.
+
+Run it under the 9700X's lock without `taskset`, and with `--directory` on each
+file system to measure. `docs/object-writer-and-linker.md` ("The floors") has
+the numbers. The default 9700X job runs it after benchmark-link; like the
+others, its measurements are informational.
 
 ## Dataflow tests
 

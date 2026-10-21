@@ -1541,11 +1541,13 @@ static void dynamic_test_frames(DynamicTestTally* tally, const Link* link, uint3
 // Against lld
 //
 // With --cross-check, the bound link's objects (the object writer's) linked by ld.lld as a PIE, against only
-// libc.so.6 and the loader in GCC's order (bind_test_link_arguments), and what the two files say compared: their
-// dynamic symbols (name, binding, type, whether defined, version name), the symbols that have a slot the loader fills
-// (GLOB_DAT, TPOFF64, or lld's JUMP_SLOT for a PLT entry, where the stub reads the GOT's slot instead), the
-// R_X86_64_64s with their addends, as many RELATIVE relocations of pointers (those outside the GOT, where lld relaxes
-// some loads that the writer reads through slots), the init and fini arrays' sizes, DT_NEEDED, DT_INIT and DT_FINI.
+// libc.so.6 and the loader in GCC's order (bind_test_link_arguments), with --build-id as the design's matched options
+// have it, and what the two files say compared: their segments (the program headers' types in order, their flags, and
+// the PT_LOADs' alignments), their dynamic symbols (name, binding, type, whether defined, version name), the symbols
+// that have a slot the loader fills (GLOB_DAT, TPOFF64, or lld's JUMP_SLOT for a PLT entry, where the stub reads the
+// GOT's slot instead), the R_X86_64_64s with their addends, as many RELATIVE relocations of pointers (those outside the
+// GOT, where lld relaxes some loads that the writer reads through slots), the init and fini arrays' sizes, DT_NEEDED,
+// DT_INIT and DT_FINI.
 
 typedef struct DynamicTestSymbol DynamicTestSymbol;
 struct DynamicTestSymbol
@@ -1742,6 +1744,10 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
             arguments[6] = "-z";
             arguments[7] = "pack-relative-relocs";
         }
+        // A build ID, as the writer's file has, whose note makes a segment.
+        const uint32_t last = count + (relr ? 2 : 0);
+        arguments[last] = "--build-id";
+        arguments[last + 1] = 0;
     }
     const bool linked = written && object_test_run(arguments, output_path, error_path) == 0;
     dynamic_test_expect(tally, linked, "lld links the objects", 0);
@@ -1751,6 +1757,24 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
     dynamic_test_expect(tally, !linked || theirs.valid, "lld's output read", 0);
     if (ours.valid && theirs.valid)
     {
+        // The segments: the same program headers in the same order, with the same flags, and the PT_LOADs' alignments.
+        const uint32_t our_segments = ours.header->e_phnum;
+        const uint32_t their_segments = theirs.header->e_phnum;
+        bool same_segments = our_segments == their_segments;
+        for (uint32_t i = 0; same_segments && i < our_segments; i += 1)
+        {
+            const Elf64_Phdr* our_segment = &ours.program_headers[i];
+            const Elf64_Phdr* their_segment = &theirs.program_headers[i];
+            same_segments = our_segment->p_type == their_segment->p_type && our_segment->p_flags == their_segment->p_flags &&
+                            (our_segment->p_type != PT_LOAD || our_segment->p_align == their_segment->p_align);
+        }
+        for (uint32_t i = 0; !same_segments && i < our_segments + their_segments; i += 1)
+        {
+            const Elf64_Phdr* segment = i < our_segments ? &ours.program_headers[i] : &theirs.program_headers[i - our_segments];
+            printf("  %s: %s segment %u: type 0x%x, flags %u, alignment 0x%llx\n", name, i < our_segments ? "our" : "lld's", i < our_segments ? i : i - our_segments,
+                   segment->p_type, segment->p_flags, (unsigned long long)segment->p_align);
+        }
+        dynamic_test_expect(tally, same_segments, "lld's segments", our_segments * 100 + their_segments);
         const uint64_t capacity = link->symbols.count + link->fixups.count + 16;
         DynamicTestSymbol* our_symbols = BUSTER_ARENA_PUSH_ARRAY(arena, DynamicTestSymbol, capacity);
         DynamicTestSymbol* their_symbols = BUSTER_ARENA_PUSH_ARRAY(arena, DynamicTestSymbol, capacity);
