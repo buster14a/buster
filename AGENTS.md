@@ -1072,16 +1072,26 @@ the 9700X, and 0.26 s with `--cross-check`) checks `import.c` and
   `__dso_handle` and `__TMC_END__`, and `crt1.o`'s ABI note; the archives in
   GCC's group order, each one's members one after another; `main` bound to
   the program, `__libc_start_main` to `libc.a`'s member,
-  `__gmon_start__` to nothing, `__TMC_END__` to `crtend.o`, and
+  `__gmon_start__` to nothing, `__TMC_END__` to `crtend.o`,
+  `_dl_relocate_static_pie` to `crt1.o`'s empty one, and
   `_GLOBAL_OFFSET_TABLE_` and the IRELATIVE relocations' bounds to the
-  linker, and nothing to a shared library; `memcpy` an IFUNC of `libc.a`'s,
-  `_nl_current_LC_CTYPE_used` absolute, and `libgcc.a`'s priorities; each
-  object's COMDAT groups as its `ImportObject` has them, with the same
-  signature numbers for groups of the same signature and different ones
-  otherwise; each piece's strong references as a scan of its symbols finds
-  them, with the member each loads, and each global name's defining member;
-  `link_check` on the whole runtime; and every crt object and member taking
-  the vector path.
+  linker, and nothing to a shared library; the names its linker defines
+  among the global names, the linker's, and no other; `memcpy` an IFUNC of
+  `libc.a`'s, `_nl_current_LC_CTYPE_used` absolute, and `libgcc.a`'s
+  priorities; each object's COMDAT groups as its `ImportObject` has them,
+  with the same signature numbers for groups of the same signature and
+  different ones otherwise; each piece's strong references as a scan of its
+  symbols finds them, with the member each loads, and each global name's
+  defining member; `link_check` on the whole runtime; and every crt object
+  and member taking the vector path;
+- the static PIE's runtime: `runtime_import_static_pie`, checked as the
+  static runtime is: `rcrt1.o`, `crtbeginS.o` and `crtendS.o`, with the
+  same archives; `_dl_relocate_static_pie` bound to `libc.a`'s
+  `dl-reloc-static-pie.o`, which relocates the executable, and its
+  `_DYNAMIC` to the linker; the IRELATIVE relocations' bounds, which
+  `libc.a` refers to weakly and a static PIE's linker doesn't define, to
+  nothing; and with `--cross-check`, every relocation compared with
+  readelf's, as the static runtime's are.
 
 `--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
 version, type, binding and size) and references with `readelf -W --dyn-syms`,
@@ -1205,10 +1215,10 @@ paths, which must make the same link and join the same members:
   `link_check`; one symbol per global name and none of a shared library;
   every fixup's target defined, absolute, the static linker's, a weak
   reference to nothing, or `__tls_get_addr`, left to the relaxation; `main`
-  the program's, `__libc_start_main` a member's, `_init` crti.o's and
-  `__dso_handle` crtbeginT.o's; and each joined object's atoms, in link
-  order, but those of a COMDAT group whose signature an object before it
-  has, with their priorities;
+  the program's, `__libc_start_main` a member's, `_init` crti.o's,
+  `__dso_handle` crtbeginT.o's and `_dl_relocate_static_pie` crt1.o's; and
+  each joined object's atoms, in link order, but those of a COMDAT group
+  whose signature an object before it has, with their priorities;
 - static rules, on links made by hand: a strong reference to a name nothing
   defines (an error naming it); strong and weak references to
   `__tls_get_addr` (left undefined); the static linker's names (the
@@ -1228,6 +1238,18 @@ paths, which must make the same link and join the same members:
   compiles (hello, stdio, threads, jumps and weak-puts), each imported as the
   program, bound and checked as the static programs are, and linked by both
   linkers, with the same members, to run with the program's status.
+
+Then the static programs, and with `--cross-check` the C programs (compiled
+with `-fPIE`), against the static PIE's runtime
+(`runtime_import_static_pie`), by both paths, which must make the same link
+and join the same members, checked as against the static runtime: the
+members the oracle's scan loads, among them `libc.a`'s
+`dl-reloc-static-pie.o`, which `rcrt1.o` makes join by not defining
+`_dl_relocate_static_pie`; that name the member's, its `_DYNAMIC` the
+linker's and `__dso_handle` crtbeginS.o's; and with `--cross-check`, each
+linked by `cc -static-pie` with GNU ld (`--trace` twice) and with lld
+(`--why-extract`), which must load the same members and run as the model
+predicts, or with the program's status.
 
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
 removed at the end unless `--keep`. The default 9700X job runs it with
@@ -1584,9 +1606,9 @@ like the others, its measurements are informational.
 
 `./build/compiler test-snapshot [--seed N] [--functions N] [--directory PATH]
 [--keep]` (about 0.27 s on the 9700X) checks `snapshot.c` with this system's
-runtimes, a dynamic PIE's and a static executable's, in a directory of its own
-under `--directory` (`TMPDIR` or `/tmp` by default), which it removes unless
-`--keep`:
+runtimes, a dynamic PIE's, a static executable's and a static PIE's, in a
+directory of its own under `--directory` (`TMPDIR` or `/tmp` by default),
+which it removes unless `--keep`:
 
 - round trip: the imported runtime written as a snapshot and loaded back must
   have the import's records, every one that binding and a dynamic PIE read
@@ -1596,45 +1618,52 @@ under `--directory` (`TMPDIR` or `/tmp` by default), which it removes unless
   over the file it maps. Then the same for the static runtime
   (`runtime_import_static`), with its kind, its archives, its members'
   references (with the members they load) and COMDAT groups and its global
-  names' members;
-- links and static links: test-link's two sets that call libc and a program
-  of `--functions` workers (2,000 by default), bound by both of binding's
-  paths against the imported runtime and against a loaded one: the same links
-  and bindings, written as dynamic PIEs, or against the static runtime as
-  static executables, by 1 and 8 lanes into the same bytes, which run;
+  names' members, and for the static PIE's (`runtime_import_static_pie`);
+- links, static links and static PIE links: test-link's two sets that call
+  libc and a program of `--functions` workers (2,000 by default), bound by
+  both of binding's paths against the imported runtime and against a loaded
+  one: the same links and bindings, written as dynamic PIEs, or against the
+  static runtime as static executables and against the static PIE's as static
+  PIEs, by 1 and 8 lanes into the same bytes, which run;
 - opening: `runtime_open` in a directory two levels below one that exists,
   which it makes private: imported and written, then loaded; with no
   directory, or without an identity, imported and nothing written; and where
   the directory can't be made, the runtime still imported, the failure named;
-- kinds: `runtime_open_static` imported and written, then loaded, with the
-  static runtime's records; the dynamic runtime's snapshot beside it, the two
-  the directory's only files; and each kind's snapshot renamed to the other
-  kind's name, stale there, imported again and written over;
+- kinds: `runtime_open_static` and `runtime_open_static_pie`, each imported
+  and written, then loaded, with its kind's records; the dynamic runtime's
+  snapshot beside them, the three (`runtime.snapshot`,
+  `runtime-static.snapshot` and `runtime-static-pie.snapshot`) the
+  directory's only files; each kind's snapshot loaded as each other kind,
+  stale; and each kind's snapshot renamed to the next kind's name in turn,
+  stale there, imported again and written over;
 - staleness: snapshots with probes of the test's own files, each changed one
   way (rewritten in place to the same size, its mode changed, replaced by a
   rename, removed, created where a probe found nothing, a file added to a
   probed directory, written with its times put back), and one written by
   another executable, must be stale, and `runtime_open` must rebuild them;
-- invalid files: 1,600 damaged copies (cut short, one byte longer, a byte of
-  the directory changed at sampled offsets and in every byte of the header)
-  must be invalid, and so must 10 whose header was changed and then rehashed
+- invalid files, of the dynamic PIE's runtime's snapshot and of the static
+  PIE's: 1,600 damaged copies (cut short, one byte longer, a byte of the
+  directory changed at sampled offsets and in every byte of the header), each
+  made in place over the snapshot and repaired after its load, must be
+  invalid, and so must 10 whose header was changed and then rehashed
   (another version or magic, a region misaligned, running or starting past
   the end or of the wrong size, counts out of range, the directory ending
   before its last region), which only the header's own checks catch;
-  `runtime_open` must replace them; a directory and a FIFO at the snapshot's
-  path must neither block a link (run in a child under an alarm) nor fail it,
-  the FIFO replaced and the directory left with nothing beside it;
+  `runtime_open` must replace them with the kind's runtime; a directory and
+  a FIFO at the snapshot's path must neither block a link (run in a child
+  under an alarm) nor fail it, the FIFO replaced and the directory left with
+  nothing beside it;
 - damaged pieces, of each kind's snapshot: a byte of the pieces' records
   changed at 123 offsets (at each 1/61 of them, and the first and last of
   each of their regions), each copy of which must load with every piece
   current but the one whose records hold the byte, by the test's own reading
   of the layout (none for a byte of padding or of a column no piece's hash
   covers). Then a program bound against a snapshot with a damaged piece, by
-  each path: `crt1.o`'s (or `Scrt1.o`'s), `crtend.o`'s, or a member the
-  program joins must fail the binding with `BIND_ERROR_SNAPSHOT`, and a member
-  it doesn't join must bind as against the whole snapshot. After a failure,
-  `snapshot_discard` and `runtime_open` import the runtime and write a
-  snapshot that loads;
+  each path: `crt1.o`'s (or `Scrt1.o`'s, or `rcrt1.o`'s), `crtend.o`'s (or
+  `crtendS.o`'s), or a member the program joins must fail the binding with
+  `BIND_ERROR_SNAPSHOT`, and a member it doesn't join must bind as against
+  the whole snapshot. After a failure, `snapshot_discard` and `runtime_open`
+  import the runtime and write a snapshot that loads;
 - concurrency: eight processes opening the runtime at once in an empty
   directory must each get it and leave one snapshot, which loads, and no other
   file;
