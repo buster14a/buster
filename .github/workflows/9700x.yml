@@ -172,6 +172,19 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-snapshot
 
+      - name: Benchmark the whole link against GNU ld, lld, mold and wild
+        # Without taskset: it pins its own lane and the linkers' runs on one thread, and the linkers' other runs need
+        # every CPU.
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          ./build/compiler benchmark-link --cpus "$cpu"
+
+      - name: Benchmark the floors
+        # Without taskset too: it pins itself, and its writes from several threads take the first CPUs it may use.
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          ./build/compiler benchmark-floors --cpu "$cpu"
+
       - name: Test token refinement
         run: ./build/compiler test-refinement src
 

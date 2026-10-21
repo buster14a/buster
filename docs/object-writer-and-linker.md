@@ -9,14 +9,15 @@ machine code and data into files:
 
 The lane base layer, the encoder's fixups, the representation, the object
 writer, the direct path's executables (static ones without libc, and dynamic
-PIEs against glibc) and the import and binding of the C runtime they need are
-implemented (`src/buster/compiler/lane.c`, `x86_64_encoder.c`, `link.c`,
-`object_writer.c`, `import.c`, `runtime.c`, `bind.c`, `executable.c` and
-`dynamic.c`, with generated test programs in `link_program.c`); the rest of
-the linker isn't yet. The document records the
-measurements on the Ryzen 7 9700X that the design rests on, the design itself,
-and the order to build it in, as `docs/x86-64-encoder.md` does for the
-encoder.
+PIEs against glibc) and the import, binding and snapshot of the C runtime they
+need are implemented (`src/buster/compiler/lane.c`, `x86_64_encoder.c`,
+`link.c`, `object_writer.c`, `import.c`, `runtime.c`, `bind.c`,
+`executable.c`, `dynamic.c` and `snapshot.c`, with generated test programs in
+`link_program.c`), and `benchmark-link` measures the whole link against the
+linkers ("The whole link"); the rest of the linker isn't yet. The document
+records the measurements on the Ryzen 7 9700X that the design rests on, the
+design itself, and the order to build it in, as `docs/x86-64-encoder.md` does
+for the encoder.
 
 The premise is that most of what mold and wild do on every link is work this
 compiler can avoid altogether. What remains is memory traffic, and the design
@@ -69,17 +70,21 @@ the output on tmpfs:
 | tcc (440 KB) | 3.30 / 6.75 ms | 2.14 / 2.95 ms | 50–120 µs | 25–60× |
 | 102,400 functions (46 MB) | 96 / 38 ms | 140 / 25 ms | 4–10 ms | 2.5–6× |
 
-Step 4's static executables without libc, written by one lane from generated
-programs of 3.9 KB, 397 KB and 35.5 MB, take 2.7 µs, 70 µs and 8.5 ms in
-place on tmpfs (3.4 µs, 87 µs and 9.9 ms as new files), and the largest
-4.1 ms with eight lanes ("The first executables"). The same programs bound
-against glibc and written as dynamic PIEs take 4.4 µs, 73 µs and 8.6 ms
-(5.4 µs, 89 µs and 10.0 ms as new files), and the largest 4.2 ms with eight
-lanes ("The dynamic PIE"): a few percent over the static executables, all of
-it before the file is written. With unwind tables, as a compiler's objects
-have them, the static executables are 4.6 KB, 510 KB and 45.6 MB and take
-3.1 µs, 75 µs and 10.0 ms, and the largest 5.8 ms with eight lanes ("The
-unwind tables"), most of the difference spent writing 10 MB more.
+The direct path meets them. `benchmark-link` links generated programs that
+call libc of these sizes, the largest of synth's shape (its 102,400 functions
+in 512 units, 44 MB of output), by the direct path, from the snapshot's load
+to the closed file, and from the object writer's objects of the same
+programs by each linker, as the appendix measured them ("The whole link"):
+
+| Program (output) | Direct path, 1 lane | mold, 1 thread / 15 threads | wild, 1 / 15 | Factor (vs wild at 15 threads) |
+| --- | ---: | ---: | ---: | ---: |
+| 1 worker (7.2 KB) | 14.5 µs | 2.52 / 5.52 ms | 1.34 / 2.54 ms | 175× |
+| 2,000 workers (513 KB) | 92.8 µs | 3.29 / 6.63 ms | 2.51 / 2.92 ms | 31× |
+| 102,400 workers (44 MB) | 7.33 ms | 99.9 / 37.0 ms | 100 / 24.8 ms | 3.4× |
+
+On these programs mold, wild and lld take what they took on hello world, tcc
+and synth, within 5% with their own threads. The writer's phases are in "The
+first executables", "The dynamic PIE" and "The unwind tables".
 
 Orders of magnitude are there for programs up to a few megabytes, where
 fixed costs dominate. For a 46 MB output both sides spend their time in the
@@ -159,7 +164,9 @@ moved by more than 5%:
 | hello, mold, one thread | 2.43 | 2.44 |
 | hello, wild, one thread | 1.27 | 1.34 |
 
-The full table is in the appendix, with the exact commands.
+The full table is in the appendix, with the exact commands. `benchmark-link`
+now links generated programs of these sizes and of synth's shape the same way,
+on which the linkers take within 5% of these times ("The whole link").
 
 For scale, tinycc, a compiler that links its own output, takes:
 
@@ -222,7 +229,14 @@ homogeneous arrays, with copying fused with relocation (§3, §4.10).
 ## The floors
 
 What the machine and the kernel charge, measured on the 9700X with one thread
-pinned to CPU 2 (medians of 5–15 runs).
+pinned to CPU 2 (medians of 5–15 runs). `benchmark-floors` measures all of it
+again. A run on 2026-10-21 (kernel 6.18.50) reproduced the file writes from
+4 MB up within 11%, but `O_TRUNC` on btrfs (1.5 ms for 4 MB rather than
+10.4), the smaller ones within a third, and the small calls within 13%, but
+touching all of `libc.so.6` (5.9 µs rather than 8.2). Writing from several
+threads on tmpfs reached 12–24% fewer GB/s, but `pwrite` in place, and tearing
+down base pages took twice as long: 24 ms and 104 ms for 1 GB and 4 GB (1.2 ms
+and 4.6 ms with huge pages).
 
 **Creating the output file** (µs; GB/s in parentheses):
 
@@ -1727,6 +1741,103 @@ the entries 1.00 and 3.14; the sorted check 0.073, and the sort 3.40.
   registers made the count 0.70 ns per FDE (from 1.0 to 1.8) and the sorted
   check 0.072 (from 0.287), 13 µs instead of 52 for the largest program.
 
+#### The whole link
+
+`benchmark-link` measures what "Summary"'s targets are about: the whole link
+of a program that calls libc, by the direct path and by the linkers, on the
+same program. The programs are generated as `benchmark-executable`'s are, but
+without `SIZE32` and `SIZE64`, which wild 0.10 doesn't link: one worker, of
+hello world's output size; 2,000 workers, of tcc's; and one of synth's shape,
+its 102,400 functions in 512 units of 200, each with up to 64 filler
+instructions, which come to 44 MB of output where synth's come to 46, with
+1.33 million fixups where synth's objects have 1.02 million relocations.
+
+- **The direct path** runs as a compiler runs it, on one lane: `runtime_open`
+  from the snapshot and `bind_begin`; then, after the program's atoms (its
+  code generation, outside the time), `bind_end`, `dynamic_inputs` and
+  `executable_write`, over the output of the run before. Each part is the
+  median of its runs, each from the link as it was before the part, and
+  every run must write the same file (its build ID); the link is the parts'
+  sum.
+- **The linkers** link the object writer's objects of the same program with
+  the appendix's command, the clang driver's with the matched options, timed
+  as the appendix timed them, from `posix_spawn` to the wait's return, with
+  their own threads (15 on the 9700X) and on one. Every output must run and
+  print what the program's model predicts.
+
+Medians on the 9700X in µs, the outputs on tmpfs over the file of the run
+before (a second run gave the same within 4%):
+
+| | 1 worker | 2,000 workers | 102,400 workers |
+| --- | ---: | ---: | ---: |
+| **Direct path, 1 lane** | **14.5** | **92.8** | **7,330** |
+| `runtime_open` | 9.1 | 9.4 | 11.8 |
+| `bind_begin` | 0.5 | 2.1 | 86.9 |
+| `bind_end` and `dynamic_inputs` | 0.4 | 1.0 | 36.3 |
+| `executable_write` | 4.6 | 80.3 | 7,190 |
+| Direct path, 8 lanes | 19.6 | 57.9 | 4,310 |
+| One `pwrite` of the output | 0.7 | 12.1 | 2,920 |
+| The objects (`-c`), 1 lane | 5.4 | 128 | 16,830 |
+| GNU ld | 5,430 | 9,060 | 354,000 |
+| lld, its threads / 1 | 5,890 / 4,710 | 6,920 / 5,820 | 57,300 / 99,500 |
+| mold, its threads / 1 | 5,520 / 2,520 | 6,630 / 3,290 | 37,000 / 99,900 |
+| wild, its threads / 1 | 2,540 / 1,340 | 2,920 / 2,510 | 24,800 / 100,000 |
+
+Its work and theirs, for the program of synth's shape. The direct path's
+page faults and memory are its warm-ups' (`getrusage`, and the growth of the
+peak resident set); the linkers' are those of one run more without forking,
+through a helper, with their own threads:
+
+| | Bytes written | Page faults | Memory |
+| --- | ---: | ---: | ---: |
+| Direct path | 43,978,312 | 13 | 6.5 MB more resident |
+| GNU ld | 49,248,600 | 38,045 | 171 MB peak resident |
+| lld | 49,242,936 | 37,678 | 303 MB |
+| mold | 53,737,480 | 17,002 | 317 MB |
+| wild | 49,255,659 | 20,292 | 207 MB |
+
+The direct path applies 1,332,827 fixups and looks up the program's 103,962
+global names, each once in the snapshot's index; the linkers read 512 objects
+of 96.2 MB, with 1,332,809 relocations and 673,314 symbols, besides the C
+runtime's files, `libc.so.6`'s 3,170 definitions among them.
+
+- **The linkers take what they took on the appendix's programs.** With
+  their own threads, mold, wild and lld take within 5% of what they took on
+  hello world, tcc and synth (GNU ld 10–14% less on the small ones). On one
+  thread so do mold and lld, within 7%; wild takes 17% longer at tcc's size
+  and 29% less at synth's, and on this program the three take within 1% of
+  each other (`perf stat`: 1.16 to 1.66 billion instructions in 97 to 102 ms
+  of task-clock).
+- **Small links are the snapshot's.** One worker's link takes 14.5 µs, 9.1 of
+  them `runtime_open`, of which 4.1 are its probes' `stat`s ("The runtime
+  snapshot"), and 4.6 the write. More lanes cost a small link more than they
+  save.
+- **Large links are the write's.** The program of synth's shape spends
+  7.19 ms of 7.33 writing, 5.69 of them on its chunks, patching 1.33 million
+  fixups, hashing and writing 44 MB, where one `pwrite` of the output takes
+  2.92. Eight lanes take 4.31 ms, 1.5 times that floor.
+- **The `-c` path pays before any linker starts.** Writing the objects takes
+  16.8 ms on one lane, 2.3 times the direct path's whole link, into 2.2 times
+  the output's bytes.
+- **The outputs hold what each linker writes.** The linkers' have a symbol
+  table, which the direct path doesn't write yet, and other sections besides:
+  lld's output is 12% larger, mold's 22%. The direct path's link adds 6.5 MB
+  to the compiler's resident set, where the linkers' processes peak at 171 to
+  317 MB (76 MB for lld's link of one worker), their own code and libraries
+  among it.
+- **A program of `benchmark-executable`'s 180,000 workers** (45.7 MB, with
+  2.34 million fixups: 1.8 times this program's, half of them kinds that the
+  tests need and a compiled program rarely has, as "Patching and writing"
+  says) takes 10.5 ms on one lane and 5.8 on eight. GNU ld takes 825 ms on
+  it, lld 114 and 175 (its threads and one), mold 58.5 and 173, and wild
+  39.3 and 173.
+
+How the counts are taken: a process spawned by the benchmark itself would
+have the benchmark's peak resident set as its own, which Linux carries over to
+the new program at `exec` from the memory it was spawned from. So the counted
+run goes through a helper, the same executable run again, whose peak a program
+that does nothing measures: 57 page faults and 7.3 MB, below every linker's.
+
 #### Synthetic sections
 
 | Section | Contents |
@@ -2711,17 +2822,18 @@ and with this document updated with what was measured:
    time, it reports the work done: bytes written, fixups applied, names looked
    up, page faults and peak memory.
 
-   In progress, in four parts: the runtime's files found and imported, each
-   reader with a vector path and an exact one (`import.c`, `runtime.c`,
-   `test-import` and `benchmark-import`, done: "The runtime snapshot" and
-   "Step 5's phases, data-parallel"); the runtime in the program's link,
-   bound (`bind.c`, `test-bind` and `benchmark-bind`, done: "Step 5's phases,
+   Done, in four parts: the runtime's files found and imported, each reader
+   with a vector path and an exact one (`import.c`, `runtime.c`,
+   `test-import` and `benchmark-import`: "The runtime snapshot" and "Step 5's
+   phases, data-parallel"); the runtime in the program's link, bound
+   (`bind.c`, `test-bind` and `benchmark-bind`: "Step 5's phases,
    data-parallel"); the dynamic PIE (`executable.c`'s dynamic mode,
-   `dynamic.c`, `test-dynamic` and `benchmark-executable`'s PIE rows, done:
-   "The dynamic PIE"); the snapshot itself (`snapshot.c`, `test-snapshot`
-   and `benchmark-snapshot`, done: "The runtime snapshot"); `.eh_frame` for
-   the generated programs and `.eh_frame_hdr` (done: "The unwind tables");
-   then `benchmark-link`.
+   `dynamic.c`, `test-dynamic` and `benchmark-executable`'s PIE rows: "The
+   dynamic PIE"); the snapshot itself (`snapshot.c`, `test-snapshot` and
+   `benchmark-snapshot`: "The runtime snapshot"), `.eh_frame` for the
+   generated programs and `.eh_frame_hdr` ("The unwind tables"), and
+   `benchmark-link`, which meets the targets ("The whole link"), with
+   `benchmark-floors`, the appendix's floors.
 6. **`-static`:** libc.a's closure, IRELATIVE for its IFUNCs, static TLS.
    Then `-static-pie` and `-shared`.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
@@ -2758,8 +2870,9 @@ and with this document updated with what was measured:
 - uops.info's Zen 5 measurements for the gather, scatter and compress
   instructions above.
 - The measurements on the 9700X: the appendix has the inputs, the exact
-  commands and the methods. The harness becomes `benchmark-link` and the floor
-  commands in step 5, inside `build/compiler` like every other benchmark.
+  commands and the methods. The harness is now `benchmark-link` and the floor
+  programs `benchmark-floors`, inside `build/compiler` like every other
+  benchmark.
 
 ## Appendix: how the numbers were measured
 
@@ -2778,7 +2891,10 @@ and with this document updated with what was measured:
 
 Every run took the machine's lock (`~/buster-fast-bench/exclusive.sh`), one
 run per lock. One-thread runs are pinned with `taskset -c 2`. The scripts are
-in `~/buster-fast-bench/linker-baseline/` there.
+in `~/buster-fast-bench/linker-baseline/` there, with the inputs below. The
+harness is now `benchmark-link`, which takes the linkers' times this way on
+generated programs ("The whole link"), and the floor programs are
+`benchmark-floors`.
 
 **Inputs.**
 
@@ -2883,7 +2999,7 @@ LINKER --hash-style=gnu --build-id --eh-frame-hdr -m elf_x86_64 [-z now --no-gc-
 - `--build-id` without a style is each linker's default.
 
 **Timing.** A harness forks and execs the linker, with stdout and stderr on
-`/dev/null`, and waits for it.
+`/dev/null`, and waits for it (`benchmark-link` spawns it with `posix_spawn`).
 
 | Runs | Pause between runs |
 | --- | --- |
@@ -2911,8 +3027,8 @@ thread.
 | synth | 343.5 | 58.4 | 38.0 | 25.9 | 106.9 | 96.4 | 140.0 |
 | synth, `-g` | 480.7 | 77.5 | 49.7 | 43.3 | 164.1 | 146.1 | 236.6 |
 
-**File and memory floors.** One thread on CPU 2, medians of 15 runs (5 at 64 MB
-and above).
+**File and memory floors**, which `benchmark-floors` takes. One thread on CPU 2,
+medians of 15 runs (5 at 64 MB and above).
 
 - Between runs at 64 MB and above, a `syncfs`, outside the timed region.
 - The source is an anonymous buffer with `MADV_HUGEPAGE`, filled before
@@ -2934,7 +3050,10 @@ and above).
   contiguous Nth of the file.
 - **Teardown:** a child touches N MiB of anonymous memory, tells the parent
   through a pipe and exits. The time is from the message to `waitpid`'s
-  return.
+  return. `benchmark-floors`'s child sends the time it sends the message, from
+  which the parent measures: on the parent's CPU, the child can exit before
+  the parent reads the message. It runs the child on another CPU than the
+  parent's when the parent may use one.
 - **Small calls:** 1,000 of each, timed together.
 
 **The object writer.** `benchmark-object-writer` pinned to CPU 2, with the

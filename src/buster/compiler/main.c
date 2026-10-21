@@ -325,6 +325,10 @@ int run_executable_benchmark(int argc, char** argv);
 #include "buster/compiler/snapshot.c"
 #include "buster/compiler/snapshot_test.c"
 int run_snapshot_benchmark(int argc, char** argv);
+// The link benchmark (the direct path against the object writer and the linkers, on the same programs) and the floors'
+// (what the machine and the kernel charge a linker) are other translation units.
+int run_link_benchmark(int argc, char** argv);
+int run_floors_benchmark(int argc, char** argv);
 
 // Branch sizing (each branch's rel8 or rel32 form inside a function, before it's encoded), the functions its tests
 // generate, and its tests, for the test-branch-sizing command. Its benchmark is another translation unit.
@@ -458,6 +462,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-snapshot") == 0)
     {
         result = run_snapshot_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-link") == 0)
+    {
+        result = run_link_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-floors") == 0)
+    {
+        result = run_floors_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-branch-sizing") == 0)
     {
