@@ -683,6 +683,7 @@ struct ParseTestKernelTally
     uint64_t random_twins;
     uint64_t wide_blocks;
     uint64_t statement_twins;
+    uint64_t check_twins;
     uint64_t fallback_items;
 };
 
@@ -1007,6 +1008,33 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
         {
             result += parse_test_check_statements(parser, pp, name, kernels, &buffers, &copies, count, tally);
         }
+        // K6 in AVX-512 against its twin, from the twins' roles: the same flags and classes, alone and with every second
+        // or third block the twin's.
+        {
+            const ParseCheckFrames frames = parse_check_frames(kernels);
+            memcpy(copies.flags, kernels->flags, count);
+            parse_check_scalar(kernels, names, parser->tokens.flags, count, copies.twin_typed, &frames, kernels->check_classes, 0, 0);
+            memcpy(copies.roles, kernels->check_classes, count);
+            memcpy(copies.starts, kernels->flags, count);
+            static const uint32_t periods[] = { 0, 2, 3 };
+            for (uint32_t p = 0; p < sizeof(periods) / sizeof(periods[0]); p += 1)
+            {
+                memcpy(kernels->flags, copies.flags, count);
+                uint64_t twins = 0;
+                parse_check_avx512_period(kernels, names, parser->tokens.flags, count, copies.twin_typed, &twins, periods[p]);
+                tally->check_twins += p == 0 ? twins : 0;
+                first = parse_test_first_byte(copies.starts, kernels->flags, count);
+                first = first != BUSTER_PARSE_NONE ? first : parse_test_first_byte(copies.roles, kernels->check_classes, count);
+                if (first != BUSTER_PARSE_NONE)
+                {
+                    parse_test_report("%s: K6 (every %u blocks the twin's) differs at token %u: twin flag %u class %s, vector flag %u class %s\n", name, periods[p], first,
+                                      copies.starts[first], parse_class_names[copies.roles[first]], kernels->flags[first], parse_class_names[kernels->check_classes[first]]);
+                    parse_test_print_context(parser, pp, first);
+                    result += 1;
+                }
+            }
+            memcpy(kernels->flags, copies.starts, count);
+        }
         parse_kernels_predeclared(kernels, parser->predeclared, false);
         // The twins together, with the fallback: on a valid unit, the scalar parser's tree.
         const ParseInput input = {
@@ -1204,7 +1232,8 @@ static uint32_t parse_test_explain(char** files, uint32_t file_count, const PPOp
                 parse_parents_scalar(&kernels, count);
                 parse_statements(&kernels, count, statements);
                 memset(kernels.flags, 0, count);
-                parse_check_scalar(&kernels, names, parser.tokens.flags, count, typed, kernels.check_frames, classes, modes, reasons);
+                const ParseCheckFrames frames = parse_check_frames(&kernels);
+                parse_check_scalar(&kernels, names, parser.tokens.flags, count, typed, &frames, classes, modes, reasons);
                 tokens += count;
                 for (uint32_t i = 0; i < count; i += 1)
                 {
@@ -1648,9 +1677,9 @@ static uint32_t parse_test_files(char** files, uint32_t file_count, const PPOpti
            (unsigned long long)tally.accepted, (unsigned long long)(tally.parse_issues + tally.other_issues), clang != 0 ? "" : " (without clang: every file must parse)",
            (unsigned long long)tally.mismatches);
     printf("paths: %llu units, %u where the paths or a kernel and its twin differ; the fallback took %llu top-level declarations; K2 left %llu blocks to the "
-           "twin's loop from random roles, K4 had %llu blocks in 16-bit lanes, K5 left %llu units to its twin\n",
+           "twin's loop from random roles, K4 had %llu blocks in 16-bit lanes, K5 left %llu units to its twin, K6 %llu blocks\n",
            (unsigned long long)kernels.units, paths_differ, (unsigned long long)kernels.fallback_items, (unsigned long long)kernels.random_twins,
-           (unsigned long long)kernels.wide_blocks, (unsigned long long)kernels.statement_twins);
+           (unsigned long long)kernels.wide_blocks, (unsigned long long)kernels.statement_twins, (unsigned long long)kernels.check_twins);
     return failures + (uint32_t)(tally.mismatches != 0);
 }
 

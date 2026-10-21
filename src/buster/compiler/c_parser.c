@@ -4128,8 +4128,14 @@ struct ParseKernels
     uint32_t* typedef_tokens;
     uint8_t* typedef_scopes;
     uint32_t typedef_count;
-    // K6's twin's frames, one per node depth.
-    struct ParseCheckFrame* check_frames;
+    // K6's frames, an entry per node depth, and each token's class.
+    uint8_t* check_group;
+    uint8_t* check_kind;
+    uint8_t* check_part;
+    uint8_t* check_items;
+    uint8_t* check_typed;
+    uint8_t* check_after_body;
+    uint8_t* check_classes;
     // What the kernels report.
     bool unbalanced;
     bool unsupported;
@@ -6130,21 +6136,35 @@ static bool parse_check_starts(bool first_in_group, uint8_t previous_role, uint8
     return first_in_group || pred == PARSE_PRED_ITEM || pred == PARSE_PRED_HEAD || previous == PARSE_ROLE_SEPARATOR;
 }
 
-// A frame of the twin's: per node depth, the group's type, what its current item is, its part, how many items it has
-// started (to 3), how many `;` it has seen (for's clauses), whether the specifiers before its opener's keyword had a type
-// (for _Alignas's closer, which is a specifier as an attribute is), whether the last token at the depth closed a tag's
-// body (or was an attribute specifier after one), and its current item's first token.
-typedef struct ParseCheckFrame ParseCheckFrame;
-struct ParseCheckFrame
+// What K6 carries per node depth (its frames, which the twin and the vector kernel share): the open group's type,
+// what its current item is (BUSTER_PARSE_ITEM_*), its part, how many items it has started (to 3), whether the
+// specifiers before its opener's keyword had a type (for _Alignas's closer, which is a specifier as an attribute is),
+// and whether the last token at the depth closed a tag's body (or was an attribute specifier after one). An array of
+// bytes each, by node depth.
+typedef struct ParseCheckFrames ParseCheckFrames;
+struct ParseCheckFrames
 {
-    uint8_t group;
-    uint8_t kind;
-    uint8_t part;
-    uint8_t items;
-    uint8_t terminators;
-    uint8_t typed;
-    uint8_t after_body;
-    uint32_t start;
+    uint8_t* group;
+    uint8_t* kind;
+    uint8_t* part;
+    uint8_t* items;
+    uint8_t* typed;
+    uint8_t* after_body;
+};
+
+// What K6 carries from token to token: the class, role, node depth, mode, item and start bit of the token before, and
+// the class of the one before that.
+typedef struct ParseCheckCarry ParseCheckCarry;
+struct ParseCheckCarry
+{
+    uint8_t before_previous;
+    uint8_t previous;
+    uint8_t previous_role;
+    uint8_t previous_mode;
+    uint8_t previous_items;
+    uint8_t previous_start;
+    uint8_t previous_group;
+    uint32_t previous_depth;
 };
 
 // Whether a token of kind `kind` (before one of virtual kind `next`) may follow a tag's body, as the scalar parser's
@@ -6225,132 +6245,171 @@ static const char* const parse_check_mode_names[PARSE_CHECK_MODE_COUNT] =
 #undef BUSTER_PARSE_MODE_NAME
 };
 
-// K6, the twin: every token's mode from a frame per node depth (`frames` has a slot per token and one more), then the
-// checks, which flag the tokens that fail them. `names` are the tokens' IdentIds, `line_flags` their output flags
-// (BUSTER_PP_START_OF_LINE) and `typed` K2's typed state per token. For the tests, `classes`,
-// `modes` and `reasons` (each 0, or a byte per token) get each token's class, mode and failed checks (BUSTER_PARSE_CHECK_*;
-// an END failure is the token's before it, which ends its group).
-static void parse_check_scalar(ParseKernels* kernels, const uint32_t* names, const uint8_t* line_flags, uint32_t count, const uint8_t* typed, ParseCheckFrame* frames,
-                               uint8_t* classes, uint8_t* modes, uint8_t* reasons)
+// The kernels' K6 frames.
+static ParseCheckFrames parse_check_frames(const ParseKernels* kernels)
 {
-    frames[0] = (ParseCheckFrame){
-        .group = PARSE_GROUP_FILE,
-        .kind = 0,
-        .part = PARSE_PART_START,
-        .items = 0,
-        .terminators = 0,
-        .typed = 0,
-        .after_body = 0,
-        .start = BUSTER_PARSE_NONE,
+    return (ParseCheckFrames){
+        .group = kernels->check_group,
+        .kind = kernels->check_kind,
+        .part = kernels->check_part,
+        .items = kernels->check_items,
+        .typed = kernels->check_typed,
+        .after_body = kernels->check_after_body,
     };
-    uint8_t before_previous = PARSE_ROLE_NONE;
-    uint8_t previous = PARSE_ROLE_NONE;
-    uint8_t previous_role = PARSE_ROLE_NONE;
-    uint32_t previous_depth = 0;
-    uint8_t previous_mode = PARSE_CHECK_FILE_START;
-    for (uint32_t i = 0; i < count; i += 1)
+}
+
+// The frames' first entry, file scope's, and the carry before the first token.
+static void parse_check_begin(const ParseCheckFrames* frames, ParseCheckCarry* carry)
+{
+    frames->group[0] = PARSE_GROUP_FILE;
+    frames->kind[0] = BUSTER_PARSE_ITEM_OTHER;
+    frames->part[0] = PARSE_PART_START;
+    frames->items[0] = 0;
+    frames->typed[0] = 0;
+    frames->after_body[0] = 0;
+    *carry = (ParseCheckCarry){
+        .before_previous = PARSE_ROLE_NONE,
+        .previous = PARSE_ROLE_NONE,
+        .previous_role = PARSE_ROLE_NONE,
+        .previous_mode = PARSE_CHECK_FILE_START,
+        .previous_items = 0,
+        .previous_start = 0,
+        .previous_group = PARSE_GROUP_FILE,
+        .previous_depth = 0,
+    };
+}
+
+// K6, the twin, on tokens [begin, end): every token's mode from the frames (`frames`, which have an entry per node
+// depth) and the carry, then the checks, which flag the tokens that fail them. `names` are the tokens' IdentIds,
+// `line_flags` their output flags (BUSTER_PP_START_OF_LINE) and `typed` K2's typed state per token. `classes` gets
+// each token's class, which the rule after a tag's body reads back. For the tests, `modes` and `reasons` (each 0, or a
+// byte per token) get each token's mode and failed checks (BUSTER_PARSE_CHECK_*; an END failure is the token's before
+// it, which ends its group). parse_check_end checks the end of the file.
+static void parse_check_range(ParseKernels* kernels, const uint32_t* names, const uint8_t* line_flags, const uint8_t* typed, uint32_t begin, uint32_t end,
+                              const ParseCheckFrames* frames, ParseCheckCarry* carry, uint8_t* classes, uint8_t* modes, uint8_t* reasons)
+{
+    const ParseCheckTables* t = &parse_check_tables;
+    for (uint32_t i = begin; i < end; i += 1)
     {
         const uint8_t role = kernels->roles[i];
         const uint32_t depth = kernels->node_depths[i];
-        ParseCheckFrame* frame = &frames[depth];
-        // _Alignas's closer is a specifier as an attribute's is, whose specifiers had a type if they had before it.
-        const uint8_t alignas = role == PARSE_ROLE_CLOSE_SPECIFIER && frames[depth + 1].group == PARSE_GROUP_ALIGNAS;
-        const uint8_t c = alignas ? (frames[depth + 1].typed ? PARSE_CLASS_TYPED_ALIGNAS_CLOSE : PARSE_CLASS_ALIGNAS_CLOSE) :
-                                    parse_check_class(role, kernels->vkinds[i], names[i], typed[i] != 0);
-        // A closer is its group's, at the depth of its opener: it starts nothing.
+        const uint8_t group = frames->group[depth];
+        // A closer is its group's, at the depth of its opener: it starts nothing, and closes the group at depth + 1.
         const bool closer = parse_role_deltas[role] < 0;
-        const bool start = !closer && parse_check_starts(depth > previous_depth || i == 0, previous_role, previous);
+        const bool empty = closer && depth == carry->previous_depth;
+        const uint8_t inner_group = frames->group[depth + 1];
+        const uint8_t inner_items = empty ? 0 : frames->items[depth + 1];
+        // _Alignas's closer is a specifier as an attribute's is, whose specifiers had a type if they had before it.
+        const bool alignas = role == PARSE_ROLE_CLOSE_SPECIFIER && inner_group == PARSE_GROUP_ALIGNAS;
+        const uint8_t c = alignas ? (frames->typed[depth + 1] ? PARSE_CLASS_TYPED_ALIGNAS_CLOSE : PARSE_CLASS_ALIGNAS_CLOSE) :
+                                    parse_check_class(role, kernels->vkinds[i], names[i], typed[i] != 0);
+        const uint8_t previous = carry->previous;
+        const bool start = !closer && parse_check_starts(depth > carry->previous_depth || i == 0, carry->previous_role, previous);
         if (start)
         {
-            frame->kind = parse_check_item(frame->group, c);
-            frame->part = PARSE_PART_DECLARATION;
-            frame->items += frame->items < 3;
-            frame->start = i;
+            frames->kind[depth] = parse_check_item(group, c);
+            frames->part[depth] = PARSE_PART_DECLARATION;
+            frames->items[depth] += frames->items[depth] < 3;
         }
-        const uint8_t mode = parse_check_mode(frame->group, start, frame->kind, frame->part, frame->items);
-        const ParseCheckTables* t = &parse_check_tables;
+        const uint8_t kind = frames->kind[depth];
+        const uint8_t items = frames->items[depth];
+        const uint8_t mode = parse_check_mode(group, start, kind, frames->part[depth], items);
         // An attribute specifier after a tag's body is the tag's: the body's rule looks past it.
         const bool transparent = c == PARSE_CLASS_ATTRIBUTE_KEYWORD || c == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER || c == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ||
                                  c == PARSE_CLASS_TYPED_ATTRIBUTE;
         // The token before this one ends its group if this one is at a lower depth (a closer), and it is the group's
         // declarator that may need a name.
-        const bool previous_last = depth < previous_depth;
-        const bool named = ((t->named_modes >> (previous_last ? previous_mode : mode)) & 1) != 0;
+        const bool previous_last = depth < carry->previous_depth;
+        const bool named = ((t->named_modes >> (previous_last ? carry->previous_mode : mode)) & 1) != 0;
         const bool skipped = named && parse_class_set_has(&t->before_name, previous) && parse_class_set_has(&t->after_name, c) &&
                              !(parse_class_set_has(&t->specifier_ends, previous) && (c == PARSE_ROLE_TERMINATOR || c == PARSE_ROLE_BITFIELD));
-        if (frame->group == PARSE_GROUP_FOR && role == PARSE_ROLE_TERMINATOR)
-        {
-            frame->terminators += 1;
-        }
-        // A label's name starts its statement; a for's group holds two `;`.
+        const bool after_body = frames->after_body[depth] != 0;
+        // A for's group holds three clauses: two `;`, the last one the second item's; a builtin's group two arguments
+        // (_Static_assert's one or two).
+        const bool clauses = (group == PARSE_GROUP_FOR && role == PARSE_ROLE_TERMINATOR && items == 3) ||
+                             (role == PARSE_ROLE_CLOSE_FOR && !(previous == PARSE_ROLE_TERMINATOR ? inner_items == 2 : inner_items == 3)) ||
+                             (role == PARSE_ROLE_CLOSE_KEYWORD && inner_items != 2 && !(inner_group == PARSE_GROUP_ASSERT && inner_items == 1));
         const uint8_t failed = (uint8_t)((!parse_class_set_has(&t->follows[previous], c) ? BUSTER_PARSE_CHECK_PAIR : 0) |
                                          (!parse_class_set_has(&t->allows[mode], c) ? BUSTER_PARSE_CHECK_MODE : 0) |
-                                         (previous_last && !parse_class_set_has(&t->ends[previous_mode], previous) ? BUSTER_PARSE_CHECK_END : 0) |
+                                         (previous_last && !parse_class_set_has(&t->ends[carry->previous_mode], previous) ? BUSTER_PARSE_CHECK_END : 0) |
                                          (skipped ? BUSTER_PARSE_CHECK_NAME : 0) |
-                                         (role == PARSE_ROLE_LABEL && (frame->start != i - 1 || previous != PARSE_ROLE_OPERAND) ? BUSTER_PARSE_CHECK_LABEL : 0) |
-                                         ((frame->group == PARSE_GROUP_FOR && frame->terminators > 2) ||
-                                                  (role == PARSE_ROLE_CLOSE_FOR && frames[depth + 1].terminators != 2) ||
-                                                  (role == PARSE_ROLE_CLOSE_KEYWORD && frames[depth + 1].items != 2 &&
-                                                   !(frames[depth + 1].group == PARSE_GROUP_ASSERT && frames[depth + 1].items == 1)) ? BUSTER_PARSE_CHECK_CLAUSES : 0) |
+                                         // A label's name starts its statement.
+                                         (role == PARSE_ROLE_LABEL && !(carry->previous_start && previous == PARSE_ROLE_OPERAND) ? BUSTER_PARSE_CHECK_LABEL : 0) |
+                                         (clauses ? BUSTER_PARSE_CHECK_CLAUSES : 0) |
                                          // A statement expression: its block first and last in parentheses, in a function.
                                          (mode == PARSE_CHECK_EXPRESSION && ((c == PARSE_ROLE_OPEN_BLOCK && (previous != PARSE_ROLE_OPEN_GROUP ||
-                                                                                                            frames[1].group != PARSE_GROUP_BLOCK)) ||
+                                                                                                            frames->group[1] != PARSE_GROUP_BLOCK)) ||
                                                                              (c == PARSE_ROLE_CLOSE_BLOCK && kernels->roles[i + 1] != PARSE_ROLE_CLOSE_GROUP)) ?
                                               BUSTER_PARSE_CHECK_CLAUSES : 0) |
                                          (role == PARSE_ROLE_ERROR || (closer && kernels->vkinds[i] != parse_check_closer_kind(role)) ? BUSTER_PARSE_CHECK_ERROR : 0) |
                                          // Only an array declarator's brackets may be empty.
-                                         (closer && depth == previous_depth && frames[depth + 1].group == PARSE_GROUP_SUBSCRIPT ? BUSTER_PARSE_CHECK_CLAUSES : 0) |
+                                         (empty && inner_group == PARSE_GROUP_SUBSCRIPT ? BUSTER_PARSE_CHECK_CLAUSES : 0) |
                                          // After a tag's body (past its attributes), or a tag and a line break, what may
                                          // follow a type; and nothing postfix after `&&label`.
-                                         (((frame->after_body && !transparent) || (previous == PARSE_ROLE_TAG && (line_flags[i] & BUSTER_PP_START_OF_LINE) != 0)) &&
-                                                  !parse_check_valid_after_tag(kernels->vkinds[i], kernels->vkinds[i + 1], frame->group == PARSE_GROUP_STRUCT) ?
+                                         (((after_body && !transparent) || (previous == PARSE_ROLE_TAG && (line_flags[i] & BUSTER_PP_START_OF_LINE) != 0)) &&
+                                                  !parse_check_valid_after_tag(kernels->vkinds[i], kernels->vkinds[i + 1], group == PARSE_GROUP_STRUCT) ?
                                               BUSTER_PARSE_CHECK_TAG : 0) |
-                                         (before_previous == PARSE_CLASS_LABEL_ADDRESS && (c == PARSE_ROLE_OPEN_CALL || c == PARSE_ROLE_OPEN_SUBSCRIPT ||
-                                                                                           c == PARSE_ROLE_POSTFIX || c == PARSE_ROLE_MEMBER_OPERATOR) ?
+                                         (carry->before_previous == PARSE_CLASS_LABEL_ADDRESS && (c == PARSE_ROLE_OPEN_CALL || c == PARSE_ROLE_OPEN_SUBSCRIPT ||
+                                                                                                  c == PARSE_ROLE_POSTFIX || c == PARSE_ROLE_MEMBER_OPERATOR) ?
                                               BUSTER_PARSE_CHECK_TAG : 0) |
                                          // A `*` outside declarators is an operator: an operand follows it.
-                                         (previous == PARSE_CLASS_STAR && ((t->declaration_modes >> previous_mode) & 1) == 0 &&
+                                         (previous == PARSE_CLASS_STAR && ((t->declaration_modes >> carry->previous_mode) & 1) == 0 &&
                                                   !parse_class_set_has(&t->operand_starts, c) ? BUSTER_PARSE_CHECK_PAIR : 0));
         kernels->flags[i] |= failed != 0;
-        if (classes != 0)
+        classes[i] = c;
+        if (modes != 0)
         {
-            classes[i] = c;
             modes[i] = mode;
             reasons[i] = failed;
         }
-        if (frame->kind == BUSTER_PARSE_ITEM_DECLARATION)
+        if (kind == BUSTER_PARSE_ITEM_DECLARATION)
         {
-            frame->part = parse_check_part_after(c, frame->part);
+            frames->part[depth] = parse_check_part_after(c, frames->part[depth]);
         }
-        frame->after_body = c == PARSE_ROLE_CLOSE_STRUCT || c == PARSE_ROLE_CLOSE_ENUM || (frame->after_body && transparent);
+        frames->after_body[depth] = c == PARSE_ROLE_CLOSE_STRUCT || c == PARSE_ROLE_CLOSE_ENUM || (after_body && transparent);
         if (parse_role_rules[role] == PARSE_RULE_OPENER)
         {
-            frames[depth + 1] = (ParseCheckFrame){
-                .group = parse_check_group(c, mode, previous),
-                .kind = 0,
-                .part = PARSE_PART_START,
-                .items = 0,
-                .terminators = 0,
-                .typed = i >= 2 && typed[i - 2] != 0,
-                .after_body = 0,
-                .start = BUSTER_PARSE_NONE,
-            };
+            frames->group[depth + 1] = parse_check_group(c, mode, previous);
+            frames->kind[depth + 1] = BUSTER_PARSE_ITEM_OTHER;
+            frames->part[depth + 1] = PARSE_PART_START;
+            frames->items[depth + 1] = 0;
+            frames->typed[depth + 1] = i >= 2 && typed[i - 2] != 0;
+            frames->after_body[depth + 1] = 0;
         }
-        before_previous = previous;
-        previous = c;
-        previous_role = role;
-        previous_depth = depth;
-        previous_mode = mode;
+        *carry = (ParseCheckCarry){
+            .before_previous = previous,
+            .previous = c,
+            .previous_role = role,
+            .previous_mode = mode,
+            .previous_items = items,
+            .previous_start = start,
+            .previous_group = group,
+            .previous_depth = depth,
+        };
     }
-    // The file's last token ends it.
-    if (count != 0 && !parse_class_set_has(&parse_check_tables.ends[previous_mode], previous))
+}
+
+// The end of the file: its last token ends file scope's last item. Flags it if it can't.
+static void parse_check_end(ParseKernels* kernels, uint32_t count, const ParseCheckCarry* carry, uint8_t* reasons)
+{
+    if (count != 0 && !parse_class_set_has(&parse_check_tables.ends[carry->previous_mode], carry->previous))
     {
         kernels->flags[count - 1] = 1;
-        if (classes != 0)
+        if (reasons != 0)
         {
             reasons[count - 1] |= BUSTER_PARSE_CHECK_END;
         }
     }
+}
+
+// K6, the twin, on the whole file.
+static void parse_check_scalar(ParseKernels* kernels, const uint32_t* names, const uint8_t* line_flags, uint32_t count, const uint8_t* typed,
+                               const ParseCheckFrames* frames, uint8_t* classes, uint8_t* modes, uint8_t* reasons)
+{
+    ParseCheckCarry carry;
+    parse_check_begin(frames, &carry);
+    parse_check_range(kernels, names, line_flags, typed, 0, count, frames, &carry, classes, modes, reasons);
+    parse_check_end(kernels, count, &carry, reasons);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -6522,14 +6581,22 @@ static bool parse_kernels_reserve(ParseKernels* kernels, Arena* arena, uint64_t 
         .typedef_log = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .typedef_tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .typedef_scopes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
-        .check_frames = BUSTER_ARENA_PUSH_ARRAY(arena, ParseCheckFrame, slots),
+        .check_group = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .check_kind = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .check_part = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .check_items = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .check_typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .check_after_body = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .check_classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
     };
     const bool result = kernels->vkinds != 0 && kernels->depths != 0 && kernels->node_depths != 0 && kernels->enclosing != 0 && kernels->bracket_blocks != 0 &&
                         kernels->role_statics != 0 && kernels->roles != 0 &&
                         kernels->parents != 0 && kernels->flags != 0 && kernels->stack != 0 && kernels->stack_keys != 0 && kernels->waiting != 0 &&
                         kernels->waiting_thresholds != 0 && kernels->lefts != 0 && kernels->left_key_values != 0 && kernels->typedef_names != 0 &&
                         kernels->typedef_first != 0 && kernels->typedef_log != 0 &&
-                        kernels->typedef_tokens != 0 && kernels->typedef_scopes != 0 && kernels->check_frames != 0;
+                        kernels->typedef_tokens != 0 && kernels->typedef_scopes != 0 && kernels->check_group != 0 && kernels->check_kind != 0 &&
+                        kernels->check_part != 0 && kernels->check_items != 0 && kernels->check_typed != 0 && kernels->check_after_body != 0 &&
+                        kernels->check_classes != 0;
     if (result)
     {
         memset(kernels->typedef_names, 0, name_capacity);
@@ -6579,7 +6646,8 @@ static ParseKernelResult parse_twins(ParseKernels* kernels, const ParseInput* in
     // K4, K5 and K6.
     parse_parents_scalar(kernels, count);
     const bool statements_ok = parse_statements(kernels, count, statements);
-    parse_check_scalar(kernels, names, input->flags, count, typed, kernels->check_frames, 0, 0, 0);
+    const ParseCheckFrames frames = parse_check_frames(kernels);
+    parse_check_scalar(kernels, names, input->flags, count, typed, &frames, kernels->check_classes, 0, 0);
     for (uint32_t i = 0; i < count; i += 1)
     {
         result.flagged_tokens += kernels->flags[i] != 0;
@@ -9441,6 +9509,737 @@ static bool parse_slots_reserve(ParseSlots* slots, Arena* arena, uint64_t capaci
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// K6 in AVX-512
+//
+// 64 tokens a block in byte lanes, on the twin's frames and carry: a block the kernel can't take goes to the twin
+// (parse_check_range) on the same frames and carry, as do the rare tokens it leaves to scalar code (a keyword's class
+// by its name, _Alignas's closer, statement expressions, attributes after a tag's body). Each lane's node depth, less
+// the block's least, plus one, is its level (1 to 64; a block whose depths span more goes to the twin). One key per lane,
+// 4 * (level - 1) plus a rank (0 for a token that starts an item, 1 for an `=`, `,` or bit-field `:`, 2 for any
+// other), and one table of window minima give each lane, by three searches, the nearest token before it in the block:
+//   - at a lower level (E): the opener of its group, whose group's type is the lane's group's;
+//   - at its level that starts an item (S1, or the lane itself if it starts one): its item's start, whose class says
+//     what the item is and, with the start before it, the item's place in its group;
+//   - at its level that starts an item or switches a declaration's part (S2): its part.
+// Where a search finds nothing in the block, the lane's level's frame has what it would have said. A group's type
+// comes from its opener's class and mode, and the mode from the opener's own group's type: the openers in a block take
+// rounds to their fixed point, from what each opener would open in an expression (past BUSTER_PARSE_CHECK_ROUNDS, the
+// twin takes the block). Then
+// the checks, by table: the pairs, the modes and the ends with the classes compressed into kinds (the classes the
+// tables treat alike), so that each two-dimensional table is 64 by 64 bits; and last, the frames of the depths still
+// open after the block, from the last lane at each.
+
+#define BUSTER_PARSE_CHECK_ROUNDS 16
+
+// Bits of ParseCheckVectorTables.class_bits, by class.
+#define BUSTER_PARSE_CHECK_BEFORE_NAME 0x01
+#define BUSTER_PARSE_CHECK_AFTER_NAME 0x02
+#define BUSTER_PARSE_CHECK_SPECIFIER_END 0x04
+#define BUSTER_PARSE_CHECK_OPERAND_START 0x08
+#define BUSTER_PARSE_CHECK_TRANSPARENT 0x10
+#define BUSTER_PARSE_CHECK_BODY_CLOSER 0x20
+#define BUSTER_PARSE_CHECK_SWITCH 0x40
+#define BUSTER_PARSE_CHECK_POSTFIX 0x80
+
+// Bits of ParseCheckVectorTables.role_bits, by role: what refines its class (the low 3 bits: 1 OPERAND, 2 SPECIFIER,
+// 3 PREFIX, 4 LEAF_RIGHT, 5 QUALIFIER_LEFT, 6 RETURN, 7 OPEN_CASE), whether it opens or closes a group, whether an
+// item starts after it (its pred is an item's or a head's), and whether its class may depend on the token's name.
+#define BUSTER_PARSE_CHECK_REFINE 0x07
+#define BUSTER_PARSE_CHECK_OPENER 0x08
+#define BUSTER_PARSE_CHECK_CLOSER 0x10
+#define BUSTER_PARSE_CHECK_ITEM_AFTER 0x20
+#define BUSTER_PARSE_CHECK_RARE 0x40
+
+// Bits of ParseCheckVectorTables.mode_bits, by mode.
+#define BUSTER_PARSE_CHECK_NAMED 0x01
+#define BUSTER_PARSE_CHECK_DECLARATION 0x02
+#define BUSTER_PARSE_CHECK_IN_EXPRESSION 0x04
+
+// Bits of ParseCheckVectorTables.after_tag, by virtual kind: what may follow a tag's body always, in a struct (`:`),
+// or unless a type specifier follows (a qualifier or storage class); and whether the kind is a type specifier's.
+#define BUSTER_PARSE_CHECK_TAG_ALWAYS 0x01
+#define BUSTER_PARSE_CHECK_TAG_COLON 0x02
+#define BUSTER_PARSE_CHECK_TAG_UNLESS_TYPE 0x04
+#define BUSTER_PARSE_CHECK_TAG_TYPE 0x08
+
+typedef struct ParseCheckVectorTables ParseCheckVectorTables;
+struct ParseCheckVectorTables
+{
+    // By class: its left kind (its row of follows) and its kinds in allows and in ends (its columns there); and by left
+    // kind * 16 + class / 8, follows' bits, and by mode * 8 + kind / 8, allows' and ends'.
+    uint8_t left[128] __attribute__((aligned(64)));
+    uint8_t allows_kind[128] __attribute__((aligned(64)));
+    uint8_t ends_kind[128] __attribute__((aligned(64)));
+    uint8_t follows[1024] __attribute__((aligned(64)));
+    uint8_t allows[512] __attribute__((aligned(64)));
+    uint8_t ends[512] __attribute__((aligned(64)));
+    uint8_t class_bits[128] __attribute__((aligned(64)));
+    uint8_t mode_bits[64] __attribute__((aligned(64)));
+    // The refinements of a class by the token's virtual kind: OPERAND's, SPECIFIER's, PREFIX's, LEAF_RIGHT's,
+    // QUALIFIER_LEFT's, RETURN's and OPEN_CASE's (index 0 unused); and the typed variant of each class.
+    uint8_t refine[8][128] __attribute__((aligned(64)));
+    uint8_t typed[128] __attribute__((aligned(64)));
+    uint8_t role_bits[128] __attribute__((aligned(64)));
+    uint8_t closer_kind[128] __attribute__((aligned(64)));
+    // By class: what an item it starts is (in a group other than an enum or an initializer list), whether it starts a
+    // designator, the part after it in a declaration, and the group an opener of it opens (by its class alone); by the
+    // class before an attribute's, a specifier's or a keyword's group, that group; and by (opener variant: 1 a call's,
+    // 2 a group's, 3 a subscript's, else 0) * 64 + mode, the group.
+    uint8_t item[128] __attribute__((aligned(64)));
+    uint8_t designator[128] __attribute__((aligned(64)));
+    uint8_t part_after[128] __attribute__((aligned(64)));
+    uint8_t opener_group[128] __attribute__((aligned(64)));
+    uint8_t keyword_group[128] __attribute__((aligned(64)));
+    uint8_t variant[128] __attribute__((aligned(64)));
+    uint8_t mode_group[256] __attribute__((aligned(64)));
+    // By group * 4 + the item's place (0 the first, 1 the second, 2 a later one): the pseudo-group; and by pseudo-group *
+    // 6 + state (0 an item's start, 1 another item's, 2 an assertion's, 3 an initializer's, 4 a width's, 5 a
+    // declaration's), the mode; by kind * 8 + part, the state of a token that doesn't start its item.
+    uint8_t pseudo[128] __attribute__((aligned(64)));
+    uint8_t modes[256] __attribute__((aligned(64)));
+    uint8_t states[64] __attribute__((aligned(64)));
+    uint8_t after_tag[128] __attribute__((aligned(64)));
+    // A bit per position in a byte, for the two-dimensional tables' tests.
+    uint8_t bit[64] __attribute__((aligned(64)));
+    uint32_t left_kinds;
+    uint32_t allows_kinds;
+    uint32_t ends_kinds;
+    uint32_t pseudo_groups;
+};
+
+static ParseCheckVectorTables parse_check_vector;
+
+// K6's vector tables, from its tables and the twin's own functions: every class's refinement, mode and group the
+// kernel looks up is the twin's.
+static void parse_check_vector_init(void)
+{
+    ParseCheckVectorTables* v = &parse_check_vector;
+    const ParseCheckTables* t = &parse_check_tables;
+    memset(v, 0, sizeof(*v));
+    // The kinds: classes with the same row of follows are one left kind; with the same column in allows, one kind there,
+    // and in ends one kind there.
+    uint8_t left_class[128];
+    uint8_t allows_class[128];
+    uint8_t ends_class[128];
+    for (uint32_t c = 0; c < 128; c += 1)
+    {
+        uint32_t k = 0;
+        while (k < v->left_kinds && memcmp(&t->follows[left_class[k]], &t->follows[c], sizeof(ParseClassSet)) != 0)
+        {
+            k += 1;
+        }
+        if (k == v->left_kinds)
+        {
+            left_class[k] = (uint8_t)c;
+            v->left_kinds += 1;
+        }
+        v->left[c] = (uint8_t)k;
+        for (uint32_t which = 0; which < 2; which += 1)
+        {
+            const ParseClassSet* table = which == 0 ? t->allows : t->ends;
+            uint8_t* classes = which == 0 ? allows_class : ends_class;
+            uint32_t* kinds = which == 0 ? &v->allows_kinds : &v->ends_kinds;
+            k = 0;
+            bool found = false;
+            while (!found && k < *kinds)
+            {
+                bool same = true;
+                for (uint32_t m = 0; same && m < 64; m += 1)
+                {
+                    same = parse_class_set_has(&table[m], (uint8_t)c) == parse_class_set_has(&table[m], classes[k]);
+                }
+                found = same;
+                k += !same;
+            }
+            if (!found)
+            {
+                classes[k] = (uint8_t)c;
+                *kinds += 1;
+            }
+            (which == 0 ? v->allows_kind : v->ends_kind)[c] = (uint8_t)k;
+        }
+    }
+    assert(v->left_kinds <= 64 && v->allows_kinds <= 64 && v->ends_kinds <= 64);
+    for (uint32_t l = 0; l < v->left_kinds; l += 1)
+    {
+        for (uint32_t c = 0; c < 128; c += 1)
+        {
+            v->follows[l * 16 + c / 8] |= (uint8_t)(parse_class_set_has(&t->follows[left_class[l]], (uint8_t)c) << (c % 8));
+        }
+    }
+    for (uint32_t m = 0; m < 64; m += 1)
+    {
+        for (uint32_t k = 0; k < v->allows_kinds; k += 1)
+        {
+            v->allows[m * 8 + k / 8] |= (uint8_t)(parse_class_set_has(&t->allows[m], allows_class[k]) << (k % 8));
+        }
+        for (uint32_t k = 0; k < v->ends_kinds; k += 1)
+        {
+            v->ends[m * 8 + k / 8] |= (uint8_t)(parse_class_set_has(&t->ends[m], ends_class[k]) << (k % 8));
+        }
+        v->mode_bits[m] = (uint8_t)((((t->named_modes >> m) & 1) != 0 ? BUSTER_PARSE_CHECK_NAMED : 0) |
+                                    (((t->declaration_modes >> m) & 1) != 0 ? BUSTER_PARSE_CHECK_DECLARATION : 0) |
+                                    (m == PARSE_CHECK_EXPRESSION ? BUSTER_PARSE_CHECK_IN_EXPRESSION : 0));
+    }
+    for (uint32_t i = 0; i < 64; i += 1)
+    {
+        v->bit[i] = (uint8_t)(1u << (i % 8));
+    }
+    // By class: the sets and what the class means to the kernel.
+    for (uint32_t c = 0; c < 128; c += 1)
+    {
+        const uint8_t k = (uint8_t)c;
+        const bool transparent = k == PARSE_CLASS_ATTRIBUTE_KEYWORD || k == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER || k == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ||
+                                 k == PARSE_CLASS_TYPED_ATTRIBUTE;
+        v->class_bits[c] = (uint8_t)((parse_class_set_has(&t->before_name, k) ? BUSTER_PARSE_CHECK_BEFORE_NAME : 0) |
+                                     (parse_class_set_has(&t->after_name, k) ? BUSTER_PARSE_CHECK_AFTER_NAME : 0) |
+                                     (parse_class_set_has(&t->specifier_ends, k) ? BUSTER_PARSE_CHECK_SPECIFIER_END : 0) |
+                                     (parse_class_set_has(&t->operand_starts, k) ? BUSTER_PARSE_CHECK_OPERAND_START : 0) |
+                                     (transparent ? BUSTER_PARSE_CHECK_TRANSPARENT : 0) |
+                                     (k == PARSE_ROLE_CLOSE_STRUCT || k == PARSE_ROLE_CLOSE_ENUM ? BUSTER_PARSE_CHECK_BODY_CLOSER : 0) |
+                                     (k == PARSE_ROLE_ASSIGN || k == PARSE_ROLE_COMMA || k == PARSE_ROLE_BITFIELD ? BUSTER_PARSE_CHECK_SWITCH : 0) |
+                                     (k == PARSE_ROLE_OPEN_CALL || k == PARSE_ROLE_OPEN_SUBSCRIPT || k == PARSE_ROLE_POSTFIX || k == PARSE_ROLE_MEMBER_OPERATOR ?
+                                          BUSTER_PARSE_CHECK_POSTFIX : 0));
+        v->typed[c] = k < PARSE_CLASS_COUNT ? k : PARSE_ROLE_ERROR;
+        v->item[c] = parse_check_item(PARSE_GROUP_BLOCK, k);
+        v->designator[c] = parse_check_item(PARSE_GROUP_INITIALIZER, k);
+        v->part_after[c] = parse_check_part_after(k, PARSE_PART_DECLARATION);
+        v->opener_group[c] = parse_check_group(k, PARSE_CHECK_NONE, PARSE_ROLE_NONE);
+        v->keyword_group[c] = parse_check_group(PARSE_ROLE_OPEN_KEYWORD, PARSE_CHECK_NONE, k) != PARSE_GROUP_OTHER ?
+                                  parse_check_group(PARSE_ROLE_OPEN_KEYWORD, PARSE_CHECK_NONE, k) : parse_check_group(PARSE_ROLE_OPEN_SPECIFIER, PARSE_CHECK_NONE, k);
+        v->variant[c] = k == PARSE_ROLE_OPEN_CALL ? 1 : k == PARSE_ROLE_OPEN_GROUP ? 2 : k == PARSE_ROLE_OPEN_SUBSCRIPT ? 3 : 0;
+        v->closer_kind[c] = c < PARSE_ROLE_COUNT ? parse_check_closer_kind(k) : PARSE_KIND_R_PAREN;
+    }
+    v->typed[PARSE_ROLE_SPECIFIER] = PARSE_CLASS_TYPED;
+    v->typed[PARSE_CLASS_STORAGE] = PARSE_CLASS_TYPED_STORAGE;
+    v->typed[PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER] = PARSE_CLASS_TYPED_ATTRIBUTE;
+    for (uint32_t variant = 1; variant < 4; variant += 1)
+    {
+        const uint8_t opener = variant == 1 ? PARSE_ROLE_OPEN_CALL : variant == 2 ? PARSE_ROLE_OPEN_GROUP : PARSE_ROLE_OPEN_SUBSCRIPT;
+        for (uint32_t m = 0; m < 64; m += 1)
+        {
+            v->mode_group[variant * 64 + m] = m < PARSE_CHECK_MODE_COUNT ? parse_check_group(opener, (uint8_t)m, PARSE_ROLE_NONE) : PARSE_GROUP_OTHER;
+        }
+    }
+    // By role.
+    static const uint8_t refined[8] = { 0, PARSE_ROLE_OPERAND, PARSE_ROLE_SPECIFIER, PARSE_ROLE_PREFIX, PARSE_ROLE_LEAF_RIGHT, PARSE_ROLE_QUALIFIER_LEFT, PARSE_ROLE_RETURN,
+                                        PARSE_ROLE_OPEN_CASE };
+    for (uint32_t r = 0; r < 128; r += 1)
+    {
+        const uint8_t role = r < PARSE_ROLE_COUNT ? (uint8_t)r : PARSE_ROLE_ERROR;
+        uint32_t refine = 0;
+        for (uint32_t k = 1; k < 8; k += 1)
+        {
+            refine = refined[k] == role ? k : refine;
+        }
+        const uint8_t pred = parse_role_preds[role];
+        v->role_bits[r] = (uint8_t)(refine | (parse_role_rules[role] == PARSE_RULE_OPENER ? BUSTER_PARSE_CHECK_OPENER : 0) |
+                                    (parse_role_deltas[role] < 0 ? BUSTER_PARSE_CHECK_CLOSER : 0) |
+                                    (pred == PARSE_PRED_ITEM || pred == PARSE_PRED_HEAD ? BUSTER_PARSE_CHECK_ITEM_AFTER : 0) |
+                                    (role == PARSE_ROLE_LEAF_RIGHT || role == PARSE_ROLE_CLOSE_SPECIFIER ? BUSTER_PARSE_CHECK_RARE : 0));
+    }
+    for (uint32_t k = 1; k < 8; k += 1)
+    {
+        for (uint32_t vkind = 0; vkind < 128; vkind += 1)
+        {
+            v->refine[k][vkind] = vkind < BUSTER_PARSE_VKINDS ? parse_check_class(refined[k], (uint8_t)vkind, 0, false) : refined[k];
+        }
+    }
+    // The pseudo-groups: (group, item's place) with the same modes in each state are one.
+    uint8_t rows[128][6];
+    for (uint32_t g = 0; g < 32; g += 1)
+    {
+        for (uint32_t place = 0; place < 4; place += 1)
+        {
+            uint8_t row[6];
+            const uint8_t item = (uint8_t)(place + 1 < 3 ? place + 1 : 3);
+            row[0] = parse_check_mode((uint8_t)g, true, BUSTER_PARSE_ITEM_OTHER, PARSE_PART_DECLARATION, item);
+            row[1] = parse_check_mode((uint8_t)g, false, BUSTER_PARSE_ITEM_OTHER, PARSE_PART_DECLARATION, item);
+            row[2] = parse_check_mode((uint8_t)g, false, BUSTER_PARSE_ITEM_ASSERTION, PARSE_PART_DECLARATION, item);
+            row[3] = parse_check_mode((uint8_t)g, false, BUSTER_PARSE_ITEM_DECLARATION, PARSE_PART_INITIALIZER, item);
+            row[4] = parse_check_mode((uint8_t)g, false, BUSTER_PARSE_ITEM_DECLARATION, PARSE_PART_WIDTH, item);
+            row[5] = parse_check_mode((uint8_t)g, false, BUSTER_PARSE_ITEM_DECLARATION, PARSE_PART_DECLARATION, item);
+            uint32_t p = 0;
+            while (p < v->pseudo_groups && memcmp(rows[p], row, 6) != 0)
+            {
+                p += 1;
+            }
+            if (p == v->pseudo_groups)
+            {
+                memcpy(rows[p], row, 6);
+                v->pseudo_groups += 1;
+            }
+            v->pseudo[g * 4 + place] = (uint8_t)p;
+        }
+    }
+    assert(v->pseudo_groups * 6 <= 256);
+    for (uint32_t p = 0; p < v->pseudo_groups; p += 1)
+    {
+        memcpy(&v->modes[p * 6], rows[p], 6);
+    }
+    for (uint32_t kind = 0; kind < 8; kind += 1)
+    {
+        for (uint32_t part = 0; part < 8; part += 1)
+        {
+            v->states[kind * 8 + part] = (uint8_t)(kind == BUSTER_PARSE_ITEM_ASSERTION ? 2 : kind != BUSTER_PARSE_ITEM_DECLARATION ? 1 :
+                                                   part == PARSE_PART_INITIALIZER ? 3 : part == PARSE_PART_WIDTH ? 4 : 5);
+        }
+    }
+    for (uint32_t vkind = 0; vkind < 128; vkind += 1)
+    {
+        const uint8_t k = (uint8_t)vkind;
+        const bool always = parse_check_valid_after_tag(k, PARSE_KIND_END, false);
+        const bool colon = !always && parse_check_valid_after_tag(k, PARSE_KIND_END, true);
+        const bool unless = !always && parse_check_valid_after_tag(k, PARSE_KIND_END, false) != parse_check_valid_after_tag(k, PARSE_KIND_TYPE, false);
+        const bool type = k == PARSE_KIND_TYPE || k == PARSE_KIND_STRUCT || k == PARSE_KIND_ENUM || k == PARSE_KIND_TYPEOF || k == PARSE_VKIND_TYPE_NAME;
+        v->after_tag[vkind] = (uint8_t)((always && parse_check_valid_after_tag(k, PARSE_KIND_TYPE, false) ? BUSTER_PARSE_CHECK_TAG_ALWAYS : 0) |
+                                        (colon ? BUSTER_PARSE_CHECK_TAG_COLON : 0) | (unless || (always && !parse_check_valid_after_tag(k, PARSE_KIND_TYPE, false)) ?
+                                                                                      BUSTER_PARSE_CHECK_TAG_UNLESS_TYPE : 0) |
+                                        (type ? BUSTER_PARSE_CHECK_TAG_TYPE : 0));
+    }
+}
+
+// The bit of a 64-by-64 table (`table`: 512 bytes, row * 8 + column / 8) at each lane's row and column.
+BUSTER_INLINE __mmask64 parse_check_bit(const uint8_t* table, __m512i row, __m512i column)
+{
+    const __m512i index = _mm512_add_epi8(_mm512_slli_epi16(_mm512_and_si512(row, _mm512_set1_epi8(0x0F)), 3), _mm512_srli_epi16(_mm512_and_si512(column, _mm512_set1_epi8(0x38)), 3));
+    const __m512i quarter = _mm512_srli_epi16(_mm512_and_si512(row, _mm512_set1_epi8(0x30)), 4);
+    // Rows 16q to 16q + 15 are the q-th 128 bytes.
+    __m512i bytes = parse_table8(table, index);
+    bytes = _mm512_mask_mov_epi8(bytes, _mm512_cmpeq_epi8_mask(quarter, _mm512_set1_epi8(1)), parse_table8(table + 128, index));
+    bytes = _mm512_mask_mov_epi8(bytes, _mm512_cmpeq_epi8_mask(quarter, _mm512_set1_epi8(2)), parse_table8(table + 256, index));
+    bytes = _mm512_mask_mov_epi8(bytes, _mm512_cmpeq_epi8_mask(quarter, _mm512_set1_epi8(3)), parse_table8(table + 384, index));
+    const __m512i bit = _mm512_permutexvar_epi8(_mm512_and_si512(column, _mm512_set1_epi8(0x07)), _mm512_load_si512(parse_check_vector.bit));
+    return _mm512_test_epi8_mask(bytes, bit);
+}
+
+// The bit of a 64-by-128 table (`table`: 1,024 bytes, row * 16 + column / 8) at each lane's row and column: the
+// 128-byte chunk is the row's bits 3 to 5.
+BUSTER_INLINE __mmask64 parse_check_bit128(const uint8_t* table, __m512i row, __m512i column)
+{
+    const __m512i index = _mm512_add_epi8(_mm512_slli_epi16(_mm512_and_si512(row, _mm512_set1_epi8(0x07)), 4), _mm512_srli_epi16(_mm512_and_si512(column, _mm512_set1_epi8(0x78)), 3));
+    const __m512i chunk = _mm512_srli_epi16(_mm512_and_si512(row, _mm512_set1_epi8(0x38)), 3);
+    __m512i bytes = parse_table8(table, index);
+    for (uint32_t k = 1; k < 8; k += 1)
+    {
+        bytes = _mm512_mask_mov_epi8(bytes, _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8((char)k)), parse_table8(table + 128 * k, index));
+    }
+    const __m512i bit = _mm512_permutexvar_epi8(_mm512_and_si512(column, _mm512_set1_epi8(0x07)), _mm512_load_si512(parse_check_vector.bit));
+    return _mm512_test_epi8_mask(bytes, bit);
+}
+
+// A 256-entry table at each lane's byte.
+BUSTER_INLINE __m512i parse_check_table256(const uint8_t* table, __m512i index)
+{
+    const __m512i low = parse_table8(table, index);
+    const __m512i high = parse_table8(table + 128, index);
+    return _mm512_mask_blend_epi8(_mm512_movepi8_mask(index), low, high);
+}
+
+// The nearest previous lane whose key is below the lane's threshold, from the windows of minima of the keys (as
+// parse_previous_smaller8 builds them): the lane, or a byte with bit 7 set if none in the block.
+BUSTER_INLINE __m512i parse_check_search(const __m512i* windows, __m512i thresholds)
+{
+    const __m512i one = _mm512_set1_epi8(1);
+    __m512i p = _mm512_sub_epi8(parse_shifts.lanes8, one);
+    for (int32_t k = 5; k >= 0; k -= 1)
+    {
+        const __m512i window = _mm512_permutexvar_epi8(p, windows[k]);
+        const __m512i below = _mm512_min_epu8(_mm512_subs_epu8(thresholds, window), one);
+        p = _mm512_sub_epi8(p, _mm512_andnot_si512(_mm512_sub_epi8(_mm512_setzero_si512(), below), _mm512_set1_epi8((char)(1 << k))));
+    }
+    return p;
+}
+
+// What K6's vector kernel works out for a block, kept for its scalar parts.
+typedef struct ParseCheckBlock ParseCheckBlock;
+struct ParseCheckBlock
+{
+    uint8_t classes[64];
+    uint8_t groups[64];
+    uint8_t kinds[64];
+    uint8_t parts[64];
+    uint8_t items[64];
+    uint8_t modes[64];
+    uint8_t opened[64];
+    uint8_t levels[64];
+    uint8_t starts[64];
+} __attribute__((aligned(64)));
+
+// The state after a tag's body (BUSTER_PARSE_CHECK_BODY_CLOSER) before token `i` of the block (`lane`), where the
+// token before it is an attribute specifier's part: walked back past the attribute specifiers to the token before
+// them. `before_block` is the frame's at the lane's depth before the block, for a walk that leaves it.
+static bool parse_check_after_body_walk(const ParseKernels* kernels, uint32_t block, uint32_t lane, bool before_block)
+{
+    // The token at the lane's depth before it: the token before it, or for a closer its opener.
+    uint32_t token = block + lane - 1;
+    bool walking = true;
+    bool result = false;
+    while (walking)
+    {
+        const uint8_t c = kernels->check_classes[token];
+        const bool closer = c == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || c == PARSE_CLASS_TYPED_ATTRIBUTE;
+        const bool transparent = closer || c == PARSE_CLASS_ATTRIBUTE_KEYWORD || c == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER;
+        result = c == PARSE_ROLE_CLOSE_STRUCT || c == PARSE_ROLE_CLOSE_ENUM;
+        uint32_t previous = closer ? kernels->enclosing[token] : token;
+        walking = transparent && previous != BUSTER_PARSE_NONE && previous > 0;
+        previous = walking ? previous - 1 : previous;
+        // A walk past the block's start takes the frame's state there.
+        if (walking && previous < block)
+        {
+            result = before_block;
+            walking = false;
+        }
+        token = previous;
+    }
+    return result;
+}
+
+// K6 on the block of tokens [block, block + live), from the frames and the carry, which it leaves as the twin would.
+// Returns false, leaving them and the flags alone, if it can't take the block.
+static bool parse_check_block_avx512(ParseKernels* kernels, const uint32_t* names, const uint8_t* line_flags, const uint8_t* typed, uint32_t block, uint32_t live,
+                                     const ParseCheckFrames* frames, ParseCheckCarry* carry)
+{
+    const ParseCheckVectorTables* v = &parse_check_vector;
+    const __mmask64 live_mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
+    // The levels: the node depths less the block's least, plus one.
+    __m512i depths[4];
+    __m512i lowest = _mm512_set1_epi32(-1);
+    __m512i highest = _mm512_setzero_si512();
+    for (uint32_t q = 0; q < 4; q += 1)
+    {
+        const __mmask16 quarter = (__mmask16)(live_mask >> (16 * q));
+        depths[q] = _mm512_maskz_loadu_epi32(quarter, kernels->node_depths + block + 16 * q);
+        lowest = _mm512_mask_min_epu32(lowest, quarter, lowest, depths[q]);
+        highest = _mm512_mask_max_epu32(highest, quarter, highest, depths[q]);
+    }
+    const uint32_t lo = _mm512_reduce_min_epu32(lowest);
+    const uint32_t hi = _mm512_reduce_max_epu32(highest);
+    bool result = hi - lo <= 63;
+    if (result)
+    {
+        const __m512i base = _mm512_set1_epi32((int)lo - 1);
+        __m512i level = _mm512_castsi128_si512(_mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[0], base)));
+        level = _mm512_inserti32x4(level, _mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[1], base)), 1);
+        level = _mm512_inserti32x4(level, _mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[2], base)), 2);
+        level = _mm512_inserti32x4(level, _mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[3], base)), 3);
+        // Lanes past the block's end at the last lane's level.
+        level = _mm512_mask_mov_epi8(_mm512_set1_epi8((char)(kernels->node_depths[block + live - 1] - lo + 1)), live_mask, level);
+        const uint32_t previous_depth = carry->previous_depth;
+        const uint8_t previous_level = (uint8_t)(previous_depth + 1 < lo ? 0 : previous_depth - lo + 1 > 65 ? 65 : previous_depth - lo + 1);
+        const __m512i level_before = parse_up8(level, 0, _mm512_set1_epi8((char)previous_level));
+        // The classes.
+        const __m512i role = _mm512_loadu_si512(kernels->roles + block);
+        const __m512i vkind = _mm512_loadu_si512(kernels->vkinds + block);
+        const __m512i role_bits = parse_table8(v->role_bits, role);
+        const __m512i refine = _mm512_and_si512(role_bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_REFINE));
+        __m512i c = role;
+        for (uint32_t k = 1; k < 8; k += 1)
+        {
+            c = _mm512_mask_mov_epi8(c, parse_equal8(refine, (uint8_t)k), parse_table8(v->refine[k], vkind));
+        }
+        const __mmask64 typed_lanes = _mm512_test_epi8_mask(_mm512_loadu_si512(typed + block), _mm512_set1_epi8(1));
+        c = _mm512_mask_mov_epi8(c, typed_lanes, parse_table8(v->typed, c));
+        ParseCheckBlock state;
+        _mm512_store_si512(state.classes, c);
+        // A keyword's class by its name (the builtins, _BitInt).
+        uint64_t rare = _mm512_test_epi8_mask(role_bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_RARE)) & live_mask &
+                        (parse_equal8(vkind, PARSE_KIND_TYPE_ARGUMENT) | parse_equal8(vkind, PARSE_KIND_TYPEOF));
+        while (rare != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(rare);
+            rare &= rare - 1;
+            const uint32_t i = block + lane;
+            state.classes[lane] = parse_check_class(kernels->roles[i], kernels->vkinds[i], names[i], typed[i] != 0);
+        }
+        c = _mm512_load_si512(state.classes);
+        __m512i c_before = parse_up8(c, 0, _mm512_set1_epi8((char)carry->previous));
+        const __m512i role_before = parse_up8(role, 0, _mm512_set1_epi8((char)carry->previous_role));
+        // The starts.
+        const __mmask64 closers = _mm512_test_epi8_mask(role_bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_CLOSER));
+        const __mmask64 first = _mm512_cmpgt_epu8_mask(level, level_before) | (block == 0 ? 1 : 0);
+        const __mmask64 after_item = _mm512_test_epi8_mask(parse_table8(v->role_bits, role_before), _mm512_set1_epi8(BUSTER_PARSE_CHECK_ITEM_AFTER));
+        const __mmask64 starts = ~closers & (first | after_item | parse_equal8(c_before, PARSE_ROLE_SEPARATOR)) & live_mask;
+        // The keys and the three searches.
+        const __m512i class_bits = parse_table8(v->class_bits, c);
+        const __m512i rank = _mm512_mask_mov_epi8(_mm512_mask_mov_epi8(_mm512_set1_epi8(2), _mm512_test_epi8_mask(class_bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_SWITCH)),
+                                                                       _mm512_set1_epi8(1)),
+                                                  starts, _mm512_setzero_si512());
+        const __m512i level4 = _mm512_slli_epi16(_mm512_and_si512(_mm512_sub_epi8(level, _mm512_set1_epi8(1)), _mm512_set1_epi8(0x3F)), 2);
+        const __m512i keys = _mm512_add_epi8(level4, rank);
+        __m512i windows[6];
+        windows[0] = keys;
+        for (uint32_t k = 1; k < 6; k += 1)
+        {
+            windows[k] = _mm512_min_epu8(windows[k - 1], parse_up8(windows[k - 1], k - 1, _mm512_set1_epi8((char)0xFF)));
+        }
+        const __m512i enclosing = parse_check_search(windows, level4);
+        const __m512i item_search = parse_check_search(windows, _mm512_add_epi8(level4, _mm512_set1_epi8(1)));
+        const __m512i part_search = parse_check_search(windows, _mm512_add_epi8(level4, _mm512_set1_epi8(2)));
+        const __mmask64 enclosed = ~_mm512_movepi8_mask(enclosing) & live_mask;
+        const __m512i item_start = _mm512_mask_mov_epi8(item_search, starts, parse_shifts.lanes8);
+        const __mmask64 item_found = ~_mm512_movepi8_mask(item_start) & live_mask;
+        const __mmask64 part_found = ~_mm512_movepi8_mask(part_search) & live_mask;
+        // What the frames say, by level.
+        const __m512i at = _mm512_sub_epi8(level, _mm512_set1_epi8(1));
+        const __m512i frame_group = _mm512_permutexvar_epi8(at, _mm512_loadu_si512(frames->group + lo));
+        const __m512i frame_kind = _mm512_permutexvar_epi8(at, _mm512_loadu_si512(frames->kind + lo));
+        const __m512i frame_part = _mm512_permutexvar_epi8(at, _mm512_loadu_si512(frames->part + lo));
+        const __m512i frame_items = _mm512_permutexvar_epi8(at, _mm512_loadu_si512(frames->items + lo));
+        // The item's place: a start first in its group is the first; else the one after the item before (that item's
+        // start found in the block, or the frame's, or the carry's for the block's first lane).
+        const __m512i start_class = _mm512_permutexvar_epi8(item_start, c);
+        const __m512i previous_start = parse_up8(item_start, 0, _mm512_set1_epi8((char)0xFF));
+        const __mmask64 previous_found = ~_mm512_movepi8_mask(previous_start) & ~(__mmask64)1;
+        const __mmask64 previous_first = _mm512_movepi8_mask(_mm512_permutexvar_epi8(previous_start, _mm512_movm_epi8(first)));
+        const __m512i next_of_frame = _mm512_min_epu8(_mm512_add_epi8(frame_items, _mm512_set1_epi8(1)), _mm512_set1_epi8(3));
+        __m512i start_items = _mm512_mask_mov_epi8(next_of_frame, previous_found, _mm512_mask_mov_epi8(_mm512_set1_epi8(3), previous_first, _mm512_set1_epi8(2)));
+        start_items = _mm512_mask_mov_epi8(start_items, 1, _mm512_set1_epi8((char)(carry->previous_items + 1 < 3 ? carry->previous_items + 1 : 3)));
+        start_items = _mm512_mask_mov_epi8(start_items, first, _mm512_set1_epi8(1));
+        const __m512i items = _mm512_mask_mov_epi8(frame_items, item_found, _mm512_permutexvar_epi8(item_start, start_items));
+        const __m512i place = _mm512_min_epu8(_mm512_max_epu8(items, _mm512_set1_epi8(1)), _mm512_set1_epi8(3));
+        const __m512i part_class = _mm512_permutexvar_epi8(part_search, c);
+        const __m512i part = _mm512_mask_mov_epi8(frame_part, part_found, parse_table8(v->part_after, part_class));
+        const __m512i variant = parse_table8(v->variant, c);
+        const __m512i opener_group = parse_table8(v->opener_group, c);
+        const __m512i keyword_group = parse_table8(v->keyword_group, c_before);
+        const __mmask64 by_keyword = parse_equal8(c, PARSE_ROLE_OPEN_SPECIFIER) | parse_equal8(c, PARSE_ROLE_OPEN_KEYWORD);
+        const __mmask64 by_attribute = parse_equal8(c, PARSE_ROLE_OPEN_ATTRIBUTE);
+        const __m512i attribute_group = _mm512_mask_mov_epi8(_mm512_set1_epi8(PARSE_GROUP_ATTRIBUTE), parse_equal8(c_before, PARSE_CLASS_ASM_KEYWORD),
+                                                             _mm512_set1_epi8(PARSE_GROUP_ASM_LABEL));
+        // The rounds: a lane's group is the one its opener (in the block) opens, or its frame's. Each opener's group
+        // depends only on lanes before it, so the groups have one fixed point, which a round that changes nothing has
+        // reached; the rounds start from what each opener would open in an expression, as most nested groups are.
+        const __m512i guess_by_mode = parse_check_table256(v->mode_group, _mm512_add_epi8(_mm512_slli_epi16(_mm512_and_si512(variant, _mm512_set1_epi8(0x03)), 6),
+                                                                                         _mm512_set1_epi8(PARSE_CHECK_EXPRESSION)));
+        __m512i guess = _mm512_mask_mov_epi8(opener_group, _mm512_test_epi8_mask(variant, variant), guess_by_mode);
+        guess = _mm512_mask_mov_epi8(guess, by_keyword, keyword_group);
+        guess = _mm512_mask_mov_epi8(guess, by_attribute, attribute_group);
+        __m512i group = _mm512_mask_mov_epi8(frame_group, enclosed, _mm512_permutexvar_epi8(enclosing, guess));
+        __m512i kind = frame_kind;
+        __m512i mode = _mm512_setzero_si512();
+        __m512i opened = _mm512_setzero_si512();
+        bool settled = false;
+        for (uint32_t round = 0; round < BUSTER_PARSE_CHECK_ROUNDS && !settled; round += 1)
+        {
+            // Each lane's item and mode from its group.
+            const __m512i start_kind = _mm512_mask_mov_epi8(_mm512_mask_mov_epi8(parse_table8(v->item, start_class), parse_equal8(group, PARSE_GROUP_ENUM),
+                                                                                 _mm512_set1_epi8(BUSTER_PARSE_ITEM_DECLARATION)),
+                                                            parse_equal8(group, PARSE_GROUP_INITIALIZER), parse_table8(v->designator, start_class));
+            kind = _mm512_mask_mov_epi8(frame_kind, item_found, start_kind);
+            const __m512i pseudo = parse_table8(v->pseudo, _mm512_add_epi8(_mm512_slli_epi16(_mm512_and_si512(group, _mm512_set1_epi8(0x1F)), 2),
+                                                                           _mm512_sub_epi8(place, _mm512_set1_epi8(1))));
+            const __m512i state_index = _mm512_add_epi8(_mm512_slli_epi16(_mm512_and_si512(kind, _mm512_set1_epi8(0x07)), 3), _mm512_and_si512(part, _mm512_set1_epi8(0x07)));
+            const __m512i state = _mm512_mask_mov_epi8(_mm512_permutexvar_epi8(state_index, _mm512_load_si512(v->states)), starts, _mm512_setzero_si512());
+            const __m512i pseudo6 = _mm512_add_epi8(_mm512_add_epi8(_mm512_slli_epi16(_mm512_and_si512(pseudo, _mm512_set1_epi8(0x3F)), 2),
+                                                                    _mm512_slli_epi16(_mm512_and_si512(pseudo, _mm512_set1_epi8(0x7F)), 1)),
+                                                    state);
+            mode = parse_check_table256(v->modes, pseudo6);
+            // The groups the openers open.
+            const __m512i by_mode = parse_check_table256(v->mode_group, _mm512_add_epi8(_mm512_slli_epi16(_mm512_and_si512(variant, _mm512_set1_epi8(0x03)), 6), mode));
+            opened = _mm512_mask_mov_epi8(opener_group, _mm512_test_epi8_mask(variant, variant), by_mode);
+            opened = _mm512_mask_mov_epi8(opened, by_keyword, keyword_group);
+            opened = _mm512_mask_mov_epi8(opened, by_attribute, attribute_group);
+            const __m512i next = _mm512_mask_mov_epi8(frame_group, enclosed, _mm512_permutexvar_epi8(enclosing, opened));
+            settled = (_mm512_cmpneq_epi8_mask(next, group) & live_mask) == 0;
+            group = next;
+        }
+        result = settled;
+        if (result)
+        {
+            _mm512_store_si512(state.groups, group);
+            _mm512_store_si512(state.kinds, kind);
+            _mm512_store_si512(state.parts, part);
+            _mm512_store_si512(state.items, items);
+            _mm512_store_si512(state.modes, mode);
+            _mm512_store_si512(state.opened, opened);
+            _mm512_store_si512(state.levels, level);
+            _mm512_store_si512(state.starts, _mm512_movm_epi8(starts));
+            const __m512i mode_before = parse_up8(mode, 0, _mm512_set1_epi8((char)carry->previous_mode));
+            const __m512i items_before = parse_up8(items, 0, _mm512_set1_epi8((char)carry->previous_items));
+            const __m512i group_before = parse_up8(group, 0, _mm512_set1_epi8((char)carry->previous_group));
+            const __m512i opened_before = parse_up8(opened, 0, _mm512_set1_epi8((char)frames->group[kernels->node_depths[block] + 1]));
+            const __mmask64 starts_before = (starts << 1) | (carry->previous_start != 0);
+            const __mmask64 empty = closers & _mm512_cmpeq_epi8_mask(level, level_before);
+            const __m512i inner_group = _mm512_mask_mov_epi8(group_before, empty, opened_before);
+            const __m512i inner_items = _mm512_maskz_mov_epi8(~empty, items_before);
+            // _Alignas's closer, by its group's type and the typed state before its keyword.
+            uint64_t alignas = parse_equal8(role, PARSE_ROLE_CLOSE_SPECIFIER) & parse_equal8(inner_group, PARSE_GROUP_ALIGNAS) & live_mask;
+            while (alignas != 0)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctzll(alignas);
+                alignas &= alignas - 1;
+                const uint32_t opener = kernels->enclosing[block + lane];
+                state.classes[lane] = opener >= 2 && typed[opener - 2] != 0 ? PARSE_CLASS_TYPED_ALIGNAS_CLOSE : PARSE_CLASS_ALIGNAS_CLOSE;
+            }
+            c = _mm512_load_si512(state.classes);
+            c_before = parse_up8(c, 0, _mm512_set1_epi8((char)carry->previous));
+            const __m512i c_before2 = _mm512_permutex2var_epi8(c, parse_shifts.up2_with_fill,
+                                                               _mm512_castsi128_si512(_mm_cvtsi32_si128((int)(carry->before_previous | (carry->previous << 8)))));
+            const __m512i bits = parse_table8(v->class_bits, c);
+            const __m512i bits_before = parse_table8(v->class_bits, c_before);
+            const __m512i allows_kind = parse_table8(v->allows_kind, c);
+            const __m512i ends_kind_before = parse_table8(v->ends_kind, c_before);
+            const __m512i left_before = parse_table8(v->left, c_before);
+            const __mmask64 previous_last = _mm512_cmplt_epu8_mask(level, level_before);
+            const __m512i mode_bits = _mm512_permutexvar_epi8(mode, _mm512_load_si512(v->mode_bits));
+            const __m512i mode_bits_before = _mm512_permutexvar_epi8(mode_before, _mm512_load_si512(v->mode_bits));
+            const __m512i named_bits = _mm512_mask_mov_epi8(mode_bits, previous_last, mode_bits_before);
+            __mmask64 failed = ~parse_check_bit128(v->follows, left_before, c);
+            failed |= ~parse_check_bit(v->allows, mode, allows_kind);
+            failed |= previous_last & ~parse_check_bit(v->ends, mode_before, ends_kind_before);
+            const __mmask64 skip_exempt = _mm512_test_epi8_mask(bits_before, _mm512_set1_epi8(BUSTER_PARSE_CHECK_SPECIFIER_END)) &
+                                          (parse_equal8(c, PARSE_ROLE_TERMINATOR) | parse_equal8(c, PARSE_ROLE_BITFIELD));
+            failed |= _mm512_test_epi8_mask(named_bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_NAMED)) &
+                      _mm512_test_epi8_mask(bits_before, _mm512_set1_epi8(BUSTER_PARSE_CHECK_BEFORE_NAME)) &
+                      _mm512_test_epi8_mask(bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_AFTER_NAME)) & ~skip_exempt;
+            failed |= parse_equal8(role, PARSE_ROLE_LABEL) & ~(starts_before & parse_equal8(c_before, PARSE_ROLE_OPERAND));
+            const __mmask64 terminator_before = parse_equal8(c_before, PARSE_ROLE_TERMINATOR);
+            failed |= parse_equal8(group, PARSE_GROUP_FOR) & parse_equal8(role, PARSE_ROLE_TERMINATOR) & parse_equal8(items, 3);
+            failed |= parse_equal8(role, PARSE_ROLE_CLOSE_FOR) & ((terminator_before & ~parse_equal8(inner_items, 2)) | (~terminator_before & ~parse_equal8(inner_items, 3)));
+            failed |= parse_equal8(role, PARSE_ROLE_CLOSE_KEYWORD) & ~parse_equal8(inner_items, 2) &
+                      ~(parse_equal8(inner_group, PARSE_GROUP_ASSERT) & parse_equal8(inner_items, 1));
+            failed |= empty & parse_equal8(inner_group, PARSE_GROUP_SUBSCRIPT);
+            failed |= parse_equal8(role, PARSE_ROLE_ERROR) | (closers & _mm512_cmpneq_epi8_mask(vkind, parse_table8(v->closer_kind, role)));
+            failed |= parse_equal8(c_before2, PARSE_CLASS_LABEL_ADDRESS) & _mm512_test_epi8_mask(bits, _mm512_set1_epi8((char)BUSTER_PARSE_CHECK_POSTFIX));
+            failed |= parse_equal8(c_before, PARSE_CLASS_STAR) & ~_mm512_test_epi8_mask(mode_bits_before, _mm512_set1_epi8(BUSTER_PARSE_CHECK_DECLARATION)) &
+                      ~_mm512_test_epi8_mask(bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_OPERAND_START));
+            // After a tag's body, or a tag and a line break: what may follow a type. The body's closer just before, the
+            // frame's state for the block's first lane, and a walk past attribute specifiers for the rare rest.
+            const __mmask64 same_level = _mm512_cmpeq_epi8_mask(level, level_before);
+            __mmask64 after_body = same_level & _mm512_test_epi8_mask(bits_before, _mm512_set1_epi8(BUSTER_PARSE_CHECK_BODY_CLOSER));
+            after_body = (after_body & ~(__mmask64)1) | (frames->after_body[kernels->node_depths[block]] != 0 ? 1 : 0);
+            uint64_t walks = same_level & _mm512_test_epi8_mask(bits_before, _mm512_set1_epi8(BUSTER_PARSE_CHECK_TRANSPARENT)) & ~(__mmask64)1 & live_mask;
+            _mm512_mask_storeu_epi8(kernels->check_classes + block, live_mask, c);
+            while (walks != 0)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctzll(walks);
+                walks &= walks - 1;
+                const uint32_t depth = kernels->node_depths[block + lane];
+                after_body |= (uint64_t)parse_check_after_body_walk(kernels, block, lane, frames->after_body[depth] != 0) << lane;
+            }
+            const __m512i after_tag = parse_table8(v->after_tag, vkind);
+            const __m512i next_after_tag = parse_table8(v->after_tag, _mm512_loadu_si512(kernels->vkinds + block + 1));
+            const __mmask64 valid_after_tag = _mm512_test_epi8_mask(after_tag, _mm512_set1_epi8(BUSTER_PARSE_CHECK_TAG_ALWAYS)) |
+                                              (_mm512_test_epi8_mask(after_tag, _mm512_set1_epi8(BUSTER_PARSE_CHECK_TAG_COLON)) & parse_equal8(group, PARSE_GROUP_STRUCT)) |
+                                              (_mm512_test_epi8_mask(after_tag, _mm512_set1_epi8(BUSTER_PARSE_CHECK_TAG_UNLESS_TYPE)) &
+                                               ~_mm512_test_epi8_mask(next_after_tag, _mm512_set1_epi8(BUSTER_PARSE_CHECK_TAG_TYPE)));
+            const __mmask64 line_start = _mm512_test_epi8_mask(_mm512_loadu_si512(line_flags + block), _mm512_set1_epi8(BUSTER_PP_START_OF_LINE));
+            failed |= ((after_body & ~_mm512_test_epi8_mask(bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_TRANSPARENT))) | (parse_equal8(c_before, PARSE_ROLE_TAG) & line_start)) &
+                      ~valid_after_tag;
+            // Statement expressions, rare: a block first in parentheses in a function, and last.
+            uint64_t blocks = _mm512_test_epi8_mask(mode_bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_IN_EXPRESSION)) &
+                              (parse_equal8(c, PARSE_ROLE_OPEN_BLOCK) | parse_equal8(c, PARSE_ROLE_CLOSE_BLOCK)) & live_mask;
+            while (blocks != 0)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctzll(blocks);
+                blocks &= blocks - 1;
+                const uint32_t i = block + lane;
+                bool fails = false;
+                if (state.classes[lane] == PARSE_ROLE_CLOSE_BLOCK)
+                {
+                    fails = kernels->roles[i + 1] != PARSE_ROLE_CLOSE_GROUP;
+                }
+                else
+                {
+                    // The group at depth 1: the latest token at depth 0 before the lane opened it, or the frame has it.
+                    uint8_t outer = frames->group[1];
+                    bool searching = true;
+                    for (uint32_t back = lane; searching && back-- > 0;)
+                    {
+                        searching = kernels->node_depths[block + back] != 0;
+                        outer = searching ? outer : state.opened[back];
+                    }
+                    fails = (lane > 0 ? state.classes[lane - 1] : carry->previous) != PARSE_ROLE_OPEN_GROUP || outer != PARSE_GROUP_BLOCK;
+                }
+                failed |= (uint64_t)fails << lane;
+            }
+            failed &= live_mask;
+            _mm512_mask_storeu_epi8(kernels->flags + block, failed, _mm512_set1_epi8(1));
+            // The frames of the depths still open after the block: from the last lane at each, in order (an opener's
+            // push before its group's tokens), with the state after a tag's body that lane leaves.
+            const __m512i live_levels = _mm512_mask_mov_epi8(_mm512_set1_epi8((char)0xFF), live_mask, level);
+            __m512i suffix = parse_down8(live_levels, 0, _mm512_set1_epi8((char)0xFF));
+            for (uint32_t k = 0; k < 6; k += 1)
+            {
+                suffix = _mm512_min_epu8(suffix, parse_down8(suffix, k, _mm512_set1_epi8((char)0xFF)));
+            }
+            uint64_t last = _mm512_cmpgt_epu8_mask(suffix, level) & live_mask;
+            while (last != 0)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctzll(last);
+                last &= last - 1;
+                const uint32_t i = block + lane;
+                const uint32_t depth = kernels->node_depths[i];
+                const uint8_t lane_class = state.classes[lane];
+                const uint8_t lane_bits = v->class_bits[lane_class];
+                const bool body = (lane_bits & BUSTER_PARSE_CHECK_BODY_CLOSER) != 0 || (((after_body >> lane) & 1) != 0 && (lane_bits & BUSTER_PARSE_CHECK_TRANSPARENT) != 0);
+                frames->group[depth] = state.groups[lane];
+                frames->kind[depth] = state.kinds[lane];
+                frames->part[depth] = state.kinds[lane] == BUSTER_PARSE_ITEM_DECLARATION ?
+                                          (state.starts[lane] ? v->part_after[lane_class] : parse_check_part_after(lane_class, state.parts[lane])) :
+                                          PARSE_PART_DECLARATION;
+                frames->items[depth] = state.items[lane];
+                frames->after_body[depth] = body;
+                if ((v->role_bits[kernels->roles[i]] & BUSTER_PARSE_CHECK_OPENER) != 0)
+                {
+                    frames->group[depth + 1] = state.opened[lane];
+                    frames->kind[depth + 1] = BUSTER_PARSE_ITEM_OTHER;
+                    frames->part[depth + 1] = PARSE_PART_START;
+                    frames->items[depth + 1] = 0;
+                    frames->typed[depth + 1] = i >= 2 && typed[i - 2] != 0;
+                    frames->after_body[depth + 1] = 0;
+                }
+            }
+            const uint32_t end = live - 1;
+            *carry = (ParseCheckCarry){
+                .before_previous = end > 0 ? state.classes[end - 1] : carry->previous,
+                .previous = state.classes[end],
+                .previous_role = kernels->roles[block + end],
+                .previous_mode = state.modes[end],
+                .previous_items = state.items[end],
+                .previous_start = state.starts[end] != 0,
+                .previous_group = state.groups[end],
+                .previous_depth = kernels->node_depths[block + end],
+            };
+        }
+    }
+    return result;
+}
+
+// K6 in AVX-512: every block by parse_check_block_avx512, or by the twin when that can't take it. `twin_blocks`, if not
+// 0, gets the number of blocks the twin took. In a check, `twin_period` (else 0) sends every block whose index is 1
+// modulo it to the twin, so that blocks of each kind follow the other's.
+static void parse_check_avx512_period(ParseKernels* kernels, const uint32_t* names, const uint8_t* line_flags, uint32_t count, const uint8_t* typed,
+                                      uint64_t* twin_blocks, uint32_t twin_period)
+{
+    const ParseCheckFrames frames = parse_check_frames(kernels);
+    ParseCheckCarry carry;
+    parse_check_begin(&frames, &carry);
+    uint64_t twins = 0;
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const uint32_t live = count - block < 64 ? count - block : 64;
+        const bool twin = twin_period != 0 && (block / 64) % twin_period == 1;
+        if (twin || !parse_check_block_avx512(kernels, names, line_flags, typed, block, live, &frames, &carry))
+        {
+            parse_check_range(kernels, names, line_flags, typed, block, block + live, &frames, &carry, kernels->check_classes, 0, 0);
+            twins += 1;
+        }
+    }
+    parse_check_end(kernels, count, &carry, 0);
+    if (twin_blocks != 0)
+    {
+        *twin_blocks += twins;
+    }
+}
+
+static void parse_check_avx512(ParseKernels* kernels, const uint32_t* names, const uint8_t* line_flags, uint32_t count, const uint8_t* typed, uint64_t* twin_blocks)
+{
+    parse_check_avx512_period(kernels, names, line_flags, count, typed, twin_blocks, 0);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The vector path together
 
 // What the vector kernels need besides ParseKernels' arrays.
@@ -9476,6 +10275,8 @@ struct ParseVectorBuffers
     uint64_t rounds[BUSTER_PARSE_ROLE_ROUNDS + 1];
     uint64_t wide_blocks;
     ParseStatementCounts statement_counts;
+    // K6's blocks that its twin took.
+    uint64_t check_twins;
 };
 
 // Candidates for K4's searches, with their padding below index 0.
@@ -9545,6 +10346,7 @@ static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* are
         .rounds = { 0 },
         .wide_blocks = 0,
         .statement_counts = { 0 },
+        .check_twins = 0,
     };
     bool result = open_stack != 0 && group_roles != 0 && group_typed != 0 && group_keywords != 0 && buffers->typed != 0 && buffers->lefts != 0 && buffers->left_keys != 0 &&
                   buffers->secondary != 0 && buffers->statements != 0 && buffers->contexts != 0 && buffers->statement_previous != 0 && buffers->statement_owners != 0 &&
@@ -9634,7 +10436,7 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
     // K4, K5 and K6.
     parse_parents_vector(kernels, count, buffers);
     const bool statements_ok = parse_statements_vector(kernels, count, buffers);
-    parse_check_scalar(kernels, names, input->flags, count, buffers->typed, kernels->check_frames, 0, 0, 0);
+    parse_check_avx512(kernels, names, input->flags, count, buffers->typed, &buffers->check_twins);
     for (uint32_t block = 0; block < count; block += 64)
     {
         const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
@@ -9795,6 +10597,7 @@ static void parse_tables_initialize(void)
         parse_role_tables_init();
         parse_statement_tables_init();
         parse_check_tables_init();
+        parse_check_vector_init();
         parse_tables_ready = true;
     }
 }

@@ -565,9 +565,13 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
         case PARSE_TIMED_VECTOR_K4: parse_parents_vector(k, count, buffers); break;
         case PARSE_TIMED_TWIN_K5: bench->statements_ok = parse_statements(k, count, bench->statements); break;
         case PARSE_TIMED_VECTOR_K5: bench->statements_ok = parse_statements_vector(k, count, buffers); break;
-        case PARSE_TIMED_TWIN_K6: parse_check_scalar(k, names, input.flags, count, bench->typed, k->check_frames, 0, 0, 0); break;
-        // The vector path's K6, the twin for now.
-        case PARSE_TIMED_VECTOR_K6: parse_check_scalar(k, names, input.flags, count, buffers->typed, k->check_frames, 0, 0, 0); break;
+        case PARSE_TIMED_TWIN_K6:
+        {
+            const ParseCheckFrames frames = parse_check_frames(k);
+            parse_check_scalar(k, names, input.flags, count, bench->typed, &frames, k->check_classes, 0, 0);
+            break;
+        }
+        case PARSE_TIMED_VECTOR_K6: parse_check_avx512(k, names, input.flags, count, buffers->typed, &buffers->check_twins); break;
         case PARSE_TIMED_TWIN_FALLBACK:
         case PARSE_TIMED_VECTOR_FALLBACK:
         {
