@@ -49,12 +49,108 @@ static bool asm_read_file(const char* path, Arena* arena, String8* source)
     return result;
 }
 
-static void asm_diagnostic(const char* path, String8 source, AsmResult result)
+// Reuse both preprocessor kernels and printers. The bounded in-memory stream includes their line markers and
+// avoids a subprocess or a temporary source file. The returned slice belongs to the assembler's arena.
+static bool asm_preprocess_file(const char* path, PPOptions options, Arena* arena, String8* source)
+{
+    static InternTable table;
+    static Preprocessor pp;
+    options.assembly = true;
+    options.expansion_starts = true;
+    const uint64_t saved = arena->length;
+    source->pointer = arena_push(arena, BUSTER_ASM_MAX_SOURCE + 1, 1);
+    bool result = source->pointer != 0 && intern_initialize(&table);
+    if (result)
+    {
+        result = pp_initialize(&pp, &options, &table) && pp_run(&pp, path);
+        FILE* stream = result ? fmemopen(source->pointer, BUSTER_ASM_MAX_SOURCE + 1, "w") : 0;
+        result = stream != 0 && pp_print(&pp, stream, true);
+        if (stream != 0)
+        {
+            result = fflush(stream) == 0 && result;
+            const long length = ftell(stream);
+            result = length >= 0 && (uint64_t)length <= BUSTER_ASM_MAX_SOURCE && result;
+            source->length = result ? (uint64_t)length : 0;
+            result = fclose(stream) == 0 && result;
+        }
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    arena_pop_to(arena, result ? (uint64_t)((uint8_t*)source->pointer - arena->base) + source->length + 1 : saved);
+    if (!result)
+    {
+        *source = (String8){0};
+    }
+    return result;
+}
+
+static void asm_diagnostic(const char* path, String8 source, AsmResult result, bool preprocessed)
 {
     uint32_t line = 1;
     uint32_t column = 1;
+    char presumed[PATH_MAX];
     for (uint32_t at = 0; at < result.location && at < source.length; at += 1)
     {
+        // Only the adapter's generated markers are interpreted. Plain .s keeps physical source locations.
+        if (preprocessed && column == 1 && source.pointer[at] == '#')
+        {
+            uint32_t end = at;
+            while (end < source.length && source.pointer[end] != '\n')
+            {
+                end += 1;
+            }
+            uint32_t p = at + 1;
+            while (p < end && source.pointer[p] == ' ')
+            {
+                p += 1;
+            }
+            uint64_t number = 0;
+            const uint32_t begin = p;
+            while (p < end && source.pointer[p] >= '0' && source.pointer[p] <= '9' && number <= UINT32_MAX)
+            {
+                number = number * 10 + source.pointer[p] - '0';
+                p += 1;
+            }
+            while (p < end && source.pointer[p] == ' ')
+            {
+                p += 1;
+            }
+            if (p > begin && number <= UINT32_MAX && p < end && source.pointer[p] == '"')
+            {
+                uint32_t length = 0;
+                p += 1;
+                while (p < end && source.pointer[p] != '"' && length + 1 < sizeof(presumed))
+                {
+                    uint8_t c = source.pointer[p++];
+                    if (c == '\\' && p < end)
+                    {
+                        c = source.pointer[p++];
+                        if (c >= '0' && c <= '7')
+                        {
+                            uint32_t value = c - '0';
+                            for (uint32_t n = 1; n < 3 && p < end && source.pointer[p] >= '0' && source.pointer[p] <= '7'; n += 1)
+                            {
+                                value = value * 8 + source.pointer[p++] - '0';
+                            }
+                            c = (uint8_t)value;
+                        }
+                        else
+                        {
+                            c = c == 'n' ? '\n' : c == 't' ? '\t' : c;
+                        }
+                    }
+                    presumed[length++] = (char)c;
+                }
+                if (p < end && source.pointer[p] == '"')
+                {
+                    presumed[length] = 0;
+                    path = presumed;
+                    line = (uint32_t)number;
+                    at = end;
+                    continue;
+                }
+            }
+        }
         if (source.pointer[at] == '\n')
         {
             line += 1;
@@ -70,11 +166,15 @@ static void asm_diagnostic(const char* path, String8 source, AsmResult result)
 
 static int run_assembler_command(int count, char** arguments)
 {
+    Arena arena = arena_reserve(1ull << 32);
+    char** preprocess_arguments = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)count + 1);
+    uint32_t preprocess_count = 0;
+    PPOptions preprocessing = {0};
     AsmOptions options = {.vectorized = true};
     const char* input = 0;
     const char* output = 0;
     bool timing = false;
-    bool valid = true;
+    bool valid = preprocess_arguments != 0;
     for (int i = 0; i < count && valid; i += 1)
     {
         const char* argument = arguments[i];
@@ -105,31 +205,22 @@ static int run_assembler_command(int count, char** arguments)
         {
             options.isa = 2;
         }
-        else if (strcmp(argument, "-o") == 0 && i + 1 < count)
-        {
-            output = arguments[++i];
-        }
-        else if (argument[0] != '-' && input == 0)
-        {
-            input = argument;
-        }
         else
         {
-            valid = false;
+            preprocess_arguments[preprocess_count++] = arguments[i];
         }
     }
+    bool markers;
+    valid = valid && pp_parse_options((int)preprocess_count, preprocess_arguments, &preprocessing, &arena, &input, &output, &markers);
+    const bool preprocessed = input != 0 && strlen(input) >= 2 && strcmp(input + strlen(input) - 2, ".S") == 0;
+    preprocessing.scalar = !options.vectorized;
     int status = 1;
     if (!valid || input == 0)
     {
-        fprintf(stderr, "usage: compiler assemble [--intel] [--scalar] [--isa=x86-64|avx2|avx512f] [--timing] -o output.o input.s\n");
-    }
-    else if (strlen(input) >= 2 && strcmp(input + strlen(input) - 2, ".S") == 0)
-    {
-        fprintf(stderr, "%s: .S preprocessing requires the assembly-mode adapter; use preprocessed .s input\n", input);
+        fprintf(stderr, "usage: compiler assemble [--intel] [--scalar] [--isa=x86-64|avx2|avx512f] [--timing] [-I dir] [-D name[=value]] [-U name] -o output.o input.s|input.S\n");
     }
     else
     {
-        Arena arena = arena_reserve(1ull << 32);
         String8 source = {0};
         char default_output[PATH_MAX];
         if (output == 0)
@@ -148,7 +239,7 @@ static int run_assembler_command(int count, char** arguments)
         }
         const uint64_t start = asm_clock();
         X86MatchIndex* index = BUSTER_ARENA_PUSH_ARRAY(&arena, X86MatchIndex, 1);
-        if (!valid || index == 0 || !x86_encoder_initialize() || !asm_read_file(input, &arena, &source))
+        if (!valid || index == 0 || !x86_encoder_initialize() || !(preprocessed ? asm_preprocess_file(input, preprocessing, &arena, &source) : asm_read_file(input, &arena, &source)))
         {
             fprintf(stderr, "%s: unable to initialize or read assembly input (maximum 16 MiB)\n", input);
         }
@@ -159,7 +250,7 @@ static int run_assembler_command(int count, char** arguments)
             AsmResult result = asm_assemble(source, index, options, &arena);
             if (result.error != 0)
             {
-                asm_diagnostic(input, source, result);
+                asm_diagnostic(input, source, result, preprocessed);
             }
             else
             {
@@ -181,7 +272,7 @@ static int run_assembler_command(int count, char** arguments)
                 }
             }
         }
-        arena_release(&arena);
     }
+    arena_release(&arena);
     return status;
 }

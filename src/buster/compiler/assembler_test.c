@@ -228,9 +228,97 @@ static void asm_test_driver(AsmTest* test, const char* directory)
     asm_test_check(test, okay, "source diagnostic and existing output preserved on failure", 0);
     okay = object_write_file(preprocessed, (const uint8_t*)asm_test_function, sizeof(asm_test_function) - 1) == OBJECT_ERROR_NONE;
     vector[4] = preprocessed;
-    okay = okay && object_test_run(vector, output, errors) == 1;
-    asm_test_check(test, okay, ".S requires the assembly preprocessor adapter", 0);
+    okay = okay && object_test_run(vector, output, errors) == 0;
+    const String8 cpp = object_test_read_file(&test->scalar, object);
+    // The file symbol names the actual .S input; compare the object contents through the ELF view below instead.
+    ObjectView original;
+    ObjectView preprocessor;
+    char difference[256] = {0};
+    okay = okay && object_view_open(&original, (const uint8_t*)a.pointer, a.length, false, difference, sizeof(difference)) && object_view_open(&preprocessor, (const uint8_t*)cpp.pointer, cpp.length, false, difference, sizeof(difference));
+    okay = okay && object_test_same_as(&original, &preprocessor, difference, sizeof(difference));
+    asm_test_check(test, okay, ".S through shared preprocessor", difference);
     test->scalar.length = saved;
+}
+
+static void asm_test_preprocessing(AsmTest* test, const char* directory)
+{
+    char input[PATH_MAX];
+    char header[PATH_MAX];
+    char object[PATH_MAX];
+    char scalar_object[PATH_MAX];
+    char clang_source[PATH_MAX];
+    char output[PATH_MAX];
+    char errors[PATH_MAX];
+    snprintf(input, sizeof(input), "%s/driver.S", directory);
+    snprintf(header, sizeof(header), "%s/values.h", directory);
+    snprintf(object, sizeof(object), "%s/driver.o", directory);
+    snprintf(scalar_object, sizeof(scalar_object), "%s/scalar.o", directory);
+    snprintf(clang_source, sizeof(clang_source), "%s/preprocessed.s", directory);
+    snprintf(output, sizeof(output), "%s/output", directory);
+    snprintf(errors, sizeof(errors), "%s/errors", directory);
+    static const char definitions[] =
+        "#define VALUE 200\n#define IMM(x) $x\n#define CAT(a,b) a ## b\n#define STR(x) #x\n"
+        "#if !defined(__ASSEMBLER__) || defined(REMOVE) || OVERRIDE != 7\n#error assembly options\n#endif\n";
+    static const char source[] =
+        "#include <values.h>\n# ordinary assembly comment VALUE\n"
+        ".text\n.globl cpp_function\n.type cpp_function,@function\ncpp_function:\n"
+        "movl $VALUE, %eax # inline comment VALUE\naddl IMM(OVERRIDE), %eax\n"
+        "addl $\\\nVALUE, %eax\njmp 1f\n1: ret\n.size cpp_function, .-cpp_function\n"
+        ".data\nCAT(data_,label): .quad external+5\n"
+        ".ascii STR(VALUE), \"$VALUE # /* still a string */\"\n"
+        ".intel_syntax noprefix\n.text\nmov eax, OVERRIDE\n.att_syntax prefix\nret\n";
+    bool okay = object_write_file(header, (const uint8_t*)definitions, sizeof(definitions) - 1) == OBJECT_ERROR_NONE && object_write_file(input, (const uint8_t*)source, sizeof(source) - 1) == OBJECT_ERROR_NONE;
+    char* vector[] = {"/proc/self/exe", "assemble", "-I", (char*)directory, "-DOVERRIDE=7", "-DREMOVE", "-UREMOVE", "-o", object, input, 0};
+    char* scalar[] = {"/proc/self/exe", "assemble", "--scalar", "-I", (char*)directory, "-DOVERRIDE=7", "-DREMOVE", "-UREMOVE", "-o", scalar_object, input, 0};
+    char* clang[] = {"clang", "-E", "-P", "-x", "assembler-with-cpp", "-I", (char*)directory, "-DOVERRIDE=7", "-DREMOVE", "-UREMOVE", "-o", clang_source, input, 0};
+    okay = okay && object_test_run(vector, output, errors) == 0 && object_test_run(scalar, output, errors) == 0 && object_test_run(clang, output, errors) == 0;
+    Arena files = arena_reserve(1ull << 28);
+    const String8 a = object_test_read_file(&files, object);
+    const String8 b = object_test_read_file(&files, scalar_object);
+    const String8 text = object_test_read_file(&files, clang_source);
+    okay = okay && a.length != 0 && a.length == b.length && memcmp(a.pointer, b.pointer, a.length) == 0;
+    asm_test_check(test, okay, ".S macros, includes, comments and scalar/vector output", 0);
+    if (okay)
+    {
+        char* terminated = arena_push(&files, text.length + 1, 1);
+        okay = terminated != 0;
+        if (okay)
+        {
+            memcpy(terminated, text.pointer, text.length);
+            terminated[text.length] = 0;
+            // Independently preprocess with Clang, assemble with GNU as, then compare Buster's .S object with both.
+            okay = asm_test_oracle(test, terminated, directory, 0);
+            ObjectView ours;
+            ObjectView oracle;
+            char difference[256] = {0};
+            char oracle_path[PATH_MAX];
+            snprintf(oracle_path, sizeof(oracle_path), "%s/oracle.o", directory);
+            const String8 oracle_bytes = object_test_read_file(&files, oracle_path);
+            okay = okay && object_view_open(&ours, (const uint8_t*)a.pointer, a.length, false, difference, sizeof(difference)) && object_view_open(&oracle, (const uint8_t*)oracle_bytes.pointer, oracle_bytes.length, true, difference, sizeof(difference));
+            okay = okay && object_test_same_as(&ours, &oracle, difference, sizeof(difference));
+            asm_test_check(test, okay, ".S against Clang preprocessing and GNU as", difference);
+        }
+        asm_test_check(test, okay, ".S oracle allocation and comparison", 0);
+    }
+    static const char bad_header[] = "#line 73 \"assembly-source.h\"\nthis_is_not_an_instruction\n";
+    static const char bad_source[] = "#include <values.h>\n";
+    okay = object_write_file(header, (const uint8_t*)bad_header, sizeof(bad_header) - 1) == OBJECT_ERROR_NONE && object_write_file(input, (const uint8_t*)bad_source, sizeof(bad_source) - 1) == OBJECT_ERROR_NONE;
+    okay = okay && object_test_run(vector, output, errors) == 1;
+    const String8 diagnostic = object_test_read_file(&files, errors);
+    const String8 kept = object_test_read_file(&files, object);
+    static const char expected[] = "assembly-source.h:73:1: error:";
+    bool located = false;
+    for (uint64_t at = 0; at + sizeof(expected) - 1 <= diagnostic.length; at += 1)
+    {
+        located |= memcmp(diagnostic.pointer + at, expected, sizeof(expected) - 1) == 0;
+    }
+    okay = okay && located && kept.length == a.length && memcmp(kept.pointer, a.pointer, a.length) == 0;
+    if (!okay)
+    {
+        fprintf(stderr, "preprocessed diagnostic: %.*s\n", (int)diagnostic.length, diagnostic.pointer);
+    }
+    asm_test_check(test, okay, ".S included #line diagnostic and existing output preserved", 0);
+    arena_release(&files);
 }
 
 static uint64_t asm_test_random(uint64_t* state)
@@ -441,7 +529,8 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_oracle(&test, ".data\nexpr:\n.byte ~0,~1,~0+256\n.long -1|0,~0&0xffffffff\n.quad ~0xffffffffffffffff\n", directory, 0);
                 asm_test_execution(&test, directory);
                 asm_test_driver(&test, directory);
-                const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "scalar.o"};
+                asm_test_preprocessing(&test, directory);
+                const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "scalar.o", "values.h", "preprocessed.s"};
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)
                 {
                     char path[PATH_MAX];

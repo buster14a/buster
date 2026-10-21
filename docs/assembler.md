@@ -1,6 +1,6 @@
 # Assembly frontend
 
-The first usable milestone of [#222](https://github.com/buster14a/buster/issues/222)
+The frontend in [#222](https://github.com/buster14a/buster/issues/222)
 is a callable GNU-syntax assembler in the existing compiler executable. Its
 default host path uses AVX-512 and has an exact scalar twin. It selects the
 existing 16-byte `X86Instruction` records and emits the existing `Link` tables
@@ -43,11 +43,16 @@ Output feature admission is separate from the host ISA:
 These are explicit subset levels, not a replacement feature database for
 [#180](https://github.com/buster14a/buster/issues/180).
 
-`.S` is explicitly rejected until the assembly-mode preprocessor adapter is
-agreed with [#117](https://github.com/buster14a/buster/issues/117#issuecomment-6325842112).
-That adapter must handle `$MACRO`, assembly `#` comments, `__ASSEMBLER__`,
-punctuation and source locations. Feeding `.S` to the C preprocessor unchanged
-would not establish this contract. This milestone does **not** close #222.
+An uppercase `.S` extension enables the shared preprocessor's explicit assembly
+mode before assembly. `-I`, `-D`, `-U`, `-include` and the preprocessor's include
+directory options are available. It defines `__ASSEMBLER__`, expands `$MACRO`
+as an immediate, and accepts unknown `#` lines as assembly comments. Literals
+remain opaque. Includes, conditionals, function macros, stringizing and token
+pasting use the existing engine; C preprocessing keeps its existing behavior.
+The adapter uses both existing vector/scalar kernels and printers. A bounded
+in-memory stream carries line markers to assembly diagnostics; no subprocess
+or temporary source file is used. `compiler -E -x assembler-with-cpp input.S`
+also exposes this preprocessing mode.
 
 ## Supported input
 
@@ -86,7 +91,9 @@ Statements end at newline or semicolon. `#` and `//` start line comments;
 `/* ... */` comments preserve statement newlines. Strings preserve embedded
 comment characters and support quote/backslash, `n/r/t/b/f`, and one to three
 octal escape digits. Source slices need no terminator or padding. Diagnostics
-report the physical source line and byte column of the first error.
+report the physical source line and byte column of the first error in `.s`.
+For `.S`, line markers recover the presumed filename and line, including
+includes and `#line`; the column refers to the expanded assembly line.
 
 Named labels and numeric labels `0` through `9` support forward/backward
 references. Numeric labels have a namespace distinct from user names.
@@ -184,6 +191,10 @@ The cross-check compares section bytes/properties, symbols and relocations
 with GNU as using the existing object comparator, and links/runs the examples.
 Different ELF file layouts and automatic stack notes are normalized. Existing
 independent encoder/GNU-as tests remain required.
+The `.S` fixtures compare both complete driver paths, independently preprocess
+with Clang's assembler-with-preprocessor mode, compare objects with GNU as,
+and check included-source diagnostics and preservation of existing output
+when assembly fails.
 
 ```sh
 ./build/compiler benchmark-assembler --external
