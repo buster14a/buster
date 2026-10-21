@@ -565,6 +565,11 @@ the mispredictions it saves.
 
 ## The oracle
 
+The real-source command is `test-preprocessor --compare-clang [--clang PATH]`.
+[Frozen preprocessor oracle](preprocessor-oracle.md) records its token-kind
+and location checks, explicit skip/error accounting, pinned input manifests,
+full-corpus reproduction and frozen CI subset.
+
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
 - **Cases.** Without files, it runs the 88 built-in cases. These are cases of
@@ -680,7 +685,7 @@ the mispredictions it saves.
 In both, the two printers must give the same bytes, with line markers and
 without, and the text must lex back into the stream's spellings.
 
-So "token-identical" means the same sequence of token spellings. Whitespace
+So "token-identical" means the same sequence of lexical kinds and spellings. Whitespace
 and line breaks may differ: clang's `-E` spacing heuristics aren't part of the
 contract.
 
@@ -701,10 +706,10 @@ The configurations behind the results table:
 ../../build/compiler test-preprocessor --clang -std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX *.c
 ```
 
-The C library corpus (Zig 0.14.1's `lib/libc`) is a collection of headers and
-sources for many targets without their build configurations, so it isn't a set
-of translation units to preprocess. Refinement checks it file by file
-(`docs/c-refinement.md`), and musl stands for it here.
+The C library corpus (Zig 0.14.1's `lib/libc`) contains headers and sources for
+many targets without their build configurations. The corpus oracle tries each
+C/header input alone, compares every one Clang accepts and records every
+rejection's reason. Musl is also checked under its upstream build configuration.
 
 ## Where the time goes
 
@@ -776,8 +781,6 @@ cleared once and reused.
 - Target options (`-march`, `-m*`, `-funsigned-char`) don't change the built-in
   predefines; they come only through `--predefines`. #117's configuration asks
   for clang's macros for the same `-march`.
-- The oracle uses the installed `/usr/include`, not the pinned copy of the
-  headers that #125's decision asks for (with its hashed manifest).
 - The feature tests (`__has_attribute` and the others) always answer from
   clang's table, which #117 and #125 keep for the oracle's mode. Outside it, they
   are to answer what the compiler implements (#123, #148).

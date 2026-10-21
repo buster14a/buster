@@ -1890,6 +1890,15 @@ the others its measurements are informational.
 
 ## Preprocessor tests
 
+`./build/compiler test-preprocessor --compare-clang [--clang PATH] [options]
+corpus...` is #125's real-source oracle. It accepts directories or
+`--files-from LIST --root DIR`, compares lexical kinds, spellings and locations,
+and reports every Clang rejection as an explicit skip. Process/configuration
+failures fail the run. `--report NEW.tsv` records every file's result and skip
+reason. `c_preprocessor_oracle.c` implements this interface;
+[the frozen oracle guide](docs/preprocessor-oracle.md) records the pinned
+headers/corpora, manifest identities, CI subset and on-demand commands.
+
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
 - without files, the 88 built-in cases (`pp_test_cases`), each preprocessed by
