@@ -190,8 +190,8 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 //     which kind) and clang doesn't count, or on the stack once there is none: nullptr_t and _Atomic scalars.
 //   - IGNORE: nothing to pass (both classes NO_CLASS: an empty struct, a struct of unnamed bit-fields).
 //   - PAIR: one 128-bit integer value (clang's i128) that LLVM never splits between a register and the stack; with a
-//     high eightbyte NO_CLASS (an i128 a union stores, as union { int a; unsigned _BitInt(128) : 127; }), clang counts
-//     one register for it all the same.
+//     high eightbyte NO_CLASS too (an i128 a union stores, as union { int a; unsigned _BitInt(128) : 127; }), which
+//     clang counts and passes as two INTEGER eightbytes (HIGH_INTEGER is set, though the row says NO_CLASS).
 //   - SIGN, ZERO: clang's Extend: the caller sign- or zero-extends the value to 32 bits (the callee, for a result).
 //   - AGGREGATE: clang's byval: a copy of it on the stack, and a result through a hidden pointer.
 //   - END_MEMORY: a type of no size that is MEMORY at offset 16 though not at 0 (see abi_member_row_at), which only the
@@ -1522,10 +1522,10 @@ static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
         pass |= high == BUSTER_ABI_SSE || high == BUSTER_ABI_X87UP ? BUSTER_ABI_PASS_HIGH_SSE : 0;
         pass |= high == BUSTER_ABI_SSEUP ? BUSTER_ABI_PASS_VECTOR : 0;
         pass |= high == BUSTER_ABI_SSEUP && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_PASS_WIDE : 0;
-        // An i128 at offset 0 makes clang's type for the low eightbyte the whole i128, a high one NO_CLASS too (which
-        // clang then counts as one register).
+        // An i128 at offset 0 makes clang's type for the low eightbyte the whole i128, a high one NO_CLASS too, which
+        // clang then counts and passes as two INTEGER eightbytes.
         const bool pair_classes = low == BUSTER_ABI_INTEGER && (high == BUSTER_ABI_INTEGER || (high == BUSTER_ABI_NO_CLASS && size == 16));
-        pass |= pair_classes && abi_is_pair(abi, table, index) ? BUSTER_ABI_PASS_PAIR : 0;
+        pass |= pair_classes && abi_is_pair(abi, table, index) ? BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_HIGH_INTEGER : 0;
         pass |= low == BUSTER_ABI_INTEGER && high == BUSTER_ABI_NO_CLASS ? abi_extension(table, index) : 0;
         pass |= abi_low_general(abi, table, index, low, high) ? BUSTER_ABI_PASS_LOW_GENERAL : 0;
     }
@@ -2428,8 +2428,8 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
 //   - an argument is UNCOUNTED, whose registers clang doesn't count but LLVM does, or a named WIDE one of a variadic
 //     call, the reverse;
 //   - a stack argument is EMPTY, whose slot depends on clang's count, or one is LOW_GENERAL, whose low eightbyte clang
-//     counts as SSE and LLVM puts in a general register, or a PAIR of one class, which clang counts as one register and
-//     LLVM gives two, or the result is one LLVM demotes to a hidden pointer, which clang doesn't count (DEMOTED);
+//     counts as SSE and LLVM puts in a general register, or the result is one LLVM demotes to a hidden pointer, which
+//     clang doesn't count (DEMOTED);
 // and the calls with one of those (rare in compiled code) go to the twin, which assigns them one argument at a time.
 static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
 {
@@ -2553,9 +2553,7 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __mmask16 empty = on_stack & _mm512_test_epi32_mask(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_EMPTY));
             const __mmask16 general_low = _mm512_test_epi32_mask(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_LOW_GENERAL));
             const __mmask16 demoted = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_DEMOTED));
-            const __mmask16 short_pair = _mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_PAIR)) &
-                                         (__mmask16)~_mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_HIGH_INTEGER));
-            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | wide_named | empty | general_low | demoted | short_pair);
+            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | wide_named | empty | general_low | demoted);
             // The registers: the low eightbyte's, then the high one's (first for a value whose low one is padding).
             const __mmask16 low_integer_lanes = _mm512_test_epi32_mask(low_integer, low_integer);
             const __mmask16 low_sse_lanes = _mm512_test_epi32_mask(low_sse, low_sse);

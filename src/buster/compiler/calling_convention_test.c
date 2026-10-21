@@ -932,7 +932,7 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     abi_test_in_registers(builder, "union {aligned(16) {long, long}, __int128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
                           BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
     // A union stores a bit-field of 121 to 128 bits as an i128 (getIntNType rounds to bytes), unnamed though it is: one
-    // i128 with a high eightbyte NO_CLASS, which clang counts as one register; 120 bits are an i120, an i64 to pass.
+    // i128 with a high eightbyte NO_CLASS, which clang counts as two registers; 120 bits are an i120, an i64 to pass.
     m[0] = abi_test_member(builder, type_bit_int(table, 32, true));
     m[1] = abi_test_bits(builder, type_bit_int(table, 128, true), 127, false);
     abi_test_in_registers(builder, "union {unsigned _BitInt(32), unsigned _BitInt(128) : 127}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
@@ -1045,7 +1045,7 @@ static bool abi_test_same_location(AbiLocation got, AbiTestLocation expected)
 // f(long x5, __int128, long) puts the __int128 on the stack and the long in r9; a result in memory shifts the general
 // registers by one; a struct of a flexible array member alone takes an 8-byte slot while a general register is free,
 // and none after (clang's i0); {__bf16, _Alignas(8) char} takes two general registers (LOW_GENERAL); and a union
-// stored as an i128 that clang counts as one register goes on the stack after five longs, the long after it in r9.
+// stored as an i128, which clang counts as two registers, goes on the stack after five longs, the long after it in r9.
 static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t vector_bytes, bool vector)
 {
     TypeTable* table = &tables->types.table;
@@ -3009,10 +3009,9 @@ static uint32_t abi_test_parts(const AbiTable* abi, const TypeTable* table, Type
     }
     else
     {
-        // A PAIR is two halves, its high eightbyte NO_CLASS or not.
         const bool halves[2] = {
             (pass & (BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_LOW_SSE)) != 0,
-            (pass & (BUSTER_ABI_PASS_HIGH_INTEGER | BUSTER_ABI_PASS_HIGH_SSE | BUSTER_ABI_PASS_PAIR)) != 0,
+            (pass & (BUSTER_ABI_PASS_HIGH_INTEGER | BUSTER_ABI_PASS_HIGH_SSE)) != 0,
         };
         for (uint32_t half = 0; half < 2; half += 1)
         {
