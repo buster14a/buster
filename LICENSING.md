@@ -82,13 +82,26 @@ third-party portions, or create a blanket exemption for copied source or
 arbitrary component embedding. Its separate GPLv2 paragraph remains in
 [LICENSE](LICENSE) with its own conditions.
 
-There are no bundled production C library headers or runtime library at the
-reviewed revision. `link_program.c` does emit original support routines and
-data into synthetic test programs; these are covered original material, not
+There is no bundled production C library or runtime library at the reviewed
+revision. `link_program.c` does emit original support routines and data into
+synthetic test programs; these are covered original material, not
 independently authored user programs. Tests can additionally link system
 libc/startup files using the system toolchain. Those external files keep their
-own terms. Any future bundled header, runtime or support implementation needs
+own terms. Any further bundled header, runtime or support implementation needs
 its own provenance entry before being included in compiler output.
+
+**The compiler's own headers.** `src/buster/include/` holds the compiler's own
+freestanding headers (`<float.h>`, `<iso646.h>`, `<limits.h>`, `<stdalign.h>`,
+`<stdarg.h>`, `<stdatomic.h>`, `<stdbool.h>`, `<stdckdint.h>`, `<stddef.h>`,
+`<stdint.h>` and `<stdnoreturn.h>`), which `--buster-headers` selects (#117).
+They are original material written for buster from ISO C23 and from the
+observed behavior of clang 23's resource headers: which macros each language
+mode defines and how they work with glibc's headers. They are not copied from
+clang, GCC or any C library. On October 22, 2026, David decided that they carry
+**Apache-2.0 WITH LLVM-exception**, as the rest of the original material does
+([#117](https://github.com/buster14a/buster/issues/117)). Compiling a program
+with them embeds portions of them in its object form, and the exception's first
+paragraph covers those portions as described above.
 
 ## Distributions
 
