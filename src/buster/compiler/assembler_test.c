@@ -352,7 +352,7 @@ static void asm_test_register_words(AsmTest* test, const uint64_t* words, const 
         const uint32_t expected = found ? X86_OPERAND_REGISTER | reference.reg << 8 | reference.class << 16 | reference.width << 24 : 0;
         const bool cached = descriptions[i] & BUSTER_ASM_REGISTER_CACHED;
         asm_test_check(test, !cached || (descriptions[i] & ~BUSTER_ASM_REGISTER_CACHED) == expected, "packed register spelling agrees with independent scalar grammar", 0);
-        asm_test_check(test, lengths[i] > 3 || cached, "all short register spellings are classified", 0);
+        asm_test_check(test, cached, "all bounded register spellings are classified", 0);
     }
 }
 
@@ -360,7 +360,7 @@ static void asm_test_registers(AsmTest* test)
 {
     uint64_t words[8];
     uint64_t lengths[8];
-    // Every two-byte key, including every collision and non-ASCII byte; then every three-letter lowercase key.
+    // Every two-byte key, including every collision and non-ASCII byte; then every three-letter mixed-case key.
     for (uint32_t base = 0; base < 65536; base += 8)
     {
         for (uint32_t i = 0; i < 8; i += 1)
@@ -370,12 +370,13 @@ static void asm_test_registers(AsmTest* test)
         }
         asm_test_register_words(test, words, lengths);
     }
-    for (uint32_t base = 0; base < 26 * 26 * 26; base += 8)
+    static const char letters[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for (uint32_t base = 0; base < 52 * 52 * 52; base += 8)
     {
         for (uint32_t i = 0; i < 8; i += 1)
         {
             const uint32_t value = base + i;
-            words[i] = ('a' + value % 26) | ('a' + value / 26 % 26) << 8 | ('a' + value / (26 * 26) % 26) << 16;
+            words[i] = letters[value % 52] | letters[value / 52 % 52] << 8 | letters[value / (52 * 52) % 52] << 16;
             lengths[i] = 3;
         }
         asm_test_register_words(test, words, lengths);
@@ -404,20 +405,30 @@ static void asm_test_registers(AsmTest* test)
             {
                 for (uint32_t base = 0; base < 136; base += 8)
                 {
-                    for (uint32_t i = 0; i < 8; i += 1)
+                    for (uint32_t capitals = 0; capitals < 32; capitals += 1)
                     {
-                        char text[32];
-                        const uint32_t length = snprintf(text, sizeof(text), "%s%0*u%s", prefixes[prefix], digits, base + i, suffixes[suffix]);
-                        lengths[i] = length < 8 ? length : 8;
-                        words[i] = 0;
-                        memcpy(words + i, text, lengths[i]);
+                        for (uint32_t i = 0; i < 8; i += 1)
+                        {
+                            char text[32];
+                            const uint32_t length = snprintf(text, sizeof(text), "%s%0*u%s", prefixes[prefix], digits, base + i, suffixes[suffix]);
+                            lengths[i] = length < 8 ? length : 8;
+                            words[i] = 0;
+                            for (uint32_t at = 0; at < length && at < 5; at += 1)
+                            {
+                                if ((capitals & (1u << at)) && text[at] >= 'a' && text[at] <= 'z')
+                                {
+                                    text[at] -= 'a' - 'A';
+                                }
+                            }
+                            memcpy(words + i, text, lengths[i]);
+                        }
+                        asm_test_register_words(test, words, lengths);
                     }
-                    asm_test_register_words(test, words, lengths);
                 }
             }
         }
     }
-    asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nmov r000000008,r000000000009\nvaddps zmm000001{k000003}{z},zmm000002,zmm000003\n"), 1, X86_ARCH_V4);
+    asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\n.quad r000000008,r000000000009,zmm000001,k000003\n"), 1, X86_ARCH_V4);
 }
 
 static void asm_test_numbers(AsmTest* test)
@@ -724,6 +735,44 @@ static String8 asm_test_padding_source(char* source, uint32_t capacity)
     return (String8){.pointer = source, .length = length < capacity ? length : 0};
 }
 
+// Whether this GNU as pads code as binutils 2.47 does, which the padding fixture's exact comparison assumes: 2.42
+// orders its long NOPs differently. After a nop, 2.47 pads 31 bytes as a 9-byte NOP and then two 11-byte ones.
+static bool asm_test_gas_pads_like_2_47(AsmTest* test, const char* directory)
+{
+    // A label, without which GNU as writes no symbol table, and object_view_open refuses the object.
+    static const char probe[] = "f: nop\n.p2align 5\nret\n";
+    static const uint8_t expected[] =
+        {
+            0x90,
+            0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xc3,
+    };
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    char output[PATH_MAX];
+    char errors[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/oracle.s", directory);
+    snprintf(object, sizeof(object), "%s/oracle.o", directory);
+    snprintf(output, sizeof(output), "%s/output", directory);
+    snprintf(errors, sizeof(errors), "%s/errors", directory);
+    char* arguments[] = {"as", "--64", "-o", object, source, 0};
+    bool same = object_write_file(source, (const uint8_t*)probe, sizeof(probe) - 1) == OBJECT_ERROR_NONE && object_test_run(arguments, output, errors) == 0;
+    const String8 bytes = same ? object_test_read_file(&test->vector, object) : (String8){0};
+    ObjectView view;
+    char error[256] = {0};
+    same = same && object_view_open(&view, (const uint8_t*)bytes.pointer, bytes.length, true, error, sizeof(error));
+    bool found = false;
+    for (uint64_t i = 1; same && !found && i < view.section_count; i += 1)
+    {
+        const char* name = object_view_section_name(&view, i);
+        found = name != 0 && strcmp(name, ".text") == 0;
+        same = !found || (view.sections[i].sh_size == sizeof(expected) && memcmp(view.file + view.sections[i].sh_offset, expected, sizeof(expected)) == 0);
+    }
+    return same && found;
+}
+
 // The driver reads a pipe, which has no size, to its end, and refuses a file one byte past the limit.
 static void asm_test_reader(AsmTest* test, const char* directory)
 {
@@ -942,6 +991,16 @@ static int run_assembler_tests(int count, char** arguments)
                 ".intel_syntax noprefix\ncall dword ptr callback\n",
                 ".intel_syntax noprefix\nmov eax,[rax-4*rbx]\n",
                 ".data\nfirst: .byte 1\n.zero 200000000\n.byte 2\n.zero 200000000\n",
+                ".intel_syntax noprefix\nmov eax,[rax + -rsi]\n",
+                ".intel_syntax noprefix\nmov eax,[rax + - -rsi]\n",
+                ".intel_syntax noprefix\nmov eax,[rax + (rsi)]\n",
+                ".intel_syntax noprefix\n.quad rsi\n",
+                ".intel_syntax noprefix\nmov rax,offset rsi\n",
+                ".intel_syntax noprefix\nmov eax,dword ptr eax\n",
+                ".intel_syntax noprefix\ncall qword ptr rax\n",
+                ".intel_syntax noprefix\nmov eax,fs:rax\n",
+                ".intel_syntax noprefix\n.quad RAX\n",
+                ".intel_syntax noprefix\nvaddps zmm1{k01},zmm2,zmm3\n",
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bad); i += 1)
         {
@@ -959,6 +1018,10 @@ static int run_assembler_tests(int count, char** arguments)
                 "f: pushw %ax\npushw (%rax)\npushw $200\npopw %ax\npush %ax\n",
                 ".intel_syntax noprefix\nf: mov eax,dword ptr [rdi+4*rsi]\nlea rax,[8*rcx+rdx+16]\nmov ecx,dword ptr [rbx+2*r12-4]\nmov eax,dword ptr [rax+-8]\nmov eax,dword ptr [rax - -8]\nmov eax,dword ptr [rax+4*-2]\n",
                 ".intel_syntax prefix\nf: mov %eax,dword ptr [%rdi+4*%rsi]\n",
+                ".intel_syntax noprefix\nf: mov eax,[rax + +rsi]\nmov eax,[rax + +rsi*4]\nmov eax,[+rsi]\nmov eax,[rax + rsi + +8]\n",
+                "f: .quad rsi\nmovq rax,%rcx\n.intel_syntax prefix\nmov %eax,dword ptr rsi\n",
+                ".intel_syntax noprefix\nf: mov rax,r08\nmov rax,xmm00\nmov rcx,r08d\n.quad r08, k00, xmm00\n",
+                ".intel_syntax noprefix\nf: mov rax,RAX\nmov eax,[RSI]\nadd rax,R8\nmov rax,Rax\nmov ecx,R10D\n.att_syntax prefix\nmovq %RAX,%RCX\n",
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(reviewed); i += 1)
         {
@@ -974,6 +1037,10 @@ static int run_assembler_tests(int count, char** arguments)
         asm_test_bytes(&test, "nop\n.p2align 2\nret\n", 1, after_instruction, sizeof(after_instruction), "code padding is GNU as's NOPs");
         static const uint8_t after_data[] = {0x01, 0x90, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0xc3};
         asm_test_bytes(&test, ".byte 1\n.p2align 3\nret\n", 1, after_data, sizeof(after_data), "code padding after data starts with a nop");
+        static const uint8_t zero_padded[] = {7, 0, 0, 0, 0, 0, 0, 0};
+        asm_test_bytes(&test, ".intel_syntax noprefix\n.equ r08,7\n.data\n.quad r08\n", 2, zero_padded, sizeof(zero_padded), "a zero-padded register number is a symbol's name, as in GNU as");
+        static const uint8_t plus_register[] = {0x8b, 0x04, 0x30};
+        asm_test_bytes(&test, ".intel_syntax noprefix\n.equ rsi,8\nmov eax,[rax + +rsi]\n", 1, plus_register, sizeof(plus_register), "a register after a unary plus is the register, not a symbol of its name");
         const AsmResult pushed = asm_test_pair(&test, BUSTER_S8("push $external\n"), 1, 0);
         asm_test_check(&test, pushed.error == 0 && pushed.link.fixups.count == 2 && pushed.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32S, "PUSH's sign-extended imm32 relocates as 32S", pushed.error);
         const uint32_t padding_capacity = 64u << 10;
@@ -1025,9 +1092,13 @@ static int run_assembler_tests(int count, char** arguments)
                 {
                     asm_test_oracle(&test, reviewed[i], directory, 0);
                 }
-                if (padding.length != 0)
+                if (padding.length != 0 && asm_test_gas_pads_like_2_47(&test, directory))
                 {
                     asm_test_oracle(&test, padding.pointer, directory, 0);
+                }
+                else if (padding.length != 0)
+                {
+                    printf("assembler: this GNU as orders code padding unlike binutils 2.47, so only the known padding bytes were checked\n");
                 }
                 asm_test_execution(&test, directory);
                 asm_test_driver(&test, directory);

@@ -694,6 +694,8 @@ static uint32_t asm_precedence(uint16_t op)
                                                                                          : 0;
 }
 
+static bool asm_token_register(const AsmParser* parser, uint32_t at, X86Operand* operand);
+
 static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
 {
     AsmExpr values[BUSTER_ASM_EXPR_DEPTH];
@@ -739,6 +741,14 @@ static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
                 }
                 else
                 {
+                    // Without register prefixes, a register's name is never a symbol: GNU as refuses it in an expression
+                    // (`.quad rsi`, `dword ptr eax`, `[rax + -rsi]`) rather than reading it as an external. Register
+                    // names are at most five bytes, which keeps the check off the longer symbol names.
+                    X86Operand reg;
+                    if (parser->options.intel && !parser->prefix && text.length <= 5 && asm_token_register(parser, parser->at - 1, &reg))
+                    {
+                        asm_fail(parser, token.start, "invalid use of register");
+                    }
                     const uint32_t symbol = text.length == 1 && text.pointer[0] == '.' ? asm_dot(parser, token.start) : asm_symbol(parser, text, token.start);
                     if (parser->symbols[symbol].absolute)
                     {
@@ -858,8 +868,17 @@ static __int128 asm_absolute(AsmParser* parser, uint32_t end)
 
 #include "assembler_words.c"
 
-static bool asm_register(String8 name, X86Operand* operand)
+// A register's name as GNU as reads it: in any case (RAX is rax), with canonical numbers (r8 and xmm0, but r08, xmm00
+// and k00 are symbols). No name is longer than five bytes (xmm31), so a longer spelling is never a register.
+static bool asm_register(String8 spelling, X86Operand* operand)
 {
+    char lower[5];
+    for (uint32_t i = 0; i < spelling.length && i < sizeof(lower); i += 1)
+    {
+        const char byte = spelling.pointer[i];
+        lower[i] = byte >= 'A' && byte <= 'Z' ? byte + ('a' - 'A') : byte;
+    }
+    const String8 name = {.pointer = lower, .length = spelling.length <= sizeof(lower) ? spelling.length : 0};
     static const char* const names[4][8] =
         {
             {"al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil"},
@@ -926,7 +945,7 @@ static bool asm_register(String8 name, X86Operand* operand)
                 class = width == 1 ? BUSTER_X86_CLASS_GPR8 : width == 2 ? BUSTER_X86_CLASS_GPR16
                                                                         : BUSTER_X86_CLASS_GPR32;
             }
-            found = at > start && at == name.length && reg < (class == BUSTER_X86_CLASS_OPMASK ? 8u : class <= BUSTER_X86_CLASS_GPR64 ? 16u
+            found = at > start && at == name.length && (name.pointer[start] != '0' || at == start + 1) && reg < (class == BUSTER_X86_CLASS_OPMASK ? 8u : class <= BUSTER_X86_CLASS_GPR64 ? 16u
                                                                                                                                       : 32u);
             found &= class > BUSTER_X86_CLASS_GPR64 || (reg >= 8 && width != 0);
             if (found)
@@ -1062,6 +1081,17 @@ static void asm_intel_address(AsmParser* parser, uint32_t end, X86Operand* opera
         {
             parser->at = named;
             scale_first = asm_read_register(parser, term_end, &reg);
+        }
+        // As in GNU as, a register term may carry unary pluses (`[rax + +rsi]`). Any other sign leaves the register to
+        // the expression below, which refuses its name.
+        parser->at = term;
+        while (!scale_first && parser->at < term_end && parser->tokens[parser->at].kind == '+')
+        {
+            parser->at += 1;
+        }
+        const bool register_first = !scale_first && asm_read_register(parser, term_end, &reg);
+        if (!register_first)
+        {
             parser->at = term;
         }
         if (scale_first)
@@ -1078,7 +1108,7 @@ static void asm_intel_address(AsmParser* parser, uint32_t end, X86Operand* opera
             parser->at = term_end;
             asm_address_register(parser, operand, reg, scale, true, location);
         }
-        else if (asm_read_register(parser, term_end, &reg))
+        else if (register_first)
         {
             const bool index = asm_take(parser, '*');
             const uint32_t scale = index ? asm_scale(parser, term_end) : 0;

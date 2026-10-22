@@ -6,18 +6,22 @@
 // the document's baselines, as its appendix links them. It takes over the appendix's harness.
 //
 // Usage: build/compiler benchmark-link [--functions LIST [--filler N]] [--seed N] [--directory PATH] [--cache PATH]
-//                                      [--cpus LIST] [--linkers LIST] [--runs N] [--only direct|linkers] [--keep]
+//                                      [--cpus LIST] [--linkers LIST] [--runs N] [--only direct|linkers]
+//                                      [--kinds LIST] [--keep]
 //
 // Run it under the 9700X's lock without taskset: it pins the direct path's lanes, one to each CPU of --cpus (CPU 2 by
 // default, so one lane), and the linkers' runs on one thread to the first of them, and leaves the linkers' other runs
 // every CPU this process may use. The programs call libc, generated as benchmark-executable generates its programs but
 // without SIZE32 and SIZE64, which wild 0.10 doesn't link: by default link_benchmark_default_programs, of hello world's
 // and tcc's output sizes and of synth's shape, or with --functions a program of each count of workers, of up to
-// --filler filler instructions each (8 by default). For each:
-//   - The direct path, as a compiler runs it: runtime_open, which must load the snapshot in --cache (the cache
-//     directory by default; a first open makes it this executable's), and bind_begin; then, after the program's atoms
-//     (its code generation, outside the time), bind_end and dynamic_inputs on lane 0 and executable_write of the
-//     dynamic PIE on every lane, into a directory of its own under --directory (TMPDIR or /tmp by default), over the
+// --filler filler instructions each (8 by default). Each is linked as each kind of --kinds (dynamic, static and
+// static-pie, a list; every kind by default): a dynamic PIE against libc.so.6, a static executable against libc.a, and
+// a static PIE against libc.a. For each:
+//   - The direct path, as a compiler runs it: runtime_open (runtime_open_static, runtime_open_static_pie), which must
+//     load the kind's snapshot in --cache (the cache directory by default; a first open makes it this executable's),
+//     and bind_begin; then, after the program's atoms (its code generation, outside the time), bind_end and
+//     dynamic_inputs (dynamic_static_inputs, dynamic_static_pie_inputs) on lane 0 and executable_write of the
+//     executable on every lane, into a directory of its own under --directory (TMPDIR or /tmp by default), over the
 //     file of the run before. Each part is the median of its runs after a warm-up, each run from the link as it was
 //     before the part (put back outside the time, as benchmark-bind puts its links back), and the link is the parts'
 //     sum; every run must write the warm-up's file again (its build ID). Its work: the bytes written, the fixups
@@ -30,18 +34,23 @@
 //     command, the clang driver's with the matched options: --hash-style=gnu --build-id --eh-frame-hdr -m elf_x86_64
 //     -z now --no-gc-sections, -pie and the loader, Scrt1.o, crti.o and crtbeginS.o, -L for GCC's directory and
 //     libc.so's, the objects, -lgcc --as-needed -lgcc_s --no-as-needed -lc -lgcc --as-needed -lgcc_s --no-as-needed,
-//     then crtendS.o and crtn.o. Each figure is the wall time from posix_spawn to the wait's return, as the caller sees
-//     it: the median of the runs after a warm-up, with a pause before each, over the output of the run before. Each
-//     linker runs with its own threads, and on one (lld's --threads=1, mold's and wild's --no-threads; GNU ld has one
-//     anyway). Then one more run, with --no-fork for mold and wild, which otherwise fork to leave their teardown to a
-//     child, through the helper (link_benchmark_rusage): its page faults and its peak resident set. A program that
-//     does nothing, run the same way first, shows the least the helper can count.
+//     then crtendS.o and crtn.o. A static executable's is the driver's -static one: -static, crt1.o, crti.o and
+//     crtbeginT.o, -L for GCC's directory and libc.a's, the objects, --start-group -lgcc -lgcc_eh -lc --end-group, then
+//     crtend.o and crtn.o; and a static PIE's its -static-pie one: -static -pie --no-dynamic-linker -z text, rcrt1.o,
+//     crti.o and crtbeginS.o, the same -L options, objects and group, then crtendS.o and crtn.o. Each figure is the
+//     wall time from posix_spawn to the wait's return, as the caller sees it: the median of the runs after a warm-up,
+//     with a pause before each, over the output of the run before. Each linker runs with its own threads, and on one
+//     (lld's --threads=1, mold's and wild's --no-threads; GNU ld has one anyway). Then one more run, with --no-fork for
+//     mold and wild, which otherwise fork to leave their teardown to a child, through the helper
+//     (link_benchmark_rusage): its page faults and its peak resident set. A program that does nothing, run the same way
+//     first, shows the least the helper can count.
 // The runs after each warm-up are the appendix's: BUSTER_LINK_BENCHMARK_RUNS with a pause of 20 ms, or for an output
 // past BUSTER_LINK_BENCHMARK_LARGE_BYTES BUSTER_LINK_BENCHMARK_LARGE_RUNS with 200 ms, and GNU ld's
 // BUSTER_LINK_BENCHMARK_SLOW_RUNS with 500 ms; --runs N sets every count. Every program written must run and print what
-// the program's model predicts. --only direct and --only linkers run one side, and --keep leaves the directory. The
-// exit status is 1 if the arguments are invalid, the runtime doesn't load from its snapshot, a link fails, or a program
-// doesn't print what it should.
+// the program's model predicts; wild doesn't link the static executable or the static PIE of a program whose .tbss is
+// more aligned than its .tdata, whose TLS segment wild 0.10 may start off its alignment (link_benchmark_wild_tls).
+// --only direct and --only linkers run one side, and --keep leaves the directory. The exit status is 1 if the arguments
+// are invalid, a runtime doesn't load from its snapshot, a link fails, or a program doesn't print what it should.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -181,6 +190,19 @@ static const LinkBenchmarkLinker link_benchmark_linkers[] = {
 
 #define BUSTER_LINK_BENCHMARK_LINKERS BUSTER_ARRAY_LENGTH(link_benchmark_linkers)
 
+// Each kind's name in --kinds, and what its links are.
+static const char* const link_benchmark_kind_names[RUNTIME_KINDS] = {
+    [RUNTIME_KIND_DYNAMIC] = "dynamic",
+    [RUNTIME_KIND_STATIC] = "static",
+    [RUNTIME_KIND_STATIC_PIE] = "static-pie",
+};
+
+static const char* const link_benchmark_kind_links[RUNTIME_KINDS] = {
+    [RUNTIME_KIND_DYNAMIC] = "a dynamic PIE",
+    [RUNTIME_KIND_STATIC] = "a static executable",
+    [RUNTIME_KIND_STATIC_PIE] = "a static PIE",
+};
+
 typedef struct LinkBenchmarkSettings LinkBenchmarkSettings;
 struct LinkBenchmarkSettings
 {
@@ -200,8 +222,8 @@ struct LinkBenchmarkSettings
     uint64_t runs;
     bool direct;
     bool linking;
-    // The kinds of link to measure, a dynamic PIE's and a static executable's (--kinds), and each one's runtime, opened
-    // once: the linkers' inputs come from its paths, and its records size the programs' room.
+    // The kinds of link to measure, a dynamic PIE's, a static executable's and a static PIE's (--kinds), and each one's
+    // runtime, opened once: the linkers' inputs come from its paths, and its records size the programs' room.
     bool kinds[RUNTIME_KINDS];
     const Runtime* runtimes[RUNTIME_KINDS];
     // The directory made under `directory`, and its files: the direct path's output, and what a program run prints, its
@@ -565,7 +587,7 @@ static const char* const link_benchmark_phase_names[EXECUTABLE_PHASES] = {
 typedef struct LinkBenchmarkDirect LinkBenchmarkDirect;
 struct LinkBenchmarkDirect
 {
-    // The kind of link: a dynamic PIE against libc.so.6, or a static executable against libc.a.
+    // The kind of link: a dynamic PIE against libc.so.6, or a static executable or a static PIE against libc.a.
     RuntimeKind kind;
     LinkProgram* program;
     // The program's symbols as they were before binding.
@@ -613,13 +635,26 @@ struct LinkBenchmarkDirect
     bool succeeded;
 };
 
-// The kind's runtime from its snapshot in `cache`: runtime_open, or runtime_open_static.
+// The kind's runtime from its snapshot in `cache`: runtime_open, runtime_open_static or runtime_open_static_pie.
 static SnapshotResult link_benchmark_open(Runtime* runtime, const char* cache, RuntimeKind kind)
 {
-    return kind == RUNTIME_KIND_STATIC ? runtime_open_static(runtime, cache) : runtime_open(runtime, cache);
+    SnapshotResult result;
+    if (kind == RUNTIME_KIND_STATIC)
+    {
+        result = runtime_open_static(runtime, cache);
+    }
+    else if (kind == RUNTIME_KIND_STATIC_PIE)
+    {
+        result = runtime_open_static_pie(runtime, cache);
+    }
+    else
+    {
+        result = runtime_open(runtime, cache);
+    }
+    return result;
 }
 
-// Lane 0's part before the program's atoms: the runs of runtime_open (or runtime_open_static) and bind_begin, each from
+// Lane 0's part before the program's atoms: the runs of runtime_open (or the static kinds') and bind_begin, each from
 // the program's symbols as they were before binding; then the runtime and binding the runs of bind_end start from, after
 // the program's atoms (its code generation), and the link checked once, by link_program_generate_end after a bind_end
 // that those runs put back. Returns whether all of it succeeded.
@@ -682,9 +717,10 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
 }
 
 // The lanes' entry point: lane 0's part before the program's atoms, then the runs of bind_end and dynamic_inputs (or
-// dynamic_static_inputs) on lane 0 and executable_write on every lane, each from the link and binding as they were after
-// the atoms, whose bytes bind_end copies again (a static executable's TLS relaxation rewrites them). The warm-up's output
-// decides how many runs follow it.
+// dynamic_static_inputs, or dynamic_static_pie_inputs) on lane 0 and executable_write on every lane, each from the link
+// and binding as they were after the atoms, whose members' bytes bind_end copies again (the static runtime's TLS
+// relaxation rewrites them, and a static PIE's GOT relaxation the program's too, which the writer relaxes alike when
+// it finds them relaxed). The warm-up's output decides how many runs follow it.
 static void link_benchmark_direct_main(void* argument)
 {
     LinkBenchmarkDirect* direct = argument;
@@ -711,6 +747,10 @@ static void link_benchmark_direct_main(void* argument)
             if (bound && direct->kind == RUNTIME_KIND_STATIC)
             {
                 dynamic_static_inputs(&direct->static_inputs, &direct->runtime, &direct->bind);
+            }
+            else if (bound && direct->kind == RUNTIME_KIND_STATIC_PIE)
+            {
+                dynamic_static_pie_inputs(&direct->dynamic, &direct->static_inputs, &direct->runtime, &direct->bind);
             }
             else
             {
@@ -801,10 +841,10 @@ static double link_benchmark_floor_median(const char* path, uint64_t size, uint3
     return read_whole ? link_benchmark_median(floors, runs) : 0.0;
 }
 
-// The direct path's link of the program, as a dynamic PIE or as a static executable by `kind`: its parts' medians, its
-// work and the floor, and its output run, which must print the program's output. *total gets the link's time in
-// microseconds, and `expected` the program's output. *damaged says whether a binding failed because a piece of the
-// kind's snapshot is damaged (BIND_ERROR_SNAPSHOT), which the measurement can't go on from.
+// The direct path's link of the program, as a dynamic PIE, a static executable or a static PIE by `kind`: its parts'
+// medians, its work and the floor, and its output run, which must print the program's output. *total gets the link's
+// time in microseconds, and `expected` the program's output. *damaged says whether a binding failed because a piece of
+// the kind's snapshot is damaged (BIND_ERROR_SNAPSHOT), which the measurement can't go on from.
 static bool link_benchmark_direct_attempt(const LinkBenchmarkSettings* settings, RuntimeKind kind, LinkBenchmarkProgram linked, uint8_t* expected, double* total,
                                           bool* damaged)
 {
@@ -841,8 +881,9 @@ static bool link_benchmark_direct_attempt(const LinkBenchmarkSettings* settings,
             .pointer = (char*)path,
             .length = strlen(path),
         };
-        direct->options.dynamic = kind == RUNTIME_KIND_STATIC ? 0 : &direct->dynamic;
-        direct->options.runtime = kind == RUNTIME_KIND_STATIC ? &direct->static_inputs : 0;
+        // A static PIE has both.
+        direct->options.dynamic = kind != RUNTIME_KIND_STATIC ? &direct->dynamic : 0;
+        direct->options.runtime = runtime_kind_is_static(kind) ? &direct->static_inputs : 0;
         const bool ran = lane_run(settings->lanes, link_benchmark_direct_main, direct, settings->cpus);
         result = ran && direct->succeeded && direct->same_files;
         if (!result)
@@ -1032,13 +1073,15 @@ static bool link_benchmark_object_counts(LinkBenchmarkObjects* objects, uint64_t
 // The linkers
 
 // The arguments of the objects' link by `linker` into `output`, the appendix's command for a dynamic PIE, or for a
-// static executable with the static runtime `runtime`, with `one_thread` and `no_fork` (each 0 for none) after the
-// matched options; `search` holds the two -L options. `arguments` has room for BUSTER_LINK_BENCHMARK_ARGUMENTS and the
-// objects. Returns how many, without the null that ends them.
+// static executable or a static PIE with the static runtime `runtime` (the clang driver's for -static and -static-pie),
+// with `one_thread` and `no_fork` (each 0 for none) after the matched options; `search` holds the two -L options.
+// `arguments` has room for BUSTER_LINK_BENCHMARK_ARGUMENTS and the objects. Returns how many, without the null that ends
+// them.
 static uint32_t link_benchmark_arguments(char** arguments, const char* linker, const char* one_thread, const char* no_fork, const Runtime* runtime, char* const* search,
                                          const char* const* objects, uint32_t object_count, const char* output)
 {
-    // The clang driver's group for -static, which links libc.a without libatomic.a: the programs need none of it.
+    // The clang driver's group for -static and -static-pie, which links libc.a without libatomic.a: the programs need
+    // none of it.
     static const char* const group[] = {
         "--start-group",
         "-lgcc",
@@ -1046,7 +1089,15 @@ static uint32_t link_benchmark_arguments(char** arguments, const char* linker, c
         "-lc",
         "--end-group",
     };
-    const bool static_link = runtime->kind == RUNTIME_KIND_STATIC;
+    // The driver's options for -static-pie.
+    static const char* const static_pie[] = {
+        "-static",
+        "-pie",
+        "--no-dynamic-linker",
+        "-z",
+        "text",
+    };
+    const bool static_link = runtime_kind_is_static(runtime->kind);
     static const char* const matched[] = {
         "--hash-style=gnu",
         "--build-id",
@@ -1082,9 +1133,16 @@ static uint32_t link_benchmark_arguments(char** arguments, const char* linker, c
     {
         arguments[count++] = (char*)no_fork;
     }
-    if (static_link)
+    if (runtime->kind == RUNTIME_KIND_STATIC)
     {
         arguments[count++] = "-static";
+    }
+    else if (runtime->kind == RUNTIME_KIND_STATIC_PIE)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(static_pie); i += 1)
+        {
+            arguments[count++] = (char*)static_pie[i];
+        }
     }
     else
     {
@@ -1235,10 +1293,11 @@ static bool link_benchmark_linker(const LinkBenchmarkSettings* settings, const R
     return result;
 }
 
-// Whether wild 0.10 links a program's static executable wrong: it starts the TLS segment at .tdata's alignment past a
-// multiple of the segment's when .tbss is more aligned than .tdata, and glibc's static startup, which takes the image
-// to start on the alignment, then faults (a C program with a 16-aligned zero thread-local beside an 8-aligned one shows
-// it; GNU ld, lld, mold and the direct path start the segment aligned). libc.a's .tdata is aligned to 8.
+// Whether wild 0.10 may link a program's static executable or static PIE wrong: when .tbss is more aligned than .tdata,
+// it starts the TLS segment at .tdata's alignment, past a multiple of the segment's wherever the layout puts it there,
+// and glibc's static startup (a static PIE's too), which takes the image to start on the alignment, then faults (a C
+// program with a 16-aligned zero thread-local beside an 8-aligned one shows it; GNU ld, lld, mold and the direct path
+// start the segment aligned). libc.a's .tdata is aligned to 8.
 static bool link_benchmark_wild_tls(const Link* link)
 {
     uint32_t tdata = 3;
@@ -1254,9 +1313,10 @@ static bool link_benchmark_wild_tls(const Link* link)
 }
 
 // The program's objects written into the work directory's objects, and linked there by each linker of the settings as
-// a dynamic PIE or a static executable by `kind`, with their figures against the direct path's `direct_total`
-// microseconds (0 if it didn't run). With `known`, the program's output must be `expected`, which otherwise it sets. A
-// static executable that wild links wrong (link_benchmark_wild_tls) isn't linked by it.
+// a dynamic PIE, a static executable or a static PIE by `kind`, with their figures against the direct path's
+// `direct_total` microseconds (0 if it didn't run). With `known`, the program's output must be `expected`, which
+// otherwise it sets. A static executable or static PIE that wild may link wrong (link_benchmark_wild_tls) isn't linked
+// by it.
 static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, RuntimeKind kind, LinkBenchmarkProgram linked_program, uint8_t* expected, bool known,
                                       double direct_total)
 {
@@ -1329,16 +1389,16 @@ static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, Run
             printf("  the objects: unit 0's error %d\n", (int)errors[0]);
         }
     }
-    const bool wild_wrong = result && kind == RUNTIME_KIND_STATIC && link_benchmark_wild_tls(&program.link);
+    const bool wild_wrong = result && runtime_kind_is_static(kind) && link_benchmark_wild_tls(&program.link);
     // The linkers get the memory the program had.
     link_program_release(&program);
-    // The -L options: GCC's directory and libc.so's, or for a static executable libc.a's.
+    // The -L options: GCC's directory and libc.so's, or for a static executable or a static PIE libc.a's.
     const Runtime* runtime = settings->runtimes[kind];
     char* search[2] = {
         names,
         names + BUSTER_LINK_BENCHMARK_PATH_BYTES,
     };
-    const String8 script = kind == RUNTIME_KIND_STATIC ? runtime->archives[runtime->archive_count - 1].path : runtime->libc_script;
+    const String8 script = runtime_kind_is_static(kind) ? runtime->archives[runtime->archive_count - 1].path : runtime->libc_script;
     uint64_t directory_length = script.length;
     while (directory_length > 0 && script.pointer[directory_length - 1] != '/')
     {
@@ -1359,7 +1419,7 @@ static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, Run
         const bool wrong = wild_wrong && strcmp(linker->name, "wild") == 0;
         if (result && (settings->linkers >> l & 1) != 0 && wrong)
         {
-            printf("  %-24s not run: its static executable of this program faults, its TLS segment off its alignment\n", "wild");
+            printf("  %-24s not run: its %s of this program may fault, its TLS segment off its alignment\n", "wild", kind == RUNTIME_KIND_STATIC ? "static executable" : "static PIE");
         }
         for (uint32_t way = 0; result && (settings->linkers >> l & 1) != 0 && !wrong && way < ways; way += 1)
         {
@@ -1453,6 +1513,35 @@ static uint32_t link_benchmark_parse_list(const char* text, uint32_t* values, ui
     return valid ? count : 0;
 }
 
+// The kinds named in a list separated by commas (link_benchmark_kind_names), each kind's entry of `kinds` set if it is
+// named and cleared if it isn't: whether every name is one.
+static bool link_benchmark_parse_kinds(const char* text, bool* kinds)
+{
+    bool valid = *text != 0;
+    const char* cursor = text;
+    for (uint32_t kind = 0; kind < RUNTIME_KINDS; kind += 1)
+    {
+        kinds[kind] = false;
+    }
+    while (valid && *cursor != 0)
+    {
+        const char* comma = strchr(cursor, ',');
+        const uint64_t length = comma != 0 ? (uint64_t)(comma - cursor) : strlen(cursor);
+        bool found = false;
+        for (uint32_t kind = 0; kind < RUNTIME_KINDS; kind += 1)
+        {
+            const char* name = link_benchmark_kind_names[kind];
+            const bool named = strlen(name) == length && memcmp(name, cursor, length) == 0;
+            kinds[kind] = kinds[kind] || named;
+            found = found || named;
+        }
+        valid = found;
+        cursor += length + (comma != 0 ? 1 : 0);
+        valid = valid && (comma == 0 || *cursor != 0);
+    }
+    return valid;
+}
+
 // The linkers named in a list separated by commas, a bit each in link_benchmark_linkers' order, or 0 if a name isn't
 // one of them.
 static uint32_t link_benchmark_parse_linkers(const char* text)
@@ -1517,7 +1606,11 @@ int run_link_benchmark(int argc, char** argv)
         .linkers = (1u << BUSTER_LINK_BENCHMARK_LINKERS) - 1,
         .direct = true,
         .linking = true,
-        .kinds = { true, true },
+        .kinds = {
+            [RUNTIME_KIND_DYNAMIC] = true,
+            [RUNTIME_KIND_STATIC] = true,
+            [RUNTIME_KIND_STATIC_PIE] = true,
+        },
     };
     settings.cpus[0] = 2;
     LinkBenchmarkProgram programs[BUSTER_LINK_BENCHMARK_MAX_PROGRAMS];
@@ -1586,10 +1679,7 @@ int run_link_benchmark(int argc, char** argv)
         }
         else if (strcmp(argv[i], "--kinds") == 0 && has_value)
         {
-            const char* kinds = argv[i + 1];
-            settings.kinds[RUNTIME_KIND_DYNAMIC] = strcmp(kinds, "dynamic") == 0 || strcmp(kinds, "dynamic,static") == 0 || strcmp(kinds, "static,dynamic") == 0;
-            settings.kinds[RUNTIME_KIND_STATIC] = strcmp(kinds, "static") == 0 || strcmp(kinds, "dynamic,static") == 0 || strcmp(kinds, "static,dynamic") == 0;
-            valid = settings.kinds[RUNTIME_KIND_DYNAMIC] || settings.kinds[RUNTIME_KIND_STATIC];
+            valid = link_benchmark_parse_kinds(argv[i + 1], settings.kinds);
             i += 1;
         }
         else
@@ -1628,13 +1718,16 @@ int run_link_benchmark(int argc, char** argv)
     snprintf(settings.usage_path, sizeof(settings.usage_path), "%s/usage", settings.work);
     // A first open of each kind's runtime makes its snapshot this executable's, so that the direct path's runs load it.
     Runtime runtimes[RUNTIME_KINDS];
-    SnapshotResult opened[RUNTIME_KINDS] = { { .error = RUNTIME_ERROR_NONE }, { .error = RUNTIME_ERROR_NONE } };
+    SnapshotResult opened[RUNTIME_KINDS];
     bool result = made;
+    // The first kind whose runtime didn't import, if one didn't.
+    uint32_t failed = RUNTIME_KINDS;
     for (uint32_t kind = 0; kind < RUNTIME_KINDS; kind += 1)
     {
         const bool wanted = made && settings.kinds[kind];
         opened[kind] = wanted ? link_benchmark_open(&runtimes[kind], settings.cache, (RuntimeKind)kind) : (SnapshotResult){ .error = RUNTIME_ERROR_NONE };
         result = result && opened[kind].error == RUNTIME_ERROR_NONE;
+        failed = failed == RUNTIME_KINDS && opened[kind].error != RUNTIME_ERROR_NONE ? kind : failed;
         settings.runtimes[kind] = wanted ? &runtimes[kind] : 0;
     }
     if (helper)
@@ -1644,7 +1737,7 @@ int run_link_benchmark(int argc, char** argv)
     else if (!valid)
     {
         fprintf(stderr, "usage: benchmark-link [--functions LIST] [--filler N] [--seed N] [--directory PATH] [--cache PATH] [--cpus LIST] [--linkers LIST] [--runs N] "
-                        "[--only direct|linkers] [--kinds dynamic|static|dynamic,static] [--keep]\n");
+                        "[--only direct|linkers] [--kinds LIST of dynamic, static and static-pie] [--keep]\n");
     }
     else if (!known_cpus || settings.cache == 0)
     {
@@ -1660,9 +1753,7 @@ int run_link_benchmark(int argc, char** argv)
     }
     else if (!result)
     {
-        const uint32_t failed = opened[RUNTIME_KIND_DYNAMIC].error != RUNTIME_ERROR_NONE ? RUNTIME_KIND_DYNAMIC : RUNTIME_KIND_STATIC;
-        fprintf(stderr, "benchmark-link: the %s runtime didn't import: error %d, %s\n", failed == RUNTIME_KIND_STATIC ? "static" : "dynamic", (int)opened[failed].error,
-                runtimes[failed].failed_file);
+        fprintf(stderr, "benchmark-link: the %s runtime didn't import: error %d, %s\n", link_benchmark_kind_names[failed], (int)opened[failed].error, runtimes[failed].failed_file);
     }
     if (made && result)
     {
@@ -1673,7 +1764,7 @@ int run_link_benchmark(int argc, char** argv)
             const SnapshotResult* open = &opened[kind];
             if (settings.kinds[kind])
             {
-                printf(" (%s: %s)", kind == RUNTIME_KIND_STATIC ? "static" : "dynamic", open->status == SNAPSHOT_STATUS_LOADED ? "loaded" : open->written ? "written" : "not written");
+                printf(" (%s: %s)", link_benchmark_kind_names[kind], open->status == SNAPSHOT_STATUS_LOADED ? "loaded" : open->written ? "written" : "not written");
             }
         }
         printf("\n");
@@ -1706,7 +1797,7 @@ int run_link_benchmark(int argc, char** argv)
             if (settings.kinds[kind])
             {
                 printf("%u worker%s in %u units, up to %u filler instructions each, linked as %s:\n", options.functions, options.functions == 1 ? "" : "s", options.units,
-                       options.filler, kind == RUNTIME_KIND_STATIC ? "a static executable" : "a dynamic PIE");
+                       options.filler, link_benchmark_kind_links[kind]);
                 uint8_t expected[BUSTER_LINK_PROGRAM_OUTPUT_BYTES];
                 double direct_total = 0.0;
                 result = !settings.direct || link_benchmark_direct(&settings, (RuntimeKind)kind, programs[i], expected, &direct_total);

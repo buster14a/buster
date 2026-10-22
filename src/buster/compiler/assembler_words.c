@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Eight bounded register spellings at a time. The two short-name tables fit in registers; indexed memory gathers
-// are deliberately absent. The full scalar spelling grammar stays in asm_register, including long zero prefixes.
+// are deliberately absent. The full scalar spelling grammar stays independent in asm_register.
 
 #define BUSTER_ASM_REGISTER_CACHED (1u << 31)
 
 static __m512i asm_word_registers_vector(__m512i words, __m512i sizes)
 {
+    // Fold only ASCII uppercase letters. Padding, numbers, punctuation and non-ASCII bytes retain their value.
+    const __mmask64 uppercase = _mm512_cmple_epu8_mask(_mm512_sub_epi8(words, _mm512_set1_epi8('A')), _mm512_set1_epi8('Z' - 'A'));
+    words = _mm512_mask_add_epi8(words, uppercase, words, _mm512_set1_epi8('a' - 'A'));
     // (first + 3 * second) & 31 is collision-free for these sixteen two-character roots. Compare the full key after
     // the permute: an unknown name with the same hash must never acquire a register's meaning.
     static const uint16_t keys[32] __attribute__((aligned(64))) =
@@ -92,6 +95,7 @@ static __m512i asm_word_registers_vector(__m512i words, __m512i sizes)
     const __mmask8 two = _mm512_cmpeq_epi64_mask(digits, _mm512_set1_epi64(2));
     __mmask8 number_valid = numbered & (one | two) & _mm512_cmple_epu64_mask(first_digit, _mm512_set1_epi64(9));
     number_valid &= one | _mm512_cmple_epu64_mask(second_digit, _mm512_set1_epi64(9));
+    number_valid &= one | _mm512_cmpneq_epi64_mask(first_digit, _mm512_setzero_si512());
     const __m512i number = _mm512_mask_mov_epi64(first_digit, two, _mm512_add_epi64(_mm512_mullo_epi64(first_digit, _mm512_set1_epi64(10)), second_digit));
     number_valid &= (~numbered_gpr | _mm512_cmpge_epi64_mask(number, _mm512_set1_epi64(8)));
     const __m512i limit = _mm512_mask_mov_epi64(_mm512_mask_mov_epi64(_mm512_set1_epi64(16), vector_name, _mm512_set1_epi64(32)), opmask, _mm512_set1_epi64(8));
@@ -110,9 +114,8 @@ static __m512i asm_word_registers_vector(__m512i words, __m512i sizes)
     descriptions = _mm512_mask_mov_epi64(descriptions, number_valid, numbered_description);
     const __mmask8 rip = three & _mm512_cmpeq_epi64_mask(words, _mm512_set1_epi64('r' | 'i' << 8 | 'p' << 16));
     descriptions = _mm512_mask_mov_epi64(descriptions, rip, _mm512_set1_epi64(X86_OPERAND_REGISTER | 255u << 16 | 8u << 24));
-    // Longer numerical spellings can still be valid through leading zeroes (r0008, xmm0001). Leave them uncached.
-    const __mmask8 certain = ~(numbered & _mm512_cmpgt_epi64_mask(digits, _mm512_set1_epi64(2)));
-    return _mm512_or_si512(descriptions, _mm512_maskz_set1_epi64(certain, BUSTER_ASM_REGISTER_CACHED));
+    // Register numbers have canonical spelling: leading-zero names such as r08 and xmm00 are symbols.
+    return _mm512_or_si512(descriptions, _mm512_set1_epi64(BUSTER_ASM_REGISTER_CACHED));
 }
 
 static void asm_cache_registers(AsmParser* parser)
