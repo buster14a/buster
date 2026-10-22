@@ -2300,7 +2300,10 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `SOURCE_DATE_EPOCH`'s when it is set; the expansion history's checks; the
   text of an `#embed`'s data, by `pp_embed_text_vector` and its scalar twin
   against `snprintf`, for every count to 300 of random bytes and of every value,
-  ending at a `PROT_NONE` page; and the fuzz batch: its isolation rules checked
+  ending at a `PROT_NONE` page; `#embed`'s lookups the cases can't set up (an
+  empty `--embed-dir=` from the case's directory as the working directory, and
+  `__has_embed` of a sparse 5 GiB file and of one it may not read); and the
+  fuzz batch: its isolation rules checked
   on small sources (what a case
   leaves open makes clang read it alone), with `--clang` its emulation of
   clang's -P printer checked on fixtures of its own, then 1,500 cases of the
