@@ -766,6 +766,9 @@ struct PPContext
     bool comment_read;
     uint8_t opaque_query_repairs;
     uint8_t opaque_direct_repairs;
+    // A file's comment-gap search advances with source header names; a new private view restarts that token cursor.
+    uint32_t header_gap_data;
+    uint32_t header_gap_token;
     // The macro to enable again when the context is popped.
     PPMacroId macro;
     uint32_t position;
@@ -3639,6 +3642,59 @@ static uint32_t pp_relex_end(uint32_t refine_flags, const PPFileData* data, uint
     return (uint32_t)result;
 }
 
+// A block comment in a confirmed source header name can hide later file lines, unlike a line comment or a closed
+// same-line comment, whose suffix is already restored by pp_header_name_tail. Inspect only the prepared token gap
+// before the header's end, using the current masked lexical bytes so a repaired name never consumes capacity twice.
+static bool pp_header_comment_overlap(const Preprocessor* pp, PPContext* file, uint32_t first, uint32_t stop)
+{
+    const PPFileData* data = &pp->datas[file->data];
+    const uint8_t* bytes = data->lexical_bytes != 0 ? data->lexical_bytes : data->bytes;
+    bool result = false;
+    if (memchr(bytes + first, '*', stop - first) != 0)
+    {
+        if (file->header_gap_data != file->data)
+        {
+            file->header_gap_data = file->data;
+            file->header_gap_token = 0;
+        }
+        // Confirmed source names advance monotonically within a view. Each prepared token is passed at most once.
+        while (file->header_gap_token < data->token_count && data->starts[file->header_gap_token] < stop)
+        {
+            file->header_gap_token += 1;
+        }
+        ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+        lexer.source = bytes;
+        uint64_t p = file->header_gap_token != 0 ? pp_file_token_end(pp, data, file->header_gap_token - 1) : stop;
+        bool done = p < first;
+        while (!done && p < stop)
+        {
+            uint64_t size;
+            uint64_t at;
+            const int32_t c = get_char(&lexer, p, &size, &at);
+            uint64_t second;
+            const int32_t next = c == '/' ? get_char(&lexer, p + size, &second, &at) : 0;
+            const bool block = c == '/' && next == '*';
+            const bool blank = c == ' ' || c == '\t' || c == '\v' || c == '\f';
+            if (block)
+            {
+                const uint64_t past = pp_skip_comment(&lexer, p);
+                ScalarLexer comment = lexer;
+                comment.length = past;
+                const bool unclosed = data->unterminated_comment != 0 && data->unterminated_comment - 1 >= first && data->unterminated_comment - 1 < stop;
+                // Bound the newline scan to this comment. Scanning the remaining line for each query is quadratic.
+                result = pp_line_end(&comment, stop) < past || unclosed;
+                p = past;
+            }
+            else
+            {
+                p += size != 0 ? size : 1;
+            }
+            done = result || (!block && !blank);
+        }
+    }
+    return result;
+}
+
 // The rest of a directive's line [first, end) past a header name read from the file up to its '>' (pp_read_header_name),
 // which ends at byte `stop`: the first of the line's tokens there or past it. The lexer read the line before the name was
 // known, so one of its tokens or comments may run past `stop` (`<a.h>>`, or `<a//b.h>`, whose "//" began a comment to
@@ -6451,6 +6507,37 @@ static bool pp_recover_direct_raw(Preprocessor* pp, PPContext* context, uint32_t
     return result;
 }
 
+// A source header's literal spelling is confirmed before the ordinary lexer's comment is corrected. The private view
+// restores file tokens and directive links after it, while old macro definitions and other inclusions keep their data.
+static bool pp_recover_header_comment(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t first, uint32_t stop, bool query)
+{
+    PPContext* file = &pp->contexts[file_context];
+    return !pp_header_comment_overlap(pp, file, first, stop) || pp_recover_opaque_span(pp, file_context, directive, first + 1, stop - 1, query);
+}
+
+// Only an executing direct header directive confirms this opaque source span. Excluded directives keep ordinary
+// lexing, including their comments; computed headers are identified during macro expansion instead.
+static bool pp_recover_direct_header_comment(Preprocessor* pp, PPContext* context, uint32_t directive)
+{
+    const PPFileData* data = &pp->datas[context->data];
+    const uint8_t kind = data->directive_kind[directive];
+    const bool header = kind == PP_DIRECTIVE_INCLUDE || kind == PP_DIRECTIVE_INCLUDE_NEXT || kind == PP_DIRECTIVE_IMPORT || kind == PP_DIRECTIVE_EMBED;
+    const uint32_t first = data->directive_hash[directive] + 2;
+    const uint32_t end = data->directive_end[directive];
+    bool result = true;
+    if (header && first < end && (data->kinds[first] & 0x7F) == C_TOKEN_LESS)
+    {
+        uint32_t length;
+        bool whole;
+        const uint32_t stop = pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole);
+        if (stop != 0)
+        {
+            result = pp_recover_header_comment(pp, (uint32_t)(context - pp->contexts), directive, data->starts[first], stop, false);
+        }
+    }
+    return result;
+}
+
 // An include-like builtin's '(' (__has_include's, __has_include_next's or __has_embed's) was just read from its #if or
 // #elif line itself, the barrier of the line's capture: a '<' next is a header name as the line writes it, read as
 // #include reads one (pp_scan_header_name), where clang's LexHeaderName lexes one from its file, and not joined from
@@ -6480,7 +6567,8 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
         uint32_t length;
         bool whole;
         const uint32_t stop = c == '<' ? pp_scan_header_bytes(pp->refine_flags, data, first, data->length, 0, 0, &length, &whole) : 0;
-        if (stop != 0 && line != 0 && pp_recover_query_raw(pp, context->relex_file, line->directive, first, stop))
+        if (stop != 0 && line != 0 && pp_recover_query_raw(pp, context->relex_file, line->directive, first, stop) &&
+            pp_recover_header_comment(pp, context->relex_file, line->directive, first, stop, true))
         {
             const PPToken token = { .kind = C_TOKEN_LESS, .value = base + stop, .location = base + first };
             context->relex_position = stop;
@@ -6500,7 +6588,8 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
         uint32_t length;
         bool whole;
         const uint32_t stop = first < end && base + data->starts[first] == token.location ? pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole) : 0;
-        if (stop != 0 && pp_recover_query_raw(pp, line->context, line->directive, data->starts[first], stop))
+        if (stop != 0 && pp_recover_query_raw(pp, line->context, line->directive, data->starts[first], stop) &&
+            pp_recover_header_comment(pp, line->context, line->directive, data->starts[first], stop, true))
         {
             uint32_t relex;
             const uint32_t after = pp_header_name_tail(pp, data, first, end, stop, &relex);
@@ -10298,7 +10387,8 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
     const PPFileData* data = &pp->datas[context->data];
     const uint8_t kind = data->directive_kind[directive];
     const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
-    if ((!text || pp_recover_diagnostic_line(pp, context, directive)) && pp_recover_direct_raw(pp, context, directive))
+    if ((!text || pp_recover_diagnostic_line(pp, context, directive)) && pp_recover_direct_raw(pp, context, directive) &&
+        pp_recover_direct_header_comment(pp, context, directive))
     {
         pp_prepared_directive(pp, context);
     }
