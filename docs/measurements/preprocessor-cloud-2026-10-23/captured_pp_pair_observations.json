@@ -1,0 +1,164 @@
+[
+  {
+    "mode": "bb",
+    "input": "main",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "3ce74490a935a3adb8fa3b9274646e35b411a215f297452c78072bfdeee9975b",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "history",
+    "input": "main",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "3735ad7cc6c70c37b2340ece6527e9dccde7b6a87ded0adbc89cff905b0a5255",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "current3",
+    "input": "main",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "1cb6ac2fae035183d7776fb13e311eeb3b14ea11aae651be148ca04fcddaecca",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "history",
+    "input": "sqlite",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "d85fdf39cd0a5398fb3a8a7543da64a064f2043ed4d4bc9baf3be52219b304b3",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "current3",
+    "input": "sqlite",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "f82caec436404effcc1edcc86f2a8bf99934875618f8ba50a519363244c248cf",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "bb",
+    "input": "sqlite",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "c8e48ffd60f37d6c3cd2b0b4c1b5b3d22b68ee0a95b51066d180bbaff78f4b86",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "current3",
+    "input": "flat-unused",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "fb6f52a3789f7b04eeffaa381eba61aaa551405d7e9eb66c1c350c9e4e6bfa63",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "bb",
+    "input": "flat-unused",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "2c7a79d373d0ac9d07f7d2c427dde0418226522f191cc3c892ce466d386dd144",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "history",
+    "input": "flat-unused",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "17c2cb2a90ac238ed126b41715ec927028b4d90333288026ec503805d6c03f6d",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "bb",
+    "input": "nested-unused",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "94511ffa9ce0a898f32a5f58d3cb2d07749c86fbc6478ae409578b65034d4b36",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "history",
+    "input": "nested-unused",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "5c03060237e152aa519360fd6b042d75e4c7f8aa1a6ea690812631adb680e9c8",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "current3",
+    "input": "nested-unused",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "4d71a4a3817f022e000507d5642c79d04f1cdf91ca10462e6382ee788e0ecc60",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "history",
+    "input": "literal-runs",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "d364fca9d9e2c0df58b608969cf577d8e1a36430ede4357d0b4009492ae216f8",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "current3",
+    "input": "literal-runs",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "5653f371a7d08cb3d4f8d77f87e89ac8ad509a7e9d15e2e2849b105154196788",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "bb",
+    "input": "literal-runs",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "34e49257a287301244098a56f16fd504ccb5f24d6fcdb37e319de0c5b251d92a",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "current3",
+    "input": "argument-copies",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "d875b6da9bc80c110fbee08b16683bc33c02be2f568770390c4a49616a582630",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "bb",
+    "input": "argument-copies",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "df3b6f444714f07e6410122811223eefa305939b72547d98f9636d38652647a9",
+    "saved_hash_matches": true
+  },
+  {
+    "mode": "history",
+    "input": "argument-copies",
+    "exit_code": 0,
+    "lines": 69,
+    "valid_capture": true,
+    "captured_sha256": "4c55b4a6d5b4af08d57cd75e2fa65b3060fcd80d0ec9873cb96bb141aeb0fa49",
+    "saved_hash_matches": true
+  }
+]
