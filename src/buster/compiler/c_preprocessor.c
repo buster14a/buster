@@ -2403,6 +2403,7 @@ static uint32_t pp_raw_opaque_stop(const PPFileData* data, uint32_t first, uint3
             const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = (flags & C_TOKENIZER_TRIGRAPHS) != 0 };
             uint64_t position = text ? data->starts[token] : (uint64_t)data->starts[first + 2] + 1;
             bool ended = false;
+            bool escaped = false;
             while (!ended && position < data->values[token])
             {
                 uint64_t size;
@@ -2410,7 +2411,8 @@ static uint32_t pp_raw_opaque_stop(const PPFileData* data, uint32_t first, uint3
                 const int32_t c = get_char(&lexer, position, &size, &start);
                 position += size != 0 ? size : 1;
                 const bool newline = c == '\n' || c == '\r';
-                ended = newline || (header && c == '>');
+                ended = newline || (header && c == '>' && !escaped);
+                escaped = c == '\\' && !escaped;
                 result = ended ? (uint32_t)(text || newline ? start : position) : 0;
             }
             result = result > data->starts[token] && result < data->values[token] ? result : 0;

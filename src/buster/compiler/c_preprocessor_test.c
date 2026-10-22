@@ -831,6 +831,7 @@ static const PPTestFile pp_test_files_raw_header[] = {
 // Angle header bytes that resemble an unterminated raw literal must not consume following source.
 static const PPTestFile pp_test_files_opaque_raw[] = {
     { "R\"(x", "header\n" },
+    { "a\\>R\"(x", "escaped_header\n" },
     { 0, 0 },
 };
 
@@ -1098,6 +1099,7 @@ static const PPTestCase pp_test_cases[] = {
       "# 1 \"%d/case.c\"\nR\"a\\\nb\" c\n" },
     { "raw-looking direct angle header preserves following source", "#include <R\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
     { "raw strings resume after an opaque direct header", "#include <R\"(x> R\"(a\nb)\"\nafter\n", 0, "gnu17", "header\nafter\n", false, 1, "-I%d", pp_test_files_opaque_raw },
+    { "escaped greater in a raw-looking direct header", "#include <a\\>R\"(x>\nafter\n", 0, "gnu17", "escaped_header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
     { "spliced raw-looking direct angle header", "#include <R\\\n\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
     { "raw-looking warning text preserves following source", "#warning R\"(\nafter\n", 0, "gnu17", "after\n", false, 1, 0, 0 },
     { "raw-looking error text preserves following source", "#error R\"(\nafter\n", 0, "gnu17", "after\n", true, 0, 0, 0 },

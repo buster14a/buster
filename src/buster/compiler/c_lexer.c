@@ -1937,13 +1937,15 @@ static uint64_t c_tokenize_scalar_context(const uint8_t* source, uint64_t length
                     uint64_t position = p;
                     bool closed = false;
                     bool line_ended = false;
+                    bool escaped = false;
                     while (!closed && !line_ended && position < length)
                     {
                         uint64_t size;
                         uint64_t char_start;
                         const int32_t character = get_char(lexer, position, &size, &char_start);
-                        closed = character == '>';
+                        closed = character == '>' && !escaped;
                         line_ended = character == '\n' || character == '\r' || character == BUSTER_LEX_END_OF_FILE;
+                        escaped = character == '\\' && !escaped;
                         position += size != 0 ? size : 1;
                     }
                     p = closed ? position : p;
