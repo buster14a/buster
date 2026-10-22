@@ -875,6 +875,59 @@ static void asm_test_reader(AsmTest* test, const char* directory)
 // .S pastes and '$' as assembler-with-cpp has them, through both preprocessor kernels and without external tools:
 // `$ ## X` is $7 and `% ## eax` is %eax, as in GCC and Clang. A comment holds 20,000 pp-numbers whose '$' splits each
 // into five tokens, more than their dollars would bound.
+// Check -E's text with the external consumer: our assembler tolerates spaces beside '$', while GNU as does not.
+static void asm_test_preprocessed_spacing(AsmTest* test, const char* directory)
+{
+    char input[PATH_MAX];
+    char printed[PATH_MAX];
+    char object[PATH_MAX];
+    char output[PATH_MAX];
+    char errors[PATH_MAX];
+    snprintf(input, sizeof(input), "%s/dollar-spacing.S", directory);
+    snprintf(printed, sizeof(printed), "%s/dollar-output.s", directory);
+    snprintf(object, sizeof(object), "%s/dollar-output.o", directory);
+    snprintf(output, sizeof(output), "%s/output", directory);
+    snprintf(errors, sizeof(errors), "%s/errors", directory);
+    static const char source[] =
+        ".text\n.macro load value, reg\nmovl \\value, \\reg\n.endm\n"
+        "#define V 5\nload $V %eax\nfoo$bar: jmp foo$bar\n";
+    static const uint8_t expected[] = {0xb8, 0x05, 0x00, 0x00, 0x00, 0xeb, 0xfe};
+    const bool written = object_write_file(input, (const uint8_t*)source, sizeof(source) - 1) == OBJECT_ERROR_NONE;
+    Arena files = arena_reserve(1ull << 24);
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        char* preprocess[] = {"/proc/self/exe", "-E", "-P", "-x", "assembler-with-cpp", "-o", printed, input, scalar ? "--scalar" : 0, 0};
+        char* assemble[] = {"as", "--64", "-o", object, printed, 0};
+        bool okay = written && object_test_run(preprocess, output, errors) == 0 && object_test_run(assemble, output, errors) == 0;
+        const String8 bytes = okay ? object_test_read_file(&files, object) : (String8){0};
+        ObjectView view;
+        char difference[256] = {0};
+        okay = okay && object_view_open(&view, (const uint8_t*)bytes.pointer, bytes.length, true, difference, sizeof(difference));
+        bool code = false;
+        bool symbol = false;
+        for (uint64_t i = 0; okay && i < view.section_count; i += 1)
+        {
+            const char* name = object_view_section_name(&view, i);
+            if (name != 0 && strcmp(name, ".text") == 0)
+            {
+                const Elf64_Shdr* section = &view.sections[i];
+                code = section->sh_size == sizeof(expected) && memcmp(bytes.pointer + section->sh_offset, expected, sizeof(expected)) == 0;
+            }
+        }
+        for (uint64_t i = 0; okay && i < view.symbol_count; i += 1)
+        {
+            const char* name = object_view_symbol_name(&view, i);
+            symbol |= name != 0 && strcmp(name, "foo$bar") == 0 && view.symbols[i].st_value == 5 && view.symbols[i].st_shndx != SHN_UNDEF;
+        }
+        asm_test_check(test, okay && code && symbol, "-E dollar spacing: GNU as macro arguments, bytes and symbol", difference);
+        arena_pop_to(&files, 0);
+    }
+    unlink(input);
+    unlink(printed);
+    unlink(object);
+    arena_release(&files);
+}
+
 static void asm_test_preprocessed(AsmTest* test, const char* directory)
 {
     char input[PATH_MAX];
@@ -1142,6 +1195,7 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_driver(&test, directory);
                 asm_test_target_driver(&test, directory);
                 asm_test_preprocessing(&test, directory);
+                asm_test_preprocessed_spacing(&test, directory);
             }
             const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "scalar.o", "values.h", "preprocessed.s"};
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)
