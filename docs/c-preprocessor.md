@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units (at fbddd2e, with `main` at e71d7fd), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,070,090 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 246 | |
+| The built-in cases (`pp_test_cases`) | 259 | |
 | #109's generated cases in C17 and C23, against `clang -E -P`: the last campaign's and those after it, but for 4 that #247 fixes ([the fuzzing](preprocessor-fuzz.md), "Qualification") | 42,800,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
@@ -640,6 +640,18 @@ arenas. Popping a context gives its tokens back when they are on top.
     navigation and skipped structural diagnostics count from the first
     unconsumed directive, using the corrected nesting instead of stale links
     or notes (`pp_skip_relexed_group`).
+  - A block-comment opener inside a literal name can make the ordinary lexer
+    hide the following source, as in `<dir/*x.h>`. After an executing direct
+    directive or expanded query confirms that name, `pp_recover_header_comment`
+    masks its interior in this inclusion's private lexical view and prepares
+    the file again. Original source offsets and macro snapshots remain valid;
+    other inclusions and the shared cache keep their own data. Only an
+    unterminated comment or one crossing the name's logical newline needs this
+    full repair; same-line and `//` suffixes keep the piecewise path. Gap
+    detection uses the current lexical bytes and advances a token cursor once
+    per view, so repeated names cannot rescan preceding tokens or masks.
+    Evaluated `#if`/`#elif` lines read their own trailing-comment diagnostic
+    after confirmed names are restored, immediately before evaluation.
   - The checks and their diagnostics go in clang's order
     (`HandleHeaderIncludeOrImport`):
     - an empty name is an error;
@@ -1198,7 +1210,7 @@ scoped to each inclusion. Source bytes, definition locations and scratch
 spellings remain alive for the whole unit. Source excerpts and carets are not
 implemented.
 
-`test-preprocessor --clang` compares 33 original diagnostic fixtures with
+`test-preprocessor --clang` compares 36 original diagnostic fixtures with
 Clang, including preprocessor failures and calls to the later-token renderer.
 It checks object/function expansions, arguments, nested and cross-context
 invocations, pastes, stringification, builtins, redefinition, `#line`, CRLF,
@@ -1465,7 +1477,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 246 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 259 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
