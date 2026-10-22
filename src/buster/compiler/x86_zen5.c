@@ -32,9 +32,10 @@ typedef enum X86CostOperands
 
 typedef enum X86CostColumn
 {
-    X86_COST_LATENCY,
+    X86_COST_GPR_LATENCY,
     X86_COST_THROUGHPUT,
     X86_COST_RETIRED_OPS,
+    X86_COST_FLAGS_LATENCY,
     X86_COST_LOAD_EXTRA,
     X86_COST_EXECUTED_UOPS,
     X86_COST_PIPES,
@@ -149,10 +150,10 @@ static bool x86_zen5_initialize(void)
         const X86CostCase* entry = &x86_zen5_cases[id];
         valid &= x86_zen5_form_ids[entry->form][entry->operands] == 0;
         x86_zen5_form_ids[entry->form][entry->operands] = id;
-        x86_zen5_columns[X86_COST_LATENCY][id] = entry->latency;
+        x86_zen5_columns[X86_COST_GPR_LATENCY][id] = entry->latency;
         x86_zen5_columns[X86_COST_THROUGHPUT][id] = entry->throughput;
         x86_zen5_columns[X86_COST_RETIRED_OPS][id] = entry->retired_ops;
-        for (uint32_t column = X86_COST_LATENCY; column <= X86_COST_RETIRED_OPS; column += 1)
+        for (uint32_t column = X86_COST_GPR_LATENCY; column <= X86_COST_RETIRED_OPS; column += 1)
         {
             x86_zen5_measured_fields[id] |= (x86_zen5_columns[column][id] != BUSTER_X86_COST_UNKNOWN) << column;
         }

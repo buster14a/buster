@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 // Original instruction microbenchmarks for #181. Encoder records generate bounded W^X mappings. Twelve independent
-// chains, two dependency paths, and mixes with six independent ADD/IMUL chains expose throughput and contention.
+// chains, matched six-chain controls, two dependency paths, and mixes with six ADD/IMUL chains measure throughput
+// and possible contention. A mix can be dependency-limited; compare it with the matched six-chain observations.
 // PMCx0C1 is RETIRED MACRO-OPS, not executed micro-ops. Neither that counter nor a mixed result identifies a pipe.
 // Only measure-x86-zen5 requires a 9700X; construction/encoding tests never label another CPU's results as Zen 5.
 
@@ -21,6 +22,7 @@ _Static_assert(BUSTER_X86_COST_BLOCK % 12 == 0, "source chains remain connected 
 typedef enum X86CostExperiment
 {
     X86_COST_INDEPENDENT,
+    X86_COST_INDEPENDENT_SIX,
     X86_COST_CHAIN_DESTINATION,
     X86_COST_CHAIN_SOURCE,
     X86_COST_MIX_ADD,
@@ -118,7 +120,8 @@ static bool x86_zen5_program(uint8_t id, X86CostExperiment experiment, X86CostPr
         const bool source_path = experiment == X86_COST_CHAIN_SOURCE && x86_zen5_source_path(id);
         for (uint32_t i = 0; id != 0 && i < BUSTER_X86_COST_BLOCK; i += 1)
         {
-            const uint8_t destination = registers[chain ? (source_path ? (i + 1) % 12 : 0) : i % (mix ? 6 : 12)];
+            const uint32_t chains = mix || experiment == X86_COST_INDEPENDENT_SIX ? 6 : 12;
+            const uint8_t destination = registers[chain ? (source_path ? (i + 1) % 12 : 0) : i % chains];
             uint8_t source = source_path ? registers[i % 12] : X86_REGISTER_R14;
             if (load)
             {
@@ -384,7 +387,7 @@ static int run_x86_zen5_measure(int argc, char** argv)
             }
             if (valid)
             {
-                static const char* const names[] = { "independent", "chain-destination", "chain-source", "mix-add", "mix-imul" };
+                static const char* const names[] = { "independent", "independent-six", "chain-destination", "chain-source", "mix-add", "mix-imul" };
                 const double denominator = (double)iterations * BUSTER_X86_COST_BLOCK;
                 for (uint32_t experiment = 0; experiment < X86_COST_EXPERIMENT_COUNT; experiment += 1)
                 {
