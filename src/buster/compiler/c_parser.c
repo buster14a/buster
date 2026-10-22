@@ -1118,6 +1118,15 @@ typedef enum ParseMode
     // In `[[`: the list's `[`, then the second `]` after the list's.
     PARSE_MODE_STANDARD_ATTRIBUTE_LIST,
     PARSE_MODE_STANDARD_ATTRIBUTE_END,
+    // In `[[`'s list (parse_scalar_standard_attribute_item): an item's name, or an empty item's `,` or the list's `]`;
+    // the second colon of a scope's `::`, and the name after it; after a name and after a scoped one, `(` and its
+    // arguments, `,` or `]` (and after a name, `::`); after the arguments, `,` or `]`.
+    PARSE_MODE_STANDARD_ATTRIBUTE_NAME,
+    PARSE_MODE_STANDARD_ATTRIBUTE_SCOPE,
+    PARSE_MODE_STANDARD_ATTRIBUTE_SCOPED_NAME,
+    PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_NAME,
+    PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_SCOPED_NAME,
+    PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_ARGUMENTS,
     // In an attribute's list, whose tokens are a balanced run: names, arguments, scopes.
     PARSE_MODE_ATTRIBUTE_TOKENS,
     // After an asm operand's `[name]`: its constraint.
@@ -1134,8 +1143,11 @@ typedef enum ParseMode
     // mean; then after a name or a subscript, `.`, `[` or the group's `)`.
     PARSE_MODE_OFFSETOF_MEMBER,
     PARSE_MODE_OFFSETOF_DESIGNATOR,
-    // After a _Static_assert's message's first string: more strings, then the group's `)`.
+    // After a _Static_assert's message's first string, or an asm label's: more strings, then the group's `)`.
     PARSE_MODE_MESSAGE,
+    // An asm label's string (`int x asm("y")`), and an asm operand's symbolic name in `[...]`.
+    PARSE_MODE_ASM_LABEL,
+    PARSE_MODE_ASM_NAME,
 } ParseMode;
 
 // Frame flags: the frame's contents are a declaration (cleared when it ends), after `typedef`, after a type specifier.
@@ -2728,7 +2740,8 @@ static bool parse_scalar_valid_after_tag(const ParseScalar* parser, uint32_t i, 
         case PARSE_KIND_ATTRIBUTE:
         // A struct's last member may go without its `;` in C: what follows decides (a member's missing name).
         case PARSE_KIND_R_BRACE: result = true; break;
-        case PARSE_KIND_COLON: result = frame->role == PARSE_ROLE_OPEN_STRUCT; break;
+        // A bit-field's width, or a _Generic association's `:` (clang's ColonIsSacred there).
+        case PARSE_KIND_COLON: result = frame->role == PARSE_ROLE_OPEN_STRUCT || (frame->role == PARSE_ROLE_OPEN_KEYWORD && frame->keyword == PARSE_KIND_GENERIC); break;
         case PARSE_KIND_QUALIFIER:
         case PARSE_KIND_STORAGE:
         case PARSE_KIND_TYPEDEF:
@@ -3098,16 +3111,15 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         const bool definition = first && (declaration->role == PARSE_ROLE_NONE || parse_frame_is_block(declaration)) &&
                                 (declaration->flags & BUSTER_PARSE_FRAME_KR_DECLARATIONS) == 0;
         declaration->derivation = first ? PARSE_DERIVATION_FUNCTION : declaration->derivation;
+        // (A K&R flag stays: it is the declared name's own list's, which suffixes of its return type don't change.)
         ParseFrame* parameters = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_FUNCTION, PARSE_MODE_ITEM, PARSE_MODE_AFTER_DECLARATOR, true, step);
         parameters->flags |= definition ? BUSTER_PARSE_FRAME_DEFINITION_PARAMETERS : 0;
-        frame->flags &= ~BUSTER_PARSE_FRAME_KR;
     }
     else if (kind == PARSE_KIND_L_SQUARE && !parse_scalar_standard_attribute(parser, i))
     {
         declaration->derivation = first ? PARSE_DERIVATION_OTHER : declaration->derivation;
         ParseFrame* array = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_MODE_OPERAND, PARSE_MODE_AFTER_DECLARATOR, false, step);
         array->flags |= BUSTER_PARSE_FRAME_ARRAY_DECLARATOR | BUSTER_PARSE_FRAME_EMPTY_OK;
-        frame->flags &= ~BUSTER_PARSE_FRAME_KR;
     }
     else if (kind == PARSE_KIND_ATTRIBUTE || (kind == PARSE_KIND_ASM && definition_scope && !kr))
     {
@@ -3244,11 +3256,11 @@ static void parse_scalar_kr_parameters(ParseScalar* parser, uint32_t i, ParseFra
 }
 
 // How many colons an asm statement may have: 3 (outputs, inputs, clobbers), or 4 with `goto` among its qualifiers
-// (labels).
+// (labels); a top-level asm block, only its template.
 static uint32_t parse_scalar_asm_sections(const ParseScalar* parser, const ParseFrame* frame)
 {
-    uint32_t result = 3;
-    for (int64_t t = (int64_t)frame->opener - 1; t >= 0 && parser->kinds[t] != PARSE_KIND_ASM; t -= 1)
+    uint32_t result = parser->frames[parser->frame_count - 2].statement == PARSE_ITEM_TOP_LEVEL_ASM ? 0 : 3;
+    for (int64_t t = (int64_t)frame->opener - 1; result != 0 && t >= 0 && parser->kinds[t] != PARSE_KIND_ASM; t -= 1)
     {
         result = parser->kinds[t] == PARSE_KIND_GOTO ? 4 : result;
     }
@@ -3274,11 +3286,35 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
         // GNU's `&&label` takes a label's name.
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_IDENTIFIER, BUSTER_PARSE_AT_TOKEN);
     }
-    else if (asm_operands && frame->argument != 0 && !(kind == PARSE_KIND_STRING || kind == PARSE_KIND_COLON || kind == PARSE_KIND_R_PAREN ||
-                                                     (kind == PARSE_KIND_L_SQUARE && frame->argument <= 2) || (kind == PARSE_KIND_IDENTIFIER && frame->argument == 4)))
+    else if (asm_operands && frame->argument == 4 && kind == PARSE_KIND_IDENTIFIER)
     {
-        // An operand starts with its symbolic name or its constraint, a clobber is a string, and asm goto's labels are names.
+        // asm goto's labels, whatever the ordinary names mean.
+        step->role = PARSE_ROLE_OPERAND;
+        frame->mode = PARSE_MODE_OPERATOR;
+        frame->flags &= ~BUSTER_PARSE_FRAME_EMPTY_OK;
+    }
+    else if (asm_operands && frame->argument == 4)
+    {
+        // The labels' section has at least one.
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_IDENTIFIER, BUSTER_PARSE_AT_TOKEN);
+    }
+    else if (asm_operands && frame->argument == 3 && previous != PARSE_KIND_COMMA && kind != PARSE_KIND_STRING && kind != PARSE_KIND_COLON &&
+             kind != PARSE_KIND_R_PAREN)
+    {
+        // A clobbers' section that doesn't start with a string is empty, and the asm statement ends.
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_R_PAREN, BUSTER_PARSE_AT_TOKEN);
+    }
+    else if (asm_operands && frame->argument != 0 &&
+             !(kind == PARSE_KIND_STRING || (kind == PARSE_KIND_L_SQUARE && frame->argument <= 2) ||
+               ((kind == PARSE_KIND_COLON || kind == PARSE_KIND_R_PAREN) && previous != PARSE_KIND_COMMA)))
+    {
+        // An operand starts with its symbolic name or its constraint, and a clobber is a string, after a comma too.
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_ASM_STRING, BUSTER_PARSE_AT_TOKEN);
+    }
+    else if (asm_operands && kind == PARSE_KIND_R_PAREN && frame->argument != 0 && parse_scalar_asm_sections(parser, frame) == 4)
+    {
+        // asm goto's colons come to its labels'.
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_COLON, BUSTER_PARSE_AT_TOKEN);
     }
     else if (attribute && frame->role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST && kind != PARSE_KIND_IDENTIFIER && kind < PARSE_KIND_TYPE && kind != PARSE_KIND_COMMA &&
              kind != PARSE_KIND_R_PAREN)
@@ -3293,11 +3329,13 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
     }
     else if (kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING || (attribute && kind >= PARSE_KIND_TYPE))
     {
-        if (!attribute && parse_scalar_is_typedef_name(parser, i) && previous == PARSE_KIND_SIZEOF)
+        // GNU's `&&label` names a label, whatever the ordinary names mean.
+        const bool ordinary = !attribute && !(previous == PARSE_KIND_AMPAMP && parser->roles[(int64_t)i - 1] == PARSE_ROLE_PREFIX);
+        if (ordinary && parse_scalar_is_typedef_name(parser, i) && previous == PARSE_KIND_SIZEOF)
         {
             parse_scalar_error_argument(parser, i, PARSE_MESSAGE_EXPECTED_PARENTHESES_AROUND_TYPE_NAME, BUSTER_PARSE_AFTER_PREVIOUS, i - 1);
         }
-        else if (!attribute && parse_scalar_is_typedef_name(parser, i))
+        else if (ordinary && parse_scalar_is_typedef_name(parser, i))
         {
             parse_scalar_error_argument(parser, i, PARSE_MESSAGE_UNEXPECTED_TYPE_NAME_EXPRESSION, BUSTER_PARSE_AT_TOKEN, i);
         }
@@ -3356,7 +3394,7 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
     else if (kind == PARSE_KIND_L_SQUARE && asm_operands)
     {
         // An asm operand's symbolic name, then its constraint.
-        parse_scalar_open(parser, i, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_MODE_OPERAND, PARSE_MODE_ASM_CONSTRAINT, false, step);
+        parse_scalar_open(parser, i, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_MODE_ASM_NAME, PARSE_MODE_ASM_CONSTRAINT, false, step);
         frame->flags &= ~BUSTER_PARSE_FRAME_EMPTY_OK;
     }
     else if ((kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_QUALIFIER) && (flags & BUSTER_PARSE_FRAME_ARRAY_DECLARATOR))
@@ -3467,11 +3505,21 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
         // An output's or input's constraint, which its operand in parentheses follows.
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_L_PAREN_AFTER_ASM_OPERAND, BUSTER_PARSE_AT_TOKEN);
     }
-    else if ((kind == PARSE_KIND_COLON && (flags & BUSTER_PARSE_FRAME_ASM) && frame->argument >= parse_scalar_asm_sections(parser, frame)) ||
-             (kind == PARSE_KIND_L_PAREN && (flags & BUSTER_PARSE_FRAME_ASM) && (frame->argument >= 3 || frame->argument == 0)))
+    else if ((flags & BUSTER_PARSE_FRAME_ASM) &&
+             ((kind == PARSE_KIND_COLON && frame->argument >= parse_scalar_asm_sections(parser, frame)) ||
+              !(kind == PARSE_KIND_COLON || kind == PARSE_KIND_R_PAREN || (kind == PARSE_KIND_COMMA && frame->argument != 0) ||
+                (kind == PARSE_KIND_STRING && parser->kinds[(int64_t)i - 1] == PARSE_KIND_STRING) ||
+                (kind == PARSE_KIND_L_PAREN && parser->kinds[(int64_t)i - 1] == PARSE_KIND_STRING && (frame->argument == 1 || frame->argument == 2)))))
     {
-        // Too many sections, or a clobber (or a label) with an operand.
+        // Too many sections, or what no section has after its strings, its operands' parentheses and its labels: an
+        // operator, a clobber's (or a label's) operand, a second template.
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_R_PAREN, BUSTER_PARSE_AT_TOKEN);
+    }
+    else if ((flags & BUSTER_PARSE_FRAME_ASM) && kind == PARSE_KIND_R_PAREN && frame->argument != 0 && frame->argument < 4 &&
+             parse_scalar_asm_sections(parser, frame) == 4)
+    {
+        // asm goto's colons come to its labels'.
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_COLON, BUSTER_PARSE_AT_TOKEN);
     }
     else if (group == PARSE_ROLE_OPEN_ATTRIBUTE_LIST && kind != PARSE_KIND_L_PAREN && kind != PARSE_KIND_COMMA && !parse_kind_is_closer(kind))
     {
@@ -3601,7 +3649,8 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
                 frame->flags |= parser->frames[parser->frame_count - 2].flags & BUSTER_PARSE_FRAME_NO_BIND;
                 frame->statement = PARSE_ITEM_EXPRESSION;
             }
-            frame->flags &= ~BUSTER_PARSE_FRAME_EMPTY_OK;
+            // A GNU attribute list's items may be empty, the last one too (`__attribute__((unused,))`).
+            frame->flags = group == PARSE_ROLE_OPEN_ATTRIBUTE_LIST ? frame->flags | BUSTER_PARSE_FRAME_EMPTY_OK : frame->flags & ~BUSTER_PARSE_FRAME_EMPTY_OK;
         }
     }
     else if (kind == PARSE_KIND_SEMI)
@@ -3683,7 +3732,8 @@ static void parse_scalar_paren(ParseScalar* parser, uint32_t i, ParseFrame* fram
         const uint8_t opener_role = closer_role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ? PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER :
                                     closer_role == PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT ? PARSE_ROLE_OPEN_ATTRIBUTE_LEFT :
                                     closer_role == PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT ? PARSE_ROLE_OPEN_ATTRIBUTE_RIGHT : PARSE_ROLE_OPEN_ATTRIBUTE;
-        ParseFrame* group = parse_scalar_open(parser, i, opener_role, list ? PARSE_MODE_ATTRIBUTE_LIST : PARSE_MODE_OPERAND, continuation, false, step);
+        const uint8_t contents = list ? PARSE_MODE_ATTRIBUTE_LIST : parser->kinds[(int64_t)i - 1] == PARSE_KIND_ASM ? PARSE_MODE_ASM_LABEL : PARSE_MODE_OPERAND;
+        ParseFrame* group = parse_scalar_open(parser, i, opener_role, contents, continuation, false, step);
         group->flags |= list ? 0 : BUSTER_PARSE_FRAME_ATTRIBUTE;
     }
 }
@@ -3711,6 +3761,59 @@ static void parse_scalar_attribute_tokens(ParseScalar* parser, uint32_t i, Parse
     else
     {
         step->role = kind == PARSE_KIND_COMMA ? PARSE_ROLE_SEPARATOR : PARSE_ROLE_OPERAND;
+    }
+}
+
+// In `[[`'s list, as clang reads it: items of a name (an identifier or a keyword), perhaps in a scope (`gnu::unused`),
+// and perhaps an argument clause in parentheses, a balanced run of tokens (parse_scalar_attribute_tokens), separated by
+// commas, any of them empty. The names and the scope's colons are leaves, as in the run.
+static void parse_scalar_standard_attribute_item(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
+{
+    const uint8_t kind = parser->kinds[i];
+    const uint8_t mode = frame->mode;
+    const bool name = kind == PARSE_KIND_IDENTIFIER || (kind >= PARSE_KIND_TYPE && kind < PARSE_KIND_COUNT);
+    // `::`, which the input splits into two colons, the second without a space before it.
+    const bool scope = kind == PARSE_KIND_COLON && parser->kinds[i + 1] == PARSE_KIND_COLON && (parser->flags[i + 1] & BUSTER_PP_SPACE) == 0;
+    const bool named = mode == PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_NAME || mode == PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_SCOPED_NAME;
+    const bool ended = mode == PARSE_MODE_STANDARD_ATTRIBUTE_NAME || named || mode == PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_ARGUMENTS;
+    if (mode == PARSE_MODE_STANDARD_ATTRIBUTE_SCOPE)
+    {
+        step->role = PARSE_ROLE_OPERAND;
+        frame->mode = PARSE_MODE_STANDARD_ATTRIBUTE_SCOPED_NAME;
+    }
+    else if ((mode == PARSE_MODE_STANDARD_ATTRIBUTE_NAME || mode == PARSE_MODE_STANDARD_ATTRIBUTE_SCOPED_NAME) && name)
+    {
+        step->role = PARSE_ROLE_OPERAND;
+        frame->mode = mode == PARSE_MODE_STANDARD_ATTRIBUTE_NAME ? PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_NAME : PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_SCOPED_NAME;
+    }
+    else if (mode == PARSE_MODE_STANDARD_ATTRIBUTE_SCOPED_NAME)
+    {
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_IDENTIFIER, BUSTER_PARSE_AT_TOKEN);
+    }
+    else if (mode == PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_NAME && scope)
+    {
+        step->role = PARSE_ROLE_OPERAND;
+        frame->mode = PARSE_MODE_STANDARD_ATTRIBUTE_SCOPE;
+    }
+    else if (named && kind == PARSE_KIND_L_PAREN)
+    {
+        ParseFrame* group = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_GROUP, PARSE_MODE_ATTRIBUTE_TOKENS, PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_ARGUMENTS, false, step);
+        group->flags |= BUSTER_PARSE_FRAME_ATTRIBUTE;
+        group->closer_role = PARSE_ROLE_CLOSE_GROUP;
+    }
+    else if (ended && kind == PARSE_KIND_COMMA)
+    {
+        step->role = PARSE_ROLE_SEPARATOR;
+        frame->mode = PARSE_MODE_STANDARD_ATTRIBUTE_NAME;
+    }
+    else if (ended && kind == PARSE_KIND_R_SQUARE)
+    {
+        parse_scalar_close(parser, i, step);
+    }
+    else
+    {
+        // clang expects the `]` or the `,` after the token before.
+        parse_scalar_error(parser, i, mode == PARSE_MODE_STANDARD_ATTRIBUTE_NAME ? PARSE_MESSAGE_EXPECTED_R_SQUARE : PARSE_MESSAGE_EXPECTED_COMMA, BUSTER_PARSE_AFTER_PREVIOUS);
     }
 }
 
@@ -3922,10 +4025,17 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
                     break;
                 case PARSE_MODE_STANDARD_ATTRIBUTE_LIST:
                 {
-                    ParseFrame* list = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE_LIST, PARSE_MODE_ATTRIBUTE_TOKENS, PARSE_MODE_STANDARD_ATTRIBUTE_END, false, &step);
+                    ParseFrame* list = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE_LIST, PARSE_MODE_STANDARD_ATTRIBUTE_NAME, PARSE_MODE_STANDARD_ATTRIBUTE_END, false,
+                                                         &step);
                     list->flags |= BUSTER_PARSE_FRAME_ATTRIBUTE;
                     break;
                 }
+                case PARSE_MODE_STANDARD_ATTRIBUTE_NAME:
+                case PARSE_MODE_STANDARD_ATTRIBUTE_SCOPE:
+                case PARSE_MODE_STANDARD_ATTRIBUTE_SCOPED_NAME:
+                case PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_NAME:
+                case PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_SCOPED_NAME:
+                case PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_ARGUMENTS: parse_scalar_standard_attribute_item(parser, i, frame, &step); break;
                 case PARSE_MODE_STANDARD_ATTRIBUTE_END:
                     if (kind == PARSE_KIND_R_SQUARE)
                     {
@@ -3933,7 +4043,7 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
                     }
                     else
                     {
-                        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_R_SQUARE, BUSTER_PARSE_AT_TOKEN);
+                        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_R_SQUARE, BUSTER_PARSE_AFTER_PREVIOUS);
                     }
                     break;
                 case PARSE_MODE_ATTRIBUTE_TOKENS: parse_scalar_attribute_tokens(parser, i, frame, &step); break;
@@ -3945,7 +4055,31 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
                     }
                     else
                     {
-                        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_L_PAREN_AFTER_ASM_OPERAND, BUSTER_PARSE_AT_TOKEN);
+                        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_ASM_STRING, BUSTER_PARSE_AT_TOKEN);
+                    }
+                    break;
+                case PARSE_MODE_ASM_NAME:
+                    // An asm operand's symbolic name, whatever the ordinary names mean, then its `]`.
+                    if (kind == PARSE_KIND_IDENTIFIER)
+                    {
+                        step.role = PARSE_ROLE_OPERAND;
+                        frame->mode = PARSE_MODE_CLOSE;
+                    }
+                    else
+                    {
+                        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_IDENTIFIER, BUSTER_PARSE_AT_TOKEN);
+                    }
+                    break;
+                case PARSE_MODE_ASM_LABEL:
+                    // An asm label's string literals.
+                    if (kind == PARSE_KIND_STRING)
+                    {
+                        step.role = PARSE_ROLE_OPERAND;
+                        frame->mode = PARSE_MODE_MESSAGE;
+                    }
+                    else
+                    {
+                        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_ASM_STRING, BUSTER_PARSE_AT_TOKEN);
                     }
                     break;
                 case PARSE_MODE_COMPOUND_BODY:

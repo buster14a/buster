@@ -494,6 +494,43 @@ static const ParseTestSnippet parse_test_snippets[] =
     // A type name where an operand would be.
     { "typedef int T; int y = sizeof T;\n", "1:30: expected parentheses around type name in sizeof expression", 0 },
     { "typedef int T; int y = 1 ? T : 2;\n", "1:28: unexpected type name 'T': expected expression", 0, true },
+    // A K&R definition's identifier list is its name's, whatever suffixes its return type has.
+    { "int (*f(x))(int) int x; { return 0; }\nint (*g(y))[3] int y; { return 0; }\n", "", 0 },
+    // A tag's definition may end a _Generic association's type name.
+    { "int x = _Generic(0, struct S { int a; }: 1, default: 0);\nint y = _Generic(0, enum E { A }: 1, default: 0);\n", "", "c17" },
+    // A GNU attribute list's items may be empty, the last one too.
+    { "int x __attribute__((unused,)); int f(int a __attribute__((unused,))); enum E { A __attribute__((deprecated,)) };\nint y __attribute__((,unused,,deprecated,));\n", "", 0 },
+    // C23's attribute lists: names, perhaps in a scope and with arguments, separated by commas, any item empty; clang
+    // expects the `,` or the `]` after the token before.
+    { "[[]] int a; [[,]] int b; [[deprecated,,maybe_unused]] int c; [[gnu::aligned(8), ]] int d; [[__gnu__::__unused__, x ::y]] int e;\n", "", 0 },
+    { "[[123]] int x;\n", "1:3: expected ']'", 0 },
+    { "[[gnu::unused gnu::deprecated]] int x;\n", "1:14: expected ','", "c23" },
+    { "[[x(1)   (2)]] int x;\n", "1:7: expected ','", 0 },
+    { "[[x,  1]] int x;\n", "1:5: expected ']'", 0 },
+    { "[[gnu::]] int x;\n", "1:8: expected identifier", 0 },
+    // A label's name after `&&`, an asm operand's symbolic name and asm goto's labels are names, whatever the ordinary
+    // names mean; asm goto's colons come to its labels, and they to one at least.
+    { "typedef int T, L; void f(int x) { void *p = &&T; asm goto(\"\" : [T] \"=r\"(x) : [U] \"r\"(x) : : L); goto *p; T: L:; }\n", "", 0 },
+    { "void f(int x) { asm(\"\" : [42] \"=r\"(x)); }\n", "1:27: expected identifier", 0 },
+    { "void f(int x) { asm(\"\" : [x + 1] \"=r\"(x)); }\n", "1:29: expected ']'", 0 },
+    { "void f(int x) { asm(\"\" : [a]); }\n", "1:29: expected string literal in 'asm'", 0 },
+    { "void f(void) { asm goto(\"\" ::::); }\n", "1:32: expected identifier", 0 },
+    { "void f(void) { asm goto(\"\" :::: a + b); a: b:; }\n", "1:35: expected ')'", 0 },
+    { "void f(void) { asm goto(\"\" :); }\n", "1:29: expected ':'", 0 },
+    { "void f(void) { asm goto(\"\" ::: \"memory\"); }\n", "1:40: expected ':'", 0 },
+    // An asm statement's template, constraints and clobbers are string literals, its operands in parentheses and its
+    // labels names, which nothing continues; an asm label is string literals, and a top-level asm block its template.
+    { "int x asm(\"a\" \"b\"), y __asm__(\"c\") = 1; void f(int z) { asm(\"a\" \"b\" : \"=r\" \"m\"(z), [b] \"=r\"(z) : \"r\"(z) : \"memory\", \"cc\"); }\n", "", 0 },
+    { "void f(void) { asm(\"\" + 1); }\n", "1:23: expected ')'", 0 },
+    { "void f(void) { asm(\"a\", \"b\"); }\n", "1:23: expected ')'", 0 },
+    { "void f(int x) { asm(\"\" : \"=r\"(x) + 1); }\n", "1:34: expected ')'", 0 },
+    { "void f(void) { asm(\"\" ::: \"memory\" + 1); }\n", "1:36: expected ')'", 0 },
+    { "void f(void) { asm(\"\" ::: \"a\",); }\n", "1:31: expected string literal in 'asm'", 0 },
+    { "void f(int x) { asm(\"\" ::: x); }\n", "1:28: expected ')'", 0 },
+    { "void f(int x) { asm(\"\" : \"=r\"(x),); }\n", "1:34: expected string literal in 'asm'", 0 },
+    { "int x; asm(\"\" : \"=r\"(x));\n", "1:15: expected ')'", 0 },
+    { "int x asm(\"y\" + 1);\n", "1:15: expected ')'", 0 },
+    { "int x asm(y);\n", "1:11: expected string literal in 'asm'", 0 },
 };
 
 // Writes `text` to `path`. Returns false if it can't.

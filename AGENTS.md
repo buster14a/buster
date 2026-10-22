@@ -2413,7 +2413,7 @@ the scalar parser's. Those checks put every array in an arena followed by 4 GB
 and its own size of address space that may not be touched, so that a load past
 an array, or through a 32-bit index that wrapped below 0, faults. On:
 
-- snippets: 174 of valid and invalid code, each with the first error clang gives
+- snippets: 202 of valid and invalid code, each with the first error clang gives
   (or none), which the parser must give at the same line and column with the
   same message; `--clang` checks each expectation against clang too, which
   must be a parse issue but for the snippets marked as the errors clang's

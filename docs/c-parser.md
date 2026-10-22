@@ -9,10 +9,10 @@ didn't have, which lets the vector path take only code the scalar parser would
 accept with the same tree. `compiler file.c` runs the preprocessor and the
 parser; nothing is written yet.
 
-On the 9700X the vector path parses `sqlite3.c` (707,153 tokens) in 3.48 ms,
-27.1 cycles a token, 2.37 times as fast as the scalar parser (64.2), and the
-libc corpus at 21.4 cycles a token, 2.29 times as fast (48.9); with the
-postorder and its subtree sizes, 41.0 and 32.7. Both paths build the same tree
+On the 9700X the vector path parses `sqlite3.c` (707,153 tokens) in 3.58 ms,
+27.9 cycles a token, 2.35 times as fast as the scalar parser (65.4), and the
+libc corpus at 21.5 cycles a token, 2.33 times as fast (49.6); with the
+postorder and its subtree sizes, 41.7 and 32.9. Both paths build the same tree
 on every file of `sqlite3.c`, the libc corpus, Lua and this repository, which
 they accept as clang does, and agree with clang on 4,300 mutations of them.
 "Measurements" has the tables; #115's budget for the parser, 2 ms for
@@ -120,8 +120,9 @@ ends at their list's `)`, as clang's prototype scope does, so that the rest of
 the declarator and its attributes see what they hid
 (`int (*f(int T))[sizeof((T)0)] {...}`); the list keeps what it bound, which a
 body binds again, after the function's own name. A K&R definition's identifier
-list is the name's own, through the declarator's groups
-(`int (f(x)) int x; {...}`), in C17 and before (#154), and clang reads one only
+list is the name's own, through the declarator's groups and whatever suffixes
+its return type has (`int (f(x)) int x; {...}`, `int (*g(y))[3] int y; {...}`),
+in C17 and before (#154), and clang reads one only
 where its first identifier is followed by `,` or `)`; its parameter
 declarations, as clang's `ParseKNRParamDeclarations` reads them, are in a scope
 of their own, which the body ends, and each declares one of the list's names,
@@ -135,7 +136,18 @@ each of their substatements (C 6.8.4p3, 6.8.5p5): what a condition declares
 ends with its statement, and what a then-statement or a do's body declares ends
 with it. `__builtin_offsetof`'s member designator and `_Static_assert`'s
 message have grammars of their own, as clang reads them: members' names,
-whatever the ordinary names mean, `.` and subscripts; and string literals.
+whatever the ordinary names mean, `.` and subscripts; and string literals. So
+do an asm statement's sections, as clang's `ParseAsmStatement` reads them: the
+template, the outputs and inputs (each a symbolic name in `[...]`, a constraint
+and its operand in parentheses), the clobbers and asm goto's labels, all of
+them string literals but the operands and the names, which are names whatever
+the ordinary names mean, as `&&label`'s is, and nothing continues them
+(`asm("" + 1)` is an error); asm goto takes all four colons and a label at
+least, a top-level asm block only its template, and an asm label after a
+declarator only string literals. A C23 attribute list's items are a name,
+perhaps in a scope (`gnu::unused`) and with an argument clause, a balanced run
+of tokens, separated by commas; its items and a GNU attribute list's may be
+empty, the last one too.
 
 Each frame keeps the index of the frame its declarators' names belong to and
 what a comma at its top level is, so that no token costs more for what is open
@@ -151,7 +163,9 @@ changing how it parses (a missing type specifier, an unknown type name); clang
 may report more. Its places follow
 clang's rules, among them: a missing `;` after the token before it; an
 unbalanced closer at the end of the file; after a tag's body, the tokens clang's
-`isValidAfterTypeSpecifier` allows, and none on a new line.
+`isValidAfterTypeSpecifier` allows (a `:` before a bit-field's width or a
+`_Generic` association's value), and none on a new line; a missing `,` or `]`
+in a C23 attribute list after the token before it.
 
 It is the fallback for what the vector path flags, the oracle every kernel is
 tested against, and the parser of a unit with errors: the vector path sends the
@@ -270,9 +284,9 @@ benchmark's counts; `test-parser --explain` says why for each):
 
 | Unit | Declarations | Tokens | Share | Why |
 | --- | ---: | ---: | ---: | --- |
-| `sqlite3.c` | 7 | 10,210 | 1.44% | `_Generic`, from glibc's `strchr` and `memchr` macros; typedef names declared in a block (`void_function`, `sqlite3LocaltimeType`) |
-| libc corpus (733 files) | 132 | 7,500 | 0.19% | asm statements; `__restrict` in glibc's parameters' array declarators; block-scope typedef names (musl's string functions) |
-| `main.c` | 38 | 19,972 | 1.23% | asm statements (clang's intrinsics headers, the compiler's own); `_Alignas(64)` before a typedef name; `__restrict` in glibc's `spawn.h`; a block's variable named `va_list` |
+| `sqlite3.c` | 10 | 10,395 | 1.47% | `_Generic`, from glibc's `strchr` and `memchr` macros; typedef names declared in a block (`void_function`, `sqlite3LocaltimeType`); definitions whose declarator has a group (`sqlite3OsDlSym`) |
+| libc corpus (733 files) | 142 | 7,827 | 0.20% | asm statements; `__restrict` in glibc's parameters' array declarators; block-scope typedef names (musl's string functions); definitions whose declarator has a group (`signal`'s kind) |
+| `main.c` | 47 | 22,088 | 1.29% | asm statements (clang's intrinsics headers, the compiler's own); `_Alignas(64)` before a typedef name; `__restrict` in glibc's `spawn.h`; a block's variable named `va_list` |
 
 ## The postorder
 
@@ -307,18 +321,22 @@ it reads, the tree's invariants and postorder, and each kernel with its twin,
 on snippets checked against clang, generated inputs, the driver's cases and
 failures, corpora, and mutations of them checked against clang.
 
-On the 9700X, at `bfeee15`, with `--clang`:
+On the 9700X, at `a70d9a3`, with `--clang`:
 
-- the tests without files: the 108 snippets, the four fixtures, 2,000 random
-  streams, the snippets at every block alignment (6,912 inputs), the seven
-  nestings 100,000 levels deep, and the driver's cases and its failures
-  (3.8 s);
-- `sqlite3.c` (3.53.4, 707,153 tokens, 1.1 s), the 733 files of the libc corpus
-  that clang accepts (3,869,223 tokens, 8.4 s) and the repository's 18
-  translation units (11,705,844 tokens, 6.0 s): every file accepted, as clang
+- the tests without files: the 174 snippets, the four fixtures, 2,000 random
+  streams, the snippets at every block alignment (11,136 inputs), nine kinds of
+  nesting 100,000 levels deep and a run of 100,000 attributes, and the driver's
+  cases and its failures (5.1 s);
+- `sqlite3.c` (3.53.4, 707,153 tokens, 1.6 s), the 733 files of the libc corpus
+  that clang accepts (3,869,223 tokens, 8.7 s) and the repository's 19
+  translation units (12,622,522 tokens, 6.9 s): every file accepted, as clang
   accepts it, with both paths' trees and every kernel's twin agreeing.
 
-Locally, on a Ryzen 9 7940HS, at the same head: Lua 5.4.8's 34 files (572,263
+The merge of main after it (`c16fa32`) brought other modules' changes, among
+them two more translation units and the preprocessor's file cache; locally, the
+21 units (13,596,016 tokens) pass the same way.
+
+Locally, on a Ryzen 9 7940HS, at `a70d9a3`: Lua 5.4.8's 34 files (572,263
 tokens) with `--clang` as well, the fixtures, and mutations of the corpora,
 checked against clang and through both paths, none with a mismatch:
 
@@ -348,48 +366,53 @@ each of Lua and libc without a report, at the same head.
 
 ## Measurements
 
-Measured on 2026-10-22 on the Ryzen 7 9700X (`benchpress`), at `bfeee15`,
+Measured on 2026-10-22 on the Ryzen 7 9700X (`benchpress`), at `a70d9a3`,
 with Clang 23.1.1 and `build.sh`'s `-O3 -march=native`, each run under the
 shared lock by itself and pinned to CPU 2. `benchmark-parser` reports the
 medians of 21 interleaved passes after a warm-up, per token, from tokens the
 preprocessor made beforehand (AGENTS.md, "Parser benchmark"). The parsers'
 fastest and slowest passes (the scalar parser's, the twins' and the vector
-path's) are within 1.1% of the median on `sqlite3.c`, 2.1% on libc and 3.7% on
+path's) are within 0.9% of the median on `sqlite3.c`, 1.7% on libc and 3.6% on
 `main.c`; the input's conversion, a fraction of a millisecond, varies more (its
-slowest pass on `main.c` took twice its median). The inputs: `sqlite3.c` 3.53.4 with the
-system's headers (707,153 tokens), the 733 files of the libc corpus that clang
-accepts (Zig 0.14.1's `lib/libc`, as #186 chose them; 3,869,223 tokens), and
-`main.c` with clang's predefines for `-march=native` (1,623,295 tokens).
+slowest pass on `sqlite3.c` took 19% more than its median). The inputs:
+`sqlite3.c` 3.53.4 with the system's headers (707,153 tokens), the 733 files of
+the libc corpus that clang accepts (Zig 0.14.1's `lib/libc`, as #186 chose
+them; 3,869,223 tokens), and `main.c` with clang's predefines for
+`-march=native` (1,706,197 tokens).
 
 | Whole path | `sqlite3.c` ms | cycles/token | instructions/token | libc ms | cycles/token | instructions/token | `main.c` ms | cycles/token | instructions/token |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| The input's conversion | 0.13 | 1.0 | 1.5 | 1.29 | 1.8 | 2.2 | 0.49 | 1.7 | 1.5 |
-| Its scalar twin | 1.69 | 13.2 | 40.7 | 5.18 | 7.4 | 41.7 | 3.08 | 10.5 | 40.6 |
-| Scalar parser | 8.21 | 64.2 | 288.5 | 34.45 | 48.9 | 269.5 | 16.94 | 57.5 | 291.7 |
-| Kernels' scalar twins | 20.80 | 162.6 | 641.2 | 79.31 | 112.7 | 634.8 | 39.72 | 134.7 | 637.2 |
-| Vector path | 3.48 | 27.1 | 59.3 | 14.94 | 21.4 | 54.6 | 8.71 | 29.6 | 57.6 |
-| Postorder, passes, with sizes | 1.78 | 13.9 | 50.3 | 7.92 | 11.3 | 50.4 | 4.61 | 15.7 | 50.3 |
-| Postorder, walk, without sizes | 1.91 | 14.9 | 19.0 | 3.84 | 5.5 | 18.7 | 3.18 | 10.8 | 19.3 |
+| The input's conversion | 0.13 | 1.0 | 1.5 | 1.39 | 2.0 | 2.2 | 0.47 | 1.5 | 1.5 |
+| Its scalar twin | 1.83 | 14.3 | 41.7 | 5.87 | 8.4 | 42.7 | 3.43 | 11.2 | 41.6 |
+| Scalar parser | 8.43 | 65.4 | 291.8 | 35.07 | 49.6 | 276.9 | 18.66 | 60.1 | 290.4 |
+| Kernels' scalar twins | 21.47 | 166.7 | 646.4 | 80.57 | 114.3 | 640.2 | 43.14 | 139.1 | 644.8 |
+| Vector path | 3.58 | 27.9 | 60.9 | 15.04 | 21.5 | 55.1 | 9.31 | 30.2 | 60.6 |
+| Postorder, passes, with sizes | 1.77 | 13.8 | 50.3 | 7.96 | 11.4 | 50.4 | 4.34 | 14.1 | 50.3 |
+| Postorder, walk, without sizes | 1.95 | 15.2 | 19.0 | 3.73 | 5.3 | 18.7 | 3.45 | 11.2 | 19.3 |
 
-- **The vector path is 2.37 times as fast as the scalar parser on `sqlite3.c`,
-  2.29 times on libc and 1.94 times on `main.c`**, at IPC 2.2, 2.6 and 1.9,
-  backend-bound (52% to 59% of dispatch slots), against the scalar parser's
-  4.5 to 5.5. It mispredicts 0.139 branches a token on `sqlite3.c` and 0.034
-  on libc, the scalar parser 0.510 and 0.122.
-- **The scalar parser costs more than the spike's**, 64.2 cycles a token on
-  `sqlite3.c` against 44.0, and 288 instructions a token against 190: it takes
-  the whole grammar now, with clang's diagnostics and recovery, where the
-  spike's parsed what its corpora held.
-- **The vector path costs more than the spike's**, 27.1 cycles a token on
-  `sqlite3.c` against 16.7, and 21.4 on libc against 11.7: K6, which the spike
-  didn't have, takes 8.6 and 8.9, and K3's classification, which now also
-  flags a typedef name used before its first declarator, 1.2 and 0.7 more.
-- **The postorder's passes with the subtree sizes cost 11.3 to 15.7 cycles a
+- **The vector path is 2.35 times as fast as the scalar parser on `sqlite3.c`,
+  2.33 times on libc and 2.00 times on `main.c`**, at IPC 2.2, 2.6 and 2.0,
+  backend-bound (51% to 59% of dispatch slots), against the scalar parser's
+  4.5 to 5.6. It mispredicts 0.149 branches a token on `sqlite3.c` and 0.035
+  on libc, the scalar parser 0.517 and 0.119.
+- **The scalar parser costs more than the spike's**, 65.4 cycles a token on
+  `sqlite3.c` against 44.0, and 292 instructions a token against 190: it takes
+  the whole grammar now, with clang's diagnostics and recovery and C's scopes,
+  where the spike's parsed what its corpora held. #244's reviews' fixes cost it
+  1.2 cycles and 3.3 instructions a token on `sqlite3.c` (64.2 and 288.5 at
+  `bfeee15`).
+- **The vector path costs more than the spike's**, 27.9 cycles a token on
+  `sqlite3.c` against 16.7, and 21.5 on libc against 11.7: K6, which the spike
+  didn't have, takes 9.3 and 9.0, and K3's classification, which now also flags
+  a typedef name used before its first declarator, 1.2 and 0.7 more. K6 takes
+  0.1 to 0.7 cycles a token more than at `bfeee15`, with the first review's
+  check of function bodies (a scalar scan back from each body).
+- **The postorder's passes with the subtree sizes cost 11.4 to 14.1 cycles a
   token**, twice the spike's passes without sizes (7.1 and 6.0): the sizes take
   two passes more, the first children forward and the starts. Without sizes the
-  walk costs 5.5 on libc and 10.8 on `main.c`, where its branches predict well,
-  and 14.9 on `sqlite3.c`, where it mispredicts 0.43 branches a token.
-- The kernels' twins are tests only: they cost 2.3 to 2.5 times the scalar
+  walk costs 5.3 on libc and 11.2 on `main.c`, where its branches predict well,
+  and 15.2 on `sqlite3.c`, where it mispredicts 0.45 branches a token.
+- The kernels' twins are tests only: they cost 2.3 to 2.6 times the scalar
   parser.
 
 Stage by stage, in cycles a token, with the spike's third follow-up's for the
@@ -397,29 +420,31 @@ kernels it had:
 
 | Stage | `sqlite3.c` | spike | libc | spike | `main.c` |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| K1 brackets | 2.27 | 2.35 | 1.85 | 1.86 | 2.22 |
-| K3 typedef pass | 0.11 | 0.10 | 0.53 | 0.49 | 0.20 |
-| K3 classification | 2.64 | 1.43 | 1.89 | 1.20 | 2.79 |
-| K2 roles | 3.90 | 3.85 | 3.53 | 3.47 | 4.97 |
-| K1's second part | 0.86 | 0.78 | 0.61 | 0.54 | 1.46 |
-| K4 parents | 4.49 | 4.47 | 3.92 | 3.95 | 4.80 |
-| K5 statements | 1.85 | 1.81 | 0.22 | 0.20 | 1.36 |
-| K6 checks | 8.60 | | 8.88 | | 8.95 |
-| Fallback | 1.47 | 1.19 | 0.42 | 0.35 | 1.25 |
-| Vector path | 27.14 | 16.67 | 21.37 | 11.72 | 29.65 |
+| K1 brackets | 2.24 | 2.35 | 2.21 | 1.86 | 2.43 |
+| K3 typedef pass | 0.11 | 0.10 | 0.54 | 0.49 | 0.20 |
+| K3 classification | 2.67 | 1.43 | 1.90 | 1.20 | 2.85 |
+| K2 roles | 3.89 | 3.85 | 3.51 | 3.47 | 5.04 |
+| K1's second part | 0.86 | 0.78 | 0.61 | 0.54 | 1.58 |
+| K4 parents | 4.53 | 4.47 | 3.99 | 3.95 | 4.98 |
+| K5 statements | 1.84 | 1.81 | 0.23 | 0.20 | 1.33 |
+| K6 checks | 9.34 | | 9.00 | | 9.59 |
+| Fallback | 1.54 | 1.19 | 0.42 | 0.35 | 1.48 |
+| Vector path | 27.87 | 16.67 | 21.52 | 11.72 | 30.18 |
 
-**K6** is now the largest stage, at IPC 1.7 to 2.0 with 65% to 67% of its
+**K6** is now the largest stage, at IPC 1.7 to 2.0 with 61% to 66% of its
 dispatch slots backend-bound: each block's fixed point of group types and its
 three nearest-smaller searches, as K4's blocks were before the spike's
-follow-ups. Its twin costs 43 to 51 cycles a token.
+follow-ups. Its twin costs 46 to 55 cycles a token.
 
 ## What's left
 
 - #115's budget for the parser, 2 ms for `sqlite3.c` (about 16 cycles a token):
-  the vector path takes 3.48 ms, and with the input's conversion and the
-  postorder 5.38 ms. K6 (8.6 cycles a token) and the postorder's sizes (the
-  passes' 13.9 against the walk's 14.9 without sizes) come first, then K3's
-  classification, and then the spike's leads: K2's round and K4's window search.
+  the vector path takes 3.58 ms, and with the input's conversion and the
+  postorder 5.49 ms. K6 (9.3 cycles a token, its check of function bodies a
+  scalar scan back from each, which masks over the 64 tokens before a body
+  would replace) and the postorder's sizes (the passes' 13.8 against the walk's
+  15.2 without sizes) come first, then K3's classification, and then the
+  spike's leads: K2's round and K4's window search.
 - The checks' misses on valid code, which cost only the fallback's time:
   qualifiers in a parameter's array declarator (glibc's headers), a typedef
   name after `_Alignas(...)` (K2 takes it for a declarator's name), and asm
