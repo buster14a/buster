@@ -1,0 +1,4 @@
+Zen 5 scalar lookup: 0.1807 ns/ID [0.1806, 0.1812], 1.0019 cycles/ID, 21 passes, after-scalar 0 ms; excludes record-to-ID resolution
+Zen 5 AVX-512 lookup: 0.0165 ns/ID [0.0160, 0.0167], 0.0913 cycles/ID, 21 passes, after-scalar 0 ms; excludes record-to-ID resolution
+Zen 5 AVX-512 lookup: 0.0150 ns/ID [0.0123, 0.0157], 0.0824 cycles/ID, 21 passes, after-scalar 0 ms; excludes record-to-ID resolution
+Zen 5 AVX-512 lookup: 0.0170 ns/ID [0.0166, 0.0170], 0.0942 cycles/ID, 21 passes, after-scalar 200 ms; excludes record-to-ID resolution

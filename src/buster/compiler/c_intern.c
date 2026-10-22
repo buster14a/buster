@@ -47,7 +47,9 @@
 //     (intern_bucket_key, intern_bucket_matches, intern_bucket_empties, intern_slot_id, intern_first_bytes),
 //     intern_layout_bytes, intern_lay_out, intern_place, intern_slot, intern_grow, intern_reserve_record, intern_insert, intern_find_hashed,
 //     intern_find_or_add_hashed, intern_find_or_add, intern_find_or_add_vector, intern_find, intern_bytes,
-//     intern_length, intern_add_names, intern_initialize, intern_release and intern_reset.
+//     intern_length, intern_add_names, intern_initialize_with, intern_initialize, intern_release and intern_reset.
+//   - Spellings added from several lanes: InternBulk, intern_place_shared, intern_bulk_begin, intern_bulk_replace,
+//     intern_bulk_add and intern_bulk_end.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -827,13 +829,15 @@ static bool intern_add_names(InternTable* table)
     return result;
 }
 
-// Reserves the table's memory and adds the predefined names. Returns false if the memory can't be reserved.
-static __attribute__((unused)) bool intern_initialize(InternTable* table)
+// Reserves the table's memory, with `buckets` buckets (a power of two) to start with, and adds the predefined names.
+// Returns false if the memory can't be reserved. c_files.c starts each lane's table at the size of the lane's share of
+// the files, so that it grows little or not at all.
+static __attribute__((unused)) bool intern_initialize_with(InternTable* table, uint64_t buckets)
 {
     uint32_t capacity;
     *table = (InternTable){ 0 };
-    table->record_arena = arena_reserve(intern_layout_bytes(BUSTER_INTERN_INITIAL_BUCKETS, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX);
-    bool result = intern_lay_out(table, &table->record_arena, BUSTER_INTERN_INITIAL_BUCKETS);
+    table->record_arena = arena_reserve(intern_layout_bytes(buckets, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX);
+    bool result = intern_lay_out(table, &table->record_arena, buckets);
     table->records = result ? table->record_arena.base + table->record_arena.length : 0;
     // Id 0's spelling: an empty one, so that no other spelling is at offset 0.
     uint8_t* none = result ? arena_push(&table->record_arena, 1, 1) : 0;
@@ -846,6 +850,12 @@ static __attribute__((unused)) bool intern_initialize(InternTable* table)
         result = intern_add_names(table);
     }
     return result;
+}
+
+// intern_initialize_with the table's usual first size.
+static __attribute__((unused)) bool intern_initialize(InternTable* table)
+{
+    return intern_initialize_with(table, BUSTER_INTERN_INITIAL_BUCKETS);
 }
 
 static __attribute__((unused)) void intern_release(InternTable* table)
@@ -862,4 +872,145 @@ static __attribute__((unused)) bool intern_reset(InternTable* table)
     table->record_arena.length = (uint64_t)(table->records - table->record_arena.base) + 1;
     table->count = 1;
     return intern_add_names(table);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Spellings added from several lanes
+//
+// c_files.c refines a round of files on several lanes, each into a table of its own, and merges what they found into
+// one shared table: the merge gives each new spelling its id, in the order of the spellings' first occurrences in the
+// files, which doesn't depend on the lanes (refining the files one after another into one table gives the same ids).
+// These add the merged spellings to the shared table with those ids, on every lane at once:
+//   - intern_bulk_begin, on one lane: room for `count` more ids and `bytes` more bytes of records (each spelling and its
+//     NUL). If the table would pass its load, it lays out buckets and spans large enough at once, and every spelling it
+//     has must then be placed in them again.
+//   - intern_bulk_replace, on every lane for a range of the ids the table had, and intern_bulk_add, on every lane for
+//     the new spellings it adds: spans and slots, and a new spelling's record. A lane takes an empty slot by exchanging
+//     its id, 0, for the spelling's (intern_place_shared), so that lanes placing spellings in one bucket each take a slot
+//     of their own, and the slots a probe passes stay full.
+//   - intern_bulk_end, on one lane once the lanes have synced: the new count, and the old layout released.
+// Nothing reads the table from intern_bulk_begin to intern_bulk_end.
+
+typedef struct InternBulk InternBulk;
+struct InternBulk
+{
+    // The first new id, how many there are, and the offset of the first one's record (the others follow in id order) and
+    // their bytes.
+    IdentId first;
+    uint32_t count;
+    uint32_t records;
+    uint64_t bytes;
+    // If the table grew: the spans it had, whose spellings intern_bulk_replace places again, and the arena of their
+    // layout, which intern_bulk_end releases (none for the first layout, which is in the record arena).
+    bool grew;
+    const InternSpan* old_spans;
+    Arena old_arena;
+};
+
+// intern_place while other lanes place other spellings in the table: a lane takes an empty slot by exchanging its id, 0,
+// for the spelling's (lock cmpxchg), and a lane that finds the slot taken first tries the next empty one. The slot's
+// prefix is written after it is taken: nothing reads a prefix until every lane has placed its spellings, and a lane looks
+// only at the ids to find empty slots. The probe sequence is intern_place's, so a probe that passes a bucket finds it
+// full, as a lookup expects.
+static void intern_place_shared(InternTable* table, __m128i slot, uint64_t hash)
+{
+    const IdentId id = (IdentId)_mm_extract_epi32(slot, BUSTER_INTERN_PREFIX_BYTES / sizeof(IdentId));
+    uint8_t prefix[BUSTER_INTERN_SLOT_BYTES];
+    _mm_storeu_si128((__m128i*)prefix, slot);
+    uint64_t bucket = hash & table->bucket_mask;
+    bool placed = false;
+    while (!placed)
+    {
+        uint8_t* bucket_bytes = table->buckets + bucket * BUSTER_INTERN_BUCKET_BYTES;
+        for (uint32_t s = 0; !placed && s < BUSTER_INTERN_BUCKET_SLOTS; s += 1)
+        {
+            uint8_t* slot_bytes = bucket_bytes + s * BUSTER_INTERN_SLOT_BYTES;
+            IdentId* word = (IdentId*)(slot_bytes + BUSTER_INTERN_PREFIX_BYTES);
+            IdentId expected = 0;
+            if (__atomic_load_n(word, __ATOMIC_RELAXED) == 0 && __atomic_compare_exchange_n(word, &expected, id, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            {
+                memcpy(slot_bytes, prefix, BUSTER_INTERN_PREFIX_BYTES);
+                placed = true;
+            }
+        }
+        bucket = (bucket + 1) & table->bucket_mask;
+    }
+}
+
+// Room in `table` for `count` more spellings of `bytes` bytes of records in all (each spelling's length + 1): their ids
+// from table->count on, and their records from bulk->records on. If the table would pass its load, it gets buckets and
+// spans large enough for all of them at once (bulk->grew), and its spellings must be placed in them again
+// (intern_bulk_replace). One lane. Returns false, leaving the table as it was, if the ids or the memory don't fit.
+static __attribute__((unused)) bool intern_bulk_begin(InternTable* table, uint32_t count, uint64_t bytes, InternBulk* bulk)
+{
+    *bulk = (InternBulk){ .first = table->count, .count = count, .bytes = bytes };
+    bool result = (uint64_t)table->count + count <= BUSTER_INTERN_MAX_IDS;
+    uint64_t buckets = table->bucket_mask + 1;
+    uint32_t capacity = table->capacity;
+    while (result && (uint64_t)table->count + count > capacity)
+    {
+        buckets *= 2;
+        intern_layout_bytes(buckets, &capacity);
+    }
+    const uint64_t mark = table->record_arena.length;
+    uint8_t* records = result ? arena_push(&table->record_arena, bytes, 1) : 0;
+    result = records != 0;
+    if (result && buckets != table->bucket_mask + 1)
+    {
+        InternTable grown = *table;
+        grown.arena = arena_reserve(intern_layout_bytes(buckets, &capacity));
+        result = intern_lay_out(&grown, &grown.arena, buckets);
+        if (result)
+        {
+            bulk->grew = true;
+            bulk->old_spans = table->spans;
+            bulk->old_arena = table->arena;
+            *table = grown;
+        }
+        else
+        {
+            arena_release(&grown.arena);
+            arena_pop_to(&table->record_arena, mark);
+        }
+    }
+    bulk->records = result ? (uint32_t)(records - table->records) : 0;
+    return result;
+}
+
+// The spans of ids [begin, end) of those the table had before intern_bulk_begin, and their slots in the buckets it grew
+// to (nothing if it didn't grow). Every lane, for ranges that cover the old ids.
+static __attribute__((unused)) void intern_bulk_replace(InternTable* table, const InternBulk* bulk, uint32_t begin, uint32_t end)
+{
+    for (uint32_t id = begin; bulk->grew && id < end && id < bulk->first; id += 1)
+    {
+        const InternSpan span = bulk->old_spans[id];
+        table->spans[id] = span;
+        if (id != 0)
+        {
+            const uint8_t* bytes = table->records + span.offset;
+            intern_place_shared(table, intern_slot(intern_first_bytes(bytes, span.length), id), intern_hash_bytes(bytes, span.length));
+        }
+    }
+}
+
+// Adds spelling `id` (one of intern_bulk_begin's new ids) with its record at offset `offset` and `hash`
+// (intern_hash_bytes's). Every lane, each for the spellings it adds.
+static __attribute__((unused)) void intern_bulk_add(InternTable* table, IdentId id, const uint8_t* bytes, uint32_t length, uint32_t offset, uint64_t hash)
+{
+    uint8_t* record = table->records + offset;
+    memcpy(record, bytes, length);
+    record[length] = 0;
+    table->spans[id] = (InternSpan){ .offset = offset, .length = length };
+    intern_place_shared(table, intern_slot(intern_first_bytes(bytes, length), id), hash);
+}
+
+// The table with the spellings intern_bulk_begin made room for, once every lane has added them.
+static __attribute__((unused)) void intern_bulk_end(InternTable* table, InternBulk* bulk)
+{
+    table->count = bulk->first + bulk->count;
+    if (bulk->grew)
+    {
+        arena_release(&bulk->old_arena);
+    }
+    *bulk = (InternBulk){ 0 };
 }
