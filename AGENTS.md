@@ -421,7 +421,11 @@ designs and the compilers already built this way.
   `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`. Its
   `FileCache` holds what is prepared from each file (by identity) and every
   path looked up, for every translation unit that preprocesses with it
-  (`PPOptions.files`; a unit without one makes its own).
+  (`PPOptions.files`; a unit without one makes its own). Of the `-f` options
+  that change clang's keywords, lexing or `-E` output (#281), `-E` models GNU's
+  keywords (`-f[no-]gnu-keywords`, `-f[no-]asm`), `$` in identifiers and char's
+  signedness in `#if`, and refuses the others where their last option turns
+  them on (`pp_take_family`, `pp_settle_families`).
 - `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
   records macro expansion history in cold records and compressed output runs;
   `pp_diagnose_output` renders a diagnostic for an output-token index.
@@ -2373,8 +2377,9 @@ identifier must get the same id and every token the same leading-space bit, on:
 - about 14,800 spellings where the same bit flipped in two lanes must change
   the hash;
 - the predefined names, every name's keyword answer in each of the ten modes
-  from `c89` to `gnu23`, and 24 spellings chosen apart from the predefined names
-  with clang's answer (17 keywords, 7 not);
+  from `c89` to `gnu23` and in five of them with `-fgnu-keywords` or
+  `-fno-gnu-keywords` (#281), and 24 spellings chosen apart from the predefined
+  names with clang's answer (17 keywords, 7 not);
 - 300,000 random spellings that grow the table three times;
 - 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
   and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64
@@ -2428,7 +2433,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 92 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 101 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2437,12 +2442,18 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   - the behaviors probed against GCC and clang;
   - inputs past the vectorized kernels' limits;
   - directives and builtins that nest through the main loop's frames;
-  - #193's review fixes, line markers among them.
+  - #193's review fixes, line markers among them;
+  - the `-f` options it models (#281): GNU's keywords, `$` and char's
+    signedness in `#if`.
 
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
   modification times of their own must give each file's time (in UTC), and
-  `SOURCE_DATE_EPOCH`'s when it is set;
+  `SOURCE_DATE_EPOCH`'s when it is set. Then each of `pp_test_option_sets`
+  must be refused, its message naming the option, or taken without one: the
+  `-f` options that change clang's keywords, lexing or `-E` output, which
+  `pp_parse_options` models or refuses where their family's last option turns
+  them on (docs/c-preprocessor.md, "The `-f` options");
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, ...), by both kernels, which must agree.
 
@@ -2462,7 +2473,12 @@ features:
   the patch release's three macros;
 - in each mode, `__is_identifier` of every predefined name, and of clang's
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
-  must give clang's answer;
+  must give clang's answer, and so must it in 25 sets of `-f` options
+  (`pp_test_keyword_sets`: GNU's keywords on and off, in each order of
+  `-f[no-]gnu-keywords` and `-f[no-]asm`, and the refused families turned off
+  again);
+- each refused option set must change clang's `-E` of a probe (from the set's
+  `-std=` alone, or no options), and each taken one must give clang's tokens;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
@@ -2524,6 +2540,8 @@ warnings, and nothing may be written to stderr while the cache is filled:
   which the walk must take once (an alias of a file in the same context, by
   its directory's device and inode, isn't walked again), and one header in two
   directories (a hard link) whose own `local.h` differ, walked in both;
+- dollars: a cache filled with `$` as punctuation (`-fno-dollars-in-identifiers`,
+  #281), whose unit must split `aa$bb` into three tokens on every lane count;
 - special paths: a FIFO that an `#include` under `#if 0` names (the walk's
   probe mustn't block) and an active one names (an error, as alone), and a
   quoted name of 2,400 bytes in a directory of 2,539, three requests of which

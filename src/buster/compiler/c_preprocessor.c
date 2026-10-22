@@ -69,7 +69,8 @@
 //   - Directives: pp_directive and the handlers (pp_condition, pp_include, pp_line, pp_pragma).
 //   - #if expressions (pp_evaluate), and the feature tables the __has_* builtins read (pp_feature).
 //   - The predefines, pp_initialize, pp_release and pp_run.
-//   - Output: pp_resolve_keywords and pp_print, and the -E command (pp_parse_options).
+//   - Output: pp_resolve_keywords and pp_print, and the -E command (pp_parse_options, with pp_take_family and
+//     pp_settle_families for the -f options that change clang's keywords, lexing or -E output).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -163,6 +164,15 @@ typedef enum PPPhase
 // Every file a preprocessor reads, and what is prepared from it, shared by the translation units that use it ("Files").
 typedef struct FileCache FileCache;
 
+// Whether '$' is an identifier character, clang's DollarIdents: as the mode has it (C's identifiers and pp-numbers take
+// it, and in assembly it is punctuation), unless -fdollars-in-identifiers or -fno-dollars-in-identifiers set it.
+typedef enum PPDollars
+{
+    PP_DOLLARS_MODE,
+    PP_DOLLARS_IDENTIFIER,
+    PP_DOLLARS_PUNCTUATION,
+} PPDollars;
+
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
@@ -178,8 +188,13 @@ struct PPOptions
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
     bool scalar;
     bool no_standard_includes;
-    // Opt-in assembler-with-cpp input: '$' is punctuation, and unknown # lines are assembly comments.
+    // Opt-in assembler-with-cpp input: '$' is punctuation (unless `dollars` says otherwise), and unknown # lines are
+    // assembly comments.
     bool assembly;
+    // A PPDollars, zero for the mode's (pp_dollar_punctuation).
+    uint8_t dollars;
+    // Ordinary character constants are unsigned in #if, as with clang's unsigned char (-funsigned-char).
+    bool char_unsigned;
     // -iquote, -I and -isystem directories, and -idirafter ones after the standard directories.
     const char* const* quote_directories;
     uint32_t quote_directory_count;
@@ -210,6 +225,13 @@ struct PPOptions
     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
     FILE* diagnostics;
 };
+
+// Is '$' punctuation with these options (PPDollars)? The lexer takes it into identifiers and pp-numbers, and
+// pp_split_dollars splits it out of them where it isn't.
+static bool pp_dollar_punctuation(const PPOptions* options)
+{
+    return options->dollars == PP_DOLLARS_PUNCTUATION || (options->dollars == PP_DOLLARS_MODE && options->assembly);
+}
 
 // A column array of tokens: an output stream, or a stack of buffers.
 typedef struct PPTokens PPTokens;
@@ -407,14 +429,14 @@ struct FileCacheArenas
 };
 
 // How files are prepared: the lexer's and refinement's flags (trigraphs), the literal prefixes the language mode splits
-// (pp_split_kinds), whether '$' is punctuation (assembly), and whether by the vectorized kernels or by their scalar
-// twins, which prepare the same records.
+// (pp_split_kinds), whether '$' is punctuation (pp_dollar_punctuation), and whether by the vectorized kernels or by their
+// scalar twins, which prepare the same records.
 typedef struct PPPrepare PPPrepare;
 struct PPPrepare
 {
     uint32_t refine_flags;
     uint64_t split_kinds;
-    bool assembly;
+    bool dollar_punctuation;
     bool vectorized;
 };
 
@@ -1151,11 +1173,11 @@ static uint32_t pp_spelling(Preprocessor* pp, uint8_t kind, uint32_t value, uint
     return result;
 }
 
-// Recover a refined identifier's end, respecting the assembly adapter's '$' boundary.
+// Recover a refined identifier's end, respecting the '$' boundary of pp_split_dollars where '$' is punctuation.
 static uint32_t pp_identifier_end(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint32_t start)
 {
     uint32_t result = refine_identifier_end(bytes, length, start, pp->refine_flags);
-    if (pp->options.assembly)
+    if (pp_dollar_punctuation(&pp->options))
     {
         const uint8_t* dollar = memchr(bytes + start, '$', result - start);
         result = dollar != 0 ? (uint32_t)(dollar - bytes) : result;
@@ -1601,8 +1623,9 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
     return count + splits;
 }
 
-// C's GNU identifier grammar includes '$'. Assembly instead needs $MACRO to expand MACRO. Only tokens containing
-// '$' take this adapter; literals stay opaque. Re-lex the intervening slices with the shared lexer, including line
+// C's GNU identifier grammar includes '$'. Assembly instead needs $MACRO to expand MACRO, and so does C with
+// -fno-dollars-in-identifiers (pp_dollar_punctuation), where '$' is punctuation too. Only tokens containing '$' take
+// this adapter; literals stay opaque. Re-lex the intervening slices with the shared lexer, including line
 // splices and numeric local references. Scratch columns leave the original columns intact on allocation failure.
 // A slice can lex into several tokens (the pp-number 1$e+5 into 1, $, e, + and 5), at most one per byte: the bytes of
 // the tokens that contain '$' bound the columns, not their dollars.
@@ -1687,7 +1710,7 @@ static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uin
 }
 
 // Splits, among `count` freshly lexed tokens, the prefixed literals that `mode`'s language doesn't have (a scan of the
-// kinds, and the rare split: pp_split_prefixes), then in assembly '$' punctuation (pp_split_dollars). Returns the new
+// kinds, and the rare split: pp_split_prefixes), then '$' punctuation where it is (pp_split_dollars). Returns the new
 // count, or -1 on allocation failure.
 static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, bool vectorized)
 {
@@ -1697,7 +1720,7 @@ static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint
         const uint32_t splits = vectorized ? pp_count_splits_vector(kinds, count, mode->split_kinds) : pp_count_splits_scalar(kinds, count, mode->split_kinds);
         result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, count, splits, mode->split_kinds) : count;
     }
-    if (mode->assembly)
+    if (mode->dollar_punctuation)
     {
         result = pp_split_dollars(mode->refine_flags, bytes, kinds, starts, ends, (uint32_t)result);
     }
@@ -1731,8 +1754,8 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
     int64_t count = -1;
     if (pushed)
     {
-        count = prepare->assembly && !prepare->vectorized ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags)
-                                                           : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags);
+        count = prepare->dollar_punctuation && !prepare->vectorized ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags)
+                                                                    : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags);
     }
     const bool lexed = count >= 0;
     count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->kinds, data->starts, data->values, (uint32_t)count, prepare->vectorized) : count;
@@ -2286,7 +2309,7 @@ static PPPrepare pp_prepare_options(const PPOptions* options)
     return (PPPrepare){
         .refine_flags = options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0,
         .split_kinds = pp_split_kinds(options->language),
-        .assembly = options->assembly,
+        .dollar_punctuation = pp_dollar_punctuation(options),
         .vectorized = !options->scalar,
     };
 }
@@ -2297,7 +2320,7 @@ static PPPrepare pp_prepare_config(const Preprocessor* pp)
     return (PPPrepare){
         .refine_flags = pp->refine_flags,
         .split_kinds = pp->split_kinds,
-        .assembly = pp->options.assembly,
+        .dollar_punctuation = pp_dollar_punctuation(&pp->options),
         .vectorized = pp->vectorized,
     };
 }
@@ -3687,8 +3710,8 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, pp->refine_flags) : -1;
-            // In assembly, '$' is punctuation (pp_split_dollars), so `$ ## x` gives two tokens.
-            count = count > 0 && pp->options.assembly ? pp_split_dollars(pp->refine_flags, joined, kinds, starts, ends, (uint32_t)count) : count;
+            // Where '$' is punctuation (pp_split_dollars), `$ ## x` gives two tokens.
+            count = count > 0 && pp_dollar_punctuation(&pp->options) ? pp_split_dollars(pp->refine_flags, joined, kinds, starts, ends, (uint32_t)count) : count;
             // A prefixed literal the mode doesn't have lexes as two tokens (pp_split_kinds).
             valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_splits_kind(pp->split_kinds, kinds[0]);
             kind = valid ? kinds[0] & 0x7F : kind;
@@ -6651,8 +6674,8 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
     return valid && !overflow;
 }
 
-// A character constant's value (C 6.4.4.4): 'c' is an int of the (signed) char's value, a multicharacter one packs its
-// characters, and L'', u'', U'' and u8'' have their types' values.
+// A character constant's value (C 6.4.4.4): 'c' is an int of the char's value (signed, unless -funsigned-char), a
+// multicharacter one packs its characters, and L'', u'', U'' and u8'' have their types' values.
 static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* spelling, uint32_t length, uint32_t location, PPValue* value)
 {
     uint32_t i = 0;
@@ -6733,7 +6756,8 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
         switch (kind)
         {
             case C_TOKEN_CHAR_CONSTANT:
-                result = count == 0 ? (int64_t)(int8_t)(uint8_t)c : (int64_t)(int32_t)(((uint32_t)result << 8) | (uint8_t)c);
+                // Each character's byte, shifted into an int: a multi-character constant keeps its last four.
+                result = (int64_t)(((uint32_t)result << 8) | (uint8_t)c);
                 break;
             case C_TOKEN_UTF8_CHAR_CONSTANT:
                 result = (uint8_t)c;
@@ -6755,8 +6779,17 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid character constant in preprocessor expression");
     }
+    // As clang has them: one character is a char, sign-extended where char is signed, and more are their concatenation
+    // as an int, sign-extended only as an int ('\377\377' is 65535); with unsigned char, both are unsigned values.
+    const bool char_unsigned = pp->options.char_unsigned;
+    if (kind == C_TOKEN_CHAR_CONSTANT)
+    {
+        const uint32_t bits = (uint32_t)result;
+        result = count == 1 ? (char_unsigned ? (int64_t)(uint8_t)bits : (int64_t)(int8_t)(uint8_t)bits) : (char_unsigned ? (int64_t)bits : (int64_t)(int32_t)bits);
+    }
     // UTF-8, UTF-16 and UTF-32 character constants are unsigned in C (unsigned char, char16_t, char32_t), as in clang.
-    const bool is_unsigned = kind == C_TOKEN_UTF8_CHAR_CONSTANT || kind == C_TOKEN_UTF16_CHAR_CONSTANT || kind == C_TOKEN_UTF32_CHAR_CONSTANT;
+    const bool is_unsigned = kind == C_TOKEN_UTF8_CHAR_CONSTANT || kind == C_TOKEN_UTF16_CHAR_CONSTANT || kind == C_TOKEN_UTF32_CHAR_CONSTANT ||
+                             (kind == C_TOKEN_CHAR_CONSTANT && char_unsigned);
     *value = (PPValue){ .bits = (uint64_t)result, .is_unsigned = is_unsigned };
     return valid;
 }
@@ -7949,7 +7982,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         result = result && pp->cache != 0 && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
     }
     else if (pp->cache->table != table || pp->cache->prepare.refine_flags != pp->refine_flags || pp->cache->prepare.split_kinds != pp->split_kinds ||
-             pp->cache->prepare.assembly != (bool)options->assembly)
+             pp->cache->prepare.dollar_punctuation != pp_dollar_punctuation(options))
     {
         fprintf(stderr, "error: the file cache was made for another language mode or intern table\n");
         result = false;
@@ -9063,6 +9096,182 @@ static bool pp_parse_standard(const char* value, CLanguage* language)
     return result;
 }
 
+// The -f options that change what clang's -E gives other than its macros, in families of an option and its -fno- form,
+// of which clang's driver reads only the last: the keyword sets (TokenKinds.def's KEYGNU, KEYMS, KEYBORLAND,
+// KEYZVECTOR, KEYZOS, KEYFIXEDPOINT and KEYDEFERTS, and __declspec), the lexing of '$', digraphs and raw strings, char's
+// signedness and wchar_t's width in #if, -E's own modes, and modules. pp_take_family records each family's last
+// option, and pp_settle_families models GNU's keywords, '$' and char, and refuses the other families where their last
+// option turns them on. Issue #281 has the audit of clang 23.1.3's -f options that found them: every other one
+// changes only macros, or nothing that -E gives.
+typedef enum PPFamily
+{
+    PP_FAMILY_GNU_KEYWORDS,
+    PP_FAMILY_ASM,
+    PP_FAMILY_DOLLARS,
+    PP_FAMILY_UNSIGNED_CHAR,
+    PP_FAMILY_DIGRAPHS,
+    PP_FAMILY_RAW_STRINGS,
+    PP_FAMILY_SHORT_WCHAR,
+    PP_FAMILY_MS_EXTENSIONS,
+    PP_FAMILY_MS_COMPATIBILITY,
+    PP_FAMILY_BORLAND,
+    PP_FAMILY_DECLSPEC,
+    PP_FAMILY_ZVECTOR,
+    PP_FAMILY_ZOS,
+    PP_FAMILY_FIXED_POINT,
+    PP_FAMILY_DEFER_TS,
+    PP_FAMILY_DIRECTIVES_ONLY,
+    PP_FAMILY_KEEP_SYSTEM_INCLUDES,
+    PP_FAMILY_MINIMIZE_WHITESPACE,
+    PP_FAMILY_LINE_DIRECTIVES,
+    PP_FAMILY_REWRITE_INCLUDES,
+    PP_FAMILY_REWRITE_IMPORTS,
+    PP_FAMILY_MODULES,
+    PP_FAMILY_IMPLICIT_MODULE_MAPS,
+    PP_FAMILY_COUNT,
+} PPFamily;
+
+#define BUSTER_PP_KEYWORDS_REFUSED(whose) whose ", which buster doesn't follow"
+#define BUSTER_PP_OUTPUT_REFUSED "it changes what clang -E prints, which buster doesn't follow"
+#define BUSTER_PP_MODULES_REFUSED "clang's modules, which buster doesn't have"
+
+// Each family's option, its -fno- form (none for -fzvector's: clang's driver never passes -fno-zvector on, and warns
+// that it is unused), and why buster refuses the option, null where pp_settle_families models the family or decides.
+static const struct
+{
+    const char* on;
+    const char* off;
+    const char* refused;
+} pp_families[PP_FAMILY_COUNT] = {
+    [PP_FAMILY_GNU_KEYWORDS] = { "-fgnu-keywords", "-fno-gnu-keywords", 0 },
+    [PP_FAMILY_ASM] = { "-fasm", "-fno-asm", 0 },
+    [PP_FAMILY_DOLLARS] = { "-fdollars-in-identifiers", "-fno-dollars-in-identifiers", 0 },
+    // With -fno-signed-char and -fno-unsigned-char (pp_take_family).
+    [PP_FAMILY_UNSIGNED_CHAR] = { "-funsigned-char", "-fsigned-char", 0 },
+    [PP_FAMILY_DIGRAPHS] = { "-fdigraphs", "-fno-digraphs", 0 },
+    [PP_FAMILY_RAW_STRINGS] = { "-fraw-string-literals", "-fno-raw-string-literals", "C's raw string literals, which buster doesn't lex" },
+    [PP_FAMILY_SHORT_WCHAR] = { "-fshort-wchar", "-fno-short-wchar", "a 16-bit wchar_t, whose wide character constants in #if buster doesn't follow" },
+    [PP_FAMILY_MS_EXTENSIONS] = { "-fms-extensions", "-fno-ms-extensions", BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
+    [PP_FAMILY_MS_COMPATIBILITY] = { "-fms-compatibility", "-fno-ms-compatibility", BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
+    [PP_FAMILY_BORLAND] = { "-fborland-extensions", "-fno-borland-extensions", BUSTER_PP_KEYWORDS_REFUSED("Borland's keywords and __declspec") },
+    [PP_FAMILY_DECLSPEC] = { "-fdeclspec", "-fno-declspec", BUSTER_PP_KEYWORDS_REFUSED("the __declspec keyword and __has_declspec_attribute") },
+    [PP_FAMILY_ZVECTOR] = { "-fzvector", 0, BUSTER_PP_KEYWORDS_REFUSED("System z's vector keywords") },
+    [PP_FAMILY_ZOS] = { "-fzos-extensions", "-fno-zos-extensions", BUSTER_PP_KEYWORDS_REFUSED("z/OS's __ptr32 keyword") },
+    [PP_FAMILY_FIXED_POINT] = { "-ffixed-point", "-fno-fixed-point", BUSTER_PP_KEYWORDS_REFUSED("the fixed-point keywords and macros") },
+    [PP_FAMILY_DEFER_TS] = { "-fdefer-ts", "-fno-defer-ts", BUSTER_PP_KEYWORDS_REFUSED("the _Defer keyword") },
+    [PP_FAMILY_DIRECTIVES_ONLY] = { "-fdirectives-only", "-fno-directives-only", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_KEEP_SYSTEM_INCLUDES] = { "-fkeep-system-includes", "-fno-keep-system-includes", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_MINIMIZE_WHITESPACE] = { "-fminimize-whitespace", "-fno-minimize-whitespace", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_LINE_DIRECTIVES] = { "-fuse-line-directives", "-fno-use-line-directives", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_REWRITE_INCLUDES] = { "-frewrite-includes", "-fno-rewrite-includes", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_REWRITE_IMPORTS] = { "-frewrite-imports", "-fno-rewrite-imports", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_MODULES] = { "-fmodules", "-fno-modules", BUSTER_PP_MODULES_REFUSED },
+    [PP_FAMILY_IMPLICIT_MODULE_MAPS] = { "-fimplicit-module-maps", "-fno-implicit-module-maps", BUSTER_PP_MODULES_REFUSED },
+};
+
+// What pp_take_family records for pp_settle_families: each family's last option (1 for its option, 0 for its -fno- form,
+// -1 for neither), and the last -fexec-charset= and -finput-charset=.
+typedef struct PPFamilies PPFamilies;
+struct PPFamilies
+{
+    int8_t last[PP_FAMILY_COUNT];
+    const char* charsets[2];
+};
+
+// Takes an argument that is a family's option (PPFamily), or -fexec-charset= or -finput-charset=, or one that buster
+// refuses wherever it comes, as it changes clang's -E with no -fno- form: modules', and __FILE__'s remapping (by prefix,
+// which takes the value too). `refused` is set for those. Returns false for any other argument.
+static bool pp_take_family(PPFamilies* families, const char* argument, bool* refused)
+{
+    static const struct
+    {
+        const char* prefix;
+        const char* refused;
+    } refusals[] = {
+        { "-fbuiltin-module-map", BUSTER_PP_MODULES_REFUSED },
+        { "-fmodule-name=", BUSTER_PP_MODULES_REFUSED },
+        { "-fmodule-map-file=", BUSTER_PP_MODULES_REFUSED },
+        { "-fdriver-only", "it stops clang before it preprocesses" },
+        { "-fproc-stat-report", "clang's process statistics, which buster doesn't report" },
+        { "-fmacro-prefix-map=", "a remapping of __FILE__ and __BASE_FILE__, which buster doesn't follow" },
+        { "-ffile-prefix-map=", "a remapping of __FILE__ and __BASE_FILE__, which buster doesn't follow" },
+    };
+    bool result = false;
+    for (uint32_t f = 0; !result && f < PP_FAMILY_COUNT; f += 1)
+    {
+        const bool on = strcmp(argument, pp_families[f].on) == 0;
+        const bool off = pp_families[f].off != 0 && strcmp(argument, pp_families[f].off) == 0;
+        families->last[f] = on ? 1 : off ? 0 : families->last[f];
+        result = on || off;
+    }
+    // clang's -fno-signed-char is -funsigned-char, and its -fno-unsigned-char is -fsigned-char.
+    if (!result && (strcmp(argument, "-fno-signed-char") == 0 || strcmp(argument, "-fno-unsigned-char") == 0))
+    {
+        families->last[PP_FAMILY_UNSIGNED_CHAR] = argument[5] == 's';
+        result = true;
+    }
+    for (uint32_t c = 0; !result && c < BUSTER_ARRAY_LENGTH(families->charsets); c += 1)
+    {
+        const char* const prefix = c == 0 ? "-fexec-charset=" : "-finput-charset=";
+        result = strncmp(argument, prefix, strlen(prefix)) == 0;
+        families->charsets[c] = result ? argument : families->charsets[c];
+    }
+    for (uint32_t r = 0; !result && r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
+    {
+        result = strncmp(argument, refusals[r].prefix, strlen(refusals[r].prefix)) == 0;
+        if (result)
+        {
+            fprintf(stderr, "error: unsupported option '%s' (%s)\n", argument, refusals[r].refused);
+            *refused = true;
+        }
+    }
+    return result;
+}
+
+// Settles the families pp_take_family recorded, after every argument, as clang's driver does. GNU's keywords follow the
+// last -f[no-]gnu-keywords, or else the last of GCC's -f[no-]asm (which the driver passes on before them), or else the
+// mode; '$' and char follow their last options. The refusals: a family buster doesn't follow whose last option turns
+// it on, but -fzvector in assembly, where clang ignores it; -fno-digraphs, and -fdigraphs in c89, which clang makes C94
+// (__STDC_VERSION__ 199409L); and a last -fexec-charset= or -finput-charset= other than UTF-8 in any case, which clang's
+// driver refuses too. Returns false after a refusal.
+static bool pp_settle_families(const PPFamilies* families, PPOptions* options)
+{
+    bool result = true;
+    const int8_t* last = families->last;
+    const int8_t gnu = last[PP_FAMILY_GNU_KEYWORDS] >= 0 ? last[PP_FAMILY_GNU_KEYWORDS] : last[PP_FAMILY_ASM];
+    options->language.gnu_keywords = (uint8_t)(gnu < 0 ? C_GNU_KEYWORDS_MODE : gnu != 0 ? C_GNU_KEYWORDS_ON : C_GNU_KEYWORDS_OFF);
+    options->dollars = (uint8_t)(last[PP_FAMILY_DOLLARS] < 0 ? PP_DOLLARS_MODE : last[PP_FAMILY_DOLLARS] != 0 ? PP_DOLLARS_IDENTIFIER : PP_DOLLARS_PUNCTUATION);
+    options->char_unsigned = last[PP_FAMILY_UNSIGNED_CHAR] == 1;
+    const bool c89 = options->language.standard == 1989 && !options->language.gnu;
+    for (uint32_t f = 0; f < PP_FAMILY_COUNT; f += 1)
+    {
+        const bool digraphs = f == PP_FAMILY_DIGRAPHS && (last[f] == 0 || (last[f] == 1 && c89));
+        const bool refuse = digraphs || (pp_families[f].refused != 0 && last[f] == 1 && !(f == PP_FAMILY_ZVECTOR && options->assembly));
+        if (refuse)
+        {
+            const char* why = !digraphs ? pp_families[f].refused : last[f] == 0 ? "C without digraphs, which buster doesn't lex" : "C94 with -std=c89, which buster doesn't have";
+            fprintf(stderr, "error: unsupported option '%s' (%s)\n", last[f] != 0 ? pp_families[f].on : pp_families[f].off, why);
+        }
+        result &= !refuse;
+    }
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(families->charsets); c += 1)
+    {
+        const char* charset = families->charsets[c];
+        const char* value = charset != 0 ? strchr(charset, '=') + 1 : "utf-8";
+        bool utf8 = strlen(value) == 5;
+        for (uint32_t i = 0; utf8 && i < 5; i += 1)
+        {
+            utf8 = (value[i] >= 'A' && value[i] <= 'Z' ? value[i] | 0x20 : value[i]) == "utf-8"[i];
+        }
+        if (!utf8)
+        {
+            fprintf(stderr, "error: invalid value '%s' in '%s'\n", value, charset);
+        }
+        result &= utf8;
+    }
+    return result;
+}
+
 // The preprocessor's options from clang-style arguments (the ones -E needs). `input` gets the source file, `output`
 // the -o file (or null), `markers` false for -P. Returns false for an argument it doesn't know.
 static bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)
@@ -9080,6 +9289,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     *markers = true;
     // -trigraphs, -ftrigraphs and -fno-trigraphs override the mode's default (-1 for none).
     int trigraphs = -1;
+    // The -f options that change clang's keywords, lexing or -E output (pp_settle_families reads them after the loop).
+    PPFamilies families = { .charsets = { 0, 0 } };
+    memset(families.last, -1, sizeof(families.last));
+    bool refused = false;
     result = quote != 0 && include != 0 && system != 0 && after != 0 && macros != 0 && includes != 0;
     for (int i = 0; result && i < count; i += 1)
     {
@@ -9132,9 +9345,14 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
                 options->target = target;
             }
         }
+        else if (pp_take_family(&families, argument, &refused))
+        {
+            result = !refused;
+        }
         else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0 || strcmp(argument, "-g") == 0)
         {
-            // Code generation and warning options retain their existing preprocessing behavior.
+            // Code generation and warning options, which change nothing -E gives but macros (pp_take_family takes the
+            // ones that do).
         }
         else if (strncmp(argument, "-std=", 5) == 0)
         {
@@ -9219,6 +9437,7 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     options->trigraphs = trigraphs >= 0 ? trigraphs != 0 : !options->language.gnu && options->language.standard < 2023;
     options->macros = macros;
     options->includes = includes;
+    result = result && pp_settle_families(&families, options);
     return result && *input != 0;
 }
 
@@ -9236,7 +9455,8 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
-                        "[-include file] [-std=...] [-march=...] [-mtune=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
+                        "[-include file] [-std=...] [-march=...] [-mtune=...] [-trigraphs] [-fno-trigraphs] [-f[no-]gnu-keywords] [-f[no-]dollars-in-identifiers] "
+                        "[-f[un]signed-char] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
     }
     else
     {

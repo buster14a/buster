@@ -665,6 +665,52 @@ static bool files_test_contexts(const char* directory, const uint32_t* lanes, ui
     return result;
 }
 
+// '$' as punctuation (-fno-dollars-in-identifiers, #281) in a cache that units share: the files are prepared with the
+// options' mode on every lane count, and the unit splits `aa$bb` into `aa`, `$` and `BB` as alone.
+static bool files_test_dollars(const char* directory, const uint32_t* lanes, uint32_t lane_count)
+{
+    static const char* const files[][2] = {
+        { "dollars.c", "#include \"dollars.h\"\nint cc$bb = 1;\n" },
+        { "dollars.h", "#define bb BB\nint aa$bb;\n" },
+    };
+    char path[4200];
+    bool result = true;
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(files); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, files[i][0]);
+        result = files_test_write(path, files[i][1]);
+    }
+    char unit[4200];
+    snprintf(unit, sizeof(unit), "%s/dollars.c", directory);
+    const char* units[1] = { unit };
+    FilesTestWork work = {
+        .name = "dollars",
+        .options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .dollars = PP_DOLLARS_PUNCTUATION },
+        .roots = units,
+        .root_count = 1,
+        .follow = true,
+        .units = units,
+        .unit_count = 1,
+    };
+    FilesTestRun reference = { 0 };
+    alarm(60);
+    result = result && files_test_work(&work, lanes, lane_count, directory, &reference);
+    alarm(0);
+    if (result)
+    {
+        // `int aa $ BB ;` and `int cc $ BB = 1 ;`.
+        result = reference.units[0].count == 12 && reference.units[0].errors == 0;
+        printf("dollars: %s\n", result ? "'$' as punctuation in a shared cache, on every lane count" : "the unit's tokens aren't 12 without errors");
+    }
+    files_test_release_run(&reference);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, files[i][0]);
+        unlink(path);
+    }
+    return result;
+}
+
 #define BUSTER_FILES_TEST_DEEP_LEVELS 10
 #define BUSTER_FILES_TEST_DEEP_NAME 250
 #define BUSTER_FILES_TEST_LONG_NAME 2400
@@ -1184,6 +1230,7 @@ static int run_files_tests(int argument_count, char** arguments)
         passed_all &= files_test_spellings(directory, lanes, lane_count, seed);
         signal(SIGALRM, files_test_watchdog);
         passed_all &= files_test_contexts(directory, lanes, lane_count);
+        passed_all &= files_test_dollars(directory, lanes, lane_count);
         passed_all &= files_test_special(directory, lanes, lane_count);
         passed_all &= files_test_memory(directory, seed);
         signal(SIGALRM, SIG_DFL);
