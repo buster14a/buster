@@ -911,8 +911,6 @@ static const PPTestCase pp_test_cases[] = {
       "aa $ BB 1 $ BB $ BB \"aa$bb\" \"$ bb$\" \"caf\\u00e9$bb\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
     { "pasting '$' as punctuation", "#define cat(a, b) a ## b\ncat(x, $)\n", 0, "c17", "x $\n", true, 0, "-fdollars-in-identifiers -fno-dollars-in-identifiers", 0 },
     { "-fdollars-in-identifiers in assembly", "#define bb BB\naa$bb $bb\n", 0, "gnu17", "aa$bb $bb\n", false, 0, "-x assembler-with-cpp -fdollars-in-identifiers", 0 },
-    { "written pragma spelling with dollar punctuation", "#pragma ppf a$b\n", 0, "gnu17", "#pragma ppf a $ b\n", false, 0, "-fno-dollars-in-identifiers", 0 },
-    { "written pragma spelling with dollar punctuation in assembly", "#pragma ppf a$b\n", 0, "gnu17", "#pragma ppf a $ b\n", false, 0, "-x assembler-with-cpp", 0 },
     // What follows a '$' joins the tokens after it as clang lexes them (#283's review): a literal's prefix (u8'x' only
     // from C23), and a pp-number's continuation; and a quote C23's digit separators free, which takes the rest of the line.
     { "'$' before prefixed literals and pp-numbers", "#define L changed\n#define u changed\n#define U changed\n#define u8 changed\n#define e changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\"x\") S($u\"x\") S($U'x') S($u8\"x\") S(a$L\"x\") S($u8'x') S($1.e) S(x$1.5) S(1$e+5)\n", 0, "c17",
@@ -1595,6 +1593,19 @@ static bool pp_test_assembly_printing(const char* directory)
             "$ foo\n$ 7\nfoo $\n1 $\n$ $\n",
             true,
             "-fdollars-in-identifiers",
+        },
+        {
+            "C pragma identifiers stop at dollar punctuation",
+            "#pragma ppf a$b\n",
+            "#pragma ppf a$b\n",
+            false,
+            "-fno-dollars-in-identifiers",
+        },
+        {
+            "assembly pragma identifiers stop at dollar punctuation",
+            "#pragma ppf a$b\n",
+            "#pragma ppf a$b\n",
+            true,
         },
     };
     // Put '$' before, at and after each side of a 64-token boundary, including a partial final chunk.
