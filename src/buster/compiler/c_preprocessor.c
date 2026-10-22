@@ -81,6 +81,7 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <dirent.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <immintrin.h>
 #include "buster/compiler/x86_target.c"
@@ -385,6 +386,8 @@ struct PPFile
     // The length of the directory part (before the last '/'), or BUSTER_PP_NONE if there is none.
     uint32_t directory_length;
     uint32_t data;
+    // Why it has no data: an errno value, or -1 for a file that is neither regular nor a directory (0 when it has data).
+    int error;
     // BUSTER_PP_USER_FILE, BUSTER_PP_SYSTEM_FILE or BUSTER_PP_EXTERN_C_FILE: how its inclusions start.
     uint8_t system;
 };
@@ -416,7 +419,8 @@ struct FileCacheCounts
 
 // What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
 // modification time, and either the record that already had that identity when it looked (BUSTER_PP_NONE if none) or
-// its bytes, which the probe mapped (`mapped`) or read into an arena.
+// its bytes, which the probe mapped (`mapped`) or read into an arena; or why no file can be read there, an errno value
+// or -1 for one that is neither a regular file nor a directory.
 typedef struct FileProbe FileProbe;
 struct FileProbe
 {
@@ -426,6 +430,7 @@ struct FileProbe
     const uint8_t* bytes;
     uint32_t length;
     uint32_t record;
+    int error;
     bool found;
     bool mapped;
 };
@@ -1077,13 +1082,16 @@ struct Preprocessor
 // ---------------------------------------------------------------------------------------------------------------------
 // Token stacks
 
+// Reserves the columns in turn, until one can't be (pp_tokens_release releases those that were).
 static bool pp_tokens_reserve(PPTokens* tokens, uint32_t capacity)
 {
     const uint64_t slots = (uint64_t)capacity + BUSTER_PP_TOKEN_SLACK;
-    tokens->arenas[0] = arena_reserve(slots);
-    tokens->arenas[1] = arena_reserve(slots);
-    tokens->arenas[2] = arena_reserve(slots * sizeof(uint32_t));
-    tokens->arenas[3] = arena_reserve(slots * sizeof(uint32_t));
+    bool reserved = true;
+    for (uint32_t i = 0; reserved && i < 4; i += 1)
+    {
+        tokens->arenas[i] = arena_reserve(i < 2 ? slots : slots * sizeof(uint32_t));
+        reserved = tokens->arenas[i].base != 0;
+    }
     tokens->kinds = arena_push(&tokens->arenas[0], slots, 64);
     tokens->flags = arena_push(&tokens->arenas[1], slots, 64);
     tokens->values = arena_push_array(&tokens->arenas[2], slots, sizeof(uint32_t), 64);
@@ -1144,7 +1152,7 @@ static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, 
     pp->fatal |= severity == PP_SEVERITY_FATAL;
 }
 
-static void* pp_array(Preprocessor* pp, uint64_t count, uint64_t size);
+static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
 
 #include "c_preprocessor_history.c"
 
@@ -2406,11 +2414,16 @@ static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, Inte
     cache->prepare = prepare;
     cache->table = table;
     cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
-    cache->arrays[0] = arena_reserve((uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData) + 64);
-    cache->arrays[1] = arena_reserve(2ull * BUSTER_PP_MAX_FILES * sizeof(uint32_t) + 64);
-    cache->arrays[2] = arena_reserve((uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath) + 64);
-    cache->arrays[3] = arena_reserve(2ull * BUSTER_FILE_CACHE_MAX_PATHS * sizeof(uint32_t) + 64);
-    cache->path_arena = arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES);
+    // Reserved in turn until one can't be (file_cache_release releases those that were).
+    const uint64_t sizes[] = { (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData) + 64, 2ull * BUSTER_PP_MAX_FILES * sizeof(uint32_t) + 64,
+                               (uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath) + 64, 2ull * BUSTER_FILE_CACHE_MAX_PATHS * sizeof(uint32_t) + 64 };
+    bool reserved = true;
+    for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
+    {
+        cache->arrays[i] = arena_reserve(sizes[i]);
+        reserved = cache->arrays[i].base != 0;
+    }
+    cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
     cache->records = arena_push_array(&cache->arrays[0], BUSTER_PP_MAX_FILES, sizeof(PPFileData), 64);
     cache->identity_slots = arena_push_array(&cache->arrays[1], 2ull * BUSTER_PP_MAX_FILES, sizeof(uint32_t), 64);
     cache->paths = arena_push_array(&cache->arrays[2], BUSTER_FILE_CACHE_MAX_PATHS, sizeof(FileCachePath), 64);
@@ -2463,12 +2476,19 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
     FileCacheArenas* result = &cache->lanes[lane];
     if (result->arena.base == 0)
     {
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(result->columns); i += 1)
+        // Reserved in turn until one can't be, and then none of them, so that a lane short of address space fails to
+        // prepare, as a reservation that fails stops a run, rather than going on without the arena it lacked.
+        Arena* arenas[] = { &result->columns[0], &result->columns[1], &result->columns[2], &result->arena, &result->bytes };
+        bool reserved = true;
+        for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
         {
-            result->columns[i] = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+            *arenas[i] = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+            reserved = arenas[i]->base != 0;
         }
-        result->arena = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
-        result->bytes = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+        for (uint32_t i = 0; !reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
+        {
+            arena_release(arenas[i]);
+        }
     }
     return result;
 }
@@ -2584,9 +2604,14 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
     // no unit reaches. A FIFO, a device or a directory then isn't a regular file, and is none. O_NONBLOCK changes
     // nothing for a regular file, and O_NOCTTY keeps a terminal from becoming the process's controlling one.
     const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+    int error = fd >= 0 ? 0 : errno;
     counts->opens += 1;
     struct stat stats;
-    if (fd >= 0 && fstat(fd, &stats) == 0 && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
+    const bool stated = fd >= 0 && fstat(fd, &stats) == 0;
+    error = fd >= 0 && !stated ? errno : error;
+    error = stated && !S_ISREG(stats.st_mode) ? (S_ISDIR(stats.st_mode) ? EISDIR : -1) : error;
+    error = stated && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK ? EFBIG : error;
+    if (stated && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
     {
         probe->device = (uint64_t)stats.st_dev;
         probe->inode = (uint64_t)stats.st_ino;
@@ -2598,6 +2623,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
         if (probe->record == BUSTER_PP_NONE && probe->length != 0 && !read)
         {
             void* mapped = mmap(0, probe->length, PROT_READ, MAP_PRIVATE | (how == FILE_CACHE_MAP_POPULATED ? MAP_POPULATE : 0), fd, 0);
+            error = mapped != MAP_FAILED ? 0 : errno;
             bytes = mapped != MAP_FAILED ? mapped : 0;
             probe->mapped = bytes != 0;
             counts->maps += 1;
@@ -2612,6 +2638,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
                 got = pread(fd, buffer + done, probe->length - done, (off_t)done);
                 done += got > 0 ? (uint64_t)got : 0;
             }
+            error = buffer == 0 ? ENOMEM : done == probe->length ? 0 : got < 0 ? errno : EIO;
             if (buffer != 0 && done == probe->length)
             {
                 memset(buffer + done, 0, 64);
@@ -2622,6 +2649,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
         probe->bytes = bytes;
         probe->found = bytes != 0;
     }
+    probe->error = probe->found ? 0 : error;
     if (fd >= 0)
     {
         close(fd);
@@ -2693,14 +2721,16 @@ static void file_cache_identify(FileCache* cache, FileCachePath* entry)
 }
 
 // The record of the file at `path` (`length` bytes, NUL-terminated), probing the file system only the first time the
-// cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full. A file of up to
-// the cache's read limit is read into the calling lane's bytes arena, which the cache keeps as long as its records, and
-// a larger one is mapped with MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation,
-// which needs the lane's other arenas, says why it fails). One lane at a time.
-static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, FileCacheCounts* counts)
+// cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full, with why in
+// `*error` (the probe's errno value or -1, or EMFILE for a full cache). A file of up to the cache's read limit is read
+// into the calling lane's bytes arena, which the cache keeps as long as its records, and a larger one is mapped with
+// MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation, which needs the lane's other
+// arenas, says why it fails). One lane at a time.
+static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, FileCacheCounts* counts, int* error)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
     FileCachePath* entry = file_cache_find_path(cache, path, length, hash);
+    int unheld = 0;
     if (entry == 0)
     {
         Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
@@ -2715,8 +2745,11 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
         {
             munmap((void*)probe.bytes, probe.length);
         }
+        unheld = probe.found ? EMFILE : probe.error;
     }
-    return entry != 0 ? entry->record : BUSTER_PP_NONE;
+    const uint32_t result = entry != 0 ? entry->record : BUSTER_PP_NONE;
+    *error = result != BUSTER_PP_NONE ? 0 : entry == 0 ? unheld : entry->probe.found ? EMFILE : entry->probe.error;
+    return result;
 }
 
 // Prepares record `record` (pp_prepare_into) unless it is prepared, into lane `lane`'s arenas and with the cache's intern
@@ -2901,8 +2934,12 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
                 directory_length = path[i] == '/' ? i : directory_length;
             }
             const uint64_t start = pp->options.timing ? __rdtsc() : 0;
-            const uint32_t record = file_cache_lookup_path(pp->cache, copy, length, &pp->probes);
+            // Why the file has no data, for the message that may report it: why no file can be read at the path, or
+            // that the unit has as many files as it can hold.
+            int error = 0;
+            const uint32_t record = file_cache_lookup_path(pp->cache, copy, length, &pp->probes, &error);
             const uint32_t data = record != BUSTER_PP_NONE ? pp_data_of_record(pp, record) : BUSTER_PP_NONE;
+            error = record != BUSTER_PP_NONE && data == BUSTER_PP_NONE ? EMFILE : error;
             pp->ticks[PP_PHASE_READ] += pp->options.timing ? __rdtsc() - start : 0;
             result = pp->file_count;
             pp->files[result] = (PPFile){
@@ -2910,6 +2947,7 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
                 .path_length = length,
                 .directory_length = directory_length,
                 .data = data,
+                .error = error,
                 .system = system,
             };
             pp->file_count += 1;
@@ -7844,15 +7882,17 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
     }
 }
 
-// The file a #include, #include_next or #import (`kind`) in the context's file names: entered, unless #import read it.
-static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, const uint8_t* name, uint32_t length, bool angled, uint32_t location)
+// The file a #include, #include_next or #import (`kind`) at `location` in the context's file names: entered, unless
+// #import read it. A name no file has is reported at `name_location`, where clang reports it: the name's.
+static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, const uint8_t* name, uint32_t length, bool angled, uint32_t location,
+                            uint32_t name_location)
 {
     const bool next = kind == PP_DIRECTIVE_INCLUDE_NEXT && pp->include_depth != 0;
     uint32_t found_in;
     const uint32_t file = pp_find_include(pp, name, length, angled, next, context->file, context->search_index, &found_in);
     if (file == BUSTER_PP_NONE)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, location, "'%.*s' file not found", (int)length, (const char*)name);
+        pp_diagnose(pp, PP_SEVERITY_FATAL, name_location, "'%.*s' file not found", (int)length, (const char*)name);
     }
     else
     {
@@ -7918,7 +7958,7 @@ static void pp_finish_include(Preprocessor* pp)
         {
             pp_diagnose(pp, PP_SEVERITY_WARNING, capture.location, "extra tokens at end of #%s directive", pp_include_name(capture.directive_kind));
         }
-        pp_include_file(pp, &pp->contexts[capture.context], capture.directive_kind, name, length, angled, capture.location);
+        pp_include_file(pp, &pp->contexts[capture.context], capture.directive_kind, name, length, angled, capture.location, capture.location);
     }
 }
 
@@ -7966,7 +8006,8 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
         {
             pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #%s directive", pp_include_name(kind));
         }
-        pp_include_file(pp, context, kind, name, length, angled, location);
+        // A name no file has is reported at the name, its first token (pp_literal_header_name's).
+        pp_include_file(pp, context, kind, name, length, angled, location, base + data->starts[hash + 2]);
     }
 }
 
@@ -11397,16 +11438,19 @@ static void pp_dedupe_directories(Preprocessor* pp)
 }
 
 // An array of `count` records of `size` bytes, in an arena of its own (address space, touched as it is used).
-static void* pp_array(Preprocessor* pp, uint64_t count, uint64_t size)
+// An array of its own of `count` entries of `size` bytes, while `*reserved` (which becomes false if it can't be): the
+// reservations stop at the first that fails.
+static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size)
 {
     void* result = 0;
-    if (pp->array_count < BUSTER_PP_ARRAYS)
+    if (*reserved && pp->array_count < BUSTER_PP_ARRAYS)
     {
         Arena* arena = &pp->arrays[pp->array_count];
         *arena = arena_reserve(count * size + 64);
         result = arena_push_array(arena, count, size, 64);
         pp->array_count += 1;
     }
+    *reserved = result != 0;
     return result;
 }
 
@@ -11421,43 +11465,49 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->vectorized = prepare.vectorized;
     pp->refine_flags = prepare.refine_flags;
     pp->split_kinds = prepare.split_kinds;
+    // The memory, reserved in turn until a reservation fails (pp_release releases what was).
     pp->arena = arena_reserve(BUSTER_PP_ARENA_BYTES);
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
+    bool result = pp->arena.base != 0;
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {
         pp->columns[i] = arena_reserve(BUSTER_PP_ARENA_BYTES);
+        result = pp->columns[i].base != 0;
     }
-    pp->scratch[0] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
-    pp->scratch[1] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
+    for (uint32_t i = 0; result && i < 2; i += 1)
+    {
+        pp->scratch[i] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
+        result = pp->scratch[i].base != 0;
+    }
     pp->scratch_range[0] = BUSTER_PP_NONE;
     pp->scratch_range[1] = BUSTER_PP_NONE;
-    bool result = pp_tokens_reserve(&pp->output, BUSTER_PP_MAX_OUTPUT_TOKENS) && pp_tokens_reserve(&pp->arguments, BUSTER_PP_MAX_STACK_TOKENS) &&
-                  pp_tokens_reserve(&pp->captures, BUSTER_PP_MAX_STACK_TOKENS) && pp_tokens_reserve(&pp->expansions, BUSTER_PP_MAX_STACK_TOKENS);
-    pp->ranges = pp_array(pp, BUSTER_PP_MAX_RANGES, sizeof(PPRange));
-    pp->datas = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(PPFileData));
-    pp->record_data = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
-    pp->files = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(PPFile));
-    pp->file_slots = pp_array(pp, BUSTER_PP_FILE_SLOTS, sizeof(uint32_t));
+    result = result && pp_tokens_reserve(&pp->output, BUSTER_PP_MAX_OUTPUT_TOKENS) && pp_tokens_reserve(&pp->arguments, BUSTER_PP_MAX_STACK_TOKENS) &&
+             pp_tokens_reserve(&pp->captures, BUSTER_PP_MAX_STACK_TOKENS) && pp_tokens_reserve(&pp->expansions, BUSTER_PP_MAX_STACK_TOKENS);
+    pp->ranges = pp_array(pp, &result, BUSTER_PP_MAX_RANGES, sizeof(PPRange));
+    pp->datas = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(PPFileData));
+    pp->record_data = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
+    pp->files = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(PPFile));
+    pp->file_slots = pp_array(pp, &result, BUSTER_PP_FILE_SLOTS, sizeof(uint32_t));
     pp->file_slot_mask = BUSTER_PP_INITIAL_FILE_SLOTS - 1;
-    pp->directories = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(char*));
-    pp->directory_lengths = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(uint32_t));
-    pp->directory_system = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(uint8_t));
-    pp->line_directives = pp_array(pp, BUSTER_PP_MAX_LINE_DIRECTIVES, sizeof(PPLineDirective));
-    pp->expansion_starts = pp_array(pp, (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPExpansionStart));
-    pp->silent_pragmas = pp_array(pp, BUSTER_PP_MAX_SILENT_PRAGMAS, sizeof(PPExpansionStart));
-    pp->macro_of = pp_array(pp, BUSTER_INTERN_MAX_IDS, sizeof(PPMacroId));
-    pp->is_macro = pp_array(pp, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
-    pp->poisoned = pp_array(pp, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
-    pp->macros = pp_array(pp, BUSTER_PP_MAX_MACROS, sizeof(PPMacro));
-    pp->items = pp_array(pp, BUSTER_PP_MAX_ITEMS, sizeof(PPItem));
-    pp->parameters = pp_array(pp, BUSTER_PP_MAX_ITEMS, sizeof(IdentId));
-    pp->pushed_names = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(IdentId));
-    pp->pushed_macros = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(PPMacroId));
-    pp->contexts = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPContext));
-    pp->conditionals = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPConditional));
-    pp->invocations = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPInvocation));
-    pp->argument_records = pp_array(pp, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
-    pp->capture_frames = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
-    if (!options->no_history)
+    pp->directories = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(char*));
+    pp->directory_lengths = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(uint32_t));
+    pp->directory_system = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(uint8_t));
+    pp->line_directives = pp_array(pp, &result, BUSTER_PP_MAX_LINE_DIRECTIVES, sizeof(PPLineDirective));
+    pp->expansion_starts = pp_array(pp, &result, (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPExpansionStart));
+    pp->silent_pragmas = pp_array(pp, &result, BUSTER_PP_MAX_SILENT_PRAGMAS, sizeof(PPExpansionStart));
+    pp->macro_of = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS, sizeof(PPMacroId));
+    pp->is_macro = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
+    pp->poisoned = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
+    pp->macros = pp_array(pp, &result, BUSTER_PP_MAX_MACROS, sizeof(PPMacro));
+    pp->items = pp_array(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(PPItem));
+    pp->parameters = pp_array(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(IdentId));
+    pp->pushed_names = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(IdentId));
+    pp->pushed_macros = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(PPMacroId));
+    pp->contexts = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPContext));
+    pp->conditionals = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPConditional));
+    pp->invocations = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPInvocation));
+    pp->argument_records = pp_array(pp, &result, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
+    pp->capture_frames = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
+    if (result && !options->no_history)
     {
         // Five retained tables and three temporary columns share base pages for their first few records. Only a
         // table that outgrows its slice reserves a large arena, avoiding eight mappings/advice calls on small units.
@@ -11490,10 +11540,6 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         fprintf(stderr, "error: the file cache was made for another language mode or intern table\n");
         result = false;
     }
-    result = result && pp->ranges != 0 && pp->datas != 0 && pp->record_data != 0 && pp->files != 0 && pp->file_slots != 0 && pp->directories != 0 && pp->directory_lengths != 0 &&
-             pp->directory_system != 0 && pp->line_directives != 0 && pp->expansion_starts != 0 && pp->silent_pragmas != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->poisoned != 0 && pp->macros != 0 && pp->items != 0 &&
-             pp->parameters != 0 && pp->pushed_names != 0 && pp->pushed_macros != 0 && pp->contexts != 0 && pp->conditionals != 0 && pp->invocations != 0 &&
-             pp->argument_records != 0 && pp->capture_frames != 0 && pp->scratch[0].base != 0 && pp->scratch[1].base != 0;
     if (result)
     {
         // Macro 0 is none; location 0 is none.
@@ -11650,6 +11696,13 @@ static void pp_release(Preprocessor* pp)
 
 static void pp_resolve_keywords(Preprocessor* pp);
 
+// Why the file of record `file` (BUSTER_PP_NONE if its record couldn't be made) has no data, for a message.
+static const char* pp_read_error(const Preprocessor* pp, uint32_t file)
+{
+    const int error = file != BUSTER_PP_NONE ? pp->files[file].error : ENOMEM;
+    return error > 0 ? strerror(error) : "not a regular file";
+}
+
 // Runs what comes before the main file: the predefines (or PPOptions.predefines_path's), then the command line's -D,
 // -U and -include. Returns false if the predefines can't be read.
 static bool pp_run_prelude(Preprocessor* pp)
@@ -11668,7 +11721,7 @@ static bool pp_run_prelude(Preprocessor* pp)
         }
         else
         {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the predefines file %s", pp->options.predefines_path);
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the predefines file '%s': %s", pp->options.predefines_path, pp_read_error(pp, file));
         }
     }
     else
@@ -11763,7 +11816,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     {
         if (!pp->fatal)
         {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "no such file: '%s'", main_path);
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read '%s': %s", main_path, pp_read_error(pp, file));
         }
         pp_resolve_keywords(pp);
         result = false;
@@ -13088,10 +13141,14 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     PPOptions options;
     const char* input;
     const char* output;
-    bool markers;
-    const bool parsed = pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
+    bool markers = true;
+    const bool parsed = arena.base != 0 && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
     options.expansion_starts = markers;
-    if (!parsed)
+    if (arena.base == 0)
+    {
+        fprintf(stderr, "fatal error: can't reserve memory\n");
+    }
+    else if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
                         "[-include file] [-dM] [-std=...] [-ansi] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-march=cpu] [-m[no-]feature] [-O...] [-f...] "
@@ -13106,7 +13163,7 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
             // A failure pp_initialize reported (a location space too small for its first spellings) or memory.
             if (!pp.fatal)
             {
-                fprintf(stderr, "can't reserve memory\n");
+                fprintf(stderr, "fatal error: can't reserve memory\n");
             }
         }
         else
@@ -13123,9 +13180,10 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
                 fprintf(stderr, "can't write %s\n", output);
             }
             result = preprocessed && printed ? 0 : 1;
-            pp_release(&pp);
-            intern_release(&table);
         }
+        // What a failed reservation left reserved too.
+        pp_release(&pp);
+        intern_release(&table);
     }
     arena_release(&arena);
     return result;

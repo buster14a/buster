@@ -5084,9 +5084,11 @@ static bool x86_mode_is_legacy(X86EncoderMode encoder)
     return encoder == X86_ENCODER_MODE_32 || encoder == X86_ENCODER_MODE_16;
 }
 
+// The opcode's byte `i`, the first in its high byte; 0 past its bytes (X86_FORM_NONE has none, and x86_opcode_map and
+// x86_legacy_map read the first byte of every form they're given).
 static uint8_t x86_opcode_byte(const X86FormDescription* form, uint32_t i)
 {
-    return (uint8_t)(form->opcode >> (8 * (form->opcode_bytes - 1 - i)));
+    return i < form->opcode_bytes ? (uint8_t)(form->opcode >> (8 * (form->opcode_bytes - 1 - i))) : 0;
 }
 
 // Whether one of the form's legacy prefixes is `byte`.
