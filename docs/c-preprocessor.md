@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units (at 8ee1e16, with `main` at c93219a), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,021,842 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 195 | |
+| The built-in cases (`pp_test_cases`) | 220 | |
 | #109's generated cases, against `clang -E -P` ([the fuzzing](preprocessor-fuzz.md)) | 40,000,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
@@ -450,20 +450,39 @@ arenas. Popping a context gives its tokens back when they are on top.
     one that had whitespace before it, the `>` too. So with a comment that runs
     on to the next line, `<a/*x` then `*/b.h>` names `a b.h`, and `< c.h >`
     from macros names ` c.h `.
+  - A `<...>` with its `>` on the line is a name written out however long it
+    is, never a computed one: its identifiers aren't expanded (#254's review).
+    `#include` reads the whole name, so one too long for a path gets clang's
+    error about the path; `#embed` reads up to `PATH_MAX` bytes, and refuses
+    a longer name.
+  - `__has_include`'s and `__has_embed`'s operand, when its `#if` line writes
+    it (with the `(` before it), is read as `#include` reads a name: `<...>` up
+    to the first `>` on the line, as clang's `LexHeaderName` lexes it from its
+    file. So `__has_include(<  x.h>)` names `  x.h`, as `#include <  x.h>`
+    does. The same operand from a macro or a macro's argument is joined from
+    its tokens and names ` x.h` (#254's review).
   - The checks and their diagnostics go in clang's order
     (`HandleHeaderIncludeOrImport`):
     - an empty name is an error;
     - a name that ends in a space or a dot gets a nonportable-path warning;
+    - a place the search can't look in is fatal: a path too long for one, or a
+      file that can't be opened for another reason than there being none, as
+      clang's `getFileAndSuggestModule` reports them ("cannot open file
+      './...': File name too long"), in `__has_include`'s search too. Nothing
+      is reported after it;
     - a file not found is fatal, unless one of clang's two recoveries finds it.
       Each is an error that still includes the file: an angled name found as a
       quoted one, and a name found once the characters other than letters and
       digits at its ends are dropped ("did you mean");
     - an `#include` in the 199th file below the main one is an error, as in
-      clang, and the run goes on. Then a file entered before isn't entered
-      again, which stops a cycle.
+      clang, and the run goes on. Then a file included before isn't entered
+      again, which stops a cycle. The file that `#include` named counts as
+      included, since clang marks a file included before its depth check: its
+      other inclusions are left out, without errors (#254's review).
 
     Each diagnostic is at the name's token (for a name a macro made, at the
-    expansion, with its notes), or at the line's end for what the line lacks.
+    expansion, with its notes; the depth limit's too), or at the line's end
+    for what the line lacks.
   - `__has_include` also works inside a macro's argument in a `#if` line.
 - **Pragmas** are acted on when they are `once`, `GCC system_header`,
   `push_macro`/`pop_macro` and `GCC poison`. Every other pragma, and `#ident`,
@@ -746,14 +765,17 @@ scoped to each inclusion. Source bytes, definition locations and scratch
 spellings remain alive for the whole unit. Source excerpts and carets are not
 implemented.
 
-`test-preprocessor --clang` compares 28 original diagnostic fixtures with
+`test-preprocessor --clang` compares 33 original diagnostic fixtures with
 Clang, including preprocessor failures and calls to the later-token renderer.
 It checks object/function expansions, arguments, nested and cross-context
 invocations, pastes, stringification, builtins, redefinition, `#line`, CRLF,
-and include stacks. Only scratch-buffer line numbers are normalized, since
-they depend on each compiler's allocation order. Real and presumed locations,
-columns, note order and text are compared exactly. Every existing case and
-corpus comparison also compares the complete scalar/vector history tables.
+include stacks, and #254's review's include errors: header names too long for
+a path, and the depth limit's error, at a name a macro made too. Each
+fixture's directory is an `-I` directory as well. Only scratch-buffer line
+numbers are normalized, since they depend on each compiler's allocation order.
+Real and presumed locations, columns, note order and text are compared
+exactly. Every existing case and corpus comparison also compares the complete
+scalar/vector history tables.
 Separate checks cover guarded input tails, maximal runs across split copies,
 batched lookups, generated-input lifetimes, growth of all eight initial slices,
 and recording-on/off token equality.
@@ -994,7 +1016,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 195 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 220 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against

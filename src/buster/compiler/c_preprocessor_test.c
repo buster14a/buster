@@ -841,7 +841,9 @@ static const PPTestFile pp_test_files_embed_directories[] = {
 // #119's header names and search: names with "//", "/*...*/" and a backslash written out, the file a comment that runs
 // on to the next line makes a name of ("a b.h"), a computed name's file, #include_next through three directories, a
 // header that includes itself, and one file reached through a symbolic link and a hard link, with #pragma once and
-// with a guard.
+// with a guard. Then #254's review's: the file a header name too long for a path would name if its identifier were
+// expanded, headers named " x.h" and "  x.h", each alone in a directory, and a header that includes itself to the depth
+// limit and there includes another three times.
 static const PPTestFile pp_test_files_includes[] = {
     { "a/b.h", "ab\n" },
     { "a/*x*/b.h", "axb\n" },
@@ -858,8 +860,19 @@ static const PPTestFile pp_test_files_includes[] = {
     { "guarded.h", "#ifndef G\n#define G\nguarded\n#endif\n" },
     { .path = "gsym.h", .link = "guarded.h" },
     { "local.h", "local\n" },
+    { "short.h", "short\n" },
+    { "one/ x.h", "one_space\n" },
+    { "two/  x.h", "two_spaces\n" },
+    { "loop.h", "#if __INCLUDE_LEVEL__ < 199\n#include \"loop.h\"\n#else\n#include \"leaf.h\"\n#include \"leaf.h\"\n#include \"leaf.h\"\n#endif\n" },
+    { "leaf.h", "LEAF\n" },
     { 0, 0 },
 };
+
+// 4,096 'A's: an identifier, and a header name too long for any path (#254's review).
+#define BUSTER_PP_TEST_A64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+#define BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64
+#define BUSTER_PP_TEST_A4096 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512
+_Static_assert(sizeof(BUSTER_PP_TEST_A4096) == 4097, "BUSTER_PP_TEST_A4096 must be 4,096 letters");
 
 static const PPTestCase pp_test_cases[] = {
     // The topics of C 6.10.4.5's examples, in cases of our own: rescanning and redefinitions, # and ## with indirection,
@@ -1455,6 +1468,58 @@ static const PPTestCase pp_test_cases[] = {
         .fails = true,
         .warnings = 1,
         .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    // #254's review, against clang 23: a header name written out that is too long for any path is one still, refused
+    // (clang's fatal error about the path, which the history cases compare), and never a computed one whose identifier
+    // expands to another header's name, nor is an #embed's longer than the buffer it reads into; __has_include's and
+    // __has_embed's operands written in their #if line are read as the line writes them, and the same operands from a
+    // macro or an argument joined from their tokens; and a header that the depth limit refused is included as clang
+    // marks it: three #includes of it give one error, and an #include after the cycle unwinds doesn't enter it.
+    {
+        .name = "#254's review: a header name written out, too long for a path",
+        .source = "#define " BUSTER_PP_TEST_A4096 " short.h\n#include <" BUSTER_PP_TEST_A4096 ">\nEND\n",
+        .standard = "c17",
+        .expected = "",
+        .fails = true,
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's review: an #embed name written out, longer than its buffer",
+        .source = "#define " BUSTER_PP_TEST_A4096 "A short.h\n#embed <" BUSTER_PP_TEST_A4096 "A>\nEND\n",
+        .standard = "c23",
+        .expected = "",
+        .fails = true,
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's review: __has_include's and __has_embed's operands as their line writes them, \" x.h\" alone",
+        .source = "#define ID(x) x\n#define HI __has_include\n#define ARG <  x.h>\n#if __has_include(<  x.h>)\nraw\n#endif\n#if HI(<  x.h>)\nhi\n#endif\n"
+                  "#if ID(__has_include(<  x.h>))\nargument\n#endif\n#if __has_include(ARG)\nmacro\n#endif\n#if __has_embed(<  x.h>) == 0 && "
+                  "ID(__has_embed(<  x.h>)) == 1\nembed\n#endif\n#if __has_include(<  x.h>)\n#include <  x.h>\n#endif\nvalid_translation_unit\n",
+        .standard = "c23",
+        .expected = "argument macro embed valid_translation_unit",
+        .options = "-I%d/one --embed-dir=%d/one",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's review: __has_include's and __has_embed's operands as their line writes them, \"  x.h\" alone",
+        .source = "#define ID(x) x\n#define HI __has_include\n#define ARG <  x.h>\n#if __has_include(<  x.h>)\nraw\n#endif\n#if HI(<  x.h>)\nhi\n#endif\n"
+                  "#if ID(__has_include(<  x.h>))\nargument\n#endif\n#if __has_include(ARG)\nmacro\n#endif\n#if __has_embed(<  x.h>) == 1 && "
+                  "__has_embed(<  x.h> limit(0)) == 2 && ID(__has_embed(<  x.h>)) == 0\nembed\n#endif\n#include <  x.h>\n",
+        .standard = "c23",
+        .expected = "raw hi embed two_spaces",
+        .options = "-I%d/two --embed-dir=%d/two",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's review: a header refused at the depth limit is included",
+        .source = "#include \"loop.h\"\n#include \"leaf.h\"\nEND\n",
+        .standard = "c17",
+        .expected = "END",
+        .fails = true,
         .files = pp_test_files_includes,
     },
 };
