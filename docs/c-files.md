@@ -270,10 +270,10 @@ preparing ("Where the time goes").
   reads as before, and so does one whose files would take the walk past the
   process's limit of open files after counting the descriptors already open,
   less a further 256 reserved for concurrent opens and probing; if that count
-  is unavailable, deferral is disabled. An explicit `--bytes read` stays a
-  read even when one lane prepares the round. So does one lane, which probes and
-  prepares every file itself. "Reading where the bytes are lexed" has the
-  measurements.
+  is unavailable, deferral is disabled. A run on one lane also reads in its
+  probes, since it prepares every file itself. An explicit `--bytes read`
+  stays a read even when one lane prepares the round. "Reading where the
+  bytes are lexed" has the measurements.
 - **Contexts.** What a file's includes resolve to depends on the file, the
   search directory it was found in (for `#include_next`), whether it is a root,
   and the directory its path is in. A path that leads to a file the walk has

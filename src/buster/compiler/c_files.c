@@ -104,8 +104,8 @@
 // one it opened itself. A smaller file costs lane 0 more to read than to lex where a probe left it, and a wave of more than
 // BUSTER_FILES_DEFER_PROBES probes (a flat corpus, a project's roots) is most often the start of a round that lanes
 // share, where reading on the preparing lane measured slower (the C library corpus) or no faster (musl's 1,357 roots):
-// its probes read their files themselves. The walk keeps open only what the process's limit holds beyond its already-open files, less
-// BUSTER_FILES_DESCRIPTOR_RESERVE (docs/c-files.md, "Reading where the bytes are lexed").
+// its probes read their files themselves. The walk keeps open only what the process's limit holds beyond its already
+// open files, less BUSTER_FILES_DESCRIPTOR_RESERVE (docs/c-files.md, "Reading where the bytes are lexed").
 #define BUSTER_FILES_DEFER_ABOVE 1024u
 #define BUSTER_FILES_DEFER_PROBES 1024u
 #define BUSTER_FILES_DESCRIPTOR_RESERVE 256
