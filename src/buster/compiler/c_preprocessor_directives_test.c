@@ -696,6 +696,37 @@ static const PPDirectiveTestStructure pp_directive_test_structures[] = {
     { "digraphs and splices", "%:if 0\n%:  if 1\n#el\\\nse\n%:else\n%:endif\n#endif\n#\\\nendif\n", 0, 0 },
 };
 
+// Fixtures of #define's and #undef's constraints and of redefinitions (C 6.10.4, #121), reported as clang reports them.
+static const PPDirectiveTestStructure pp_directive_test_definitions[] = {
+    { "'#' without a parameter", "#define F(x) #y\n#define G() #\n#define H(a) a #\n#define O #y\n#define P(x) #x x ## ##\n", 0, 0 },
+    { "'##' at either end", "#define F(x) ## x\n#define G(x) x ##\n#define H ## x\n#define I x ##\n", 0, 0 },
+    { "__VA_OPT__",
+      "#define F(x) __VA_OPT__(x)\n#define G __VA_OPT__\n#define H(...) __VA_OPT__(__VA_OPT__())\n#define I(...) __VA_OPT__ x\n#define J(...) __VA_OPT__\n"
+      "#define K(...) __VA_OPT__(## a)\n#define L(...) __VA_OPT__((a ##))\n#define M(...) __VA_OPT__(a ##)\n#define N(...) #__VA_ARGS__ __VA_OPT__(a ## b)\n",
+      0, 0 },
+    { "an unterminated __VA_OPT__",
+      "#define F(...) __VA_OPT__(\n#define G(...) __VA_OPT__(a\n#define H(...) __VA_OPT__(a (b)\n#define I(...) __VA_OPT__(int\n#define J(...) __VA_OPT__(1\n"
+      "#define K(...) __VA_OPT__(<:\n#define L(...) __VA_OPT__(L\"s\"\n#define M(...) __VA_OPT__(@\n",
+      0, 0 },
+    { "parameter lists",
+      "#define A(x, x) x\n#define B(x\n#define C(x,) x\n#define D(\n#define E(1) x\n#define F(...x) x\n#define G(x...y) x\n#define H(x,...,y) x\n"
+      "#define I(x y) x\n#define J(a,b,a) a\n#define K(__VA_ARGS__) 1\n#define L(x...) x\n#define M(for, int) for int\n",
+      0, 0 },
+    { "names", "#define\n#define 123\n#define defined 1\n#undef\n#undef 1\n#undef X Y\n#ifdef\n#endif\n#ifdef 1\n#endif\n#ifndef /* c */ \n#endif\n#if 0\n#elifdef\n#endif\n",
+      0, "c23" },
+    { "builtins",
+      "#define __LINE__ 1\n#undef __FILE__\n#define __STDC__ 2\n#define __has_include 1\n#undef __STDC_VERSION__\n#undef __COUNTER__\n#undef _Pragma\n"
+      "#undef __x86_64__\n#define __STDC_HOSTED__ 0\n#undef __LINE__\n",
+      0, 0 },
+    { "whitespace after the name", "#define A+1\n#define B\"s\"\n#define C\\\n+1\n#define D\\\n 1\n#define E/**/+1\n#define F@\n", 0, 0 },
+    { "whitespace after the name in C89", "#define A+1\n#define B@\n#define C`\n#define D\"s\"\n", 0, "c89" },
+    { "redefinitions",
+      "#define A 1\n#define A 2\n#define B(x) x\n#define B(y) y\n#define C 1\n#define C  1\n#define D a/**/b\n#define D a b\n#define E <:\n#define E [\n"
+      "#define G 1 // c\n#define G 1\n#define H /* a */\n#define H\n#define I(x) x\n#undef I\n#define I(y) y\n#define J(...) __VA_OPT__(a)\n#define J(...) __VA_OPT__(a )\n"
+      "#define K(x) #x\n#define K(x) # x\n#define L 01\n#define L 1\n",
+      0, 0 },
+};
+
 // Runs a command (`argv`, ended by a null) with CPATH and C_INCLUDE_PATH unset: what it writes to standard output and
 // to standard error go to `*output` and `*errors` (each may be null to drop it), in memory (null if it doesn't run).
 // Returns its exit status, or -1.
@@ -806,12 +837,12 @@ static int64_t pp_directive_test_clang_guards(char** arguments, int argument_cou
 }
 
 // Each fixture by both kernels, whose diagnostics must be the same, and with clang, clang's.
-static bool pp_directive_test_structure(const char* directory, bool with_clang)
+static bool pp_directive_test_diagnostics(const PPDirectiveTestStructure* fixtures, uint32_t count, const char* label, const char* directory, bool with_clang)
 {
     uint32_t failures = 0;
-    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(pp_directive_test_structures); f += 1)
+    for (uint32_t f = 0; f < count; f += 1)
     {
-        const PPDirectiveTestStructure* fixture = &pp_directive_test_structures[f];
+        const PPDirectiveTestStructure* fixture = &fixtures[f];
         char path[4200];
         char header[4200];
         snprintf(path, sizeof(path), "%s/structure.c", directory);
@@ -850,7 +881,7 @@ static bool pp_directive_test_structure(const char* directory, bool with_clang)
         result = result && (!with_clang || (oracle != 0 && strcmp(diagnostics[0], oracle) == 0));
         if (!result)
         {
-            printf("structure %s differs:\nours:\n%s%sclang:\n%s\n", fixture->name, diagnostics[0] != 0 ? diagnostics[0] : "<failed>",
+            printf("%s %s differs:\nours:\n%s%sclang:\n%s\n", label, fixture->name, diagnostics[0] != 0 ? diagnostics[0] : "<failed>",
                    diagnostics[1] != 0 && diagnostics[0] != 0 && strcmp(diagnostics[0], diagnostics[1]) != 0 ? "(the scalar kernels' differ)\n" : "",
                    oracle != 0 ? oracle : "<not run>");
         }
@@ -861,8 +892,7 @@ static bool pp_directive_test_structure(const char* directory, bool with_clang)
         unlink(path);
         unlink(header);
     }
-    printf("directive structure: %u of %lu fixtures differ%s\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_directive_test_structures),
-           with_clang ? " from clang's diagnostics" : " between the kernels");
+    printf("%s: %u of %u fixtures differ%s\n", label, failures, count, with_clang ? " from clang's diagnostics" : " between the kernels");
     return failures == 0;
 }
 
@@ -1012,11 +1042,13 @@ static bool pp_directive_test_guards(const char* directory, bool with_clang)
 // ---------------------------------------------------------------------------------------------------------------------
 // pp_test_directives
 
-// The checks without files: random streams (`count` from `seed`), the structure fixtures and the guard fixtures.
+// The checks without files: random streams (`count` from `seed`), the structure and definition fixtures, and the guard
+// fixtures.
 static bool pp_test_directives(const char* directory, bool with_clang, uint64_t seed, uint64_t count)
 {
     bool result = pp_directive_test_streams(seed, count);
-    result &= pp_directive_test_structure(directory, with_clang);
+    result &= pp_directive_test_diagnostics(pp_directive_test_structures, BUSTER_ARRAY_LENGTH(pp_directive_test_structures), "directive structure", directory, with_clang);
+    result &= pp_directive_test_diagnostics(pp_directive_test_definitions, BUSTER_ARRAY_LENGTH(pp_directive_test_definitions), "definitions", directory, with_clang);
     result &= pp_directive_test_guards(directory, with_clang);
     return result;
 }
