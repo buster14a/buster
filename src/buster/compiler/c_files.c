@@ -65,6 +65,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <dirent.h>
+#include <errno.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <immintrin.h>
@@ -1560,11 +1561,13 @@ static void files_run_ahead(FilesRun* run)
         }
         more = files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && !run->failed && run->item_count > run->round_items) != 0;
     }
-    // A walk that stopped early may have kept files open that no lane read: lane 0 reads them, mapped as a unit maps a
-    // file, so that no file stays open past the walk.
+    // A walk that stopped early may have kept files open that no lane read: lane 0 reads them, keeping an explicit
+    // read strategy or mapping as a unit does, so that no file stays open past the walk.
     for (uint32_t record = run->first_record; lane == 0 && run->failed && record < run->cache->record_count; record += 1)
     {
-        file_cache_load(run->cache, record, FILE_CACHE_MAP_POPULATED, 0, 0, &mine->counts);
+        const FileCacheBytes how = run->bytes == FILE_CACHE_READ ? FILE_CACHE_READ : FILE_CACHE_MAP_POPULATED;
+        Arena* bytes = how == FILE_CACHE_READ ? &run->cache->lanes[0].bytes : 0;
+        file_cache_load(run->cache, record, how, 0, bytes, &mine->counts);
     }
 }
 
@@ -1582,16 +1585,18 @@ static uint64_t files_descriptor_limit(void)
     struct rlimit limit;
     DIR* directory = getrlimit(RLIMIT_NOFILE, &limit) == 0 ? opendir("/proc/self/fd") : 0;
     uint64_t used = BUSTER_FILES_DESCRIPTOR_RESERVE;
+    errno = 0;
     for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
     {
         used += entry->d_name[0] != '.';
     }
+    const bool counted = errno == 0;
     uint64_t result = 0;
     if (directory != 0)
     {
         closedir(directory);
         used -= 1;
-        result = (uint64_t)limit.rlim_cur > used ? (uint64_t)limit.rlim_cur - used : 0;
+        result = counted && (uint64_t)limit.rlim_cur > used ? (uint64_t)limit.rlim_cur - used : 0;
     }
     return result;
 }

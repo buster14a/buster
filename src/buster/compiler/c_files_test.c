@@ -1069,12 +1069,13 @@ static bool files_test_descriptor_pressure(const char* directory)
     }
     struct rlimit original;
     const bool limited = result && getrlimit(RLIMIT_NOFILE, &original) == 0;
+    const bool supported = limited && original.rlim_max >= 512;
     struct rlimit limit = limited ? original : (struct rlimit){ 0 };
     limit.rlim_cur = 512;
-    result = limited && setrlimit(RLIMIT_NOFILE, &limit) == 0;
+    result = limited && (!supported || setrlimit(RLIMIT_NOFILE, &limit) == 0);
     int descriptors[400];
     uint32_t opened = 0;
-    while (result && opened < BUSTER_ARRAY_LENGTH(descriptors))
+    while (result && supported && opened < BUSTER_ARRAY_LENGTH(descriptors))
     {
         const int descriptor = open("/dev/null", O_RDONLY | O_CLOEXEC);
         result = descriptor >= 0;
@@ -1091,17 +1092,24 @@ static bool files_test_descriptor_pressure(const char* directory)
         .root_count = BUSTER_ARRAY_LENGTH(roots),
     };
     FilesTestRun run = { 0 };
-    result = result && files_test_run(&work, 2, directory, 0, &run);
+    result = result && (!supported || files_test_run(&work, 2, directory, 0, &run));
     uint32_t readable = 0;
     FileCacheCounts counts = { 0 };
-    for (uint32_t f = 0; result && f < BUSTER_ARRAY_LENGTH(roots); f += 1)
+    for (uint32_t f = 0; result && supported && f < BUSTER_ARRAY_LENGTH(roots); f += 1)
     {
         readable += file_cache_lookup_path(&run.cache, roots[f], (uint32_t)strlen(roots[f]), &counts) != BUSTER_PP_NONE;
     }
-    result = result && run.cache.record_count == BUSTER_ARRAY_LENGTH(roots) && run.prepared == BUSTER_ARRAY_LENGTH(roots) &&
-             readable == BUSTER_ARRAY_LENGTH(roots) && run.absent == 0 && !run.failed && run.descriptors == 0 && run.stderr_bytes == 0;
-    printf("descriptor pressure: %u/%zu roots readable after the walk with 400 descriptors already open and limit 512: %s\n", readable,
-           BUSTER_ARRAY_LENGTH(roots), result ? "passed" : "FAILED");
+    result = result && (!supported || (run.cache.record_count == BUSTER_ARRAY_LENGTH(roots) && run.prepared == BUSTER_ARRAY_LENGTH(roots) &&
+             readable == BUSTER_ARRAY_LENGTH(roots) && run.absent == 0 && !run.failed && run.descriptors == 0 && run.stderr_bytes == 0));
+    if (supported || !result)
+    {
+        printf("descriptor pressure: %u/%zu roots readable after the walk with 400 descriptors already open and limit 512: %s\n", readable,
+               BUSTER_ARRAY_LENGTH(roots), result ? "passed" : "FAILED");
+    }
+    else
+    {
+        printf("descriptor pressure: skipped (inherited hard descriptor limit below 512)\n");
+    }
     files_test_release_run(&run);
     for (uint32_t f = 0; f < opened; f += 1)
     {
@@ -1131,7 +1139,7 @@ static bool files_test_read_strategy(const char* directory)
         snprintf(paths[f], sizeof(paths[f]), "%s/read-strategy-%u.h", directory, f);
         result = files_test_write(paths[f], text) && result;
     }
-    for (uint32_t way = 0; result && way < 3; way += 1)
+    for (uint32_t way = 0; result && way < 4; way += 1)
     {
         for (uint32_t defer = 0; result && defer < 2; defer += 1)
         {
@@ -1149,6 +1157,12 @@ static bool files_test_read_strategy(const char* directory)
             run.read_limit = 0;
             run.defer = defer != 0;
             run.lane_bytes = way == 2 ? 0 : run.lane_bytes;
+            if (way == 3)
+            {
+                // Fail the next-round arrays after the probes retained their files: the drain must read them too.
+                arena_release(&run.files);
+                run.files = arena_reserve(1);
+            }
             result = result && lane_run(lanes, files_run_lane, &run, 0);
             FileCacheCounts counts = { 0 };
             for (uint32_t l = 0; run.lanes != 0 && l < lanes; l += 1)
@@ -1157,7 +1171,7 @@ static bool files_test_read_strategy(const char* directory)
                 counts.reads += run.lanes[l].counts.reads;
             }
             const uint64_t kept = defer != 0 && lanes > 1 ? BUSTER_ARRAY_LENGTH(roots) : 0;
-            result = result && !run.failed && cache.prepared_records == BUSTER_ARRAY_LENGTH(roots) && counts.maps == 0 &&
+            result = result && run.failed == (way == 3) && cache.prepared_records == (way == 3 ? 0 : BUSTER_ARRAY_LENGTH(roots)) && counts.maps == 0 &&
                      counts.reads == BUSTER_ARRAY_LENGTH(roots) && run.kept == kept;
             if (!result)
             {
@@ -1176,7 +1190,7 @@ static bool files_test_read_strategy(const char* directory)
     }
     if (result)
     {
-        printf("read strategy: larger files read without mappings, with probes and deferral on one or several preparing lanes\n");
+        printf("read strategy: larger files read without mappings, with probes and deferral on one or several preparing lanes, and after a failed round\n");
     }
     return result;
 }
