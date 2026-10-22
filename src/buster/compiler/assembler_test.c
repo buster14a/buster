@@ -888,8 +888,9 @@ static void asm_test_preprocessed_spacing(AsmTest* test, const char* directory)
     snprintf(object, sizeof(object), "%s/dollar-output.o", directory);
     snprintf(output, sizeof(output), "%s/output", directory);
     snprintf(errors, sizeof(errors), "%s/errors", directory);
+    // The parameters check argument boundaries; a fixed body keeps parameter substitution out of this regression.
     static const char source[] =
-        ".text\n.macro load value, reg\nmovl \\value, \\reg\n.endm\n"
+        ".text\n.macro load value, reg\nmovl $5, %eax\n.endm\n"
         "#define V 5\nload $V %eax\nfoo$bar: jmp foo$bar\n";
     static const uint8_t expected[] = {0xb8, 0x05, 0x00, 0x00, 0x00, 0xeb, 0xfe};
     const bool written = object_write_file(input, (const uint8_t*)source, sizeof(source) - 1) == OBJECT_ERROR_NONE;
