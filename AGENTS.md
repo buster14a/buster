@@ -2210,7 +2210,7 @@ others, its measurements are informational.
 
 `./build/compiler test-calling-convention [--seed N] [--count N]
 [--cross-check] [--signatures N] [--clang PATH] [--gcc PATH] [--keep]`
-(about 0.02 s on the 9700X, and 18 s with `--cross-check`) checks
+(about 0.05 s on the 9700X, and 18 s with `--cross-check`) checks
 `calling_convention.c`, by its vector paths and their twins at 16-, 32- and
 64-byte vectors:
 
