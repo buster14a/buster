@@ -1018,7 +1018,8 @@ struct AbiWideFrame
 // for it, but the i128 and EMPTY): the log2 of its alignment, a struct's members' largest storage alignment (a
 // bit-field's run's unit's past an eightbyte, abi_bit_field_run) and a union's most aligned member's
 // (abi_member_storage's), unless a struct's member is off its own or the size isn't a multiple of it (determinePacked:
-// 1); and INEXACT if a member's storage is. A member that holds such a record by value has its storage, walked in turn
+// 1); and INEXACT if a member's storage is, or a struct's bit-field is in a run of an eightbyte or less, whose access
+// units clang decides (abi_storage). A member that holds such a record by value has its storage, walked in turn
 // on an explicit stack in scratch memory (no record holds itself, so it is no deeper than the table has types). With
 // BUSTER_ABI_WIDE_UNREADY if a type whose storage it reads isn't classified yet: a flag in the result rather than through
 // a pointer, which would make its callers take a local's address, and so check a stack protector's canary at every call
@@ -1084,7 +1085,7 @@ __attribute__((cold, noinline)) static uint32_t abi_wide_alignment(const AbiTabl
                 ready = ready && (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
                 frame->largest = alignment > frame->largest ? alignment : frame->largest;
                 frame->packed = frame->packed || (!in_union && !bit_field && ((table->members.offset[member] >> 3) & ((1ull << alignment) - 1)) != 0);
-                frame->inexact = frame->inexact || (storage & BUSTER_ABI_STORAGE_INEXACT) != 0;
+                frame->inexact = frame->inexact || (storage & BUSTER_ABI_STORAGE_INEXACT) != 0 || (in_run && frame->run_storage == UINT8_MAX);
             }
         }
         else
@@ -2043,8 +2044,8 @@ struct AbiFoldGroup
 //     (abi_union_storage_member's).
 //   - NONEMPTY and INEXACT, in a struct's storage word and in a union's layout word (whose bits past 47 a union doesn't
 //     use): the member isn't one clang's layout counts empty, a zero-width bit-field or of an EMPTY record's type, and
-//     its storage is INEXACT. ORed: a record without a NONEMPTY member is EMPTY, and one with an INEXACT member is
-//     INEXACT.
+//     its storage is INEXACT, or it is a struct's bit-field in a run of an eightbyte or less. ORed: a record without a
+//     NONEMPTY member is EMPTY, and one with an INEXACT member is INEXACT.
 // A zero-width bit-field adds nothing.
 typedef struct AbiPart AbiPart;
 struct AbiPart
@@ -2135,7 +2136,10 @@ static AbiPart abi_member_part(const AbiTable* abi, const TypeTable* table, uint
                                     (first_at_start && i128 ? BUSTER_ABI_PART_I128 : 0);
     const uint64_t key = (uint64_t)alignment << BUSTER_ABI_PART_KEY_ALIGNMENT_SHIFT | (bytes < 31 ? bytes : 31) << BUSTER_ABI_PART_KEY_BYTES_SHIFT |
                          (uint64_t)(BUSTER_ABI_PART_STEPS - step) << BUSTER_ABI_PART_KEY_STEPS_SHIFT | (bytes != 0 && i128 ? BUSTER_ABI_PART_KEY_I128 : 0) | placed;
-    const uint64_t flags = (nonempty ? BUSTER_ABI_PART_NONEMPTY : 0) | (!bit_field && (own & BUSTER_ABI_STORAGE_INEXACT) != 0 ? BUSTER_ABI_PART_INEXACT : 0);
+    // INEXACT from its type, or for a struct's bit-field from a run of an eightbyte or less, whose access units clang
+    // decides (abi_storage).
+    const bool inexact = bit_field ? in_run && state->run_storage == UINT8_MAX : (own & BUSTER_ABI_STORAGE_INEXACT) != 0;
+    const uint64_t flags = (nonempty ? BUSTER_ABI_PART_NONEMPTY : 0) | (inexact ? BUSTER_ABI_PART_INEXACT : 0);
     const AbiPart result = {
         .layout = (counts ? leaves | data | covered : 0) | (in_union ? flags : 0),
         .storage = !counts ? 0 : in_union ? key : struct_storage | flags,
