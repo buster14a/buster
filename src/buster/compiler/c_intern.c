@@ -40,8 +40,9 @@
 // main.c includes this file after c_lexer.c (BUSTER_INLINE) and lane.c (Arena); every function is static. Layout, in
 // this order:
 //   - The predefined names: BUSTER_C_NAMES (keywords, then directive names, then the preprocessor's names), IdentId,
-//     the C_NAME_* ids, CGnuKeywords, CLanguage, c_language_gnu_keywords and c_name_is_keyword (which names are
-//     keywords in a language mode).
+//     the C_NAME_* ids, CGnuKeywords, CDigraphs, CLanguage, c_language_gnu_keywords, c_language_digraphs,
+//     c_language_lexer_flags (how a language mode's tokens are lexed) and c_name_is_keyword (which names are keywords in
+//     a language mode).
 //   - The table: InternSpan, InternTable, the hash (intern_lane_rounds, intern_chain, intern_hash_bytes_scalar,
 //     intern_fold, intern_with_length, intern_hash_vector, intern_hash_zero_lanes, intern_hash_vectors4_short,
 //     intern_chain_chunks, intern_hash_bytes), the bucket helpers
@@ -340,21 +341,48 @@ typedef enum CGnuKeywords
     C_GNU_KEYWORDS_OFF,
 } CGnuKeywords;
 
+// Whether a language has digraphs, clang's Digraphs: as its mode has them (every mode but c89), unless -fdigraphs or
+// -fno-digraphs set them. iso9899:199409 (C94) is c89 with them on, as clang has it, and its __STDC_VERSION__ (199409L)
+// that of any c89 with digraphs: c89 with -fdigraphs is C94, and C94 with -fno-digraphs is c89.
+typedef enum CDigraphs
+{
+    C_DIGRAPHS_MODE,
+    C_DIGRAPHS_ON,
+    C_DIGRAPHS_OFF,
+} CDigraphs;
+
 // A language mode: the C standard's year in full (1989, 1999, 2011, 2017 or 2023, so that later standards compare
-// greater) and whether GNU extensions are on (gnu17 rather than c17), as clang's -std= gives them, and its GNU keywords
-// (a CGnuKeywords, so that a mode written without them has the mode's).
+// greater) and whether GNU extensions are on (gnu17 rather than c17), as clang's -std= gives them, its GNU keywords (a
+// CGnuKeywords, so that a mode written without them has the mode's) and its digraphs (a CDigraphs, likewise).
 typedef struct CLanguage CLanguage;
 struct CLanguage
 {
     uint32_t standard;
     bool gnu;
     uint8_t gnu_keywords;
+    uint8_t digraphs;
 };
 
 // Does `language` have GNU's keywords?
 static __attribute__((unused)) bool c_language_gnu_keywords(CLanguage language)
 {
     return language.gnu_keywords == C_GNU_KEYWORDS_ON || (language.gnu_keywords == C_GNU_KEYWORDS_MODE && language.gnu);
+}
+
+// Does `language` have digraphs?
+static __attribute__((unused)) bool c_language_digraphs(CLanguage language)
+{
+    return language.digraphs == C_DIGRAPHS_ON || (language.digraphs == C_DIGRAPHS_MODE && (language.standard >= 1999 || language.gnu));
+}
+
+// The lexer's flags (CTokenizerFlags) for `language`'s tokens: without digraphs where it has none, and without "//"
+// comments in c89 and C94, as clang's -E lexes them (clang's LineComment, which no option changes). Compiling, clang takes
+// "//" comments in those modes too, but for a "//*" before a file's first one (#288), which only a compile driver would
+// need.
+static __attribute__((unused)) uint32_t c_language_lexer_flags(CLanguage language)
+{
+    const bool line_comments = language.standard >= 1999 || language.gnu;
+    return (c_language_digraphs(language) ? 0 : C_TOKENIZER_NO_DIGRAPHS) | (line_comments ? 0 : C_TOKENIZER_NO_LINE_COMMENTS);
 }
 
 // Is the predefined name `id` a keyword in `language`?

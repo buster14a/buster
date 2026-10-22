@@ -520,9 +520,10 @@ struct FileCacheArenas
     Arena bytes;
 };
 
-// How files are prepared: the lexer's and refinement's flags (trigraphs), the literal prefixes the language mode splits
-// (pp_split_kinds), whether '$' is punctuation (pp_dollar_punctuation), and whether by the vectorized kernels or by their
-// scalar twins, which prepare the same records.
+// How files are prepared: the lexer's and refinement's flags (trigraphs, and the language mode's lexing without digraphs
+// or "//" comments: c_language_lexer_flags), the literal prefixes the language mode splits (pp_split_kinds), whether '$'
+// is punctuation (pp_dollar_punctuation), and whether by the vectorized kernels or by their scalar twins, which prepare
+// the same records.
 typedef struct PPPrepare PPPrepare;
 struct PPPrepare
 {
@@ -2226,7 +2227,8 @@ static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uin
     return result;
 }
 
-// The lexer's flags for a mode: refinement's (trigraphs), and C_TOKENIZER_NO_DOLLARS where '$' is punctuation.
+// The lexer's flags for a mode: refinement's (trigraphs, digraphs and "//" comments), and C_TOKENIZER_NO_DOLLARS where '$'
+// is punctuation.
 static uint32_t pp_lex_flags(const PPPrepare* mode)
 {
     return mode->refine_flags | (mode->dollar_punctuation ? C_TOKENIZER_NO_DOLLARS : 0);
@@ -2876,13 +2878,13 @@ static PPPrepareStatus file_cache_prepare(FileCache* cache, uint32_t record, uin
     return result;
 }
 
-// How a unit with these options prepares files: trigraphs or not, digit separators or not (C23's: before it, the lexer
-// ends a number before a `'`), the literal prefixes its language mode splits, and its kernels. A file cache that units
-// share is made with it (file_cache_initialize).
+// How a unit with these options prepares files: trigraphs or not, digraphs and "//" comments or not, the literal prefixes
+// its language mode splits, and its kernels. A file cache that units share is made with it (file_cache_initialize).
 static PPPrepare pp_prepare_options(const PPOptions* options)
 {
     return (PPPrepare){
-        .refine_flags = (options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0) | (options->language.standard < 2023 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0),
+        .refine_flags = (options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0) | c_language_lexer_flags(options->language) |
+                        (options->language.standard < 2023 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0),
         .split_kinds = pp_split_kinds(options->language),
         .dollar_punctuation = pp_dollar_punctuation(options),
         .vectorized = !options->scalar,
@@ -12727,12 +12729,14 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer, uint32_t* 
         length += (uint32_t)sprintf(buffer + length, "#pragma push_macro(\"__GCC_DESTRUCTIVE_SIZE\")\n#pragma push_macro(\"__GCC_CONSTRUCTIVE_SIZE\")\n");
     }
     const CLanguage language = options->language;
-    const char* version = language.standard >= 2023   ? "202311L"
-                          : language.standard >= 2017 ? "201710L"
-                          : language.standard >= 2011 ? "201112L"
-                          : language.standard >= 1999 ? "199901L"
-                          : language.standard >= 1994 ? "199409L"
-                                                      : 0;
+    // C94's 199409L is that of any C89 mode that isn't GNU's and has digraphs (CDigraphs), as clang's
+    // LangOptions::getCLangStd has it.
+    const char* version = language.standard >= 2023                   ? "202311L"
+                          : language.standard >= 2017                 ? "201710L"
+                          : language.standard >= 2011                 ? "201112L"
+                          : language.standard >= 1999                 ? "199901L"
+                          : !language.gnu && c_language_digraphs(language) ? "199409L"
+                                                                      : 0;
     if (version != 0)
     {
         length += (uint32_t)sprintf(buffer + length, "#define __STDC_VERSION__ %s\n", version);
@@ -14606,25 +14610,28 @@ static __attribute__((unused)) bool pp_print_macros(Preprocessor* pp, FILE* stre
 // The language mode of a -std= value, or false if it isn't one.
 static bool pp_parse_standard(const char* value, CLanguage* language)
 {
+    // C94 (iso9899:199409) is c89 with digraphs, as clang has it (CDigraphs).
     static const struct
     {
         const char* name;
         uint32_t standard;
         bool gnu;
+        uint8_t digraphs;
     } standards[] = {
-        { "c89", 1989, false }, { "c90", 1989, false }, { "iso9899:1990", 1989, false }, { "gnu89", 1989, true }, { "gnu90", 1989, true },
+        { "c89", 1989, false }, { "c90", 1989, false }, { "iso9899:1990", 1989, false }, { "iso9899:199409", 1989, false, C_DIGRAPHS_ON },
+        { "gnu89", 1989, true }, { "gnu90", 1989, true },
         { "c99", 1999, false }, { "iso9899:1999", 1999, false }, { "gnu99", 1999, true }, { "c11", 2011, false }, { "iso9899:2011", 2011, false },
         { "gnu11", 2011, true }, { "c17", 2017, false }, { "c18", 2017, false }, { "iso9899:2017", 2017, false }, { "iso9899:2018", 2017, false },
         { "gnu17", 2017, true }, { "gnu18", 2017, true }, { "c23", 2023, false }, { "c2x", 2023, false }, { "iso9899:2024", 2023, false },
         { "gnu23", 2023, true }, { "gnu2x", 2023, true }, { "c9x", 1999, false }, { "iso9899:199x", 1999, false }, { "gnu9x", 1999, true },
-        { "c1x", 2011, false }, { "iso9899:201x", 2011, false }, { "gnu1x", 2011, true }, { "iso9899:199409", 1994, false },
+        { "c1x", 2011, false }, { "iso9899:201x", 2011, false }, { "gnu1x", 2011, true },
     };
     bool result = false;
     for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(standards); i += 1)
     {
         if (strcmp(value, standards[i].name) == 0)
         {
-            *language = (CLanguage){ .standard = standards[i].standard, .gnu = standards[i].gnu };
+            *language = (CLanguage){ .standard = standards[i].standard, .gnu = standards[i].gnu, .digraphs = standards[i].digraphs };
             result = true;
         }
     }
@@ -14635,9 +14642,9 @@ static bool pp_parse_standard(const char* value, CLanguage* language)
 // of which clang's driver reads only the last: the keyword sets (TokenKinds.def's KEYGNU, KEYMS, KEYBORLAND,
 // KEYZVECTOR, KEYZOS, KEYFIXEDPOINT and KEYDEFERTS, and __declspec), the lexing of '$', digraphs and raw strings, -E's
 // own modes, and modules. pp_take_family records each family's last option, and pp_settle_families models GNU's
-// keywords and '$', and refuses the other families where their last option turns them on. Issue #281 has the audit of
-// clang 23.1.3's -f options that found them: every other one changes only macros (predefines_option), or nothing that
-// -E gives, but char's signedness and wchar_t's width, which predefines_option reads and #if follows
+// keywords, '$' and digraphs, and refuses the other families where their last option turns them on. Issue #281 has the
+// audit of clang 23.1.3's -f options that found them: every other one changes only macros (predefines_option), or
+// nothing that -E gives, but char's signedness and wchar_t's width, which predefines_option reads and #if follows
 // (pp_parse_character).
 typedef enum PPFamily
 {
@@ -14755,9 +14762,9 @@ static bool pp_take_family(PPFamilies* families, const char* argument, bool* ref
 
 // Settles the families pp_take_family recorded, after every argument, as clang's driver does. GNU's keywords follow the
 // last -f[no-]gnu-keywords, or else the last of GCC's -f[no-]asm (which the driver passes on before them), or else the
-// mode; '$' follows its last option. The refusals: a family buster doesn't follow whose last option turns
-// it on, but -fzvector in assembly, where clang ignores it; -fno-digraphs, and -fdigraphs in c89, which clang makes C94
-// (__STDC_VERSION__ 199409L); and a last -fexec-charset= or -finput-charset= other than UTF-8 in any case, which clang's
+// mode; '$' and digraphs follow their last options (-fdigraphs makes c89 C94, and -fno-digraphs makes C94 c89:
+// CDigraphs). The refusals: a family buster doesn't follow whose last option turns it on, but -fzvector in assembly,
+// where clang ignores it; and a last -fexec-charset= or -finput-charset= other than UTF-8 in any case, which clang's
 // driver refuses too. Returns false after a refusal.
 static bool pp_settle_families(const PPFamilies* families, PPOptions* options)
 {
@@ -14765,16 +14772,14 @@ static bool pp_settle_families(const PPFamilies* families, PPOptions* options)
     const int8_t* last = families->last;
     const int8_t gnu = last[PP_FAMILY_GNU_KEYWORDS] >= 0 ? last[PP_FAMILY_GNU_KEYWORDS] : last[PP_FAMILY_ASM];
     options->language.gnu_keywords = (uint8_t)(gnu < 0 ? C_GNU_KEYWORDS_MODE : gnu != 0 ? C_GNU_KEYWORDS_ON : C_GNU_KEYWORDS_OFF);
+    options->language.digraphs = (uint8_t)(last[PP_FAMILY_DIGRAPHS] < 0 ? options->language.digraphs : last[PP_FAMILY_DIGRAPHS] != 0 ? C_DIGRAPHS_ON : C_DIGRAPHS_OFF);
     options->dollars = (uint8_t)(last[PP_FAMILY_DOLLARS] < 0 ? PP_DOLLARS_MODE : last[PP_FAMILY_DOLLARS] != 0 ? PP_DOLLARS_IDENTIFIER : PP_DOLLARS_PUNCTUATION);
-    const bool c89 = options->language.standard == 1989 && !options->language.gnu;
     for (uint32_t f = 0; f < PP_FAMILY_COUNT; f += 1)
     {
-        const bool digraphs = f == PP_FAMILY_DIGRAPHS && (last[f] == 0 || (last[f] == 1 && c89));
-        const bool refuse = digraphs || (pp_families[f].refused != 0 && last[f] == 1 && !(f == PP_FAMILY_ZVECTOR && options->assembly));
+        const bool refuse = pp_families[f].refused != 0 && last[f] == 1 && !(f == PP_FAMILY_ZVECTOR && options->assembly);
         if (refuse)
         {
-            const char* why = !digraphs ? pp_families[f].refused : last[f] == 0 ? "C without digraphs, which buster doesn't lex" : "C94 with -std=c89, which buster doesn't have";
-            fprintf(stderr, "error: unsupported option '%s' (%s)\n", last[f] != 0 ? pp_families[f].on : pp_families[f].off, why);
+            fprintf(stderr, "error: unsupported option '%s' (%s)\n", pp_families[f].on, pp_families[f].refused);
         }
         result &= !refuse;
     }
