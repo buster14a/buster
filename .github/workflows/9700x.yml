@@ -352,8 +352,10 @@ jobs:
           awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 4 && NR == 5) }' build/oracle-musl.tsv
 
       - name: Test the per-file jobs
-        # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams, and
-        # each unit the spellings it gives alone. Uses the predefines "Benchmark the preprocessor on main.c" wrote.
+        # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams, -E
+        # text and diagnostics, and each unit the spellings it gives alone; and again with the shared table's ids in
+        # another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and locations, each id
+        # spelled the same. Uses the predefines "Benchmark the preprocessor on main.c" wrote.
         run: |
           ./build/compiler test-files
           ./build/compiler test-files --flat src
