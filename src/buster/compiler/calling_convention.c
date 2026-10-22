@@ -47,7 +47,7 @@
 // type table's columns never change once written, but a tag's at its completion, after which abi_classify_all
 // classifies it). Lanes may read it while none writes.
 //
-// main.c includes this file after lane.c (Arena, Scratch) and c_types.c (TypeTable).
+// main.c and calling_convention_benchmark.c include this file after lane.c (Arena, Scratch) and c_types.c (TypeTable).
 // Layout, in this order:
 //   - API: the classes (BUSTER_ABI_INTEGER ...) and AbiClasses, the registers (BUSTER_ABI_RAX ...), the convention's
 //     constants, the pass bits (BUSTER_ABI_PASS_*), AbiReturn, AbiLocation, AbiCall, AbiSignatures, AbiVaArg, AbiVaList,
@@ -193,7 +193,9 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 //     high eightbyte NO_CLASS too (an i128 a union stores, as union { int a; unsigned _BitInt(128) : 127; }), which
 //     clang counts and passes as two INTEGER eightbytes (HIGH_INTEGER is set, though the row says NO_CLASS).
 //   - SIGN, ZERO: clang's Extend: the caller sign- or zero-extends the value to 32 bits (the callee, for a result).
-//   - AGGREGATE: clang's byval: a copy of it on the stack, and a result through a hidden pointer.
+//   - AGGREGATE: clang's byval: a copy of it on the stack (and, 8 bytes or less with no general register left in
+//     clang's count, an integer value instead). Results don't read it: a vector LLVM has no register type for is
+//     AGGREGATE as an argument but returned as its value (abi_result reads abi_is_aggregate).
 //   - END_MEMORY: a type of no size that is MEMORY at offset 16 though not at 0 (see abi_member_row_at), which only the
 //     classification reads.
 //   - UNSUPPORTED: an UNCOUNTED vector wider than the target's vector registers (an _Atomic one), which LLVM would split
@@ -263,10 +265,10 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 
 // An argument: IGNORE (nothing passed), REGISTERS (registers[0] holds its first part and registers[1] its second, or
 // NONE: eightbytes, or a vector register for a VECTOR, two general ones for a PAIR), STACK (the whole value at
-// stack_offset from rsp at the call) or SPLIT (a part LLVM couldn't give a register, after UNCOUNTED arguments: the
-// register of the part that has one, NONE for the one in the 8-byte slot at stack_offset). flags: SIGN or ZERO (the
-// caller extends the value to 32 bits) and HIGH (the parts are the value's high eightbyte alone: its low one is
-// padding).
+// stack_offset from rsp at the call) or SPLIT (a part LLVM couldn't give a register, where clang's count runs ahead of
+// LLVM's registers: the register of the part that has one, NONE for the one in the 8-byte slot at stack_offset).
+// flags: SIGN or ZERO (the caller extends the value to 32 bits) and HIGH (the parts are the value's high eightbyte
+// alone: its low one is padding).
 #define BUSTER_ABI_LOCATION_IGNORE 0
 #define BUSTER_ABI_LOCATION_REGISTERS 1
 #define BUSTER_ABI_LOCATION_STACK 2
@@ -1495,7 +1497,9 @@ static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
     uint32_t pass = BUSTER_ABI_PASS_CLASSIFIED;
     abi->alignment_log2[index] = abi_canonical_alignment_log2(abi, table, index);
     abi->storage[index] = abi_storage(abi, table, index);
-    abi->layout[index] = abi_layout(abi, table, index);
+    // Only a type of 16 bytes or less reads its layout, and its members' and elements' (a larger type is MEMORY or one
+    // vector, and so is any type it is in; an array of no elements reads none).
+    abi->layout[index] = size <= BUSTER_ABI_REGISTER_BYTES ? abi_layout(abi, table, index) : 0;
     if (low == BUSTER_ABI_NO_CLASS && high == BUSTER_ABI_NO_CLASS)
     {
         pass |= BUSTER_ABI_PASS_IGNORE;
@@ -2159,9 +2163,12 @@ static uint32_t abi_stack_place(uint64_t* stack, uint8_t* area_alignment_log2, u
 }
 
 // One call, as clang and LLVM assign it (the vector path's twin): clang decides from its count of free registers
-// whether an argument's eightbytes go to registers, a count an UNCOUNTED argument doesn't lower; LLVM then gives each
-// value it gets the next register of its kind or, once there is none, a stack slot of its own. The two counts differ
-// only after an UNCOUNTED argument, where an eightbyte clang meant for a register can land on the stack.
+// whether an argument's eightbytes go to registers; LLVM then gives each value it gets the next register of its kind
+// or, once there is none, a stack slot of its own. The two counts differ where clang counts otherwise than LLVM
+// assigns: LLVM uses registers clang doesn't count for an UNCOUNTED argument, a DEMOTED result's hidden pointer and a
+// LOW_GENERAL low eightbyte (counted as SSE), so that an eightbyte clang meant for a register can land on the stack
+// (SPLIT); and clang counts registers LLVM doesn't use for a named WIDE vector of a variadic call and a PAIR on the
+// stack, which LLVM then gives to the values clang sends to memory after them.
 static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uint32_t count, uint32_t named, bool variadic, TypeId result, AbiLocation* locations)
 {
     AbiCall call = {
