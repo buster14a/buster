@@ -3129,6 +3129,54 @@ static bool dynamic_test_smalls(const ExecutableTestDirectory* directory, const 
 // ---------------------------------------------------------------------------------------------------------------------
 // Shared libraries
 
+// A shared library's named default-visible absolute symbol is dynamic. Its direct CALL must still be refused, by
+// the vector count and the exact count alike. Build the link here: an assembler may fold or reject the absolute CALL.
+static bool dynamic_test_shared_absolute_call(const ExecutableTestDirectory* directory, const Runtime* runtime)
+{
+    DynamicTestTally tally = {
+        .check = "shared absolute call",
+    };
+    BindTestLink test;
+    bool built = bind_test_link_begin(&test, runtime, bind_test_room(runtime));
+    const SymbolId absolute =
+        built ? bind_test_symbol(&test, "buster_absolute", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_ABSOLUTE) : 0;
+    const SymbolId never = built ? bind_test_symbol(&test, "buster_never", BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+    if (absolute != 0)
+    {
+        test.link.symbols.value[absolute] = BUSTER_DYNAMIC_TEST_ABSOLUTE_VALUE;
+    }
+    built = absolute != 0 && never != 0 && bind_begin(&test.bind, &test.link, runtime, BIND_PATH_VECTOR, &test.bytes, 1, &test.arena);
+    const X86Instruction code[] = {
+        { .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP },
+        { .form = X86_FORM_RET },
+    };
+    const LinkReference references[] = {
+        { .instruction = 0, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_CALL, .target = absolute, .addend = 0 },
+    };
+    built = built && bind_test_code(&test, code, BUSTER_ARRAY_LENGTH(code), references, BUSTER_ARRAY_LENGTH(references), never);
+    const FixupId refused = built ? test.link.atoms.fixup_begin[test.link.symbols.atom[never]] : 0;
+    built = built && refused != 0 && bind_end(&test.bind, &test.link) && link_check(&test.link) == LINK_ERROR_NONE;
+    dynamic_test_expect(&tally, built, "the absolute CALL bound", 0);
+    dynamic_test_expect(&tally, built && dynamic_test_is_dynamic(&test.link, absolute, true), "the absolute symbol is preemptible", 0);
+    char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, "shared-absolute-call", path_bytes);
+    for (uint32_t l = 0; built && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) + 2; l += 1)
+    {
+        const bool exact = l >= BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts);
+        const uint32_t lanes = exact ? (l == BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) ? 1 : 8) : dynamic_test_lane_counts[l];
+        DynamicTestWrite write = {
+            .exact = exact,
+        };
+        ExecutableResult result;
+        unlink(path.pointer);
+        const bool written = dynamic_test_write_with(&write, &test.link, &test.bind, runtime, path, lanes, &result);
+        const bool clean = !written && result.error == EXECUTABLE_ERROR_RELOCATION && result.fixup == refused && access(path.pointer, F_OK) != 0;
+        dynamic_test_expect(&tally, clean, "the absolute CALL refused without output", (exact ? 100 : 0) + lanes);
+    }
+    bind_test_link_end(&test);
+    return dynamic_test_report(&tally);
+}
+
 // test-link's shared libraries (link_test_shared_options) and one of --functions workers, each bound against the shared
 // library's runtime (runtime_import_shared) and written by every lane count, which the harness must load and run as the
 // model predicts.
@@ -3283,16 +3331,6 @@ static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
         .option = "-ftls-model=local-exec",
         .refused = true,
         .lld_refuses = true,
-    },
-    {
-        // Its named default-visible absolute definition is dynamic, but a direct CALL must still be refused.
-        .name = "absolute-call",
-        .source = "__asm__(\".globl buster_absolute\\n.set buster_absolute, 42\");\n"
-                  "extern int buster_absolute(void);\n"
-                  "int buster_never(void) { return buster_absolute() + 1; }\n"
-                  "int buster_check(int (*helper)(void), int* data) { return helper() != 2 || *data != 9; }\n",
-        .pic = "-fPIC",
-        .refused = true,
     },
     {
         // A pointer to a preemptible function in .rodata (a text relocation), from code without -fPIC.
@@ -3556,6 +3594,7 @@ static int run_dynamic_tests(int argc, char** argv)
         Runtime shared_runtime;
         const RuntimeError shared_imported = runtime_import_shared(&shared_runtime);
         dynamic_test_report_import(shared_imported, &shared_runtime);
+        passed = shared_imported == RUNTIME_ERROR_NONE && dynamic_test_shared_absolute_call(&directory, &shared_runtime) && passed;
         passed = shared_imported == RUNTIME_ERROR_NONE && dynamic_test_shared(&directory, &shared_runtime, seed, (uint32_t)functions, cross_check) && passed;
         passed = shared_imported == RUNTIME_ERROR_NONE && dynamic_test_shared_compiled(&directory, &shared_runtime, cross_check) && passed;
         if (shared_imported == RUNTIME_ERROR_NONE)
