@@ -1623,72 +1623,80 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
     return count + splits;
 }
 
+// Does token `i` hold a '$' that the vectorized lexer took into it (an identifier or a pp-number)?
+static bool pp_holds_dollar(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t i)
+{
+    const uint8_t kind = kinds[i] & 0x7F;
+    return (kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT) && memchr(bytes + starts[i], '$', ends[i] - starts[i]) != 0;
+}
+
+// The last token of the run token `i` starts: the tokens after it with nothing between them but line splices.
+static uint32_t pp_run_end(uint32_t refine_flags, const uint8_t* bytes, uint32_t length, const uint32_t* starts, const uint32_t* ends, uint32_t count, uint32_t i)
+{
+    uint32_t result = i;
+    while (result + 1 < count && (ends[result] == starts[result + 1] || refine_gap_is_splices(bytes, length, ends[result], starts[result + 1], refine_flags)))
+    {
+        result += 1;
+    }
+    return result;
+}
+
 // C's GNU identifier grammar includes '$'. Assembly instead needs $MACRO to expand MACRO, and so does C with
-// -fno-dollars-in-identifiers (pp_dollar_punctuation), where '$' is punctuation too. Only tokens containing '$' take
-// this adapter; literals stay opaque. Re-lex the intervening slices with the shared lexer, including line
-// splices and numeric local references. Scratch columns leave the original columns intact on allocation failure.
-// A slice can lex into several tokens (the pp-number 1$e+5 into 1, $, e, + and 5), at most one per byte: the bytes of
-// the tokens that contain '$' bound the columns, not their dollars.
-static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count)
+// -fno-dollars-in-identifiers (pp_dollar_punctuation): there '$' is punctuation, as C_TOKENIZER_NO_DOLLARS lexes it.
+// The vectorized lexer takes '$' into identifiers and pp-numbers, so each run of tokens with nothing but line splices
+// between them that holds such a token is lexed again that way: what follows a '$' can then join the tokens after it,
+// as in clang ($L"x" is $ and a wide string literal, x$1.5 is x, $ and 1.5). Whitespace bounds the runs, and both
+// lexings start and end tokens there alike, but for a literal a run's end cuts: a quote that C23's digit separators
+// free ($1'2' is $, 1'2 and an unterminated character constant that takes the rest of the line). A run that ends in
+// an unknown token of more than a '$' sends the whole file to C_TOKENIZER_NO_DOLLARS instead. Literals stay opaque.
+// Scratch columns leave the original columns intact on allocation failure. A run can lex into more tokens, at most one
+// per byte: the runs' bytes bound the columns. `bytes` are the whole file's, of `length` bytes.
+static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count)
 {
     // Most sources have no '$' at all, which one scan of their extent finds.
     const bool dollars = count != 0 && memchr(bytes + starts[0], '$', ends[count - 1] - starts[0]) != 0;
-    uint64_t split_bytes = 0;
+    uint64_t run_bytes = 0;
     for (uint32_t i = 0; dollars && i < count; i += 1)
     {
-        const uint8_t kind = kinds[i] & 0x7F;
-        if ((kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT) && memchr(bytes + starts[i], '$', ends[i] - starts[i]) != 0)
+        if (pp_holds_dollar(bytes, kinds, starts, ends, i))
         {
-            split_bytes += ends[i] - starts[i];
+            const uint32_t last = pp_run_end(refine_flags, bytes, length, starts, ends, count, i);
+            run_bytes += ends[last] - starts[i];
+            i = last;
         }
     }
     int64_t result = count;
-    if (split_bytes != 0)
+    if (run_bytes != 0)
     {
         Scratch scratch = scratch_begin(0);
-        const uint64_t capacity = (uint64_t)count + split_bytes + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
+        const uint64_t capacity = (uint64_t)count + run_bytes + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
         uint8_t* split_kinds = arena_push(scratch.arena, capacity, 64);
         uint32_t* split_starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
         uint32_t* split_ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
         result = split_kinds != 0 && split_starts != 0 && split_ends != 0 ? 0 : -1;
-        for (uint32_t i = 0; result >= 0 && i < count; i += 1)
+        bool whole = false;
+        for (uint32_t i = 0; result >= 0 && !whole && i < count; i += 1)
         {
-            const uint8_t kind = kinds[i] & 0x7F;
-            const bool word = kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT;
-            if (word && memchr(bytes + starts[i], '$', ends[i] - starts[i]) != 0)
+            if (pp_holds_dollar(bytes, kinds, starts, ends, i))
             {
-                const uint32_t first = (uint32_t)result;
-                for (uint32_t at = starts[i]; result >= 0 && at < ends[i];)
+                const uint32_t last = pp_run_end(refine_flags, bytes, length, starts, ends, count, i);
+                const uint32_t begin = starts[i];
+                const int64_t added = c_tokenize_scalar(bytes + begin, ends[last] - begin, split_kinds + result, split_starts + result, split_ends + result,
+                                                        refine_flags | C_TOKENIZER_NO_DOLLARS);
+                for (int64_t n = 0; n < added; n += 1)
                 {
-                    if (bytes[at] == '$')
-                    {
-                        split_kinds[result] = C_TOKEN_UNKNOWN;
-                        split_starts[result] = at;
-                        split_ends[result] = at + 1;
-                        result += 1;
-                        at += 1;
-                    }
-                    else
-                    {
-                        const uint32_t begin = at;
-                        while (at < ends[i] && bytes[at] != '$')
-                        {
-                            at += 1;
-                        }
-                        const int64_t added = c_tokenize_scalar(bytes + begin, at - begin, split_kinds + result, split_starts + result, split_ends + result, refine_flags);
-                        for (int64_t n = 0; n < added; n += 1)
-                        {
-                            split_kinds[result + n] &= 0x7F;
-                            split_starts[result + n] += begin;
-                            split_ends[result + n] += begin;
-                        }
-                        result = added >= 0 ? result + added : -1;
-                    }
+                    split_kinds[result + n] &= 0x7F;
+                    split_starts[result + n] += begin;
+                    split_ends[result + n] += begin;
                 }
-                if (result > first)
+                if (added > 0)
                 {
-                    split_kinds[first] |= kinds[i] & BUSTER_C_TOKEN_START_OF_LINE;
+                    const int64_t final = result + added - 1;
+                    split_kinds[result] |= kinds[i] & BUSTER_C_TOKEN_START_OF_LINE;
+                    whole = split_kinds[final] == C_TOKEN_UNKNOWN && (split_ends[final] - split_starts[final] > 1 || bytes[split_starts[final]] != '$');
                 }
+                result = added >= 0 ? result + added : -1;
+                i = last;
             }
             else
             {
@@ -1698,7 +1706,11 @@ static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uin
                 result += 1;
             }
         }
-        if (result >= 0)
+        if (result >= 0 && whole)
+        {
+            result = c_tokenize_scalar(bytes, length, kinds, starts, ends, refine_flags | C_TOKENIZER_NO_DOLLARS);
+        }
+        else if (result >= 0)
         {
             memcpy(kinds, split_kinds, result);
             memcpy(starts, split_starts, (uint64_t)result * sizeof(uint32_t));
@@ -1709,20 +1721,24 @@ static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uin
     return result;
 }
 
-// Splits, among `count` freshly lexed tokens, the prefixed literals that `mode`'s language doesn't have (a scan of the
-// kinds, and the rare split: pp_split_prefixes), then '$' punctuation where it is (pp_split_dollars). Returns the new
-// count, or -1 on allocation failure.
-static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, bool vectorized)
+// The lexer's flags for a mode: refinement's (trigraphs), and C_TOKENIZER_NO_DOLLARS where '$' is punctuation.
+static uint32_t pp_lex_flags(const PPPrepare* mode)
 {
-    int64_t result = count;
-    if (mode->split_kinds != 0)
+    return mode->refine_flags | (mode->dollar_punctuation ? C_TOKENIZER_NO_DOLLARS : 0);
+}
+
+// Splits, among `count` freshly lexed tokens of `length` bytes, '$' out of the identifiers and pp-numbers that the
+// vectorized lexer gave it to, where it is punctuation (pp_split_dollars: the scalar lexer, pp_lex_flags, lexes it so
+// itself, so `vectorized` says which made them), then the prefixed literals that `mode`'s language doesn't have (a
+// scan of the kinds, and the rare split: pp_split_prefixes), the literals pp_split_dollars makes among them. Returns
+// the new count, or -1 on allocation failure.
+static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, bool vectorized)
+{
+    int64_t result = mode->dollar_punctuation && vectorized ? pp_split_dollars(mode->refine_flags, bytes, length, kinds, starts, ends, count) : count;
+    if (result > 0 && mode->split_kinds != 0)
     {
-        const uint32_t splits = vectorized ? pp_count_splits_vector(kinds, count, mode->split_kinds) : pp_count_splits_scalar(kinds, count, mode->split_kinds);
-        result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, count, splits, mode->split_kinds) : count;
-    }
-    if (mode->dollar_punctuation)
-    {
-        result = pp_split_dollars(mode->refine_flags, bytes, kinds, starts, ends, (uint32_t)result);
+        const uint32_t splits = vectorized ? pp_count_splits_vector(kinds, (uint32_t)result, mode->split_kinds) : pp_count_splits_scalar(kinds, (uint32_t)result, mode->split_kinds);
+        result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, (uint32_t)result, splits, mode->split_kinds) : result;
     }
     return result;
 }
@@ -1754,11 +1770,12 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
     int64_t count = -1;
     if (pushed)
     {
-        count = prepare->dollar_punctuation && !prepare->vectorized ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags)
+        // The scalar kernels lex '$' as punctuation themselves, the twin of the vectorized lexer and pp_split_dollars.
+        count = prepare->dollar_punctuation && !prepare->vectorized ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, pp_lex_flags(prepare))
                                                                     : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags);
     }
     const bool lexed = count >= 0;
-    count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->kinds, data->starts, data->values, (uint32_t)count, prepare->vectorized) : count;
+    count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds, data->starts, data->values, (uint32_t)count, prepare->vectorized) : count;
     if (ticks != 0)
     {
         const uint64_t now = __rdtsc();
@@ -3645,9 +3662,9 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
     uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
     const PPPrepare mode = pp_prepare_config(pp);
-    count = count > 0 ? pp_lex_for_mode(&mode, bytes, kinds, starts, ends, (uint32_t)count, false) : count;
+    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp_lex_flags(&mode)) : -1;
+    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, (uint32_t)count, false) : count;
     uint32_t result = count >= 0 && pp_room(pp, into, (uint32_t)count) ? (uint32_t)count : BUSTER_PP_NONE;
     for (uint32_t i = 0; result != BUSTER_PP_NONE && i < (uint32_t)count; i += 1)
     {
@@ -3709,9 +3726,9 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
             uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-            int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, pp->refine_flags) : -1;
-            // Where '$' is punctuation (pp_split_dollars), `$ ## x` gives two tokens.
-            count = count > 0 && pp_dollar_punctuation(&pp->options) ? pp_split_dollars(pp->refine_flags, joined, kinds, starts, ends, (uint32_t)count) : count;
+            // Where '$' is punctuation (pp_dollar_punctuation), `$ ## x` gives two tokens.
+            const uint32_t flags = pp->refine_flags | (pp_dollar_punctuation(&pp->options) ? C_TOKENIZER_NO_DOLLARS : 0);
+            const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, flags) : -1;
             // A prefixed literal the mode doesn't have lexes as two tokens (pp_split_kinds).
             valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_splits_kind(pp->split_kinds, kinds[0]);
             kind = valid ? kinds[0] & 0x7F : kind;

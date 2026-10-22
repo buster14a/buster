@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 101 | |
+| The built-in cases (`pp_test_cases`) | 107 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -607,8 +607,18 @@ decides after every argument:
     output's keyword kinds read. C23 keeps `typeof` without them.
   - `$` in identifiers and pp-numbers: `-fno-dollars-in-identifiers` makes it
     punctuation in C, as it is in assembly, and `-fdollars-in-identifiers` gives
-    assembly's identifiers it back (`pp_dollar_punctuation`, which
-    `pp_split_dollars`, the file cache and pasting follow).
+    assembly's identifiers it back (`pp_dollar_punctuation`, which the file
+    cache and pasting follow). The scalar lexer lexes `$` as punctuation itself
+    (`C_TOKENIZER_NO_DOLLARS`), which the scalar kernels and pastes use. The
+    vectorized lexer takes it into identifiers and pp-numbers, so
+    `pp_split_dollars` lexes again, with the scalar lexer, each run of tokens
+    that holds one (tokens with nothing but line splices between them): what
+    follows a `$` then joins the tokens after it as in clang (`$L"x"` is `$` and
+    a wide string literal, and `x$1.5` is `x`, `$` and `1.5`). A run that ends in
+    an unknown token other than `$` (an unterminated literal: C23's digit
+    separators can free a quote, as in `$1'2'`) has the whole file lexed so
+    instead, since the literal takes the rest of the line. The literal prefixes
+    the mode doesn't have are split after that.
   - Character constants in `#if` follow the last of `-funsigned-char` and
     `-fno-signed-char` (unsigned) and `-fsigned-char` and `-fno-unsigned-char`
     (signed, the default). With unsigned char, `'\xff'` is 255 and an ordinary
@@ -996,7 +1006,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 101 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 107 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -1072,9 +1082,11 @@ full-corpus reproduction and frozen CI subset.
   - the `-f` options buster models (#281): GNU's keywords off in `gnu89`, on in
     `c89` with `-fasm`, and `-f[no-]gnu-keywords` against a later `-f[no-]asm`;
     `$` as punctuation in C, in a paste too and stringized (beside an
-    identifier written with a UCN), and in assembly's identifiers; and character
-    constants in `#if` with unsigned and signed char, multi-character ones among
-    them.
+    identifier written with a UCN), and in assembly's identifiers; what follows a
+    `$` joining the tokens after it, in C, C23 and assembly (#283's review):
+    prefixed literals (`u8'x'` from C23 only), one across a line splice,
+    pp-numbers, and a quote a digit separator frees; and character constants in
+    `#if` with unsigned and signed char, multi-character ones among them.
 
   A case can name more files, and options for both sides (`-I`, `-include`,
   with `%d` for its directory), and the text `-E` prints with line markers. A

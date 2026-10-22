@@ -120,15 +120,14 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
     return result;
 }
 
-// Lexes a text as the language mode does: c_tokenize, then the prefixed literals the mode doesn't have split, by `split`
-// (pp_split_kinds), and '$' split out where it is punctuation (`dollars`, pp_dollar_punctuation). Returns the count, or
-// -1.
+// Lexes a text as the language mode does: c_tokenize, with '$' as punctuation where it is (`dollars`,
+// pp_dollar_punctuation: C_TOKENIZER_NO_DOLLARS, the scalar lexer's, not the stream's pp_split_dollars), then the
+// prefixed literals the mode doesn't have split, by `split` (pp_split_kinds). Returns the count, or -1.
 static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
 {
-    int64_t result = c_tokenize(text, length, kinds, starts, ends, 0);
+    int64_t result = c_tokenize(text, length, kinds, starts, ends, dollars ? C_TOKENIZER_NO_DOLLARS : 0);
     const uint32_t splits = result > 0 ? pp_count_splits_scalar(kinds, (uint32_t)result, split) : 0;
     result = splits != 0 ? pp_split_prefixes(text, kinds, starts, ends, (uint32_t)result, splits, split) : result;
-    result = result > 0 && dollars ? pp_split_dollars(0, text, kinds, starts, ends, (uint32_t)result) : result;
     return result;
 }
 
@@ -875,6 +874,17 @@ static const PPTestCase pp_test_cases[] = {
       "aa $ BB 1 $ BB $ BB \"aa$bb\" \"$ bb$\" \"caf\\u00e9$bb\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
     { "pasting '$' as punctuation", "#define cat(a, b) a ## b\ncat(x, $)\n", 0, "c17", "x $\n", true, 0, "-fdollars-in-identifiers -fno-dollars-in-identifiers", 0 },
     { "-fdollars-in-identifiers in assembly", "#define bb BB\naa$bb $bb\n", 0, "gnu17", "aa$bb $bb\n", false, 0, "-x assembler-with-cpp -fdollars-in-identifiers", 0 },
+    // What follows a '$' joins the tokens after it as clang lexes them (#283's review): a literal's prefix (u8'x' only
+    // from C23), and a pp-number's continuation; and a quote C23's digit separators free, which takes the rest of the line.
+    { "'$' before prefixed literals and pp-numbers", "#define L changed\n#define u changed\n#define U changed\n#define u8 changed\n#define e changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\"x\") S($u\"x\") S($U'x') S($u8\"x\") S(a$L\"x\") S($u8'x') S($1.e) S(x$1.5) S(1$e+5)\n", 0, "c17",
+      "\"$L\\\"x\\\"\" \"$u\\\"x\\\"\" \"$U'x'\" \"$u8\\\"x\\\"\" \"a$L\\\"x\\\"\" \"$changed'x'\" \"$1.e\" \"x$1.5\" \"1$changed+5\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
+    { "'$' before prefixed literals in C23", "#define L changed\n#define u changed\n#define U changed\n#define u8 changed\n#define e changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\"x\") S($u\"x\") S($U'x') S($u8\"x\") S(a$L\"x\") S($u8'x') S($1.e) S(x$1.5) S(1$e+5)\n", 0, "c23",
+      "\"$L\\\"x\\\"\" \"$u\\\"x\\\"\" \"$U'x'\" \"$u8\\\"x\\\"\" \"a$L\\\"x\\\"\" \"$u8'x'\" \"$1.e\" \"x$1.5\" \"1$changed+5\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
+    { "'$' before prefixed literals in assembly", "#define L changed\n#define u changed\n#define U changed\n#define u8 changed\n#define e changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\"x\") S($u\"x\") S($U'x') S($u8\"x\") S(a$L\"x\") S($u8'x') S($1.e) S(x$1.5) S(1$e+5)\n", 0, "gnu17",
+      "\"$L\\\"x\\\"\" \"$u\\\"x\\\"\" \"$U'x'\" \"$u8\\\"x\\\"\" \"a$L\\\"x\\\"\" \"$changed'x'\" \"$1.e\" \"x$1.5\" \"1$changed+5\"\n", false, 0, "-x assembler-with-cpp", 0 },
+    { "'$' before a prefixed literal across a line splice", "#define L changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\\\n\"y\") $L\\\n\"z\"\n", 0, "c17", "\"$L\\\"y\\\"\" $ L\"z\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
+    { "'$' before a prefixed literal across a line splice in assembly", "#define L changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\\\n\"y\") $L\\\n\"z\"\n", 0, "gnu17", "\"$L\\\"y\\\"\" $ L\"z\"\n", false, 0, "-x assembler-with-cpp", 0 },
+    { "a quote after '$' that a digit separator frees", "#define x X\n$1'2' + x\nnext x\n", 0, "c23", "$ 1'2 ' + x\nnext X\n", false, 0, "-fno-dollars-in-identifiers", 0 },
     // Character constants in #if are unsigned with -funsigned-char (or -fno-signed-char), and a multi-character one's
     // first byte isn't sign-extended (#281).
     { "-funsigned-char in #if", "#if '\\xff' == 255 && 'a' - 'b' > 0 && -'\\x01' > 0 && '\\377\\377' == 65535 && '\\377abc' > 0\nyes\n#endif\n",
