@@ -114,7 +114,8 @@ decides where their tokens are joined. There are two kinds:
 
 - A stream with an unterminated literal. It runs to the end of its line in
   either text, so the line breaks clang chooses decide which tokens it takes.
-- A case with two or more tokens on presumed line 1. Clang's printer takes a
+- A case with two or more tokens on presumed line 1, where clang's lexer
+  starts them (at a line splice right before one). Clang's printer takes a
   token that started a line inside a macro's arguments for the file's first
   (`MoveToLine`'s `IsFirstInFile`), and indents it by its column in place of
   a space, which can join it to the token before.
@@ -480,6 +481,12 @@ The third freeze (`7696788`, below) found, while it ran:
   variadic `,`, clang drops `d`'s placemarker with its `##`, so `e` is the
   operand of the `##` after a comma, and stays apart (VaArgsPseudoPaste). We
   pasted `,,`, an error.
+- **Presumed line 1 at a line splice** (seed 65's case 702022, C17, a fault
+  of the comparison's own): after `# 1`, a macro whose name followed a lone
+  `\` line is on presumed line 1 for clang, whose token starts at the splice,
+  so its printer joins `.5_z` and the `4ll` that started a line in its
+  argument; the check for line 1's cases read the name's own place, on line
+  2. It now reads where clang's lexer starts the token.
 - seed 62's case 629259 (both modes), another of #247's skipped-group
   structure.
 
