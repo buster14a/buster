@@ -315,11 +315,22 @@ static bool preprocessor_fuzz_tokenize_limit(Arena* arena, String8 source, uint6
     return success;
 }
 
-// How preprocessor_fuzz_lex_printed took a printed text's token: as the lexer made it, whole on a pragma's line, or
-// whole elsewhere, where the other text's token at its index follows its end.
+// How preprocessor_fuzz_lex_printed took a printed text's token: as the lexer made it, whole on a pragma's line where it
+// doesn't run on (preprocessor_fuzz_whole_runs_on), or whole elsewhere, where the other text's token at its index
+// follows its end.
 #define BUSTER_PPF_TAKEN_LEXED 0
 #define BUSTER_PPF_TAKEN_WHOLE 1
 #define BUSTER_PPF_TAKEN_FOLLOWED 2
+
+// Whether a whole token of `text` runs on past its end in the text, so that another text's can't show where it ends:
+// an unterminated literal, or a broken string's last quote, runs on to its line's end, unless it is there already; a
+// stray `\` only takes a newline right after it into a line splice.
+static bool preprocessor_fuzz_whole_runs_on(String8 text, const PreprocessorFuzzWhole* whole)
+{
+    const bool line_end = whole->end == text.length || text.pointer[whole->end] == '\n';
+    const bool backslash = whole->end - whole->start == 1 && text.pointer[whole->start] == '\\';
+    return !line_end && !backslash;
+}
 
 // A printed text's tokens (preprocessor_fuzz_lex_printed), with how each was taken.
 typedef struct PreprocessorFuzzPrinted PreprocessorFuzzPrinted;
@@ -372,10 +383,12 @@ static bool preprocessor_fuzz_push_printed(PreprocessorFuzzPrinted* printed, uin
 //     so a `/` printed before a `*` or a `/` made the one, and a `\` before a newline the other;
 //   - the lexed token that reaches the start of one of output.whole's tokens ends where it does, and lexing goes on
 //     from there. A text without them (clang's) follows `reference`'s tokens (ours, lexed first) instead, but on a
-//     pragma's line, which such a token ends in both texts: the token at the index of one of its whole tokens is as
-//     long, when it starts with the same bytes. So an unterminated literal ends where our stream's does in both texts,
-//     rather than run on through the printer's spaces and the tokens after it to its line's end. Where it ends in
-//     clang's stream, its text can't show: clang's own tokens confirm it (c_preprocessor_fuzz.c's pp_fuzz_check_ends).
+//     pragma's line where such a token doesn't run on (preprocessor_fuzz_whole_runs_on), whose end both texts show:
+//     the token at the index of one of its whole tokens is as long, when it starts with the same bytes. So an unterminated literal ends where our stream's does in both
+//     texts, rather than run on through the printer's spaces and the tokens after it to its line's end. Where it ends
+//     in clang's stream, its text can't show: clang's own tokens confirm it (c_preprocessor_fuzz.c's
+//     pp_fuzz_check_ends), but on a pragma's line, which they don't have, and which a pragma whose tokens are expanded
+//     (`#pragma omp`) can go on past such a token.
 // A whole token is unknown. Returns false if the text can't be lexed or its whole tokens are out of order or outside
 // it.
 static bool preprocessor_fuzz_lex_printed(Arena* arena, PreprocessorFuzzOutput output, bool c23, String8 reference_text, const PreprocessorFuzzPrinted* reference, PreprocessorFuzzPrinted* result)
@@ -442,7 +455,8 @@ static bool preprocessor_fuzz_lex_printed(Arena* arena, PreprocessorFuzzOutput o
                 else if (range < output.whole_count && output.whole[range].start < end)
                 {
                     stop = output.whole[range].end;
-                    taken = output.whole[range].pragma ? BUSTER_PPF_TAKEN_WHOLE : BUSTER_PPF_TAKEN_FOLLOWED;
+                    const bool runs_on = preprocessor_fuzz_whole_runs_on(text, &output.whole[range]);
+                    taken = output.whole[range].pragma && !runs_on ? BUSTER_PPF_TAKEN_WHOLE : BUSTER_PPF_TAKEN_FOLLOWED;
                     range += 1;
                 }
                 else if (reference != 0 && printed.tokens.count < reference->tokens.count && reference->taken[printed.tokens.count] == BUSTER_PPF_TAKEN_FOLLOWED)

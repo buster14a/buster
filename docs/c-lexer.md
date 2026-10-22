@@ -386,3 +386,41 @@ Discarded, measured the same way (C, C++):
 The A/B harness and `trees/` are as in the second round. Also in the harness directory: `rounds.sh N name...` (N
 interleaved runs and their medians), `stat_remote.sh` (dispatch-stall and misprediction counters per variant) and
 `spills_cpp.sh` (the spill profile on the C++ corpus). Build and run each under `exclusive.sh`.
+
+## Pre-C23 pp-numbers (#264)
+
+`C_TOKENIZER_NO_DIGIT_SEPARATORS` makes a pp-number end before an apostrophe,
+as C17 and earlier modes require. For example, `1'000` becomes the number
+`1` and an unterminated character constant starting at `'`. Without the
+flag, the existing C23 behavior remains. The same choice applies to C++'s
+number grammar: the flag selects C++11's numbers, while the default keeps
+C++14 and later digit separators.
+
+Both scalar and SIMD paths receive the flag. The SIMD chunk loop has separate
+C and C++ specializations without separators, so the choice is outside the
+hot loop. Their apostrophe mask contains every unescaped apostrophe; the
+literal-delimiter scan no longer depends on the pp-number region's carry
+calculation. The scalar numeric-constant reader stops at the apostrophe.
+
+Every existing lexer check runs with and without the flag, including all
+snippet placements, random inputs, comments and guarded-page prefixes and
+suffixes. The targeted separator sweep adds 80,946 inputs per number mode:
+apostrophes at every position in 17 number forms, 18 followers, splices on
+either side, and positions around the source, 64-byte lane and 512-byte chunk
+boundaries. Cases without splices must remain on the SIMD path when the flag
+is set. Twenty independent Clang 23.1.3 token fixtures pin C17, C23, C++11 and
+C++26 results.
+
+`benchmark-lexer [--cplusplus] [--no-digit-separators] path...` passes the
+same flag to both implementations and checks their tokens before timing.
+The preprocessor selects it for modes before C23 and removes its old scan
+through every number's bytes; literal-prefix splitting stays.
+
+The completion qualification is tracked in [PR #278](https://github.com/buster14a/buster/pull/278).
+It runs the tests and the C17 300,000-case Clang differential on the locked
+9700X, then three rotating rounds against frozen main `f3a68dd` and
+#263 `8fb1cd5`, using identical `sqlite3.c` and frozen `main.c` inputs.
+Each lexer/preprocessor command takes 21 interleaved samples after warm-up,
+pinned to CPU 2. The candidate's lexer is measured both with and without the
+flag. These new results have not yet been recorded; the earlier tables in
+this document describe their explicitly named revisions.

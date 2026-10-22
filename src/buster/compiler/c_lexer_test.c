@@ -23,6 +23,7 @@
 //   - Random inputs: N of them (BUSTER_TEST_DEFAULT_RANDOM_INPUTS by default) from fuzz_input, which strings
 //     fuzz_pieces together with a xorshift sequence. --seed N picks another sequence: the one upstream's --seed N
 //     picks. The first inputs that differ are saved in the current directory as fuzz_failure_0.c, fuzz_failure_1.c...
+//     (fuzz_failure_no_separators_0.c... without digit separators).
 //   - Page edges: inputs of 0 to BUSTER_TEST_PAGE_EDGE_LENGTHS - 1 bytes that end exactly at the end of a readable
 //     page, or start exactly at the start of one, in a mapping with a PROT_NONE guard page on either side. Each one is
 //     a prefix or a suffix of a template: the snippet repeated, BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES strings of
@@ -33,19 +34,28 @@
 //   - Comment delimiters: comments that end around the leading-comment scanner's 64-byte loads and around 512-byte
 //     chunk boundaries (with closers split across chunks), at every misalignment from a cache line, a spliced closer
 //     and a closer right after a slash among them (see check_comments).
+//   - Digit separators: pp-numbers with a '\'' at every place, then what may follow one, with line splices around the
+//     '\'' too, placed so that the '\'' is around the start of the source and the ends of a vector and of a chunk (see
+//     check_separators); then inputs with the tokens clang's raw lexer gives them (check_separator_fixtures).
+//
+// Every check lexes each of its inputs twice: as C23 (or C++26) lexes numbers, and without digit separators
+// (C_TOKENIZER_NO_DIGIT_SEPARATORS, as C17 or C++11 does), and prints the second's counts on a line of their own.
 //
 // --cplusplus tokenizes everything as C++, with boundary_snippet_cpp instead and the fuzz_pieces_cpp pieces too. The
 // results go to stdout, with the first differences of each check. The exit status is 1 if the arguments are invalid
 // or a check fails.
 //
 // Layout, in this order:
-//   - The comparison: TokenArrays, print_token and compare.
+//   - The comparison: TokenArrays, print_token, compare, and the number modes (number_mode_flags and
+//     print_counts).
 //   - The snippet: boundary_snippet, boundary_snippet_cpp and check_snippet.
 //   - Random inputs: random_next, fuzz_pieces, fuzz_pieces_cpp, has_backslash, fuzz_input, save_failure and
 //     check_random.
 //   - Page edges: page_edge_input, report_fault, page_edge_template and check_page_edges.
 //   - Comment delimiters: check_comments, with delimiters split across the prefix scanner's unaligned loads and
 //     across chunks.
+//   - Digit separators: separator_numbers, separator_followers, separator_splices, separator_places,
+//     check_separators, then SeparatorFixture, separator_fixtures and check_separator_fixtures.
 //   - run_c_lexer_tests, with parse_u64.
 
 #include <stdint.h>
@@ -189,6 +199,26 @@ static Comparison compare(String8 source, TokenArrays* vectorized, TokenArrays* 
     return result;
 }
 
+// The two ways every check lexes numbers: as C23 and C++26 do, and without digit separators, as C17 and C++11 do.
+// A check prints its counts for the second after the first's, with this name after its own.
+#define BUSTER_TEST_NUMBER_MODES 2
+static const uint32_t number_mode_flags[BUSTER_TEST_NUMBER_MODES] = { 0, C_TOKENIZER_NO_DIGIT_SEPARATORS };
+static const char* const number_mode_names[BUSTER_TEST_NUMBER_MODES] = { "", " without digit separators" };
+
+// Prints a check's counts of `total` inputs (`items`) in each number mode, and returns their sum.
+static CheckCounts print_counts(const char* check, uint64_t total, const char* items, const CheckCounts counts[BUSTER_TEST_NUMBER_MODES])
+{
+    CheckCounts sum = {0};
+    for (uint32_t mode = 0; mode < BUSTER_TEST_NUMBER_MODES; mode += 1)
+    {
+        printf("%s%s: %lu of %lu %s differ, %lu need the scalar lexer for a part\n", check, number_mode_names[mode], (unsigned long)counts[mode].different,
+               (unsigned long)total, items, (unsigned long)counts[mode].fell_back);
+        sum.different += counts[mode].different;
+        sum.fell_back += counts[mode].fell_back;
+    }
+    return sum;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The snippet
 
@@ -229,8 +259,8 @@ _Static_assert(BUSTER_TEST_BUFFER_ALIGNMENT - 1 + BUSTER_TEST_SNIPPET_PADDING - 
                "the C++ snippet doesn't fit after the padding");
 _Static_assert(BUSTER_TEST_SNIPPET_BUFFER_BYTES <= BUSTER_TEST_MAX_INPUT_BYTES, "a snippet placement doesn't fit in the output arrays");
 
-// Compares the paths on the snippet after each padding at each misalignment, and prints the counts. The first
-// placements that differ or need the scalar lexer are printed too.
+// Compares the paths on the snippet after each padding at each misalignment, in each number mode, and prints the
+// counts. The first placements that differ or need the scalar lexer are printed too. Returns the modes' counts summed.
 static CheckCounts check_snippet(TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
 {
     uint8_t buffer[BUSTER_TEST_SNIPPET_BUFFER_BYTES] __attribute__((aligned(BUSTER_TEST_BUFFER_ALIGNMENT)));
@@ -238,7 +268,7 @@ static CheckCounts check_snippet(TokenArrays* vectorized, TokenArrays* scalar, u
     const char* snippet = cplusplus ? boundary_snippet_cpp : boundary_snippet;
     const uint64_t snippet_length =
         cplusplus ? BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet_cpp) : BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet);
-    CheckCounts counts = {0};
+    CheckCounts counts[BUSTER_TEST_NUMBER_MODES] = {0};
     char name[128];
     for (uint64_t misalignment = 0; misalignment < BUSTER_TEST_BUFFER_ALIGNMENT; misalignment += 1)
     {
@@ -252,19 +282,22 @@ static CheckCounts check_snippet(TokenArrays* vectorized, TokenArrays* scalar, u
             }
             memcpy(buffer + misalignment + padding, snippet, snippet_length);
             const String8 placement = { .pointer = (char*)buffer + misalignment, .length = padding + snippet_length };
-            snprintf(name, sizeof(name), "snippet (misalignment %lu, padding %lu)", (unsigned long)misalignment, (unsigned long)padding);
-            Comparison comparison = compare(placement, vectorized, scalar, flags, counts.different < BUSTER_TEST_REPORTED_INPUTS ? name : 0);
-            if (comparison == COMPARISON_FELL_BACK && counts.fell_back < BUSTER_TEST_REPORTED_INPUTS)
+            for (uint32_t mode = 0; mode < BUSTER_TEST_NUMBER_MODES; mode += 1)
             {
-                printf("%s needs the scalar lexer for a part\n", name);
+                snprintf(name, sizeof(name), "snippet%s (misalignment %lu, padding %lu)", number_mode_names[mode], (unsigned long)misalignment,
+                         (unsigned long)padding);
+                const Comparison comparison = compare(placement, vectorized, scalar, flags | number_mode_flags[mode],
+                                                      counts[mode].different < BUSTER_TEST_REPORTED_INPUTS ? name : 0);
+                if (comparison == COMPARISON_FELL_BACK && counts[mode].fell_back < BUSTER_TEST_REPORTED_INPUTS)
+                {
+                    printf("%s needs the scalar lexer for a part\n", name);
+                }
+                counts[mode].different += comparison == COMPARISON_DIFFERENT;
+                counts[mode].fell_back += comparison == COMPARISON_FELL_BACK;
             }
-            counts.different += comparison == COMPARISON_DIFFERENT;
-            counts.fell_back += comparison == COMPARISON_FELL_BACK;
         }
     }
-    printf("snippet: %lu of %lu placements differ, %lu need the scalar lexer for a part\n", (unsigned long)counts.different,
-           (unsigned long)(BUSTER_TEST_BUFFER_ALIGNMENT * BUSTER_TEST_SNIPPET_PADDING), (unsigned long)counts.fell_back);
-    return counts;
+    return print_counts("snippet", BUSTER_TEST_BUFFER_ALIGNMENT * BUSTER_TEST_SNIPPET_PADDING, "placements", counts);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -377,11 +410,12 @@ static String8 fuzz_input(Random* random, uint8_t* buffer, uint64_t capacity, bo
     return (String8){ .pointer = (char*)buffer, .length = length };
 }
 
-// Saves a random input that the paths tokenize differently as fuzz_failure_<index>.c in the current directory.
-static void save_failure(String8 input, uint64_t index)
+// Saves a random input that the paths tokenize differently as fuzz_failure_<index>.c in the current directory, or as
+// fuzz_failure_no_separators_<index>.c in number mode 1.
+static void save_failure(String8 input, uint64_t index, uint32_t mode)
 {
     char path[64];
-    snprintf(path, sizeof(path), "fuzz_failure_%lu.c", (unsigned long)index);
+    snprintf(path, sizeof(path), mode == 0 ? "fuzz_failure_%lu.c" : "fuzz_failure_no_separators_%lu.c", (unsigned long)index);
     FILE* file = fopen(path, "wb");
     bool saved = false;
     if (file != 0)
@@ -403,13 +437,13 @@ static void save_failure(String8 input, uint64_t index)
 
 _Static_assert(BUSTER_TEST_RANDOM_INPUT_BYTES <= BUSTER_TEST_MAX_INPUT_BYTES, "a random input doesn't fit in the output arrays");
 
-// Compares the paths on `count` random inputs, and prints the counts. The first inputs that differ are printed and
-// saved too.
+// Compares the paths on `count` random inputs, in each number mode, and prints the counts. The first inputs that
+// differ are printed and saved too. Returns the modes' counts summed.
 static CheckCounts check_random(Random* random, uint64_t count, TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
 {
     uint8_t buffer[BUSTER_TEST_BUFFER_ALIGNMENT + BUSTER_TEST_RANDOM_INPUT_BYTES] __attribute__((aligned(BUSTER_TEST_BUFFER_ALIGNMENT)));
     const bool cplusplus = (flags & C_TOKENIZER_CPLUSPLUS) != 0;
-    CheckCounts counts = {0};
+    CheckCounts counts[BUSTER_TEST_NUMBER_MODES] = {0};
     char name[64];
     // The bytes around an input are left from earlier ones (the lexer doesn't read them). Zeroing the buffer first
     // makes them the same on every run.
@@ -418,19 +452,20 @@ static CheckCounts check_random(Random* random, uint64_t count, TokenArrays* vec
     {
         const uint64_t misalignment = random_next(random) % BUSTER_TEST_BUFFER_ALIGNMENT;
         const String8 input = fuzz_input(random, buffer + misalignment, BUSTER_TEST_RANDOM_INPUT_BYTES, cplusplus);
-        snprintf(name, sizeof(name), "random input %lu", (unsigned long)i);
-        const bool reported = counts.different < BUSTER_TEST_REPORTED_INPUTS;
-        Comparison comparison = compare(input, vectorized, scalar, flags, reported ? name : 0);
-        if (comparison == COMPARISON_DIFFERENT && reported)
+        for (uint32_t mode = 0; mode < BUSTER_TEST_NUMBER_MODES; mode += 1)
         {
-            save_failure(input, counts.different);
+            snprintf(name, sizeof(name), "random input %lu%s", (unsigned long)i, number_mode_names[mode]);
+            const bool reported = counts[mode].different < BUSTER_TEST_REPORTED_INPUTS;
+            const Comparison comparison = compare(input, vectorized, scalar, flags | number_mode_flags[mode], reported ? name : 0);
+            if (comparison == COMPARISON_DIFFERENT && reported)
+            {
+                save_failure(input, counts[mode].different, mode);
+            }
+            counts[mode].different += comparison == COMPARISON_DIFFERENT;
+            counts[mode].fell_back += comparison == COMPARISON_FELL_BACK;
         }
-        counts.different += comparison == COMPARISON_DIFFERENT;
-        counts.fell_back += comparison == COMPARISON_FELL_BACK;
     }
-    printf("random: %lu of %lu inputs differ, %lu need the scalar lexer for a part\n", (unsigned long)counts.different, (unsigned long)count,
-           (unsigned long)counts.fell_back);
-    return counts;
+    return print_counts("random", count, "inputs", counts);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -498,15 +533,16 @@ static void page_edge_template(Random* random, uint64_t index, uint8_t* buffer, 
 _Static_assert(BUSTER_TEST_PAGE_EDGE_LENGTHS <= BUSTER_TEST_MAX_INPUT_BYTES, "a page edge input doesn't fit in the output arrays");
 
 // Compares the paths on every prefix and suffix of each template, ending at the end of a readable page and starting at
-// the start of one, and prints the counts. The first inputs that differ are printed too. A read outside of an input
-// faults, and report_fault ends the program.
+// the start of one, in each number mode, and prints the counts. The first inputs that differ are printed too. A read
+// outside of an input faults, and report_fault ends the program. Returns the modes' counts summed.
 static CheckCounts check_page_edges(Random* random, TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
 {
     // A template, with room for the last random input to run past BUSTER_TEST_PAGE_EDGE_LENGTHS.
     uint8_t template[BUSTER_TEST_PAGE_EDGE_LENGTHS + BUSTER_TEST_RANDOM_INPUT_BYTES];
     const bool cplusplus = (flags & C_TOKENIZER_CPLUSPLUS) != 0;
     const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
-    CheckCounts counts = {0};
+    CheckCounts counts[BUSTER_TEST_NUMBER_MODES] = {0};
+    CheckCounts sum = {0};
     // A guard page, the readable page and another guard page.
     uint8_t* mapping = mmap(0, 3 * page_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint8_t* page = mapping + page_bytes;
@@ -517,7 +553,7 @@ static CheckCounts check_page_edges(Random* random, TokenArrays* vectorized, Tok
         sigaction(SIGSEGV, &action, 0) != 0)
     {
         fprintf(stderr, "page edges: can't set up the guard pages\n");
-        counts.different = 1;
+        sum.different = 1;
     }
     else
     {
@@ -536,32 +572,34 @@ static CheckCounts check_page_edges(Random* random, TokenArrays* vectorized, Tok
                         memset(page, 0, page_bytes);
                         memcpy(page + offset, content, length);
                         const String8 input = { .pointer = (char*)page + offset, .length = length };
-                        page_edge_input_length = snprintf(page_edge_input, sizeof(page_edge_input), "%s of %lu bytes of template %lu %s",
-                                                          suffix ? "suffix" : "prefix", (unsigned long)length, (unsigned long)index,
-                                                          at_start ? "at a page start" : "at a page end");
-                        const bool reported = counts.different < BUSTER_TEST_REPORTED_INPUTS;
-                        Comparison comparison = compare(input, vectorized, scalar, flags, reported ? page_edge_input : 0);
-                        if (comparison == COMPARISON_DIFFERENT && reported)
+                        for (uint32_t mode = 0; mode < BUSTER_TEST_NUMBER_MODES; mode += 1)
                         {
-                            fflush(stdout);
+                            page_edge_input_length = snprintf(page_edge_input, sizeof(page_edge_input), "%s of %lu bytes of template %lu %s%s",
+                                                              suffix ? "suffix" : "prefix", (unsigned long)length, (unsigned long)index,
+                                                              at_start ? "at a page start" : "at a page end", number_mode_names[mode]);
+                            const bool reported = counts[mode].different < BUSTER_TEST_REPORTED_INPUTS;
+                            const Comparison comparison = compare(input, vectorized, scalar, flags | number_mode_flags[mode], reported ? page_edge_input : 0);
+                            if (comparison == COMPARISON_DIFFERENT && reported)
+                            {
+                                fflush(stdout);
+                            }
+                            counts[mode].different += comparison == COMPARISON_DIFFERENT;
+                            counts[mode].fell_back += comparison == COMPARISON_FELL_BACK;
                         }
-                        counts.different += comparison == COMPARISON_DIFFERENT;
-                        counts.fell_back += comparison == COMPARISON_FELL_BACK;
                     }
                 }
             }
         }
         action.sa_handler = SIG_DFL;
         sigaction(SIGSEGV, &action, 0);
-        printf("page edges: %lu of %lu inputs differ, %lu need the scalar lexer for a part\n", (unsigned long)counts.different,
-               (unsigned long)(BUSTER_TEST_PAGE_EDGE_TEMPLATES * BUSTER_TEST_PAGE_EDGE_LENGTHS * 4), (unsigned long)counts.fell_back);
+        sum = print_counts("page edges", BUSTER_TEST_PAGE_EDGE_TEMPLATES * BUSTER_TEST_PAGE_EDGE_LENGTHS * 4, "inputs", counts);
     }
 
     if (mapping != MAP_FAILED)
     {
         munmap(mapping, 3 * page_bytes);
     }
-    return counts;
+    return sum;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -585,7 +623,7 @@ static bool check_comments(TokenArrays* vectorized, TokenArrays* scalar, uint32_
     static const bool may_fall_back[] = {false, false, false, true, true};
     uint8_t buffer[BUSTER_TEST_SNIPPET_BUFFER_BYTES] __attribute__((aligned(BUSTER_TEST_BUFFER_ALIGNMENT)));
     uint64_t checked = 0;
-    uint64_t failed = 0;
+    uint64_t failed[BUSTER_TEST_NUMBER_MODES] = {0};
     for (uint64_t alignment = 0; alignment < BUSTER_TEST_BUFFER_ALIGNMENT; alignment += 1)
     {
         for (uint64_t variant = 0; variant < BUSTER_ARRAY_LENGTH(prefixes); variant += 1)
@@ -600,22 +638,208 @@ static bool check_comments(TokenArrays* vectorized, TokenArrays* scalar, uint32_
                 memcpy(source, prefixes[variant], prefix_bytes);
                 memset(source + prefix_bytes, 'a', lengths[i]);
                 memcpy(source + prefix_bytes + lengths[i], suffixes[variant], suffix_bytes);
-                char name[128];
-                snprintf(name, sizeof(name), "comment (alignment %lu, variant %lu, length %u)",
-                         (unsigned long)alignment, (unsigned long)variant, lengths[i]);
-                const Comparison comparison = compare((String8){ .pointer = source, .length = length }, vectorized, scalar, flags,
-                                                      failed < BUSTER_TEST_REPORTED_INPUTS ? name : 0);
-                const bool unexpected_fallback = !may_fall_back[variant] && comparison == COMPARISON_FELL_BACK;
-                if (unexpected_fallback && failed < BUSTER_TEST_REPORTED_INPUTS)
+                for (uint32_t mode = 0; mode < BUSTER_TEST_NUMBER_MODES; mode += 1)
                 {
-                    printf("%s unexpectedly needs the scalar lexer\n", name);
+                    char name[128];
+                    snprintf(name, sizeof(name), "comment%s (alignment %lu, variant %lu, length %u)", number_mode_names[mode],
+                             (unsigned long)alignment, (unsigned long)variant, lengths[i]);
+                    const Comparison comparison = compare((String8){ .pointer = source, .length = length }, vectorized, scalar,
+                                                          flags | number_mode_flags[mode], failed[mode] < BUSTER_TEST_REPORTED_INPUTS ? name : 0);
+                    const bool unexpected_fallback = !may_fall_back[variant] && comparison == COMPARISON_FELL_BACK;
+                    if (unexpected_fallback && failed[mode] < BUSTER_TEST_REPORTED_INPUTS)
+                    {
+                        printf("%s unexpectedly needs the scalar lexer\n", name);
+                    }
+                    failed[mode] += comparison == COMPARISON_DIFFERENT || unexpected_fallback;
                 }
-                failed += comparison == COMPARISON_DIFFERENT || unexpected_fallback;
                 checked += 1;
             }
         }
     }
-    printf("comments: %lu of %lu cases fail\n", (unsigned long)failed, (unsigned long)checked);
+    for (uint32_t mode = 0; mode < BUSTER_TEST_NUMBER_MODES; mode += 1)
+    {
+        printf("comments%s: %lu of %lu cases fail\n", number_mode_names[mode], (unsigned long)failed[mode], (unsigned long)checked);
+    }
+    return failed[0] == 0 && failed[1] == 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Digit separators
+
+// pp-numbers that a '\'' goes into, at every place: every kind of digit, a prefix and suffixes, a '.' first and in the
+// middle, exponents with and without a sign, and numbers that have digit separators already.
+static const char* const separator_numbers[] =
+{
+    "0", "7", "1234567890", "0x1Fe+3", "0X1p-2", "1.5e+10", ".5", "0b1011", "1e", "12uLL", "1.2.3", "9e+e+5", "0x_1", "1_0",
+    "1'000'000", "0x1'f'e+5", "1.5'e'3",
+};
+// What follows a number with its '\'': the end of the source, what a digit separator may join, a sign, the ends and
+// quotes of character constants, and other literals and comments.
+static const char* const separator_followers[] =
+{
+    "", "\n", " ", ";", "'", "''", "a", "a'", "1'", "_'", "'\n", "\"s\"", "e+1", "+1", ".5", "x'y'", "/**/", "//c\n",
+};
+// The line splices before and after the '\'': none, one on either side, and on both sides with "\r\n".
+static const char* const separator_splices[][2] =
+{
+    { "", "" }, { "\\\n", "" }, { "", "\\\n" }, { "\\\r\n", "\\\r\n" },
+};
+// Where the '\'' goes in the source, which starts a chunk: around its start, and around the ends of its first vector and
+// first chunk. The chunk-ahead lane 8 covers the first bytes of the next chunk.
+static const uint32_t separator_places[] = { 0, 1, 2, 62, 63, 64, 65, 509, 510, 511, 512, 513, 514 };
+
+// The bytes before a case's '\'' at the last of separator_places, and the case's own, fit in the buffer.
+#define BUSTER_TEST_SEPARATOR_BUFFER_BYTES 1024
+
+// Compares the paths on each number of separator_numbers with a '\'' at every place in it, followed by each of
+// separator_followers, with each of separator_splices around the '\'', at each of separator_places (after spaces), in
+// each number mode, and prints the counts. Without digit separators, a case without a line splice must also stay on
+// the vectorized path: there, a '\'' outside of literals and comments always starts a character constant.
+static bool check_separators(TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
+{
+    uint8_t buffer[BUSTER_TEST_SEPARATOR_BUFFER_BYTES] __attribute__((aligned(BUSTER_TEST_BUFFER_ALIGNMENT)));
+    CheckCounts counts[BUSTER_TEST_NUMBER_MODES] = {0};
+    uint64_t unexpected_fallbacks = 0;
+    uint64_t total = 0;
+    char name[192];
+    for (uint64_t n = 0; n < BUSTER_ARRAY_LENGTH(separator_numbers); n += 1)
+    {
+        const char* number = separator_numbers[n];
+        const uint64_t number_length = strlen(number);
+        for (uint64_t at = 0; at <= number_length; at += 1)
+        {
+            for (uint64_t f = 0; f < BUSTER_ARRAY_LENGTH(separator_followers); f += 1)
+            {
+                for (uint64_t s = 0; s < BUSTER_ARRAY_LENGTH(separator_splices); s += 1)
+                {
+                    // The case: the number's first `at` bytes, the splice before, the '\'', the splice after, the
+                    // number's other bytes and the follower.
+                    char text[64];
+                    const int text_length = snprintf(text, sizeof(text), "%.*s%s'%s%s%s", (int)at, number, separator_splices[s][0],
+                                                     separator_splices[s][1], number + at, separator_followers[f]);
+                    const uint64_t quote = at + strlen(separator_splices[s][0]);
+                    for (uint64_t p = 0; p < BUSTER_ARRAY_LENGTH(separator_places); p += 1)
+                    {
+                        if (separator_places[p] >= quote)
+                        {
+                            const uint64_t padding = separator_places[p] - quote;
+                            memset(buffer, 0, sizeof(buffer));
+                            for (uint64_t b = 0; b < padding; b += 1)
+                            {
+                                buffer[b] = b % BUSTER_TEST_PADDING_LINE_BYTES == BUSTER_TEST_PADDING_LINE_BYTES - 1 ? '\n' : ' ';
+                            }
+                            memcpy(buffer + padding, text, (uint64_t)text_length);
+                            const String8 input = { .pointer = (char*)buffer, .length = padding + (uint64_t)text_length };
+                            for (uint32_t mode = 0; mode < BUSTER_TEST_NUMBER_MODES; mode += 1)
+                            {
+                                snprintf(name, sizeof(name), "number%s \"%s\" with a ' at %lu, follower %lu and splices %lu, ' at byte %u", number_mode_names[mode],
+                                         number, (unsigned long)at, (unsigned long)f, (unsigned long)s, separator_places[p]);
+                                const bool reported = counts[mode].different + unexpected_fallbacks < BUSTER_TEST_REPORTED_INPUTS;
+                                const Comparison comparison = compare(input, vectorized, scalar, flags | number_mode_flags[mode], reported ? name : 0);
+                                const bool unexpected = mode == 1 && s == 0 && comparison == COMPARISON_FELL_BACK;
+                                if (unexpected && reported)
+                                {
+                                    printf("%s unexpectedly needs the scalar lexer\n", name);
+                                }
+                                unexpected_fallbacks += unexpected;
+                                counts[mode].different += comparison == COMPARISON_DIFFERENT;
+                                counts[mode].fell_back += comparison == COMPARISON_FELL_BACK;
+                            }
+                            total += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const CheckCounts sum = print_counts("numbers", total, "cases", counts);
+    printf("numbers without digit separators: %lu cases without line splices need the scalar lexer for a part\n", (unsigned long)unexpected_fallbacks);
+    return sum.different == 0 && unexpected_fallbacks == 0;
+}
+
+// A token that clang's raw lexer gives an input: its kind (without the start-of-line bit), start and end.
+typedef struct SeparatorToken SeparatorToken;
+struct SeparatorToken
+{
+    uint8_t kind;
+    uint8_t start;
+    uint8_t end;
+};
+
+// An input, how it is lexed (C_TOKENIZER_CPLUSPLUS and C_TOKENIZER_NO_DIGIT_SEPARATORS), and its tokens.
+typedef struct SeparatorFixture SeparatorFixture;
+struct SeparatorFixture
+{
+    const char* source;
+    uint32_t flags;
+    uint32_t count;
+    SeparatorToken tokens[4];
+};
+
+// Numbers with a '\'' and the tokens clang 23.1.3's raw lexer gives them (`clang -cc1 -std=c17 -dump-raw-tokens`, and
+// c23, and `-x c++` with c++11 and c++26), with digit separators and without: a number ends before a '\'' that isn't one,
+// which starts a character constant (unknown if it is unterminated).
+static const SeparatorFixture separator_fixtures[] =
+{
+    { "1'000", 0, 1, { { C_TOKEN_NUMERIC_CONSTANT, 0, 5 } } },
+    { "1'000", C_TOKENIZER_NO_DIGIT_SEPARATORS, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 1 }, { C_TOKEN_UNKNOWN, 1, 5 } } },
+    { "1'2' x", 0, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 3 }, { C_TOKEN_UNKNOWN, 3, 6 } } },
+    { "1'2' x", C_TOKENIZER_NO_DIGIT_SEPARATORS, 3, { { C_TOKEN_NUMERIC_CONSTANT, 0, 1 }, { C_TOKEN_CHAR_CONSTANT, 1, 4 }, { C_TOKEN_RAW_IDENTIFIER, 5, 6 } } },
+    { "0x1'f", 0, 1, { { C_TOKEN_NUMERIC_CONSTANT, 0, 5 } } },
+    { "0x1'f", C_TOKENIZER_NO_DIGIT_SEPARATORS, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 3 }, { C_TOKEN_UNKNOWN, 3, 5 } } },
+    { "1'e+5", 0, 3, { { C_TOKEN_NUMERIC_CONSTANT, 0, 3 }, { C_TOKEN_PLUS, 3, 4 }, { C_TOKEN_NUMERIC_CONSTANT, 4, 5 } } },
+    { "1'e+5", C_TOKENIZER_NO_DIGIT_SEPARATORS, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 1 }, { C_TOKEN_UNKNOWN, 1, 5 } } },
+    { ".5'a'", 0, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 4 }, { C_TOKEN_UNKNOWN, 4, 5 } } },
+    { ".5'a'", C_TOKENIZER_NO_DIGIT_SEPARATORS, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 2 }, { C_TOKEN_CHAR_CONSTANT, 2, 5 } } },
+    { "1''", 0, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 1 }, { C_TOKEN_UNKNOWN, 1, 3 } } },
+    { "1''", C_TOKENIZER_NO_DIGIT_SEPARATORS, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 1 }, { C_TOKEN_UNKNOWN, 1, 3 } } },
+    { "1'\\\n2 y", 0, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 5 }, { C_TOKEN_RAW_IDENTIFIER, 6, 7 } } },
+    { "1'\\\n2 y", C_TOKENIZER_NO_DIGIT_SEPARATORS, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 1 }, { C_TOKEN_UNKNOWN, 1, 7 } } },
+    { "1'", 0, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 1 }, { C_TOKEN_UNKNOWN, 1, 2 } } },
+    { "1'", C_TOKENIZER_NO_DIGIT_SEPARATORS, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 1 }, { C_TOKEN_UNKNOWN, 1, 2 } } },
+    { "1'2'_x y", C_TOKENIZER_CPLUSPLUS, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 6 }, { C_TOKEN_RAW_IDENTIFIER, 7, 8 } } },
+    { "1'2'_x y", C_TOKENIZER_CPLUSPLUS | C_TOKENIZER_NO_DIGIT_SEPARATORS, 3,
+      { { C_TOKEN_NUMERIC_CONSTANT, 0, 1 }, { C_TOKEN_CHAR_CONSTANT, 1, 6 }, { C_TOKEN_RAW_IDENTIFIER, 7, 8 } } },
+    { "1'2\"s\"", C_TOKENIZER_CPLUSPLUS, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 3 }, { C_TOKEN_STRING_LITERAL, 3, 6 } } },
+    { "1'2\"s\"", C_TOKENIZER_CPLUSPLUS | C_TOKENIZER_NO_DIGIT_SEPARATORS, 2, { { C_TOKEN_NUMERIC_CONSTANT, 0, 1 }, { C_TOKEN_UNKNOWN, 1, 6 } } },
+};
+
+// Lexes each of separator_fixtures of the language of `flags` with c_tokenize and c_tokenize_scalar, which must both
+// give its tokens, and prints the count of those that don't.
+static bool check_separator_fixtures(TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
+{
+    uint8_t buffer[BUSTER_TEST_BUFFER_ALIGNMENT] __attribute__((aligned(BUSTER_TEST_BUFFER_ALIGNMENT)));
+    uint64_t checked = 0;
+    uint64_t failed = 0;
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(separator_fixtures); i += 1)
+    {
+        const SeparatorFixture* fixture = &separator_fixtures[i];
+        if ((fixture->flags & C_TOKENIZER_CPLUSPLUS) == (flags & C_TOKENIZER_CPLUSPLUS))
+        {
+            const uint64_t length = strlen(fixture->source);
+            memset(buffer, 0, sizeof(buffer));
+            memcpy(buffer, fixture->source, length);
+            const int64_t vectorized_count = c_tokenize(buffer, length, vectorized->kinds, vectorized->starts, vectorized->ends, fixture->flags);
+            const int64_t scalar_count = c_tokenize_scalar(buffer, length, scalar->kinds, scalar->starts, scalar->ends, fixture->flags);
+            bool same = vectorized_count == fixture->count && scalar_count == fixture->count;
+            for (uint32_t t = 0; same && t < fixture->count; t += 1)
+            {
+                const SeparatorToken token = fixture->tokens[t];
+                same = (vectorized->kinds[t] & ~BUSTER_C_TOKEN_START_OF_LINE) == token.kind && vectorized->starts[t] == token.start &&
+                       vectorized->ends[t] == token.end && (scalar->kinds[t] & ~BUSTER_C_TOKEN_START_OF_LINE) == token.kind &&
+                       scalar->starts[t] == token.start && scalar->ends[t] == token.end;
+            }
+            if (!same && failed < BUSTER_TEST_REPORTED_INPUTS)
+            {
+                printf("number fixture %lu (%s%s) differs from clang's tokens: vectorized has %ld, scalar %ld, clang %u\n", (unsigned long)i,
+                       (fixture->flags & C_TOKENIZER_CPLUSPLUS) ? "C++" : "C", (fixture->flags & C_TOKENIZER_NO_DIGIT_SEPARATORS) ? " without digit separators" : "",
+                       (long)vectorized_count, (long)scalar_count, fixture->count);
+            }
+            failed += !same;
+            checked += 1;
+        }
+    }
+    printf("number fixtures: %lu of %lu fail\n", (unsigned long)failed, (unsigned long)checked);
     return failed == 0;
 }
 
@@ -684,9 +908,13 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
         // The page edge inputs continue the random sequence, so that the random check's inputs stay upstream's.
         const CheckCounts page_edges = check_page_edges(&random, &vectorized, &scalar, flags);
         const bool comments = check_comments(&vectorized, &scalar, flags);
+        const bool numbers = check_separators(&vectorized, &scalar, flags);
+        const bool number_fixtures = check_separator_fixtures(&vectorized, &scalar, flags);
         // Random inputs and cut templates are meant to need the scalar lexer at times, but the snippet is meant to stay
         // on the vectorized path.
-        result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 && comments ? 0 : 1;
+        const bool passed = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 && comments && numbers &&
+                            number_fixtures;
+        result = passed ? 0 : 1;
     }
     return result;
 }

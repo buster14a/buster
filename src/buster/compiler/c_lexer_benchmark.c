@@ -8,12 +8,13 @@
 // https://github.com/davidgmbb/Accelerated-Zig-Parser (commit f4482e2dd53413522d75d8c254b9a824021238ce, which
 // c_lexer.c also comes from) and prints the same lines for them, so its numbers compare directly with upstream's.
 //
-// Usage: build/compiler benchmark-lexer [--cplusplus] path...
+// Usage: build/compiler benchmark-lexer [--cplusplus] [--no-digit-separators] path...
 //
 // Paths are files or directories. Directories are searched for .c and .h files, or with --cplusplus for C++ sources
-// and headers (including extensionless text files like <vector>), and --cplusplus tokenizes the corpus as C++. Run it
-// pinned to one CPU (`taskset -c 2 ...`) for stable numbers. The exit status is 1 if a path can't be read or a file
-// tokenizes differently on the vectorized and scalar paths.
+// and headers (including extensionless text files like <vector>), and --cplusplus tokenizes the corpus as C++.
+// --no-digit-separators lexes numbers as C17 (or C++11) does (C_TOKENIZER_NO_DIGIT_SEPARATORS), as the preprocessor
+// does before C23. Run it pinned to one CPU (`taskset -c 2 ...`) for stable numbers. The exit status is 1 if a path
+// can't be read or a file tokenizes differently on the vectorized and scalar paths.
 //
 // A build made by `./build.sh lexer-variant NAME=SOURCE...` has other lexers compiled in (c_lexer_variant.c, each from
 // its own copy of c_lexer.c): the corpus check then compares each with c_tokenize too, and the benchmark times them
@@ -752,12 +753,17 @@ int run_c_lexer_benchmark(int argc, char** argv)
     int result = 1;
     CorpusLoader loader = {0};
     bool valid_options = true;
+    bool no_digit_separators = false;
     uint64_t path_count = 0;
     for (int i = 1; i < argc; i += 1)
     {
         if (strcmp(argv[i], "--cplusplus") == 0)
         {
             loader.cplusplus = true;
+        }
+        else if (strcmp(argv[i], "--no-digit-separators") == 0)
+        {
+            no_digit_separators = true;
         }
         else if (argv[i][0] == '-')
         {
@@ -771,7 +777,7 @@ int run_c_lexer_benchmark(int argc, char** argv)
 
     if (!valid_options || path_count == 0)
     {
-        fprintf(stderr, "usage: %s [--cplusplus] path...\n", argv[0]);
+        fprintf(stderr, "usage: %s [--cplusplus] [--no-digit-separators] path...\n", argv[0]);
     }
     else if (!arena_initialize(&loader.memory, BUSTER_BENCHMARK_MEMORY_RESERVE) || !arena_initialize(&loader.sources, BUSTER_BENCHMARK_SOURCES_RESERVE))
     {
@@ -808,7 +814,7 @@ int run_c_lexer_benchmark(int argc, char** argv)
                 .total_bytes = loader.total_bytes,
                 .max_length = loader.max_length,
             };
-            const uint32_t flags = loader.cplusplus ? C_TOKENIZER_CPLUSPLUS : 0;
+            const uint32_t flags = (loader.cplusplus ? C_TOKENIZER_CPLUSPLUS : 0) | (no_digit_separators ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0);
             printf("%lu files, %lu bytes\n", (unsigned long)corpus.count, (unsigned long)corpus.total_bytes);
             uint64_t different = check_corpus(&corpus, &outputs[IMPLEMENTATION_VECTORIZED], &outputs[IMPLEMENTATION_SCALAR], &outputs[IMPLEMENTATION_COUNT], flags);
             if (corpus.total_bytes != 0)
