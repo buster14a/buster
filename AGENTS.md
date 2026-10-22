@@ -2148,7 +2148,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 197 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 198 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2212,8 +2212,8 @@ current directory. One block of 64 cases in 128 has every case read alone
 too, which must give its batch's result, and a batch clang gives no result
 for has its cases read alone. It exits with status 1 on any difference, a
 batch that differs from its cases alone, or a case without a result. For a
-qualification run (about 10 minutes per million cases in each mode on 16
-threads):
+qualification run (a million cases in each mode take about 7 minutes on the
+9700X's 15 threads, and 15 to 24 on a 7940HS's 16, mostly clang's processes):
 
 ```sh
 ./build/compiler test-preprocessor --clang --fuzz 1000000 --seed 11 --jobs 16

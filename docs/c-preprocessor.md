@@ -17,10 +17,10 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | --- | ---: | ---: |
 | `sqlite3.c` 3.53, with glibc's headers | 1 | 707,153 |
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
-| This repository's translation units (at 8ee1e16, with `main` at c93219a), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,021,842 |
+| This repository's translation units (at fbddd2e, with `main` at e71d7fd), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,070,090 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 197 | |
-| #109's generated cases, against `clang -E -P` ([the fuzzing](preprocessor-fuzz.md)) | 40,000,000 | |
+| The built-in cases (`pp_test_cases`) | 198 | |
+| #109's generated cases in C17 and C23, against `clang -E -P`: the last campaign's and those after it, but for 4 that #247 fixes ([the fuzzing](preprocessor-fuzz.md), "Qualification") | 42,800,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -102,6 +102,36 @@ straight from the files. `main.c` is mostly expansion: the encoder's form
 tables and the name lists are X-macros, so 100,629 object-like expansions,
 21,730 invocations with 162,318 arguments, and 66,530 pastes make more output
 tokens than there are input tokens.
+
+**#109's cost.** The fixes for what #109's fuzzing found cost more. In an
+A/B on the 9700X against `main` (e71d7fd), with this branch merged into it
+(4c6160f), medians of two interleaved rounds (each round's figures within
+0.4% of the other's):
+
+| Translation unit | `main` | With #109's fixes | Instructions/input token |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 11.21 ms | 11.90 ms | 123.28 → 133.31 |
+| `main.c` (`main`'s) | 25.23 ms | 26.37 ms | 340.41 → 372.80 |
+
+On `sqlite3.c`, lexing takes 0.36 ms more (the digit separators, below) and
+the main loop 0.38 ms more. On `main.c`, the main loop takes 0.79 ms more.
+
+What they pay for, each a difference from clang that the fuzzing found:
+- the spaces in a substitution, which follow clang's `NextTokGetsSpace` item
+  by item, and the checks `## ##` and GNU's comma make at every paste;
+- arguments expanded in the order of their parameters' first uses: a macro
+  without `__VA_OPT__` lists that order when it is compiled, and one with it
+  walks its body;
+- before C23, the search for digit separators, which reads every number's
+  bytes ("Not yet"), and the prefixes the mode lacks on unknown tokens
+  (`u8''`);
+- a paste's check of its operands for bytes past 0x7F, 64 at a time: an
+  identifier written with UCNs pastes as written.
+
+Their first versions cost 21% more instructions on `main.c` and 7.5% on
+`sqlite3.c` than the branch's base did (on the 7940HS). Listing the arguments'
+order and checking pastes 64 bytes at a time took back more than half of
+`main.c`'s.
 
 **Budget.** The front-end plan (#115) proposed 2 ms to preprocess `sqlite3.c`,
 about 16 cycles per output token, next to 2 ms for lexing every input and
@@ -884,7 +914,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 197 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 198 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -1177,10 +1207,11 @@ cleared once and reused.
 - `-E -P` keeps no line numbers, so it doesn't move the token after a
   `_Pragma` that prints nothing to its own line, as clang's printer does when
   that token is on another line; `-E` with line markers does.
-- Before C23, the digit-separator pass (`pp_lex_mode`) costs about 1.2% of
-  `sqlite3.c`'s instructions: it reads every number's bytes for a `'`. A lexer
-  flag that leaves `'` out of numbers would make it free (`c_lexer.c`'s
-  `apostrophe_separator`).
+- Before C23, the digit-separator pass (`pp_lex_mode`) costs about 2% of
+  `sqlite3.c`'s instructions: it reads every number's bytes for a `'`. Most
+  64-token blocks have a `'` somewhere, in a character constant or a comment,
+  so a block's bytes can't rule it out. A lexer flag that leaves `'` out of
+  numbers would make it free (`c_lexer.c`'s `apostrophe_separator`).
 
 ## Next steps
 
