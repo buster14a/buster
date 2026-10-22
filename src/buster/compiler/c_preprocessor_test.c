@@ -24,9 +24,10 @@
 // With files, each is preprocessed with the options (-I, -isystem, -D, -std=, -ffreestanding, ... as for -E) by both
 // kernels, which must agree, and with --clang compared with `clang -E` and the same options, spellings and line
 // markers: our side then reads clang's own predefines (`clang -dM -E` with the options, as --predefines), so that both
-// start from the same macros. The first difference is printed with the tokens around it. In both, the vectorized
-// printer's text must be the scalar printer's byte for byte, with line markers and without, and must lex back into
-// the stream's tokens.
+// start from the same macros. The first difference is printed with the tokens around it. Then, with our own
+// predefines, the macros defined at the file's end (-dM) must be `clang -dM -E`'s (pp_test_macros). In both, the
+// vectorized printer's text must be the scalar printer's byte for byte, with line markers and without, and must lex
+// back into the stream's tokens.
 //
 // main.c includes this file after c_preprocessor.c. Layout: the token spellings of a stream and of a text, the
 // comparison, clang's side (pp_test_clang), the line markers' places (PPPlaced), the cases, the files, the predefines,
@@ -1150,6 +1151,13 @@ static const PPTestCase pp_test_cases[] = {
         .expected = "builtin_names raw_names attribute_and_target",
     },
     {
+        .name = "__has_constexpr_builtin's name is raw, a macro's too",
+        .source = "#define CLZ __builtin_clz\n__has_constexpr_builtin(CLZ)\n__has_constexpr_builtin(__builtin_clz)\n#define __builtin_clz 0\n"
+                  "__has_constexpr_builtin(__builtin_clz)\n",
+        .standard = "gnu17",
+        .expected = "0 1 1",
+    },
+    {
         .name = "the oracle recognizes ext_vector_type with either attribute spelling",
         .source = "#if __has_attribute(ext_vector_type) && __has_attribute(__ext_vector_type__)\nvector_attribute\n#endif\n",
         .standard = "gnu17",
@@ -1169,6 +1177,21 @@ static const PPTestCase pp_test_cases[] = {
                   "_Pragma(\"clang assume_nonnull end\")\nint after = __LINE__;\n",
         .standard = "gnu17",
         .expected = "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint after = 503;\n",
+    },
+    {
+        .name = "-municode's UNICODE is <command line>'s first macro, before -D and -U",
+        .source = "UNICODE\n",
+        .standard = "gnu17",
+        .expected = "2",
+        .warnings = 1,
+        .options = "-DUNICODE=2 -municode",
+    },
+    {
+        .name = "-municode is a joined option, and a -U before it undefines its UNICODE",
+        .source = "#ifdef UNICODE\ndefined\n#else\nundefined\n#endif\n",
+        .standard = "gnu17",
+        .expected = "undefined",
+        .options = "-UUNICODE -municodeX",
     },
 };
 
@@ -1329,6 +1352,8 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     const char* output;
     bool markers;
     result = result && pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
+    // The cases are compared with clang: the feature queries answer as clang's.
+    options.clang_features = true;
     static InternTable tables[2];
     static Preprocessor runs[2];
     bool ran[2] = { false, false };
@@ -1385,6 +1410,180 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     return result;
 }
 
+// c_predefines_test.c's: drops the -dM lines of clang's patch release's version macros and of __BUSTER__.
+static void predefines_test_drop_versions(char* text);
+
+// The macros defined at the end of a file's translation unit (#121), with our own predefines for the options: -dM
+// against `clang -dM -E` with the same arguments, byte for byte but for the version macros of clang's patch release
+// and our __BUSTER__. So the whole table is clang's, the predefines and every definition and #undef.
+static bool pp_test_macros(int argument_count, char** arguments, const PPOptions* base, const char* path)
+{
+    PPOptions options = *base;
+    options.predefines_path = 0;
+    static InternTable table;
+    static Preprocessor pp;
+    char* ours = 0;
+    size_t ours_length = 0;
+    FILE* stream = open_memstream(&ours, &ours_length);
+    bool result = stream != 0 && intern_initialize(&table);
+    if (result)
+    {
+        result = pp_initialize(&pp, &options, &table) && pp_run(&pp, path) && pp_print_macros(&pp, stream);
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    if (stream != 0)
+    {
+        fclose(stream);
+    }
+    PPClangOutput clang = result ? pp_test_clang_process("clang", arguments, argument_count, path, true) : (PPClangOutput){ 0 };
+    char* theirs = clang.status == PP_CLANG_ACCEPTED ? clang.text : 0;
+    result = theirs != 0 && ours != 0;
+    if (result)
+    {
+        predefines_test_drop_versions(ours);
+        predefines_test_drop_versions(theirs);
+        result = strcmp(ours, theirs) == 0;
+    }
+    if (!result && ours != 0 && theirs != 0)
+    {
+        // The first line that differs.
+        uint32_t line = 1;
+        size_t at = 0;
+        for (; ours[at] != 0 && ours[at] == theirs[at]; at += 1)
+        {
+            line += ours[at] == '\n';
+        }
+        const char* our_line = ours + at;
+        const char* their_line = theirs + at;
+        while (our_line > ours && our_line[-1] != '\n')
+        {
+            our_line -= 1;
+            their_line -= 1;
+        }
+        printf("%s: -dM differs from clang's at line %u:\n  ours:  %.*s\n  clang: %.*s\n", path, line, (int)strcspn(our_line, "\n"), our_line,
+               (int)strcspn(their_line, "\n"), their_line);
+    }
+    else if (!result)
+    {
+        printf("%s: -dM failed (ours %s, clang %s)\n", path, ours != 0 ? "ran" : "failed", theirs != 0 ? "ran" : "failed");
+    }
+    free(ours);
+    free(clang.text);
+    free(clang.diagnostics);
+    return result;
+}
+
+// Assembly's printed bytes matter to GNU as even when a C token comparison treats the output as equivalent.
+static bool pp_test_assembly_printing(const char* directory)
+{
+    static const char adjacency[] = "#define D() $\n#define F() foo\n#define N() 1\nD()foo\nD()7\nF()$\nN()$\nD()D()\n";
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        const char* expected;
+        bool assembly;
+    } cases[] = {
+        {
+            "assembly immediates and dollar symbols",
+            "#define FOO 4\nmovl $FOO, %eax\nfoo$bar: jmp foo$bar\n",
+            "movl $4, %eax\nfoo$bar: jmp foo$bar\n",
+            true,
+        },
+        {
+            "assembly macro arguments separated by whitespace",
+            "#define V 5\nload $V %eax\n",
+            "load $5 %eax\n",
+            true,
+        },
+        {
+            "assembly explicit whitespace around dollars",
+            "$ FOO\nFOO $\n$/**/FOO\nFOO/**/$\n",
+            "$ FOO\nFOO $\n$ FOO\nFOO $\n",
+            true,
+        },
+        {
+            "assembly dollar adjacency after macro expansion",
+            adjacency,
+            "$foo\n$7\nfoo$\n1$\n$$\n",
+            true,
+        },
+        {
+            "C dollar tokens still need separation",
+            adjacency,
+            "$ foo\n$ 7\nfoo $\n1 $\n$ $\n",
+            false,
+        },
+    };
+    // Put '$' before, at and after each side of a 64-token boundary, including a partial final chunk.
+    static const uint32_t padding[] = { 0, 62, 63, 64, 126, 127, 128 };
+    uint32_t failures = 0;
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/dollar-printing.S", directory);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases) + BUSTER_ARRAY_LENGTH(padding); i += 1)
+    {
+        const bool boundary = i >= BUSTER_ARRAY_LENGTH(cases);
+        const uint32_t prefix = boundary ? padding[i - BUSTER_ARRAY_LENGTH(cases)] : 0;
+        char padded[256];
+        memset(padded, ';', prefix);
+        memcpy(padded + prefix, "$tail\n", sizeof("$tail\n"));
+        const char* name = boundary ? "assembly dollars at token boundaries" : cases[i].name;
+        const char* source = boundary ? padded : cases[i].source;
+        const char* expected = boundary ? padded : cases[i].expected;
+        const bool assembly = boundary || cases[i].assembly;
+        char* arguments[] = { "-std=gnu17", "-x", assembly ? "assembler-with-cpp" : "c", path };
+        Arena arena = arena_reserve(1ull << 20);
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        bool passed = pp_test_write_file(path, source) && pp_parse_options(BUSTER_ARRAY_LENGTH(arguments), arguments, &options, &arena, &input, &output, &markers);
+        static InternTable tables[2];
+        static Preprocessor runs[2];
+        bool ran[2] = { false, false };
+        for (uint32_t kernel = 0; passed && kernel < 2; kernel += 1)
+        {
+            options.scalar = kernel != 0;
+            ran[kernel] = pp_test_run(&runs[kernel], &tables[kernel], &options, path);
+        }
+        passed = passed && ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], name) && pp_same_directive_tables(&runs[0], &runs[1], name);
+        for (uint32_t kernel = 0; passed && kernel < 2; kernel += 1)
+        {
+            for (uint32_t marking = 0; passed && marking < 2; marking += 1)
+            {
+                size_t vector_length = 0;
+                size_t scalar_length = 0;
+                char* vector_text = pp_test_print(&runs[kernel], true, marking != 0, &vector_length);
+                char* scalar_text = pp_test_print(&runs[kernel], false, marking != 0, &scalar_length);
+                passed = vector_text != 0 && scalar_text != 0 && vector_length == scalar_length && memcmp(vector_text, scalar_text, vector_length) == 0;
+                passed = passed && (marking != 0 || (vector_length == strlen(expected) && memcmp(vector_text, expected, vector_length) == 0));
+                if (!passed)
+                {
+                    printf("%s: dollar-printing case %u (%u leading tokens), %s kernels%s differs\n", name, i, prefix,
+                           kernel == 0 ? "vectorized" : "scalar", marking != 0 ? " with line markers" : "");
+                    if (marking == 0 && vector_text != 0)
+                    {
+                        printf("  ours: %s  wanted: %s", vector_text, expected);
+                    }
+                }
+                free(vector_text);
+                free(scalar_text);
+            }
+        }
+        failures += !passed;
+        for (uint32_t kernel = 0; kernel < 2; kernel += 1)
+        {
+            pp_release(&runs[kernel]);
+            intern_release(&tables[kernel]);
+        }
+        arena_release(&arena);
+    }
+    unlink(path);
+    printf("dollar printing: %u of %lu cases fail\n", failures, (unsigned long)(BUSTER_ARRAY_LENGTH(cases) + BUSTER_ARRAY_LENGTH(padding)));
+    return failures == 0;
+}
+
 // One accepted file, by both kernels, and (when supplied) against Clang's already-collected output.
 static bool pp_test_file_output(const PPOptions* base, const char* path, bool with_clang, const char* text, size_t length, uint64_t* tokens)
 {
@@ -1425,7 +1624,9 @@ static bool pp_test_file(int argument_count, char** arguments, const PPOptions* 
     size_t length = 0;
     char* text = with_clang ? pp_test_clang(arguments, argument_count, path, predefines, &length) : 0;
     options.predefines_path = with_clang ? predefines : options.predefines_path;
-    const bool result = (!with_clang || text != 0) && pp_test_file_output(&options, path, with_clang, text, length, tokens);
+    bool result = (!with_clang || text != 0) && pp_test_file_output(&options, path, with_clang, text, length, tokens);
+    // Then, with our own predefines, the macros at the file's end against clang's.
+    result = result && (!with_clang || pp_test_macros(argument_count, arguments, base, path));
     free(text);
     return result;
 }
@@ -1435,8 +1636,8 @@ static int pp_test_compare_lines(const void* a, const void* b)
     return strcmp(*(char* const*)a, *(char* const*)b);
 }
 
-// The lines of a predefines text, sorted, without the macros that name clang's patch release (which the 9700X's and
-// the generator's clang differ in) and our own __BUSTER__: `lines` gets pointers into `text`, whose newlines become
+// The #define lines of a predefines text, sorted, without the macros that name clang's patch release (which the 9700X's
+// and the generator's clang differ in) and our own __BUSTER__: `lines` gets pointers into `text`, whose newlines become
 // NULs. Returns the count.
 static uint32_t pp_test_predefine_lines(char* text, size_t length, char** lines, uint32_t capacity)
 {
@@ -1453,7 +1654,8 @@ static uint32_t pp_test_predefine_lines(char* text, size_t length, char** lines,
             {
                 text[k - 1] = 0;
             }
-            bool kept = *line != 0;
+            // Only the definitions: the predefines also push two of them (#pragma push_macro), which -dM doesn't list.
+            bool kept = strncmp(line, "#define ", 8) == 0;
             for (uint32_t k = 0; kept && k < BUSTER_ARRAY_LENGTH(skipped); k += 1)
             {
                 kept = strncmp(line, skipped[k], strlen(skipped[k])) != 0;
@@ -1507,7 +1709,10 @@ static bool pp_test_predefines(const char* directory)
         bool markers;
         bool passed = pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
         char* ours = malloc(BUSTER_PP_PREDEFINES_BYTES);
-        size_t ours_length = passed && ours != 0 ? pp_predefines(&options, ours) : 0;
+        uint32_t flt_eval_method;
+        const uint32_t made = passed && ours != 0 ? pp_predefines(&options, ours, &flt_eval_method) : BUSTER_PP_PREDEFINES_BYTES + 1;
+        passed &= made <= BUSTER_PP_PREDEFINES_BYTES;
+        size_t ours_length = passed ? made : 0;
         size_t clang_length = 0;
         free(pp_test_clang(arguments, count, empty_path, clang_path, &clang_length));
         FILE* file = fopen(clang_path, "r");
@@ -1690,7 +1895,9 @@ static uint32_t pp_test_modes(const char* directory, const char* path, const cha
         const char* output;
         bool markers;
         uint64_t tokens = 0;
-        const bool passed = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers) && pp_test_file(1, arguments, &options, path, true, directory, &tokens);
+        bool passed = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers);
+        options.clang_features = true;
+        passed = passed && pp_test_file(1, arguments, &options, path, true, directory, &tokens);
         if (!passed)
         {
             printf("%s: the answers differ from clang's with %s\n", label, modes[m]);
@@ -1760,6 +1967,146 @@ static bool pp_test_features(const char* directory)
     return result && failures == 0;
 }
 
+// One option set (words separated by spaces) for `path`, against clang with the same options: the queries in the
+// oracle's mode, which answer from them. False when the answers differ or either side refuses the options.
+static bool pp_test_option_set(const char* directory, const char* path, const char* set)
+{
+    char words[512];
+    char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
+    int count = 0;
+    snprintf(words, sizeof(words), "%s", set);
+    for (char* word = strtok(words, " "); word != 0 && count < BUSTER_PP_TEST_MAX_ARGUMENTS; word = strtok(0, " "))
+    {
+        arguments[count] = word;
+        count += 1;
+    }
+    arguments[count] = (char*)path;
+    Arena arena = arena_reserve(1ull << 20);
+    PPOptions options;
+    const char* input;
+    const char* output;
+    bool markers;
+    uint64_t tokens = 0;
+    bool result = pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
+    options.clang_features = true;
+    result = result && pp_test_file(count, arguments, &options, path, true, directory, &tokens);
+    if (!result)
+    {
+        printf("feature options: the answers differ from clang's with %s\n", set);
+    }
+    arena_release(&arena);
+    return result;
+}
+
+// The queries clang answers from the options, against clang's: __has_feature and __has_extension of every feature name
+// under sanitizer options (the sanitizers they leave on, c_predefines.c's predefines_sanitizer_feature), and the four
+// __is_target_* of names around x86_64-linux-gnu's (in other cases, with prefixes, and other ABIs') under each kind of
+// target triple.
+static bool pp_test_option_features(const char* directory)
+{
+    static const char* const sanitizer_sets[] = {
+        "-fsanitize=address",
+        "-fsanitize=kernel-address",
+        "-fsanitize=hwaddress",
+        "-fsanitize=kernel-hwaddress",
+        "-fsanitize=thread",
+        "-fsanitize=memory",
+        "-fsanitize=kernel-memory",
+        "-fsanitize=leak",
+        "-fsanitize=address,leak",
+        "-fsanitize=address -fno-sanitize=kernel-address",
+        "-fsanitize=address -fsanitize=thread -fno-sanitize=address",
+        "-fsanitize=undefined",
+        "-fsanitize=undefined -fwrapv",
+        "-fsanitize=undefined -fno-strict-overflow -fno-wrapv",
+        "-fsanitize=undefined -fwrapv-pointer",
+        "-fsanitize=signed-integer-overflow -fwrapv",
+        "-fsanitize=undefined -fsanitize-ignore-for-ubsan-feature=alignment",
+        "-fsanitize=alignment -fsanitize-ignore-for-ubsan-feature=undefined",
+        "-fsanitize=undefined -mexecute-only",
+        "-fsanitize=undefined-trap -O1",
+        "-fsanitize=object-size",
+        "-fsanitize=object-size -O2",
+        "-fsanitize=object-size -O00",
+        "-fsanitize=integer,nullability,implicit-conversion,bounds,float-divide-by-zero",
+        "-fsanitize=fuzzer",
+        "-fsanitize=fuzzer -fno-sanitize=fuzzer-no-link",
+        "-fsanitize=fuzzer -fsanitize-coverage=0",
+        "-fsanitize-coverage=trace-pc-guard",
+        "-fsanitize-coverage=stack-depth",
+        "-fsanitize-coverage=pc-table,trace-div,trace-gep",
+        "-fsanitize-coverage=trace-pc-guard -fno-sanitize-coverage=trace-pc-guard",
+        "-fsanitize=scudo -fsanitize-coverage=trace-pc-guard",
+        "-fsanitize-coverage=trace-pc-guard -fsanitize=scudo -fno-sanitize=scudo",
+        "-fsanitize=cfi -flto -fvisibility=hidden",
+        "-fsanitize=cfi -flto -fvisibility=hidden -fsanitize-cfi-cross-dso",
+        "-fsanitize=cfi-icall,cfi-cast-strict -flto",
+        "-fsanitize=kcfi",
+        "-fsanitize=safe-stack",
+        "-fsanitize=shadow-call-stack",
+        "-fsanitize=dataflow",
+        "-fsanitize=numerical",
+        "-fsanitize=type",
+        "-fsanitize=realtime",
+        "-fsanitize=alloc-token",
+        "-fsanitize=vptr",
+        "-fsanitize=memtag,address,undefined -fno-sanitize=all",
+    };
+    static const char* const target_sets[] = {
+        "-std=gnu17",
+        "--target=x86_64-pc-linux-gnu",
+        "--target=x86_64-linux-gnu",
+        "--target=x86_64--linux-gnu",
+        "--target=x86_64-none-linux-gnu",
+        "--target=x86_64-PC-linux-gnu",
+        "--target=amd64-Foo-linux-gnu",
+        "-target x86_64-unknown-linux-gnu",
+    };
+    static const char target_names[] =
+        "x86_64 X86_64 x86_64h x86_64_lfi AMD64 amd64 i386 x86 x86_64x linux Linux LINUX linux2 linuxfoo lin darwin macos gnu GNU gnu2 gnux32 gnuabi "
+        "gnuabi64 gnueabi gnueabihf gnuf gnuf32 gnus gnusf2 gnut64 gnu_ilp32 musl unknown Unknown pc PC Pc none foo Foo apple";
+    char features[4096];
+    char targets[4096];
+    snprintf(features, sizeof(features), "%s/option_features.c", directory);
+    snprintf(targets, sizeof(targets), "%s/option_targets.c", directory);
+    FILE* file = fopen(features, "w");
+    bool result = file != 0;
+    if (file != 0)
+    {
+        fputs("#define S(x) #x\n", file);
+        pp_test_write_names(file, pp_test_feature_names, "__has_feature", "__has_extension");
+        result = fclose(file) == 0 && result;
+    }
+    file = fopen(targets, "w");
+    result &= file != 0;
+    for (const char* at = target_names; file != 0 && *at != 0;)
+    {
+        const char* end = strchr(at, ' ');
+        const int length = (int)(end != 0 ? end - at : (long)strlen(at));
+        fprintf(file, "%.*s: __is_target_arch(%.*s) __is_target_vendor(%.*s) __is_target_os(%.*s) __is_target_environment(%.*s)\n", length, at, length, at,
+                length, at, length, at, length, at);
+        at += length + (end != 0);
+    }
+    if (file != 0)
+    {
+        result = fclose(file) == 0 && result;
+    }
+    uint32_t failures = 0;
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(sanitizer_sets); i += 1)
+    {
+        failures += !pp_test_option_set(directory, features, sanitizer_sets[i]);
+    }
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(target_sets); i += 1)
+    {
+        failures += !pp_test_option_set(directory, targets, target_sets[i]);
+    }
+    unlink(features);
+    unlink(targets);
+    printf("feature options: %u of %u sanitizer and target option sets differ from clang's answers\n", failures,
+           (uint32_t)(BUSTER_ARRAY_LENGTH(sanitizer_sets) + BUSTER_ARRAY_LENGTH(target_sets)));
+    return result && failures == 0;
+}
+
 // __TIMESTAMP__ is the modification time of the file it is read in (local time, here UTC), or SOURCE_DATE_EPOCH's time
 // when that is set: a file and the header it includes, written with times of their own, give each theirs (both kernels,
 // and with --clang clang too). The environment is restored after.
@@ -1807,6 +2154,7 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
         const char* output;
         bool markers;
         result = pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
+        options.clang_features = true;
         static InternTable tables[2];
         static Preprocessor preprocessors[2];
         for (uint32_t k = 0; k < 2; k += 1)
@@ -1899,6 +2247,64 @@ static bool pp_test_number(const char* text, uint64_t* value)
     return result;
 }
 
+// Outside the oracle's mode, the feature queries answer what buster implements (pp_implemented_*): of builtins only the
+// preprocessor's __is_target_*, and no attribute, feature, extension or constexpr builtin; __has_warning answers as
+// clang does in both modes, and so do the queries that aren't about the compiler (__has_include, __is_identifier,
+// __is_target_*). With --clang-features, the same lines give clang's answers. Neither expands __has_constexpr_builtin's
+// name, a macro's or not.
+static bool pp_test_implemented_features(const char* directory)
+{
+    static const char source[] =
+        "A __has_builtin(__builtin_expect) __has_constexpr_builtin(__builtin_clz) __has_feature(c_static_assert) __has_extension(c_atomic) "
+        "__has_attribute(packed) __has_attribute(__packed__) __has_c_attribute(gnu::packed) __has_warning(\"-Wreserved-identifier\") "
+        "__is_identifier(int) __is_target_arch(x86_64)\n"
+        "#define CLZ __builtin_clz\n#define __builtin_clz 0\nB __has_constexpr_builtin(CLZ) __has_constexpr_builtin(__builtin_clz)\n";
+    static const char* const expected[2] = { "A 0 0 0 0 0 0 0 1 0 1 B 0 0\n", "A 1 1 1 1 1 1 1 1 0 1 B 0 1\n" };
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/case.c", directory);
+    pp_test_write_file(path, source);
+    bool result = true;
+    for (uint32_t clang = 0; clang < 2; clang += 1)
+    {
+        char* arguments[2] = { path, 0 };
+        Arena arena = arena_reserve(1ull << 20);
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        bool passed = pp_parse_options(1, arguments, &options, &arena, &input, &output, &markers);
+        options.clang_features = clang == 1;
+        static InternTable table;
+        static Preprocessor pp;
+        PPSpellings ours = { 0 };
+        PPSpellings wanted = { 0 };
+        passed = passed && pp_test_run(&pp, &table, &options, path) && pp_stream_spellings(&pp, &ours) &&
+                 pp_text_spellings((const uint8_t*)expected[clang], strlen(expected[clang]), pp.split_kinds, &wanted) &&
+                 pp_compare_spellings(&pp, &ours, &wanted, clang == 1 ? "clang's feature answers" : "implemented feature answers", "wanted");
+        pp_release(&pp);
+        intern_release(&table);
+        arena_release(&ours.arena);
+        arena_release(&wanted.arena);
+        arena_release(&arena);
+        result &= passed;
+    }
+    // The preprocessor's own builtins are what __has_builtin answers 1 for by default.
+    static const char* const own[] = { "__is_target_arch", "__is_target_vendor", "__is_target_os", "__is_target_environment" };
+    const PPOptions defaults = { .language = { .standard = 2017, .gnu = true } };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(own); i += 1)
+    {
+        result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)own[i], (uint32_t)strlen(own[i])) == 1;
+    }
+    printf("feature answers: %s (what buster implements by default, clang's with --clang-features)\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
+// c_predefines_test.c's checks and generator: main.c includes it after this file.
+static bool predefines_test_run(const char* directory, uint64_t seed);
+static bool predefines_test_print_tables(const char* directory);
+static bool predefines_test_target(void);
+static bool predefines_test_refused(void);
+
 #include "c_preprocessor_history_test.c"
 #include "c_preprocessor_order_test.c"
 
@@ -1918,6 +2324,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         .clang_path = "clang",
         .jobs = 1,
     };
+    bool generate_targets = false;
     uint64_t id_order = 153;
     bool valid = true;
     // --print-case: print that fuzz case (as clang reads it), and nothing else.
@@ -1934,7 +2341,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         const char* argument = arguments[i];
         const char* next = i + 1 < argument_count ? arguments[i + 1] : 0;
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
-                                 strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0;
+                                 strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
+                                 strcmp(argument, "-target") == 0;
         uint64_t number = 0;
         if (strcmp(argument, "--id-order") == 0 && i + 1 < argument_count)
         {
@@ -1978,6 +2386,10 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             valid = valid && (fuzz.modes[0] || fuzz.modes[1]);
             i += 1;
         }
+        else if (strcmp(argument, "--generate-targets") == 0)
+        {
+            generate_targets = true;
+        }
         else if (argument[0] == '-')
         {
             passed[passed_count++] = arguments[i];
@@ -2002,7 +2414,12 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
     const bool created = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && files != 0 && mkdtemp(directory) != 0;
     bool passed_all = created;
-    if (passed_all && file_count == 0)
+    if (passed_all && generate_targets)
+    {
+        // c_predefines.c's generated tables, from clang (c_predefines_test.c).
+        passed_all = predefines_test_print_tables(directory);
+    }
+    else if (passed_all && file_count == 0)
     {
         uint32_t failures = 0;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_test_cases); i += 1)
@@ -2012,13 +2429,19 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
         passed_all = failures == 0;
         passed_all &= pp_test_timestamps(directory, with_clang);
+        passed_all &= pp_test_implemented_features(directory);
+        passed_all &= predefines_test_target();
+        passed_all &= predefines_test_refused();
         passed_all &= pp_test_history(directory, with_clang);
         passed_all &= pp_test_id_order(directory, id_order);
+        passed_all &= pp_test_assembly_printing(directory);
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);
+            passed_all &= predefines_test_run(directory, fuzz.seed);
             passed_all &= pp_test_keywords(directory);
             passed_all &= pp_test_features(directory);
+            passed_all &= pp_test_option_features(directory);
         }
         if (fuzz.count != 0)
         {
@@ -2038,6 +2461,9 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
         with_input[passed_count] = files[0];
         passed_all = pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers);
+        // The files are compared with clang (with --clang) and taken from its corpora: the feature queries answer as
+        // clang's.
+        options.clang_features = true;
         uint32_t failures = 0;
         uint64_t tokens = 0;
         for (int i = 0; passed_all && i < file_count; i += 1)

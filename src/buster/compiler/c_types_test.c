@@ -4073,7 +4073,7 @@ static bool type_test_batch_after_completion(void)
     return tally.failures == 0;
 }
 
-int run_type_tests(int argc, char** argv)
+static int run_type_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
     uint64_t count = BUSTER_TYPE_TEST_DEFAULT_COUNT;
