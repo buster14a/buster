@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units (at fbddd2e, with `main` at e71d7fd), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,070,090 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 295 | |
+| The built-in cases (`pp_test_cases`) | 306 | |
 | #109's generated cases in C17 and C23, against `clang -E -P`: the last campaign's and those after it, but for 4 that #247 fixes ([the fuzzing](preprocessor-fuzz.md), "Qualification") | 42,800,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
@@ -1572,7 +1572,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 295 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 306 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -1931,9 +1931,12 @@ spellings alone would miss this change (#272).
 - A header query whose builtin identity appears during macro expansion can
   require a private prepared view when raw-looking header bytes swallowed
   later source. Each inclusion permits eight such repairs. A ninth produces
-  a fatal capacity diagnostic. This bounds the fallback's full-file work and
-  retained storage; unlimited contextual recovery remains follow-up work in
-  #285. Ordinary multiline raw macro arguments retain their original tokens.
+  a fatal capacity diagnostic. Executing direct directives have a separate
+  budget of 64 exceptional repairs; ordinary directives consume none. The
+  combined full-file copy/preparation work and retained storage are bounded
+  by `O((64 + 8) * N)` for a file of `N` bytes. Unlimited contextual recovery
+  remains follow-up work in #285. Excluded directives retain ordinary lexing,
+  and ordinary multiline raw macro arguments retain their original tokens.
 - c89 and C94 are lexed as clang's `-E` lexes them, without `//` comments. A
   compile driver would need clang's compiling rule there (`//` comments but for a
   `//*` before a file's first one), or to refuse those modes (#288).

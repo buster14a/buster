@@ -839,6 +839,7 @@ static const PPTestFile pp_test_files_opaque_raw[] = {
 // earlier and later macro definitions keep the prepared view that supplied their token indexes.
 static const PPTestFile pp_test_files_raw_query[] = {
     { "R\"(x", "header\n" },
+    { "raw-plain.h", "ordinary\n" },
     { "raw-view.h", "#ifndef RAW_REENTER\n#define RAW_REENTER\n#define RAW_BEFORE 11\n#if RAW_QUERY(<R\"(x>) // )\"\nouter\n#endif\n#define RAW_AFTER 22\n#include \"raw-view.h\"\nRAW_BEFORE RAW_AFTER\n#else\n#if RAW_QUERY(<R\"(x>) // )\"\ninner\n#endif\n#endif\n" },
     { "raw-once.h", "#if RAW_QUERY(<R\"(x>)\nonce\n#endif\n#pragma once\n" },
     { "raw-import.h", "#if RAW_QUERY(<R\"(x>)\nimported\n#endif\n" },
@@ -1118,6 +1119,14 @@ static const PPTestCase pp_test_cases[] = {
       0, "gnu17", "outer inner 11 22 11 22", false, 0, "-I%d", pp_test_files_raw_query },
     { "raw query private views retain once, import and guard identity", "#define RAW_QUERY __has_include\n#include \"raw-once.h\"\n#include \"raw-once.h\"\n#import \"raw-import.h\"\n#import \"raw-import.h\"\n#include \"raw-guard.h\"\n#include \"raw-guard.h\"\nafter\n",
       0, "gnu17", "once imported guarded after", false, 0, "-I%d", pp_test_files_raw_query },
+    { "an excluded raw-looking direct header stays ordinary text", "#if 0\n#include <R\"(x>\n#endif\nafter\n",
+      0, "gnu17", "", true, 0, "-I%d", pp_test_files_raw_query },
+    { "an excluded raw-looking diagnostic stays ordinary text", "#if 0\n#warning R\"(\n#endif\nafter\n",
+      0, "gnu17", "", true, 0, 0, 0 },
+    { "a malformed raw-looking active diagnostic is opaque", "#warning R\"bad\nafter\n",
+      0, "gnu17", "after", false, 1, 0, 0 },
+    { "a malformed raw-looking excluded diagnostic stays ordinary text", "#if 0\n#warning R\"bad\n#endif\nafter\n",
+      0, "gnu17", "", true, 0, 0, 0 },
     // c89 lexes neither digraphs nor "//" comments, as clang's -E has it: "%:define" is no directive, a digraph is two
     // punctuators ("<%=" is '<' and "%=", and "<::>" '<', "::" and '>'), and "//" two slashes, of which the second starts
     // a block comment before a '*'. Pasting a digraph's characters or "//" forms no token (#288).
@@ -3015,7 +3024,7 @@ static bool pp_test_raw_query_views(const char* directory)
 // a ninth reports the capacity and leaves the run failed/fatal, rather than returning a successful truncated stream.
 static bool pp_test_raw_query_capacity(const char* directory)
 {
-    char source[2048] = { 0 };
+    char source[8192] = { 0 };
     PPTestCase test = { .name = "raw query capacity", .source = source, .standard = "gnu17", .options = "-I%d", .files = pp_test_files_raw_query };
     char path[4096];
     bool result = pp_test_write_case(&test, directory, path, sizeof(path));
@@ -3030,48 +3039,59 @@ static bool pp_test_raw_query_capacity(const char* directory)
     result = result && pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
     static InternTable table;
     static Preprocessor run;
-    for (uint32_t repairs = BUSTER_PP_MAX_QUERY_REPAIRS; result && repairs <= BUSTER_PP_MAX_QUERY_REPAIRS + 1; repairs += 1)
+    for (uint32_t family = 0; result && family < 2; family += 1)
     {
-        uint32_t length = (uint32_t)snprintf(source, sizeof(source), "#define RAW_QUERY __has_include\n");
-        for (uint32_t i = 0; i < repairs; i += 1)
+        const uint32_t capacity = family == 0 ? BUSTER_PP_MAX_QUERY_REPAIRS : BUSTER_PP_MAX_DIRECT_REPAIRS;
+        const uint32_t ordinary = family == 0 ? 0 : capacity + 1;
+        char message[128];
+        snprintf(message, sizeof(message), "%s recovery capacity exceeded (%u repairs per inclusion)", family == 0 ? "header query" : "opaque directive", capacity);
+        for (uint32_t repairs = capacity; result && repairs <= capacity + 1; repairs += 1)
         {
-            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n");
-        }
-        snprintf(source + length, sizeof(source) - length, "tail\n");
-        result = pp_test_write_file(path, source);
-        for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
-        {
-            options.scalar = kernel != 0;
-            FILE* caught = 0;
-            const int saved = pp_test_catch_stderr(&caught);
-            const bool ran = saved >= 0 && pp_test_run(&run, &table, &options, path);
-            char messages[2048];
-            pp_test_release_stderr(saved, caught, messages, sizeof(messages));
-            uint32_t views = 0;
-            for (uint32_t d = 0; d < run.data_count; d += 1)
+            uint32_t length = (uint32_t)snprintf(source, sizeof(source), "#define RAW_QUERY __has_include\n");
+            for (uint32_t i = 0; family != 0 && i <= capacity; i += 1)
             {
-                views += run.datas[d].lexical_bytes != 0;
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "#include <raw-plain.h>\n");
             }
-            const bool exceeded = repairs > BUSTER_PP_MAX_QUERY_REPAIRS;
-            result = saved >= 0 && ran != exceeded && run.fatal == exceeded && run.errors == (uint32_t)exceeded && views == BUSTER_PP_MAX_QUERY_REPAIRS;
-            if (exceeded)
+            for (uint32_t i = 0; i < repairs; i += 1)
             {
-                result = result && strstr(messages, "header query recovery capacity exceeded (8 repairs per inclusion)") != 0;
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, family == 0 ? "#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n" : "#include <R\"(x>\n");
             }
-            else
+            snprintf(source + length, sizeof(source) - length, "tail\n");
+            result = pp_test_write_file(path, source);
+            for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
             {
-                const uint32_t last = run.output.count != 0 ? run.output.count - 1 : 0;
-                const IdentId name = run.output.count != 0 ? run.output.values[last] : 0;
-                result = result && messages[0] == 0 && run.output.count == repairs + 1 && run.output.kinds[last] == C_TOKEN_RAW_IDENTIFIER &&
-                         intern_length(&table, name) == 4 && memcmp(intern_bytes(&table, name), "tail", 4) == 0;
+                options.scalar = kernel != 0;
+                FILE* caught = 0;
+                const int saved = pp_test_catch_stderr(&caught);
+                const bool ran = saved >= 0 && pp_test_run(&run, &table, &options, path);
+                char messages[2048];
+                pp_test_release_stderr(saved, caught, messages, sizeof(messages));
+                uint32_t views = 0;
+                for (uint32_t d = 0; d < run.data_count; d += 1)
+                {
+                    views += run.datas[d].lexical_bytes != 0;
+                }
+                const bool exceeded = repairs > capacity;
+                result = saved >= 0 && ran != exceeded && run.fatal == exceeded && run.errors == (uint32_t)exceeded && views == capacity;
+                if (exceeded)
+                {
+                    result = result && strstr(messages, message) != 0;
+                }
+                else
+                {
+                    const uint32_t last = run.output.count != 0 ? run.output.count - 1 : 0;
+                    const IdentId name = run.output.count != 0 ? run.output.values[last] : 0;
+                    result = result && messages[0] == 0 && run.output.count == repairs + ordinary + 1 && run.output.kinds[last] == C_TOKEN_RAW_IDENTIFIER &&
+                             intern_length(&table, name) == 4 && memcmp(intern_bytes(&table, name), "tail", 4) == 0;
+                }
+                pp_release(&run);
+                intern_release(&table);
             }
-            pp_release(&run);
-            intern_release(&table);
         }
     }
     arena_release(&arena);
     pp_test_remove_case(&test, directory);
-    printf("raw query recovery capacity: %s (eight succeed, ninth fails, both kernels)\n", result ? "pass" : "FAIL");
+    printf("opaque recovery capacity: %s (8/9 queries, 64/65 direct repairs, ordinary directives uncharged, both kernels)\n", result ? "pass" : "FAIL");
     return result;
 }
 

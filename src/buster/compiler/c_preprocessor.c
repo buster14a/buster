@@ -6383,6 +6383,29 @@ static bool pp_recover_query_raw(Preprocessor* pp, uint32_t file_context, uint32
     return !overlap || pp_recover_opaque_span(pp, file_context, directive, first + 1, stop - 1, true);
 }
 
+// Only an executing direct header directive owns this source span. An excluded directive never reaches this hook,
+// so raw-looking text in skipped groups retains the ordinary lexer's behavior and cannot reveal hidden directives.
+static bool pp_recover_direct_raw(Preprocessor* pp, PPContext* context, uint32_t directive)
+{
+    const PPFileData* data = &pp->datas[context->data];
+    const uint8_t kind = data->directive_kind[directive];
+    const bool header = kind == PP_DIRECTIVE_INCLUDE || kind == PP_DIRECTIVE_INCLUDE_NEXT || kind == PP_DIRECTIVE_IMPORT || kind == PP_DIRECTIVE_EMBED;
+    const uint32_t first = data->directive_hash[directive] + 2;
+    const uint32_t end = data->directive_end[directive];
+    bool result = true;
+    if (header && (pp->refine_flags & C_TOKENIZER_RAW_STRINGS) && first < end && (data->kinds[first] & 0x7F) == C_TOKEN_LESS)
+    {
+        uint32_t length;
+        bool whole;
+        const uint32_t stop = pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole);
+        if (stop != 0 && pp_query_raw_overlap(pp, data, data->starts[first], stop))
+        {
+            result = pp_recover_opaque_span(pp, (uint32_t)(context - pp->contexts), directive, data->starts[first] + 1, stop - 1, false);
+        }
+    }
+    return result;
+}
+
 // An include-like builtin's '(' (__has_include's, __has_include_next's or __has_embed's) was just read from its #if or
 // #elif line itself, the barrier of the line's capture: a '<' next is a header name as the line writes it, read as
 // #include reads one (pp_scan_header_name), where clang's LexHeaderName lexes one from its file, and not joined from
@@ -10040,6 +10063,10 @@ static void pp_embed(Preprocessor* pp, PPContext* context, uint32_t d);
 static void pp_directive(Preprocessor* pp, PPContext* context)
 {
     const uint32_t d = context->next_directive;
+    if (!pp_recover_direct_raw(pp, context, d))
+    {
+        return;
+    }
     const PPFileData* data = &pp->datas[context->data];
     const uint32_t data_index = context->data;
     const uint32_t hash = data->directive_hash[d];
