@@ -87,7 +87,8 @@
 #define BUSTER_PP_NO_EXPAND 0x04 // It names a macro that was disabled when it was read: it never expands.
 #define BUSTER_PP_FROM_MACRO 0x08 // A macro's expansion made it (for __LINE__ and __FILE__).
 // Its BUSTER_PP_SPACE stands for the line it started among a macro's arguments, where clang's token keeps its own
-// flags: clang's -P printer gives it no space for that (test-preprocessor's emulation of it reads this).
+// flags: clang's printer gives it no space for that, and starts a line with it when its expansion's line is another one
+// (-E with line markers does the same, and test-preprocessor's emulation of the -P printer reads this).
 #define BUSTER_PP_LINE_SPACE 0x10
 // Its BUSTER_PP_SPACE is an expansion's name's, which the expansion's first token takes (and an empty expansion passes
 // on to the next token): clang's token then has a leading space only as the name does, for whitespace or a comment
@@ -4767,9 +4768,13 @@ static void pp_collect_step(Preprocessor* pp)
     {
         while (collected == PP_COLLECTED_MORE && context->position < context->end)
         {
-            const PPToken token = pp_context_token(pp, context, context->position);
+            PPToken token = pp_context_token(pp, context, context->position);
             const uint32_t expansion_end = pp_expansion_end(context, token);
             context->position += 1;
+            // A name of a macro disabled now is painted: the expansion it is in can end before the argument expands,
+            // which enables the macro again (Preprocessor::ReadMacroCallArgumentList, C 6.10.4.4p2).
+            const bool disabled = token.kind == C_TOKEN_RAW_IDENTIFIER && pp_is_macro(pp, token.value) && pp->macros[pp->macro_of[token.value]].disabled != 0;
+            token.flags |= disabled ? BUSTER_PP_NO_EXPAND : 0;
             collected = pp_collect_token(pp, invocation, token, expansion_end);
         }
     }
@@ -5435,8 +5440,8 @@ static void pp_start_stream(Preprocessor* pp)
     }
 }
 
-// An expansion whose tokens can start a line is read from a file into the output, from the name at `location`: they
-// start at the output's end (PPExpansionStart). One that gives none is replaced by the next.
+// An expansion is read from a file into the output, from the name at `location`: its tokens start at the output's end
+// (PPExpansionStart). One that gives none is replaced by the next.
 BUSTER_INLINE void pp_note_expansion(Preprocessor* pp, uint32_t location)
 {
     const uint32_t token = pp->output.count;
@@ -5995,11 +6000,10 @@ static void pp_expand_current(Preprocessor* pp)
         }
         if (pp->options.expansion_starts && context->kind == BUSTER_PP_CONTEXT_FILE && pp->capture_count == 0)
         {
+            // Every expansion read from a file starts where its first token goes (a token among its arguments that
+            // started a line can start an output line too).
             pp->expansion_location = name.location;
-            if (name.flags & BUSTER_PP_START_OF_LINE)
-            {
-                pp_note_expansion(pp, name.location);
-            }
+            pp_note_expansion(pp, name.location);
             // The next token after a _Pragma that printed nothing comes from this expansion, if any.
             const uint32_t silent = pp->silent_pragma_count;
             if (silent != 0 && pp->silent_pragmas[silent - 1].token == pp->output.count)
@@ -10873,13 +10877,22 @@ BUSTER_INLINE uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint
     return result;
 }
 
-// Where -E puts output token `token`, a line's first, when a _Pragma that printed nothing came before it
-// (Preprocessor.silent_pragmas, from *silent on, which moves past the ones before it), or BUSTER_PP_NONE when it stays on
-// the line: clang's lexer starts a line there, and its printer moves to the token's place (its own, or its expansion's
-// for one a macro or a builtin made) only when that is another line than the current one (MoveToLine).
-static __attribute__((noinline, cold)) uint32_t pp_print_moves(Preprocessor* pp, const PPMarkers* markers, uint32_t token, uint32_t* silent)
+// Where -E puts output token `token`, a line's first, when clang's token starts a line though ours doesn't, or
+// BUSTER_PP_NONE when it stays on the line: one that started a line among a macro's arguments (BUSTER_PP_LINE_SPACE),
+// and one after a _Pragma that printed nothing (Preprocessor.silent_pragmas, from *silent on, which moves past the ones
+// before it), where clang's lexer starts a line. Clang's printer moves to the token's place (its own, or its
+// expansion's for one a macro or a builtin made) only when that is another line than the current one (MoveToLine).
+static __attribute__((noinline, cold)) uint32_t pp_print_moves(Preprocessor* pp, PPMarkers* markers, uint32_t token, uint32_t* silent)
 {
     uint32_t result = BUSTER_PP_NONE;
+    if (pp->output.flags[token] & BUSTER_PP_LINE_SPACE)
+    {
+        const uint32_t place = pp_lexed_start(pp, pp_print_location(pp, markers, token));
+        const char* name;
+        uint32_t length;
+        const bool moves = pp_find_range(pp, place) != markers->range || pp_presumed(pp, place, &name, &length) != markers->line;
+        result = moves ? place : BUSTER_PP_NONE;
+    }
     while (*silent < pp->silent_pragma_count && pp->silent_pragmas[*silent].token <= token)
     {
         if (pp->silent_pragmas[*silent].token == token)
@@ -10928,7 +10941,9 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
             continue;
         }
         const bool starts = (flags & BUSTER_PP_START_OF_LINE) || force_line || i == 0;
-        const uint32_t moved = markers && !starts && silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i ? pp_print_moves(pp, &marked, i, &silent) : BUSTER_PP_NONE;
+        const uint32_t moved = markers && !starts && ((flags & BUSTER_PP_LINE_SPACE) || (silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i))
+                                   ? pp_print_moves(pp, &marked, i, &silent)
+                                   : BUSTER_PP_NONE;
         if (starts || moved != BUSTER_PP_NONE)
         {
             uint32_t breaks = !line_start;
@@ -11253,7 +11268,8 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                 result = fwrite(buffer, 1, used, stream) == used;
                 used = 0;
             }
-            const uint32_t moved = markers && !((line_starts >> k) & 1) && BUSTER_UNLIKELY(silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i)
+            const uint32_t moved = markers && !((line_starts >> k) & 1) &&
+                                           BUSTER_UNLIKELY((out_flags[i] & BUSTER_PP_LINE_SPACE) || (silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i))
                                        ? pp_print_moves(pp, &marked, i, &silent)
                                        : BUSTER_PP_NONE;
             const bool moves = moved != BUSTER_PP_NONE;

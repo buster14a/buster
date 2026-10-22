@@ -1104,6 +1104,13 @@ static const PPTestCase pp_test_cases[] = {
     // is on another one.
     { "the token after a _Pragma that prints nothing", "#define h(x) _Pragma(x)\na h(\"once\") \\\n    b\n#define g(x) _Pragma(x) y\nc g(\"once\") \\\nd\n",
       0, "c17", "\na\nb\nc y d\n", false, 2 },
+    // A name of a macro whose expansion an argument is read from is painted there: the expansion ends at the ')' after
+    // it, before the argument expands (Preprocessor::ReadMacroCallArgumentList).
+    { "a disabled macro's name among its arguments", "#define e a ( e\n#define a(...) __VA_ARGS__\ne )\n#define f g ( f\n#define g(x) [x]\nf )\n", 0, "c17", "\ne\n[f]\n", false, 0 },
+    // A token that started a line among a macro's arguments (but the first) starts one in clang's printer too, which
+    // moves to the expansion's line when that is another one: the name's, after a line splice.
+    { "line markers: a line among a macro's arguments", "#define h(...) __VA_ARGS__\nL\\\n h(\nU\n\"#\")\nx\\\n  h(7\n  y\nz)\n", 0, "c17", "L U \"#\" x 7 y z", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\n\nL U\n\"#\"\n\n\nx 7\ny z\n" },
     {
         .name = "builtin and feature names are raw, attribute names may expand",
         .source = "#define BUILTIN_NAME __builtin_expect\n#define FEATURE_NAME c_atomic\n#define ATTRIBUTE_NAME __const__\n"

@@ -404,13 +404,18 @@ static uint32_t pp_fuzz_place_line(Preprocessor* pp, uint32_t i, uint32_t* at, u
 
 // Whether clang's token has a leading space where -P puts output token `i` first on a line, at `place`, which its
 // printer's indentation counts (HandleWhitespaceBeforeTok: column 1 with one is column 2). Our BUSTER_PP_SPACE counts a
-// line's start, clang's only whitespace or a comment before the token on its line: a token's own from a file, or for
-// the first token of an expansion (BUSTER_PP_NAME_SPACE), its name's at the place.
+// line's start, clang's only whitespace or a comment before the token on its line: a token's own from a file or from a
+// line among a macro's arguments (BUSTER_PP_LINE_SPACE), or for the first token of an expansion
+// (BUSTER_PP_NAME_SPACE), its name's at the place.
 static bool pp_fuzz_line_start_space(Preprocessor* pp, const PPTokens* out, uint32_t i, uint32_t place)
 {
     bool result = (out->flags[i] & BUSTER_PP_SPACE) != 0;
     const bool name = (out->flags[i] & BUSTER_PP_NAME_SPACE) != 0;
-    if (result && (name || !(out->flags[i] & BUSTER_PP_FROM_MACRO)))
+    if (result && (out->flags[i] & BUSTER_PP_LINE_SPACE))
+    {
+        result = pp_fuzz_leading_space(pp, out, i);
+    }
+    else if (result && (name || !(out->flags[i] & BUSTER_PP_FROM_MACRO)))
     {
         uint32_t offset = 0;
         uint32_t available = 0;
@@ -465,6 +470,14 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length)
             if (starts || i == 0)
             {
                 const uint32_t line = pp_fuzz_place_line(pp, i, &at, &place, &column);
+                current_line = line != BUSTER_PP_NONE ? line : current_line;
+            }
+            else if (out->flags[i] & BUSTER_PP_LINE_SPACE)
+            {
+                // A token that started a line among a macro's arguments keeps its start of line in clang (but an
+                // argument's first): its printer moves to its expansion's line when that is another one.
+                const uint32_t line = pp_fuzz_place_line(pp, i, &at, &place, &column);
+                starts = line != BUSTER_PP_NONE && line != current_line;
                 current_line = line != BUSTER_PP_NONE ? line : current_line;
             }
             else if (silent_place != BUSTER_PP_NONE)

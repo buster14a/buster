@@ -138,8 +138,13 @@ The C rules:
 - Two tokens that were next to each other in the source never get a space.
   Clang's tokens start at the line splices before them.
 - A token that started a line among a macro's arguments keeps its own flags
-  in clang (`BUSTER_PP_LINE_SPACE` marks ours). Clang gives it no space, unless
-  whitespace or a comment came before it on its line.
+  in clang (`BUSTER_PP_LINE_SPACE` marks ours), but an argument's first token
+  takes its parameter's. Clang gives it no space, unless whitespace or a
+  comment came before it on its line, and starts a line with it, which its
+  printer moves to when the expansion's line is another one: after a line
+  splice before the macro's name. Our printer does the same in `-E` with line
+  markers, and so every expansion read from a file records where its tokens
+  start (`PPExpansionStart`).
 - After a `_Pragma` that prints nothing, clang's lexer starts a line at the
   next token (`Lexer::PropagateLineStartLeadingSpaceInfo`, as the pragma's
   lexer ends). Its printer moves to that token's line only when it is another
@@ -320,8 +325,14 @@ Probing around each one found more, which were fixed and pinned the same way:
 - **UCNs.** Identifiers with UCNs keep their spelling when stringized and
   pasted, and in pragma lines.
 
-The first frozen campaign (below) found nine more, in about 1.5 million cases
-per mode before it was stopped, and the runs that checked the fixes one more:
+The first frozen campaign (`c4a7706`) found the rest. On the 9700X, seeds 21
+to 30 with 1,000,000 cases per mode each, 130 cases differed from clang (70
+in C17, 60 in C23), one's `-P` text didn't lex back into its stream and two
+had no result; six of its 300 workers crashed (the attribute query below).
+Locally, seed 11 was stopped after its first six differences. The runs that
+checked the fixes (seeds 3 to 7, 200,000 to 500,000 cases per mode) found
+eight more. They come down to these fixes, each with a case in
+test-preprocessor, and to the harness changes after them:
 
 - **`__VA_OPT__` in a macro without parameters** is a token. Clang
   substitutes nothing in such a macro (`TokenLexer::Init`), so its
@@ -391,6 +402,15 @@ per mode before it was stopped, and the runs that checked the fixes one more:
   (`EvaluateDirectiveExpression`). So a `#line`'s and an `#ident`'s operands
   there are read as written (`pp_collecting`): `#line N` with `N` a macro, or
   `#line _Pragma("x") 1`, is an error there.
+- **A disabled macro's name among the arguments its expansion gives** is
+  painted as it is collected (`ReadMacroCallArgumentList`): with
+  `#define e a ( e` and `#define a(...) __VA_ARGS__`, `e )` is `e`. The `)`
+  comes after `e`'s expansion has ended, which enabled `e` again before the
+  argument expands.
+- **A line among a macro's arguments** that the emulation kept on the line
+  before starts its own in clang when the expansion's line is another one
+  (above): `L\`, then `h(`, `U` and `"#")` on lines of their own, printed
+  `U` and `"#"` together, one literal.
 
 Each harness change came from a case the comparison couldn't place. They
 cover the printer's emulation, the by-spellings cases, the isolation rules,
