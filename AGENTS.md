@@ -2042,7 +2042,13 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   fixtures of a file's conditional structure (`#else` and `#elif` after
   `#else`, a directive without `#if`, groups left open, in skipped groups and in
   an included file, extra tokens, `#elifdef` before C23), whose diagnostics
-  both kernels must give alike;
+  both kernels must give alike, and ten of `#define`'s and `#undef`'s
+  constraints and redefinitions (#121). And 20 fixtures of include guards and
+  `#pragma once` (#120): the guard's shapes clang's multiple-include
+  optimization takes and those it doesn't, `#undef` between inclusions, an
+  inclusion from inside the file, the macro defined before the first, links to
+  a `#pragma once` file, `#import`. Each run must skip as many inclusions by
+  guards and by `#pragma once` as expected, by both kernels;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, ...), by both kernels, which must agree;
 - with `--tables`, the directive tables of every `.c` and `.h` file under each
@@ -2068,7 +2074,9 @@ features:
   must give clang's answer;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers;
-- the structure fixtures' diagnostics must be clang's, byte for byte. `sqlite3.c`, musl 1.2.5's 1,357 sources,
+- the structure and definition fixtures' diagnostics must be clang's, byte for byte, and the
+  guard fixtures' output and skips by guards clang's (`-Xclang -print-stats`),
+  as every file's skips by guards must be. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
 `docs/c-preprocessor.md` has the configurations. The 9700X job runs the cases
 and the repository's translation units with `--clang`, and `--tables src`.
@@ -2088,6 +2096,10 @@ them with `clang -dM -E` output (the benchmark leaves this option out of clang's
 command line), as the smoke commands above do for `main.c`. The default 9700X
 job runs that one, pinned to one allowed CPU; like the others, its measurements
 are informational.
+
+`--guard-cost` times the vectorized kernels with the skip of guarded files and
+without it (`PPOptions.no_guard_skip`), in place of the scalar twins: the
+output's tokens must be the same (#120).
 
 `./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
 path...` times the directive tables alone (#118): every `.c` and `.h` file under
