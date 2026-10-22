@@ -540,6 +540,10 @@ struct Foreign
     uint32_t library_count;
     // The libraries under --as-needed that aren't needed yet, which the decisions look for.
     uint32_t as_needed_waiting;
+    // The positions of the first archive's first member and of the first library (BUSTER_FOREIGN_NO_POSITION without
+    // one): a name defined before them, as most of a program's are, has no member or library to decide about.
+    uint64_t archives_begin;
+    uint64_t libraries_begin;
     // The loaded objects, by id: object 0 holds the command line's references (-u), then each round's in position
     // order; each one's position, which the resolution reads per record; and once the groups are picked, whether it has
     // a section of a discarded group (ForeignObject.discarded), which the winners read per record.
@@ -1192,6 +1196,8 @@ static bool foreign_list_inputs(Foreign* foreign, ForeignLane* lane)
             foreign->as_needed_waiting += as_needed ? 1 : 0;
         }
     }
+    foreign->archives_begin = foreign->archive_count != 0 ? foreign_position(foreign->archives[0].input, 1) : BUSTER_FOREIGN_NO_POSITION;
+    foreign->libraries_begin = foreign->library_count != 0 ? foreign_position(foreign->libraries[0].input, 0) : BUSTER_FOREIGN_NO_POSITION;
     if (!result)
     {
         foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0));
@@ -2923,8 +2929,11 @@ static void foreign_decide(const Foreign* foreign, ForeignEntry* entry, ForeignL
     // Where a member that loads for the name will define it, if one does.
     uint64_t loading = BUSTER_FOREIGN_NO_POSITION;
     // A member can load for a strong reference before every definition of the name, a later one included: GNU ld
-    // takes the member that an archive between the two offers.
-    if ((entry->flags & BUSTER_FOREIGN_ENTRY_ARCHIVES_PROBED) == 0 && entry->reference < entry->defined)
+    // takes the member that an archive between the two offers. Only an archive before the definition can offer one, so
+    // a name defined before every archive isn't probed: one test that is mostly false, in place of the reference's
+    // place against the definition's, which a program's names take either way.
+    const bool probe = ((entry->flags & BUSTER_FOREIGN_ENTRY_ARCHIVES_PROBED) == 0) & (foreign->archives_begin < entry->defined) & (entry->reference < entry->defined);
+    if (probe)
     {
         foreign_probe_archives(foreign, entry, entry->defined);
     }
@@ -2945,10 +2954,14 @@ static void foreign_decide(const Foreign* foreign, ForeignEntry* entry, ForeignL
             loading = owner;
         }
     }
-    // A library under --as-needed is needed once a strong reference before it finds a name it exports still undefined.
-    if (foreign->as_needed_waiting != 0 && entry->reference != BUSTER_FOREIGN_NO_POSITION && entry->visibility == 0)
+    // A library under --as-needed is needed once a strong reference before it finds a name it exports still undefined:
+    // a library before the name's definition and the member that loads for it, if any.
+    const uint64_t undefined_until = foreign_min(entry->defined, loading);
+    const bool waiting = (foreign->as_needed_waiting != 0) & (foreign->libraries_begin < undefined_until) & (entry->reference != BUSTER_FOREIGN_NO_POSITION) &
+                         (entry->visibility == 0);
+    if (waiting)
     {
-        const uint32_t library = foreign_needed_library(foreign, entry, foreign_min(entry->defined, loading));
+        const uint32_t library = foreign_needed_library(foreign, entry, undefined_until);
         if (library != UINT32_MAX)
         {
             foreign_need(lane, BUSTER_FOREIGN_LIBRARY_NEED, library);
