@@ -17,12 +17,21 @@ The preprocessor and assembler accept the same target options:
 ./build/compiler assemble -march=x86-64-v3 -o output.o input.S
 ```
 
-The last `-march=` wins. Unknown names and individual `-m` switches are errors;
-they must not silently leave baseline macros active. `-mtune=` accepts the same
-names and `generic`, independently of the ISA. It is recorded for the future
-scheduler, and currently changes no costs, scheduling or allowed instructions.
-As with Clang 23, CPU identity macros, including `__tune_*__`, follow `-march`.
-`--predefines` remains an explicit replacement of the entire macro preamble.
+The last `-march=` wins. Both take every x86-64 CPU clang 23 knows (79, and
+`native`), and the preprocessor every `-m` feature switch, resolved as clang
+resolves them by `c_predefines.c` (see "The predefined macros" in
+[the preprocessor's design](c-preprocessor.md)). It writes their macros and
+fills the `X86Target` from the result (`predefines_target`): the features this
+file knows by name, with RDTSCP and CLFLUSH, which clang has no feature for,
+from the profile where `-march` names one of the six above, and that profile's
+architecture (`X86_ARCH_OTHER` for clang's other CPUs). An unknown name or
+switch is an error, as in clang (the preprocessor takes only the `-m` options
+clang 23 uses for x86-64 Linux), so no option silently leaves baseline macros
+active. `-mtune=` accepts clang's names and `generic`, independently of the
+ISA. It is recorded for the future scheduler, and currently changes no costs,
+scheduling or allowed instructions. As with Clang 23, CPU identity macros,
+including `__tune_*__`, follow `-march`. `--predefines` remains an explicit
+replacement of the entire macro preamble.
 
 `x86_target.c` supplies the bitset and target parser. A zero-initialized
 `X86Target` means baseline. The v2/v3/v4 profiles are cumulative; the named Zen 5
@@ -32,10 +41,10 @@ and the opmask/ZMM state bits before exposing AVX-512. Missing CPUID leaves
 remain zero. Its feature catalogue covers the supported Zen 5 host; this is not
 a CPU-dispatch mechanism or a promise of support for other compiler hosts.
 
-Target macros are emitted from that same bitset, without invoking another
+Target macros come from that same resolution, without invoking another
 compiler. `test-x86-target` compares the complete preamble with Clang 23 for all
 six target choices, alongside the existing language/optimization configurations
-(22 option sets total). Only `__BUSTER__` and the three Clang patch-version
+(22 option sets total), and `test-preprocessor --clang` for every CPU and switch. Only `__BUSTER__` and the three Clang patch-version
 macros are excluded from comparison. The preprocessor also queries the explicit
 `x86_target_builtins` table for target-sensitive `__has_builtin` answers. Its
 eleven names are compared with Clang at every target. This extends the existing

@@ -423,13 +423,18 @@ designs and the compilers already built this way.
   provides `benchmark-refinement`.
 - `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
   unit's token stream from its files' refined tokens, and `./build/compiler -E`
-  (as `clang -E`). `docs/c-preprocessor.md` explains the design, the `clang -E`
-  oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
-  (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
+  (as `clang -E`, with `-dM`). `docs/c-preprocessor.md` explains the design, the
+  `clang -E` oracle and the 9700X measurements. `c_preprocessor_test.c` holds its
+  tests (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
   `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`. Its
   `FileCache` holds what is prepared from each file (by identity) and every
   path looked up, for every translation unit that preprocesses with it
   (`PPOptions.files`; a unit without one makes its own).
+  `c_predefines.c` gives the predefined macros the target and the options decide,
+  as clang does (`-march`, the `-m` feature flags, `-march=native` from CPUID,
+  `-O`, `-f...`, `-g`), from tables generated from clang 23; `c_predefines_test.c`
+  checks them against clang under `test-preprocessor --clang` and regenerates the
+  tables (`test-preprocessor --generate-targets`).
 - `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
   records macro expansion history in cold records and compressed output runs;
   `pp_diagnose_output` renders a diagnostic for an output-token index.
@@ -500,13 +505,12 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
 ./build/compiler test-preprocessor --clang
-clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
-./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
-./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+./build/compiler -E -march=native -Isrc -fwrapv -funsigned-char -o build/main.i src/buster/compiler/main.c
+./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 ./build/compiler test-files
 ./build/compiler test-files --flat src
-./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
-./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 ./build/compiler test-types
 ./build/compiler benchmark-types
 ./build/compiler test-calling-convention --cross-check
@@ -514,8 +518,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
-`#error` without AVX-512's). The built-in predefines now follow `-march`;
-`--predefines` additionally supplies Clang's effects for the other host flags.
+`#error` without AVX-512's), which the preprocessor's predefines give as clang's
+do for the same options (`c_predefines.c`).
 
 ## Sharing the 9700X
 
@@ -1115,11 +1119,14 @@ allocation failures. Jobs run in forward and reverse order with delayed
 completion at 1, 2, 3 and 8 lanes; the bytes must agree.
 
 `test-preprocessor` (without files), `test-object-writer`, `test-executable`,
-`test-dynamic` and `test-static` also check output after changing opaque
-identifier assignments. Each accepts `--id-order N` (default 153). The object
-test covers both section modes at every lane count; the preprocessor compares
-both `-E` text modes and diagnostics through both kernels and both job orders.
-The 9700X workflow runs these checks as part of the stage commands.
+`test-dynamic`, `test-static` and `test-files` also check output after changing
+opaque identifier assignments. Each accepts `--id-order N` (default 153). The
+object test covers both section modes at every lane count; the preprocessor
+compares both `-E` text modes and diagnostics through both kernels and both job
+orders; the per-file jobs' test primes the shared table before the walk fills
+the cache, and compares every translation unit's `-E` text, diagnostics and
+locations and every cached file's tokens at every lane count. The 9700X workflow
+runs these checks as part of the stage commands.
 
 `./build/compiler benchmark-diagnostics [--only scalar|selected]
 [--after-scalar MS]` compares the
@@ -1128,7 +1135,7 @@ ticks/key. Run both isolated `--only selected` and
 `--only selected --after-scalar 100`, across several processes pinned to CPU 2
 under the host's lock. [The determinism guide](docs/determinism.md) specifies
 the caller's source-order and lifetime contracts and the integration still
-required by #150, #151 and #152.
+required by #151 and #152.
 
 ## Lane benchmark
 
@@ -2439,7 +2446,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 92 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 95 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2453,32 +2460,68 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
   modification times of their own must give each file's time (in UTC), and
-  `SOURCE_DATE_EPOCH`'s when it is set;
+  `SOURCE_DATE_EPOCH`'s when it is set; and the `-m` options buster refuses
+  though clang takes them (another target's, which clang ignores with a
+  warning, and those that change the target) must be refused, and each `-m`
+  flag that changes no macro taken;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
-  `-ffreestanding`, ...), by both kernels, which must agree.
+  `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree.
 
 In both, the vectorized printer's text must be the scalar printer's byte for
 byte, with line markers and without, and must lex back into the stream's
 spellings.
 
+Every case and file runs with clang's answers to the feature queries
+(`--clang-features`, the oracle's mode), and a check runs a line of queries both
+ways: by default they answer what buster implements.
+
 `--clang` also compares every case and file with `clang -E` and the same
 options, token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
 prints the first difference with the tokens around it. For files, our side
-reads clang's own predefines for the options through `--predefines`. Without
-files, `--clang` also checks the built-in predefines, the keywords and the
-features:
+reads clang's own predefines for the options through `--predefines`, so that
+only preprocessing is compared (the 9700X's clang names another patch release);
+then, with our own predefines, the macros defined at the file's end must be
+`clang -dM -E`'s byte for byte, but for those three macros and `__BUSTER__`.
+Without files, `--clang` also checks the built-in predefines, the keywords and
+the features:
 - in 22 option sets (the ten modes from `c89` to `gnu23`, `-ffreestanding`,
-  `-O2`, the six ISA profiles and independent tuning), `pp_predefines` must give `clang -dM -E` line for line, but for
+  `-O2`, two combinations, the six ISA profiles of `docs/x86-target.md` and two
+  with `-mtune`), `pp_predefines` must give `clang -dM -E` line for line, but for
   the patch release's three macros;
+- `c_predefines.c`'s generated tables (each x86-64 feature's flag, closures and
+  macros, each `-march` CPU's macro name and features, the `-mtune` names) must
+  be what `c_predefines_test.c`'s generator learns from clang now;
+- about 2,200 option sets must give `clang -dM -E`'s macros, and be accepted or
+  refused alike: every `-march` CPU and `native`, every feature flag on and off
+  on x86-64 and on the CPUs with the most features, each `-O`, `-f`, `-g` and
+  `-m` option `c_predefines.c` reads, alone and in the orders that matter (an
+  invalid value before the last of an option clang reads only the last of among
+  them), each `-m` option that changes no macro (each flag alone, the hardening
+  flags against each other, and each value option's rule at its edges), each of
+  clang's `-m` aliases alone and against its option in either order, `-m`
+  options clang refuses too (`-mavx512`), the 16 sanitizers with a macro or in clang's incompatible pairs, alone,
+  in pairs and in pairs with either one turned off after them, each of them and
+  each other group with `-fno-sanitize=all` after it and before it, and 400
+  random combinations, some with those `-m` flags and aliases (`--seed N`
+  changes them);
+- `-E -dM` of a file with every kind of definition must be clang's byte for byte
+  (but `__BUSTER__`), and `__FLT_EVAL_METHOD__` clang's under
+  `-ffp-eval-method=` and without SSE;
 - in each mode, `__is_identifier` of every predefined name, and of clang's
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
   must give clang's answer;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
-  23's `Features.def` must give clang's answers. `sqlite3.c`, musl 1.2.5's 1,357 sources,
+  23's `Features.def` must give clang's answers, and so must they under 45
+  sanitizer option sets, and the four `__is_target_*` of 41 names under eight
+  kinds of target triple. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
 `docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs
 the cases and the repository's translation units with `--clang`.
+
+`./build/compiler test-preprocessor --generate-targets` prints `c_predefines.c`'s
+generated block from clang 23 (on `PATH`), to paste over the old one when clang
+changes; `docs/c-preprocessor.md` ("The predefined macros") has the procedure.
 
 ## Preprocessor benchmark
 
@@ -2494,27 +2537,45 @@ expansions, invocations, pastes, and the `#if` lines and their lengths).
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.
 `--clang` also times `clang -E -P` with the same options, a process per file.
-`-march` selects the shared target's predefines. `--predefines FILE` can replace
-them with `clang -dM -E` output (the benchmark leaves this option out of clang's
-command line), as the smoke commands above do for `main.c`. The default 9700X
-job runs that one, pinned to one allowed CPU; like the others, its measurements
-are informational.
+Our predefines follow the target options as clang's do; `--predefines FILE`
+still replaces them (the benchmark leaves it out of clang's command line). The
+runs answer the feature queries as clang does (`--clang-features`), so that they
+do the work `clang -E` does. The
+default 9700X job runs the smoke command above on `main.c`, pinned to one allowed
+CPU; like the others, its measurements are informational.
 
 ## Per-file jobs tests
 
-`./build/compiler test-files [--lanes LIST] [--seed N] [--keep] [--flat]
-[options] [path...]` (about 0.3 s without paths) checks `c_files.c`. Every
-check fills a file cache on each lane count of `--lanes` (1, 2, 3 and 8), each
-time with a new intern table and cache, and must give the first lane count's
-results byte for byte: the shared table's ids and spellings, every record's
-tokens, values, leading-space bits, directive table and guard, what the walk
-did, and each translation unit's output stream (kinds, flags, values and
-locations) when it preprocesses with the cache. One lane refines straight into
-the shared table, so it is the merge's scalar twin. Each unit's spellings must
-also be those it gives with a cache of its own, with as many errors and
-warnings; nothing may be written to stderr while the cache is filled, no walk
-may leave a file open (counted in `/proc/self/fd`), and one lane may leave no
-file's bytes for later:
+`./build/compiler test-files [--lanes LIST] [--seed N] [--id-order N] [--keep]
+[--flat] [options] [path...]` (about 0.7 s without paths) checks `c_files.c`.
+Every check fills a file cache on each lane count of `--lanes` (1, 2, 3 and 8),
+each time with a new intern table and cache, and must give the first lane
+count's results byte for byte: the shared table's ids and spellings, every
+record's tokens, values, leading-space bits, directive table and guard, what the
+walk did, and each translation unit's output stream (kinds, flags, values and
+locations), the text `-E` prints for it with and without line markers and its
+diagnostics when it preprocesses with the cache. One lane refines straight into
+the shared table, so it is the merge's scalar twin. Each unit's spellings and
+diagnostics must also be those it gives with a cache of its own, with as many
+errors and warnings, and nothing may be written to stderr while the cache is
+filled. No walk may leave a file open (counted in `/proc/self/fd`), and one lane
+may leave no file's bytes for later.
+
+Then every check runs again on each lane count with the shared table's ids
+handed out in another order (#153: ids are opaque, and nothing may depend on
+their order), as `test-preprocessor --id-order` does for its cases. Before the
+walk fills the cache, the table is primed with 17 to 47 names no file has, then
+with every other name of the first run's table, in reverse from a place the
+seed picks (`--id-order N`, 153 by default, plus the lane count's place in the
+list), so that the walk finds those in the table and gives the others ids after
+them; every lane prepares every round, so that on more than one lane the merge
+does. The predefined names keep their fixed ids. The first run's other names
+must all be in the table, which may hold no others, and both those primed and
+those added after them must have changed ids. Every unit must give the first
+run's `-E` text (both modes) and diagnostics byte for byte, and its stream's
+kinds, flags and locations, each identifier's and keyword's id spelled as the
+first run's; every record must be the first run's, each identifier's value and
+the guard spelled the same, and the walk must do what it did:
 
 - the tree: a directory of the test's own (under `$TMPDIR` or `/tmp`) with
   three translation units and the headers they include, by every kind of
@@ -2523,20 +2584,23 @@ file's bytes for later:
   paths (a symbolic link and `..` among them), a hard link to a header a
   computed include names, guarded and `#pragma once` headers included twice, a
   header under `#if 0` that exists and one that doesn't, and a missing header
-  in an active line. The counts are exact: 13 files prepared (each identity
-  once) in 4 rounds, 1 unused, 2 requests not found (no diagnostic), and the
-  units' system calls after the walk (only the computed include's). It runs
-  with the vectorized kernels and with their scalar twins, cut into parts and
-  split once, on every lane (`FilesRun.lane_bytes` 0), every file's bytes left
-  to the lane that prepares it however small; then with the probes reading
-  every file and with at most 4 files kept open (some waves deferring and some
-  not), which must give the same results, with 13, none and 1 to 12 files
-  read by the lanes that prepared them;
+  in an active line; and two warnings that name identifiers: an `#if` in a
+  header two units include, whose notes name the macros it was expanded from,
+  and a macro redefined. The counts are exact: 13 files prepared (each identity
+  once) in 4 rounds, 1 unused, 2 requests not found (no diagnostic), the units'
+  errors and warnings, and their system calls after the walk (only the
+  computed include's). It runs with the vectorized kernels and with their
+  scalar twins, cut into parts and split once, on every lane
+  (`FilesRun.lane_bytes` 0), every file's bytes left to the lane that prepares
+  it however small; then with the probes reading every file and with at most
+  4 files kept open, which must give the same results, with 13, none and 1 to
+  12 files read by the lanes that prepared them;
 - spellings: 240 generated files of identifiers (a shared vocabulary drawn
   unevenly, names of their own, long names, line splices and UCNs) prepared
   without following includes, 165,562 ids, so that the shared table grows in a
-  merge: in parts, split once, and with two lanes working, and in two runs into
-  one cache, which must equal one run on one lane;
+  merge, and a translation unit that includes them all: in parts, split once,
+  and with two lanes working, and in two runs into one cache, which must equal
+  one run on one lane;
 - contexts: a guarded header that includes itself through `./` and `sub/..`,
   which the walk must take once (an alias of a file in the same context, by
   its directory's device and inode, isn't walked again), and one header in two
@@ -2555,6 +2619,11 @@ file's bytes for later:
   merge's and a file's allocations and the next round's lists after its probes
   kept files open: every unit must give what it gives alone, some runs must
   keep files open for the lanes, and none may leave one open;
+- descriptor pressure: 200 readable 2 KB roots on two lanes with a soft
+  limit of 512 and 400 descriptors already open; all must remain readable
+  through the cache after the walk, with no absent paths or leaked files;
+- explicit reads: two 32,787-byte files must count two reads and no mappings,
+  with deferral on and off, on one lane, one preparing lane of two, and both;
 - with paths, their `.c` and `.h` files as translation units with `-E`'s
   options (`-I`, `-isystem`, `-D`, `--predefines`, `-std=`, ...), all the walk's
   roots; with `--flat`, only prepared (a corpus such as the C library's).
@@ -2562,9 +2631,10 @@ file's bytes for later:
 The checks that would hang if they regressed run under a 60-second alarm, which
 fails the test.
 
-`--seed N` changes the spellings, and `--keep` leaves the directory. On the
-9700X, `sqlite3.c`, Lua 5.4.8, musl 1.2.5's 1,357 sources and the C library
-corpus (`--flat`) pass too.
+`--seed N` changes the spellings, `--id-order N` the ids' order, and `--keep`
+leaves the directory. On the 9700X, `sqlite3.c`, musl 1.2.5's 1,357 sources and
+the C library corpus (`--flat`) pass too, and Lua 5.4.8 did before the ids'
+order and the units' `-E` text and diagnostics were checked.
 The 9700X job's test step runs it, on `src` with `--flat`, and on the
 repository's translation units.
 
