@@ -430,9 +430,9 @@ struct FileCacheArenas
     Arena bytes;
 };
 
-// How files are prepared: the lexer's and refinement's flags (trigraphs), the literal prefixes the language mode splits
-// (pp_split_kinds), whether '$' is punctuation (assembly), and whether by the vectorized kernels or by their scalar
-// twins, which prepare the same records.
+// How files are prepared: the lexer's and refinement's flags (trigraphs, and no digit separators before C23), the
+// literal prefixes the language mode splits (pp_split_kinds), whether '$' is punctuation (assembly), and whether by the
+// vectorized kernels or by their scalar twins, which prepare the same records.
 typedef struct PPPrepare PPPrepare;
 struct PPPrepare
 {
@@ -1850,33 +1850,6 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
     return count + splits;
 }
 
-// The first token from `from` that is a number with a digit separator, at or after token `from` of `count`, and where its
-// first `'` is (`*quote`); `count` if none. 64 tokens at a time: one compare finds the numbers, whose lengths (a
-// separator needs three bytes: `1'0`) say which have their bytes read, 32 at a time in a register (a longer number's
-// rest by memchr).
-static uint32_t pp_find_separator_vector(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t from, uint32_t count, uint32_t* quote)
-{
-    uint32_t result = count;
-    for (uint32_t t = from; result == count && t < count; t += 64)
-    {
-        const __mmask64 valid = _bzhi_u64(~0ull, count - t < 64 ? count - t : 64);
-        const __m512i kind = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, kinds + t), _mm512_set1_epi8(0x7F));
-        uint64_t numbers = _mm512_mask_cmpeq_epi8_mask(valid, kind, _mm512_set1_epi8(C_TOKEN_NUMERIC_CONSTANT));
-        while (result == count && numbers != 0)
-        {
-            const uint32_t i = t + (uint32_t)__builtin_ctzll(numbers);
-            const uint32_t length = ends[i] - starts[i];
-            const __mmask32 in = (__mmask32)_bzhi_u32(length >= 3 ? ~0u : 0u, length < 32 ? length : 32);
-            const uint32_t quotes = _mm256_mask_cmpeq_epi8_mask(in, _mm256_maskz_loadu_epi8(in, bytes + starts[i]), _mm256_set1_epi8('\''));
-            const uint8_t* found = quotes != 0 ? bytes + starts[i] + __builtin_ctz(quotes) : length > 32 ? memchr(bytes + starts[i] + 32, '\'', length - 32) : 0;
-            result = found != 0 ? i : count;
-            *quote = found != 0 ? (uint32_t)(found - bytes) : *quote;
-            numbers &= numbers - 1;
-        }
-    }
-    return result;
-}
-
 // C's GNU identifier grammar includes '$'. Assembly instead needs $MACRO to expand MACRO. Only tokens containing
 // '$' take this adapter; literals stay opaque. Re-lex the intervening slices with the shared lexer, including line
 // splices and numeric local references. Scratch columns leave the original columns intact on allocation failure.
@@ -1962,61 +1935,15 @@ static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uin
     return result;
 }
 
-// pp_find_separator_vector's scalar twin.
-static uint32_t pp_find_separator_scalar(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t from, uint32_t count, uint32_t* quote)
-{
-    uint32_t result = count;
-    for (uint32_t i = from; result == count && i < count; i += 1)
-    {
-        const uint8_t* found = (kinds[i] & 0x7F) == C_TOKEN_NUMERIC_CONSTANT ? memchr(bytes + starts[i], '\'', ends[i] - starts[i]) : 0;
-        result = found != 0 ? i : count;
-        *quote = found != 0 ? (uint32_t)(found - bytes) : *quote;
-    }
-    return result;
-}
-
-// Lexes as a mode before C23 does `count` tokens the lexer lexed as C23 does, from `length` bytes: a number has no digit
-// separators there (clang ends it before a `'`, which starts a character constant: `1'000` is 1 and the unterminated
-// '000), and a literal's prefix the mode doesn't have isn't one (`split`, pp_split_kinds; nonzero just before C23). A
-// number with a `'` is cut there, and the bytes from the `'` on are lexed again, for each such number, which sources
-// that compile don't have; then the prefixes are split (pp_split_prefixes). The arrays have room for a token per byte.
-// Returns the new count, or -1 if the lexer fails.
-static int64_t pp_lex_mode(const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, uint64_t split, uint32_t flags, bool vectorized)
+// Splits the literal prefixes that a mode before C23 doesn't have off `count` freshly lexed tokens (`split`,
+// pp_split_kinds; nonzero just before C23): clang lexes such a literal as its prefix, an identifier, and the literal
+// without it (pp_split_prefixes). The lexer has lexed the numbers as the mode does already: before C23 it has no digit
+// separators (C_TOKENIZER_NO_DIGIT_SEPARATORS in the mode's flags), so a number ends before a `'`, which starts a
+// character constant (`1'000` is 1 and the unterminated '000). The arrays have room for a token per byte. Returns the new
+// count.
+static int64_t pp_lex_mode(const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, uint64_t split, bool vectorized)
 {
     int64_t result = count;
-    uint32_t from = 0;
-    bool searching = split != 0 && result > 0;
-    while (searching)
-    {
-        uint32_t quote = 0;
-        const uint32_t n = (uint32_t)result;
-        const uint32_t t = vectorized ? pp_find_separator_vector(bytes, kinds, starts, ends, from, n, &quote) : pp_find_separator_scalar(bytes, kinds, starts, ends, from, n, &quote);
-        searching = t < n;
-        if (searching)
-        {
-            // The number ends at its `'`; the tokens from there on are lexed again, into aligned scratch first.
-            ends[t] = quote;
-            Scratch scratch = scratch_begin(0);
-            const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY((uint64_t)(length - quote));
-            uint8_t* tail_kinds = arena_push(scratch.arena, capacity, 64);
-            uint32_t* tail_starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-            uint32_t* tail_ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-            const int64_t tail = tail_kinds == 0 || tail_starts == 0 || tail_ends == 0 ? -1
-                                 : vectorized ? c_tokenize(bytes + quote, length - quote, tail_kinds, tail_starts, tail_ends, flags)
-                                              : c_tokenize_scalar(bytes + quote, length - quote, tail_kinds, tail_starts, tail_ends, flags);
-            for (int64_t k = 0; k < tail; k += 1)
-            {
-                // The first is in the middle of its line.
-                kinds[t + 1 + k] = (uint8_t)(k == 0 ? tail_kinds[k] & 0x7F : tail_kinds[k]);
-                starts[t + 1 + k] = tail_starts[k] + quote;
-                ends[t + 1 + k] = tail_ends[k] + quote;
-            }
-            scratch_end(scratch);
-            result = tail >= 0 ? (int64_t)t + 1 + tail : -1;
-            searching = tail >= 0;
-            from = t + 1;
-        }
-    }
     if (split != 0 && result > 0)
     {
         const uint32_t n = (uint32_t)result;
@@ -2026,11 +1953,12 @@ static int64_t pp_lex_mode(const uint8_t* bytes, uint32_t length, uint8_t* kinds
     return result;
 }
 
-// A file's (or a scratch text's) freshly lexed tokens, lexed as the language mode does (pp_lex_mode), then with
-// assembly's '$' punctuation (pp_split_dollars). Returns the new count, or -1 if the lexer or an allocation fails.
-static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, bool vectorized)
+// A file's (or a scratch text's) tokens, freshly lexed with the mode's flags, as the language mode has them: without the
+// literal prefixes it lacks (pp_lex_mode), then with assembly's '$' punctuation (pp_split_dollars). Returns the new
+// count, or -1 if an allocation fails.
+static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, bool vectorized)
 {
-    int64_t result = pp_lex_mode(bytes, length, kinds, starts, ends, count, mode->split_kinds, mode->refine_flags, vectorized);
+    int64_t result = pp_lex_mode(bytes, kinds, starts, ends, count, mode->split_kinds, vectorized);
     if (mode->assembly && result > 0)
     {
         result = pp_split_dollars(mode->refine_flags, bytes, kinds, starts, ends, (uint32_t)result);
@@ -2076,7 +2004,7 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
                                                            : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags);
     }
     const bool lexed = count >= 0;
-    count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds, data->starts, data->values, count, prepare->vectorized) : count;
+    count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->kinds, data->starts, data->values, count, prepare->vectorized) : count;
     if (ticks != 0)
     {
         const uint64_t now = __rdtsc();
@@ -2615,12 +2543,13 @@ static PPPrepareStatus file_cache_prepare(FileCache* cache, uint32_t record, uin
     return result;
 }
 
-// How a unit with these options prepares files: trigraphs or not, the literal prefixes its language mode splits, and its
-// kernels. A file cache that units share is made with it (file_cache_initialize).
+// How a unit with these options prepares files: trigraphs or not, digit separators or not (C23's: before it, the lexer
+// ends a number before a `'`), the literal prefixes its language mode splits, and its kernels. A file cache that units
+// share is made with it (file_cache_initialize).
 static PPPrepare pp_prepare_options(const PPOptions* options)
 {
     return (PPPrepare){
-        .refine_flags = options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0,
+        .refine_flags = (options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0) | (options->language.standard < 2023 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0),
         .split_kinds = pp_split_kinds(options->language),
         .assembly = options->assembly,
         .vectorized = !options->scalar,
@@ -4173,7 +4102,7 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
     const PPPrepare mode = pp_prepare_config(pp);
-    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, count, false) : count;
+    count = count > 0 ? pp_lex_for_mode(&mode, bytes, kinds, starts, ends, count, false) : count;
     *comment = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
     count -= *comment;
     uint32_t result = count >= 0 && pp_room(pp, into, (uint32_t)count) ? (uint32_t)count : BUSTER_PP_NONE;
@@ -4285,11 +4214,11 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, pp->refine_flags) : -1;
-            // As the mode lexes it (pp_lex_for_mode): a prefix or a digit separator it doesn't have makes two tokens, and
-            // in assembly '$' is punctuation (pp_split_dollars), so `$ ## x` gives two tokens. A '/' and a '*' make no
-            // token, but an unterminated comment.
+            // As the mode lexes it (its flags, then pp_lex_for_mode): a digit separator or a prefix it doesn't have makes
+            // two tokens, and in assembly '$' is punctuation (pp_split_dollars), so `$ ## x` gives two tokens. A '/' and a
+            // '*' make no token, but an unterminated comment.
             const PPPrepare mode = pp_prepare_config(pp);
-            count = count > 0 ? pp_lex_for_mode(&mode, joined, length, kinds, starts, ends, count, false) : count;
+            count = count > 0 ? pp_lex_for_mode(&mode, joined, kinds, starts, ends, count, false) : count;
             valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_is_unterminated_comment(joined, kinds[0], 0);
             kind = valid ? kinds[0] & 0x7F : kind;
         }
