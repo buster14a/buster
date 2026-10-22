@@ -22,7 +22,8 @@
 //   most, and ranks its loops (each backward jump's range) by their share of the samples, then prints the smallest loop
 //   with at least half of them, instruction by instruction with its samples.
 // - label-spills copies clang's assembly (`clang -S`) with a label before every spill and reload of one function
-//   (clang's "Spill" and "Reload" comments), and spill-report reads samples (IBS's) of the program built from it, by
+//   (clang's annotations on them, `# 64-byte Spill` and the others), and a static function renamed, so that the
+//   labeled copy's samples are its own; spill-report reads samples (IBS's) of the program built from it, by
 //   `perf script -F ip,sym,symoff`: each label's own samples are its spill's or reload's, by stack slot, with the
 //   source location of each slot's hottest, against all the labeled copy's samples.
 // - branch-misses reads `perf script -F brstack` of last-branch records (`perf record -j any,u`) and ranks the branches
@@ -63,6 +64,9 @@
 #define BUSTER_PROFILE_BRANCH_TABLE_START 4096
 // label-spills' labels: BUSTER_PROFILE_SPILL_LABEL then the spill's number.
 #define BUSTER_PROFILE_SPILL_LABEL "buster_spill_"
+// label-spills renames a static function to its name and this, so that its samples are its own: every other translation
+// unit that includes its file has a copy of the same name.
+#define BUSTER_PROFILE_LABELED_SUFFIX ".labeled"
 // ab's --cpu: sched_setaffinity's mask of 1,024 CPUs, as glibc's cpu_set_t.
 #define BUSTER_PROFILE_CPUS 1024
 
@@ -696,18 +700,106 @@ static bool profile_is_label(String8 line, String8 name)
     return labeled && (rest.length == 0 || rest.pointer[0] == '#');
 }
 
-static bool profile_is_spill(String8 line)
+typedef enum ProfileSpillKind
 {
+    PROFILE_SPILL_NONE,
+    PROFILE_SPILL_SPILL,
+    PROFILE_SPILL_RELOAD,
+} ProfileSpillKind;
+
+// Whether a line of clang's assembly is a spill or a reload: an instruction (not a directive, a label or a comment)
+// whose comment is clang's annotation, `# 64-byte Spill`, `# 8-byte Reload`, `# 4-byte Folded Spill` or
+// `# 8-byte Folded Reload`, and nothing else. Other comments, as the source paths on .loc directives, may hold the words.
+static ProfileSpillKind profile_spill_kind(String8 line)
+{
+    ProfileSpillKind result = PROFILE_SPILL_NONE;
     const uint64_t comment = profile_find(line, profile_string("#"));
-    const String8 text = profile_slice(line, comment, line.length);
-    return comment != line.length && (profile_find(text, profile_string("Spill")) != text.length || profile_find(text, profile_string("Reload")) != text.length);
+    const String8 instruction = profile_trim(profile_slice(line, 0, comment));
+    const bool is_instruction = comment != line.length && instruction.length != 0 && instruction.pointer[0] != '.' &&
+                                instruction.pointer[instruction.length - 1] != ':';
+    String8 text = profile_trim(profile_slice(line, comment == line.length ? comment : comment + 1, line.length));
+    uint64_t digits = 0;
+    while (digits < text.length && text.pointer[digits] >= '0' && text.pointer[digits] <= '9')
+    {
+        digits += 1;
+    }
+    text = profile_slice(text, digits, text.length);
+    if (is_instruction && digits != 0 && profile_starts_with(text, profile_string("-byte ")))
+    {
+        text = profile_slice(text, 6, text.length);
+        if (profile_starts_with(text, profile_string("Folded ")))
+        {
+            text = profile_slice(text, 7, text.length);
+        }
+        if (profile_equal(text, profile_string("Spill")))
+        {
+            result = PROFILE_SPILL_SPILL;
+        }
+        else if (profile_equal(text, profile_string("Reload")))
+        {
+            result = PROFILE_SPILL_RELOAD;
+        }
+    }
+    return result;
+}
+
+static bool profile_is_symbol_char(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '$';
+}
+
+// Appends `line` with every whole symbol `name` in it followed by BUSTER_PROFILE_LABELED_SUFFIX.
+static void profile_append_renamed(ProfileReport* output, String8 line, String8 name)
+{
+    uint64_t copied = 0;
+    uint64_t i = 0;
+    while (name.length != 0 && i + name.length <= line.length)
+    {
+        const bool before = i == 0 || !profile_is_symbol_char(line.pointer[i - 1]);
+        const bool after = i + name.length == line.length || !profile_is_symbol_char(line.pointer[i + name.length]);
+        if (before && after && memcmp(line.pointer + i, name.pointer, name.length) == 0)
+        {
+            profile_append(output, profile_slice(line, copied, i + name.length));
+            profile_append(output, profile_string(BUSTER_PROFILE_LABELED_SUFFIX));
+            copied = i + name.length;
+            i = copied;
+        }
+        else
+        {
+            i += 1;
+        }
+    }
+    profile_append(output, profile_slice(line, copied, line.length));
+}
+
+// Whether `.globl name` or `.weak name` is among the lines: then other translation units may refer to the function by
+// its name, which label-spills keeps.
+static bool profile_is_global(String8 assembly, String8 name)
+{
+    bool result = false;
+    uint64_t position = 0;
+    while (position < assembly.length)
+    {
+        // Without its comment: clang writes `.globl f  # -- Begin function f`.
+        const String8 whole = profile_line(assembly, &position);
+        const String8 line = profile_trim(profile_slice(whole, 0, profile_find(whole, profile_string("#"))));
+        const bool directive = profile_starts_with(line, profile_string(".globl")) || profile_starts_with(line, profile_string(".weak"));
+        uint64_t i = 0;
+        while (directive && i < line.length && !profile_is_blank(line.pointer[i]))
+        {
+            i += 1;
+        }
+        result = result || (directive && i < line.length && profile_equal(profile_trim(profile_slice(line, i, line.length)), name));
+    }
+    return result;
 }
 
 // Copies clang's assembly with BUSTER_PROFILE_SPILL_LABEL and a number before each spill and reload of `function`,
-// numbered from 0 in order. Returns false, with the reason in the report, if the function isn't in the assembly; the
-// output is then empty.
+// numbered from 0 in order, and a static function renamed (BUSTER_PROFILE_LABELED_SUFFIX) everywhere in the file.
+// Returns false, with the reason in the report, if the function isn't in the assembly; the output is then empty.
 static bool profile_label_spills(ProfileReport* output, ProfileReport* report, String8 function, String8 assembly)
 {
+    const bool rename = !profile_is_global(assembly, function);
     uint64_t labels = 0;
     bool found = false;
     bool inside = false;
@@ -725,12 +817,20 @@ static bool profile_label_spills(ProfileReport* output, ProfileReport* report, S
         {
             inside = false;
         }
-        else if (inside && profile_is_spill(line))
+        else if (inside && profile_spill_kind(line) != PROFILE_SPILL_NONE)
         {
             profile_print(output, BUSTER_PROFILE_SPILL_LABEL "%llu:\n", (unsigned long long)labels);
             labels += 1;
         }
-        profile_append(output, profile_slice(assembly, start, position));
+        const String8 whole = profile_slice(assembly, start, position);
+        if (rename)
+        {
+            profile_append_renamed(output, whole, function);
+        }
+        else
+        {
+            profile_append(output, whole);
+        }
     }
     const bool result = found && !output->full;
     if (!found)
@@ -740,7 +840,12 @@ static bool profile_label_spills(ProfileReport* output, ProfileReport* report, S
     }
     else
     {
-        profile_print(report, "label-spills: %llu spills and reloads labeled in %.*s\n", (unsigned long long)labels, (int)function.length, function.pointer);
+        profile_print(report, "label-spills: %llu spills and reloads labeled in %.*s", (unsigned long long)labels, (int)function.length, function.pointer);
+        if (rename)
+        {
+            profile_print(report, ", renamed %.*s" BUSTER_PROFILE_LABELED_SUFFIX, (int)function.length, function.pointer);
+        }
+        profile_print(report, "\n");
     }
     return result;
 }
@@ -851,17 +956,21 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
     }
     ProfileSpill* spills = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileSpill, lines + 1);
     ProfileSlot* slots = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileSlot, lines + 1);
-    // The function's starts among the samples (ip less symoff), one per copy that has samples, and their samples.
-    uint64_t sample_lines = 0;
-    position = 0;
-    while (position < samples_text.length)
+    // The labeled function's name: renamed if it is static, as label-spills renames it.
+    char* renamed = arena_push(arena, function.length + sizeof(BUSTER_PROFILE_LABELED_SUFFIX), 1);
+    String8 name = function;
+    if (renamed != 0)
     {
-        profile_line(samples_text, &position);
-        sample_lines += 1;
+        memcpy(renamed, function.pointer, function.length);
+        memcpy(renamed + function.length, BUSTER_PROFILE_LABELED_SUFFIX, sizeof(BUSTER_PROFILE_LABELED_SUFFIX) - 1);
+        const String8 candidate = { .pointer = renamed, .length = function.length + sizeof(BUSTER_PROFILE_LABELED_SUFFIX) - 1 };
+        position = 0;
+        while (position < labeled.length)
+        {
+            name = profile_is_label(profile_line(labeled, &position), candidate) ? candidate : name;
+        }
     }
-    uint64_t* starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, sample_lines + 1);
-    uint64_t* start_samples = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, sample_lines + 1);
-    if (spills == 0 || slots == 0 || starts == 0 || start_samples == 0)
+    if (spills == 0 || slots == 0 || renamed == 0)
     {
         profile_print(report, "spill-report: out of memory\n");
     }
@@ -880,7 +989,7 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
         {
             const String8 line = profile_line(labeled, &position);
             const String8 trimmed = profile_trim(line);
-            if (profile_is_label(line, function))
+            if (profile_is_label(line, name))
             {
                 found = true;
                 inside = true;
@@ -906,7 +1015,7 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
                     .width = profile_spill_width(trimmed),
                     .slot = profile_spill_slot(trimmed),
                     .location = location.length != 0 ? location : profile_string("-"),
-                    .reload = profile_find(trimmed, profile_string("Reload")) != trimmed.length,
+                    .reload = profile_spill_kind(line) == PROFILE_SPILL_RELOAD,
                 };
                 spill_count += 1;
                 pending = false;
@@ -924,14 +1033,12 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
         else
         {
             // Samples at each label's first byte, the instruction after it, and after it up to the next label, which
-            // perf names by the label before them. The function's own name only covers the labeled copy up to its first
-            // label, and names the copies of other translation units (each copy of c_lexer.c has a tokenize_c): the
-            // labeled copy's start is the greatest one at or below its labels.
-            uint64_t at_labels = 0;
+            // perf names by the label before them, and before the first label, which it names by the function's name.
+            // That name is the labeled copy's alone: label-spills renamed a static function, whose copies in other
+            // translation units have its name.
+            uint64_t total = 0;
             uint64_t at_spills = 0;
             uint64_t at_reloads = 0;
-            uint64_t lowest_label = UINT64_MAX;
-            uint64_t start_count = 0;
             position = 0;
             while (position < samples_text.length)
             {
@@ -939,41 +1046,14 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
                 uint64_t number = 0;
                 const bool labeled = profile_starts_with(sample.symbol, label) && profile_decimal(profile_slice(sample.symbol, label.length, sample.symbol.length), &number) &&
                                      number < spill_count;
-                if (labeled)
+                total += labeled || profile_equal(sample.symbol, name);
+                if (labeled && sample.offset == 0)
                 {
-                    at_labels += 1;
-                    lowest_label = sample.ip - sample.offset < lowest_label ? sample.ip - sample.offset : lowest_label;
-                    if (sample.offset == 0)
-                    {
-                        spills[number].samples += 1;
-                        at_reloads += spills[number].reload;
-                        at_spills += !spills[number].reload;
-                    }
-                }
-                else if (profile_equal(sample.symbol, function))
-                {
-                    const uint64_t start = sample.ip - sample.offset;
-                    uint64_t found_start = start_count;
-                    for (uint64_t k = 0; k < start_count; k += 1)
-                    {
-                        found_start = starts[k] == start ? k : found_start;
-                    }
-                    if (found_start == start_count)
-                    {
-                        starts[start_count] = start;
-                        start_samples[start_count] = 0;
-                        start_count += 1;
-                    }
-                    start_samples[found_start] += 1;
+                    spills[number].samples += 1;
+                    at_reloads += spills[number].reload;
+                    at_spills += !spills[number].reload;
                 }
             }
-            uint64_t labeled_start = start_count;
-            for (uint64_t k = 0; k < start_count; k += 1)
-            {
-                const bool below = starts[k] <= lowest_label;
-                labeled_start = below && (labeled_start == start_count || starts[k] > starts[labeled_start]) ? k : labeled_start;
-            }
-            const uint64_t total = at_labels + (labeled_start != start_count ? start_samples[labeled_start] : 0);
 
             uint64_t used = 0;
             for (uint64_t s = 0; s < spill_count; s += 1)

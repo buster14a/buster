@@ -12,10 +12,11 @@
 //     symbol whose name only starts with the function's, and of none; the loops' ranking, the smallest loop with half
 //     the samples and its instructions; --loops 1; a function that isn't there; and a disassembly out of order;
 //   - label-spills: spills and reloads inside the function (whose label has clang's comment), folded ones among them,
-//     labeled in order, and none of another function's, one whose name starts with the function's among them; a
-//     function that isn't there;
-//   - spill-report: label-spills' output with samples at labels, after them, at a label it doesn't have and in another
-//     function: the slots, their widths and the source locations of their hottest spills and reloads; labels that aren't
+//     labeled in order, and none of another function's, one whose name starts with the function's among them; source
+//     paths and another comment that hold the words, which aren't spills; the static function renamed everywhere, and
+//     a global one not; a function that isn't there;
+//   - spill-report: label-spills' output with samples at labels, after them, at a label it doesn't have, in another
+//     function and in other copies of the static function, before its labels too (#236's review): the slots, their widths and the source locations of their hottest spills and reloads; labels that aren't
 //     numbered in order;
 //   - branch-misses: records with M, P and neither, a field that isn't one and one of a branch at 0, with the load bias
 //     and the disassembly's instructions, and an address the disassembly doesn't have; then 10,000 branches, which grow
@@ -92,45 +93,55 @@ static const char profile_test_hot_loops[] = "hot-loops: 14 samples in f (12 ins
                                              "         0  101f  cmp    %ecx,0x8(%rsp)\n"
                                              "         3  1023  jne    1016 <f+0x6>\n";
 
-static const char profile_test_assembly[] = "\t.text\n"
+static const char profile_test_assembly[] = "\t.file\t0 \"/src\" \"ReduceSpills.c\"\n"
+                                            "\t.text\n"
+                                            "\t.type\tf,@function\n"
                                             "f:                                      # @f\n"
-                                            "\t.loc\t0 10 3 prologue_end            # a.c:10:3\n"
+                                            "\t.loc\t0 10 3 prologue_end            # ReduceSpills.c:10:3\n"
                                             "\tmovq\t%rsi, 64(%rsp)                  # 8-byte Spill\n"
                                             "\tvmovups\t%zmm0, -128(%rsp)               # 64-byte Spill\n"
-                                            "\t.loc\t0 12 5                          # a.c:12:5\n"
+                                            "\t.loc\t0 12 5                          # ReduceSpills.c:12:5\n"
                                             "\tvaddps\t-128(%rsp), %zmm1, %zmm1         # 64-byte Folded Reload\n"
+                                            "\tmovq\t%rax, %rbx                      # Reload the count from Spill.c\n"
                                             "\tmovq\t64(%rsp), %rax                  # 8-byte Reload\n"
                                             "\tret\n"
                                             ".Lfunc_end0:\n"
+                                            "\t.size\tf, .Lfunc_end0-f\n"
                                             "f2:                                     # @f2\n"
                                             "\tmovq\t%rsi, 64(%rsp)                  # 8-byte Spill\n"
+                                            "\tcall\tf\n"
                                             ".Lfunc_end1:\n"
                                             "g:\n"
                                             "\tmovq\t%rsi, 64(%rsp)                  # 8-byte Spill\n"
                                             "\tret\n";
 
-static const char profile_test_labeled[] = "\t.text\n"
-                                           "f:                                      # @f\n"
-                                           "\t.loc\t0 10 3 prologue_end            # a.c:10:3\n"
+static const char profile_test_labeled[] = "\t.file\t0 \"/src\" \"ReduceSpills.c\"\n"
+                                           "\t.text\n"
+                                           "\t.type\tf.labeled,@function\n"
+                                           "f.labeled:                                      # @f.labeled\n"
+                                           "\t.loc\t0 10 3 prologue_end            # ReduceSpills.c:10:3\n"
                                            "buster_spill_0:\n"
                                            "\tmovq\t%rsi, 64(%rsp)                  # 8-byte Spill\n"
                                            "buster_spill_1:\n"
                                            "\tvmovups\t%zmm0, -128(%rsp)               # 64-byte Spill\n"
-                                           "\t.loc\t0 12 5                          # a.c:12:5\n"
+                                           "\t.loc\t0 12 5                          # ReduceSpills.c:12:5\n"
                                            "buster_spill_2:\n"
                                            "\tvaddps\t-128(%rsp), %zmm1, %zmm1         # 64-byte Folded Reload\n"
+                                           "\tmovq\t%rax, %rbx                      # Reload the count from Spill.c\n"
                                            "buster_spill_3:\n"
                                            "\tmovq\t64(%rsp), %rax                  # 8-byte Reload\n"
                                            "\tret\n"
                                            ".Lfunc_end0:\n"
+                                           "\t.size\tf.labeled, .Lfunc_end0-f.labeled\n"
                                            "f2:                                     # @f2\n"
                                            "\tmovq\t%rsi, 64(%rsp)                  # 8-byte Spill\n"
+                                           "\tcall\tf.labeled\n"
                                            ".Lfunc_end1:\n"
                                            "g:\n"
                                            "\tmovq\t%rsi, 64(%rsp)                  # 8-byte Spill\n"
                                            "\tret\n";
 
-static const char profile_test_spill_samples[] = " 401000 f+0x0\n"
+static const char profile_test_spill_samples[] = " 401000 f.labeled+0x0\n"
                                                  " 300004 f+0x4\n"
                                                  " 500010 f+0x10\n"
                                                  " 401010 buster_spill_0+0x0\n"
@@ -153,8 +164,8 @@ static const char profile_test_spill_samples[] = " 401000 f+0x0\n"
                                                  " 401060 g+0x0\n";
 
 static const char profile_test_spill_report[] = "spill-report: 16 samples in f, 12 (75.00%) at its 4 spills and reloads: 7 spills, 5 reloads, in 2 slots\n"
-                                                "zmm  -128(%rsp)   spills      5 reloads      4  | hottest spill 5 at a.c:10:3  | hottest reload 4 at a.c:12:5\n"
-                                                "gpr  64(%rsp)     spills      2 reloads      1  | hottest spill 2 at a.c:10:3  | hottest reload 1 at a.c:12:5\n";
+                                                "zmm  -128(%rsp)   spills      5 reloads      4  | hottest spill 5 at ReduceSpills.c:10:3  | hottest reload 4 at ReduceSpills.c:12:5\n"
+                                                "gpr  64(%rsp)     spills      2 reloads      1  | hottest spill 2 at ReduceSpills.c:10:3  | hottest reload 1 at ReduceSpills.c:12:5\n";
 
 static const char profile_test_brstack[] = " 0x401005/0x401000/M/-/-/3/  0x401005/0x401000/P/-/-/1/ 0x40100a/0x401020/M/-/-/2/\n"
                                            " 0x401005/0x401000/M/-/-/1/ junk 0x0/0x1/M/-/-/1/ 0x401011/0x401000/-/-/-/1/\n";
@@ -254,7 +265,7 @@ static void profile_test_text_tools(ProfileTest* test)
 
     ProfileReport labeled = { .arena = arena_reserve(BUSTER_PROFILE_REPORT_CAPACITY) };
     ok = profile_label_spills(&labeled, &test->report, profile_test_string("f"), profile_test_string(profile_test_assembly));
-    profile_test_check(test, "label-spills", ok, true, profile_report_text(&test->report), "label-spills: 4 spills and reloads labeled in f\n");
+    profile_test_check(test, "label-spills", ok, true, profile_report_text(&test->report), "label-spills: 4 spills and reloads labeled in f, renamed f.labeled\n");
     profile_test_check(test, "label-spills' output", ok, true, profile_report_text(&labeled), profile_test_labeled);
     labeled.arena.length = 0;
     ok = profile_label_spills(&labeled, &test->report, profile_test_string("h"), profile_test_string(profile_test_assembly));
@@ -264,6 +275,29 @@ static void profile_test_text_tools(ProfileTest* test)
 
     ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), profile_test_string(profile_test_labeled), profile_test_string(profile_test_spill_samples), 24);
     profile_test_check(test, "spill-report", ok, true, profile_report_text(&test->report), profile_test_spill_report);
+
+    // #236's review: samples of another copy of a static function, before the labeled copy's first label in address
+    // order, and none of the labeled copy's own before its first label, mustn't count.
+    ProfileReport small = { .arena = arena_reserve(BUSTER_PROFILE_REPORT_CAPACITY) };
+    ok = profile_label_spills(&small, &test->report, profile_test_string("e"), profile_test_string("e:\n\tmovq\t%rsi, 64(%rsp)  # 8-byte Spill\n\tret\n.Lfunc_end0:\n"));
+    profile_test_check(test, "label-spills of one spill", ok, true, profile_report_text(&test->report), "label-spills: 1 spills and reloads labeled in e, renamed e.labeled\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("e"), profile_report_text(&small),
+                              profile_test_string("300004 e+0x4\n300008 e+0x8\n30000c e+0xc\n401010 buster_spill_0+0x0\n"), 24);
+    profile_test_check(test, "spill-report beside another copy", ok, true, profile_report_text(&test->report),
+                       "spill-report: 1 samples in e, 1 (100.00%) at its 1 spills and reloads: 1 spills, 0 reloads, in 1 slots\n"
+                       "gpr  64(%rsp)     spills      1 reloads      0  | hottest spill 1 at -\n");
+
+    // A global function keeps its name, which other translation units may use.
+    small.arena.length = 0;
+    ok = profile_label_spills(&small, &test->report, profile_test_string("h"), profile_test_string("\t.globl\th                               # -- Begin function h\nh:\n\tmovq\t%rsi, 64(%rsp)  # 8-byte Spill\n.Lfunc_end0:\n"));
+    profile_test_check(test, "label-spills of a global function", ok, true, profile_report_text(&test->report), "label-spills: 1 spills and reloads labeled in h\n");
+    profile_test_check(test, "label-spills' output of a global function", ok, true, profile_report_text(&small),
+                       "\t.globl\th                               # -- Begin function h\nh:\nbuster_spill_0:\n\tmovq\t%rsi, 64(%rsp)  # 8-byte Spill\n.Lfunc_end0:\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("h"), profile_report_text(&small), profile_test_string("1 h+0x0\n2 buster_spill_0+0x0\n"), 24);
+    profile_test_check(test, "spill-report of a global function", ok, true, profile_report_text(&test->report),
+                       "spill-report: 2 samples in h, 1 (50.00%) at its 1 spills and reloads: 1 spills, 0 reloads, in 1 slots\n"
+                       "gpr  64(%rsp)     spills      1 reloads      0  | hottest spill 1 at -\n");
+    arena_release(&small.arena);
 
     ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), profile_test_string("f:\nbuster_spill_1:\n\tret\n"), profile_test_string(""), 24);
     profile_test_check(test, "spill-report out of order", ok, false, profile_report_text(&test->report),
