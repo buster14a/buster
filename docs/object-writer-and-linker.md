@@ -3076,6 +3076,240 @@ from the mapped files. Each step is a lane phase (see "Lanes"):
 Steps 1–3 and 7 are where most of the foreign path's work is, and where the
 vector kernels go. Steps 4–6 are graph walks bound by memory latency.
 
+#### Steps 1 to 5, as built
+
+`foreign.c` (the first part of step 7) resolves a command line on a group of
+lanes and leaves what the later steps read: each loaded object's section
+table, symbol table, COMDAT groups and relocation sections, each global
+name's winner, and each group's fate. `foreign_arguments` takes paths, `-l`
+(and `-l:FILE`), `-L`, `-u`, `--whole-archive`, `--as-needed`, `-Bstatic`
+and `-Bdynamic`, and groups, which the rounds make moot. Nothing is written
+yet: garbage collection, the relocation scan, merged strings and the write
+are the later parts.
+
+- **Positions.** Every input has a place in link order, a script's inputs at
+  the script's place, and an archive's member is at its archive's place in
+  member order: `(input + 1) << 32 | member`. Every comparison of definitions
+  and every decision to load a member goes by position, so the result doesn't
+  depend on which lane or which round met a record first.
+- **Open** (step 1). The inputs are found (`-l` as GNU ld searches, a
+  script's inputs as lld finds them) and mapped privately, split across the
+  lanes by count, each opened without blocking, so that a FIFO is refused
+  rather than waited on; lane 0 reads the scripts and puts their inputs in
+  their place. Then each archive's symbol index alone (`import_archive_lazy`:
+  the index and the headers of the members it names, no member's bytes; a
+  thin archive's member is a file of its own, mapped when it loads, or, where
+  GNU ar added a regular archive to a thin one, a member of that archive,
+  named `/N:M` and read from its header there), its names hashed eight at a
+  time and indexed as a library's exports are (`import_index_build`), with
+  each entry's name, length and member copied into the index's order, so that
+  a probe reads its bucket's entries one after another; and each library's
+  exports (`import_library`).
+- **Rounds** (steps 2 to 4). The first round's objects are the command
+  line's, with an object of references for each shared library not under
+  `--as-needed`: its undefined symbols, weak or not, at its place, which load
+  the members that define them as an object's references do (as GNU ld and
+  lld load them). A library that refers to no name, such as the loader,
+  takes no object: it becomes needed without a round of its own. Each round
+  parses its objects, exchanges their records, resolves them and decides
+  which members load, which are the next round's objects, until a round
+  loads none. A round's columns are pushed once its headers have counted
+  them, so the link touches no more memory than it uses.
+  - *The parse:* each object's header, section table, COMDAT groups and
+    relocation sections, by object, eight section headers at a time on the
+    vector path (transposed by `link_transpose_words`); then the global
+    symbols, by symbol across objects, in a count, place and fill over the
+    round (rule 3): eight entries at a time, their classes, visibilities and
+    sections as masks (`SHN_ABS` and `SHN_COMMON` kept out of the range of
+    the sections `SHN_XINDEX` reaches, which number them too past 65,280
+    sections), their names' lengths by masked loads, their hashes by
+    `link_hash_rows`, and a copy of each name, which the resolution compares,
+    made by a masked store of the row the hash read.
+  - *The partitions* come from round 0's counted records and the archives'
+    index entries, about 2,048 records each: an input's size, never the
+    lanes. The file sizes they were first taken from gave the synth-size link
+    2,048 partitions of 200 records; from 128 to 2,048 of them the resolution
+    took the same time within 5% on the 9700X, so the count only spreads the
+    work over the lanes.
+  - *The exchange* (rule 4): a 32-byte record per global symbol and per
+    group: the hash, the name and its length, the symbol, a tag (class,
+    visibility and object) and the section. The design's 16 bytes (a hash,
+    the symbol and its class) left a partition's lane to read the name, its
+    length and the section from the round's columns, a miss each at a
+    symbol's place. The counts are a histogram of the hashes' top bits, the
+    places an exclusive scan over partitions and lanes, and the records are
+    built eight at a time by a transpose and stored from the registers, two
+    per vector: a batch stored to memory and copied a record at a time read
+    each record back from a store twice its size, and lost to the exact path.
+  - *The resolution:* each lane takes its partitions, whose tables (names and
+    group signatures, by open addressing) it keeps from round to round, and
+    probes them once per record, on both paths. A probe is a few loads in the
+    partition's table; what a record costs is the compare of its name with
+    its entry's, which waits for both names' bytes. So each record's name is
+    fetched 16 records ahead, and in a partition whose table held names
+    before the round, its hash's first slot, the entry it holds and that
+    entry's name in three stages, 24, 16 and 8 records ahead. A later round's
+    records find an earlier round's entries, cold by then; a first round's
+    find the entries its own records just made, still in cache, where the
+    stages only cost: in a run of each way on the 9700X, the synth-size link's
+    resolution took 5.8 ms with the stages and 4.9 with the names alone (5.0
+    without any prefetch), and its members kind, whose second round resolves
+    310,000 records against the first's entries, 9.5 and 10.4.
+  - *Loading:* each name the round touched decides (`foreign_decide`). Its
+    first member by position, found by probing once the indices of the
+    archives before the name's earliest definition when a strong reference
+    comes before it, loads when both the member and the earliest strong
+    reference come before the earliest definition, and before the first
+    shared library that exports the name if every symbol of it has default
+    visibility. A later definition doesn't stop it: for `start.o libfoo.a
+    weak.o`, GNU ld loads the member, whose strong definition wins, and with
+    a strong definition in place of the weak one the two are a duplicate.
+    Only the libraries before that bound can shadow the member, so only they
+    are looked in; the winners look in the rest for a name left without a
+    definition. Then GNU ld's common rule: a common symbol without a strong
+    definition loads the first member after it that defines the name as
+    global data, read from the member's symbol table without loading it. And
+    a library under `--as-needed` becomes needed when a strong reference with
+    default visibility finds a name it exports still undefined before it, as
+    GNU ld decides it left to right (`foreign_needed_library`). Lane 0 marks
+    the needs, and the members not loaded before and the newly needed
+    libraries' objects of references are the next round's objects, in
+    position order.
+- **COMDAT groups** (step 5). A group's record goes through the exchange with
+  the symbols', and its partition's group table keeps each signature's
+  earliest group by position. After the last round each object's sections in
+  a discarded group are marked, and its definitions in them become references
+  of their binding, as GNU ld and lld make them.
+- **The winners.** Each name's strong definitions (two or more are a
+  duplicate), its largest common symbol (with the largest alignment), its
+  earliest weak definition, its shared library's export, or nothing: a strong
+  reference to nothing is an error the link reports unless garbage collection
+  drops every reference, a weak one is 0. Then each symbol's name id.
+- **Failures.** After each phase every lane decides whether to go on
+  (`foreign_proceed`), and all must decide alike: a lane that skipped a phase
+  another took would leave that one waiting at the phase's syncs. A failure
+  carries the number of decisions its lane had taken, and a decision counts
+  only the failures from before it, which the sync before it shows every
+  lane; a failure in the next phase, of a lane that has gone on, waits for
+  the next decision. A group that `lane_run` couldn't start fails as
+  `FOREIGN_ERROR_LANES`.
+
+The members loaded and each name's winner are GNU ld's, except where GNU ld's
+result depends on the order of the archives on the command line; there they
+are lld's and mold's. `test-foreign --cross-check` compares them with GNU
+ld's `--trace`, `-y` and map, and with lld's `--why-extract`, `-y` and map.
+Where the three linkers differ:
+
+- **an archive before the input that needs it** (GNU ld loads nothing for a
+  reference after its archive), and a shared library's export of a name that
+  an archive before it defines: lld's;
+- **GNU ld's common rule**, which lld doesn't have: GNU ld's;
+- **ties between members of one archive** (two weak definitions, commons of
+  one size, COMDAT groups of one signature) go by member order, as mold's
+  do: GNU ld and lld order a member loaded for a member after it after that
+  one;
+- **loading only adds:** a member a round loads stays, where lld, which loads
+  in input order, can find a definition first that a later round of this walk
+  finds;
+- **a library under `--as-needed` that nothing needs:** GNU ld's, which drops
+  it, so that its own references load nothing; lld loads the members they
+  name;
+- **a thin archive of another archive's members** (GNU ar's `/N:M`): GNU
+  ld's, which reads them as this path does; lld 23 refuses the archive.
+
+The tests count each documented difference and print it on a line of its own
+rather than as a failure.
+
+Measured on the 9700X (`benchmark-foreign --linkers`, CPU 2, medians of 21
+runs; each phase is the slowest lane's time to its last sync), for generated
+programs that call libc, 200 workers per unit, written as objects and
+resolved as GCC's driver links them: as a PIE (`dynamic`: the crt objects,
+the program's objects, `libgcc.a`, `libgcc_s.so.1` as needed and `libc.so`'s
+script, with `libc.so.6`, `libc_nonshared.a` and the loader), as a static
+executable (`static`: `crt1.o`, `crtbeginT.o` and the group of `libgcc.a`,
+`libgcc_eh.a` and `libc.a`, of whose members 442 load in 13 rounds), and as
+the PIE with every unit but the first in an archive after it (`members`):
+
+| Program | Kind | Objects (members) | Global symbols | Names | Vector | Exact | wild |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 worker | dynamic | 7 | 57 | 53 | 108 µs | 207 µs | 430 µs |
+| 1 worker | static | 448 (442) | 3,980 | 1,408 | 324 µs | 675 µs | 1,530 µs |
+| 2,000 workers | dynamic | 16 | 6,863 | 2,052 | 225 µs | 387 µs | 620 µs |
+| 2,000 workers | static | 457 (442) | 10,786 | 3,407 | 491 µs | 908 µs | 1,610 µs |
+| 2,000 workers | members | 16 (9) | 6,863 | 2,052 | 256 µs | 467 µs | 600 µs |
+| 102,400 workers | dynamic | 518 | 413,919 | 102,452 | 14.1 ms | 16.7 ms | 16.1 ms |
+| 102,400 workers | static | 959 (442) | 417,842 | 103,807 | 14.6 ms | 17.8 ms | 17.9 ms |
+| 102,400 workers | members | 518 (511) | 413,919 | 102,452 | 18.4 ms | 24.2 ms | 14.5 ms |
+
+wild's figure is the sum of its phases that read and resolve (`--time`:
+opening the inputs, loading them into its symbol database, resolving symbols
+and alternative definitions, and resolving sections), on one thread
+(`--no-threads`, the same command line, medians of 11 runs). mold's (`--perf`:
+`read_input_files` and `resolve_symbols`) has a millisecond's resolution, so
+only the synth-size links' mean anything: 20, 23 and 18 ms for the three
+kinds. For the dynamic one, mold's reading takes 9 ms where this path's
+open, indices, headers and symbols take 5.3, and its resolution 11 where the
+exchange, the resolution, the groups and the winners take 8.8. wild's parts
+are 2.07 ms opening, 4.82 loading and 9.16 resolving.
+
+Phase by phase, for the synth-size links by the vector path, on one lane and
+on 8 (`--lanes 1,8 --cpus 2,0,1,3,4,5,6,7`: lane 0 on CPU 2, the others on
+the cores that run `powersave`), in ms; the whole is `foreign_run`'s call to
+its return, which starts the lanes:
+
+| Phase | dynamic, 1 lane | 8 lanes | static, 1 lane | 8 lanes | members, 1 lane | 8 lanes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| open | 1.31 | 0.62 | 1.23 | 0.58 | 0.07 | 0.04 |
+| indices | 0.08 | 0.20 | 0.13 | 0.26 | 0.90 | 1.16 |
+| headers | 0.43 | 0.09 | 0.65 | 0.13 | 0.77 | 0.12 |
+| symbols | 3.47 | 1.88 | 3.66 | 1.92 | 3.98 | 2.51 |
+| exchange | 1.48 | 1.24 | 1.55 | 1.40 | 1.14 | 1.24 |
+| resolve | 5.00 | 1.43 | 5.25 | 1.45 | 9.24 | 1.91 |
+| load | 0.00 | 0.00 | 0.01 | 0.01 | 0.07 | 0.07 |
+| groups | 0.24 | 0.06 | 0.33 | 0.09 | 0.18 | 0.08 |
+| winners | 1.99 | 1.33 | 1.95 | 1.22 | 1.94 | 1.18 |
+| whole | 14.1 | 7.59 | 14.8 | 7.57 | 18.3 | 8.92 |
+
+- **Opening** is the kernel's: 529 inputs at 2.5 µs each (an `open`, an
+  `fstat`, a private mapping and the fault of its first page), against
+  about 1.2 µs for the calls alone ("The floors"). The members kind opens one
+  archive for its 511 objects. Mapping every input whole with
+  `MAP_POPULATE` (on the laptop) made opening ten times slower to save the
+  1.6 ms that the headers' and symbols' faults cost: the mappings stay lazy.
+- **The symbols** cost 8.3 ns each on the vector path against 13.8 on the
+  exact one (the dynamic link, by `--linkers`' run). What is left is
+  reading 10 MB of symbol table entries and 5 MB of their names from the
+  files' pages, whose first touches fault, and writing 19 MB of columns and
+  5 MB of names to new memory.
+- **The exchange** is 3.7 ns per record against the exact path's 4.1 (3.0
+  and 3.5 in a session of runs hours earlier, by the same code): the stores
+  of 13 MB of records into new memory, whose first touches it pays. On 8
+  lanes it takes nearly as long, 1.24 ms against 1.48: those 13 MB are seven
+  huge pages, each cleared by the fault that takes it.
+- **The resolution** is 12 ns per record, the probes and compares above, and
+  3.5 times faster on 8 lanes. In the members kind the first object refers to
+  every name, so round 0 makes 102,452 entries and looks each name up in the
+  archive's index (every other unit's definitions, about 102,000 entries),
+  and round 1's 310,000 records find the
+  entries round 0 left cold: 9.4 ms against 5.0 for the same records in one
+  round. That kind is the one wild resolves faster (14.5 ms against 18.4).
+- **The winners** read every round's records again, partition by partition,
+  and write each symbol's name id at its place, a store per record over
+  1.6 MB, and the names' columns: 4.8 ns per record, 1.5 times faster on 8
+  lanes.
+- **The indices** are libc's exports and the archives' indices: 85 µs for
+  the dynamic link against 248 by the exact path, and for the members
+  kind's archive, whose index of about 102,000 entries is hashed eight at a
+  time and copied into the index's order, 0.90 ms against 4.1.
+
+On 8 lanes the synth-size links take half the time (7.6 to 8.9 ms), and the
+small ones longer than on one lane, by an amount that varies from run to
+run: over four runs, 0.23 to 0.53 ms for the dynamic link of one worker and
+0.52 to 1.42 ms for its static link, against 0.11 and 0.32. Starting seven
+threads and the syncs of up to 13 rounds cost more than the work ("Lanes" has
+those costs), so a small link wants one lane: how many lanes a link takes is
+step 8's question, with the exchange's and the winners' first touches.
+
 ### Lanes
 
 Fleury's model, adapted to this repository's style: every phase is one
@@ -3478,6 +3712,9 @@ Where the decisions stand:
 | Reading ELF records (objects, archives, `.dynsym`) | shuffles, compression and scalar joins | AVX-512 with an exact path (done: 2.1 against 22 ns per record; "Step 5's phases, data-parallel") |
 | Copying chunks | bandwidth | `memcpy`; the chunks stay in L2 |
 | Hashing names | arithmetic | vectorized, one name per masked load, several in flight |
+| Reading foreign objects' global symbols (the foreign path's parse) | shuffles and masked loads | AVX-512 with an exact path, eight symbols at a time with their names hashed and copied eight at a time (done: 8.3 against 13.8 ns per symbol for the synth-size link; "Steps 1 to 5, as built") |
+| The foreign path's exchange | stores to every partition | the records built eight at a time by a transpose and stored from the registers, with an exact path; the counts a histogram of the hashes' top bits on both (done: 3.7 against 4.1 ns per record, bound by the records' new memory; a batch stored to memory and copied a record at a time lost to the exact path) |
+| Resolving foreign names (a partition's table) | each compare's wait for two names' bytes | scalar probes per record on both paths, each record's name prefetched ahead, and its slot, entry and entry's name where an earlier round made the entry (done: 12 ns per record): grouping a partition's records by name first with a radix sort, to probe each name once, lost (7.7 against 5.3 ms for the synth-size link before the prefetches; "Steps 1 to 5, as built") |
 | Splitting strings at NULs | arithmetic | the lexer's bitmask-to-positions method |
 | Decoding and classifying relocations | shuffles and tables | `vpermt2q` transpose, `vpermb` classification, `vpcompressd` lists |
 | Bitsets (liveness, GOT needs) | bandwidth | 512-bit OR, `vpopcntq` for counts |
@@ -3737,6 +3974,17 @@ and with this document updated with what was measured:
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
    and the exchange. Done when the differential tests against lld and mold
    pass on a corpus.
+
+   The first part is done: steps 1 to 5 of "Linking other compilers'
+   objects" (`foreign.c`, `test-foreign` and `benchmark-foreign`: "Steps 1 to
+   5, as built"): the command line opened, the archives' indices read alone,
+   each round's objects parsed, their records exchanged and resolved, the
+   members the link needs loaded in rounds, and COMDAT groups picked, as GNU
+   ld picks them where its result doesn't depend on the archives' order and
+   as lld does where it does, which the tests check against both. Next, the
+   loaded objects into the representation (atoms, symbols and fixups, from
+   step 7's relocation scan) so that `executable.c` writes them, then garbage
+   collection, merged strings and `.eh_frame`, and the corpus.
 8. **More than one lane:** measured scaling, and the per-filesystem write
    choice.
 9. **Unwind tables from the code generator's prologues, and DWARF,** then
