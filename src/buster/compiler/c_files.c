@@ -104,7 +104,7 @@
 // one it opened itself. A smaller file costs lane 0 more to read than to lex where a probe left it, and a wave of more than
 // BUSTER_FILES_DEFER_PROBES probes (a flat corpus, a project's roots) is most often the start of a round that lanes
 // share, where reading on the preparing lane measured slower (the C library corpus) or no faster (musl's 1,357 roots):
-// its probes read their files themselves. The walk keeps open only what the process's limit holds, less
+// its probes read their files themselves. The walk keeps open only what the process's limit holds beyond its already-open files, less
 // BUSTER_FILES_DESCRIPTOR_RESERVE (docs/c-files.md, "Reading where the bytes are lexed").
 #define BUSTER_FILES_DEFER_ABOVE 1024u
 #define BUSTER_FILES_DEFER_PROBES 1024u
@@ -721,7 +721,8 @@ static uint64_t files_broadcast(FilesLane* mine, FilesPhase phase, uint64_t valu
 static bool files_read(FilesRun* run, FilesLane* mine, uint32_t lane, uint32_t record, bool alone)
 {
     FileCache* cache = run->cache;
-    const bool result = file_cache_read_record(cache, record, alone ? FILE_CACHE_MAP_POPULATED : run->bytes, run->read_limit, &cache->lanes[lane].bytes, &mine->counts);
+    const FileCacheBytes how = alone && run->bytes != FILE_CACHE_READ ? FILE_CACHE_MAP_POPULATED : run->bytes;
+    const bool result = file_cache_read_record(cache, record, how, run->read_limit, &cache->lanes[lane].bytes, &mine->counts);
     mine->closed += !result && file_cache_close(cache, record);
     return result;
 }
@@ -1290,7 +1291,7 @@ static void files_search(FilesRun* run)
         // else files of up to run->read_limit bytes read, and larger ones mapped, with MAP_POPULATE on one lane, and as
         // run->bytes says on more.
         const Range64 range = lane_range(probes);
-        const FileCacheBytes how = run->lane_count > 1 ? run->bytes : FILE_CACHE_MAP_POPULATED;
+        const FileCacheBytes how = run->lane_count == 1 && run->bytes != FILE_CACHE_READ ? FILE_CACHE_MAP_POPULATED : run->bytes;
         const uint32_t defer_above = run->wave_defer ? run->defer_above : UINT32_MAX;
         for (uint64_t p = range.begin; p < range.end; p += 1)
         {
@@ -1573,6 +1574,28 @@ static __attribute__((unused)) void files_run_lane(void* argument)
     files_run_ahead(argument);
 }
 
+// The descriptors a run may retain beyond those the process already has open. Keep the reserve for concurrent opens
+// and the lanes' probes. If the process's open files can't be counted, disable deferral rather than risk caching
+// EMFILE failures as missing paths. The directory used to count them is closed before the run starts.
+static uint64_t files_descriptor_limit(void)
+{
+    struct rlimit limit;
+    DIR* directory = getrlimit(RLIMIT_NOFILE, &limit) == 0 ? opendir("/proc/self/fd") : 0;
+    uint64_t used = BUSTER_FILES_DESCRIPTOR_RESERVE;
+    for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
+    {
+        used += entry->d_name[0] != '.';
+    }
+    uint64_t result = 0;
+    if (directory != 0)
+    {
+        closedir(directory);
+        used -= 1;
+        result = (uint64_t)limit.rlim_cur > used ? (uint64_t)limit.rlim_cur - used : 0;
+    }
+    return result;
+}
+
 // A run for `lane_count` lanes, which fills `cache` (whose intern table it refines into) from `roots`, following their
 // includes as `search` (a preprocessor initialized with the units' options and this cache) would search for them, if
 // `follow`. Returns false if the run's memory can't be reserved. Then lane_run(lane_count, files_run_lane, run, cpus)
@@ -1596,10 +1619,7 @@ static __attribute__((unused)) bool files_run_initialize(FilesRun* run, FileCach
         .lane_count = lane_count,
         .partition_count = BUSTER_FILES_PARTITIONS_PER_LANE * lane_count,
     };
-    // The files the walk may keep open: the process's limit, but for BUSTER_FILES_DESCRIPTOR_RESERVE of them.
-    struct rlimit limit;
-    const uint64_t descriptors = getrlimit(RLIMIT_NOFILE, &limit) == 0 ? (uint64_t)limit.rlim_cur : 0;
-    run->descriptor_limit = descriptors > BUSTER_FILES_DESCRIPTOR_RESERVE ? descriptors - BUSTER_FILES_DESCRIPTOR_RESERVE : 0;
+    run->descriptor_limit = files_descriptor_limit();
     run->arena = arena_reserve(BUSTER_FILES_ARENA_BYTES);
     run->files = arena_reserve(BUSTER_FILES_ARENA_BYTES);
     run->round = arena_reserve(BUSTER_FILES_ARENA_BYTES);

@@ -823,6 +823,137 @@ static bool files_test_unread(const char* directory)
     return result;
 }
 
+// With more descriptors already open than the reserve, deferral must still find every readable root, and those paths
+// must stay readable through the cache after the walk closes its files. Restore the soft limit before leaving.
+static bool files_test_descriptor_pressure(const char* directory)
+{
+    char paths[200][4200];
+    const char* roots[200];
+    char text[2049];
+    memset(text, ' ', sizeof(text) - 1);
+    memcpy(text, "int descriptor_pressure;\n", sizeof("int descriptor_pressure;\n") - 1);
+    text[sizeof(text) - 1] = 0;
+    bool result = true;
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(paths); f += 1)
+    {
+        snprintf(paths[f], sizeof(paths[f]), "%s/descriptor-%u.h", directory, f);
+        roots[f] = paths[f];
+        result = files_test_write(paths[f], text) && result;
+    }
+    struct rlimit original;
+    const bool limited = result && getrlimit(RLIMIT_NOFILE, &original) == 0;
+    struct rlimit limit = limited ? original : (struct rlimit){ 0 };
+    limit.rlim_cur = 512;
+    result = limited && setrlimit(RLIMIT_NOFILE, &limit) == 0;
+    int descriptors[400];
+    uint32_t opened = 0;
+    while (result && opened < BUSTER_ARRAY_LENGTH(descriptors))
+    {
+        const int descriptor = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        result = descriptor >= 0;
+        if (result)
+        {
+            descriptors[opened] = descriptor;
+            opened += 1;
+        }
+    }
+    const FilesTestWork work = {
+        .name = "descriptor pressure",
+        .options = { .language = { .standard = 2017, .gnu = true } },
+        .roots = roots,
+        .root_count = BUSTER_ARRAY_LENGTH(roots),
+    };
+    FilesTestRun run = { 0 };
+    result = result && files_test_run(&work, 2, directory, &run);
+    uint32_t readable = 0;
+    FileCacheCounts counts = { 0 };
+    for (uint32_t f = 0; result && f < BUSTER_ARRAY_LENGTH(roots); f += 1)
+    {
+        readable += file_cache_lookup_path(&run.cache, roots[f], (uint32_t)strlen(roots[f]), &counts) != BUSTER_PP_NONE;
+    }
+    result = result && run.cache.record_count == BUSTER_ARRAY_LENGTH(roots) && run.prepared == BUSTER_ARRAY_LENGTH(roots) &&
+             readable == BUSTER_ARRAY_LENGTH(roots) && run.absent == 0 && !run.failed && run.descriptors == 0 && run.stderr_bytes == 0;
+    printf("descriptor pressure: %u/%zu roots readable after the walk with 400 descriptors already open and limit 512: %s\n", readable,
+           BUSTER_ARRAY_LENGTH(roots), result ? "passed" : "FAILED");
+    files_test_release_run(&run);
+    for (uint32_t f = 0; f < opened; f += 1)
+    {
+        close(descriptors[f]);
+    }
+    result = (!limited || setrlimit(RLIMIT_NOFILE, &original) == 0) && result;
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(paths); f += 1)
+    {
+        unlink(paths[f]);
+    }
+    return result;
+}
+
+// An explicit read strategy must read the larger files too: in the probes or deferred, on one preparing lane or
+// several. The counters catch a deferred round silently selecting MAP_POPULATE instead.
+static bool files_test_read_strategy(const char* directory)
+{
+    char paths[2][4200];
+    const char* roots[2] = { paths[0], paths[1] };
+    char text[32788];
+    memset(text, ' ', sizeof(text) - 1);
+    memcpy(text, "int read_strategy;\n", sizeof("int read_strategy;\n") - 1);
+    text[sizeof(text) - 1] = 0;
+    bool result = true;
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(paths); f += 1)
+    {
+        snprintf(paths[f], sizeof(paths[f]), "%s/read-strategy-%u.h", directory, f);
+        result = files_test_write(paths[f], text) && result;
+    }
+    for (uint32_t way = 0; result && way < 3; way += 1)
+    {
+        for (uint32_t defer = 0; result && defer < 2; defer += 1)
+        {
+            InternTable table = { 0 };
+            FileCache cache = { 0 };
+            static Preprocessor search;
+            PPOptions options = { .language = { .standard = 2017, .gnu = true } };
+            const uint32_t lanes = way == 0 ? 1 : 2;
+            result = intern_initialize(&table) && file_cache_initialize(&cache, &table, pp_prepare_options(&options));
+            options.files = &cache;
+            result = result && pp_initialize(&search, &options, &table);
+            FilesRun run = { 0 };
+            result = result && files_run_initialize(&run, &cache, &search, roots, BUSTER_ARRAY_LENGTH(roots), false, lanes);
+            run.bytes = FILE_CACHE_READ;
+            run.read_limit = 0;
+            run.defer = defer != 0;
+            run.lane_bytes = way == 2 ? 0 : run.lane_bytes;
+            result = result && lane_run(lanes, files_run_lane, &run, 0);
+            FileCacheCounts counts = { 0 };
+            for (uint32_t l = 0; run.lanes != 0 && l < lanes; l += 1)
+            {
+                counts.maps += run.lanes[l].counts.maps;
+                counts.reads += run.lanes[l].counts.reads;
+            }
+            const uint64_t kept = defer != 0 && lanes > 1 ? BUSTER_ARRAY_LENGTH(roots) : 0;
+            result = result && !run.failed && cache.prepared_records == BUSTER_ARRAY_LENGTH(roots) && counts.maps == 0 &&
+                     counts.reads == BUSTER_ARRAY_LENGTH(roots) && run.kept == kept;
+            if (!result)
+            {
+                printf("read strategy: way %u defer %u: %lu reads, %lu maps, %lu kept (%lu): FAILED\n", way, defer, (unsigned long)counts.reads,
+                       (unsigned long)counts.maps, (unsigned long)run.kept, (unsigned long)kept);
+            }
+            files_run_release(&run);
+            pp_release(&search);
+            file_cache_release(&cache);
+            intern_release(&table);
+        }
+    }
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(paths); f += 1)
+    {
+        unlink(paths[f]);
+    }
+    if (result)
+    {
+        printf("read strategy: larger files read without mappings, with probes and deferral on one or several preparing lanes\n");
+    }
+    return result;
+}
+
 #define BUSTER_FILES_TEST_DEEP_LEVELS 10
 #define BUSTER_FILES_TEST_DEEP_NAME 250
 #define BUSTER_FILES_TEST_LONG_NAME 2400
@@ -1364,6 +1495,8 @@ static int run_files_tests(int argument_count, char** arguments)
         passed_all &= files_test_contexts(directory, lanes, lane_count);
         passed_all &= files_test_special(directory, lanes, lane_count);
         passed_all &= files_test_unread(directory);
+        passed_all &= files_test_descriptor_pressure(directory);
+        passed_all &= files_test_read_strategy(directory);
         passed_all &= files_test_memory(directory, seed);
         signal(SIGALRM, SIG_DFL);
     }
