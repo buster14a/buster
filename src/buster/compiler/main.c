@@ -267,6 +267,10 @@ int run_x86_encoder_benchmark(int argc, char** argv);
 #include "buster/compiler/lane_test.c"
 int run_lane_benchmark(int argc, char** argv);
 
+#include "buster/compiler/diagnostic.c"
+#include "buster/compiler/diagnostic_test.c"
+#include "buster/compiler/diagnostic_benchmark.c"
+
 // Liveness and interference over aligned bitsets, independent of the future IR's use/def construction.
 #include "buster/compiler/dataflow.c"
 #include "buster/compiler/dataflow_program.c"
@@ -306,6 +310,7 @@ int run_files_benchmark(int argc, char** argv);
 #include "buster/compiler/link.c"
 #include "buster/compiler/link_program.c"
 #include "buster/compiler/link_test.c"
+#include "buster/compiler/link_order_test.c"
 
 // The object writer (ET_REL objects from the link representation, for -c) and its tests, for the test-object-writer
 // command. Its benchmark is another translation unit.
@@ -375,6 +380,10 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/c_types_test.c"
 int run_type_benchmark(int argc, char** argv);
 
+#include "buster/compiler/c_builtin.c"
+#include "buster/compiler/c_builtin_test.c"
+int run_builtin_benchmark(int argc, char** argv);
+
 // The System V calling convention (each type's classes, and each call's argument locations) and its tests, for the
 // test-calling-convention command. Its benchmark is another translation unit.
 #include "buster/compiler/calling_convention.c"
@@ -391,10 +400,23 @@ int run_calling_convention_benchmark(int argc, char** argv);
 #include "buster/compiler/profile.c"
 #include "buster/compiler/profile_test.c"
 
+// The runner the 9700X job runs its tests through (a list of commands at once, each one's output printed in the list's
+// order) and its tests, for the parallel and test-parallel commands.
+#include "buster/compiler/parallel.c"
+#include "buster/compiler/parallel_test.c"
+
 int main(int argc, char** argv)
 {
     int result = 0;
-    if (argc >= 2 && (strcmp(argv[1], "assemble") == 0 || strcmp(argv[1], "-c") == 0))
+    if (argc == 2 && strcmp(argv[1], "test-diagnostics") == 0)
+    {
+        result = run_diagnostic_tests();
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-diagnostics") == 0)
+    {
+        result = run_diagnostic_benchmark(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && (strcmp(argv[1], "assemble") == 0 || strcmp(argv[1], "-c") == 0))
     {
         result = run_assembler_command(argc - 2, argv + 2);
     }
@@ -598,6 +620,14 @@ int main(int argc, char** argv)
     {
         result = run_calling_convention_tests(argc - 2, argv + 2);
     }
+    else if (argc >= 2 && strcmp(argv[1], "test-builtins") == 0)
+    {
+        result = run_builtin_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-builtins") == 0)
+    {
+        result = run_builtin_benchmark(argc - 1, argv + 1);
+    }
     else if (argc >= 2 && strcmp(argv[1], "benchmark-calling-convention") == 0)
     {
         result = run_calling_convention_benchmark(argc - 1, argv + 1);
@@ -618,6 +648,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "test-profile") == 0)
     {
         result = run_profile_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "parallel") == 0)
+    {
+        result = run_parallel_command(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-parallel") == 0)
+    {
+        result = run_parallel_tests(argc - 2, argv + 2);
     }
     else
     {

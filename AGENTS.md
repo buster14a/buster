@@ -100,7 +100,8 @@ old `buster14a/buster` links now address this compiler.
 Local checkout directories, `~/buster-fast-bench/`, the shared host lock,
 `~/llm-memory/projects/buster-fast/` and its memory symlinks retain their existing
 names. The repository-local `buster-fast-9700x` concurrency key is also retained.
-Queues use that prefix per PR/ref; the runner hooks serialize every CI job with
+Queues use that prefix per PR/ref, each holding one pending run (a newer push
+replaces its PR's, and cancels the PR's run in progress); the runner hooks serialize every CI job with
 the shared host lock. These are operational resources, not canonical repository URLs; do not rename
 them by replacing text. Source paths, executable names and object-file metadata
 are unchanged by the repository rename.
@@ -159,6 +160,15 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
+  #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
+  AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
+  undefined/invalid cases and guarded tails. `benchmark-builtins [--only
+  scalar|vector] [--after-scalar MS]` measures synthetic action batches on the
+  locked 9700X, pinned to CPU 2. [The builtin guide](docs/c-builtins.md) records
+  the API and the checking, C selector, feature-query and corpus integration
+  still required before #148 can close.
+
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
   observation table and scalar/AVX-512 cost-column lookups. `test-x86-zen5`
   checks unknowns, guard-page tails and generated microbenchmark loops;
@@ -190,6 +200,8 @@ designs and the compilers already built this way.
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
   `-march=native`, so the machine executing the build determines the host ISA.
   The benchmark is linked into this executable rather than built separately.
+  It compiles the translation units at once, a clang process each, and links
+  them in order: the same executable as one clang command for all of them.
 - `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
   it, and `./build/compiler test-lexer` runs them.
   The same command also runs `main_test.c`'s input-loader error and cleanup
@@ -317,10 +329,12 @@ designs and the compilers already built this way.
   IFUNCs' stubs and IRELATIVE relocations, its general- and local-dynamic
   TLS accesses relaxed to local-exec and its init and fini arrays' priorities,
   or as a static PIE (step 6's fifth part): the PIE's layout and RELATIVE
-  relocations without dynamic symbols, the static runtime's IFUNCs with their
-  IRELATIVE relocations last in `.rela.dyn`, and its loads and calls through
-  the GOT of the image's symbols relaxed; all from vector passes with exact
-  twins. `dynamic.c` gives it what a PIE needs from the C runtime and from
+  relocations without dynamic symbols, and the static runtime's IFUNCs with
+  their IRELATIVE relocations last in `.rela.dyn`. Every kind's loads and
+  calls through the GOT of the image's symbols are relaxed, as GNU ld and lld
+  relax them, and an IFUNC whose stub only calls reach reads the stub's slot
+  through the GOT, as lld's does; all from vector passes with exact twins.
+  `dynamic.c` gives it what a PIE needs from the C runtime and from
   binding (`dynamic_inputs`), what a static executable with the C runtime
   needs (`dynamic_static_inputs`) and what a static PIE needs
   (`dynamic_static_pie_inputs`). `executable_test.c` holds the static
@@ -445,6 +459,11 @@ designs and the compilers already built this way.
   `./build/compiler test-profile` runs them). `docs/profiling.md` is how the
   lexer and the encoder were measured and profiled on the 9700X, with these
   tools: read it before tuning a stage.
+- `src/buster/compiler/parallel.c` is the runner the 9700X job runs its tests
+  through, `parallel`: a list of commands at once, each one's output printed
+  in the list's order. `parallel_test.c` holds its tests (`main.c` includes
+  both; `./build/compiler test-parallel` runs them); "The parallel runner"
+  below describes both.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -455,6 +474,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-call-graph
 ./build.sh check-call-graph
 ./build/compiler test-profile
+./build/compiler test-parallel
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
 ./build/compiler benchmark-lexer src
@@ -514,8 +534,12 @@ there at a time, so everything takes one lock:
 
 - Run every build, test, benchmark and perf run there through
   `EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND...`.
+  Also set `EXCLUSIVE_TITLE` to the session's title and `EXCLUSIVE_LINK` to
+  its link (its claude.ai page, or else the PR or issue it works on): whoever
+  waits sees them in `/var/lib/buster-9700x/owner`.
 - The runner's job hooks take the same lock for every CI job, and a waiting CI
-  job goes first.
+  job goes first. A CI job's owner lines give its workflow, job, PR number and
+  title (or a push's first line), the run's link and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
@@ -576,8 +600,9 @@ then a summary line, and exits with status 1 on a cycle not in
 can't read. An entry names a component's functions, each as many times as
 the component has a function of that name; add one only for the
 style's "trivial statically bounded recursion", with a comment saying what
-bounds its depth. The list is empty: the tree has no cycle. The 9700X job runs
-`test-call-graph` and the check after the build; the IR takes about 1.5 s.
+bounds its depth. The list is empty: the tree has no cycle. The 9700X job's
+test step runs `test-call-graph` and the check; the check, which captures the
+units' IR at once, takes about 1.8 s.
 
 `./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
 on IR of the call forms clang writes and of what must be left out, a
@@ -627,7 +652,7 @@ with the scalar lexer token by token on:
 
 `--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces. The
 command prints each check's counts and first differences, and exits with status
-1 if anything fails. The 9700X job runs both modes after the build. On that
+1 if anything fails. The 9700X job's test step runs both modes. On that
 machine, with `build.sh`'s unoptimized build, the C and C++ runs take about
 5.7 s and 6.1 s. For a longer run:
 
@@ -707,7 +732,108 @@ FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]` and `branch-misses BRSTACK [
 ADDRESS] [--disassembly FILE] [--branches N]`; `docs/profiling.md` has the
 perf and objdump commands that make their inputs. Run `ab` itself outside the
 9700X's lock, with `--lock ~/buster-fast-bench/exclusive.sh`, which takes it
-for each run. The 9700X job runs the tests after the call graph check.
+for each run. The 9700X job's test step runs the tests.
+
+## The parallel runner
+
+`./build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [LIST]`
+runs a list of commands at once. LIST (standard input without one) holds them:
+each starts at a heading, a line `== TITLE`, and its script is the lines after
+it, up to the next heading; before the first heading there may be blank lines
+and comments. Each script runs in a bash of its own, as GitHub Actions runs a
+step's `run` (`bash --noprofile --norc -e -o pipefail`), in a process group of
+its own, with standard input from `/dev/null`, its standard output and errors
+into one capture, and no other descriptor. The commands start in the list's
+order, at most `--jobs` at once, unpinned: by default one per core of the CPUs
+the process may run on, 8 on the 9700X, whose 15 CPUs online would put two tests
+on a core's SMT siblings, which slow each other down, as do the lanes' spinning
+waits (the job's tests took 21.3 to 22.4 s with 8 jobs, and 22.9 to 23.3 s with
+15, test-lanes 2.3 to 2.9 s of them rather than 0.2). The report gives each
+one's heading, with its outcome and time, then its output, in the list's order
+as soon as it and every command before it have ended; with `--github`, between
+`::group::` and `::endgroup::`, and an `::error::` annotation for each that
+failed. Then come a summary line and a line naming each command that failed. The
+exit status is 1 if a command failed or couldn't start, a signal stopped the
+run, or the report was lost. The report never holds up the run (#276's review):
+a command's output is read into memory when it ends and its capture closed, so
+that only running commands hold one, and the report goes out only as fast as its
+reader takes it, at most `PIPE_BUF` bytes at a time into a pipe or a terminal
+once `poll` says it has room, while the runner keeps starting commands,
+enforcing their timeouts and taking signals, all from one `poll` on a
+`signalfd`. Whatever a command's shell leaves running in its group is killed
+when the shell ends, and a command still running `--timeout` seconds after it
+started is killed with its group and fails, though its shell may end before the
+runner reaps it. SIGINT, SIGTERM and SIGHUP stop the run: the signal goes on to
+every running command's group (a second one sends SIGKILL), nothing more starts,
+and the report gives what every command wrote; once every command has ended, one
+drops the rest of the report rather than wait for its reader. A report that
+can't be written (EPIPE: `parallel | head`, whether or not SIGPIPE is ignored)
+stops the run, and its commands are killed.
+
+The 9700X job's test step ("Run the tests at once") runs every test through it,
+with `--timeout 180`, before the benchmarks, which run one at a time and pinned.
+A test goes in its list as a heading and the step's commands, the longest
+first, so that they start first; one that needs the machine to itself doesn't
+belong there. On the 9700X its tests took 52.1 s one after another, as the
+job's steps ran them, and take 21.8 s through the runner, the time of the
+longest, `test-calling-convention --cross-check` (18.1 s alone), whose six
+configurations run in turn. To run the list as the job does (on the 9700X,
+under its lock, as one run):
+
+```sh
+sed -n "/<<'TESTS'$/,/^ *TESTS$/{//!{s/^ \{10\}//;p}}" .github/workflows/9700x.yml | ./build/compiler parallel
+```
+
+`./build/compiler test-parallel` (about 7 s) checks it, each report exactly
+as expected with its times written as `*`:
+
+- lists: headings, scripts, blank lines and comments before the first heading,
+  a heading without its space, a last line without a newline and `==` inside a
+  line; then each error at its line: a line before the first heading, a heading
+  without a title, a command without a script (before another heading and at
+  the end), a title that repeats, a NUL byte, and no commands;
+- order: commands that end out of order, printed in the list's order, each with
+  its standard output and errors in the order it wrote them, output that
+  doesn't end in a newline and none at all, an exit status and a signal; then
+  `--github`'s groups and annotations, with a title GitHub must read escaped;
+  and a command's descriptors, without `/proc` (whose PID namespace may not be
+  the shell's): standard input reads nothing though the runner's is a file
+  with a line in it, and no other than the three is open (an external `true`
+  redirected to each from 3 to 63), though the runner has one open without
+  `FD_CLOEXEC`;
+- at once: three commands that each wait for the other two pass with 3 jobs;
+  with one job, four commands' starts and ends in a log come in turn; and eight
+  with 3 jobs are never more than 3 at once, by the runner's times;
+- output: 1 MB from one command, past a pipe's 64 KB;
+- processes: a command past its timeout killed with the process it started,
+  what a command leaves running killed when its shell ends, and a shell that
+  can't start;
+- a slow reader (#276's review): a report whose pipe its reader leaves full for
+  1 s while a command passes its timeout, which must be killed at its deadline
+  and fail, and while a command sends SIGTERM, which must go on to it at once;
+  SIGTERM once every command has ended, which must drop the rest of the report
+  rather than wait for the reader; and 61 commands with room for 32
+  descriptors, 60 of them ending before the first, whose captures must close
+  as they end;
+- signals: SIGTERM from a command stops the run, goes on to the command's
+  group, and what didn't start is reported so; a run stopped while its command
+  passes fails; SIGINT then SIGTERM, from a command that ignores both, kill it;
+  SIGHUP while ignored (as under nohup) doesn't stop the run, and SIGCHLD
+  ignored doesn't keep the runner from its commands; each run leaves the signal
+  mask and the dispositions as they were;
+- the command: its report and exit status for lists on standard input and in a
+  file that pass and fail, a report with no reader (the run stops, and the
+  runner ends at once with its command killed), with SIGPIPE at its default and
+  ignored, a reader that leaves after the first line (the run fails though its
+  command passes), a command that ends past its deadline while the runner is
+  stopped (SIGSTOP), which must fail, a list's error, a list that can't be
+  read, and invalid options;
+- the cores: `--jobs`' default against the distinct physical and core ids that
+  `/proc/cpuinfo` gives the CPUs the process may use.
+
+The runner is test tooling outside the compile path and has no vector path: a
+list is a few dozen commands, and the time goes into them. The 9700X job's
+test step runs its tests too.
 
 ## x86-64 disassembler
 
@@ -921,8 +1047,8 @@ branch short at first, then growing the ones out of range) must give the same
 bytes as `x86_encode_scalar` of the sized records; an object that can't be read,
 or a function left uncompared, fails the check. The files go in a directory
 under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure. `--seed N`
-changes the generated functions. The default 9700X job runs it with
-`--cross-check` after the encoder's benchmark.
+changes the generated functions. The 9700X job's test step runs it with
+`--cross-check`.
 
 ## Branch sizing benchmark
 
@@ -985,6 +1111,30 @@ reference:
 A watchdog ends the run with status 1 if a group doesn't finish within 60 s,
 which is how a lost wake-up would show. `--rounds N` and `--seed N` change the
 rounds and the random inputs.
+
+## Deterministic output tests
+
+`./build/compiler test-diagnostics` checks the buffered diagnostic merge:
+the AVX-512 radix sort against stable insertion sort, guard-page tails,
+complete 64-bit keys, grouped notes, the earliest fatal cutoff, and bounded
+allocation failures. Jobs run in forward and reverse order with delayed
+completion at 1, 2, 3 and 8 lanes; the bytes must agree.
+
+`test-preprocessor` (without files), `test-object-writer`, `test-executable`,
+`test-dynamic` and `test-static` also check output after changing opaque
+identifier assignments. Each accepts `--id-order N` (default 153). The object
+test covers both section modes at every lane count; the preprocessor compares
+both `-E` text modes and diagnostics through both kernels and both job orders.
+The 9700X workflow runs these checks as part of the stage commands.
+
+`./build/compiler benchmark-diagnostics [--only scalar|selected]
+[--after-scalar MS]` compares the
+ordering paths with 21 interleaved samples, in ns/key and invariant-TSC
+ticks/key. Run both isolated `--only selected` and
+`--only selected --after-scalar 100`, across several processes pinned to CPU 2
+under the host's lock. [The determinism guide](docs/determinism.md) specifies
+the caller's source-order and lifetime contracts and the integration still
+required by #150, #151 and #152.
 
 ## Lane benchmark
 
@@ -1308,8 +1458,7 @@ each one must be a fixup of its kind at its offset (a `GOTPCRELX` or
 of `libgcc.a`'s are `GOTPCREL` on the 9700X, adds of slots), against the
 symbol (or the section) readelf names, with its addend, and there must be no
 other fixups. `--seed N` changes the programs
-and the random bytes. The default 9700X job runs it with `--cross-check` after
-the object writer's benchmark.
+and the random bytes. The 9700X job's test step runs it with `--cross-check`.
 
 ## Import benchmark
 
@@ -1337,7 +1486,7 @@ Run it under the 9700X's lock with `taskset -c 2`. With `--library
 /usr/lib/libstdc++.so.6 --library /usr/lib/libLLVM.so.23.1 --archive
 /usr/lib/libc.a` it measures the larger files the design's "Step 5's phases,
 data-parallel" has the numbers for. The default 9700X job runs it after the
-import tests, pinned to one allowed CPU; like the others, its measurements are
+tests, pinned to one allowed CPU; like the others, its measurements are
 informational.
 
 ## Bind tests
@@ -1495,8 +1644,8 @@ paths, which must make the same link and binding:
   and whose `--why-extract` the members that joined.
 
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
-removed at the end unless `--keep`. The default 9700X job runs it with
-`--cross-check` after the import benchmark.
+removed at the end unless `--keep`. The 9700X job's test step runs it with
+`--cross-check`.
 
 ## Bind benchmark
 
@@ -1512,7 +1661,7 @@ runtimes' closure (the members the link needs, per member) and `bind_end`,
 each run on the same link put back as it was. The paths must make the same
 links. Run it under the 9700X's lock with `taskset -c 2`; the design's "Step
 5's phases, data-parallel" and "Static links, as built" have the numbers. The
-default 9700X job runs it after the bind tests, pinned to one allowed CPU;
+default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
 
 ## Direct executable tests
@@ -1529,8 +1678,13 @@ like the others, its measurements are informational.
   the last file scribbled over, so that a lane that skipped a field or a chunk
   shows. The files and build IDs must be byte-identical, and each program must
   run and print what its model predicts. In each file every fixup's field must
-  hold its kind's value, the GOT must have a slot for each target of a GOT
-  kind (numbered from 1 in symbol order, holding its value), the headers must
+  hold its kind's value; a load or call through the GOT that relaxes (a
+  `CALL_GOT` or `LOAD_GOT` with the addend -4 to a symbol of the image's that
+  isn't an IFUNC: `executable_test_relaxes`, the test's own rule) must have its
+  instruction rewritten (`mov` to `lea`, `call` to `addr32 call`, `jmp` to
+  `jmp` and a `nop`) and every other must keep its own; the GOT must have a
+  slot for each target of a GOT kind that a fixup reads unrelaxed (numbered
+  from 1 in symbol order, holding its value), the headers must
   have lld's layout, no chunk boundary may split a field, and the build ID
   must be the tree of the file's chunks. The unwind tables, read back as an
   unwinder reads them (`executable_test_unwind`): `PT_GNU_EH_FRAME` exactly
@@ -1546,9 +1700,11 @@ like the others, its measurements are informational.
   named, without creating the output;
 - chunk boundaries: programs with a call's rel32 0 to 4 bytes before the
   nominal 256 KB boundary and an `ABS64` 0 to 8 bytes before 512 KB, both in
-  atoms larger than a chunk. A boundary must move to the end of a field that
-  crosses it and stay where it is otherwise, with every lane count, and the
-  program must run;
+  atoms larger than a chunk, and with a call through the GOT (`call [rip +
+  slot]`, which relaxes to `addr32 call` and so rewrites the 2 bytes before
+  its field) whose 6 bytes start 0 to 6 bytes before 256 KB. A boundary must
+  move to the end of a field (or such an instruction) that crosses it and stay
+  where it is otherwise, with every lane count, and the program must run;
 - the output file: created; overwritten in place by a smaller program (and
   truncated) and with its mode restored; written beside it and renamed over it
   when it has another link (which keeps its bytes), when it is a symbolic link,
@@ -1638,10 +1794,15 @@ before the exports, and each export at its address, found through
 `.gnu.hash` as glibc's loader looks it up); `.gnu.hash`'s shape (lld's); and
 every relocation the loader needs, from `.rela.dyn` and `.relr.dyn` decoded,
 against the GOT's slots and the `ABS64` fields of the atoms the loader writes,
-with each slot's bytes and each call's stub; and the unwind tables, by
-test-executable's rules (the runtime's FDEs among them). The writer's exact
-twins must write the same file with 1 and 8 lanes, and a write without RELR
-must have the same relocations in `.rela.dyn` alone and run alike. The checks:
+with each slot's bytes and each call's stub; the loads and calls through the
+GOT, each that relaxes by test-executable's rule rewritten and each other
+kept, with a GOT slot for each symbol that an unrelaxed GOT kind or a call to
+a dynamic symbol reaches, and for no other, in symbol order; and the unwind
+tables, by test-executable's rules (the runtime's FDEs among them). The link's
+bytes are binding's again after the writes, for the checks and the objects
+that lld links. The writer's exact twins must write the same file with 1 and 8
+lanes, and a write without RELR must have the same relocations in `.rela.dyn`
+alone and run alike. The checks:
 
 - programs: test-link's two sets that call libc, and one of `--functions`
   workers (2,000 by default) whose table of pointers has targets that the
@@ -1657,22 +1818,23 @@ must have the same relocations in `.rela.dyn` alone and run alike. The checks:
   `.gnu.hash`;
 - imports: 256 of `libc.so.6`'s functions, each called through a stub and
   pointed to, which the loader must bind at their versions;
-- refusals: a pointer to `main` in `.rodata` (a text relocation), an `ABS32`
-  to `main` and a `PC32` to a dynamic symbol in `.data`, a `lea` of and a
-  `PC64` in `.data` to a hidden weak reference to nothing, which stays at
-  address 0 wherever the program loads, and a `lea` of, a call to and a
-  `PC64` in `.data` to an absolute symbol, which stays its value (GNU ld and
-  lld refuse them too), each refused with its fixup by every lane count and
-  by the exact twins, without an output; a call to and a pointer to a weak
-  reference to nothing, and to a hidden one, loads through the GOT slots of
-  the first and of the program's data, the dynamic one's first in its word of
-  the bitsets, a pointer to `main` at an odd address, which RELR can't hold,
-  and pointers in `.data` and `.rodata` to, a load through the GOT of and an
-  `ABS32` in `.data` to an absolute symbol at 42, which need no relocation
-  (as lld links them), all of which run; and a lane short of scratch memory
-  (lane 0 of 1 and of 8 lanes, the last of 2 and of 8), with which every link
-  that fails must fail with `EXECUTABLE_ERROR_MEMORY` and no output, and one
-  with room enough must run.
+- refusals: a pointer to `main` in `.rodata` (a text relocation), an `ABS32` to
+  `main` and a `PC32` to a dynamic symbol in `.data`, a `lea` of and a `PC64`
+  in `.data` to a hidden weak reference to nothing, which stays at address 0
+  wherever the program loads, and a `lea` of, a call to and a `PC64` in `.data`
+  to an absolute symbol, which stays its value (GNU ld and lld refuse them
+  too), each refused with its fixup by every lane count and by the exact twins,
+  without an output; a call to and a pointer to a weak reference to nothing,
+  and to a hidden one, loads through the GOT slots of the first and of the
+  program's data (by `GOTPCREL`, which doesn't relax), the dynamic one's first
+  in its word of the bitsets, and a load of the data that relaxes to a `lea`, a
+  pointer to `main` at an odd address, which RELR can't hold, and pointers in
+  `.data` and `.rodata` to, a load through the GOT of and an `ABS32` in `.data`
+  to an absolute symbol at 42, which need no relocation (as lld links them),
+  all of which run; and a lane short of scratch memory (lane 0 of 1 and of 8
+  lanes, the last of 2 and of 8), with which every link that fails must fail
+  with `EXECUTABLE_ERROR_MEMORY` and no output, and one with room enough must
+  run.
 
 With `--cross-check`, which needs `ld.lld`, `cc`, `objdump` and `readelf`, the
 bound link's objects (the object writer's) are linked by lld as a PIE against
@@ -1681,14 +1843,16 @@ pack-relative-relocs` when libc defines `GLIBC_ABI_DT_RELR`), and the two files
 must have the same segments (the program headers' types in order, their flags
 and the `PT_LOAD`s' alignments), the same dynamic symbols (name, binding, type,
 whether defined, version), the same symbols with a GOT slot the loader fills,
-the same `R_X86_64_64`s with their addends, as many RELATIVE pointers outside
-the GOT, the same init and fini arrays' sizes, the same `DT_NEEDED` libraries
-in order, each with the same needed versions, the same `DT_INIT`, `DT_FINI`,
-`DT_GNU_HASH` and `DT_VERNEED`, and `.eh_frame_hdr` tables (lld's
-with `--eh-frame-hdr`, as GCC's driver asks) that index the same functions with
-the same ranges. And each program runs
-again with a library preloaded, which `cc` builds: its `write` walks the stack
-with libgcc's `_Unwind_Backtrace`, which finds each frame's FDE through
+as many GOT slots relocated RELATIVE and as many that no relocation fills (but
+for ours of thread-locals' offsets, whose initial-exec accesses lld relaxes to
+local-exec), the same `R_X86_64_64`s with their addends, as many RELATIVE
+pointers outside the GOT, the same init and fini arrays' sizes, the same
+`DT_NEEDED` libraries in order, each with the same needed versions, the same
+`DT_INIT`, `DT_FINI`, `DT_GNU_HASH` and `DT_VERNEED`, and `.eh_frame_hdr`
+tables (lld's with `--eh-frame-hdr`, as GCC's driver asks) that index the
+same functions with the same ranges. And each program runs again with a
+library preloaded, which `cc` builds: its `write` walks the stack with
+libgcc's `_Unwind_Backtrace`, which finds each frame's FDE through
 `PT_GNU_EH_FRAME` and the table, and the walk must go through `main` and end
 at `_start`, the outermost frame. And `readelf -wF`'s reading of each of the
 program's functions' FDEs (the CFA's rule and each saved register's, from each
@@ -1696,13 +1860,13 @@ location on) must be, row for row, what `objdump -d`'s disassembly of the
 function's pushes and pops gives as GCC's CFI: the CFA 8 bytes further from
 `rsp` after each push and 8 nearer after each pop, a callee-saved register a
 push saves at the CFA less the new offset, and one a pop restores as it was.
-`--seed N` changes the programs. The default 9700X job runs it with
-`--cross-check` after test-executable.
+`--seed N` changes the programs. The 9700X job's test step runs it with
+`--cross-check`.
 
 ## Static executable tests
 
 `./build/compiler test-static [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 2.7 s on the 9700X, and 2.9 s with
+[--cross-check] [--keep]` (about 2.9 s on the 9700X, and 3.2 s with
 `--cross-check`) checks `executable.c`'s static executables with the C
 runtime against this system's static runtime (`runtime_import_static`), then
 its static PIEs against the static PIE's (`runtime_import_static_pie`), in a
@@ -1710,11 +1874,11 @@ directory of its own under `--directory` (`TMPDIR` or `/tmp` by default),
 which it removes unless `--keep`. Each program is bound by `bind.c` and
 written by groups of 1, 2, 3 and 8 lanes and by the writer's exact twins with
 1 and 8 lanes, each time from the atoms' bytes as binding left them (the TLS
-relaxation and a static PIE's GOT relaxation rewrite them), with zeroed fields
-over the last file scribbled over, every other time over poisoned scratch
-memory: the files must be byte-identical. A static PIE without general- or
-local-dynamic TLS accesses is then written once more over the bytes the last
-write left, its loads and calls relaxed already, and must come out the same.
+relaxation and the GOT relaxation rewrite them), with zeroed fields over the
+last file scribbled over, every other time over poisoned scratch memory: the
+files must be byte-identical. A link without general- or local-dynamic TLS
+accesses is then written once more over the bytes the last write left, its
+loads and calls relaxed already, and must come out the same.
 Each file is read back and checked by the test's own rules:
 
 - the headers: `_start` the entry, no `PT_INTERP`, a `PT_NOTE` with the start
@@ -1729,26 +1893,31 @@ Each file is read back and checked by the test's own rules:
   IFUNC's GOT slot without a stub, its addend the IFUNC's resolver, in
   `.rela.iplt` (a static PIE's after its RELATIVE ones in `.rela.dyn`); each
   stub in `.iplt` a `jmp` through its own slot; an IFUNC with a stub at its
-  stub's address everywhere, its GOT slot too; and a static executable's
-  `__rela_iplt_start` and `__rela_iplt_end` at `.rela.iplt`'s bounds;
+  stub's address for its calls, and everywhere when a fixup other than a call
+  takes it (its GOT slot too), where one whose stub only calls reach reads the
+  stub's slot through the GOT, as lld's reads its `.got.plt` entry; and a
+  static executable's `__rela_iplt_start` and `__rela_iplt_end` at
+  `.rela.iplt`'s bounds;
 - a static PIE's RELATIVE relocations: one of each GOT slot that holds an
-  address in the image (an IFUNC's stub among them) and one of each `ABS64`
-  field of an atom the loader writes whose target is in the image, with the
-  value as its addend, and no others: `.relr.dyn`'s (decoded, the field
-  holding the addend) for the slots and the fields at even addresses in atoms
-  aligned to 2 or more when `libc.a` takes `DT_RELR` (it defines
-  `arc4random`, as glibc 2.36 and later do), and `.rela.dyn`'s for the others;
+  address in the image (an IFUNC's stub among them, when it stands for the
+  IFUNC's address) and one of each `ABS64` field of an atom the loader writes
+  whose target is in the image, with the value as its addend, and no others:
+  `.relr.dyn`'s (decoded, the field holding the addend) for the slots and the
+  fields at even addresses in atoms aligned to 2 or more when `libc.a` takes
+  `DT_RELR` (it defines `arc4random`, as glibc 2.36 and later do), and
+  `.rela.dyn`'s for the others;
 - every fixup's field: test-executable's kinds' values, with an IFUNC's stub
   for its address, a general- or local-dynamic access as the local-exec
   sequence it relaxes to, `DTPOFF32` as an offset from the thread pointer, an
   absolute symbol's value, and nothing for a call of `__tls_get_addr`, which
-  the access consumed; in a static PIE, each `CALL_GOT` and `LOAD_GOT` with
-  the addend -4 to a symbol of the image's that isn't an IFUNC relaxed from
-  its instruction in the link's bytes (the test checks it is the `call`,
-  `jmp` or `REX.W` `mov` the kind says): `addr32 call`, `jmp` and a `nop`, or
-  `lea`; the GOT's slots in symbol order (but for the targets whose every
-  slot read relaxed), then the stubs'; and every name of the linker's where
-  its section or segment says (`_DYNAMIC` at `.dynamic`);
+  the access consumed; each `CALL_GOT` and `LOAD_GOT` with the addend -4 to a
+  symbol of the image's that isn't an IFUNC relaxed from its instruction in
+  the link's bytes (the test checks it is the `call`, `jmp` or `REX.W` `mov`
+  the kind says): `addr32 call`, `jmp` and a `nop`, or `lea`, and every other
+  keeping its instruction; the GOT's slots in symbol order (but for the
+  targets whose every slot read relaxed, and the IFUNCs whose stubs only
+  calls reach), then the stubs'; and every name of the linker's where its
+  section or segment says (`_DYNAMIC` at `.dynamic`);
 - the init and fini arrays: their prioritized atoms first, by priority and in
   id order, then the others in id order, from their section's start to its
   end;
@@ -1759,30 +1928,31 @@ The checks:
 - programs: test-link's two sets that call libc, and one of `--functions`
   workers (2,000 by default): each must run and print what its model
   predicts, as a static executable and as a static PIE;
-- compiled: test-bind's C programs (hello, stdio, threads, jumps and
-  weak-puts) and this file's: prioritized constructors and destructors beside
-  libgcc's `cpuinfo.o`'s; decimal floating point, whose rounding mode and
-  flags are libgcc's thread-local variables, reached by general-dynamic
-  accesses, from a thread too; GCC 14's heap trampolines, whose member's
-  accesses are local-dynamic, where `cc` is GCC 14 or later (it says so
-  otherwise); and assembly with each general- and local-dynamic sequence
-  through the PLT and the GOT (status 31), with a local IFUNC called,
-  pointed to and compared, and a global one called through the GOT (status
-  53), with a weak IFUNC defined nowhere, which has no resolver, loaded
-  through the GOT, taken by a `lea` and pointed to, each 0 (status 0), and
-  with absolute symbols that another object defines (combined with `ld -r`,
-  since GNU as resolves a `lea` of an absolute symbol its file defines),
-  taken by a `lea`, through the GOT, as an immediate and pointed to (status
-  0). `cc` compiles each, and each must run as `cc -static`'s link of the
-  same object does, with the same status and output, both from directories
-  of the same length (`argv[0]`). As static PIEs, each must run as
-  `cc -static-pie`'s link does, but the IFUNC program, which must run with
-  status 53, as lld's link does (GNU ld's gives the pointer in `.data` the
-  IFUNC's implementation, where a `lea` gives its `.iplt` entry, and the
-  comparison fails: 52), and the weak IFUNC's and the absolute symbols'
+- compiled: test-bind's C programs (hello, stdio, threads, jumps and weak-puts)
+  and this file's: prioritized constructors and destructors beside libgcc's
+  `cpuinfo.o`'s; decimal floating point, whose rounding mode and flags are
+  libgcc's thread-local variables, reached by general-dynamic accesses, from a
+  thread too; GCC 14's heap trampolines, whose member's accesses are
+  local-dynamic, where `cc` is GCC 14 or later (it says so otherwise); and
+  assembly with each general- and local-dynamic sequence through the PLT and
+  the GOT (status 31), with a local IFUNC called, pointed to and compared, and
+  a global one called through the GOT (status 53), with an IFUNC called
+  directly, called through its GOT slot and loaded through it, whose stub only
+  calls reach, so that the loads read the stub's slot (status 63), with a weak
+  IFUNC defined nowhere, which has no resolver, loaded through the GOT, taken
+  by a `lea` and pointed to, each 0 (status 0), and with absolute symbols that
+  another object defines (combined with `ld -r`, since GNU as resolves a `lea`
+  of an absolute symbol its file defines), taken by a `lea`, through the GOT,
+  as an immediate and pointed to (status 0). `cc` compiles each, and each must
+  run as `cc -static`'s link of the same object does, with the same status and
+  output, both from directories of the same length (`argv[0]`). As static PIEs,
+  each must run as `cc -static-pie`'s link does, but the IFUNC program, which
+  must run with status 53, as lld's link does (GNU ld's gives the pointer in
+  `.data` the IFUNC's implementation, where a `lea` gives its `.iplt` entry,
+  and the comparison fails: 52), and the weak IFUNC's and the absolute symbols'
   programs, whose `lea` of address 0 and of an absolute symbol a static PIE
-  refuses (`EXECUTABLE_ERROR_RELOCATION`, by every write), as
-  `cc -static-pie` refuses them;
+  refuses (`EXECUTABLE_ERROR_RELOCATION`, by every write), as `cc -static-pie`
+  refuses them;
 - refusals: assembly with a call of `__tls_get_addr` outside an access
   (refused naming the symbol), a general-dynamic access without its prefixes
   (its fixup), a pointer to an absolute symbol farther than int32 from the
@@ -1806,12 +1976,16 @@ same sizes; but lld 23 links the weak IFUNC's program wrong (an `IRELATIVE`
 relocation with resolver 0, which faults at startup), so that one only has to
 link, and the static PIEs that a static PIE refuses aren't linked; lld packs
 a static PIE's RELATIVE relocations into `.relr.dyn` (`-z
-pack-relative-relocs`) as ours are. A static PIE's RELATIVE relocations are
-printed beside lld's: ours have 6 more for hello world, the GOT slots of
-IFUNCs that only calls give stubs, whose loads lld points at the stub's
-IRELATIVE slot. `--seed N` and
-`--functions N` change the generated programs. The default 9700X job runs it
-with `--cross-check` after test-dynamic.
+pack-relative-relocs`) as ours are, and a static PIE must have as many as
+lld's. Then the GOT (`executable_test_got`, from the files' sections): our
+slots must be as many as lld's `.got` entries and IFUNCs' `.got.plt` entries,
+but for those of thread-locals' offsets, whose initial-exec accesses lld
+relaxes to local-exec, and in a static executable those that only tests and
+binops with REX read through the GOT, which lld writes with immediates
+without PIC (`static_test_immediate_slots`: 5 of the decimal program's).
+`--seed N` and
+`--functions N` change the generated programs. The 9700X job's test step runs
+it with `--cross-check`.
 
 ## Direct executable benchmark
 
@@ -1829,7 +2003,10 @@ with `--cross-check` after test-dynamic.
   `/tmp`) by a group of `--lanes` lanes that runs every write of a case, as a
   compiler runs its phases on one group: in place and as a new file, phase by
   phase, against the floor, one `pwrite` of the same bytes; and with one lane,
-  the patch kernel on each program's own mix of kinds, and the unwind tables'
+  the patch kernel on each program's own mix of kinds, three ways: relaxing
+  the loads and calls through the GOT from the code generator's instructions
+  (put back before each run, outside the time), relaxing them over the forms
+  the relaxation wrote, and without relaxing them; and the unwind tables'
   passes: the FDEs counted by the vector path and by the walk, their table
   entries both ways, and the table's sorted check and sort;
 - the same sizes as programs that call libc, bound against the system's
@@ -1840,14 +2017,15 @@ with `--cross-check` after test-dynamic.
   with their stubs, IRELATIVE relocations and GOT slots (`--only static`);
 - and bound against the static PIE's runtime and written as static PIEs,
   with their stubs, relocations (RELATIVE among them) and GOT slots
-  (`--only static-pie`): each write over the last one's bytes, whose loads
-  and calls through the GOT it relaxed already.
+  (`--only static-pie`).
 
-Run it under the 9700X's lock with `taskset -c 2` for one lane, or with
-`taskset -c 0-7` for 8 (one CPU per core), since the lanes' threads keep the
-affinity they start with. `docs/object-writer-and-linker.md` ("Patching and
-writing", "The first executables", "The dynamic PIE" and "The static
-executable with libc") has the numbers.
+Every write after a case's first goes over the last one's bytes, whose loads
+and calls through the GOT it relaxed already. Run it under the 9700X's lock
+with `taskset -c 2` for one lane, or with `taskset -c 0-7` for 8 (one CPU per
+core), since the lanes' threads keep the affinity they start with.
+`docs/object-writer-and-linker.md` ("Patching and writing", "The first
+executables", "The dynamic PIE", "The static executable with libc", "The
+static PIE" and "GOT relaxation in every executable") has the numbers.
 The default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
 
@@ -1923,8 +2101,8 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
   file;
 - the cache directory: `snapshot_directory` from `XDG_CACHE_HOME` and `HOME`.
 
-`--seed N` and `--functions N` change the programs. The default 9700X job runs
-it after benchmark-executable.
+`--seed N` and `--functions N` change the programs. The 9700X job's test step
+runs it.
 
 ## Snapshot benchmark
 
@@ -2011,7 +2189,11 @@ Run it under the 9700X's lock without `taskset`: it pins its lanes and the
 linkers' runs on one thread itself, and the linkers' other runs need every CPU.
 `docs/object-writer-and-linker.md` ("The whole link") has the numbers. The
 default 9700X job runs it after benchmark-snapshot, with its lane on the job's
-first allowed CPU; like the others, its measurements are informational.
+first allowed CPU; like the others, its measurements are informational. The
+linkers' side, about 121 s of its 122, times other programs on the machine,
+the same for every pull request: the job runs it on pushes to main, dispatched
+runs and pull requests that change `link_benchmark.c` or `floors_benchmark.c`,
+and only the direct path (`--only direct`, about 1 s) on other pull requests.
 
 ## Floors benchmark
 
@@ -2045,8 +2227,9 @@ write, naming its `errno`, or a child that dies before its message or its exit.
 
 Run it under the 9700X's lock without `taskset`, and with `--directory` on each
 file system to measure. `docs/object-writer-and-linker.md` ("The floors") has
-the numbers. The default 9700X job runs it after benchmark-link; like the
-others, its measurements are informational.
+the numbers. The default 9700X job runs it after benchmark-link, where that
+runs the linkers' side (the machine's floors don't depend on a pull request
+either); like the others, its measurements are informational.
 
 ## Foreign tests
 
@@ -2159,8 +2342,11 @@ are printed: mold's `read_input_files` and `resolve_symbols`, wild's opening,
 loading, resolving and section resolution. Run it under the 9700X's lock with
 `taskset -c 2` for one lane, or with `--cpus` for several.
 `docs/object-writer-and-linker.md` ("Steps 1 to 5, as built") has the numbers.
-The default 9700X job runs it with `--linkers` after the tests, pinned to one
-allowed CPU; like the others, its measurements are informational.
+The default 9700X job runs it after benchmark-snapshot, pinned to one allowed
+CPU: with `--linkers` on pushes to main, dispatched runs and pull requests
+that change `foreign_benchmark.c`, since mold's and wild's times don't depend
+on a pull request, and without it on other pull requests. Like the others,
+its measurements are informational.
 
 ## Dataflow tests
 
@@ -2200,7 +2386,7 @@ liveness and interference primitives in `dataflow.c`:
 
 `--seed N` changes the generated inputs (1 by default). The command reports
 the check and failure counts and exits with status 1 on any failure. The
-9700X job runs it after the link tests.
+9700X job's test step runs it.
 
 ## Dataflow benchmark
 
@@ -2252,8 +2438,8 @@ running the corpora remain outside this module's current scope and wait for
 `./build/compiler test-preprocessor-fuzz [--fuzz N] [--seed N] [--clang PATH]
 [--std c17|c23]` checks the independent tooling for #109. It requires Clang 23
 on `PATH`, or the executable selected by `--clang PATH`. The defaults are
-64 generated cases, seed 1, `clang` and C17; the 9700X job runs both C17 and
-C23. The checks cover:
+64 generated cases, seed 1, `clang` and C17; the 9700X job's test step runs
+both C17 and C23. The checks cover:
 
 - deterministic generation, including every one of the 36 construct families
   even when `--fuzz N` is smaller, and repeatability for seeds 1, 7 and 99;
@@ -2339,7 +2525,8 @@ identifier must get the same id and every token the same leading-space bit, on:
 - every `.c` and `.h` file under each path. On the 9700X, `src` and the C
   library corpus (`~/azp-bench/c-tokenizer/corpus/libc`) pass.
 
-`--seed N` picks another random sequence. The 9700X job runs it on `src`.
+`--seed N` picks another random sequence. The 9700X job's test step runs it on
+`src`.
 
 ## Refinement benchmark
 
@@ -2413,18 +2600,22 @@ features:
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
-`docs/c-preprocessor.md` has the configurations. The 9700X job runs the cases
-and the repository's translation units with `--clang`.
+`docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs
+the cases and the repository's translation units with `--clang`.
 
 ## Preprocessor benchmark
 
 `./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
-[options] file...` preprocesses each file from nothing per run (a new intern
-table and preprocessor), with the vectorized kernels and their scalar twins, 21
-passes after a warm-up, and reports the medians of time, cycles and instructions
-per input token and per output token, IPC, each phase's share and time (read,
-lex, refine, directive tables, main loop) and what a run did (directives, runs,
+[--read-limit N,...] [options] file...` preprocesses each file from nothing per
+run (a new intern table and preprocessor), with the vectorized kernels and their
+scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
+and instructions per input token and per output token, IPC, each phase's share
+and time (read, lex, refine, directive tables, main loop), the release after the
+run (the files' mappings among it), and what a run did (directives, runs,
 expansions, invocations, pastes, and the `#if` lines and their lengths).
+`--read-limit` gives a list of the largest files a run reads rather than maps
+(16 KB by default; 0 maps every file), each run in turn in every pass, which
+must all give the same output.
 `--clang` also times `clang -E -P` with the same options, a process per file.
 `-march` selects the shared target's predefines. `--predefines FILE` can replace
 them with `clang -dM -E` output (the benchmark leaves this option out of clang's
@@ -2484,8 +2675,8 @@ fails the test.
 `--seed N` changes the spellings, and `--keep` leaves the directory. On the
 9700X, `sqlite3.c`, Lua 5.4.8, musl 1.2.5's 1,357 sources and the C library
 corpus (`--flat`) pass too.
-The 9700X job runs it, on `src` with `--flat`, and on the repository's
-translation units.
+The 9700X job's test step runs it, on `src` with `--flat`, and on the
+repository's translation units.
 
 ## Per-file jobs benchmark
 
@@ -2556,8 +2747,8 @@ the one `--clang` names:
   which `type_print`'s must equal.
 
 The files go in a new directory under `$TMPDIR` (or `/tmp`), removed unless
-`--keep`. `--seed N` changes every random input. The 9700X job runs it after
-the preprocessor's benchmark.
+`--keep`. `--seed N` changes every random input. The 9700X job's test step
+runs it.
 
 ## Type benchmark
 
@@ -2579,7 +2770,7 @@ item (time, cycles, instructions, IPC):
 
 Run it under the 9700X's lock with `taskset -c 2`. `docs/c-types.md` has the
 numbers and the layout designs the vector one was chosen over. The default
-9700X job runs it after the type tests, pinned to one allowed CPU; like the
+9700X job runs it after the tests, pinned to one allowed CPU; like the
 others, its measurements are informational.
 
 ## Calling convention tests
@@ -2634,7 +2825,7 @@ clang would pass as an `i0` becomes a long (its passes crash on them now and
 then), as does an unnamed one clang's `va_arg` reads elsewhere than its call
 puts it; and bytes clang doesn't pass aren't compared. The files go in a new
 directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure.
-The 9700X job runs it with `--cross-check` after the type table's benchmark.
+The 9700X job's test step runs it with `--cross-check`.
 
 ## Calling convention benchmark
 
@@ -2667,6 +2858,6 @@ classification mispredicts 3 to 10 times less often and runs up to 2.3 times
 as fast. `--path` times one path alone, back to back, and `--after-scalar MS`
 runs the twin for MS ms before each sample of the vector path. Run it under
 the 9700X's lock with `taskset -c 2`; `docs/calling-convention.md` has the
-numbers. The default 9700X job runs it after the calling convention's tests,
-pinned to one allowed CPU; like the others, its measurements are
+numbers. The default 9700X job runs it after the tests, pinned to one allowed
+CPU; like the others, its measurements are
 informational.

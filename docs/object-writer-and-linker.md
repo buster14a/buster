@@ -484,8 +484,8 @@ relocation, and an executable's patch kernel derives its arithmetic from it:
 | Kind | Where | Relocation in an object | Value in an executable |
 | --- | --- | --- | --- |
 | `CALL` | a branch's rel32: `call`, `jmp` or `jcc` | `R_X86_64_PLT32` | S + A − P |
-| `CALL_GOT` | `call` or `jmp [rip + slot]` (`ff 15`, `ff 25`) | `R_X86_64_GOTPCRELX` | G + A − P, or in a static PIE, when S is the image's and not an IFUNC, S + A − P with `call` rewritten to `addr32 call` and `jmp` to `jmp` and a `nop` |
-| `LOAD_GOT` | `mov r64, [rip + slot]` | `R_X86_64_REX_GOTPCRELX`: loading a pointer has REX.W | G + A − P, or in a static PIE, when S is the image's and not an IFUNC, S + A − P with `mov` rewritten to `lea` |
+| `CALL_GOT` | `call` or `jmp [rip + slot]` (`ff 15`, `ff 25`) | `R_X86_64_GOTPCRELX` | G + A − P, or when S is the image's and not an IFUNC, S + A − P with `call` rewritten to `addr32 call` and `jmp` to `jmp` and a `nop` |
+| `LOAD_GOT` | `mov r64, [rip + slot]` | `R_X86_64_REX_GOTPCRELX`: loading a pointer has REX.W | G + A − P, or when S is the image's and not an IFUNC, S + A − P with `mov` rewritten to `lea` |
 | `GOTPCREL` | any other instruction that reads the slot (`push [rip + slot]`) | `R_X86_64_GOTPCREL` | G + A − P, never rewritten |
 | `PC32` | any other RIP-relative operand or rel32, or 4 bytes of data | `R_X86_64_PC32` | S + A − P, checked to fit in int32 |
 | `TPOFF32` | a 32-bit displacement or immediate: `fs:[x@tpoff]` (local-exec), `[rax + x@tpoff]` | `R_X86_64_TPOFF32` | S's offset from the end of the TLS block + A |
@@ -1730,9 +1730,12 @@ writes them from the representation, at GNU ld's fixed base, 0x400000:
 - **The GOT:** a slot for each target of `CALL_GOT`, `LOAD_GOT`, `GOTPCREL`
   and `GOTTPOFF`, numbered from 1 in symbol order: the target's address, its
   offset from the thread pointer for TLS, or 0 for a weak symbol defined
-  nowhere. Nothing is relaxed, and a static executable needs no dynamic
-  relocations. The generated programs use the GOT kinds to test them, where a
-  compiled program's references to its own symbols are direct.
+  nowhere. A static executable needs no dynamic relocations. The generated
+  programs use the GOT kinds to test them, where a compiled program's
+  references to its own symbols are direct. (Step 4's executables relaxed
+  nothing; since step 6, every kind relaxes a `CALL_GOT` or `LOAD_GOT` to the
+  image's symbols, whose targets then need no slot: "GOT relaxation in every
+  executable".)
 - **Symbols:** `reference` is the image offset (the address less the base); a
   TLS symbol's is its offset from the thread pointer (variant II: from the end
   of the TLS block). The writer starts the TLS segment on a multiple of its
@@ -1869,6 +1872,12 @@ compares each with lld's link of the same objects.
   library with a needed version, all of them before their auxiliary entries,
   as lld lays them out. `test-dynamic` compares both, library by library,
   with lld's link.
+- **Relaxation.** A `CALL_GOT` or `LOAD_GOT` with the addend −4 to a RELATIVE
+  symbol (the image's) that isn't an IFUNC is relaxed, as lld relaxes it in a
+  PIE ("GOT relaxation in every executable"), and its target gets no slot
+  from it: the GOT keeps the dynamic symbols' slots (`GLOB_DAT`), those of
+  the image's symbols that `GOTPCREL` reads (RELATIVE), and the
+  thread-locals' offsets that initial-exec accesses read.
 - **Stubs.** A `CALL` to a dynamic symbol (GCC 13's `crtbeginS.o` calls
   `__cxa_finalize` so, where GCC 16's reads the slot itself) goes to a stub
   in `.plt.got`, `jmp [rip + slot]` and a two-byte nop, GNU ld's form for a
@@ -1998,10 +2007,13 @@ link of the same object runs, and with `--cross-check` as lld's.
   `PT_INTERP` or `PT_DYNAMIC`.
 - **IFUNCs** (glibc's string and memory functions): an IFUNC that a fixup
   reaches other than through the GOT gets a stub in `.iplt`, `jmp [rip +
-  slot]` and a two-byte nop, which stands for its address everywhere, as
-  lld's canonical PLT entry does, so that `&f` is the same however it is
-  taken: its GOT slot, if it has one, holds the stub's address. Each stub's
-  slot comes after the GOT kinds' and an IRELATIVE relocation in
+  slot]` and a two-byte nop, which calls reach it through. A fixup that takes
+  its address (any kind but a call: lld's direct relocation) makes the stub
+  stand for it everywhere, as lld's canonical PLT entry does, so that `&f` is
+  the same however it is taken: its GOT slot, if it has one, holds the stub's
+  address. When only calls reach the stub, the IFUNC's loads through the GOT
+  read the stub's slot instead ("GOT relaxation in every executable"). Each
+  stub's slot comes after the GOT kinds' and an IRELATIVE relocation in
   `.rela.iplt` fills it at startup from the IFUNC's resolver, its addend; an
   IFUNC reached only through the GOT gets an IRELATIVE relocation of its GOT
   slot instead. `__rela_iplt_start` and `__rela_iplt_end` are the section's
@@ -2149,10 +2161,12 @@ program as a static PIE as well, and with `--cross-check` against lld's.
   static PIE, so a `PC32` or `PC64` to one is refused, and so are text
   relocations, an `ABS32` to the image and a `CALL`, `PC32` or `PC64` to an
   absolute symbol, as in a dynamic PIE.
-- **IFUNCs:** as the static executable's, stubs in `.iplt` that stand for
-  their addresses everywhere, their slots and the GOT slots of IFUNCs without
-  stubs filled by IRELATIVE relocations, which go last in `.rela.dyn`; a GOT
-  slot that holds a stub's address is RELATIVE. lld's static PIE keeps the
+- **IFUNCs:** as the static executable's, stubs in `.iplt` that calls reach
+  and that stand for their addresses everywhere when a fixup takes one, their
+  slots and the GOT slots of IFUNCs without stubs filled by IRELATIVE
+  relocations, which go last in `.rela.dyn`; a GOT slot that holds a stub's
+  address is RELATIVE (an IFUNC whose stub only calls reach reads the stub's
+  slot: "GOT relaxation in every executable"). lld's static PIE keeps the
   same pointer equality; GNU ld's gives a pointer in `.data` the IFUNC's
   implementation where a `lea` gives its `.iplt` entry, and `test-static`'s
   IFUNC program sees them differ there.
@@ -2170,8 +2184,9 @@ program as a static PIE as well, and with `--cross-check` against lld's.
   it may, and the rewrite takes its own forms too, so that a link written
   again over its relaxed bytes comes out the same (`test-static` writes each
   static PIE so once more). A chunk boundary never splits the two bytes
-  before such a field either. The generated program of one worker has 155 GOT
-  slots as a static executable and 62 as a static PIE.
+  before such a field either. The generated program of one worker had 155 GOT
+  slots as a static executable and 62 as a static PIE; every kind relaxes them
+  now ("GOT relaxation in every executable").
 - **RELR**, when `libc.a`'s startup takes `DT_RELR`: glibc's
   `_dl_relocate_static_pie` applies it from 2.36 on, before `DT_RELA`, and an
   older one would leave its relocations undone. `libc.a` has no version
@@ -2186,9 +2201,9 @@ program as a static PIE as well, and with `--cross-check` against lld's.
 Against lld's static PIE of each compiled program (`--cross-check`, lld given
 `-z pack-relative-relocs` as ours has RELR), the IRELATIVE relocations are as
 many and the RELATIVE ones outside the GOT the same (1,099 for hello world);
-ours have 6 more in the GOT, the slots of IFUNCs that only calls give stubs,
-which lld points at the stubs' IRELATIVE slots. That would take the slots
-from the static executable too, and is left for later.
+ours had 6 more in the GOT, the slots of IFUNCs that only calls give stubs,
+which lld points at the stubs' IRELATIVE slots. They are gone ("GOT
+relaxation in every executable").
 
 `benchmark-executable` writes the generated programs as static PIEs
 (`--only static-pie`). Medians in µs on the 9700X, the output on tmpfs, in
@@ -2224,6 +2239,113 @@ place / as a new file, against the static executables of the same session:
   hashes, with the symbols outside the image added to it, for both checks at
   once took it to 1.56 ms. Each hit's check also ends at its bit in the
   RELATIVE bitset now, before reading the symbol's columns, in both PIEs.
+
+#### GOT relaxation in every executable
+
+Step 6's part after the static PIE: every kind of executable relaxes its
+loads and calls through the GOT as GNU ld and lld relax them in an
+executable, where #225 relaxed only the static PIE's, which can't run without
+it. A `CALL_GOT` or `LOAD_GOT` with the addend −4 to a symbol of the image's
+that isn't an IFUNC is rewritten as "The static PIE" says (`addr32 call`,
+`jmp` and a `nop`, `lea`), and its target gets no slot unless a fixup reads
+the slot unrelaxed: a `GOTPCREL` (`push [rip + slot]`, `libgcc.a`'s adds of
+slots), a `GOTTPOFF`, or a load of an IFUNC.
+
+- **The rule is lld's.** lld relaxes a `GOTPCRELX` or `REX_GOTPCRELX` with the
+  addend −4 to a symbol that isn't preemptible, an IFUNC, absolute,
+  thread-local or undefined (its `RelocScan::process` and
+  `X86_64::adjustGotPcExpr`). In an executable no definition is preemptible,
+  so that is relocation class RELATIVE but the IFUNCs, with the linker's names
+  among them: `executable_relocation_class`'s for a PIE, and with no imports
+  for a static executable. `-shared` will leave its preemptible definitions
+  out of the same bitset. lld's non-PIC immediates for `test` and binops
+  through the GOT (`R_RELAX_GOT_PC_NOPIC`) aren't taken: the import gives
+  those instructions `GOTPCREL`, and the count doesn't read the code.
+- **The passes,** data-parallel with exact twins: `executable_mark_relaxable`
+  makes the bitset of the relaxable symbols 64 at a time, a PIE's from its
+  RELATIVE bitset and a static executable's from compares of the source and
+  type columns, 2 bytes a symbol, less the IFUNCs (the static runtime's
+  bitset, or a compare of the types and, for those of the type, of the
+  atoms); its twin classifies one symbol at a time. The count marks the loads'
+  and calls' targets as candidates, and the reduction ANDs them with the
+  bitset 64 symbols at a time: #225's passes, now for every kind. A chunk
+  boundary keeps a relaxing instruction's opcode and ModRM in its field's
+  chunk, for every kind: `test-executable` puts a relaxing `call [rip +
+  slot]` across a boundary at every place.
+- **An IFUNC whose stub only calls reach shares the stub's slot.** A stub
+  stands for its IFUNC's address everywhere when a fixup takes the address
+  (any kind but a call and the GOT kinds: lld's `HAS_DIRECT_RELOC`), and a GOT
+  slot of the IFUNC then holds the stub's address, as before. When only calls
+  reach the stub, nothing takes it for the address: the IFUNC's loads through
+  the GOT read the stub's own slot, which its IRELATIVE relocation fills with
+  the IFUNC's code, as lld's read its `.got.plt` entry (`gotInIgot`). That is a
+  slot fewer, and in a static PIE a RELATIVE relocation fewer. The count tells
+  the calls from the other fixups among the IFUNC filter's hits, a bitset per
+  lane; the reduction takes the IFUNCs whose stubs only calls reach out of the
+  GOT's marks, and the placement gives them their stubs' slots. `test-static`'s
+  `ifunc-calls` program calls an IFUNC directly and through its slot, and
+  loads it.
+
+On the 9700X, against main at 44e1189, where only the static PIE relaxed, on
+one lane (CPU 2), medians of three interleaved runs of each, in µs.
+`benchmark-executable` writes each program over its own last bytes, whose
+loads and calls it relaxed already:
+
+| 180,000 workers | Static | Dynamic PIE | Static, with libc | Static PIE |
+| --- | ---: | ---: | ---: | ---: |
+| GOT slots | 116,338 fewer | 116,339 fewer | 116,498 → 63 | 69 → 64 |
+| The file | 45.61 → 44.67 MB | 45.68 → 44.70 MB | 46.33 → 45.40 MB | 45.43 MB, 64 bytes less |
+| The write, in place | 9,403 → 9,302 | 9,771 → 9,596 | 10,454 → 10,308 | 10,619 → 10,653 |
+| — its symbols | 299 → 192 | 324 → 220 | 320 → 206 | 235 → 234 |
+| — its chunks | 7,530 → 7,492 | 7,547 → 7,438 | 7,712 → 7,651 | 7,700 → 7,684 |
+| — its count | 1,103 → 1,163 | 1,410 → 1,464 | 1,328 → 1,365 | 1,568 → 1,616 |
+
+`benchmark-link`'s direct path binds the program afresh before each write,
+copying its code as a compiler's link does:
+
+| Direct path | 1 worker | 2,000 workers | Synth's shape | — its chunks |
+| --- | ---: | ---: | ---: | ---: |
+| Dynamic PIE | 15.6 → 15.9 | 86.3 → 85.5 | 6,945 → 7,200 | 5,544 → 5,792 |
+| Static | 288 → 286 | 361 → 364 | 7,911 → 8,092 | 5,851 → 6,080 |
+| Static PIE | 298 → 297 | 377 → 380 | 8,182 → 8,213 | 6,027 → 6,039 |
+
+- **The slots go, and what fills them.** The symbols phase fills 116,000
+  fewer slots, 0.1 ms less at 180,000 workers, and the file is 0.93 MB
+  smaller (the dynamic PIE's RELR words go from 8,653 to 2,916). The static
+  executable of synth's shape keeps 63 slots where it kept 66,335, and comes
+  to 44.13 MB, 23 KB less than the static PIE.
+- **The count takes 0.04 to 0.06 ms more** at 180,000 workers: the bitset of
+  the relaxable symbols, and the candidates' row of their own. Between builds
+  whose count is the same code it moves by as much.
+- **A compiler's link pays for reading each relaxed call's opcode.** The
+  patch reads it to tell `call` from `jmp`, which `CALL_GOT` doesn't say:
+  that is its only load from the code, where every other fixup only stores
+  its field (a `LOAD_GOT`'s rewrite stores too). When the code comes fresh
+  from binding, the call's line is often out of L2 by the chunks, and the
+  load holds up retirement where a store's miss doesn't: at synth's shape,
+  102,400 relaxed calls cost the chunks 0.23 and 0.25 ms, more than the
+  smaller file saves, and the static executable's and the dynamic PIE's links
+  take 2.3% and 3.7% longer. A write over relaxed bytes pays almost nothing
+  for them: the patch kernel over the 180,000 workers' fixups, by itself,
+  takes 1.638 ns a fixup relaxing them from the code generator's instructions
+  (put back before each run), 1.587 over relaxed bytes and 1.662 without
+  relaxing them, its lines in cache.
+- **What was tried.** Prefetching the calls' lines eight pieces ahead in the
+  chunks (a compare of each piece's kinds, then a prefetch of each call's
+  line) took the static executable of synth's shape to 7,946 µs and the static
+  PIE to 8,064, in one run of each, but its bookkeeping cost 3% to
+  8% on the small links (a static hello world's is 2,300 pieces, most of them
+  `libc.a`'s members' atoms) and 2% to 4% on writes over relaxed bytes at
+  180,000 workers. A 16-bit read of the opcode, with a call's or a jmp's 6
+  bytes as two stores rather than three, gave nothing beyond the noise
+  between builds, and nor did dropping the count's mask of calls (reading the
+  kind on an IFUNC filter's hit instead). None is taken. A kind of its own for
+  `jmp [rip + slot]`, which the import and `link_add_code_fixups` know, would
+  let the patch store without reading: left for later.
+- **What is left of lld's:** initial-exec TLS accesses relaxed to local-exec
+  (`GOTTPOFF`), whose slots stay, 3 in hello world's static PIE and 4 in the
+  decimal program's; and in a static executable, the non-PIC immediates for
+  `test` and binops through the GOT, 5 slots in the decimal program.
 
 #### The unwind tables
 
@@ -2425,7 +2547,10 @@ runtime's files, `libc.so.6`'s 3,170 definitions among them.
 - **Large links are the write's.** The program of synth's shape spends
   6.51 ms of 6.65 writing, 5.31 of them on its chunks, patching 1.33 million
   fixups, hashing and writing 44 MB, where one `pwrite` of the output takes
-  2.99. Eight lanes take 4.48 ms, 1.5 times that floor.
+  2.99. Eight lanes take 4.48 ms, 1.5 times that floor. Relaxing the loads
+  and calls through the GOT in every kind added 0.26 ms to it on one lane,
+  and 0.18 ms to the static executable's, for reading each relaxed call's
+  opcode ("GOT relaxation in every executable").
 - **The `-c` path pays before any linker starts.** Writing the objects takes
   16.5 ms on one lane, 2.5 times the direct path's whole link, into 2.2 times
   the output's bytes.
@@ -2520,14 +2645,20 @@ static executables (`--kinds static,static-pie`), whose figures came within
   runtime's IFUNCs and the PIE's symbols, counts with both filters, finds the
   loads through the GOT that relax and classifies the ABS64 fixups. The
   dynamic phase takes 0.16 ms against 0.14, and the chunks 5.77 against 5.61.
-- **RELR and the relaxed loads make the static PIE the smaller file:**
+  Since the static executable relaxes its loads through the GOT too ("GOT
+  relaxation in every executable"), its chunks pay for reading its relaxed
+  calls' opcodes as well, and the static PIE's write at synth's shape takes
+  0.13 ms longer than its write where it took 0.27: 7.71 ms against 7.58.
+- **RELR and the relaxed loads made the static PIE the smaller file:**
   44.15 MB against the static executable's 44.66. Its 105,077 relative
   relocations are 1,767 RELR words (14 KB), and its 22 IRELATIVE relocations
   stay in `.rela.dyn`. The linkers' static PIEs carry the relative ones in
   `.rela.dyn` with the driver's command (2.5 MB), and are 2.5 to 4.1 MB
   larger than their static executables. And the loads through the GOT of the
   image's symbols relax, so the GOT keeps 66 slots, where the static
-  executable's keeps 66,335 (531 KB).
+  executable's kept 66,335 (531 KB) until it relaxed them too ("GOT relaxation
+  in every executable"): it keeps 63 now, and its file is 44.13 MB, 23 KB less
+  than the static PIE's.
 - **wild's static PIEs have its static executables' flaw.** wild 0.10 starts
   a static PIE's TLS segment at `.tdata`'s alignment as it does a static
   executable's, and glibc's static-PIE startup then faults alike. Whether a
@@ -3594,7 +3725,7 @@ Where the decisions stand:
 | A static link's closure over the archives' members (binding) | each member's references | rounds over a bitset of the members, references 16 at a time compressed onto a list that is marked after the round: marked per batch, each waited for its masked store (done: 1.43 against 2.44 µs, 3.24 against 5.51 ns per member; "Static links, as built") |
 | A static executable's IFUNCs and stubs (the writer's count) | the fixups' targets, against tens of IFUNCs | a filter by two hashes in four registers, 16 targets at a time: one hash took a 46th of them for IFUNCs (done: count 1,309 against 1,588 µs for 2.35 million fixups; "The static executable with libc") |
 | Relaxing general- and local-dynamic TLS accesses | a compare and a copy per access | scalar, in the patch's path for the other kinds: the most a test program has is 47 accesses, whose five atoms' patching takes 0.89 µs of a 125 µs write |
-| A static PIE's loads and calls through the GOT that relax (the count, and the patch) | which of a link's reads of slots may relax, and which targets need a slot | compares of 64 kinds and addends find the candidates, marked in a bitset of their own that the reduction ANDs with the relaxable symbols 64 at a time; each is rewritten in the patch's path for the other kinds, a byte or two (done: the count 2.01 against 2.40 ms with gathers of the bitset's words for 180,000 workers; "The static PIE") |
+| Every executable's loads and calls through the GOT that relax (the count, and the patch) | which of a link's reads of slots may relax, and which targets need a slot | compares of 64 kinds and addends find the candidates, marked in a bitset of their own that the reduction ANDs with the relaxable symbols 64 at a time (those a symbols' pass finds 64 at a time from the source and type columns, or a PIE's RELATIVE bitset); each is rewritten in the patch's path for the other kinds, a byte or two (done: the count 2.01 against 2.40 ms with gathers of the bitset's words for 180,000 workers; "The static PIE" and "GOT relaxation in every executable") |
 | Ordering prioritized init and fini arrays | a few entries | scalar on lane 0, a stable radix sort: six entries take 0.24 µs of a 99.5 µs write |
 
 So on the direct path, most of the output is produced by a vector kernel that
@@ -3683,13 +3814,18 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
   writes programs bound against the static runtime, generated and compiled
   ones, which must run as `cc -static`'s links of the same objects do, and
   checks their IFUNCs' stubs and IRELATIVE relocations, every relaxed TLS
-  access, the prioritized arrays' order and the linker's names; with
+  access, every relaxed load and call against the instruction it was, the
+  GOT's slots, the prioritized arrays' order and the linker's names; with
   `--cross-check`, they must run as lld's links do too, with as many
-  IRELATIVE relocations, the same TLS alignment and the same arrays' sizes.
+  IRELATIVE relocations, the same TLS alignment and the same arrays' sizes,
+  and as many GOT slots as lld's, but for thread-locals' offsets and the
+  slots that lld's non-PIC immediates replace.
   It writes them as static PIEs too, which must run as `cc -static-pie`'s
   links do (or be refused as those are), and checks their `.dynamic`, every
-  RELATIVE relocation in `.rela.dyn` and `.relr.dyn`, every relaxed load and
-  call against the instruction it was, and a write over the relaxed bytes.
+  RELATIVE relocation in `.rela.dyn` and `.relr.dyn` (with `--cross-check`,
+  as many as lld's, and as many GOT slots but for thread-locals' offsets),
+  and a write over the relaxed bytes. `test-executable` and `test-dynamic`
+  check every relaxed load and call by the same rule, and their GOTs.
 - **The runtime snapshot:** `test-snapshot` loads each kind's runtime back
   from its snapshot and compares it with the import, binds and writes the same
   programs against both into the same bytes, and checks staleness, damage and
@@ -3827,13 +3963,14 @@ and with this document updated with what was measured:
    The fifth part's first half is done: the static PIE (the static PIE's
    runtime, `runtime_import_static_pie`; `executable.c`'s static PIE with GOT
    relaxation and RELR, `dynamic_static_pie_inputs`, and `test-static` and
-   `benchmark-executable`'s static PIEs: "The static PIE"). Its second half,
-   `-shared`, has its runtime and binding: the loader as a library of the
-   dynamic runtimes, needed as `libc.so`'s script says ("The runtime
-   snapshot", "The dynamic PIE"), and a shared library's runtime
-   (`runtime_import_shared`, `runtime_open_shared`) and binding
-   (`bind_shared_exports`: "Shared libraries, as built so far"). Next, its
-   writer.
+   `benchmark-executable`'s static PIEs: "The static PIE"). So is GOT
+   relaxation in every kind, with lld's sharing of an IFUNC's stub slot ("GOT
+   relaxation in every executable"). Its second half, `-shared`, has its
+   runtime and binding: the loader as a library of the dynamic runtimes,
+   needed as `libc.so`'s script says ("The runtime snapshot", "The dynamic
+   PIE"), and a shared library's runtime (`runtime_import_shared`,
+   `runtime_open_shared`) and binding (`bind_shared_exports`: "Shared
+   libraries, as built so far"). Next, its writer.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
    and the exchange. Done when the differential tests against lld and mold
    pass on a corpus.
