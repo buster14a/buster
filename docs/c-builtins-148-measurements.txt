@@ -1,0 +1,59 @@
+Integer builtin action measurements, 2026-10-22
+Source: 8b0cd7b2fcf5bb82705607abb24580d34836e652
+Merged: 09ccd1b16585a52f89d3ef43b3941f4d001a91cc (PR #273)
+Executable SHA-256: c67db28ff8cdb62de21fe4ecab28b989a18e6a3e21b8d1cf81c91500f5c32a8b
+Host: Linux x86-64, AMD Ryzen 7 9700X, CPU 2
+Compiler: Clang 23.1.1, repository build.sh, -O3 -march=native
+Other build flags: -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -g
+Inputs: benchmark-builtins generator, seed 148, 16384 independent rows
+Each process acquired/released ~/buster-fast-bench/exclusive.sh separately.
+Each line reports its process median and within-process p10-p90 over 21 samples.
+interleaved: taskset -c 2 ./build/compiler benchmark-builtins
+isolated:   taskset -c 2 ./build/compiler benchmark-builtins --only vector
+after:      taskset -c 2 ./build/compiler benchmark-builtins --only vector --after-scalar 100
+
+round=1 configuration=interleaved
+bit-mixed      scalar 1.123 ns/row [1.048, 1.218] count=16384 after-scalar=0 ms
+bit-mixed      vector 0.634 ns/row [0.633, 0.636] count=16384 after-scalar=0 ms
+overflow-mixed scalar 3.311 ns/row [3.299, 3.314] count=16384 after-scalar=0 ms
+overflow-mixed vector 1.298 ns/row [1.294, 1.301] count=16384 after-scalar=0 ms
+all-mixed      scalar 1.635 ns/row [1.600, 1.689] count=16384 after-scalar=0 ms
+all-mixed      vector 1.147 ns/row [1.145, 1.149] count=16384 after-scalar=0 ms
+round=1 configuration=isolated
+bit-mixed      vector 0.630 ns/row [0.630, 0.634] count=16384 after-scalar=0 ms
+overflow-mixed vector 1.294 ns/row [1.292, 1.296] count=16384 after-scalar=0 ms
+all-mixed      vector 1.146 ns/row [1.144, 1.147] count=16384 after-scalar=0 ms
+round=1 configuration=after
+bit-mixed      vector 0.632 ns/row [0.631, 0.635] count=16384 after-scalar=100 ms
+overflow-mixed vector 1.294 ns/row [1.293, 1.297] count=16384 after-scalar=100 ms
+all-mixed      vector 1.145 ns/row [1.144, 1.148] count=16384 after-scalar=100 ms
+round=2 configuration=interleaved
+bit-mixed      scalar 1.082 ns/row [1.032, 1.169] count=16384 after-scalar=0 ms
+bit-mixed      vector 0.631 ns/row [0.630, 0.633] count=16384 after-scalar=0 ms
+overflow-mixed scalar 3.304 ns/row [3.300, 3.311] count=16384 after-scalar=0 ms
+overflow-mixed vector 1.295 ns/row [1.293, 1.308] count=16384 after-scalar=0 ms
+all-mixed      scalar 1.608 ns/row [1.594, 1.687] count=16384 after-scalar=0 ms
+all-mixed      vector 1.145 ns/row [1.144, 1.146] count=16384 after-scalar=0 ms
+round=2 configuration=isolated
+bit-mixed      vector 0.632 ns/row [0.631, 0.636] count=16384 after-scalar=0 ms
+overflow-mixed vector 1.294 ns/row [1.294, 1.295] count=16384 after-scalar=0 ms
+all-mixed      vector 1.145 ns/row [1.144, 1.145] count=16384 after-scalar=0 ms
+round=2 configuration=after
+bit-mixed      vector 0.633 ns/row [0.631, 0.635] count=16384 after-scalar=100 ms
+overflow-mixed vector 1.295 ns/row [1.294, 1.295] count=16384 after-scalar=100 ms
+all-mixed      vector 1.146 ns/row [1.144, 1.147] count=16384 after-scalar=100 ms
+round=3 configuration=interleaved
+bit-mixed      scalar 1.063 ns/row [1.023, 1.152] count=16384 after-scalar=0 ms
+bit-mixed      vector 0.630 ns/row [0.630, 0.631] count=16384 after-scalar=0 ms
+overflow-mixed scalar 3.311 ns/row [3.305, 3.312] count=16384 after-scalar=0 ms
+overflow-mixed vector 1.295 ns/row [1.294, 1.297] count=16384 after-scalar=0 ms
+all-mixed      scalar 1.620 ns/row [1.611, 1.672] count=16384 after-scalar=0 ms
+all-mixed      vector 1.151 ns/row [1.147, 1.152] count=16384 after-scalar=0 ms
+round=3 configuration=isolated
+bit-mixed      vector 0.630 ns/row [0.630, 0.631] count=16384 after-scalar=0 ms
+overflow-mixed vector 1.295 ns/row [1.294, 1.297] count=16384 after-scalar=0 ms
+all-mixed      vector 1.146 ns/row [1.144, 1.148] count=16384 after-scalar=0 ms
+round=3 configuration=after
+bit-mixed      vector 0.631 ns/row [0.630, 0.634] count=16384 after-scalar=100 ms
+overflow-mixed vector 1.294 ns/row [1.293, 1.298] count=16384 after-scalar=100 ms
+all-mixed      vector 1.144 ns/row [1.143, 1.146] count=16384 after-scalar=100 ms
