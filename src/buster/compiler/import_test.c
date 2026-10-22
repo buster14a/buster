@@ -410,7 +410,7 @@ static void import_test_library_paths(ImportTestTally* tally, String8 bytes, Imp
 // Whether two reads of an archive are the same: its members and its index, field by field.
 static bool import_test_same_archive(const ImportArchive* a, const ImportArchive* b)
 {
-    bool result = a->member_count == b->member_count && a->symbol_count == b->symbol_count;
+    bool result = a->member_count == b->member_count && a->symbol_count == b->symbol_count && a->thin == b->thin;
     for (uint32_t m = 0; result && m < a->member_count; m += 1)
     {
         const ImportMember* x = &a->members[m];
@@ -1782,6 +1782,8 @@ struct ImportTestArchive
     uint32_t symbol_members[BUSTER_IMPORT_TEST_ARCHIVE_SYMBOLS];
     uint32_t symbol_count;
     uint32_t width;
+    // A thin archive: every member's name in the long names' table, and only its header in the archive.
+    bool thin;
 };
 
 // A member header as GNU ar writes one: the name field, a date, owner, group and mode, the size, and "`\n".
@@ -1818,7 +1820,7 @@ static bool import_test_archive(ImportTestFile* file, const ImportTestArchive* a
     for (uint32_t i = 0; i < archive->member_count; i += 1)
     {
         const uint64_t length = strlen(archive->names[i]);
-        if (length >= 16)
+        if (length >= 16 || archive->thin)
         {
             assert(long_length + length + 2 <= sizeof(long_names));
             long_name_offsets[i] = long_length;
@@ -1840,9 +1842,10 @@ static bool import_test_archive(ImportTestFile* file, const ImportTestArchive* a
     offset += long_length != 0 ? BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + long_length + (long_length & 1) : 0;
     for (uint32_t i = 0; i < archive->member_count; i += 1)
     {
+        const uint64_t contents = archive->thin ? 0 : archive->sizes[i];
         file->headers[i] = offset;
         file->contents[i] = offset + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES;
-        offset += BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + archive->sizes[i] + (archive->sizes[i] & 1);
+        offset += BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + contents + (contents & 1);
     }
     file->count = archive->member_count;
     file->size = offset;
@@ -1850,7 +1853,7 @@ static bool import_test_archive(ImportTestFile* file, const ImportTestArchive* a
     if (file->bytes != 0)
     {
         memset(file->bytes, '\n', file->size);
-        memcpy(file->bytes, BUSTER_IMPORT_ARCHIVE_MAGIC, sizeof(BUSTER_IMPORT_ARCHIVE_MAGIC) - 1);
+        memcpy(file->bytes, archive->thin ? BUSTER_IMPORT_THIN_ARCHIVE_MAGIC : BUSTER_IMPORT_ARCHIVE_MAGIC, sizeof(BUSTER_IMPORT_ARCHIVE_MAGIC) - 1);
         if (archive->width != 0)
         {
             uint8_t* index = file->bytes + file->index_header + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES;
@@ -1874,7 +1877,7 @@ static bool import_test_archive(ImportTestFile* file, const ImportTestArchive* a
         {
             char name[32];
             const uint64_t length = strlen(archive->names[i]);
-            if (length >= 16)
+            if (length >= 16 || archive->thin)
             {
                 snprintf(name, sizeof(name), "/%llu", (unsigned long long)long_name_offsets[i]);
             }
@@ -1883,7 +1886,7 @@ static bool import_test_archive(ImportTestFile* file, const ImportTestArchive* a
                 snprintf(name, sizeof(name), "%s/", archive->names[i]);
             }
             import_test_archive_header(file->bytes + file->headers[i], name, archive->sizes[i]);
-            if (archive->sizes[i] != 0)
+            if (archive->sizes[i] != 0 && !archive->thin)
             {
                 memcpy(file->bytes + file->contents[i], archive->bytes[i], archive->sizes[i]);
             }
@@ -1899,12 +1902,13 @@ static void import_test_archive_check(ImportTestTally* tally, const ImportTestAr
     ImportArchive read;
     const ImportResult result = import_archive(&read, import_test_bytes(file), arena);
     const uint32_t symbols = archive->width != 0 ? archive->symbol_count : 0;
-    bool same = result.error == IMPORT_ERROR_NONE && read.member_count == archive->member_count && read.symbol_count == symbols;
+    bool same = result.error == IMPORT_ERROR_NONE && read.member_count == archive->member_count && read.symbol_count == symbols && read.thin == archive->thin;
     for (uint32_t i = 0; same && i < archive->member_count; i += 1)
     {
+        // A thin archive's member has no bytes in it: they are the file its name gives.
         const ImportMember* member = &read.members[i];
-        same = import_equal(member->name, archive->names[i]) && member->bytes.pointer == (char*)file->bytes + file->contents[i] && member->bytes.length == archive->sizes[i] &&
-               member->offset == file->headers[i];
+        same = import_equal(member->name, archive->names[i]) && member->bytes.pointer == (char*)file->bytes + file->contents[i] &&
+               member->bytes.length == (archive->thin ? 0 : archive->sizes[i]) && member->offset == file->headers[i];
     }
     for (uint32_t s = 0; same && s < symbols; s += 1)
     {
@@ -1994,8 +1998,9 @@ static bool import_test_archives(Arena* arena)
         const uint64_t last_name = index_names + strlen("alpha") + strlen("beta") + strlen("gamma") + strlen("delta") + 4 + strlen("epsilon");
         const uint64_t long_names = file.names_header + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES;
         import_test_case(&tally, a, &file, "not an archive", 0, 1, 'X', import_test_result(IMPORT_ERROR_FORMAT, 0, 0, 0, 0, 0), arena);
-        import_test_case(&tally, a, &file, "a thin archive", 0, 8, import_test_text(BUSTER_IMPORT_THIN_ARCHIVE_MAGIC, 8), import_test_result(IMPORT_ERROR_UNSUPPORTED, 0, 0, 0, 0, 0),
-                         arena);
+        // Read as thin, the first member's bytes are where its next header would be.
+        import_test_case(&tally, a, &file, "an archive marked thin", 0, 8, import_test_text(BUSTER_IMPORT_THIN_ARCHIVE_MAGIC, 8),
+                         import_test_result(IMPORT_ERROR_BOUNDS, file.contents[0], 0, 0, 0, 0), arena);
         import_test_case(&tally, a, &file, "a header without its terminator", file.headers[1] + 58, 1, 'x', member_bounds, arena);
         import_test_case(&tally, a, &file, "a size with a letter", file.headers[1] + 48, 1, 'a', member_bounds, arena);
         import_test_case(&tally, a, &file, "a size with a digit after a space", file.headers[1] + 51, 1, '5', member_bounds, arena);
@@ -2019,6 +2024,19 @@ static bool import_test_archives(Arena* arena)
     {
         import_test_archive_check(&tally, &archive, &file, "a 64-bit index", arena);
     }
+    // A thin archive of the same members: only their headers, and every name in the long names' table.
+    archive.thin = true;
+    for (uint32_t width = 4; width <= 8; width += 4)
+    {
+        archive.width = width;
+        built = import_test_archive(&file, &archive, arena);
+        import_test_expect(&tally, built, "the thin archive made by hand", width);
+        if (built)
+        {
+            import_test_archive_check(&tally, &archive, &file, "a thin archive", arena);
+        }
+    }
+    archive.thin = false;
     // A member without a symbol, which the index doesn't list.
     archive.symbol_members[2] = 1;
     for (uint32_t width = 4; width <= 8; width += 4)

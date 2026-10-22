@@ -18,7 +18,10 @@ the selected Clang for its include search and passes that order explicitly to
 both sides. Frozen runs use `-nostdinc` and the pinned `-isystem` paths. Clang's
 `CPATH` and `C_INCLUDE_PATH` are cleared; Buster does not read them. One
 `clang -dM -E` dump per configuration supplies Buster's predefines, without
-adding `__BUSTER__`. Both sides inherit `SOURCE_DATE_EPOCH`, defaulted to
+adding `__BUSTER__`. The target, the fixed one and any `--target=` or `-target
+TRIPLE` after it, reaches both sides, so the target queries
+(`__is_target_vendor` and the others) answer for the same triple;
+`accepted.input` checks the vendor's. Both sides inherit `SOURCE_DATE_EPOCH`, defaulted to
 `1792454400` (2026-10-20 UTC) for this run. The existing Clang feature tables
 supply the feature queries in oracle mode.
 
