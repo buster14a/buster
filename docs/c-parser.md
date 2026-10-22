@@ -156,7 +156,7 @@ attributes in a row, parse in time linear in their count. Nesting is bounded by
 memory, not by the native stack: 100,000 levels of every kind of group parse.
 
 It rejects what C's grammar rejects, at the token clang names, with clang's
-message (68 messages, `BUSTER_PARSE_MESSAGES`), and after an error skips to the
+message (76 messages, `BUSTER_PARSE_MESSAGES`), and after an error skips to the
 end of the top-level declaration and goes on. It reports one syntax error per
 top-level declaration, the first, after the errors clang gives without
 changing how it parses (a missing type specifier, an unknown type name); clang
@@ -223,7 +223,7 @@ the code is well-formed, so that every top-level declaration the vector path
 keeps is one the scalar parser accepts with the same tree. Each token gets:
 
 - a **class**: its role, refined by its kind, its typed state or its name
-  where what may follow it differs (118 classes: a constant, a string, a type
+  where what may follow it differs (119 classes: a constant, a string, a type
   keyword, a typedef name, `*`, `sizeof`, `goto`, a label's name, `->`, which
   designators don't take, ...);
 - a **mode**: its group's type (a file, a block, a struct or enum body, a
