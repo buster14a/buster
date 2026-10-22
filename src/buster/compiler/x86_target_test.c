@@ -222,7 +222,8 @@ static bool x86_target_test_preprocessor(const char* directory)
         .options = "-march=x86-64-v4 -mtune=znver5 -march=x86-64",
     };
     passed &= pp_test_case(&order, directory, true);
-    static const char* const invalid[] = { "-march=", "-march=x86-64-v5", "-march=znver6", "-mtune=invalid", "-mavx2" };
+    // Names clang doesn't know, and an output mode buster doesn't follow (c_predefines.c takes clang's CPUs and -m switches).
+    static const char* const invalid[] = { "-march=", "-march=x86-64-v5", "-march=znver9", "-mtune=invalid", "-m32" };
     for (uint32_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i += 1)
     {
         Arena arena = arena_reserve(1ull << 20);
