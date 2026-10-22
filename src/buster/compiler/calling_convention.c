@@ -1663,7 +1663,23 @@ static uint32_t abi_value_alignment_log2(const TypeTable* table, uint32_t index)
     {
         value = table->types.base[value] >> BUSTER_TYPE_INDEX_SHIFT;
     }
-    return table->types.alignment_log2[value];
+    uint32_t result = table->types.alignment_log2[value];
+    if (table->types.kind[value] == BUSTER_TYPE_KIND_ATOMIC)
+    {
+        const uint32_t vector = abi_value_type(table, value);
+        const uint8_t kind = table->types.kind[vector];
+        if ((kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && table->types.size[vector] < 16)
+        {
+            const uint32_t element = abi_vector_element(table, vector);
+            const uint8_t code = table->types.code[element];
+            const bool half = table->types.kind[element] == BUSTER_TYPE_KIND_FLOATING &&
+                              (code == BUSTER_TYPE_CODE_FLOAT16 || code == BUSTER_TYPE_CODE_BF16 || code == BUSTER_TYPE_CODE_HALF);
+            const bool widened = !abi_is_bool_vector(table, vector) && (table->types.extent[vector] > 1 || half);
+            // Calling-convention legalization widens genuine short vectors to 128 bits, including a single half.
+            result = widened ? 4 : result;
+        }
+    }
+    return result;
 }
 
 // Whether clang treats the type as an aggregate: by value as a copy (byval) when it goes in memory as an argument, and
@@ -2166,6 +2182,11 @@ __attribute__((cold, noinline)) static AbiRare abi_finish_rare(AbiTable* abi, co
             abi->larger += 1;
             abi->rare += 1;
         }
+        // A legalized 128-bit atomic vector has a 16-byte spill slot even when its memory object is smaller.
+        const bool vector_value = (result.pass & BUSTER_ABI_PASS_UNCOUNTED) != 0 &&
+                                  (result.pass & BUSTER_ABI_PASS_VALUE) == (BUSTER_ABI_VALUE_VECTOR << BUSTER_ABI_PASS_VALUE_SHIFT);
+        const uint32_t spill_log2 = (result.pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT;
+        result.slot = vector_value && spill_log2 == 4 && result.slot < 16 ? 16 : result.slot;
         const uint32_t single = (rare.pass & BUSTER_ABI_PASS_VECTOR) != 0 ? abi_single_member(abi, table, index) : 0;
         if (single != 0)
         {
