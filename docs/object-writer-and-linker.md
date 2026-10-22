@@ -833,26 +833,31 @@ kind, which the loader checks: the other kind's file at its name is stale.
 
 On the 9700X (`benchmark-snapshot`, one CPU, medians of 41 runs, on tmpfs; on
 btrfs, the cache directory's file system there, within 0.4 µs but for the
-write), in µs, with a program of one worker bound against each:
+write), in µs, with a program of one worker bound against each. The static
+PIE's runtime (`runtime_open_static_pie`, in `runtime-static-pie.snapshot`)
+was measured later, at 5cd1e31, which added it, in a run whose dynamic and
+static rows came within 3% of those here as rounded, but for the dynamic
+runtime's binding against one loaded afresh (3.3) and its pieces' checks
+(0.3):
 
-| Step | Dynamic | Static |
-| --- | ---: | ---: |
-| `runtime_import` (`_static`) and `runtime_release`, without a snapshot | 147 | 1,894 |
-| `runtime_open` from the snapshot | 9.6 | 22.8 |
-| — the compiler's identity: `stat` of `/proc/self/exe` | 0.5 | 0.6 |
-| — `open`, `fstat`, `mmap` and `close` | 1.0 | 1.2 |
-| — the header and the directory's hash | 3.3 | 15.5 |
-| — the columns pointed into the mapping, the probes and versions rebased | 0.6 | 0.8 |
-| — the probes' `stat` (19 and 20) | 4.1 | 4.6 |
-| `runtime_release` of a loaded runtime (`munmap`) | 1.9 | 6.3 |
-| `snapshot_write` (tmpfs) | 48 | 1,543 |
-| the file read with `pread` into new memory instead | 22 | 241 |
-| mapped without the hash, then 12 lookups | 7.8 | 13.0 |
-| mapped and hashed whole, as format 3 checked it | 4.2 | 155 |
-| binding, against the imported runtime | 2.7 | 138 |
-| binding, against one loaded afresh, as a link binds | 2.9 | 221 |
-| binding, against one loaded and warm | 3.0 | 165 |
-| — the checks of the pieces it read (5 and 447), warm | 0.2 | 41 |
+| Step | Dynamic | Static | Static PIE |
+| --- | ---: | ---: | ---: |
+| `runtime_import` (`_static`, `_static_pie`) and `runtime_release`, without a snapshot | 147 | 1,894 | 1,892 |
+| `runtime_open` from the snapshot | 9.6 | 22.8 | 22.9 |
+| — the compiler's identity: `stat` of `/proc/self/exe` | 0.5 | 0.6 | 0.6 |
+| — `open`, `fstat`, `mmap` and `close` | 1.0 | 1.2 | 1.1 |
+| — the header and the directory's hash | 3.3 | 15.5 | 15.8 |
+| — the columns pointed into the mapping, the probes and versions rebased | 0.6 | 0.8 | 0.7 |
+| — the probes' `stat` (19, 20 and 20) | 4.1 | 4.6 | 4.6 |
+| `runtime_release` of a loaded runtime (`munmap`) | 1.9 | 6.3 | 6.3 |
+| `snapshot_write` (tmpfs) | 48 | 1,543 | 1,533 |
+| the file read with `pread` into new memory instead | 22 | 241 | 241 |
+| mapped without the hash, then 12 lookups | 7.8 | 13.0 | 13.0 |
+| mapped and hashed whole, as format 3 checked it | 4.2 | 155 | 156 |
+| binding, against the imported runtime | 2.7 | 138 | 139 |
+| binding, against one loaded afresh, as a link binds | 2.9 | 221 | 222 |
+| binding, against one loaded and warm | 3.0 | 165 | 165 |
+| — the checks of the pieces it read (5, 447 and 448), warm | 0.2 | 41 | 40 |
 
 - **Mapped, not read.** `pread` puts the file into new anonymous pages, whose
   first touches make it cost 22 µs for the dynamic runtime's 197 KB; mapping
@@ -881,6 +886,15 @@ write), in µs, with a program of one worker bound against each:
   than `stat`.
 - **Binding the dynamic runtime is as fast loaded as imported:** the directory
   hash has already read what it reads, and its pieces are a few crt objects.
+- **A static PIE's runtime costs what a static executable's does.** It is the
+  same archives with `rcrt1.o`, `crtbeginS.o` and `crtendS.o` for `crt1.o`,
+  `crtbeginT.o` and `crtend.o`: 23,986 symbols to 23,992, a snapshot of
+  8,670,305 bytes to 8,670,737. Its import end to end (`benchmark-import`)
+  takes 1.82 ms, against `runtime_import_static`'s 1.85 in the same run. A
+  program bound against it joins one member more, `libc.a`'s
+  `dl-reloc-static-pie.o`, which relocates the executable at startup
+  (`rcrt1.o` doesn't define `_dl_relocate_static_pie`, as `crt1.o` does), so
+  binding checks one piece more.
 
 **Finding and importing the files** (`runtime.c`, with the readers of
 `import.c`). GCC's installation is the highest version under
@@ -1057,6 +1071,22 @@ a member's dozen small columns by masked 64-byte stores rather than calls of
 `memcpy` changed nothing. Per record, the 23 members' joins cost 15.5 TSC
 ticks against a block join's 10.8, so joining them as blocks would save
 about 5 µs: they stay the rare case, left to the exact join.
+
+Against a static PIE's runtime (`runtime_import_static_pie`, with `rcrt1.o`,
+`crti.o` and `crtbeginS.o` before the program and `crtendS.o` and `crtn.o`
+after it), the programs join 443 members: the static executable's 442 and
+`dl-reloc-static-pie.o`, the member lld's `--why-extract` adds for the same
+objects linked `-static-pie`. Binding costs what it costs against the static
+runtime. In one run of `benchmark-bind` at 5cd1e31, vector / exact:
+
+| Workers | Runtime | `bind_begin` | Closure | `bind_end` |
+| --- | --- | ---: | ---: | ---: |
+| 1 | static | 0.80 / 0.95 µs | 1.37 / 2.46 µs | 73.4 / 123.5 µs |
+| 1 | static PIE | 0.79 / 0.86 µs | 1.37 / 2.48 µs | 74.9 / 123.0 µs |
+| 2,000 | static | 2.56 / 5.57 µs | 1.56 / 2.41 µs | 74.1 / 121.7 µs |
+| 2,000 | static PIE | 2.54 / 5.50 µs | 1.46 / 2.44 µs | 74.5 / 123.0 µs |
+| 102,400 | static | 92.4 / 818 µs | 1.87 / 3.62 µs | 97.7 / 142.2 µs |
+| 102,400 | static PIE | 92.6 / 818 µs | 1.76 / 3.60 µs | 99.6 / 142.0 µs |
 
 **What the snapshot buys.** Synthetic sections and patching for the runtime
 are a few dozen records. `__libc_start_main`, `__cxa_finalize` and the
@@ -2384,6 +2414,62 @@ the appendix's `-static` command. Medians on the 9700X in µs, one lane:
   a 16-aligned zero thread-local beside an 8-aligned one shows it, and GNU
   ld, lld and mold start the segment aligned. The benchmark doesn't run wild
   on such a program.
+
+**Static PIEs.** The same programs linked with `-static-pie` (`--kinds
+static-pie`): the direct path opens the static PIE's runtime's snapshot
+(`runtime_open_static_pie`), binds against it, and writes with
+`dynamic_static_pie_inputs`, its `ExecutableOptions.dynamic` and `.runtime`
+both set; the linkers take the driver's `-static-pie` command (`-static -pie
+--no-dynamic-linker -z text`, `rcrt1.o`, `crti.o` and `crtbeginS.o`, the
+static executable's group, then `crtendS.o` and `crtn.o`). Medians on the
+9700X in µs, one lane, with RELR ("The static PIE"), in one run with the
+static executables (`--kinds static,static-pie`), whose figures came within
+4% of the table above (the totals within 1.5%):
+
+| | 1 worker | 2,000 workers | 102,400 workers |
+| --- | ---: | ---: | ---: |
+| **Direct path, 1 lane** | **298** | **379** | **7,894** |
+| `runtime_open_static_pie` | 22.3 | 22.6 | 25.2 |
+| `bind_begin` | 13.9 | 15.6 | 103 |
+| `bind_end` and `dynamic_static_pie_inputs` | 128 | 132 | 379 |
+| `executable_write` | 134 | 209 | 7,388 |
+| One `pwrite` of the output | 19.1 | 31.9 | 2,911 |
+| GNU ld | 13,090 | 17,020 | 336,600 |
+| lld, its threads / 1 | 8,820 / 6,790 | 9,760 / 8,310 | 59,900 / 102,600 |
+| mold, its threads / 1 | 8,670 / 6,220 | 10,040 / 7,630 | 42,500 / 106,000 |
+| wild, its threads / 1 | — | 4,100 / 5,100 | 26,800 / 103,700 |
+
+- **A static PIE's link costs a static executable's and a little more:** in
+  the same run the static executables took 291, 362 and 7,664 µs, 2% to 5%
+  less. Binding joins one member more ("Static links, as built"), and the
+  write does a PIE's work besides the static runtime's. Against the linkers
+  it is a static executable's link: 21 times faster than mold on one thread
+  at hello world's size, 44 times faster than GNU ld, and 3.4 times faster
+  than wild with its threads at synth's shape.
+- **At synth's shape the write takes 0.23 ms longer** (7.39 ms against the
+  static executable's 7.16), where the linkers' static PIEs cost them from
+  1% less (mold with its threads) to 11% more (GNU ld) than their static
+  executables. The count takes 0.82 ms against 0.72: it marks the static
+  runtime's IFUNCs and the PIE's symbols, counts with both filters, finds the
+  loads through the GOT that relax and classifies the ABS64 fixups. The
+  dynamic phase takes 0.16 ms against 0.14, and the chunks 5.77 against 5.61.
+- **RELR and the relaxed loads make the static PIE the smaller file:**
+  44.15 MB against the static executable's 44.66. Its 105,077 relative
+  relocations are 1,767 RELR words (14 KB), and its 22 IRELATIVE relocations
+  stay in `.rela.dyn`. The linkers' static PIEs carry the relative ones in
+  `.rela.dyn` with the driver's command (2.5 MB), and are 2.5 to 4.1 MB
+  larger than their static executables. And the loads through the GOT of the
+  image's symbols relax, so the GOT keeps 66 slots, where the static
+  executable's keeps 66,335 (531 KB).
+- **wild's static PIEs have its static executables' flaw.** wild 0.10 starts
+  a static PIE's TLS segment at `.tdata`'s alignment as it does a static
+  executable's, and glibc's static-PIE startup then faults alike. Whether a
+  link starts it off its alignment depends on the layout: on the 9700X,
+  wild's static PIEs of the 1-worker program and of the C program above land
+  aligned and run, while its static executables of both fault; on another
+  machine, with another build of glibc 2.44, the C program's static PIE
+  faults and its static executable runs. So the benchmark doesn't run wild on
+  the static PIE of such a program either.
 
 #### Synthetic sections
 

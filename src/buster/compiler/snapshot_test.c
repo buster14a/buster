@@ -11,30 +11,37 @@
 //   - Round trip: the system's runtime, imported, written as a snapshot and loaded back, must have the same records as
 //     the import's (snapshot_test_same_runtime), and so must the loaded one after a new snapshot was renamed over the
 //     file it maps. The loaded runtime must use the file's mapping and no arena. Then the same for a static
-//     executable's runtime (runtime_import_static), with its archives' members, their references and COMDAT groups.
+//     executable's runtime (runtime_import_static), with its archives' members, their references and COMDAT groups, and
+//     for a static PIE's (runtime_import_static_pie).
 //   - Links: test-link's programs that call libc, and one of --functions workers (2,000 by default), bound by both of
 //     binding's paths against the imported runtime and against the loaded one: the same links and bindings, written as
-//     dynamic PIEs by 1 and 8 lanes into the same bytes, which run as their models predict.
+//     dynamic PIEs by 1 and 8 lanes into the same bytes, which run as their models predict. Then the same against each
+//     static kind's runtime, written as static executables and as static PIEs.
 //   - Opening: runtime_open in a directory that doesn't exist yet, which it makes (private), then in it again: imported
 //     and written, then loaded. With no directory, or as an executable without an identity, the runtime is imported and
 //     no file written; and where the directory can't be made, the link still gets the imported runtime.
+//   - Kinds: runtime_open_static and runtime_open_static_pie, then runtime_open, in one directory, each kind's snapshot
+//     a file of its own (snapshot_name) beside the others'; each loaded as another kind, stale; and each renamed over
+//     another kind's, stale there, and written over.
 //   - Staleness: snapshots with probes of the test's own files and directories, each then changed one way, must be stale:
 //     a file rewritten in place to the same size, one whose mode changed, one replaced by a rename, one removed, a file
 //     created where a probe found none, one added to a probed directory, and a file written to with its times put back
 //     (st_ctim still changes). So must one written by another executable (another identity). runtime_open must then
 //     import the runtime and write a new snapshot, which loads.
-//   - Invalid files: copies of a snapshot cut short at sampled lengths, one byte longer, with a byte changed at sampled
-//     offsets and in each of the header's bytes, must be invalid, and so must ones whose header was changed and the hash
-//     made right again (another version or magic, a region misaligned, past the end or of the wrong size, counts out of
-//     range); runtime_open must replace them. A directory and a FIFO at the snapshot's path must neither block nor
-//     fail the link.
+//   - Invalid files, of the dynamic PIE's runtime's snapshot and the static PIE's: copies of a snapshot cut short at
+//     sampled lengths, one byte longer, with a byte changed at sampled offsets and in each of the header's bytes, must
+//     be invalid, and so must ones whose header was changed and the hash made right again (another version or magic, a
+//     region misaligned, past the end or of the wrong size, counts out of range); runtime_open must replace them. A
+//     directory and a FIFO at the snapshot's path must neither block nor fail the link.
+//   - Damaged pieces, of each kind's snapshot: a byte of the pieces' records changed, which only the piece that holds
+//     it shows, and a link that reads that piece fails (snapshot_test_damaged).
 //   - Concurrency: eight processes opening the runtime at once in an empty directory must each get it, imported or
 //     loaded, and leave one snapshot, which loads, and no other file.
 //   - The cache directory: snapshot_directory from XDG_CACHE_HOME and HOME.
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, the comparison, the round trip, the links, opening, staleness, invalid files,
-// concurrency, the cache directory, and run_snapshot_tests.
+// damaged pieces, the kinds, concurrency, the cache directory, and run_snapshot_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -340,13 +347,14 @@ static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, c
 // The links
 
 // Writes a bound link with a group of `lanes` lanes, as a dynamic PIE or, against a static runtime, as a static
-// executable, from its atoms' bytes as binding left them (`saved`: the TLS relaxation rewrites them).
+// executable or a static PIE by its kind (static_test_write_with), from its atoms' bytes as binding left them (`saved`:
+// the TLS relaxation and a static PIE's relaxed loads through the GOT rewrite them).
 static bool snapshot_test_write_link(Link* link, const Bind* bind, const Runtime* runtime, const uint8_t* saved, char* path, uint32_t lanes, ExecutableResult* result)
 {
     DynamicTestWrite write = { 0 };
     const bool reset = executable_test_reset(link, path);
     bool written = false;
-    if (reset && runtime->kind == RUNTIME_KIND_STATIC)
+    if (reset && runtime_kind_is_static(runtime->kind))
     {
         static_test_restore(link, saved);
         written = static_test_write_with(&write, link, bind, runtime, snapshot_test_string(path), lanes, result);
@@ -358,8 +366,8 @@ static bool snapshot_test_write_link(Link* link, const Bind* bind, const Runtime
     return written;
 }
 
-// Binds a program against each runtime by `path` and writes it with 1 and 8 lanes, as a dynamic PIE or as a static
-// executable by the runtimes' kind: the same links, bindings and files.
+// Binds a program against each runtime by `path` and writes it with 1 and 8 lanes, as a dynamic PIE, a static
+// executable or a static PIE by the runtimes' kind: the same links, bindings and files.
 static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDirectory* directory, const Runtime* imported, const Runtime* loaded, LinkProgramOptions options,
                                BindPath path, const char* name, uint64_t index)
 {
@@ -738,34 +746,45 @@ static bool snapshot_test_staleness(const ExecutableTestDirectory* directory, co
 // ---------------------------------------------------------------------------------------------------------------------
 // Invalid files
 
-// Writes `length` bytes of `bytes` to `path`, then `extra` bytes of zeros, with the byte at `flip` (if it is below
-// length) changed.
-static bool snapshot_test_copy(const char* path, const uint8_t* bytes, uint64_t length, uint64_t extra, uint64_t flip)
+// Writes `count` bytes at `offset` of the file, all of them.
+static bool snapshot_test_pwrite(int file, const uint8_t* bytes, uint64_t count, uint64_t offset)
 {
-    const int file = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    bool result = file >= 0;
     uint64_t done = 0;
-    while (result && done < length)
+    bool result = true;
+    while (result && done < count)
     {
-        const uint64_t piece = flip >= done && flip < length ? flip - done : length - done;
-        const ssize_t count = piece != 0 ? write(file, bytes + done, piece) : 0;
-        const uint8_t changed = (uint8_t)(bytes[done] ^ 0x5a);
-        const ssize_t flipped = piece == 0 ? write(file, &changed, 1) : 0;
-        result = (piece != 0 && count > 0) || (piece == 0 && flipped == 1);
-        done += piece != 0 ? (count > 0 ? (uint64_t)count : 0) : 1;
-    }
-    static const uint8_t zeros[64] = { 0 };
-    result = result && (extra == 0 || write(file, zeros, extra) == (ssize_t)extra);
-    if (file >= 0)
-    {
-        close(file);
+        const ssize_t written = pwrite(file, bytes + done, count - done, (off_t)(offset + done));
+        result = written > 0;
+        done += result ? (uint64_t)written : 0;
     }
     return result;
 }
 
-// runtime_open in a child, which an alarm ends if it blocks: whether it ended in time, having imported the runtime and,
-// with `refused`, failed to rename the snapshot over what is at its path, or otherwise written it.
-static bool snapshot_test_open_child(const char* place, const RuntimeProbe* compiler, bool refused)
+// Changes the file, which holds the snapshot `good`, in place into a damaged copy of it: its first `length` bytes and
+// `extra` zeros after them, with the byte at `flip` (if it is below length) changed; or with `repair`, that copy back
+// into `good`. Each writes only what differs, so that a case of a static runtime's 9 MB snapshot costs its damage, not
+// the file.
+static bool snapshot_test_edit(int file, String8 good, uint64_t length, uint64_t extra, uint64_t flip, bool repair)
+{
+    static const uint8_t zeros[64] = { 0 };
+    const uint8_t* bytes = (const uint8_t*)good.pointer;
+    const uint8_t changed = flip < length ? (uint8_t)(bytes[flip] ^ 0x5a) : 0;
+    bool result = flip >= length || snapshot_test_pwrite(file, repair ? bytes + flip : &changed, 1, flip);
+    if (length < good.length)
+    {
+        result = result && (repair ? snapshot_test_pwrite(file, bytes + length, good.length - length, length) : ftruncate(file, (off_t)length) == 0);
+    }
+    if (extra != 0)
+    {
+        result = result && (repair ? ftruncate(file, (off_t)good.length) == 0 : snapshot_test_pwrite(file, zeros, extra, good.length));
+    }
+    return result;
+}
+
+// runtime_open of a kind's runtime in a child, which an alarm ends if it blocks: whether it ended in time, having
+// imported the runtime and, with `refused`, failed to rename the snapshot over what is at its path, or otherwise
+// written it.
+static bool snapshot_test_open_child(const char* place, RuntimeKind kind, const RuntimeProbe* compiler, bool refused)
 {
     fflush(stdout);
     const pid_t child = fork();
@@ -773,7 +792,7 @@ static bool snapshot_test_open_child(const char* place, const RuntimeProbe* comp
     {
         alarm(BUSTER_SNAPSHOT_TEST_SECONDS);
         Runtime runtime;
-        const SnapshotResult result = runtime_open_as(&runtime, place, RUNTIME_KIND_DYNAMIC, compiler);
+        const SnapshotResult result = runtime_open_as(&runtime, place, kind, compiler);
         const bool imported = result.status == SNAPSHOT_STATUS_MISSING && result.error == RUNTIME_ERROR_NONE;
         const bool written = refused ? !result.written && result.call != 0 && strcmp(result.call, "rename") == 0 : result.written;
         _exit(imported && written ? 0 : 1);
@@ -782,26 +801,32 @@ static bool snapshot_test_open_child(const char* place, const RuntimeProbe* comp
     return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, const Runtime* imported, const RuntimeProbe* compiler)
+// The imported runtime's snapshot, of its kind, damaged in each way below, as the check `check` in a directory of its
+// own, `name`. The damaged copies are made in place over the snapshot (snapshot_test_edit) and repaired after each
+// load.
+static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, const Runtime* imported, const RuntimeProbe* compiler, const char* check, const char* name)
 {
     SnapshotTestTally tally = {
-        .check = "invalid files",
+        .check = check,
     };
+    const RuntimeKind kind = imported->kind;
     char place[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     char path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
-    snapshot_test_path(place, directory->path, "invalid");
-    snapshot_test_path(path, place, BUSTER_SNAPSHOT_NAME);
+    snapshot_test_path(place, directory->path, name);
+    snapshot_test_path(path, place, snapshot_name(kind));
     Scratch scratch = scratch_begin(0);
     const bool written = snapshot_test_write(imported, place, compiler);
     const String8 good = written ? executable_test_read(scratch.arena, path) : (String8){ 0 };
     snapshot_test_expect(&tally, good.pointer != 0 && good.length > sizeof(SnapshotHeader), "the snapshot written", 0);
     const uint8_t* bytes = (const uint8_t*)good.pointer;
     const uint64_t directory_bytes = good.pointer != 0 ? ((const SnapshotHeader*)bytes)->directory_bytes : 0;
+    const int file = good.pointer != 0 ? open(path, O_RDWR | O_CLOEXEC) : -1;
+    bool repaired = file >= 0;
     uint64_t cases = 0;
     // Cut short (a length for each 1/61 of the file, and around the header), one byte longer, and a byte of the directory
     // changed (at each 1/61 of it, and in each of the header's first bytes): the pieces' records are checked as binding
     // reads them (snapshot_test_damaged).
-    for (uint64_t i = 0; good.pointer != 0 && directory_bytes > 61 && i < 61 + 3 + 1 + 61 + sizeof(SnapshotHeader); i += 1)
+    for (uint64_t i = 0; file >= 0 && directory_bytes > 61 && i < 61 + 3 + 1 + 61 + sizeof(SnapshotHeader); i += 1)
     {
         uint64_t length = good.length;
         uint64_t extra = 0;
@@ -826,19 +851,24 @@ static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, cons
         {
             flip = i - 65 - 61;
         }
-        const bool copied = snapshot_test_copy(path, bytes, length < good.length ? length : good.length, extra, flip < good.length ? flip : UINT64_MAX);
+        const uint64_t cut = length < good.length ? length : good.length;
+        const uint64_t changed = flip < good.length ? flip : UINT64_MAX;
+        const bool damaged = snapshot_test_edit(file, good, cut, extra, changed, false);
         Runtime loaded;
-        const SnapshotStatus status = copied ? snapshot_load(&loaded, path, RUNTIME_KIND_DYNAMIC, compiler, 0) : SNAPSHOT_STATUS_LOADED;
+        const SnapshotStatus status = damaged ? snapshot_load(&loaded, path, kind, compiler, 0) : SNAPSHOT_STATUS_LOADED;
         snapshot_test_expect(&tally, status == SNAPSHOT_STATUS_INVALID, "a damaged snapshot invalid", i);
         if (status == SNAPSHOT_STATUS_LOADED)
         {
             runtime_release(&loaded);
         }
+        repaired = repaired && snapshot_test_edit(file, good, cut, extra, changed, true);
         cases += 1;
     }
+    snapshot_test_expect(&tally, repaired, "each damaged copy made in place, and repaired", cases);
     // Headers that the hash passes (rehashed after the change) but that aren't this format's, or whose regions don't fit
-    // the file: each checked by snapshot_valid_header alone.
-    uint8_t* edited = good.pointer != 0 ? arena_push(scratch.arena, good.length, 64) : 0;
+    // the file: each checked by snapshot_valid_header alone. Only the header changes, so only it is written over the
+    // snapshot, and the last stays there.
+    uint8_t* edited = file >= 0 ? arena_push(scratch.arena, good.length, 64) : 0;
     for (uint32_t change = 0; edited != 0 && change < BUSTER_SNAPSHOT_TEST_HEADER_CHANGES; change += 1)
     {
         memcpy(edited, bytes, good.length);
@@ -881,9 +911,9 @@ static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, cons
             break;
         }
         snapshot_hash(edited, header->directory_bytes, header->hash);
-        const bool copied = snapshot_test_copy(path, edited, good.length, 0, UINT64_MAX);
+        const bool copied = snapshot_test_pwrite(file, edited, sizeof(SnapshotHeader), 0);
         Runtime loaded;
-        const SnapshotStatus status = copied ? snapshot_load(&loaded, path, RUNTIME_KIND_DYNAMIC, compiler, 0) : SNAPSHOT_STATUS_LOADED;
+        const SnapshotStatus status = copied ? snapshot_load(&loaded, path, kind, compiler, 0) : SNAPSHOT_STATUS_LOADED;
         snapshot_test_expect(&tally, status == SNAPSHOT_STATUS_INVALID, "a header the hash passes, invalid", change);
         if (status == SNAPSHOT_STATUS_LOADED)
         {
@@ -891,19 +921,24 @@ static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, cons
         }
         cases += 1;
     }
+    if (file >= 0)
+    {
+        close(file);
+    }
     // runtime_open replaces the last one, which then loads.
     Runtime opened;
-    const SnapshotResult result = runtime_open_as(&opened, place, RUNTIME_KIND_DYNAMIC, compiler);
+    const SnapshotResult result = runtime_open_as(&opened, place, kind, compiler);
     snapshot_test_expect(&tally, result.status == SNAPSHOT_STATUS_INVALID && result.error == RUNTIME_ERROR_NONE && result.written, "an invalid snapshot replaced", result.status);
     if (result.error == RUNTIME_ERROR_NONE)
     {
         runtime_release(&opened);
     }
     Runtime loaded;
-    const SnapshotStatus replaced = snapshot_load(&loaded, path, RUNTIME_KIND_DYNAMIC, compiler, 0);
+    const SnapshotStatus replaced = snapshot_load(&loaded, path, kind, compiler, 0);
     snapshot_test_expect(&tally, replaced == SNAPSHOT_STATUS_LOADED, "its replacement loaded", replaced);
     if (replaced == SNAPSHOT_STATUS_LOADED)
     {
+        snapshot_test_same_runtime(&tally, imported, &loaded, 0);
         runtime_release(&loaded);
     }
     // A directory, then a FIFO, at the snapshot's path: imported without blocking (in a child, which an alarm ends if it
@@ -913,11 +948,11 @@ static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, cons
     {
         const bool placed = way == 0 ? mkdir(path, 0700) == 0 : mkfifo(path, 0600) == 0;
         snapshot_test_expect(&tally, placed, way == 0 ? "a directory at the path" : "a FIFO at the path", way);
-        snapshot_test_expect(&tally, snapshot_test_open_child(place, compiler, way == 0), way == 0 ? "imported, not renamed over a directory" : "imported, a FIFO replaced",
+        snapshot_test_expect(&tally, snapshot_test_open_child(place, kind, compiler, way == 0), way == 0 ? "imported, not renamed over a directory" : "imported, a FIFO replaced",
                              way);
         bool named = false;
         struct stat status;
-        snapshot_test_expect(&tally, snapshot_test_entries(place, BUSTER_SNAPSHOT_NAME, &named) == 1 && named && stat(path, &status) == 0 &&
+        snapshot_test_expect(&tally, snapshot_test_entries(place, snapshot_name(kind), &named) == 1 && named && stat(path, &status) == 0 &&
                                          (way == 0 ? S_ISDIR(status.st_mode) : S_ISREG(status.st_mode)),
                              "nothing beside it", way);
         if (way == 0)
@@ -1012,19 +1047,22 @@ static uint64_t snapshot_test_piece_byte(const SnapshotHeader* header, const Run
     return result;
 }
 
-// The snapshot of `imported` with the byte at `flip` changed, written at `path` and loaded as `compiler`: its status.
-static SnapshotStatus snapshot_test_damage(Runtime* loaded, const char* path, String8 good, uint64_t flip, RuntimeKind kind, const RuntimeProbe* compiler)
+// The snapshot at `path`, whose file (`file`) holds `good`, with the byte at `flip` changed in place (none for
+// UINT64_MAX), loaded as `compiler`: its status. The caller changes the byte back (snapshot_test_edit's `repair`) once it
+// has released the runtime, whose private mapping would see the repair in the pages it hasn't copied.
+static SnapshotStatus snapshot_test_damage(Runtime* loaded, int file, const char* path, String8 good, uint64_t flip, RuntimeKind kind, const RuntimeProbe* compiler)
 {
-    const bool copied = snapshot_test_copy(path, (const uint8_t*)good.pointer, good.length, 0, flip);
-    return copied ? snapshot_load(loaded, path, kind, compiler, 0) : SNAPSHOT_STATUS_MISSING;
+    const bool damaged = file >= 0 && snapshot_test_edit(file, good, good.length, 0, flip, false);
+    return damaged ? snapshot_load(loaded, path, kind, compiler, 0) : SNAPSHOT_STATUS_MISSING;
 }
 
-// A runtime's snapshot with a byte of its pieces' records changed, one at a time: at each 1/61 of them, and the first and
-// last of each piece region. Each loads, and every piece is current but the one whose records hold the byte
-// (snapshot_test_piece_at), if any. Then binding a program by each path: a program that joins a damaged piece (crt1.o's
-// or Scrt1.o's, which bind_begin joins; crtend.o's or crtendS.o's, which it checks first; or a member the program joins)
-// must fail with BIND_ERROR_SNAPSHOT, and one that doesn't (a member it doesn't join) must bind as against the snapshot
-// whole. After a failure, snapshot_discard and runtime_open give a runtime imported again, whose new snapshot loads.
+// A runtime's snapshot with a byte of its pieces' records changed, one at a time: at each 1/61 of them, and the first
+// and last of each piece region. Each loads, and every piece is current but the one whose records hold the byte
+// (snapshot_test_piece_at), if any. Then binding a program by each path: a program that joins a damaged piece
+// (Scrt1.o's, crt1.o's or rcrt1.o's, which bind_begin joins; crtendS.o's or crtend.o's, which it checks first; or a
+// member the program joins) must fail with BIND_ERROR_SNAPSHOT, and one that doesn't (a member it doesn't join) must
+// bind as against the snapshot whole. After a failure, snapshot_discard and runtime_open give a runtime imported again,
+// whose new snapshot loads.
 static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, const Runtime* imported, const RuntimeProbe* compiler, uint64_t seed, const char* check,
                                   const char* name)
 {
@@ -1051,6 +1089,10 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
     const SnapshotHeader* header = (const SnapshotHeader*)copy;
     const uint32_t pieces = copy != 0 ? header->counts.pieces : 0;
     const uint32_t regions = SNAPSHOT_REGIONS - BUSTER_SNAPSHOT_PIECE_REGIONS;
+    // Each damaged copy is made in place over the snapshot and repaired after its runtime is released
+    // (snapshot_test_damage).
+    const int file = good.pointer != 0 ? open(path, O_RDWR | O_CLOEXEC) : -1;
+    bool repaired = file >= 0;
     uint64_t cases = 0;
     uint64_t harmless = 0;
     for (uint64_t i = 0; copy != 0 && i < 61 + 2 * (uint64_t)regions; i += 1)
@@ -1061,7 +1103,7 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
         const uint64_t flip = i < 61 ? first + (good.length - first) * i / 61 : edge;
         const uint32_t expected = snapshot_test_piece_at(header, &view, flip);
         Runtime loaded;
-        const SnapshotStatus status = snapshot_test_damage(&loaded, path, good, flip, kind, compiler);
+        const SnapshotStatus status = snapshot_test_damage(&loaded, file, path, good, flip, kind, compiler);
         snapshot_test_expect(&tally, status == SNAPSHOT_STATUS_LOADED, "a snapshot with a piece damaged loads", i);
         uint32_t wrong = UINT32_MAX;
         for (uint32_t p = 0; status == SNAPSHOT_STATUS_LOADED && p < pieces; p += 1)
@@ -1073,15 +1115,17 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
         {
             runtime_release(&loaded);
         }
+        repaired = repaired && snapshot_test_edit(file, good, good.length, 0, flip, true);
         cases += 1;
         harmless += expected == UINT32_MAX ? 1 : 0;
     }
-    // Binding: a program bound against the whole snapshot, which says which members join.
+    // Binding: a program bound against the whole snapshot, which says which members join. Binding copies what it reads
+    // into the program's link, so that the whole runtime isn't read again while the file under its mapping is damaged.
     LinkProgramOptions all[BUSTER_LINK_TEST_PROGRAMS];
     link_test_program_options(all, seed, 1);
     const LinkProgramOptions options = all[5];
     Runtime whole;
-    const SnapshotStatus whole_status = snapshot_test_damage(&whole, path, good, UINT64_MAX, kind, compiler);
+    const SnapshotStatus whole_status = snapshot_test_damage(&whole, file, path, good, UINT64_MAX, kind, compiler);
     BindTestProgram reference = { 0 };
     const bool referenced = whole_status == SNAPSHOT_STATUS_LOADED && bind_test_program(&reference, &whole, options, BIND_PATH_VECTOR);
     snapshot_test_expect(&tally, referenced, "the program bound against the whole snapshot", 0);
@@ -1093,7 +1137,8 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
         joined = in && joined == UINT32_MAX ? m : joined;
         unjoined = !in && unjoined == UINT32_MAX ? m : unjoined;
     }
-    // The damaged pieces: crt1.o's, crtend.o's, a member that joins and one that doesn't (where there is one).
+    // The damaged pieces: the first crt object's, the last but one's (crtendS.o's or crtend.o's), a member that joins and
+    // one that doesn't (where there is one).
     const uint32_t damaged[4] = {
         RUNTIME_OBJECT_START,
         RUNTIME_OBJECT_END,
@@ -1108,7 +1153,7 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
         for (uint32_t way = 0; piece != UINT32_MAX && way < 2; way += 1)
         {
             Runtime loaded;
-            const SnapshotStatus status = snapshot_test_damage(&loaded, path, good, flip, kind, compiler);
+            const SnapshotStatus status = snapshot_test_damage(&loaded, file, path, good, flip, kind, compiler);
             BindTestProgram bound = { 0 };
             const bool succeeded = status == SNAPSHOT_STATUS_LOADED && bind_test_program(&bound, &loaded, options, way == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT);
             const bool reads = d < 3;
@@ -1121,13 +1166,19 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
                 bind_test_release(&bound);
                 runtime_release(&loaded);
             }
+            repaired = repaired && snapshot_test_edit(file, good, good.length, 0, flip, true);
         }
         printf("  %s damaged: %s\n", d == 0 ? "the first crt object" : d == 1 ? "crtend's" : d == 2 ? "a member the program joins" : "a member it doesn't", piece == UINT32_MAX ? "none to damage" : "checked");
     }
+    snapshot_test_expect(&tally, repaired, "each damaged copy made in place, and repaired", cases);
     // After a binding found a damaged piece: the snapshot discarded, and the runtime opened again, imported, written.
-    snapshot_test_expect(&tally, snapshot_test_copy(path, (const uint8_t*)good.pointer, good.length, 0, copy != 0 ? snapshot_test_piece_byte(header, &view, 0) : UINT64_MAX) &&
-                                     snapshot_discard(place, kind) && access(path, F_OK) != 0,
+    const uint64_t first_piece = copy != 0 ? snapshot_test_piece_byte(header, &view, 0) : UINT64_MAX;
+    snapshot_test_expect(&tally, file >= 0 && snapshot_test_edit(file, good, good.length, 0, first_piece, false) && snapshot_discard(place, kind) && access(path, F_OK) != 0,
                          "the damaged snapshot discarded", 0);
+    if (file >= 0)
+    {
+        close(file);
+    }
     Runtime opened;
     const SnapshotResult result = runtime_open_as(&opened, place, kind, compiler);
     snapshot_test_expect(&tally, result.status == SNAPSHOT_STATUS_MISSING && result.error == RUNTIME_ERROR_NONE && result.written, "imported again, and written", result.status);
@@ -1164,57 +1215,96 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
 // ---------------------------------------------------------------------------------------------------------------------
 // The kinds
 //
-// Each kind's runtime has a snapshot of its own beside the other's (snapshot_name), and the loader checks the kind.
+// Each kind's runtime has a snapshot of its own beside the others' (snapshot_name), and the loader checks the kind.
 
-// runtime_open_static in a directory of its own: imported and written, then loaded, with the static runtime's records;
-// runtime_open beside it, the two snapshots side by side; and each kind's snapshot renamed to the other kind's name,
-// stale there, imported again and written over.
-static bool snapshot_test_kinds(const ExecutableTestDirectory* directory, const Runtime* dynamic_runtime, const Runtime* static_runtime, const RuntimeProbe* compiler)
+// runtime_open_static and runtime_open_static_pie in a directory of their own: each imported and written, then loaded,
+// with its kind's records; runtime_open beside them, the three snapshots side by side; each kind's snapshot loaded as
+// each other kind, stale; and each kind's snapshot renamed to the next kind's name in turn (a dynamic PIE's to a static
+// executable's, that to a static PIE's, that to a dynamic PIE's), stale there, imported again and written over.
+// `runtimes` holds each kind's imported runtime, by RuntimeKind.
+static bool snapshot_test_kinds(const ExecutableTestDirectory* directory, const Runtime* const* runtimes, const RuntimeProbe* compiler)
 {
     SnapshotTestTally tally = {
         .check = "kinds",
     };
     char place[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
-    char dynamic_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
-    char static_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char paths[RUNTIME_KINDS][BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     snapshot_test_path(place, directory->path, "kinds");
-    snapshot_test_path(dynamic_path, place, snapshot_name(RUNTIME_KIND_DYNAMIC));
-    snapshot_test_path(static_path, place, snapshot_name(RUNTIME_KIND_STATIC));
-    for (uint32_t round = 0; round < 2; round += 1)
+    for (uint32_t kind = 0; kind < RUNTIME_KINDS; kind += 1)
     {
-        Runtime runtime;
-        const SnapshotResult result = runtime_open_as(&runtime, place, RUNTIME_KIND_STATIC, compiler);
-        const SnapshotStatus expected = round == 0 ? SNAPSHOT_STATUS_MISSING : SNAPSHOT_STATUS_LOADED;
-        snapshot_test_expect(&tally, result.status == expected && result.error == RUNTIME_ERROR_NONE && (round == 1 || result.written),
-                             round == 0 ? "the static runtime imported, and written" : "loaded, the second time", result.status);
-        if (result.error == RUNTIME_ERROR_NONE)
+        snapshot_test_path(paths[kind], place, snapshot_name((RuntimeKind)kind));
+    }
+    const RuntimeKind statics[] = {
+        RUNTIME_KIND_STATIC,
+        RUNTIME_KIND_STATIC_PIE,
+    };
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(statics); s += 1)
+    {
+        const RuntimeKind kind = statics[s];
+        for (uint32_t round = 0; round < 2; round += 1)
         {
-            snapshot_test_expect(&tally, runtime.kind == RUNTIME_KIND_STATIC, "a static runtime", round);
-            if (round == 1)
+            // The entry points, which take this executable's identity (`compiler`) themselves.
+            Runtime runtime;
+            const SnapshotResult result = kind == RUNTIME_KIND_STATIC ? runtime_open_static(&runtime, place) : runtime_open_static_pie(&runtime, place);
+            const SnapshotStatus expected = round == 0 ? SNAPSHOT_STATUS_MISSING : SNAPSHOT_STATUS_LOADED;
+            snapshot_test_expect(&tally, result.status == expected && result.error == RUNTIME_ERROR_NONE && (round == 1 || result.written),
+                                 round == 0 ? "a static kind's runtime imported, and written" : "loaded, the second time", s * 2 + round);
+            if (result.error == RUNTIME_ERROR_NONE)
             {
-                snapshot_test_same_runtime(&tally, static_runtime, &runtime, round);
+                snapshot_test_expect(&tally, runtime.kind == kind, "the kind's runtime", s * 2 + round);
+                if (round == 1)
+                {
+                    snapshot_test_same_runtime(&tally, runtimes[kind], &runtime, s * 2 + round);
+                }
+                runtime_release(&runtime);
             }
-            runtime_release(&runtime);
         }
     }
     Runtime runtime;
     SnapshotResult result = runtime_open_as(&runtime, place, RUNTIME_KIND_DYNAMIC, compiler);
-    snapshot_test_expect(&tally, result.status == SNAPSHOT_STATUS_MISSING && result.error == RUNTIME_ERROR_NONE && result.written, "the dynamic runtime's beside it", result.status);
+    snapshot_test_expect(&tally, result.status == SNAPSHOT_STATUS_MISSING && result.error == RUNTIME_ERROR_NONE && result.written, "the dynamic runtime's beside them", result.status);
     if (result.error == RUNTIME_ERROR_NONE)
     {
         runtime_release(&runtime);
     }
     bool named = false;
-    snapshot_test_expect(&tally, snapshot_test_entries(place, snapshot_name(RUNTIME_KIND_STATIC), &named) == 2 && named && access(dynamic_path, F_OK) == 0,
-                         "both snapshots, and no other file", 0);
-    // Each kind's snapshot at the other kind's name: stale, imported again, and written over.
-    for (uint32_t way = 0; way < 2; way += 1)
+    bool every = snapshot_test_entries(place, snapshot_name(RUNTIME_KIND_STATIC_PIE), &named) == RUNTIME_KINDS && named;
+    for (uint32_t kind = 0; kind < RUNTIME_KINDS; kind += 1)
     {
-        const RuntimeKind kind = way == 0 ? RUNTIME_KIND_STATIC : RUNTIME_KIND_DYNAMIC;
-        const bool moved = rename(way == 0 ? dynamic_path : static_path, way == 0 ? static_path : dynamic_path) == 0;
+        every = every && access(paths[kind], F_OK) == 0;
+    }
+    snapshot_test_expect(&tally, every, "the three snapshots, and no other file", 0);
+    // Each kind's snapshot loaded as each other kind: stale.
+    for (uint32_t written = 0; written < RUNTIME_KINDS; written += 1)
+    {
+        for (uint32_t asked = 0; asked < RUNTIME_KINDS; asked += 1)
+        {
+            if (asked != written)
+            {
+                Runtime loaded;
+                const SnapshotStatus status = snapshot_load(&loaded, paths[written], (RuntimeKind)asked, compiler, 0);
+                snapshot_test_expect(&tally, status == SNAPSHOT_STATUS_STALE, "another kind's snapshot stale", written * RUNTIME_KINDS + asked);
+                if (status == SNAPSHOT_STATUS_LOADED)
+                {
+                    runtime_release(&loaded);
+                }
+            }
+        }
+    }
+    // Each kind's snapshot at the next kind's name: stale, imported again, and written over.
+    const RuntimeKind order[RUNTIME_KINDS] = {
+        RUNTIME_KIND_DYNAMIC,
+        RUNTIME_KIND_STATIC,
+        RUNTIME_KIND_STATIC_PIE,
+    };
+    for (uint32_t way = 0; way < RUNTIME_KINDS; way += 1)
+    {
+        const RuntimeKind from = order[way];
+        const RuntimeKind kind = order[(way + 1) % RUNTIME_KINDS];
+        const bool moved = rename(paths[from], paths[kind]) == 0;
         result = runtime_open_as(&runtime, place, kind, compiler);
         snapshot_test_expect(&tally, moved && result.status == SNAPSHOT_STATUS_STALE && result.error == RUNTIME_ERROR_NONE && result.written,
-                             "the other kind's snapshot stale, and written over", way);
+                             "another kind's snapshot stale, and written over", way);
         if (result.error == RUNTIME_ERROR_NONE)
         {
             runtime_release(&runtime);
@@ -1224,14 +1314,16 @@ static bool snapshot_test_kinds(const ExecutableTestDirectory* directory, const 
         snapshot_test_expect(&tally, status == SNAPSHOT_STATUS_LOADED, "then loaded", way);
         if (status == SNAPSHOT_STATUS_LOADED)
         {
-            snapshot_test_same_runtime(&tally, kind == RUNTIME_KIND_STATIC ? static_runtime : dynamic_runtime, &loaded, way);
+            snapshot_test_same_runtime(&tally, runtimes[kind], &loaded, way);
             runtime_release(&loaded);
         }
     }
     if (!directory->keep)
     {
-        unlink(dynamic_path);
-        unlink(static_path);
+        for (uint32_t kind = 0; kind < RUNTIME_KINDS; kind += 1)
+        {
+            unlink(paths[kind]);
+        }
         rmdir(place);
     }
     return snapshot_test_report(&tally);
@@ -1424,25 +1516,43 @@ static int run_snapshot_tests(int argc, char** argv)
     else
     {
         bool passed = snapshot_test_round_trip(&directory, &runtime, &compiler, "round trip", "round-trip");
-        // A static executable's runtime, whose snapshot has the archives' members, references and groups.
+        // A static executable's runtime, whose snapshot has the archives' members, references and groups, and a static
+        // PIE's, with the same archives behind its own crt objects.
         Runtime static_runtime;
+        Runtime static_pie_runtime;
         const RuntimeError static_imported = runtime_import_static(&static_runtime);
+        const RuntimeError static_pie_imported = runtime_import_static_pie(&static_pie_runtime);
         const bool statics = static_imported == RUNTIME_ERROR_NONE;
+        const bool static_pies = static_pie_imported == RUNTIME_ERROR_NONE;
         printf("%s", !statics ? "static round trip: the static runtime didn't import\n" : "");
+        printf("%s", !static_pies ? "static PIE round trip: the static PIE's runtime didn't import\n" : "");
         passed = statics && snapshot_test_round_trip(&directory, &static_runtime, &compiler, "static round trip", "static-round-trip") && passed;
+        passed = static_pies && snapshot_test_round_trip(&directory, &static_pie_runtime, &compiler, "static PIE round trip", "static-pie-round-trip") && passed;
         passed = snapshot_test_links(&directory, &runtime, &compiler, seed, (uint32_t)functions, "links", "links") && passed;
         passed = statics && snapshot_test_links(&directory, &static_runtime, &compiler, seed, (uint32_t)functions, "static links", "static-links") && passed;
+        passed = static_pies && snapshot_test_links(&directory, &static_pie_runtime, &compiler, seed, (uint32_t)functions, "static PIE links", "static-pie-links") && passed;
         passed = snapshot_test_opening(&directory, &runtime, &compiler) && passed;
-        passed = statics && snapshot_test_kinds(&directory, &runtime, &static_runtime, &compiler) && passed;
+        const Runtime* const runtimes[RUNTIME_KINDS] = {
+            [RUNTIME_KIND_DYNAMIC] = &runtime,
+            [RUNTIME_KIND_STATIC] = &static_runtime,
+            [RUNTIME_KIND_STATIC_PIE] = &static_pie_runtime,
+        };
+        passed = statics && static_pies && snapshot_test_kinds(&directory, runtimes, &compiler) && passed;
         passed = snapshot_test_staleness(&directory, &runtime, &compiler) && passed;
-        passed = snapshot_test_invalid(&directory, &runtime, &compiler) && passed;
+        passed = snapshot_test_invalid(&directory, &runtime, &compiler, "invalid files", "invalid") && passed;
+        passed = static_pies && snapshot_test_invalid(&directory, &static_pie_runtime, &compiler, "static PIE invalid files", "static-pie-invalid") && passed;
         passed = snapshot_test_damaged(&directory, &runtime, &compiler, seed, "damaged pieces", "damaged") && passed;
         passed = statics && snapshot_test_damaged(&directory, &static_runtime, &compiler, seed, "static damaged pieces", "static-damaged") && passed;
+        passed = static_pies && snapshot_test_damaged(&directory, &static_pie_runtime, &compiler, seed, "static PIE damaged pieces", "static-pie-damaged") && passed;
         passed = snapshot_test_concurrency(&directory, &runtime, &compiler) && passed;
         passed = snapshot_test_directories() && passed;
         if (statics)
         {
             runtime_release(&static_runtime);
+        }
+        if (static_pies)
+        {
+            runtime_release(&static_pie_runtime);
         }
         result = passed ? 0 : 1;
         if (keep)
