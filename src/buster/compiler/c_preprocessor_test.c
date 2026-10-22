@@ -916,6 +916,10 @@ static const PPTestCase pp_test_cases[] = {
     { "-fno-digraphs in C94", "%:define D 1\nD __STDC_VERSION__\n", 0, "iso9899:199409", "% : define D 1\nD __STDC_VERSION__\n", false, 0, "-fdigraphs -fno-digraphs", 0 },
     { "-fno-digraphs", "%:define D 1\nD <%= <::> a // b\n", 0, "gnu17", "% : define D 1\nD < %= < :: > a\n", false, 0, "-fno-digraphs", 0 },
     { "-fno-digraphs in gnu89", "%:define D 1\nD __STDC_VERSION__ a // b\n", 0, "gnu89", "% : define D 1\nD __STDC_VERSION__ a\n", false, 0, "-fno-digraphs", 0 },
+    { "short wchar in #if", "#if (L'\\0' - 1) > 0 && L'\\xffff' - 65536 > 0\nyes\n#endif\n",
+      0, "c17", "yes\n", false, 0, "-fno-short-wchar -fshort-wchar", 0 },
+    { "default wchar after short wchar in #if", "#if (L'\\0' - 1) < 0 && L'\\xffff' - 65536 < 0\nyes\n#endif\n",
+      0, "c17", "yes\n", false, 0, "-fshort-wchar -fno-short-wchar", 0 },
     { "true in C99", "#if true\nyes\n#else\nno\n#endif\n",
       0, "c99", "no\n", false, 0, 0, 0 },
     // Where clang and GCC differ, clang's answer: a #line continued on the next line counts from the line of its # (GCC
