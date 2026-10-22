@@ -900,7 +900,7 @@ static bool files_test_contexts(const char* directory, const uint32_t* lanes, ui
 
 // '$' as punctuation (-fno-dollars-in-identifiers, #281) in a cache that units share: the files are prepared with the
 // options' mode on every lane count, and the unit splits `aa$bb` into `aa`, `$` and `BB` as alone.
-static bool files_test_dollars(const char* directory, const uint32_t* lanes, uint32_t lane_count)
+static bool files_test_dollars(const char* directory, const uint32_t* lanes, uint32_t lane_count, uint64_t id_order)
 {
     static const char* const files[][2] = {
         { "dollars.c", "#include \"dollars.h\"\nint cc$bb = 1;\n" },
@@ -927,7 +927,7 @@ static bool files_test_dollars(const char* directory, const uint32_t* lanes, uin
     };
     FilesTestRun reference = { 0 };
     alarm(60);
-    result = result && files_test_work(&work, lanes, lane_count, directory, &reference);
+    result = result && files_test_work(&work, lanes, lane_count, directory, id_order, &reference);
     alarm(0);
     if (result)
     {
@@ -1488,7 +1488,7 @@ static int run_files_tests(int argument_count, char** arguments)
         passed_all &= files_test_spellings(directory, lanes, lane_count, seed, id_order);
         signal(SIGALRM, files_test_watchdog);
         passed_all &= files_test_contexts(directory, lanes, lane_count, id_order);
-        passed_all &= files_test_dollars(directory, lanes, lane_count);
+        passed_all &= files_test_dollars(directory, lanes, lane_count, id_order);
         passed_all &= files_test_special(directory, lanes, lane_count, id_order);
         passed_all &= files_test_memory(directory, seed);
         signal(SIGALRM, SIG_DFL);
