@@ -1320,7 +1320,15 @@ static void abi_test_build_units(AbiTestBuilder* builder)
     abi_test_in_registers(builder, "{_Complex _Float16, long[0], union {short, {unsigned char : 8 x 4}}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0),
                           sse_integer, low_general, 0, rax, rdx);
     abi_test_llvm(builder, 3, halves | BUSTER_ABI_TEST_LEAF(8, I32) | tail_bytes);
-    // Runs merge while their integer fits: {unsigned : 8 x 3, char} is {i16, i8, i8}, aligned to 2.
+    // Runs merge while their integer fits before the next member or the struct's end: {unsigned char : 8 x 3}, of 3
+    // bytes, is <{i16, i8}>, packed (its size isn't a multiple of 2), and {unsigned : 8 x 3, char} is {i16, i8, i8},
+    // aligned to 2.
+    m[0] = abi_test_bits(builder, uchar, 8, true);
+    m[1] = abi_test_bits(builder, uchar, 8, true);
+    m[2] = abi_test_bits(builder, uchar, 8, true);
+    abi_test_in_registers(builder, "{unsigned char : 8 x 3}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0), BUSTER_ABI_TEST_INTEGER_ONLY, 0, 0, rax,
+                          BUSTER_ABI_TEST_NONE);
+    abi_test_llvm(builder, 0, BUSTER_ABI_TEST_LEAF(0, I16) | BUSTER_ABI_TEST_LEAF(2, I8));
     m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT, 8, true);
     m[1] = abi_test_bits(builder, BUSTER_TYPE_UINT, 8, true);
     m[2] = abi_test_bits(builder, BUSTER_TYPE_UINT, 8, true);

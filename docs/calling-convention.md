@@ -246,9 +246,10 @@ the unit for the bit-fields after it.
   ends a span: no unit reaches past it, though the room before the next member
   clang stores still counts.
 
-So `struct { unsigned char a : 8, b : 8, c : 8; }` stores an `i32`,
-`struct { unsigned a : 8, b : 8, c : 8; char d; }` an `i16` and an `i8`
-(an `i24` wouldn't fit before `d`), `struct { unsigned a : 24; char c; }` a
+So `struct { unsigned a : 8, b : 8, c : 8; }` stores an `i32`, where
+`struct { unsigned char a : 8, b : 8, c : 8; }`, of 3 bytes, stores an `i16`
+and an `i8`, as does `struct { unsigned a : 8, b : 8, c : 8; char d; }` (an
+`i24`'s 4 bytes don't fit before `d`), `struct { unsigned a : 24; char c; }` a
 `[3 x i8]`, `struct { long a : 8; }` an `i8` (aligned to 1, though the C
 struct is aligned to 8), and `struct { unsigned __int128 x : 65; }` an
 `i128`, where packed, or followed by a `char` or an `int[0]`, it is a `[9 x
@@ -1110,7 +1111,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (2,170 checks): about 185 types whose classes, pass bits and
+- **Fixtures** (2,176 checks): about 185 types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -1132,8 +1133,8 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang's IR has it: runs merged into an `i16` and an `i32` in an INTEGER high
   eightbyte, which widen a `<2 x half>` low part (`LOW_GENERAL`), and a
   `[3 x i8]` there, which doesn't; a union in the high eightbyte whose storage
-  member the merged unit's alignment decides; merging that stops before a
-  `char`; `{long : 8}`, an `i8`; a zero-width bit-field between two units; an
+  member the merged unit's alignment decides; merging that stops at a
+  struct's end and before a `char`; `{long : 8}`, an `i8`; a zero-width bit-field between two units; an
   `i16` at 1 that packs `{char, int : 16}`, and one that packs a struct
   aligned to 16 by its `unsigned __int128 : 16` (a union of it and an
   `__int128` stores the `__int128` either way round: `PAIR`), and in a record

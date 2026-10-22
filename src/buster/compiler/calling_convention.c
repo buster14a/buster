@@ -979,8 +979,9 @@ struct AbiUnit
 // bit-field that starts at a byte and those after it that start inside one (they share bytes). The span's first run is
 // its unit, then each run after it joins the span while the span's bytes are no more than a register's (8; a first
 // run may be wider), and the unit is the span's longest integer, of LLVM's size for its bytes, that fits before the
-// next member clang stores (abi_unit_limit): `{ unsigned char a : 8, b : 8, c : 8; }` stores an i32. If none fits,
-// it is an array of the first run's bytes: `{ unsigned a : 24; char c; }` stores a [3 x i8], and `{ unsigned __int128
+// next member clang stores, or the struct's end (abi_unit_limit): `{ unsigned a : 8, b : 8, c : 8; }` stores an i32,
+// and `{ unsigned char a : 8, b : 8, c : 8; }`, of 3 bytes, an i16 and an i8. If none fits, it is an array of the
+// first run's bytes: `{ unsigned a : 24; char c; }` stores a [3 x i8], and `{ unsigned __int128
 // x : 65; char c; }` a [9 x i8] where `{ unsigned __int128 x : 65; }` stores an i128. A zero-width bit-field at a
 // byte or a member that isn't a bit-field ends the span, past which no unit reaches, though a unit's room does. The
 // unit's integer may be off its alignment: `{ char c; int a : 16; }` stores an i16 at 1, and LLVM's struct is packed
