@@ -1166,7 +1166,7 @@ static int run_files_tests(int argument_count, char** arguments)
         const char* argument = arguments[i];
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
-                                 strcmp(argument, "--predefines") == 0 || strcmp(argument, "-x") == 0;
+                                 strcmp(argument, "--predefines") == 0 || strcmp(argument, "-x") == 0 || strcmp(argument, "-target") == 0;
         if (strcmp(argument, "--lanes") == 0 && i + 1 < argument_count)
         {
             lane_count = files_test_lanes(arguments[i + 1], lanes);
