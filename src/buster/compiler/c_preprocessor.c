@@ -4351,7 +4351,7 @@ static bool pp_header_name(Preprocessor* pp, const PPTokens* tokens, uint32_t be
 }
 
 // The answer of a feature query (__has_attribute and the like) about `name` (a scoped one as "scope::name").
-static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length, uint32_t standard, bool clang);
+static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const uint8_t* name, uint32_t length);
 
 // Builds the name a feature query's argument holds: an identifier, or `scope::identifier`; names with leading and
 // trailing "__" lose them for the attribute, feature and extension queries, as clang normalizes them.
@@ -4487,7 +4487,7 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
     }
     else if (pp_feature_name(pp, builtin, tokens, first, last, text, &length))
     {
-        result = pp_feature(builtin, text, length, pp->options.language.standard, pp->options.clang_features);
+        result = pp_feature(&pp->options, builtin, text, length);
         // The target's builtins (x86_target.c) as clang answers them, in the oracle's mode: buster implements none yet (#148).
         if (builtin == PP_BUILTIN_HAS_BUILTIN && result == 0 && pp->options.clang_features)
         {
@@ -4579,10 +4579,12 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
     else
     {
         const bool include = builtin == PP_BUILTIN_HAS_INCLUDE || builtin == PP_BUILTIN_HAS_INCLUDE_NEXT;
-        // Clang reads builtin, feature and target names literally, even when the name is itself a builtin macro.
-        // Attribute queries may expand their operand. Header names in <...> or a string literal are already complete.
-        const bool raw_name = builtin == PP_BUILTIN_HAS_BUILTIN || builtin == PP_BUILTIN_HAS_FEATURE || builtin == PP_BUILTIN_HAS_EXTENSION ||
-                              builtin == PP_BUILTIN_IS_IDENTIFIER || (builtin >= PP_BUILTIN_IS_TARGET_ARCH && builtin <= PP_BUILTIN_IS_TARGET_ENVIRONMENT);
+        // Clang reads builtin, feature and target names literally, even when the name is itself a builtin macro or a
+        // macro (__has_constexpr_builtin too). Attribute queries may expand their operand. Header names in <...> or a
+        // string literal are already complete.
+        const bool raw_name = builtin == PP_BUILTIN_HAS_BUILTIN || builtin == PP_BUILTIN_HAS_CONSTEXPR_BUILTIN || builtin == PP_BUILTIN_HAS_FEATURE ||
+                              builtin == PP_BUILTIN_HAS_EXTENSION || builtin == PP_BUILTIN_IS_IDENTIFIER ||
+                              (builtin >= PP_BUILTIN_IS_TARGET_ARCH && builtin <= PP_BUILTIN_IS_TARGET_ENVIRONMENT);
         const bool direct = (include && begin < end && (tokens->kinds[begin] == C_TOKEN_LESS || tokens->kinds[begin] == C_TOKEN_STRING_LITERAL)) ||
                             raw_name;
         const PPCapture capture = {
@@ -6574,9 +6576,45 @@ static uint32_t pp_feature_lookup(const PPFeature* table, uint32_t count, const 
     return result;
 }
 
-// A feature query's answer for `name`: clang's (`clang`, the oracle's mode) or what buster implements.
-static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length, uint32_t standard, bool clang)
+// Whether `name` is `text`'s `size` bytes (with `prefix`, whether it starts with them), ASCII case aside, as clang's
+// __is_target_* builtins compare names.
+static bool pp_name_matches(const uint8_t* name, uint32_t length, const char* text, uint32_t size, bool prefix)
 {
+    bool result = prefix ? length >= size : length == size;
+    for (uint32_t i = 0; i < size && result; i += 1)
+    {
+        const uint8_t a = name[i];
+        const uint8_t b = (uint8_t)text[i];
+        result = (a >= 'A' && a <= 'Z' ? a | 0x20 : a) == (b >= 'A' && b <= 'Z' ? b | 0x20 : b);
+    }
+    return result;
+}
+
+// Whether clang's triple parser reads `name` as the GNU environment: gnu and anything after it, but the names of its
+// other ABIs (gnux32, gnueabi, ...) and what follows them.
+static bool pp_target_gnu(const uint8_t* name, uint32_t length)
+{
+    static const char* const others[] = { "gnuabin32", "gnuabi64", "gnueabi", "gnuf32", "gnuf64", "gnusf", "gnux32", "gnu_ilp32", "gnut64" };
+    bool result = pp_name_matches(name, length, "gnu", 3, true);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(others) && result; i += 1)
+    {
+        result = !pp_name_matches(name, length, others[i], (uint32_t)strlen(others[i]), true);
+    }
+    return result;
+}
+
+// A feature query's answer for `name`: clang's (`options->clang_features`, the oracle's mode) or what buster implements.
+// The sanitizer features follow the sanitizers the options leave on (c_predefines.c's predefines_sanitizer_feature). The
+// target queries answer for the target triple in both modes, as clang's read a name: case aside, and the operating
+// system and the environment as its triple parser reads a triple's (linux2 is Linux; gnux32 isn't GNU).
+static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const uint8_t* name, uint32_t length)
+{
+    const uint32_t standard = options->language.standard;
+    const bool clang = options->clang_features;
+    const bool feature = builtin == PP_BUILTIN_HAS_FEATURE || builtin == PP_BUILTIN_HAS_EXTENSION;
+    const uint32_t sanitizer = clang && feature ? predefines_sanitizer_feature(&options->predefines, name, length) : 0;
+    uint32_t vendor_length;
+    const char* vendor = predefines_target_vendor(&options->predefines, &vendor_length);
     uint32_t result = 0;
     switch (builtin)
     {
@@ -6591,22 +6629,26 @@ static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t leng
             result = clang ? pp_feature_lookup(pp_features_constexpr_builtin, BUSTER_ARRAY_LENGTH(pp_features_constexpr_builtin), name, length, standard) : 0;
             break;
         case PP_BUILTIN_HAS_FEATURE:
-            result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) : 0;
+            result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) | sanitizer : 0;
             break;
         case PP_BUILTIN_HAS_EXTENSION:
             // An extension is anything that is a feature, or in the extension table.
             result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) |
-                                 pp_feature_lookup(pp_features_extension, BUSTER_ARRAY_LENGTH(pp_features_extension), name, length, standard)
+                                 pp_feature_lookup(pp_features_extension, BUSTER_ARRAY_LENGTH(pp_features_extension), name, length, standard) | sanitizer
                            : 0;
             break;
         case PP_BUILTIN_HAS_C_ATTRIBUTE:
             result = clang ? pp_feature_lookup(pp_features_c_attribute, BUSTER_ARRAY_LENGTH(pp_features_c_attribute), name, length, standard) : 0;
             break;
         case PP_BUILTIN_HAS_WARNING: result = pp_feature_lookup(pp_features_warning, BUSTER_ARRAY_LENGTH(pp_features_warning), name, length, standard); break;
-        case PP_BUILTIN_IS_TARGET_ARCH: result = length == 6 && memcmp(name, "x86_64", 6) == 0; break;
-        case PP_BUILTIN_IS_TARGET_VENDOR: result = length == 7 && memcmp(name, "unknown", 7) == 0; break;
-        case PP_BUILTIN_IS_TARGET_OS: result = length == 5 && memcmp(name, "linux", 5) == 0; break;
-        case PP_BUILTIN_IS_TARGET_ENVIRONMENT: result = length == 3 && memcmp(name, "gnu", 3) == 0; break;
+        case PP_BUILTIN_IS_TARGET_ARCH:
+            // The names the triple parser reads as x86-64 without a subarchitecture (x86_64_lfi has one).
+            result = pp_name_matches(name, length, "x86_64", 6, false) || pp_name_matches(name, length, "amd64", 5, false) ||
+                     pp_name_matches(name, length, "x86_64h", 7, false);
+            break;
+        case PP_BUILTIN_IS_TARGET_VENDOR: result = pp_name_matches(name, length, vendor, vendor_length, false); break;
+        case PP_BUILTIN_IS_TARGET_OS: result = pp_name_matches(name, length, "linux", 5, true); break;
+        case PP_BUILTIN_IS_TARGET_ENVIRONMENT: result = pp_target_gnu(name, length); break;
         default: break;
     }
     return result;
@@ -8537,6 +8579,8 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     *markers = true;
     // -trigraphs, -ftrigraphs and -fno-trigraphs override the mode's default (-1 for none).
     int trigraphs = -1;
+    // The last -std= or -ansi, the only one clang's driver reads.
+    const char* standard = 0;
     result = quote != 0 && include != 0 && system != 0 && after != 0 && macros != 0 && includes != 0;
     result = result && predefines_options_initialize(&options->predefines, arena, (uint32_t)count);
     for (int i = 0; result && i < count; i += 1)
@@ -8589,8 +8633,7 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         }
         else if (strncmp(argument, "-std=", 5) == 0 || strcmp(argument, "-ansi") == 0)
         {
-            // -ansi is -std=c89 in C.
-            result = pp_parse_standard(argument[1] == 'a' ? "c89" : argument + 5, &options->language);
+            standard = argument;
         }
         else if (strcmp(argument, "-x") == 0 && next != 0 && (strcmp(next, "c") == 0 || strcmp(next, "assembler-with-cpp") == 0))
         {
@@ -8664,6 +8707,13 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
             result = false;
         }
     }
+    // -ansi is -std=c89 in C.
+    const char* mode = standard == 0 ? 0 : standard[1] == 'a' ? "c89" : standard + 5;
+    if (result && mode != 0 && !pp_parse_standard(mode, &options->language))
+    {
+        fprintf(stderr, "error: invalid value '%s' in '%s'\n", mode, standard);
+        result = false;
+    }
     options->quote_directories = quote;
     options->include_directories = include;
     options->system_directories = system;
@@ -8671,8 +8721,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     options->trigraphs = trigraphs >= 0 ? trigraphs != 0 : !options->language.gnu && options->language.standard < 2023;
     options->macros = macros;
     options->includes = includes;
-    // The generated code's instruction set, from the target options as clang resolves them; it reports what doesn't
-    // resolve (an unknown CPU, -mfpmath against the features), as clang's driver does.
+    // What clang's driver decides from the whole command line (the sanitizers, -flto and -fvisibility='s values), and the
+    // generated code's instruction set, from the target options as clang resolves them; each reports what doesn't
+    // resolve (an incompatible pair of sanitizers, an unknown CPU, -mfpmath against the features), as clang's driver does.
+    result = result && predefines_finish(&options->predefines);
     result = result && predefines_target(&options->predefines, &options->target, &options->tune);
     return result && *input != 0;
 }

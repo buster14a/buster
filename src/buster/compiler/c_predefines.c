@@ -26,6 +26,9 @@
 //     predefines_cpus (each -march CPU's macro name and features) and predefines_tunes (the -mtune names).
 //   - The host: predefines_host, -march=native's CPU and features from CPUID, as LLVM's Host.cpp finds them.
 //   - The options: PredefinesOptions, predefines_options_initialize and predefines_option (one argument).
+//   - The sanitizers: clang's sanitizers and groups, predefines_sanitizers (clang's SanitizerArgs), predefines_finish
+//     (what the whole command line decides, after every option: the sanitizers and the options clang's driver reads
+//     only the last of) and predefines_sanitizer_feature (the sanitizer features of the oracle's mode).
 //   - The macros: predefines_resolve (the final CPU and features), predefines_text and predefines_flt_eval_method.
 
 #include <stdint.h>
@@ -731,12 +734,6 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
 #define BUSTER_PREDEFINES_EXCEPTIONS_DWARF 3 // -fdwarf-exceptions
 #define BUSTER_PREDEFINES_EXCEPTIONS_WASM 4 // -fwasm-exceptions
 
-#define BUSTER_PREDEFINES_SANITIZE_ADDRESS 0x01 // address, kernel-address
-#define BUSTER_PREDEFINES_SANITIZE_HWADDRESS 0x02 // hwaddress, kernel-hwaddress
-#define BUSTER_PREDEFINES_SANITIZE_THREAD 0x04
-#define BUSTER_PREDEFINES_SANITIZE_MEMORY 0x08 // memory, kernel-memory: no macro, but not with the others.
-#define BUSTER_PREDEFINES_SANITIZE_ALLOC_TOKEN 0x10
-
 #define BUSTER_PREDEFINES_CODE_MODEL_SMALL 0
 #define BUSTER_PREDEFINES_CODE_MODEL_KERNEL 1
 #define BUSTER_PREDEFINES_CODE_MODEL_MEDIUM 2
@@ -805,12 +802,15 @@ struct PredefinesOptions
     uint32_t feature_count;
     uint32_t feature_capacity;
     bool inline_asm_use_gpr32;
-    // -mfpmath (BUSTER_PREDEFINES_FPMATH_*), checked against the final features.
+    // -mfpmath (BUSTER_PREDEFINES_FPMATH_*, from the last -mfpmath= by predefines_finish), checked against the final
+    // features.
     uint8_t fpmath;
-    // The last -O: its level (0 to 3), size (1 for -Os, 2 for -Oz) and whether it is -Ofast.
+    // The last -O: its level (0 to 3), size (1 for -Os, 2 for -Oz) and whether it is -Ofast; and whether it is one other
+    // than -O0 itself, which is what clang's driver reads to keep -fsanitize=object-size (-O00 keeps it, as no -O doesn't).
     uint8_t optimization;
     uint8_t optimize_size;
     bool ofast;
+    bool optimization_flag;
     // The last of -finline and -fno-inline, and of -finline-functions, -finline-hint-functions and
     // -fno-inline-functions.
     uint8_t inline_option;
@@ -829,8 +829,11 @@ struct PredefinesOptions
     uint8_t unwind_tables;
     bool exceptions;
     uint8_t exception_model;
-    // The last -g option turns debug information on (-g, -g1, -ggdb, -gdwarf-4, ...) rather than off (-g0, -ggdb0).
+    // The last -g option of clang's g_Group turns debug information on (-g, -g1, -ggdb, -gdwarf-4, -gcodeview,
+    // -gmodules, ...) rather than off (-g0, -ggdb0); and -gmodules, when -gno-modules doesn't follow it, turns it on
+    // whatever that last option is.
     bool debug;
+    bool debug_modules;
     // -fgnuc-version: whether given, and the version (0.0.0 turns the GNU macros off).
     bool gnuc_given;
     uint8_t gnuc_major;
@@ -840,8 +843,47 @@ struct PredefinesOptions
     bool pthread;
     // -fcf-protection: bit 0 branch, bit 1 return.
     uint8_t cf_protection;
-    uint8_t sanitize;
+    // The sanitizer options in order (-fsanitize=, -fno-sanitize=, -fsanitize-ignore-for-ubsan-feature=,
+    // -fsanitize-coverage= and -fno-sanitize-coverage=), which predefines_finish resolves after every option, as clang's
+    // driver does; `sanitize_arguments` has room for one per argument.
+    const char** sanitize_arguments;
+    uint32_t sanitize_count;
+    uint32_t sanitize_capacity;
+    // What the sanitizers' rules read besides: the last of -mexecute-only, -mno-execute-only and their aliases -mpure-code
+    // and -mno-pure-code (null for none), the last -flto value (-flto is "full", null for none or -fno-lto), the last
+    // -fvisibility= value when no -fvisibility-ms-compat follows it, whether any -fvisibility= was given, and the last
+    // option of each -f/-fno- pair.
+    const char* execute_only;
+    const char* lto;
+    const char* visibility;
+    bool visibility_given;
+    uint8_t rtti;
+    uint8_t wrapv;
+    uint8_t wrapv_pointer;
+    uint8_t strict_overflow;
+    uint8_t cfi_cross_dso;
+    // predefines_finish's results: the sanitizers on (by PredefinesSanitizer), those -fsanitize-ignore-for-ubsan-feature=
+    // keeps out of __has_feature(undefined_behavior_sanitizer), and whether coverage instrumentation is on.
+    uint64_t sanitizers;
+    uint64_t ubsan_feature_ignored;
+    bool sanitize_coverage;
+    // -target's or --target='s triple (predefines_target_valid), or null for clang's default, x86_64-pc-linux-gnu.
+    const char* target;
+    // The options clang's driver reads only the last of, which predefines_finish checks (-march's CPU and -mtune are
+    // above): the last -mfpmath=, -mcmodel=, -mabi= and -fveclib= value (null for none); the last -O, -fgnuc-version=
+    // and -fcf-protection= when its value is invalid (null otherwise); and OpenMP, on with the last of -fopenmp,
+    // -fopenmp= and -fno-openmp unless it is -fno-openmp, with the last -fopenmp='s runtime (null for libomp).
+    const char* fpmath_name;
+    const char* code_model_name;
+    const char* abi;
+    const char* veclib;
+    const char* optimization_invalid;
+    const char* gnuc_invalid;
+    const char* cf_protection_invalid;
+    bool openmp_enabled;
+    const char* openmp_runtime;
     bool blocks;
+    // Whether clang defines _OPENMP (predefines_finish's): OpenMP on, with libomp's runtime or its old name, libiomp5's.
     bool openmp;
     // -fopenmp-version's value, or 0.
     uint32_t openmp_version;
@@ -852,6 +894,7 @@ struct PredefinesOptions
     // The profile-generating options' families, each last-wins (-fprofile-generate, -fprofile-instr-generate,
     // -fcs-profile-generate and -fprofile-generate-cold-function-coverage).
     uint8_t profile_generate[4];
+    // BUSTER_PREDEFINES_CODE_MODEL_*, from the last -mcmodel= by predefines_finish.
     uint8_t code_model;
     uint8_t long_double;
 };
@@ -876,7 +919,9 @@ static __attribute__((unused)) bool predefines_options_initialize(PredefinesOpti
     options->features = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, options->feature_capacity);
     options->float_capacity = argument_count + 1;
     options->floats = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, options->float_capacity);
-    return options->features != 0 && options->floats != 0;
+    options->sanitize_capacity = argument_count + 1;
+    options->sanitize_arguments = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, options->sanitize_capacity);
+    return options->features != 0 && options->floats != 0 && options->sanitize_arguments != 0;
 }
 
 static bool predefines_starts(const char* argument, const char* prefix)
@@ -916,6 +961,21 @@ static bool predefines_push_float(PredefinesOptions* options, PredefinesFloat ev
     return result;
 }
 
+static bool predefines_push_sanitize(PredefinesOptions* options, const char* argument)
+{
+    const bool result = options->sanitize_count < options->sanitize_capacity;
+    if (result)
+    {
+        options->sanitize_arguments[options->sanitize_count] = argument;
+        options->sanitize_count += 1;
+    }
+    else
+    {
+        fprintf(stderr, "error: too many sanitizer options\n");
+    }
+    return result;
+}
+
 static bool predefines_tune_valid(const char* name)
 {
     bool result = strcmp(name, "generic") == 0 || strcmp(name, "native") == 0;
@@ -947,56 +1007,6 @@ static bool predefines_apx_features(PredefinesOptions* options, const char* argu
         result = result && predefines_push_feature(options, (uint32_t)feature, on);
         more = end != 0;
         name = end != 0 ? end + 1 : name;
-    }
-    return result;
-}
-
-// -fsanitize= or -fno-sanitize=: the sanitizers that change the macros, and memory, which can't go with them. Every
-// other name clang knows changes no macro and is taken as it is. False after an error.
-static bool predefines_sanitize(PredefinesOptions* options, const char* list, bool on)
-{
-    static const struct
-    {
-        const char* name;
-        uint8_t mask;
-    } sanitizers[] = {
-        { "address", BUSTER_PREDEFINES_SANITIZE_ADDRESS },
-        { "kernel-address", BUSTER_PREDEFINES_SANITIZE_ADDRESS },
-        { "hwaddress", BUSTER_PREDEFINES_SANITIZE_HWADDRESS },
-        { "kernel-hwaddress", BUSTER_PREDEFINES_SANITIZE_HWADDRESS },
-        { "thread", BUSTER_PREDEFINES_SANITIZE_THREAD },
-        { "memory", BUSTER_PREDEFINES_SANITIZE_MEMORY },
-        { "kernel-memory", BUSTER_PREDEFINES_SANITIZE_MEMORY },
-        { "alloc-token", BUSTER_PREDEFINES_SANITIZE_ALLOC_TOKEN },
-        { "all", 0xff },
-    };
-    const char* name = list;
-    bool all_on = false;
-    bool more = true;
-    while (more)
-    {
-        const char* end = strchr(name, ',');
-        const size_t length = end != 0 ? (size_t)(end - name) : strlen(name);
-        uint8_t mask = 0;
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sanitizers); i += 1)
-        {
-            mask |= strlen(sanitizers[i].name) == length && memcmp(sanitizers[i].name, name, length) == 0 ? sanitizers[i].mask : 0;
-        }
-        all_on |= on && mask == 0xff;
-        options->sanitize = on ? (uint8_t)(options->sanitize | (mask == 0xff ? 0 : mask)) : (uint8_t)(options->sanitize & ~mask);
-        more = end != 0;
-        name = end != 0 ? end + 1 : name;
-    }
-    // clang's incompatible pairs among these, and -fsanitize=all, which clang refuses (only -fno-sanitize= takes it).
-    const uint8_t s = options->sanitize;
-    const bool address = (s & BUSTER_PREDEFINES_SANITIZE_ADDRESS) != 0;
-    const bool hwaddress = (s & BUSTER_PREDEFINES_SANITIZE_HWADDRESS) != 0;
-    const bool thread = (s & BUSTER_PREDEFINES_SANITIZE_THREAD) != 0;
-    const bool memory = (s & BUSTER_PREDEFINES_SANITIZE_MEMORY) != 0;
-    const bool result = !all_on && !(address && (thread || memory || hwaddress)) && !(thread && (memory || hwaddress)) && !(memory && hwaddress);
-    if (!result)
-    {
-        fprintf(stderr, "error: invalid combination of sanitizers in '-fsanitize=%s'\n", list);
     }
     return result;
 }
@@ -1045,20 +1055,35 @@ static bool predefines_unsupported(const char* argument)
     return result;
 }
 
-// Whether a -target or --target triple is x86-64 Linux with glibc, the one target buster predefines for: x86_64 (or
-// amd64), any of the vendors pc, unknown and none, linux and gnu.
+// Whether a -target or --target triple is x86-64 Linux with glibc, the one target buster predefines for: x86_64 or
+// amd64, any vendor (clang's predefines are the same for every one) or none, linux and gnu: ARCH-VENDOR-linux-gnu or
+// ARCH-linux-gnu.
 static bool predefines_target_valid(const char* triple)
 {
-    static const char* const valid[] = {
-        "x86_64-linux-gnu", "x86_64-pc-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-none-linux-gnu",
-        "amd64-linux-gnu", "amd64-pc-linux-gnu", "amd64-unknown-linux-gnu",
-    };
-    bool result = false;
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(valid) && !result; i += 1)
-    {
-        result = strcmp(triple, valid[i]) == 0;
-    }
-    return result;
+    const char* rest = predefines_starts(triple, "x86_64-") ? triple + 7 : predefines_starts(triple, "amd64-") ? triple + 6 : 0;
+    const char* vendor_end = rest != 0 ? strchr(rest, '-') : 0;
+    return rest != 0 && (strcmp(rest, "linux-gnu") == 0 || (vendor_end != 0 && strcmp(vendor_end + 1, "linux-gnu") == 0));
+}
+
+// The target triple's vendor name, as clang's __is_target_vendor reads it: the -target's ("unknown" when it names none)
+// or clang's default triple's, x86_64-pc-linux-gnu. *length gets its length.
+static const char* predefines_target_vendor(const PredefinesOptions* options, uint32_t* length)
+{
+    const char* rest = options->target != 0 ? strchr(options->target, '-') + 1 : 0;
+    const char* vendor_end = rest != 0 ? strchr(rest, '-') : 0;
+    const bool named = rest != 0 && strcmp(rest, "linux-gnu") != 0 && vendor_end != rest;
+    *length = rest == 0 ? 2 : named ? (uint32_t)(vendor_end - rest) : 7;
+    return rest == 0 ? "pc" : named ? rest : "unknown";
+}
+
+// The target triple as clang's driver normalizes it (a missing or empty vendor is "unknown"), for its messages.
+static void predefines_target_triple(const PredefinesOptions* options, char* buffer, size_t capacity)
+{
+    uint32_t vendor_length;
+    const char* vendor = predefines_target_vendor(options, &vendor_length);
+    const char* architecture = options->target != 0 ? options->target : "x86_64";
+    const int architecture_length = options->target != 0 ? (int)(strchr(options->target, '-') - options->target) : 6;
+    snprintf(buffer, capacity, "%.*s-%.*s-linux-gnu", architecture_length, architecture, (int)vendor_length, vendor);
 }
 
 // One argument (`next` is the one after it, or null). Reports an error on stderr, as clang's driver words it.
@@ -1081,22 +1106,13 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     }
     else if (predefines_starts(argument, "-march="))
     {
-        const char* value = argument + 7;
-        options->march = value;
-        if (strcmp(value, "native") != 0 && predefines_cpu_index(value) < 0)
-        {
-            fprintf(stderr, "error: unknown target CPU '%s'\n", value);
-            result = PREDEFINES_PARSE_ERROR;
-        }
+        // clang's driver reads only the last -march: predefines_resolve checks its CPU.
+        options->march = argument + 7;
     }
     else if (predefines_starts(argument, "-mtune="))
     {
+        // Only the last, which predefines_finish checks.
         options->mtune = argument + 7;
-        if (!predefines_tune_valid(argument + 7))
-        {
-            fprintf(stderr, "error: unknown target CPU '%s'\n", argument + 7);
-            result = PREDEFINES_PARSE_ERROR;
-        }
     }
     else if (strcmp(argument, "-msse4") == 0 || strcmp(argument, "-mno-sse4") == 0)
     {
@@ -1127,29 +1143,21 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     {
         options->inline_asm_use_gpr32 = true;
     }
+    else if (strcmp(argument, "-mexecute-only") == 0 || strcmp(argument, "-mno-execute-only") == 0 || strcmp(argument, "-mpure-code") == 0 ||
+             strcmp(argument, "-mno-pure-code") == 0)
+    {
+        // ARM's, which clang leaves unused on x86-64 but for the sanitizers' rules (predefines_sanitizers).
+        options->execute_only = argument;
+    }
     else if (predefines_starts(argument, "-mfpmath="))
     {
-        const char* value = argument + 9;
-        options->fpmath = strcmp(value, "sse") == 0 ? BUSTER_PREDEFINES_FPMATH_SSE : strcmp(value, "387") == 0 ? BUSTER_PREDEFINES_FPMATH_387 : 0;
-        if (options->fpmath == 0)
-        {
-            fprintf(stderr, "error: unknown FP unit '%s'\n", value);
-            result = PREDEFINES_PARSE_ERROR;
-        }
+        // Only the last, which predefines_finish reads.
+        options->fpmath_name = argument + 9;
     }
     else if (predefines_starts(argument, "-mcmodel="))
     {
-        const char* value = argument + 9;
-        options->code_model = strcmp(value, "small") == 0    ? BUSTER_PREDEFINES_CODE_MODEL_SMALL
-                              : strcmp(value, "kernel") == 0 ? BUSTER_PREDEFINES_CODE_MODEL_KERNEL
-                              : strcmp(value, "medium") == 0 ? BUSTER_PREDEFINES_CODE_MODEL_MEDIUM
-                              : strcmp(value, "large") == 0  ? BUSTER_PREDEFINES_CODE_MODEL_LARGE
-                                                             : 0xff;
-        if (options->code_model == 0xff)
-        {
-            fprintf(stderr, "error: unsupported argument '%s' to option '-mcmodel=' for target 'x86_64-pc-linux-gnu'\n", value);
-            result = PREDEFINES_PARSE_ERROR;
-        }
+        // Only the last, which predefines_finish reads.
+        options->code_model_name = argument + 9;
     }
     else if (strcmp(argument, "-mlong-double-64") == 0 || strcmp(argument, "-mlong-double-80") == 0 || strcmp(argument, "-mlong-double-128") == 0)
     {
@@ -1157,24 +1165,25 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     }
     else if (predefines_starts(argument, "-mabi="))
     {
-        if (strcmp(argument + 6, "sysv") != 0)
-        {
-            fprintf(stderr, "error: unsupported option '-mabi=' for target 'x86_64-pc-linux-gnu'\n");
-            result = PREDEFINES_PARSE_ERROR;
-        }
+        // Only the last, which predefines_finish checks.
+        options->abi = argument + 6;
     }
     else if (strcmp(argument, "-target") == 0 || predefines_starts(argument, "--target="))
     {
+        // Only the last, which predefines_finish checks.
         const char* triple = argument[1] == 't' ? next : argument + 9;
-        result = triple != 0 && predefines_target_valid(triple) ? (argument[1] == 't' ? PREDEFINES_PARSE_TAKEN_TWO : PREDEFINES_PARSE_TAKEN) : PREDEFINES_PARSE_ERROR;
-        if (result == PREDEFINES_PARSE_ERROR)
+        result = triple != 0 ? (argument[1] == 't' ? PREDEFINES_PARSE_TAKEN_TWO : PREDEFINES_PARSE_TAKEN) : PREDEFINES_PARSE_ERROR;
+        if (triple == 0)
         {
-            fprintf(stderr, "error: unsupported target '%s': buster predefines for x86_64-linux-gnu only\n", triple != 0 ? triple : "");
+            fprintf(stderr, "error: argument to '-target' is missing (expected 1 value)\n");
         }
+        options->target = triple;
     }
     else if (argument[0] == '-' && argument[1] == 'O')
     {
         const char* level = argument + 2;
+        options->optimization_flag = strcmp(argument, "-O0") != 0;
+        options->optimization_invalid = 0;
         if (strcmp(level, "s") == 0 || strcmp(level, "z") == 0)
         {
             options->optimization = 2;
@@ -1203,11 +1212,8 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
                 digits = *p >= '0' && *p <= '9';
                 value = value < 1000 ? value * 10 + (uint32_t)(*p - '0') : value;
             }
-            if (!digits)
-            {
-                fprintf(stderr, "error: invalid integral value '%s' in '%s'\n", level, argument);
-                result = PREDEFINES_PARSE_ERROR;
-            }
+            // Only the last -O counts, so predefines_finish reports an invalid one.
+            options->optimization_invalid = digits ? 0 : argument;
             // Past 3 is 3, with clang's warning.
             options->optimization = (uint8_t)(value > 3 ? 3 : value);
             options->optimize_size = 0;
@@ -1288,17 +1294,57 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     }
     else if (argument[0] == '-' && argument[1] == 'g')
     {
-        // The -g options that choose a debug information kind: the last one turns it on or off. The others (-gz,
-        // -gsplit-dwarf, -gno-column-info, ...) change no macro.
+        // The -g options of clang's g_Group, which choose a debug information kind: the last one turns it on or off.
+        // -gmodules is one, and turns it on whatever comes last unless -gno-modules follows it. The others (-gz,
+        // -gsplit-dwarf, -gno-column-info, ...) change no macro, and clang refuses the old formats' options.
         static const char* const enabling[] = {
-            "-g", "-g1", "-g2", "-g3", "-ggdb", "-ggdb1", "-ggdb2", "-ggdb3", "-glldb", "-gsce", "-gdbx", "-gline-tables-only",
-            "-gline-directives-only", "-gmlt", "-gdwarf", "-gdwarf-2", "-gdwarf-3", "-gdwarf-4", "-gdwarf-5", "-gcodeview", "-gfull", "-gused",
+            "-g",
+            "-g1",
+            "-g2",
+            "-g3",
+            "-ggdb",
+            "-ggdb1",
+            "-ggdb2",
+            "-ggdb3",
+            "-glldb",
+            "-gsce",
+            "-gdbx",
+            "-gline-tables-only",
+            "-gline-directives-only",
+            "-gmlt",
+            "-gdwarf",
+            "-gdwarf-2",
+            "-gdwarf-3",
+            "-gdwarf-4",
+            "-gdwarf-5",
+            "-gdwarf-6",
+            "-gdwarf32",
+            "-gdwarf64",
+            "-gcodeview",
+            "-gfull",
+            "-gused",
+            "-gmodules",
         };
+        static const char* const refused[] = { "-gstabs", "-gcoff", "-gxcoff", "-gvms" };
+        bool enables = false;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(enabling); i += 1)
         {
-            options->debug |= strcmp(argument, enabling[i]) == 0;
+            enables |= strcmp(argument, enabling[i]) == 0;
         }
-        options->debug &= strcmp(argument, "-g0") != 0 && strcmp(argument, "-ggdb0") != 0;
+        const bool disables = strcmp(argument, "-g0") == 0 || strcmp(argument, "-ggdb0") == 0;
+        options->debug = enables || (options->debug && !disables);
+        options->debug_modules = strcmp(argument, "-gmodules") == 0 || (options->debug_modules && strcmp(argument, "-gno-modules") != 0);
+        // The refused ones are prefixes (-gstabs+ is one too), and -gtoggle.
+        bool unsupported = strcmp(argument, "-gtoggle") == 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
+        {
+            unsupported |= predefines_starts(argument, refused[i]);
+        }
+        if (unsupported)
+        {
+            fprintf(stderr, "error: unsupported option '%s'\n", argument);
+            result = PREDEFINES_PARSE_ERROR;
+        }
     }
     else if (predefines_starts(argument, "-fgnuc-version="))
     {
@@ -1324,11 +1370,8 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
             }
         }
         valid &= (digit || argument[15] == 0) && parts[0] < 256 && parts[1] < 100 && parts[2] < 100;
-        if (!valid)
-        {
-            fprintf(stderr, "error: invalid value '%s' in '%s'\n", argument + 15, argument);
-            result = PREDEFINES_PARSE_ERROR;
-        }
+        // Only the last counts, so predefines_finish reports an invalid one.
+        options->gnuc_invalid = valid ? 0 : argument;
         options->gnuc_given = true;
         options->gnuc_major = (uint8_t)parts[0];
         options->gnuc_minor = (uint8_t)parts[1];
@@ -1350,16 +1393,48 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     {
         const char* value = argument[15] == '=' ? argument + 16 : "full";
         options->cf_protection = strcmp(value, "full") == 0 ? 3 : strcmp(value, "branch") == 0 ? 1 : strcmp(value, "return") == 0 ? 2 : strcmp(value, "none") == 0 ? 0 : 0xff;
-        if (options->cf_protection == 0xff)
-        {
-            fprintf(stderr, "error: invalid value '%s' in '%s'\n", value, argument);
-            result = PREDEFINES_PARSE_ERROR;
-        }
+        // Only the last counts, so predefines_finish reports an invalid one.
+        options->cf_protection_invalid = options->cf_protection == 0xff ? argument : 0;
     }
-    else if (predefines_starts(argument, "-fsanitize=") || predefines_starts(argument, "-fno-sanitize="))
+    else if (predefines_starts(argument, "-fsanitize=") || predefines_starts(argument, "-fno-sanitize=") ||
+             predefines_starts(argument, "-fsanitize-ignore-for-ubsan-feature=") || predefines_starts(argument, "-fsanitize-coverage=") ||
+             predefines_starts(argument, "-fno-sanitize-coverage="))
     {
-        const bool on = argument[2] == 's';
-        result = predefines_sanitize(options, strchr(argument, '=') + 1, on) ? result : PREDEFINES_PARSE_ERROR;
+        // Resolved after every option (predefines_finish): clang's driver reads them from the last back.
+        result = predefines_push_sanitize(options, argument) ? result : PREDEFINES_PARSE_ERROR;
+    }
+    else if (strcmp(argument, "-fsanitize-cfi-cross-dso") == 0 || strcmp(argument, "-fno-sanitize-cfi-cross-dso") == 0)
+    {
+        options->cfi_cross_dso = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
+    }
+    else if (strcmp(argument, "-frtti") == 0 || strcmp(argument, "-fno-rtti") == 0)
+    {
+        options->rtti = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
+    }
+    else if (strcmp(argument, "-fwrapv") == 0 || strcmp(argument, "-fno-wrapv") == 0)
+    {
+        options->wrapv = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
+    }
+    else if (strcmp(argument, "-fwrapv-pointer") == 0 || strcmp(argument, "-fno-wrapv-pointer") == 0)
+    {
+        options->wrapv_pointer = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
+    }
+    else if (strcmp(argument, "-fstrict-overflow") == 0 || strcmp(argument, "-fno-strict-overflow") == 0)
+    {
+        options->strict_overflow = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
+    }
+    else if (strcmp(argument, "-flto") == 0 || predefines_starts(argument, "-flto=") || strcmp(argument, "-fno-lto") == 0)
+    {
+        // -flto, -flto=jobserver and -flto=auto are -flto=full; predefines_finish checks the value.
+        const bool full = strcmp(argument, "-flto") == 0 || strcmp(argument, "-flto=jobserver") == 0 || strcmp(argument, "-flto=auto") == 0;
+        options->lto = argument[2] == 'n' ? 0 : full ? "full" : argument + 6;
+    }
+    else if (predefines_starts(argument, "-fvisibility=") || strcmp(argument, "-fvisibility-ms-compat") == 0)
+    {
+        // The last of them is checked (only -fvisibility= has a value); CFI's checks need any -fvisibility=.
+        const bool value = argument[12] == '=';
+        options->visibility = value ? argument + 13 : 0;
+        options->visibility_given |= value;
     }
     else if (strcmp(argument, "-fblocks") == 0 || strcmp(argument, "-fno-blocks") == 0)
     {
@@ -1367,9 +1442,10 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     }
     else if (strcmp(argument, "-fopenmp") == 0 || strcmp(argument, "-fno-openmp") == 0 || predefines_starts(argument, "-fopenmp="))
     {
-        // libgomp's runtime gets no _OPENMP from clang: only libomp's (and its old name, libiomp5) do.
-        const char* runtime = argument[8] == '=' ? argument + 9 : "libomp";
-        options->openmp = argument[2] == 'o' && (strcmp(runtime, "libomp") == 0 || strcmp(runtime, "libiomp5") == 0);
+        // On unless -fno-openmp comes last; the runtime is the last -fopenmp='s (libomp without one), whichever comes
+        // after it. predefines_finish reads them.
+        options->openmp_enabled = argument[2] == 'o';
+        options->openmp_runtime = argument[8] == '=' ? argument + 9 : options->openmp_runtime;
     }
     else if (predefines_starts(argument, "-fopenmp-version="))
     {
@@ -1448,14 +1524,13 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     }
     else if (predefines_starts(argument, "-fveclib="))
     {
-        // Of the vector libraries, only ArmPL and SLEEF change a macro (they imply -fno-math-errno), and clang rejects
+        // Of the vector libraries, ArmPL and SLEEF turn math errno off where they come among the floating-point options
+        // (clang's state machine, whatever -fveclib= follows). predefines_finish checks the last one: clang refuses
         // both for x86-64.
         const char* value = argument + 9;
-        if (strcmp(value, "SLEEF") == 0 || strcmp(value, "ArmPL") == 0)
-        {
-            fprintf(stderr, "error: unsupported option '%s' for target 'x86_64-pc-linux-gnu'\n", argument);
-            result = PREDEFINES_PARSE_ERROR;
-        }
+        options->veclib = value;
+        const bool no_errno = strcmp(value, "SLEEF") == 0 || strcmp(value, "ArmPL") == 0;
+        result = !no_errno || predefines_push_float(options, PREDEFINES_FLOAT_NO_MATH_ERRNO) ? result : PREDEFINES_PARSE_ERROR;
     }
     else
     {
@@ -1495,6 +1570,860 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
             event = strcmp(argument, floats[i].name) == 0 ? (int)floats[i].event : -1;
         }
         result = event >= 0 ? (predefines_push_float(options, (PredefinesFloat)event) ? PREDEFINES_PARSE_TAKEN : PREDEFINES_PARSE_ERROR) : PREDEFINES_PARSE_UNKNOWN;
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The sanitizers
+
+// clang 23's sanitizers (Sanitizers.def), in its order: PREDEFINES_SANITIZER_<enumerator> numbers them, and bit i of a
+// sanitizer mask is the i-th one's.
+#define BUSTER_PREDEFINES_SANITIZERS(X) \
+    X(ADDRESS, "address") \
+    X(POINTER_COMPARE, "pointer-compare") \
+    X(POINTER_SUBTRACT, "pointer-subtract") \
+    X(KERNEL_ADDRESS, "kernel-address") \
+    X(HWADDRESS, "hwaddress") \
+    X(KERNEL_HWADDRESS, "kernel-hwaddress") \
+    X(MEMTAG_STACK, "memtag-stack") \
+    X(MEMTAG_HEAP, "memtag-heap") \
+    X(MEMTAG_GLOBALS, "memtag-globals") \
+    X(MEMORY, "memory") \
+    X(KERNEL_MEMORY, "kernel-memory") \
+    X(FUZZER, "fuzzer") \
+    X(FUZZER_NO_LINK, "fuzzer-no-link") \
+    X(TYPE, "type") \
+    X(THREAD, "thread") \
+    X(NUMERICAL, "numerical") \
+    X(REALTIME, "realtime") \
+    X(LEAK, "leak") \
+    X(ALIGNMENT, "alignment") \
+    X(ARRAY_BOUNDS, "array-bounds") \
+    X(BOOL, "bool") \
+    X(BUILTIN, "builtin") \
+    X(ENUM, "enum") \
+    X(FLOAT_CAST_OVERFLOW, "float-cast-overflow") \
+    X(FLOAT_DIVIDE_BY_ZERO, "float-divide-by-zero") \
+    X(FUNCTION, "function") \
+    X(INTEGER_DIVIDE_BY_ZERO, "integer-divide-by-zero") \
+    X(NONNULL_ATTRIBUTE, "nonnull-attribute") \
+    X(NULL_POINTER, "null") \
+    X(NULLABILITY_ARG, "nullability-arg") \
+    X(NULLABILITY_ASSIGN, "nullability-assign") \
+    X(NULLABILITY_RETURN, "nullability-return") \
+    X(OBJECT_SIZE, "object-size") \
+    X(POINTER_OVERFLOW, "pointer-overflow") \
+    X(RETURN, "return") \
+    X(RETURNS_NONNULL_ATTRIBUTE, "returns-nonnull-attribute") \
+    X(SHIFT_BASE, "shift-base") \
+    X(SHIFT_EXPONENT, "shift-exponent") \
+    X(SIGNED_INTEGER_OVERFLOW, "signed-integer-overflow") \
+    X(UNREACHABLE, "unreachable") \
+    X(VLA_BOUND, "vla-bound") \
+    X(VPTR, "vptr") \
+    X(UNSIGNED_INTEGER_OVERFLOW, "unsigned-integer-overflow") \
+    X(UNSIGNED_SHIFT_BASE, "unsigned-shift-base") \
+    X(DATAFLOW, "dataflow") \
+    X(CFI_CAST_STRICT, "cfi-cast-strict") \
+    X(CFI_DERIVED_CAST, "cfi-derived-cast") \
+    X(CFI_ICALL, "cfi-icall") \
+    X(CFI_MFCALL, "cfi-mfcall") \
+    X(CFI_UNRELATED_CAST, "cfi-unrelated-cast") \
+    X(CFI_NVCALL, "cfi-nvcall") \
+    X(CFI_VCALL, "cfi-vcall") \
+    X(KCFI, "kcfi") \
+    X(SAFE_STACK, "safe-stack") \
+    X(SHADOW_CALL_STACK, "shadow-call-stack") \
+    X(IMPLICIT_UNSIGNED_INTEGER_TRUNCATION, "implicit-unsigned-integer-truncation") \
+    X(IMPLICIT_SIGNED_INTEGER_TRUNCATION, "implicit-signed-integer-truncation") \
+    X(IMPLICIT_INTEGER_SIGN_CHANGE, "implicit-integer-sign-change") \
+    X(IMPLICIT_BITFIELD_CONVERSION, "implicit-bitfield-conversion") \
+    X(OBJC_CAST, "objc-cast") \
+    X(LOCAL_BOUNDS, "local-bounds") \
+    X(SCUDO, "scudo") \
+    X(ALLOC_TOKEN, "alloc-token")
+
+typedef enum PredefinesSanitizer
+{
+#define BUSTER_PREDEFINES_SANITIZER_ENUM(enumerator, name) PREDEFINES_SANITIZER_##enumerator,
+    BUSTER_PREDEFINES_SANITIZERS(BUSTER_PREDEFINES_SANITIZER_ENUM)
+#undef BUSTER_PREDEFINES_SANITIZER_ENUM
+    PREDEFINES_SANITIZER_COUNT,
+} PredefinesSanitizer;
+
+static const char* const predefines_sanitizer_names[PREDEFINES_SANITIZER_COUNT] = {
+#define BUSTER_PREDEFINES_SANITIZER_NAME(enumerator, name) name,
+    BUSTER_PREDEFINES_SANITIZERS(BUSTER_PREDEFINES_SANITIZER_NAME)
+#undef BUSTER_PREDEFINES_SANITIZER_NAME
+};
+
+#define BUSTER_PREDEFINES_SANITIZER(enumerator) (1ull << PREDEFINES_SANITIZER_##enumerator)
+
+// The groups' members (Sanitizers.def's SANITIZER_GROUP), and the masks clang's driver reads.
+#define BUSTER_PREDEFINES_SANITIZERS_ALL ((1ull << PREDEFINES_SANITIZER_COUNT) - 1)
+#define BUSTER_PREDEFINES_SANITIZERS_MEMTAG \
+    (BUSTER_PREDEFINES_SANITIZER(MEMTAG_STACK) | BUSTER_PREDEFINES_SANITIZER(MEMTAG_HEAP) | BUSTER_PREDEFINES_SANITIZER(MEMTAG_GLOBALS))
+#define BUSTER_PREDEFINES_SANITIZERS_NULLABILITY \
+    (BUSTER_PREDEFINES_SANITIZER(NULLABILITY_ARG) | BUSTER_PREDEFINES_SANITIZER(NULLABILITY_ASSIGN) | BUSTER_PREDEFINES_SANITIZER(NULLABILITY_RETURN))
+#define BUSTER_PREDEFINES_SANITIZERS_SHIFT (BUSTER_PREDEFINES_SANITIZER(SHIFT_BASE) | BUSTER_PREDEFINES_SANITIZER(SHIFT_EXPONENT))
+#define BUSTER_PREDEFINES_SANITIZERS_CFI \
+    (BUSTER_PREDEFINES_SANITIZER(CFI_DERIVED_CAST) | BUSTER_PREDEFINES_SANITIZER(CFI_ICALL) | BUSTER_PREDEFINES_SANITIZER(CFI_MFCALL) | \
+     BUSTER_PREDEFINES_SANITIZER(CFI_UNRELATED_CAST) | BUSTER_PREDEFINES_SANITIZER(CFI_NVCALL) | BUSTER_PREDEFINES_SANITIZER(CFI_VCALL))
+#define BUSTER_PREDEFINES_SANITIZERS_UNDEFINED \
+    (BUSTER_PREDEFINES_SANITIZER(ALIGNMENT) | BUSTER_PREDEFINES_SANITIZER(BOOL) | BUSTER_PREDEFINES_SANITIZER(BUILTIN) | \
+     BUSTER_PREDEFINES_SANITIZER(ARRAY_BOUNDS) | BUSTER_PREDEFINES_SANITIZER(ENUM) | BUSTER_PREDEFINES_SANITIZER(FLOAT_CAST_OVERFLOW) | \
+     BUSTER_PREDEFINES_SANITIZER(INTEGER_DIVIDE_BY_ZERO) | BUSTER_PREDEFINES_SANITIZER(NONNULL_ATTRIBUTE) | BUSTER_PREDEFINES_SANITIZER(NULL_POINTER) | \
+     BUSTER_PREDEFINES_SANITIZER(OBJECT_SIZE) | BUSTER_PREDEFINES_SANITIZER(POINTER_OVERFLOW) | BUSTER_PREDEFINES_SANITIZER(RETURN) | \
+     BUSTER_PREDEFINES_SANITIZER(RETURNS_NONNULL_ATTRIBUTE) | BUSTER_PREDEFINES_SANITIZERS_SHIFT | BUSTER_PREDEFINES_SANITIZER(SIGNED_INTEGER_OVERFLOW) | \
+     BUSTER_PREDEFINES_SANITIZER(UNREACHABLE) | BUSTER_PREDEFINES_SANITIZER(VLA_BOUND) | BUSTER_PREDEFINES_SANITIZER(FUNCTION))
+#define BUSTER_PREDEFINES_SANITIZERS_IMPLICIT_INTEGER_TRUNCATION \
+    (BUSTER_PREDEFINES_SANITIZER(IMPLICIT_UNSIGNED_INTEGER_TRUNCATION) | BUSTER_PREDEFINES_SANITIZER(IMPLICIT_SIGNED_INTEGER_TRUNCATION))
+#define BUSTER_PREDEFINES_SANITIZERS_IMPLICIT_INTEGER_ARITHMETIC_VALUE_CHANGE \
+    (BUSTER_PREDEFINES_SANITIZER(IMPLICIT_INTEGER_SIGN_CHANGE) | BUSTER_PREDEFINES_SANITIZER(IMPLICIT_SIGNED_INTEGER_TRUNCATION))
+#define BUSTER_PREDEFINES_SANITIZERS_IMPLICIT_INTEGER_CONVERSION \
+    (BUSTER_PREDEFINES_SANITIZERS_IMPLICIT_INTEGER_ARITHMETIC_VALUE_CHANGE | BUSTER_PREDEFINES_SANITIZER(IMPLICIT_UNSIGNED_INTEGER_TRUNCATION))
+#define BUSTER_PREDEFINES_SANITIZERS_IMPLICIT_CONVERSION \
+    (BUSTER_PREDEFINES_SANITIZERS_IMPLICIT_INTEGER_CONVERSION | BUSTER_PREDEFINES_SANITIZER(IMPLICIT_BITFIELD_CONVERSION))
+#define BUSTER_PREDEFINES_SANITIZERS_INTEGER \
+    (BUSTER_PREDEFINES_SANITIZERS_IMPLICIT_INTEGER_CONVERSION | BUSTER_PREDEFINES_SANITIZER(INTEGER_DIVIDE_BY_ZERO) | BUSTER_PREDEFINES_SANITIZERS_SHIFT | \
+     BUSTER_PREDEFINES_SANITIZER(SIGNED_INTEGER_OVERFLOW) | BUSTER_PREDEFINES_SANITIZER(UNSIGNED_INTEGER_OVERFLOW) | \
+     BUSTER_PREDEFINES_SANITIZER(UNSIGNED_SHIFT_BASE))
+#define BUSTER_PREDEFINES_SANITIZERS_BOUNDS (BUSTER_PREDEFINES_SANITIZER(ARRAY_BOUNDS) | BUSTER_PREDEFINES_SANITIZER(LOCAL_BOUNDS))
+// Those clang supports for x86_64-linux-gnu (ToolChain's and Linux's getSupportedSanitizers): all but MTE's and objc-cast.
+#define BUSTER_PREDEFINES_SANITIZERS_SUPPORTED \
+    (BUSTER_PREDEFINES_SANITIZERS_ALL & ~BUSTER_PREDEFINES_SANITIZERS_MEMTAG & ~BUSTER_PREDEFINES_SANITIZER(OBJC_CAST))
+// Those that turn coverage instrumentation off (the ones SanitizerArgs.cpp's SupportsCoverage leaves out).
+#define BUSTER_PREDEFINES_SANITIZERS_WITHOUT_COVERAGE \
+    (BUSTER_PREDEFINES_SANITIZER(POINTER_COMPARE) | BUSTER_PREDEFINES_SANITIZER(POINTER_SUBTRACT) | BUSTER_PREDEFINES_SANITIZER(REALTIME) | \
+     BUSTER_PREDEFINES_SANITIZER(CFI_CAST_STRICT) | BUSTER_PREDEFINES_SANITIZER(SCUDO))
+// The CFI checks of classes, which need -fvisibility= (CFIClasses).
+#define BUSTER_PREDEFINES_SANITIZERS_CFI_CLASSES \
+    (BUSTER_PREDEFINES_SANITIZER(CFI_VCALL) | BUSTER_PREDEFINES_SANITIZER(CFI_NVCALL) | BUSTER_PREDEFINES_SANITIZER(CFI_MFCALL) | \
+     BUSTER_PREDEFINES_SANITIZER(CFI_DERIVED_CAST) | BUSTER_PREDEFINES_SANITIZER(CFI_UNRELATED_CAST))
+// Those -mexecute-only refuses (NotAllowedWithExecuteOnly).
+#define BUSTER_PREDEFINES_SANITIZERS_NOT_EXECUTE_ONLY (BUSTER_PREDEFINES_SANITIZER(FUNCTION) | BUSTER_PREDEFINES_SANITIZER(KCFI))
+
+// The groups, in Sanitizers.def's order: bit g of a group mask is the g-th, the group named itself (clang keeps a
+// group's own bit beside its members').
+static const struct
+{
+    const char* name;
+    uint64_t members;
+} predefines_sanitizer_groups[] = {
+    { "memtag", BUSTER_PREDEFINES_SANITIZERS_MEMTAG },
+    { "nullability", BUSTER_PREDEFINES_SANITIZERS_NULLABILITY },
+    { "shift", BUSTER_PREDEFINES_SANITIZERS_SHIFT },
+    { "cfi", BUSTER_PREDEFINES_SANITIZERS_CFI },
+    { "undefined", BUSTER_PREDEFINES_SANITIZERS_UNDEFINED },
+    { "undefined-trap", BUSTER_PREDEFINES_SANITIZERS_UNDEFINED },
+    { "implicit-integer-truncation", BUSTER_PREDEFINES_SANITIZERS_IMPLICIT_INTEGER_TRUNCATION },
+    { "implicit-integer-arithmetic-value-change", BUSTER_PREDEFINES_SANITIZERS_IMPLICIT_INTEGER_ARITHMETIC_VALUE_CHANGE },
+    { "implicit-integer-conversion", BUSTER_PREDEFINES_SANITIZERS_IMPLICIT_INTEGER_CONVERSION },
+    { "implicit-conversion", BUSTER_PREDEFINES_SANITIZERS_IMPLICIT_CONVERSION },
+    { "integer", BUSTER_PREDEFINES_SANITIZERS_INTEGER },
+    { "bounds", BUSTER_PREDEFINES_SANITIZERS_BOUNDS },
+    { "all", BUSTER_PREDEFINES_SANITIZERS_ALL },
+};
+
+#define BUSTER_PREDEFINES_SANITIZER_GROUP_MEMTAG 0x0001
+#define BUSTER_PREDEFINES_SANITIZER_GROUP_UNDEFINED 0x0010
+#define BUSTER_PREDEFINES_SANITIZER_GROUP_ALL 0x1000
+// The groups with a member clang supports for x86_64-linux-gnu: all but memtag.
+#define BUSTER_PREDEFINES_SANITIZER_GROUPS_SUPPORTED (0x1fff & ~BUSTER_PREDEFINES_SANITIZER_GROUP_MEMTAG)
+
+// clang's IncompatibleGroups for Linux, in its order: with `group` on, `incompatible`'s are errors, and dropped.
+static const struct
+{
+    uint64_t group;
+    uint64_t incompatible;
+} predefines_sanitizer_conflicts[] = {
+    { BUSTER_PREDEFINES_SANITIZER(ADDRESS), BUSTER_PREDEFINES_SANITIZER(THREAD) | BUSTER_PREDEFINES_SANITIZER(MEMORY) },
+    {
+        BUSTER_PREDEFINES_SANITIZER(TYPE),
+        BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(KERNEL_ADDRESS) | BUSTER_PREDEFINES_SANITIZER(MEMORY) |
+            BUSTER_PREDEFINES_SANITIZER(LEAK) | BUSTER_PREDEFINES_SANITIZER(THREAD),
+    },
+    { BUSTER_PREDEFINES_SANITIZER(THREAD), BUSTER_PREDEFINES_SANITIZER(MEMORY) },
+    { BUSTER_PREDEFINES_SANITIZER(LEAK), BUSTER_PREDEFINES_SANITIZER(THREAD) | BUSTER_PREDEFINES_SANITIZER(MEMORY) },
+    {
+        BUSTER_PREDEFINES_SANITIZER(KERNEL_ADDRESS),
+        BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(LEAK) | BUSTER_PREDEFINES_SANITIZER(THREAD) | BUSTER_PREDEFINES_SANITIZER(MEMORY),
+    },
+    {
+        BUSTER_PREDEFINES_SANITIZER(HWADDRESS),
+        BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(THREAD) | BUSTER_PREDEFINES_SANITIZER(MEMORY) |
+            BUSTER_PREDEFINES_SANITIZER(KERNEL_ADDRESS),
+    },
+    {
+        BUSTER_PREDEFINES_SANITIZER(SCUDO),
+        BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(HWADDRESS) | BUSTER_PREDEFINES_SANITIZER(LEAK) |
+            BUSTER_PREDEFINES_SANITIZER(THREAD) | BUSTER_PREDEFINES_SANITIZER(MEMORY) | BUSTER_PREDEFINES_SANITIZER(KERNEL_ADDRESS),
+    },
+    {
+        BUSTER_PREDEFINES_SANITIZER(SAFE_STACK),
+        BUSTER_PREDEFINES_SANITIZER(LEAK) | BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(HWADDRESS) |
+            BUSTER_PREDEFINES_SANITIZER(THREAD) | BUSTER_PREDEFINES_SANITIZER(MEMORY) | BUSTER_PREDEFINES_SANITIZER(KERNEL_ADDRESS),
+    },
+    {
+        BUSTER_PREDEFINES_SANITIZER(KERNEL_HWADDRESS),
+        BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(HWADDRESS) | BUSTER_PREDEFINES_SANITIZER(LEAK) |
+            BUSTER_PREDEFINES_SANITIZER(THREAD) | BUSTER_PREDEFINES_SANITIZER(MEMORY) | BUSTER_PREDEFINES_SANITIZER(KERNEL_ADDRESS) |
+            BUSTER_PREDEFINES_SANITIZER(SAFE_STACK),
+    },
+    {
+        BUSTER_PREDEFINES_SANITIZER(KERNEL_MEMORY),
+        BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(HWADDRESS) | BUSTER_PREDEFINES_SANITIZER(LEAK) |
+            BUSTER_PREDEFINES_SANITIZER(THREAD) | BUSTER_PREDEFINES_SANITIZER(MEMORY) | BUSTER_PREDEFINES_SANITIZER(KERNEL_ADDRESS) |
+            BUSTER_PREDEFINES_SANITIZER(SCUDO) | BUSTER_PREDEFINES_SANITIZER(SAFE_STACK),
+    },
+    {
+        BUSTER_PREDEFINES_SANITIZERS_MEMTAG,
+        BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(KERNEL_ADDRESS) | BUSTER_PREDEFINES_SANITIZER(HWADDRESS) |
+            BUSTER_PREDEFINES_SANITIZER(KERNEL_HWADDRESS),
+    },
+    { BUSTER_PREDEFINES_SANITIZER(KCFI), BUSTER_PREDEFINES_SANITIZER(FUNCTION) },
+    {
+        BUSTER_PREDEFINES_SANITIZER(REALTIME),
+        BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(THREAD) | BUSTER_PREDEFINES_SANITIZERS_UNDEFINED |
+            BUSTER_PREDEFINES_SANITIZER(MEMORY) | BUSTER_PREDEFINES_SANITIZER(TYPE),
+    },
+    {
+        BUSTER_PREDEFINES_SANITIZER(ALLOC_TOKEN),
+        BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(HWADDRESS) | BUSTER_PREDEFINES_SANITIZER(KERNEL_ADDRESS) |
+            BUSTER_PREDEFINES_SANITIZER(KERNEL_HWADDRESS) | BUSTER_PREDEFINES_SANITIZER(MEMORY),
+    },
+};
+
+// clang's -fsanitize-coverage= features (SanitizerArgs.cpp's CoverageFeature), in its order: bit i is the i-th.
+static const char* const predefines_coverage_names[] = {
+    "func",
+    "bb",
+    "edge",
+    "indirect-calls",
+    "trace-bb",
+    "trace-cmp",
+    "trace-div",
+    "trace-gep",
+    "8bit-counters",
+    "trace-pc",
+    "trace-pc-guard",
+    "no-prune",
+    "inline-8bit-counters",
+    "pc-table",
+    "stack-depth",
+    "inline-bool-flag",
+    "trace-loads",
+    "trace-stores",
+    "control-flow",
+    "trace-pc-entry-exit",
+};
+
+#define BUSTER_PREDEFINES_COVERAGE_FUNC 0x00001
+#define BUSTER_PREDEFINES_COVERAGE_BB 0x00002
+#define BUSTER_PREDEFINES_COVERAGE_EDGE 0x00004
+#define BUSTER_PREDEFINES_COVERAGE_INDIRECT_CALLS 0x00008
+#define BUSTER_PREDEFINES_COVERAGE_TRACE_CMP 0x00020
+#define BUSTER_PREDEFINES_COVERAGE_TRACE_PC 0x00200
+#define BUSTER_PREDEFINES_COVERAGE_TRACE_PC_GUARD 0x00400
+#define BUSTER_PREDEFINES_COVERAGE_INLINE_8BIT_COUNTERS 0x01000
+#define BUSTER_PREDEFINES_COVERAGE_PC_TABLE 0x02000
+#define BUSTER_PREDEFINES_COVERAGE_STACK_DEPTH 0x04000
+#define BUSTER_PREDEFINES_COVERAGE_INLINE_BOOL_FLAG 0x08000
+#define BUSTER_PREDEFINES_COVERAGE_TRACE_LOADS 0x10000
+#define BUSTER_PREDEFINES_COVERAGE_TRACE_STORES 0x20000
+#define BUSTER_PREDEFINES_COVERAGE_CONTROL_FLOW 0x40000
+#define BUSTER_PREDEFINES_COVERAGE_TRACE_PC_ENTRY_EXIT 0x80000
+// What -fsanitize=fuzzer turns on (on Linux, with stack-depth).
+#define BUSTER_PREDEFINES_COVERAGE_FUZZER \
+    (BUSTER_PREDEFINES_COVERAGE_INLINE_8BIT_COUNTERS | BUSTER_PREDEFINES_COVERAGE_INDIRECT_CALLS | BUSTER_PREDEFINES_COVERAGE_TRACE_CMP | \
+     BUSTER_PREDEFINES_COVERAGE_PC_TABLE | BUSTER_PREDEFINES_COVERAGE_STACK_DEPTH)
+// The features that imply edge coverage when none of func, bb and edge is given.
+#define BUSTER_PREDEFINES_COVERAGE_IMPLY_EDGE \
+    (BUSTER_PREDEFINES_COVERAGE_TRACE_PC | BUSTER_PREDEFINES_COVERAGE_TRACE_PC_ENTRY_EXIT | BUSTER_PREDEFINES_COVERAGE_TRACE_PC_GUARD | \
+     BUSTER_PREDEFINES_COVERAGE_INLINE_8BIT_COUNTERS | BUSTER_PREDEFINES_COVERAGE_INLINE_BOOL_FLAG | BUSTER_PREDEFINES_COVERAGE_CONTROL_FLOW)
+// The features that instrument: __has_feature(coverage_sanitizer) is on with one of them (CodeGenOptions's
+// hasSanitizeCoverage).
+#define BUSTER_PREDEFINES_COVERAGE_INSTRUMENTING \
+    (BUSTER_PREDEFINES_COVERAGE_FUNC | BUSTER_PREDEFINES_COVERAGE_BB | BUSTER_PREDEFINES_COVERAGE_EDGE | BUSTER_PREDEFINES_COVERAGE_INDIRECT_CALLS | \
+     BUSTER_PREDEFINES_COVERAGE_TRACE_CMP | BUSTER_PREDEFINES_COVERAGE_TRACE_LOADS | BUSTER_PREDEFINES_COVERAGE_TRACE_STORES | \
+     BUSTER_PREDEFINES_COVERAGE_CONTROL_FLOW)
+
+// Sanitizers and groups, as clang's SanitizerMask holds both.
+typedef struct PredefinesSanitizers PredefinesSanitizers;
+struct PredefinesSanitizers
+{
+    uint64_t kinds;
+    uint16_t groups;
+};
+
+// One value of a sanitizer list: its sanitizer, its group's bit, or nothing for a name clang doesn't know.
+static PredefinesSanitizers predefines_sanitizer_value(const char* name, size_t length)
+{
+    PredefinesSanitizers result = { 0 };
+    for (uint32_t i = 0; i < PREDEFINES_SANITIZER_COUNT; i += 1)
+    {
+        const bool same = strlen(predefines_sanitizer_names[i]) == length && memcmp(predefines_sanitizer_names[i], name, length) == 0;
+        result.kinds |= same ? 1ull << i : 0;
+    }
+    for (uint32_t g = 0; g < BUSTER_ARRAY_LENGTH(predefines_sanitizer_groups); g += 1)
+    {
+        const bool same = strlen(predefines_sanitizer_groups[g].name) == length && memcmp(predefines_sanitizer_groups[g].name, name, length) == 0;
+        result.groups |= same ? (uint16_t)(1u << g) : 0;
+    }
+    return result;
+}
+
+// clang's expandSanitizerGroups: the groups' members added, the groups' own bits kept.
+static PredefinesSanitizers predefines_sanitizers_expand(PredefinesSanitizers set)
+{
+    PredefinesSanitizers result = set;
+    for (uint32_t g = 0; g < BUSTER_ARRAY_LENGTH(predefines_sanitizer_groups); g += 1)
+    {
+        result.kinds |= (set.groups >> g) & 1 ? predefines_sanitizer_groups[g].members : 0;
+    }
+    return result;
+}
+
+// The values of a sanitizer list (the option's argument after its '='; empty values skipped, as clang's option parser
+// skips them), as clang's parseArgValues reads them. -fsanitize= (`add`) refuses "all", which only the others take. With
+// `valid`, each value clang doesn't take is reported as an error of the option `spelling` and makes *valid false; without
+// it (as clang's lastArgumentForMask reads a list), nothing is.
+static PredefinesSanitizers predefines_sanitizer_list(const char* spelling, const char* list, bool add, bool* valid)
+{
+    PredefinesSanitizers result = { 0 };
+    const char* name = list;
+    bool more = true;
+    while (more)
+    {
+        const char* end = strchr(name, ',');
+        const size_t length = end != 0 ? (size_t)(end - name) : strlen(name);
+        PredefinesSanitizers value = predefines_sanitizer_value(name, length);
+        value.groups &= add ? (uint16_t)~BUSTER_PREDEFINES_SANITIZER_GROUP_ALL : (uint16_t)0xffff;
+        const bool known = value.kinds != 0 || value.groups != 0;
+        if (!known && length != 0 && valid != 0)
+        {
+            fprintf(stderr, "error: unsupported argument '%.*s' to option '%s'\n", (int)length, name, spelling);
+            *valid = false;
+        }
+        result.kinds |= value.kinds;
+        result.groups |= value.groups;
+        more = end != 0;
+        name = end != 0 ? end + 1 : name;
+    }
+    return result;
+}
+
+// Appends `length` bytes of `text` to `buffer`, which keeps a NUL and stops at its capacity. Returns the new length.
+static size_t predefines_text_append(char* buffer, size_t used, size_t capacity, const char* text, size_t length)
+{
+    const size_t copied = used + length < capacity ? length : (used < capacity ? capacity - 1 - used : 0);
+    memcpy(buffer + used, text, copied);
+    buffer[used + copied] = 0;
+    return used + copied;
+}
+
+// clang's describeSanitizeArg: "-fsanitize=" and the values of `argument`'s list whose sanitizers or groups meet `mask`,
+// into `buffer`.
+static const char* predefines_sanitizer_describe(const char* argument, PredefinesSanitizers mask, char* buffer, size_t capacity)
+{
+    size_t used = predefines_text_append(buffer, 0, capacity, "-fsanitize=", 11);
+    bool first = true;
+    const char* name = strchr(argument, '=') + 1;
+    bool more = true;
+    while (more)
+    {
+        const char* end = strchr(name, ',');
+        const size_t length = end != 0 ? (size_t)(end - name) : strlen(name);
+        const PredefinesSanitizers value = predefines_sanitizers_expand(predefines_sanitizer_value(name, length));
+        if (length != 0 && ((value.kinds & mask.kinds) != 0 || (value.groups & mask.groups) != 0))
+        {
+            used = first ? used : predefines_text_append(buffer, used, capacity, ",", 1);
+            used = predefines_text_append(buffer, used, capacity, name, length);
+            first = false;
+        }
+        more = end != 0;
+        name = end != 0 ? end + 1 : name;
+    }
+    return buffer;
+}
+
+// clang's lastArgumentForMask: the last -fsanitize= that turns on one of `mask`'s sanitizers (less those a later
+// -fno-sanitize= turns off), described as predefines_sanitizer_describe does; empty when none does, as clang 23's release
+// build prints the case its assertion is about.
+static const char* predefines_sanitizer_last(const PredefinesOptions* options, uint64_t mask, char* buffer, size_t capacity)
+{
+    const char* result = "";
+    uint64_t left = mask;
+    for (uint32_t i = options->sanitize_count; i > 0 && result[0] == 0; i -= 1)
+    {
+        const char* argument = options->sanitize_arguments[i - 1];
+        const char* list = strchr(argument, '=') + 1;
+        if (predefines_starts(argument, "-fsanitize="))
+        {
+            const PredefinesSanitizers added = predefines_sanitizers_expand(predefines_sanitizer_list("-fsanitize=", list, true, 0));
+            result = (added.kinds & left) != 0 ? predefines_sanitizer_describe(argument, (PredefinesSanitizers){ .kinds = left }, buffer, capacity) : result;
+        }
+        else if (predefines_starts(argument, "-fno-sanitize="))
+        {
+            left &= ~predefines_sanitizers_expand(predefines_sanitizer_list("-fno-sanitize=", list, false, 0)).kinds;
+        }
+    }
+    return result;
+}
+
+// Whether a -fsanitize-coverage= list is the old form, one number (as LLVM's getAsInteger reads an int, its radix from
+// its prefix: 0x, 0b, 0o or a leading 0, or decimal).
+static bool predefines_coverage_number(const char* list)
+{
+    // The one value, without empty ones.
+    const char* begin = list;
+    while (*begin == ',')
+    {
+        begin += 1;
+    }
+    const char* end = begin;
+    while (*end != 0 && *end != ',')
+    {
+        end += 1;
+    }
+    const char* rest = end;
+    while (*rest == ',')
+    {
+        rest += 1;
+    }
+    const char* digits = begin + (*begin == '-');
+    const bool hexadecimal = digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X');
+    const bool binary = digits[0] == '0' && (digits[1] == 'b' || digits[1] == 'B');
+    const bool octal_prefix = digits[0] == '0' && digits[1] == 'o';
+    const bool octal = !hexadecimal && !binary && !octal_prefix && digits[0] == '0' && digits + 1 < end && digits[1] >= '0' && digits[1] <= '9';
+    const uint32_t radix = hexadecimal ? 16 : binary ? 2 : octal_prefix || octal ? 8 : 10;
+    const char* p = digits + (hexadecimal || binary || octal_prefix ? 2 : octal ? 1 : 0);
+    uint64_t value = 0;
+    bool number = p < end && *rest == 0;
+    for (; number && p < end; p += 1)
+    {
+        const char c = *p;
+        const uint32_t digit = c >= '0' && c <= '9' ? (uint32_t)(c - '0') : c >= 'a' && c <= 'z' ? (uint32_t)(c - 'a' + 10) : c >= 'A' && c <= 'Z' ? (uint32_t)(c - 'A' + 10) : 99;
+        number = digit < radix;
+        value = number && value <= (1ull << 40) ? value * radix + digit : value;
+    }
+    // It must fit an int.
+    return number && value <= (*begin == '-' ? 0x80000000ull : 0x7fffffffull);
+}
+
+// The features of a -fsanitize-coverage= or -fno-sanitize-coverage= list (empty values skipped), each clang doesn't know
+// reported as an error of the option `spelling`, which makes *valid false.
+static uint32_t predefines_coverage_list(const char* spelling, const char* list, bool* valid)
+{
+    uint32_t result = 0;
+    const char* name = list;
+    bool more = true;
+    while (more)
+    {
+        const char* end = strchr(name, ',');
+        const size_t length = end != 0 ? (size_t)(end - name) : strlen(name);
+        uint32_t feature = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_coverage_names); i += 1)
+        {
+            const bool same = strlen(predefines_coverage_names[i]) == length && memcmp(predefines_coverage_names[i], name, length) == 0;
+            feature |= same ? 1u << i : 0;
+        }
+        if (feature == 0 && length != 0)
+        {
+            fprintf(stderr, "error: unsupported argument '%.*s' to option '%s'\n", (int)length, name, spelling);
+            *valid = false;
+        }
+        result |= feature;
+        more = end != 0;
+        name = end != 0 ? end + 1 : name;
+    }
+    return result;
+}
+
+// clang's SanitizerArgs for x86_64-linux-gnu, after every option: options->sanitizers (the sanitizers on),
+// options->ubsan_feature_ignored and options->sanitize_coverage, with clang's errors. The sanitizer options are read from
+// the last back, each -fsanitize= turning on only what no later -fno-sanitize= turns off; the rules that need the whole
+// set (the incompatible pairs, -flto for CFI, ...) come after, in clang's order. clang's rules that read
+// -fsanitize-trap=, -fsanitize-minimal-runtime and -fsanitize-recover= aren't followed: they only refuse vptr and the
+// recovery modes, and change no macro or feature. Returns false after an error.
+static bool predefines_sanitizers(PredefinesOptions* options)
+{
+    bool result = true;
+    char triple[256];
+    char first[1024];
+    char second[1024];
+    const bool execute_only = options->execute_only != 0 && (strcmp(options->execute_only, "-mexecute-only") == 0 || strcmp(options->execute_only, "-mpure-code") == 0);
+    const bool cross_dso = options->cfi_cross_dso == BUSTER_PREDEFINES_ON;
+    const bool no_rtti = options->rtti == BUSTER_PREDEFINES_OFF;
+    // -fno-strict-overflow is -fwrapv and -fwrapv-pointer unless they say otherwise.
+    const bool no_strict_overflow = options->strict_overflow == BUSTER_PREDEFINES_OFF;
+    const bool wrapv = options->wrapv != 0 ? options->wrapv == BUSTER_PREDEFINES_ON : no_strict_overflow;
+    const bool wrapv_pointer = options->wrapv_pointer != 0 ? options->wrapv_pointer == BUSTER_PREDEFINES_ON : no_strict_overflow;
+    const bool lto = options->lto != 0 && (strcmp(options->lto, "full") == 0 || strcmp(options->lto, "thin") == 0);
+    // `removed`: what this option and the later ones turn off; `diagnosed`: what an error named already; `added`: every
+    // sanitizer any -fsanitize= named (with its groups' members), turned off later or not.
+    PredefinesSanitizers removed = { 0 };
+    PredefinesSanitizers diagnosed = { 0 };
+    uint64_t added = 0;
+    uint64_t kinds = 0;
+    uint64_t ignored = 0;
+    uint32_t coverage = 0;
+    for (uint32_t i = options->sanitize_count; i > 0; i -= 1)
+    {
+        const char* argument = options->sanitize_arguments[i - 1];
+        const char* list = strchr(argument, '=') + 1;
+        if (predefines_starts(argument, "-fsanitize="))
+        {
+            PredefinesSanitizers add = predefines_sanitizer_list("-fsanitize=", list, true, &result);
+            // Without -O or with -O0, object-size is off (clang warns when it is named).
+            removed.kinds |= options->optimization_flag ? 0 : BUSTER_PREDEFINES_SANITIZER(OBJECT_SIZE);
+            added |= predefines_sanitizers_expand(add).kinds;
+            add.kinds &= ~removed.kinds;
+            add.groups &= (uint16_t)~removed.groups;
+            // The rules for the sanitizers named themselves, not through a group.
+            if (options->code_model != BUSTER_PREDEFINES_CODE_MODEL_SMALL && (add.kinds & BUSTER_PREDEFINES_SANITIZER(FUNCTION) & ~diagnosed.kinds) != 0)
+            {
+                fprintf(stderr, "error: invalid argument '-fsanitize=function' only allowed with '-mcmodel=small'\n");
+                add.kinds &= ~BUSTER_PREDEFINES_SANITIZER(FUNCTION);
+                diagnosed.kinds |= BUSTER_PREDEFINES_SANITIZER(FUNCTION);
+                result = false;
+            }
+            const PredefinesSanitizers execute = { .kinds = execute_only ? add.kinds & BUSTER_PREDEFINES_SANITIZERS_NOT_EXECUTE_ONLY & ~diagnosed.kinds : 0 };
+            if (execute.kinds != 0)
+            {
+                fprintf(stderr, "error: invalid argument '%s' not allowed with '%s'\n", predefines_sanitizer_describe(argument, execute, first, sizeof(first)),
+                        options->execute_only);
+                diagnosed.kinds |= execute.kinds;
+                result = false;
+            }
+            add.kinds &= execute_only ? ~BUSTER_PREDEFINES_SANITIZERS_NOT_EXECUTE_ONLY : ~0ull;
+            if (cross_dso && (add.kinds & BUSTER_PREDEFINES_SANITIZER(CFI_MFCALL) & ~diagnosed.kinds) != 0)
+            {
+                fprintf(stderr, "error: invalid argument '-fsanitize=cfi-mfcall' not allowed with '-fsanitize-cfi-cross-dso'\n");
+                add.kinds &= ~BUSTER_PREDEFINES_SANITIZER(CFI_MFCALL);
+                diagnosed.kinds |= BUSTER_PREDEFINES_SANITIZER(CFI_MFCALL);
+                result = false;
+            }
+            const PredefinesSanitizers unsupported = {
+                .kinds = add.kinds & ~BUSTER_PREDEFINES_SANITIZERS_SUPPORTED & ~diagnosed.kinds,
+                .groups = (uint16_t)(add.groups & ~BUSTER_PREDEFINES_SANITIZER_GROUPS_SUPPORTED & ~diagnosed.groups),
+            };
+            if (unsupported.kinds != 0 || unsupported.groups != 0)
+            {
+                predefines_target_triple(options, triple, sizeof(triple));
+                fprintf(stderr, "error: unsupported option '%s' for target '%s'\n", predefines_sanitizer_describe(argument, unsupported, first, sizeof(first)), triple);
+                diagnosed.kinds |= unsupported.kinds;
+                diagnosed.groups |= unsupported.groups;
+                result = false;
+            }
+            add.kinds &= BUSTER_PREDEFINES_SANITIZERS_SUPPORTED;
+            add.groups &= BUSTER_PREDEFINES_SANITIZER_GROUPS_SUPPORTED;
+            if ((add.kinds & BUSTER_PREDEFINES_SANITIZER(VPTR)) != 0 && no_rtti)
+            {
+                fprintf(stderr, "error: invalid argument '-fsanitize=vptr' not allowed with '-fno-rtti'\n");
+                removed.kinds |= BUSTER_PREDEFINES_SANITIZER(VPTR);
+                result = false;
+            }
+            // Then with the groups' members, which the same rules drop silently. -fwrapv (or -fno-strict-overflow) keeps
+            // -fsanitize=undefined from checking signed overflow, and -fwrapv-pointer pointer overflow.
+            const bool undefined = (add.groups & BUSTER_PREDEFINES_SANITIZER_GROUP_UNDEFINED) != 0;
+            uint64_t on = predefines_sanitizers_expand(add).kinds & ~removed.kinds & BUSTER_PREDEFINES_SANITIZERS_SUPPORTED;
+            on &= execute_only ? ~BUSTER_PREDEFINES_SANITIZERS_NOT_EXECUTE_ONLY : ~0ull;
+            on &= cross_dso ? ~BUSTER_PREDEFINES_SANITIZER(CFI_MFCALL) : ~0ull;
+            on &= undefined && wrapv ? ~BUSTER_PREDEFINES_SANITIZER(SIGNED_INTEGER_OVERFLOW) : ~0ull;
+            on &= undefined && wrapv_pointer ? ~BUSTER_PREDEFINES_SANITIZER(POINTER_OVERFLOW) : ~0ull;
+            on |= (on & BUSTER_PREDEFINES_SANITIZER(FUZZER)) != 0 ? BUSTER_PREDEFINES_SANITIZER(FUZZER_NO_LINK) : 0;
+            coverage |= (on & BUSTER_PREDEFINES_SANITIZER(FUZZER_NO_LINK)) != 0 ? BUSTER_PREDEFINES_COVERAGE_FUZZER : 0;
+            kinds |= on;
+        }
+        else if (predefines_starts(argument, "-fno-sanitize="))
+        {
+            const PredefinesSanitizers remove = predefines_sanitizers_expand(predefines_sanitizer_list("-fno-sanitize=", list, false, &result));
+            removed.kinds |= remove.kinds;
+            removed.groups |= remove.groups;
+        }
+        else if (predefines_starts(argument, "-fsanitize-ignore-for-ubsan-feature="))
+        {
+            ignored |= predefines_sanitizers_expand(predefines_sanitizer_list("-fsanitize-ignore-for-ubsan-feature=", list, false, &result)).kinds;
+        }
+    }
+    // Linux turns no sanitizer on by default. Without RTTI, vptr is off.
+    kinds &= no_rtti ? ~BUSTER_PREDEFINES_SANITIZER(VPTR) : ~0ull;
+    if ((kinds & BUSTER_PREDEFINES_SANITIZERS_CFI) != 0 && !lto)
+    {
+        fprintf(stderr, "error: invalid argument '%s' only allowed with '-flto'\n",
+                predefines_sanitizer_last(options, kinds & BUSTER_PREDEFINES_SANITIZERS_CFI, first, sizeof(first)));
+        result = false;
+    }
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(predefines_sanitizer_conflicts); c += 1)
+    {
+        const uint64_t group = predefines_sanitizer_conflicts[c].group;
+        const uint64_t incompatible = (kinds & group) != 0 ? kinds & predefines_sanitizer_conflicts[c].incompatible : 0;
+        if (incompatible != 0)
+        {
+            fprintf(stderr, "error: invalid argument '%s' not allowed with '%s'\n", predefines_sanitizer_last(options, group, first, sizeof(first)),
+                    predefines_sanitizer_last(options, incompatible, second, sizeof(second)));
+            kinds &= ~incompatible;
+            result = false;
+        }
+    }
+    // kcfi and CFI ever named together, whatever turned them off.
+    if ((added & BUSTER_PREDEFINES_SANITIZER(KCFI)) != 0 && (added & BUSTER_PREDEFINES_SANITIZERS_CFI) != 0)
+    {
+        fprintf(stderr, "error: invalid argument '-fsanitize=kcfi' not allowed with '%s'\n",
+                predefines_sanitizer_last(options, BUSTER_PREDEFINES_SANITIZERS_CFI, first, sizeof(first)));
+        result = false;
+    }
+    // Coverage, in command-line order: a number (the old form) turns it off, and so does a sanitizer that doesn't
+    // support it, whenever a -fsanitize-coverage= list comes.
+    for (uint32_t i = 0; i < options->sanitize_count; i += 1)
+    {
+        const char* argument = options->sanitize_arguments[i];
+        const char* list = strchr(argument, '=') + 1;
+        const bool on = predefines_starts(argument, "-fsanitize-coverage=");
+        if (on && predefines_coverage_number(list))
+        {
+            coverage = 0;
+        }
+        else if (on)
+        {
+            coverage |= predefines_coverage_list("-fsanitize-coverage=", list, &result);
+            coverage = (added & ~removed.kinds & BUSTER_PREDEFINES_SANITIZERS_WITHOUT_COVERAGE) != 0 ? 0 : coverage;
+        }
+        else if (predefines_starts(argument, "-fno-sanitize-coverage="))
+        {
+            coverage &= ~predefines_coverage_list("-fno-sanitize-coverage=", list, &result);
+        }
+    }
+    static const struct
+    {
+        uint32_t features;
+        const char* first;
+        const char* second;
+    } exclusive[] = {
+        { BUSTER_PREDEFINES_COVERAGE_FUNC | BUSTER_PREDEFINES_COVERAGE_BB, "func", "bb" },
+        { BUSTER_PREDEFINES_COVERAGE_FUNC | BUSTER_PREDEFINES_COVERAGE_EDGE, "func", "edge" },
+        { BUSTER_PREDEFINES_COVERAGE_BB | BUSTER_PREDEFINES_COVERAGE_EDGE, "bb", "edge" },
+    };
+    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(exclusive); e += 1)
+    {
+        if ((coverage & exclusive[e].features) == exclusive[e].features)
+        {
+            fprintf(stderr, "error: invalid argument '-fsanitize-coverage=%s' not allowed with '-fsanitize-coverage=%s'\n", exclusive[e].first, exclusive[e].second);
+            result = false;
+        }
+    }
+    // The tracing features without a kind of coverage imply edge coverage, and stack-depth function coverage.
+    const bool kind = (coverage & (BUSTER_PREDEFINES_COVERAGE_FUNC | BUSTER_PREDEFINES_COVERAGE_BB | BUSTER_PREDEFINES_COVERAGE_EDGE)) != 0;
+    coverage |= !kind && (coverage & BUSTER_PREDEFINES_COVERAGE_IMPLY_EDGE) != 0 ? BUSTER_PREDEFINES_COVERAGE_EDGE : 0;
+    coverage |= !kind && (coverage & BUSTER_PREDEFINES_COVERAGE_STACK_DEPTH) != 0 ? BUSTER_PREDEFINES_COVERAGE_FUNC : 0;
+    // pointer-compare and pointer-subtract need address, ever named.
+    const uint64_t pointers = BUSTER_PREDEFINES_SANITIZER(POINTER_COMPARE) | BUSTER_PREDEFINES_SANITIZER(POINTER_SUBTRACT);
+    if ((added & BUSTER_PREDEFINES_SANITIZER(ADDRESS)) == 0 && (added & pointers & ~removed.kinds) != 0)
+    {
+        fprintf(stderr, "error: invalid argument '%s' only allowed with '-fsanitize=address'\n", predefines_sanitizer_last(options, pointers, first, sizeof(first)));
+        result = false;
+    }
+    // The CFI checks of classes need a -fvisibility=.
+    if ((kinds & BUSTER_PREDEFINES_SANITIZERS_CFI_CLASSES) != 0 && !options->visibility_given)
+    {
+        fprintf(stderr, "error: invalid argument '%s' only allowed with '-fvisibility='\n",
+                predefines_sanitizer_last(options, kinds & BUSTER_PREDEFINES_SANITIZERS_CFI_CLASSES, first, sizeof(first)));
+        result = false;
+    }
+    options->sanitizers = kinds;
+    options->ubsan_feature_ignored = ignored;
+    options->sanitize_coverage = (coverage & BUSTER_PREDEFINES_COVERAGE_INSTRUMENTING) != 0;
+    return result;
+}
+
+// The options clang's driver reads only the last of, after every option (an earlier invalid one doesn't count): -mtune,
+// -mfpmath=, -mcmodel=, -mabi=, -fveclib=, -O, -fgnuc-version=, -fcf-protection=, -fopenmp='s runtime, -flto= and
+// -fvisibility=. Sets the values they give (fpmath, code_model, openmp) and reports clang's errors; false after one.
+static bool predefines_finish_options(PredefinesOptions* options)
+{
+    bool result = true;
+    // The target triple, for the messages that name it.
+    char triple[256];
+    if (options->mtune != 0 && !predefines_tune_valid(options->mtune))
+    {
+        fprintf(stderr, "error: unknown target CPU '%s'\n", options->mtune);
+        result = false;
+    }
+    const char* fpmath = options->fpmath_name;
+    options->fpmath = fpmath == 0                 ? 0
+                      : strcmp(fpmath, "sse") == 0 ? BUSTER_PREDEFINES_FPMATH_SSE
+                      : strcmp(fpmath, "387") == 0 ? BUSTER_PREDEFINES_FPMATH_387
+                                                   : 0xff;
+    if (options->fpmath == 0xff)
+    {
+        fprintf(stderr, "error: unknown FP unit '%s'\n", fpmath);
+        result = false;
+    }
+    const char* model = options->code_model_name;
+    options->code_model = model == 0 || strcmp(model, "small") == 0 ? BUSTER_PREDEFINES_CODE_MODEL_SMALL
+                          : strcmp(model, "kernel") == 0             ? BUSTER_PREDEFINES_CODE_MODEL_KERNEL
+                          : strcmp(model, "medium") == 0             ? BUSTER_PREDEFINES_CODE_MODEL_MEDIUM
+                          : strcmp(model, "large") == 0              ? BUSTER_PREDEFINES_CODE_MODEL_LARGE
+                                                                     : 0xff;
+    if (options->code_model == 0xff)
+    {
+        predefines_target_triple(options, triple, sizeof(triple));
+        fprintf(stderr, "error: unsupported argument '%s' to option '-mcmodel=' for target '%s'\n", model, triple);
+        result = false;
+    }
+    if (options->abi != 0 && strcmp(options->abi, "sysv") != 0)
+    {
+        predefines_target_triple(options, triple, sizeof(triple));
+        fprintf(stderr, "error: unsupported option '-mabi=' for target '%s'\n", triple);
+        result = false;
+    }
+    // The vector libraries: ArmPL and SLEEF are refused for x86-64 (naming the triple's architecture), and a name clang
+    // doesn't know is an invalid value.
+    static const char* const veclibs[] = { "Accelerate", "libmvec", "MASSV", "SVML", "SLEEF", "Darwin_libsystem_m", "ArmPL", "AMDLIBM", "none" };
+    const char* veclib = options->veclib;
+    bool known = veclib == 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(veclibs) && !known; i += 1)
+    {
+        known = strcmp(veclib, veclibs[i]) == 0;
+    }
+    if (veclib != 0 && (strcmp(veclib, "SLEEF") == 0 || strcmp(veclib, "ArmPL") == 0))
+    {
+        predefines_target_triple(options, triple, sizeof(triple));
+        fprintf(stderr, "error: unsupported option '%s' for target '%.*s'\n", veclib, (int)(strchr(triple, '-') - triple), triple);
+        result = false;
+    }
+    else if (!known)
+    {
+        fprintf(stderr, "error: invalid value '%s' in '-fveclib=%s'\n", veclib, veclib);
+        result = false;
+    }
+    if (options->optimization_invalid != 0)
+    {
+        fprintf(stderr, "error: invalid integral value '%s' in '%s'\n", options->optimization_invalid + 2, options->optimization_invalid);
+        result = false;
+    }
+    if (options->gnuc_invalid != 0)
+    {
+        fprintf(stderr, "error: invalid value '%s' in '%s'\n", options->gnuc_invalid + 15, options->gnuc_invalid);
+        result = false;
+    }
+    if (options->cf_protection_invalid != 0)
+    {
+        fprintf(stderr, "error: invalid value '%s' in '%s'\n", options->cf_protection_invalid + 16, options->cf_protection_invalid);
+        result = false;
+    }
+    // OpenMP's runtime is checked only when OpenMP is on. libgomp's gets no _OPENMP from clang: only libomp's (and its
+    // old name, libiomp5's) do.
+    const char* runtime = options->openmp_runtime != 0 ? options->openmp_runtime : "libomp";
+    const bool openmp_runtime = strcmp(runtime, "libomp") == 0 || strcmp(runtime, "libiomp5") == 0;
+    if (options->openmp_enabled && !openmp_runtime && strcmp(runtime, "libgomp") != 0)
+    {
+        fprintf(stderr, "error: unsupported argument '%s' to option '-fopenmp='\n", runtime);
+        result = false;
+    }
+    options->openmp = options->openmp_enabled && openmp_runtime;
+    const char* lto = options->lto;
+    if (lto != 0 && strcmp(lto, "full") != 0 && strcmp(lto, "thin") != 0 && strcmp(lto, "none") != 0)
+    {
+        fprintf(stderr, "error: unsupported argument '%s' to option '-flto='\n", lto);
+        result = false;
+    }
+    const char* visibility = options->visibility;
+    if (visibility != 0 && strcmp(visibility, "default") != 0 && strcmp(visibility, "hidden") != 0 && strcmp(visibility, "internal") != 0 &&
+        strcmp(visibility, "protected") != 0)
+    {
+        fprintf(stderr, "error: invalid value '%s' in '-fvisibility=%s'\n", visibility, visibility);
+        result = false;
+    }
+    return result;
+}
+
+// What clang's driver decides from the whole command line, after every option: the target, the options it reads only the
+// last of, the -flto mode, -fvisibility='s value and the sanitizers (predefines_sanitizers). Reports clang's errors and
+// returns false after one.
+static __attribute__((unused)) bool predefines_finish(PredefinesOptions* options)
+{
+    bool result = options->target == 0 || predefines_target_valid(options->target);
+    if (!result)
+    {
+        fprintf(stderr, "error: unsupported target '%s': buster predefines for x86_64-linux-gnu only\n", options->target);
+    }
+    else
+    {
+        result = predefines_finish_options(options);
+        result = predefines_sanitizers(options) && result;
+    }
+    return result;
+}
+
+// clang's sanitizer features (Features.def), which the oracle's mode answers from the sanitizers predefines_finish left
+// on: 1 when `name` is one of them and on, and 0 otherwise.
+static __attribute__((unused)) uint32_t predefines_sanitizer_feature(const PredefinesOptions* options, const uint8_t* name, uint32_t length)
+{
+    static const struct
+    {
+        const char* name;
+        uint64_t kinds;
+    } features[] = {
+        { "address_sanitizer", BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(KERNEL_ADDRESS) },
+        { "leak_sanitizer", BUSTER_PREDEFINES_SANITIZER(LEAK) },
+        { "hwaddress_sanitizer", BUSTER_PREDEFINES_SANITIZER(HWADDRESS) | BUSTER_PREDEFINES_SANITIZER(KERNEL_HWADDRESS) },
+        { "memtag_stack", BUSTER_PREDEFINES_SANITIZER(MEMTAG_STACK) },
+        { "memtag_heap", BUSTER_PREDEFINES_SANITIZER(MEMTAG_HEAP) },
+        { "memtag_globals", BUSTER_PREDEFINES_SANITIZER(MEMTAG_GLOBALS) },
+        { "alignment_sanitizer", BUSTER_PREDEFINES_SANITIZER(ALIGNMENT) },
+        { "bool_sanitizer", BUSTER_PREDEFINES_SANITIZER(BOOL) },
+        { "builtin_sanitizer", BUSTER_PREDEFINES_SANITIZER(BUILTIN) },
+        { "array_bounds_sanitizer", BUSTER_PREDEFINES_SANITIZER(ARRAY_BOUNDS) },
+        { "enum_sanitizer", BUSTER_PREDEFINES_SANITIZER(ENUM) },
+        { "float_cast_overflow_sanitizer", BUSTER_PREDEFINES_SANITIZER(FLOAT_CAST_OVERFLOW) },
+        { "integer_divide_by_zero_sanitizer", BUSTER_PREDEFINES_SANITIZER(INTEGER_DIVIDE_BY_ZERO) },
+        { "nonnull_attribute_sanitizer", BUSTER_PREDEFINES_SANITIZER(NONNULL_ATTRIBUTE) },
+        { "null_sanitizer", BUSTER_PREDEFINES_SANITIZER(NULL_POINTER) },
+        { "object_size_sanitizer", BUSTER_PREDEFINES_SANITIZER(OBJECT_SIZE) },
+        { "pointer_overflow_sanitizer", BUSTER_PREDEFINES_SANITIZER(POINTER_OVERFLOW) },
+        { "return_sanitizer", BUSTER_PREDEFINES_SANITIZER(RETURN) },
+        { "returns_nonnull_attribute_sanitizer", BUSTER_PREDEFINES_SANITIZER(RETURNS_NONNULL_ATTRIBUTE) },
+        { "shift_base_sanitizer", BUSTER_PREDEFINES_SANITIZER(SHIFT_BASE) },
+        { "shift_exponent_sanitizer", BUSTER_PREDEFINES_SANITIZER(SHIFT_EXPONENT) },
+        { "shift_sanitizer", BUSTER_PREDEFINES_SANITIZERS_SHIFT },
+        { "signed_integer_overflow_sanitizer", BUSTER_PREDEFINES_SANITIZER(SIGNED_INTEGER_OVERFLOW) },
+        { "unreachable_sanitizer", BUSTER_PREDEFINES_SANITIZER(UNREACHABLE) },
+        { "vla_bound_sanitizer", BUSTER_PREDEFINES_SANITIZER(VLA_BOUND) },
+        { "function_sanitizer", BUSTER_PREDEFINES_SANITIZER(FUNCTION) },
+        { "realtime_sanitizer", BUSTER_PREDEFINES_SANITIZER(REALTIME) },
+        { "numerical_stability_sanitizer", BUSTER_PREDEFINES_SANITIZER(NUMERICAL) },
+        { "memory_sanitizer", BUSTER_PREDEFINES_SANITIZER(MEMORY) | BUSTER_PREDEFINES_SANITIZER(KERNEL_MEMORY) },
+        { "type_sanitizer", BUSTER_PREDEFINES_SANITIZER(TYPE) },
+        { "thread_sanitizer", BUSTER_PREDEFINES_SANITIZER(THREAD) },
+        { "dataflow_sanitizer", BUSTER_PREDEFINES_SANITIZER(DATAFLOW) },
+        { "scudo", BUSTER_PREDEFINES_SANITIZER(SCUDO) },
+        { "cfi_sanitizer", BUSTER_PREDEFINES_SANITIZERS_CFI },
+        { "cfi_cast_strict_sanitizer", BUSTER_PREDEFINES_SANITIZER(CFI_CAST_STRICT) },
+        { "cfi_derived_cast_sanitizer", BUSTER_PREDEFINES_SANITIZER(CFI_DERIVED_CAST) },
+        { "cfi_icall_sanitizer", BUSTER_PREDEFINES_SANITIZER(CFI_ICALL) },
+        { "cfi_mfcall_sanitizer", BUSTER_PREDEFINES_SANITIZER(CFI_MFCALL) },
+        { "cfi_unrelated_cast_sanitizer", BUSTER_PREDEFINES_SANITIZER(CFI_UNRELATED_CAST) },
+        { "cfi_nvcall_sanitizer", BUSTER_PREDEFINES_SANITIZER(CFI_NVCALL) },
+        { "cfi_vcall_sanitizer", BUSTER_PREDEFINES_SANITIZER(CFI_VCALL) },
+        { "kcfi", BUSTER_PREDEFINES_SANITIZER(KCFI) },
+        { "kcfi_arity", BUSTER_PREDEFINES_SANITIZER(KCFI) },
+        { "safe_stack", BUSTER_PREDEFINES_SANITIZER(SAFE_STACK) },
+        { "shadow_call_stack", BUSTER_PREDEFINES_SANITIZER(SHADOW_CALL_STACK) },
+    };
+    // undefined_behavior_sanitizer: one of the undefined behavior checks -fsanitize-ignore-for-ubsan-feature= doesn't
+    // name; coverage_sanitizer: coverage instrumentation.
+    const bool undefined = length == 28 && memcmp(name, "undefined_behavior_sanitizer", 28) == 0;
+    const bool coverage = length == 18 && memcmp(name, "coverage_sanitizer", 18) == 0;
+    uint32_t result = undefined ? (options->sanitizers & BUSTER_PREDEFINES_SANITIZERS_UNDEFINED & ~options->ubsan_feature_ignored) != 0
+                      : coverage ? options->sanitize_coverage
+                                 : 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(features); i += 1)
+    {
+        const bool same = strlen(features[i].name) == length && memcmp(features[i].name, name, length) == 0;
+        result |= same && (options->sanitizers & features[i].kinds) != 0;
     }
     return result;
 }
@@ -2000,7 +2929,7 @@ static __attribute__((unused)) uint32_t predefines_text(const PredefinesOptions*
     // exceptions or debug information.
     const bool asynchronous = options->asynchronous_unwind_tables != 0 ? options->asynchronous_unwind_tables == BUSTER_PREDEFINES_ON : !freestanding;
     const bool unwind = options->unwind_tables == BUSTER_PREDEFINES_ON;
-    const bool cfi_default = options->exceptions || unwind || asynchronous || options->debug;
+    const bool cfi_default = options->exceptions || unwind || asynchronous || options->debug || options->debug_modules;
     const bool cfi = options->dwarf2_cfi_asm != 0 ? options->dwarf2_cfi_asm == BUSTER_PREDEFINES_ON : cfi_default;
     length = cfi ? predefines_append(buffer, length, capacity, "#define __GCC_HAVE_DWARF2_CFI_ASM 1\n") : length;
     // Exceptions.
@@ -2015,10 +2944,14 @@ static __attribute__((unused)) uint32_t predefines_text(const PredefinesOptions*
         snprintf(line, sizeof(line), "#define __CET__ %u\n", options->cf_protection);
         length = predefines_append(buffer, length, capacity, line);
     }
-    length = (options->sanitize & BUSTER_PREDEFINES_SANITIZE_ADDRESS) != 0 ? predefines_append(buffer, length, capacity, "#define __SANITIZE_ADDRESS__ 1\n") : length;
-    length = (options->sanitize & BUSTER_PREDEFINES_SANITIZE_HWADDRESS) != 0 ? predefines_append(buffer, length, capacity, "#define __SANITIZE_HWADDRESS__ 1\n") : length;
-    length = (options->sanitize & BUSTER_PREDEFINES_SANITIZE_THREAD) != 0 ? predefines_append(buffer, length, capacity, "#define __SANITIZE_THREAD__ 1\n") : length;
-    length = (options->sanitize & BUSTER_PREDEFINES_SANITIZE_ALLOC_TOKEN) != 0 ? predefines_append(buffer, length, capacity, "#define __SANITIZE_ALLOC_TOKEN__ 1\n") : length;
+    // The sanitizers' macros: a kernel's sanitizer and its user space one share theirs.
+    const uint64_t sanitizers = options->sanitizers;
+    const uint64_t address = BUSTER_PREDEFINES_SANITIZER(ADDRESS) | BUSTER_PREDEFINES_SANITIZER(KERNEL_ADDRESS);
+    const uint64_t hwaddress = BUSTER_PREDEFINES_SANITIZER(HWADDRESS) | BUSTER_PREDEFINES_SANITIZER(KERNEL_HWADDRESS);
+    length = (sanitizers & address) != 0 ? predefines_append(buffer, length, capacity, "#define __SANITIZE_ADDRESS__ 1\n") : length;
+    length = (sanitizers & hwaddress) != 0 ? predefines_append(buffer, length, capacity, "#define __SANITIZE_HWADDRESS__ 1\n") : length;
+    length = (sanitizers & BUSTER_PREDEFINES_SANITIZER(THREAD)) != 0 ? predefines_append(buffer, length, capacity, "#define __SANITIZE_THREAD__ 1\n") : length;
+    length = (sanitizers & BUSTER_PREDEFINES_SANITIZER(ALLOC_TOKEN)) != 0 ? predefines_append(buffer, length, capacity, "#define __SANITIZE_ALLOC_TOKEN__ 1\n") : length;
     length = options->blocks ? predefines_append(buffer, length, capacity, "#define __block __attribute__((__blocks__(byref)))\n#define __BLOCKS__ 1\n") : length;
     if (options->openmp)
     {

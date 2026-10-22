@@ -962,6 +962,13 @@ static const PPTestCase pp_test_cases[] = {
         .expected = "builtin_names raw_names attribute_and_target",
     },
     {
+        .name = "__has_constexpr_builtin's name is raw, a macro's too",
+        .source = "#define CLZ __builtin_clz\n__has_constexpr_builtin(CLZ)\n__has_constexpr_builtin(__builtin_clz)\n#define __builtin_clz 0\n"
+                  "__has_constexpr_builtin(__builtin_clz)\n",
+        .standard = "gnu17",
+        .expected = "0 1 1",
+    },
+    {
         .name = "the oracle recognizes ext_vector_type with either attribute spelling",
         .source = "#if __has_attribute(ext_vector_type) && __has_attribute(__ext_vector_type__)\nvector_attribute\n#endif\n",
         .standard = "gnu17",
@@ -1646,6 +1653,145 @@ static bool pp_test_features(const char* directory)
     return result && failures == 0;
 }
 
+// One option set (words separated by spaces) for `path`, against clang with the same options: the queries in the
+// oracle's mode, which answer from them. False when the answers differ or either side refuses the options.
+static bool pp_test_option_set(const char* directory, const char* path, const char* set)
+{
+    char words[512];
+    char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
+    int count = 0;
+    snprintf(words, sizeof(words), "%s", set);
+    for (char* word = strtok(words, " "); word != 0 && count < BUSTER_PP_TEST_MAX_ARGUMENTS; word = strtok(0, " "))
+    {
+        arguments[count] = word;
+        count += 1;
+    }
+    arguments[count] = (char*)path;
+    Arena arena = arena_reserve(1ull << 20);
+    PPOptions options;
+    const char* input;
+    const char* output;
+    bool markers;
+    uint64_t tokens = 0;
+    bool result = pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
+    options.clang_features = true;
+    result = result && pp_test_file(count, arguments, &options, path, true, directory, &tokens);
+    if (!result)
+    {
+        printf("feature options: the answers differ from clang's with %s\n", set);
+    }
+    arena_release(&arena);
+    return result;
+}
+
+// The queries clang answers from the options, against clang's: __has_feature and __has_extension of every feature name
+// under sanitizer options (the sanitizers they leave on, c_predefines.c's predefines_sanitizer_feature), and the four
+// __is_target_* of names around x86_64-linux-gnu's (in other cases, with prefixes, and other ABIs') under each kind of
+// target triple.
+static bool pp_test_option_features(const char* directory)
+{
+    static const char* const sanitizer_sets[] = {
+        "-fsanitize=address",
+        "-fsanitize=kernel-address",
+        "-fsanitize=hwaddress",
+        "-fsanitize=kernel-hwaddress",
+        "-fsanitize=thread",
+        "-fsanitize=memory",
+        "-fsanitize=kernel-memory",
+        "-fsanitize=leak",
+        "-fsanitize=address,leak",
+        "-fsanitize=address -fno-sanitize=kernel-address",
+        "-fsanitize=address -fsanitize=thread -fno-sanitize=address",
+        "-fsanitize=undefined",
+        "-fsanitize=undefined -fwrapv",
+        "-fsanitize=undefined -fno-strict-overflow -fno-wrapv",
+        "-fsanitize=undefined -fwrapv-pointer",
+        "-fsanitize=signed-integer-overflow -fwrapv",
+        "-fsanitize=undefined -fsanitize-ignore-for-ubsan-feature=alignment",
+        "-fsanitize=alignment -fsanitize-ignore-for-ubsan-feature=undefined",
+        "-fsanitize=undefined -mexecute-only",
+        "-fsanitize=undefined-trap -O1",
+        "-fsanitize=object-size",
+        "-fsanitize=object-size -O2",
+        "-fsanitize=object-size -O00",
+        "-fsanitize=integer,nullability,implicit-conversion,bounds,float-divide-by-zero",
+        "-fsanitize=fuzzer",
+        "-fsanitize=fuzzer -fno-sanitize=fuzzer-no-link",
+        "-fsanitize=fuzzer -fsanitize-coverage=0",
+        "-fsanitize-coverage=trace-pc-guard",
+        "-fsanitize-coverage=stack-depth",
+        "-fsanitize-coverage=pc-table,trace-div,trace-gep",
+        "-fsanitize-coverage=trace-pc-guard -fno-sanitize-coverage=trace-pc-guard",
+        "-fsanitize=scudo -fsanitize-coverage=trace-pc-guard",
+        "-fsanitize-coverage=trace-pc-guard -fsanitize=scudo -fno-sanitize=scudo",
+        "-fsanitize=cfi -flto -fvisibility=hidden",
+        "-fsanitize=cfi -flto -fvisibility=hidden -fsanitize-cfi-cross-dso",
+        "-fsanitize=cfi-icall,cfi-cast-strict -flto",
+        "-fsanitize=kcfi",
+        "-fsanitize=safe-stack",
+        "-fsanitize=shadow-call-stack",
+        "-fsanitize=dataflow",
+        "-fsanitize=numerical",
+        "-fsanitize=type",
+        "-fsanitize=realtime",
+        "-fsanitize=alloc-token",
+        "-fsanitize=vptr",
+    };
+    static const char* const target_sets[] = {
+        "-std=gnu17",
+        "--target=x86_64-pc-linux-gnu",
+        "--target=x86_64-linux-gnu",
+        "--target=x86_64--linux-gnu",
+        "--target=x86_64-none-linux-gnu",
+        "--target=x86_64-PC-linux-gnu",
+        "--target=amd64-Foo-linux-gnu",
+        "-target x86_64-unknown-linux-gnu",
+    };
+    static const char target_names[] =
+        "x86_64 X86_64 x86_64h x86_64_lfi AMD64 amd64 i386 x86 x86_64x linux Linux LINUX linux2 linuxfoo lin darwin macos gnu GNU gnu2 gnux32 gnuabi "
+        "gnuabi64 gnueabi gnueabihf gnuf gnuf32 gnus gnusf2 gnut64 gnu_ilp32 musl unknown Unknown pc PC Pc none foo Foo apple";
+    char features[4096];
+    char targets[4096];
+    snprintf(features, sizeof(features), "%s/option_features.c", directory);
+    snprintf(targets, sizeof(targets), "%s/option_targets.c", directory);
+    FILE* file = fopen(features, "w");
+    bool result = file != 0;
+    if (file != 0)
+    {
+        fputs("#define S(x) #x\n", file);
+        pp_test_write_names(file, pp_test_feature_names, "__has_feature", "__has_extension");
+        result = fclose(file) == 0 && result;
+    }
+    file = fopen(targets, "w");
+    result &= file != 0;
+    for (const char* at = target_names; file != 0 && *at != 0;)
+    {
+        const char* end = strchr(at, ' ');
+        const int length = (int)(end != 0 ? end - at : (long)strlen(at));
+        fprintf(file, "%.*s: __is_target_arch(%.*s) __is_target_vendor(%.*s) __is_target_os(%.*s) __is_target_environment(%.*s)\n", length, at, length, at,
+                length, at, length, at, length, at);
+        at += length + (end != 0);
+    }
+    if (file != 0)
+    {
+        result = fclose(file) == 0 && result;
+    }
+    uint32_t failures = 0;
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(sanitizer_sets); i += 1)
+    {
+        failures += !pp_test_option_set(directory, features, sanitizer_sets[i]);
+    }
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(target_sets); i += 1)
+    {
+        failures += !pp_test_option_set(directory, targets, target_sets[i]);
+    }
+    unlink(features);
+    unlink(targets);
+    printf("feature options: %u of %u sanitizer and target option sets differ from clang's answers\n", failures,
+           (uint32_t)(BUSTER_ARRAY_LENGTH(sanitizer_sets) + BUSTER_ARRAY_LENGTH(target_sets)));
+    return result && failures == 0;
+}
+
 // __TIMESTAMP__ is the modification time of the file it is read in (local time, here UTC), or SOURCE_DATE_EPOCH's time
 // when that is set: a file and the header it includes, written with times of their own, give each theirs (both kernels,
 // and with --clang clang too). The environment is restored after.
@@ -1753,14 +1899,16 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
 // Outside the oracle's mode, the feature queries answer what buster implements (pp_implemented_*): of builtins only the
 // preprocessor's __is_target_*, and no attribute, feature, extension or constexpr builtin; __has_warning answers as
 // clang does in both modes, and so do the queries that aren't about the compiler (__has_include, __is_identifier,
-// __is_target_*). With --clang-features, the same line gives clang's answers.
+// __is_target_*). With --clang-features, the same lines give clang's answers. Neither expands __has_constexpr_builtin's
+// name, a macro's or not.
 static bool pp_test_implemented_features(const char* directory)
 {
     static const char source[] =
         "A __has_builtin(__builtin_expect) __has_constexpr_builtin(__builtin_clz) __has_feature(c_static_assert) __has_extension(c_atomic) "
         "__has_attribute(packed) __has_attribute(__packed__) __has_c_attribute(gnu::packed) __has_warning(\"-Wreserved-identifier\") "
-        "__is_identifier(int) __is_target_arch(x86_64)\n";
-    static const char* const expected[2] = { "A 0 0 0 0 0 0 0 1 0 1\n", "A 1 1 1 1 1 1 1 1 0 1\n" };
+        "__is_identifier(int) __is_target_arch(x86_64)\n"
+        "#define CLZ __builtin_clz\n#define __builtin_clz 0\nB __has_constexpr_builtin(CLZ) __has_constexpr_builtin(__builtin_clz)\n";
+    static const char* const expected[2] = { "A 0 0 0 0 0 0 0 1 0 1 B 0 0\n", "A 1 1 1 1 1 1 1 1 0 1 B 0 1\n" };
     char path[4200];
     snprintf(path, sizeof(path), "%s/case.c", directory);
     pp_test_write_file(path, source);
@@ -1791,9 +1939,10 @@ static bool pp_test_implemented_features(const char* directory)
     }
     // The preprocessor's own builtins are what __has_builtin answers 1 for by default.
     static const char* const own[] = { "__is_target_arch", "__is_target_vendor", "__is_target_os", "__is_target_environment" };
+    const PPOptions defaults = { .language = { .standard = 2017, .gnu = true } };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(own); i += 1)
     {
-        result &= pp_feature(PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)own[i], (uint32_t)strlen(own[i]), 2017, false) == 1;
+        result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)own[i], (uint32_t)strlen(own[i])) == 1;
     }
     printf("feature answers: %s (what buster implements by default, clang's with --clang-features)\n", result ? "as expected" : "WRONG");
     return result;
@@ -1882,6 +2031,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             passed_all &= predefines_test_run(directory, seed);
             passed_all &= pp_test_keywords(directory);
             passed_all &= pp_test_features(directory);
+            passed_all &= pp_test_option_features(directory);
         }
     }
     else if (passed_all)

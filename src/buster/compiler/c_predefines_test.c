@@ -1036,6 +1036,44 @@ static const char* const predefines_test_option_sets[] = {
     "-march=znver5 -mno-sse4.2 -mpopcnt", "-msse4", "-mno-sse4", "-msse4 -mno-sse4", "-m80387 -mno-80387", "-mapxf", "-mno-apxf", "-mapxf -mno-apxf",
     "-mapx-features=egpr,ndd", "-mapxf -mno-apx-features=jmpabs", "-mapx-features=bogus", "-mapx-inline-asm-use-gpr32", "-mapxf -mapx-inline-asm-use-gpr32",
     "-mapx-features=egpr -mapx-inline-asm-use-gpr32", "-march=native -mno-avx512f", "-mno-avx512f -march=native", "-march=znver4 -march=znver5",
+    // The sanitizers' rules past the pairs predefines_test_options generates: clang's driver reads them after every
+    // option, so a later -fno-sanitize= resolves a pair, and each sanitizer keeps its own state.
+    "-fsanitize=address -fsanitize=thread -fno-sanitize=address", "-fsanitize=address -fno-sanitize=kernel-address",
+    "-fsanitize=hwaddress -fno-sanitize=kernel-hwaddress", "-fsanitize=thread,address -fno-sanitize=address -fsanitize=memory",
+    "-fsanitize=address,kernel-address,thread", "-fno-sanitize=address -fsanitize=address", "-fsanitize=", "-fsanitize=address,", "-fno-sanitize=",
+    "-fsanitize=all", "-fsanitize=all -fno-sanitize=all", "-fsanitize=address,all", "-fsanitize=bogus", "-fno-sanitize=bogus", "-fsanitize=Address",
+    "-fsanitize=memtag", "-fsanitize=memtag-stack", "-fsanitize=memtag -fno-sanitize=memtag", "-fsanitize=memtag -fno-sanitize=memtag-stack,memtag-heap,memtag-globals",
+    "-fsanitize=objc-cast", "-fsanitize=shadow-call-stack", "-fsanitize=pointer-compare", "-fsanitize=pointer-subtract,address",
+    "-fsanitize=address,pointer-compare -fno-sanitize=address", "-fno-sanitize=pointer-compare -fsanitize=pointer-compare", "-fsanitize=cfi",
+    "-fsanitize=cfi -flto", "-fsanitize=cfi -flto -fvisibility=hidden", "-fsanitize=cfi -flto=thin -fvisibility=default",
+    "-fsanitize=cfi -flto -fno-lto -fvisibility=hidden", "-fsanitize=cfi-icall -flto", "-fsanitize=cfi-icall -flto=none", "-fsanitize=cfi-icall -flto=jobserver",
+    "-fsanitize=cfi -flto -fvisibility=bogus", "-flto=bogus", "-flto=bogus -fno-lto", "-flto=bogus -flto", "-fvisibility=bogus -fvisibility=hidden",
+    "-fvisibility=bogus -fvisibility-ms-compat", "-fsanitize=cfi-mfcall -fsanitize-cfi-cross-dso -flto -fvisibility=hidden",
+    "-fsanitize=cfi -fsanitize-cfi-cross-dso -flto -fvisibility=hidden", "-fsanitize=kcfi,cfi -flto -fvisibility=hidden", "-fsanitize=function -mcmodel=large",
+    "-fsanitize=undefined -mcmodel=large", "-fsanitize=vptr -fno-rtti", "-fsanitize=vptr -fno-rtti -frtti", "-fno-rtti -fsanitize=undefined",
+    "-fsanitize=function -mexecute-only", "-fsanitize=kcfi -mpure-code", "-fsanitize=kcfi -mexecute-only -mno-execute-only", "-fsanitize=undefined -mexecute-only",
+    "-fsanitize=realtime,object-size", "-fsanitize=realtime,object-size -O2", "-fsanitize=realtime,object-size -O00", "-fsanitize=realtime,object-size -O2 -O0",
+    "-fsanitize=fuzzer", "-fsanitize-coverage=func,bb", "-fsanitize-coverage=bogus", "-fno-sanitize-coverage=bogus", "-fsanitize-coverage=trace-pc-guard",
+    "-fsanitize-coverage=1", "-fsanitize-ignore-for-ubsan-feature=bogus", "-fsanitize=undefined -fsanitize-ignore-for-ubsan-feature=all",
+    // -gmodules turns debug information on unless -gno-modules follows it, -g0 or not; -gcodeview is one of the -g kinds.
+    "-ffreestanding -gmodules", "-ffreestanding -gmodules -g0", "-ffreestanding -g0 -gmodules", "-ffreestanding -gmodules -gno-modules",
+    "-ffreestanding -gmodules -gno-modules -g0", "-ffreestanding -gno-modules", "-ffreestanding -gcodeview", "-ffreestanding -gcodeview -g0",
+    "-ffreestanding -g0 -gcodeview", "-ffreestanding -gdwarf64", "-ffreestanding -gdwarf32", "-ffreestanding -gdwarf-6", "-gstabs", "-gstabs+", "-gcoff",
+    "-gxcoff", "-gvms", "-gtoggle",
+    // Targets: any vendor, which __is_target_vendor reads (the feature tests check it).
+    "--target=x86_64-PC-linux-gnu", "--target=x86_64-none-linux-gnu", "--target=x86_64--linux-gnu", "--target=amd64-Foo-linux-gnu", "--target=x86_64-apple-linux-gnu",
+    "-target x86_64-unknown-linux-gnu", "--target=x86_64-linux-gnu -fsanitize=memtag", "--target=x86_64-linux-gnu -mabi=ms",
+    // The options clang's driver reads only the last of: an earlier invalid one doesn't count.
+    "-march=bogus -march=znver4", "-mtune=bogus -mtune=generic", "-mfpmath=bogus -mfpmath=sse", "-mcmodel=bogus -mcmodel=small", "-mcmodel=large -mcmodel=small",
+    "-fcf-protection=bogus -fcf-protection", "-fgnuc-version=1.2.3.4 -fgnuc-version=5", "-Obogus -O2", "-O2 -Obogus", "-mabi=ms -mabi=sysv", "-mabi=sysv -mabi=ms",
+    "--target=bogus --target=x86_64-linux-gnu", "-std=bogus -std=c17", "-std=c17 -std=bogus", "-ffp-model=bogus -ffp-model=fast",
+    "-ffp-eval-method=bogus -ffp-eval-method=source", "-mapx-features=bogus -mapx-features=egpr",
+    // -fveclib=: ArmPL and SLEEF turn math errno off where they come, whatever follows; the last is checked.
+    "-fveclib=SLEEF -fveclib=none", "-fveclib=none -fveclib=SLEEF", "-fveclib=ArmPL -fmath-errno -fveclib=SVML", "-fveclib=bogus", "-fveclib=bogus -fveclib=none",
+    "-fveclib=SVML", "-fveclib=libmvec", "-fveclib=AMDLIBM", "-fveclib=Darwin_libsystem_m",
+    // OpenMP: on with the last of -fopenmp, -fopenmp= and -fno-openmp, with the last -fopenmp='s runtime.
+    "-fopenmp=bogus", "-fopenmp=bogus -fopenmp", "-fopenmp=bogus -fno-openmp", "-fopenmp=libgomp -fopenmp", "-fopenmp -fopenmp=libgomp",
+    "-fopenmp=libgomp -fopenmp=libomp", "-fopenmp=libomp -fno-openmp -fopenmp",
 };
 
 // Our predefines for `arguments` (as pp_parse_options and pp_predefines make them) into `*text`, or false where the
@@ -1171,6 +1209,22 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_test_option_sets); i += 1)
     {
         BUSTER_PREDEFINES_TEST_SET("%s", predefines_test_option_sets[i]);
+    }
+    // The sanitizers clang's incompatible pairs name and those with macros: each alone, each pair, and each pair with
+    // either one turned off after it, which clang accepts.
+    static const char* const sanitizers[] = {
+        "address", "kernel-address", "hwaddress", "kernel-hwaddress", "thread", "memory", "kernel-memory", "leak",
+        "safe-stack", "scudo", "type", "realtime", "alloc-token", "kcfi", "function", "undefined",
+    };
+    for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(sanitizers); a += 1)
+    {
+        BUSTER_PREDEFINES_TEST_SET("-fsanitize=%s", sanitizers[a]);
+        for (uint32_t b = a + 1; b < BUSTER_ARRAY_LENGTH(sanitizers); b += 1)
+        {
+            BUSTER_PREDEFINES_TEST_SET("-fsanitize=%s,%s", sanitizers[a], sanitizers[b]);
+            BUSTER_PREDEFINES_TEST_SET("-fsanitize=%s,%s -fno-sanitize=%s", sanitizers[a], sanitizers[b], sanitizers[a]);
+            BUSTER_PREDEFINES_TEST_SET("-fsanitize=%s,%s -fno-sanitize=%s", sanitizers[a], sanitizers[b], sanitizers[b]);
+        }
     }
     // Random combinations: a -march (or none), then up to eight feature flags, special flags and other options.
     uint64_t state = seed;

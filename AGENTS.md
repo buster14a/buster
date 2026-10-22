@@ -2061,11 +2061,14 @@ the features:
 - `c_predefines.c`'s generated tables (each x86-64 feature's flag, closures and
   macros, each `-march` CPU's macro name and features, the `-mtune` names) must
   be what `c_predefines_test.c`'s generator learns from clang now;
-- about 1,300 option sets must give `clang -dM -E`'s macros, and be accepted or
+- about 1,800 option sets must give `clang -dM -E`'s macros, and be accepted or
   refused alike: every `-march` CPU and `native`, every feature flag on and off
   on x86-64 and on the CPUs with the most features, each `-O`, `-f`, `-g` and
-  `-m` option `c_predefines.c` reads, alone and in the orders that matter, and
-  400 random combinations (`--seed N` changes them);
+  `-m` option `c_predefines.c` reads, alone and in the orders that matter (an
+  invalid value before the last of an option clang reads only the last of among
+  them), the 16 sanitizers with a macro or in clang's incompatible pairs, alone,
+  in pairs and in pairs with either one turned off after them, and 400 random
+  combinations (`--seed N` changes them);
 - `-E -dM` of a file with every kind of definition must be clang's byte for byte
   (but `__BUSTER__`), and `__FLT_EVAL_METHOD__` clang's under
   `-ffp-eval-method=` and without SSE;
@@ -2073,7 +2076,9 @@ the features:
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
   must give clang's answer;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
-  23's `Features.def` must give clang's answers. `sqlite3.c`, musl 1.2.5's 1,357 sources,
+  23's `Features.def` must give clang's answers, and so must they under 45
+  sanitizer option sets, and the four `__is_target_*` of 41 names under eight
+  kinds of target triple. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
 `docs/c-preprocessor.md` has the configurations. The 9700X job runs the cases
 and the repository's translation units with `--clang`.
