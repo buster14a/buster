@@ -455,3 +455,56 @@ preprocessor's lex phase stayed 0.1 ms above main's on `sqlite3.c`.
 `ab` over them (`ab-preprocessor.log`, `ab-lexer.log`); the `bins/mine-nosep` script runs this branch's
 `benchmark-lexer` with `--no-digit-separators`, so that `ab` takes it as a tree. `separators-264` has the discarded
 loop's runs.
+
+## C89 and C94 mode costs (#288)
+
+C89 disables digraphs and `//` comments; C94 retains digraphs. The three
+additional chunk specializations share the separator-table choice. The ordinary
+C/C++ specializations retain constant mode choices.
+
+The frozen control was 9989bb61fb8fde70223009107d8a64dc7e53a4b6 (#283), and the
+candidate eabf46ab07fa711086c62a73d36c2e7215703907. On the approved 9700X, each
+build and benchmark took the shared lock separately, with timing pinned to CPU
+2. The C library corpus has 8,983 files and 93,836,361 bytes. Each lexer process
+reports 21 interleaved passes. Three complete alternating rounds gave:
+
+| Default mode | Round 1 | Round 2 | Round 3 | Instructions/B |
+| --- | ---: | ---: | ---: | ---: |
+| Control lexer, cycles/B | 0.794 | 0.795 | 0.785 | 3.046 |
+| Candidate lexer, cycles/B | 0.788 | 0.789 | 0.799 | 3.047 |
+| Control SQLite preprocessing, cycles/input token | 41.69 | 41.78 | 41.80 | 132.00 |
+| Candidate SQLite preprocessing, cycles/input token | 41.68 | 42.04 | 41.44 | 132.00 |
+
+The paired differences change direction within the observed spread. These
+measurements establish comparable default cost, without a speedup claim. The
+original 15-round script was stopped after three complete pairs; an extra
+partial fourth-round lexer receipt is excluded.
+
+Disassembly of those target-built binaries, normalizing addresses, gives
+identical default-loop instructions: 18,913 bytes / 3,289 instructions for both
+C separator choices, and 22,808 bytes / 3,979 instructions for both C++ choices.
+Subsequent parent/main merges preserve the candidate lexer and benchmark blobs
+9cddb88e235e19c6790cdad2229d739a0ec5b916 and
+fa883e1495d6b87f5da07414482aa5fdb955794c. The preprocessing numbers above remain
+bound to their frozen revisions.
+
+Two additional processes per new lexer mode gave:
+
+| Flags after `--no-digit-separators` | Cycles/B, runs 1 / 2 | Instructions/B |
+| --- | ---: | ---: |
+| `--no-digraphs --no-line-comments` (C89) | 0.788 / 0.809 | 3.042 |
+| `--no-line-comments` (C94) | 0.787 / 0.807 | 3.042 |
+| `--no-digraphs` | 0.799 / 0.793 | 3.051 |
+
+Every corpus comparison agrees with the scalar twin in its selected mode.
+These processes take about 3.0 seconds each, excluding lock waits. A separate
+SQLite `-std=c89 -march=native` process took 42.43 cycles/input token and 133.52
+instructions/input token (12.046 ms vector, 24.275 ms scalar). Its modern system
+headers produce C89 extra-token warnings; this is a mode-cost measurement,
+not a Clang-oracle qualification.
+
+Receipts and frozen binaries are under
+`~/buster-fast-bench/codex-takeover/{control,292}` on `benchpress`:
+`measurement-provenance`, `ab-default.log`, `c89-*.log`, `c94-*.log`,
+`no-digraphs-*.log` and `c89-preprocessor.log`. `bench292.sh` records the original
+alternating comparison; `bench292-modes.sh` records the bounded mode runs.
