@@ -734,6 +734,7 @@ struct X86FlagEffects
     uint8_t written;
     uint8_t undefined;
     uint8_t counted;
+    bool known;
 };
 
 // The rule of x86_flags_substitutable and x86_instruction_flags_substitutable.
@@ -745,7 +746,9 @@ static bool x86_flag_effects_substitutable(X86FlagEffects original, X86FlagEffec
     // encoding of the same shift), and it isn't one nothing may rely on.
     const uint8_t counted_alike = original.counted & substitute.counted & same;
     const uint8_t allowed = kept | alike | counted_alike | (original.undefined & ~original.counted);
-    return (live & BUSTER_X86_FLAGS_STATUS & ~allowed) == 0;
+    // An uncovered form's may-clobber mask proves no flag undefined or alike, in either direction.
+    const uint8_t proven = original.known && substitute.known ? allowed : 0;
+    return (live & BUSTER_X86_FLAGS_STATUS & ~proven) == 0;
 }
 
 // A form's flags for x86_flag_effects_substitutable: a counted form's undefined ones are counted.
@@ -756,6 +759,7 @@ static X86FlagEffects x86_effects_flag_effects(const X86Effects* effects)
         .written = effects->flags_written,
         .undefined = effects->flags_undefined,
         .counted = counted ? effects->flags_undefined : 0,
+        .known = effects->operation != X86_OPERATION_NONE,
     };
 }
 
@@ -765,7 +769,8 @@ static X86FlagEffects x86_effects_flag_effects(const X86Effects* effects)
 // leaves undefined, which nothing may rely on, or for a counted form one it may keep or change as its count says, which
 // only a substitute counted alike does (another encoding of the same shift: `same` says so). shl r/m32, imm8 doesn't
 // take or r/m32, imm8 with CF live: shl by 0 keeps CF, and or clears it. For two records with their counts,
-// x86_instruction_flags_substitutable.
+// x86_instruction_flags_substitutable. With any status flag live, both forms must have covered effects: an uncovered
+// form's conservative may-clobber mask doesn't prove its outputs undefined.
 static __attribute__((unused)) bool x86_flags_substitutable(const X86Effects* original, const X86Effects* substitute, uint8_t same, uint8_t live)
 {
     return x86_flag_effects_substitutable(x86_effects_flag_effects(original), x86_effects_flag_effects(substitute), same, live);
@@ -785,6 +790,7 @@ static __attribute__((unused)) bool x86_instruction_flags_substitutable(const X8
         x86_instruction_flags(records[i], &read, &effects[i].written, &effects[i].undefined);
         const bool counted = (form->properties & BUSTER_X86_EFFECT_COUNT) && x86_effects_immediate_kind(form) != BUSTER_X86_IMMEDIATE_COUNT;
         effects[i].counted = counted ? effects[i].undefined : 0;
+        effects[i].known = form->operation != X86_OPERATION_NONE;
     }
     return x86_flag_effects_substitutable(effects[0], effects[1], same, live);
 }

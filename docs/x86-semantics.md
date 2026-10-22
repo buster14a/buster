@@ -264,6 +264,12 @@ keeping a second copy of the flags. A candidate that claims too much is still
 caught: inc's CF is undefined to the table, so naming CF among its alike flags
 changes nothing.
 
+Both substitution helpers require covered effects for both forms whenever a
+status flag is live. An uncovered form's conservative may-clobber mask proves
+neither undefined outputs nor equivalent flags, even when the caller names
+all flags in `same`. For example, RORX keeps CF whereas ROR changes it; the
+uncovered RORX record cannot authorize that replacement with CF live.
+
 A counted shift's flags are the exception: its record leaves undefined the
 flags it may change, but a count of 0 keeps them. So for a counted original
 those flags are counted, not free, and only a substitute counted alike stands
@@ -386,6 +392,10 @@ the model does. Then pairs of records go through
 every state of the status flags. Where it takes a live flag the original doesn't
 leave undefined, the two must leave that flag alike. `shl ebx, 0` and
 `or ebx, 0`, which it refuses with CF live, must show CF apart in some run.
+Uncovered forms fail closed in both helper APIs for every live-flag set, in
+both substitution directions and against themselves. A deterministic RORX
+and ROR witness rotates EAX = 2 to 1 after setting CF: RORX keeps it set, and
+ROR clears it, so the helpers must refuse that substitution with CF live.
 
 **The immediate's contract**, on all 189 covered forms with an immediate,
 against about 60 boundary values: a field that takes a value gives it back,

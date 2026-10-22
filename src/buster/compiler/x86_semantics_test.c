@@ -524,6 +524,7 @@ static const uint16_t x86_semantics_uncovered[] = {
     X86_FORM_NONE,
     X86_FORM_MOVABS_AL_MOFFS,
     X86_FORM_RCL_RM64_1,
+    X86_FORM_RORX_R32_RM32_IMM8,
     X86_FORM_SHLD_RM64_R64_CL,
     X86_FORM_CMPXCHG_RM64_R64,
     X86_FORM_XCHG_R64_RAX,
@@ -595,6 +596,29 @@ static bool x86_semantics_check_fixtures(void)
                              effects->operation == X86_OPERATION_NONE && effects->implicit_writes == 0xffff && effects->flags_undefined == BUSTER_X86_FLAGS_ALL &&
                                  x86_effects_control(effects) == BUSTER_X86_CONTROL_UNKNOWN && reads == BUSTER_X86_RESOURCE_ALL && writes == BUSTER_X86_RESOURCE_ALL,
                              "%s is uncovered: the conservative record, reading and writing everything", x86_semantics_test_name(x86_semantics_uncovered[i]));
+        // A conservative may-clobber mask grants no substitution permission, even with every flag claimed alike.
+        const X86Instruction known = {
+            .form = X86_FORM_ROR_RM32_1,
+            .rm = X86_REGISTER_RAX,
+        };
+        const X86Instruction* records[] = { &record, &known };
+        for (uint32_t original = 0; original < BUSTER_ARRAY_LENGTH(records); original += 1)
+        {
+            for (uint32_t substitute = 0; substitute < BUSTER_ARRAY_LENGTH(records); substitute += 1)
+            {
+                if (original == 0 || substitute == 0)
+                {
+                    for (uint32_t live = 0; live <= BUSTER_X86_FLAGS_STATUS; live += 1)
+                    {
+                        const bool expected = live == 0;
+                        const bool forms = x86_flags_substitutable(x86_effects(records[original]->form), x86_effects(records[substitute]->form), BUSTER_X86_SAME_ALL, (uint8_t)live);
+                        const bool instructions = x86_instruction_flags_substitutable(records[original], records[substitute], BUSTER_X86_SAME_ALL, (uint8_t)live);
+                        x86_semantics_expect(&tally, forms == expected && instructions == expected, "%s for %s with flags %#x live: unknown effects fail closed",
+                                             x86_semantics_test_name(records[substitute]->form), x86_semantics_test_name(records[original]->form), live);
+                    }
+                }
+            }
+        }
     }
     // Every covered form's row is consistent with the form table, and the count is what the rows say.
     uint32_t covered = 0;
@@ -858,6 +882,8 @@ static bool x86_semantics_check_resolved(void)
         { X86_FORM_SAR_RM8_1, X86_FORM_SAR_RM8_IMM8, BUSTER_X86_SAME_ALL, BUSTER_X86_FLAGS_LOGICAL },
         { X86_FORM_SHL_RM32_IMM8, X86_FORM_SHL_RM32_IMM8, BUSTER_X86_SAME_ALL, 0 },
         { X86_FORM_ROL_RM64_CL, X86_FORM_ROL_RM64_CL, BUSTER_X86_SAME_ALL, 0 },
+        // RORX isn't covered: its conservative mask doesn't prove CF architecturally undefined.
+        { X86_FORM_RORX_R32_RM32_IMM8, X86_FORM_ROR_RM32_1, 0, BUSTER_X86_FLAGS_STATUS },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(substitutions); i += 1)
     {
@@ -1605,6 +1631,28 @@ static bool x86_semantics_check_shift_flags(X86SemanticsMachine* machine, uint64
         }
         x86_semantics_expect(&tally, (shown & pair->witness) == pair->witness, "%s by %d for %s by %d: flags %#x never apart", substitute_name,
                              pair->substitute.immediate, original_name, pair->original.immediate, pair->witness & ~shown);
+    }
+    // The review's uncovered-form counterexample: both rotate 2 to 1, but only RORX keeps the incoming carry.
+    const X86Instruction rotations[] = {
+        { .form = X86_FORM_RORX_R32_RM32_IMM8, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .immediate = 1 },
+        { .form = X86_FORM_ROR_RM32_1, .rm = X86_REGISTER_RAX },
+    };
+    x86_semantics_expect(&tally, !x86_instruction_flags_substitutable(&rotations[0], &rotations[1], 0, BUSTER_X86_FLAG_CF), "ROR for uncovered RORX refuses live CF");
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rotations); i += 1)
+    {
+        const X86Instruction* record = &rotations[i];
+        snprintf(x86_semantics_test_case, sizeof(x86_semantics_test_case), "%s with EAX = 2 and CF = 1", x86_semantics_test_name(record->form));
+        x86_semantics_random_state(&state, machine, &input);
+        input.gpr[X86_REGISTER_RAX] = 2;
+        input.flags = BUSTER_X86_SEMANTICS_TEST_RFLAGS_BASE | x86_semantics_rflags(BUSTER_X86_FLAG_CF);
+        output = input;
+        if (x86_semantics_expect(&tally, x86_semantics_machine_load(machine, record, 1), "%s encodes", x86_semantics_test_case))
+        {
+            x86_semantics_machine_run(machine, &output);
+            const uint8_t carry = x86_semantics_flags(output.flags) & BUSTER_X86_FLAG_CF;
+            x86_semantics_expect(&tally, output.gpr[X86_REGISTER_RAX] == 1 && carry == (i == 0 ? BUSTER_X86_FLAG_CF : 0), "%s: result %#llx, CF %#x",
+                                 x86_semantics_test_case, (unsigned long long)output.gpr[X86_REGISTER_RAX], carry);
+        }
     }
     return x86_semantics_report(&tally);
 }
