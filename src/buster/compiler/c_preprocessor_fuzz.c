@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The preprocessor's differential fuzzing (#109), for test-preprocessor --fuzz: run_preprocessor_tests runs pp_fuzz.
+// The preprocessor's differential fuzzing (#109), for test-preprocessor --fuzz: run_preprocessor_fixture_tests runs
+// pp_fuzz.
 // Each case preprocessor_fuzz_generate.c makes is preprocessed as clang reads it alone (preprocessor_fuzz_batch_source:
 // its #line, its source and its marker), by preprocessors of its own with the oracle's configuration, -undef -nostdinc
 // and -std=c17 or -std=c23 (trigraphs in C17, as in clang's ISO modes). Its vectorized kernels and their scalar twins
@@ -13,7 +14,8 @@
 // Clang reads a block's cases in two batches, the ones we accept and the ones we reject, so that a batch of accepted
 // cases usually exits cleanly. A case that differs is read again alone, and so is every case of one block in
 // BUSTER_PP_FUZZ_SAMPLED: a batch that gives another result than the case alone is a fault of the oracle, which is
-// counted and fails the run, never taken for the preprocessor's. A difference on the case alone is printed, minimized
+// counted and fails the run, never taken for the preprocessor's. A batch without a result has its cases read alone,
+// and one without a result alone either is reported and fails the run. A difference on the case alone is printed, minimized
 // by preprocessor_fuzz_minimize with the oracle that found it (preprocessor_fuzz_difference, defined here), printed
 // again with both sides' results, and saved as fuzz_failure_N.c in the current directory.
 //
@@ -22,7 +24,7 @@
 //
 // main.c includes this file after c_preprocessor_test.c, whose helpers it uses (pp_same_streams,
 // pp_same_directive_tables, pp_stream_spellings, pp_test_printed, pp_test_print and pp_test_quiet), and which has
-// PPFuzzOptions, since run_preprocessor_tests parses them. Layout: the counts, our side of a case (pp_fuzz_run,
+// PPFuzzOptions, since run_preprocessor_fixture_tests parses them. Layout: the counts, our side of a case (pp_fuzz_run,
 // pp_fuzz_output), the kernels' check, the oracles the minimizer calls, reports, a worker (pp_fuzz_worker), and
 // pp_fuzz.
 

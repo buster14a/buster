@@ -1601,25 +1601,27 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
 }
 
 // The first token from `from` that is a number with a digit separator, at or after token `from` of `count`, and where its
-// first `'` is (`*quote`); `count` if none. 16 tokens at a time: one compare finds the numbers, and their lengths (a
-// separator needs three bytes: `1'0`) the ones whose bytes are read.
+// first `'` is (`*quote`); `count` if none. 64 tokens at a time: one compare finds the numbers, whose lengths (a
+// separator needs three bytes: `1'0`) say which have their bytes read, 32 at a time in a register (a longer number's
+// rest by memchr).
 static uint32_t pp_find_separator_vector(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t from, uint32_t count, uint32_t* quote)
 {
     uint32_t result = count;
-    for (uint32_t t = from; result == count && t < count; t += 16)
+    for (uint32_t t = from; result == count && t < count; t += 64)
     {
-        const __mmask16 valid = (__mmask16)_bzhi_u32(0xFFFF, count - t < 16 ? count - t : 16);
-        const __m128i kind = _mm_and_si128(_mm_maskz_loadu_epi8(valid, kinds + t), _mm_set1_epi8(0x7F));
-        const __mmask16 numbers = _mm_mask_cmpeq_epi8_mask(valid, kind, _mm_set1_epi8(C_TOKEN_NUMERIC_CONSTANT));
-        const __m512i lengths = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(numbers, ends + t), _mm512_maskz_loadu_epi32(numbers, starts + t));
-        uint32_t candidates = _mm512_mask_cmpge_epu32_mask(numbers, lengths, _mm512_set1_epi32(3));
-        while (result == count && candidates != 0)
+        const __mmask64 valid = _bzhi_u64(~0ull, count - t < 64 ? count - t : 64);
+        const __m512i kind = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, kinds + t), _mm512_set1_epi8(0x7F));
+        uint64_t numbers = _mm512_mask_cmpeq_epi8_mask(valid, kind, _mm512_set1_epi8(C_TOKEN_NUMERIC_CONSTANT));
+        while (result == count && numbers != 0)
         {
-            const uint32_t i = t + (uint32_t)__builtin_ctz(candidates);
-            const uint8_t* found = memchr(bytes + starts[i], '\'', ends[i] - starts[i]);
+            const uint32_t i = t + (uint32_t)__builtin_ctzll(numbers);
+            const uint32_t length = ends[i] - starts[i];
+            const __mmask32 in = (__mmask32)_bzhi_u32(length >= 3 ? ~0u : 0u, length < 32 ? length : 32);
+            const uint32_t quotes = _mm256_mask_cmpeq_epi8_mask(in, _mm256_maskz_loadu_epi8(in, bytes + starts[i]), _mm256_set1_epi8('\''));
+            const uint8_t* found = quotes != 0 ? bytes + starts[i] + __builtin_ctz(quotes) : length > 32 ? memchr(bytes + starts[i] + 32, '\'', length - 32) : 0;
             result = found != 0 ? i : count;
             *quote = found != 0 ? (uint32_t)(found - bytes) : *quote;
-            candidates &= candidates - 1;
+            numbers &= numbers - 1;
         }
     }
     return result;
@@ -5520,8 +5522,9 @@ static void pp_stream_unexpanded(Preprocessor* pp)
 
 // After a step of the main loop with a stream open: reads the top stream's new tokens, but its pragma lines, counting
 // parentheses as clang does (a ',' and any token after the first are errors that pp_builtin_value finds), and ends it at
-// the ')' that closes its operand (pp_finish_stream), which may close the stream below too.
-static void pp_stream_check(Preprocessor* pp)
+// the ')' that closes its operand (pp_finish_stream), which may close the stream below too. Kept out of the main loop's
+// code, which only tests whether a stream is open.
+static __attribute__((noinline, cold)) void pp_stream_check(Preprocessor* pp)
 {
     bool more = true;
     while (more && pp->capture_count != 0 && pp->capture_frames[pp->capture_count - 1].kind == BUSTER_PP_CAPTURE_STREAM)

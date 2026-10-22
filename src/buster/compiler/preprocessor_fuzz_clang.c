@@ -339,10 +339,19 @@ static bool preprocessor_fuzz_clang_space(char value)
     return result;
 }
 
-// Splits a batch's text at its markers, each a line of its own (the batch puts it after two newlines, and -P starts a
-// line for it). They are found by their bytes, not by lexing the text: a case's output can hold what doesn't lex back,
-// as an unterminated character constant that took the rest of its source line and then ends at a quote further on its
-// printed line, after which a `/*` would take the marker into a comment.
+// Whether a byte can be part of an identifier in clang's -P text (a UCN's backslash and UTF-8 bytes too).
+static bool preprocessor_fuzz_clang_identifier_byte(char value)
+{
+    return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') || value == '_' || value == '$' || value == '\\' ||
+           (unsigned char)value >= 0x80;
+}
+
+// Splits a batch's text at its markers. Each ends its printed line (the batch puts it on a line of its own, after two
+// newlines; -P starts a line for it, but for what an expansion printed before it, which can put it at a line's end),
+// and is found by its bytes, as a whole identifier outside literals, rather than by lexing the text: a case's output
+// can hold what doesn't lex back, as an unterminated character constant that took the rest of its source line and
+// then ends at a quote further on its printed line, after which a `/*` would take the marker into a comment. Any other
+// marker, or one out of its place, fails the split: the generator keeps the names to the markers.
 static bool preprocessor_fuzz_clang_split(Arena* arena, String8 text, uint64_t count, PreprocessorFuzzOutput* outputs)
 {
     const String8 prefix = BUSTER_S8(BUSTER_PPF_CLANG_MARKER_PREFIX);
@@ -357,57 +366,77 @@ static bool preprocessor_fuzz_clang_split(Arena* arena, String8 text, uint64_t c
         {
             line_end += 1;
         }
-        uint64_t first = line;
-        while (first < line_end && preprocessor_fuzz_clang_space(text.pointer[first]))
-        {
-            first += 1;
-        }
         uint64_t last = line_end;
-        while (last > first && preprocessor_fuzz_clang_space(text.pointer[last - 1]))
+        while (last > line && preprocessor_fuzz_clang_space(text.pointer[last - 1]))
         {
             last -= 1;
         }
-        bool marker = last - first > prefix.length && memcmp(text.pointer + first, prefix.pointer, prefix.length) == 0;
-        for (uint64_t digit = first + prefix.length; marker && digit < last; ++digit)
+        // The markers on the line: every whole identifier that is the prefix and digits, outside string and character
+        // literals (one runs to its closing quote, or to the line's end).
+        bool ends_with_marker = false;
+        uint64_t marker_start = last;
+        char quote = 0;
+        for (uint64_t at = line; result && at < last; at += 1)
         {
-            marker = text.pointer[digit] >= '0' && text.pointer[digit] <= '9';
+            const char value = text.pointer[at];
+            if (quote != 0)
+            {
+                at += value == '\\';
+                quote = value == quote ? 0 : quote;
+            }
+            else if (value == '"' || value == '\'')
+            {
+                quote = value;
+            }
+            else if (value == prefix.pointer[0] && last - at > prefix.length && memcmp(text.pointer + at, prefix.pointer, prefix.length) == 0 &&
+                     (at == line || !preprocessor_fuzz_clang_identifier_byte(text.pointer[at - 1])))
+            {
+                uint64_t end = at + prefix.length;
+                uint64_t number = 0;
+                while (end < last && text.pointer[end] >= '0' && text.pointer[end] <= '9')
+                {
+                    number = number * 10 + (uint64_t)(text.pointer[end] - '0');
+                    end += 1;
+                }
+                if (end > at + prefix.length && (end == last || !preprocessor_fuzz_clang_identifier_byte(text.pointer[end])))
+                {
+                    ends_with_marker = end == last && number == marker_count && marker_count < count;
+                    marker_start = at;
+                    result = ends_with_marker;
+                }
+                at = end - 1;
+            }
         }
-        if (marker)
+        if (result && ends_with_marker)
         {
-            char expected[64];
-            const int expected_length = snprintf(expected, sizeof(expected), BUSTER_PPF_CLANG_MARKER_PREFIX "%llu", (unsigned long long)marker_count);
-            result = marker_count < count && expected_length > 0 && (uint64_t)expected_length == last - first && memcmp(text.pointer + first, expected, last - first) == 0;
+            uint64_t end = marker_start;
+            while (begin < end && preprocessor_fuzz_clang_space(text.pointer[begin]))
+            {
+                ++begin;
+            }
+            while (end > begin && preprocessor_fuzz_clang_space(text.pointer[end - 1]))
+            {
+                --end;
+            }
+            const uint64_t bytes = end - begin;
+            char* copy = bytes <= BUSTER_PPF_MAX_OUTPUT_BYTES ? arena_push(arena, bytes + 1, 1) : 0;
+            result = copy != 0;
             if (result)
             {
-                uint64_t end = line;
-                while (begin < end && preprocessor_fuzz_clang_space(text.pointer[begin]))
+                memcpy(copy, text.pointer + begin, bytes);
+                copy[bytes] = 0;
+                outputs[marker_count] = (PreprocessorFuzzOutput)
                 {
-                    ++begin;
-                }
-                while (end > begin && preprocessor_fuzz_clang_space(text.pointer[end - 1]))
-                {
-                    --end;
-                }
-                const uint64_t bytes = end - begin;
-                char* copy = bytes <= BUSTER_PPF_MAX_OUTPUT_BYTES ? arena_push(arena, bytes + 1, 1) : 0;
-                result = copy != 0;
-                if (result)
-                {
-                    memcpy(copy, text.pointer + begin, bytes);
-                    copy[bytes] = 0;
-                    outputs[marker_count] = (PreprocessorFuzzOutput)
+                    .text =
                     {
-                        .text =
-                        {
-                            .pointer = copy,
-                            .length = bytes,
-                        },
-                        .accepted = true,
-                        .valid = true,
-                    };
-                    ++marker_count;
-                    begin = line_end;
-                }
+                        .pointer = copy,
+                        .length = bytes,
+                    },
+                    .accepted = true,
+                    .valid = true,
+                };
+                ++marker_count;
+                begin = line_end;
             }
         }
         line = line_end + 1;

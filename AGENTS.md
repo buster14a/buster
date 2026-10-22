@@ -195,11 +195,12 @@ designs and the compilers already built this way.
   and the minimizer for the independent preprocessor test harness.
   `preprocessor_fuzz_generate.c` generates cases, `preprocessor_fuzz_clang.c`
   runs the Clang oracle, and `preprocessor_fuzz_test.c` provides
-  `test-preprocessor-fuzz`; `main.c` includes all four.
-  `preprocessor_fuzz_benchmark.c` provides `benchmark-preprocessor-fuzz`,
-  measuring the external test harness. `docs/preprocessor-fuzz.md` records
-  its contract. These names and locations are provisional pending agreement
-  with the #117 session; no Buster preprocessor is attached yet.
+  `test-preprocessor-fuzz`, the harness's own checks; `main.c` includes all
+  four. `preprocessor_fuzz_benchmark.c` provides `benchmark-preprocessor-fuzz`,
+  measuring the external test harness. `c_preprocessor_fuzz.c` attaches the
+  preprocessor to it: `test-preprocessor --fuzz`, below.
+  `docs/preprocessor-fuzz.md` records the contract, the comparison and the
+  qualification runs.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
   of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder,
   and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
@@ -374,8 +375,10 @@ designs and the compilers already built this way.
   unit's token stream from its files' refined tokens, and `./build/compiler -E`
   (as `clang -E`). `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
-  (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
-  `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`.
+  (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
+  `c_preprocessor_fuzz.c` its differential fuzzing (#109; `main.c` includes
+  it after the tests) and `c_preprocessor_benchmark.c` provides
+  `benchmark-preprocessor`.
 - `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
   records macro expansion history in cold records and compressed output runs;
   `pp_diagnose_output` renders a diagnostic for an output-token index.
@@ -504,7 +507,9 @@ then a summary line, and exits with status 1 on a cycle not in
 can't read. An entry names a component's functions, each as many times as
 the component has a function of that name; add one only for the
 style's "trivial statically bounded recursion", with a comment saying what
-bounds its depth. The list is empty: the tree has no cycle. The 9700X job runs
+bounds its depth. The list has three entries, the preprocessor fuzz generator's
+recursions (conditionals in groups, expressions, invocations in arguments),
+each bounded by its depth argument. The 9700X job runs
 `test-call-graph` and the check after the build; the IR takes about 1.5 s.
 
 `./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
@@ -1926,15 +1931,17 @@ C23. The checks cover:
 
 The oracle runs `clang -E -P -undef -nostdinc -std=c17` or `-std=c23` with
 `-x c`. It resets each case's source filename and line number identically in
-batched and individual runs, tokenizes the output with `c_tokenize` and splits
-it at exact marker identifiers. Infrastructure failures are distinct from
-source rejection.
+batched and individual runs, and splits the output at its markers, each a
+whole identifier that ends its printed line (found by its bytes outside
+literals, since a case's output can hold text that doesn't lex back); any
+other marker fails the split. A batch's output is tokenized with `c_tokenize`
+as the mode lexes. Infrastructure failures are distinct from source
+rejection.
 
 This is test tooling outside the compile path and has no new vector path.
-The minimizer currently uses only the planted comparison; these checks do
-not establish the correctness of a Buster preprocessor. The command
-names and file locations remain provisional until agreed with #117.
-`docs/preprocessor-fuzz.md` describes the extension points and remaining work.
+These self-tests check the harness alone, with the minimizer on its planted
+comparison; `test-preprocessor --fuzz` (below) runs the preprocessor through
+it. `docs/preprocessor-fuzz.md` has the harness's contract and its use.
 
 ## Preprocessor harness benchmark
 
@@ -2014,7 +2021,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 92 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 166 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2023,12 +2030,18 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   - the behaviors probed against GCC and clang;
   - inputs past the vectorized kernels' limits;
   - directives and builtins that nest through the main loop's frames;
-  - #193's review fixes, line markers among them.
+  - #193's review fixes, line markers among them;
+  - each difference from clang that #109's fuzzing found, minimized, and the
+    ones probing around it found.
 
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
   modification times of their own must give each file's time (in UTC), and
-  `SOURCE_DATE_EPOCH`'s when it is set;
+  `SOURCE_DATE_EPOCH`'s when it is set; the expansion history's checks; and
+  the fuzz batch: 1,500 cases of the independent harness's generator in each
+  of C17 and C23 (`c_preprocessor_fuzz.c`), which both kernels must give
+  alike (streams, directive tables, diagnostics' counts, history and both
+  printers' bytes), with -P text that lexes back into the stream;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, ...), by both kernels, which must agree.
 
@@ -2050,10 +2063,34 @@ features:
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
   must give clang's answer;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
-  23's `Features.def` must give clang's answers. `sqlite3.c`, musl 1.2.5's 1,357 sources,
-Lua 5.4.8 and this repository's translation units are token-identical;
-`docs/c-preprocessor.md` has the configurations. The 9700X job runs the cases
-and the repository's translation units with `--clang`.
+  23's `Features.def` must give clang's answers;
+- the fuzz batch's cases must give clang's acceptance, and an accepted case's
+  stream, printed with clang's -P spacing, must lex into clang's tokens.
+
+`sqlite3.c`, musl 1.2.5's 1,357 sources, Lua 5.4.8 and this repository's
+translation units are token-identical; `docs/c-preprocessor.md` has the
+configurations. The 9700X job runs the cases and the repository's translation
+units with `--clang`.
+
+The fuzz batch's options: `--fuzz N` cases per mode (0 for none), `--first N`
+the first case's id, `--seed N` (1 by default), `--std c17|c23` one mode,
+`--jobs N` worker processes (1 by default; the cases don't depend on it), and
+`--print-case N`, which prints case N as clang reads it alone. Each
+difference from clang is confirmed on the case alone; the first 4 that each
+worker finds in a mode are minimized and saved as `fuzz_failure_N.c` in the
+current directory. One block of 64 cases in 128 has every case read alone
+too, which must give its batch's result, and a batch clang gives no result
+for has its cases read alone. It exits with status 1 on any difference, a
+batch that differs from its cases alone, or a case without a result. For a
+qualification run (about 10 minutes per million cases in each mode on 16
+threads):
+
+```sh
+./build/compiler test-preprocessor --clang --fuzz 1000000 --seed 11 --jobs 16
+```
+
+`docs/preprocessor-fuzz.md` has the comparison's rules, the generator's
+constructs and the qualification runs.
 
 ## Preprocessor benchmark
 
