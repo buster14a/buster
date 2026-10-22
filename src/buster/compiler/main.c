@@ -413,6 +413,11 @@ int run_calling_convention_benchmark(int argc, char** argv);
 #include "buster/compiler/profile.c"
 #include "buster/compiler/profile_test.c"
 
+// The runner the 9700X job runs its tests through (a list of commands at once, each one's output printed in the list's
+// order) and its tests, for the parallel and test-parallel commands.
+#include "buster/compiler/parallel.c"
+#include "buster/compiler/parallel_test.c"
+
 // The other units' main_command, each in its own unit (at the top).
 int main_unit_x86(int argc, char** argv, bool* found);
 int main_unit_frontend(int argc, char** argv, bool* found);
@@ -662,6 +667,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-profile") == 0)
     {
         result = run_profile_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "parallel") == 0)
+    {
+        result = run_parallel_command(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-parallel") == 0)
+    {
+        result = run_parallel_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {

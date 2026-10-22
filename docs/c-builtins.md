@@ -125,8 +125,54 @@ EXCLUSIVE_LINK=https://github.com/buster14a/buster/issues/148 \
 ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-builtins
 ```
 
-Measurements are recorded after validation. They describe these synthetic
-action batches, not frontend or whole-compiler speed.
+### Recorded 9700X results, October 22, 2026
+
+The measured source is `8b0cd7b2fcf5bb82705607abb24580d34836e652`, merged in
+[PR #273](https://github.com/buster14a/buster/pull/273) as
+`09ccd1b16585a52f89d3ef43b3941f4d001a91cc`. The merge and tested head have the
+same tree, `346870195f3769eed0b1ac987c9da86fe4d09481`. The host was Linux/x86-64,
+AMD Ryzen 7 9700X, with Clang 23.1.1 and the repository's `build.sh` flags:
+`-O3 -march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall
+-Werror -g`. The benchmark executable's SHA-256 is
+`c67db28ff8cdb62de21fe4ecab28b989a18e6a3e21b8d1cf81c91500f5c32a8b`.
+
+Three independent processes ran each configuration, interleaving the
+configurations in the order default, `--only vector`, and `--only vector
+--after-scalar 100`, then repeating that order twice. Every process acquired
+and released the shared lock separately and ran on CPU 2. The fixed input is
+the benchmark's 16,384-row generator with seed 148. The
+[raw process output](c-builtins-148-measurements.txt) retains every process
+median and its within-process p10–p90.
+
+Nanoseconds per row below are the median of the three process medians, with
+their minimum and maximum in brackets:
+
+| Workload | Scalar, interleaved | Vector, interleaved | Vector alone | Vector after 100 ms scalar |
+| --- | ---: | ---: | ---: | ---: |
+| Bit operations | 1.082 [1.063, 1.123] | 0.631 [0.630, 0.634] | 0.630 [0.630, 0.632] | 0.632 [0.631, 0.633] |
+| Overflow | 3.311 [3.304, 3.311] | 1.295 [1.295, 1.298] | 1.294 [1.294, 1.295] | 1.294 [1.294, 1.295] |
+| Mixed | 1.620 [1.608, 1.635] | 1.147 [1.145, 1.151] | 1.146 [1.145, 1.146] | 1.145 [1.144, 1.146] |
+
+The interleaved median throughput ratios are 1.71, 2.56, and 1.41 respectively,
+with the vector path ahead in every process. The isolated and conditioned
+vector ranges overlap. These results cover complete synthetic action batches,
+including result stores. Tiny-batch cutoffs and frontend/whole-compiler speed
+remain unmeasured.
+
+The frozen production build passed 221,184 deterministic boundary rows and
+1,019,519 generated rows, plus spelling checks and every builtin at guarded
+column tails 0 through 33. Defined values and overflow booleans are checked
+against Clang; undefined/invalid cases have explicit status expectations.
+The generated and boundary suites also passed in an unoptimized validation
+build. The call-graph check found zero cycles over 21 translation units,
+8,123 functions and 44,285 calls. The frozen vector assembly contains vector
+counts, byte shuffles and four 32-bit products for the high multiply halves,
+with no gathers or scatters.
+
+The required [PR 9700X workflow](https://github.com/buster14a/buster/actions/runs/39802046396)
+passed on this head, including the existing compiler suite and the new builtin
+tests. These receipts establish the integer actions' validation; the source
+language and selector acceptance listed above remains outstanding.
 
 ## Behavioral references and provenance
 
