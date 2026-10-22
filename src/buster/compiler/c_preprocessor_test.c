@@ -931,6 +931,10 @@ static const PPTestCase pp_test_cases[] = {
     { "line breaks in an unknown token and in a raw string literal", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", 0, "gnu17", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\nR\"x\ny\" z\nw\nR\"(a\nb)\" c\n\nd\n" },
     { "invalid raw delimiter keeps its line splice", "R\"a\\\nb\" c\n", 0, "gnu17", "R\"a\\\nb\" c\n", false, 0, 0, 0,
       "# 1 \"%d/case.c\"\nR\"a\\\nb\" c\n" },
+    { "short wchar in #if", "#if (L'\\0' - 1) > 0 && L'\\xffff' - 65536 > 0\nyes\n#endif\n",
+      0, "c17", "yes\n", false, 0, "-fno-short-wchar -fshort-wchar", 0 },
+    { "default wchar after short wchar in #if", "#if (L'\\0' - 1) < 0 && L'\\xffff' - 65536 < 0\nyes\n#endif\n",
+      0, "c17", "yes\n", false, 0, "-fshort-wchar -fno-short-wchar", 0 },
     { "true in C99", "#if true\nyes\n#else\nno\n#endif\n",
       0, "c99", "no\n", false, 0, 0, 0 },
     // Where clang and GCC differ, clang's answer: a #line continued on the next line counts from the line of its # (GCC
