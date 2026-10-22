@@ -2,7 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Bounded decoding of the encoder catalogue's 64-bit encodings, including 32-bit addresses. Initialize
-// once before sharing the read-only tables. Source and output storage must not overlap; no source padding is required.
+// once before sharing the read-only tables. Initialization retains two compact allocated table regions; decoding
+// itself allocates nothing. Source and output storage must not overlap; no source padding is required.
 // The decoder publishes complete records
 // before the first error; consumed is that error's byte offset. Unsupported can include valid instructions outside
 // this catalogue. Actual input lengths are retained, including non-shortest displacements and VEX prefixes.
@@ -18,6 +19,7 @@
 #include <string.h>
 #include <immintrin.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define BUSTER_X86_DECODE_MAPS 11
 #define BUSTER_X86_DECODE_BUCKETS (3 * BUSTER_X86_DECODE_MAPS * 256)
@@ -86,15 +88,98 @@ struct X86DecodeCheck
     uint16_t flags;
 };
 
+typedef struct X86DecodeIndex X86DecodeIndex;
+struct X86DecodeIndex
+{
+    uint64_t common_mask;
+    uint64_t common_key;
+    uint64_t varying;
+    uint32_t first;
+};
+
 static X86DecodeBucket x86_decode_buckets[BUSTER_X86_DECODE_BUCKETS];
-static uint64_t x86_decode_keys[BUSTER_X86_DECODE_ENTRIES] __attribute__((aligned(64)));
-static uint64_t x86_decode_masks[BUSTER_X86_DECODE_ENTRIES] __attribute__((aligned(64)));
-static uint16_t x86_decode_forms[BUSTER_X86_DECODE_ENTRIES];
+static uint64_t* x86_decode_keys;
+static uint64_t* x86_decode_masks;
+static uint16_t* x86_decode_forms;
+static uint64_t x86_decode_storage_bytes;
+static X86DecodeIndex x86_decode_indices[2 * BUSTER_X86_DECODE_MAPS * 256];
+static uint16_t* x86_decode_index_rows;
+static uint32_t x86_decode_index_count;
 static uint8_t x86_decode_length_table[256] __attribute__((aligned(64)));
 static X86DecodeCheck x86_decode_checks[X86_FORM_COUNT];
 static uint32_t x86_decode_simple[256 * 32];
 static bool x86_decode_initialized;
 static uint32_t x86_decode_entry_count;
+
+static void x86_disassembly_initialize(void);
+
+static bool x86_decode_indices_initialize(void)
+{
+    // A vector bucket's common signature bits are checked once. PEXT packs only its varying bits into a compact
+    // table index; wildcard rows populate each of their cells. An ambiguous cell retains the original SIMD scan,
+    // so aliases, address-size distinctions and exceptional validators keep the same candidate ordering.
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_decode_indices); i += 1)
+    {
+        const X86DecodeBucket bucket = x86_decode_buckets[i + BUSTER_X86_DECODE_MAPS * 256];
+        X86DecodeIndex* index = &x86_decode_indices[i];
+        *index = (X86DecodeIndex){.first = UINT32_MAX};
+        if (bucket.count != 0)
+        {
+            uint64_t common = UINT64_MAX;
+            uint64_t all = 0;
+            uint64_t different = 0;
+            const uint64_t key = x86_decode_keys[bucket.first];
+            for (uint32_t j = 0; j < bucket.count; j += 1)
+            {
+                common &= x86_decode_masks[bucket.first + j];
+                all |= x86_decode_masks[bucket.first + j];
+                different |= key ^ x86_decode_keys[bucket.first + j];
+            }
+            common &= ~different;
+            const uint64_t varying = all & ~common;
+            const uint32_t bits = (uint32_t)__builtin_popcountll(varying);
+            if (bits <= 12)
+            {
+                index->common_mask = common;
+                index->common_key = key & common;
+                index->varying = varying;
+                index->first = total;
+                total += 1u << bits;
+            }
+        }
+    }
+    x86_decode_index_rows = total != 0 ? malloc((uint64_t)total * sizeof(*x86_decode_index_rows)) : 0;
+    const bool valid = total == 0 || x86_decode_index_rows != 0;
+    if (valid)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_decode_indices); i += 1)
+        {
+            const X86DecodeIndex* index = &x86_decode_indices[i];
+            if (index->first != UINT32_MAX)
+            {
+                const X86DecodeBucket bucket = x86_decode_buckets[i + BUSTER_X86_DECODE_MAPS * 256];
+                const uint32_t count = 1u << __builtin_popcountll(index->varying);
+                for (uint32_t cell = 0; cell < count; cell += 1)
+                {
+                    const uint64_t key = index->common_key | _pdep_u64(cell, index->varying);
+                    uint16_t row = 0;
+                    for (uint32_t j = 0; j < bucket.count; j += 1)
+                    {
+                        const uint32_t entry = bucket.first + j;
+                        if ((key & x86_decode_masks[entry]) == x86_decode_keys[entry])
+                        {
+                            row = row == 0 ? x86_decode_forms[entry] : UINT16_MAX;
+                        }
+                    }
+                    x86_decode_index_rows[index->first + cell] = row;
+                }
+            }
+        }
+        x86_decode_index_count = total;
+    }
+    return valid;
+}
 
 static uint32_t x86_decode_bucket(uint32_t family, uint32_t map, uint32_t opcode)
 {
@@ -336,6 +421,16 @@ static bool x86_disassembler_initialize(void)
         result = total <= BUSTER_X86_DECODE_ENTRIES;
         if (result)
         {
+            // One region sized from the actual padded buckets, rather than the catalogue's worst-case expansion.
+            // Padding each bucket to eight also aligns both 64-bit arrays for their vector loads.
+            x86_decode_storage_bytes = ((uint64_t)total * 18 + 63) & ~63ull;
+            x86_decode_keys = aligned_alloc(64, x86_decode_storage_bytes);
+            result = x86_decode_keys != 0;
+        }
+        if (result)
+        {
+            x86_decode_masks = x86_decode_keys + total;
+            x86_decode_forms = (uint16_t*)(x86_decode_masks + total);
             for (uint32_t i = 0; i < total; i += 1)
             {
                 x86_decode_keys[i] = UINT64_MAX;
@@ -362,11 +457,24 @@ static bool x86_disassembler_initialize(void)
                     }
                 }
             }
-            x86_decode_lengths_initialize();
-            x86_decode_checks_initialize();
-            x86_decode_simple_initialize();
-            x86_decode_entry_count = total;
-            x86_decode_initialized = true;
+            result = x86_decode_indices_initialize();
+            if (result)
+            {
+                x86_decode_lengths_initialize();
+                x86_decode_checks_initialize();
+                x86_decode_simple_initialize();
+                x86_disassembly_initialize();
+                x86_decode_entry_count = total;
+                x86_decode_initialized = true;
+            }
+            else
+            {
+                free(x86_decode_keys);
+                x86_decode_keys = 0;
+                x86_decode_masks = 0;
+                x86_decode_forms = 0;
+                x86_decode_storage_bytes = 0;
+            }
         }
     }
     return result;
@@ -778,7 +886,7 @@ static X86DecodeStatus x86_decode_candidate(const uint8_t* bytes, uint32_t size,
     return status;
 }
 
-static X86DecodeStatus x86_decode_one(const uint8_t* bytes, uint32_t size, uint64_t prefixes, bool vectorized, bool compact, X86Decoded* output)
+static X86DecodeStatus x86_decode_one(const uint8_t* bytes, uint32_t size, uint64_t prefixes, bool vectorized, bool compact, bool indexed, X86Decoded* output)
 {
     X86DecodeHeader header;
     X86DecodeStatus status = x86_decode_header(bytes, size, prefixes, vectorized, &header);
@@ -786,7 +894,25 @@ static X86DecodeStatus x86_decode_one(const uint8_t* bytes, uint32_t size, uint6
     {
         status = X86_DECODE_UNSUPPORTED;
         const X86DecodeBucket bucket = x86_decode_buckets[header.bucket];
-        for (uint32_t i = 0; i < bucket.count && status != X86_DECODE_OK; i += vectorized ? 8 : 1)
+        bool scan = true;
+        if (indexed && header.family != BUSTER_X86_FAMILY_LEGACY && header.end < size)
+        {
+            const X86DecodeIndex* index = &x86_decode_indices[header.bucket - BUSTER_X86_DECODE_MAPS * 256];
+            if (index->first != UINT32_MAX)
+            {
+                uint16_t row = 0;
+                if ((header.key & index->common_mask) == index->common_key)
+                {
+                    row = x86_decode_index_rows[index->first + _pext_u64(header.key, index->varying)];
+                }
+                scan = row == UINT16_MAX;
+                if (row != 0 && !scan)
+                {
+                    status = x86_decode_candidate(bytes, size, &header, row, compact, output);
+                }
+            }
+        }
+        for (uint32_t i = 0; scan && i < bucket.count && status != X86_DECODE_OK; i += vectorized ? 8 : 1)
         {
             const uint32_t first = bucket.first + i;
             uint32_t matches = 0;
@@ -862,7 +988,7 @@ static X86DecodeResult x86_disassemble_impl(const uint8_t* source, uint64_t size
             }
             X86Decoded decoded = {.offset = (uint32_t)result.consumed};
             const uint64_t prefix_bits = vectorized ? prefixes >> (result.consumed - window_start) : 0;
-            result.status = x86_decode_one(source + result.consumed, available, prefix_bits, vectorized, compact, &decoded);
+            result.status = x86_decode_one(source + result.consumed, available, prefix_bits, vectorized, compact, false, &decoded);
             if (result.status == X86_DECODE_OK)
             {
                 output[result.count] = decoded;
@@ -1052,7 +1178,7 @@ static X86DecodeResult x86_disassemble_batched(const uint8_t* source, uint64_t s
                         const uint32_t at = offsets[i];
                         const uint64_t available = remaining - at;
                         X86Decoded decoded = {.offset = (uint32_t)(start + at)};
-                        result.status = x86_decode_one(source + start + at, available < 15 ? (uint32_t)available : 15, prefixes >> at, true, true, &decoded);
+                        result.status = x86_decode_one(source + start + at, available < 15 ? (uint32_t)available : 15, prefixes >> at, true, true, true, &decoded);
                         if (result.status == X86_DECODE_OK)
                         {
                             output[result.count] = decoded;
@@ -1243,7 +1369,7 @@ static void x86_disassembly_memory(X86DisassemblyText* text, const X86Decoded* d
 
 // Returns a NUL-terminated Intel-syntax instruction's length, or -1 on insufficient capacity. The decoder's records
 // are the input contract. Relative targets use the current instruction's location, preserving their displacement.
-static int64_t x86_disassembly_format(const X86Decoded* decoded, char* output, uint64_t capacity)
+static int64_t x86_disassembly_format_scalar(const X86Decoded* decoded, char* output, uint64_t capacity)
 {
     static const char* const syntax[] =
     {
@@ -1417,3 +1543,5 @@ static int64_t x86_disassembly_format(const X86Decoded* decoded, char* output, u
     }
     return text.full ? -1 : (int64_t)text.length;
 }
+
+#include "buster/compiler/x86_64_disassembly.c"

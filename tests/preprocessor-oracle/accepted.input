@@ -1,0 +1,13 @@
+/* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
+/* Copyright (c) 2026 David Gonzalez Martin. */
+#include "oracle-header.h"
+#define JOIN_INNER(a, b) a ## b
+#define JOIN(a, b) JOIN_INNER(a, b)
+#define STRING_INNER(x) #x
+#define STRING(x) STRING_INNER(x)
+#line 300 "oracle logical.c"
+const char *JOIN(file_, name) = __FILE__;
+const char *date = __DATE__, *time = __TIME__;
+const char *feature = STRING(__has_builtin(__builtin_expect));
+int line = __LINE__;
+int header = ORACLE_HEADER;
