@@ -348,7 +348,7 @@ static bool preprocessor_fuzz_clang_version(const char* clang_path)
     return result;
 }
 
-bool preprocessor_fuzz_benchmark_version(const char* clang_path)
+static bool preprocessor_fuzz_benchmark_version(const char* clang_path)
 {
     const bool result = preprocessor_fuzz_clang_version(clang_path);
     return result;
@@ -908,7 +908,7 @@ static bool preprocessor_fuzz_clang(Arena* arena, const char* clang_path, bool c
     return result;
 }
 
-bool preprocessor_fuzz_benchmark_sample(const char* clang_path, bool c23, uint64_t seed, uint64_t count, bool individual, uint64_t* accepted, uint64_t* bytes)
+static bool preprocessor_fuzz_benchmark_sample(const char* clang_path, bool c23, uint64_t seed, uint64_t count, bool individual, uint64_t* accepted, uint64_t* bytes)
 {
     uint64_t capacity = 0;
     bool result = accepted != 0 && bytes != 0 && count <= UINT64_MAX / BUSTER_PPF_FAMILY_CYCLE &&
