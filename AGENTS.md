@@ -3060,6 +3060,16 @@ file, for perf. Run it under the 9700X's lock with `taskset -c 2`;
 The default 9700X job runs it on `main.c`, pinned to one allowed CPU; like the
 others, its measurements are informational.
 
+## Scoped binding kernels
+
+`./build/compiler test-bindings [--seed N]` checks the standalone scoped C
+binding kernels: stack replay and the vector batch against an independent
+scope oracle, 100,000-level nesting, protected-page tails and allocation
+failure. `benchmark-bindings [--events N] [--names N] [--only scalar|batch|sort]
+[--after-scalar MS]` measures synthetic events under the 9700X lock, pinned to
+CPU 2. The parser adapter and corpus acceptance for #128 remain pending;
+[docs/c-bindings.md](docs/c-bindings.md) describes the contract and boundaries.
+
 ## Type tests
 
 `./build/compiler test-types [--seed N] [--count N] [--clang PATH] [--keep]`
