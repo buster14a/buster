@@ -522,6 +522,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
 ./build/compiler test-preprocessor --clang
+./build/compiler test-preprocessor --tables src
+./build/compiler benchmark-preprocessor --tables src
 ./build/compiler -E -march=native -Isrc -fwrapv -funsigned-char -o build/main.i src/buster/compiler/main.c
 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 ./build/compiler test-files
@@ -2578,7 +2580,8 @@ reason. `c_preprocessor_oracle.c` implements this interface;
 [the frozen oracle guide](docs/preprocessor-oracle.md) records the pinned
 headers/corpora, manifest identities, CI subset and on-demand commands.
 
-`./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
+`./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
+[options] [file...]`, or `test-preprocessor --tables path...`:
 
 - without files, the 95 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
@@ -2597,9 +2600,37 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `SOURCE_DATE_EPOCH`'s when it is set; and the `-m` options buster refuses
   though clang takes them (another target's, which clang ignores with a
   warning, and those that change the target) must be refused, and each `-m`
-  flag that changes no macro taken;
+  flag that changes no macro taken. Then the directive tables (#118,
+  `c_preprocessor_directives_test.c`): 2,000 random sources (`--count N`,
+  `--seed N`) of directives, `%:`, `#` alone, line markers, unknown names,
+  `#`s inside lines, literals and comments and after line splices, and
+  conditionals nested to many levels, balanced and not, and nests past the
+  vectorized pairing's depth limit, each prepared by both kernels, whose tables
+  (directives, line ends, kinds, pairing, notes and include guard) must be the
+  oracle's: a walk of the tokens one at a time, of the test's own. And 17
+  fixtures of a file's conditional structure (`#else` and `#elif` after
+  `#else`, a directive without `#if`, groups left open, in skipped groups and in
+  an included file, extra tokens, `#elifdef` before C23), whose diagnostics
+  both kernels must give alike, and ten of `#define`'s and `#undef`'s
+  constraints and redefinitions (#121). And 20 fixtures of include guards and
+  `#pragma once` (#120): the guard's shapes clang's multiple-include
+  optimization takes and those it doesn't, `#undef` between inclusions, an
+  inclusion from inside the file, the macro defined before the first, links to
+  a `#pragma once` file, `#import`. Each run must skip as many inclusions by
+  guards and by `#pragma once` as expected, by both kernels. Then a location
+  space shrunk to end where an inclusion, and then the first pasted spelling,
+  would start (`--location-limit N`, #124): both kernels must stop there, with
+  the output before it, and report the inclusion at its `#include` and the
+  spelling without a place. And `test-preprocessor` with a file and
+  `benchmark-preprocessor` (with `--clang`, and `--compare-clang`), run as
+  children on a small file, must take `--location-limit N` with its value as
+  ours, kept from clang, succeeding in a space the file fits in and running
+  out of one of a byte;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
-  `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree.
+  `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree;
+- with `--tables`, the directive tables of every `.c` and `.h` file under each
+  path, by both kernels, against the oracle (about 0.02 s for `src`, 0.6 s for
+  the C library corpus).
 
 In both, the vectorized printer's text must be the scalar printer's byte for
 byte, with line markers and without, and must lex back into the stream's
@@ -2610,7 +2641,7 @@ Every case and file runs with clang's answers to the feature queries
 ways: by default they answer what buster implements.
 
 `--clang` also compares every case and file with `clang -E` and the same
-options, token spelling by token spelling, and then where clang's line markers
+options (but `--predefines` and `--location-limit`, ours alone), token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
 prints the first difference with the tokens around it. For files, our side
 reads clang's own predefines for the options through `--predefines`, so that
@@ -2648,10 +2679,13 @@ the features:
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers, and so must they under 45
   sanitizer option sets, and the four `__is_target_*` of 41 names under eight
-  kinds of target triple. `sqlite3.c`, musl 1.2.5's 1,357 sources,
+  kinds of target triple.
+- the structure and definition fixtures' diagnostics must be clang's, byte for byte, and the
+  guard fixtures' output and skips by guards clang's (`-Xclang -print-stats`),
+  as every file's skips by guards must be. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
-`docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs
-the cases and the repository's translation units with `--clang`.
+`docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs the cases
+and the repository's translation units with `--clang`, and `--tables src`.
 
 `./build/compiler test-preprocessor --generate-targets` prints `c_predefines.c`'s
 generated block from clang 23 (on `PATH`), to paste over the old one when clang
@@ -2665,8 +2699,10 @@ run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
 and time (read, lex, refine, directive tables, main loop), the release after the
-run (the files' mappings among it), and what a run did (directives, runs,
-expansions, invocations, pastes, and the `#if` lines and their lengths).
+run (the files' mappings among it), `-E -P`'s throughput with its printing
+(input bytes and output tokens per second, #124) and what a run did
+(directives, runs, expansions, invocations, pastes, the `#if` lines and their
+lengths, and the inclusions skipped by guards and by `#pragma once`).
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.
@@ -2677,6 +2713,28 @@ runs answer the feature queries as clang does (`--clang-features`), so that they
 do the work `clang -E` does. The
 default 9700X job runs the smoke command above on `main.c`, pinned to one allowed
 CPU; like the others, its measurements are informational.
+
+`./build/compiler benchmark-preprocessor --defines [--only vectorized|scalar]
+path...` times definitions and lookups alone (#121): every `.c` and `.h` file
+under the paths is read and prepared once, then each of 21 passes after a
+warm-up, file by file, defines its `#define`s, compiles its macros and looks up
+its identifiers as the main loop's runs test them, by each kernel, which must
+make the same macros. It reports the medians in cycles per `#define`, per macro
+compiled and per lookup. `docs/c-preprocessor.md` has the numbers for the C
+library corpus.
+
+`--guard-cost` times the vectorized kernels with the skip of guarded files and
+without it (`PPOptions.no_guard_skip`), in place of the scalar twins: the
+output's tokens must be the same (#120).
+
+`./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
+path...` times the directive tables alone (#118): every `.c` and `.h` file under
+the paths is read and prepared once, then each of 21 passes after a warm-up
+builds every file's table by each kernel, whose tables must be the same, and it
+reports the medians per input token and per directive, IPC, and the scan's
+share. Run it under the 9700X's lock with `taskset -c 2`;
+`docs/c-preprocessor.md` has the numbers for the C library corpus. The default
+9700X job runs it on `src`, pinned to one allowed CPU.
 
 ## Per-file jobs tests
 
