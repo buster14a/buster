@@ -389,6 +389,15 @@ jobs:
         # Without taskset: it pins each lane to an allowed CPU of its own.
         run: ./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
+      - name: Test the C type table
+        # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a
+        # random world of types against clang's: clang -fsyntax-only on _Static_asserts, the same file compiled and
+        # run, and clang's AST dump.
+        run: ./build/compiler test-types
+
+      - name: Test integer builtin actions against Clang
+        run: ./build/compiler test-builtins
+
       - name: Benchmark the C type table
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
