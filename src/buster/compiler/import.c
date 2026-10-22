@@ -37,8 +37,10 @@
 // symbol, which the caller binds.
 //
 // Archives (import_archive): GNU's format, with its symbol index (32- or 64-bit) and its table of long names. The
-// members are slices of the archive's bytes, and the index maps each name to the member that defines it. Thin archives
-// are unsupported.
+// members are slices of the archive's bytes, and the index maps each name to the member that defines it. A thin
+// archive (!<thin>, ar's T) has the same index and long names, but its members' bytes are files of their own, named by
+// paths relative to the archive's directory, and only their headers are in the archive: each member's bytes are then
+// empty, at the end of its header, and ImportArchive.thin tells the caller to open the file its name gives.
 //
 // Shared libraries (import_library): the soname, the version definitions, and from .dynsym the names it defines, each
 // with its default version (name@@VERSION, or unversioned), type and size, indexed by link_hash (ImportNameIndex), and
@@ -87,7 +89,7 @@ typedef enum ImportError
     // An offset, size, count or index outside the file or the table it indexes, or a string without its NUL.
     IMPORT_ERROR_BOUNDS,
     // Something valid that this step doesn't import: a section, symbol or relocation type, a symbol in an absolute or
-    // common section, a section group, a thin archive.
+    // common section, a section group, a BSD archive's member.
     IMPORT_ERROR_UNSUPPORTED,
     // The representation refused a record (link->error says why): a table full, relocations that overlap, a symbol
     // outside its section.
@@ -160,6 +162,27 @@ struct ImportArchive
     uint32_t member_count;
     ImportArchiveSymbol* symbols;
     uint32_t symbol_count;
+    // A thin archive: each member's bytes are the file its name gives, relative to the archive's directory, and its
+    // `bytes` are empty.
+    bool thin;
+};
+
+// An archive's symbol index alone, for a link that loads only the members it needs: each entry's name, and in `member`
+// the rank of its member among the members the index names (in archive order, which is the members' offsets' order);
+// each such member's header offset; the long names' table, for their names; and whether the archive is thin. A
+// member's header is read when it is loaded (import_archive_member).
+typedef struct ImportArchiveIndex ImportArchiveIndex;
+struct ImportArchiveIndex
+{
+    ImportArchiveSymbol* symbols;
+    uint32_t symbol_count;
+    uint64_t* member_offsets;
+    uint32_t member_count;
+    String8 long_names;
+    bool thin;
+    // Whether the archive has an index, and whether it has a member past its special ones.
+    bool indexed;
+    bool members;
 };
 
 // The names a shared library defines at their default versions, as columns: export i's name, a slice of the library's
@@ -262,6 +285,17 @@ static __attribute__((unused)) ImportResult import_archive_scalar(ImportArchive*
 // The vector path: true if it read the archive exactly as import_archive_scalar would have. Otherwise it may have
 // pushed from the arena, which import_archive takes back before the exact path.
 static __attribute__((unused)) bool import_archive_vector(ImportArchive* archive, String8 bytes, Arena* arena);
+// Reads an archive's symbol index alone (ImportArchiveIndex), without its members' headers: an archive without an index
+// has no symbols and no members in it. The vector path (import_archive_lazy_vector) reads it, or when anything is out
+// of the ordinary, import_archive_lazy_scalar does.
+static __attribute__((unused)) ImportResult import_archive_lazy(ImportArchiveIndex* index, String8 bytes, Arena* arena);
+// The exact path, the vector path's twin: it also takes an index out of archive order, which it sorts.
+static __attribute__((unused)) ImportResult import_archive_lazy_scalar(ImportArchiveIndex* index, String8 bytes, Arena* arena);
+// The vector path: true if it read the index exactly as import_archive_lazy_scalar would have.
+static __attribute__((unused)) bool import_archive_lazy_vector(ImportArchiveIndex* index, String8 bytes, Arena* arena);
+// The header of the indexed member of rank `rank`: its name, its bytes (empty for a thin archive's member) and offset.
+// A header that doesn't read, or a special member's, fails at its offset.
+static __attribute__((unused)) ImportResult import_archive_member(ImportMember* member, String8 bytes, const ImportArchiveIndex* index, uint32_t rank);
 // Reads a shared library's soname, versions, exports and references, and indexes the exports by hash; the arrays are
 // pushed from `arena`, the names are slices of the library's bytes. The vector path (import_library_vector) reads
 // them, or if anything in .dynsym is out of the ordinary, import_library_scalar does.
@@ -2183,15 +2217,14 @@ static ImportResult import_archive_scalar(ImportArchive* archive, String8 bytes,
     ImportResult result = { 0 };
     *archive = (ImportArchive){ 0 };
     const uint64_t magic = sizeof(BUSTER_IMPORT_ARCHIVE_MAGIC) - 1;
-    if (bytes.length >= magic && memcmp(bytes.pointer, BUSTER_IMPORT_THIN_ARCHIVE_MAGIC, magic) == 0)
-    {
-        result = import_fail(IMPORT_ERROR_UNSUPPORTED, 0);
-    }
-    else if (bytes.length < magic || memcmp(bytes.pointer, BUSTER_IMPORT_ARCHIVE_MAGIC, magic) != 0)
+    const bool thin = bytes.length >= magic && memcmp(bytes.pointer, BUSTER_IMPORT_THIN_ARCHIVE_MAGIC, magic) == 0;
+    if (!thin && (bytes.length < magic || memcmp(bytes.pointer, BUSTER_IMPORT_ARCHIVE_MAGIC, magic) != 0))
     {
         result = import_fail(IMPORT_ERROR_FORMAT, 0);
     }
-    // Two passes over the headers: count the members, then fill them; the index refers to them by offset.
+    archive->thin = thin;
+    // Two passes over the headers: count the members, then fill them; the index refers to them by offset. A thin
+    // archive's special members have their bytes after their headers, and its regular members only their headers.
     String8 long_names = { 0 };
     String8 index = { 0 };
     uint32_t index_width = 0;
@@ -2211,8 +2244,16 @@ static ImportResult import_archive_scalar(ImportArchive* archive, String8 bytes,
             const char* header = bytes.pointer + offset;
             uint64_t size = 0;
             const bool header_fits = import_within(bytes.length, offset, BUSTER_IMPORT_ARCHIVE_HEADER_BYTES);
+            const String8 field = {
+                .pointer = (char*)header,
+                .length = header_fits ? 16 : 0,
+            };
+            const bool symbol_index = import_starts_with(field, "/ ");
+            const bool symbol_index64 = import_starts_with(field, "/SYM64/ ");
+            const bool long_name_table = import_starts_with(field, "// ");
+            const bool inline_bytes = !thin || symbol_index || symbol_index64 || long_name_table;
             const bool valid = header_fits && header[58] == '`' && header[59] == '\n' && import_archive_number(header + 48, 10, &size) &&
-                               import_within(bytes.length, offset + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES, size);
+                               (!inline_bytes || import_within(bytes.length, offset + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES, size));
             if (!valid)
             {
                 result = import_fail(IMPORT_ERROR_BOUNDS, offset);
@@ -2221,15 +2262,8 @@ static ImportResult import_archive_scalar(ImportArchive* archive, String8 bytes,
             {
                 const String8 data = {
                     .pointer = (char*)header + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES,
-                    .length = size,
+                    .length = inline_bytes ? size : 0,
                 };
-                const String8 field = {
-                    .pointer = (char*)header,
-                    .length = 16,
-                };
-                const bool symbol_index = import_starts_with(field, "/ ");
-                const bool symbol_index64 = import_starts_with(field, "/SYM64/ ");
-                const bool long_name_table = import_starts_with(field, "// ");
                 if (import_starts_with(field, "#1/"))
                 {
                     result = import_fail(IMPORT_ERROR_UNSUPPORTED, offset);
@@ -2263,7 +2297,7 @@ static ImportResult import_archive_scalar(ImportArchive* archive, String8 bytes,
                     member += 1;
                 }
                 // Members start at even offsets: one padding byte after an odd size.
-                offset += BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + size + (size & 1);
+                offset += BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + data.length + (data.length & 1);
             }
         }
         if (pass == 1)
@@ -2313,37 +2347,42 @@ static bool import_archive_size(const char* field, uint64_t* value)
     return result;
 }
 
-// A regular member's header at `at`, on its own: within the file with its bytes, its size, and its name, not a special
-// member's or a BSD one. *end is where the next header is.
-static bool import_vector_member(String8 bytes, String8 long_names, uint64_t at, ImportMember* member, uint64_t* end)
+// A regular member's header at `at`, on its own: within the file with its bytes (a thin archive's member has none
+// there), its size, and its name, not a special member's or a BSD one. *end is where the next header is.
+static bool import_vector_member(String8 bytes, String8 long_names, uint64_t at, bool thin, ImportMember* member, uint64_t* end)
 {
     const char* header = bytes.pointer + at;
     uint64_t size = 0;
     String8 name = { 0 };
     bool result = import_within(bytes.length, at, BUSTER_IMPORT_ARCHIVE_HEADER_BYTES) && header[58] == '`' && header[59] == '\n' && import_archive_size(header + 48, &size) &&
-                  import_within(bytes.length, at + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES, size);
+                  (thin || import_within(bytes.length, at + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES, size));
     result = result && header[0] != '#' && !(header[0] == '/' && (header[1] == ' ' || header[1] == '/' || header[1] == 'S')) && import_archive_name(header, long_names, &name);
+    const uint64_t length = thin ? 0 : size;
     if (result)
     {
         *member = (ImportMember){
             .name = name,
             .bytes = {
                 .pointer = (char*)header + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES,
-                .length = size,
+                .length = length,
             },
             .offset = at,
         };
-        *end = at + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + size + (size & 1);
+        *end = at + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + length + (length & 1);
     }
     return result;
 }
 
-static bool import_archive_vector(ImportArchive* archive, String8 bytes, Arena* arena)
+// The index part of the vector path (import_archive_lazy_vector), from the special members GNU ar writes first (the
+// symbol index, then the long names' table; their bytes are after their headers in a thin archive too) to the
+// symbols, each with its member's rank among the indexed members; *first_member is where the members start.
+static bool import_archive_index_parse(ImportArchiveIndex* archive_index, String8 bytes, Arena* arena, uint64_t* first_member)
 {
     const uint64_t magic = sizeof(BUSTER_IMPORT_ARCHIVE_MAGIC) - 1;
-    *archive = (ImportArchive){ 0 };
-    bool result = bytes.length >= magic && memcmp(bytes.pointer, BUSTER_IMPORT_ARCHIVE_MAGIC, magic) == 0;
-    // The special members GNU ar writes first: the symbol index, then the long names' table.
+    *archive_index = (ImportArchiveIndex){ 0 };
+    const bool thin = bytes.length >= magic && memcmp(bytes.pointer, BUSTER_IMPORT_THIN_ARCHIVE_MAGIC, magic) == 0;
+    bool result = thin || (bytes.length >= magic && memcmp(bytes.pointer, BUSTER_IMPORT_ARCHIVE_MAGIC, magic) == 0);
+    archive_index->thin = thin;
     String8 index = { 0 };
     String8 long_names = { 0 };
     uint32_t width = 0;
@@ -2351,37 +2390,42 @@ static bool import_archive_vector(ImportArchive* archive, String8 bytes, Arena* 
     bool special = true;
     for (uint32_t step = 0; result && special && step < 3 && offset < bytes.length; step += 1)
     {
+        // The first header without a special member's name ends the special ones; a regular member's header is checked
+        // when the member is read.
         const char* header = bytes.pointer + offset;
-        uint64_t size = 0;
-        result = import_within(bytes.length, offset, BUSTER_IMPORT_ARCHIVE_HEADER_BYTES) && header[58] == '`' && header[59] == '\n' && import_archive_size(header + 48, &size) &&
-                 import_within(bytes.length, offset + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES, size);
         const String8 field = {
             .pointer = (char*)header,
-            .length = 16,
+            .length = import_within(bytes.length, offset, 16) ? 16 : 0,
         };
-        const bool index32 = result && import_starts_with(field, "/ ");
-        const bool index64 = result && import_starts_with(field, "/SYM64/ ");
-        const bool names = result && import_starts_with(field, "// ");
+        const bool index32 = import_starts_with(field, "/ ");
+        const bool index64 = import_starts_with(field, "/SYM64/ ");
+        const bool names = import_starts_with(field, "// ");
+        special = index32 || index64 || names;
+        uint64_t size = 0;
+        result = !special || (import_within(bytes.length, offset, BUSTER_IMPORT_ARCHIVE_HEADER_BYTES) && header[58] == '`' && header[59] == '\n' &&
+                              import_archive_size(header + 48, &size) && import_within(bytes.length, offset + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES, size));
         const String8 data = {
             .pointer = (char*)header + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES,
             .length = size,
         };
-        index = index32 || index64 ? data : index;
-        width = index32 ? 4 : index64 ? 8 : width;
-        long_names = names ? data : long_names;
-        special = index32 || index64 || names;
-        offset += special ? BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + size + (size & 1) : 0;
+        index = result && (index32 || index64) ? data : index;
+        width = result && index32 ? 4 : result && index64 ? 8 : width;
+        long_names = result && names ? data : long_names;
+        offset += result && special ? BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + size + (size & 1) : 0;
     }
-    const uint64_t first_member = offset;
+    *first_member = offset;
+    archive_index->long_names = long_names;
+    archive_index->indexed = width != 0;
+    archive_index->members = offset < bytes.length;
     const uint64_t count = width != 0 && index.length >= width ? import_big_endian(index.pointer, width) : 0;
-    // An index of at least one symbol: the exact path walks an archive without one.
+    // An index of at least one symbol: the exact path reads an archive without one.
     result = result && width != 0 && count != 0 && count <= (index.length - width) / width && count <= UINT32_MAX;
     Scratch scratch = scratch_begin(arena);
     uint64_t* offsets = result ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, count) : 0;
-    uint64_t* member_offsets = result ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, count) : 0;
     uint32_t* ranks = result ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count) : 0;
-    archive->symbols = result ? BUSTER_ARENA_PUSH_ARRAY(arena, ImportArchiveSymbol, count) : 0;
-    result = result && offsets != 0 && member_offsets != 0 && ranks != 0 && archive->symbols != 0;
+    archive_index->member_offsets = result ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count) : 0;
+    archive_index->symbols = result ? BUSTER_ARENA_PUSH_ARRAY(arena, ImportArchiveSymbol, count) : 0;
+    result = result && offsets != 0 && ranks != 0 && archive_index->member_offsets != 0 && archive_index->symbols != 0;
     // The offsets, big-endian: each vector's bytes reversed within each lane, then widened to 64 bits.
     const __m512i reverse32 = _mm512_broadcast_i32x4(_mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12));
     const __m512i reverse64 = _mm512_broadcast_i32x4(_mm_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8));
@@ -2428,45 +2472,13 @@ static bool import_archive_vector(ImportArchive* archive, String8 bytes, Arena* 
         rank = _mm512_max_epi64(rank, _mm512_alignr_epi64(rank, none, 4));
         rank = _mm512_max_epi64(rank, last_rank);
         import_store32(ranks + first, rank, n);
-        import_store64(member_offsets + indexed, _mm512_maskz_compress_epi64((__mmask8)changes, lanes), new_members);
+        import_store64(archive_index->member_offsets + indexed, _mm512_maskz_compress_epi64((__mmask8)changes, lanes), new_members);
         indexed += new_members;
         previous = _mm512_permutexvar_epi64(_mm512_set1_epi64(n - 1), lanes);
         last_rank = _mm512_permutexvar_epi64(_mm512_set1_epi64(n - 1), rank);
     }
     result = result && failed == 0;
-    // Each indexed member's header on its own, and the members before the next indexed one walked: none, unless a
-    // member has no global symbol. Into scratch memory first, as many as there is room for, then the exact count into
-    // the arena; places[j] is the member that indexed offset j is.
-    const uint64_t most = result ? (bytes.length - first_member) / BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + 1 : 0;
-    ImportMember* members = result ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ImportMember, most) : 0;
-    uint32_t* places = result ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, indexed) : 0;
-    result = result && members != 0 && places != 0;
-    uint64_t member_count = 0;
-    uint64_t cursor = first_member;
-    for (uint32_t j = 0; result && j <= indexed; j += 1)
-    {
-        const uint64_t next = j < indexed ? member_offsets[j] : bytes.length;
-        while (result && cursor < next)
-        {
-            result = member_count < most && import_vector_member(bytes, long_names, cursor, &members[member_count], &cursor);
-            member_count += 1;
-        }
-        result = result && (j == indexed || cursor == next);
-        if (result && j < indexed)
-        {
-            places[j] = (uint32_t)member_count;
-            result = member_count < most && import_vector_member(bytes, long_names, next, &members[member_count], &cursor);
-            member_count += 1;
-        }
-    }
-    result = result && member_count <= UINT32_MAX;
-    archive->members = result ? BUSTER_ARENA_PUSH_ARRAY(arena, ImportMember, member_count) : 0;
-    result = result && archive->members != 0;
-    if (result)
-    {
-        memcpy(archive->members, members, member_count * sizeof(ImportMember));
-        archive->member_count = (uint32_t)member_count;
-    }
+    archive_index->member_count = result ? indexed : 0;
     // The names after the offsets, split at their NULs, 64 bytes at a time.
     const String8 names = {
         .pointer = index.pointer + width + count * width,
@@ -2483,12 +2495,12 @@ static bool import_archive_vector(ImportArchive* archive, String8 bytes, Arena* 
         while (nuls != 0 && named < count)
         {
             const uint64_t end = first + _tzcnt_u64(nuls);
-            archive->symbols[named] = (ImportArchiveSymbol){
+            archive_index->symbols[named] = (ImportArchiveSymbol){
                 .name = {
                     .pointer = names.pointer + name_start,
                     .length = end - name_start,
                 },
-                .member = places[ranks[named]],
+                .member = ranks[named],
             };
             name_start = end + 1;
             named += 1;
@@ -2496,7 +2508,64 @@ static bool import_archive_vector(ImportArchive* archive, String8 bytes, Arena* 
         }
     }
     result = result && named == count;
-    archive->symbol_count = result ? (uint32_t)count : 0;
+    archive_index->symbol_count = result ? (uint32_t)count : 0;
+    archive_index->member_count = result ? archive_index->member_count : 0;
+    scratch_end(scratch);
+    return result;
+}
+
+static bool import_archive_vector(ImportArchive* archive, String8 bytes, Arena* arena)
+{
+    *archive = (ImportArchive){ 0 };
+    ImportArchiveIndex index;
+    uint64_t first_member = 0;
+    bool result = import_archive_index_parse(&index, bytes, arena, &first_member);
+    const bool thin = index.thin;
+    const String8 long_names = index.long_names;
+    const uint32_t indexed = index.member_count;
+    const uint64_t* member_offsets = index.member_offsets;
+    archive->thin = thin;
+    // Each indexed member's header on its own, and the members before the next indexed one walked: none, unless a
+    // member has no global symbol. Into scratch memory first, as many as there is room for, then the exact count into
+    // the arena; places[j] is the member that indexed offset j is.
+    Scratch scratch = scratch_begin(arena);
+    const uint64_t most = result ? (bytes.length - first_member) / BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + 1 : 0;
+    ImportMember* members = result ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ImportMember, most) : 0;
+    uint32_t* places = result ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, indexed) : 0;
+    result = result && members != 0 && places != 0;
+    uint64_t member_count = 0;
+    uint64_t cursor = first_member;
+    for (uint32_t j = 0; result && j <= indexed; j += 1)
+    {
+        const uint64_t next = j < indexed ? member_offsets[j] : bytes.length;
+        while (result && cursor < next)
+        {
+            result = member_count < most && import_vector_member(bytes, long_names, cursor, thin, &members[member_count], &cursor);
+            member_count += 1;
+        }
+        result = result && (j == indexed || cursor == next);
+        if (result && j < indexed)
+        {
+            places[j] = (uint32_t)member_count;
+            result = member_count < most && import_vector_member(bytes, long_names, next, thin, &members[member_count], &cursor);
+            member_count += 1;
+        }
+    }
+    result = result && member_count <= UINT32_MAX;
+    archive->members = result ? BUSTER_ARENA_PUSH_ARRAY(arena, ImportMember, member_count) : 0;
+    result = result && archive->members != 0;
+    if (result)
+    {
+        memcpy(archive->members, members, member_count * sizeof(ImportMember));
+        archive->member_count = (uint32_t)member_count;
+        // Each symbol's member, from its rank among the indexed members.
+        archive->symbols = index.symbols;
+        for (uint32_t i = 0; i < index.symbol_count; i += 1)
+        {
+            archive->symbols[i].member = places[index.symbols[i].member];
+        }
+        archive->symbol_count = index.symbol_count;
+    }
     archive->member_count = result ? archive->member_count : 0;
     scratch_end(scratch);
     return result;
@@ -2510,6 +2579,193 @@ static ImportResult import_archive(ImportArchive* archive, String8 bytes, Arena*
     {
         arena_pop_to(arena, length);
         result = import_archive_scalar(archive, bytes, arena);
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Archives' indices alone
+//
+// A link that loads only the members it needs reads an archive's symbol index and nothing else up front: reading every
+// member's header, as import_archive does, touches a page of the file per member (2,231 of glibc's libc.a's), where the
+// index is a few pages at the start. The vector path is import_archive_vector's index part (import_archive_index_parse:
+// the offsets byte-swapped eight at a time and ranked by an expand of their changes and a prefix maximum, the names
+// split at their NULs 64 bytes at a time), which gives up on an index out of archive order; the exact path reads an
+// entry at a time and sorts such an index. A member's header is read when it is loaded, the same way on both paths.
+
+static bool import_archive_lazy_vector(ImportArchiveIndex* index, String8 bytes, Arena* arena)
+{
+    uint64_t first_member = 0;
+    return import_archive_index_parse(index, bytes, arena, &first_member);
+}
+
+// Sorts `count` offsets in place, bottom-up (no recursion), through `spare`.
+static void import_sort_offsets(uint64_t* values, uint64_t* spare, uint64_t count)
+{
+    uint64_t* from = values;
+    uint64_t* to = spare;
+    for (uint64_t width = 1; width < count; width *= 2)
+    {
+        for (uint64_t start = 0; start < count; start += 2 * width)
+        {
+            const uint64_t middle = start + width < count ? start + width : count;
+            const uint64_t end = start + 2 * width < count ? start + 2 * width : count;
+            uint64_t left = start;
+            uint64_t right = middle;
+            for (uint64_t out = start; out < end; out += 1)
+            {
+                const bool take_left = left < middle && (right >= end || from[left] <= from[right]);
+                to[out] = take_left ? from[left] : from[right];
+                left += take_left ? 1 : 0;
+                right += take_left ? 0 : 1;
+            }
+        }
+        uint64_t* swap = from;
+        from = to;
+        to = swap;
+    }
+    if (from != values)
+    {
+        memcpy(values, from, count * sizeof(uint64_t));
+    }
+}
+
+static ImportResult import_archive_lazy_scalar(ImportArchiveIndex* index, String8 bytes, Arena* arena)
+{
+    ImportResult result = { 0 };
+    *index = (ImportArchiveIndex){ 0 };
+    const uint64_t magic = sizeof(BUSTER_IMPORT_ARCHIVE_MAGIC) - 1;
+    const bool thin = bytes.length >= magic && memcmp(bytes.pointer, BUSTER_IMPORT_THIN_ARCHIVE_MAGIC, magic) == 0;
+    if (!thin && (bytes.length < magic || memcmp(bytes.pointer, BUSTER_IMPORT_ARCHIVE_MAGIC, magic) != 0))
+    {
+        result = import_fail(IMPORT_ERROR_FORMAT, 0);
+    }
+    index->thin = thin;
+    // The special members at the start: the symbol index and the long names' table, at most three of them, as the
+    // vector path reads them.
+    String8 table = { 0 };
+    uint32_t width = 0;
+    uint64_t table_offset = 0;
+    uint64_t offset = magic;
+    bool special = true;
+    for (uint32_t step = 0; result.error == IMPORT_ERROR_NONE && special && step < 3 && offset < bytes.length; step += 1)
+    {
+        // The first header without a special member's name ends the special ones; a regular member's header is checked
+        // when the member is read.
+        const char* header = bytes.pointer + offset;
+        const String8 field = {
+            .pointer = (char*)header,
+            .length = import_within(bytes.length, offset, 16) ? 16 : 0,
+        };
+        const bool index32 = import_starts_with(field, "/ ");
+        const bool index64 = import_starts_with(field, "/SYM64/ ");
+        const bool names = import_starts_with(field, "// ");
+        special = index32 || index64 || names;
+        uint64_t size = 0;
+        const bool valid = !special || (import_within(bytes.length, offset, BUSTER_IMPORT_ARCHIVE_HEADER_BYTES) && header[58] == '`' && header[59] == '\n' &&
+                                        import_archive_number(header + 48, 10, &size) && import_within(bytes.length, offset + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES, size));
+        const String8 data = {
+            .pointer = (char*)header + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES,
+            .length = size,
+        };
+        if (!valid)
+        {
+            result = import_fail(IMPORT_ERROR_BOUNDS, offset);
+        }
+        else if (special)
+        {
+            table = index32 || index64 ? data : table;
+            table_offset = index32 || index64 ? offset : table_offset;
+            width = index32 ? 4 : index64 ? 8 : width;
+            index->long_names = names ? data : index->long_names;
+            offset += BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + size + (size & 1);
+        }
+    }
+    index->indexed = width != 0;
+    index->members = offset < bytes.length;
+    const uint64_t count = result.error == IMPORT_ERROR_NONE && width != 0 && table.length >= width ? import_big_endian(table.pointer, width) : 0;
+    if (result.error == IMPORT_ERROR_NONE && width != 0 && (table.length < width || count > (table.length - width) / width || count > UINT32_MAX))
+    {
+        result = import_fail(IMPORT_ERROR_BOUNDS, table_offset);
+    }
+    Scratch scratch = scratch_begin(arena);
+    uint64_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, count + 1);
+    uint64_t* spare = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, count + 1);
+    index->symbols = BUSTER_ARENA_PUSH_ARRAY(arena, ImportArchiveSymbol, count + 1);
+    index->member_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1);
+    if (result.error == IMPORT_ERROR_NONE && (offsets == 0 || spare == 0 || index->symbols == 0 || index->member_offsets == 0))
+    {
+        result = import_fail(IMPORT_ERROR_MEMORY, 0);
+    }
+    const String8 names = {
+        .pointer = table.pointer + width + count * width,
+        .length = result.error == IMPORT_ERROR_NONE && width != 0 ? table.length - width - count * width : 0,
+    };
+    uint64_t name_offset = 0;
+    for (uint64_t i = 0; result.error == IMPORT_ERROR_NONE && i < count; i += 1)
+    {
+        offsets[i] = import_big_endian(table.pointer + width + i * width, width);
+        if (!import_string(names, name_offset, &index->symbols[i].name))
+        {
+            result = import_fail(IMPORT_ERROR_BOUNDS, table_offset);
+            result.symbol = (uint32_t)i;
+        }
+        name_offset += index->symbols[i].name.length + 1;
+    }
+    // The indexed members: the distinct offsets in order, each symbol's member its offset's rank among them.
+    uint32_t members = 0;
+    if (result.error == IMPORT_ERROR_NONE)
+    {
+        memcpy(spare, offsets, count * sizeof(uint64_t));
+        import_sort_offsets(spare, index->member_offsets, count);
+        for (uint64_t i = 0; i < count; i += 1)
+        {
+            if (members == 0 || spare[i] != index->member_offsets[members - 1])
+            {
+                index->member_offsets[members] = spare[i];
+                members += 1;
+            }
+        }
+        for (uint64_t i = 0; i < count; i += 1)
+        {
+            uint32_t low = 0;
+            uint32_t high = members;
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                low = index->member_offsets[middle] < offsets[i] ? middle + 1 : low;
+                high = index->member_offsets[middle] < offsets[i] ? high : middle;
+            }
+            index->symbols[i].member = low;
+        }
+    }
+    index->member_count = result.error == IMPORT_ERROR_NONE ? members : 0;
+    index->symbol_count = result.error == IMPORT_ERROR_NONE ? (uint32_t)count : 0;
+    scratch_end(scratch);
+    return result;
+}
+
+static ImportResult import_archive_lazy(ImportArchiveIndex* index, String8 bytes, Arena* arena)
+{
+    const uint64_t length = arena->length;
+    ImportResult result = { 0 };
+    if (!import_archive_lazy_vector(index, bytes, arena))
+    {
+        arena_pop_to(arena, length);
+        result = import_archive_lazy_scalar(index, bytes, arena);
+    }
+    return result;
+}
+
+static ImportResult import_archive_member(ImportMember* member, String8 bytes, const ImportArchiveIndex* index, uint32_t rank)
+{
+    const uint64_t at = rank < index->member_count ? index->member_offsets[rank] : bytes.length;
+    uint64_t end = 0;
+    ImportResult result = { 0 };
+    *member = (ImportMember){ 0 };
+    if (!import_vector_member(bytes, index->long_names, at, index->thin, member, &end))
+    {
+        result = import_fail(IMPORT_ERROR_BOUNDS, at);
     }
     return result;
 }
