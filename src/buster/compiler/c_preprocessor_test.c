@@ -1285,6 +1285,116 @@ static bool pp_test_macros(int argument_count, char** arguments, const PPOptions
     return result;
 }
 
+// Assembly's printed bytes matter to GNU as even when a C token comparison treats the output as equivalent.
+static bool pp_test_assembly_printing(const char* directory)
+{
+    static const char adjacency[] = "#define D() $\n#define F() foo\n#define N() 1\nD()foo\nD()7\nF()$\nN()$\nD()D()\n";
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        const char* expected;
+        bool assembly;
+    } cases[] = {
+        {
+            "assembly immediates and dollar symbols",
+            "#define FOO 4\nmovl $FOO, %eax\nfoo$bar: jmp foo$bar\n",
+            "movl $4, %eax\nfoo$bar: jmp foo$bar\n",
+            true,
+        },
+        {
+            "assembly macro arguments separated by whitespace",
+            "#define V 5\nload $V %eax\n",
+            "load $5 %eax\n",
+            true,
+        },
+        {
+            "assembly explicit whitespace around dollars",
+            "$ FOO\nFOO $\n$/**/FOO\nFOO/**/$\n",
+            "$ FOO\nFOO $\n$ FOO\nFOO $\n",
+            true,
+        },
+        {
+            "assembly dollar adjacency after macro expansion",
+            adjacency,
+            "$foo\n$7\nfoo$\n1$\n$$\n",
+            true,
+        },
+        {
+            "C dollar tokens still need separation",
+            adjacency,
+            "$ foo\n$ 7\nfoo $\n1 $\n$ $\n",
+            false,
+        },
+    };
+    // Put '$' before, at and after each side of a 64-token boundary, including a partial final chunk.
+    static const uint32_t padding[] = { 0, 62, 63, 64, 126, 127, 128 };
+    uint32_t failures = 0;
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/dollar-printing.S", directory);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases) + BUSTER_ARRAY_LENGTH(padding); i += 1)
+    {
+        const bool boundary = i >= BUSTER_ARRAY_LENGTH(cases);
+        const uint32_t prefix = boundary ? padding[i - BUSTER_ARRAY_LENGTH(cases)] : 0;
+        char padded[256];
+        memset(padded, ';', prefix);
+        memcpy(padded + prefix, "$tail\n", sizeof("$tail\n"));
+        const char* name = boundary ? "assembly dollars at token boundaries" : cases[i].name;
+        const char* source = boundary ? padded : cases[i].source;
+        const char* expected = boundary ? padded : cases[i].expected;
+        const bool assembly = boundary || cases[i].assembly;
+        char* arguments[] = { "-std=gnu17", "-x", assembly ? "assembler-with-cpp" : "c", path };
+        Arena arena = arena_reserve(1ull << 20);
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        bool passed = pp_test_write_file(path, source) && pp_parse_options(BUSTER_ARRAY_LENGTH(arguments), arguments, &options, &arena, &input, &output, &markers);
+        static InternTable tables[2];
+        static Preprocessor runs[2];
+        bool ran[2] = { false, false };
+        for (uint32_t kernel = 0; passed && kernel < 2; kernel += 1)
+        {
+            options.scalar = kernel != 0;
+            ran[kernel] = pp_test_run(&runs[kernel], &tables[kernel], &options, path);
+        }
+        passed = passed && ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], name) && pp_same_directive_tables(&runs[0], &runs[1], name);
+        for (uint32_t kernel = 0; passed && kernel < 2; kernel += 1)
+        {
+            for (uint32_t marking = 0; passed && marking < 2; marking += 1)
+            {
+                size_t vector_length = 0;
+                size_t scalar_length = 0;
+                char* vector_text = pp_test_print(&runs[kernel], true, marking != 0, &vector_length);
+                char* scalar_text = pp_test_print(&runs[kernel], false, marking != 0, &scalar_length);
+                passed = vector_text != 0 && scalar_text != 0 && vector_length == scalar_length && memcmp(vector_text, scalar_text, vector_length) == 0;
+                passed = passed && (marking != 0 || (vector_length == strlen(expected) && memcmp(vector_text, expected, vector_length) == 0));
+                if (!passed)
+                {
+                    printf("%s: dollar-printing case %u (%u leading tokens), %s kernels%s differs\n", name, i, prefix,
+                           kernel == 0 ? "vectorized" : "scalar", marking != 0 ? " with line markers" : "");
+                    if (marking == 0 && vector_text != 0)
+                    {
+                        printf("  ours: %s  wanted: %s", vector_text, expected);
+                    }
+                }
+                free(vector_text);
+                free(scalar_text);
+            }
+        }
+        failures += !passed;
+        for (uint32_t kernel = 0; kernel < 2; kernel += 1)
+        {
+            pp_release(&runs[kernel]);
+            intern_release(&tables[kernel]);
+        }
+        arena_release(&arena);
+    }
+    unlink(path);
+    printf("dollar printing: %u of %lu cases fail\n", failures, (unsigned long)(BUSTER_ARRAY_LENGTH(cases) + BUSTER_ARRAY_LENGTH(padding)));
+    return failures == 0;
+}
+
 // One accepted file, by both kernels, and (when supplied) against Clang's already-collected output.
 static bool pp_test_file_output(const PPOptions* base, const char* path, bool with_clang, const char* text, size_t length, uint64_t* tokens)
 {
@@ -2061,6 +2171,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= predefines_test_refused();
         passed_all &= pp_test_history(directory, with_clang);
         passed_all &= pp_test_id_order(directory, id_order);
+        passed_all &= pp_test_assembly_printing(directory);
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);

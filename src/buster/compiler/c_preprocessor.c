@@ -8321,25 +8321,25 @@ static bool pp_punctuation_joins(uint8_t before, uint8_t after)
     return before != 0 && after != 0 && strchr(joining, before) != 0 && strchr(joining, after) != 0;
 }
 
-static bool pp_word_character(uint8_t c)
+static bool pp_word_character(uint8_t c, bool assembly)
 {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$' || c >= 0x80 || c == '\\';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || (c == '$' && !assembly) || c >= 0x80 || c == '\\';
 }
 
 // Would printing `after` right after `before` (their last and first characters) lex differently? Then a space goes
 // between them. It errs towards a space: -E's output only has to lex into the same tokens.
-static bool pp_needs_separation(uint8_t before_last, uint8_t before_kind, uint8_t after_first)
+static bool pp_needs_separation(uint8_t before_last, uint8_t before_kind, uint8_t after_first, bool assembly)
 {
     bool result = false;
     if (before_kind == C_TOKEN_NUMERIC_CONSTANT)
     {
         // A pp-number goes on with word characters, '.', a digit separator and an exponent's sign.
-        result = pp_word_character(after_first) || after_first == '.' || after_first == '\'' || after_first == '+' || after_first == '-';
+        result = pp_word_character(after_first, assembly) || after_first == '.' || after_first == '\'' || after_first == '+' || after_first == '-';
     }
-    else if (pp_word_character(before_last))
+    else if (pp_word_character(before_last, assembly))
     {
         // An identifier goes on with word characters, and a prefix makes a literal with a quote.
-        result = pp_word_character(after_first) || after_first == '"' || after_first == '\'';
+        result = pp_word_character(after_first, assembly) || after_first == '"' || after_first == '\'';
     }
     else if (before_last == '.')
     {
@@ -8753,7 +8753,7 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
         {
             const uint8_t* spelling;
             const uint32_t length = pp_spelling(pp, kind, out->values[i], out->locations[i], buffer, &spelling);
-            if (!line_start && length != 0 && ((flags & BUSTER_PP_SPACE) || pp_needs_separation(previous_last, previous_kind, spelling[0])))
+            if (!line_start && length != 0 && ((flags & BUSTER_PP_SPACE) || pp_needs_separation(previous_last, previous_kind, spelling[0], pp->options.assembly)))
             {
                 fputc(' ', stream);
             }
@@ -8909,9 +8909,11 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     // The last character and kind of the token before the chunk, for its first token's space.
     uint8_t previous_last = 0;
     uint8_t previous_kind = 0;
-    const __m512i after_low = _mm512_load_si512(pp_after_classes);
+    // Assembly splits '$' from names and numbers. Classify it as punctuation once for all chunks; source spaces stay.
+    const __mmask64 word_classes = ~((uint64_t)pp->options.assembly << '$');
+    const __m512i after_low = _mm512_maskz_loadu_epi8(word_classes, pp_after_classes);
     const __m512i after_high = _mm512_load_si512(pp_after_classes + 64);
-    const __m512i before_low = _mm512_load_si512(pp_before_classes);
+    const __m512i before_low = _mm512_maskz_loadu_epi8(word_classes, pp_before_classes);
     const __m512i before_high = _mm512_load_si512(pp_before_classes + 64);
     const __m512i separation = _mm512_load_si512(pp_separation_table);
     const __m512i previous_lanes = _mm512_sub_epi8(_mm512_load_si512(pp_byte_indices), _mm512_set1_epi8(1));
@@ -8983,7 +8985,8 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
         // Each token's before-class is its previous token's: the classes move up a lane, the chunk's first taking the
         // class of the token before the chunk.
         const uint8_t carried = previous_kind == C_TOKEN_NUMERIC_CONSTANT ? BUSTER_PP_BEFORE_NUMBER
-                                : previous_last >= 0x80 ? BUSTER_PP_BEFORE_WORD : pp_before_classes[previous_last];
+                                : previous_last >= 0x80 ? BUSTER_PP_BEFORE_WORD
+                                : pp->options.assembly && previous_last == '$' ? 0 : pp_before_classes[previous_last];
         before = _mm512_mask_permutexvar_epi8(_mm512_set1_epi8((char)carried), ~1ull, previous_lanes, before);
         const __m512i pair = _mm512_add_epi8(_mm512_slli_epi16(before, 3), after);
         const uint64_t joins = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(pair, separation), _mm512_set1_epi8(1));

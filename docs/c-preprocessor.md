@@ -1385,6 +1385,21 @@ token), the intern table, and the unused part of each arena's last huge page.
 In a process that preprocesses many translation units (#152), that memory is
 cleared once and reused.
 
+## Assembly output spacing
+
+In `-x assembler-with-cpp` mode, the lexer splits `$` from names and
+numbers so that macros beside it still expand. Both printers use that same
+boundary: `$VALUE` can print as `$4`, and `foo$bar` stays a single GNU as
+symbol in the printed text. Whitespace and comments that separate tokens in
+the input still produce spaces. C mode retains its identifier-separation rules.
+
+The vector printer clears `$`'s entry in both byte-class tables once per
+call, and applies the same classification to the token carried between
+64-token chunks. Its scalar twin uses the language mode in its word-character
+test. `test-preprocessor` checks exact output bytes, including assembly macro
+arguments, explicit whitespace, and the chunk boundary; comparing token
+spellings alone would miss this change (#272).
+
 ## Not yet
 
 - `#embed` is an error, and `__has_embed` isn't answered (C23).
