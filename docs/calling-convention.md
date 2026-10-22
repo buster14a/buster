@@ -179,16 +179,10 @@ members' own:
   too). A struct's storage at offset 0 is its first member's there, and the
   struct is aligned to its members' largest alignment unless `determinePacked`
   packs it (a member off its own alignment, or a size that isn't a multiple of
-  it). A struct's bit-fields share access units (`accumulateBitFields`): a run
-  of them, from one that starts a byte through those that start inside a byte
-  after it, wider than an eightbyte is the integer its bytes round up to, an
-  `i128` for 9 to 16, where that fits before the next member with storage (but
-  a zero-width bit-field and an empty record) or the struct's end, and
-  otherwise an array of its bytes (`abi_bit_field_run`). So `struct { unsigned
-  __int128 x : 65; }` stores an `i128`, and packed, or followed by a `char` or
-  an `int[0]`, a `[9 x i8]`; a run's narrower units are left as its
-  bit-fields' types are aligned. A union is stored as the member LLVM aligns
-  most, then the largest, the first of equals
+  it). A struct's bit-fields are stored in access units (see "Bit-fields'
+  access units" below), each a member of the struct's LLVM type with an
+  alignment of its own. A union is stored as the member LLVM aligns most, then
+  the largest, the first of equals
   (`CGRecordLowering::lowerUnion`); a bit-field there is an `iN` of its width,
   or of its type's bits if fewer, rounded up to bytes (`getIntNType`: 121 to
   128 bits make an `i128`). An array, a complex type, an enum and an `_Atomic`
@@ -202,7 +196,7 @@ members' own:
   record's alignment, which counts in the smaller record's alignment and in a
   union's choice of its storage member; the array works it out when it is
   finished (`abi_wide_alignment`: the record's members' storage alignments, a
-  bit-field's run's unit's among them, a larger record walked in turn on an
+  bit-field's access unit's among them, a larger record walked in turn on an
   explicit stack, or 1 if packed), and waits in the levels until everything
   the walk reads is classified. `union {struct {long a, b; struct {__int128 x;
   long y;} z[0];} s; __int128 i;}` passes as two `i64`s (the struct is aligned
@@ -221,9 +215,52 @@ members' own:
   `half`, `bfloat`, `float`, `double`, or another), and which of the 16 bytes
   hold the C type's data (`BitsContainNoUserData`'s view, which takes a
   bit-field as its whole declared type, not its width). A struct's padding
-  holds `i8`s, as the byte arrays clang pads with do; its bit-fields are an
-  integer of their type at the start of their storage unit, an approximation
-  of clang's access units. A union's scalars are its storage member's.
+  holds `i8`s, as the byte arrays clang pads with do; its bit-fields' access
+  units are the integer of their bytes at their offset, or `i8`s for an array
+  of bytes. A union's scalars are its storage member's.
+
+#### Bit-fields' access units
+
+clang stores a struct's bit-fields in access units
+(`CGRecordLowering::accumulateBitFields`, with x86-64's cheap unaligned
+accesses), which `abi_bit_field_unit` works out the same way, one unit at a
+time: the twin's `abi_storage`, `abi_layout` and `abi_wide_alignment` and the
+vector path's `abi_member_part` call it at a unit's first bit-field and keep
+the unit for the bit-fields after it.
+
+- A **run** is a bit-field that starts at a byte and those after it that start
+  inside one: they share bytes, so they share a unit.
+- A **span** starts with a run (after a member that isn't a bit-field, after a
+  zero-width bit-field, or where the unit before it ended) and takes each run
+  after it while the span's bytes are no more than a register's, 8 (its first
+  run may be wider).
+- The **unit** is the span's longest integer that fits: the integer of its
+  bytes, at LLVM's size for them (an `i24` takes an `i32`'s 4 bytes, an `i40`
+  to an `i56` an `i64`'s 8, and 9 to 16 bytes an `i128`), before the next
+  member clang stores, or the struct's end (`abi_unit_limit`;
+  `isEmptyFieldForLayout`: a zero-width bit-field and a member of an empty
+  record don't count, a zero-length array does; a C record's tail padding is
+  usable). Where none fits, it is an array of the first run's bytes, aligned
+  to 1.
+- A **zero-width bit-field** at a byte, or a member that isn't a bit-field,
+  ends a span: no unit reaches past it, though the room before the next member
+  clang stores still counts.
+
+So `struct { unsigned char a : 8, b : 8, c : 8; }` stores an `i32`,
+`struct { unsigned a : 8, b : 8, c : 8; char d; }` an `i16` and an `i8`
+(an `i24` wouldn't fit before `d`), `struct { unsigned a : 24; char c; }` a
+`[3 x i8]`, `struct { long a : 8; }` an `i8` (aligned to 1, though the C
+struct is aligned to 8), and `struct { unsigned __int128 x : 65; }` an
+`i128`, where packed, or followed by a `char` or an `int[0]`, it is a `[9 x
+i8]`. A unit's integer may be off its own alignment: `struct { char c; int
+a : 16; }` stores an `i16` at 1, so LLVM's struct is packed, aligned to 1,
+and a union of it and a `short` stores the `short`. The units count wherever
+an LLVM type does: a struct's alignment and packing (`storage`), the scalars
+`GetSSETypeAtOffset` and `GetINTEGERTypeAtOffset` find (`layout`, where a
+unit's integer, `i8` to `i64` or an `i128`, is at its offset, and an array's
+bytes are `i8`s), a union's choice of its storage member, and the `i128` at
+offset 0 (`PAIR`). In passing that decides `LOW_GENERAL` too (see "Where
+clang's LLVM types decide").
 
 ### Results, locations and calls
 
@@ -410,9 +447,9 @@ type's 16 offsets:
    type, by `abi_member_storage`'s, `abi_storage`'s and `abi_layout`'s rules
    for the member alone. The layout word holds, as `layout` has them, the
    scalars it puts at the even offsets (a member's type's where it is; a
-   bit-field's integer at its storage unit's start, unless a member before it
-   put a scalar there, which the pass keeps track of along a struct's
-   members) and its data bytes, and in a struct the bytes its storage covers.
+   bit-field's access unit's integer at the unit's offset, the unit the pass
+   keeps along a struct's members, from `abi_bit_field_unit` as the twin has
+   it) and its data bytes, and in a struct the bytes its storage covers.
    The storage word holds, in a struct, a bit for its storage's alignment
    (bit 32 plus the log2), whether it is off that alignment
    (`determinePacked`) and the i128 of the first member at offset 0 with
@@ -515,8 +552,8 @@ and then `abi_finish_passing`, which both paths share:
   (`abi_is_pair`): `__int128` and `_BitInt(128)` by themselves, and aggregates
   whose `storage` at offset 0 is an `i128` (`GetINTEGERTypeAtOffset` returns
   the `i128` it finds there): a struct whose first member is an `__int128`, a
-  `_BitInt` of 65 to 128 bits or an aggregate stored so, or whose first run of
-  bit-fields is one; a union that stores one; an array of them.
+  `_BitInt` of 65 to 128 bits or an aggregate stored so, or whose first access
+  unit is one; a union that stores one; an array of them.
   `_BitInt(65)` to `_BitInt(127)` by themselves pass as two `i64`s, which LLVM
   can split. A union stored as an `i128` whose high eightbyte is NO_CLASS
   (`union { int a; unsigned _BitInt(128) b : 127; }`) or SSE (a `struct {
@@ -868,7 +905,15 @@ and has a fixture:
   to an `i64`, which goes in a general register though clang counted a
   vector one (`LOW_GENERAL`). That is a `bfloat`, `<2 x half>` or `<2 x
   bfloat>` before an `i32`, a `float` or the like: `struct { __bf16 a, b;
-  _Alignas(8) int c; }` passes in rdi and rsi.
+  _Alignas(8) int c; }` passes in rdi and rsi. Bit-fields' access units
+  decide the high part's type: `struct { _Complex _Float16 h; _Complex long
+  z[0]; _BitInt(8) a : 3; unsigned char b : 8; }` is `(i64, i16)`, its two
+  runs one `i16` alone in the high eightbyte, and with `union { short s;
+  struct { unsigned char a : 8, b : 8, c : 8, d : 8; } p; }` there in their
+  place, `(i64, i32)`: LLVM stores the union as the struct's `i32`, aligned
+  to 4, over the `short`. `struct { _Complex _Float16 h; long z[0]; unsigned
+  a : 24; char c; }` keeps its `<2 x half>`: its unit, a `[3 x i8]` before
+  the `char`, leaves the high part an `i64`.
 - **`i128` storage.** An `i128` at a record's offset 0 makes the record one
   `i128` value (`PAIR`), which LLVM never splits, in a stack slot aligned to
   16 whatever the record's alignment. With a NO_CLASS high eightbyte too, as
@@ -884,8 +929,8 @@ and has a fixture:
   it): after an SSE low eightbyte the value is `{i64, i128}`, three general
   registers that hold none of the high eightbyte's bytes, and alone it is an
   `i128` in two general registers that clang counts as one. The module
-  refuses both (`UNSUPPORTED`). A run of bit-fields is an `i128` only where
-  its 16 bytes fit (see "clang's LLVM types"): after an uncounted `_Atomic
+  refuses both (`UNSUPPORTED`). An access unit is an `i128` only where its 16
+  bytes fit (see "Bit-fields' access units"): after an uncounted `_Atomic
   int` and four `long`s, `struct { unsigned __int128 x : 65; }` goes whole on
   the stack and a `long` after it takes r9, while packed (an `i64` and an
   `i8`) it is split between r9 and the stack, as is `{ unsigned __int128 x :
@@ -896,11 +941,12 @@ and has a fixture:
   union with an `__int128` it ties, and the first of the two is the union's
   storage: two `i64`s, or one `i128` (`PAIR`). A packed element, aligned to 1,
   leaves the struct at 8, and the `__int128` wins wherever it is; so does an
-  element whose run of bit-fields is bytes, as in `{unsigned __int128 x : 65;
-  char c; long d;}`, which LLVM's type aligns to 8. An `_Atomic` of a struct
-  of no size takes that alignment as its size: `_Atomic(struct {struct
-  {__int128 x; char c[100];} z[0];})` is 16 bytes to LLVM, as
-  `_Atomic(struct {__int128 x[0];})` is.
+  element whose access unit is bytes, as in `{unsigned __int128 x : 65;
+  char c; long d;}`, which LLVM's type aligns to 8, or one that a unit off its
+  alignment packs, as `{char c; unsigned __int128 a : 16; char d[20];}` (an
+  `i16` at 1). An `_Atomic` of a struct of no size takes that alignment as its
+  size: `_Atomic(struct {struct {__int128 x; char c[100];} z[0];})` is 16
+  bytes to LLVM, as `_Atomic(struct {__int128 x[0];})` is.
 - **Demoted results.** A vector result that would need more than four
   registers, or of `__int128`s wider than 16 bytes, is a value in clang's IR,
   and LLVM's demotion adds the hidden pointer, which clang doesn't count
@@ -1064,7 +1110,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (2,086 checks): about 170 types whose classes, pass bits and
+- **Fixtures** (2,170 checks): about 185 types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -1080,8 +1126,19 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   larger record, plain (of 32 bytes, and of 80, whose row doesn't wait for its
   members), nested, packed or with a run of bit-fields that is an `i128` or
   bytes, which ties with an `__int128` or doesn't) and narrow low
-  parts (`{__bf16, _Alignas(8) char}` and its kin). Then the `_Atomic` types
-  clang's LLVM types decide, with the slots that `-mllvm
+  parts (`{__bf16, _Alignas(8) char}` and its kin). Then structs' bit-fields
+  in access units (`abi_test_build_units`), each with its LLVM type as the
+  module keeps it, its `storage` and `layout`'s scalars (`abi_test_llvm`), as
+  clang's IR has it: runs merged into an `i16` and an `i32` in an INTEGER high
+  eightbyte, which widen a `<2 x half>` low part (`LOW_GENERAL`), and a
+  `[3 x i8]` there, which doesn't; a union in the high eightbyte whose storage
+  member the merged unit's alignment decides; merging that stops before a
+  `char`; `{long : 8}`, an `i8`; a zero-width bit-field between two units; an
+  `i16` at 1 that packs `{char, int : 16}`, and one that packs a struct
+  aligned to 16 by its `unsigned __int128 : 16` (a union of it and an
+  `__int128` stores the `__int128` either way round: `PAIR`), and in a record
+  larger than 16 bytes in a zero-length array (`abi_wide_alignment`). Then
+  the `_Atomic` types clang's LLVM types decide, with the slots that `-mllvm
   -stop-after=finalize-isel`'s fixed stack objects show: `_Atomic`s of
   structs of no size, `LARGER` and `GROWN` ones among them (of a packed one,
   of a flexible array member's `unsigned _BitInt(127)`, and of one aligned by
@@ -1208,10 +1265,8 @@ elements of no size (`abi_test_empty_arrays`), on which clang 23 crashes now
 and then: `getFPTypeAtOffset` and `GetINTEGERTypeAtOffset` divide an offset
 by such an element's LLVM size, 0, where they look into it, as
 `GetSSETypeAtOffset` does after the `_Float16` in `struct { long l; _Float16
-h; struct {} e[1]; }` passed by value. Their signatures pass no type with an
-SSE low eightbyte and bit-fields in an INTEGER high one
-(`abi_test_bit_field_bytes`), whose access units the module doesn't work out
-yet, and they make no vector of bools (see "Next steps" for both). The unnamed arguments leave out the types the default
+h; struct {} e[1]; }` passed by value. They make no vector of bools (see
+"Next steps"). The unnamed arguments leave out the types the default
 argument promotions change, `nullptr_t` and `_Atomic` ones, types wider than
 16 bytes that are SSE, SSEUP as unnamed arguments, types of no size, whose
 calls and `va_arg`s clang passes differently (see "va_arg"), and
@@ -1311,20 +1366,6 @@ for `assign-simple`.
   the module passes it in one ymm or zmm register. LLVM passes it as its
   elements: `<2 x x86_fp80>` in two 16-byte stack slots, `<2 x fp128>` in
   xmm0 and xmm1. Each needs its rule from probes, or `UNSUPPORTED`.
-- **Bit-fields' access units.** `abi_layout` and the parts take a run of
-  bit-fields within an eightbyte as its first bit-field's type, at its type's
-  offset, where clang's `accumulateBitFields` makes access units of the run's
-  bytes (merged up to a register while the next one's integer fits before
-  the next member with storage, else an array of bytes), and the struct's
-  LLVM alignment from them. A unit decides one thing the module gives: in an
-  INTEGER high eightbyte, by its alignment, whether a narrow SSE low part
-  widens (`LOW_GENERAL`). `struct { _Complex _Float16 h; _Complex long z[0];
-  _BitInt(8) a : 3; unsigned char b : 8; }` is `(i64, i16)` to clang, a unit
-  of two bytes after the `<2 x half>`, and the module passes its low part in
-  xmm0, as it takes an `i8` with data after it. clang's cross-check found it
-  at seeds 50, 82 and 98 of 100, and leaves such types out until the module
-  works the units out (in `abi_bit_field_run`, which does it for a run wider
-  than an eightbyte), or refuses them.
 - **Arrays of none of a large record.** A record larger than 64 bytes may be
   finished before its members (see "Levels"), so its storage may not be
   LLVM's, and a record of 16 bytes or less that holds an array of none of

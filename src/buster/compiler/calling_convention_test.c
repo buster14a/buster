@@ -13,8 +13,9 @@
 //     of classes and both kinds of size.
 //   - Fixtures: types whose classes, passing, slots and results clang's IR and LLVM's fixed stack objects show
 //     (abi_test_fixtures says which; abi_test_build_atomics the LARGER, GROWN and refused _Atomic types and what holds
-//     them), at each target vector width, by the vector path and by the twin; and calls whose locations clang and LLVM
-//     give (an UNCOUNTED argument's shift and the LARGER copies' slots among them).
+//     them; abi_test_build_units structs' bit-fields in clang's access units, each with its LLVM type as the module
+//     keeps it, abi_test_llvm), at each target vector width, by the vector path and by the twin; and calls whose
+//     locations clang and LLVM give (an UNCOUNTED argument's shift and the LARGER copies' slots among them).
 //   - Worlds: random worlds of types (abi_test_world_build: scalars, vectors, complex types, _BitInts, _Atomic and
 //     aligned types, _Atomics of structs of no size, and records and unions of them, small ones mostly, with bit-fields,
 //     arrays, nesting, packing and alignment, and zero-length arrays of large records), classified by the vector path in
@@ -35,9 +36,7 @@
 //     each side checks every argument, result, hidden pointer, al and va_arg value against the bytes. GCC's worlds
 //     leave out what GCC lays out or passes otherwise (each named where it is left out, GCC's own bugs among them), and
 //     clang's a type in registers that holds an array of elements of no size, which crashes it now and then
-//     (abi_test_empty_arrays), and one with an SSE low eightbyte and bit-fields in an INTEGER high one, whose access
-//     units the module doesn't work out yet (abi_test_bit_field_bytes); an argument clang would pass as an i0 becomes a
-//     long, as does an unnamed one clang's
+//     (abi_test_empty_arrays); an argument clang would pass as an i0 becomes a long, as does an unnamed one clang's
 //     va_arg reads elsewhere than its call puts it (abi_test_va_disagreement); and bytes clang doesn't pass aren't
 //     checked (abi_test_mask_unpassed).
 // The exit status is 1 if the arguments are invalid or a check fails.
@@ -596,7 +595,9 @@ static AbiClasses abi_test_classify(const TypeTable* table, uint32_t vector_byte
 #define BUSTER_ABI_TEST_XMM(n) (BUSTER_ABI_REGISTER_VECTOR | (n))
 #define BUSTER_ABI_TEST_ST(n) (BUSTER_ABI_REGISTER_X87 | (n))
 #define BUSTER_ABI_TEST_NONE BUSTER_ABI_REGISTER_NONE
-#define BUSTER_ABI_TEST_FIXTURES 192
+#define BUSTER_ABI_TEST_FIXTURES 224
+// A scalar of a layout (AbiTable.layout) at an even offset: BUSTER_ABI_LEAF_<kind>'s 4 bits.
+#define BUSTER_ABI_TEST_LEAF(offset, kind) ((uint32_t)BUSTER_ABI_LEAF_##kind << ((offset) * 2))
 // A result kind the fixture doesn't check: an UNSUPPORTED type's, which the code generator refuses.
 #define BUSTER_ABI_TEST_RESULT_ANY 0xff
 
@@ -614,6 +615,11 @@ struct AbiTestExpectation
     uint8_t result[2];
     // The stack slot's bytes it must have, or 0 for any.
     uint32_t stack_bytes;
+    // With `llvm`, clang's LLVM type as the module keeps it: AbiTable.storage, and AbiTable.layout's scalars (its low 32
+    // bits, BUSTER_ABI_TEST_LEAF's).
+    bool llvm;
+    uint8_t storage;
+    uint32_t leaves;
 };
 
 typedef struct AbiTestBuilder AbiTestBuilder;
@@ -644,6 +650,9 @@ static void abi_test_expectation(AbiTestBuilder* builder, const char* name, Type
                 second,
             },
             .stack_bytes = 0,
+            .llvm = false,
+            .storage = 0,
+            .leaves = 0,
         };
         builder->count += 1;
     }
@@ -655,6 +664,19 @@ static void abi_test_slot(AbiTestBuilder* builder, uint32_t stack_bytes)
     if (builder->count != 0 && builder->count <= BUSTER_ABI_TEST_FIXTURES)
     {
         builder->expectations[builder->count - 1].stack_bytes = stack_bytes;
+    }
+}
+
+// The last expectation's LLVM type, as clang's IR has it: its storage (the log2 of its alignment, 0 for a packed
+// struct, and BUSTER_ABI_STORAGE_I128) and the scalars at its even offsets (BUSTER_ABI_TEST_LEAF's: i8s in its padding
+// and its arrays of bytes, as GetINTEGERTypeAtOffset finds them).
+static void abi_test_llvm(AbiTestBuilder* builder, uint8_t storage, uint32_t leaves)
+{
+    if (builder->count != 0 && builder->count <= BUSTER_ABI_TEST_FIXTURES)
+    {
+        builder->expectations[builder->count - 1].llvm = true;
+        builder->expectations[builder->count - 1].storage = storage;
+        builder->expectations[builder->count - 1].leaves = leaves;
     }
 }
 
@@ -1031,7 +1053,7 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
     abi_test_in_registers(builder, "union {{long, long, packed {char, long double, long}[0]}, __int128}",
                           abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
-    // A run of bit-fields in the large record is its unit there (abi_bit_field_run): an array of bytes, aligned to 1,
+    // A run of bit-fields in the large record is its unit there (abi_bit_field_unit): an array of bytes, aligned to 1,
     // where its 16 bytes don't fit before a char, which leaves {unsigned __int128 : 65, char, long} aligned to 8 in
     // LLVM's type and the __int128 the most aligned; an i128 where they fit, a tie the struct wins.
     m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 65, true);
@@ -1232,6 +1254,130 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     // An aligned typedef passes as its type: canonical types have no typedefs.
     abi_test_in_registers(builder, "int aligned(32)", type_aligned(table, BUSTER_TYPE_INT, 5), BUSTER_ABI_TEST_INTEGER_ONLY, 3u << BUSTER_ABI_PASS_ALIGNMENT_SHIFT, 0, rax,
                           BUSTER_ABI_TEST_NONE);
+}
+
+// A struct's bit-fields in clang's access units (abi_bit_field_unit), each type's LLVM type as clang 23's IR has it
+// (abi_test_llvm): runs that share no byte merged up to a register, a byte array where no integer fits before the next
+// member, a unit off its alignment that packs the struct, a zero-width bit-field as a barrier, and what they decide:
+// whether a narrow SSE low eightbyte widens to an i64 (LOW_GENERAL, by the alignment of the high eightbyte's integer)
+// and which member a union stores (and so its i128, PAIR).
+static void abi_test_build_units(AbiTestBuilder* builder)
+{
+    TypeTable* table = builder->table;
+    const uint8_t rax = BUSTER_ABI_RAX;
+    const uint8_t rdx = BUSTER_ABI_RDX;
+    const TypeId uchar = BUSTER_TYPE_UCHAR;
+    const TypeId half_pair = BUSTER_TYPE_COMPLEX(BUSTER_TYPE_CODE_FLOAT16);
+    const AbiClasses sse_integer = BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_INTEGER);
+    const uint32_t low_general = BUSTER_ABI_PASS_LOW_GENERAL;
+    // The low eightbyte of the structs that start with a _Complex _Float16 and a zero-length array of an 8-byte type:
+    // {half, half} and the padding to 8, which the array leaves implicit; the struct is aligned to 8.
+    const uint32_t halves = BUSTER_ABI_TEST_LEAF(0, HALF) | BUSTER_ABI_TEST_LEAF(2, HALF) | BUSTER_ABI_TEST_LEAF(4, I8) | BUSTER_ABI_TEST_LEAF(6, I8);
+    const uint32_t tail_bytes = BUSTER_ABI_TEST_LEAF(12, I8) | BUSTER_ABI_TEST_LEAF(14, I8);
+    TypeMember m[8];
+    // {{half, half}, [0 x {i64, i64}], i16}: the two runs share a unit, an i16 alone in the high eightbyte, aligned to
+    // 2, so the <2 x half> widens: (i64, i16), where an i8 with data after it would leave an i64 and xmm0.
+    m[0] = abi_test_member(builder, half_pair);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_COMPLEX(BUSTER_TYPE_CODE_LONG), 0));
+    m[2] = abi_test_bits(builder, type_bit_int(table, 8, false), 3, true);
+    m[3] = abi_test_bits(builder, uchar, 8, true);
+    abi_test_in_registers(builder, "{_Complex _Float16, _Complex long[0], _BitInt(8) : 3, unsigned char : 8}",
+                          abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 4, false, 0), sse_integer, low_general, 0, rax, rdx);
+    abi_test_llvm(builder, 3, halves | BUSTER_ABI_TEST_LEAF(8, I16) | BUSTER_ABI_TEST_LEAF(10, I8) | tail_bytes);
+    // Four runs of a byte merged into an i32: (i64, i32).
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_LONG, 0));
+    m[2] = abi_test_bits(builder, uchar, 8, true);
+    m[3] = abi_test_bits(builder, uchar, 8, true);
+    m[4] = abi_test_bits(builder, uchar, 8, true);
+    m[5] = abi_test_bits(builder, uchar, 8, true);
+    abi_test_in_registers(builder, "{_Complex _Float16, long[0], unsigned char : 8 x 4}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 6, false, 0), sse_integer,
+                          low_general, 0, rax, rdx);
+    abi_test_llvm(builder, 3, halves | BUSTER_ABI_TEST_LEAF(8, I32) | tail_bytes);
+    // A run of 3 bytes before a char: an i24 would take 4, so the unit is a [3 x i8], and the high eightbyte an i64:
+    // (<2 x half>, i64), where its int's type, an i32 with nothing after it, would widen the low part.
+    m[2] = abi_test_bits(builder, BUSTER_TYPE_UINT, 24, true);
+    m[3] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    abi_test_in_registers(builder, "{_Complex _Float16, long[0], unsigned : 24, char}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 4, false, 0), sse_integer, 0,
+                          low_general, BUSTER_ABI_TEST_XMM(0), rax);
+    abi_test_llvm(builder, 3, halves | BUSTER_ABI_TEST_LEAF(8, I8) | BUSTER_ABI_TEST_LEAF(10, I8) | tail_bytes);
+    // A union stores the member LLVM aligns most: {unsigned char : 8 x 4} is an i32, aligned to 4, over a short, so the
+    // high eightbyte is that i32 alone: (i64, i32).
+    m[0] = abi_test_bits(builder, uchar, 8, true);
+    m[1] = abi_test_bits(builder, uchar, 8, true);
+    m[2] = abi_test_bits(builder, uchar, 8, true);
+    m[3] = abi_test_bits(builder, uchar, 8, true);
+    const TypeId four = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 4, false, 0);
+    abi_test_in_registers(builder, "{unsigned char : 8 x 4}", four, BUSTER_ABI_TEST_INTEGER_ONLY, 0, 0, rax, BUSTER_ABI_TEST_NONE);
+    abi_test_llvm(builder, 2, BUSTER_ABI_TEST_LEAF(0, I32));
+    m[0] = abi_test_member(builder, BUSTER_TYPE_SHORT);
+    m[1] = abi_test_member(builder, four);
+    const TypeId short_four = abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
+    abi_test_in_registers(builder, "union {short, {unsigned char : 8 x 4}}", short_four, BUSTER_ABI_TEST_INTEGER_ONLY, 0, 0, rax, BUSTER_ABI_TEST_NONE);
+    abi_test_llvm(builder, 2, BUSTER_ABI_TEST_LEAF(0, I32));
+    m[0] = abi_test_member(builder, half_pair);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_LONG, 0));
+    m[2] = abi_test_member(builder, short_four);
+    abi_test_in_registers(builder, "{_Complex _Float16, long[0], union {short, {unsigned char : 8 x 4}}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0),
+                          sse_integer, low_general, 0, rax, rdx);
+    abi_test_llvm(builder, 3, halves | BUSTER_ABI_TEST_LEAF(8, I32) | tail_bytes);
+    // Runs merge while their integer fits: {unsigned : 8 x 3, char} is {i16, i8, i8}, aligned to 2.
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT, 8, true);
+    m[1] = abi_test_bits(builder, BUSTER_TYPE_UINT, 8, true);
+    m[2] = abi_test_bits(builder, BUSTER_TYPE_UINT, 8, true);
+    m[3] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    abi_test_in_registers(builder, "{unsigned : 8 x 3, char}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 4, false, 0), BUSTER_ABI_TEST_INTEGER_ONLY, 0, 0, rax,
+                          BUSTER_ABI_TEST_NONE);
+    abi_test_llvm(builder, 1, BUSTER_ABI_TEST_LEAF(0, I16) | BUSTER_ABI_TEST_LEAF(2, I8));
+    // A unit is the integer of its bytes, whatever its bit-fields' type: {long : 8} is {i8, [7 x i8]}, aligned to 1.
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_LONG, 8, true);
+    abi_test_in_registers(builder, "{long : 8}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), BUSTER_ABI_TEST_INTEGER_ONLY, 0, 0, rax,
+                          BUSTER_ABI_TEST_NONE);
+    abi_test_llvm(builder, 0, BUSTER_ABI_TEST_LEAF(0, I8) | BUSTER_ABI_TEST_LEAF(2, I8) | BUSTER_ABI_TEST_LEAF(4, I8) | BUSTER_ABI_TEST_LEAF(6, I8));
+    // A zero-width bit-field ends a span: {unsigned : 3, unsigned : 0, unsigned : 5} is {i8, [3 x i8], i8, [3 x i8]}.
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT, 3, true);
+    m[1] = abi_test_bits(builder, BUSTER_TYPE_UINT, 0, false);
+    m[2] = abi_test_bits(builder, BUSTER_TYPE_UINT, 5, true);
+    abi_test_in_registers(builder, "{unsigned : 3, unsigned : 0, unsigned : 5}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0),
+                          BUSTER_ABI_TEST_INTEGER_ONLY, 0, 0, rax, BUSTER_ABI_TEST_NONE);
+    abi_test_llvm(builder, 0, BUSTER_ABI_TEST_LEAF(0, I8) | BUSTER_ABI_TEST_LEAF(2, I8) | BUSTER_ABI_TEST_LEAF(4, I8) | BUSTER_ABI_TEST_LEAF(6, I8));
+    // An i16 at 1 packs the struct: {char, int : 16} is <{i8, i16, i8}>, aligned to 1.
+    m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    m[1] = abi_test_bits(builder, BUSTER_TYPE_INT, 16, true);
+    abi_test_in_registers(builder, "{char, int : 16}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), BUSTER_ABI_TEST_INTEGER_ONLY, 0, 0, rax,
+                          BUSTER_ABI_TEST_NONE);
+    abi_test_llvm(builder, 0, BUSTER_ABI_TEST_LEAF(0, I8));
+    // ... and so does one in a struct aligned to 16 by its bit-field's type, <{i8, i16, [13 x i8]}>, which a union with
+    // an __int128 then doesn't store, whichever comes first: one i128 (PAIR).
+    m[1] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 16, true);
+    const TypeId packed_by_unit = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+    abi_test_in_registers(builder, "{char, unsigned __int128 : 16}", packed_by_unit, BUSTER_ABI_TEST_INTEGER_ONLY, 0, BUSTER_ABI_PASS_PAIR, rax, BUSTER_ABI_TEST_NONE);
+    abi_test_llvm(builder, 0, BUSTER_ABI_TEST_LEAF(0, I8) | BUSTER_ABI_TEST_LEAF(4, I8) | BUSTER_ABI_TEST_LEAF(6, I8) | BUSTER_ABI_TEST_LEAF(8, I8) | tail_bytes |
+                                  BUSTER_ABI_TEST_LEAF(10, I8));
+    const uint8_t i128 = (uint8_t)(4 | BUSTER_ABI_STORAGE_I128);
+    m[0] = abi_test_member(builder, packed_by_unit);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{char, unsigned __int128 : 16}, __int128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    abi_test_llvm(builder, i128, BUSTER_ABI_TEST_LEAF(0, OTHER));
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    m[1] = abi_test_member(builder, packed_by_unit);
+    abi_test_in_registers(builder, "union {__int128, {char, unsigned __int128 : 16}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    abi_test_llvm(builder, i128, BUSTER_ABI_TEST_LEAF(0, OTHER));
+    // The same in a record larger than 16 bytes in a zero-length array (abi_wide_alignment): {char, unsigned __int128 :
+    // 16, char[20]} is packed, so {long, long, that[0]} is aligned to 8 and the __int128 is the union's storage.
+    m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    m[1] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 16, true);
+    m[2] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 20));
+    const TypeId wide_packed = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[2] = abi_test_member(builder, type_array(table, wide_packed, 0));
+    m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0));
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{long, long, {char, unsigned __int128 : 16, char[20]}[0]}, __int128}",
+                          abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    abi_test_llvm(builder, i128, BUSTER_ABI_TEST_LEAF(0, OTHER));
 }
 
 // The pass bits of an UNCOUNTED value of a kind, and the VALUE bits that must be clear for it.
@@ -2182,6 +2328,7 @@ static bool abi_test_fixtures(void)
                 abi_test_build_scalars(&builder);
                 abi_test_build_vectors(&builder);
                 abi_test_build_records(&builder);
+                abi_test_build_units(&builder);
                 abi_test_build_atomics(&builder);
                 abi_test_expect(&tally, builder.count < BUSTER_ABI_TEST_FIXTURES, "fixtures", "more fixtures than BUSTER_ABI_TEST_FIXTURES holds");
                 abi_test_expect(&tally, abi_test_tables_start(&tables, widths[w]), "fixtures", "the calling convention's table can't be made");
@@ -2203,12 +2350,15 @@ static bool abi_test_fixtures(void)
                     const bool same_result = e.result_kind == BUSTER_ABI_TEST_RESULT_ANY ||
                                              (result.kind == e.result_kind && (e.result_kind != BUSTER_ABI_RESULT_REGISTERS ||
                                                                                (result.registers[0] == e.result[0] && result.registers[1] == e.result[1])));
+                    const uint8_t storage = classified ? tables.abi.storage[index] : 0;
+                    const uint32_t leaves = classified ? (uint32_t)tables.abi.layout[index] : 0;
                     const bool same = classified && abi_classes(&tables.abi, e.type, true) == e.named && abi_classes(&tables.abi, e.type, false) == e.unnamed &&
                                       (pass & e.set) == e.set && (pass & e.clear) == 0 && same_result &&
-                                      (e.stack_bytes == 0 || tables.abi.stack_bytes[index] == e.stack_bytes);
-                    snprintf(detail, sizeof(detail), "%s (%u bytes, %s): classes %02x/%02x, pass %08x, stack %u, result %u (%02x %02x)", e.name, widths[w],
-                             path == 0 ? "vector" : "scalar", abi_classes(&tables.abi, e.type, true), abi_classes(&tables.abi, e.type, false), pass,
-                             classified ? tables.abi.stack_bytes[index] : 0, result.kind, result.registers[0], result.registers[1]);
+                                      (e.stack_bytes == 0 || tables.abi.stack_bytes[index] == e.stack_bytes) &&
+                                      (!e.llvm || (storage == e.storage && leaves == e.leaves));
+                    snprintf(detail, sizeof(detail), "%s (%u bytes, %s): classes %02x/%02x, pass %08x, stack %u, result %u (%02x %02x), storage %02x, leaves %08x",
+                             e.name, widths[w], path == 0 ? "vector" : "scalar", abi_classes(&tables.abi, e.type, true), abi_classes(&tables.abi, e.type, false),
+                             pass, classified ? tables.abi.stack_bytes[index] : 0, result.kind, result.registers[0], result.registers[1], storage, leaves);
                     abi_test_expect(&tally, same, "fixtures", detail);
                 }
                 abi_test_calls(&tally, &tables, widths[w], path == 0);
@@ -2447,7 +2597,7 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
 }
 
 // The records clang's directed signatures pass (abi_test_cross_signatures): runs of bit-fields past an eightbyte that
-// are one i128 or two parts, packed and not (see abi_bit_field_run). Returns how many it made into `directed`.
+// are one i128 or two parts, packed and not (see abi_bit_field_unit). Returns how many it made into `directed`.
 #define BUSTER_ABI_TEST_DIRECTED 5
 
 static uint32_t abi_test_world_directed(AbiTestWorld* world, TypeId* directed)
@@ -3458,65 +3608,6 @@ static uint8_t* abi_test_empty_arrays(const TypeTable* table)
         }
     }
     return holds;
-}
-
-// Per type, which of its first 16 bytes hold bit-fields, in itself or in its members, elements, base or value: a bit per
-// byte. clang makes access units of a run of bit-fields (CGRecordLowering::accumulateBitFields), which the module doesn't
-// work out yet (it takes the run as its first bit-field's type: see "Next steps" in docs/calling-convention.md), and a
-// unit in an INTEGER high eightbyte decides, by its alignment, whether a narrow SSE low eightbyte widens to an i64 in a
-// general register (LOW_GENERAL): struct { _Complex _Float16 h; _Complex long z[0]; _BitInt(8) a : 3; unsigned char
-// b : 8; } is (i64, i16) to clang, and the module passes its low part in xmm0. So clang's signatures don't pass a type
-// with an SSE low eightbyte and bit-fields in an INTEGER high one. Worked out in passes over the table until one changes
-// nothing; 0 without the memory.
-static uint16_t* abi_test_bit_field_bytes(const TypeTable* table)
-{
-    uint16_t* bytes = calloc(table->types.count, sizeof(uint16_t));
-    bool changed = bytes != 0;
-    while (changed)
-    {
-        changed = false;
-        for (uint32_t index = 1; index < table->types.count; index += 1)
-        {
-            const uint8_t kind = table->types.kind[index];
-            uint16_t value = bytes[index];
-            if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC)
-            {
-                value |= bytes[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
-            }
-            else if (kind == BUSTER_TYPE_KIND_ARRAY)
-            {
-                const uint32_t element = bytes[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
-                const uint64_t element_size = table->types.size[abi_resolved_index(table, table->types.base[index])];
-                for (uint64_t i = 0; element != 0 && element_size != 0 && i < table->types.extent[index] && i * element_size < 16; i += 1)
-                {
-                    value |= (uint16_t)(element << (i * element_size));
-                }
-            }
-            else if ((kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && type_is_complete(table, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT))
-            {
-                const uint32_t tag = table->types.index[index];
-                const uint32_t begin = table->tags.member_begin[tag];
-                const uint32_t end = begin + table->tags.member_count[tag];
-                for (uint32_t member = begin; member < end; member += 1)
-                {
-                    const uint64_t offset = table->members.offset[member];
-                    const uint64_t width = table->members.bit_width[member];
-                    if ((table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0)
-                    {
-                        const uint32_t member_bytes = bytes[table->members.type[member] >> BUSTER_TYPE_INDEX_SHIFT];
-                        value |= (offset >> 3) < 16 ? (uint16_t)(member_bytes << (offset >> 3)) : 0;
-                    }
-                    for (uint64_t byte = offset >> 3; width != 0 && byte <= (offset + width - 1) >> 3 && byte < 16; byte += 1)
-                    {
-                        value |= (uint16_t)(1u << byte);
-                    }
-                }
-            }
-            changed = changed || value != bytes[index];
-            bytes[index] = value;
-        }
-    }
-    return bytes;
 }
 
 static uint64_t abi_test_round(uint64_t value, uint64_t alignment)
@@ -4555,8 +4646,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                             cross.locations != 0 && cross.calls != 0 && cross.data != 0 && cross.data_mask != 0 && cross.data_begin != 0 && cross.results != 0 &&
                             cross.result_mask != 0 && cross.result_begin != 0 && code != 0;
         uint8_t* empty_arrays = memory ? abi_test_empty_arrays(table) : 0;
-        uint16_t* bit_field_bytes = memory ? abi_test_bit_field_bytes(table) : 0;
-        if (abi_test_expect(tally, empty_arrays != 0 && bit_field_bytes != 0 && abi_initialize(&abi, &arena, table, vector_bytes), "cross-check", "no memory"))
+        if (abi_test_expect(tally, empty_arrays != 0 && abi_initialize(&abi, &arena, table, vector_bytes), "cross-check", "no memory"))
         {
             abi_classify_all(&abi, table);
             uint32_t type_count = 0;
@@ -4580,12 +4670,8 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 // clang crashes on some types passed in registers that hold an array of elements of no size.
                 const bool in_registers = (abi.pass[index] & (BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_IGNORE)) == 0;
                 const bool clang_crashes = !gcc && in_registers && empty_arrays[index] != 0;
-                // clang's access units of bit-fields, which the module doesn't work out, decide whether a narrow SSE low
-                // eightbyte widens (abi_test_bit_field_bytes).
-                const AbiClasses classes = abi_classes(&abi, type, true);
-                const bool unit_decides = !gcc && (classes & 7) == BUSTER_ABI_SSE && (classes >> 4) == BUSTER_ABI_INTEGER && (bit_field_bytes[index] & 0xff00u) != 0;
                 if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !atomic_result && !gcc_differs &&
-                    !clang_crashes && !unit_decides)
+                    !clang_crashes)
                 {
                     types[type_count] = type;
                     type_count += 1;
@@ -4675,7 +4761,6 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
         free(types);
         free(unnamed_types);
         free(empty_arrays);
-        free(bit_field_bytes);
         free(cross.signatures);
         free(cross.arguments);
         free(cross.offsets);

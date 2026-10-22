@@ -2532,7 +2532,12 @@ others, its measurements are informational.
   high eightbyte under an INTEGER low one and refused under another, runs of
   bit-fields that are an `i128` and that aren't, unions whose storage member
   a zero-length array of a larger record decides, and the narrow low parts
-  clang widens into a general register; and the `_Atomic` types whose LLVM
+  clang widens into a general register; structs' bit-fields in clang's access
+  units, each with its LLVM type as the module keeps it (runs merged up to an
+  `i32`, arrays of bytes, merging stopped before a member, a zero-width
+  bit-field between units, units off their alignment that pack their struct,
+  unions whose storage member a unit's alignment decides, and the narrow low
+  parts the units widen or don't); and the `_Atomic` types whose LLVM
   types decide: of types of no size, which LLVM makes larger, as the records
   ending in one, with their slots, the records it lays out otherwise than C,
   and vectors LLVM keeps whole, splits or, of bools, passes as integers), and
