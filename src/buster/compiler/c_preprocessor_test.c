@@ -2443,6 +2443,7 @@ static bool pp_test_header_expansions(char* text, size_t length, bool comments, 
     return valid;
 }
 
+// Frees what pp_test_header_expansions made: a zeroed record (one it never filled) frees nothing.
 static void pp_test_expansions_release(PPTestExpansions* expansions)
 {
     free(expansions->storage);
@@ -2474,6 +2475,394 @@ static void pp_test_primary_diagnostics(const char* diagnostics, const char* pat
     }
 }
 
+// Whether two texts' expansions (pp_test_header_expansions), clang's headers' and buster's, are the same: each check's
+// name and tokens, and with `declarations` the declarations. Prints the first difference, after `label`.
+static bool pp_test_compare_expansions(const PPTestExpansions* theirs, const PPTestExpansions* mine, bool declarations, const char* label)
+{
+    bool result = true;
+    for (uint32_t k = 0; result && k < theirs->expansion_count; k += 1)
+    {
+        result = k < mine->expansion_count && strcmp(theirs->names[k], mine->names[k]) == 0 && strcmp(theirs->expansions[k], mine->expansions[k]) == 0;
+        if (!result)
+        {
+            printf("%s: %s expands to \"%s\" in clang's, \"%s\" in ours\n", label, theirs->names[k], theirs->expansions[k], k < mine->expansion_count ? mine->expansions[k] : "(nothing)");
+        }
+    }
+    for (uint32_t k = 0; result && declarations && k < theirs->declaration_count; k += 1)
+    {
+        result = k < mine->declaration_count && strcmp(theirs->declarations[k], mine->declarations[k]) == 0;
+        if (!result)
+        {
+            printf("%s: a declaration differs:\n  clang's %s\n  ours    %s\n", label, theirs->declarations[k], k < mine->declaration_count ? mine->declarations[k] : "(nothing)");
+        }
+    }
+    if (result && ((declarations && theirs->declaration_count != mine->declaration_count) || theirs->expansion_count != mine->expansion_count))
+    {
+        printf("%s: %u declarations and %u checks in clang's, %u and %u in ours\n", label, theirs->declaration_count, theirs->expansion_count, mine->declaration_count,
+               mine->expansion_count);
+        result = false;
+    }
+    return result;
+}
+
+// Counts clang's warnings and errors in `diagnostics`: those in the unit `path` itself (`*primary`), and those in the
+// headers it includes (`*elsewhere`), which clang shows only with -Wsystem-headers.
+static void pp_test_count_diagnostics(const char* diagnostics, const char* path, uint32_t* primary, uint32_t* elsewhere)
+{
+    const size_t path_length = strlen(path);
+    *primary = 0;
+    *elsewhere = 0;
+    for (const char* line = diagnostics != 0 ? diagnostics : ""; *line != 0;)
+    {
+        const char* end = strchr(line, '\n');
+        const size_t length = end != 0 ? (size_t)(end - line) : strlen(line);
+        const char* warning = memmem(line, length, ": warning:", 10);
+        const char* error = memmem(line, length, ": error:", 8);
+        const bool in_unit = length > path_length && memcmp(line, path, path_length) == 0 && line[path_length] == ':';
+        *primary += (warning != 0 || error != 0) && in_unit;
+        *elsewhere += (warning != 0 || error != 0) && !in_unit;
+        line += length + (end != 0);
+    }
+}
+
+// Appends a formatted text to `buffer` (`capacity` bytes, `*length` of them used), if it fits. Returns whether it did;
+// the buffer's text is as it was if not.
+static __attribute__((format(printf, 4, 5))) bool pp_test_append(char* buffer, size_t capacity, size_t* length, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    const int written = buffer != 0 && *length < capacity ? vsnprintf(buffer + *length, capacity - *length, format, arguments) : -1;
+    va_end(arguments);
+    const bool result = written >= 0 && (size_t)written < capacity - *length;
+    if (result)
+    {
+        *length += (size_t)written;
+    }
+    else if (buffer != 0 && *length < capacity)
+    {
+        buffer[*length] = 0;
+    }
+    return result;
+}
+
+// Appends `#include <NAME.h>` for each of `count` names.
+static bool pp_test_append_includes(char* buffer, size_t capacity, size_t* length, const char* const* names, uint32_t count)
+{
+    bool result = true;
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        result = pp_test_append(buffer, capacity, length, "#include <%s.h>\n", names[i]);
+    }
+    return result;
+}
+
+// Our preprocessor with --buster-headers on `path` in `mode` (and -ffreestanding if `freestanding`, and `option` if it
+// isn't null), which must give the tokens of clang's -P text of it with buster's headers (`clang`), and warn no more
+// than clang does in the unit itself: it reports warnings in system headers too, which clang hides without
+// -Wsystem-headers, and the headers must give none. Returns whether it does, printing what differs after `name`.
+static bool pp_test_buster_run(const char* mode, bool freestanding, const char* option, const char* path, const PPClangOutput* clang, const char* name)
+{
+    uint32_t clang_warnings = 0;
+    uint32_t clang_elsewhere = 0;
+    pp_test_count_diagnostics(clang->diagnostics, path, &clang_warnings, &clang_elsewhere);
+    char* arguments[5];
+    int count = 0;
+    arguments[count++] = (char*)mode;
+    if (freestanding)
+    {
+        arguments[count++] = "-ffreestanding";
+    }
+    arguments[count++] = "--buster-headers";
+    if (option != 0)
+    {
+        arguments[count++] = (char*)option;
+    }
+    arguments[count++] = (char*)path;
+    Arena arena = arena_reserve(1ull << 20);
+    PPOptions options;
+    const char* input;
+    const char* output;
+    bool markers;
+    static InternTable table;
+    static Preprocessor pp;
+    bool result = pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers) && pp_test_run(&pp, &table, &options, path);
+    if (result && pp.warnings > clang_warnings)
+    {
+        printf("%s: our preprocessor warns %u times, clang %u times in the unit\n", name, pp.warnings, clang_warnings);
+        result = false;
+    }
+    PPSpellings mine = { 0 };
+    PPSpellings theirs = { 0 };
+    result = result && clang->status == PP_CLANG_ACCEPTED && pp_stream_spellings(&pp, &mine) &&
+             pp_text_spellings((const uint8_t*)clang->text, clang->length, pp.split_kinds, &theirs) && pp_compare_spellings(&pp, &mine, &theirs, name, "clang");
+    arena_release(&mine.arena);
+    arena_release(&theirs.arena);
+    pp_release(&pp);
+    intern_release(&table);
+    arena_release(&arena);
+    return result;
+}
+
+// What --buster-headers searches after buster's directory `ours`, for clang, which has no such rule: a directory
+// `links` with a link to each entry of clang's resource directory that `ours` hasn't. Returns whether it made it.
+static bool pp_test_fallback_links(const char* ours, const char* links)
+{
+    char resource[PATH_MAX];
+    bool result = pp_clang_resource_directory(resource, sizeof(resource)) && mkdir(links, 0700) == 0;
+    DIR* directory = result ? opendir(resource) : 0;
+    result = directory != 0;
+    for (struct dirent* entry = result ? readdir(directory) : 0; result && entry != 0; entry = readdir(directory))
+    {
+        char target[PATH_MAX];
+        char shadow[PATH_MAX];
+        char link[PATH_MAX];
+        struct stat stats;
+        const bool dots = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0;
+        result = (size_t)snprintf(target, sizeof(target), "%s/%s", resource, entry->d_name) < sizeof(target) &&
+                 (size_t)snprintf(shadow, sizeof(shadow), "%s/%s", ours, entry->d_name) < sizeof(shadow) &&
+                 (size_t)snprintf(link, sizeof(link), "%s/%s", links, entry->d_name) < sizeof(link);
+        if (result && !dots && stat(shadow, &stats) != 0)
+        {
+            result = symlink(target, link) == 0;
+        }
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+    return result;
+}
+
+// Removes the directory pp_test_fallback_links made, with its links.
+static void pp_test_remove_links(const char* links)
+{
+    DIR* directory = opendir(links);
+    for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
+    {
+        char link[PATH_MAX];
+        const bool dots = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0;
+        if (!dots && (size_t)snprintf(link, sizeof(link), "%s/%s", links, entry->d_name) < sizeof(link))
+        {
+            unlink(link);
+        }
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+    rmdir(links);
+}
+
+// buster's headers, in the order pp_test_headers checks them.
+static const char* const pp_test_header_names[] = { "stddef", "stdarg", "limits", "stdint", "float", "stdbool", "stdalign", "stdnoreturn", "iso646", "stdckdint", "stdatomic" };
+
+// The C library's headers that define some of buster's headers' macros themselves (<wchar.h> WCHAR_MIN and WCHAR_MAX,
+// <math.h> INFINITY and NAN, <unistd.h> __intptr_t_defined) or ask buster's for their parts (__need_size_t and the
+// like); and clang's headers that buster doesn't supply, which --buster-headers finds in clang's resource directory
+// (its <inttypes.h>, <tgmath.h> and <endian.h> include the C library's).
+static const char* const pp_test_system_headers[] = { "wchar", "math", "unistd", "sys/types", "stdio", "stdlib", "string", "signal", "time", "uchar", "wctype", "locale" };
+static const char* const pp_test_clang_headers[] = { "immintrin", "x86intrin", "cpuid", "mm_malloc", "unwind", "inttypes", "tgmath", "endian" };
+
+#define BUSTER_PP_TEST_HEADER_TEXT (1u << 20)
+
+// buster's headers among the C library's and clang's other ones (pp_test_system_headers, pp_test_clang_headers), in
+// one mode, hosted or `freestanding`: two units, the others first and then buster's 11, and buster's first, each
+// followed by `checks` (the mode's check lines, whose #include lines then include nothing). clang preprocesses each
+// with its own headers, and with buster's in the search --buster-headers makes (-nobuiltininc -isystem `ours` -isystem
+// `links`: pp_test_fallback_links), both with -Wsystem-headers, and:
+// - with buster's, clang warns about nothing in the headers (with its own, glibc's C23 widths in <limits.h> and the
+//   line comments of <stdckdint.h> in strict C89 give warnings), and gives the unit itself the same diagnostics;
+// - each compared macro expands to the same tokens with either. The declarations aren't compared: clang's freestanding
+//   <stdint.h> leaves helper macros defined (__int_least16_t and the like) that rename glibc's typedefs of those names
+//   after it;
+// - our preprocessor with --buster-headers gives clang's tokens with buster's, and no warnings in the headers.
+// Strict C89 has no // comments, which clang's other headers are full of and reads as tokens there, where our lexer
+// reads them as comments: in that mode the units leave clang's other headers out. Returns how many units differ.
+static uint32_t pp_test_header_orders(const char* directory, const char* ours, const char* links, const char* mode, bool freestanding, const char* checks)
+{
+    static char text[BUSTER_PP_TEST_HEADER_TEXT];
+    const bool strict_c89 = strcmp(mode, "-std=c89") == 0;
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/header-orders.c", directory);
+    char* theirs[4];
+    char* mine[9];
+    int their_count = 0;
+    int my_count = 0;
+    theirs[their_count++] = (char*)mode;
+    mine[my_count++] = (char*)mode;
+    if (freestanding)
+    {
+        theirs[their_count++] = "-ffreestanding";
+        mine[my_count++] = "-ffreestanding";
+    }
+    mine[my_count++] = "-nobuiltininc";
+    mine[my_count++] = "-isystem";
+    mine[my_count++] = (char*)ours;
+    mine[my_count++] = "-isystem";
+    mine[my_count++] = (char*)links;
+    theirs[their_count++] = "-Wsystem-headers";
+    mine[my_count++] = "-Wsystem-headers";
+    theirs[their_count++] = "-P";
+    mine[my_count++] = "-P";
+    uint32_t result = 0;
+    for (uint32_t order = 0; order < 2; order += 1)
+    {
+        char label[256];
+        snprintf(label, sizeof(label), "headers among others, %s first, %s, %s", order == 0 ? "theirs" : "ours", mode, freestanding ? "freestanding" : "hosted");
+        size_t length = 0;
+        bool same = order == 0 || pp_test_append_includes(text, sizeof(text), &length, pp_test_header_names, BUSTER_ARRAY_LENGTH(pp_test_header_names));
+        same = same && pp_test_append_includes(text, sizeof(text), &length, pp_test_system_headers, BUSTER_ARRAY_LENGTH(pp_test_system_headers));
+        same = same && (strict_c89 || pp_test_append_includes(text, sizeof(text), &length, pp_test_clang_headers, BUSTER_ARRAY_LENGTH(pp_test_clang_headers)));
+        same = same && (order == 1 || pp_test_append_includes(text, sizeof(text), &length, pp_test_header_names, BUSTER_ARRAY_LENGTH(pp_test_header_names)));
+        same = same && pp_test_append(text, sizeof(text), &length, "%s", checks);
+        if (!same)
+        {
+            printf("%s: the unit doesn't fit in %u bytes\n", label, BUSTER_PP_TEST_HEADER_TEXT);
+        }
+        same = same && pp_test_write_file(path, text);
+        PPClangOutput their_text = same ? pp_test_clang_process("clang", theirs, their_count, path, false) : (PPClangOutput){ 0 };
+        PPClangOutput my_text = same ? pp_test_clang_process("clang", mine, my_count, path, false) : (PPClangOutput){ 0 };
+        same = same && their_text.status == PP_CLANG_ACCEPTED && my_text.status == PP_CLANG_ACCEPTED;
+        // No warning in the headers with buster's, and the unit's own diagnostics (ATOMIC_VAR_INIT is deprecated in
+        // C17) as with clang's.
+        uint32_t primary = 0;
+        uint32_t elsewhere = 0;
+        pp_test_count_diagnostics(my_text.diagnostics, path, &primary, &elsewhere);
+        if (same && elsewhere != 0)
+        {
+            printf("%s: with ours, clang warns in the headers:\n%s", label, my_text.diagnostics);
+            same = false;
+        }
+        static char their_diagnostics[1 << 16];
+        static char my_diagnostics[1 << 16];
+        pp_test_primary_diagnostics(their_text.diagnostics, path, their_diagnostics, sizeof(their_diagnostics));
+        pp_test_primary_diagnostics(my_text.diagnostics, path, my_diagnostics, sizeof(my_diagnostics));
+        if (same && strcmp(their_diagnostics, my_diagnostics) != 0)
+        {
+            printf("%s: the diagnostics differ:\n  clang's %s\n  ours    %s\n", label, their_diagnostics, my_diagnostics);
+            same = false;
+        }
+        // Ours first, while clang's text is whole: pp_test_header_expansions drops the comment lines from it.
+        same = same && pp_test_buster_run(mode, freestanding, 0, path, &my_text, label);
+        PPTestExpansions their_expansions = { 0 };
+        PPTestExpansions my_expansions = { 0 };
+        same = same && pp_test_header_expansions(their_text.text, their_text.length, !strict_c89, &their_expansions) &&
+               pp_test_header_expansions(my_text.text, my_text.length, !strict_c89, &my_expansions) &&
+               pp_test_compare_expansions(&their_expansions, &my_expansions, false, label);
+        pp_test_expansions_release(&their_expansions);
+        pp_test_expansions_release(&my_expansions);
+        free(their_text.text);
+        free(their_text.diagnostics);
+        free(my_text.text);
+        free(my_text.diagnostics);
+        result += !same;
+    }
+    unlink(path);
+    return result;
+}
+
+// -nobuiltininc and -nostdinc leave out buster's headers and clang's after them alike, as clang's leave out its resource
+// directory: which headers a unit finds (__has_include of buster's, clang's and the C library's) with our preprocessor,
+// --buster-headers and each, must be what clang finds with it alone; and with neither, what clang finds searched as
+// --buster-headers searches (pp_test_header_orders). Returns how many of the three runs differ.
+static uint32_t pp_test_header_options(const char* directory, const char* ours, const char* links)
+{
+    static const char* const names[] = { "stddef", "stdatomic", "stdint", "immintrin", "inttypes", "stdio" };
+    static const char* const options[] = { 0, "-nobuiltininc", "-nostdinc" };
+    char path[4096];
+    char text[1024];
+    snprintf(path, sizeof(path), "%s/header-options.c", directory);
+    size_t length = 0;
+    bool written = true;
+    for (uint32_t i = 0; written && i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        written = pp_test_append(text, sizeof(text), &length, "#if __has_include(<%s.h>)\nhas_%s\n#endif\n", names[i], names[i]);
+    }
+    written = written && pp_test_write_file(path, text);
+    uint32_t result = 0;
+    for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
+    {
+        char* arguments[8];
+        int count = 0;
+        arguments[count++] = "-std=gnu17";
+        if (options[o] != 0)
+        {
+            arguments[count++] = (char*)options[o];
+        }
+        else
+        {
+            arguments[count++] = "-nobuiltininc";
+            arguments[count++] = "-isystem";
+            arguments[count++] = (char*)ours;
+            arguments[count++] = "-isystem";
+            arguments[count++] = (char*)links;
+        }
+        arguments[count++] = "-P";
+        PPClangOutput clang_text = written ? pp_test_clang_process("clang", arguments, count, path, false) : (PPClangOutput){ 0 };
+        char name[128];
+        snprintf(name, sizeof(name), "headers with --buster-headers%s%s", options[o] != 0 ? " " : "", options[o] != 0 ? options[o] : "");
+        result += !pp_test_buster_run("-std=gnu17", false, options[o], path, &clang_text, name);
+        free(clang_text.text);
+        free(clang_text.diagnostics);
+    }
+    unlink(path);
+    return result;
+}
+
+// A quoted include beside one of clang's headers (pp_find_include): with --buster-headers, a name buster's directory has
+// comes from buster's, as the search gives it, and any other from beside the includer; without, from beside it. No
+// header of clang 23's includes one of buster's names so, so this asks the search itself, for an include in clang's
+// <immintrin.h>. Returns whether each is found where it should be.
+static bool pp_test_header_beside(void)
+{
+    bool result = true;
+    for (uint32_t buster = 0; result && buster < 2; buster += 1)
+    {
+        char* arguments[2] = { buster != 0 ? "--buster-headers" : "-std=gnu17", "unit.c" };
+        Arena arena = arena_reserve(1ull << 20);
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        static InternTable table;
+        static Preprocessor pp;
+        char resource[PATH_MAX];
+        char includer_path[PATH_MAX];
+        result = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers) && intern_initialize(&table) && pp_initialize(&pp, &options, &table) &&
+                 pp_clang_resource_directory(resource, sizeof(resource)) && (size_t)snprintf(includer_path, sizeof(includer_path), "%s/immintrin.h", resource) < sizeof(includer_path);
+        // The search directory clang's headers are in: the fallback, or the resource directory.
+        uint32_t search = BUSTER_PP_NONE;
+        for (uint32_t i = 0; result && i < pp.directory_count; i += 1)
+        {
+            search = strcmp(pp.directories[i], resource) == 0 ? i : search;
+        }
+        result = result && search != BUSTER_PP_NONE && (buster == 0 || search == pp.fallback_directory);
+        const uint32_t includer = result ? pp_lookup_path(&pp, includer_path, (uint32_t)strlen(includer_path), BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
+        result = includer != BUSTER_PP_NONE && pp.files[includer].data != BUSTER_PP_NONE;
+        uint32_t found_in = BUSTER_PP_NONE;
+        const uint32_t stddef = result ? pp_find_include(&pp, (const uint8_t*)"stddef.h", 8, false, false, includer, search, &found_in) : BUSTER_PP_NONE;
+        const char* expected = buster != 0 ? pp.buster_directory : resource;
+        const size_t expected_length = expected != 0 ? strlen(expected) : 0;
+        const bool stddef_right = stddef != BUSTER_PP_NONE && strncmp(pp.files[stddef].path, expected, expected_length) == 0 && pp.files[stddef].path[expected_length] == '/';
+        const uint32_t other = result ? pp_find_include(&pp, (const uint8_t*)"mmintrin.h", 10, false, false, includer, search, &found_in) : BUSTER_PP_NONE;
+        const bool other_right = other != BUSTER_PP_NONE && found_in == BUSTER_PP_NONE && strncmp(pp.files[other].path, resource, strlen(resource)) == 0;
+        if (result && (!stddef_right || !other_right))
+        {
+            printf("headers: \"stddef.h\" and \"mmintrin.h\" beside clang's <immintrin.h>%s: %s and %s\n", buster != 0 ? " with --buster-headers" : "",
+                   stddef != BUSTER_PP_NONE ? pp.files[stddef].path : "(none)", other != BUSTER_PP_NONE ? pp.files[other].path : "(none)");
+        }
+        else if (!result)
+        {
+            printf("headers: can't set up the search beside clang's <immintrin.h>%s\n", buster != 0 ? " with --buster-headers" : "");
+        }
+        result = result && stddef_right && other_right;
+        pp_release(&pp);
+        intern_release(&table);
+        arena_release(&arena);
+    }
+    return result;
+}
+
 // buster's own headers (src/buster/include, #117's item 6) against clang's resource directory, for each header, language
 // mode and hosted or freestanding run. clang preprocesses the header with each set, its own and ours
 // (-nobuiltininc -isystem), and:
@@ -2487,10 +2876,12 @@ static void pp_test_primary_diagnostics(const char* diagnostics, const char* pat
 // - clang must accept or reject both alike, with the same primary diagnostics.
 // In strict C89, clang's own <stdint.h> and <stdckdint.h> put their // comments in the output as tokens (C89 has no
 // such comments): those lines are dropped from its side. Then our preprocessor with --buster-headers must give clang's
-// tokens with ours, for every header in each mode.
+// tokens with ours, for every header in each mode, with no warnings from them; the headers must work among the C
+// library's and clang's other ones, which --buster-headers finds in clang's resource directory after buster's
+// (pp_test_header_orders); -nobuiltininc and -nostdinc must leave out both (pp_test_header_options); and a quoted name
+// beside one of clang's headers must come from buster's when buster's has it (pp_test_header_beside).
 static bool pp_test_headers(const char* directory)
 {
-    static const char* const headers[] = { "stddef", "stdarg", "limits", "stdint", "float", "stdbool", "stdalign", "stdnoreturn", "iso646", "stdckdint", "stdatomic" };
     static const char* const modes[] = { "-std=c89", "-std=c99", "-std=c11", "-std=c17", "-std=c23", "-std=gnu89", "-std=gnu17", "-std=gnu23" };
     char ours[PATH_MAX];
     bool result = pp_buster_headers_directory(ours, sizeof(ours));
@@ -2500,18 +2891,27 @@ static bool pp_test_headers(const char* directory)
     }
     char path[4096];
     char empty[4096];
+    char links[4096];
     snprintf(path, sizeof(path), "%s/headers.c", directory);
     snprintf(empty, sizeof(empty), "%s/headers-empty.c", directory);
+    snprintf(links, sizeof(links), "%s/clang-headers", directory);
     result = result && pp_test_write_file(empty, "");
+    const bool linked = result && pp_test_fallback_links(ours, links);
+    if (result && !linked)
+    {
+        printf("headers: can't link clang's resource headers into %s\n", links);
+    }
+    result = linked;
     static PPTestMacro theirs[BUSTER_PP_TEST_HEADER_LINES];
     static PPTestMacro mine[BUSTER_PP_TEST_HEADER_LINES];
     static char* predefines[BUSTER_PP_TEST_HEADER_LINES];
-    // Every compared macro of every header, for the run of our preprocessor: the check lines.
-    char* checks = malloc(1 << 20);
+    // Every compared macro of every header, for the runs of our preprocessor: the check lines. And one header's.
+    static char checks[BUSTER_PP_TEST_HEADER_TEXT];
+    static char text[BUSTER_PP_TEST_HEADER_TEXT];
     uint32_t sets = 0;
     uint32_t failures = 0;
     uint32_t our_failures = 0;
-    result = result && checks != 0;
+    uint32_t order_failures = 0;
     for (uint32_t m = 0; result && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
     {
         for (uint32_t hosting = 0; result && hosting < 2; hosting += 1)
@@ -2526,11 +2926,14 @@ static bool pp_test_headers(const char* directory)
             const uint32_t predefine_count = predefined.status == PP_CLANG_ACCEPTED ? pp_test_predefine_lines(predefined.text, predefined.length, predefines, BUSTER_PP_TEST_HEADER_LINES) : 0;
             result = predefined.status == PP_CLANG_ACCEPTED;
             size_t checks_length = 0;
-            for (uint32_t h = 0; result && h < BUSTER_ARRAY_LENGTH(headers); h += 1)
+            bool checks_fit = true;
+            for (uint32_t h = 0; result && h < BUSTER_ARRAY_LENGTH(pp_test_header_names); h += 1)
             {
                 char source[64];
-                snprintf(source, sizeof(source), "#include <%s.h>\n", headers[h]);
-                checks_length += (size_t)snprintf(checks + checks_length, (1 << 20) - checks_length, "%s", source);
+                char label[128];
+                snprintf(source, sizeof(source), "#include <%s.h>\n", pp_test_header_names[h]);
+                snprintf(label, sizeof(label), "headers: <%s.h>, %s, %s", pp_test_header_names[h], modes[m], hosted);
+                checks_fit = checks_fit && pp_test_append(checks, sizeof(checks), &checks_length, "%s", source);
                 result = pp_test_write_file(path, source);
                 PPClangOutput their_macros = pp_test_clang_process("clang", arguments, base, path, true);
                 PPClangOutput my_macros = pp_test_clang_process("clang", arguments, base + 3, path, true);
@@ -2545,29 +2948,35 @@ static bool pp_test_headers(const char* directory)
                     const int order = i == their_count ? 1 : j == my_count ? -1 : strcmp(theirs[i].name, mine[j].name);
                     if (order != 0)
                     {
-                        printf("headers: <%s.h>, %s, %s: only %s defines %s\n", headers[h], modes[m], hosted, order < 0 ? "clang's" : "ours", order < 0 ? theirs[i].name : mine[j].name);
+                        printf("%s: only %s defines %s\n", label, order < 0 ? "clang's" : "ours", order < 0 ? theirs[i].name : mine[j].name);
                         same = false;
                     }
                     i += order <= 0;
                     j += order >= 0;
                 }
                 // The check lines: each compared macro named alone, or invoked with placeholder arguments.
-                char* text = malloc(1 << 20);
-                size_t text_length = (size_t)snprintf(text, 1 << 20, "%s", source);
-                for (uint32_t k = 0; same && text != 0 && k < their_count; k += 1)
+                size_t text_length = 0;
+                bool fits = pp_test_append(text, sizeof(text), &text_length, "%s", source);
+                for (uint32_t k = 0; same && fits && k < their_count; k += 1)
                 {
                     char line[512];
-                    int n = snprintf(line, sizeof(line), "buster_check_%s_ %s", theirs[k].name, theirs[k].name);
-                    for (int32_t a = 0; theirs[k].parameters >= 0 && a <= theirs[k].parameters; a += 1)
+                    size_t line_length = 0;
+                    fits = pp_test_append(line, sizeof(line), &line_length, "buster_check_%s_ %s", theirs[k].name, theirs[k].name);
+                    for (int32_t a = 0; fits && theirs[k].parameters >= 0 && a <= theirs[k].parameters; a += 1)
                     {
-                        n += snprintf(line + n, sizeof(line) - (size_t)n, "%s", a == 0 ? "(" : "");
-                        n += a < theirs[k].parameters ? snprintf(line + n, sizeof(line) - (size_t)n, "%sa%d", a == 0 ? "" : ", ", a) : snprintf(line + n, sizeof(line) - (size_t)n, ")");
+                        const char* open = a == 0 ? "(" : "";
+                        fits = a < theirs[k].parameters ? pp_test_append(line, sizeof(line), &line_length, "%s%sa%d", open, a == 0 ? "" : ", ", a)
+                                                        : pp_test_append(line, sizeof(line), &line_length, "%s)", open);
                     }
-                    n += snprintf(line + n, sizeof(line) - (size_t)n, "\n");
-                    text_length += (size_t)snprintf(text + text_length, (1 << 20) - text_length, "%s", line);
-                    checks_length += (size_t)snprintf(checks + checks_length, (1 << 20) - checks_length, "%s", line);
+                    fits = fits && pp_test_append(text, sizeof(text), &text_length, "%s\n", line);
+                    checks_fit = checks_fit && pp_test_append(checks, sizeof(checks), &checks_length, "%s\n", line);
                 }
-                if (same && text != 0)
+                if (same && !fits)
+                {
+                    printf("%s: the check lines don't fit in %u bytes\n", label, BUSTER_PP_TEST_HEADER_TEXT);
+                    same = false;
+                }
+                if (same)
                 {
                     result = pp_test_write_file(path, text);
                     arguments[base + 3] = "-P";
@@ -2576,39 +2985,21 @@ static bool pp_test_headers(const char* directory)
                     with_p[base] = "-P";
                     PPClangOutput their_text = pp_test_clang_process("clang", with_p, base + 1, path, false);
                     PPClangOutput my_text = pp_test_clang_process("clang", arguments, base + 4, path, false);
-                    PPTestExpansions their_expansions;
-                    PPTestExpansions my_expansions;
+                    // Both zeroed first, so that each can be released whichever of the runs fails.
+                    PPTestExpansions their_expansions = { 0 };
+                    PPTestExpansions my_expansions = { 0 };
                     const bool strict_c89 = m == 0;
                     same = their_text.status == my_text.status && their_text.status != PP_CLANG_ERROR &&
                            pp_test_header_expansions(their_text.text, their_text.length, !strict_c89, &their_expansions) &&
-                           pp_test_header_expansions(my_text.text, my_text.length, true, &my_expansions);
-                    for (uint32_t k = 0; same && k < their_expansions.expansion_count; k += 1)
-                    {
-                        same = k < my_expansions.expansion_count && strcmp(their_expansions.names[k], my_expansions.names[k]) == 0 &&
-                               strcmp(their_expansions.expansions[k], my_expansions.expansions[k]) == 0;
-                        if (!same)
-                        {
-                            printf("headers: <%s.h>, %s, %s: %s expands to \"%s\" in clang's, \"%s\" in ours\n", headers[h], modes[m], hosted, their_expansions.names[k],
-                                   their_expansions.expansions[k], k < my_expansions.expansion_count ? my_expansions.expansions[k] : "(nothing)");
-                        }
-                    }
-                    for (uint32_t k = 0; same && k < their_expansions.declaration_count; k += 1)
-                    {
-                        same = k < my_expansions.declaration_count && strcmp(their_expansions.declarations[k], my_expansions.declarations[k]) == 0;
-                        if (!same)
-                        {
-                            printf("headers: <%s.h>, %s, %s: a declaration differs:\n  clang's %s\n  ours    %s\n", headers[h], modes[m], hosted, their_expansions.declarations[k],
-                                   k < my_expansions.declaration_count ? my_expansions.declarations[k] : "(nothing)");
-                        }
-                    }
-                    same = same && their_expansions.declaration_count == my_expansions.declaration_count && their_expansions.expansion_count == my_expansions.expansion_count;
+                           pp_test_header_expansions(my_text.text, my_text.length, true, &my_expansions) &&
+                           pp_test_compare_expansions(&their_expansions, &my_expansions, true, label);
                     static char their_diagnostics[1 << 16];
                     static char my_diagnostics[1 << 16];
                     pp_test_primary_diagnostics(their_text.diagnostics, path, their_diagnostics, sizeof(their_diagnostics));
                     pp_test_primary_diagnostics(my_text.diagnostics, path, my_diagnostics, sizeof(my_diagnostics));
                     if (same && strcmp(their_diagnostics, my_diagnostics) != 0)
                     {
-                        printf("headers: <%s.h>, %s, %s: the diagnostics differ:\n  clang's %s\n  ours    %s\n", headers[h], modes[m], hosted, their_diagnostics, my_diagnostics);
+                        printf("%s: the diagnostics differ:\n  clang's %s\n  ours    %s\n", label, their_diagnostics, my_diagnostics);
                         same = false;
                     }
                     pp_test_expansions_release(&their_expansions);
@@ -2618,7 +3009,6 @@ static bool pp_test_headers(const char* directory)
                     free(my_text.text);
                     free(my_text.diagnostics);
                 }
-                free(text);
                 free(their_macros.text);
                 free(their_macros.diagnostics);
                 free(my_macros.text);
@@ -2628,48 +3018,40 @@ static bool pp_test_headers(const char* directory)
             }
             free(predefined.text);
             free(predefined.diagnostics);
+            if (result && !checks_fit)
+            {
+                printf("headers: the check lines of %s, %s don't fit in %u bytes\n", modes[m], hosted, BUSTER_PP_TEST_HEADER_TEXT);
+                result = false;
+            }
             // Our preprocessor with --buster-headers, on every header and check line of the mode at once, against clang
-            // with our headers.
+            // with our headers; then the headers among the C library's and clang's other ones.
             if (result)
             {
                 result = pp_test_write_file(path, checks);
-                char* our_arguments[4] = { (char*)modes[m], hosting != 0 ? "-ffreestanding" : "--buster-headers", hosting != 0 ? "--buster-headers" : path, path };
-                Arena arena = arena_reserve(1ull << 20);
-                PPOptions options;
-                const char* input;
-                const char* output;
-                bool markers;
-                static InternTable table;
-                static Preprocessor pp;
-                bool same = pp_parse_options(base + 2, our_arguments, &options, &arena, &input, &output, &markers) && pp_test_run(&pp, &table, &options, path);
                 char* with_p[9];
                 memcpy(with_p, arguments, sizeof(arguments));
                 with_p[base + 3] = "-P";
                 PPClangOutput clang_text = pp_test_clang_process("clang", with_p, base + 4, path, false);
-                PPSpellings mine_spellings = { 0 };
-                PPSpellings their_spellings = { 0 };
                 char name[128];
                 snprintf(name, sizeof(name), "headers, ours preprocessed, %s, %s", modes[m], hosted);
-                same = same && clang_text.status == PP_CLANG_ACCEPTED && pp_stream_spellings(&pp, &mine_spellings) &&
-                       pp_text_spellings((const uint8_t*)clang_text.text, clang_text.length, pp.split_kinds, &their_spellings) &&
-                       pp_compare_spellings(&pp, &mine_spellings, &their_spellings, name, "clang");
-                our_failures += !same;
-                arena_release(&mine_spellings.arena);
-                arena_release(&their_spellings.arena);
+                our_failures += !pp_test_buster_run(modes[m], hosting != 0, 0, path, &clang_text, name);
                 free(clang_text.text);
                 free(clang_text.diagnostics);
-                pp_release(&pp);
-                intern_release(&table);
-                arena_release(&arena);
+                order_failures += pp_test_header_orders(directory, ours, links, modes[m], hosting != 0, checks);
             }
         }
     }
+    const uint32_t option_failures = result ? pp_test_header_options(directory, ours, links) : 0;
+    const bool beside = result && pp_test_header_beside();
     unlink(path);
     unlink(empty);
-    free(checks);
-    printf("headers: %u of %u header, mode and hosting sets differ from clang's; our preprocessor differs from clang on %u of %lu modes with them\n", failures, sets, our_failures,
-           (unsigned long)(2 * BUSTER_ARRAY_LENGTH(modes)));
-    return result && failures == 0 && our_failures == 0;
+    pp_test_remove_links(links);
+    printf("headers: %u of %u header, mode and hosting sets differ from clang's; our preprocessor differs from clang on %u of %lu modes with them; %u of %lu units "
+           "among the C library's and clang's other headers differ; %u of 3 runs with -nobuiltininc, -nostdinc and neither find other headers than clang; "
+           "quoted names beside clang's headers are found %s\n",
+           failures, sets, our_failures, (unsigned long)(2 * BUSTER_ARRAY_LENGTH(modes)), order_failures, (unsigned long)(4 * BUSTER_ARRAY_LENGTH(modes)), option_failures,
+           beside ? "where they should be" : "elsewhere");
+    return result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside;
 }
 
 static bool pp_fuzz(const PPFuzzOptions* options);

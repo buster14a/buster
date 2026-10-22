@@ -128,8 +128,14 @@ typedef __UINTMAX_TYPE__ uintmax_t;
 #define SIG_ATOMIC_MAX __SIG_ATOMIC_MAX__
 #define SIG_ATOMIC_MIN __SIG_ATOMIC_MIN__
 #define SIZE_MAX __SIZE_MAX__
+/* glibc's <wchar.h> defines these too, unless they are defined, and may come first: then its definitions stay, as in
+   clang's header. */
+#ifndef WCHAR_MAX
 #define WCHAR_MAX __WCHAR_MAX__
+#endif
+#ifndef WCHAR_MIN
 #define WCHAR_MIN __WCHAR_MIN__
+#endif
 #define WINT_MAX __WINT_MAX__
 #define WINT_MIN __WINT_MIN__
 

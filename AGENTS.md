@@ -375,8 +375,10 @@ designs and the compilers already built this way.
   unit's token stream from its files' refined tokens (C23's `#embed` among its
   directives), and `./build/compiler -E` (as `clang -E`, with `--embed-dir=`).
   `src/buster/include` holds the compiler's own freestanding headers, which
-  `--buster-headers` selects in place of clang's resource directory (the
-  default), and `-nobuiltininc` leaves out either.
+  `--buster-headers` puts where clang's resource directory goes (the default),
+  with clang's after them for the headers they don't supply (never for a name
+  they have, so their `#include_next` reaches the C library's), and
+  `-nobuiltininc` leaves out the compiler's headers, whichever they are.
   `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
@@ -2085,7 +2087,16 @@ features:
   define the same macros (but the guards and helpers each names its own way),
   expand each to the same tokens, make the same declarations and give the same
   diagnostics; and our preprocessor with `--buster-headers` must give clang's
-  tokens on all of them;
+  tokens on all of them, with no warnings from the headers. Then, in each mode,
+  hosted and freestanding, two units (32) include them with the C library's
+  headers that define some of their macros or ask them for parts and clang's
+  headers they don't supply (`<immintrin.h>` and others), buster's last and
+  first: clang with them, searched as `--buster-headers` searches
+  (`-Wsystem-headers`), must warn about nothing in the headers and expand every
+  macro as clang's own headers do, and our preprocessor must give its tokens,
+  with no warnings from the headers; `-nobuiltininc` and `-nostdinc` must
+  leave out buster's headers and clang's after them alike; and a quoted name
+  beside one of clang's headers must come from buster's when buster's has it;
 - the fuzz batch's cases must give clang's acceptance, and an accepted case's
   stream, printed with clang's -P spacing, must lex into clang's tokens.
 

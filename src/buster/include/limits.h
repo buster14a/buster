@@ -79,8 +79,22 @@
 #define ULLONG_MAX (__LONG_LONG_MAX__ * 2ULL + 1ULL)
 #endif
 
-/* The widths, C23's. */
+/* The widths, C23's. Hosted, glibc's <limits.h> (included above) defined them already in C23: these replace glibc's,
+   which clang's header redefines instead, with a warning that -Wsystem-headers shows. */
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#undef BOOL_WIDTH
+#undef CHAR_WIDTH
+#undef SCHAR_WIDTH
+#undef UCHAR_WIDTH
+#undef SHRT_WIDTH
+#undef USHRT_WIDTH
+#undef INT_WIDTH
+#undef UINT_WIDTH
+#undef LONG_WIDTH
+#undef ULONG_WIDTH
+#undef LLONG_WIDTH
+#undef ULLONG_WIDTH
+#undef BITINT_MAXWIDTH
 #define BOOL_WIDTH __BOOL_WIDTH__
 #define CHAR_WIDTH CHAR_BIT
 #define SCHAR_WIDTH CHAR_BIT

@@ -432,11 +432,13 @@ arenas. Popping a context gives its tokens back when they are on top.
 - **Includes** (#119) are searched as clang searches them. A quoted name looks
   in the includer's directory, then the `-iquote` directories. Both forms then
   look in `-I`, `-isystem`, clang's resource directory (the highest version
-  under `/usr/lib/clang`), `/usr/local/include`, `/usr/include` and
-  `-idirafter`. `#include_next` resumes after the directory that found the
-  includer: this inclusion of it, which each file context keeps, since a file
-  can be found through two entries (`-iquote d` and `-I d`). `__has_include`
-  and `__has_include_next` use the same search.
+  under `/usr/lib/clang`; with `--buster-headers`, buster's own headers and
+  then that directory without their names, as "The compiler's own headers"
+  says), `/usr/local/include`, `/usr/include` and `-idirafter`. `#include_next`
+  resumes after the directory that found the includer: this inclusion of it,
+  which each file context keeps, since a file can be found through two entries
+  (`-iquote d` and `-I d`). `__has_include` and `__has_include_next` use the
+  same search.
   - As in clang, directories that don't exist are dropped, and so are later
     copies of a directory (by device and inode). A non-system directory that is
     also a system one is dropped in favor of the system one. Otherwise a
@@ -504,9 +506,31 @@ clang 23's resource headers give, and carry the project's license
 
 - **Selecting them.** `--buster-headers` puts them where clang's resource
   directory goes in the search. They are found from the executable: the tree
-  whose `build/` holds it. `-nobuiltininc`, clang's flag, leaves out the
-  compiler's headers, whichever they are. Clang's resource directory stays the
-  default.
+  whose `build/` holds it. Clang's resource directory stays the default.
+- **Clang's other headers.** Not among buster's: the intrinsics' headers
+  (`<immintrin.h>` and the rest, the larger part of #156's own-headers work),
+  `<cpuid.h>`, `<unwind.h>`, and clang's wrappers of the C library's
+  `<inttypes.h>`, `<tgmath.h>` and `<endian.h>`. With `--buster-headers`,
+  clang's resource directory follows buster's for them, and supplies no name
+  buster's directory has, to the search or to a quoted include beside one of
+  clang's headers (`pp_find_include`), so:
+  - buster's headers' `#include_next` goes on to the C library's, past clang's
+    header of the same name: hosted, `<limits.h>` and `<stdint.h>` include
+    glibc's, and `<stdatomic.h>` and `<stdckdint.h>`, which glibc doesn't
+    have, keep their own definitions;
+  - every other name is found as without the flag.
+
+  Clang's options can't place it so. Right after buster's directory
+  (`-isystem`), the four headers' `#include_next` would reach clang's copies.
+  After the system directories (`-idirafter`), `<limits.h>` and `<stdint.h>`
+  would reach glibc's, but `<stdatomic.h>` and `<stdckdint.h>` would still
+  reach clang's, and `<inttypes.h>`, `<tgmath.h>` and `<endian.h>` would be
+  glibc's, not clang's wrappers of them. Freestanding, buster's headers include
+  nothing next.
+- **Leaving them out.** `-nobuiltininc`, clang's flag, leaves out the
+  compiler's headers, whichever they are: with `--buster-headers`, buster's and
+  clang's after them alike. `-nostdinc` leaves out both with the other standard
+  directories.
 - **What they give.** Like clang's, each gives what its language mode has, and
   takes the target's types and limits from the predefined macros.
 - **Working with glibc.**
@@ -516,8 +540,11 @@ clang 23's resource headers give, and carry the project's license
     headers make.
   - The guards other headers test (`_SIZE_T`, `__int8_t_defined`,
     `_GCC_LIMITS_H_` and the like) keep clang's and GCC's names.
-- **Not among them:** the intrinsics' headers (`<immintrin.h>`). They come from
-  clang's resource directory, as the rest of #156's self-hosting work needs.
+  - A macro that another header may define first is kept, or replaced, without
+    a warning. `<stdint.h>` keeps `<wchar.h>`'s `WCHAR_MAX` and `WCHAR_MIN`,
+    and `<float.h>` replaces the signaling NaNs, as clang's do. `<limits.h>`
+    replaces the C23 widths that glibc's `<limits.h>` defines before it, where
+    clang's redefines them with a warning (shown with `-Wsystem-headers`).
 - **`__FLT_EVAL_METHOD__`** is now a builtin, as in clang (0 on x86-64): both
   headers' `<float.h>` define `FLT_EVAL_METHOD` with it.
 
@@ -534,11 +561,46 @@ preprocesses the header with its own set and with ours
 - clang's primary diagnostics must be the same.
 
 Then our preprocessor with `--buster-headers` must give clang's tokens on all
-the headers and their macros in each mode. In strict C89, clang's own
-`<stdint.h>` and `<stdckdint.h>` put their `//` comments in the output as
-tokens; the check drops those lines from clang's side. With these headers,
-`sqlite3.c` (also in C23) and Lua 5.4.8 preprocess token for token as clang
-does, and compile with clang.
+the headers and their macros in each mode, and warn no more than clang does in
+the unit itself: it reports warnings in system headers too, which clang hides
+without `-Wsystem-headers`, and the headers must give none. In strict C89,
+clang's own `<stdint.h>` and `<stdckdint.h>` put their `//` comments in the
+output as tokens; the check drops those lines from clang's side.
+
+Then the headers among others (#255's review), in each mode, hosted and
+freestanding: two units include buster's 11, the C library's headers that
+define some of their macros or ask them for parts (`<wchar.h>`, `<math.h>`,
+`<unistd.h>`, `<stdio.h>` and others), and clang's headers that buster doesn't
+supply (`<immintrin.h>`, `<x86intrin.h>`, `<cpuid.h>`, `<mm_malloc.h>`,
+`<unwind.h>`, `<inttypes.h>`, `<tgmath.h>` and `<endian.h>`), buster's last in
+one and first in the other, then name every compared macro. Clang
+preprocesses each with its own headers, and with buster's in the search
+`--buster-headers` makes (`-nobuiltininc -isystem src/buster/include -isystem
+DIR`, where DIR links to clang's resource headers but those buster has), both
+with `-Wsystem-headers`, and:
+
+- with buster's, clang must warn about nothing in the headers, and give the
+  unit itself the diagnostics it gives with its own (`ATOMIC_VAR_INIT` is
+  deprecated in C17);
+- each macro must expand to the same tokens with either. The declarations
+  aren't compared: clang's own freestanding `<stdint.h>` leaves helper macros
+  defined (`__int_least16_t` and the like) that rename glibc's typedefs of
+  those names in the headers after it, and buster's leaves none;
+- our preprocessor with `--buster-headers` must give clang's tokens with
+  buster's, and no warnings in the headers.
+
+In strict C89 the units leave clang's other headers out. They are full of `//`
+comments, which clang reads as tokens in that mode, and our lexer as comments.
+
+Last, `-nobuiltininc` and `-nostdinc` must leave out buster's headers and
+clang's after them alike: which headers `__has_include` finds with
+`--buster-headers` and each must be what clang finds with it alone. And a
+quoted name beside one of clang's headers must come from buster's when
+buster's has it, and from beside it otherwise; no header of clang 23's
+includes one of buster's names so, so the check asks the search itself.
+
+With these headers, `sqlite3.c` (also in C23) and Lua 5.4.8 preprocess token
+for token as clang does, and compile with clang.
 
 ### `#embed`
 

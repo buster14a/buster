@@ -62,8 +62,12 @@
 #define LDBL_HAS_SUBNORM __LDBL_HAS_DENORM__
 #endif
 
-/* C23's: signaling NaNs, and the largest normalized numbers. */
+/* C23's: signaling NaNs, and the largest normalized numbers. The signaling NaNs replace those another header defined
+   first, as clang's do. */
 #if (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L) || !defined(__STRICT_ANSI__)
+#undef FLT_SNAN
+#undef DBL_SNAN
+#undef LDBL_SNAN
 #define FLT_SNAN (__builtin_nansf(""))
 #define DBL_SNAN (__builtin_nans(""))
 #define LDBL_SNAN (__builtin_nansl(""))
