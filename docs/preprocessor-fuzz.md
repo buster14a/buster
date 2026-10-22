@@ -108,17 +108,58 @@ texts are split at their markers and lexed as the mode lexes. They must then
 give the same token kinds and spellings (`preprocessor_fuzz_compare_mode`).
 Whitespace and line breaks don't count.
 
-Some cases are compared by their spellings with all whitespace removed
-(`pp_fuzz_by_spellings`, counted "by spellings"), because clang's printer
-decides where their tokens are joined. There are two kinds:
+Every case is compared by tokens. Where clang's printer joins two tokens,
+our text joins them too (below), so both lex into the same tokens. Lexing a
+printed text can also run past its stream's tokens, or lose one, where bytes
+printed next to each other make what neither printer writes. So the two texts
+are lexed as `preprocessor_fuzz_lex_printed` says:
 
-- A stream with an unterminated literal. It runs to the end of its line in
-  either text, so the line breaks clang chooses decide which tokens it takes.
-- A case with two or more tokens on presumed line 1, where clang's lexer
-  starts them (at a line splice right before one). Clang's printer takes a
-  token that started a line inside a macro's arguments for the file's first
-  (`MoveToLine`'s `IsFirstInFile`), and indents it by its column in place of
-  a space, which can join it to the token before.
+- An unterminated literal runs on to the end of its line, through the
+  printer's spaces and the tokens after it, and a `'` further on can close it.
+  Stringizing one leaves a string whose last quote does the same, and a stray
+  `\` at a line's end splices the next line to it. Our printer notes where
+  each such token of our stream lies in its text (`pp_fuzz_breaks`,
+  `PreprocessorFuzzOutput.whole`), and the lexed token that reaches one ends
+  where it does.
+- Clang's text can't show where such a token of clang's ends. On a pragma's
+  line it ends the line, so clang's lexed token must end where ours does.
+  Elsewhere clang's text follows ours: its token at the same index, when it
+  starts with the same bytes, is as long. Then clang's own tokens for the
+  case alone confirm it (`clang -Xclang -dump-tokens`,
+  `preprocessor_fuzz_clang_tokens`, `pp_fuzz_check_ends`): its unterminated
+  literals, stray `\`s and broken strings must be ours, in order, with the
+  same kinds and spellings. About 2% of the cases need clang's tokens. A
+  pragma's tokens aren't among clang's. Nor are other unknown tokens, which
+  end where a lexer ends them: clang also calls unknown a `##` that it took
+  out of a macro's argument, which ours keeps a `##`.
+- A comment can only be a `/` printed before a `*` or a `/`, and a line
+  splice a `\` before a newline. Their `/` and `\` are tokens, and lexing goes
+  on after them.
+
+Clang's token dump writes a line per token: its kind, its spelling escaped
+(`\\`, `\t`, `\n`, `\"` and octal for other bytes), its location and flags.
+A token written with a line splice also shows its bytes as written, raw, so
+that its line goes on past each splice's newline; each line before the last
+ends in the splice's `\`. The reader (`preprocessor_fuzz_clang_dump`) refuses
+any line it can't read in exactly one way, which leaves the case without a
+result rather than guess.
+
+Until the review of #263, a stream with an unterminated literal, or with two
+or more tokens on presumed line 1, was compared by its spellings with all
+whitespace removed, which could hide a difference inside a literal or
+between two tokens. Without that fallback, the qualification found six cases
+whose texts differed only in the printer's spaces and line breaks inside
+what an unterminated literal or comment had taken: the indentation of a
+line, a space after a `(`, a line break where clang's printer starts a new
+line. Elsewhere such whitespace doesn't count, so the emulation doesn't place
+it as clang does. With the rules above, the six agree ("Qualification").
+
+The second review of #263 found that, without clang's tokens, following our
+end let a token of ours one byte short pass: `#define A 'a  ` (two spaces)
+and `A` printed as `'a ` lexed equal to clang's `'a  `, the lost space taken
+for the printer's. A comparison that couldn't be made, as when its tokens
+don't fit its arena, also counted as compared. It now leaves the case
+without a result, which fails the run.
 
 #### Clang's `-P` printer, emulated
 
@@ -160,6 +201,13 @@ The C rules:
   line break then keeps apart. `Preprocessor.silent_pragmas` records these
   pragmas and the expansion the next token comes from. Our printer does the
   same in `-E` with line markers.
+- A token that keeps clang's start of line without moving to another line
+  (a line among a macro's arguments, the token after a silent `_Pragma`) is
+  the file's first to clang's printer when the line is presumed line 1
+  (`MoveToLine`'s `IsFirstInFile`). The printer indents it by its column in
+  place of a space, without `AvoidConcat`, so that in column 1 it joins the
+  token before: `h(x` with `y)` on the next line, on line 1, prints `xy`;
+  `a _Pragma("once")b` prints `b` at its column on `a`'s line.
 - A line's first token is placed where clang's lexer starts it: at a line
   splice right before it. It is indented from column 2 when it is in column 1
   with a leading space, by clang's rule for its token's. Our
@@ -197,11 +245,26 @@ Four kinds of case run in a clang process of their own (`isolated`):
 
 Before its cases, the fuzz batch checks these rules on 12 small sources in
 each mode (`pp_fuzz_check_isolation`), a region whose end a line splice takes
-among them. With `--clang` it then compares the emulation's fixtures with
-clang in each mode (`pp_fuzz_emulation_cases`, `pp_fuzz_check_emulation`):
-the minimized cases the emulation once printed wrong, and those probing
-around them found, which test-preprocessor's cases can't pin, since they
-compare tokens and line markers, not the `-P` text.
+among them, and the comparison on 22 pairs of texts (`pp_fuzz_check_comparison`):
+whitespace between tokens doesn't count, but a literal's contents and two
+tokens joined into one do, as `"a b" 0` against `"ab" 0` and `a b` against
+`ab`; an unterminated literal and a broken string of ours are whole, the
+spaces after them not counting and their own bytes counting; and a
+comment's `/` and a splice's `\` are tokens; and on a pragma's line,
+clang's text gives an unterminated literal's end. With `--clang` it then
+compares the emulation's fixtures with clang in each mode
+(`pp_fuzz_emulation_cases`, `pp_fuzz_check_emulation`): the minimized cases
+the emulation once printed wrong, and those probing around them found, which
+test-preprocessor's cases can't pin, since they compare tokens and line
+markers, not the `-P` text. Then the two probes of #263's second review:
+four sources whose output has a token that clang's text runs on past
+(`pp_fuzz_ends_cases`), each of which must agree with clang, confirmed by
+clang's tokens, and must differ with its first such token one byte shorter,
+the first source by clang's tokens alone (`pp_fuzz_check_ends_cases`); and a
+comparison whose tokens don't fit its arena, which must leave its case
+without a result (`pp_fuzz_check_failed_comparison`). The harness's own tests
+(`test-preprocessor-fuzz`) check the reader of clang's token dump on lines
+as clang 23 writes them, and its refusals.
 
 A case that differs from clang is read again alone, and so is every case of
 one block in 128. The batch must give what the case alone gives. A case that
@@ -502,7 +565,7 @@ A fresh seed on the build merged with main found one more:
   operand's `BUSTER_PP_LINE_SPACE` (`pp_paste`).
 
 Each harness change came from a case the comparison couldn't place. They
-cover the printer's emulation, the by-spellings cases, the isolation rules,
+cover the printer's emulation, the isolation rules,
 the attribution of a rejected batch's errors, the line-based marker split
 and reading an unanswered batch case by case. After the first frozen
 campaign, two more: an error clang prints at no location (`error: missing

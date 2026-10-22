@@ -980,6 +980,9 @@ static const PPTestCase pp_test_cases[] = {
     // #109's differential fuzzing against clang: a case for each difference it found (minimized) and for each that
     // probing around one found, with clang's -P text, which test-preprocessor --clang checks again.
     { "-undef", "__STDC__ __STDC_VERSION__ __STDC_HOSTED__ __STDC_UTF_16__ __STDC_UTF_32__\n__STDC_EMBED_NOT_FOUND__ __STDC_EMBED_FOUND__ __STDC_EMBED_EMPTY__\n__x86_64__ __clang__ __BUSTER__ __GNUC__ __CHAR_BIT__\n", 0, "c23", "1 202311L 1 1 1\n0 1 2\n__x86_64__ __clang__ __BUSTER__ __GNUC__ __CHAR_BIT__\n", false, 0, "-undef" },
+    // Assembly's language macro stays with -undef, as the standard ones do: a header shared with C keeps its C apart.
+    { "-undef in assembly", "#ifdef __ASSEMBLER__\nassembly\n#else\nc\n#endif\n__STDC_VERSION__ __STDC_HOSTED__ __x86_64__\n", 0, "c17", "assembly\n201710L 1 __x86_64__\n", false, 0,
+      "-undef -x assembler-with-cpp" },
     { "feature answers' spelling", "__has_c_attribute(nodiscard) __has_c_attribute(deprecated) __has_c_attribute(fallthrough) __has_c_attribute(maybe_unused)\n__has_c_attribute(gnu::packed) __has_attribute(cold) __has_attribute(__nonnull__) __has_builtin(__builtin_expect) __has_feature(c_atomic) __has_extension(c_atomic)\n__has_cpp_attribute(nodiscard) __has_declspec_attribute(dllexport)\n#if __has_embed(\"/dev/null\") == 2\nempty\n#endif\n", 0, "c23", "202003L 201904L 201910L 202106L\n1 1 1 1 1 1\n__has_cpp_attribute(nodiscard) 0\nempty\n", false, 0 },
     { "__has_warning", "__has_warning(\"-Wall\") __has_warning(\"-Wunused-macros\") __has_warning(\"-Wppf-none\") __has_warning(\"-W\" \"shadow\") __has_warning(\"-Rpass\")\n", 0, "c17", "1 1 0 1 0\n", false, 0 },
     { "__VA_OPT__ without variadic parameters", "#define F(a) [__VA_OPT__(x a) a]\nF(1)\n", 0, "c23", "\n[ 1]\n", false, 0 },
