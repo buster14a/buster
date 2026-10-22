@@ -2211,7 +2211,10 @@ C23. The checks cover:
 - isolation of cases, line information and predefined counter behavior.
   `__COUNTER__` cases run alone because its state belongs to the Clang process;
 - output comparison, including unequal acceptance, token counts, kinds and
-  spellings, whitespace-only changes, and invalid oracle results;
+  spellings, whitespace-only changes, and invalid oracle results; and the
+  reader of clang's `-dump-tokens` text, on lines as clang 23 writes them
+  (escapes, keywords, annotations, and tokens written with line splices, whose
+  bytes as written go on to more lines), and the lines it must refuse;
 - a planted comparison for the minimizer: delete complete lines, then tokens,
   while preserving the difference, until only the two required identifier
   tokens remain. Saving and reading a `fuzz_failure_N.c` fixture must preserve
@@ -2371,7 +2374,12 @@ features:
   stream, printed with clang's -P spacing, must lex into clang's tokens (with
   a comment's `/` and a line splice's `\` as tokens, which only tokens printed
   next to each other make, and our tokens that don't lex back whole:
-  `preprocessor_fuzz_lex_printed`).
+  `preprocessor_fuzz_lex_printed`). Where clang's text can't show where such a
+  token ends (an unterminated literal off a pragma's line), clang's own tokens
+  for the case alone (`clang -Xclang -dump-tokens`) must confirm ours; a
+  comparison that can't be made leaves its case without a result. With
+  `--clang`, the batch first checks these on fixtures of its own, among them
+  #263's second review's probes.
 
 `sqlite3.c`, musl 1.2.5's 1,357 sources, Lua 5.4.8 and this repository's
 translation units are token-identical; `docs/c-preprocessor.md` has the

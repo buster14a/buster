@@ -124,6 +124,79 @@ static void preprocessor_fuzz_test_comparison(PreprocessorFuzzTestTally* tally, 
     arena_pop_to(memory, mark);
 }
 
+// Clang's -dump-tokens text (preprocessor_fuzz_clang_dump), as clang 23 writes it: escapes, a spelling with quotes and
+// padding in it, a keyword's and an annotation's lines, tokens written with line splices, whose bytes as written go on
+// to more lines, and the case's marker; then lines it can't read (without "Loc=<", with two ends its spelling could
+// have, with an escape it doesn't know, a diagnostic's), a dump without the marker before its end, one without its last
+// newline, and one whose bytes as written never end.
+static void preprocessor_fuzz_test_dump(PreprocessorFuzzTestTally* tally, Arena* memory)
+{
+    const uint64_t mark = memory->length;
+    const String8 dump = BUSTER_S8("unknown          ''a  '                          Loc=<ppf_7.c:2:1 <Spelling=ppf_7.c:1:11>> [StartOfLine]\n"
+                                   "identifier       'x'                             Loc=<ppf_7.c:3:1>     [StartOfLine]\n"
+                                   "string_literal   '\\\"\\\"a b\\\"'                     Loc=<ppf_7.c:4:1>     [StartOfLine]\n"
+                                   "unknown          ''a\\tb\\\\q\\\"\\001\\303\\251 \\177'   Loc=<ppf_7.c:5:1>     [StartOfLine]\n"
+                                   "__int128         '__int128'                      Loc=<ppf_7.c:6:1>     [StartOfLine]\n"
+                                   "annot_embed                                      Loc=<ppf_7.c:7:1>    \n"
+                                   "unknown          '\\\\'                            Loc=<ppf_7.c:7:2>     [UnClean='\\ \n\\']\n"
+                                   "identifier       'abc'                           Loc=<ppf_7.c:8:1>     [StartOfLine] [UnClean='a\\\nb\\\nc']\n"
+                                   "identifier       'BUSTER_PPF_END_0'              Loc=<ppf_7.c:9:1>     [StartOfLine]\n"
+                                   "eof              ''                              Loc=<ppf_7.c:9:17>   \n");
+    static const char* const kinds[] = {
+        "unknown",
+        "identifier",
+        "string_literal",
+        "unknown",
+        "__int128",
+        "annot_embed",
+        "unknown",
+        "identifier",
+    };
+    static const char* const spellings[] = {
+        "'a  ",
+        "x",
+        "\"\"a b\"",
+        "'a\tb\\q\"\001\303\251 \177",
+        "__int128",
+        "",
+        "\\",
+        "abc",
+    };
+    PreprocessorFuzzClangTokens tokens = { 0 };
+    const bool read = preprocessor_fuzz_clang_dump(memory, dump, &tokens);
+    bool same = read && tokens.count == BUSTER_ARRAY_LENGTH(kinds);
+    for (uint64_t i = 0; same && i < tokens.count; i += 1)
+    {
+        const String8 kind = tokens.tokens[i].kind;
+        const String8 spelling = tokens.tokens[i].spelling;
+        same = kind.length == strlen(kinds[i]) && memcmp(kind.pointer, kinds[i], kind.length) == 0 && spelling.length == strlen(spellings[i]) &&
+               memcmp(spelling.pointer, spellings[i], spelling.length) == 0;
+    }
+    preprocessor_fuzz_test_expect(tally, same, "clang's token dump read wrong");
+    static const char* const unreadable[] = {
+        "unknown          ''a'\nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+        "unknown          ''a' Loc=<b'   Loc=<p.c:1:1>\nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+        "unknown          ''a\\q'   Loc=<p.c:1:1>\nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+        "p.c:1:1: error: something\nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+        "identifier       'x'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+        "identifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>",
+        "unknown          '\\\\'     Loc=<p.c:1:1>     [UnClean='\\ \nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+    };
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(unreadable); i += 1)
+    {
+        const String8 text = {
+            .pointer = (char*)unreadable[i],
+            .length = strlen(unreadable[i]),
+        };
+        const uint64_t before = memory->length;
+        PreprocessorFuzzClangTokens none = { 0 };
+        tally->case_id = i;
+        preprocessor_fuzz_test_expect(tally, !preprocessor_fuzz_clang_dump(memory, text, &none) && memory->length == before, "an unreadable token dump was read");
+    }
+    tally->case_id = 0;
+    arena_pop_to(memory, mark);
+}
+
 // Check source witnesses as well as the generator's coverage mask. Semantic transport checks below additionally
 // require rejected argument/paste families to be rejected, and compare every accepted expansion with its own process.
 static bool preprocessor_fuzz_test_construct(PreprocessorFuzzCase test_case, uint64_t family, bool c23)
@@ -808,6 +881,7 @@ static int run_preprocessor_fuzz_tests(int argc, char** argv)
         if (memory.base != 0)
         {
             preprocessor_fuzz_test_comparison(&tally, &memory);
+            preprocessor_fuzz_test_dump(&tally, &memory);
             preprocessor_fuzz_test_generation(&tally, &memory, c23);
             preprocessor_fuzz_test_minimizer(&tally, &memory);
             preprocessor_fuzz_test_oracle(&tally, &memory, clang_path, c23);

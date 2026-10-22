@@ -67,8 +67,10 @@ struct PPFuzzTally
     uint64_t oracle;
     // The batches clang gave no result for, whose cases it read alone.
     uint64_t unbatched;
-    // Cases a preprocessor, the generator or a clang process couldn't give a result for.
+    // Cases a preprocessor, the generator, a clang process or the comparison couldn't give a result for.
     uint64_t invalid;
+    // Cases compared with clang whose whole tokens clang's own tokens confirmed (pp_fuzz_check_ends).
+    uint64_t ends;
     // Cases whose -P text can't lex back into their stream, as clang's can't (pp_fuzz_unprintable).
     uint64_t unprintable;
     // Differences minimized and saved, and the ones reported.
@@ -444,12 +446,21 @@ static bool pp_fuzz_broken_string(const uint8_t* bytes, uint32_t length)
     return result;
 }
 
+// Whether an unknown token's spelling runs on in a printed text past its own end: an unterminated literal's (a quote,
+// after a literal's prefix: u8, u, U or L), which runs on to its line's end, or a stray `\`'s, which splices the line
+// after it when it ends one. Another unknown token (`@`, or a `##` clang took out of a macro's argument) ends where
+// the lexer ends it.
+static bool pp_fuzz_runs_on(const uint8_t* spelling, uint64_t length)
+{
+    const uint64_t prefix = length >= 3 && spelling[0] == 'u' && spelling[1] == '8' ? 2 : length >= 2 && (spelling[0] == 'u' || spelling[0] == 'U' || spelling[0] == 'L') ? 1 : 0;
+    return (prefix < length && (spelling[prefix] == '\'' || spelling[prefix] == '"')) || (length != 0 && spelling[0] == '\\');
+}
+
 // Whether a token's printed spelling doesn't lex back into it, so that the comparison takes it whole: an unknown token
-// (an unterminated literal runs on to its line's end, and a `\` before a newline splices it to the next) or a broken
-// string (pp_fuzz_broken_string).
+// that runs on (pp_fuzz_runs_on) or a broken string (pp_fuzz_broken_string).
 static bool pp_fuzz_breaks(uint8_t kind, const uint8_t* spelling, uint32_t length)
 {
-    return kind == C_TOKEN_UNKNOWN || (kind == C_TOKEN_STRING_LITERAL && pp_fuzz_broken_string(spelling, length));
+    return (kind == C_TOKEN_UNKNOWN && pp_fuzz_runs_on(spelling, length)) || (kind == C_TOKEN_STRING_LITERAL && pp_fuzz_broken_string(spelling, length));
 }
 
 // Our stream printed with clang's -E -P spacing, for the comparison with clang's text: clang's text can join two tokens
@@ -461,9 +472,9 @@ static bool pp_fuzz_breaks(uint8_t kind, const uint8_t* spelling, uint32_t lengt
 // a line at the next token, and its printer moves to that token's line (its own, or its expansion's: PPExpansionStart
 // in Preprocessor.silent_pragmas) only when it is another than the current one (MoveToLine), as after a line splice. A
 // line's first token is indented to its column, as clang's printer indents it (HandleWhitespaceBeforeTok), which keeps
-// it apart from a `\` that ends the line before. The ranges of the tokens that don't lex back into themselves
-// (pp_fuzz_breaks) go in *whole, in `arena`, a start and an end each. `free` the text; null if it can't be made.
-static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, uint32_t** whole, uint64_t* whole_count)
+// it apart from a `\` that ends the line before. The tokens that don't lex back into themselves (pp_fuzz_breaks) go
+// in *whole, in `arena`. `free` the text; null if it can't be made.
+static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, PreprocessorFuzzWhole** whole, uint64_t* whole_count)
 {
     char* result = 0;
     *length = 0;
@@ -474,7 +485,7 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, 
     {
         candidates += out->kinds[i] == C_TOKEN_UNKNOWN || out->kinds[i] == C_TOKEN_STRING_LITERAL;
     }
-    uint32_t* ranges = candidates != 0 ? arena_push_array(arena, 2 * candidates, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    PreprocessorFuzzWhole* ranges = candidates != 0 ? arena_push_array(arena, candidates, sizeof(PreprocessorFuzzWhole), _Alignof(PreprocessorFuzzWhole)) : 0;
     uint64_t range_count = 0;
     bool line_start = true;
     bool valid = candidates == 0 || ranges != 0;
@@ -565,8 +576,12 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, 
             valid = valid && (!breaks || (start >= 0 && end > start && end <= UINT32_MAX && range_count < candidates));
             if (valid && breaks)
             {
-                ranges[2 * range_count] = (uint32_t)start;
-                ranges[2 * range_count + 1] = (uint32_t)end;
+                ranges[range_count] = (PreprocessorFuzzWhole){
+                    .start = (uint32_t)start,
+                    .end = (uint32_t)end,
+                    .kind = kind,
+                    .pragma = pragma != BUSTER_PP_PRAGMA_OUTSIDE,
+                };
                 range_count += 1;
             }
             arena_pop_to(scratch.arena, mark);
@@ -603,7 +618,7 @@ static PreprocessorFuzzOutput pp_fuzz_output(Preprocessor* pp, bool accepted, Ar
     if (accepted)
     {
         size_t length = 0;
-        uint32_t* whole = 0;
+        PreprocessorFuzzWhole* whole = 0;
         uint64_t whole_count = 0;
         char* text = pp_fuzz_clang_text(pp, &length, arena, &whole, &whole_count);
         result.valid = text != 0;
@@ -627,10 +642,11 @@ static PreprocessorFuzzOutput pp_fuzz_output(Preprocessor* pp, bool accepted, Ar
                 uint64_t kept = 0;
                 for (uint64_t range = 0; result.valid && range < whole_count; range += 1)
                 {
-                    if (whole[2 * range] >= offset && whole[2 * range + 1] <= offset + result.text.length)
+                    if (whole[range].start >= offset && whole[range].end <= offset + result.text.length)
                     {
-                        whole[2 * kept] = (uint32_t)(whole[2 * range] - offset);
-                        whole[2 * kept + 1] = (uint32_t)(whole[2 * range + 1] - offset);
+                        whole[kept] = whole[range];
+                        whole[kept].start -= (uint32_t)offset;
+                        whole[kept].end -= (uint32_t)offset;
                         kept += 1;
                     }
                 }
@@ -671,6 +687,59 @@ static PreprocessorFuzzDifference pp_fuzz_compare(Arena* scratch, PreprocessorFu
 {
     const PreprocessorFuzzDifference difference = preprocessor_fuzz_compare_mode(scratch, ours, theirs, c23);
     return lost && difference == BUSTER_PPF_EQUAL ? BUSTER_PPF_TOKEN_COUNT : difference;
+}
+
+// Where our whole tokens off pragma lines end, which clang's text followed (preprocessor_fuzz_lex_printed), clang's own
+// tokens for the case alone confirm (preprocessor_fuzz_clang_tokens): its unknown tokens that run on (pp_fuzz_runs_on)
+// and broken strings (pp_fuzz_broken_string), in order, must be those tokens of ours, of their kinds and spellings. A
+// pragma's tokens are among neither. Returns the difference (BUSTER_PPF_EQUAL if there is none, or no such token of
+// ours), or BUSTER_PPF_INVALID if clang's tokens can't be had. Sets *checked when there were tokens to confirm.
+static PreprocessorFuzzDifference pp_fuzz_check_ends(Arena* scratch, const char* clang_path, bool c23, const PreprocessorFuzzCase* test_case, PreprocessorFuzzOutput ours, bool* checked)
+{
+    const uint64_t begin = scratch->length;
+    uint64_t followed = 0;
+    for (uint64_t w = 0; ours.accepted && w < ours.whole_count; w += 1)
+    {
+        followed += !ours.whole[w].pragma;
+    }
+    *checked = followed != 0;
+    PreprocessorFuzzClangTokens theirs = { 0 };
+    PreprocessorFuzzDifference result = BUSTER_PPF_EQUAL;
+    if (*checked && !preprocessor_fuzz_clang_tokens(scratch, clang_path, c23, test_case, &theirs))
+    {
+        result = BUSTER_PPF_INVALID;
+    }
+    uint64_t w = 0;
+    uint64_t matched = 0;
+    for (uint64_t t = 0; *checked && result == BUSTER_PPF_EQUAL && t < theirs.count; t += 1)
+    {
+        const PreprocessorFuzzClangToken* token = &theirs.tokens[t];
+        const bool unknown = token->kind.length == 7 && memcmp(token->kind.pointer, "unknown", 7) == 0 &&
+                             pp_fuzz_runs_on((const uint8_t*)token->spelling.pointer, token->spelling.length);
+        const bool string = token->kind.length == 14 && memcmp(token->kind.pointer, "string_literal", 14) == 0 &&
+                            pp_fuzz_broken_string((const uint8_t*)token->spelling.pointer, (uint32_t)token->spelling.length);
+        while (w < ours.whole_count && ours.whole[w].pragma)
+        {
+            w += 1;
+        }
+        if ((unknown || string) && w == ours.whole_count)
+        {
+            result = BUSTER_PPF_TOKEN_COUNT;
+        }
+        else if (unknown || string)
+        {
+            const PreprocessorFuzzWhole* mine = &ours.whole[w];
+            const uint64_t length = (uint64_t)mine->end - mine->start;
+            const bool same_kind = (mine->kind == C_TOKEN_UNKNOWN) == unknown;
+            const bool same_spelling = token->spelling.length == length && memcmp(token->spelling.pointer, ours.text.pointer + mine->start, length) == 0;
+            result = !same_kind ? BUSTER_PPF_TOKEN_KIND : !same_spelling ? BUSTER_PPF_TOKEN_SPELLING : BUSTER_PPF_EQUAL;
+            w += 1;
+            matched += 1;
+        }
+    }
+    result = result == BUSTER_PPF_EQUAL && matched != followed ? BUSTER_PPF_TOKEN_COUNT : result;
+    arena_pop_to(scratch, begin);
+    return result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -795,6 +864,8 @@ static PreprocessorFuzzDifference pp_fuzz_clang_difference(Arena* scratch, const
         if (ours.valid && preprocessor_fuzz_clang(scratch, oracle->clang_path, oracle->c23, &test_case, 1, true, &theirs))
         {
             result = pp_fuzz_compare(scratch, ours, lost, theirs, oracle->c23);
+            bool checked = false;
+            result = result == BUSTER_PPF_EQUAL ? pp_fuzz_check_ends(scratch, oracle->clang_path, oracle->c23, &test_case, ours, &checked) : result;
         }
     }
     pp_fuzz_release(&pp_fuzz_state);
@@ -1022,36 +1093,41 @@ struct PPFuzzComparison
     const char* ours;
     uint32_t whole_start;
     uint32_t whole_end;
+    bool pragma;
     const char* theirs;
     PreprocessorFuzzDifference difference;
 };
 
 static const PPFuzzComparison pp_fuzz_comparisons[] = {
-    { "\"a b\" 0\n", 0, 0, "\"a b\"\n 0\n", BUSTER_PPF_EQUAL },
-    { "\"a b\" 0\n", 0, 0, "\"ab\" 0\n", BUSTER_PPF_TOKEN_SPELLING },
-    { "'a b' 0\n", 0, 0, "'ab' 0\n", BUSTER_PPF_TOKEN_SPELLING },
-    { "a b\n", 0, 0, "ab\n", BUSTER_PPF_TOKEN_COUNT },
-    { "ab\n", 0, 0, "a\nb\n", BUSTER_PPF_TOKEN_COUNT },
-    { "x\n  y\n", 0, 0, "x y\n", BUSTER_PPF_EQUAL },
+    { "\"a b\" 0\n", 0, 0, false, "\"a b\"\n 0\n", BUSTER_PPF_EQUAL },
+    { "\"a b\" 0\n", 0, 0, false, "\"ab\" 0\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "'a b' 0\n", 0, 0, false, "'ab' 0\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "a b\n", 0, 0, false, "ab\n", BUSTER_PPF_TOKEN_COUNT },
+    { "ab\n", 0, 0, false, "a\nb\n", BUSTER_PPF_TOKEN_COUNT },
+    { "x\n  y\n", 0, 0, false, "x y\n", BUSTER_PPF_EQUAL },
     // An unterminated literal ends where ours does in both texts: the spaces after it don't count, but its own bytes
     // do, and so does a `'` after it on its line, which would close a character constant.
-    { "'a  b x\n", 0, 5, "'a  b  x\n", BUSTER_PPF_EQUAL },
-    { "'a  b x\n", 0, 5, "'a  b\nx\n", BUSTER_PPF_EQUAL },
-    { "'a  b x\n", 0, 5, "'a b\nx\n", BUSTER_PPF_TOKEN_SPELLING },
-    { "'a x 'y'\n", 0, 2, "'a  x 'y'\n", BUSTER_PPF_EQUAL },
-    { "'a x 'y'\n", 0, 2, "'a x 'z'\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "'a  b x\n", 0, 5, false, "'a  b  x\n", BUSTER_PPF_EQUAL },
+    { "'a  b x\n", 0, 5, false, "'a  b\nx\n", BUSTER_PPF_EQUAL },
+    { "'a  b x\n", 0, 5, false, "'a b\nx\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "'a x 'y'\n", 0, 2, false, "'a  x 'y'\n", BUSTER_PPF_EQUAL },
+    { "'a x 'y'\n", 0, 2, false, "'a x 'z'\n", BUSTER_PPF_TOKEN_SPELLING },
     // Without our range, it runs on to its line's end, spaces and all.
-    { "'a x\n", 0, 0, "'a  x\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "'a x\n", 0, 0, false, "'a  x\n", BUSTER_PPF_TOKEN_SPELLING },
     // A string that stringizing an unterminated literal broke (pp_fuzz_broken_string) is whole too.
-    { "\"\"a b\" x\n", 0, 6, "\"\"a b\"  x\n", BUSTER_PPF_EQUAL },
-    { "\"\"a b\" x\n", 0, 6, "\"\"a  b\" x\n", BUSTER_PPF_TOKEN_COUNT },
+    { "\"\"a b\" x\n", 0, 6, false, "\"\"a b\"  x\n", BUSTER_PPF_EQUAL },
+    { "\"\"a b\" x\n", 0, 6, false, "\"\"a  b\" x\n", BUSTER_PPF_TOKEN_COUNT },
     // A comment's `/` and a line splice's `\`, which only tokens printed next to each other make, are tokens.
-    { "/*a b\n", 0, 0, "/*a  b\n", BUSTER_PPF_EQUAL },
-    { "/*a*/b\n", 0, 0, "/*c*/b\n", BUSTER_PPF_TOKEN_SPELLING },
-    { "//a b\n", 0, 0, "//a\nb\n", BUSTER_PPF_EQUAL },
-    { "a \\\nb\n", 0, 0, "a \\\n b\n", BUSTER_PPF_EQUAL },
-    { "a \\\nb\n", 0, 0, "a\nb\n", BUSTER_PPF_TOKEN_COUNT },
-    { "a\\\nb\n", 1, 2, "a\\\n b\n", BUSTER_PPF_EQUAL },
+    { "/*a b\n", 0, 0, false, "/*a  b\n", BUSTER_PPF_EQUAL },
+    { "/*a*/b\n", 0, 0, false, "/*c*/b\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "//a b\n", 0, 0, false, "//a\nb\n", BUSTER_PPF_EQUAL },
+    { "a \\\nb\n", 0, 0, false, "a \\\n b\n", BUSTER_PPF_EQUAL },
+    { "a \\\nb\n", 0, 0, false, "a\nb\n", BUSTER_PPF_TOKEN_COUNT },
+    { "a\\\nb\n", 1, 2, false, "a\\\n b\n", BUSTER_PPF_EQUAL },
+    // On a pragma's line, which the literal ends in both texts, clang's text gives its end. Off it, the text can't
+    // show it, and clang's own tokens do (pp_fuzz_check_ends): the bytes the text took for the printer's are its.
+    { "#pragma x 'a \n", 10, 13, true, "#pragma x 'a  \n", BUSTER_PPF_TOKEN_SPELLING },
+    { "'a \nx\n", 0, 3, false, "'a  \nx\n", BUSTER_PPF_EQUAL },
 };
 
 // Runs each pair above through pp_fuzz_compare, in both modes, as accepted outputs. Returns whether every pair gives its
@@ -1065,13 +1141,18 @@ static bool pp_fuzz_check_comparison(void)
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_fuzz_comparisons); i += 1)
         {
             const PPFuzzComparison* comparison = &pp_fuzz_comparisons[i];
-            const uint32_t whole[2] = { comparison->whole_start, comparison->whole_end };
+            const PreprocessorFuzzWhole whole = {
+                .start = comparison->whole_start,
+                .end = comparison->whole_end,
+                .kind = C_TOKEN_UNKNOWN,
+                .pragma = comparison->pragma,
+            };
             const PreprocessorFuzzOutput ours = {
                 .text = {
                     .pointer = (char*)comparison->ours,
                     .length = strlen(comparison->ours),
                 },
-                .whole = whole,
+                .whole = &whole,
                 .whole_count = comparison->whole_end != 0,
                 .accepted = true,
                 .valid = true,
@@ -1149,8 +1230,10 @@ static bool pp_fuzz_case(Arena* arena, Arena* scratch, const PPFuzzOptions* opti
 
 // A block's cases against clang: the ones we accept in one batch, then the ones we reject in another. A difference is
 // confirmed with clang on the case alone, and in sampled blocks every case is read alone too: the batch must give what
-// the case alone gives. A batch without a result (clang's output without its markers in place) has each of its cases
-// read alone instead, and one that gives no result alone either is reported.
+// the case alone gives. Where clang's text followed our whole tokens, clang's own tokens confirm their ends
+// (pp_fuzz_check_ends). A batch without a result (clang's output without its markers in place) has each of its cases
+// read alone instead, and one that gives no result alone either is reported, as is a case the comparison can't be made
+// for.
 static void pp_fuzz_against_clang(Arena* arena, const PPFuzzOptions* options, bool c23, bool sampled, const PreprocessorFuzzCase* cases, const PreprocessorFuzzOutput* ours,
                                   const bool* lost, const bool* usable, uint64_t count, PPFuzzTally* tally)
 {
@@ -1185,35 +1268,48 @@ static void pp_fuzz_against_clang(Arena* arena, const PPFuzzOptions* options, bo
         for (uint64_t k = 0; k < grouped_count; k += 1)
         {
             const uint64_t i = indices[k];
-            tally->compared += answered[k];
-            const PreprocessorFuzzDifference difference = answered[k] ? pp_fuzz_compare(arena, ours[i], lost[i], theirs[k], c23) : BUSTER_PPF_EQUAL;
-            if (answered[k] && (difference != BUSTER_PPF_EQUAL || sampled))
+            PreprocessorFuzzDifference result = answered[k] ? pp_fuzz_compare(arena, ours[i], lost[i], theirs[k], c23) : BUSTER_PPF_EQUAL;
+            PreprocessorFuzzOutput alone = theirs[k];
+            if (answered[k] && (result != BUSTER_PPF_EQUAL || sampled))
             {
-                PreprocessorFuzzOutput alone = theirs[k];
+                // Confirmed on the case alone: the batch must give what the case alone gives.
                 const bool alone_valid = !batched || preprocessor_fuzz_clang(arena, options->clang_path, c23, &grouped[k], 1, true, &alone);
                 tally->alone += batched;
-                tally->invalid += !alone_valid;
-                const PreprocessorFuzzDifference confirmed = alone_valid ? pp_fuzz_compare(arena, ours[i], lost[i], alone, c23) : BUSTER_PPF_INVALID;
-                if (alone_valid && preprocessor_fuzz_compare_mode(arena, theirs[k], alone, c23) != BUSTER_PPF_EQUAL)
+                const PreprocessorFuzzDifference batch = alone_valid ? preprocessor_fuzz_compare_mode(arena, theirs[k], alone, c23) : BUSTER_PPF_INVALID;
+                if (batch != BUSTER_PPF_EQUAL && batch != BUSTER_PPF_INVALID)
                 {
                     tally->oracle += 1;
                     printf("fuzz: %s, seed %" PRIu64 ", case %" PRIu64 ": clang's batch gives another result than the case alone\n", c23 ? "c23" : "c17",
                            options->seed, grouped[k].id);
                 }
-                if (confirmed != BUSTER_PPF_EQUAL && confirmed != BUSTER_PPF_INVALID)
+                result = batch != BUSTER_PPF_INVALID ? pp_fuzz_compare(arena, ours[i], lost[i], alone, c23) : BUSTER_PPF_INVALID;
+            }
+            bool checked = false;
+            if (answered[k] && result == BUSTER_PPF_EQUAL)
+            {
+                result = pp_fuzz_check_ends(arena, options->clang_path, c23, &grouped[k], ours[i], &checked);
+            }
+            // A comparison that can't be made leaves the case without a result.
+            tally->compared += answered[k] && result != BUSTER_PPF_INVALID;
+            tally->ends += checked && result != BUSTER_PPF_INVALID;
+            tally->invalid += answered[k] && result == BUSTER_PPF_INVALID;
+            if (answered[k] && result == BUSTER_PPF_INVALID && !pp_test_quiet)
+            {
+                printf("fuzz: %s, seed %" PRIu64 ", case %" PRIu64 ": the comparison with clang gave no result\n", c23 ? "c23" : "c17", options->seed, grouped[k].id);
+            }
+            if (answered[k] && result != BUSTER_PPF_EQUAL && result != BUSTER_PPF_INVALID)
+            {
+                tally->differences += 1;
+                if (tally->reported < BUSTER_PP_FUZZ_REPORTED)
                 {
-                    tally->differences += 1;
-                    if (tally->reported < BUSTER_PP_FUZZ_REPORTED)
-                    {
-                        tally->reported += 1;
-                        const PreprocessorFuzzOracle oracle = {
-                            .kind = BUSTER_PPF_ORACLE_CLANG,
-                            .clang_path = options->clang_path,
-                            .id = grouped[k].id,
-                            .c23 = c23,
-                        };
-                        pp_fuzz_report(arena, &oracle, options->seed, &grouped[k], confirmed, &ours[i], &alone, tally);
-                    }
+                    tally->reported += 1;
+                    const PreprocessorFuzzOracle oracle = {
+                        .kind = BUSTER_PPF_ORACLE_CLANG,
+                        .clang_path = options->clang_path,
+                        .id = grouped[k].id,
+                        .c23 = c23,
+                    };
+                    pp_fuzz_report(arena, &oracle, options->seed, &grouped[k], result, &ours[i], &alone, tally);
                 }
             }
         }
@@ -1322,6 +1418,123 @@ static bool pp_fuzz_check_emulation(const PPFuzzOptions* options)
     return failures == 0;
 }
 
+// Sources whose output has a token clang's text runs on past (an unterminated literal, or a string stringizing one
+// broke) off a pragma's line, for pp_fuzz_check_ends_cases: one whose literal ends in two spaces, its line's end
+// (#263's second review's), one whose tokens after it its line takes, a broken string, and one among a macro's
+// arguments.
+static const char* const pp_fuzz_ends_cases[] = {
+    "#define A 'a  \nA\nx\n",
+    "#define Q 'q\nQ y z\n",
+    "#define S(x) #x\nS(\"a b\n) c\n",
+    "#define F(x) x\nF('x\nb) c\n",
+};
+
+// Each source above in each mode as it is, which must agree with clang, its ends confirmed by clang's tokens
+// (pp_fuzz_check_ends); then with the first of our tokens that its text can't lex back one byte shorter, as #263's
+// second review shortened it, which must differ. The first source's text puts the byte it lost among the printer's
+// spaces, which don't count: only clang's tokens show it. Returns whether every source gives its results.
+static bool pp_fuzz_check_ends_cases(const PPFuzzOptions* options)
+{
+    Arena scratch = arena_reserve(BUSTER_PP_FUZZ_ARENA_BYTES);
+    uint32_t failures = scratch.base == 0;
+    for (uint32_t mode = 0; scratch.base != 0 && mode < 2; mode += 1)
+    {
+        const bool c23 = mode == 1;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_fuzz_ends_cases); i += 1)
+        {
+            const PreprocessorFuzzCase test_case = {
+                .source = {
+                    .pointer = (char*)pp_fuzz_ends_cases[i],
+                    .length = strlen(pp_fuzz_ends_cases[i]),
+                },
+                .id = i,
+                .isolated = true,
+            };
+            String8 text = { 0 };
+            PreprocessorFuzzOutput theirs = { 0 };
+            const bool ran = pp_fuzz_text(&scratch, &test_case, &text) && pp_fuzz_run(&pp_fuzz_state, c23, true, text, 1) &&
+                             preprocessor_fuzz_clang(&scratch, options->clang_path, c23, &test_case, 1, true, &theirs);
+            PreprocessorFuzzDifference results[2] = {
+                BUSTER_PPF_INVALID,
+                BUSTER_PPF_INVALID,
+            };
+            PreprocessorFuzzDifference texts[2] = {
+                BUSTER_PPF_INVALID,
+                BUSTER_PPF_INVALID,
+            };
+            bool checked = false;
+            bool shortened = false;
+            for (uint32_t pass = 0; ran && pass < 2; pass += 1)
+            {
+                Preprocessor* pp = &pp_fuzz_state.runs[0];
+                for (uint32_t t = 0; pass == 1 && !shortened && t < pp->output.count; t += 1)
+                {
+                    const uint8_t kind = pp->output.kinds[t];
+                    const uint32_t length = pp->output.values[t] - pp->output.locations[t];
+                    const bool whole = pp_fuzz_breaks(kind, pp_location_bytes(pp, pp->output.locations[t]), length);
+                    shortened = whole && length >= 2;
+                    pp->output.values[t] -= shortened;
+                }
+                bool lost = false;
+                const PreprocessorFuzzOutput ours = pp_fuzz_output(pp, pp_fuzz_state.ran[0], &scratch, &lost);
+                texts[pass] = pp_fuzz_compare(&scratch, ours, lost, theirs, c23);
+                bool pass_checked = false;
+                results[pass] = texts[pass] == BUSTER_PPF_EQUAL ? pp_fuzz_check_ends(&scratch, options->clang_path, c23, &test_case, ours, &pass_checked) : texts[pass];
+                checked |= pass == 0 && pass_checked;
+            }
+            pp_fuzz_release(&pp_fuzz_state);
+            arena_pop_to(&scratch, 0);
+            const bool agrees = results[0] == BUSTER_PPF_EQUAL && checked;
+            const bool differs = shortened && results[1] != BUSTER_PPF_EQUAL && results[1] != BUSTER_PPF_INVALID;
+            const bool only_tokens = i != 0 || (texts[1] == BUSTER_PPF_EQUAL && results[1] == BUSTER_PPF_TOKEN_SPELLING);
+            if (!agrees || !differs || !only_tokens)
+            {
+                printf("fuzz ends: %s, case %u gives %s as it is and %s one byte shorter (by its text, %s)\n", c23 ? "c23" : "c17", i, pp_fuzz_difference_name(results[0]),
+                       pp_fuzz_difference_name(results[1]), pp_fuzz_difference_name(texts[1]));
+                failures += 1;
+            }
+        }
+    }
+    arena_release(&scratch);
+    printf("fuzz ends: %u of %lu cases fail\n", failures, 2 * (unsigned long)BUSTER_ARRAY_LENGTH(pp_fuzz_ends_cases));
+    return failures == 0;
+}
+
+// A comparison that can't be made, #263's second review's probe: our accepted output of 1,024 bytes, in an arena of
+// 8 KB that the comparison's tokens don't fit, against clang's for `x`. pp_fuzz_against_clang must count the case as
+// one without a result, not as compared or differing. Returns whether it does.
+static bool pp_fuzz_check_failed_comparison(const PPFuzzOptions* options)
+{
+    Arena arena = arena_reserve(8 << 10);
+    char* text = arena.base != 0 ? arena_push(&arena, 1024, 1) : 0;
+    PPFuzzTally tally = { 0 };
+    if (text != 0)
+    {
+        memset(text, 'a', 1024);
+        const PreprocessorFuzzCase test_case = {
+            .source = BUSTER_S8("x\n"),
+        };
+        const PreprocessorFuzzOutput ours = {
+            .text = {
+                .pointer = text,
+                .length = 1024,
+            },
+            .accepted = true,
+            .valid = true,
+        };
+        const bool lost = false;
+        const bool usable = true;
+        const bool quiet = pp_test_quiet;
+        pp_test_quiet = true;
+        pp_fuzz_against_clang(&arena, options, false, false, &test_case, &ours, &lost, &usable, 1, &tally);
+        pp_test_quiet = quiet;
+    }
+    arena_release(&arena);
+    const bool result = text != 0 && tally.invalid == 1 && tally.compared == 0 && tally.differences == 0;
+    printf("fuzz failed comparison: %s\n", result ? "a case without a result" : "counted as a result");
+    return result;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The run
 
@@ -1353,6 +1566,7 @@ static void pp_fuzz_add(PPFuzzTally* total, const PPFuzzTally* part)
     total->oracle += part->oracle;
     total->unbatched += part->unbatched;
     total->invalid += part->invalid;
+    total->ends += part->ends;
     total->unprintable += part->unprintable;
     total->saved += part->saved;
     total->reported += part->reported;
@@ -1398,6 +1612,8 @@ static bool pp_fuzz(const PPFuzzOptions* options)
     result = result && pp_fuzz_check_isolation();
     result = result && pp_fuzz_check_comparison();
     result = result && (!options->with_clang || pp_fuzz_check_emulation(options));
+    result = result && (!options->with_clang || pp_fuzz_check_ends_cases(options));
+    result = result && (!options->with_clang || pp_fuzz_check_failed_comparison(options));
     if (result && options->jobs == 1)
     {
         for (uint32_t mode = 0; mode < 2; mode += 1)
@@ -1474,9 +1690,9 @@ static bool pp_fuzz(const PPFuzzOptions* options)
                    total->cases, total->accepted, total->kernels);
             if (options->with_clang)
             {
-                printf("; %" PRIu64 " compared with clang, %" PRIu64 " differ (%" PRIu64 " read alone), %" PRIu64
+                printf("; %" PRIu64 " compared with clang (%" PRIu64 " with clang's tokens), %" PRIu64 " differ (%" PRIu64 " read alone), %" PRIu64
                        " batches differ from the case alone, %" PRIu64 " batches read case by case",
-                       total->compared, total->differences, total->alone, total->oracle, total->unbatched);
+                       total->compared, total->ends, total->differences, total->alone, total->oracle, total->unbatched);
             }
             printf("; %" PRIu64 " without a result; %" PRIu64 " whose text can't lex back, as clang's can't", total->invalid, total->unprintable);
             if (total->saved != 0)
