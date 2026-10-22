@@ -957,6 +957,66 @@ static void pp_fuzz_report(Arena* arena, const PreprocessorFuzzOracle* oracle, u
 // ---------------------------------------------------------------------------------------------------------------------
 // A worker
 
+// Whether a run leaves something open that would reach into the next case in a batch, so that clang reads its case
+// alone: an invocation, an operand, a conditional, a comment or a pragma region left open at the case's end, an #endif
+// without its #if (Preprocessor.unterminated), or a diagnostic push left on the stack.
+static bool pp_fuzz_leaks(const Preprocessor* pp)
+{
+    return pp->unterminated != 0 || pp->diagnostic_depth != 0;
+}
+
+// A source pp_fuzz_check_isolation runs, and whether it leaves something open into the next case of a batch.
+typedef struct PPFuzzIsolation PPFuzzIsolation;
+struct PPFuzzIsolation
+{
+    const char* source;
+    bool leaks;
+};
+
+static const PPFuzzIsolation pp_fuzz_isolations[] = {
+    { "x\n", false },
+    { "#if 1\n", true },
+    { "#endif\n", true },
+    { "#define f(x) x\nf(\n", true },
+    { "/* x\n", true },
+    { "#pragma clang diagnostic push\n", true },
+    { "#pragma clang diagnostic push\n#pragma clang diagnostic pop\n", false },
+    { "#pragma clang unsafe_buffer_usage begin\n", true },
+    { "#pragma clang assume_nonnull begin\n", true },
+    { "#pragma clang arc_cf_code_audited begin\n", true },
+    { "#pragma clang unsafe_buffer_usage begin\nx\n#pragma clang unsafe_buffer_usage end\n", false },
+    // The text in a region ends in a line splice, which takes the end's line into its own (seed 43's case 409876).
+    { "#pragma clang unsafe_buffer_usage begin\nx \\\n#pragma clang unsafe_buffer_usage end\n", true },
+};
+
+// Runs each source above in both modes: pp_fuzz_leaks must say whether clang reads it alone. Returns whether every
+// source agrees.
+static bool pp_fuzz_check_isolation(void)
+{
+    uint32_t failures = 0;
+    for (uint32_t mode = 0; mode < 2; mode += 1)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_fuzz_isolations); i += 1)
+        {
+            const PPFuzzIsolation* isolation = &pp_fuzz_isolations[i];
+            const String8 text = {
+                .pointer = (char*)isolation->source,
+                .length = strlen(isolation->source),
+            };
+            const bool ran = pp_fuzz_run(&pp_fuzz_state, mode == 1, true, text, 1);
+            const bool leaks = ran && pp_fuzz_leaks(&pp_fuzz_state.runs[0]);
+            pp_fuzz_release(&pp_fuzz_state);
+            if (!ran || leaks != isolation->leaks)
+            {
+                printf("fuzz isolation: %s, source %u %s\n", mode == 1 ? "c23" : "c17", i, !ran ? "can't run" : isolation->leaks ? "isn't read alone" : "is read alone");
+                failures += 1;
+            }
+        }
+    }
+    printf("fuzz isolation: %u of %lu sources fail\n", failures, 2 * (unsigned long)BUSTER_ARRAY_LENGTH(pp_fuzz_isolations));
+    return failures == 0;
+}
+
 // Our side of case `id`: generated into `arena`, preprocessed by both sets of kernels, which must agree, and our result
 // (the vectorized run's) into *ours, with whether it is compared by spellings (pp_fuzz_by_spellings) into *spellings. Returns
 // false if the case can't be generated or preprocessed.
@@ -979,9 +1039,7 @@ static bool pp_fuzz_case(Arena* arena, Arena* scratch, const PPFuzzOptions* opti
         *ours = pp_fuzz_output(&pp_fuzz_state.runs[0], pp_fuzz_state.ran[0], arena, lost);
         *spellings = pp_fuzz_by_spellings(&pp_fuzz_state.runs[0]);
         tally->accepted += ours->valid && ours->accepted;
-        // An invocation, a conditional or a comment left open at the case's end, an #endif without its #if, or a
-        // diagnostic push left on the stack would reach into the next case in a batch: clang reads it alone.
-        test_case->isolated |= pp_fuzz_state.runs[0].unterminated != 0 || pp_fuzz_state.runs[0].diagnostic_depth != 0;
+        test_case->isolated |= pp_fuzz_leaks(&pp_fuzz_state.runs[0]);
         result = ours->valid;
         pp_fuzz_release(&pp_fuzz_state);
         if (kernels != BUSTER_PPF_EQUAL)
@@ -1187,6 +1245,7 @@ static bool pp_fuzz(const PPFuzzOptions* options)
         printf("fuzz: %s isn't clang 23\n", options->clang_path);
         result = false;
     }
+    result = result && pp_fuzz_check_isolation();
     if (result && options->jobs == 1)
     {
         for (uint32_t mode = 0; mode < 2; mode += 1)

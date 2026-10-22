@@ -2038,8 +2038,10 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
   modification times of their own must give each file's time (in UTC), and
   `SOURCE_DATE_EPOCH`'s when it is set; the expansion history's checks; and
-  the fuzz batch: 1,500 cases of the independent harness's generator in each
-  of C17 and C23 (`c_preprocessor_fuzz.c`), which both kernels must give
+  the fuzz batch: its isolation rules checked on small sources (what a case
+  leaves open makes clang read it alone), then 1,500 cases of the independent
+  harness's generator in each of C17 and C23 (`c_preprocessor_fuzz.c`), which
+  both kernels must give
   alike (streams, directive tables, diagnostics' counts, history and both
   printers' bytes), with -P text that lexes back into the stream;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,

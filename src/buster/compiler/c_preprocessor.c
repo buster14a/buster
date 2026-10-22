@@ -875,7 +875,8 @@ struct Preprocessor
     uint32_t warnings;
     bool fatal;
     // What a run leaves open, or closes without its opening: invocations and builtin operands left open where their
-    // context ended, conditionals and block comments left open at a file's end, and #elif, #else or #endif without #if.
+    // context ended, conditionals and block comments left open at a file's end, pragma regions (assume_nonnull,
+    // arc_cf_code_audited, unsafe_buffer_usage) left open at the main file's end, and #elif, #else or #endif without #if.
     // test-preprocessor's fuzz runs read such a case by clang alone, since in a batch it would reach into the next case.
     uint32_t unterminated;
     // The output kind of each identifier id below BUSTER_PP_KEYWORD_TABLE: its keyword's in this language mode, or an
@@ -3028,7 +3029,8 @@ static PPContext* pp_push_buffer(Preprocessor* pp, PPTokens* tokens, uint32_t be
 }
 
 // A file ends: an assume_nonnull or arc_cf_code_audited region open in it is an error, and so is an unsafe_buffer_usage
-// region open at the main file's end, as clang has them (pp_pragma_region).
+// region open at the main file's end, as clang has them (pp_pragma_region). One open at the main file's end is left
+// open by the run (Preprocessor.unterminated).
 static void pp_end_regions(Preprocessor* pp, bool main_file)
 {
     for (uint32_t region = 0; region < BUSTER_ARRAY_LENGTH(pp->region_locations); region += 1)
@@ -3039,6 +3041,7 @@ static void pp_end_regions(Preprocessor* pp, bool main_file)
                                                                                                                      : "'#pragma clang %s' was not ended within this file",
                         pp_region_names[region]);
             pp->region_locations[region] = 0;
+            pp->unterminated += main_file;
         }
     }
 }

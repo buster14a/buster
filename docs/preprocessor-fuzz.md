@@ -182,9 +182,14 @@ Four kinds of case run in a clang process of their own (`isolated`):
 
 - the cases that use `__COUNTER__`, whose state is the process's;
 - a fatal error (a missing `#include`);
-- one that leaves an invocation, an operand, a conditional or a comment open
-  (`Preprocessor.unterminated`);
+- one that leaves an invocation, an operand, a conditional, a comment or a
+  pragma region (`assume_nonnull`, `arc_cf_code_audited`,
+  `unsafe_buffer_usage`) open (`Preprocessor.unterminated`);
 - one that leaves `#pragma clang diagnostic push` without its pop.
+
+Before its cases, the fuzz batch checks these rules on 12 small sources in
+each mode (`pp_fuzz_check_isolation`), a region whose end a line splice takes
+among them.
 
 A case that differs from clang is read again alone, and so is every case of
 one block in 128. The batch must give what the case alone gives. A case that
@@ -481,9 +486,12 @@ seed gave none. A focused check of substitution spacing ran beside them: 4,000
 stringized `__VA_OPT__`, `##` and `#` bodies per run, over 12 seeds and three
 modes. It found the spacing rules above and now finds no difference.
 
-The corpora stay token-identical after the fixes:
+The corpora stay token-identical after the fixes, with the frozen build
+(`docs/c-preprocessor.md` has the configurations):
 
 - `sqlite3.c` (707,153 tokens);
-- Lua 5.4.8 (34 files, 578,971 tokens);
-- this repository's 19 translation units (11,998,175 tokens);
-- the corpus oracle's CI checks (`docs/preprocessor-oracle.md`).
+- musl 1.2.5's 1,357 sources (5,124,927 tokens, on the 9700X);
+- Lua 5.4.8 (34 files, 588,066 tokens);
+- this repository's 19 translation units (12,021,842 tokens);
+- the corpus oracle's CI checks (`docs/preprocessor-oracle.md`), and its
+  frozen subset of `sqlite3.c`, the C library and musl on the 9700X.
