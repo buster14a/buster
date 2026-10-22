@@ -40,6 +40,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <errno.h>
 
 #define BUSTER_PP_TEST_CONTEXT 6
 #define BUSTER_PP_TEST_MAX_OUTPUT (1ull << 32)
@@ -54,24 +55,26 @@ struct PPSpellings
     uint64_t* offsets;
     uint32_t* lengths;
     uint32_t* locations; // The stream's locations (0 for a text's tokens).
+    uint8_t* kinds; // Lexical kinds: keywords become identifiers, built-in integers become pp-numbers.
     uint64_t count;
     uint64_t capacity;
 };
 
 static bool pp_spellings_initialize(PPSpellings* spellings, uint64_t capacity, uint64_t bytes)
 {
-    spellings->arena = arena_reserve(capacity * 16 + bytes + 1024);
+    spellings->arena = arena_reserve(capacity * 17 + bytes + 1024);
     spellings->offsets = arena_push_array(&spellings->arena, capacity, sizeof(uint64_t), 64);
     spellings->lengths = arena_push_array(&spellings->arena, capacity, sizeof(uint32_t), 64);
     spellings->locations = arena_push_array(&spellings->arena, capacity, sizeof(uint32_t), 64);
+    spellings->kinds = arena_push(&spellings->arena, capacity, 64);
     spellings->bytes = arena_push(&spellings->arena, bytes, 64);
     spellings->length = 0;
     spellings->count = 0;
     spellings->capacity = capacity;
-    return spellings->offsets != 0 && spellings->lengths != 0 && spellings->locations != 0 && spellings->bytes != 0;
+    return spellings->offsets != 0 && spellings->lengths != 0 && spellings->locations != 0 && spellings->kinds != 0 && spellings->bytes != 0;
 }
 
-static void pp_spellings_add(PPSpellings* spellings, const uint8_t* bytes, uint32_t length, uint32_t location)
+static void pp_spellings_add(PPSpellings* spellings, const uint8_t* bytes, uint32_t length, uint32_t location, uint8_t kind)
 {
     if (spellings->count < spellings->capacity)
     {
@@ -79,6 +82,7 @@ static void pp_spellings_add(PPSpellings* spellings, const uint8_t* bytes, uint3
         spellings->offsets[spellings->count] = spellings->length;
         spellings->lengths[spellings->count] = length;
         spellings->locations[spellings->count] = location;
+        spellings->kinds[spellings->count] = kind & (uint8_t)~BUSTER_C_TOKEN_START_OF_LINE;
         spellings->length += length;
         spellings->count += 1;
     }
@@ -93,7 +97,7 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
     {
         const uint8_t kind = out->kinds[i];
         bytes += kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END) ? intern_length(pp->table, out->values[i])
-                 : kind == BUSTER_PP_KIND_PRAGMA_END ? 0 : out->values[i] - out->locations[i];
+                 : kind == BUSTER_PP_KIND_PRAGMA_END ? 0 : kind == BUSTER_PP_KIND_INTEGER ? 24 : out->values[i] - out->locations[i];
     }
     bool result = pp_spellings_initialize(spellings, (uint64_t)out->count + 1, bytes + 64);
     Scratch scratch = scratch_begin(0);
@@ -105,7 +109,9 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
         {
             const uint8_t* spelling;
             const uint32_t length = pp_spelling(pp, out->kinds[i], out->values[i], out->locations[i], buffer, &spelling);
-            pp_spellings_add(spellings, spelling, length, out->locations[i]);
+            const uint8_t kind = out->kinds[i] >= BUSTER_PP_KIND_KEYWORD && out->kinds[i] < BUSTER_PP_KIND_PRAGMA_END ? C_TOKEN_RAW_IDENTIFIER :
+                                 out->kinds[i] == BUSTER_PP_KIND_INTEGER ? C_TOKEN_NUMERIC_CONSTANT : out->kinds[i];
+            pp_spellings_add(spellings, spelling, length, out->locations[i], kind);
         }
     }
     scratch_end(scratch);
@@ -134,7 +140,7 @@ static bool pp_text_spellings(const uint8_t* text, uint64_t length, uint64_t spl
     bool result = count >= 0 && pp_spellings_initialize(spellings, (uint64_t)count + 1, length + 64);
     for (int64_t i = 0; result && i < count; i += 1)
     {
-        pp_spellings_add(spellings, text + starts[i], ends[i] - starts[i], 0);
+        pp_spellings_add(spellings, text + starts[i], ends[i] - starts[i], 0, kinds[i]);
     }
     arena_release(&arena);
     return result;
@@ -144,7 +150,7 @@ static bool pp_text_spellings(const uint8_t* text, uint64_t length, uint64_t spl
 static bool pp_compare_spellings(Preprocessor* pp, const PPSpellings* ours, const PPSpellings* theirs, const char* name, const char* their_name)
 {
     uint64_t i = 0;
-    while (i < ours->count && i < theirs->count && ours->lengths[i] == theirs->lengths[i] &&
+    while (i < ours->count && i < theirs->count && ours->kinds[i] == theirs->kinds[i] && ours->lengths[i] == theirs->lengths[i] &&
            memcmp(ours->bytes + ours->offsets[i], theirs->bytes + theirs->offsets[i], ours->lengths[i]) == 0)
     {
         i += 1;
@@ -153,6 +159,10 @@ static bool pp_compare_spellings(Preprocessor* pp, const PPSpellings* ours, cons
     if (!result)
     {
         printf("%s: token %lu differs (%lu tokens, %s %lu)\n", name, (unsigned long)i, (unsigned long)ours->count, their_name, (unsigned long)theirs->count);
+        if (i < ours->count && i < theirs->count && ours->kinds[i] != theirs->kinds[i])
+        {
+            printf("  lexical kinds: ours %u, %s %u\n", ours->kinds[i], their_name, theirs->kinds[i]);
+        }
         const uint64_t first = i > BUSTER_PP_TEST_CONTEXT ? i - BUSTER_PP_TEST_CONTEXT : 0;
         for (int side = 0; side < 2; side += 1)
         {
@@ -316,85 +326,147 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
     return result;
 }
 
-// Runs `clang [arguments] -E [extra...]` (`extra` ends with a null) with CPATH and C_INCLUDE_PATH unset: its standard
-// output, or null.
-static char* pp_test_clang_output(char** arguments, int argument_count, const char* const* extra, size_t* length)
+typedef enum PPClangStatus
 {
-    char* result = 0;
-    *length = 0;
-    int pipe_fds[2];
-    const pid_t child = pipe(pipe_fds) == 0 ? fork() : -1;
-    if (child == 0)
+    PP_CLANG_ERROR,
+    PP_CLANG_ACCEPTED,
+    PP_CLANG_REJECTED,
+} PPClangStatus;
+
+typedef struct PPClangOutput PPClangOutput;
+struct PPClangOutput
+{
+    PPClangStatus status;
+    char* text;
+    size_t length;
+    char* diagnostics;
+};
+
+// A child writes into temporary files, so neither a full stdout nor a full stderr pipe can deadlock the parent.
+// Read only bounded output, check every I/O operation, and keep failed/partial output separate from acceptance.
+static bool pp_test_read_output(FILE* stream, char** text, size_t* length)
+{
+    bool result = fflush(stream) == 0 && fseek(stream, 0, SEEK_END) == 0;
+    const long size = result ? ftell(stream) : -1;
+    result = result && size >= 0 && (uint64_t)size < BUSTER_PP_TEST_MAX_OUTPUT && fseek(stream, 0, SEEK_SET) == 0;
+    *text = result ? malloc((size_t)size + 1) : 0;
+    result = result && *text != 0;
+    if (result)
     {
-        char* argv[256];
-        int n = 0;
-        argv[n++] = "clang";
-        for (int i = 0; i < argument_count && n < 240; i += 1)
-        {
-            argv[n++] = arguments[i];
-        }
-        argv[n++] = "-E";
-        for (uint32_t i = 0; extra[i] != 0 && n < 255; i += 1)
-        {
-            argv[n++] = (char*)extra[i];
-        }
-        argv[n] = 0;
-        unsetenv("CPATH");
-        unsetenv("C_INCLUDE_PATH");
-        dup2(pipe_fds[1], STDOUT_FILENO);
-        close(pipe_fds[0]);
-        close(pipe_fds[1]);
-        execvp("clang", argv);
-        _exit(127);
-    }
-    if (child > 0)
-    {
-        close(pipe_fds[1]);
-        FILE* stream = fdopen(pipe_fds[0], "r");
-        char* text = 0;
-        size_t text_length = 0;
-        FILE* collected = open_memstream(&text, &text_length);
-        char chunk[1 << 16];
-        size_t n;
-        while (stream != 0 && collected != 0 && (n = fread(chunk, 1, sizeof(chunk), stream)) > 0)
-        {
-            fwrite(chunk, 1, n, collected);
-        }
-        if (stream != 0)
-        {
-            fclose(stream);
-        }
-        if (collected != 0)
-        {
-            fclose(collected);
-        }
-        int status = 0;
-        waitpid(child, &status, 0);
-        result = text;
-        *length = text_length;
+        *length = (size_t)size;
+        result = fread(*text, 1, *length, stream) == *length && ferror(stream) == 0;
+        (*text)[*length] = 0;
     }
     return result;
 }
 
-// Runs `clang -E` with the options' arguments on `path`: its output, with line markers, or null. Also writes clang's
-// predefines for the same arguments to `predefines_path` (when it isn't null), as `clang -dM -E` gives them.
+static PPClangOutput pp_test_clang_process(const char* executable, char** arguments, int argument_count, const char* path, bool macros)
+{
+    PPClangOutput result = { 0 };
+    FILE* output = tmpfile();
+    FILE* diagnostics = tmpfile();
+    char** argv = calloc((size_t)argument_count + 9, sizeof(char*));
+    bool ready = output != 0 && diagnostics != 0 && argv != 0;
+    pid_t child = -1;
+    if (ready)
+    {
+        int n = 0;
+        argv[n++] = (char*)executable;
+        for (int i = 0; i < argument_count; i += 1)
+        {
+            argv[n++] = arguments[i];
+        }
+        argv[n++] = "-E";
+        if (macros)
+        {
+            argv[n++] = "-dM";
+            argv[n++] = "-x";
+            argv[n++] = "c";
+        }
+        argv[n++] = (char*)path;
+        child = fork();
+        if (child == 0)
+        {
+            unsetenv("CPATH");
+            unsetenv("C_INCLUDE_PATH");
+            if (dup2(fileno(output), STDOUT_FILENO) < 0 || dup2(fileno(diagnostics), STDERR_FILENO) < 0)
+            {
+                _exit(126);
+            }
+            execvp(executable, argv);
+            perror(executable);
+            _exit(127);
+        }
+        int status = 0;
+        pid_t waited = -1;
+        do
+        {
+            waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        }
+        while (waited < 0 && child > 0 && errno == EINTR);
+        size_t diagnostic_length = 0;
+        ready = waited == child && child > 0 && pp_test_read_output(output, &result.text, &result.length) &&
+                pp_test_read_output(diagnostics, &result.diagnostics, &diagnostic_length);
+        // Exit 1 alone does not establish an input rejection: a driver can also report a failed frontend or I/O.
+        const char* message = result.diagnostics != 0 ? result.diagnostics : "";
+        const bool rejected = strstr(message, "error:") != 0 && strstr(message, "clang: error:") == 0 &&
+                              strstr(message, "unable to execute command") == 0 && strstr(message, "PLEASE submit a bug report") == 0 &&
+                              strstr(message, "LLVM ERROR") == 0 && strstr(message, "No space left on device") == 0 &&
+                              strstr(message, "Input/output error") == 0 && strstr(message, "Cannot allocate memory") == 0;
+        if (ready && WIFEXITED(status) && (WEXITSTATUS(status) == 0 || (WEXITSTATUS(status) == 1 && rejected)))
+        {
+            result.status = WEXITSTATUS(status) == 0 ? PP_CLANG_ACCEPTED : PP_CLANG_REJECTED;
+        }
+        else
+        {
+            fprintf(stderr, "%s: Clang oracle could not run reliably (wait status %d)\n", path, status);
+        }
+    }
+    if (output != 0)
+    {
+        fclose(output);
+    }
+    if (diagnostics != 0)
+    {
+        fclose(diagnostics);
+    }
+    free(argv);
+    return result;
+}
+
+// Legacy fixture callers may compare the partial output of an intentionally rejected case. File-oracle callers
+// inspect PPClangOutput.status instead: a rejection is an explicit skip, a process/I/O failure is a failed run.
 static char* pp_test_clang(char** arguments, int argument_count, const char* path, const char* predefines_path, size_t* length)
 {
+    char* result = 0;
+    *length = 0;
+    bool ready = true;
     if (predefines_path != 0)
     {
-        static const char* const extra[] = { "-dM", "-x", "c", "/dev/null", 0 };
-        size_t predefines_length;
-        char* text = pp_test_clang_output(arguments, argument_count, extra, &predefines_length);
-        FILE* out = text != 0 ? fopen(predefines_path, "w") : 0;
+        PPClangOutput macros = pp_test_clang_process("clang", arguments, argument_count, "/dev/null", true);
+        ready = macros.status == PP_CLANG_ACCEPTED;
+        FILE* out = ready ? fopen(predefines_path, "w") : 0;
+        ready = out != 0 && fwrite(macros.text, 1, macros.length, out) == macros.length;
         if (out != 0)
         {
-            fwrite(text, 1, predefines_length, out);
-            fclose(out);
+            ready = fclose(out) == 0 && ready;
         }
-        free(text);
+        free(macros.text);
+        free(macros.diagnostics);
     }
-    const char* const extra[] = { path, 0 };
-    return pp_test_clang_output(arguments, argument_count, extra, length);
+    if (ready)
+    {
+        PPClangOutput output = pp_test_clang_process("clang", arguments, argument_count, path, false);
+        if (output.diagnostics != 0)
+        {
+            fputs(output.diagnostics, stderr);
+        }
+        result = output.status != PP_CLANG_ERROR ? output.text : 0;
+        *length = output.length;
+        free(output.status == PP_CLANG_ERROR ? output.text : 0);
+        free(output.diagnostics);
+    }
+    return result;
 }
 
 // The tokens of a text -E printed with line markers, and where the markers put each, as a compiler reading the text
@@ -532,7 +604,7 @@ static bool pp_placed_tokens(const uint8_t* text, uint64_t length, uint64_t spli
             {
                 k += 1;
             }
-            pp_spellings_add(&placed->spellings, blank + starts[i], ends[i] - starts[i], 0);
+            pp_spellings_add(&placed->spellings, blank + starts[i], ends[i] - starts[i], 0, kinds[i]);
             placed->lines[i] = line_lines[k];
             placed->states[i] = line_states[k];
         }
@@ -880,6 +952,36 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "\"\?\?=\"\nL\"#\"\n", false, 0, 0, 0 },
     { "#include of a missing absolute path", "#include \"/buster-missing-directory/absent.h\"\nafter\n", 0, "c17", "", true },
     { "-include of a missing absolute path", "x\n", 0, "c17", "", true, 0, "-include /buster-missing-directory/absent.h", 0 },
+    {
+        .name = "builtin and feature names are raw, attribute names may expand",
+        .source = "#define BUILTIN_NAME __builtin_expect\n#define FEATURE_NAME c_atomic\n#define ATTRIBUTE_NAME __const__\n"
+                  "#if __has_builtin(__is_target_arch) && __has_builtin(__is_target_os)\nbuiltin_names\n#endif\n"
+                  "#if __has_builtin(BUILTIN_NAME) || __has_feature(FEATURE_NAME) || __has_extension(FEATURE_NAME)\nwrong_expansion\n#else\nraw_names\n#endif\n"
+                  "#if __has_attribute(ATTRIBUTE_NAME) && __is_target_arch(x86_64) && __is_target_os(linux)\nattribute_and_target\n#endif\n",
+        .standard = "gnu17",
+        .expected = "builtin_names raw_names attribute_and_target",
+    },
+    {
+        .name = "the oracle recognizes ext_vector_type with either attribute spelling",
+        .source = "#if __has_attribute(ext_vector_type) && __has_attribute(__ext_vector_type__)\nvector_attribute\n#endif\n",
+        .standard = "gnu17",
+        .expected = "vector_attribute",
+    },
+    {
+        .name = "assume_nonnull end uses the printer's current line",
+        .source = "_Pragma(\"clang assume_nonnull begin\")\n#define SILENT 1\n_Pragma(\"clang assume_nonnull end\")\nint first = __LINE__;\n"
+                  "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint last = __LINE__;\n",
+        .standard = "gnu17",
+        .expected = "#pragma clang assume_nonnull begin\n#pragma clang assume_nonnull end\nint first = 4;\n"
+                    "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint last = 8;\n",
+    },
+    {
+        .name = "assume_nonnull end after a presumed-file change",
+        .source = "#pragma clang assume_nonnull begin\n#line 500 \"logical-nullability.h\"\nint *pointer;\n#define SILENT 1\n"
+                  "_Pragma(\"clang assume_nonnull end\")\nint after = __LINE__;\n",
+        .standard = "gnu17",
+        .expected = "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint after = 503;\n",
+    },
 };
 
 // Writes a text to a file; returns whether it could.
@@ -1123,9 +1225,8 @@ static bool pp_test_macros(int argument_count, char** arguments, const PPOptions
     {
         fclose(stream);
     }
-    const char* const extra[] = { "-dM", path, 0 };
-    size_t theirs_length = 0;
-    char* theirs = result ? pp_test_clang_output(arguments, argument_count, extra, &theirs_length) : 0;
+    PPClangOutput clang = result ? pp_test_clang_process("clang", arguments, argument_count, path, true) : (PPClangOutput){ 0 };
+    char* theirs = clang.status == PP_CLANG_ACCEPTED ? clang.text : 0;
     result = theirs != 0 && ours != 0;
     if (result)
     {
@@ -1157,23 +1258,15 @@ static bool pp_test_macros(int argument_count, char** arguments, const PPOptions
         printf("%s: -dM failed (ours %s, clang %s)\n", path, ours != 0 ? "ran" : "failed", theirs != 0 ? "ran" : "failed");
     }
     free(ours);
-    free(theirs);
+    free(clang.text);
+    free(clang.diagnostics);
     return result;
 }
 
-// One file, by both kernels, and with --clang against clang with the same options.
-static bool pp_test_file(int argument_count, char** arguments, const PPOptions* base, const char* path, bool with_clang, const char* directory, uint64_t* tokens)
+// One accepted file, by both kernels, and (when supplied) against Clang's already-collected output.
+static bool pp_test_file_output(const PPOptions* base, const char* path, bool with_clang, const char* text, size_t length, uint64_t* tokens)
 {
     PPOptions options = *base;
-    char predefines[4096];
-    snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
-    size_t length = 0;
-    char* text = 0;
-    if (with_clang)
-    {
-        text = pp_test_clang(arguments, argument_count, path, predefines, &length);
-        options.predefines_path = predefines;
-    }
     static InternTable tables[2];
     static Preprocessor runs[2];
     bool ran[2];
@@ -1192,15 +1285,28 @@ static bool pp_test_file(int argument_count, char** arguments, const PPOptions* 
         result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, runs[0].split_kinds, &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
                  pp_test_placed(&runs[0], &theirs, path);
         pp_placed_release(&theirs);
-        result = result && pp_test_macros(argument_count, arguments, base, path);
     }
     arena_release(&ours.arena);
-    free(text);
     for (uint32_t k = 0; k < 2; k += 1)
     {
         pp_release(&runs[k]);
         intern_release(&tables[k]);
     }
+    return result;
+}
+
+static bool pp_test_file(int argument_count, char** arguments, const PPOptions* base, const char* path, bool with_clang, const char* directory, uint64_t* tokens)
+{
+    PPOptions options = *base;
+    char predefines[4096];
+    snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
+    size_t length = 0;
+    char* text = with_clang ? pp_test_clang(arguments, argument_count, path, predefines, &length) : 0;
+    options.predefines_path = with_clang ? predefines : options.predefines_path;
+    bool result = (!with_clang || text != 0) && pp_test_file_output(&options, path, with_clang, text, length, tokens);
+    // Then, with our own predefines, the macros at the file's end against clang's.
+    result = result && (!with_clang || pp_test_macros(argument_count, arguments, base, path));
+    free(text);
     return result;
 }
 
@@ -1700,7 +1806,7 @@ static bool predefines_test_target(void);
 
 #include "c_preprocessor_history_test.c"
 
-static int run_preprocessor_tests(int argument_count, char** arguments)
+static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
 {
     bool with_clang = false;
     bool keep = false;
