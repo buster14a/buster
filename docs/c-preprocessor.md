@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units (at fbddd2e, with `main` at e71d7fd), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,070,090 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 241 | |
+| The built-in cases (`pp_test_cases`) | 246 | |
 | #109's generated cases in C17 and C23, against `clang -E -P`: the last campaign's and those after it, but for 4 that #247 fixes ([the fuzzing](preprocessor-fuzz.md), "Qualification") | 42,800,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
@@ -631,9 +631,17 @@ arenas. Popping a context gives its tokens back when they are on top.
     file. So `__has_include(<  x.h>)` names `  x.h`, as `#include <  x.h>`
     does. The same operand from a macro or a macro's argument is joined from
     its tokens and names ` x.h` (#254's review). When the rest of the line is
-    lexed again from the `>`, its tokens go in as a buffer the main loop reads
-    before the line's own, which are left: `__has_include(<x.h>>)` keeps a `>`
-    in the operand, an error, as clang's does.
+    lexed again from the `>`, its source is read in pieces before the line's
+    own tokens, which are left (`pp_continue_relex`). Each piece ends after a
+    `(`, so a later query can read its own header raw too: several `//` names
+    and a later `<  x.h>` keep their meanings. Geometrically growing windows
+    retain complete token prefixes, withholding the last three tokens at an
+    unfinished window's edge; each byte is lexed a bounded number of times.
+    `__has_include(<x.h>>)` keeps a `>` in the operand, an error, as clang's
+    does. If the corrected source hides directives in a comment, conditional
+    navigation and skipped structural diagnostics count from the first
+    unconsumed directive, using the corrected nesting instead of stale links
+    or notes (`pp_skip_relexed_group`).
   - The checks and their diagnostics go in clang's order
     (`HandleHeaderIncludeOrImport`):
     - an empty name is an error;
@@ -1586,7 +1594,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 241 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 246 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -1746,7 +1754,7 @@ full-corpus reproduction and frozen CI subset.
   splices, CRLF lines, unterminated comments, and conditionals nested to 64
   levels, balanced and not. With `--tables PATH...`, every `.c` and `.h` file
   under the paths is checked the same way: this repository's sources and the
-  C library corpus (8,983 files, 598,310 directives) agree. Then 17 fixtures
+  C library corpus (8,983 files, 598,310 directives) agree. Then 26 fixtures
   of the conditionals' structure must give the same diagnostics by both
   kernels, and under `--clang` clang's, byte for byte, columns included.
 - **Definitions** (#121). Ten fixtures of `#define`'s and `#undef`'s
