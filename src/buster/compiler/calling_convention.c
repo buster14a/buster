@@ -1011,14 +1011,16 @@ static uint32_t abi_union_storage_member(const AbiTable* abi, const TypeTable* t
 // underlying type's or value's (never EMPTY); any other type is aligned as in C. A record with a flexible array member
 // is MEMORY, its members maybe not classified yet: nothing, and INEXACT, but for one of no size, which waits for them,
 // since an _Atomic of it takes its alignment as its LLVM size (abi_copy_bytes). A record larger than 64 bytes is
-// INEXACT, and so is one holding an INEXACT type.
+// INEXACT, and so is a type aligned past the 2^15 the storage holds (LLVM aligns a vector as large as itself, so one of
+// 64 KB or more), and one holding an INEXACT type.
 static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const uint8_t kind = table->types.kind[index];
     const uint8_t code = table->types.code[index];
     const uint64_t size = table->types.size[index];
     const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
-    uint8_t result = (uint8_t)(table->types.alignment_log2[index] & BUSTER_ABI_STORAGE_ALIGNMENT);
+    const uint8_t alignment_log2 = table->types.alignment_log2[index];
+    uint8_t result = alignment_log2 > BUSTER_ABI_STORAGE_ALIGNMENT ? BUSTER_ABI_STORAGE_INEXACT : alignment_log2;
     if (kind == BUSTER_TYPE_KIND_INTEGER && (code == BUSTER_TYPE_CODE_INT128 || code == BUSTER_TYPE_CODE_UINT128))
     {
         result = 4 | BUSTER_ABI_STORAGE_I128;
@@ -1357,7 +1359,8 @@ static uint32_t abi_vector_element(const TypeTable* table, uint32_t vector)
 // vector of one element: its value goes where the element's would (<1 x i16> in a general register), but for one of 16
 // bytes, whose halves it splits as it never does an i128 (<1 x i128>, <1 x _BitInt(128)>). clang stores a vector of
 // bools as an integer of its bits, at least 8 (ConvertTypeForMem), and passes an _Atomic one as that: a general register
-// up to 64 bits, two halves past them (an i65 to an i127 isn't an i128), and an i128 for 128 bits.
+// up to 64 bits, two halves past them (an i65 to an i127 isn't an i128), and an i128 for 128 bits. One that isn't _Atomic
+// is a vector, <N x i1> (abi_result reaches it as one MEMORY by its size).
 static uint32_t abi_value_class(const TypeTable* table, uint32_t index)
 {
     const uint32_t value = abi_value_type(table, index);
@@ -1365,7 +1368,8 @@ static uint32_t abi_value_class(const TypeTable* table, uint32_t index)
     const uint32_t element = vector ? abi_vector_element(table, value) : value;
     const uint8_t kind = table->types.kind[element];
     const uint64_t count = table->types.extent[value];
-    const bool bits = vector && kind == BUSTER_TYPE_KIND_INTEGER && table->types.code[element] == BUSTER_TYPE_CODE_BOOL;
+    const bool atomic = table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC;
+    const bool bits = atomic && vector && kind == BUSTER_TYPE_KIND_INTEGER && table->types.code[element] == BUSTER_TYPE_CODE_BOOL;
     const bool single = vector && count == 1 && !bits;
     const bool wide_integer = (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && table->types.size[element] == 16;
     uint32_t result = BUSTER_ABI_VALUE_GENERAL;
@@ -1658,7 +1662,8 @@ static bool abi_end_memory(const AbiTable* abi, const TypeTable* table, uint32_t
 // The bytes of clang's LLVM type for a type, which a byval copy of it takes: its C size but where clang's type is larger
 // (LARGER), and UINT64_MAX where the module can't give them (UNSUPPORTED).
 //   - An _Atomic of a type T of no size is {T, [1 x i8]} (CodeGenTypes; getTypeInfo gives the _Atomic a byte), as
-//     large as LLVM aligns T: 16 bytes for an _Atomic(struct { __int128 x[0]; }) of 1.
+//     large as LLVM aligns T: 16 bytes for an _Atomic(struct { __int128 x[0]; }) of 1. Where T's storage is INEXACT
+//     (abi_storage), the module can't give them.
 //   - A struct is its members at their C offsets with their LLVM types, and a capstone at its size (CGRecordLowering).
 //     Where a member's type runs past the next member's offset, insertPadding records a negative padding at its end,
 //     which the sort puts after the capstone and pop_back drops in the capstone's place, so the capstone stays a field.
