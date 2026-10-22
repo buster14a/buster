@@ -69,8 +69,11 @@ struct PPFuzzTally
     uint64_t unbatched;
     // Cases a preprocessor, the generator, a clang process or the comparison couldn't give a result for.
     uint64_t invalid;
-    // Cases compared with clang whose whole tokens clang's own tokens confirmed (pp_fuzz_check_ends).
+    // Cases compared with clang whose whole tokens clang's own tokens confirmed (pp_fuzz_check_ends), and those that agree
+    // with clang only as far as their texts show: a token on a pragma's line that clang's text runs on past, which
+    // clang's tokens don't have.
     uint64_t ends;
+    uint64_t unverified;
     // Cases whose -P text can't lex back into their stream, as clang's can't (pp_fuzz_unprintable).
     uint64_t unprintable;
     // Differences minimized and saved, and the ones reported.
@@ -693,14 +696,19 @@ static PreprocessorFuzzDifference pp_fuzz_compare(Arena* scratch, PreprocessorFu
 // tokens for the case alone confirm (preprocessor_fuzz_clang_tokens): its unknown tokens that run on (pp_fuzz_runs_on)
 // and broken strings (pp_fuzz_broken_string), in order, must be those tokens of ours, of their kinds and spellings. A
 // pragma's tokens are among neither. Returns the difference (BUSTER_PPF_EQUAL if there is none, or no such token of
-// ours), or BUSTER_PPF_INVALID if clang's tokens can't be had. Sets *checked when there were tokens to confirm.
-static PreprocessorFuzzDifference pp_fuzz_check_ends(Arena* scratch, const char* clang_path, bool c23, const PreprocessorFuzzCase* test_case, PreprocessorFuzzOutput ours, bool* checked)
+// ours), or BUSTER_PPF_INVALID if clang's tokens can't be had. Sets *checked when there were tokens to confirm, and
+// *unverified when the texts agree only as far as they show: a token of ours on a pragma's line that runs on
+// (preprocessor_fuzz_whole_runs_on), whose end clang's text followed and clang's tokens can't confirm.
+static PreprocessorFuzzDifference pp_fuzz_check_ends(Arena* scratch, const char* clang_path, bool c23, const PreprocessorFuzzCase* test_case, PreprocessorFuzzOutput ours, bool* checked,
+                                                     bool* unverified)
 {
     const uint64_t begin = scratch->length;
     uint64_t followed = 0;
+    uint64_t unconfirmed = 0;
     for (uint64_t w = 0; ours.accepted && w < ours.whole_count; w += 1)
     {
         followed += !ours.whole[w].pragma;
+        unconfirmed += ours.whole[w].pragma && preprocessor_fuzz_whole_runs_on(ours.text, &ours.whole[w]);
     }
     *checked = followed != 0;
     PreprocessorFuzzClangTokens theirs = { 0 };
@@ -738,6 +746,7 @@ static PreprocessorFuzzDifference pp_fuzz_check_ends(Arena* scratch, const char*
         }
     }
     result = result == BUSTER_PPF_EQUAL && matched != followed ? BUSTER_PPF_TOKEN_COUNT : result;
+    *unverified = result == BUSTER_PPF_EQUAL && unconfirmed != 0;
     arena_pop_to(scratch, begin);
     return result;
 }
@@ -865,7 +874,8 @@ static PreprocessorFuzzDifference pp_fuzz_clang_difference(Arena* scratch, const
         {
             result = pp_fuzz_compare(scratch, ours, lost, theirs, oracle->c23);
             bool checked = false;
-            result = result == BUSTER_PPF_EQUAL ? pp_fuzz_check_ends(scratch, oracle->clang_path, oracle->c23, &test_case, ours, &checked) : result;
+            bool unverified = false;
+            result = result == BUSTER_PPF_EQUAL ? pp_fuzz_check_ends(scratch, oracle->clang_path, oracle->c23, &test_case, ours, &checked, &unverified) : result;
         }
     }
     pp_fuzz_release(&pp_fuzz_state);
@@ -1124,10 +1134,12 @@ static const PPFuzzComparison pp_fuzz_comparisons[] = {
     { "a \\\nb\n", 0, 0, false, "a \\\n b\n", BUSTER_PPF_EQUAL },
     { "a \\\nb\n", 0, 0, false, "a\nb\n", BUSTER_PPF_TOKEN_COUNT },
     { "a\\\nb\n", 1, 2, false, "a\\\n b\n", BUSTER_PPF_EQUAL },
-    // On a pragma's line, which the literal ends in both texts, clang's text gives its end. Off it, the text can't
-    // show it, and clang's own tokens do (pp_fuzz_check_ends): the bytes the text took for the printer's are its.
+    // At a pragma's line's end, which the literal is in both texts, clang's text gives its end. Elsewhere the text
+    // can't show it, and clang's own tokens do (pp_fuzz_check_ends): the bytes the text took for the printer's are its.
+    // On a pragma's line that goes on past it (`#pragma omp` expands its tokens), they can't either: unverified.
     { "#pragma x 'a \n", 10, 13, true, "#pragma x 'a  \n", BUSTER_PPF_TOKEN_SPELLING },
     { "'a \nx\n", 0, 3, false, "'a  \nx\n", BUSTER_PPF_EQUAL },
+    { "#pragma x 'a )\n", 10, 12, true, "#pragma x 'a  )\n", BUSTER_PPF_EQUAL },
 };
 
 // Runs each pair above through pp_fuzz_compare, in both modes, as accepted outputs. Returns whether every pair gives its
@@ -1285,13 +1297,15 @@ static void pp_fuzz_against_clang(Arena* arena, const PPFuzzOptions* options, bo
                 result = batch != BUSTER_PPF_INVALID ? pp_fuzz_compare(arena, ours[i], lost[i], alone, c23) : BUSTER_PPF_INVALID;
             }
             bool checked = false;
+            bool unverified = false;
             if (answered[k] && result == BUSTER_PPF_EQUAL)
             {
-                result = pp_fuzz_check_ends(arena, options->clang_path, c23, &grouped[k], ours[i], &checked);
+                result = pp_fuzz_check_ends(arena, options->clang_path, c23, &grouped[k], ours[i], &checked, &unverified);
             }
             // A comparison that can't be made leaves the case without a result.
             tally->compared += answered[k] && result != BUSTER_PPF_INVALID;
             tally->ends += checked && result != BUSTER_PPF_INVALID;
+            tally->unverified += unverified;
             tally->invalid += answered[k] && result == BUSTER_PPF_INVALID;
             if (answered[k] && result == BUSTER_PPF_INVALID && !pp_test_quiet)
             {
@@ -1418,21 +1432,46 @@ static bool pp_fuzz_check_emulation(const PPFuzzOptions* options)
     return failures == 0;
 }
 
-// Sources whose output has a token clang's text runs on past (an unterminated literal, or a string stringizing one
-// broke) off a pragma's line, for pp_fuzz_check_ends_cases: one whose literal ends in two spaces, its line's end
-// (#263's second review's), one whose tokens after it its line takes, a broken string, and one among a macro's
-// arguments.
-static const char* const pp_fuzz_ends_cases[] = {
-    "#define A 'a  \nA\nx\n",
-    "#define Q 'q\nQ y z\n",
-    "#define S(x) #x\nS(\"a b\n) c\n",
-    "#define F(x) x\nF('x\nb) c\n",
+// A source whose output has a token clang's text runs on past (an unterminated literal, or a string stringizing one
+// broke), for pp_fuzz_check_ends_cases, and whether the texts' agreement is all there is to confirm it with: the token
+// is on a pragma's line with more after it.
+typedef struct PPFuzzEndsCase PPFuzzEndsCase;
+struct PPFuzzEndsCase
+{
+    const char* source;
+    bool unverified;
+};
+
+// One whose literal ends in two spaces, its line's end (#263's second review's), one whose tokens after it its line
+// takes, a broken string, one among a macro's arguments, and one on a pragma's line that a `#pragma omp`, whose tokens
+// are expanded, goes on past (seed 133's case 832692 in C17).
+static const PPFuzzEndsCase pp_fuzz_ends_cases[] = {
+    {
+        "#define A 'a  \nA\nx\n",
+        false,
+    },
+    {
+        "#define Q 'q\nQ y z\n",
+        false,
+    },
+    {
+        "#define S(x) #x\nS(\"a b\n) c\n",
+        false,
+    },
+    {
+        "#define F(x) x\nF('x\nb) c\n",
+        false,
+    },
+    {
+        "#define Q 'q\n#pragma omp Q x\n",
+        true,
+    },
 };
 
 // Each source above in each mode as it is, which must agree with clang, its ends confirmed by clang's tokens
-// (pp_fuzz_check_ends); then with the first of our tokens that its text can't lex back one byte shorter, as #263's
-// second review shortened it, which must differ. The first source's text puts the byte it lost among the printer's
-// spaces, which don't count: only clang's tokens show it. Returns whether every source gives its results.
+// (pp_fuzz_check_ends), or unverified; then with the first of our tokens that its text can't lex back one byte shorter,
+// as #263's second review shortened it, which must differ. The first source's text puts the byte it lost among the
+// printer's spaces, which don't count: only clang's tokens show it. Returns whether every source gives its results.
 static bool pp_fuzz_check_ends_cases(const PPFuzzOptions* options)
 {
     Arena scratch = arena_reserve(BUSTER_PP_FUZZ_ARENA_BYTES);
@@ -1442,10 +1481,11 @@ static bool pp_fuzz_check_ends_cases(const PPFuzzOptions* options)
         const bool c23 = mode == 1;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_fuzz_ends_cases); i += 1)
         {
+            const PPFuzzEndsCase* ends_case = &pp_fuzz_ends_cases[i];
             const PreprocessorFuzzCase test_case = {
                 .source = {
-                    .pointer = (char*)pp_fuzz_ends_cases[i],
-                    .length = strlen(pp_fuzz_ends_cases[i]),
+                    .pointer = (char*)ends_case->source,
+                    .length = strlen(ends_case->source),
                 },
                 .id = i,
                 .isolated = true,
@@ -1463,6 +1503,7 @@ static bool pp_fuzz_check_ends_cases(const PPFuzzOptions* options)
                 BUSTER_PPF_INVALID,
             };
             bool checked = false;
+            bool unverified = false;
             bool shortened = false;
             for (uint32_t pass = 0; ran && pass < 2; pass += 1)
             {
@@ -1479,12 +1520,15 @@ static bool pp_fuzz_check_ends_cases(const PPFuzzOptions* options)
                 const PreprocessorFuzzOutput ours = pp_fuzz_output(pp, pp_fuzz_state.ran[0], &scratch, &lost);
                 texts[pass] = pp_fuzz_compare(&scratch, ours, lost, theirs, c23);
                 bool pass_checked = false;
-                results[pass] = texts[pass] == BUSTER_PPF_EQUAL ? pp_fuzz_check_ends(&scratch, options->clang_path, c23, &test_case, ours, &pass_checked) : texts[pass];
+                bool pass_unverified = false;
+                results[pass] = texts[pass] == BUSTER_PPF_EQUAL ? pp_fuzz_check_ends(&scratch, options->clang_path, c23, &test_case, ours, &pass_checked, &pass_unverified)
+                                                                : texts[pass];
                 checked |= pass == 0 && pass_checked;
+                unverified |= pass == 0 && pass_unverified;
             }
             pp_fuzz_release(&pp_fuzz_state);
             arena_pop_to(&scratch, 0);
-            const bool agrees = results[0] == BUSTER_PPF_EQUAL && checked;
+            const bool agrees = results[0] == BUSTER_PPF_EQUAL && checked == !ends_case->unverified && unverified == ends_case->unverified;
             const bool differs = shortened && results[1] != BUSTER_PPF_EQUAL && results[1] != BUSTER_PPF_INVALID;
             const bool only_tokens = i != 0 || (texts[1] == BUSTER_PPF_EQUAL && results[1] == BUSTER_PPF_TOKEN_SPELLING);
             if (!agrees || !differs || !only_tokens)
@@ -1567,6 +1611,7 @@ static void pp_fuzz_add(PPFuzzTally* total, const PPFuzzTally* part)
     total->unbatched += part->unbatched;
     total->invalid += part->invalid;
     total->ends += part->ends;
+    total->unverified += part->unverified;
     total->unprintable += part->unprintable;
     total->saved += part->saved;
     total->reported += part->reported;
@@ -1690,9 +1735,9 @@ static bool pp_fuzz(const PPFuzzOptions* options)
                    total->cases, total->accepted, total->kernels);
             if (options->with_clang)
             {
-                printf("; %" PRIu64 " compared with clang (%" PRIu64 " with clang's tokens), %" PRIu64 " differ (%" PRIu64 " read alone), %" PRIu64
-                       " batches differ from the case alone, %" PRIu64 " batches read case by case",
-                       total->compared, total->ends, total->differences, total->alone, total->oracle, total->unbatched);
+                printf("; %" PRIu64 " compared with clang (%" PRIu64 " with clang's tokens, %" PRIu64 " unverified), %" PRIu64 " differ (%" PRIu64
+                       " read alone), %" PRIu64 " batches differ from the case alone, %" PRIu64 " batches read case by case",
+                       total->compared, total->ends, total->unverified, total->differences, total->alone, total->oracle, total->unbatched);
             }
             printf("; %" PRIu64 " without a result; %" PRIu64 " whose text can't lex back, as clang's can't", total->invalid, total->unprintable);
             if (total->saved != 0)

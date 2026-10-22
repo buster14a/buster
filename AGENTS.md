@@ -202,6 +202,10 @@ designs and the compilers already built this way.
   The benchmark is linked into this executable rather than built separately.
   It compiles the translation units at once, a clang process each, and links
   them in order: the same executable as one clang command for all of them.
+- `C_TOKENIZER_NO_DIGIT_SEPARATORS` makes both lexer paths end pp-numbers
+  before `'`; the preprocessor sets it in modes before C23, including file
+  caches, scratch text and pastes. The standalone lexer's default keeps C23
+  separators. `benchmark-lexer --no-digit-separators` measures the flag.
 - `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
   it, and `./build/compiler test-lexer` runs them.
   The same command also runs `main_test.c`'s input-loader error and cleanup
@@ -2404,7 +2408,9 @@ features:
   next to each other make, and our tokens that don't lex back whole:
   `preprocessor_fuzz_lex_printed`). Where clang's text can't show where such a
   token ends (an unterminated literal off a pragma's line), clang's own tokens
-  for the case alone (`clang -Xclang -dump-tokens`) must confirm ours; a
+  for the case alone (`clang -Xclang -dump-tokens`) must confirm ours; on a
+  pragma's line that goes on past one (`#pragma omp` expands its tokens),
+  which clang's tokens don't have, the case counts as unverified; a
   comparison that can't be made leaves its case without a result. With
   `--clang`, the batch first checks these on fixtures of its own, among them
   #263's second review's probes.

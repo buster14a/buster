@@ -113,7 +113,8 @@ A/B on the 9700X against `main` (e71d7fd), with this branch merged into it
 | `sqlite3.c` | 11.21 ms | 11.90 ms | 123.28 → 133.31 |
 | `main.c` (`main`'s) | 25.23 ms | 26.37 ms | 340.41 → 372.80 |
 
-On `sqlite3.c`, lexing takes 0.36 ms more (the digit separators, below) and
+At `4c6160f`, before #264, `sqlite3.c`'s lexing takes 0.36 ms more (the digit
+separators, below) and
 the main loop 0.38 ms more. On `main.c`, the main loop takes 0.79 ms more.
 
 What they pay for, each a difference from clang that the fuzzing found:
@@ -135,9 +136,11 @@ order and checking pastes 64 bytes at a time took back more than half of
 
 **#264's digit separators.** The lexer now ends a number before a `'` itself
 before C23 (`C_TOKENIZER_NO_DIGIT_SEPARATORS`, in "Lexing by the language
-mode" below), and the search is gone. In an A/B on the 9700X of `main`
-(f8e4834), #109's branch (7d5779b) and #264's merged with it (e9f86d6),
-medians of two interleaved rounds:
+mode" below), and the search is gone. `pp_prepare_options` sets it in
+`PPPrepare.refine_flags`, which the lanes that prepare a cache's files take
+too; the lexer's own default keeps C23's numbers. In an A/B on the 9700X of
+`main` (f8e4834), #109's branch (7d5779b) and #264's merged with it
+(e9f86d6), medians of two interleaved rounds:
 
 | Translation unit | `main` | #109's fixes | With #264 | Lex phase | Instructions/input token |
 | --- | ---: | ---: | ---: | ---: | ---: |
