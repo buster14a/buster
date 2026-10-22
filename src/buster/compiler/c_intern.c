@@ -40,7 +40,9 @@
 // main.c includes this file after c_lexer.c (BUSTER_INLINE) and lane.c (Arena); every function is static. Layout, in
 // this order:
 //   - The predefined names: BUSTER_C_NAMES (keywords, then directive names, then the preprocessor's names), IdentId,
-//     the C_NAME_* ids, CLanguage and c_keyword_kind (which keyword kinds a language mode has).
+//     the C_NAME_* ids, CGnuKeywords, CDigraphs, CLanguage, c_language_gnu_keywords, c_language_digraphs,
+//     c_language_lexer_flags (how a language mode's tokens are lexed) and c_name_is_keyword (which names are keywords in
+//     a language mode).
 //   - The table: InternSpan, InternTable, the hash (intern_lane_rounds, intern_chain, intern_hash_bytes_scalar,
 //     intern_fold, intern_with_length, intern_hash_vector, intern_hash_zero_lanes, intern_hash_vectors4_short,
 //     intern_chain_chunks, intern_hash_bytes), the bucket helpers
@@ -61,8 +63,9 @@
 
 typedef uint32_t IdentId;
 
-// When a keyword is one, by language mode (CLanguage): in every mode, from C99 (or in GNU modes), from C99, from C23,
-// from C23 (or in GNU modes), or only in GNU modes. Clang's TokenKinds.def has the same rules for these names.
+// When a keyword is one, by language mode (CLanguage): in every mode, from C99 (or with GNU's keywords), from C99, from
+// C23, from C23 (or with GNU's keywords), or only with GNU's keywords, which GNU modes have (c_language_gnu_keywords).
+// Clang's TokenKinds.def has the same rules for these names (KEYGNU is GNU's keywords).
 #define BUSTER_C_KEYWORD_ALL 0
 #define BUSTER_C_KEYWORD_C99_OR_GNU 1
 #define BUSTER_C_KEYWORD_C99 2
@@ -294,7 +297,8 @@ typedef uint32_t IdentId;
     X(POISON, "poison", BUSTER_C_KEYWORD_NONE) \
     X(DEPENDENCY, "dependency", BUSTER_C_KEYWORD_NONE) \
     X(IS_TARGET_VARIANT_OS, "__is_target_variant_os", BUSTER_C_KEYWORD_NONE) \
-    X(IS_TARGET_VARIANT_ENVIRONMENT, "__is_target_variant_environment", BUSTER_C_KEYWORD_NONE)
+    X(IS_TARGET_VARIANT_ENVIRONMENT, "__is_target_variant_environment", BUSTER_C_KEYWORD_NONE) \
+    X(FLT_EVAL_METHOD, "__FLT_EVAL_METHOD__", BUSTER_C_KEYWORD_NONE)
 
 #define BUSTER_C_NAMES(X) BUSTER_C_KEYWORDS(X) BUSTER_C_DIRECTIVE_NAMES(X) BUSTER_C_PREPROCESSOR_NAMES(X)
 
@@ -328,29 +332,74 @@ static const uint8_t c_name_keyword_rules[C_NAME_COUNT] =
 #undef BUSTER_C_NAME_RULE
 };
 
+// Whether a language has GNU's keywords (asm, typeof, and inline before C99), clang's GNUKeywords: as its mode has them
+// (GNU modes do), unless -fgnu-keywords or -fno-gnu-keywords (or GCC's -fasm and -fno-asm) set them.
+typedef enum CGnuKeywords
+{
+    C_GNU_KEYWORDS_MODE,
+    C_GNU_KEYWORDS_ON,
+    C_GNU_KEYWORDS_OFF,
+} CGnuKeywords;
+
+// Whether a language has digraphs, clang's Digraphs: as its mode has them (every mode but c89), unless -fdigraphs or
+// -fno-digraphs set them. iso9899:199409 (C94) is c89 with them on, as clang has it, and its __STDC_VERSION__ (199409L)
+// that of any c89 with digraphs: c89 with -fdigraphs is C94, and C94 with -fno-digraphs is c89.
+typedef enum CDigraphs
+{
+    C_DIGRAPHS_MODE,
+    C_DIGRAPHS_ON,
+    C_DIGRAPHS_OFF,
+} CDigraphs;
+
 // A language mode: the C standard's year in full (1989, 1999, 2011, 2017 or 2023, so that later standards compare
-// greater) and whether GNU extensions are on (gnu17 rather than c17), as clang's -std= gives them.
+// greater) and whether GNU extensions are on (gnu17 rather than c17), as clang's -std= gives them, its GNU keywords (a
+// CGnuKeywords, so that a mode written without them has the mode's) and its digraphs (a CDigraphs, likewise).
 typedef struct CLanguage CLanguage;
 struct CLanguage
 {
     uint32_t standard;
     bool gnu;
+    uint8_t gnu_keywords;
+    uint8_t digraphs;
 };
+
+// Does `language` have GNU's keywords?
+static __attribute__((unused)) bool c_language_gnu_keywords(CLanguage language)
+{
+    return language.gnu_keywords == C_GNU_KEYWORDS_ON || (language.gnu_keywords == C_GNU_KEYWORDS_MODE && language.gnu);
+}
+
+// Does `language` have digraphs?
+static __attribute__((unused)) bool c_language_digraphs(CLanguage language)
+{
+    return language.digraphs == C_DIGRAPHS_ON || (language.digraphs == C_DIGRAPHS_MODE && (language.standard >= 1999 || language.gnu));
+}
+
+// The lexer's flags (CTokenizerFlags) for `language`'s tokens: without digraphs where it has none, and without "//"
+// comments in c89 and C94, as clang's -E lexes them (clang's LineComment, which no option changes). Compiling, clang takes
+// "//" comments in those modes too, but for a "//*" before a file's first one (#288), which only a compile driver would
+// need.
+static __attribute__((unused)) uint32_t c_language_lexer_flags(CLanguage language)
+{
+    const bool line_comments = language.standard >= 1999 || language.gnu;
+    return (c_language_digraphs(language) ? 0 : C_TOKENIZER_NO_DIGRAPHS) | (line_comments ? 0 : C_TOKENIZER_NO_LINE_COMMENTS);
+}
 
 // Is the predefined name `id` a keyword in `language`?
 static __attribute__((unused)) bool c_name_is_keyword(IdentId id, CLanguage language)
 {
     bool result = false;
+    const bool gnu = c_language_gnu_keywords(language);
     if (id != 0 && id <= C_NAME_KEYWORD_COUNT)
     {
         switch (c_name_keyword_rules[id])
         {
             case BUSTER_C_KEYWORD_ALL: result = true; break;
-            case BUSTER_C_KEYWORD_C99_OR_GNU: result = language.standard >= 1999 || language.gnu; break;
+            case BUSTER_C_KEYWORD_C99_OR_GNU: result = language.standard >= 1999 || gnu; break;
             case BUSTER_C_KEYWORD_C99: result = language.standard >= 1999; break;
             case BUSTER_C_KEYWORD_C23: result = language.standard >= 2023; break;
-            case BUSTER_C_KEYWORD_C23_OR_GNU: result = language.standard >= 2023 || language.gnu; break;
-            case BUSTER_C_KEYWORD_GNU: result = language.gnu; break;
+            case BUSTER_C_KEYWORD_C23_OR_GNU: result = language.standard >= 2023 || gnu; break;
+            case BUSTER_C_KEYWORD_GNU: result = gnu; break;
         }
     }
     return result;

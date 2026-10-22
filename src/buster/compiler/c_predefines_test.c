@@ -1120,8 +1120,8 @@ static const char* const predefines_test_option_sets[] = {
     // clang's -m aliases (predefines_aliases; each alone besides these), against their options in either order: the
     // last of either spelling wins.
     "-fpascal-strings -mno-pascal-strings", "-mpascal-strings -fno-pascal-strings", "-mno-pascal-strings -fpascal-strings",
-    "-fno-pascal-strings -mpascal-strings", "-mpascal-strings -mno-pascal-strings", "-mno-pascal-strings -mpascal-strings", "-fzvector -mno-zvector",
-    "-mzvector -fno-zvector", "-mno-zvector -fzvector", "-fatomic-ignore-denormal-mode -mno-unsafe-fp-atomics",
+    "-fno-pascal-strings -mpascal-strings", "-mpascal-strings -mno-pascal-strings", "-mno-pascal-strings -mpascal-strings", "-fno-zvector -mno-zvector",
+    "-mno-zvector -fno-zvector", "-fatomic-ignore-denormal-mode -mno-unsafe-fp-atomics",
     "-mno-unsafe-fp-atomics -fatomic-ignore-denormal-mode", "-munsafe-fp-atomics -fno-atomic-ignore-denormal-mode", "-mx87 -mno-fp-ret-in-387",
     "-mno-fp-ret-in-387 -mx87", "-mno-fp-ret-in-387 -m80387", "-mno-fp-ret-in-387 -mfpmath=387", "-mno-fp-ret-in-387 -mfpmath=sse", "-mips1 -march=x86-64",
     "-march=znver4 -mips32r6", "-mips64r6 -march=znver4", "-mips1 -march=native", "-mips5 -mtune=znver5", "-marm", "-msmall-data-limit=8",
@@ -1278,9 +1278,13 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
         BUSTER_PREDEFINES_TEST_SET("-mno-%s", predefines_hardening_names[h]);
     }
     // Each of clang's -m aliases buster reads as its option, alone.
+    // -mzvector's -fzvector, which pp_take_family refuses (test-preprocessor's option sets check it), is left out.
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_aliases); i += 1)
     {
-        BUSTER_PREDEFINES_TEST_SET("%s", predefines_aliases[i][0]);
+        if (strcmp(predefines_aliases[i][1], "-fzvector") != 0)
+        {
+            BUSTER_PREDEFINES_TEST_SET("%s", predefines_aliases[i][0]);
+        }
     }
     // The sanitizers clang's incompatible pairs name and those with macros: each alone, each pair, and each pair with
     // either one turned off after it, which clang accepts.
@@ -1361,7 +1365,9 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
                 }
                 else
                 {
-                    used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", predefines_aliases[alias][0]);
+                    // -mzvector's next entry, -mno-zvector, for it (pp_take_family refuses -fzvector).
+                    const uint64_t taken = alias + (strcmp(predefines_aliases[alias][1], "-fzvector") == 0);
+                    used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", predefines_aliases[taken][0]);
                 }
             }
         }

@@ -134,6 +134,8 @@ inherit its portability layers, build system, or performance-acceptance machiner
 - Choose data layout and batch boundaries before choosing instructions.
   Prefer vectorized classification, masks, population counts, and compaction
   when they eliminate useful work, not just when they look branchless.
+  Apply the [producer-consumer stage contract](#simd-producer-consumer-stage-contracts)
+  to the handoff as well as the kernels on either side.
 - Every vector load must be within readable memory, including on the final
   partial chunk. A `mmap` length or a `String8.length` does **not** authorize
   a full-width load across the end of the logical input. Use a proved padding
@@ -148,6 +150,73 @@ inherit its portability layers, build system, or performance-acceptance machiner
   changes, inspection of emitted assembly. Measure single-thread throughput,
   scaling, bytes scanned, allocations, and correctness; do not assume wider
   vectors or fewer branches automatically win.
+
+## SIMD producer-consumer stage contracts
+
+Every compiler stage **must** supply output representations, metadata and batch
+parameters designed for efficient SIMD processing by the next stage and other
+consumers. This applies to internal substages and shared side tables too, not
+just the named frontend and backend passes. Optimize **producer + handoff +
+consumer**, then validate the available end-to-end path, rather than minimizing
+one stage's time by shifting work downstream.
+
+The goal is the best measured useful throughput for the actual workload on the
+intended host. "Optimal" does not mean a proved global optimum, maximum vector
+width, maximum batch size, or a mandatory layout independent of its consumers.
+
+- **Produce directly usable data.** Prefer contiguous ranges, appropriate SoA
+  columns or compact records, compact IDs, and hot/cold separation according
+  to the next consumers' access patterns. Avoid forcing them to reconstruct,
+  transpose, classify, rescan or regroup information the producer already had.
+  Retain or compute reusable information once where it reduces total work;
+  charge its construction, storage and maintenance to that decision.
+- **Expose the batching information consumers need.** Define ranges/counts,
+  active and exceptional items, work classifications, dependency/readiness
+  information and completion conditions. For variable output, expose counts,
+  offsets or another bounded consumption protocol. Represent these as columns,
+  masks, ranges or documented invariants as appropriate; do not allocate unused
+  metadata or materialize what the consumer can derive more cheaply.
+- **Specify the memory contract.** Document element widths and strides,
+  alignment, logical lengths separately from readable/writable capacities,
+  padding and tail rules, aliasing, ownership, lifetime and mutation rules.
+  A batch count or spare arena capacity alone never authorizes out-of-bounds
+  loads or stores. State how empty batches, partial batches, allocation failure
+  and count/capacity overflow are handled.
+- **Choose batch parameters jointly.** Keep logical batch size distinct from
+  a kernel's vector width. Compare useful work per batch, active-lane occupancy,
+  cache footprint, peak live/scratch memory, latency and fallback frequency.
+  Preserve batching across calls rather than exposing only one-item APIs for
+  batchable work. Specify when partial batches are flushed; do not wait for a
+  full batch across a semantic dependency or retain unbounded buffered work.
+- **Preserve meaning when grouping work.** Homogeneous groups or ready
+  frontiers are useful only where reordering is legal. Preserve macro state,
+  typedef visibility, dependencies, side effects and required diagnostic order.
+  Keep stable identities/source locations or explicit remapping when regrouping,
+  and retain exact scalar handling for exceptional cases. Varying legal batch
+  partitions or scheduling must not change the required results.
+- **Remove unnecessary handoffs.** Prefer fusion, bounded streaming or direct
+  emission when measurements show that they eliminate passes, materialization
+  or conversion and improve the whole path. Where a boundary remains, include
+  preparation, copies, allocation, sorting/compaction, synchronization and
+  memory traffic in its cost. Do not add a generic batching framework or an
+  intermediate representation solely to make an isolated kernel look faster.
+
+PRs that introduce or change a stage interface must document its actual
+producer/consumer entry points and contract in the relevant stage document or
+source, and test it against the scalar twin or existing semantic oracle. Cover
+empty/tiny inputs, partial and exceptional batches, vector/chunk boundaries,
+inactive lanes, guarded tails, capacity limits and required ordering; compare
+legal batch partitions. Measure the producer, handoff and consumer together on
+representative small and large workloads, reporting time, useful-item throughput
+and memory costs. Follow the preceding Zen 5 measurement rules for sustained
+vector work and work following lighter phases. Inspect generated assembly for
+significant SIMD changes and preserve generated-program quality.
+
+When a consumer or full compilation path does not exist yet, record that gap
+and its integration follow-up. Synthetic or kernel-only results do not prove
+end-to-end performance. The initial boundary audit is tracked in
+[#298](https://github.com/buster14a/buster/issues/298); adding this rule does
+not establish that existing interfaces already satisfy it.
 
 ## Correctness, diagnostics, and dependencies
 

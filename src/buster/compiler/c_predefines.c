@@ -1043,7 +1043,8 @@ static bool predefines_apx_features(PredefinesOptions* options, const char* argu
 }
 
 // The options clang rejects or that change what clang compiles past what buster follows: rejected by name, so that
-// a run never silently differs from clang's.
+// a run never silently differs from clang's. Those that change clang's keywords (-fms-compatibility, -ffixed-point,
+// -fdefer-ts, ...) are pp_take_family's, refused only where the last of their family turns them on.
 static bool predefines_unsupported(const char* argument)
 {
     static const char* const exact[] = {
@@ -1053,10 +1054,7 @@ static bool predefines_unsupported(const char* argument)
         "-miamcu",
         "-mkernel",
         "-fapple-kext",
-        "-fms-compatibility",
-        "-ffixed-point",
         "-foffload-via-llvm",
-        "-fdefer-ts",
         "-fstack-protector-explicit",
         "-fprofile-use",
         "-fprofile-instr-use",
