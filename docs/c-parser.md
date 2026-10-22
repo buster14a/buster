@@ -107,20 +107,40 @@ stack, and two precedence stacks, the L candidates and the tokens waiting for
 their R, which resolve as tokens arrive, as a shunting-yard parser's operator
 stack does. Typedef names are bound by scope in a meaning table with an undo
 log. A declarator's name is bound once its declarator is complete (at its `=`,
-`,`, `;`, body or list's end), where C begins its scope: in
-`typedef int T; void f(void) { int T[sizeof((T)0)]; }` the cast still sees the
-typedef. What the declarator makes the name is the derivation it applies first,
-going out from the name past groups without a `*`, as clang's
+`,`, `;`, body or list's end), and an enumeration constant once its enumerator
+is (at its `,` or `}`), where C begins their scopes: in
+`typedef int T; void f(void) { int T[sizeof((T)0)]; }` and in
+`enum { T = sizeof((T)0) }` the cast still sees the typedef. What the
+declarator makes the name is the derivation it applies first, going out from
+the name past groups without a `*`, as clang's
 `Declarator::isFunctionDeclarator` decides it: `void (f(void)) {}` and
 `int (*g(void))[3] {...}` are definitions, `int (*p)(int) {` isn't, and only a
-declaration's one declarator may have a body. That function's parameter list
-keeps its scope until the declarator ends, into the body if one follows, so
-later suffixes and attributes keep the parameters bound; the function's own
-binding goes into the log before them, so the body's end keeps the name. Nesting is bounded by memory, not by the native stack: 100,000 levels of
-every kind of group parse.
+declaration's one declarator may have a body. That function's parameters' scope
+ends at their list's `)`, as clang's prototype scope does, so that the rest of
+the declarator and its attributes see what they hid
+(`int (*f(int T))[sizeof((T)0)] {...}`); the list keeps what it bound, which a
+body binds again, after the function's own name. A K&R definition's identifier
+list is the name's own, through the declarator's groups
+(`int (f(x)) int x; {...}`), in C17 and before (#154), and clang reads one only
+where its first identifier is followed by `,` or `)`. Elsewhere an identifier
+that isn't a type name, where a type would be, is what clang's
+`ParseImplicitInt` makes it: the declarator's name with an implicit int if what
+follows may follow a name, and else an unknown type name, as a parameter's
+always is in C23. Selection and iteration statements are blocks, and so is
+each of their substatements (C 6.8.4p3, 6.8.5p5): what a condition declares
+ends with its statement, and what a then-statement or a do's body declares ends
+with it. `__builtin_offsetof`'s member designator and `_Static_assert`'s
+message have grammars of their own, as clang reads them: members' names,
+whatever the ordinary names mean, `.` and subscripts; and string literals.
+
+Each frame keeps the index of the frame its declarators' names belong to and
+what a comma at its top level is, so that no token costs more for what is open
+around it: 320,000 nested parentheses, ternaries with commas in them, or
+attributes in a row, parse in time linear in their count. Nesting is bounded by
+memory, not by the native stack: 100,000 levels of every kind of group parse.
 
 It rejects what C's grammar rejects, at the token clang names, with clang's
-message (60 messages, `BUSTER_PARSE_MESSAGES`), and after an error skips to the
+message (63 messages, `BUSTER_PARSE_MESSAGES`), and after an error skips to the
 end of the top-level declaration and goes on. It reports one error per
 top-level declaration, the first; clang may report more. Its places follow
 clang's rules, among them: a missing `;` after the token before it; an
@@ -183,8 +203,9 @@ the code is well-formed, so that every top-level declaration the vector path
 keeps is one the scalar parser accepts with the same tree. Each token gets:
 
 - a **class**: its role, refined by its kind, its typed state or its name
-  where what may follow it differs (117 classes: a constant, a string, a type
-  keyword, a typedef name, `*`, `sizeof`, `goto`, a label's name, ...);
+  where what may follow it differs (118 classes: a constant, a string, a type
+  keyword, a typedef name, `*`, `sizeof`, `goto`, a label's name, `->`, which
+  designators don't take, ...);
 - a **mode**: its group's type (a file, a block, a struct or enum body, a
   parameter list, a call's arguments, a declarator in parentheses, a
   subscript, an array declarator, an initializer, `for`'s clauses, an

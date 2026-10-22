@@ -2151,19 +2151,25 @@ the scalar parser's. Those checks put every array in an arena followed by 4 GB
 and its own size of address space that may not be touched, so that a load past
 an array, or through a 32-bit index that wrapped below 0, faults. On:
 
-- snippets: 108 of valid and invalid code, each with the first error clang gives
+- snippets: 148 of valid and invalid code, each with the first error clang gives
   (or none), which the parser must give at the same line and column with the
-  same message; `--clang` checks each expectation against clang too, and the
-  oracle itself: clang given an option it doesn't know must count as no answer,
-  and an error in a header a file includes must reject the file;
+  same message; `--clang` checks each expectation against clang too, which
+  must be a parse issue but for the snippets marked as the errors clang's
+  semantic analysis gives where its parser took a declaration as ours does (an
+  unknown type name, a missing type specifier, a type name where an operand
+  would be), and the oracle itself: clang given an option it doesn't know must
+  count as no answer, and an error in a header a file includes must reject the
+  file;
 - fixtures: four trees checked by hand, parent by parent, among them #127's
   comma case (`f(a ? b, c : d, e)` has two arguments), its cast case (`(T) * p`
   is a cast where `T` names a type and a product where it doesn't) and a
   declarator's spine (`(*a[3])(double)`: array, pointer, function);
 - generated inputs, without files: `--streams N` random streams of C's tokens
   (2,000; half with balanced brackets), the snippets after 0 to 63 file-scope
-  `;`, at every block alignment, and seven kinds of nesting 100,000 levels deep,
-  which mustn't grow the native stack;
+  `;`, at every block alignment, and nine kinds of nesting 100,000 levels deep
+  (commas in nested ternaries among them) and a run of 100,000 attributes, which
+  mustn't grow the native stack, nor make a token cost more for what is open
+  around it;
 - the driver, without files: eleven cases' exit statuses and exact messages (a
   valid, an empty and an invalid file, the last with `--scalar` too, an
   `#error`, a missing header, a missing file, a directory, a sparse file past

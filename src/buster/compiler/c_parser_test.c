@@ -277,13 +277,16 @@ static bool parse_test_clang(const char* clang_path, const char* const* argument
 // The snippets
 
 // A snippet and the first error clang gives for it ("" for none), as "line:column: message", in gnu17 unless `std`
-// says otherwise.
+// says otherwise. clang's first error must be a parse issue, but where `semantic` says it is one of the errors clang's
+// semantic analysis gives as the parser hands it a declaration it took as clang's parser does (an unknown type name, a
+// missing type specifier, a type name where an expression would be).
 typedef struct ParseTestSnippet ParseTestSnippet;
 struct ParseTestSnippet
 {
     const char* source;
     const char* error;
     const char* std;
+    bool semantic;
 };
 
 static const ParseTestSnippet parse_test_snippets[] =
@@ -303,6 +306,7 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(int x) { asm volatile (\"\" : [r] \"=r\" (x) : \"r\" (x) : \"memory\"); }\n", "", 0 },
     { "int f(a, b) int a; char b; { return a + b; }\n", "", 0 },
     { "int x = 1 ? : 2;\n", "", 0 },
+    { "void f(int a, int b) { a = a ? b, a : b; for (b = a ? 1, 2 : 3; b; ) b--; }\n", "", 0 },
     { "int f(void) { return ({ int y = 1; y; }); }\n", "", 0 },
     { "void f(void) { __label__ a, b; a: b: ; }\n", "", 0 },
     { "_Static_assert(1, \"x\"); _Static_assert(1); struct S { _Static_assert(1, \"y\"); int x; };\n", "", 0 },
@@ -406,6 +410,56 @@ static const ParseTestSnippet parse_test_snippets[] =
     // The end of an identifier is where its spelling ends: a UCN and a line splice make it longer than its bytes.
     { "int \\u00E9\n", "1:11: expected ';' after top level declarator", 0 },
     { "int ve\\\nctor\n", "2:5: expected ';' after top level declarator", 0 },
+    // An enumeration constant's scope begins after its enumerator, value included.
+    { "typedef int T; void f(void) { enum { T = sizeof((T)0) }; }\n", "", 0 },
+    { "typedef int T; void f(void) { enum { A = sizeof(T), T, B = T }; int y = T; }\n", "", 0 },
+    { "typedef int T; void f(void) { enum { A = sizeof(T), T = 2, B = T }; int y = T; }\n", "", 0 },
+    { "typedef int T; void f(void) { enum { T = 1 } x; T y; }\n", "1:50: expected ';' after expression", 0 },
+    // Selection and iteration statements are blocks, and so is each of their substatements; a labeled statement isn't.
+    { "typedef int T; void f(void) { if (sizeof(enum { T = 1 })) { int y = T; } else { int z = T; } T x; }\n", "", 0 },
+    { "typedef int T; void f(void) { while (sizeof(enum { T = 1 })) (void)T; switch (sizeof(enum { T = 1 })) { case T: ; } T x; }\n", "", 0 },
+    { "typedef int T; void f(void) { do (void)sizeof(enum { T = 1 }); while (0); do {} while (sizeof(enum { T = 1 }) + T); T x; }\n", "", 0 },
+    { "typedef int T; void f(void) { if (1) (void)sizeof(enum { T = 1 }); else (void)(T)1; for (;;) (void)sizeof(enum { T = 1 }); T x; }\n", "", 0 },
+    { "typedef int T; void f(void) { do (void)sizeof(enum { T = 1 }); while (T); }\n", "1:71: unexpected type name 'T': expected expression", 0, true },
+    { "typedef int T; void f(void) { L: (void)sizeof(enum { T = 1 }); T x; }\n", "1:65: expected ';' after expression", 0 },
+    // A definition's parameters are in scope in its body, and not in the rest of its declarator or its attributes;
+    // what its parameter list declares is.
+    { "typedef int T; int (*f(int T))[sizeof((T)0)] { return 0; }\n", "", 0 },
+    { "typedef int T; int (*g(int T))(T) { (void)T; return 0; }\n", "", 0 },
+    { "typedef int T; int h(int T) __attribute__((aligned(sizeof((T)0)))) { return T; }\n", "", 0 },
+    { "typedef int T; int f(enum { T = 1 } a) { return T + a; }\n", "", 0 },
+    // __builtin_offsetof's member designator: members' names whatever the ordinary names mean, `.` and subscripts.
+    { "typedef int T; struct S { int T; int m[2]; }; int x = __builtin_offsetof(struct S, T) + __builtin_offsetof(struct S, m[1]);\n", "", 0 },
+    { "typedef int T; struct U { int T; }; struct S { struct U m[2]; }; int x = __builtin_offsetof(struct S, m[sizeof(T) - 3].T);\n", "", 0 },
+    { "struct S { int a; }; int x = __builtin_offsetof(struct S, a + 1);\n", "1:61: expected ')'", 0 },
+    { "struct S { int a; }; int x = __builtin_offsetof(struct S, (a));\n", "1:59: expected identifier", 0 },
+    { "struct S { int a; }; int x = __builtin_offsetof(struct S, a->b);\n", "1:60: expected ')'", 0 },
+    // An initializer's designators take `.`, never `->`.
+    { "struct S { int a; } s = { ->a = 1 };\n", "1:27: expected expression", 0 },
+    { "struct S { struct { int b; } a; } s = { .a->b = 1 };\n", "1:43: expected '=' or another designator", 0 },
+    // K&R definitions: the name's own identifier list, through the declarator's groups, in C17 and before.
+    { "int (f(x)) int x; { return x; }\nint (*g(y)) int y; { return 0; }\n", "", 0 },
+    { "int f(x) int x; 5\n", "1:17: expected function body after function declarator", 0 },
+    { "int f(x) int x; { return x; }\n", "1:7: unknown type name 'x'", "c23", true },
+    { "int g(const x);\n", "1:13: unknown type name 'x'", "c23", true },
+    // An identifier where a type would be is the name, with an implicit int, if what follows may follow a name, and
+    // else an unknown type name.
+    { "int f(int a, x);\n", "", "c89" },
+    { "int f(x y);\n", "1:7: unknown type name 'x'", 0, true },
+    { "int f(int a, x);\n", "1:14: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "x y;\n", "1:1: unknown type name 'x'", 0, true },
+    { "struct S { x *y; };\n", "1:12: unknown type name 'x'", 0, true },
+    { "struct S { [[deprecated]] x; };\n", "1:27: type name requires a specifier or qualifier", 0 },
+    { "x;\n", "1:1: a type specifier is required for all declarations", "c23", true },
+    { "__extension__ x;\n", "1:15: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "__extension__;\n", "", 0 },
+    // A _Static_assert's message is string literals.
+    { "_Static_assert(1, \"x\" \"y\" \"z\");\n", "", 0 },
+    { "_Static_assert(1, \"x\" + 1);\n", "1:23: expected ')'", 0 },
+    { "_Static_assert(1, \"x\", 2);\n", "1:22: expected ')'", 0 },
+    // A type name where an operand would be.
+    { "typedef int T; int y = sizeof T;\n", "1:30: expected parentheses around type name in sizeof expression", 0 },
+    { "typedef int T; int y = 1 ? T : 2;\n", "1:28: unexpected type name 'T': expected expression", 0, true },
 };
 
 // Writes `text` to `path`. Returns false if it can't.
@@ -471,11 +525,12 @@ static uint32_t parse_test_check_snippets(const char* directory, const char* cla
             {
                 snprintf(expected, sizeof(expected), "%u:%u: %s", theirs.line, theirs.column, theirs.message);
             }
-            if (!good || strcmp(expected, snippet->error) != 0 || (theirs.rejected && !theirs.parse_issue))
+            const bool kind_differs = theirs.rejected && theirs.parse_issue == snippet->semantic;
+            if (!good || strcmp(expected, snippet->error) != 0 || kind_differs)
             {
                 failures += 1;
-                printf("snippet %u: clang gives \"%s\"%s, the table \"%s\"\n    %s", i, expected, theirs.rejected && !theirs.parse_issue ? " (not a parse issue)" : "",
-                       snippet->error, snippet->source);
+                printf("snippet %u: clang gives \"%s\"%s, the table \"%s\"\n    %s", i, expected,
+                       kind_differs ? (theirs.parse_issue ? " (a parse issue)" : " (not a parse issue)") : "", snippet->error, snippet->source);
             }
         }
         remove(path);
@@ -2093,8 +2148,10 @@ static uint32_t parse_test_alignments(const char* file, const PPOptions* options
     return failures;
 }
 
-// Deep nesting, 100,000 levels: parentheses in an initializer, blocks, declarator groups, subscripts, ternaries,
-// casts and if-statements' heads, each through both paths, which must agree (and not grow the native stack).
+// Deep nesting, 100,000 levels: parentheses in an initializer and in a function, blocks, declarator groups, subscripts,
+// ternaries (and commas inside them), casts and if-statements' heads, and a run of 100,000 attributes, each through both
+// paths, which must agree (and not grow the native stack, nor take time that grows faster than the input: each token
+// costs the parser the same whatever is open around it).
 static uint32_t parse_test_nesting(const PPOptions* options, const char* directory)
 {
     uint32_t failures = 0;
@@ -2104,12 +2161,15 @@ static uint32_t parse_test_nesting(const PPOptions* options, const char* directo
     {
         // Before each level, the middle, after each level, and around the whole.
         { "(", "1", ")", "int x = %s;\n" },
+        { "(", "0", ")", "int e(void) { return %s; }\n" },
         { "{", "x;", "}", "void f(int x) %s\n" },
         { "(", "y", ")", "int %s;\n" },
         { "a[", "0", "]", "int g(int *a) { return %s; }\n" },
         { "1 ? ", "2", " : 3", "int z = %s;\n" },
+        { "1 ? 0, ", "2", " : 3", "int m(void) { return %s; }\n" },
         { "(int)", "w", "", "long h(int w) { return %s; }\n" },
         { "if (q) ", "q = 0;", "", "void k(int q) { %s }\n" },
+        { "__attribute__((unused)) ", "a", "", "int %s;\n" },
     };
     char path[4200];
     snprintf(path, sizeof(path), "%s/deep.c", directory);
