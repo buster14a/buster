@@ -342,3 +342,161 @@ validation. This is function-level sampling, not a precise decomposition of
 individual instruction latency. The retained scalar boundary walk, admission
 loads, stores, complex-form fallback and formatting are measured limitations;
 no llvm-mca prediction is used as acceptance evidence.
+
+## Completion and optimization measurements (#242)
+
+The implementation was frozen as `77233e1` before integration with newer main.
+All decoder, formatter, command, test and benchmark source is unchanged by that
+integration. Production measurements use the 9700X-built `build/compiler`,
+Clang 23.1.1, `-O3 -march=native`, CPU 2 and a separate exclusive lock for every
+process. The candidate binary SHA-256 is
+`d8232adabfbca012bbc325aefcde722b52327ba7c379ea6fc35e4eaf2872519b`.
+The baseline is `073c1bc` with only the same full-text compiler memory barrier
+added to its benchmark; its binary SHA-256 is
+`6b1f9b2186bdb6515b2b34e5a0c1ac350d134debabbcb620c05b6d37cea7b14d`,
+and its modified benchmark source SHA-256 is
+`76b200e5d57d91cb80f144ba4ab5ab18e6d35a417e1bab102fb13c7457b82223`.
+This controls output observability; the earlier PR #240 formatter timings above
+are historical evidence rather than the baseline for these percentages.
+
+The ordinary/vector streams remain 55,852/91,105 bytes and 16,384 instructions.
+The larger real workload is the complete `.text` of the original production
+`073c1bc` compiler: 4,895,631 bytes and 991,561 decoded instructions, SHA-256
+`2a9979146ea5ffa72daafa9517aaef91cc03ea87e9c84e9514a8b16805fd1d82`.
+The same raw file is used for both binaries; it includes compiler-generated
+ordinary and vector code with its original padding. Every benchmark verifies
+complete coverage and scalar/vector records before timing.
+
+Production seeds 1 and 99 and the ASan/UBSan seed-7 build passed all supported
+catalogue instances, 100,000 generated/mutated instructions and 100,000 random
+byte inputs per seed, the 4,096 dense ordinary streams, input/output guards and
+22 command output/error checks per seed. The three runs exercised 18,971,344
+guarded formatter/listing capacities. GNU as independently reproduced all
+34,833 catalogue-stream and 30,005 random-stream instructions to identical bytes;
+the extra NOPs separate standalone FWAIT. The whole compiler-text objdump oracle
+passed in production and under sanitizers. The sanitizer build used
+`-O1 -fsanitize=address,undefined -fno-omit-frame-pointer`, leak detection and
+halt-on-UB, with no findings. Its binary SHA-256 is
+`57c5bb1aac816668e8b76dc56b0a84e67ef88129aecc3d8f76825ccfff24d331`.
+
+### Complete-path comparison
+
+Each cell below is ns/instruction (hardware cycles/instruction), the median of
+three process medians with 21 interleaved passes per process. The listing phase
+includes address/byte text but no I/O.
+
+| Stream | Baseline decode | New decode | Baseline decode + format | New decode + format | New decode + listing |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Ordinary | 7.574 (42.005) | 7.636 (42.344) | 42.366 (234.853) | 25.281 (140.161) | 26.051 (144.454) |
+| Vector mix | 28.314 (156.917) | 25.623 (142.023) | 76.595 (424.553) | 46.751 (259.226) | 47.703 (264.389) |
+| Compiler text | 15.061 (83.514) | 14.592 (80.890) | 57.066 (315.555) | 32.212 (178.574) | 33.054 (183.242) |
+
+Decode plus formatting takes 40.3%, 39.0% and 43.6% less time respectively.
+Retired instructions for that path fall from 797.883 to 398.201 per ordinary
+instruction, 1,624.606 to 952.493 per vector-mix instruction, and 1,080.300 to
+591.161 per compiler instruction. These reductions accompany the cycle savings.
+
+Decode alone is **0.8% slower on the ordinary mix**, 9.5% faster on the vector
+mix and 3.1% faster on compiler text. The ordinary increase is retained, not
+rounded into a universal win. The new default's vector decode is 6.4% faster
+than the new basic SIMD matcher, eliminating the previous batching regression.
+The controls below keep the full-validator scalar reference and the compact
+scalar check control visible. Formatting is the old independent scalar writer
+only in the full-scalar row; the other controls use the new planned formatter.
+
+| Stream | Control | Decode ns/insn | Cycles/insn | Decode + format ns/insn | Decode + listing ns/insn |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Ordinary | Full scalar | 31.955 | 177.194 | 62.644 | 63.294 |
+| Ordinary | Compact scalar | 23.070 | 127.877 | 40.842 | 41.589 |
+| Ordinary | Basic AVX-512 | 23.337 | 129.276 | 41.164 | 42.030 |
+| Vector mix | Full scalar | 38.084 | 211.078 | 80.904 | 81.831 |
+| Vector mix | Compact scalar | 27.536 | 152.652 | 48.573 | 49.404 |
+| Vector mix | Basic AVX-512 | 27.374 | 151.764 | 48.714 | 49.595 |
+| Compiler text | Full scalar | 37.016 | 205.170 | 73.064 | 76.768 |
+| Compiler text | Compact scalar | 25.565 | 141.694 | 43.133 | 43.984 |
+| Compiler text | Basic AVX-512 | 25.844 | 143.328 | 43.351 | 44.225 |
+
+### Sustained work and work after scalar decoding
+
+These use the same production candidate and default path in separate processes.
+Sustained samples decode each synthetic stream 512 times, or compiler text four
+times, per sample. Warm samples decode one stream immediately after 100 ms of
+active scalar decoding; they do not begin from an idle sleep. Each row retains
+all three process medians in run order, including the 8.117 ns ordinary decode
+sample. A stream-sized warm sample and sustained execution are different scopes;
+the larger real stream also averages over a longer interval.
+
+| Stream | State | Phase | ns/instruction, three processes | Cycles/instruction, three processes |
+| --- | --- | --- | --- | --- |
+| Ordinary | Sustained | decode | 7.567 / 7.569 / 7.575 | 41.936 / 41.933 / 41.982 |
+| Ordinary | Sustained | decode+format | 25.102 / 25.149 / 25.055 | 139.201 / 139.463 / 138.935 |
+| Ordinary | Sustained | decode+listing | 25.960 / 25.931 / 25.958 | 143.873 / 143.738 / 143.833 |
+| Ordinary | After 100 ms scalar | decode | 7.618 / 8.117 / 7.691 | 42.291 / 45.037 / 42.686 |
+| Ordinary | After 100 ms scalar | decode+format | 25.498 / 25.795 / 25.427 | 141.436 / 143.062 / 140.999 |
+| Ordinary | After 100 ms scalar | decode+listing | 26.258 / 26.767 / 26.206 | 145.692 / 148.422 / 145.339 |
+| Vector mix | Sustained | decode | 25.423 / 25.465 / 25.537 | 140.888 / 141.094 / 141.551 |
+| Vector mix | Sustained | decode+format | 46.551 / 46.220 / 46.433 | 258.118 / 256.150 / 257.343 |
+| Vector mix | Sustained | decode+listing | 47.216 / 47.028 / 47.252 | 261.759 / 260.720 / 261.970 |
+| Vector mix | After 100 ms scalar | decode | 26.170 / 25.817 / 25.828 | 145.195 / 143.213 / 143.059 |
+| Vector mix | After 100 ms scalar | decode+format | 47.381 / 46.947 / 46.835 | 262.786 / 260.276 / 259.562 |
+| Vector mix | After 100 ms scalar | decode+listing | 48.026 / 47.912 / 47.822 | 266.355 / 265.813 / 265.013 |
+| Compiler text | Sustained | decode | 14.498 / 14.537 / 14.561 | 80.378 / 80.591 / 80.654 |
+| Compiler text | Sustained | decode+format | 31.816 / 31.805 / 31.621 | 176.390 / 176.313 / 175.270 |
+| Compiler text | Sustained | decode+listing | 32.687 / 32.715 / 32.383 | 181.178 / 181.337 / 179.459 |
+| Compiler text | After 100 ms scalar | decode | 14.588 / 14.537 / 14.540 | 80.875 / 80.595 / 80.597 |
+| Compiler text | After 100 ms scalar | decode+format | 32.113 / 31.845 / 31.832 | 178.064 / 176.561 / 176.482 |
+| Compiler text | After 100 ms scalar | decode+listing | 33.043 / 32.735 / 32.738 | 183.201 / 181.454 / 181.390 |
+
+### Command, startup and storage costs
+
+The complete default command, including initialization, mapped input, formatting,
+buffered writes and final flush, was also measured on compiler text with stdout
+directed to `/dev/null`. These are `perf stat` task-clock CPU times, not terminal
+wall times. Each entry retains all three separate processes.
+
+| Command | Baseline CPU ms | New CPU ms | Baseline median cycles | New median cycles |
+| --- | --- | --- | ---: | ---: |
+| Listing | 310.34 / 305.52 / 312.73 | 36.48 / 36.02 / 36.03 | 1,707,840,058 | 199,126,977 |
+| Assembly | 60.97 / 61.59 / 60.74 | 34.70 / 34.65 / 34.89 | 336,074,376 | 191,730,387 |
+
+Listing uses 88.4% less CPU time (an 8.61-fold throughput ratio) and assembly
+43.1% less (1.76-fold), based on the process medians. Avoiding fifteen formatted-print calls per listed instruction
+explains the larger command gain; it must not be attributed to decoding alone.
+
+Initialization is a measured tradeoff. In the nine main comparison processes,
+the baseline took 1.456–1.638 ms (median 1.530), while the candidate took
+1.608–1.919 ms (median 1.668). New decoder/formatter setup was 0.524–0.575 ms;
+the remaining startup time builds the two encoder validation prerequisites.
+Precomputing the index and text plans adds startup work, amortized by long streams.
+
+Declared/allocated decoder tables total 964,920 bytes, including 12,224 padded
+signature entries, 10,780 compressed cells, 334,080 bytes of text plans and
+8,192 bytes of register tokens. The previous 2,467,968-byte figure reserved
+worst-case signature capacity; its active signature arrays plus other declared
+tables accounted for 420,864 bytes. Exact allocation reduces worst-case reservation
+by 60.9%, while the new indices/plans increase active data. This is not a measured
+RSS reduction. Both translation-unit instances still have independent static
+metadata; only the invoked command or benchmark initializes its allocated storage.
+
+### Final emitted code and remaining costs
+
+The production decoder retains all 24-byte record stores, including the ordinary
+lane loop's four-record unrolling. The compressed lookup emits `PEXT` with a
+memory mask followed by the 16-bit cell load and ambiguity check. The register
+form's uops.info cost guides the design; it does not include this mask load or
+the rest of the lookup. Formatting emits XMM `VPSHUFB` and masked byte stores.
+The listing prefix uses a masked input load, YMM `VPSHUFB`, ZMM `VPERMI2B`
+(`VPERMT2B` when inlined into the benchmark) and a masked 46-byte output store.
+Clang combines the byte permutation with the space insertion. The bounded
+formatter calls and complete record stores remain in the observed benchmark;
+the compiler barriers themselves require no machine instruction.
+
+Separate CPU-2 cycle profiles of default decode plus formatting retained
+121,342 vector-mix samples and 162,784 compiler-text samples, with no lost samples.
+On the vector mix, candidate construction/validation accounts for 50.34%, the
+formatter 32.62%, and the batched decoder wrapper 4.24%. On compiler text these
+are 31.02%, 36.11%, and 12.93%. These are function-level samples, including
+inlined work, not individual-instruction latency measurements. Scalar operand
+selection, decimal conversion, validation, record stores and library copies
+remain costs; the final comparison measures their combined effect. Profiled
+runs are excluded from the timing tables above.
