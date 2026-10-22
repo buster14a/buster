@@ -936,33 +936,37 @@ arguments, and the six runs make about 33,700 checks; on the 9700X the whole
 
 `benchmark-calling-convention` (AGENTS.md has its options) on the Ryzen 7
 9700X, pinned to CPU 2, with clang 23.1.1's `-O3 -march=native` build of this
-module as it is now, each process run under the host's lock on its own: the
-medians of 21 passes that take turns going first, per type for the
-classification and per argument for the assignment.
+module as it is now, each process run under the host's lock on its own. A
+process gives the medians of 21 passes that take turns going first, per type
+for the classification and per argument for the assignment. The table has the
+medians of three processes in the default state, with their range, and the
+times of two processes that time each path alone, back to back (`--path`),
+and two that run the twin for 100 ms before each sample of the vector path
+(`--after-scalar 100`):
 
-| Case | Path | ns | cycles | instructions | IPC |
-| --- | --- | ---: | ---: | ---: | ---: |
-| classify-all, 16 B | vector | 56.55 | 313.5 | 803 | 2.56 |
-| | scalar | 77.45 | 429.2 | 1,519 | 3.54 |
-| classify-all, 32 B | vector | 62.54 | 346.7 | 841 | 2.43 |
-| | scalar | 78.28 | 434.1 | 1,524 | 3.51 |
-| classify-all, 64 B | vector | 68.06 | 377.2 | 899 | 2.38 |
-| | scalar | 79.68 | 442.0 | 1,527 | 3.45 |
-| batches of 1 | vector | 50.07 | 277.6 | 964 | 3.47 |
-| | scalar | 63.83 | 354.1 | 1,459 | 4.12 |
-| batches of 4 | vector | 50.11 | 277.8 | 840 | 3.02 |
-| | scalar | 65.54 | 363.3 | 1,437 | 3.96 |
-| batches of 16 | vector | 46.36 | 257.0 | 764 | 2.97 |
-| | scalar | 64.15 | 355.6 | 1,429 | 4.02 |
-| assign | vector | 4.81 | 26.7 | 55 | 2.05 |
-| | scalar | 7.40 | 41.1 | 146 | 3.55 |
-| assign-simple | vector | 4.08 | 22.6 | 48 | 2.11 |
-| | scalar | 6.88 | 38.2 | 149 | 3.91 |
+| Case | Path | ns | cycles | instructions | IPC | alone | after 100 ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| classify-all, 16 B | vector | 56.55 [55.81–56.75] | 313.5 | 803 | 2.56 | 56.42 | 55.98 |
+|  | scalar | 77.45 [76.76–78.37] | 429.2 | 1,519 | 3.54 | 76.75 | 76.84 |
+| classify-all, 32 B | vector | 62.17 [61.36–62.54] | 344.5 | 841 | 2.44 | 61.52 | 61.45 |
+|  | scalar | 78.28 [77.87–79.07] | 434.1 | 1,524 | 3.51 | 77.15 | 77.56 |
+| classify-all, 64 B | vector | 66.37 [65.73–68.06] | 367.8 | 899 | 2.44 | 65.78 | 66.45 |
+|  | scalar | 78.30 [78.06–79.68] | 434.0 | 1,527 | 3.52 | 77.25 | 77.86 |
+| batches of 1 | vector | 50.07 [49.77–52.88] | 277.6 | 964 | 3.47 | 49.57 | 51.58 |
+|  | scalar | 63.94 [63.83–64.18] | 354.2 | 1,459 | 4.12 | 63.13 | 63.66 |
+| batches of 4 | vector | 50.16 [50.11–52.36] | 277.9 | 840 | 3.02 | 49.53 | 51.30 |
+|  | scalar | 65.55 [65.54–65.97] | 363.3 | 1,437 | 3.96 | 64.17 | 65.40 |
+| batches of 16 | vector | 46.36 [46.35–47.50] | 257.0 | 764 | 2.97 | 45.61 | 47.05 |
+|  | scalar | 64.15 [63.95–64.19] | 355.6 | 1,429 | 4.02 | 62.52 | 63.97 |
+| assign | vector | 4.81 [4.81–4.81] | 26.7 | 55 | 2.05 | 4.75 | 4.81 |
+|  | scalar | 7.40 [7.40–7.40] | 41.1 | 146 | 3.55 | 7.35 | 7.41 |
+| assign-simple | vector | 4.07 [4.07–4.08] | 22.6 | 48 | 2.11 | 4.05 | 4.08 |
+|  | scalar | 6.87 [6.87–6.88] | 38.1 | 149 | 3.91 | 6.84 | 6.88 |
 
-The twin's time over the vector path's: 1.37, 1.25 and 1.17 for `classify-all`
-at 16, 32 and 64 bytes; 1.27, 1.31 and 1.38 for batches of 1, 4 and 16 types
-(1.00, 2.76 and 8.17 types per call); 1.54 for `assign` and 1.69 for
-`assign-simple`.
+The twin's time over the vector path's, default state: 1.37, 1.26 and 1.18 for
+`classify-all` at 16, 32 and 64 bytes; 1.28, 1.31 and 1.38 for batches of 1, 4
+and 16 types (1.00, 2.76 and 8.17 types per call); 1.54 for `assign` and 1.69
+for `assign-simple`.
 
 - **The classification's table:** 32,756 types to classify, 26,779 of them
   records (4,383 unions) with 107,818 members, in 13 levels of nesting; 18,045
@@ -988,7 +992,11 @@ at 16, 32 and 64 bytes; 1.27, 1.31 and 1.38 for batches of 1, 4 and 16 types
   paths' dispatch slots per cycle, less than the dataflow solver loses on its
   large CFGs alone and uncapped (0.11 a cycle, from `docs/dataflow.md`'s
   table), against its 1.9 after scalar code. These are short AVX-512 phases,
-  too light to need a state of their own.
+  too light to need a state of their own: the clock is 5.54 GHz in every
+  state, and the states' medians agree within 3%. Of the two processes after
+  the twin, one ran the batches as the default state does and the other 6%
+  slower, at the same clock and with 0.05 of the slots a cycle withheld,
+  too few to account for it.
 
 ## Next steps
 
