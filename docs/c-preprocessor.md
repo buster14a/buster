@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units (at fbddd2e, with `main` at e71d7fd), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,070,090 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 286 | |
+| The built-in cases (`pp_test_cases`) | 320 | |
 | #109's generated cases in C17 and C23, against `clang -E -P`: the last campaign's and those after it, but for 4 that #247 fixes ([the fuzzing](preprocessor-fuzz.md), "Qualification") | 42,800,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
@@ -1286,6 +1286,13 @@ decides after every argument:
     one, so `-fno-gnu-keywords -fasm` turns them off. `CLanguage.gnu_keywords`
     holds the choice (`c_language_gnu_keywords`), which `__is_identifier` and the
     output's keyword kinds read. C23 keeps `typeof` without them.
+  - Raw strings follow the last `-fraw-string-literals` or
+    `-fno-raw-string-literals`, or the mode: on in GNU modes from C99,
+    including assembly. `R` and `LR` work in every mode with raw strings;
+    `uR`, `UR` and `u8R` need C11. Files, cache entries, pastes and scratch
+    text share these flags. Raw bodies keep line splices and trigraphs when
+    printed or stringized; `_Pragma`, line file names and `__has_warning`
+    read their bodies. Raw strings cannot supply header names.
   - `$` in identifiers and pp-numbers: `-fno-dollars-in-identifiers` makes it
     punctuation in C, as it is in assembly, and `-fdollars-in-identifiers` gives
     assembly's identifiers it back (`pp_dollar_punctuation`, which the file
@@ -1325,7 +1332,6 @@ decides after every argument:
     `-fborland-extensions`, `-fdeclspec`, `-fzos-extensions`, `-ffixed-point`,
     `-fdefer-ts`, and `-fzvector` whatever follows it (clang's driver never
     passes `-fno-zvector` on), but in assembly, where clang ignores it;
-  - lexing buster doesn't do: `-fraw-string-literals`;
   - `-E`'s other modes (`-fdirectives-only`, `-fkeep-system-includes`,
     `-fminimize-whitespace`, `-fuse-line-directives`, `-frewrite-includes` and
     `-frewrite-imports`) and modules (`-fmodules` and
@@ -1715,7 +1721,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 286 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 320 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -2091,9 +2097,18 @@ spellings alone would miss this change (#272).
   answers without options, but for the sanitizers': `-fblocks`, `-fno-builtin`,
   `-fno-gnu-inline-asm` and the other options that change clang's answers
   (#281's item 5) don't change ours.
-- The GNU modes lex no raw string literals (`R"x(...)x"`), which clang's do.
-  `-fraw-string-literals`, which would change it, is refused ("The `-f`
-  options").
+- Invalid raw delimiters and unterminated raw strings still lack Clang's
+  lexer diagnostics. Their token spelling is retained, including a line
+  splice inside an invalid delimiter.
+- A header query whose builtin identity appears during macro expansion can
+  require a private prepared view when raw-looking header bytes swallowed
+  later source. Each inclusion permits eight such repairs. A ninth produces
+  a fatal capacity diagnostic. Executing direct directives have a separate
+  budget of 64 exceptional repairs; ordinary directives consume none. The
+  combined full-file copy/preparation work and retained storage are bounded
+  by `O((64 + 8) * N)` for a file of `N` bytes. Unlimited contextual recovery
+  remains follow-up work in #285. Excluded directives retain ordinary lexing,
+  and ordinary multiline raw macro arguments retain their original tokens.
 - c89 and C94 are lexed as clang's `-E` lexes them, without `//` comments. A
   compile driver would need clang's compiling rule there (`//` comments but for a
   `//*` before a file's first one), or to refuse those modes (#288).

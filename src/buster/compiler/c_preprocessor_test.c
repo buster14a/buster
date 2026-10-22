@@ -823,6 +823,31 @@ static const PPTestFile pp_test_files_stack[] = {
     { 0, 0 },
 };
 
+// A file whose name is what a header name taken from the raw string literal R"(other.h)" would be.
+static const PPTestFile pp_test_files_raw_header[] = {
+    { "\"(other.h)", "found_by_a_raw_string\n" },
+    { 0, 0 },
+};
+
+// Angle header bytes that resemble an unterminated raw literal must not consume following source.
+static const PPTestFile pp_test_files_opaque_raw[] = {
+    { "R\"(x", "header\n" },
+    { "a\\>R\"(x", "escaped_header\n" },
+    { 0, 0 },
+};
+
+// Runtime header queries may get their identity through a macro. Raw-looking header bytes remain header bytes;
+// earlier and later macro definitions keep the prepared view that supplied their token indexes.
+static const PPTestFile pp_test_files_raw_query[] = {
+    { "R\"(x", "header\n" },
+    { "raw-plain.h", "ordinary\n" },
+    { "raw-view.h", "#ifndef RAW_REENTER\n#define RAW_REENTER\n#define RAW_BEFORE 11\n#if RAW_QUERY(<R\"(x>) // )\"\nouter\n#endif\n#define RAW_AFTER 22\n#include \"raw-view.h\"\nRAW_BEFORE RAW_AFTER\n#else\n#if RAW_QUERY(<R\"(x>) // )\"\ninner\n#endif\n#endif\n" },
+    { "raw-once.h", "#if RAW_QUERY(<R\"(x>)\nonce\n#endif\n#pragma once\n" },
+    { "raw-import.h", "#if RAW_QUERY(<R\"(x>)\nimported\n#endif\n" },
+    { "raw-guard.h", "#ifndef RAW_GUARD\n#define RAW_GUARD\n#if RAW_QUERY(<R\"(x>) // )\"\nguarded\n#endif\n#endif\n" },
+    { 0, 0 },
+};
+
 // #embed's resources: text, bytes of every kind (a zero, 255, the edges of one, two and three digits), every value in
 // turn, nothing, and headers that end with an #embed, with and without a newline after it.
 // #252's review's #embed files: a resource in a directory of its own, for a name with "//" (and one whose name starts
@@ -1052,6 +1077,59 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "yes\n", false, 1, "-fsigned-char -fno-signed-char", 0 },
     { "signed char in #if", "#if '\\xff' == -1 && 'a' - 'b' < 0 && '\\377\\377' == 65535 && '\\377abc' < 0 && 'abcde' == 0x62636465\nyes\n#endif\n",
       0, "c17", "yes\n", false, 3, "-funsigned-char -fno-unsigned-char", 0 },
+    // Raw string literals (#285): R and LR ones in GNU modes from C99 on, u8R, uR and UR ones from C11 (whose prefixes
+    // they need), in any mode with -fraw-string-literals and in none with -fno-raw-string-literals, in skipped groups
+    // too; their spellings as written after the opening quote (line splices and trigraphs kept), pasted, stringized
+    // (line breaks as \n), as _Pragma's operand (the body) and #line's and a line marker's file name (the body);
+    // neither a header name nor (from a string) __has_warning's name, but its body; after '$' where '$' is punctuation;
+    // and -E's lines, which count the line breaks in an unknown token (a raw string literal's invalid delimiter: clang
+    // also reports an error, which buster doesn't yet) and in no other.
+    { "raw string literals in a GNU mode", "#define R RR\n#define LR LRR\n#define u8R u8RR\n#define uR uRR\n#define UR URR\nR\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" R(h) xR\"(i)\" 1R\"(j)\"\nafter\n", 0, "gnu17", "R\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" RR(h) xR\"(i)\" 1R\"(j)\"\nafter\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\n\n\n\n\n\nR\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" RR(h) xR \"(i)\" 1R\"(j)\"\n\nafter\n" },
+    { "raw string literals in gnu99", "#define uR uRR\n#define UR URR\n#define u8R u8RR\nR\"(a)\" LR\"(b)\" uR\"(c)\" UR\"(d)\" u8R\"(e)\"\n", 0, "gnu99", "R\"(a)\" LR\"(b)\" uRR \"(c)\" URR \"(d)\" u8RR \"(e)\"\n", false, 0, 0, 0 },
+    { "no raw string literals in an ISO mode", "#define R RR\n#define LR LRR\nR\"(a)\" LR\"(b)\"\n", 0, "c17", "RR \"(a)\" LRR \"(b)\"\n", false, 0, 0, 0 },
+    { "-fraw-string-literals in an ISO mode", "#define R RR\nR\"(a)\" u8R\"(b)\" R\"(?\?=)\" ?\?=\n", 0, "c17", "R\"(a)\" u8R\"(b)\" R\"(?\?=)\" #\n", false, 0, "-fraw-string-literals", 0 },
+    { "-fno-raw-string-literals in a GNU mode", "#define R RR\nR\"(a)\"\n", 0, "gnu17", "RR \"(a)\"\n", false, 0, "-fno-raw-string-literals", 0 },
+    { "raw string literals over lines and directives", "#if 0\nR\"(\n#endif\n)\"\n#endif\nR\"(\n#define X 1\n)\" X\nafter\n", 0, "gnu17", "R\"(\n#define X 1\n)\" X\nafter\n", false, 0, 0, 0 },
+    { "raw string literals keep their splices and trigraphs", "a R\"(x\\\ny?\?=)\" b ?\?=\nL\\\nR\"(z\\\nw)\" c\n", 0, "c17", "a R\"(x\\\ny?\?=)\" b #\nLR\"(z\\\nw)\" c\n", false, 0, "-fraw-string-literals", 0 },
+    { "raw string literals pasted and stringized", "#define CAT(a,b) a##b\n#define S(x) #x\nCAT(R,\"(x)\") CAT(L,R\"(y)\") CAT(u8,R\"(z)\") S(R\"(a\nb)\") S(R\"x(e\"f\\)x\") S(LR\"(\\\n)\")\n", 0, "gnu17", "R\"(x)\" LR\"(y)\" u8R\"(z)\" \"R\\\"(a\\nb)\\\"\" \"R\\\"x(e\\\"f\\\\)x\\\"\" \"LR\\\"(\\\\\\n)\\\"\"\n", false, 0, 0, 0 },
+    { "raw string literals in _Pragma, #line and a line marker", "_Pragma(R\"(omp parallel for)\")\n_Pragma(LR\"x(message(\"ab\"))x\")\n#line 7 R\"(f\\g.c)\"\n__FILE__ __LINE__\n# 9 R\"(h\"i.c)\"\n__FILE__\n", 0, "gnu17", "#pragma omp parallel for\n#pragma message(\"ab\")\n\"f\\\\g.c\" 7\n\"h\\\"i.c\"\n", false, 1, 0, 0 },
+    { "raw string literals in __has_warning", "#if __has_warning(R\"(-Wmisleading-indentation)\") && __has_warning(\"-Wmisleading\" R\"(-indentation)\")\nyes\n#endif\n", 0, "gnu17", "yes\n", false, 0, 0, 0 },
+    { "a raw string literal isn't a header name", "#if __has_include(R\"(other.h)\")\nfound\n#else\nnot\n#endif\n", 0, "gnu17", "not\n", true, 0, 0, pp_test_files_raw_header },
+    { "a raw string literal isn't an #include's header name", "#include R\"(other.h)\"\n", "x\n", "gnu17", "", true, 0, 0, 0 },
+    { "raw string literals after '$' as punctuation", "#define R RR\n$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" 1$e+R\"(e)\" $u8R\"(f)\" $xR\"(g)\"\n", 0, "gnu17", "$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" 1$e+R\"(e)\" $u8R\"(f)\" $xR\"(g)\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
+    { "raw string literals after '$' in assembly", "#define R RR\n$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" $xR\"(g)\"\n", 0, "gnu17", "$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" $xR\"(g)\"\n", false, 0, "-x assembler-with-cpp", 0 },
+    { "line breaks in an unknown token and in a raw string literal", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", 0, "gnu17", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\nR\"x\ny\" z\nw\nR\"(a\nb)\" c\n\nd\n" },
+    { "invalid raw delimiter keeps its line splice", "R\"a\\\nb\" c\n", 0, "gnu17", "R\"a\\\nb\" c\n", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\nR\"a\\\nb\" c\n" },
+    { "raw-looking direct angle header preserves following source", "#include <R\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
+    { "raw strings resume after an opaque direct header", "#include <R\"(x> R\"(a\nb)\"\nafter\n", 0, "gnu17", "header\nafter\n", false, 1, "-I%d", pp_test_files_opaque_raw },
+    { "escaped greater in a raw-looking direct header", "#include <a\\>R\"(x>\nafter\n", 0, "gnu17", "escaped_header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
+    { "spliced raw-looking direct angle header", "#include <R\\\n\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
+    { "raw-looking warning text preserves following source", "#warning R\"(\nafter\n", 0, "gnu17", "after\n", false, 1, 0, 0 },
+    { "raw-looking error text preserves following source", "#error R\"(\nafter\n", 0, "gnu17", "after\n", true, 0, 0, 0 },
+    { "repeated raw-looking direct headers use one recovery", "#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\nafter\n", 0, "gnu17", "header\nheader\nheader\nheader\nheader\nheader\nheader\nheader\nheader\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
+    { "a macro-named raw header query restores later source", "#define RAW_QUERY __has_include\n#define RAW_BEFORE 11\n#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n#define RAW_AFTER 22\nRAW_BEFORE RAW_AFTER\n",
+      0, "gnu17", "hit 11 22", false, 0, "-I%d", pp_test_files_raw_query },
+    { "successive raw header queries in one condition", "#define RAW_QUERY __has_include\n#if RAW_QUERY(<R\"(x>) && RAW_QUERY(<R\"(x>)\ntwo\n#endif\nafter\n",
+      0, "gnu17", "two after", false, 0, "-I%d", pp_test_files_raw_query },
+    { "a raw header query with a splice", "#define RAW_QUERY __has_include\n#if RAW_QUERY(<R\\\n\"(x>)\nspliced\n#endif\nafter\n",
+      0, "gnu17", "spliced after", false, 0, "-I%d", pp_test_files_raw_query },
+    { "a macro-named raw embed query restores later source", "#define RAW_QUERY __has_embed\n#if RAW_QUERY(<R\"(x>) == 1\nresource\n#endif\nafter\n",
+      0, "gnu23", "resource after", false, 0, "--embed-dir=%d", pp_test_files_raw_query },
+    { "a multiline raw macro argument remains opaque", "#define DROP(x) 1\n#if DROP(R\"(a\nb)\")\nkept\n#endif\nafter\n",
+      0, "gnu17", "kept after", false, 0, 0, 0 },
+    { "raw query private views preserve recursive macro snapshots", "#define RAW_QUERY __has_include\n#include \"raw-view.h\"\nRAW_BEFORE RAW_AFTER\n",
+      0, "gnu17", "outer inner 11 22 11 22", false, 0, "-I%d", pp_test_files_raw_query },
+    { "raw query private views retain once, import and guard identity", "#define RAW_QUERY __has_include\n#include \"raw-once.h\"\n#include \"raw-once.h\"\n#import \"raw-import.h\"\n#import \"raw-import.h\"\n#include \"raw-guard.h\"\n#include \"raw-guard.h\"\nafter\n",
+      0, "gnu17", "once imported guarded after", false, 0, "-I%d", pp_test_files_raw_query },
+    { "an excluded raw-looking direct header stays ordinary text", "#if 0\n#include <R\"(x>\n#endif\nafter\n",
+      0, "gnu17", "", true, 0, "-I%d", pp_test_files_raw_query },
+    { "an excluded raw-looking diagnostic stays ordinary text", "#if 0\n#warning R\"(\n#endif\nafter\n",
+      0, "gnu17", "", true, 0, 0, 0 },
+    { "a malformed raw-looking active diagnostic is opaque", "#warning R\"bad\nafter\n",
+      0, "gnu17", "after", false, 1, 0, 0 },
+    { "a malformed raw-looking excluded diagnostic stays ordinary text", "#if 0\n#warning R\"bad\n#endif\nafter\n",
+      0, "gnu17", "", true, 0, 0, 0 },
     // c89 lexes neither digraphs nor "//" comments, as clang's -E has it: "%:define" is no directive, a digraph is two
     // punctuators ("<%=" is '<' and "%=", and "<::>" '<', "::" and '>'), and "//" two slashes, of which the second starts
     // a block comment before a '*'. Pasting a digraph's characters or "//" forms no token (#288).
@@ -3041,6 +3119,176 @@ static void pp_test_release_stderr(int saved, FILE* caught, char* messages, size
     }
 }
 
+// The private query view is per inclusion, while cache records and once/guard identity remain canonical. Compare
+// a fresh unit-owned cache with a cold and warm shared cache, and retain the shared columns' fingerprints across units.
+static bool pp_test_raw_query_views(const char* directory)
+{
+    const PPTestCase test = {
+        .name = "raw query private-view lifetime",
+        .source = "#define RAW_QUERY __has_include\n#include \"raw-view.h\"\n#include \"raw-once.h\"\n#include \"raw-once.h\"\n#import \"raw-import.h\"\n#import \"raw-import.h\"\n#include \"raw-guard.h\"\n#include \"raw-guard.h\"\nRAW_BEFORE RAW_AFTER\n",
+        .standard = "gnu17",
+        .expected = "outer inner 11 22 once imported guarded 11 22",
+        .options = "-I%d",
+        .files = pp_test_files_raw_query,
+    };
+    char path[4096];
+    bool result = pp_test_write_case(&test, directory, path, sizeof(path));
+    char text[16384];
+    char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
+    const int count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
+    Arena arena = arena_reserve(1ull << 20);
+    PPOptions options;
+    const char* input;
+    const char* output;
+    bool markers;
+    result = result && pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
+    options.timing = true;
+    static InternTable table;
+    static Preprocessor run;
+    static FileCache cache;
+    for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
+    {
+        options.scalar = kernel != 0;
+        uint64_t hashes[16] = { 0 };
+        uint32_t records = 0;
+        bool cached = false;
+        for (uint32_t pass = 0; result && pass < 3; pass += 1)
+        {
+            if (pass == 0)
+            {
+                options.files = 0;
+                result = pp_test_run(&run, &table, &options, path);
+            }
+            else
+            {
+                if (pass == 1)
+                {
+                    cached = intern_initialize(&table) && file_cache_initialize(&cache, &table, pp_prepare_options(&options));
+                }
+                options.files = &cache;
+                result = cached && pp_initialize(&run, &options, &table) && pp_run(&run, path);
+            }
+            PPSpellings ours = { 0 };
+            PPSpellings expected = { 0 };
+            result = result && pp_stream_spellings(&run, &ours) &&
+                     pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), run.split_kinds, pp_test_lex_flags(&run), &expected) &&
+                     pp_compare_spellings(&run, &ours, &expected, test.name, "wanted");
+            result = result && run.statistics.skipped_once != 0 && run.statistics.skipped_guards != 0;
+            uint32_t views = 0;
+            for (uint32_t d = 0; d < run.data_count; d += 1)
+            {
+                views += run.datas[d].lexical_bytes != 0;
+            }
+            result = result && views >= 4;
+            if (pass != 0)
+            {
+                result = result && cache.record_count <= BUSTER_ARRAY_LENGTH(hashes) && (pass == 1 || records == cache.record_count);
+                records = cache.record_count;
+                for (uint32_t r = 0; result && r < records; r += 1)
+                {
+                    const PPFileData* data = &cache.records[r];
+                    const uint64_t hash = intern_hash_bytes(data->kinds, data->token_count) ^
+                                          intern_hash_bytes((const uint8_t*)data->starts, (uint64_t)data->token_count * sizeof(uint32_t)) ^
+                                          intern_hash_bytes((const uint8_t*)data->values, (uint64_t)data->token_count * sizeof(uint32_t));
+                    result = data->lexical_bytes == 0 && (pass == 1 || hash == hashes[r]);
+                    hashes[r] = hash;
+                }
+            }
+            arena_release(&ours.arena);
+            arena_release(&expected.arena);
+            pp_release(&run);
+            if (pass == 0)
+            {
+                intern_release(&table);
+            }
+        }
+        if (cached)
+        {
+            file_cache_release(&cache);
+            intern_release(&table);
+        }
+    }
+    arena_release(&arena);
+    pp_test_remove_case(&test, directory);
+    printf("raw query private views: %s (fresh, cold shared and warm shared caches, both kernels)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
+// Capacity is a Buster resource bound, separate from the Clang-equivalence cases. Eight confirmed repairs succeed;
+// a ninth reports the capacity and leaves the run failed/fatal, rather than returning a successful truncated stream.
+static bool pp_test_raw_query_capacity(const char* directory)
+{
+    char source[8192] = { 0 };
+    PPTestCase test = { .name = "raw query capacity", .source = source, .standard = "gnu17", .options = "-I%d", .files = pp_test_files_raw_query };
+    char path[4096];
+    bool result = pp_test_write_case(&test, directory, path, sizeof(path));
+    char text[16384];
+    char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
+    const int count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
+    Arena arena = arena_reserve(1ull << 20);
+    PPOptions options;
+    const char* input;
+    const char* output;
+    bool markers;
+    result = result && pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
+    static InternTable table;
+    static Preprocessor run;
+    for (uint32_t family = 0; result && family < 2; family += 1)
+    {
+        const uint32_t capacity = family == 0 ? BUSTER_PP_MAX_QUERY_REPAIRS : BUSTER_PP_MAX_DIRECT_REPAIRS;
+        const uint32_t ordinary = family == 0 ? 0 : capacity + 1;
+        char message[128];
+        snprintf(message, sizeof(message), "%s recovery capacity exceeded (%u repairs per inclusion)", family == 0 ? "header query" : "opaque directive", capacity);
+        for (uint32_t repairs = capacity; result && repairs <= capacity + 1; repairs += 1)
+        {
+            uint32_t length = (uint32_t)snprintf(source, sizeof(source), "#define RAW_QUERY __has_include\n");
+            for (uint32_t i = 0; family != 0 && i <= capacity; i += 1)
+            {
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "#include <raw-plain.h>\n");
+            }
+            for (uint32_t i = 0; i < repairs; i += 1)
+            {
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, family == 0 ? "#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n" : "#include <R\"(x>\n");
+            }
+            snprintf(source + length, sizeof(source) - length, "tail\n");
+            result = pp_test_write_file(path, source);
+            for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
+            {
+                options.scalar = kernel != 0;
+                FILE* caught = 0;
+                const int saved = pp_test_catch_stderr(&caught);
+                const bool ran = saved >= 0 && pp_test_run(&run, &table, &options, path);
+                char messages[2048];
+                pp_test_release_stderr(saved, caught, messages, sizeof(messages));
+                uint32_t views = 0;
+                for (uint32_t d = 0; d < run.data_count; d += 1)
+                {
+                    views += run.datas[d].lexical_bytes != 0;
+                }
+                const bool exceeded = repairs > capacity;
+                result = saved >= 0 && ran != exceeded && run.fatal == exceeded && run.errors == (uint32_t)exceeded && views == capacity;
+                if (exceeded)
+                {
+                    result = result && strstr(messages, message) != 0;
+                }
+                else
+                {
+                    const uint32_t last = run.output.count != 0 ? run.output.count - 1 : 0;
+                    const IdentId name = run.output.count != 0 ? run.output.values[last] : 0;
+                    result = result && messages[0] == 0 && run.output.count == repairs + ordinary + 1 && run.output.kinds[last] == C_TOKEN_RAW_IDENTIFIER &&
+                             intern_length(&table, name) == 4 && memcmp(intern_bytes(&table, name), "tail", 4) == 0;
+                }
+                pp_release(&run);
+                intern_release(&table);
+            }
+        }
+    }
+    arena_release(&arena);
+    pp_test_remove_case(&test, directory);
+    printf("opaque recovery capacity: %s (8/9 queries, 64/65 direct repairs, ordinary directives uncharged, both kernels)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
 // An option set of #281's families, or one beside them (%d stands for the test's directory): `refused` is in the message
 // of the option pp_parse_options must refuse, or null for a set it must take without a message.
 typedef struct PPTestOptionSet PPTestOptionSet;
@@ -3066,7 +3314,6 @@ static const PPTestOptionSet pp_test_option_sets[] = {
     { { "-fno-zos-extensions", "-fzos-extensions" }, "-fzos-extensions" },
     { { "-ffixed-point" }, "-ffixed-point" },
     { { "-fdefer-ts" }, "-fdefer-ts" },
-    { { "-std=c17", "-fno-raw-string-literals", "-fraw-string-literals" }, "-fraw-string-literals" },
     { { "-fno-directives-only", "-fdirectives-only" }, "-fdirectives-only" },
     { { "-fkeep-system-includes" }, "-fkeep-system-includes" },
     { { "-fminimize-whitespace" }, "-fminimize-whitespace" },
@@ -3089,6 +3336,11 @@ static const PPTestOptionSet pp_test_option_sets[] = {
     // any mode (c89 with them is C94, and C94 without them c89: #288), and raw strings off (buster lexes none), each in
     // c17, where clang's lexes none either (a GNU mode's would differ); and UTF-8 charsets in any case.
     { { "-std=c17", "-fgnu-keywords" }, 0 },
+    { { "-std=c17", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
+    { { "-std=gnu89", "-fraw-string-literals" }, 0 },
+    { { "-std=gnu99", "-fraw-string-literals", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
+    { { "-std=gnu23", "-fno-raw-string-literals" }, 0 },
+    { { "-x", "assembler-with-cpp", "-fno-raw-string-literals" }, 0 },
     { { "-std=gnu17", "-fno-raw-string-literals", "-fno-asm" }, 0 },
     { { "-std=c17", "-fno-dollars-in-identifiers" }, 0 },
     { { "-std=c17", "-fno-signed-char" }, 0 },
@@ -3136,7 +3388,8 @@ static const char pp_test_option_probe[] =
     "__is_identifier(_Accum) __is_identifier(_Defer) __is_identifier(asm) __is_identifier(typeof)\n"
     "#define bb BB\naa$bb 1$bb\n"
     "%:define DIGRAPH __STDC_VERSION__\nDIGRAPH <: :> <%= a //* c */ b x // y\n"
-    "#define R RR\nR\"x(raw)x\"\n"
+    "#define R RR\n#define LR LRR\n#define uR uRR\n#define UR URR\n#define u8R u8RR\n"
+    "R\"x(raw)x\" LR\"(l)\" uR\"(u)\" UR\"(U)\" u8R\"(8)\"\n"
     "#if (L'\\0' - 1) < 0\nwide_signed\n#endif\n"
     "#if '\\xff' < 0\nchar_signed\n#endif\n"
     "__FILE__ __MODULE__\n";
@@ -4791,6 +5044,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);
+        passed_all &= pp_test_raw_query_views(directory);
+        passed_all &= pp_test_raw_query_capacity(directory);
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {

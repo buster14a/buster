@@ -7,7 +7,7 @@
 // that move tricky C across the vectorized path's 64-byte vector and 512-byte chunk boundaries. The compiler runs them
 // as a command:
 //
-//   build/compiler test-lexer [--cplusplus | [--no-digraphs] [--no-line-comments]] [--fuzz N] [--seed N]
+//   build/compiler test-lexer [--cplusplus] [--raw-strings | --raw-strings-c99] [--fuzz N] [--seed N]
 //
 // main.c includes this file after c_lexer.c, String8, BUSTER_ARRAY_LENGTH and BUSTER_COMPILE_TIME_STRING_LENGTH, and
 // calls run_c_lexer_tests for that command. The tests are a port of the snippet and random-input checks of
@@ -34,30 +34,25 @@
 //   - Comment delimiters: comments that end around the leading-comment scanner's 64-byte loads and around 512-byte
 //     chunk boundaries (with closers split across chunks), at every misalignment from a cache line, a spliced closer
 //     and a closer right after a slash among them (see check_comments).
-//   - Digit separators: pp-numbers with a '\'' at every place, then what may follow one, with line splices around the
-//     '\'' too, placed so that the '\'' is around the start of the source and the ends of a vector and of a chunk (see
-//     check_separators); then inputs with the tokens clang's raw lexer gives them (check_separator_fixtures).
-//
-// Every check lexes each of its inputs twice: as C23 (or C++26) lexes numbers, and without digit separators
-// (C_TOKENIZER_NO_DIGIT_SEPARATORS, as C17 or C++11 does), and prints the second's counts on a line of their own.
+//   - Raw string literals, and identifiers before a quote that start none, with each byte of the prefix at each place
+//     around 64-byte vector and 512-byte chunk boundaries, at every misalignment from a cache line: the vectorized
+//     path must leave each literal to the scalar lexer, and none of the others (see check_raw_strings).
 //
 // --cplusplus tokenizes everything as C++, with boundary_snippet_cpp instead and the fuzz_pieces_cpp pieces too.
-// --no-digraphs and --no-line-comments tokenize without digraphs (C_TOKENIZER_NO_DIGRAPHS) and without "//" comments
-// (C_TOKENIZER_NO_LINE_COMMENTS), as clang's -E lexes c89 with both and C94 with the second: the inputs are the same, and
-// lex otherwise. The results go to stdout, with the first differences of each check. The exit status is 1 if the
-// arguments are invalid or a check fails.
+// --raw-strings tokenizes C with raw string literals as C11 and later GNU modes have them (C_TOKENIZER_RAW_STRINGS and
+// C_TOKENIZER_UTF_RAW_STRINGS), --raw-strings-c99 as gnu99 has them (C_TOKENIZER_RAW_STRINGS alone), both with
+// boundary_snippet_raw instead and the fuzz_pieces_raw pieces too. The results go to stdout, with the first
+// differences of each check. The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order:
-//   - The comparison: TokenArrays, print_token, compare, and the number modes (number_mode_flags and
-//     print_counts).
-//   - The snippet: boundary_snippet, boundary_snippet_cpp and check_snippet.
-//   - Random inputs: random_next, fuzz_pieces, fuzz_pieces_cpp, has_backslash, fuzz_input, save_failure and
-//     check_random.
+//   - The comparison: TokenArrays, print_token and compare.
+//   - The snippet: boundary_snippet, boundary_snippet_cpp, boundary_snippet_raw, test_snippet and check_snippet.
+//   - Random inputs: random_next, fuzz_pieces, fuzz_pieces_cpp, fuzz_pieces_raw, has_backslash, fuzz_input,
+//     save_failure and check_random.
 //   - Page edges: page_edge_input, report_fault, page_edge_template and check_page_edges.
 //   - Comment delimiters: check_comments, with delimiters split across the prefix scanner's unaligned loads and
 //     across chunks.
-//   - Digit separators: separator_numbers, separator_followers, separator_splices, separator_places,
-//     check_separators, then SeparatorFixture, separator_fixtures and check_separator_fixtures.
+//   - Raw string literals: check_raw_strings.
 //   - run_c_lexer_tests, with parse_u64.
 
 #include <stdint.h>
@@ -252,24 +247,58 @@ static const char boundary_snippet_cpp[] =
     "'' ''_x 'unterminated\n\"unterminated string\nok = \"multi \\\nline string\"_sfx 'a\\\nb'_c @ ` $x a$ ::: ## #\r\n"
     "s = \"a\\\\\\\\\" \"tab\tin\" /* \"unterminated\n*/ 'x' // line comment \\\ncontinued\nend;\r\n";
 
-// The last placement of either snippet fits in the buffer, and so in the output arrays.
+// The same for C with raw string literals: identifiers before a quote that start no raw string literal, where the C
+// snippet has LR"(no raw)" (an identifier and a pp-number end in R or LR, and "%"PRIxPTR"\n" is how C code writes
+// inttypes.h's formats; R'c' is an identifier and a character constant).
+static const char boundary_snippet_raw[] =
+    "#include <stdio.h> // a \"comment\" with 'quotes' and /* in it\n"
+    "  # define X(a, b) a ## b %: y %:%: z \\\n"
+    "    (x) /* block\n"
+    " * comment with \"quotes\" and 'apostrophes' don't\n"
+    " */ int main(void) { return 0; } /**/ /* not closed by / or * / */ x /***/\n"
+    "char *s = \"string with \\\" escaped \\\\ and // not a comment\", c = 'x', d = '\\'', e = '\\\\', f = '\"';\n"
+    "wchar_t *w = L\"wide\"; char8_t *u = u8\"utf8\" u\"utf16\" U\"utf32\" L'w' u8'8' u'u' U'U' xLR\"(no raw)\" Lx\"y\" uu\"z\";\n"
+    "p = \"%\"PRIxPTR\"\\n\" RR\"(a)\" LLR\"(b)\" u88R\"(c)\" 1R\"(d)\" .5LR\"(e)\" $R\"(f)\" R'c' LR'c' R (g) \"R\"(h);\n"
+    "x = a+++b - -c --d ->e <<= f >>= g <= h >= i == j != k && l || m *= n /= o %= p += q -= r &= s ^= t |= u;\n"
+    "a<::>b <% %> <: :> ... .. . .... a.b ...5 ..5 .5.5 1.2.3 x.e+5 1e+e+5 0x1p-3 1'000'000 1'a 1'e+5 0b1010 12.5DF 1$x;\n"
+    "'' 'unterminated\n\"unterminated string\nok = \"multi \\\nline string\" 'a\\\nb' @ ` $x a$ ::: <=> ->* .* ## #\r\n"
+    "s = \"a\\\\\\\\\" \"tab\tin\" /* \"unterminated\n*/ 'x' // line comment \\\ncontinued\nend;\r\n";
+
+// The last placement of each snippet fits in the buffer, and so in the output arrays.
 _Static_assert(BUSTER_TEST_BUFFER_ALIGNMENT - 1 + BUSTER_TEST_SNIPPET_PADDING - 1 + BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet) <=
                    BUSTER_TEST_SNIPPET_BUFFER_BYTES,
                "the C snippet doesn't fit after the padding");
 _Static_assert(BUSTER_TEST_BUFFER_ALIGNMENT - 1 + BUSTER_TEST_SNIPPET_PADDING - 1 + BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet_cpp) <=
                    BUSTER_TEST_SNIPPET_BUFFER_BYTES,
                "the C++ snippet doesn't fit after the padding");
+_Static_assert(BUSTER_TEST_BUFFER_ALIGNMENT - 1 + BUSTER_TEST_SNIPPET_PADDING - 1 + BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet_raw) <=
+                   BUSTER_TEST_SNIPPET_BUFFER_BYTES,
+               "the raw strings' snippet doesn't fit after the padding");
 _Static_assert(BUSTER_TEST_SNIPPET_BUFFER_BYTES <= BUSTER_TEST_MAX_INPUT_BYTES, "a snippet placement doesn't fit in the output arrays");
 
-// Compares the paths on the snippet after each padding at each misalignment, in each number mode, and prints the
-// counts. The first placements that differ or need the scalar lexer are printed too. Returns the modes' counts summed.
+// The snippet for `flags`' language, and its length.
+static String8 test_snippet(uint32_t flags)
+{
+    String8 result = { .pointer = (char*)boundary_snippet, .length = BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet) };
+    if (flags & C_TOKENIZER_CPLUSPLUS)
+    {
+        result = (String8){ .pointer = (char*)boundary_snippet_cpp, .length = BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet_cpp) };
+    }
+    else if (flags & C_TOKENIZER_RAW_STRINGS)
+    {
+        result = (String8){ .pointer = (char*)boundary_snippet_raw, .length = BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet_raw) };
+    }
+    return result;
+}
+
+// Compares the paths on the snippet after each padding at each misalignment, and prints the counts. The first
+// placements that differ or need the scalar lexer are printed too.
 static CheckCounts check_snippet(TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
 {
     uint8_t buffer[BUSTER_TEST_SNIPPET_BUFFER_BYTES] __attribute__((aligned(BUSTER_TEST_BUFFER_ALIGNMENT)));
-    const bool cplusplus = (flags & C_TOKENIZER_CPLUSPLUS) != 0;
-    const char* snippet = cplusplus ? boundary_snippet_cpp : boundary_snippet;
-    const uint64_t snippet_length =
-        cplusplus ? BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet_cpp) : BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet);
+    const String8 snippet_text = test_snippet(flags);
+    const char* snippet = snippet_text.pointer;
+    const uint64_t snippet_length = snippet_text.length;
     CheckCounts counts[BUSTER_TEST_NUMBER_MODES] = {0};
     char name[128];
     for (uint64_t misalignment = 0; misalignment < BUSTER_TEST_BUFFER_ALIGNMENT; misalignment += 1)
@@ -337,6 +366,14 @@ static const char* const fuzz_pieces_cpp[] =
     "<=>", "->*", ".*", "<::", "<::>", "\"x\"_y", "\"x\"s", "\"x\"sv", "'x'_y", "s", "sv", "min", "_", "_x", "R", "LR", "u8R",
 };
 
+// More pieces for C with raw string literals: their prefixes, openers with and without a valid delimiter (of 16 and 17
+// characters: the longest and one too long), and closers that match some openers' delimiters.
+static const char* const fuzz_pieces_raw[] =
+{
+    "R", "LR", "u8R", "uR", "UR", "R\"", "R\"(", "LR\"(", "u8R\"(", "uR\"x(", "UR\"(", "R\"x(", "R\"x y(", "R\"0123456789abcdef(",
+    "R\"0123456789abcdefg(", ")\"", ")x\"", ")0123456789abcdef\"", ")", "(", "\"",
+};
+
 // The runs of plain code between pieces are made of these bytes.
 static const char fuzz_plain_code[] = "abc xyz 123 (); ";
 // A careful input ends with this, to close a block comment that may be open: an unterminated one needs the scalar
@@ -350,21 +387,28 @@ static bool has_backslash(const char* piece)
     return strchr(piece, '\\') != 0;
 }
 
-// Writes a random input of up to `capacity` bytes to `buffer`, and returns it. Half of the inputs are careful: they
-// leave out the pieces with a backslash outside of string literals (after a piece with a line break, a literal counts
-// as closed), and end with fuzz_comment_end.
-static String8 fuzz_input(Random* random, uint8_t* buffer, uint64_t capacity, bool cplusplus)
+// Writes a random input of up to `capacity` bytes to `buffer`, and returns it, with pieces for `flags`' language. Half
+// of the inputs are careful: they leave out the pieces with a backslash outside of string literals (after a piece with
+// a line break, a literal counts as closed), and end with fuzz_comment_end.
+static String8 fuzz_input(Random* random, uint8_t* buffer, uint64_t capacity, uint32_t flags)
 {
     const uint64_t piece_count = 1 + random_next(random) % BUSTER_TEST_MAX_PIECES;
     const bool careful = random_next(random) % 2 == 0;
-    const uint64_t choices = BUSTER_ARRAY_LENGTH(fuzz_pieces) + (cplusplus ? BUSTER_ARRAY_LENGTH(fuzz_pieces_cpp) : 0);
+    const char* const* extra = fuzz_pieces_cpp;
+    uint64_t extra_count = BUSTER_ARRAY_LENGTH(fuzz_pieces_cpp);
+    if (!(flags & C_TOKENIZER_CPLUSPLUS))
+    {
+        extra = fuzz_pieces_raw;
+        extra_count = flags & C_TOKENIZER_RAW_STRINGS ? BUSTER_ARRAY_LENGTH(fuzz_pieces_raw) : 0;
+    }
+    const uint64_t choices = BUSTER_ARRAY_LENGTH(fuzz_pieces) + extra_count;
     uint64_t length = 0;
     bool in_literal = false;
     bool full = false;
     for (uint64_t i = 0; !full && i < piece_count; i += 1)
     {
         const uint64_t which = random_next(random) % choices;
-        const char* piece = which < BUSTER_ARRAY_LENGTH(fuzz_pieces) ? fuzz_pieces[which] : fuzz_pieces_cpp[which - BUSTER_ARRAY_LENGTH(fuzz_pieces)];
+        const char* piece = which < BUSTER_ARRAY_LENGTH(fuzz_pieces) ? fuzz_pieces[which] : extra[which - BUSTER_ARRAY_LENGTH(fuzz_pieces)];
         bool skipped = false;
         if (careful)
         {
@@ -444,7 +488,6 @@ _Static_assert(BUSTER_TEST_RANDOM_INPUT_BYTES <= BUSTER_TEST_MAX_INPUT_BYTES, "a
 static CheckCounts check_random(Random* random, uint64_t count, TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
 {
     uint8_t buffer[BUSTER_TEST_BUFFER_ALIGNMENT + BUSTER_TEST_RANDOM_INPUT_BYTES] __attribute__((aligned(BUSTER_TEST_BUFFER_ALIGNMENT)));
-    const bool cplusplus = (flags & C_TOKENIZER_CPLUSPLUS) != 0;
     CheckCounts counts[BUSTER_TEST_NUMBER_MODES] = {0};
     char name[64];
     // The bytes around an input are left from earlier ones (the lexer doesn't read them). Zeroing the buffer first
@@ -453,7 +496,7 @@ static CheckCounts check_random(Random* random, uint64_t count, TokenArrays* vec
     for (uint64_t i = 0; i < count; i += 1)
     {
         const uint64_t misalignment = random_next(random) % BUSTER_TEST_BUFFER_ALIGNMENT;
-        const String8 input = fuzz_input(random, buffer + misalignment, BUSTER_TEST_RANDOM_INPUT_BYTES, cplusplus);
+        const String8 input = fuzz_input(random, buffer + misalignment, BUSTER_TEST_RANDOM_INPUT_BYTES, flags);
         for (uint32_t mode = 0; mode < BUSTER_TEST_NUMBER_MODES; mode += 1)
         {
             snprintf(name, sizeof(name), "random input %lu%s", (unsigned long)i, number_mode_names[mode]);
@@ -491,10 +534,11 @@ static void report_fault(int signal_number)
     _exit(1);
 }
 
-// Writes template `index` (BUSTER_TEST_PAGE_EDGE_LENGTHS bytes) to `buffer`: for index 0 the snippet repeated, and
-// then random inputs one after the other, then comment regressions. The extra templates do not consume the random
-// sequence. Prefixes and suffixes move their delimiters across every alignment and cut both complete and malformed comments.
-static void page_edge_template(Random* random, uint64_t index, uint8_t* buffer, bool cplusplus)
+// Writes template `index` (BUSTER_TEST_PAGE_EDGE_LENGTHS bytes) to `buffer`: for index 0 the snippet of `flags`'
+// language repeated, and then random inputs one after the other, then comment regressions. The extra templates do not
+// consume the random sequence. Prefixes and suffixes move their delimiters across every alignment and cut both complete
+// and malformed comments.
+static void page_edge_template(Random* random, uint64_t index, uint8_t* buffer, uint32_t flags)
 {
     if (index > BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES)
     {
@@ -512,9 +556,9 @@ static void page_edge_template(Random* random, uint64_t index, uint8_t* buffer, 
     }
     else
     {
-        const char* snippet = cplusplus ? boundary_snippet_cpp : boundary_snippet;
-        const uint64_t snippet_length =
-            cplusplus ? BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet_cpp) : BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet);
+        const String8 snippet_text = test_snippet(flags);
+        const char* snippet = snippet_text.pointer;
+        const uint64_t snippet_length = snippet_text.length;
         uint64_t length = 0;
         while (length < BUSTER_TEST_PAGE_EDGE_LENGTHS)
         {
@@ -526,7 +570,7 @@ static void page_edge_template(Random* random, uint64_t index, uint8_t* buffer, 
             }
             else
             {
-                length += fuzz_input(random, buffer + length, BUSTER_TEST_RANDOM_INPUT_BYTES, cplusplus).length;
+                length += fuzz_input(random, buffer + length, BUSTER_TEST_RANDOM_INPUT_BYTES, flags).length;
             }
         }
     }
@@ -541,7 +585,6 @@ static CheckCounts check_page_edges(Random* random, TokenArrays* vectorized, Tok
 {
     // A template, with room for the last random input to run past BUSTER_TEST_PAGE_EDGE_LENGTHS.
     uint8_t template[BUSTER_TEST_PAGE_EDGE_LENGTHS + BUSTER_TEST_RANDOM_INPUT_BYTES];
-    const bool cplusplus = (flags & C_TOKENIZER_CPLUSPLUS) != 0;
     const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
     CheckCounts counts[BUSTER_TEST_NUMBER_MODES] = {0};
     CheckCounts sum = {0};
@@ -561,7 +604,7 @@ static CheckCounts check_page_edges(Random* random, TokenArrays* vectorized, Tok
     {
         for (uint64_t index = 0; index < BUSTER_TEST_PAGE_EDGE_TEMPLATES; index += 1)
         {
-            page_edge_template(random, index, template, cplusplus);
+            page_edge_template(random, index, template, flags);
             for (uint64_t length = 0; length < BUSTER_TEST_PAGE_EDGE_LENGTHS; length += 1)
             {
                 for (uint64_t suffix = 0; suffix < 2; suffix += 1)
@@ -846,6 +889,111 @@ static bool check_separator_fixtures(TokenArrays* vectorized, TokenArrays* scala
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Raw string literals
+
+// Which of check_raw_strings' cases start a raw string literal: none of them in any mode, the R and LR ones wherever C
+// or C++ has raw string literals, and the u8R, uR and UR ones where those prefixes do too (C++ and C11's GNU modes).
+typedef enum RawCase
+{
+    RAW_CASE_NEVER,
+    RAW_CASE_RAW,
+    RAW_CASE_UTF,
+} RawCase;
+
+// Each case of check_raw_strings starts at the last few bytes before 64-byte and 512-byte boundaries and the first ones
+// after (from the 64-byte-aligned buffer the source starts in, where the chunks start too), and at the source's start.
+static const uint32_t raw_string_starts[] = {56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 500, 504, 505, 506, 507, 508, 509, 510, 511, 512, 513};
+
+// Raw string literals of every prefix and of valid and invalid delimiters, unterminated and over lines, and identifiers
+// and pp-numbers before a quote that start none, with each byte of the prefix at each place around the vector and
+// chunk boundaries (raw_string_starts) at every misalignment from a cache line, after padding of spaces and newlines.
+// The paths must agree, the vectorized path must leave each raw string literal to the scalar lexer (it lexes none), and
+// the others must stay on it: before C11, u8R, uR and UR may take the scalar lexer, which lexes them as identifiers.
+static bool check_raw_strings(TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
+{
+    static const struct
+    {
+        const char* text;
+        RawCase raw;
+    } cases[] = {
+        { "R\"(a)\"", RAW_CASE_RAW },
+        { "LR\"(b)\"", RAW_CASE_RAW },
+        { "u8 R\"(c)\"", RAW_CASE_RAW },
+        { "R\"x(d\")x\"", RAW_CASE_RAW },
+        { "R\"(e\n f)\"", RAW_CASE_RAW },
+        { "R\"0123456789abcdef(g)0123456789abcdef\"", RAW_CASE_RAW },
+        { "R\"0123456789abcdefg(h)\"", RAW_CASE_RAW },
+        { "R\"i j(k)\"", RAW_CASE_RAW },
+        { "R\"(l\\\n)\"", RAW_CASE_RAW },
+        { "u8R\"(m)\"", RAW_CASE_UTF },
+        { "uR\"(n)\"", RAW_CASE_UTF },
+        { "UR\"x(o)x\"", RAW_CASE_UTF },
+        { "xR\"(p)\"", RAW_CASE_NEVER },
+        { "RR\"(q)\"", RAW_CASE_NEVER },
+        { "xLR\"(r)\"", RAW_CASE_NEVER },
+        { "LLR\"(s)\"", RAW_CASE_NEVER },
+        { "xu8R\"(t)\"", RAW_CASE_NEVER },
+        { "u88R\"(u)\"", RAW_CASE_NEVER },
+        { "_R\"(v)\"", RAW_CASE_NEVER },
+        { "$R\"(w)\"", RAW_CASE_NEVER },
+        { "9R\"(x)\"", RAW_CASE_NEVER },
+        { ".5LR\"(y)\"", RAW_CASE_NEVER },
+        { "1e+R\"(z)\"", RAW_CASE_NEVER },
+        { "R'c'", RAW_CASE_NEVER },
+        { "LR'c'", RAW_CASE_NEVER },
+        { "R (a)", RAW_CASE_NEVER },
+        { "\"R\"(b)", RAW_CASE_NEVER },
+        { "PRIxPTR\"\\n\"", RAW_CASE_NEVER },
+    };
+    static const char tail[] = " t; /* tail */ y = 1;\n";
+    const bool raw_strings = (flags & (C_TOKENIZER_CPLUSPLUS | C_TOKENIZER_RAW_STRINGS)) != 0;
+    const bool utf_raw_strings = (flags & C_TOKENIZER_CPLUSPLUS) || (flags & C_TOKENIZER_UTF_RAW_STRINGS);
+    uint8_t buffer[BUSTER_TEST_SNIPPET_BUFFER_BYTES] __attribute__((aligned(BUSTER_TEST_BUFFER_ALIGNMENT)));
+    uint64_t checked = 0;
+    uint64_t failed = 0;
+    for (uint64_t misalignment = 0; misalignment < BUSTER_TEST_BUFFER_ALIGNMENT; misalignment += 1)
+    {
+        for (uint64_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+        {
+            const bool raw = cases[c].raw == RAW_CASE_RAW ? raw_strings : cases[c].raw == RAW_CASE_UTF && utf_raw_strings;
+            // Before C11, the vectorized path leaves u8R, uR and UR before a quote to the scalar lexer too.
+            const bool may_fall_back = cases[c].raw == RAW_CASE_UTF && raw_strings;
+            for (uint64_t i = 0; i <= BUSTER_ARRAY_LENGTH(raw_string_starts); i += 1)
+            {
+                const uint64_t start = i < BUSTER_ARRAY_LENGTH(raw_string_starts) ? raw_string_starts[i] : misalignment;
+                if (start >= misalignment)
+                {
+                    const uint64_t text_bytes = strlen(cases[c].text);
+                    memset(buffer, 0, sizeof(buffer));
+                    for (uint64_t p = misalignment; p < start; p += 1)
+                    {
+                        buffer[p] = p % BUSTER_TEST_PADDING_LINE_BYTES == BUSTER_TEST_PADDING_LINE_BYTES - 1 ? '\n' : ' ';
+                    }
+                    memcpy(buffer + start, cases[c].text, text_bytes);
+                    memcpy(buffer + start + text_bytes, tail, BUSTER_COMPILE_TIME_STRING_LENGTH(tail));
+                    const String8 source = { .pointer = (char*)buffer + misalignment,
+                                             .length = start - misalignment + text_bytes + BUSTER_COMPILE_TIME_STRING_LENGTH(tail) };
+                    char name[160];
+                    snprintf(name, sizeof(name), "raw strings (misalignment %lu, case %lu, start %lu)", (unsigned long)misalignment, (unsigned long)c,
+                             (unsigned long)start);
+                    const Comparison comparison = compare(source, vectorized, scalar, flags, failed < BUSTER_TEST_REPORTED_INPUTS ? name : 0);
+                    const bool unexpected = comparison == COMPARISON_DIFFERENT || (raw && comparison != COMPARISON_FELL_BACK) ||
+                                            (!raw && !may_fall_back && comparison != COMPARISON_SAME);
+                    if (unexpected && comparison != COMPARISON_DIFFERENT && failed < BUSTER_TEST_REPORTED_INPUTS)
+                    {
+                        printf("%s %s the scalar lexer\n", name, raw ? "doesn't take" : "takes");
+                    }
+                    failed += unexpected;
+                    checked += 1;
+                }
+            }
+        }
+    }
+    printf("raw strings: %lu of %lu cases fail\n", (unsigned long)failed, (unsigned long)checked);
+    return failed == 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // run_c_lexer_tests
 
 // Parses a decimal number of up to 64 bits into `value`. Returns false if `text` isn't one.
@@ -881,6 +1029,10 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
         {
             flags |= C_TOKENIZER_CPLUSPLUS;
         }
+        else if (strcmp(arguments[i], "--raw-strings") == 0 || strcmp(arguments[i], "--raw-strings-c99") == 0)
+        {
+            flags |= C_TOKENIZER_RAW_STRINGS | (arguments[i][13] == 0 ? C_TOKENIZER_UTF_RAW_STRINGS : 0);
+        }
         else if (strcmp(arguments[i], "--no-digraphs") == 0)
         {
             flags |= C_TOKENIZER_NO_DIGRAPHS;
@@ -911,7 +1063,7 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
 
     if (!valid_arguments)
     {
-        fprintf(stderr, "usage: %s test-lexer [--cplusplus | [--no-digraphs] [--no-line-comments]] [--fuzz N] [--seed N]\n", program);
+        fprintf(stderr, "usage: %s test-lexer [--cplusplus] [--raw-strings | --raw-strings-c99] [--fuzz N] [--seed N]\n", program);
     }
     else
     {
@@ -920,13 +1072,13 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
         // The page edge inputs continue the random sequence, so that the random check's inputs stay upstream's.
         const CheckCounts page_edges = check_page_edges(&random, &vectorized, &scalar, flags);
         const bool comments = check_comments(&vectorized, &scalar, flags);
-        const bool numbers = check_separators(&vectorized, &scalar, flags);
-        const bool number_fixtures = check_separator_fixtures(&vectorized, &scalar, flags);
+        const bool raw_strings = check_raw_strings(&vectorized, &scalar, flags);
+        const bool separators = check_separators(&vectorized, &scalar, flags) && check_separator_fixtures(&vectorized, &scalar, flags);
         // Random inputs and cut templates are meant to need the scalar lexer at times, but the snippet is meant to stay
         // on the vectorized path.
-        const bool passed = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 && comments && numbers &&
-                            number_fixtures;
-        result = passed ? 0 : 1;
+        result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 && comments && raw_strings && separators
+                     ? 0
+                     : 1;
     }
     return result;
 }

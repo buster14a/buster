@@ -508,3 +508,83 @@ Receipts and frozen binaries are under
 `measurement-provenance`, `ab-default.log`, `c89-*.log`, `c94-*.log`,
 `no-digraphs-*.log` and `c89-preprocessor.log`. `bench292.sh` records the original
 alternating comparison; `bench292-modes.sh` records the bounded mode runs.
+
+## GNU C raw strings (#285)
+
+`C_TOKENIZER_RAW_STRINGS` (8) enables `R` and `LR` raw literals in C;
+`C_TOKENIZER_UTF_RAW_STRINGS` (16) adds `uR`, `UR` and `u8R`, whose
+prefixes need C11. C++ keeps its raw literals and user-defined suffixes;
+C never takes a user-defined suffix. The ordinary C chunk specialization
+still has no raw-string check.
+
+The raw specialization checks identifier-start and quote bitstrings in the
+existing rare prefixed-literal branch. It looks three bytes into the next
+chunk for `u8R"`, and hands a chunk containing a raw literal to the scalar
+lexer, which reads its delimiter and body. C99 conservatively detects UTF
+raw prefixes too, then the scalar lexer recognizes their identifier tokens.
+This bounds the extra work to chunks with possible literal prefixes and
+preserves exact scalar/vector token equality.
+
+`test-lexer --raw-strings` and `--raw-strings-c99` cover raw literals,
+near misses, randomized pieces and every placement around 64-byte and
+512-byte boundaries, with guarded pages. `benchmark-lexer` accepts the
+same flags so the specialization can be timed directly. The preprocessor
+covers modes, option order, pasting, stringizing, skipped directives,
+splices/trigraphs, dollar punctuation, `_Pragma`, line names and printers.
+An invalid delimiter containing a line splice pins its verbatim spelling.
+
+### Frozen target-host measurements
+
+The candidate is 281e245d9a1e19412689d85666dede7d79875fe8, built on the approved
+9700X with the shared lock. Three processes per configuration, pinned to CPU 2,
+compare its lexer with a same-process `control` variant from the C89 lexer at
+1051292. Both see the same 8,983 files / 93,836,361 bytes and 13,152,141 tokens.
+Each process takes 21 rotating passes. All scalar/vector/variant corpus
+comparisons agree.
+
+| Configuration | Candidate cycles/B, runs 1 / 2 / 3 | Control cycles/B, runs 1 / 2 / 3 | Candidate / control instructions/B |
+| --- | ---: | ---: | ---: |
+| Ordinary C, no RAW flag | 0.789 / 0.797 / 0.793 | 0.789 / 0.790 / 0.788 | 3.048 / 3.045 |
+| `--raw-strings` | 0.797 / 0.801 / 0.795 | 0.789 / 0.787 / 0.785 | 3.076 / 3.045 |
+| `--raw-strings-c99` | 0.793 / 0.798 / 0.797 | 0.787 / 0.787 / 0.792 | 3.076 / 3.045 |
+
+The ordinary copy differs from its control by up to 1% between processes,
+showing the remaining code-placement spread. RAW-enabled modes retire about
+0.9% more instructions than the candidate's ordinary mode. The raw feature
+therefore has a small explicit cost; these results establish neither a speedup
+nor a no-cost GNU raw path. Each process takes about 3.45–3.52 seconds,
+excluding lock waits.
+
+A separate alternating A/B uses the **same candidate binary** for SQLite
+preprocessing, with default GNU raw strings enabled or
+`-fno-raw-string-literals`. All parent/include/recovery implementation is shared
+between the two controls. `-E -P` output hashes match byte for byte before the
+timings (SHA256 8cc652b634970b9bd71497309e5d33ffe54459edbc3356c260a6e61dbd550bee).
+
+| SQLite vector preprocessing | Round 1 | Round 2 | Round 3 | Instructions/input token |
+| --- | ---: | ---: | ---: | ---: |
+| Raw disabled, cycles/input token | 41.73 | 41.73 | 41.93 | 133.49 |
+| Raw enabled, cycles/input token | 42.02 | 41.86 | 42.24 | 133.94 |
+
+The paired time cost is about 0.3–0.7%, and the instruction cost 0.34%. These
+frozen receipts measure the raw feature without attributing unrelated parent
+changes to it. The candidate binary SHA256 is
+0f106e7f750b0e6425f1d0e9ac1cc4f6fe7b4d95be4f3711a10dd629d467f38f;
+the SQLite input SHA256 is
+b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189.
+
+The frozen candidate passes 319 built-in cases against Clang, the fresh/cold
+shared/warm shared private-view checks, both kernels' 8/9 query and 64/65 direct
+repair boundaries, all 70 option sets and the three saved minimized angle-header
+fuzz failures. A one-case fuzz batch per language also checks the harness; the
+standard random campaign belongs to the final exact-head hosted workflow.
+Later header-CLI/oracle integration gets that separate correctness validation.
+The measured lexer and benchmark source blobs remain
+982029ded5c4b2a0f8a0677c6313778b6f21268f and
+38a5a9572938a14565a40475647e3b28e713803f.
+
+Receipts are under `~/buster-fast-bench/codex-takeover/293` on `benchpress`:
+`raw-measurement-provenance`, `raw-fixed-{default,gnu11,gnu99}-*.log`,
+`raw-preprocessor-provenance`, `raw-preprocessor-ab.log`,
+`raw-fixed-preprocessor.log` and `saved-repro-*.log`.
+`bench293-lexer.sh` and `bench293-preprocessor.sh` reproduce the bounded runs.

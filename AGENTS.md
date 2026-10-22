@@ -760,6 +760,9 @@ second's counts after the first's. The inputs:
   `c++26`), from both lexers.
 
 `--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces.
+`--raw-strings` enables C11's raw prefixes in C; `--raw-strings-c99`
+enables `R` and `LR`. Raw literals and near misses are checked around
+chunk and page boundaries. Both modes run in the 9700X workflow.
 `--no-digraphs` and `--no-line-comments` tokenize C without digraphs and without
 `//` comments (`C_TOKENIZER_NO_DIGRAPHS` and `C_TOKENIZER_NO_LINE_COMMENTS`), as
 the preprocessor lexes `-std=c89` (both), C94 (the second) and `-fno-digraphs`
@@ -2796,7 +2799,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 `./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
 [options] [file...]`, or `test-preprocessor --tables path...`:
 
-- without files, the 286 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 320 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The

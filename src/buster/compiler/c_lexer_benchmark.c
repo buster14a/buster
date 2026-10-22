@@ -753,6 +753,7 @@ int run_c_lexer_benchmark(int argc, char** argv)
 {
     int result = 1;
     CorpusLoader loader = {0};
+    uint32_t raw_flags = 0;
     bool valid_options = true;
     bool no_digit_separators = false;
     uint64_t path_count = 0;
@@ -763,9 +764,13 @@ int run_c_lexer_benchmark(int argc, char** argv)
         {
             loader.cplusplus = true;
         }
-        else if (strcmp(argv[i], "--no-digit-separators") == 0)
+        else if (strcmp(argv[i], "--raw-strings") == 0)
         {
-            no_digit_separators = true;
+            raw_flags = C_TOKENIZER_RAW_STRINGS | C_TOKENIZER_UTF_RAW_STRINGS;
+        }
+        else if (strcmp(argv[i], "--raw-strings-c99") == 0)
+        {
+            raw_flags = C_TOKENIZER_RAW_STRINGS;
         }
         else if (strcmp(argv[i], "--no-digraphs") == 0)
         {
@@ -774,6 +779,10 @@ int run_c_lexer_benchmark(int argc, char** argv)
         else if (strcmp(argv[i], "--no-line-comments") == 0)
         {
             mode_flags |= C_TOKENIZER_NO_LINE_COMMENTS;
+        }
+        else if (strcmp(argv[i], "--no-digit-separators") == 0)
+        {
+            no_digit_separators = true;
         }
         else if (argv[i][0] == '-')
         {
@@ -788,7 +797,7 @@ int run_c_lexer_benchmark(int argc, char** argv)
     // The modes without digraphs or "//" comments are C's (with them, C++ takes the scalar lexer whole).
     if (!valid_options || path_count == 0 || (loader.cplusplus && mode_flags != 0))
     {
-        fprintf(stderr, "usage: %s [--cplusplus | [--no-digraphs] [--no-line-comments]] path...\n", argv[0]);
+        fprintf(stderr, "usage: %s [--cplusplus] [--raw-strings|--raw-strings-c99] path...\n", argv[0]);
     }
     else if (!arena_initialize(&loader.memory, BUSTER_BENCHMARK_MEMORY_RESERVE) || !arena_initialize(&loader.sources, BUSTER_BENCHMARK_SOURCES_RESERVE))
     {
@@ -825,7 +834,8 @@ int run_c_lexer_benchmark(int argc, char** argv)
                 .total_bytes = loader.total_bytes,
                 .max_length = loader.max_length,
             };
-            const uint32_t flags = (loader.cplusplus ? C_TOKENIZER_CPLUSPLUS : 0) | mode_flags | (no_digit_separators ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0);
+            const uint32_t flags = (loader.cplusplus ? C_TOKENIZER_CPLUSPLUS : 0) | raw_flags | mode_flags |
+                                   (no_digit_separators ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0);
             printf("%lu files, %lu bytes\n", (unsigned long)corpus.count, (unsigned long)corpus.total_bytes);
             uint64_t different = check_corpus(&corpus, &outputs[IMPLEMENTATION_VECTORIZED], &outputs[IMPLEMENTATION_SCALAR], &outputs[IMPLEMENTATION_COUNT], flags);
             if (corpus.total_bytes != 0)

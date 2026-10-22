@@ -206,6 +206,15 @@ typedef enum PPDollars
     PP_DOLLARS_PUNCTUATION,
 } PPDollars;
 
+// Whether the lexer takes raw string literals, clang's RawStringLiterals: as the mode has them (GNU modes from C99 on,
+// assembler-with-cpp among them), unless -fraw-string-literals or -fno-raw-string-literals set it in any mode.
+typedef enum PPRawStrings
+{
+    PP_RAW_STRINGS_MODE,
+    PP_RAW_STRINGS_ON,
+    PP_RAW_STRINGS_OFF,
+} PPRawStrings;
+
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
@@ -235,6 +244,8 @@ struct PPOptions
     bool assembly;
     // A PPDollars, zero for the mode's (pp_dollar_punctuation).
     uint8_t dollars;
+    // A PPRawStrings, zero for the mode's (pp_raw_strings).
+    uint8_t raw_strings;
     // -iquote, -I and -isystem directories, and -idirafter ones after the standard directories.
     const char* const* quote_directories;
     uint32_t quote_directory_count;
@@ -291,6 +302,15 @@ struct PPOptions
 static bool pp_dollar_punctuation(const PPOptions* options)
 {
     return options->dollars == PP_DOLLARS_PUNCTUATION || (options->dollars == PP_DOLLARS_MODE && options->assembly);
+}
+
+// The lexer's flags for raw string literals with these options (PPRawStrings): C_TOKENIZER_RAW_STRINGS for their R and
+// LR forms, and from C11, whose u8, u and U prefixes they need, C_TOKENIZER_UTF_RAW_STRINGS for those forms too.
+static uint32_t pp_raw_strings(const PPOptions* options)
+{
+    const CLanguage language = options->language;
+    const bool on = options->raw_strings == PP_RAW_STRINGS_ON || (options->raw_strings == PP_RAW_STRINGS_MODE && language.gnu && language.standard >= 1999);
+    return on ? C_TOKENIZER_RAW_STRINGS | (language.standard >= 2011 ? C_TOKENIZER_UTF_RAW_STRINGS : 0) : 0;
 }
 
 // A column array of tokens: an output stream, or a stack of buffers.
@@ -520,10 +540,9 @@ struct FileCacheArenas
     Arena bytes;
 };
 
-// How files are prepared: the lexer's and refinement's flags (trigraphs, and the language mode's lexing without digraphs
-// or "//" comments: c_language_lexer_flags), the literal prefixes the language mode splits (pp_split_kinds), whether '$'
-// is punctuation (pp_dollar_punctuation), and whether by the vectorized kernels or by their scalar twins, which prepare
-// the same records.
+// How files are prepared: the lexer's and refinement's flags (trigraphs, and raw strings: pp_raw_strings), the literal
+// prefixes the language mode splits (pp_split_kinds), whether '$' is punctuation (pp_dollar_punctuation), and whether
+// by the vectorized kernels or by their scalar twins, which prepare the same records.
 typedef struct PPPrepare PPPrepare;
 struct PPPrepare
 {
@@ -1376,17 +1395,39 @@ static const uint8_t* pp_location_bytes(const Preprocessor* pp, uint32_t locatio
     return range != BUSTER_PP_NONE ? pp->ranges[range].bytes + (location - pp->ranges[range].base) : 0;
 }
 
-// `length` bytes of source without the line splices in them (and trigraphs, with C_TOKENIZER_TRIGRAPHS in
-// `refine_flags`): the bytes themselves if they have none, else a copy in `buffer`, which needs room for `length` bytes.
-// Returns the length.
-static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t* buffer, const uint8_t** spelling)
+// Is a token of this kind a string literal?
+BUSTER_INLINE bool pp_is_string_literal(uint8_t kind)
+{
+    return kind >= C_TOKEN_STRING_LITERAL && kind <= C_TOKEN_UTF32_STRING_LITERAL;
+}
+
+// Do `length` bytes start with a raw string literal's prefix and opening quote, as written (R", LR", uR", UR" or u8R",
+// with no line splice or trigraph in them)? A token that does is one the lexer read as a raw string literal: one, or an
+// unknown token if its delimiter is invalid or it is unterminated.
+static bool pp_raw_string_start(const uint8_t* bytes, uint32_t length)
+{
+    const bool u8 = length >= 2 && bytes[0] == 'u' && bytes[1] == '8';
+    const uint32_t prefix = u8 ? 2 : length >= 1 && (bytes[0] == 'L' || bytes[0] == 'u' || bytes[0] == 'U') ? 1 : 0;
+    return length >= prefix + 2 && bytes[prefix] == 'R' && bytes[prefix + 1] == '"';
+}
+
+// `length` bytes of source of a token of kind `kind`, without the line splices in them (and trigraphs, with
+// C_TOKENIZER_TRIGRAPHS in `refine_flags`): the bytes themselves if they have none, else a copy in `buffer`, which
+// needs room for `length` bytes. A raw string literal's characters undo translation phases 1 and 2, as clang's
+// getSpelling keeps them: a raw string literal keeps what follows its opening quote as written, and so does an unknown
+// token the lexer read as one (its delimiter invalid, or unterminated) whose prefix and quote are as written, which
+// clang reads byte by byte (a token that needs cleaning anywhere, as one with a line splice in its prefix, clang cleans
+// whole). Returns the length.
+static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t kind, uint8_t* buffer, const uint8_t** spelling)
 {
     const bool trigraphs = (refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
+    const bool string = pp_is_string_literal(kind);
     bool cleaned = false;
     for (uint32_t i = 0; !cleaned && i < length; i += 1)
     {
         cleaned = bytes[i] == '\\' || (bytes[i] == '?' && trigraphs);
     }
+    cleaned = cleaned && !(kind == C_TOKEN_UNKNOWN && pp_raw_string_start(bytes, length));
     uint32_t result = length;
     *spelling = bytes;
     if (cleaned)
@@ -1400,6 +1441,7 @@ static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_
         };
         uint64_t p = 0;
         result = 0;
+        bool opened = false;
         while (p < length)
         {
             uint64_t size;
@@ -1411,15 +1453,25 @@ static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_
                 result += 1;
             }
             p += size != 0 ? size : 1;
+            // A string literal's first quote is its opening one, right after its R if it is a raw string literal.
+            if (string && !opened && c == '"')
+            {
+                opened = true;
+                const bool raw = result >= 2 && buffer[result - 2] == 'R';
+                const uint64_t rest = raw ? length - p : 0;
+                memcpy(buffer + result, bytes + p, rest);
+                result += (uint32_t)rest;
+                p += rest;
+            }
         }
         *spelling = buffer;
     }
     return result;
 }
 
-// `length` bytes without the line splices in them (pp_remove_splices), unless they are a clean scratch spelling (in its
-// arena: pp_scratch_clean), which is final and is the bytes themselves.
-static uint32_t pp_without_splices(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint8_t* buffer, const uint8_t** spelling)
+// `length` bytes of a token of kind `kind` without the line splices in them (pp_remove_splices), unless they are a
+// clean scratch spelling (in its arena: pp_scratch_clean), which is final and is the bytes themselves.
+static uint32_t pp_without_splices(const Preprocessor* pp, uint8_t kind, const uint8_t* bytes, uint32_t length, uint8_t* buffer, const uint8_t** spelling)
 {
     const Arena* clean = &pp->scratch[1];
     const bool final = bytes >= clean->base && bytes < clean->base + clean->capacity;
@@ -1427,7 +1479,24 @@ static uint32_t pp_without_splices(const Preprocessor* pp, const uint8_t* bytes,
     *spelling = bytes;
     if (!final)
     {
-        result = pp_remove_splices(bytes, length, pp->refine_flags, buffer, spelling);
+        result = pp_remove_splices(bytes, length, pp->refine_flags, kind, buffer, spelling);
+    }
+    return result;
+}
+
+// The body of a string literal's spelling (pp_spelling's) if it is a raw string literal: its prefix, R and the opening
+// quote, the delimiter and '(', then the body, then ')', the delimiter and the closing quote (C has no user-defined
+// suffix), as the lexer makes one. The body's characters are as written, without escape sequences.
+static bool pp_raw_string_body(const uint8_t* spelling, uint32_t length, const uint8_t** body, uint32_t* body_length)
+{
+    const uint8_t* quote = memchr(spelling, '"', length);
+    const uint8_t* open = quote != 0 && quote > spelling && quote[-1] == 'R' ? memchr(quote, '(', length - (uint32_t)(quote - spelling)) : 0;
+    const bool result = open != 0;
+    if (result)
+    {
+        const uint32_t delimiter = (uint32_t)(open - quote) - 1;
+        *body = open + 1;
+        *body_length = length - (uint32_t)(open + 1 - spelling) - delimiter - 2;
     }
     return result;
 }
@@ -1489,7 +1558,7 @@ static uint32_t pp_spelling(Preprocessor* pp, uint8_t kind, uint32_t value, uint
     }
     else
     {
-        result = pp_without_splices(pp, pp_location_bytes(pp, location), value - location, buffer, spelling);
+        result = pp_without_splices(pp, kind, pp_location_bytes(pp, location), value - location, buffer, spelling);
         result = kind == C_TOKEN_UNKNOWN && *spelling == buffer ? pp_trailing_splice(pp, location, value - location, buffer, result) : result;
     }
     return result;
@@ -1519,7 +1588,7 @@ static uint32_t pp_identifier_as_written(Preprocessor* pp, uint32_t location, ui
         const PPRange* bytes_range = &pp->ranges[range];
         const uint32_t start = location - bytes_range->base;
         const uint32_t end = pp_identifier_end(pp, bytes_range->bytes, bytes_range->length, start);
-        result = pp_without_splices(pp, bytes_range->bytes + start, end - start, buffer, spelling);
+        result = pp_without_splices(pp, C_TOKEN_RAW_IDENTIFIER, bytes_range->bytes + start, end - start, buffer, spelling);
     }
     return result;
 }
@@ -1562,7 +1631,7 @@ static uint32_t pp_written_spelling(Preprocessor* pp, uint32_t value, uint32_t l
         const uint32_t start = location - bytes_range->base;
         const uint32_t end = pp_identifier_end(pp, bytes_range->bytes, bytes_range->length, start);
         uint8_t* buffer = arena_push(arena, (uint64_t)(end - start) + 1, 1);
-        result = buffer != 0 ? pp_without_splices(pp, bytes_range->bytes + start, end - start, buffer, spelling) : 0;
+        result = buffer != 0 ? pp_without_splices(pp, C_TOKEN_RAW_IDENTIFIER, bytes_range->bytes + start, end - start, buffer, spelling) : 0;
         *spelling = buffer != 0 ? *spelling : 0;
     }
     return result;
@@ -2878,12 +2947,12 @@ static PPPrepareStatus file_cache_prepare(FileCache* cache, uint32_t record, uin
     return result;
 }
 
-// How a unit with these options prepares files: trigraphs or not, digraphs and "//" comments or not, the literal prefixes
-// its language mode splits, and its kernels. A file cache that units share is made with it (file_cache_initialize).
+// How a unit with these options prepares files: trigraphs or not, raw string literals or not, the literal prefixes its
+// language mode splits, and its kernels. A file cache that units share is made with it (file_cache_initialize).
 static PPPrepare pp_prepare_options(const PPOptions* options)
 {
     return (PPPrepare){
-        .refine_flags = (options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0) | c_language_lexer_flags(options->language) |
+        .refine_flags = (options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0) | pp_raw_strings(options) | c_language_lexer_flags(options->language) |
                         (options->language.standard < 2023 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0),
         .split_kinds = pp_split_kinds(options->language),
         .dollar_punctuation = pp_dollar_punctuation(options),
@@ -3351,7 +3420,7 @@ static PPHeaderForm pp_literal_header_name(const PPFileData* data, uint32_t d, u
         const uint64_t mark = scratch->length;
         uint8_t* buffer = arena_push(scratch, (uint64_t)(stop_byte - start) + 1, 1);
         const uint8_t* spelling = 0;
-        const uint32_t spelled = buffer != 0 ? pp_remove_splices(data->bytes + start, stop_byte - start, refine_flags, buffer, &spelling) : 0;
+        const uint32_t spelled = buffer != 0 ? pp_remove_splices(data->bytes + start, stop_byte - start, refine_flags, C_TOKEN_STRING_LITERAL, buffer, &spelling) : 0;
         if (spelled >= 2 && spelled - 2 < capacity && spelling[0] == '"')
         {
             *length = spelled - 2;
@@ -3758,8 +3827,8 @@ static bool pp_same_file_token(const Preprocessor* pp, const PPFileData* a, uint
         uint32_t b_spelled = b_length;
         if (a_buffer != 0 && b_buffer != 0)
         {
-            a_spelled = pp_without_splices(pp, a->bytes + a->starts[i], a_length, a_buffer, &a_spelling);
-            b_spelled = pp_without_splices(pp, b->bytes + b->starts[j], b_length, b_buffer, &b_spelling);
+            a_spelled = pp_without_splices(pp, a->kinds[i] & 0x7F, a->bytes + a->starts[i], a_length, a_buffer, &a_spelling);
+            b_spelled = pp_without_splices(pp, b->kinds[j] & 0x7F, b->bytes + b->starts[j], b_length, b_buffer, &b_spelling);
         }
         result = a_spelled == b_spelled && memcmp(a_spelling, b_spelling, a_spelled) == 0;
         scratch_end(scratch);
@@ -5165,13 +5234,17 @@ static PPToken pp_stringize(Preprocessor* pp, const PPTokens* tokens, uint32_t b
                 const bool escape = pp_is_literal(kind);
                 for (uint32_t k = 0; k < spelling_length; k += 1)
                 {
-                    if (escape && (spelling[k] == '"' || spelling[k] == '\\'))
+                    const uint8_t c = spelling[k];
+                    // A raw string literal's line break is \n, as clang's Stringify writes one (\r\n and \n\r too).
+                    const bool line_break = escape && (c == '\n' || c == '\r');
+                    if (escape && (c == '"' || c == '\\' || line_break))
                     {
                         text[length] = '\\';
                         length += 1;
                     }
-                    text[length] = spelling[k];
+                    text[length] = line_break ? 'n' : c;
                     length += 1;
+                    k += line_break && k + 1 < spelling_length && (spelling[k + 1] == '\n' || spelling[k + 1] == '\r') && spelling[k + 1] != c;
                 }
                 first = false;
             }
@@ -6345,7 +6418,144 @@ static const char* pp_embedded_directive_name(uint8_t kind)
 
 static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end, PPTokens* into);
 
-static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t begin, uint32_t stop, bool query);
+// Did the ordinary lexer read the token before byte `stop` as a raw string that runs past it? Only that rare case
+// can hide source after a confirmed header name. Read just its prefix through phases 1 and 2, including a spliced R.
+static bool pp_query_raw_overlap(const Preprocessor* pp, const PPFileData* data, uint32_t first, uint32_t stop)
+{
+    uint32_t low = 0;
+    uint32_t high = data->token_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = data->starts[middle] < stop;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    const uint32_t token = low != 0 ? low - 1 : 0;
+    const uint8_t kind = low != 0 ? data->kinds[token] & 0x7F : 0;
+    const bool candidate = low != 0 && data->starts[token] > first &&
+                           (kind == C_TOKEN_UNKNOWN || pp_is_string_literal(kind)) && pp_file_token_end(pp, data, token) > stop;
+    bool result = false;
+    if (candidate)
+    {
+        const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+        uint64_t at = data->starts[token];
+        int32_t previous = 0;
+        bool quoted = false;
+        for (uint32_t i = 0; !quoted && i < 4; i += 1)
+        {
+            uint64_t size;
+            uint64_t start;
+            const int32_t c = get_char(&lexer, at, &size, &start);
+            result = c == '"' && previous == 'R';
+            quoted = c == '"';
+            at += size;
+            previous = c;
+        }
+    }
+    return result;
+}
+
+// The executing directive or expanded query has proved [begin, stop) opaque to ordinary C lexing. Prepare a
+// private view for this inclusion with only that span masked. Original source bytes/offsets, old macro data indexes,
+// other inclusions and shared cache records stay unchanged. Previous masks are retained. Callers invoke this only
+// for an exceptional lexical overlap, and reload their data afterward: position moves to the rebuilt directive end.
+// Separate per-inclusion budgets of 64 direct repairs and 8 queries bound full-file copy/preparation work and retained
+// storage by O((64 + 8) * N). Capacity/allocation exhaustion is fatal, never a successful truncated stream.
+static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t begin, uint32_t stop, bool query)
+{
+    PPContext* file = &pp->contexts[file_context];
+    const PPFileData* data = &pp->datas[file->data];
+    uint8_t* repairs = query ? &file->opaque_query_repairs : &file->opaque_direct_repairs;
+    const uint32_t capacity = query ? BUSTER_PP_MAX_QUERY_REPAIRS : BUSTER_PP_MAX_DIRECT_REPAIRS;
+    bool result = true;
+    if (*repairs >= capacity)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "%s recovery capacity exceeded (%u repairs per inclusion)",
+                    query ? "header query" : "opaque directive", capacity);
+        result = false;
+    }
+    else
+    {
+        uint8_t* lexical = pp->data_count < BUSTER_PP_MAX_FILES ? arena_push(&pp->arena, data->length, 1) : 0;
+        result = lexical != 0;
+        if (result)
+        {
+            memcpy(lexical, data->lexical_bytes != 0 ? data->lexical_bytes : data->bytes, data->length);
+            const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = pp->options.trigraphs };
+            uint64_t p = begin;
+            while (p < stop)
+            {
+                uint64_t size;
+                uint64_t at;
+                get_char(&lexer, p, &size, &at);
+                // Leave physical splices before `at` intact, preserving logical lines and original source offsets.
+                const uint64_t end = p + size < stop ? p + size : stop;
+                memset(lexical + at, ' ', at < end ? end - at : 0);
+                p += size != 0 ? size : 1;
+            }
+            PPFileData recovered = *data;
+            recovered.bytes = lexical;
+            recovered.lexical_bytes = lexical;
+            recovered.mapped = false;
+            recovered.prepared = false;
+            recovered.unterminated_comment = 0;
+            recovered.unterminated_comment_starts_line = false;
+            const PPPrepare prepare = pp_prepare_config(pp);
+            result = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, &recovered, 0) == PP_PREPARE_DONE;
+            if (result)
+            {
+                recovered.bytes = data->bytes;
+                pp->datas[pp->data_count] = recovered;
+                file->data = pp->data_count;
+                pp->data_count += 1;
+                *repairs += 1;
+                file->end = recovered.token_count;
+                file->position = recovered.directive_end[directive];
+                file->next_directive = directive + 1;
+                file->comment_read = false;
+            }
+        }
+        if (!result)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "out of memory recovering an opaque directive span");
+        }
+    }
+    return result;
+}
+
+// Raw-looking header bytes need this correction only after expansion confirms the query's source header context.
+// Genuine multiline raw macro arguments never call the primitive merely because they appear on a directive line.
+static bool pp_recover_query_raw(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t first, uint32_t stop)
+{
+    const PPContext* file = &pp->contexts[file_context];
+    const PPFileData* data = &pp->datas[file->data];
+    const bool overlap = (pp->refine_flags & C_TOKENIZER_RAW_STRINGS) && pp_query_raw_overlap(pp, data, first, stop);
+    return !overlap || pp_recover_opaque_span(pp, file_context, directive, first + 1, stop - 1, true);
+}
+
+// Only an executing direct header directive owns this source span. An excluded directive never reaches this hook,
+// so raw-looking text in skipped groups retains the ordinary lexer's behavior and cannot reveal hidden directives.
+static bool pp_recover_direct_raw(Preprocessor* pp, PPContext* context, uint32_t directive)
+{
+    const PPFileData* data = &pp->datas[context->data];
+    const uint8_t kind = data->directive_kind[directive];
+    const bool header = kind == PP_DIRECTIVE_INCLUDE || kind == PP_DIRECTIVE_INCLUDE_NEXT || kind == PP_DIRECTIVE_IMPORT || kind == PP_DIRECTIVE_EMBED;
+    const uint32_t first = data->directive_hash[directive] + 2;
+    const uint32_t end = data->directive_end[directive];
+    bool result = true;
+    if (header && (pp->refine_flags & C_TOKENIZER_RAW_STRINGS) && first < end && (data->kinds[first] & 0x7F) == C_TOKEN_LESS)
+    {
+        uint32_t length;
+        bool whole;
+        const uint32_t stop = pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole);
+        if (stop != 0 && pp_query_raw_overlap(pp, data, data->starts[first], stop))
+        {
+            result = pp_recover_opaque_span(pp, (uint32_t)(context - pp->contexts), directive, data->starts[first] + 1, stop - 1, false);
+        }
+    }
+    return result;
+}
 
 // A source header's literal spelling is confirmed before the ordinary lexer's comment is corrected. The private view
 // restores file tokens and directive links after it, while old macro definitions and other inclusions keep their data.
@@ -6407,7 +6617,8 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
         uint32_t length;
         bool whole;
         const uint32_t stop = c == '<' ? pp_scan_header_bytes(pp->refine_flags, data, first, data->length, 0, 0, &length, &whole) : 0;
-        if (stop != 0 && line != 0 && pp_recover_header_comment(pp, context->relex_file, line->directive, first, stop, true))
+        if (stop != 0 && line != 0 && pp_recover_query_raw(pp, context->relex_file, line->directive, first, stop) &&
+            pp_recover_header_comment(pp, context->relex_file, line->directive, first, stop, true))
         {
             const PPToken token = { .kind = C_TOKEN_LESS, .value = base + stop, .location = base + first };
             context->relex_position = stop;
@@ -6427,7 +6638,8 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
         uint32_t length;
         bool whole;
         const uint32_t stop = first < end && base + data->starts[first] == token.location ? pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole) : 0;
-        if (stop != 0 && pp_recover_header_comment(pp, line->context, line->directive, data->starts[first], stop, true))
+        if (stop != 0 && pp_recover_query_raw(pp, line->context, line->directive, data->starts[first], stop) &&
+            pp_recover_header_comment(pp, line->context, line->directive, data->starts[first], stop, true))
         {
             uint32_t relex;
             const uint32_t after = pp_header_name_tail(pp, data, first, end, stop, &relex);
@@ -6812,7 +7024,8 @@ static bool pp_header_name(Preprocessor* pp, const PPTokens* tokens, uint32_t be
         uint8_t* buffer = arena_push(scratch.arena, (uint64_t)(tokens->values[begin] - tokens->locations[begin]) + 1, 1);
         const uint8_t* spelling = 0;
         const uint32_t spelled = buffer != 0 ? pp_spelling(pp, tokens->kinds[begin], tokens->values[begin], tokens->locations[begin], buffer, &spelling) : 0;
-        result = spelled >= 2 && spelled - 2 < capacity;
+        // (A raw string literal is no header name, as in clang.)
+        result = spelled >= 2 && spelled - 2 < capacity && (tokens->kinds[begin] == C_TOKEN_LESS || spelling[0] == '"');
         if (result)
         {
             memcpy(name, spelling + 1, spelled - 2);
@@ -6908,13 +7121,28 @@ static bool pp_feature_name(Preprocessor* pp, PPBuiltin builtin, const PPTokens*
     }
     else if (builtin == PP_BUILTIN_HAS_WARNING && end - begin >= 1)
     {
-        // __has_warning("-Wname"): the strings' value, as clang reads it (FinishLexStringLiteral: ordinary literals,
-        // joined, without their line splices and with their escapes decoded), and nothing after them. Another first
-        // token (a macro's name too: clang doesn't expand the operand) is an error.
-        uint32_t i = begin;
-        const uint32_t n = pp_pragma_strings(pp, tokens, &i, end, name, 256, "'__has_warning'", tokens->locations[begin]);
-        result = n != BUSTER_PP_NONE && i == end;
-        *length = result ? n : 0;
+        // __has_warning("-Wname"): the strings' contents (adjacent strings joined), from their spellings; a raw string
+        // literal's is its body.
+        result = true;
+        for (uint32_t i = begin; result && i < end; i += 1)
+        {
+            const uint32_t spelled = tokens->values[i] - tokens->locations[i];
+            result = tokens->kinds[i] == C_TOKEN_STRING_LITERAL && spelled >= 2 && *length + spelled < 256;
+            Scratch scratch = scratch_begin(0);
+            uint8_t* buffer = result ? arena_push(scratch.arena, (uint64_t)spelled + 1, 1) : 0;
+            result = buffer != 0;
+            if (result)
+            {
+                const uint8_t* spelling;
+                const uint32_t length_spelled = pp_spelling(pp, tokens->kinds[i], tokens->values[i], tokens->locations[i], buffer, &spelling);
+                const uint8_t* body = spelling + 1;
+                uint32_t body_length = length_spelled - 2;
+                pp_raw_string_body(spelling, length_spelled, &body, &body_length);
+                memcpy(name + *length, body, body_length);
+                *length += body_length;
+            }
+            scratch_end(scratch);
+        }
     }
     return result;
 }
@@ -6937,8 +7165,18 @@ static bool pp_pragma_string(Preprocessor* pp, PPToken string, uint32_t name_loc
         {
             open_quote += 1;
         }
+        // A raw string literal's body is as written (clang takes off its prefix, delimiters and parentheses); another
+        // string loses its escaped quotes' and backslashes' escapes.
+        const uint8_t* body;
+        uint32_t body_length;
+        const bool raw = pp_raw_string_body(spelling, length, &body, &body_length);
         uint32_t n = 0;
-        for (uint32_t i = open_quote + 1; i + 1 < length; i += 1)
+        if (raw)
+        {
+            memcpy(text, body, body_length);
+            n = body_length;
+        }
+        for (uint32_t i = open_quote + 1; !raw && i + 1 < length; i += 1)
         {
             if (spelling[i] == '\\' && i + 2 < length && (spelling[i + 1] == '"' || spelling[i + 1] == '\\'))
             {
@@ -8246,67 +8484,6 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
 // for an exceptional lexical overlap, and reload their data afterward: position moves to the rebuilt directive end.
 // Separate per-inclusion budgets of 64 direct repairs and 8 queries bound full-file copy/preparation work and retained
 // storage by O((64 + 8) * N). Capacity/allocation exhaustion is fatal, never a successful truncated stream.
-static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t begin, uint32_t stop, bool query)
-{
-    PPContext* file = &pp->contexts[file_context];
-    const PPFileData* data = &pp->datas[file->data];
-    uint8_t* repairs = query ? &file->opaque_query_repairs : &file->opaque_direct_repairs;
-    const uint32_t capacity = query ? BUSTER_PP_MAX_QUERY_REPAIRS : BUSTER_PP_MAX_DIRECT_REPAIRS;
-    bool result = true;
-    if (*repairs >= capacity)
-    {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "%s recovery capacity exceeded (%u repairs per inclusion)",
-                    query ? "header query" : "opaque directive", capacity);
-        result = false;
-    }
-    else
-    {
-        uint8_t* lexical = pp->data_count < BUSTER_PP_MAX_FILES ? arena_push(&pp->arena, data->length, 1) : 0;
-        result = lexical != 0;
-        if (result)
-        {
-            memcpy(lexical, data->lexical_bytes != 0 ? data->lexical_bytes : data->bytes, data->length);
-            const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = pp->options.trigraphs };
-            uint64_t p = begin;
-            while (p < stop)
-            {
-                uint64_t size;
-                uint64_t at;
-                get_char(&lexer, p, &size, &at);
-                // Leave physical splices before `at` intact, preserving logical lines and original source offsets.
-                const uint64_t end = p + size < stop ? p + size : stop;
-                memset(lexical + at, ' ', at < end ? end - at : 0);
-                p += size != 0 ? size : 1;
-            }
-            PPFileData recovered = *data;
-            recovered.bytes = lexical;
-            recovered.lexical_bytes = lexical;
-            recovered.mapped = false;
-            recovered.prepared = false;
-            recovered.unterminated_comment = 0;
-            recovered.unterminated_comment_starts_line = false;
-            const PPPrepare prepare = pp_prepare_config(pp);
-            result = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, &recovered, 0) == PP_PREPARE_DONE;
-            if (result)
-            {
-                recovered.bytes = data->bytes;
-                pp->datas[pp->data_count] = recovered;
-                file->data = pp->data_count;
-                pp->data_count += 1;
-                *repairs += 1;
-                file->end = recovered.token_count;
-                file->position = recovered.directive_end[directive];
-                file->next_directive = directive + 1;
-                file->comment_read = false;
-            }
-        }
-        if (!result)
-        {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "out of memory recovering an opaque directive span");
-        }
-    }
-    return result;
-}
 
 // Only active diagnostic directives read their message opaquely. Detect a token or comment that ordinary lexing
 // carried past its logical newline, or an unterminated comment on it, then restore the following source. A token's
@@ -8363,7 +8540,7 @@ static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_
     if (buffer != 0)
     {
         const uint8_t* text;
-        const uint32_t length = pp_remove_splices(data->bytes + begin, end - begin, pp->refine_flags, buffer, &text);
+        const uint32_t length = pp_remove_splices(data->bytes + begin, end - begin, pp->refine_flags, C_TOKEN_RAW_IDENTIFIER, buffer, &text);
         uint32_t first = 0;
         while (first < length && (text[first] == ' ' || text[first] == '\t' || text[first] == '\v' || text[first] == '\f'))
         {
@@ -8940,7 +9117,7 @@ static bool pp_read_header_name(Preprocessor* pp, const PPFileData* data, uint32
         Scratch scratch = scratch_begin(0);
         uint8_t* buffer = arena_push(scratch.arena, (uint64_t)(stop - start) + 1, 1);
         const uint8_t* spelling = 0;
-        const uint32_t spelled = buffer != 0 ? pp_without_splices(pp, data->bytes + start, stop - start, buffer, &spelling) : 0;
+        const uint32_t spelled = buffer != 0 ? pp_without_splices(pp, C_TOKEN_STRING_LITERAL, data->bytes + start, stop - start, buffer, &spelling) : 0;
         valid = spelled >= 2 && spelled - 2 < capacity && spelling[0] == '"';
         if (valid)
         {
@@ -9205,7 +9382,15 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         char* copy = valid ? arena_push(&pp->arena, (uint64_t)spelled + 1, 1) : 0;
         const uint8_t* spelling = 0;
         const uint32_t length = buffer != 0 && copy != 0 ? pp_spelling(pp, tokens->kinds[begin + 1], tokens->values[begin + 1], tokens->locations[begin + 1], buffer, &spelling) : 0;
-        name_length = length >= 2 ? pp_decode_file_name(pp, spelling, length, copy, location) : BUSTER_PP_NONE;
+        // A raw string literal names the file with its body as written.
+        const uint8_t* body;
+        uint32_t body_length;
+        const bool raw = length >= 2 && pp_raw_string_body(spelling, length, &body, &body_length);
+        if (raw)
+        {
+            memcpy(copy, body, body_length);
+        }
+        name_length = raw ? body_length : length >= 2 ? pp_decode_file_name(pp, spelling, length, copy, location) : BUSTER_PP_NONE;
         name_reported = length >= 2 && name_length == BUSTER_PP_NONE;
         valid = valid && name_length != BUSTER_PP_NONE;
         name = valid ? copy : 0;
@@ -10253,7 +10438,8 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
     const PPFileData* data = &pp->datas[context->data];
     const uint8_t kind = data->directive_kind[directive];
     const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
-    if ((!text || pp_recover_diagnostic_line(pp, context, directive)) && pp_recover_direct_header_comment(pp, context, directive))
+    if ((!text || pp_recover_diagnostic_line(pp, context, directive)) && pp_recover_direct_raw(pp, context, directive) &&
+        pp_recover_direct_header_comment(pp, context, directive))
     {
         // Recovery resumes a capture after its directive; this caller still has to dispatch that directive itself.
         context->next_directive = directive;
@@ -13831,11 +14017,21 @@ BUSTER_INLINE uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint
     return result;
 }
 
-// Where -E puts output token `token`, a line's first, when clang's token starts a line though ours doesn't, or
-// BUSTER_PP_NONE when it stays on the line: one that started a line among a macro's arguments (BUSTER_PP_LINE_SPACE),
-// and one after a _Pragma that printed nothing (Preprocessor.silent_pragmas, from *silent on, which moves past the ones
-// before it), where clang's lexer starts a line. Clang's printer moves to the token's place (its own, or its
-// expansion's for one a macro or a builtin made) only when that is another line than the current one (MoveToLine).
+// The line breaks in an unknown token's spelling (\r\n and \n\r count as one), which clang's printer adds to its line
+// (HandleNewlinesInToken): an unknown token the lexer read as a raw string literal (its delimiter invalid) can have
+// some. It counts no other token's, a raw string literal's among them.
+static __attribute__((noinline)) uint32_t pp_print_token_lines(const uint8_t* spelling, uint32_t length)
+{
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < length; i += 1)
+    {
+        const bool line_break = spelling[i] == '\n' || spelling[i] == '\r';
+        result += line_break;
+        i += line_break && i + 1 < length && (spelling[i + 1] == '\n' || spelling[i + 1] == '\r') && spelling[i + 1] != spelling[i];
+    }
+    return result;
+}
+
 static __attribute__((noinline, cold)) uint32_t pp_print_moves(Preprocessor* pp, PPMarkers* markers, uint32_t token, uint32_t* silent)
 {
     uint32_t result = BUSTER_PP_NONE;
@@ -14087,6 +14283,7 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
                 fputc(' ', stream);
             }
             fwrite(spelling, 1, length, stream);
+            marked.line += markers && kind == C_TOKEN_UNKNOWN ? pp_print_token_lines(spelling, length) : 0;
             previous_last = length != 0 ? spelling[length - 1] : previous_last;
             previous_kind = kind;
             line_start = false;
@@ -14317,7 +14514,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                     uint8_t* spare = arena_push(scratch.arena, (uint64_t)length + 1, 1);
                     result = spare != 0;
                     const uint32_t raw = length;
-                    length = result ? pp_without_splices(pp, spelling, length, spare, &spelling) : 0;
+                    length = result ? pp_without_splices(pp, kind, spelling, length, spare, &spelling) : 0;
                     length = result && kind == C_TOKEN_UNKNOWN && spelling == spare ? pp_trailing_splice(pp, location, raw, spare, length) : length;
                 }
             }
@@ -14365,6 +14562,8 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
         const uint64_t joins = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(pair, separation), _mm512_set1_epi8(1));
         const uint64_t line_starts = starts | (pragma_ends << 1) | (uint64_t)force_line | (uint64_t)(c == 0 && line_start);
         const uint64_t spaced = (spaces | joins) & ~line_starts & valid;
+        // With markers, the unknown tokens, whose line breaks the printer's line counts (pp_print_token_lines).
+        const uint64_t unknowns = markers ? _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)) : 0;
         // 3. Copies, with the line breaks and markers between: without a branch per token but for line markers (which
         // -P doesn't print), the rare line of more than one break, and spellings past 64 bytes.
         for (uint32_t k = 0; result && k < available; k += 1)
@@ -14462,6 +14661,10 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                 }
             }
             used += direct ? 0 : length;
+            if (BUSTER_UNLIKELY((unknowns >> k) & 1))
+            {
+                marked.line += pp_print_token_lines(spelling, length);
+            }
             line_start = false;
             previous_last = length != 0 ? lasts[k] : previous_last;
             previous_kind = out_kinds[i];
@@ -14688,7 +14891,7 @@ static const struct
     [PP_FAMILY_ASM] = { "-fasm", "-fno-asm", 0 },
     [PP_FAMILY_DOLLARS] = { "-fdollars-in-identifiers", "-fno-dollars-in-identifiers", 0 },
     [PP_FAMILY_DIGRAPHS] = { "-fdigraphs", "-fno-digraphs", 0 },
-    [PP_FAMILY_RAW_STRINGS] = { "-fraw-string-literals", "-fno-raw-string-literals", "C's raw string literals, which buster doesn't lex" },
+    [PP_FAMILY_RAW_STRINGS] = { "-fraw-string-literals", "-fno-raw-string-literals", 0 },
     [PP_FAMILY_MS_EXTENSIONS] = { "-fms-extensions", "-fno-ms-extensions", BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
     [PP_FAMILY_MS_COMPATIBILITY] = { "-fms-compatibility", "-fno-ms-compatibility", BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
     [PP_FAMILY_BORLAND] = { "-fborland-extensions", "-fno-borland-extensions", BUSTER_PP_KEYWORDS_REFUSED("Borland's keywords and __declspec") },
@@ -14774,6 +14977,7 @@ static bool pp_settle_families(const PPFamilies* families, PPOptions* options)
     options->language.gnu_keywords = (uint8_t)(gnu < 0 ? C_GNU_KEYWORDS_MODE : gnu != 0 ? C_GNU_KEYWORDS_ON : C_GNU_KEYWORDS_OFF);
     options->language.digraphs = (uint8_t)(last[PP_FAMILY_DIGRAPHS] < 0 ? options->language.digraphs : last[PP_FAMILY_DIGRAPHS] != 0 ? C_DIGRAPHS_ON : C_DIGRAPHS_OFF);
     options->dollars = (uint8_t)(last[PP_FAMILY_DOLLARS] < 0 ? PP_DOLLARS_MODE : last[PP_FAMILY_DOLLARS] != 0 ? PP_DOLLARS_IDENTIFIER : PP_DOLLARS_PUNCTUATION);
+    options->raw_strings = (uint8_t)(last[PP_FAMILY_RAW_STRINGS] < 0 ? PP_RAW_STRINGS_MODE : last[PP_FAMILY_RAW_STRINGS] != 0 ? PP_RAW_STRINGS_ON : PP_RAW_STRINGS_OFF);
     for (uint32_t f = 0; f < PP_FAMILY_COUNT; f += 1)
     {
         const bool refuse = pp_families[f].refused != 0 && last[f] == 1 && !(f == PP_FAMILY_ZVECTOR && options->assembly);

@@ -21,12 +21,11 @@
 //   - Scalar lexer: ScalarLexer, get_char_slow, get_char and peek_char (line splices and trigraphs), the lex_*
 //     functions, c_tokenize_scalar_range (a line range, used by c_tokenize) and c_tokenize_scalar.
 //   - Vectorized lexer: the U64x8 bitstring helpers, the vector helpers (perm2b, shift_in_previous), the source
-//     checks it calls on rare paths (is_raw_string_quote, is_literal_suffix, contains_trigraph), load_lane, the
-//     masks, State and needs_scalar, property_masks and transpose_property_masks (the GFNI property transposition),
-//     classify (Phase I), scan_lines (the delimiter scan), skip_leading_comments, ChunkTokens and write_chunk
-//     (Phase III), tokenize_chunks (Phase II, with the BUSTER_LEX_CHUNK_BYTES chunk loop), tokenize_c, its
-//     specializations without digraphs and without "//" comments, tokenize_cpp, tokenize_with_flags,
-//     c_tokenize_scalar_only, c_tokenize_vectorized and c_tokenize.
+//     checks it calls on rare paths (is_literal_suffix, contains_trigraph), load_lane, the masks, State and
+//     needs_scalar, property_masks and transpose_property_masks (the GFNI property transposition), classify
+//     (Phase I), scan_lines (the delimiter scan), skip_leading_comments, ChunkTokens and write_chunk (Phase III),
+//     tokenize_chunks (Phase II, with the BUSTER_LEX_CHUNK_BYTES chunk loop), tokenize_c, tokenize_c_raw and
+//     tokenize_cpp, tokenize_with_flags, c_tokenize_vectorized and c_tokenize.
 //
 // Origin: a single-file version of the C lexer from https://github.com/davidgmbb/Accelerated-Zig-Parser
 // (c/c_tokenizer.h, c/c_tokenizer_tables.h, c/c_tokenizer_unicode.h, c/c_tokenizer_scalar.c and c/c_tokenizer.c at
@@ -41,8 +40,8 @@
 // fewer register spills, and a scan that finds the block comment a chunk starts inside of first (which also covers
 // what the comment-only chunk shortcut did, so that is gone); then C++'s raw string literals checked at literal
 // starts, chunks read in place from the source, the previous chunk's bitstrings carried as their last lanes, and a
-// one-permute byte shift; then (2026-10-22) C_TOKENIZER_NO_DIGRAPHS and C_TOKENIZER_NO_LINE_COMMENTS. Measurements:
-// docs/c-lexer.md.
+// one-permute byte shift; then (2026-10-22) raw string literals in C (C_TOKENIZER_RAW_STRINGS), found at prefixed
+// literals' starts by bitstrings. Measurements: docs/c-lexer.md.
 //
 // Upstream license (Accelerated-Zig-Parser's LICENSE file, verbatim):
 //
@@ -284,6 +283,12 @@
 // -dump-raw-tokens`), or in C++26 mode with `C_TOKENIZER_CPLUSPLUS` (`clang -cc1 -x c++ -std=c++26
 // -dump-raw-tokens`): line splices anywhere, digraphs, UCNs and UTF-8 identifiers, digit separators, unterminated
 // literals and stray characters, and in C++ raw string literals, user-defined literal suffixes (which are part of
+// the literal's token), `<=>`, `->*`, `.*` and the `<::` rule. With `C_TOKENIZER_RAW_STRINGS`, C has raw string
+// literals too (`clang -cc1 -std=gnu23 -dump-raw-tokens`, or `-std=gnu99` without `C_TOKENIZER_UTF_RAW_STRINGS`).
+// Common code takes the vectorized path; the rare lines it can't handle exactly (e.g. a line splice in the middle of
+// a token, a non-ASCII identifier or a raw string literal) are tokenized by a scalar lexer. With
+// `C_TOKENIZER_NO_DOLLARS` the scalar lexer takes the whole source and lexes `$` as punctuation, as
+// `-fno-dollars-in-identifiers` and `-x assembler-with-cpp` have it.
 // the literal's token), `<=>`, `->*`, `.*` and the `<::` rule. With `C_TOKENIZER_NO_DIGRAPHS` and
 // `C_TOKENIZER_NO_LINE_COMMENTS`, C is lexed without digraphs or without `//` comments, as clang's `-E` lexes
 // `-std=c89` (neither) and `-std=iso9899:199409` (no `//` comments). Common code takes the vectorized path; the rare
@@ -399,6 +404,11 @@ typedef enum CTokenizerFlags
     // lexer's alone: c_tokenize gives such a source to it, and c_tokenize_vectorized refuses it. 128 keeps it apart from
     // the flags other branches add (#278's 4, #285's 8 and 16, #292's 32 and 64).
     C_TOKENIZER_NO_DOLLARS = 128,
+    // Lex raw string literals in C (C++ always has them): R"d(...)d" and LR"d(...)d", as clang's GNU modes from C99 on
+    // and -fraw-string-literals have them, without C++'s user-defined suffix. Off by default, like clang's ISO modes.
+    C_TOKENIZER_RAW_STRINGS = 8,
+    // With C_TOKENIZER_RAW_STRINGS, their u8R, uR and UR forms too, which need C11's u8, u and U prefixes.
+    C_TOKENIZER_UTF_RAW_STRINGS = 16,
     // Lex without digraphs, as clang's `-std=c89` and `-fno-digraphs` do: `<:`, `:>`, `<%`, `%>` and `%:` are two
     // punctuators each (`<%=` is `<` and `%=`, and `%:%:` four tokens).
     C_TOKENIZER_NO_DIGRAPHS = 32,
@@ -862,6 +872,10 @@ struct ScalarLexer
     uint64_t length;
     bool trigraphs;
     bool cplusplus;
+    // clang's RawStringLiterals: R and LR start raw string literals (C++, and C_TOKENIZER_RAW_STRINGS), and so do u8R,
+    // uR and UR where the u8, u and U prefixes have them (C++, and C_TOKENIZER_UTF_RAW_STRINGS).
+    bool raw_strings;
+    bool utf_raw_strings;
     // C_TOKENIZER_NO_DOLLARS: '$' takes no part in identifiers and pp-numbers (false, the default, as clang's C has it).
     bool no_dollars;
     bool no_digraphs; // C_TOKENIZER_NO_DIGRAPHS
@@ -1367,9 +1381,9 @@ static uint64_t lex_ud_suffix(const ScalarLexer* lexer, uint64_t position, bool 
     return result;
 }
 
-// clang's LexRawStringLiteral (C++): returns the end of the raw string literal whose `R"` ends at `position`, and
-// turns `kind` into `C_TOKEN_UNKNOWN` if its delimiter is invalid or it is unterminated. Inside of it, trigraphs and
-// line splices are undone, so it is read from the source bytes.
+// clang's LexRawStringLiteral: returns the end of the raw string literal whose `R"` ends at `position`, and turns
+// `kind` into `C_TOKEN_UNKNOWN` if its delimiter is invalid or it is unterminated. Inside of it, trigraphs and line
+// splices are undone, so it is read from the source bytes. In C++, a user-defined suffix is part of the literal.
 static uint64_t lex_raw_string(const ScalarLexer* lexer, uint64_t position, uint8_t* kind)
 {
     const uint8_t* s = lexer->source;
@@ -1409,7 +1423,7 @@ static uint64_t lex_raw_string(const ScalarLexer* lexer, uint64_t position, uint
         }
         if (terminated)
         {
-            result = lex_ud_suffix(lexer, p, true);
+            result = lexer->cplusplus ? lex_ud_suffix(lexer, p, true) : p;
         }
         else
         {
@@ -1552,6 +1566,9 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
         .length = length,
         .trigraphs = (flags & C_TOKENIZER_TRIGRAPHS) != 0,
         .cplusplus = (flags & C_TOKENIZER_CPLUSPLUS) != 0,
+        .raw_strings = (flags & (C_TOKENIZER_CPLUSPLUS | C_TOKENIZER_RAW_STRINGS)) != 0,
+        .utf_raw_strings = (flags & C_TOKENIZER_CPLUSPLUS) != 0 || (flags & (C_TOKENIZER_RAW_STRINGS | C_TOKENIZER_UTF_RAW_STRINGS)) ==
+                                                                     (C_TOKENIZER_RAW_STRINGS | C_TOKENIZER_UTF_RAW_STRINGS),
         .no_dollars = (flags & C_TOKENIZER_NO_DOLLARS) != 0,
         .no_digraphs = (flags & C_TOKENIZER_NO_DIGRAPHS) != 0,
         .no_line_comments = (flags & C_TOKENIZER_NO_LINE_COMMENTS) != 0,
@@ -1619,8 +1636,9 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
                 break;
             case 'L': case 'u': case 'U': case 'R':
             {
-                // Prefixed character constants and string literals: L, u8, u and U, in the order of the kinds. In
-                // C++, R (after one of those or alone) starts a raw string literal.
+                // Prefixed character constants and string literals: L, u8, u and U, in the order of the kinds. With raw
+                // strings, R (alone or after L, and after u8, u or U where those have raw strings) starts a raw string
+                // literal.
                 uint8_t prefix = c == 'L' ? 1 : c == 'u' ? 3 : c == 'U' ? 4 : 0;
                 c2 = peek_char(lexer, p, &size2);
                 uint64_t quote_end = p + size2;
@@ -1628,7 +1646,7 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
                 {
                     uint64_t size3;
                     int32_t c3 = peek_char(lexer, quote_end, &size3);
-                    if (c3 == '"' || c3 == '\'' || (c3 == 'R' && lexer->cplusplus))
+                    if (c3 == '"' || c3 == '\'' || (c3 == 'R' && lexer->utf_raw_strings))
                     {
                         prefix = 2;
                         c2 = c3;
@@ -1636,7 +1654,7 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
                     }
                 }
                 bool raw = false;
-                if (lexer->cplusplus && (c == 'R' || c2 == 'R'))
+                if ((c == 'R' || c == 'L' ? lexer->raw_strings : lexer->utf_raw_strings) && (c == 'R' || c2 == 'R'))
                 {
                     uint64_t size3;
                     if (c == 'R')
@@ -1903,10 +1921,13 @@ static int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t
 // literals and line comments), a splice after a backslash or apostrophe or with whitespace before its newline, a
 // non-ASCII byte or UCN outside of literals and comments (a UTF-8 identifier or a stray character), a stray
 // backslash before a quote or backslash, the overlapping comment delimiters "/*/" and "*/*", an unterminated block
-// comment, block comments whose lines need more than a few rescans to settle, C++'s raw string literals, and
-// trigraphs (when enabled, for the whole source).
+// comment, block comments whose lines need more than a few rescans to settle, raw string literals, and trigraphs
+// (when enabled, for the whole source).
 //
 // C++ (C_TOKENIZER_CPLUSPLUS) is a specialization of the same chunk loop: it adds "<=>", "->*" and ".*", the "<::"
+// rule, user-defined literal suffixes and raw string literals. So is C with raw string literals
+// (C_TOKENIZER_RAW_STRINGS), whose check is C++'s: it finds every u8R, uR and UR literal too, which before C11
+// (without C_TOKENIZER_UTF_RAW_STRINGS) the scalar lexer then lexes as an identifier and a string literal.
 // rule and user-defined literal suffixes. So is C without digraphs (C_TOKENIZER_NO_DIGRAPHS), by its table of
 // first-character channels alone (c_first_char_channels_no_digraphs), in which no digraph pairs: the loops are the same
 // code. And C without `//` comments (C_TOKENIZER_NO_LINE_COMMENTS, c89 and C94 only), whose line-comment marks are empty.
@@ -2138,25 +2159,6 @@ BUSTER_INLINE bool splice_joins(uint8_t earlier, uint8_t before, uint8_t after, 
 BUSTER_INLINE uint8_t source_byte(const uint8_t* source, uint64_t begin, uint64_t length, int64_t position)
 {
     return position >= (int64_t)begin && position < (int64_t)length ? source[position] : '\n';
-}
-
-BUSTER_INLINE bool is_identifier_byte(uint8_t c)
-{
-    return c >= 0x80 || (c_char_properties[c] & BUSTER_LEX_CHAR_IDENTIFIER);
-}
-
-// In C++, does the quote at `position` start a raw string literal (it ends an identifier R, LR, u8R, uR or UR)?
-static bool is_raw_string_quote(const uint8_t* source, uint64_t begin, uint64_t length, int64_t position)
-{
-    bool result = false;
-    if (source_byte(source, begin, length, position - 1) == 'R')
-    {
-        const uint8_t before = source_byte(source, begin, length, position - 2);
-        const uint8_t earlier = source_byte(source, begin, length, position - 3);
-        result = !is_identifier_byte(before) || ((before == 'L' || before == 'u' || before == 'U') && !is_identifier_byte(earlier)) ||
-                 (before == '8' && earlier == 'u' && !is_identifier_byte(source_byte(source, begin, length, position - 4)));
-    }
-    return result;
 }
 
 // In C++, is the identifier at `position` (after a literal's closing quote) a user-defined suffix of the literal? It
@@ -2690,7 +2692,7 @@ __attribute__((noinline)) static OutputCursors write_chunk_outlined(const ChunkT
 // the scalar lexer (see BUSTER_LEX_NEEDS_SCALAR). Without `digraphs`, Phase I classifies with
 // c_first_char_channels_no_digraphs, and every other step is as with them, so the two loops are the same code; without
 // `line_comments`, "//" marks no comment.
-BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs, const bool line_comments, const bool separators, const uint8_t* source, uint64_t length, uint64_t begin,
+BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs, const bool line_comments, const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin,
                                uint8_t* restrict kinds_out, uint32_t* restrict starts_out, uint32_t* restrict ends_out, uint64_t* written, uint64_t* restart,
                                uint64_t* scalar_until)
 {
@@ -3243,26 +3245,11 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         U64x8 unknown_starts = zero;
         uint64_t next_suppressed_starts = 0;
         uint64_t next_suppressed_ends = 0;
-        const uint64_t next_quotes = (BUSTER_LEX_NEXT(M_QUOTE) | BUSTER_LEX_NEXT(M_APOSTROPHE)) & 3;
+        // The quotes in the next chunk's first bytes that an identifier ending this chunk can be the prefix of: an L,
+        // u8, u or U literal's, and a u8R, uR or UR raw string literal's (three bytes on).
+        const uint64_t next_quotes = (BUSTER_LEX_NEXT(M_QUOTE) | BUSTER_LEX_NEXT(M_APOSTROPHE)) & (raw_strings ? 7 : 3);
         if (BUSTER_UNLIKELY(!is_zero(literal_starts & shl_carry(identifier_token, previous_identifier_token, 1)) | ((bit_511(identifier_token) & (uint64_t)(next_quotes != 0)) != 0)))
         {
-            // C++'s raw string literals need the scalar lexer. (A quote after an identifier character is checked only
-            // where it starts a literal, rather than at each one before the scan: most end strings. The scan is right
-            // up to the first raw string literal, which starts one.)
-            if (cplusplus)
-            {
-                const U64x8 prefixed_quotes = quote & literal_starts & shl_carry(identifier_token, previous_identifier_token, 1);
-                for (uint32_t lane = 0; lane < BUSTER_LEX_VECTOR_COUNT; lane += 1)
-                {
-                    for (uint64_t bits = prefixed_quotes[lane]; bits != 0; bits &= bits - 1)
-                    {
-                        if (is_raw_string_quote(source, begin, length, chunk_position + BUSTER_LEX_VECTOR_BYTES * lane + __builtin_ctzll(bits)))
-                        {
-                            return BUSTER_LEX_NEEDS_SCALAR;
-                        }
-                    }
-                }
-            }
             U64x8 letter;
             U64x8 u;
             U64x8 eight;
@@ -3274,6 +3261,27 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
             }
             letter |= u;
             const uint64_t next_eight = _mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8('8'));
+            // Raw string literals need the scalar lexer. One starts at an identifier R, LR, u8R, uR or UR right before
+            // a quote: an identifier token's start is outside of literals and comments, and so is the quote. (Before
+            // C11, without C_TOKENIZER_UTF_RAW_STRINGS, the scalar lexer then finds that u8R, uR and UR start none.)
+            // The scan before is right up to the first raw string literal, whose quote it takes for a string's.
+            if (raw_strings)
+            {
+                U64x8 r;
+                for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
+                {
+                    r[j] = _mm512_cmpeq_epi8_mask(raw[j], splat8('R'));
+                }
+                const uint64_t next_r = _mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8('R'));
+                const uint64_t next_quote = BUSTER_LEX_NEXT(M_QUOTE);
+                const U64x8 raw_starts = identifier_starts & ((r & shr_next(quote, next_quote, 1)) |
+                                                              (letter & shr_next(r, next_r, 1) & shr_next(quote, next_quote, 2)) |
+                                                              (u & shr_next(eight, next_eight, 1) & shr_next(r, next_r, 2) & shr_next(quote, next_quote, 3)));
+                if (!is_zero(raw_starts))
+                {
+                    return BUSTER_LEX_NEEDS_SCALAR;
+                }
+            }
             const U64x8 one_letter = identifier_starts & letter & shr_next(literal_starts, next_quotes, 1);
             const U64x8 u8 = identifier_starts & u & shr_next(eight, next_eight, 1) & shr_next(literal_starts, next_quotes, 2);
             prefix_starts = one_letter | u8;
@@ -3388,44 +3396,56 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
 __attribute__((noinline)) static int64_t tokenize_c(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                     uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, true, true, true, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_no_digraphs(const bool separators, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+__attribute__((noinline)) static int64_t tokenize_c_no_digraphs(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                 uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, false, true, separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, false, true, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_no_line_comments(const bool separators, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+__attribute__((noinline)) static int64_t tokenize_c_no_line_comments(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                      uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, true, false, separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, true, false, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_no_digraphs_no_line_comments(const bool separators, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds,
+__attribute__((noinline)) static int64_t tokenize_c_no_digraphs_no_line_comments(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds,
                                                                                  uint32_t* starts, uint32_t* ends, uint64_t* written, uint64_t* restart,
                                                                                  uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, false, false, separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, false, false, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 __attribute__((noinline)) static int64_t tokenize_cpp(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                       uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(true, true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 __attribute__((noinline)) static int64_t tokenize_c_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                   uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, true, true, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, true, true, false, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 __attribute__((noinline)) static int64_t tokenize_cpp_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                     uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(true, true, true, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(true, true, true, false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+}
+
+__attribute__((noinline)) static int64_t tokenize_c_raw(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+                                                        uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
+{
+    return tokenize_chunks(false, true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+}
+
+__attribute__((noinline)) static int64_t tokenize_c_raw_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+                                                                      uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
+{
+    return tokenize_chunks(false, true, true, false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 // The chunk loop that `flags` ask for (C_TOKENIZER_CPLUSPLUS, C_TOKENIZER_NO_DIGRAPHS and C_TOKENIZER_NO_LINE_COMMENTS;
@@ -3436,22 +3456,28 @@ static int64_t tokenize_with_flags(uint32_t flags, const uint8_t* source, uint64
     const bool digraphs = (flags & C_TOKENIZER_NO_DIGRAPHS) == 0;
     const bool line_comments = (flags & C_TOKENIZER_NO_LINE_COMMENTS) == 0;
     const bool separators = (flags & C_TOKENIZER_NO_DIGIT_SEPARATORS) == 0;
+    const bool raw_strings = (flags & C_TOKENIZER_RAW_STRINGS) != 0;
     int64_t result;
     if (flags & C_TOKENIZER_CPLUSPLUS)
     {
         result = separators ? tokenize_cpp(source, length, begin, kinds, starts, ends, written, restart, scalar_until)
                             : tokenize_cpp_no_separators(source, length, begin, kinds, starts, ends, written, restart, scalar_until);
     }
+    else if (line_comments && digraphs && raw_strings)
+    {
+        result = separators ? tokenize_c_raw(source, length, begin, kinds, starts, ends, written, restart, scalar_until)
+                            : tokenize_c_raw_no_separators(source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    }
     else if (line_comments)
     {
-        result = !digraphs ? tokenize_c_no_digraphs(separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until)
+        result = !digraphs ? tokenize_c_no_digraphs(separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until)
                            : separators ? tokenize_c(source, length, begin, kinds, starts, ends, written, restart, scalar_until)
                                         : tokenize_c_no_separators(source, length, begin, kinds, starts, ends, written, restart, scalar_until);
     }
     else
     {
-        result = digraphs ? tokenize_c_no_line_comments(separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until)
-                          : tokenize_c_no_digraphs_no_line_comments(separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+        result = digraphs ? tokenize_c_no_line_comments(separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until)
+                          : tokenize_c_no_digraphs_no_line_comments(separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
     }
     return result;
 }
