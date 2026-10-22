@@ -396,8 +396,8 @@ struct PPExpansionStart
 #define BUSTER_PP_MACRO_COMPILED 0x04 // pp_compile_macro made its body items.
 #define BUSTER_PP_MACRO_BUILTIN 0x08
 #define BUSTER_PP_MACRO_PASTES 0x10 // Its body has ## (an object-like macro then needs a buffer).
-// Its body uses its parameters expanded first in their order and has no __VA_OPT__: its arguments are expanded in
-// order (pp_continue_invocation).
+// Its body has no __VA_OPT__: its arguments are expanded in an order known from its definition, its parameters' first
+// expanded uses, which pp_compile_macro lists after its items (pp_continue_invocation).
 #define BUSTER_PP_MACRO_IN_ORDER 0x20
 // #pragma push_macro pushed it: a redefinition is no warning (clang's isAllowRedefinitionsWithoutWarning).
 #define BUSTER_PP_MACRO_REDEFINABLE 0x40
@@ -448,6 +448,8 @@ struct PPMacro
     // Nonzero while its expansion is being rescanned.
     uint8_t disabled;
     uint16_t parameter_count; // With the variadic one.
+    // A BUSTER_PP_MACRO_IN_ORDER macro's: how many parameters its arguments are expanded for, listed after its items.
+    uint16_t order_count;
     // Where its definition is: the file's data, the base of the range it was read in, the replacement list's tokens.
     uint32_t data;
     uint32_t base;
@@ -2377,7 +2379,7 @@ BUSTER_INLINE bool pp_is_defined(const Preprocessor* pp, IdentId id)
     return builtin != PP_BUILTIN_POISONED && builtin != PP_BUILTIN_DEFINED;
 }
 
-static void pp_check_poison(Preprocessor* pp, IdentId id, uint32_t location)
+BUSTER_INLINE void pp_check_poison(Preprocessor* pp, IdentId id, uint32_t location)
 {
     if (pp_is_poisoned(pp, id))
     {
@@ -2900,22 +2902,37 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     }
     // The parameters substituted expanded: those that aren't an operand of ## (or of #, which has its own item). A
     // parameter that ends a __VA_OPT__'s content is no operand of a ## after the __VA_OPT__: the content is expanded first.
-    // Their first uses in order and no __VA_OPT__ make the macro BUSTER_PP_MACRO_IN_ORDER.
+    // Without __VA_OPT__, the macro is BUSTER_PP_MACRO_IN_ORDER: each parameter's first such use is listed after the
+    // items, as a PP_ITEM_PARAMETER item (`listed` has a bit per parameter), and its arguments are expanded in that order.
+    // If there's no room for the list, its arguments are expanded by walking its body.
     const PPItem* items = pp->items + macro->items_begin;
     const uint32_t count = pp->item_count - macro->items_begin;
+    Scratch scratch = scratch_begin(0);
+    const uint64_t words = ((uint64_t)macro->parameter_count + 63) / 64;
+    uint64_t* listed = arena_push_array(scratch.arena, words, sizeof(uint64_t), 8);
+    if (listed != 0)
+    {
+        memset(listed, 0, words * sizeof(uint64_t));
+    }
     uint32_t content_end = BUSTER_PP_NONE;
-    bool in_order = true;
+    bool in_order = listed != 0;
+    uint32_t order_count = 0;
     for (uint32_t i = 0; result && i < count; i += 1)
     {
         if (items[i].kind == PP_ITEM_PARAMETER)
         {
             const bool pasted = (i > 0 && items[i - 1].kind == PP_ITEM_PASTE) || (i + 1 < count && i + 1 != content_end && items[i + 1].kind == PP_ITEM_PASTE);
-            const uint64_t bit = 1ull << (items[i].parameter < 63 ? items[i].parameter : 63);
-            if (!pasted)
+            const uint32_t parameter = items[i].parameter;
+            macro->expanded_parameters |= pasted ? 0 : 1ull << (parameter < 63 ? parameter : 63);
+            if (!pasted && in_order && !((listed[parameter / 64] >> (parameter % 64)) & 1))
             {
-                // A first use after a later parameter's.
-                in_order = in_order && ((macro->expanded_parameters & bit) != 0 || macro->expanded_parameters < bit);
-                macro->expanded_parameters |= bit;
+                listed[parameter / 64] |= 1ull << (parameter % 64);
+                in_order = pp->item_count + order_count < BUSTER_PP_MAX_ITEMS;
+                if (in_order)
+                {
+                    pp->items[pp->item_count + order_count] = (PPItem){ .kind = PP_ITEM_PARAMETER, .parameter = (uint16_t)parameter };
+                    order_count += 1;
+                }
             }
         }
         else if (items[i].kind == PP_ITEM_VA_OPT || items[i].kind == PP_ITEM_STRINGIZE_VA_OPT)
@@ -2927,7 +2944,11 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             in_order = false;
         }
     }
-    macro->flags |= in_order && macro->parameter_count < 63 ? BUSTER_PP_MACRO_IN_ORDER : 0;
+    scratch_end(scratch);
+    in_order = in_order && result;
+    macro->flags |= in_order ? BUSTER_PP_MACRO_IN_ORDER : 0;
+    macro->order_count = (uint16_t)(in_order ? order_count : 0);
+    pp->item_count += in_order ? order_count : 0;
     macro->item_count = result ? count : 0;
     macro->flags |= result ? BUSTER_PP_MACRO_COMPILED : 0;
     if (!result)
@@ -3472,25 +3493,41 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     return result;
 }
 
-// A token's spelling for a paste: an identifier's as it was written when its name has a byte past 0x7F (so with its
-// UCNs, as clang pastes it), and any other's from pp_spelling. `buffer` has room for pp_spelling's, and `written` for
-// ten bytes per byte of an identifier's name (\U00000024 is `$`).
-static uint32_t pp_paste_spelling(Preprocessor* pp, PPToken token, uint8_t* buffer, uint8_t* written, const uint8_t** spelling)
+// Whether `length` bytes have one past 0x7F: 64 at a time in masked loads, or for the scalar kernels one at a time.
+BUSTER_INLINE bool pp_has_non_ascii(const uint8_t* bytes, uint32_t length, bool vectorized)
 {
-    uint32_t result = pp_spelling(pp, token.kind, token.value, token.location, buffer, spelling);
-    bool non_ascii = false;
-    for (uint32_t k = 0; token.kind == C_TOKEN_RAW_IDENTIFIER && k < result; k += 1)
+    bool result = false;
+    for (uint32_t k = 0; vectorized && !result && k < length; k += 64)
     {
-        non_ascii |= (*spelling)[k] >= 0x80;
+        const uint32_t available = length - k < 64 ? length - k : 64;
+        result = _mm512_movepi8_mask(_mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, available), bytes + k)) != 0;
     }
-    if (non_ascii && written != 0)
+    for (uint32_t k = 0; !vectorized && k < length; k += 1)
     {
-        const uint8_t* as_written = 0;
-        const uint32_t length = pp_identifier_as_written(pp, token.location, written, &as_written);
-        *spelling = length != 0 ? as_written : *spelling;
-        result = length != 0 ? length : result;
+        result |= bytes[k] >= 0x80;
     }
     return result;
+}
+
+// An identifier's spelling as it was written, for pp_paste_spelling: in `arena`, which gets up to ten bytes per byte
+// of its interned spelling's `length` (\U00000024 is `$`). Returns its length, or `length` (and leaves *spelling) if it
+// has none.
+static uint32_t pp_paste_written(Preprocessor* pp, uint32_t location, uint32_t length, Arena* arena, const uint8_t** spelling)
+{
+    uint8_t* written = arena_push(arena, 10 * (uint64_t)length + 24, 1);
+    const uint8_t* as_written = 0;
+    const uint32_t written_length = written != 0 ? pp_identifier_as_written(pp, location, written, &as_written) : 0;
+    *spelling = written_length != 0 ? as_written : *spelling;
+    return written_length != 0 ? written_length : length;
+}
+
+// A token's spelling for a paste: an identifier's as it was written when its name has a byte past 0x7F (so with its
+// UCNs, as clang pastes it: pp_paste_written), and any other's from pp_spelling, which `buffer` has room for.
+BUSTER_INLINE uint32_t pp_paste_spelling(Preprocessor* pp, PPToken token, uint8_t* buffer, Arena* arena, const uint8_t** spelling)
+{
+    const uint32_t length = pp_spelling(pp, token.kind, token.value, token.location, buffer, spelling);
+    const bool non_ascii = token.kind == C_TOKEN_RAW_IDENTIFIER && pp_has_non_ascii(*spelling, length, pp->vectorized);
+    return non_ascii ? pp_paste_written(pp, token.location, length, arena, spelling) : length;
 }
 
 // Pastes two tokens (C 6.10.5.3): their spellings joined (pp_paste_spelling) must lex as exactly one token. Returns
@@ -3506,10 +3543,8 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
     const bool right_name = right.kind == C_TOKEN_RAW_IDENTIFIER;
     uint8_t* left_space = left_name || left.kind == BUSTER_PP_KIND_INTEGER ? left_buffer : arena_push(scratch.arena, left.value - left.location + 1, 1);
     uint8_t* right_space = right_name || right.kind == BUSTER_PP_KIND_INTEGER ? right_buffer : arena_push(scratch.arena, right.value - right.location + 1, 1);
-    uint8_t* left_written = left_name ? arena_push(scratch.arena, 10 * (uint64_t)intern_length(pp->table, left.value) + 24, 1) : 0;
-    uint8_t* right_written = right_name ? arena_push(scratch.arena, 10 * (uint64_t)intern_length(pp->table, right.value) + 24, 1) : 0;
-    const uint32_t left_length = pp_paste_spelling(pp, left, left_space, left_written, &left_spelling);
-    const uint32_t right_length = pp_paste_spelling(pp, right, right_space, right_written, &right_spelling);
+    const uint32_t left_length = pp_paste_spelling(pp, left, left_space, scratch.arena, &left_spelling);
+    const uint32_t right_length = pp_paste_spelling(pp, right, right_space, scratch.arena, &right_spelling);
     uint8_t* joined = arena_push(scratch.arena, (uint64_t)left_length + right_length + 1, 1);
     bool valid = false;
     if (joined != 0)
@@ -3523,10 +3558,16 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
         // need to lex them. The scalar kernels lex every paste.
         bool identifier = pp->vectorized && left.kind == C_TOKEN_RAW_IDENTIFIER &&
                           (right.kind == C_TOKEN_RAW_IDENTIFIER || right.kind == C_TOKEN_NUMERIC_CONSTANT || right.kind == BUSTER_PP_KIND_INTEGER);
-        for (uint32_t k = 0; identifier && k < length; k += 1)
+        for (uint32_t k = 0; identifier && k < length; k += 64)
         {
-            const uint8_t c = joined[k];
-            identifier = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$';
+            // Letters (either case, with 0x20 set), digits, '_' and '$', 64 bytes at a time.
+            const uint32_t available = length - k < 64 ? length - k : 64;
+            const __mmask64 valid = _bzhi_u64(~0ull, available);
+            const __m512i c = _mm512_maskz_loadu_epi8(valid, joined + k);
+            const __mmask64 letters = _mm512_cmplt_epu8_mask(_mm512_sub_epi8(_mm512_or_si512(c, _mm512_set1_epi8(0x20)), _mm512_set1_epi8('a')), _mm512_set1_epi8(26));
+            const __mmask64 digits = _mm512_cmplt_epu8_mask(_mm512_sub_epi8(c, _mm512_set1_epi8('0')), _mm512_set1_epi8(10));
+            const __mmask64 others = _mm512_cmpeq_epi8_mask(c, _mm512_set1_epi8('_')) | _mm512_cmpeq_epi8_mask(c, _mm512_set1_epi8('$'));
+            identifier = ((letters | digits | others) & valid) == valid;
         }
         uint8_t kind = C_TOKEN_RAW_IDENTIFIER;
         if (identifier)
@@ -4335,7 +4376,7 @@ static bool pp_start_capture(Preprocessor* pp, PPCapture capture, uint32_t begin
 // Starts expanding the top invocation's argument `parameter` if it names an enabled macro: a barrier context with a
 // capture, which the main loop runs (pp_finish_argument takes it from there). Else the argument is its own expansion.
 // Returns whether the main loop must run the capture.
-static bool pp_expand_argument(Preprocessor* pp, uint32_t parameter)
+BUSTER_INLINE bool pp_expand_argument(Preprocessor* pp, uint32_t parameter)
 {
     const uint32_t index = pp->invocation_count - 1;
     const PPInvocation* invocation = &pp->invocations[index];
@@ -4371,12 +4412,11 @@ static void pp_continue_invocation(Preprocessor* pp)
     bool waiting = false;
     if (macro->flags & BUSTER_PP_MACRO_IN_ORDER)
     {
-        while (!waiting && invocation->next < invocation->argument_count && !pp->fatal)
+        const PPItem* order = pp->items + macro->items_begin + macro->item_count;
+        while (!waiting && invocation->next < macro->order_count && !pp->fatal)
         {
-            const uint32_t parameter = invocation->next;
-            const bool expanded = (macro->expanded_parameters >> parameter) & 1;
-            const bool known = pp->argument_records[invocation->arguments + parameter].expanded;
-            waiting = expanded && !known && pp_expand_argument(pp, parameter);
+            const uint32_t parameter = order[invocation->next].parameter;
+            waiting = parameter < invocation->argument_count && !pp->argument_records[invocation->arguments + parameter].expanded && pp_expand_argument(pp, parameter);
             invocation->next += !waiting;
         }
     }
