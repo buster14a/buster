@@ -19,6 +19,15 @@
 //     (BUSTER_LINK_SOURCE_RUNTIME_SHARED, without a type, as undefined symbols are in a compiler's objects), and its
 //     code reaches them through the GOT, as the direct path binds imports (docs/object-writer-and-linker.md, "Binding
 //     before instruction selection").
+//   - With LinkProgramOptions.shared, a program that calls libc built as a shared library, as -shared links it: its
+//     main is buster_library_main, which a program loads the library (dlopen) to call (dlsym) with main's arguments,
+//     after the loader has run its init functions. Its code is position-independent: its functions (the workers,
+//     buster_mix and buster_library_main) are its exports, global with default visibility, which another object may
+//     preempt, and every other global symbol is hidden, since the code reaches the variables and buster_constants
+//     RIP-relatively (PC32, PC64) and takes their sizes; its thread-locals are reached with initial-exec (GOTTPOFF),
+//     since a shared library can't know their offsets from the thread pointer (local-exec's TPOFF32); and each
+//     function's FDE points at a local symbol at the function's start, as a compiler's FDEs point at a local label,
+//     since a PC32 to a function another object may preempt is no offset the library can know.
 // Either kind refers through the GOT to buster_absent, a weak symbol that nothing defines (BUSTER_LINK_SOURCE_NONE).
 // Link either with wild 0.10, which doesn't link SIZE32 and SIZE64, without LinkProgramOptions.sizes. The program
 // prints a checksum of everything it read, as 16 hexadecimal digits and a newline (LinkProgram.output), and exits with
@@ -118,6 +127,10 @@ struct LinkProgramOptions
     // Whether the program calls libc: a main that the C runtime calls, and imports from libc, instead of a _start that
     // makes system calls.
     bool libc;
+    // Whether the program is a shared library (-shared), which a program loads (dlopen) to call its entry,
+    // buster_library_main, with main's arguments: position-independent code, whose exports are its functions alone (see
+    // the orientation comment). With libc, and without absolute.
+    bool shared;
 };
 
 typedef struct LinkProgramPlan LinkProgramPlan;
@@ -674,6 +687,7 @@ static const uint8_t link_program_cie[BUSTER_LINK_PROGRAM_CIE_BYTES] = {
 typedef struct LinkProgramUnwind LinkProgramUnwind;
 struct LinkProgramUnwind
 {
+    // What its FDE points at: the function's symbol, or an exported function's anchor (LinkProgramBuilder.first_anchor).
     SymbolId symbol;
     uint32_t unit;
     uint32_t length;
@@ -715,6 +729,9 @@ struct LinkProgramBuilder
     SymbolId first_thread_local;
     SymbolId first_hook;
     SymbolId first_string;
+    // With LinkProgramOptions.shared, the local symbols at the exported functions' starts that their FDEs point at:
+    // each worker's, then buster_mix's and buster_library_main's.
+    SymbolId first_anchor;
     // Each function's FDE, in the order the functions were added, room for unwind_capacity of them.
     LinkProgramUnwind* unwind;
     uint32_t unwind_count;
@@ -953,7 +970,7 @@ static uint32_t link_program_unwind_instructions(const LinkProgramCode* code, ui
 }
 
 // Keeps the FDE of the function `symbol`, which `code` holds encoded at `length` bytes, for its unit's .eh_frame.
-static bool link_program_keep_unwind(LinkProgramBuilder* builder, uint32_t unit, SymbolId symbol, uint64_t length)
+static bool link_program_keep_unwind(LinkProgramBuilder* builder, uint32_t unit, SymbolId symbol, SymbolId anchor, uint64_t length)
 {
     LinkProgram* program = builder->program;
     uint8_t instructions[BUSTER_LINK_PROGRAM_MAX_UNWIND_BYTES];
@@ -963,7 +980,7 @@ static bool link_program_keep_unwind(LinkProgramBuilder* builder, uint32_t unit,
     {
         memcpy(kept, instructions, count);
         builder->unwind[builder->unwind_count] = (LinkProgramUnwind){
-            .symbol = symbol,
+            .symbol = anchor,
             .unit = unit,
             .length = (uint32_t)length,
             .instruction_bytes = count,
@@ -976,6 +993,19 @@ static bool link_program_keep_unwind(LinkProgramBuilder* builder, uint32_t unit,
         program->problem = "out of memory for the unwind tables";
     }
     return kept != 0;
+}
+
+// The local symbol at an exported function's start that its FDE points at in a shared library, or 0 (see the
+// orientation comment): a worker's, buster_mix's or buster_library_main's.
+static SymbolId link_program_anchor(const LinkProgramBuilder* builder, SymbolId symbol)
+{
+    const uint32_t functions = builder->plan->options.functions;
+    const bool worker = symbol >= builder->first_worker && symbol < builder->first_worker + functions;
+    const SymbolId anchor = worker ? builder->first_anchor + (symbol - builder->first_worker)
+                            : symbol == builder->mix ? builder->first_anchor + functions
+                            : symbol == builder->main ? builder->first_anchor + functions + 1
+                                                      : 0;
+    return builder->plan->options.shared ? anchor : 0;
 }
 
 // Encodes the function being built as an atom of `unit` that defines `symbol`. The first encoding gives the offsets
@@ -1014,9 +1044,12 @@ static bool link_program_finish(LinkProgramBuilder* builder, uint32_t unit, Symb
         memset(output + length, BUSTER_LINK_PROGRAM_INT3, padded - (uint64_t)length);
         arena_pop_to(&program->bytes, (uint64_t)(output - program->bytes.base) + padded);
         const AtomId atom = link_add_atom(&program->link, BUSTER_LINK_CLASS_TEXT, BUSTER_LINK_PROGRAM_FUNCTION_ALIGNMENT_LOG2, padded, output, unit);
+        // An exported function's FDE points at its anchor, defined at its start too.
+        const SymbolId anchor = link_program_anchor(builder, symbol);
         result = atom != 0 && link_add_code_fixups(&program->link, atom, code->instructions, count, code->fixup_ends, code->marked, code->references,
                                                    code->reference_count) &&
-                 link_define_symbol(&program->link, symbol, atom, 0, (uint64_t)length) && link_program_keep_unwind(builder, unit, symbol, (uint64_t)length);
+                 link_define_symbol(&program->link, symbol, atom, 0, (uint64_t)length) && (anchor == 0 || link_define_symbol(&program->link, anchor, atom, 0, 0)) &&
+                 link_program_keep_unwind(builder, unit, symbol, anchor != 0 ? anchor : symbol, (uint64_t)length);
         program->instructions += count;
         program->code_bytes += (uint64_t)length;
     }
@@ -1437,8 +1470,18 @@ static bool link_program_emit_worker(LinkProgramBuilder* builder, uint32_t index
     link_program_refer(code, link_program_rip(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_PC32, builder->constants,
                        8 * (int64_t)worker->constant);
     link_program_add(code, link_program_registers(X86_FORM_ADD_R64_RM64, X86_REGISTER_RBX, X86_REGISTER_RAX));
-    link_program_refer(code, link_program_absolute(X86_FORM_MOV_R64_RM64 + BUSTER_X86_FORM_FS, X86_REGISTER_RAX), X86_FIXUP_DISPLACEMENT,
-                       BUSTER_LINK_FIXUP_TPOFF32, builder->first_thread_local + worker->local_exec, 0);
+    // The local-exec thread-local, which a shared library reaches with initial-exec: its offset from its GOT slot.
+    if (plan->options.shared)
+    {
+        link_program_refer(code, link_program_rip(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_GOTTPOFF,
+                           builder->first_thread_local + worker->local_exec, 0);
+        link_program_add(code, link_program_memory(X86_FORM_MOV_R64_RM64 + BUSTER_X86_FORM_FS, X86_REGISTER_RAX, X86_REGISTER_RAX, 0));
+    }
+    else
+    {
+        link_program_refer(code, link_program_absolute(X86_FORM_MOV_R64_RM64 + BUSTER_X86_FORM_FS, X86_REGISTER_RAX), X86_FIXUP_DISPLACEMENT,
+                           BUSTER_LINK_FIXUP_TPOFF32, builder->first_thread_local + worker->local_exec, 0);
+    }
     link_program_add(code, link_program_registers(X86_FORM_ADD_R64_RM64, X86_REGISTER_RBX, X86_REGISTER_RAX));
     link_program_refer(code, link_program_rip(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_GOTTPOFF,
                        builder->first_thread_local + worker->initial_exec, 0);
@@ -1462,8 +1505,17 @@ static bool link_program_emit_worker(LinkProgramBuilder* builder, uint32_t index
     }
     link_program_refer(code, link_program_rip(X86_FORM_MOV_RM64_R64, X86_REGISTER_RBX), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_PC32,
                        builder->first_global + worker->write_global, 0);
-    link_program_refer(code, link_program_absolute(X86_FORM_ADD_RM64_R64 + BUSTER_X86_FORM_FS, X86_REGISTER_RBX), X86_FIXUP_DISPLACEMENT,
-                       BUSTER_LINK_FIXUP_TPOFF32, builder->first_thread_local + worker->local_exec, 0);
+    if (plan->options.shared)
+    {
+        link_program_refer(code, link_program_rip(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_GOTTPOFF,
+                           builder->first_thread_local + worker->local_exec, 0);
+        link_program_add(code, link_program_memory(X86_FORM_ADD_RM64_R64 + BUSTER_X86_FORM_FS, X86_REGISTER_RBX, X86_REGISTER_RAX, 0));
+    }
+    else
+    {
+        link_program_refer(code, link_program_absolute(X86_FORM_ADD_RM64_R64 + BUSTER_X86_FORM_FS, X86_REGISTER_RBX), X86_FIXUP_DISPLACEMENT,
+                           BUSTER_LINK_FIXUP_TPOFF32, builder->first_thread_local + worker->local_exec, 0);
+    }
     link_program_add(code, link_program_registers(X86_FORM_TEST_RM32_R32, X86_REGISTER_R12, X86_REGISTER_R12));
     link_program_jump(code, X86_FORM_JE_REL32, done);
     link_program_add(code, link_program_registers(X86_FORM_MOV_R64_RM64, X86_REGISTER_RDI, X86_REGISTER_RBX));
@@ -1829,7 +1881,13 @@ static bool link_program_add_symbols(LinkProgramBuilder* builder)
     const uint8_t import = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE;
     const uint8_t runtime = BUSTER_LINK_SOURCE_RUNTIME_SHARED;
     const bool libc = options->libc;
-    if (libc)
+    // A shared library's data, which its code reaches RIP-relatively, is hidden (see the orientation comment).
+    const uint8_t hidden = options->shared ? BUSTER_LINK_SYMBOL_HIDDEN : 0;
+    if (options->shared)
+    {
+        builder->main = link_program_symbol(link, "buster_library_main", 0, false, global_function, program);
+    }
+    else if (libc)
     {
         builder->main = link_program_symbol(link, "main", 0, false, global_function, program);
     }
@@ -1840,7 +1898,7 @@ static bool link_program_add_symbols(LinkProgramBuilder* builder)
     }
     builder->mix = link_program_symbol(link, "buster_mix", 0, false, global_function, program);
     builder->write_hex = link_program_symbol(link, "buster_write_hex", 0, false, local_function, program);
-    builder->constants = link_program_symbol(link, "buster_constants", 0, false, global_object, program);
+    builder->constants = link_program_symbol(link, "buster_constants", 0, false, global_object | hidden, program);
     builder->functions = link_program_symbol(link, "buster_functions", 0, false, local_object, program);
     builder->globals_table = link_program_symbol(link, "buster_globals", 0, false, local_object, program);
     builder->far = link_program_symbol(link, "buster_far", 0, false, local_object, program);
@@ -1871,12 +1929,12 @@ static bool link_program_add_symbols(LinkProgramBuilder* builder)
     builder->first_global = link->symbols.count;
     for (uint32_t i = 0; i < options->globals; i += 1)
     {
-        link_program_symbol(link, "g_", i, true, plan->globals[i].local ? local_object : global_object, program);
+        link_program_symbol(link, "g_", i, true, plan->globals[i].local ? local_object : global_object | hidden, program);
     }
     builder->first_thread_local = link->symbols.count;
     for (uint32_t i = 0; i < options->thread_locals; i += 1)
     {
-        const uint8_t binding = plan->thread_locals[i].local ? BUSTER_LINK_SYMBOL_LOCAL : BUSTER_LINK_SYMBOL_GLOBAL;
+        const uint8_t binding = plan->thread_locals[i].local ? BUSTER_LINK_SYMBOL_LOCAL : BUSTER_LINK_SYMBOL_GLOBAL | hidden;
         link_program_symbol(link, "t_", i, true, binding | BUSTER_LINK_SYMBOL_TLS, program);
     }
     builder->first_hook = link->symbols.count;
@@ -1893,6 +1951,11 @@ static bool link_program_add_symbols(LinkProgramBuilder* builder)
     {
         link_program_symbol(link, 0, 0, false, local_object, program);
     }
+    builder->first_anchor = link->symbols.count;
+    for (uint32_t i = 0; options->shared && i < options->functions + 2; i += 1)
+    {
+        link_program_symbol(link, 0, 0, false, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE, program);
+    }
     return link->error == LINK_ERROR_NONE;
 }
 
@@ -1905,7 +1968,7 @@ static LinkCapacity link_program_capacity(LinkProgramOptions options)
     LinkCapacity result = {
         .names = options.functions + variables + hooks + 16,
         .atoms = options.functions + variables + hooks + 4 * options.units + 11,
-        .symbols = options.functions + variables + hooks + options.units * options.strings + 17,
+        .symbols = options.functions + variables + hooks + options.units * options.strings + 17 + (options.shared ? options.functions + 2 : 0),
         .fixups = 13 * options.functions + options.globals + 3 * hooks + 68,
         .wide_addends = BUSTER_LINK_PROGRAM_FAR_POINTERS,
     };
@@ -1959,7 +2022,8 @@ static bool link_program_generate_begin(LinkProgram* program, LinkProgramOptions
     const bool valid = options.units >= 1 && options.units <= maximum && options.functions >= 1 && options.functions <= maximum && options.globals >= 1 &&
                        options.globals <= maximum && options.thread_locals >= 1 && options.thread_locals <= maximum && options.strings >= 1 &&
                        options.strings <= maximum && (uint64_t)options.units * options.strings <= maximum && options.init_functions <= maximum &&
-                       options.fini_functions <= maximum && options.filler <= BUSTER_LINK_PROGRAM_MAX_FILLER;
+                       options.fini_functions <= maximum && options.filler <= BUSTER_LINK_PROGRAM_MAX_FILLER &&
+                       (!options.shared || (options.libc && !options.absolute));
     // Room for the extra records: each table's total stays below UINT32_MAX, which link_initialize refuses.
     const LinkCapacity own = link_program_capacity(options);
     const bool extra_fits = extra.names < UINT32_MAX - own.names && extra.atoms < UINT32_MAX - own.atoms && extra.symbols < UINT32_MAX - own.symbols &&

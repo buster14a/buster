@@ -1176,6 +1176,11 @@ static const PPTestCase pp_test_cases[] = {
     // moves to the expansion's line when that is another one: the name's, after a line splice.
     { "line markers: a line among a macro's arguments", "#define h(...) __VA_ARGS__\nL\\\n h(\nU\n\"#\")\nx\\\n  h(7\n  y\nz)\n", 0, "c17", "L U \"#\" x 7 y z", false, 0, 0, 0,
       "# 1 \"%d/case.c\"\n\nL U\n\"#\"\n\n\nx 7\ny z\n" },
+    // A paste's result takes its left operand's line start among the arguments, as clang's TokenLexer::pasteTokens
+    // gives it the left one's flags, so the printer moves to the expansion's line at the result, not at the token
+    // after it (seed 14's case 452, C23).
+    { "line markers: a paste of a line among a macro's arguments", "#define E(a) X a ## a .\nx \\\ny \\\nE(f\nz)\n", 0, "c17", "x y X f zf z .", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\n\nx y X f\nzf z .\n" },
     // Directives that read only part of their line expanded, and the rest as it is (Preprocessor::CheckEndOfDirective):
     // #ident its string, #line its number, its name and one token more, a computed #include its header name and one token
     // more, and push_macro and pop_macro their '(', string and ')'. What comes after never expands.

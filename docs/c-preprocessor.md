@@ -17,10 +17,10 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | --- | ---: | ---: |
 | `sqlite3.c` 3.53, with glibc's headers | 1 | 707,153 |
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
-| This repository's translation units (at 8ee1e16, with `main` at c93219a), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,021,842 |
+| This repository's translation units (at fbddd2e, with `main` at e71d7fd), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,070,090 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 209 | |
-| #109's generated cases, against `clang -E -P` ([the fuzzing](preprocessor-fuzz.md)) | 40,000,000 | |
+| The built-in cases (`pp_test_cases`) | 210 | |
+| #109's generated cases in C17 and C23, against `clang -E -P`: the last campaign's and those after it, but for 4 that #247 fixes ([the fuzzing](preprocessor-fuzz.md), "Qualification") | 42,800,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -103,13 +103,45 @@ tables and the name lists are X-macros, so 100,629 object-like expansions,
 21,730 invocations with 162,318 arguments, and 66,530 pastes make more output
 tokens than there are input tokens.
 
+**#109's cost.** The fixes for what #109's fuzzing found cost more. In an
+A/B on the 9700X against `main` (e71d7fd), with this branch merged into it
+(4c6160f), medians of two interleaved rounds (each round's figures within
+0.4% of the other's):
+
+| Translation unit | `main` | With #109's fixes | Instructions/input token |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 11.21 ms | 11.90 ms | 123.28 → 133.31 |
+| `main.c` (`main`'s) | 25.23 ms | 26.37 ms | 340.41 → 372.80 |
+
+On `sqlite3.c`, lexing takes 0.36 ms more (the digit separators, below) and
+the main loop 0.38 ms more. On `main.c`, the main loop takes 0.79 ms more.
+
+What they pay for, each a difference from clang that the fuzzing found:
+- the spaces in a substitution, which follow clang's `NextTokGetsSpace` item
+  by item, and the checks `## ##` and GNU's comma make at every paste;
+- arguments expanded in the order of their parameters' first uses: a macro
+  without `__VA_OPT__` lists that order when it is compiled, and one with it
+  walks its body;
+- before C23, the search for digit separators, which reads every number's
+  bytes ("Not yet"), and the prefixes the mode lacks on unknown tokens
+  (`u8''`);
+- a paste's check of its operands for bytes past 0x7F, 64 at a time: an
+  identifier written with UCNs pastes as written.
+
+Their first versions cost 21% more instructions on `main.c` and 7.5% on
+`sqlite3.c` than the branch's base did (on the 7940HS). Listing the arguments'
+order and checking pastes 64 bytes at a time took back more than half of
+`main.c`'s.
+
 **Budget.** The front-end plan (#115) proposed 2 ms to preprocess `sqlite3.c`,
 about 16 cycles per output token, next to 2 ms for lexing every input and
 1.5 ms for refinement. Measured: 12.00 ms in all, of which lexing is 2.4 ms,
 refinement 3.6 ms, and directive tables and the main loop 5.7 ms, 2.8 times
 the 2 ms proposed. Each phase's time includes the kernel clearing the fresh
 pages it writes, 13% of the samples (see "Where the time goes"). "Next steps"
-lists what would close the gap.
+lists what would close the gap. Since then, #116's budget work has brought
+refinement to 1.67 ms and the whole run to 10.0 ms (measured on 2026-10-22,
+`docs/c-refinement.md`).
 
 ## Object-macro eligibility cache experiment (#110)
 
@@ -848,7 +880,7 @@ differ by up to 1% from code placement alone.
 
 | Piece | Vectorized design | Scalar twin and rare cases | 9700X comparison |
 | --- | --- | --- | --- |
-| Refinement (#116) | Pass A per 64 tokens; pass B batches of 64 identifiers (`docs/c-refinement.md`) | `refine_tokens_scalar`; spliced, UCN and long identifiers | 4.2 times the scalar twin on `sqlite3.c` |
+| Refinement (#116) | Pass A per 64 tokens; pass B batches of 64 identifiers (`docs/c-refinement.md`) | `refine_tokens_scalar`; spliced, UCN and long identifiers | 6.2 times the scalar twin on `sqlite3.c` (4.2 before #116's budget work) |
 | Directive scan (#118) | A compare of 64 kinds with `#` and the start-of-line bit | Token at a time | Part of the directive tables' 1.9% |
 | Conditional pairing (#118) | Depth as a prefix sum, pairing as nearest smaller values by pointer jumping, 32 conditionals at a time | The stack; files with a continuation too many | 16% faster on a file of 36,868 conditionals; within noise on `sqlite3.c` |
 | File and buffer runs (#122) | 64 tokens per step: one compare finds the identifiers, whole-vector stores | Token at a time | The scalar twins: 22.8 ms against 12.0 ms in all |
@@ -973,7 +1005,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 209 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 210 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -1272,10 +1304,11 @@ cleared once and reused.
 - `-E -P` keeps no line numbers, so it doesn't move the token after a
   `_Pragma` that prints nothing to its own line, as clang's printer does when
   that token is on another line; `-E` with line markers does.
-- Before C23, the digit-separator pass (`pp_lex_mode`) costs about 1.2% of
-  `sqlite3.c`'s instructions: it reads every number's bytes for a `'`. A lexer
-  flag that leaves `'` out of numbers would make it free (`c_lexer.c`'s
-  `apostrophe_separator`).
+- Before C23, the digit-separator pass (`pp_lex_mode`) costs about 2% of
+  `sqlite3.c`'s instructions: it reads every number's bytes for a `'`. Most
+  64-token blocks have a `'` somewhere, in a character constant or a comment,
+  so a block's bytes can't rule it out. A lexer flag that leaves `'` out of
+  numbers would make it free (`c_lexer.c`'s `apostrophe_separator`).
 
 ## Next steps
 
@@ -1296,7 +1329,12 @@ cleared once and reused.
   about their own benchmarks' speeds here: `tokenize_c`'s samples come to 7.8
   cycles per input token and `refine_tokens`' to about 12, against 7.89 and
   10.50 in their benchmarks. So their next steps apply (`docs/c-lexer.md`,
-  `docs/c-refinement.md`).
+  `docs/c-refinement.md`). Refinement has since come to 1.67 ms of a 10.0 ms
+  run. Its phase takes 0.12 ms more than its kernel does with everything in
+  the caches. The columns, the source and the table come from memory, because
+  a whole file is lexed before it is refined. A lexer that hands over a block
+  at a time would keep them in the caches (`docs/c-refinement.md`, "Next
+  steps").
 - **Streaming to the parser.** The first version preprocesses a whole
   translation unit before the parser reads it. Streaming needs a rule for when
   a block of output is final, since a function-like macro name at the end of an
