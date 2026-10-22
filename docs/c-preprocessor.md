@@ -531,6 +531,23 @@ arenas. Popping a context gives its tokens back when they are on top.
   The text is the only part of `#embed` that grows with the file. The rest is
   scalar: reading the parameters, looking up the file and the join's scan of the
   bytes after the line. It costs a line's worth of work once per directive.
+
+  On the 9700X (CPU 2, `benchmark-preprocessor --embed 16777216`, 16 MB of
+  random bytes, medians of 21 passes):
+
+  | kernel | cycles/byte | ns/byte | instructions/byte | IPC | text, GB/s |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | `pp_embed_text_vector` | 1.12 | 0.202 | 3.70 | 3.31 | 22.7 |
+  | `pp_embed_text_scalar` | 17.6 | 3.167 | 30.7 | 1.75 | 1.44 |
+
+  The vector kernel is 15.7 times as fast. On 4 KB formatted again and again,
+  the scalar twin reads 6.8 cycles a byte, since the predictor learns its
+  branches on the digit counts, as it can't on a real file's bytes; the vector
+  kernel reads 1.13 there too. What `#embed` adds to the main loop costs
+  nothing measurable: the pending join and the file-change records. On
+  `main.c`, the vectorized kernels take 29.5 and 29.7 ms (428.1 instructions
+  per input token), against 30.1 and 29.7 ms (429.3) on #109's branch before
+  it.
 - **Where `-E` prints it.** No token of an `#embed` starts a line, so the data
   goes on the line of the output before it. After its tokens, the file's next
   token joins their line too (`pp_embed_joins`, `BUSTER_PP_JOIN_LINE`). Clang's
