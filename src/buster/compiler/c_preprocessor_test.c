@@ -1896,6 +1896,7 @@ static bool pp_test_number(const char* text, uint64_t* value)
 }
 
 #include "c_preprocessor_history_test.c"
+#include "c_preprocessor_order_test.c"
 
 static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
 {
@@ -1913,6 +1914,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         .clang_path = "clang",
         .jobs = 1,
     };
+    uint64_t id_order = 153;
     bool valid = true;
     // --print-case: print that fuzz case (as clang reads it), and nothing else.
     bool print_case = false;
@@ -1930,7 +1932,19 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0;
         uint64_t number = 0;
-        if (strcmp(argument, "--clang") == 0)
+        if (strcmp(argument, "--id-order") == 0 && i + 1 < argument_count)
+        {
+            char* end;
+            errno = 0;
+            i += 1;
+            id_order = strtoull(arguments[i], &end, 10);
+            valid = valid && errno == 0 && end != arguments[i] && *end == 0 && arguments[i][0] != '-';
+        }
+        else if (strcmp(argument, "--id-order") == 0)
+        {
+            valid = false;
+        }
+        else if (strcmp(argument, "--clang") == 0)
         {
             with_clang = true;
         }
@@ -1977,12 +1991,13 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     fuzz.with_clang = with_clang;
     if (!valid || fuzz.jobs == 0 || fuzz.jobs > BUSTER_PP_FUZZ_MAX_JOBS)
     {
-        fprintf(stderr, "usage: test-preprocessor [--clang] [--keep] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--print-case N] [options] [file...]\n");
+        fprintf(stderr, "usage: test-preprocessor [--clang] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--print-case N] [options] [file...]\n");
     }
     char directory[4096];
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
-    bool passed_all = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    const bool created = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    bool passed_all = created;
     if (passed_all && file_count == 0)
     {
         uint32_t failures = 0;
@@ -1994,6 +2009,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all = failures == 0;
         passed_all &= pp_test_timestamps(directory, with_clang);
         passed_all &= pp_test_history(directory, with_clang);
+        passed_all &= pp_test_id_order(directory, id_order);
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);
@@ -2033,7 +2049,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     {
         passed_all = pp_fuzz_print_case(&fuzz, printed_case);
     }
-    else if (!keep)
+    else if (!keep && created)
     {
         // The files the cases and the clang runs write, then the directory.
         static const char* const names[] = { "case.c", "other.h", "predefines.h" };
