@@ -21,6 +21,9 @@
 // And for `cc -static-pie main.c -o main` (RUNTIME_KIND_STATIC_PIE), the same archives with the crt objects rcrt1.o,
 // crti.o, crtbeginS.o, crtendS.o and crtn.o. rcrt1.o doesn't define _dl_relocate_static_pie, as crt1.o does (an empty
 // one), so libc.a's member that relocates the executable joins, which refers to _DYNAMIC.
+// And for `cc -shared lib.c -o lib.so` (RUNTIME_KIND_SHARED), a dynamic PIE's but its start object: crti.o,
+// crtbeginS.o, crtendS.o and crtn.o, with libc.so's libc.so.6, libc_nonshared.a and loader. The start object's unit and
+// piece are there, empty, so that each object keeps its unit (RuntimeObject), and nothing refers to main.
 // Each path probed, found or absent, is recorded with what identifies a found file (st_dev, st_ino, st_size, st_mtim
 // and st_ctim), so that the snapshot can tell with one stat per path whether it still describes the system
 // (runtime_probes_current). Among them are the directory GCC's versions were chosen from, whose times change when a
@@ -93,6 +96,8 @@ typedef enum RuntimeKind
     RUNTIME_KIND_STATIC,
     // A static PIE: rcrt1.o, crti.o, crtbeginS.o, crtendS.o and crtn.o; the static executable's archives.
     RUNTIME_KIND_STATIC_PIE,
+    // A shared library: crti.o, crtbeginS.o, crtendS.o and crtn.o, without a start object; a dynamic PIE's libraries.
+    RUNTIME_KIND_SHARED,
     RUNTIME_KINDS,
 } RuntimeKind;
 
@@ -311,12 +316,13 @@ struct Runtime
 
 // Finds a dynamic PIE's runtime's files and imports them, with arenas of its own; runtime_release frees them (or a
 // snapshot's mapping, for a runtime loaded from one). On failure, the error says what went wrong and the runtime's
-// fields where. runtime_import_static does the same for a static executable's runtime, and runtime_import_static_pie for a
-// static PIE's.
+// fields where. runtime_import_static does the same for a static executable's runtime, runtime_import_static_pie for a
+// static PIE's and runtime_import_shared for a shared library's.
 static __attribute__((unused)) RuntimeError runtime_import(Runtime* runtime);
 static __attribute__((unused)) RuntimeError runtime_import_static(Runtime* runtime);
 static __attribute__((unused)) RuntimeError runtime_import_static_pie(Runtime* runtime);
-// runtime_import, runtime_import_static or runtime_import_static_pie, by `kind`.
+static __attribute__((unused)) RuntimeError runtime_import_shared(Runtime* runtime);
+// runtime_import, runtime_import_static, runtime_import_static_pie or runtime_import_shared, by `kind`.
 static __attribute__((unused)) RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind);
 static __attribute__((unused)) void runtime_release(Runtime* runtime);
 // Whether a runtime of `kind` is libc.a's, with archives and without a shared library: a static executable's or a static
@@ -703,6 +709,13 @@ static RuntimeError runtime_search(Runtime* runtime)
             [RUNTIME_OBJECT_END] = "crtend.o",
             [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
         },
+        // No start object: its path stays empty.
+        [RUNTIME_KIND_SHARED] = {
+            [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
+            [RUNTIME_OBJECT_BEGIN] = "crtbeginS.o",
+            [RUNTIME_OBJECT_END] = "crtendS.o",
+            [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
+        },
         [RUNTIME_KIND_STATIC_PIE] = {
             [RUNTIME_OBJECT_START] = "rcrt1.o",
             [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
@@ -719,10 +732,11 @@ static RuntimeError runtime_search(Runtime* runtime)
     for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < RUNTIME_OBJECTS; i += 1)
     {
         const bool gcc = i == RUNTIME_OBJECT_BEGIN || i == RUNTIME_OBJECT_END;
-        runtime->object_paths[i] = runtime_find_file(runtime, objects[runtime->kind][i], gcc);
-        result = runtime->object_paths[i].length != 0 ? result : RUNTIME_ERROR_MISSING;
+        const char* name = objects[runtime->kind][i];
+        runtime->object_paths[i] = name != 0 ? runtime_find_file(runtime, name, gcc) : (String8){ 0 };
+        result = name == 0 || runtime->object_paths[i].length != 0 ? result : RUNTIME_ERROR_MISSING;
     }
-    if (result == RUNTIME_ERROR_NONE && runtime->kind == RUNTIME_KIND_DYNAMIC)
+    if (result == RUNTIME_ERROR_NONE && !runtime_kind_is_static(runtime->kind))
     {
         runtime->libc_script = runtime_find_file(runtime, "libc.so", false);
         result = runtime->libc_script.length != 0 ? result : RUNTIME_ERROR_MISSING;
@@ -837,7 +851,8 @@ static String8 runtime_section(String8 bytes, const char* name)
 // define them there:
 //   - every kind: the bounds of the init and fini arrays, which step 4's executables define, and the GOT's
 //     _GLOBAL_OFFSET_TABLE_, which GNU as names in an object with a GOT reference;
-//   - the PIEs: .dynamic's address (_DYNAMIC, through which libc.a's member that relocates a static PIE finds it);
+//   - the PIEs and a shared library: .dynamic's address (_DYNAMIC, through which libc.a's member that relocates a static
+//     PIE finds it);
 //   - a static executable and a static PIE: the ELF header's address (__ehdr_start, through which libc.a's startup finds
 //     the program headers) and the image's start; the preinit array's bounds; and the ends of the text, the data and
 //     the image;
@@ -845,8 +860,8 @@ static String8 runtime_section(String8 bytes, const char* name)
 //     libc.a's startup applies for its IFUNCs). A static PIE's are in .rela.dyn, which its startup applies with the
 //     others, and libc.a's weak references to the bounds bind to nothing, as GNU ld and lld leave them.
 #define BUSTER_RUNTIME_KIND_BIT(kind) (1u << (kind))
-#define BUSTER_RUNTIME_EVERY_KIND (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_DYNAMIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE))
-#define BUSTER_RUNTIME_PIE_KINDS (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_DYNAMIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE))
+#define BUSTER_RUNTIME_EVERY_KIND ((1u << RUNTIME_KINDS) - 1)
+#define BUSTER_RUNTIME_DYNAMIC_SECTION_KINDS (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_DYNAMIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_SHARED))
 #define BUSTER_RUNTIME_STATIC_KINDS (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE))
 
 typedef struct RuntimeLinkerName RuntimeLinkerName;
@@ -862,7 +877,7 @@ static const RuntimeLinkerName runtime_linker_names[] = {
     { "__init_array_end", BUSTER_RUNTIME_EVERY_KIND },
     { "__fini_array_start", BUSTER_RUNTIME_EVERY_KIND },
     { "__fini_array_end", BUSTER_RUNTIME_EVERY_KIND },
-    { "_DYNAMIC", BUSTER_RUNTIME_PIE_KINDS },
+    { "_DYNAMIC", BUSTER_RUNTIME_DYNAMIC_SECTION_KINDS },
     { "__ehdr_start", BUSTER_RUNTIME_STATIC_KINDS },
     { "__executable_start", BUSTER_RUNTIME_STATIC_KINDS },
     { "__preinit_array_start", BUSTER_RUNTIME_STATIC_KINDS },
@@ -1428,7 +1443,8 @@ static RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind)
 {
     RuntimeError result = runtime_begin(runtime) ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MEMORY;
     runtime->kind = kind;
-    const bool dynamic = kind == RUNTIME_KIND_DYNAMIC;
+    // A dynamic PIE's runtime and a shared library's have libc.so's libraries.
+    const bool dynamic = !runtime_kind_is_static(kind);
     if (result == RUNTIME_ERROR_NONE)
     {
         result = runtime_search(runtime);
@@ -1437,10 +1453,11 @@ static RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind)
     {
         result = runtime_read_script(runtime);
     }
-    // Read every file, then size the runtime's link for the objects and the archives' members.
+    // Read every file, then size the runtime's link for the objects and the archives' members. A shared library's runtime
+    // has no start object: no file, and an empty piece.
     for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < RUNTIME_OBJECTS; i += 1)
     {
-        runtime->object_bytes[i] = runtime_read(runtime, runtime->object_paths[i], &result);
+        runtime->object_bytes[i] = runtime->object_paths[i].length != 0 ? runtime_read(runtime, runtime->object_paths[i], &result) : (String8){ 0 };
     }
     for (uint32_t a = 0; result == RUNTIME_ERROR_NONE && a < runtime->archive_count; a += 1)
     {
@@ -1489,7 +1506,7 @@ static RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind)
     LinkCapacity capacity = { 0 };
     for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < RUNTIME_OBJECTS; i += 1)
     {
-        result = runtime_count(runtime, runtime->object_paths[i], runtime->object_bytes[i], &capacity);
+        result = runtime->object_paths[i].length != 0 ? runtime_count(runtime, runtime->object_paths[i], runtime->object_bytes[i], &capacity) : result;
     }
     for (uint32_t a = 0; result == RUNTIME_ERROR_NONE && a < runtime->archive_count; a += 1)
     {
@@ -1514,9 +1531,11 @@ static RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind)
     }
     for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < RUNTIME_OBJECTS; i += 1)
     {
+        const bool present = runtime->object_paths[i].length != 0;
         runtime->pieces[i].begin = import_mark(&runtime->link, &runtime->files);
-        const ImportResult imported =
-            import_object(&runtime->link, runtime->object_bytes[i], i, BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE, &runtime->files, &runtime->objects[i]);
+        const ImportResult imported = present ? import_object(&runtime->link, runtime->object_bytes[i], i, BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE, &runtime->files,
+                                                              &runtime->objects[i])
+                                              : (ImportResult){ 0 };
         runtime->pieces[i].end = import_mark(&runtime->link, &runtime->files);
         result = imported.error == IMPORT_ERROR_NONE ? result : runtime_fail_import(runtime, runtime->object_paths[i], imported);
     }
@@ -1579,6 +1598,11 @@ static RuntimeError runtime_import_static(Runtime* runtime)
 static RuntimeError runtime_import_static_pie(Runtime* runtime)
 {
     return runtime_import_kind(runtime, RUNTIME_KIND_STATIC_PIE);
+}
+
+static RuntimeError runtime_import_shared(Runtime* runtime)
+{
+    return runtime_import_kind(runtime, RUNTIME_KIND_SHARED);
 }
 
 static void runtime_release(Runtime* runtime)
