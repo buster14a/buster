@@ -124,7 +124,7 @@ static int run_diagnostic_benchmark(int argc, char** argv)
             const double work = (double)count * repeats;
             const uint64_t ns = diagnostic_benchmark_median(times[mode], 21);
             const uint64_t tsc = diagnostic_benchmark_median(ticks[mode], 21);
-            printf("diagnostics %4u %s: %.2f ns/key, %.2f TSC ticks/key, after-scalar %llu ms\n", count, mode == 0 ? "scalar" : "vector",
+            printf("diagnostics %4u %s: %.2f ns/key, %.2f TSC ticks/key, after-scalar %llu ms\n", count, mode == 0 ? "scalar" : "selected",
                    ns / work, tsc / work, (unsigned long long)after_scalar);
         }
     }

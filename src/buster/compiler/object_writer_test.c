@@ -2271,6 +2271,9 @@ static bool object_test_lanes(uint64_t seed, uint64_t id_order, const char* dire
         const uint32_t lanes = lane_counts[c / 2];
         ordered = link_test_permute_names(&program.link, id_order + c, arena);
         object_test_expect(&tally, ordered, "permuted NameIds", c);
+        // Preparation caches the atoms' NameIds. Rebuild it from the permuted input before giving it to the writer.
+        ordered = ordered && object_prepare(&units, &program.link, options.units + 1, arena);
+        object_test_expect(&tally, ordered, "prepared permuted names", c);
         char lanes_directory[BUSTER_OBJECT_TEST_PATH_BYTES];
         snprintf(lanes_directory, sizeof(lanes_directory), "%s/lanes%u-mode%u", directory, lanes, c % 2);
         object_test_expect(&tally, mkdir(lanes_directory, 0755) == 0, "mkdir", c);

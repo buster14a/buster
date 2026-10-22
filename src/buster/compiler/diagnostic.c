@@ -10,8 +10,8 @@
 //
 // The two packed 64-bit keys retain all four u32 fields. A stable byte radix sort counts and places 16 keys at a time;
 // conflicts give equal digits their ranks within a block. Scalar stores avoid Zen 5's expensive gather/scatter.
-// Insertion sort is the exact twin and the path for at most 32 records. All buffers are bounded; any failed append or
-// merge rejects the whole result before printing. The caller can then report its resource failure deterministically.
+// Insertion sort is the exact twin and the measured path for at most 256 records. All buffers are bounded; any failed
+// append or merge rejects the whole result before printing. The caller can then report its resource failure deterministically.
 //
 // Include after lane.c and String8. Layout: records and buffers; append; sorting; merge and write.
 
@@ -21,7 +21,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#define BUSTER_DIAGNOSTIC_SMALL_COUNT 32
+#define BUSTER_DIAGNOSTIC_SMALL_COUNT 256
 #define BUSTER_DIAGNOSTIC_BATCH 16
 #define BUSTER_DIAGNOSTIC_BUCKETS 256
 

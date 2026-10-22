@@ -3,7 +3,7 @@
 // Tests for diagnostic.c: radix/insertion agreement including every short tail against guard pages, stable ties,
 // all 128 key bits, lane-local ownership, reversed completion, grouped notes, fatal cutoff and bounded failures.
 
-#define BUSTER_DIAGNOSTIC_TEST_JOBS 17
+#define BUSTER_DIAGNOSTIC_TEST_JOBS 129
 #define BUSTER_DIAGNOSTIC_TEST_RECORDS (BUSTER_DIAGNOSTIC_TEST_JOBS * 3)
 
 static uint64_t diagnostic_test_random(uint64_t* state)
@@ -16,9 +16,9 @@ static bool diagnostic_test_sort(uint64_t seed)
 {
     bool result = true;
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    for (uint32_t trial = 0; result && trial < 203; trial += 1)
+    for (uint32_t trial = 0; result && trial < 323; trial += 1)
     {
-        const uint32_t count = trial < 200 ? trial : 4095 + trial - 200;
+        const uint32_t count = trial < 320 ? trial : 4095 + trial - 320;
         const uint64_t bytes = (uint64_t)count * sizeof(DiagnosticOrder);
         const uint64_t readable = (bytes + page - 1) / page * page;
         const uint64_t mapped = readable + 2 * page;

@@ -35,7 +35,7 @@ The stable LSD radix sort runs eight byte passes on each key. It takes 16
 digits at a time: AVX-512 conflict masks and population counts give each
 duplicate digit its rank, and the last copy advances the bucket count once.
 Placement uses those ranks and scalar stores, avoiding gathers and scatters.
-Inactive tail lanes cannot enter the histogram. Small counts use insertion
+Inactive tail lanes cannot enter the histogram. Counts up to 256 use insertion
 sort, which is also the exact scalar oracle.
 
 A fatal stops its own job. It does not cancel another job on whichever lane
@@ -62,7 +62,8 @@ assignment by priming the table with unused names and a reordered vocabulary.
 The link representation's atom, symbol and fixup arrays are already placed
 input ranges. Their indices express that canonical placement, rather than
 an arbitrary intern insertion order. Tests permute `NameId`, update all
-symbol-name references, and preserve those ranges. The object tests freeze
+symbol-name references, rebuild preparation that caches those IDs, and preserve
+those ranges. The object tests freeze
 the reference bytes before any permutation, for both section modes.
 
 Future literal pooling must first find each value's earliest source use and
@@ -75,7 +76,7 @@ they do not stand in for an unimplemented C literal-pooling frontend.
 
 ## Property tests
 
-- `test-diagnostics`: radix against stable insertion sort on counts 0–199
+- `test-diagnostics`: radix against stable insertion sort on counts 0–319
   and 4,095–4,097, every tail ending against a guard page, repeated keys,
   forward/reverse/random orders and high key bits. Lane tests compare rendered
   groups at 1, 2, 3 and 8 lanes with reversed jobs and delayed completions,
