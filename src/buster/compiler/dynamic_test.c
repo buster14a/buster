@@ -54,6 +54,8 @@
 
 // OS-dependent includes
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -3177,6 +3179,94 @@ static bool dynamic_test_shared_absolute_call(const ExecutableTestDirectory* dir
     return dynamic_test_report(&tally);
 }
 
+// A regular shared-library output must be replaced even with one link and no running process. Keep the old inode
+// open and mapped, as a process that has loaded it does, while every writer path installs a different generated
+// library. MAP_SHARED makes an accidental in-place rewrite visible, without a private copy hiding changed bytes.
+static void dynamic_test_shared_replacement(DynamicTestTally* tally, const ExecutableTestDirectory* directory, const Runtime* runtime, BindTestProgram* bound,
+                                            String8 expected, const char* harness)
+{
+    Scratch scratch = scratch_begin(0);
+    LinkProgramOptions options = bound->program.options;
+    options.seed += BUSTER_LINK_TEST_ALL_PROGRAMS;
+    options.units = 1;
+    options.functions = 1;
+    options.globals = 1;
+    options.thread_locals = 1;
+    options.strings = 1;
+    options.init_functions = 0;
+    options.fini_functions = 0;
+    options.filler = 0;
+    BindTestProgram old;
+    const bool built = bind_test_program(&old, runtime, options, BIND_PATH_VECTOR) && link_check(&old.program.link) == LINK_ERROR_NONE;
+    const uint8_t* old_saved = built ? executable_test_save(&old.program.link, scratch.arena) : 0;
+    const uint8_t* new_saved = executable_test_save(&bound->program.link, scratch.arena);
+    dynamic_test_expect(tally, built && old_saved != 0 && new_saved != 0, "the libraries for replacement", 0);
+    char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, "shared-replacement", path_bytes);
+    for (uint32_t l = 0; old_saved != 0 && new_saved != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) + 2; l += 1)
+    {
+        const bool exact = l >= BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts);
+        const uint32_t lanes = exact ? (l == BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) ? 1 : 8) : dynamic_test_lane_counts[l];
+        const uint64_t index = (exact ? 100 : 0) + lanes;
+        Scratch iteration = scratch_begin(0);
+        executable_test_restore(&old.program.link, old_saved);
+        executable_test_restore(&bound->program.link, new_saved);
+        DynamicTestWrite old_write = { 0 };
+        ExecutableResult old_result;
+        const bool written_old = dynamic_test_write_with(&old_write, &old.program.link, &old.bind, runtime, path, 1, &old_result);
+        const String8 before = written_old ? executable_test_read(iteration.arena, path.pointer) : (String8){ 0 };
+        const bool different = before.pointer != 0 && (before.length != expected.length || memcmp(before.pointer, expected.pointer, before.length) != 0);
+        dynamic_test_expect(tally, written_old && different && dynamic_test_loads(harness, path.pointer, old.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
+                            "the old library differs and loads", index);
+        const int held = written_old ? open(path.pointer, O_RDONLY | O_CLOEXEC) : -1;
+        struct stat before_status;
+        const bool opened = held >= 0 && fstat(held, &before_status) == 0 && S_ISREG(before_status.st_mode) && before_status.st_nlink == 1 &&
+                            before.pointer != 0 && before.length != 0 && (uint64_t)before_status.st_size == before.length;
+        void* mapping = opened ? mmap(0, before.length, PROT_READ, MAP_SHARED, held, 0) : MAP_FAILED;
+        const bool mapped = mapping != MAP_FAILED && memcmp(mapping, before.pointer, before.length) == 0;
+        dynamic_test_expect(tally, opened && mapped, "the old library's one-link inode mapped", index);
+        DynamicTestWrite write = {
+            .exact = exact,
+        };
+        ExecutableResult result;
+        const bool written = mapped && dynamic_test_write_with(&write, &bound->program.link, &bound->bind, runtime, path, lanes, &result);
+        dynamic_test_expect(tally, written && result.write == EXECUTABLE_WRITE_RENAMED, "the regular shared library renamed", index);
+        struct stat held_status;
+        const bool retained = opened && fstat(held, &held_status) == 0 && held_status.st_dev == before_status.st_dev && held_status.st_ino == before_status.st_ino &&
+                              held_status.st_size == before_status.st_size && held_status.st_nlink == 0;
+        // Check the size first: a broken in-place rewrite that shrank the file must fail without touching a page
+        // past its new end, which could raise SIGBUS instead of reporting the failed preservation check.
+        dynamic_test_expect(tally, written && retained && mapped && memcmp(mapping, before.pointer, before.length) == 0,
+                            "the old inode and mapped bytes retained", index);
+        struct stat replacement_status;
+        const bool replaced = written && stat(path.pointer, &replacement_status) == 0 && S_ISREG(replacement_status.st_mode) && replacement_status.st_nlink == 1 &&
+                              (replacement_status.st_dev != before_status.st_dev || replacement_status.st_ino != before_status.st_ino) &&
+                              (uint64_t)replacement_status.st_size == expected.length;
+        dynamic_test_expect(tally, replaced && executable_test_same_file(iteration.arena, path.pointer, expected), "the new inode has the expected bytes", index);
+        dynamic_test_expect(tally, written && dynamic_test_loads(harness, path.pointer, bound->program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
+                            "the replacement library loads and runs", index);
+        if (mapping != MAP_FAILED)
+        {
+            munmap(mapping, before.length);
+        }
+        if (held >= 0)
+        {
+            close(held);
+        }
+        scratch_end(iteration);
+    }
+    if (new_saved != 0)
+    {
+        executable_test_restore(&bound->program.link, new_saved);
+    }
+    bind_test_release(&old);
+    if (!directory->keep)
+    {
+        unlink(path.pointer);
+    }
+    scratch_end(scratch);
+}
+
 // test-link's shared libraries (link_test_shared_options) and one of --functions workers, each bound against the shared
 // library's runtime (runtime_import_shared) and written by every lane count, which the harness must load and run as the
 // model predicts.
@@ -3217,6 +3307,10 @@ static bool dynamic_test_shared(const ExecutableTestDirectory* directory, const 
         }
         const bool loaded = written && harnessed && dynamic_test_loads(harness, path.pointer, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES);
         dynamic_test_expect(&tally, loaded, "the library loads and runs as its model predicts", i);
+        if (i == 0 && written && harnessed)
+        {
+            dynamic_test_shared_replacement(&tally, directory, runtime, &bound, file, harness);
+        }
         if (written && harnessed)
         {
             dynamic_test_variants(&tally, &bound.program.link, &bound.bind, runtime, path, file, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES, 0, harness, i);

@@ -1038,6 +1038,8 @@ struct ExecutableFile
 {
     int descriptor;
     ExecutableWrite write;
+    // A normal shared-library output is published by rename, including its first creation.
+    bool temporary;
     // The output's size and mode when it existed and is written in place.
     uint64_t old_size;
     uint32_t old_mode;
@@ -1058,20 +1060,22 @@ static void executable_fail_file(ExecutableResult* result, const char* call, int
 
 // Opens the output, by what lstat finds at its path: lstat opens nothing, which a FIFO would count as a reader or a
 // writer, and needs no permission on the file.
-//   - A regular file with one link that this process's user owns is opened with O_RDWR and written in place.
+//   - Without `replace`, a regular file with one link that this process's user owns is opened with O_RDWR and written in place.
 //   - One that is running (ETXTBSY), has other links or another owner, and a symbolic link (replaced, not written
 //     through) get a new file in the output's directory, under a random name of its own, renamed over them at the end.
-//   - A path with nothing there gets a new file, and a directory is an error.
+//   - With `replace`, a normal output is always written beside its path and renamed over it: mapped libraries aren't
+//     protected by ETXTBSY. A path with nothing there otherwise gets a new file, and a directory is an error.
 //   - A file of another type (/dev/null, a FIFO) is opened once, with O_WRONLY, and written in order, as GNU ld and lld
 //     write into one rather than replace it.
 // fstat then checks what was opened, in case the path changed after lstat: a file opened in place that no longer
 // qualifies, or a regular file opened as another type, is closed, and the output written beside it. Never O_TRUNC: on
 // btrfs it costs 58 µs for 16 KB and 10 ms for 4 MB (docs/object-writer-and-linker.md, "The floors").
-static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult* result)
+static bool executable_open(ExecutableFile* file, String8 path, bool replace, ExecutableResult* result)
 {
     bool opened = path.length != 0 && path.length < BUSTER_EXECUTABLE_PATH_BYTES;
     file->descriptor = -1;
     file->write = EXECUTABLE_WRITE_NONE;
+    file->temporary = false;
     if (!opened)
     {
         executable_fail_file(result, "the path", ENAMETOOLONG);
@@ -1085,7 +1089,7 @@ static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult
         const int found_error = lstat(file->path, &found) == 0 ? 0 : errno;
         const mode_t type = found_error == 0 ? found.st_mode & S_IFMT : 0;
         const bool special = type != 0 && type != S_IFREG && type != S_IFLNK && type != S_IFDIR;
-        if (type == S_IFREG && found.st_nlink == 1 && found.st_uid == geteuid())
+        if (!replace && type == S_IFREG && found.st_nlink == 1 && found.st_uid == geteuid())
         {
             file->descriptor = open(file->path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
         }
@@ -1129,17 +1133,18 @@ static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult
             {
                 close(file->descriptor);
             }
-            // The path itself when nothing is there, once; otherwise random names in its directory, so that a file a killed
-            // link left doesn't block the next ones.
+            // The path itself when nothing is there and replacement isn't required, once; otherwise random names in
+            // its directory, so that a file a killed link left doesn't block the next ones.
             const bool absent = found_error == ENOENT;
+            file->temporary = !absent || replace;
             const char* slash = strrchr(file->path, '/');
             const uint64_t directory_bytes = slash != 0 ? (uint64_t)(slash - file->path) + 1 : 0;
-            const uint32_t attempts = absent ? 1 : BUSTER_EXECUTABLE_NAME_ATTEMPTS;
+            const uint32_t attempts = file->temporary ? BUSTER_EXECUTABLE_NAME_ATTEMPTS : 1;
             file->descriptor = -1;
             int create_error = EEXIST;
             for (uint32_t attempt = 0; file->descriptor < 0 && create_error == EEXIST && attempt < attempts; attempt += 1)
             {
-                if (!absent)
+                if (file->temporary)
                 {
                     uint64_t random = 0;
                     if (getrandom(&random, sizeof(random), GRND_NONBLOCK) != (ssize_t)sizeof(random))
@@ -1193,14 +1198,16 @@ static bool executable_close(ExecutableFile* file, uint64_t size, bool keep, Exe
         executable_fail_file(result, "close", errno);
         kept = false;
     }
-    if (kept && file->write == EXECUTABLE_WRITE_RENAMED && rename(file->written_path, file->path) != 0)
+    if (kept && file->temporary && rename(file->written_path, file->path) != 0)
     {
         executable_fail_file(result, "rename", errno);
         kept = false;
     }
     if (!kept && file->write != EXECUTABLE_WRITE_SEQUENTIAL)
     {
-        unlink(file->written_path);
+        // A first shared publication is CREATED too: on failure remove only its temporary, never the destination.
+        const char* removed = file->temporary ? file->written_path : file->path;
+        unlink(removed);
     }
     file->descriptor = -1;
     return kept;
@@ -3341,46 +3348,6 @@ static void executable_check_direct(const Link* link, ExecutableShared* shared, 
     }
 }
 
-// The filter's hits among 16 of a PIE's direct fixups (`hits`, of the fixups from `first`, whose targets and whose
-// CALLs are `targets` and `calls`), checked as executable_check_direct checks each, in vectors: the targets' bits of the
-// RELATIVE and dynamic bitsets by gathers of their 32-bit words, the CALLs to dynamic symbols compressed into a list
-// whose bits a short loop sets in this lane's GOT and stub marks, the fixups of other kinds to dynamic symbols counted
-// as refused, and the rare targets that are neither (absolute symbols, and weak references to nothing that aren't
-// dynamic) checked one at a time. A shared library's filter takes almost every target, its preemptible definitions, of
-// which a call is most of its fixups: one at a time, the count took 4.2 ms where a dynamic PIE's of the same 180,000
-// workers takes 1.5 on the 9700X.
-static void executable_check_direct16(const Link* link, ExecutableShared* shared, uint32_t lane, FixupId first, __mmask16 hits, __m512i targets, __mmask16 calls,
-                                      uint64_t* refused)
-{
-    const __m512i words = _mm512_srli_epi32(targets, 5);
-    const __m512i shifts = _mm512_and_si512(targets, _mm512_set1_epi32(31));
-    const __m512i one = _mm512_set1_epi32(1);
-    const __m512i relative_words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), hits, words, shared->relative_bits, 4);
-    const __mmask16 outside = hits & ~_mm512_mask_test_epi32_mask(hits, _mm512_srlv_epi32(relative_words, shifts), one);
-    const __m512i dynamic_words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), outside, words, shared->dynamic_bits, 4);
-    const __mmask16 dynamic = _mm512_mask_test_epi32_mask(outside, _mm512_srlv_epi32(dynamic_words, shifts), one);
-    const __mmask16 stubbed = dynamic & calls;
-    uint32_t ids[16];
-    _mm512_mask_compressstoreu_epi32(ids, stubbed, targets);
-    uint64_t* got_marks = shared->got_marks + lane * shared->words_per_lane;
-    uint64_t* stub_marks = shared->stub_marks + lane * shared->words_per_lane;
-    const uint32_t count = (uint32_t)__builtin_popcount(stubbed);
-    uint64_t absolute_calls = 0;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        const uint64_t bit = 1ull << (ids[i] % 64);
-        got_marks[ids[i] / 64] |= bit;
-        stub_marks[ids[i] / 64] |= bit;
-        // A library's named absolute definition can be dynamic, but its CALL is still refused by the exact check.
-        absolute_calls += link->symbols.source[ids[i]] == BUSTER_LINK_SOURCE_ABSOLUTE;
-    }
-    *refused += absolute_calls + (uint64_t)__builtin_popcount(dynamic & ~calls);
-    for (uint32_t rare = outside & ~dynamic; rare != 0; rare &= rare - 1)
-    {
-        executable_check_direct(link, shared, lane, first + (FixupId)__builtin_ctz(rare), refused);
-    }
-}
-
 // Whether a static executable's symbol is an IFUNC with a resolver, the code at it: of the type and defined in an atom.
 // A weak IFUNC defined nowhere has none, and is address 0, as any weak symbol defined nowhere is (cc -static's links
 // leave its GOT slot 0).
@@ -3800,7 +3767,6 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
             refused += (uint64_t)__builtin_popcountll(refused_kinds);
             initial_exec += (uint64_t)__builtin_popcountll(valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_GOTTPOFF)));
         }
-        const uint64_t calls_any = dynamic ? valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_CALL)) : 0;
         if (shared->runtime)
         {
             const uint64_t accesses = valid & (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSGD)) |
@@ -3825,9 +3791,9 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
             // the 9700X), and the count took 2.0 ms where it takes 1.56.
             const uint32_t shared_hits = static_pie && (pie_lanes | ifunc_lanes) != 0 ? executable_filter_test_both(ifunc_filter, targets, pie_lanes | ifunc_lanes) : 0;
             const uint32_t pie_hits = static_pie ? shared_hits & pie_lanes : pie_lanes != 0 ? executable_filter_test(filter, targets, pie_lanes) : 0;
-            if (pie_hits != 0)
+            for (uint32_t hits = pie_hits; hits != 0; hits &= hits - 1)
             {
-                executable_check_direct16(link, shared, lane, group + 16 * part, (__mmask16)pie_hits, targets, (__mmask16)(calls_any >> (16 * part)), &refused);
+                executable_check_direct(link, shared, lane, group + 16 * part + (FixupId)__builtin_ctz(hits), &refused);
             }
             const uint32_t ifunc_hits = static_pie ? shared_hits & ifunc_lanes : ifunc_lanes != 0 ? executable_filter_test_both(ifunc_filter, targets, ifunc_lanes) : 0;
             for (uint32_t hits = ifunc_hits; hits != 0; hits &= hits - 1)
@@ -6109,7 +6075,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     if (ok && lane == 0)
     {
         file = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ExecutableFile, 1);
-        opened = file != 0 && executable_open(file, options->path, result);
+        opened = file != 0 && executable_open(file, options->path, dynamic && options->dynamic->shared, result);
         if (!opened)
         {
             executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_OPEN, lane, lanes), file == 0 ? EXECUTABLE_ERROR_MEMORY : EXECUTABLE_ERROR_FILE, 0, 0, 0);

@@ -699,7 +699,8 @@ static const char* const executable_benchmark_phase_names[EXECUTABLE_PHASES] = {
 // With `runtime`, the program calls libc: it is bound against the runtime (bind.c) and written as the runtime's kind
 // is for, a dynamic PIE, a static executable (runtime_import_static's), a static PIE (runtime_import_static_pie's) or a
 // shared library (runtime_import_shared's, the program generated as one), its inputs from dynamic.c; otherwise it is
-// written as a static executable without libc. The programs that call libc
+// written as a static executable without libc. A shared library replaces an existing file by rename, rather than
+// rewriting its inode. The programs that call libc
 // have no general- or local-dynamic TLS accesses, whose relaxation rewrites the atoms' bytes so that a write over them
 // again would fail.
 static bool executable_benchmark_link(const char* directory, uint32_t functions, uint32_t lanes, uint64_t seed, const Runtime* runtime)
@@ -818,12 +819,12 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     {
         const bool in_place = place == 0;
         result = executable_benchmark_write(&write, lanes, runs, in_place);
-        const ExecutableWrite expected = in_place ? EXECUTABLE_WRITE_IN_PLACE : EXECUTABLE_WRITE_CREATED;
+        const ExecutableWrite expected = in_place ? (library ? EXECUTABLE_WRITE_RENAMED : EXECUTABLE_WRITE_IN_PLACE) : EXECUTABLE_WRITE_CREATED;
         result = result && write.result.write == expected;
         if (result)
         {
             const double total = executable_benchmark_median(write.totals, runs);
-            printf("  %-9s %10.1f us (%5.2f GB/s):", in_place ? "in place" : "new file", total / 1000.0, (double)size / total);
+            printf("  %-9s %10.1f us (%5.2f GB/s):", in_place ? (library ? "replace" : "in place") : "new file", total / 1000.0, (double)size / total);
             for (uint32_t phase = 0; phase < EXECUTABLE_PHASES; phase += 1)
             {
                 printf(" %s %.1f", executable_benchmark_phase_names[phase], executable_benchmark_median(write.phases[phase], runs) / 1000.0);
