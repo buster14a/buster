@@ -5,22 +5,25 @@
 // nothing fills it, and how the time scales.
 //
 // Usage: build/compiler benchmark-files [--lanes LIST] [--cpus LIST] [--runs N] [--spin MS] [--flat] [--bytes map|read|populate]
-//                                       [--lane-bytes N] [--read-limit N] [options] path...
+//                                       [--lane-bytes N] [--read-limit N] [--defer on|off] [--defer-above N] [options] path...
 //
 // The paths (files, or the .c and .h files under directories) are the walk's roots, with -E's options (-I, -isystem,
 // -D, --predefines, -std=, ...); with --flat they are only prepared, without following their includes (a corpus such as
 // the C library's, which is files rather than translation units). For each lane count of --lanes (1 to 8 by default),
 // lane i runs on the i-th CPU of --cpus (by default the CPUs the process may use, in order: one per core on the 9700X).
-// Each run is from nothing: a new intern table and cache, and every file probed (opened, then mapped with one lane or
-// read with more), lexed, refined and given its directive table; its lanes first spin --spin ms (2 by default), so that
+// Each run is from nothing: a new intern table and cache, and every file probed (opened, then read or mapped by its
+// probe, or with more than one lane by the lane that prepares it: --defer off makes the probes read every file, and
+// --defer-above N sets the largest file they read themselves, BUSTER_FILES_DEFER_ABOVE), lexed, refined and given its
+// directive table; its lanes first spin --spin ms (2 by default), so that
 // a core that slept doesn't start slow, then meet at a sync that starts the time. For --runs runs (21 by default) per
 // lane count it reports medians: the run's time, its speedup over the first lane count's, and the time until the roots
 // were prepared (round 0, which a walk from one big file spends on that file alone); the tokens prepared per second;
 // each phase's time on the lane that spent the most on it (FilesPhase: preparing, the merge's lookups, exchange,
 // additions and rewrite, reading the include lines, the searches with their probes, the work one lane does while the
 // others wait, and waiting at syncs); and how busy the least and the most busy lane were (all but waiting), as a share
-// of the run. Then what a run did: its rounds and waves, files, bytes, tokens, shared ids, the merge's candidates, and
-// the opens, mappings and reads of its probes. Without --flat, it then preprocesses each root as a translation unit with
+// of the run. Then what a run did: its rounds and waves, files, bytes, tokens, shared ids, the merge's candidates, the
+// opens, mappings and reads of its probes and lanes, and the files read by the lanes that prepared them. Without --flat,
+// it then preprocesses each root as a translation unit with
 // the cache of a run on one lane, and counts the files the walk prepared that no unit entered, with their tokens and
 // bytes, and the largest of them. Run it under the 9700X's lock without taskset: it pins its lanes itself. The exit
 // status is 1 if the arguments are invalid or a run fails.
@@ -156,7 +159,7 @@ static void files_benchmark_lane(void* argument)
 // One run from nothing on `lanes` lanes (pinned to `cpus`): its times in `sample` and what it did in `counts`. Leaves
 // the cache and its table filled when `keep` (for files_benchmark_unused), else releases them.
 static bool files_benchmark_run(const PPOptions* options, const char* const* roots, uint32_t root_count, bool follow, FileCacheBytes bytes, uint32_t read_limit,
-                                bool defer, uint32_t defer_above, uint64_t load_batch, bool close_later, uint64_t lane_bytes, uint32_t lanes, const uint32_t* cpus, uint64_t spin_ticks, FilesBenchmarkSample* sample, FilesBenchmarkCounts* counts,
+                                bool defer, uint32_t defer_above, uint64_t lane_bytes, uint32_t lanes, const uint32_t* cpus, uint64_t spin_ticks, FilesBenchmarkSample* sample, FilesBenchmarkCounts* counts,
                                 InternTable* table, FileCache* cache, bool keep)
 {
     static Preprocessor search;
@@ -168,8 +171,6 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
     benchmark.run.bytes = bytes;
     benchmark.run.read_limit = read_limit;
     benchmark.run.defer = defer;
-    benchmark.run.load_batch = load_batch;
-    benchmark.run.close_later = close_later;
     benchmark.run.defer_above = defer_above;
     benchmark.run.lane_bytes = lane_bytes;
     benchmark.spin_ticks = spin_ticks;
@@ -360,8 +361,6 @@ int run_files_benchmark(int argc, char** argv)
     uint64_t lane_bytes = BUSTER_FILES_LANE_BYTES;
     uint32_t read_limit = BUSTER_FILES_READ_LIMIT;
     bool defer = true;
-    uint64_t load_batch = BUSTER_FILES_LOAD_BATCH;
-    bool close_later = false;
     uint32_t defer_above = BUSTER_FILES_DEFER_ABOVE;
     char** passed = calloc((size_t)argc + 2, sizeof(char*));
     int passed_count = 0;
@@ -414,15 +413,6 @@ int run_files_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--defer-above") == 0 && next != 0)
         {
             defer_above = (uint32_t)strtoul(next, 0, 10);
-            i += 1;
-        }
-        else if (strcmp(argument, "--close-later") == 0)
-        {
-            close_later = true;
-        }
-        else if (strcmp(argument, "--load-batch") == 0 && next != 0)
-        {
-            load_batch = strtoull(next, 0, 10);
             i += 1;
         }
         else if (strcmp(argument, "--defer") == 0 && next != 0)
@@ -483,7 +473,9 @@ int run_files_benchmark(int argc, char** argv)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: %s [--lanes LIST] [--cpus LIST] [--runs N] [--spin MS] [--flat] [--bytes map|read|populate] [--lane-bytes N] [--read-limit N] [options] path...\n",
+        fprintf(stderr,
+                "usage: %s [--lanes LIST] [--cpus LIST] [--runs N] [--spin MS] [--flat] [--bytes map|read|populate] [--lane-bytes N] [--read-limit N] [--defer on|off] "
+                "[--defer-above N] [options] path...\n",
                 argv[0]);
     }
     const double ticks_per_nanosecond = valid ? files_benchmark_ticks_per_nanosecond() : 1.0;
@@ -509,10 +501,10 @@ int run_files_benchmark(int argc, char** argv)
     for (uint32_t l = 0; result && l < lane_count; l += 1)
     {
         // A warm-up run, then the measured ones.
-        result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, read_limit, defer, defer_above, load_batch, close_later, lane_bytes, lanes[l], cpus, spin_ticks, &samples[0], &counts, &table, &cache, false);
+        result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, read_limit, defer, defer_above, lane_bytes, lanes[l], cpus, spin_ticks, &samples[0], &counts, &table, &cache, false);
         for (uint32_t r = 0; result && r < runs; r += 1)
         {
-            result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, read_limit, defer, defer_above, load_batch, close_later, lane_bytes, lanes[l], cpus, spin_ticks, &samples[r], &counts, &table, &cache, false);
+            result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, read_limit, defer, defer_above, lane_bytes, lanes[l], cpus, spin_ticks, &samples[r], &counts, &table, &cache, false);
         }
         if (result)
         {
@@ -567,7 +559,7 @@ int run_files_benchmark(int argc, char** argv)
     if (result && !flat)
     {
         FilesBenchmarkSample sample;
-        result = files_benchmark_run(&options, sources.paths, sources.count, true, bytes, read_limit, defer, defer_above, load_batch, close_later, lane_bytes, 1, cpus, 0, &sample, &counts, &table, &cache, true) &&
+        result = files_benchmark_run(&options, sources.paths, sources.count, true, bytes, read_limit, defer, defer_above, lane_bytes, 1, cpus, 0, &sample, &counts, &table, &cache, true) &&
                  files_benchmark_unused(&options, sources.paths, sources.count, &table, &cache);
         file_cache_release(&cache);
         intern_release(&table);

@@ -86,9 +86,10 @@ struct FilesTestRun
     uint64_t candidates;
     uint64_t shared_found;
     uint64_t stderr_bytes;
-    // The files the lanes that prepared them read, and how many more files the process had open after the walks than
-    // before (none: the walk keeps no file open past its end).
+    // The files the lanes that prepared them read (and the most of any lane count's run, files_test_work's), and how many
+    // more files the process had open after the walks than before (none: the walk keeps no file open past its end).
     uint64_t kept;
+    uint64_t kept_most;
     int64_t descriptors;
     bool failed;
     FilesTestUnit* units;
@@ -111,9 +112,11 @@ struct FilesTestWork
     bool thresholds;
     uint64_t lane_bytes;
     uint64_t split_bytes;
-    // Probes that read the files' bytes themselves (FilesRun.defer false), and the files the walk may keep open (its
-    // descriptor_limit; 0 for the process's).
+    // Probes that read the files' bytes themselves (FilesRun.defer false), every file's left to the lane that prepares
+    // it however small (FilesRun.defer_above 0), and the files the walk may keep open (its descriptor_limit; 0 for the
+    // process's).
     bool reads;
+    bool defer_small;
     uint64_t descriptors;
     const char* const* units;
     uint32_t unit_count;
@@ -217,6 +220,7 @@ static bool files_test_run(const FilesTestWork* work, uint32_t lanes, const char
         files.lane_bytes = work->thresholds ? work->lane_bytes : files.lane_bytes;
         files.split_bytes = work->thresholds ? work->split_bytes : files.split_bytes;
         files.defer = !work->reads;
+        files.defer_above = work->defer_small ? 0 : files.defer_above;
         files.descriptor_limit = work->descriptors != 0 ? work->descriptors : files.descriptor_limit;
         char path[4200];
         const int saved = files_test_quiet_begin(directory, path, sizeof(path));
@@ -393,10 +397,15 @@ static bool files_test_alone(const FilesTestWork* work, const FilesTestRun* refe
 static bool files_test_work(const FilesTestWork* work, const uint32_t* lanes, uint32_t lane_count, const char* directory, FilesTestRun* reference)
 {
     bool result = files_test_run(work, lanes[0], directory, reference);
+    reference->kept_most = reference->kept;
+    // One lane is the lane that probes and prepares every file: it leaves none open for later.
+    bool one_kept = lanes[0] == 1 && reference->kept != 0;
     for (uint32_t l = 1; result && l < lane_count; l += 1)
     {
         FilesTestRun other;
         result = files_test_run(work, lanes[l], directory, &other) && files_test_same(work, reference, &other);
+        reference->kept_most = other.kept > reference->kept_most ? other.kept : reference->kept_most;
+        one_kept |= lanes[l] == 1 && other.kept != 0;
         if (getenv("BUSTER_FILES_TEST_VERBOSE") != 0)
         {
             printf("%s: %u lanes: %lu candidates exchanged, %lu found in the shared table\n", work->name, lanes[l], (unsigned long)other.candidates,
@@ -409,7 +418,11 @@ static bool files_test_work(const FilesTestWork* work, const uint32_t* lanes, ui
         }
         files_test_release_run(&other);
     }
-    result = result && reference->stderr_bytes == 0 && !reference->failed && reference->descriptors == 0 && files_test_alone(work, reference);
+    result = result && reference->stderr_bytes == 0 && !reference->failed && reference->descriptors == 0 && !one_kept && files_test_alone(work, reference);
+    if (one_kept)
+    {
+        printf("%s: one lane left files' bytes for later\n", work->name);
+    }
     if (reference->stderr_bytes != 0)
     {
         printf("%s: the walk wrote %lu bytes to stderr\n", work->name, (unsigned long)reference->stderr_bytes);
@@ -539,6 +552,7 @@ static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32
         .thresholds = true,
         .lane_bytes = 0,
         .split_bytes = split ? UINT64_MAX : 0,
+        .defer_small = true,
         .options = {
             .language = { .standard = 2017, .gnu = true },
             .scalar = !vectorized,
@@ -586,8 +600,8 @@ static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32
             printf("%s: 13 files prepared once each in 4 rounds, the same on every lane count; 1 unused, 2 not found, no diagnostic\n", work.name);
         }
     }
-    // The bytes read by the lane that prepares each file (the reference), by the probes, and by the probes of waves
-    // that 4 files kept open can't hold: the same, on every lane count.
+    // The bytes read by the lane that prepares each file (with more than one lane), by the probes, and by the probes of
+    // waves that 4 files kept open can't hold: the same, on every lane count.
     if (result && vectorized && !split)
     {
         FilesTestWork reads = work;
@@ -600,16 +614,17 @@ static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32
         FilesTestRun few_reference = { 0 };
         result = files_test_work(&reads, lanes, lane_count, directory, &read_reference) && files_test_same(&reads, &reference, &read_reference) &&
                  files_test_work(&few, lanes, lane_count, directory, &few_reference) && files_test_same(&few, &reference, &few_reference);
-        const bool kept = reference.kept == 13 && read_reference.kept == 0 && few_reference.kept != 0 && few_reference.kept < 13;
+        const bool several = lane_count > 1 || lanes[0] > 1;
+        const bool kept = !several || (reference.kept_most == 13 && read_reference.kept_most == 0 && few_reference.kept_most != 0 && few_reference.kept_most < 13);
         if (result && !kept)
         {
             printf("tree: %lu files read by the lane that prepared them (13), %lu with probes that read (0), %lu with 4 kept open (1 to 12)\n",
-                   (unsigned long)reference.kept, (unsigned long)read_reference.kept, (unsigned long)few_reference.kept);
+                   (unsigned long)reference.kept_most, (unsigned long)read_reference.kept_most, (unsigned long)few_reference.kept_most);
         }
         else if (result)
         {
             printf("tree: the same with the bytes read by the lane that prepares each file, by the probes, and by both (%lu files, with 4 kept open)\n",
-                   (unsigned long)few_reference.kept);
+                   (unsigned long)few_reference.kept_most);
         }
         result = result && kept;
         files_test_release_run(&read_reference);
@@ -971,6 +986,7 @@ static bool files_test_memory(const char* directory, uint64_t seed)
     }
     uint32_t runs = 0;
     uint32_t failed = 0;
+    uint64_t kept = 0;
     int64_t left_open = 0;
     for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(lane_counts); c += 1)
     {
@@ -1015,6 +1031,7 @@ static bool files_test_memory(const char* directory, uint64_t seed)
                     result = lane_run(lanes, files_test_short_lane, &test, 0);
                     alarm(0);
                     failed += files.failed;
+                    kept += files.kept;
                     runs += 1;
                     files_run_release(&files);
                     left_open += files_test_descriptors() - descriptors;
@@ -1039,11 +1056,13 @@ static bool files_test_memory(const char* directory, uint64_t seed)
             }
         }
     }
-    // The sizes must reach both: runs that fail, and runs with room enough. No run may leave a file open.
-    const bool both = failed != 0 && failed < runs;
+    // The sizes must reach both: runs that fail, and runs with room enough. The probes must have left files to the lanes
+    // that prepare them, and no run may leave a file open.
+    const bool both = failed != 0 && failed < runs && kept != 0;
     if (result && !both)
     {
-        printf("memory: %u of %u runs failed: the sizes don't reach both outcomes\n", failed, runs);
+        printf("memory: %u of %u runs failed, %lu files kept open for the lanes that prepare them: the runs don't reach every way\n", failed, runs,
+               (unsigned long)kept);
     }
     if (result && left_open != 0)
     {
