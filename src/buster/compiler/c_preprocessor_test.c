@@ -997,6 +997,7 @@ static const PPTestCase pp_test_cases[] = {
     { "a warning's comment ends at its logical newline", "#warning /*\ninside\n*/\ntail\n", 0, "c17", "inside\n*/\ntail\n", false, 1 },
     { "a warning's spliced name and text", "#war\\\nning /* op\\\nen\ntail\n", 0, "c17", "tail\n", false, 1 },
     { "a warning in a repeated include", "#include \"other.h\"\n#include \"other.h\"\n", "#warning /* never closed\ntail\n", "c17", "tail\ntail\n", false, 2 },
+    { "a warning preserves macro snapshots", "#define BEFORE(x) [x]\n#warning /* never closed\n#define AFTER(y) {y}\nBEFORE(AFTER(7))\n", 0, "c17", "[{7}]\n", false, 1 },
     { "a skipped warning is still lexed raw", "#if 0\n#warning /* never closed\n#endif\ntail\n", 0, "c17", "", true, 0 },
     { "a skipped error is still lexed raw", "#if 0\n#error /* never closed\n#endif\ntail\n", 0, "c17", "", true, 0 },
     { "a comma in #if", "#if 1, 2\nyes\n#endif\n#if (1, 2)\nparenthesized\n#endif\n#if 0 ? 1, 2 : 3\nconditional\n#endif\n", 0, "c17", "", true, 0 },

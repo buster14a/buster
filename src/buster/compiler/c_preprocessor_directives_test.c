@@ -921,6 +921,68 @@ static bool pp_directive_test_diagnostics(const PPDirectiveTestStructure* fixtur
 // ---------------------------------------------------------------------------------------------------------------------
 // Include guards and #pragma once (#120)
 
+// Ordinary messages don't consume recovery capacity. At the exceptional-repair boundary the whole tail survives;
+// past it the run must fail explicitly, with no spurious comment diagnostic or extra message from the failed repair.
+static bool pp_directive_test_message_capacity(void)
+{
+    uint32_t failures = 0;
+    for (uint32_t test = 0; test < 3; test += 1)
+    {
+        char source[4096];
+        uint32_t length = 0;
+        const uint32_t count = test == 1 ? 64 : 65;
+        const char* message = test == 0 ? "#warning plain\n" : "#warning /*\n";
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "%s", message);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "tail\n");
+        for (uint32_t kernel = 0; kernel < 2; kernel += 1)
+        {
+            static Preprocessor pp;
+            static InternTable table;
+            const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true, .scalar = kernel != 0 };
+            const bool initialized = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+            const bool ran = initialized && pp_run_source(&pp, "message-capacity.c", (const uint8_t*)source, length);
+            const bool complete = test != 2;
+            bool same = initialized && ran == complete && pp.fatal == !complete && pp.errors == !complete && pp.warnings == (complete ? count : 64);
+            if (same && complete)
+            {
+                same = pp.output.count == 1 && pp.output.kinds[0] == C_TOKEN_RAW_IDENTIFIER && intern_length(&table, pp.output.values[0]) == 4 &&
+                       memcmp(intern_bytes(&table, pp.output.values[0]), "tail", 4) == 0;
+            }
+            failures += !same;
+            pp_release(&pp);
+            intern_release(&table);
+        }
+    }
+    printf("diagnostic recovery capacity: %u of 6 kernel runs differ\n", failures);
+    return failures == 0;
+}
+
+// A private prepared view doesn't change the origin of language macros read from the supplied predefines file.
+static bool pp_directive_test_predefines_origin(const char* directory)
+{
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/message-predefines.h", directory);
+    bool result = pp_test_write_file(path, "#warning /* never closed\n#define __STDC__ 1\n");
+    for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
+    {
+        static Preprocessor pp;
+        static InternTable table;
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true, .scalar = kernel != 0, .predefines_path = path };
+        const bool initialized = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        static const uint8_t source[] = "#undef __STDC__\n";
+        const bool ran = initialized && pp_run_source(&pp, "message-origin.c", source, sizeof(source) - 1);
+        result = initialized && ran && pp.errors == 0 && pp.warnings == 2;
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    unlink(path);
+    printf("diagnostic recovery predefines origin: %s\n", result ? "preserved" : "DIFFERS");
+    return result;
+}
+
 // A guard fixture: the main source, its files (a name and its text, or for a link "->target" (symbolic) or "=>target"
 // (hard) to another of them; ended by a null name), and how many inclusions it skips by guards and by #pragma once.
 typedef struct PPDirectiveTestGuard PPDirectiveTestGuard;
@@ -1267,6 +1329,8 @@ static bool pp_test_directives(const char* directory, bool with_clang, uint64_t 
     bool result = pp_directive_test_streams(seed, count);
     result &= pp_directive_test_diagnostics(pp_directive_test_structures, BUSTER_ARRAY_LENGTH(pp_directive_test_structures), "directive structure", directory, with_clang);
     result &= pp_directive_test_diagnostics(pp_directive_test_messages, BUSTER_ARRAY_LENGTH(pp_directive_test_messages), "diagnostic text", directory, with_clang);
+    result &= pp_directive_test_message_capacity();
+    result &= pp_directive_test_predefines_origin(directory);
     result &= pp_directive_test_diagnostics(pp_directive_test_definitions, BUSTER_ARRAY_LENGTH(pp_directive_test_definitions), "definitions", directory, with_clang);
     result &= pp_directive_test_guards(directory, with_clang);
     result &= pp_directive_test_location_space(directory);
