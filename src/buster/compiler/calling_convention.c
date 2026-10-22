@@ -1109,7 +1109,8 @@ static uint64_t abi_layout(const AbiTable* abi, const TypeTable* table, uint32_t
     }
     else if (kind == BUSTER_TYPE_KIND_ARRAY)
     {
-        const uint64_t element = table->types.size[base];
+        // An aligned typedef's size is its base's (the type table keeps none for it).
+        const uint64_t element = table->types.size[abi_resolved_index(table, table->types.base[index])];
         const uint64_t count = table->types.extent[index];
         result = 0;
         for (uint64_t i = 0; element != 0 && i < count && i * element < 16; i += 1)

@@ -1010,6 +1010,16 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     m[3].alignment_log2 = 4;
     abi_test_in_registers(builder, "{__bf16, __bf16, __bf16, _Alignas(8) char}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 4, false, 0), sse_integer, 0,
                           low_general, BUSTER_ABI_TEST_XMM(0), rax);
+    // An array of an aligned typedef lays out as one of its base (the type table keeps no size for the typedef): a
+    // __bf16 in it is the narrow low part clang widens, as in an array of plain __bf16.
+    m[0] = abi_test_member(builder, type_array(table, bf16, 1));
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT);
+    m[1].alignment_log2 = 4;
+    abi_test_in_registers(builder, "{__bf16[1], _Alignas(8) int}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), sse_integer, low_general, 0, rax,
+                          rdx);
+    m[0] = abi_test_member(builder, type_array(table, type_aligned(table, bf16, 0), 1));
+    abi_test_in_registers(builder, "{aligned(1) __bf16[1], _Alignas(8) int}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), sse_integer, low_general,
+                          0, rax, rdx);
     // A struct of 32 bytes: MEMORY, unless it is one vector the target passes in a register.
     m[0] = abi_test_member(builder, type_vector_size(table, BUSTER_TYPE_FLOAT, 16));
     m[1] = abi_test_member(builder, type_vector_size(table, BUSTER_TYPE_FLOAT, 16));
