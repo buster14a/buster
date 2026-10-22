@@ -2354,8 +2354,8 @@ set. Binding uses `runtime_open_shared` and `dynamic_shared_inputs`: the C
 runtime's shared-library inputs without a start object, ABI note or interpreter.
 `ExecutableDynamic.soname`, when present, becomes `DT_SONAME`. The file is
 ET_DYN, keeps PT_PHDR, has no PT_INTERP, and uses entry zero unless the link
-explicitly provides one. Its dynamic table has DT_FLAGS, without a PIE's
-DT_FLAGS_1 or DT_DEBUG.
+explicitly provides one. Initial-exec TLS adds DT_FLAGS with DF_STATIC_TLS;
+the table has neither a PIE's DT_FLAGS_1 nor DT_DEBUG.
 
 A regular shared-library output is always written to a new file in its
 directory and renamed into place. It never overwrites the previous inode:
@@ -2440,8 +2440,9 @@ uses CPU 2; eight lanes use CPUs 0–7. Times are milliseconds.
 | 8 | Replace | 1.498 (1.479–1.511) | 15.993 (15.395–16.131) |
 | 8 | New file | 1.504 (1.504–1.509) | 13.149 (13.097–13.165) |
 
-Both rows stage and rename. Replacing the old file also releases its inode;
-the finish medians are 1.706 ms with one lane and 2.908 ms with eight. These
+Both rows stage and rename. Replacing the benchmark's unreferenced old file
+also releases its inode; the finish medians are 1.706 ms with one lane and
+2.908 ms with eight. These
 measurements describe the final writer, without a claim that the required
 file-policy change is a throughput improvement.
 
