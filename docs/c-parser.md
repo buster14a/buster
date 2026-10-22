@@ -106,7 +106,17 @@ attributes, asm, `_Generic` and the builtins that take a type), the statement
 stack, and two precedence stacks, the L candidates and the tokens waiting for
 their R, which resolve as tokens arrive, as a shunting-yard parser's operator
 stack does. Typedef names are bound by scope in a meaning table with an undo
-log. Nesting is bounded by memory, not by the native stack: 100,000 levels of
+log. A declarator's name is bound once its declarator is complete (at its `=`,
+`,`, `;`, body or list's end), where C begins its scope: in
+`typedef int T; void f(void) { int T[sizeof((T)0)]; }` the cast still sees the
+typedef. What the declarator makes the name is the derivation it applies first,
+going out from the name past groups without a `*`, as clang's
+`Declarator::isFunctionDeclarator` decides it: `void (f(void)) {}` and
+`int (*g(void))[3] {...}` are definitions, `int (*p)(int) {` isn't, and only a
+declaration's one declarator may have a body. That function's parameter list
+keeps its scope until the declarator ends, into the body if one follows, so
+later suffixes and attributes keep the parameters bound; the function's own
+binding goes into the log before them, so the body's end keeps the name. Nesting is bounded by memory, not by the native stack: 100,000 levels of
 every kind of group parse.
 
 It rejects what C's grammar rejects, at the token clang names, with clang's
@@ -205,12 +215,18 @@ goes to the twin, and the twin's frames carry from block to block. The check
 tables are built from the twin's own functions (`parse_check_vector_init`), so
 the two can't disagree on a rule.
 
+A function's body is checked apart (`parse_check_body`, the same in both): its
+declaration is read back from the `{` to the item before it, and a declarator
+group or a comma at the body's depth flags it, as the tables can't tell what the
+declarator makes its name, nor see the comma. Bodies are few, so this costs a
+short scan each.
+
 What the checks don't take, and so leave to the scalar parser wherever it is:
 asm statements and file-scope asm (an asm label after a declarator passes),
-`_Generic`, K&R parameter lists, storage
-classes in parameters, C23's `[[...]]` attributes, a typedef name after an
-`_Alignas(...)`, and qualifiers in a parameter's array declarator
-(`char *const argv[__restrict]`).
+`_Generic`, K&R parameter lists, storage classes in parameters, C23's `[[...]]`
+attributes, a typedef name after an `_Alignas(...)`, qualifiers in a parameter's
+array declarator (`char *const argv[__restrict]`), and function definitions
+whose declarator has a group (`void (*signal(int, void (*)(int)))(int) {`).
 
 ### The fallback
 
@@ -266,8 +282,8 @@ failures, corpora, and mutations of them checked against clang.
 
 On the 9700X, at `bfeee15`, with `--clang`:
 
-- the tests without files: the 94 snippets, the four fixtures, 2,000 random
-  streams, the snippets at every block alignment (6,016 inputs), the seven
+- the tests without files: the 108 snippets, the four fixtures, 2,000 random
+  streams, the snippets at every block alignment (6,912 inputs), the seven
   nestings 100,000 levels deep, and the driver's cases and its failures
   (3.8 s);
 - `sqlite3.c` (3.53.4, 707,153 tokens, 1.1 s), the 733 files of the libc corpus

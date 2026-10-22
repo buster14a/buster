@@ -2151,9 +2151,11 @@ the scalar parser's. Those checks put every array in an arena followed by 4 GB
 and its own size of address space that may not be touched, so that a load past
 an array, or through a 32-bit index that wrapped below 0, faults. On:
 
-- snippets: 94 of valid and invalid code, each with the first error clang gives
+- snippets: 108 of valid and invalid code, each with the first error clang gives
   (or none), which the parser must give at the same line and column with the
-  same message; `--clang` checks each expectation against clang too;
+  same message; `--clang` checks each expectation against clang too, and the
+  oracle itself: clang given an option it doesn't know must count as no answer,
+  and an error in a header a file includes must reject the file;
 - fixtures: four trees checked by hand, parent by parent, among them #127's
   comma case (`f(a ? b, c : d, e)` has two arguments), its cast case (`(T) * p`
   is a cast where `T` names a type and a product where it doesn't) and a
@@ -2168,7 +2170,7 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   the preprocessor's size limit, no file and an unknown option), 16 runs of
   each, after which the address space and the descriptors must be as they were;
   then every reservation and mapping of a run on a valid and on an invalid file
-  failed in turn (61 and 62), in children whose address space may grow a page
+  failed in turn (59 and 60), in children whose address space may grow a page
   less than a run reached: the last fails, then, a page below the peak that run
   reached, the one before it, down to the first. Each run must exit with status
   1 having said why in a fatal error, and leave nothing behind;
