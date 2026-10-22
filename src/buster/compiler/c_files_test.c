@@ -3,28 +3,38 @@
 //
 // The per-file jobs' tests (c_files.c), for the test-files command:
 //
-//   build/compiler test-files [--lanes LIST] [--seed N] [--keep] [--flat] [options] [path...]
+//   build/compiler test-files [--lanes LIST] [--seed N] [--id-order N] [--keep] [--flat] [options] [path...]
 //
 // Each check runs the same work with the file cache filled on each lane count of --lanes (1, 2, 3 and 8 by default),
 // every time with a new intern table and cache, and requires the same results from every lane count, byte for byte:
 // the shared table's ids and spellings, every record's tokens, values, leading-space bits, directive table and guard,
-// what the walk did, and each translation unit's output stream (kinds, flags, values and locations) when it
-// preprocesses with the cache. One lane refines straight into the shared table, so it is the merge's scalar twin, and
-// the others must give its ids. Each unit's spellings must also be those it gives with a cache of its own (the
-// preprocessor as it runs alone), with as many errors and warnings, and nothing may be written to stderr while the
-// cache is filled.
+// what the walk did, and each translation unit's output stream (kinds, flags, values and locations), the text -E prints
+// for it without and with line markers, and its diagnostics, when it preprocesses with the cache. One lane refines
+// straight into the shared table, so it is the merge's scalar twin, and the others must give its ids. Each unit's
+// spellings and diagnostics must also be those it gives with a cache of its own (the preprocessor as it runs alone), with
+// as many errors and warnings, and nothing may be written to stderr while the cache is filled.
+// Then every check runs again on each lane count with the shared table's ids handed out in another order (#153: ids are
+// opaque, and nothing may depend on their order): the table is primed before the walk fills the cache, with names no
+// file has, then every other name of the first run's table in another order (--id-order N picks it, 153 by default), so
+// that the walk finds those in the table and gives the others ids after them; every lane prepares every round, so that on
+// more than one lane the merge gives them. The fixed ids of the predefined names stay theirs, and the other names must
+// actually change ids. Every unit must give the first run's -E text, diagnostics and stream, each id there (an
+// identifier's or a keyword's value) spelled as the first run's, and every record and the walk must be the first run's,
+// each identifier's value and guard spelled the same.
 //   - The tree: a directory of the test's own under $TMPDIR (or /tmp), with three translation units and the headers they
 //     include: by the includer's directory and through -I and -isystem, an #include_next chain through three
 //     directories, a header reached by four paths (a symbolic link and `..` among them), a hard link to a header that a
 //     computed include names too (which the walk can't follow: the unit finds it prepared by its other name), a guarded
 //     header and a #pragma once header included twice, a header under #if 0 that exists (prepared but never entered) and
-//     one that doesn't (no diagnostic), and a missing header in an active line, which the unit reports. The counts are
-//     exact: the files prepared (each identity once), the rounds, the unused files, the headers not found, and the system
-//     calls each unit made after the walk (only the computed include's).
+//     one that doesn't (no diagnostic), and a missing header in an active line, which the unit reports. Two warnings name
+//     identifiers: a header that two units include warns in an #if with notes naming the macros it was expanded from, and
+//     a unit redefines a macro. The counts are exact: the files prepared (each identity once), the rounds, the unused
+//     files, the headers not found, the units' errors and warnings, and the system calls each unit made after the walk
+//     (only the computed include's).
 //   - Spellings: generated files of identifiers (a shared vocabulary drawn unevenly, names of their own, long ones, line
 //     splices and UCNs) prepared without following includes, enough new spellings for the shared table to grow during a
-//     merge; and again in two runs into one cache, whose second finds most of its spellings in the shared table, against
-//     one run of all of them on one lane.
+//     merge, and a translation unit that includes them all; and again in two runs into one cache, whose second finds most
+//     of its spellings in the shared table, against one run of all of them on one lane.
 //   - Contexts: a guarded header that includes itself through ./ and sub/.., which the walk must take once, and one
 //     header in two directories (a hard link) whose own local.h differ, which it must walk in both.
 //   - Special paths: a FIFO that an include under #if 0 names (the walk's probe mustn't block) and an active one
@@ -36,15 +46,16 @@
 //     -I, -isystem, -D, --predefines, -std=, ...), all of them the walk's roots. With --flat, the files are only prepared,
 //     without following their includes or preprocessing them (a corpus such as the C library's, which is files rather
 //     than translation units).
-// --seed N changes the generated spellings, and --keep leaves the directory.
+// --seed N changes the generated spellings, --id-order N the order of the ids, and --keep leaves the directory.
 //
-// main.c includes this file after c_files.c and c_preprocessor_test.c, whose spellings and comparison it uses.
+// main.c includes this file after c_files.c and c_preprocessor_test.c, whose spellings, comparison and printing it uses.
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
@@ -53,7 +64,8 @@
 #define BUSTER_FILES_TEST_MAX_LANES 16
 #define BUSTER_FILES_TEST_MAX_UNITS 4096
 
-// A unit's results with a cache: its output stream (copied), spellings, errors and warnings, and its system calls.
+// A unit's results with a cache: its output stream (copied), errors and warnings, its system calls, the text -E prints
+// for it without and with line markers (text[0] and text[1]) and its diagnostics, as printed (each by a memory stream).
 typedef struct FilesTestUnit FilesTestUnit;
 struct FilesTestUnit
 {
@@ -66,7 +78,20 @@ struct FilesTestUnit
     uint32_t errors;
     uint32_t warnings;
     FileCacheCounts probes;
+    char* text[2];
+    size_t text_length[2];
+    char* diagnostics;
+    size_t diagnostic_length;
     bool ran;
+};
+
+// The shared table's ids in another order (#153): the names of a first run's table, primed by files_test_prime with
+// `seed`.
+typedef struct FilesTestOrder FilesTestOrder;
+struct FilesTestOrder
+{
+    const InternTable* names;
+    uint64_t seed;
 };
 
 // One lane count's run: the table and cache it filled, what the walk did, and its units' results.
@@ -76,12 +101,19 @@ struct FilesTestRun
     InternTable table;
     FileCache cache;
     uint32_t lanes;
-    // What the walk did (the run's counts), the bytes it wrote to stderr, and the records it prepared.
+    // With the ids in another order: the table's count after priming (the ids below it were primed, the others added by
+    // the walk and the units), and how many of the names primed first are no name of the first run's.
+    IdentId primed_end;
+    uint32_t padding;
+    // What the walk did (the run's counts), the bytes it wrote to stderr, and the records it prepared, their tokens and the
+    // table's ids after it (the units add their own).
     uint32_t rounds;
     uint64_t requests;
     uint64_t searches;
     uint64_t absent;
     uint64_t prepared;
+    uint64_t tokens;
+    IdentId ids;
     uint64_t candidates;
     uint64_t shared_found;
     uint64_t stderr_bytes;
@@ -161,7 +193,11 @@ static void files_test_release_run(FilesTestRun* run)
 {
     for (uint32_t u = 0; run->units != 0 && u < run->unit_count; u += 1)
     {
-        arena_release(&run->units[u].arena);
+        FilesTestUnit* unit = &run->units[u];
+        arena_release(&unit->arena);
+        free(unit->text[0]);
+        free(unit->text[1]);
+        free(unit->diagnostics);
     }
     free(run->units);
     file_cache_release(&run->cache);
@@ -169,15 +205,43 @@ static void files_test_release_run(FilesTestRun* run)
     *run = (FilesTestRun){ 0 };
 }
 
+// Primes a fresh shared table as test-preprocessor's check of the ids' order does (pp_order_prime): first with names
+// that no file has (17 to 47 of them, by the seed), then with every other name of the first run's table past the
+// predefined names, whose fixed ids are the table's contract, in reverse from a place the seed picks. The walk then
+// finds those in the table, and gives the others ids after them. Returns false if a name doesn't fit.
+static bool files_test_prime(InternTable* table, const FilesTestOrder* order, FilesTestRun* run)
+{
+    const InternTable* names = order->names;
+    const uint32_t padding = 17 + (uint32_t)(order->seed % 31);
+    bool result = true;
+    for (uint32_t i = 0; result && i < padding; i += 1)
+    {
+        char text[80];
+        const int length = snprintf(text, sizeof(text), "__buster_determinism_unused_%u", i);
+        result = intern_find_or_add(table, (const uint8_t*)text, (uint32_t)length) != 0;
+        run->padding += intern_find(names, (const uint8_t*)text, (uint32_t)length) == 0;
+    }
+    const uint32_t count = names->count - C_NAME_COUNT;
+    for (uint32_t i = 0; result && i < count; i += 2)
+    {
+        const IdentId id = C_NAME_COUNT + (uint32_t)((order->seed % count + count - 1ull - i) % count);
+        result = intern_find_or_add(table, intern_bytes(names, id), intern_length(names, id)) != 0;
+    }
+    run->primed_end = table->count;
+    return result;
+}
+
 // The cache filled on `lanes` lanes from the work's roots (in one run or two), then each of the work's units
-// preprocessed with it. `directory` takes the walk's stderr while it runs.
-static bool files_test_run(const FilesTestWork* work, uint32_t lanes, const char* directory, FilesTestRun* run)
+// preprocessed with it. `directory` takes the walk's stderr while it runs. With `order`, the shared table is primed
+// first, so that it gives the ids in another order.
+static bool files_test_run(const FilesTestWork* work, uint32_t lanes, const char* directory, const FilesTestOrder* order, FilesTestRun* run)
 {
     static Preprocessor search;
     static Preprocessor unit;
     *run = (FilesTestRun){ .lanes = lanes };
     PPOptions options = work->options;
-    bool result = intern_initialize(&run->table) && file_cache_initialize(&run->cache, &run->table, pp_prepare_options(&options));
+    bool result = intern_initialize(&run->table) && (order == 0 || files_test_prime(&run->table, order, run)) &&
+                  file_cache_initialize(&run->cache, &run->table, pp_prepare_options(&options));
     options.files = &run->cache;
     result = result && pp_initialize(&search, &options, &run->table);
     const uint32_t runs = work->split != 0 ? 2 : 1;
@@ -204,13 +268,20 @@ static bool files_test_run(const FilesTestWork* work, uint32_t lanes, const char
     }
     pp_release(&search);
     run->prepared = run->cache.prepared_records;
+    run->tokens = run->cache.prepared_tokens;
+    run->ids = run->table.count;
     run->units = result ? calloc(work->unit_count + 1, sizeof(FilesTestUnit)) : 0;
     run->unit_count = work->unit_count;
     result = result && run->units != 0;
+    // The units keep their expansions' starts, which -E's line markers need, and print their diagnostics into memory.
+    PPOptions unit_options = options;
+    unit_options.expansion_starts = true;
     for (uint32_t u = 0; result && u < work->unit_count; u += 1)
     {
         FilesTestUnit* out = &run->units[u];
-        const bool initialized = pp_initialize(&unit, &options, &run->table);
+        FILE* diagnostics = open_memstream(&out->diagnostics, &out->diagnostic_length);
+        unit_options.diagnostics = diagnostics;
+        const bool initialized = diagnostics != 0 && pp_initialize(&unit, &unit_options, &run->table);
         out->ran = initialized && pp_run(&unit, work->units[u]);
         const PPTokens* tokens = &unit.output;
         out->arena = arena_reserve((uint64_t)tokens->count * 10 + 256);
@@ -230,24 +301,55 @@ static bool files_test_run(const FilesTestWork* work, uint32_t lanes, const char
             out->warnings = unit.warnings;
             out->probes = unit.probes;
         }
+        for (uint32_t k = 0; result && k < 2; k += 1)
+        {
+            out->text[k] = pp_test_print(&unit, !options.scalar, k != 0, &out->text_length[k]);
+            result = out->text[k] != 0;
+        }
         pp_release(&unit);
+        result = diagnostics != 0 && fclose(diagnostics) == 0 && result;
     }
     if (!result)
     {
-        printf("%s: the run on %u lanes couldn't be set up\n", work->name, lanes);
+        printf("%s: the run on %u lanes%s couldn't be set up\n", work->name, lanes, order != 0 ? " with the ids in another order" : "");
     }
     return result;
 }
 
-// Are two records' prepared fields the same, byte for byte?
-static bool files_test_same_record(const PPFileData* a, const PPFileData* b)
+// Do ids a (of table x) and b (of table y) stand for the same name? With `opaque`, the tables give their ids in different
+// orders, and the names' spellings must be the same; otherwise the ids must be.
+static bool files_test_same_id(const InternTable* x, const InternTable* y, bool opaque, IdentId a, IdentId b)
+{
+    const bool result = opaque ? a < x->count && b < y->count && intern_length(x, a) == intern_length(y, b) &&
+                                     memcmp(intern_bytes(x, a), intern_bytes(y, b), intern_length(x, a)) == 0
+                               : a == b;
+    return result;
+}
+
+// Do two output tokens of `kind` with values a and b say the same? An identifier's or a keyword's value is an id
+// (files_test_same_id), and any other's must be the same.
+static bool files_test_same_value(const InternTable* x, const InternTable* y, bool opaque, uint8_t kind, uint32_t a, uint32_t b)
+{
+    const bool named = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END);
+    return named ? files_test_same_id(x, y, opaque, a, b) : a == b;
+}
+
+// Are two records' prepared fields the same, byte for byte? With `opaque`, but for their ids: each identifier's value and
+// the guard, ids of the records' tables (x and y), are compared by files_test_same_id.
+static bool files_test_same_record(const PPFileData* a, const PPFileData* b, const InternTable* x, const InternTable* y, bool opaque)
 {
     bool result = a->prepared == b->prepared && a->device == b->device && a->inode == b->inode && a->length == b->length;
     if (result && a->prepared)
     {
         const uint32_t count = a->token_count;
         result = b->token_count == count && memcmp(a->kinds, b->kinds, count) == 0 && memcmp(a->starts, b->starts, (uint64_t)count * sizeof(uint32_t)) == 0 &&
-                 memcmp(a->values, b->values, (uint64_t)count * sizeof(uint32_t)) == 0 && a->guard == b->guard && a->directive_count == b->directive_count;
+                 files_test_same_id(x, y, opaque, a->guard, b->guard) && a->directive_count == b->directive_count;
+        result = result && (opaque || memcmp(a->values, b->values, (uint64_t)count * sizeof(uint32_t)) == 0);
+        for (uint32_t t = 0; result && opaque && t < count; t += 1)
+        {
+            const bool identifier = (a->kinds[t] & (uint8_t)~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_RAW_IDENTIFIER;
+            result = identifier ? files_test_same_id(x, y, true, a->values[t], b->values[t]) : a->values[t] == b->values[t];
+        }
         for (uint32_t w = 0; result && w < (count + 63) / 64; w += 1)
         {
             // The last word's bits past the last token are refinement's, which only the tokens' bits are meant for.
@@ -262,18 +364,42 @@ static bool files_test_same_record(const PPFileData* a, const PPFileData* b)
     return result;
 }
 
-// Does `other` have everything `reference` has: the same shared ids and spellings, records, walk and units' streams?
-static bool files_test_same(const FilesTestWork* work, const FilesTestRun* reference, const FilesTestRun* other)
+// Are a unit's two texts (its -E text or its diagnostics) the same, byte for byte? If not, prints where they first differ:
+// `what` names the text, and `how` the other run.
+static bool files_test_same_text(const FilesTestWork* work, const char* unit, const char* what, const char* how, const char* a, size_t a_length, const char* b,
+                                 size_t b_length)
+{
+    const bool result = a_length == b_length && (a_length == 0 || memcmp(a, b, a_length) == 0);
+    if (!result)
+    {
+        size_t at = 0;
+        while (at < a_length && at < b_length && a[at] == b[at])
+        {
+            at += 1;
+        }
+        printf("%s: %s's %s differs %s at byte %zu of %zu/%zu\n", work->name, unit, what, how, at, b_length, a_length);
+    }
+    return result;
+}
+
+// Does `other` have everything `reference` has: the same shared ids and spellings, records, walk, and units' streams, -E
+// texts and diagnostics? With `opaque`, `other` gave the ids in another order (files_test_prime): an id in a record or a
+// stream must stand for the same name rather than be the same id (files_test_same_id), and its table's names are
+// files_test_same_names's to check.
+static bool files_test_same(const FilesTestWork* work, const FilesTestRun* reference, const FilesTestRun* other, bool opaque)
 {
     const InternTable* x = &reference->table;
     const InternTable* y = &other->table;
-    bool result = x->count == y->count;
+    char how[64];
+    snprintf(how, sizeof(how), "on %u lanes%s", other->lanes, opaque ? " with the ids in another order" : "");
+    bool result = opaque || x->count == y->count;
     IdentId id = 1;
-    while (result && id < x->count && intern_length(x, id) == intern_length(y, id) && memcmp(intern_bytes(x, id), intern_bytes(y, id), intern_length(x, id)) == 0)
+    while (result && !opaque && id < x->count && intern_length(x, id) == intern_length(y, id) &&
+           memcmp(intern_bytes(x, id), intern_bytes(y, id), intern_length(x, id)) == 0)
     {
         id += 1;
     }
-    if (!result || id < x->count)
+    if (!result || (!opaque && id < x->count))
     {
         printf("%s: the shared tables differ on %u lanes (%u and %u ids; first different id %u)\n", work->name, other->lanes, x->count, y->count, id);
         result = false;
@@ -281,22 +407,22 @@ static bool files_test_same(const FilesTestWork* work, const FilesTestRun* refer
     bool records = reference->cache.record_count == other->cache.record_count;
     for (uint32_t r = 0; records && r < reference->cache.record_count; r += 1)
     {
-        records = files_test_same_record(&reference->cache.records[r], &other->cache.records[r]);
+        records = files_test_same_record(&reference->cache.records[r], &other->cache.records[r], x, y, opaque);
         if (!records)
         {
-            printf("%s: record %u differs on %u lanes\n", work->name, r, other->lanes);
+            printf("%s: record %u differs %s\n", work->name, r, how);
         }
     }
     if (reference->cache.record_count != other->cache.record_count)
     {
-        printf("%s: %u records on %u lanes, %u on %u\n", work->name, other->cache.record_count, other->lanes, reference->cache.record_count, reference->lanes);
+        printf("%s: %u records %s, %u on %u\n", work->name, other->cache.record_count, how, reference->cache.record_count, reference->lanes);
     }
     const bool walks = reference->rounds == other->rounds && reference->requests == other->requests && reference->searches == other->searches &&
                        reference->absent == other->absent && reference->prepared == other->prepared;
     if (!walks)
     {
-        printf("%s: the walk differs on %u lanes (rounds %u/%u, requests %lu/%lu, searches %lu/%lu, not found %lu/%lu, prepared %lu/%lu)\n", work->name, other->lanes,
-               other->rounds, reference->rounds, (unsigned long)other->requests, (unsigned long)reference->requests, (unsigned long)other->searches,
+        printf("%s: the walk differs %s (rounds %u/%u, requests %lu/%lu, searches %lu/%lu, not found %lu/%lu, prepared %lu/%lu)\n", work->name, how, other->rounds,
+               reference->rounds, (unsigned long)other->requests, (unsigned long)reference->requests, (unsigned long)other->searches,
                (unsigned long)reference->searches, (unsigned long)other->absent, (unsigned long)reference->absent, (unsigned long)other->prepared,
                (unsigned long)reference->prepared);
     }
@@ -306,23 +432,57 @@ static bool files_test_same(const FilesTestWork* work, const FilesTestRun* refer
         const FilesTestUnit* a = &reference->units[u];
         const FilesTestUnit* b = &other->units[u];
         uint32_t i = 0;
-        while (i < a->count && i < b->count && a->kinds[i] == b->kinds[i] && a->flags[i] == b->flags[i] && a->values[i] == b->values[i] &&
-               a->locations[i] == b->locations[i])
+        while (i < a->count && i < b->count && a->kinds[i] == b->kinds[i] && a->flags[i] == b->flags[i] && a->locations[i] == b->locations[i] &&
+               files_test_same_value(x, y, opaque, a->kinds[i], a->values[i], b->values[i]))
         {
             i += 1;
         }
-        const bool same = a->ran == b->ran && a->errors == b->errors && a->warnings == b->warnings && i == a->count && i == b->count;
-        if (!same)
+        const bool streams = a->ran == b->ran && a->errors == b->errors && a->warnings == b->warnings && i == a->count && i == b->count;
+        if (!streams)
         {
-            printf("%s: %s's stream differs on %u lanes at token %u of %u/%u\n", work->name, work->units[u], other->lanes, i, b->count, a->count);
+            printf("%s: %s's stream differs %s at token %u of %u/%u (errors %u/%u, warnings %u/%u)\n", work->name, work->units[u], how, i, b->count, a->count, b->errors,
+                   a->errors, b->warnings, a->warnings);
         }
-        result = result && same;
+        const bool texts = files_test_same_text(work, work->units[u], "-E text", how, a->text[0], a->text_length[0], b->text[0], b->text_length[0]) &&
+                           files_test_same_text(work, work->units[u], "-E text with line markers", how, a->text[1], a->text_length[1], b->text[1], b->text_length[1]) &&
+                           files_test_same_text(work, work->units[u], "diagnostics", how, a->diagnostics, a->diagnostic_length, b->diagnostics, b->diagnostic_length);
+        result = result && streams && texts;
     }
     return result;
 }
 
+// The first run's names in a run with the ids in another order: each must be in its table, which must have no others but
+// the names primed first that no file has. Of the names primed, and of those the walk and the units added after them,
+// some must have changed ids, if there are any; `changed` counts them all.
+static bool files_test_same_names(const FilesTestWork* work, const FilesTestRun* reference, const FilesTestRun* other, uint32_t* changed)
+{
+    const InternTable* x = &reference->table;
+    const InternTable* y = &other->table;
+    uint32_t missing = 0;
+    // By whether the name was primed: how many there are, and how many changed ids.
+    uint32_t names[2] = { 0 };
+    uint32_t moved[2] = { 0 };
+    for (IdentId id = C_NAME_COUNT; id < x->count; id += 1)
+    {
+        const IdentId found = intern_find(y, intern_bytes(x, id), intern_length(x, id));
+        const uint32_t primed = found != 0 && found < other->primed_end;
+        missing += found == 0;
+        names[primed] += found != 0;
+        moved[primed] += found != 0 && found != id;
+    }
+    const bool result = missing == 0 && y->count == x->count + other->padding && (names[0] == 0 || moved[0] != 0) && (names[1] == 0 || moved[1] != 0);
+    if (!result)
+    {
+        printf("%s: on %u lanes with the ids in another order, %u of the first run's %u names are missing, %u ids against %u and %u names that no file has, and "
+               "%u of %u primed names and %u of %u others changed ids\n",
+               work->name, other->lanes, missing, x->count - C_NAME_COUNT, y->count, x->count, other->padding, moved[1], names[1], moved[0], names[0]);
+    }
+    *changed = moved[0] + moved[1];
+    return result;
+}
+
 // Each of the work's units with a cache of its own, against the same unit with the reference run's cache: the same
-// spellings, errors and warnings.
+// spellings, errors, warnings and diagnostics.
 static bool files_test_alone(const FilesTestWork* work, const FilesTestRun* reference)
 {
     static Preprocessor alone;
@@ -331,11 +491,16 @@ static bool files_test_alone(const FilesTestWork* work, const FilesTestRun* refe
     bool result = true;
     for (uint32_t u = 0; u < work->unit_count; u += 1)
     {
+        char* texts[2] = { 0 };
+        size_t lengths[2] = { 0 };
+        FILE* streams[2] = { open_memstream(&texts[0], &lengths[0]), open_memstream(&texts[1], &lengths[1]) };
         PPOptions options = work->options;
         options.files = 0;
-        bool same = intern_initialize(&alone_table) && pp_initialize(&alone, &options, &alone_table);
+        options.diagnostics = streams[0];
+        bool same = streams[0] != 0 && streams[1] != 0 && intern_initialize(&alone_table) && pp_initialize(&alone, &options, &alone_table);
         const bool alone_ran = same && pp_run(&alone, work->units[u]);
         options.files = (FileCache*)&reference->cache;
+        options.diagnostics = streams[1];
         same = same && pp_initialize(&cached, &options, (InternTable*)&reference->table);
         const bool cached_ran = same && pp_run(&cached, work->units[u]);
         PPSpellings ours = { 0 };
@@ -352,32 +517,84 @@ static bool files_test_alone(const FilesTestWork* work, const FilesTestRun* refe
         pp_release(&alone);
         pp_release(&cached);
         intern_release(&alone_table);
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            same = streams[k] != 0 && fclose(streams[k]) == 0 && same;
+        }
+        same = same && files_test_same_text(work, work->units[u], "diagnostics", "from the unit run alone", texts[0], lengths[0], texts[1], lengths[1]);
+        free(texts[0]);
+        free(texts[1]);
         result = result && same;
     }
     return result;
 }
 
-// Runs a work on every lane count, compares each run with the first's, and the units with themselves run alone. Keeps the
-// first run in `reference` for the caller's own checks (it releases it).
-static bool files_test_work(const FilesTestWork* work, const uint32_t* lanes, uint32_t lane_count, const char* directory, FilesTestRun* reference)
+// A run after the first must have written nothing to stderr and not run out of memory.
+static bool files_test_quiet(const FilesTestWork* work, const FilesTestRun* other, const char* how)
 {
-    bool result = files_test_run(work, lanes[0], directory, reference);
+    if (getenv("BUSTER_FILES_TEST_VERBOSE") != 0)
+    {
+        printf("%s: %u lanes%s: %lu candidates exchanged, %lu found in the shared table\n", work->name, other->lanes, how, (unsigned long)other->candidates,
+               (unsigned long)other->shared_found);
+    }
+    const bool result = other->stderr_bytes == 0 && !other->failed;
+    if (!result)
+    {
+        printf("%s: on %u lanes%s the walk %s\n", work->name, other->lanes, how, other->failed ? "ran out of memory" : "wrote to stderr");
+    }
+    return result;
+}
+
+// #153's check of the ids' order: the work on every lane count with the shared table primed by files_test_prime, a seed
+// per lane count from `id_order` on, and every lane preparing every round (as the tree's rounds are prepared), so that on
+// more than one lane the merge gives the walk's new spellings their ids after the primed ones. Each run must give what
+// the first run (`reference`, whose table gives the names) gives, but for the ids.
+static bool files_test_order(const FilesTestWork* work, const FilesTestRun* reference, const uint32_t* lanes, uint32_t lane_count, const char* directory,
+                             uint64_t id_order)
+{
+    FilesTestWork every = *work;
+    every.thresholds = true;
+    every.lane_bytes = 0;
+    every.split_bytes = work->thresholds ? work->split_bytes : BUSTER_FILES_SPLIT_BYTES;
+    uint32_t fewest = UINT32_MAX;
+    bool result = true;
+    for (uint32_t l = 0; result && l < lane_count; l += 1)
+    {
+        const FilesTestOrder order = { .names = &reference->table, .seed = id_order + l };
+        FilesTestRun other;
+        uint32_t changed = 0;
+        result = files_test_run(&every, lanes[l], directory, &order, &other) && files_test_same_names(work, reference, &other, &changed) &&
+                 files_test_same(work, reference, &other, true);
+        result = files_test_quiet(work, &other, " with the ids in another order") && result;
+        fewest = changed < fewest ? changed : fewest;
+        files_test_release_run(&other);
+    }
+    if (result)
+    {
+        printf("%s, with the ids in another order: the same -E text, diagnostics, locations and records on every lane count, at least %u of %u names with other ids "
+               "(seeds %llu to %llu)\n",
+               work->name, fewest, reference->table.count - C_NAME_COUNT, (unsigned long long)id_order, (unsigned long long)(id_order + lane_count - 1));
+    }
+    return result;
+}
+
+// Runs a work on every lane count, compares each run with the first's, and the units with themselves run alone; then
+// again with the ids in another order (files_test_order). Keeps the first run in `reference` for the caller's own checks
+// (it releases it).
+static bool files_test_work(const FilesTestWork* work, const uint32_t* lanes, uint32_t lane_count, const char* directory, uint64_t id_order,
+                            FilesTestRun* reference)
+{
+    bool result = files_test_run(work, lanes[0], directory, 0, reference);
     for (uint32_t l = 1; result && l < lane_count; l += 1)
     {
         FilesTestRun other;
-        result = files_test_run(work, lanes[l], directory, &other) && files_test_same(work, reference, &other);
-        if (getenv("BUSTER_FILES_TEST_VERBOSE") != 0)
-        {
-            printf("%s: %u lanes: %lu candidates exchanged, %lu found in the shared table\n", work->name, lanes[l], (unsigned long)other.candidates,
-                   (unsigned long)other.shared_found);
-        }
-        result = result && other.stderr_bytes == 0 && !other.failed;
-        if (other.stderr_bytes != 0 || other.failed)
-        {
-            printf("%s: on %u lanes the walk %s\n", work->name, lanes[l], other.failed ? "ran out of memory" : "wrote to stderr");
-        }
+        result = files_test_run(work, lanes[l], directory, 0, &other) && files_test_same(work, reference, &other, false);
+        result = files_test_quiet(work, &other, "") && result;
         files_test_release_run(&other);
     }
+    // Before files_test_alone, which preprocesses the units with the first run's table again: the order's names are those
+    // the first run's walk and units interned.
+    result = result && files_test_order(work, reference, lanes, lane_count, directory, id_order);
     result = result && reference->stderr_bytes == 0 && !reference->failed && files_test_alone(work, reference);
     if (reference->stderr_bytes != 0)
     {
@@ -395,9 +612,14 @@ static uint32_t files_test_unused(const FilesTestWork* work, FilesTestRun* refer
     const uint32_t walked = reference->cache.record_count;
     uint8_t* used = calloc((size_t)walked + 1, 1);
     uint32_t result = 0;
+    // The units' diagnostics, which files_test_run compared, go to memory unread.
+    char* text = 0;
+    size_t length = 0;
+    FILE* diagnostics = open_memstream(&text, &length);
     PPOptions options = work->options;
     options.files = &reference->cache;
-    for (uint32_t u = 0; used != 0 && u < work->unit_count; u += 1)
+    options.diagnostics = diagnostics;
+    for (uint32_t u = 0; used != 0 && diagnostics != 0 && u < work->unit_count; u += 1)
     {
         if (pp_initialize(&unit, &options, &reference->table))
         {
@@ -417,20 +639,27 @@ static uint32_t files_test_unused(const FilesTestWork* work, FilesTestRun* refer
     {
         result += reference->cache.records[r].prepared && used[r] == 0;
     }
+    if (diagnostics != 0)
+    {
+        fclose(diagnostics);
+    }
+    free(text);
     free(used);
     return result;
 }
 
-// The tree's files, relative to its directory, and its directories (made first, removed last).
+// The tree's files, relative to its directory, and its directories (made first, removed last). The warnings name
+// identifiers by their ids: b.h's #if, in main1 and main2, has notes naming the macros it was expanded from, and main2
+// redefines NEXT2.
 static const char* const files_test_tree_directories[] = { "sub", "I1", "I2", "I3", "sys" };
 static const char* const files_test_tree_files[][2] = {
     { "main1.c", "#include \"a.h\"\n#include <sys1.h>\n#include \"sub/b.h\"\n#if 0\n#include \"missing.h\"\n#include \"unused.h\"\n#endif\n#define COMPUTED \"c.h\"\n"
                  "#include COMPUTED\n#include \"link.h\"\n#include \"hard.h\"\n#include \"once.h\"\n#include \"once.h\"\n#include \"guarded.h\"\n#include \"guarded.h\"\n"
                  "int main1 = A + B + SYS1 + C + ONCE + GUARDED;\n" },
-    { "main2.c", "#include \"sub/../a.h\"\n#include <next.h>\n#include \"sub/b.h\"\nint main2 = A + B + NEXT + NEXT2;\n" },
+    { "main2.c", "#include \"sub/../a.h\"\n#include <next.h>\n#include \"sub/b.h\"\n#define NEXT2 10\nint main2 = A + B + NEXT + NEXT2;\n" },
     { "main3.c", "#include \"a.h\"\n#include \"nope.h\"\nint main3;\n" },
     { "a.h", "#ifndef A_H\n#define A_H\n#define A 1\n#endif\n" },
-    { "sub/b.h", "#include \"../a.h\"\n#define B 2\n" },
+    { "sub/b.h", "#include \"../a.h\"\n#define B 2\n#define BIG 18446744073709551615\n#define WIDE BIG\n#if WIDE\n#endif\n" },
     { "c.h", "#define C 3\n" },
     { "unused.h", "#define UNUSED 4\n" },
     { "once.h", "#pragma once\n#define ONCE 5\n" },
@@ -463,9 +692,10 @@ static void files_test_remove_tree(const char* directory)
     }
 }
 
-// The tree's check: its units, on every lane count, and its exact counts. Its rounds are small, so that lane 0 would
-// prepare them alone: they are prepared on every lane instead, cut into parts (`split` false) or one range per lane.
-static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32_t lane_count, bool vectorized, bool split)
+// The tree's check: its units, on every lane count and with the ids in another order, and its exact counts. Its rounds
+// are small, so that lane 0 would prepare them alone: they are prepared on every lane instead, cut into parts (`split`
+// false) or one range per lane.
+static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32_t lane_count, bool vectorized, bool split, uint64_t id_order)
 {
     char path[4200];
     bool result = true;
@@ -520,16 +750,19 @@ static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32
         .unit_count = 3,
     };
     FilesTestRun reference = { 0 };
-    result = result && files_test_work(&work, lanes, lane_count, directory, &reference);
+    result = result && files_test_work(&work, lanes, lane_count, directory, id_order, &reference);
     if (result)
     {
         // 13 files: the units, then a.h (reached as a.h, sub/../a.h and link.h), sys1.h, b.h, unused.h, hard.h (c.h,
         // which main1's computed include names), once.h, guarded.h and I1's next.h, then I2's, then I3's.
         const uint32_t unused = files_test_unused(&work, &reference);
         const bool counts = reference.prepared == 13 && reference.rounds == 4 && reference.absent == 2 && unused == 1;
-        // After the walk, main1 opens only c.h (its computed include), and the others open nothing; main3 reports nope.h.
-        const bool units_right = reference.units[0].errors == 0 && reference.units[0].probes.opens == 1 && reference.units[1].errors == 0 &&
-                                 reference.units[1].probes.opens == 0 && reference.units[2].errors == 1 && reference.units[2].probes.opens == 0;
+        // After the walk, main1 opens only c.h (its computed include), and the others open nothing; main3 reports nope.h,
+        // main1 and main2 warn in b.h, and main2 about NEXT2.
+        const FilesTestUnit* results = reference.units;
+        const bool units_right = results[0].errors == 0 && results[0].warnings == 1 && results[0].probes.opens == 1 && results[1].errors == 0 &&
+                                 results[1].warnings == 2 && results[1].probes.opens == 0 && results[2].errors == 1 && results[2].warnings == 0 &&
+                                 results[2].probes.opens == 0;
         uint32_t a_records = 0;
         struct stat stats;
         snprintf(path, sizeof(path), "%s/a.h", directory);
@@ -542,13 +775,13 @@ static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32
         }
         if (!units_right)
         {
-            printf("%s: the units' errors %u, %u, %u (0, 0, 1) and opens %lu, %lu, %lu (1, 0, 0)\n", work.name, reference.units[0].errors, reference.units[1].errors,
-                   reference.units[2].errors, (unsigned long)reference.units[0].probes.opens, (unsigned long)reference.units[1].probes.opens,
-                   (unsigned long)reference.units[2].probes.opens);
+            printf("%s: the units' errors %u, %u, %u (0, 0, 1), warnings %u, %u, %u (1, 2, 0) and opens %lu, %lu, %lu (1, 0, 0)\n", work.name, results[0].errors,
+                   results[1].errors, results[2].errors, results[0].warnings, results[1].warnings, results[2].warnings, (unsigned long)results[0].probes.opens,
+                   (unsigned long)results[1].probes.opens, (unsigned long)results[2].probes.opens);
         }
         if (result)
         {
-            printf("%s: 13 files prepared once each in 4 rounds, the same on every lane count; 1 unused, 2 not found, no diagnostic\n", work.name);
+            printf("%s: 13 files prepared once each in 4 rounds, the same on every lane count; 1 unused, 2 not found without a diagnostic\n", work.name);
         }
     }
     files_test_release_run(&reference);
@@ -590,7 +823,7 @@ static void files_test_watchdog(int signal_number)
 // The contexts' check: a guarded header that includes itself through ./ and through sub/.. (each path a new spelling
 // of one file in one directory), which the walk must take once rather than make paths of without end; and one header
 // in two directories (a hard link) whose own local.h differ, which it must walk in both.
-static bool files_test_contexts(const char* directory, const uint32_t* lanes, uint32_t lane_count)
+static bool files_test_contexts(const char* directory, const uint32_t* lanes, uint32_t lane_count, uint64_t id_order)
 {
     static const char* const directories[] = { "sub", "one", "two" };
     static const char* const files[][2] = {
@@ -630,7 +863,7 @@ static bool files_test_contexts(const char* directory, const uint32_t* lanes, ui
     };
     FilesTestRun reference = { 0 };
     alarm(60);
-    result = result && files_test_work(&work, lanes, lane_count, directory, &reference);
+    result = result && files_test_work(&work, lanes, lane_count, directory, id_order, &reference);
     alarm(0);
     if (result)
     {
@@ -673,7 +906,7 @@ static bool files_test_contexts(const char* directory, const uint32_t* lanes, ui
 // it to the unit, which never reaches it) and an active one names (an error, as the unit gives alone); and a quoted
 // name of 2,400 bytes under #if 0, twice in a file and once in another of the same directory, which is more than 2,500
 // bytes long: the three requests' key holds both whole, and they must share one search.
-static bool files_test_special(const char* directory, const uint32_t* lanes, uint32_t lane_count)
+static bool files_test_special(const char* directory, const uint32_t* lanes, uint32_t lane_count, uint64_t id_order)
 {
     char path[4200];
     char deep[4200];
@@ -721,7 +954,7 @@ static bool files_test_special(const char* directory, const uint32_t* lanes, uin
     };
     FilesTestRun reference = { 0 };
     alarm(60);
-    result = result && files_test_work(&work, lanes, lane_count, directory, &reference);
+    result = result && files_test_work(&work, lanes, lane_count, directory, id_order, &reference);
     alarm(0);
     if (result)
     {
@@ -913,8 +1146,8 @@ static bool files_test_memory(const char* directory, uint64_t seed)
 #define BUSTER_FILES_TEST_VOCABULARY 30000
 
 // The spellings' check: generated files of identifiers, on every lane count without following includes, then in two
-// runs into one cache.
-static bool files_test_spellings(const char* directory, const uint32_t* lanes, uint32_t lane_count, uint64_t seed)
+// runs into one cache. A translation unit includes every file, so that it reads them all from the cache.
+static bool files_test_spellings(const char* directory, const uint32_t* lanes, uint32_t lane_count, uint64_t seed, uint64_t id_order)
 {
     uint64_t state = seed;
     char* vocabulary = calloc(BUSTER_FILES_TEST_VOCABULARY, 96);
@@ -974,15 +1207,26 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
         result = files_test_write(paths[f], text);
         written += length;
     }
+    char unit[4200];
+    snprintf(unit, sizeof(unit), "%s/spellings.c", directory);
+    uint64_t includes = 0;
+    for (uint32_t f = 0; result && f < BUSTER_FILES_TEST_SPELLING_FILES; f += 1)
+    {
+        includes += (uint64_t)snprintf(text + includes, (1u << 20) - includes, "#include \"s%u.c\"\n", f);
+    }
+    result = result && files_test_write(unit, text);
+    const char* units[1] = { unit };
     FilesTestWork work = {
         .name = "spellings",
         .options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true },
         .roots = roots,
         .root_count = BUSTER_FILES_TEST_SPELLING_FILES,
         .follow = false,
+        .units = units,
+        .unit_count = 1,
     };
     FilesTestRun reference = { 0 };
-    result = result && files_test_work(&work, lanes, lane_count, directory, &reference);
+    result = result && files_test_work(&work, lanes, lane_count, directory, id_order, &reference);
     // And with one range per lane, then with two lanes working (one range each) and the others idle, on every lane
     // count, against the same reference.
     FilesTestWork once = work;
@@ -998,20 +1242,20 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
     for (uint32_t l = 1; result && l < lane_count; l += 1)
     {
         FilesTestRun other;
-        result = files_test_run(&once, lanes[l], directory, &other) && files_test_same(&once, &reference, &other);
+        result = files_test_run(&once, lanes[l], directory, 0, &other) && files_test_same(&once, &reference, &other, false);
         files_test_release_run(&other);
-        result = result && files_test_run(&two, lanes[l], directory, &other) && files_test_same(&two, &reference, &other);
+        result = result && files_test_run(&two, lanes[l], directory, 0, &other) && files_test_same(&two, &reference, &other, false);
         files_test_release_run(&other);
     }
-    const bool grew = result && reference.table.count > 40960;
+    const bool grew = result && reference.ids > 40960;
     if (result)
     {
         printf("spellings: %u files, %u ids, %lu tokens, the same on every lane count, in parts, split once and on two lanes\n",
-               BUSTER_FILES_TEST_SPELLING_FILES, reference.table.count, (unsigned long)reference.cache.prepared_tokens);
+               BUSTER_FILES_TEST_SPELLING_FILES, reference.ids, (unsigned long)reference.tokens);
     }
     if (result && !grew)
     {
-        printf("spellings: only %u ids, too few for the shared table to grow in a merge\n", reference.table.count);
+        printf("spellings: only %u ids, too few for the shared table to grow in a merge\n", reference.ids);
     }
     result = result && grew;
     // Two runs into one cache, on each lane count, against the reference (one run on the first lane count).
@@ -1021,12 +1265,12 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
     for (uint32_t l = 0; result && l < lane_count; l += 1)
     {
         FilesTestRun other;
-        result = files_test_run(&split, lanes[l], directory, &other);
+        result = files_test_run(&split, lanes[l], directory, 0, &other);
         // The two runs' walks add up to the one's but in their rounds; the tables and records must be the same.
         other.rounds = reference.rounds;
         other.requests = reference.requests;
         other.searches = reference.searches;
-        result = result && files_test_same(&split, &reference, &other);
+        result = result && files_test_same(&split, &reference, &other, false);
         files_test_release_run(&other);
     }
     if (result)
@@ -1038,6 +1282,7 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
     {
         unlink(paths[f]);
     }
+    unlink(unit);
     free(vocabulary);
     free(paths);
     free(roots);
@@ -1047,7 +1292,7 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
 
 // The files' check: each a unit with the options, all the walk's roots; or with `flat`, only prepared.
 static bool files_test_files(const PPOptions* options, const char* const* files, uint32_t count, bool flat, const char* directory, const uint32_t* lanes,
-                             uint32_t lane_count)
+                             uint32_t lane_count, uint64_t id_order)
 {
     FilesTestWork work = {
         .name = flat ? "flat files" : "files",
@@ -1059,7 +1304,7 @@ static bool files_test_files(const PPOptions* options, const char* const* files,
         .unit_count = flat ? 0 : count,
     };
     FilesTestRun reference = { 0 };
-    bool result = files_test_work(&work, lanes, lane_count, directory, &reference);
+    bool result = files_test_work(&work, lanes, lane_count, directory, id_order, &reference);
     if (result && flat)
     {
         printf("flat files: %u files (%lu tokens, %u ids), the same on every lane count\n", reference.cache.record_count, (unsigned long)reference.cache.prepared_tokens,
@@ -1107,6 +1352,7 @@ static int run_files_tests(int argument_count, char** arguments)
     uint32_t lanes[BUSTER_FILES_TEST_MAX_LANES] = { 1, 2, 3, 8 };
     uint32_t lane_count = 4;
     uint64_t seed = 1;
+    uint64_t id_order = 153;
     bool keep = false;
     bool flat = false;
     FilesSources sources = { 0 };
@@ -1120,7 +1366,7 @@ static int run_files_tests(int argument_count, char** arguments)
         const char* argument = arguments[i];
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
-                                 strcmp(argument, "--predefines") == 0 || strcmp(argument, "-x") == 0;
+                                 strcmp(argument, "--predefines") == 0 || strcmp(argument, "-x") == 0 || strcmp(argument, "-target") == 0;
         if (strcmp(argument, "--lanes") == 0 && i + 1 < argument_count)
         {
             lane_count = files_test_lanes(arguments[i + 1], lanes);
@@ -1131,6 +1377,18 @@ static int run_files_tests(int argument_count, char** arguments)
         {
             seed = strtoull(arguments[i + 1], 0, 10);
             i += 1;
+        }
+        else if (strcmp(argument, "--id-order") == 0 && i + 1 < argument_count)
+        {
+            char* end;
+            errno = 0;
+            i += 1;
+            id_order = strtoull(arguments[i], &end, 10);
+            valid = errno == 0 && end != arguments[i] && *end == 0 && arguments[i][0] != '-';
+        }
+        else if (strcmp(argument, "--id-order") == 0)
+        {
+            valid = false;
         }
         else if (strcmp(argument, "--keep") == 0)
         {
@@ -1169,22 +1427,22 @@ static int run_files_tests(int argument_count, char** arguments)
     bool passed_all = valid && mkdtemp(directory) != 0;
     if (!valid)
     {
-        printf("usage: test-files [--lanes LIST] [--seed N] [--keep] [--flat] [options] [path...]\n");
+        printf("usage: test-files [--lanes LIST] [--seed N] [--id-order N] [--keep] [--flat] [options] [path...]\n");
     }
     if (passed_all && file_count == 0)
     {
         for (uint32_t way = 0; way < 4; way += 1)
         {
-            passed_all &= files_test_tree(directory, lanes, lane_count, way < 2, (way & 1) != 0);
+            passed_all &= files_test_tree(directory, lanes, lane_count, way < 2, (way & 1) != 0, id_order);
             if (!keep)
             {
                 files_test_remove_tree(directory);
             }
         }
-        passed_all &= files_test_spellings(directory, lanes, lane_count, seed);
+        passed_all &= files_test_spellings(directory, lanes, lane_count, seed, id_order);
         signal(SIGALRM, files_test_watchdog);
-        passed_all &= files_test_contexts(directory, lanes, lane_count);
-        passed_all &= files_test_special(directory, lanes, lane_count);
+        passed_all &= files_test_contexts(directory, lanes, lane_count, id_order);
+        passed_all &= files_test_special(directory, lanes, lane_count, id_order);
         passed_all &= files_test_memory(directory, seed);
         signal(SIGALRM, SIG_DFL);
     }
@@ -1198,7 +1456,7 @@ static int run_files_tests(int argument_count, char** arguments)
         // pp_parse_options wants one input: give it the first file, and use its options for every file.
         passed[passed_count] = (char*)files[0];
         passed_all = pp_parse_options(passed_count + 1, passed, &options, &arena, &input, &output, &markers) &&
-                     files_test_files(&options, files, file_count, flat, directory, lanes, lane_count);
+                     files_test_files(&options, files, file_count, flat, directory, lanes, lane_count, id_order);
         arena_release(&arena);
     }
     if (!keep)
