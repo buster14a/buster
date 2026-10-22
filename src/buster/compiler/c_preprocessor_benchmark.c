@@ -505,6 +505,190 @@ static int pp_benchmark_tables(char** paths, int path_count, uint32_t only)
     return ran ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Definitions and lookups alone (--defines)
+
+// What a pass of one kernel measured (#121), file by file: its #defines defined in order (pp_define), its macros so
+// defined compiled (pp_compile_macro), and its identifiers looked up as the main loop's test looks one up
+// (pp_is_macro), each in user-space cycles; the counts, and a digest of the macros, which both kernels must make alike.
+typedef struct PPBenchmarkDefinesSample PPBenchmarkDefinesSample;
+struct PPBenchmarkDefinesSample
+{
+    uint64_t define_cycles;
+    uint64_t compile_cycles;
+    uint64_t lookup_cycles;
+    uint64_t defines;
+    uint64_t macros;
+    uint64_t lookups;
+    uint64_t found;
+    uint64_t digest;
+};
+
+static bool pp_benchmark_defines_pass(PPBenchmarkTables* tables, uint32_t first_data, bool vectorized, int cycles_fd, PPBenchmarkDefinesSample* sample)
+{
+    Preprocessor* pp = &tables->pp;
+    pp->vectorized = vectorized;
+    const uint32_t macros = pp->macro_count;
+    const uint32_t items = pp->item_count;
+    const uint32_t parameters = pp->parameter_count;
+    *sample = (PPBenchmarkDefinesSample){ .digest = 14695981039346656037ull };
+    bool result = true;
+    // A file at a time, as a translation unit defines its macros: its #defines, then its macros compiled, then its
+    // identifiers looked up; then, outside the time, its definitions taken back.
+    for (uint32_t f = 0; f < tables->count; f += 1)
+    {
+        const PPFileData* data = &pp->datas[first_data + f];
+        uint64_t before = pp_benchmark_read_counter(cycles_fd);
+        for (uint32_t d = 0; d < data->directive_count; d += 1)
+        {
+            if (data->directive_kind[d] == PP_DIRECTIVE_DEFINE)
+            {
+                pp_define(pp, first_data + f, 0, data->directive_hash[d] + 2, data->directive_end[d]);
+                sample->defines += 1;
+            }
+        }
+        uint64_t now = pp_benchmark_read_counter(cycles_fd);
+        sample->define_cycles += now - before;
+        before = now;
+        for (uint32_t id = macros; id < pp->macro_count; id += 1)
+        {
+            pp_compile_macro(pp, id);
+        }
+        now = pp_benchmark_read_counter(cycles_fd);
+        sample->compile_cycles += now - before;
+        before = now;
+        // As the main loop's runs test them: the identifiers of 64 kinds at a time from one compare, then each one's bit.
+        uint64_t found = 0;
+        uint64_t lookups = 0;
+        for (uint32_t t = 0; t < data->token_count; t += 64)
+        {
+            const __mmask64 lanes = _bzhi_u64(~0ull, data->token_count - t < 64 ? data->token_count - t : 64);
+            const __m512i kind = _mm512_and_si512(_mm512_maskz_loadu_epi8(lanes, data->kinds + t), _mm512_set1_epi8(0x7F));
+            for (uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER)); identifiers != 0; identifiers &= identifiers - 1)
+            {
+                found += pp_is_macro(pp, data->values[t + (uint32_t)__builtin_ctzll(identifiers)]);
+                lookups += 1;
+            }
+        }
+        sample->lookup_cycles += pp_benchmark_read_counter(cycles_fd) - before;
+        sample->found += found;
+        sample->lookups += lookups;
+        sample->macros += pp->macro_count - macros;
+        for (uint32_t id = macros; id < pp->macro_count; id += 1)
+        {
+            const PPMacro* macro = &pp->macros[id];
+            sample->digest = (sample->digest ^ ((uint64_t)macro->name << 32 | macro->body_begin)) * 1099511628211ull;
+            sample->digest = (sample->digest ^ ((uint64_t)macro->flags << 32 | macro->parameter_count)) * 1099511628211ull;
+        }
+        for (uint32_t id = pp->macro_count; id > macros; id -= 1)
+        {
+            pp_set_macro(pp, pp->macros[id - 1].name, 0);
+        }
+        pp->macro_count = macros;
+        pp->item_count = items;
+        pp->parameter_count = parameters;
+    }
+    return result;
+}
+
+// --defines PATH...: each .c and .h file under the paths defines its #defines, compiles its macros and looks up its
+// identifiers, by each kernel in turn, 21 passes after a warm-up, and it reports the medians per #define, per macro
+// compiled and per lookup (#121).
+static int pp_benchmark_defines(char** paths, int path_count, uint32_t only)
+{
+    static PPBenchmarkTables tables;
+    FILE* null_stream = fopen("/dev/null", "w");
+    // Diagnostics (the corpus's redefinitions, as its files are defined one after another) go nowhere.
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .diagnostics = null_stream };
+    tables.bytes = arena_reserve(1ull << 36);
+    tables.datas = calloc(BUSTER_PP_BENCHMARK_MAX_FILES, sizeof(PPFileData));
+    bool ran = null_stream != 0 && tables.bytes.base != 0 && tables.datas != 0 && intern_initialize(&tables.table) && pp_initialize(&tables.pp, &options, &tables.table);
+    for (int i = 0; ran && i < path_count; i += 1)
+    {
+        ran = pp_benchmark_tables_path(&tables, paths[i]);
+    }
+    // The files become the preprocessor's file data, which definitions point into.
+    const uint32_t first_data = tables.pp.data_count;
+    ran = ran && first_data + tables.count <= BUSTER_PP_MAX_FILES;
+    for (uint32_t f = 0; ran && f < tables.count; f += 1)
+    {
+        tables.pp.datas[first_data + f] = tables.datas[f];
+    }
+    tables.pp.data_count += ran ? tables.count : 0;
+    const int cycles_fd = pp_benchmark_open_counter(PERF_COUNT_HW_CPU_CYCLES);
+    static PPBenchmarkDefinesSample samples[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS][BUSTER_PP_BENCHMARK_PASSES];
+    uint64_t digest = 0;
+    bool have_digest = false;
+    for (uint32_t pass = 0; ran && pass <= BUSTER_PP_BENCHMARK_PASSES; pass += 1)
+    {
+        for (uint32_t order = 0; ran && order < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; order += 1)
+        {
+            const uint32_t implementation = order ^ (pass & 1);
+            PPBenchmarkDefinesSample sample;
+            if (((only >> implementation) & 1) != 0)
+            {
+                ran = pp_benchmark_defines_pass(&tables, first_data, implementation == 0, cycles_fd, &sample);
+                ran = ran && (!have_digest || sample.digest == digest);
+                digest = sample.digest;
+                have_digest = true;
+                if (pass > 0)
+                {
+                    samples[implementation][pass - 1] = sample;
+                }
+            }
+        }
+    }
+    if (!ran)
+    {
+        fprintf(stderr, "a file can't be read or prepared, or the kernels' macros differ\n");
+    }
+    else
+    {
+        static const char* const names[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { "vectorized", "scalar" };
+        const PPBenchmarkDefinesSample* counts = &samples[only == 2 ? 1 : 0][0];
+        printf("definitions: %u files, %lu #define directives, %lu macros defined, %lu identifiers looked up (%.1f%% macros); %d passes, medians:\n",
+               tables.count, (unsigned long)counts->defines, (unsigned long)counts->macros, (unsigned long)counts->lookups,
+               counts->lookups != 0 ? 100.0 * (double)counts->found / (double)counts->lookups : 0.0, BUSTER_PP_BENCHMARK_PASSES);
+        for (uint32_t implementation = 0; implementation < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; implementation += 1)
+        {
+            uint64_t defines[BUSTER_PP_BENCHMARK_PASSES];
+            uint64_t compiles[BUSTER_PP_BENCHMARK_PASSES];
+            uint64_t lookups[BUSTER_PP_BENCHMARK_PASSES];
+            for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
+            {
+                defines[pass] = samples[implementation][pass].define_cycles;
+                compiles[pass] = samples[implementation][pass].compile_cycles;
+                lookups[pass] = samples[implementation][pass].lookup_cycles;
+            }
+            pp_benchmark_sort(defines, BUSTER_PP_BENCHMARK_PASSES);
+            pp_benchmark_sort(compiles, BUSTER_PP_BENCHMARK_PASSES);
+            pp_benchmark_sort(lookups, BUSTER_PP_BENCHMARK_PASSES);
+            if (((only >> implementation) & 1) != 0)
+            {
+                printf("  %-10s %7.1f cycles per #define  %7.1f cycles per macro compiled  %5.2f cycles per lookup\n", names[implementation],
+                       (double)defines[BUSTER_PP_BENCHMARK_PASSES / 2] / (double)(counts->defines != 0 ? counts->defines : 1),
+                       (double)compiles[BUSTER_PP_BENCHMARK_PASSES / 2] / (double)(counts->macros != 0 ? counts->macros : 1),
+                       (double)lookups[BUSTER_PP_BENCHMARK_PASSES / 2] / (double)(counts->lookups != 0 ? counts->lookups : 1));
+            }
+        }
+    }
+    if (cycles_fd >= 0)
+    {
+        close(cycles_fd);
+    }
+    // The files' data belong to the benchmark's arena, not the preprocessor.
+    tables.pp.data_count = first_data;
+    pp_release(&tables.pp);
+    intern_release(&tables.table);
+    arena_release(&tables.bytes);
+    free(tables.datas);
+    if (null_stream != 0)
+    {
+        fclose(null_stream);
+    }
+    return ran ? 0 : 1;
+}
+
 int run_preprocessor_benchmark(int argc, char** argv)
 {
     int result = 1;
@@ -512,6 +696,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
     bool history_cost = false;
     bool guard_cost = false;
     bool tables = false;
+    bool defines = false;
     uint32_t only = 3;
     char** passed = calloc((size_t)argc + 1, sizeof(char*));
     char** clang_passed = calloc((size_t)argc + 1, sizeof(char*));
@@ -542,6 +727,10 @@ int run_preprocessor_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--guard-cost") == 0)
         {
             guard_cost = true;
+        }
+        else if (strcmp(argument, "--defines") == 0)
+        {
+            defines = true;
         }
         else if (strcmp(argument, "--only") == 0 && i + 1 < argc)
         {
@@ -575,6 +764,11 @@ int run_preprocessor_benchmark(int argc, char** argv)
         result = pp_benchmark_tables(files, file_count, only);
         file_count = 0;
     }
+    else if (defines && file_count != 0 && only != 0)
+    {
+        result = pp_benchmark_defines(files, file_count, only);
+        file_count = 0;
+    }
     Arena arena = arena_reserve(1ull << 30);
     PPOptions options;
     const char* input;
@@ -586,14 +780,14 @@ int run_preprocessor_benchmark(int argc, char** argv)
         memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
         with_input[passed_count] = files[0];
     }
-    if (tables)
+    if (tables || defines)
     {
-        // --tables ran above.
+        // --tables or --defines ran above.
     }
     else if (file_count == 0 || with_input == 0 || only == 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
     {
         fprintf(stderr, "usage: %s [--clang] [--history-cost | --guard-cost] [--only vectorized|scalar] [-E's options] file...\n"
-                        "       %s --tables [--only vectorized|scalar] path...\n", argv[0], argv[0]);
+                        "       %s --tables|--defines [--only vectorized|scalar] path...\n", argv[0], argv[0]);
     }
     else
     {

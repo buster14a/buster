@@ -2103,6 +2103,15 @@ command line), as the smoke commands above do for `main.c`. The default 9700X
 job runs that one, pinned to one allowed CPU; like the others, its measurements
 are informational.
 
+`./build/compiler benchmark-preprocessor --defines [--only vectorized|scalar]
+path...` times definitions and lookups alone (#121): every `.c` and `.h` file
+under the paths is read and prepared once, then each of 21 passes after a
+warm-up, file by file, defines its `#define`s, compiles its macros and looks up
+its identifiers as the main loop's runs test them, by each kernel, which must
+make the same macros. It reports the medians in cycles per `#define`, per macro
+compiled and per lookup. `docs/c-preprocessor.md` has the numbers for the C
+library corpus.
+
 `--guard-cost` times the vectorized kernels with the skip of guarded files and
 without it (`PPOptions.no_guard_skip`), in place of the scalar twins: the
 output's tokens must be the same (#120).
