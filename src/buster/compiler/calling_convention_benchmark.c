@@ -1284,10 +1284,10 @@ struct AbiBenchmarkDeferred
 // abi_assign's deferred_lanes), since its results don't tell: the twin's are the same. The prefix sums of a call's
 // registers and stack slots count every argument that needs a register as using it, so a call goes to the twin when an
 // argument is UNCOUNTED, doesn't fit (the sum of a class it needs past the registers) while a register it needs is
-// still free (inexact), goes to the stack at an offset its alignment doesn't divide (padded), is a named WIDE vector of
-// a variadic call, is of no size on the stack (EMPTY, which may take no slot), or has a LOW_GENERAL low eightbyte, or
-// when the call's result is a vector demoted to a hidden pointer, which clang doesn't count, or the call has more
-// arguments than its 16-bit register sums can count (BUSTER_ABI_COUNTED_ARGUMENTS).
+// still free (inexact), goes to the stack at an offset its alignment doesn't divide or aligned to more than 32 bits hold
+// (padded), is a named WIDE vector of a variadic call, is of no size on the stack (EMPTY, which may take no slot), or
+// has a LOW_GENERAL low eightbyte, or when the call's result is a vector demoted to a hidden pointer, which clang doesn't
+// count, or the call has more arguments than its 16-bit register sums can count (BUSTER_ABI_COUNTED_ARGUMENTS).
 static AbiBenchmarkDeferred abi_benchmark_deferred(const AbiTable* abi, AbiSignatures signatures)
 {
     AbiBenchmarkDeferred result = { 0 };
@@ -1323,10 +1323,11 @@ static AbiBenchmarkDeferred abi_benchmark_deferred(const AbiTable* abi, AbiSigna
                               (need_vectors == 0 || vectors + need_vectors <= BUSTER_ABI_VECTOR_ARGUMENTS);
             const bool spills = need_integers + need_vectors != 0 && !fits;
             const bool on_stack = (in_memory || spills) && (pass & BUSTER_ABI_PASS_IGNORE) == 0;
-            const uint64_t alignment = 1ull << ((pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT);
+            const uint32_t alignment_log2 = (pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT;
+            const uint64_t alignment = 1ull << alignment_log2;
             uncounted = uncounted || (pass & BUSTER_ABI_PASS_UNCOUNTED) != 0;
             inexact = inexact || (spills && ((need_integers != 0 && integers < BUSTER_ABI_INTEGER_ARGUMENTS) || (need_vectors != 0 && vectors < BUSTER_ABI_VECTOR_ARGUMENTS)));
-            padded = padded || (on_stack && (stack & (alignment - 1)) != 0);
+            padded = padded || (on_stack && ((stack & (alignment - 1)) != 0 || alignment_log2 > 31));
             wide_named = wide_named || (wide && variadic && !unnamed);
             empty = empty || (on_stack && (pass & BUSTER_ABI_PASS_EMPTY) != 0);
             general_low = general_low || (pass & BUSTER_ABI_PASS_LOW_GENERAL) != 0;

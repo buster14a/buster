@@ -609,12 +609,16 @@ slot's.
 ### The vector path: segmented prefix sums
 
 `abi_assign` takes every call's arguments in order, 16 at a time whatever call
-they belong to, after a scalar setup that writes each call's result and
-starting totals and each argument's lane flags (first of its call, last,
-unnamed, after a hidden pointer, in a variadic call) and call number:
+they belong to, after a scalar setup over the calls that has no loop over a
+call's arguments: it writes each call's result, starting totals and first
+argument, and its marks, a byte per argument (zeroed first): at the call's
+first argument `START`, `HIDDEN` (its result goes in memory: the hidden pointer
+takes rdi before it), `DEMOTED` and `VARIADIC`, and `UNNAMED` at its first
+unnamed one. Past the last argument, a `START` ends it.
 
 1. **Loads:** a masked load of 16 `TypeId`s, two `vpgatherdd` of their pass
-   bits and stack bytes, and the flags.
+   bits and stack bytes, and the marks of the 16 arguments and of the 16
+   after each: a lane whose next argument starts a call ends its own.
 2. **Needs:** per lane, the general registers it needs in the low 16 bits and
    the vector ones in the high 16 (0 for an argument in memory), plus 1
    general at a call's first lane after a hidden pointer.
@@ -623,7 +627,9 @@ unnamed, after a hidden pointer, in a variadic call) and call number:
    below it only when no call starts after that lane and up to it; then the
    lanes before the vector's first call start add the carry, the previous
    vector's last lane's sum (broadcast with `vpermd`). Inclusive sums less the
-   needs give each argument its first register of each class.
+   needs give each argument its first register of each class. A segmented OR
+   scan (`abi_scan_or`) of the marks gives each lane its call's `VARIADIC`
+   and, from the call's first unnamed argument on, `UNNAMED`.
 4. **Fit:** an argument whose registers fit (first plus need at most 6 for
    the general ones it needs and 8 for the vector ones) gets them, by a
    `vpermd` from a 16-entry table (rdi to r9, then none) for general ones and
@@ -632,11 +638,20 @@ unnamed, after a hidden pointer, in a variadic call) and call number:
    a `long` after nine `double`s fits, though the vector sum is past 8.
 5. **The stack:** the slots of the arguments on the stack in another
    segmented scan, whose exclusive sums are their offsets, and an OR scan of
-   their alignments, whose highest bit is the call's.
+   their alignments, whose highest bit is the call's, with bit 0 (below every
+   slot's alignment, 8 or more) set by a lane the twin must assign.
 6. **Stores:** each lane's 8-byte location (its offset, and a word of its
    registers, kind and flags), interleaved with `vpermt2d` and stored with two
-   masked 64-bit stores of 8; at the lanes that end a call, its totals: the
-   registers used (clamped to 6 and 8), the stack bytes and the alignment.
+   masked 64-bit stores of 8; and at the lanes that end a call, the three
+   scans' inclusive values, its totals, into columns of their own (three
+   masked stores).
+
+A last pass over the calls reads each call's totals at its last argument (a
+call without arguments keeps its starting ones): the registers used, clamped
+to 6 and 8, the stack bytes and the largest alignment. The calls with bit 0
+set go to the twin. The setup's marks and the totals' columns replace a loop
+over each call's arguments, whose random lengths mispredicted at their exits,
+and a loop per vector over the calls that end in it.
 
 Where nothing makes clang's and LLVM's counts differ, the twin's two counts
 are complements, so one sum serves both; an argument that spills adds its
@@ -650,7 +665,7 @@ a lane:
   with one free, or one of both classes with one class full), which the sums
   count as used though it stays free for the arguments after;
 - is on the stack at an offset its alignment doesn't divide, where the twin
-  would pad;
+  would pad, or aligned to 2^32 or more, which a 32-bit lane can't hold;
 - makes the counts differ: it is `UNCOUNTED` or `LOW_GENERAL`, a named
   `WIDE` vector in a variadic call, or the first of a call whose result is
   `DEMOTED`;
@@ -661,10 +676,11 @@ a lane:
   more, 65,535 in all, and past that the general registers' sum would carry
   into the vector ones'.
 
-A call with such a lane is listed, and after the loop the twin assigns it
-again, over what the vector path wrote: 1.7% of the benchmark's calls, which
-hold 5.2% of its arguments (see "Measurements on the 9700X"). Without scratch
-memory for the setup's columns, `abi_assign` runs the twin on every call.
+A call with such a lane carries bit 0 in its totals, and after the loop the
+twin assigns it again, over what the vector path wrote: 1.7% of the
+benchmark's calls, which hold 5.2% of its arguments (see "Measurements on the
+9700X"). Without scratch memory for the setup's columns, `abi_assign` runs the
+twin on every call.
 
 ## va_arg
 
