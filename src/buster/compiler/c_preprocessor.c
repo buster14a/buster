@@ -372,8 +372,8 @@ struct FileProbe
 };
 
 // How a probe gets a file's bytes: mapped with MAP_POPULATE (a translation unit's, and one lane's), mapped without it
-// (its pages are faulted in as they are first read, without the process's memory map lock that the mapping itself
-// holds), or read into an arena.
+// (the mapping holds the process's memory map lock for less time, and its pages are faulted in as they are first read),
+// or read into an arena. A lane reads small files whatever this says (file_cache_probe's `read_limit`).
 typedef enum FileCacheBytes
 {
     FILE_CACHE_MAP_POPULATED,
@@ -2102,10 +2102,12 @@ static FileCachePath* file_cache_find_path(FileCache* cache, const char* path, u
 // Probes the file system for a regular file at `path` (NUL-terminated): opens it and reads its identity, and unless a
 // record already has that identity, gets its bytes as `how` says. A mapping is read-only: the page cache's pages, which
 // costs neither a copy nor clearing new pages, but each mapping holds the process's memory map lock, on which lanes that
-// map at once queue; FILE_CACHE_READ reads the bytes into `bytes_arena` instead, followed by 64 zero bytes. A file too
-// big for 32-bit positions, or that can't be mapped or read whole, is none. The probe reads the identity table only, so
-// lanes probe at once while no lane adds records; the system calls go to `counts`.
-static void file_cache_probe(const FileCache* cache, const char* path, FileCacheBytes how, Arena* bytes_arena, FileProbe* probe, FileCacheCounts* counts)
+// map at once queue. A file of up to `read_limit` bytes, or any with FILE_CACHE_READ, is read into `bytes_arena`
+// instead (unless it is null), followed by 64 zero bytes. A file too big for 32-bit positions, or that can't be mapped
+// or read whole, is none. The probe reads the identity table only, so lanes probe at once while no lane adds records;
+// the system calls go to `counts`.
+static void file_cache_probe(const FileCache* cache, const char* path, FileCacheBytes how, uint32_t read_limit, Arena* bytes_arena, FileProbe* probe,
+                             FileCacheCounts* counts)
 {
     static const uint8_t empty[1] = { 0 };
     *probe = (FileProbe){ .record = BUSTER_PP_NONE };
@@ -2120,7 +2122,8 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
         probe->length = (uint32_t)stats.st_size;
         probe->record = file_cache_find_identity(cache, probe->device, probe->inode);
         const uint8_t* bytes = empty;
-        if (probe->record == BUSTER_PP_NONE && probe->length != 0 && how != FILE_CACHE_READ)
+        const bool read = bytes_arena != 0 && (how == FILE_CACHE_READ || probe->length <= read_limit);
+        if (probe->record == BUSTER_PP_NONE && probe->length != 0 && !read)
         {
             void* mapped = mmap(0, probe->length, PROT_READ, MAP_PRIVATE | (how == FILE_CACHE_MAP_POPULATED ? MAP_POPULATE : 0), fd, 0);
             bytes = mapped != MAP_FAILED ? mapped : 0;
@@ -2227,7 +2230,7 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
     if (entry == 0)
     {
         FileProbe probe;
-        file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, 0, &probe, counts);
+        file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, 0, 0, &probe, counts);
         entry = file_cache_add_path(cache, path, length, hash, &probe);
         if (entry != 0)
         {

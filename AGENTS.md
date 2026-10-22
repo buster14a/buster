@@ -2121,18 +2121,22 @@ warnings, and nothing may be written to stderr while the cache is filled:
   roots; with `--flat`, only prepared (a corpus such as the C library's).
 
 `--seed N` changes the spellings, and `--keep` leaves the directory. On the
-9700X, `sqlite3.c`, Lua 5.4.8 and the C library corpus (`--flat`) pass too.
+9700X, `sqlite3.c`, Lua 5.4.8, musl 1.2.5's 1,357 sources and the C library
+corpus (`--flat`) pass too.
 The 9700X job runs it, on `src` with `--flat`, and on the repository's
 translation units.
 
 ## Per-file jobs benchmark
 
 `./build/compiler benchmark-files [--lanes LIST] [--cpus LIST] [--runs N]
-[--spin MS] [--flat] [--bytes map|read|populate] [--lane-bytes N] [options]
-path...` fills a cache from the paths (with `--flat`, without following their
-includes) on each lane count of `--lanes` (1 to 8), lane i pinned to the i-th
-CPU of `--cpus` (the allowed CPUs, in order), every run from nothing after
-`--spin` ms (2) of spinning on every lane. It reports medians of `--runs` (21):
+[--spin MS] [--flat] [--bytes map|read|populate] [--read-limit N]
+[--lane-bytes N] [options] path...` fills a cache from the paths (with
+`--flat`, without following their includes) on each lane count of `--lanes`
+(1 to 8), lane i pinned to the i-th CPU of `--cpus` (the allowed CPUs, in
+order), every run from nothing after `--spin` ms (2) of spinning on every lane.
+`--read-limit` sets the largest file the lanes read rather than map (16 KB),
+`--bytes` how lanes map the larger ones (or read them), and `--lane-bytes` a
+round's bytes per working lane (4 MB). It reports medians of `--runs` (21):
 the run's time, speedup and time to the roots' round, the tokens per second,
 each phase on the lane that spent the most on it (preparing, the merge's
 lookups, exchange, additions and rewrite, the include lines, the searches, the

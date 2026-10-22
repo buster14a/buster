@@ -79,8 +79,14 @@
 #define BUSTER_FILES_MIN_BUCKETS 1024
 // Shared-table slots a lane prefetches before it takes them (files_add_first).
 #define BUSTER_FILES_PLACE_BATCH 32
-// How lanes get files' bytes (FileCacheBytes, file_cache_probe).
+// How lanes get files' bytes (FileCacheBytes, file_cache_probe), and the largest file every lane count reads into its
+// arena rather than maps: each mapping holds the process's memory map lock, on which lanes that map at once queue (14%
+// of the samples of 8 lanes preparing the C library corpus), and its pages fault in as the lexer reads them, while a
+// small file's copy costs little. On the 9700X, reading files of up to 16 KB made the C library corpus 8% faster on 8
+// lanes and 7% on one, and musl's walk 21% to 26%, against up to 4% slower for this repository's walk on 4 to 8 lanes
+// (docs/c-files.md, "Where the time goes").
 #define BUSTER_FILES_BYTES FILE_CACHE_MAP
+#define BUSTER_FILES_READ_LIMIT (16u << 10)
 // Most files a round can have, and items, requests and paths a walk can have.
 #define BUSTER_FILES_MAX_FILES (1u << 20)
 #define BUSTER_FILES_MAX_ITEMS (1u << 22)
@@ -242,8 +248,10 @@ struct FilesRun
     // change to reach every way of preparing a round.
     uint64_t lane_bytes;
     uint64_t split_bytes;
-    // How lanes get files' bytes when there is more than one (FileCacheBytes): BUSTER_FILES_BYTES.
+    // How lanes get files' bytes when there is more than one (FileCacheBytes): BUSTER_FILES_BYTES; and the largest file
+    // read into a lane's arena rather than mapped, whatever the lane count: BUSTER_FILES_READ_LIMIT.
     FileCacheBytes bytes;
+    uint32_t read_limit;
     // The lanes' state, by lane index.
     FilesLane* lanes;
     uint32_t lane_count;
@@ -674,11 +682,12 @@ static void files_prepare(FilesRun* run)
     }
     else
     {
-        // A lane's own table is made at its first round of several lanes, the size of its share of the round's bytes.
+        // A lane's own table is made at its first round of several lanes, the size of a working lane's share of the
+        // round's bytes.
         if (mine->table.records == 0)
         {
             uint64_t buckets = BUSTER_FILES_MIN_BUCKETS;
-            while (buckets * BUSTER_FILES_BYTES_PER_BUCKET < bytes / run->lane_count)
+            while (buckets * BUSTER_FILES_BYTES_PER_BUCKET < bytes / lanes)
             {
                 buckets *= 2;
             }
@@ -1142,13 +1151,13 @@ static void files_search(FilesRun* run)
             files_tick(mine, FILES_PHASE_ALONE);
         }
         probes = (uint32_t)files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && !run->failed ? run->probe_count : 0);
-        // How the lanes get the files' bytes (file_cache_probe): with one lane, mapped with MAP_POPULATE; with more, as
-        // run->bytes says.
+        // How the lanes get the files' bytes (file_cache_probe): files of up to run->read_limit bytes read, and larger
+        // ones mapped, with MAP_POPULATE on one lane, and as run->bytes says on more.
         const Range64 range = lane_range(probes);
         const FileCacheBytes how = run->lane_count > 1 ? run->bytes : FILE_CACHE_MAP_POPULATED;
         for (uint64_t p = range.begin; p < range.end; p += 1)
         {
-            file_cache_probe(run->cache, run->probes[p].path, how, &run->cache->lanes[lane].bytes, &run->found[p], &mine->counts);
+            file_cache_probe(run->cache, run->probes[p].path, how, run->read_limit, &run->cache->lanes[lane].bytes, &run->found[p], &mine->counts);
         }
         files_sync(mine, FILES_PHASE_SEARCH);
         if (lane == 0 && probes != 0)
@@ -1380,6 +1389,7 @@ static __attribute__((unused)) bool files_run_initialize(FilesRun* run, FileCach
         .lane_bytes = BUSTER_FILES_LANE_BYTES,
         .split_bytes = BUSTER_FILES_SPLIT_BYTES,
         .bytes = BUSTER_FILES_BYTES,
+        .read_limit = BUSTER_FILES_READ_LIMIT,
         .lane_count = lane_count,
         .partition_count = BUSTER_FILES_PARTITIONS_PER_LANE * lane_count,
     };
