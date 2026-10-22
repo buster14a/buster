@@ -252,6 +252,9 @@ int run_c_lexer_benchmark(int argc, char** argv);
 // The x86-64 encoder and its tests, for the test-x86-encoder command. Its benchmark is another translation unit.
 #include "buster/compiler/x86_64_encoder.c"
 #include "buster/compiler/x86_64_encoder_test.c"
+#include "buster/compiler/x86_zen5.c"
+#include "buster/compiler/x86_zen5_measure.c"
+#include "buster/compiler/x86_zen5_test.c"
 #include "buster/compiler/x86_64_disassembler.c"
 #include "buster/compiler/x86_64_disassembler_test.c"
 #include "buster/compiler/x86_64_disassembler_cli.c"
@@ -373,10 +376,21 @@ int run_x86_semantics_benchmark(int argc, char** argv);
 #include "buster/compiler/c_types_test.c"
 int run_type_benchmark(int argc, char** argv);
 
+// The System V calling convention (each type's classes, and each call's argument locations) and its tests, for the
+// test-calling-convention command. Its benchmark is another translation unit.
+#include "buster/compiler/calling_convention.c"
+#include "buster/compiler/calling_convention_test.c"
+int run_calling_convention_benchmark(int argc, char** argv);
+
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
 // check-call-graph and test-call-graph commands.
 #include "buster/compiler/call_graph.c"
 #include "buster/compiler/call_graph_test.c"
+
+// The profiling tools (ab, and the reports of perf's and objdump's text: hot-loops, label-spills, spill-report and
+// branch-misses) and their tests, for the test-profile command.
+#include "buster/compiler/profile.c"
+#include "buster/compiler/profile_test.c"
 
 int main(int argc, char** argv)
 {
@@ -432,6 +446,18 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
     {
         result = run_x86_target_tests();
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-x86-zen5") == 0)
+    {
+        result = run_x86_zen5_tests();
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-zen5") == 0)
+    {
+        result = run_x86_zen5_benchmark(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "measure-x86-zen5") == 0)
+    {
+        result = run_x86_zen5_measure(argc - 2, argv + 2);
     }
     else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
     {
@@ -569,6 +595,14 @@ int main(int argc, char** argv)
     {
         result = run_type_benchmark(argc - 1, argv + 1);
     }
+    else if (argc >= 2 && strcmp(argv[1], "test-calling-convention") == 0)
+    {
+        result = run_calling_convention_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-calling-convention") == 0)
+    {
+        result = run_calling_convention_benchmark(argc - 1, argv + 1);
+    }
     else if (argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
     {
         result = run_check_call_graph(argc - 2, argv + 2);
@@ -576,6 +610,15 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "test-call-graph") == 0)
     {
         result = run_call_graph_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && (strcmp(argv[1], "ab") == 0 || strcmp(argv[1], "hot-loops") == 0 || strcmp(argv[1], "label-spills") == 0 ||
+                           strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0))
+    {
+        result = run_profile_command(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-profile") == 0)
+    {
+        result = run_profile_tests(argc - 2, argv + 2);
     }
     else
     {
