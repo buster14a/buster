@@ -4382,6 +4382,17 @@ static void pp_read_file_comment(Preprocessor* pp, PPContext* context, bool dire
     }
 }
 
+// A recognized directive reads a trailing comment on its own line actively. Conditions do this after source header
+// queries have restored any opaque names, before their expression is evaluated; a body comment is left to the file.
+static void pp_read_directive_comment(Preprocessor* pp, PPContext* context, uint32_t directive)
+{
+    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    if (data->unterminated_comment != 0 && !data->unterminated_comment_starts_line && data->directive_end[directive] == data->token_count)
+    {
+        pp_read_file_comment(pp, context, true);
+    }
+}
+
 BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
@@ -8202,6 +8213,7 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     bool started = false;
     if (begin == end)
     {
+        pp_read_directive_comment(pp, context, d);
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#if with no expression");
     }
     else if (pp_copy_line(pp, context, begin, end))
@@ -8218,6 +8230,7 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     }
     if (!started)
     {
+        pp_read_directive_comment(pp, context, d);
         pp->arguments.count = line;
         pp_apply_condition(pp, context, d, kind, false);
     }
@@ -8227,6 +8240,7 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
 static void pp_finish_condition(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
+    pp_read_directive_comment(pp, &pp->contexts[capture.context], capture.directive);
     const bool taken = pp_evaluate(pp, &pp->captures, capture.begin, pp->captures.count, capture.location);
     if (pp->options.timing)
     {
@@ -9788,10 +9802,11 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
     const uint8_t kind = data->directive_kind[d];
     const uint32_t base = pp->ranges[context->range].base;
     const uint32_t location = base + data->starts[hash];
-    if (data->unterminated_comment != 0 && !data->unterminated_comment_starts_line && end == data->token_count)
+    const PPConditional* group = pp->conditional_count > context->conditional_base ? &pp->conditionals[pp->conditional_count - 1] : 0;
+    const bool condition = kind == PP_DIRECTIVE_IF || (kind == PP_DIRECTIVE_ELIF && group != 0 && !group->seen_else && !group->taken);
+    if (!condition)
     {
-        // A comment on this directive's line is read before the directive changes which group is active.
-        pp_read_file_comment(pp, context, true);
+        pp_read_directive_comment(pp, context, d);
     }
     context->position = end;
     context->next_directive = d + 1;

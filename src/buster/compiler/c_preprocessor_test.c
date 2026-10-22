@@ -865,6 +865,7 @@ static const PPTestFile pp_test_files_embed_directories[] = {
 static const PPTestFile pp_test_files_includes[] = {
     { "a/b.h", "ab\n" },
     { "dir/*x.h", "opaque_header\n" },
+    { "dir/*x.bin", "B\n" },
     { "a/*x*/b.h", "axb\n" },
     { "a\\b.h", "backslash\n" },
     { "a b.h", "joined\n" },
@@ -1799,10 +1800,12 @@ static const PPTestCase pp_test_cases[] = {
     },
     {
         .name = "opaque header: an unclosed comment delimiter in a query name",
-        .source = "#if __has_include(<dir/*x.h>)\nfound\n#else\nwrong\n#endif\nafter\n",
+        .source = "#if __has_include(<dir/*x.h>) && __has_embed(<dir/*x.bin> limit(1)) == 1\nfound\n#else\nwrong\n#endif\n"
+                  "#if __has_include(<dir/*x.h>) && 0\nwrong\n#else\nfalse_branch\n#endif\n"
+                  "#if 0\nwrong\n#elif __has_include(<dir/*x.h>)\nelif_branch\n#endif\nafter\n",
         .standard = "c23",
-        .expected = "found after",
-        .options = "-I%d",
+        .expected = "found false_branch elif_branch after",
+        .options = "-I%d --embed-dir=%d",
         .files = pp_test_files_includes,
     },
     {
