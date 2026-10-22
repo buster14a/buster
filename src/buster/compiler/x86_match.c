@@ -181,9 +181,14 @@ static bool x86_match_name(String8 name, const char* text)
 
 static uint32_t x86_match_hash(String8 name)
 {
+    // movabs is mov's 64-bit immediate, and pushw push's 16-bit operand size: each shares its family's bucket.
     if (x86_match_name(name, "movabs"))
     {
         name = BUSTER_S8("mov");
+    }
+    else if (x86_match_name(name, "pushw"))
+    {
+        name = BUSTER_S8("push");
     }
     uint32_t hash = 0;
     for (uint64_t i = 0; i < name.length; i += 1)
@@ -341,6 +346,15 @@ static bool x86_match_supported(const X86FormDescription* form)
     return allowed;
 }
 
+// Whether a form sign-extends its immediate into a wider operand: the imm8 of 83, 6B and 6A, and an imm32 into 64 bits
+// (REX.W, or PUSH's default operand size). Such a field holds a signed value, which its range and its relocation (32S)
+// follow.
+static bool x86_match_sign_extends(const X86FormDescription* form)
+{
+    const uint32_t opcode = form->opcode & 0xff;
+    return form->family == BUSTER_X86_FAMILY_LEGACY && (opcode == 0x83 || opcode == 0x6b || opcode == 0x6a || (form->immediate_bytes == 4 && (form->w || strcmp(form->mnemonic, "push") == 0)));
+}
+
 static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
 {
     memset(index, 0, sizeof(*index));
@@ -376,8 +390,7 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
             index->counts[at] = count;
             index->broadcast[at] = (form->evex & BUSTER_X86_EVEX_BROADCAST) ? 64 / form->disp8_scale : 0;
             const uint32_t bytes = form->immediate_bytes;
-            const uint32_t opcode = form->opcode & 0xff;
-            const bool extended = form->family == BUSTER_X86_FAMILY_LEGACY && (opcode == 0x83 || opcode == 0x6b || opcode == 0x6a || (bytes == 4 && (form->w || strcmp(form->mnemonic, "push") == 0)));
+            const bool extended = x86_match_sign_extends(form);
             index->immediate_min[at] = bytes != 0 ? (int64_t)(-((__int128)1 << (8 * bytes - 1))) : 0;
             index->immediate_max[at] = bytes != 0 ? (uint64_t)(((__int128)1 << (8 * bytes - (extended ? 1 : 0))) - 1) : 0;
             for (uint32_t operand = 0; operand < count; operand += 1)
@@ -412,8 +425,7 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
 static bool x86_match_immediate(const X86FormDescription* form, const X86Operand* operand)
 {
     const uint32_t bytes = form->immediate_bytes;
-    const uint32_t opcode = form->opcode & 0xff;
-    const bool extended = form->family == BUSTER_X86_FAMILY_LEGACY && (opcode == 0x83 || opcode == 0x6b || opcode == 0x6a || (bytes == 4 && (form->w || strcmp(form->mnemonic, "push") == 0)));
+    const bool extended = x86_match_sign_extends(form);
     const __int128 low = bytes != 0 ? -((__int128)1 << (bytes * 8 - 1)) : 0;
     const __int128 high = bytes != 0 ? (((__int128)1 << (bytes * 8 - (extended ? 1 : 0))) - 1) : 0;
     return operand->kind == X86_OPERAND_IMMEDIATE && bytes != 0 && (operand->symbolic ? bytes >= 4 : operand->value >= low && operand->value <= high);
@@ -456,8 +468,9 @@ static bool x86_match_candidate(const X86MatchRequest* request, uint32_t f, X86I
 {
     const X86FormDescription* form = &x86_form_descriptions[f];
     uint8_t roles[4];
-    // The target-specific index contains only supported, eligible forms.
-    bool result = x86_match_name(request->mnemonic, form->mnemonic) || (x86_match_name(request->mnemonic, "mov") && strcmp(form->mnemonic, "movabs") == 0);
+    // The target-specific index contains only supported, eligible forms. pushw is also push's 16-bit register and
+    // memory forms, as in GNU as.
+    bool result = x86_match_name(request->mnemonic, form->mnemonic) || (x86_match_name(request->mnemonic, "mov") && strcmp(form->mnemonic, "movabs") == 0) || (x86_match_name(request->mnemonic, "pushw") && strcmp(form->mnemonic, "push") == 0 && form->operand_bytes == 2);
     result &= x86_match_roles(form->syntax, roles) == request->count;
     const bool implicit_qword = form->operand_bytes == 0 && (strcmp(form->mnemonic, "call") == 0 || strcmp(form->mnemonic, "jmp") == 0 || strcmp(form->mnemonic, "ret") == 0 || strcmp(form->mnemonic, "leave") == 0);
     result &= request->width == 0 || request->width == form->operand_bytes || (request->width == 8 && implicit_qword);
