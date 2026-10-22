@@ -1744,6 +1744,11 @@ static void asm_simple_words_vector(const uint64_t* keys, const uint64_t* length
         const __m512i words = _mm512_maskz_loadu_epi64(valid, keys + first);
         const __m512i sizes = _mm512_maskz_loadu_epi64(valid, lengths + first);
         __m512i descriptions = _mm512_maskz_loadu_epi64(valid, descriptors + first);
+        // RIP is valid in an address, but never as a standalone register operand. Keep its exact diagnostic and
+        // source-order error handling in asm_operand instead of accepting the cached spelling into this batch.
+        const __m512i class_mask = _mm512_set1_epi64(255u << 16);
+        const __m512i classes = _mm512_and_si512(descriptions, class_mask);
+        descriptions = _mm512_maskz_mov_epi64(_mm512_cmpneq_epi64_mask(classes, class_mask), descriptions);
         __mmask8 decimal = valid & _mm512_cmpgt_epi64_mask(sizes, _mm512_setzero_si512());
         const __m512i shift = _mm512_slli_epi64(_mm512_sub_epi64(_mm512_set1_epi64(8), sizes), 3);
         // Move the spelling to the high end of its qword; shifting supplies zero-valued leading digits and

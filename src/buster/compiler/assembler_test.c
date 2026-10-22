@@ -431,6 +431,43 @@ static void asm_test_registers(AsmTest* test)
     asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\n.quad r000000008,r000000000009,zmm000001,k000003\n"), 1, X86_ARCH_V4);
 }
 
+static void asm_test_register_diagnostics(AsmTest* test)
+{
+    // Exercise every RIP spelling and both operand positions before and after the 16-row batch boundary. A later
+    // bad directive must not hide the earlier invalid operand; both paths must report that operand's exact byte.
+    for (uint32_t leading = 0; leading <= 17; leading += 1)
+    {
+        for (uint32_t capitals = 0; capitals < 8; capitals += 1)
+        {
+            char name[] = "rip";
+            for (uint32_t i = 0; i < 3; i += 1)
+            {
+                if (capitals & (1u << i))
+                {
+                    name[i] -= 'a' - 'A';
+                }
+            }
+            for (uint32_t operand = 0; operand < 2; operand += 1)
+            {
+                for (uint32_t later_error = 0; later_error < 2; later_error += 1)
+                {
+                    char source[512];
+                    uint32_t length = snprintf(source, sizeof(source), ".intel_syntax noprefix\n");
+                    for (uint32_t row = 0; row < leading; row += 1)
+                    {
+                        length += snprintf(source + length, sizeof(source) - length, "mov rax,rbx\n");
+                    }
+                    const uint32_t location = length + (operand == 0 ? 4 : 8);
+                    length += snprintf(source + length, sizeof(source) - length, "mov %s,%s\n%s", operand == 0 ? name : "rax", operand == 1 ? name : "rax", later_error ? ".bad\n" : "");
+                    const AsmResult result = asm_test_pair(test, (String8){.pointer = source, .length = length}, 0, 0);
+                    const bool correct = result.error != 0 && strcmp(result.error, "invalid register operand (AT&T indirect branches require '*')") == 0 && result.location == location;
+                    asm_test_check(test, correct, "standalone RIP keeps its diagnostic before later source errors", result.error);
+                }
+            }
+        }
+    }
+}
+
 static void asm_test_numbers(AsmTest* test)
 {
     uint64_t words[8];
@@ -1059,6 +1096,7 @@ static int run_assembler_tests(int count, char** arguments)
         uint64_t matcher_random = random;
         asm_test_matcher(&test, &matcher_random);
         asm_test_registers(&test);
+        asm_test_register_diagnostics(&test);
         asm_test_numbers(&test);
         asm_test_valid_batches(&test, &random);
         static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz0123456789.,:;[](){}%$@+-*/\\\"# \n\t";
