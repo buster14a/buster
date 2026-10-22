@@ -1117,6 +1117,15 @@ static const char* const predefines_test_option_sets[] = {
     "-mconstant-cfstrings", "-mno-constant-cfstrings", "-mno-constant-cfstrings -mconstant-cfstrings", "-mno-constant-cfstrings -fconstant-cfstrings",
     "-fno-constant-cfstrings -mconstant-cfstrings", "-municode", "-municode -municode", "-municodeX", "-mavx512", "-mavx512f2", "-mbogus", "-mno-bogus", "-m68000",
     "-mfpu=neon", "-mindirect-branch=thunk", "-mbig-endian", "-mrtd", "-mfentry -mnop-mcount", "-mrecord-mcount",
+    // clang's -m aliases (predefines_aliases; each alone besides these), against their options in either order: the
+    // last of either spelling wins.
+    "-fpascal-strings -mno-pascal-strings", "-mpascal-strings -fno-pascal-strings", "-mno-pascal-strings -fpascal-strings",
+    "-fno-pascal-strings -mpascal-strings", "-mpascal-strings -mno-pascal-strings", "-mno-pascal-strings -mpascal-strings", "-fzvector -mno-zvector",
+    "-mzvector -fno-zvector", "-mno-zvector -fzvector", "-fatomic-ignore-denormal-mode -mno-unsafe-fp-atomics",
+    "-mno-unsafe-fp-atomics -fatomic-ignore-denormal-mode", "-munsafe-fp-atomics -fno-atomic-ignore-denormal-mode", "-mx87 -mno-fp-ret-in-387",
+    "-mno-fp-ret-in-387 -mx87", "-mno-fp-ret-in-387 -m80387", "-mno-fp-ret-in-387 -mfpmath=387", "-mno-fp-ret-in-387 -mfpmath=sse", "-mips1 -march=x86-64",
+    "-march=znver4 -mips32r6", "-mips64r6 -march=znver4", "-mips1 -march=native", "-mips5 -mtune=znver5", "-marm", "-msmall-data-limit=8",
+    "-miphoneos-version-min=10",
 };
 
 // Our predefines for `arguments` (as pp_parse_options and pp_predefines make them) into `*text`, or false where the
@@ -1268,6 +1277,11 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
         BUSTER_PREDEFINES_TEST_SET("-m%s", predefines_hardening_names[h]);
         BUSTER_PREDEFINES_TEST_SET("-mno-%s", predefines_hardening_names[h]);
     }
+    // Each of clang's -m aliases buster reads as its option, alone.
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_aliases); i += 1)
+    {
+        BUSTER_PREDEFINES_TEST_SET("%s", predefines_aliases[i][0]);
+    }
     // The sanitizers clang's incompatible pairs name and those with macros: each alone, each pair, and each pair with
     // either one turned off after it, which clang accepts.
     static const char* const sanitizers[] = {
@@ -1331,16 +1345,23 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
             }
             else
             {
-                // A flag that changes no macro, or a hardening flag (on or off), which clang weighs against the others.
-                const uint64_t pick = predefines_test_random(&state) % (BUSTER_ARRAY_LENGTH(predefines_neutral_flags) + 2 * PREDEFINES_HARDENING_COUNT);
-                const uint64_t hardening = pick - BUSTER_ARRAY_LENGTH(predefines_neutral_flags);
-                if (pick < BUSTER_ARRAY_LENGTH(predefines_neutral_flags))
+                // A flag that changes no macro, a hardening flag (on or off), which clang weighs against the others, or an
+                // alias of clang's.
+                const uint64_t flags = BUSTER_ARRAY_LENGTH(predefines_neutral_flags);
+                const uint64_t pick = predefines_test_random(&state) % (flags + 2 * PREDEFINES_HARDENING_COUNT + BUSTER_ARRAY_LENGTH(predefines_aliases));
+                const uint64_t hardening = pick - flags;
+                const uint64_t alias = pick - flags - 2 * PREDEFINES_HARDENING_COUNT;
+                if (pick < flags)
                 {
                     used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", predefines_neutral_flags[pick]);
                 }
-                else
+                else if (hardening < 2 * PREDEFINES_HARDENING_COUNT)
                 {
                     used += (size_t)snprintf(line + used, sizeof(line) - used, " -m%s%s", hardening % 2 ? "no-" : "", predefines_hardening_names[hardening / 2]);
+                }
+                else
+                {
+                    used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", predefines_aliases[alias][0]);
                 }
             }
         }

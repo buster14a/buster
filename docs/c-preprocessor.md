@@ -705,11 +705,19 @@ with neither but LVI's CFI), `-mfunction-return=thunk-extern` against
 `-mcmodel=large`, and each value option's last value as clang's driver and then
 cc1 read it (cc1 reads a number in any radix: `0x10`, or `010` in octal),
 `-mlarge-data-threshold=`'s only under `-mcmodel=medium` or `large`, and
-`-mrecip=`'s estimates as `parseMRecipOption` does. Every other `-m` option is
-refused, so that no switch silently leaves the baseline's macros: one clang
-doesn't know (`-mavx512`, for `-mavx512f`) or refuses for the target, and
-another target's, which clang takes with a warning that it ignores it
-(`-mthumb`, `-moutline-atomics`).
+`-mrecip=`'s estimates as `parseMRecipOption` does. clang's `-m` aliases of
+other options (`Options.td`'s `Alias`) are read as those options
+(`predefines_alias`, before anything else reads the argument), so the last of
+either spelling wins: `-m[no-]pascal-strings` as `-f[no-]pascal-strings`,
+`-m[no-]zvector` and `-m[no-]unsafe-fp-atomics` as their `-f` options,
+`-mno-fp-ret-in-387` as `-mno-x87`, and `-mips1` to `-mips64r6` as
+`-march=mips1` and so on (an unknown CPU, unless a later `-march` wins).
+`-msse4`, `-m80387`, `-mapxf` and `-mpure-code` keep branches of their own.
+Every other `-m` option is refused, so that no switch silently leaves the
+baseline's macros: one clang doesn't know (`-mavx512`, for `-mavx512f`) or
+refuses for the target, another target's, which clang takes with a warning that
+it ignores it (`-mthumb`, `-moutline-atomics`), and `-mcpu=help` and
+`-mtune=help`, which ask clang for its CPUs instead of compiling.
 
 **The sanitizers.** `predefines_finish` reads the sanitizer options after every
 option, as clang 23's driver does (`SanitizerArgs`): from the last back, so a

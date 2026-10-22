@@ -9253,7 +9253,8 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     result = result && predefines_options_initialize(&options->predefines, arena, (uint32_t)count);
     for (int i = 0; result && i < count; i += 1)
     {
-        const char* argument = arguments[i];
+        // An alias of clang's (-mpascal-strings) is read as the option it stands for (-fpascal-strings).
+        const char* argument = predefines_alias(arguments[i]);
         const char* next = i + 1 < count ? arguments[i + 1] : 0;
         // The target's options and the others that change the predefined macros (c_predefines.c) come first.
         const PredefinesParse predefined = predefines_option(&options->predefines, argument, next);

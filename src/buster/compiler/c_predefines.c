@@ -29,7 +29,7 @@
 //   - The options: PredefinesOptions, predefines_options_initialize, the -m options that change no macro
 //     (predefines_neutral, the flags and value options clang uses for x86-64 Linux, beside which pp_parse_options
 //     refuses every other -m option, and predefines_finish_neutral, their values and combinations checked as clang
-//     checks them) and predefines_option (one argument).
+//     checks them), clang's -m aliases of other options (predefines_alias) and predefines_option (one argument).
 //   - The sanitizers: clang's sanitizers and groups, predefines_sanitizers (clang's SanitizerArgs), predefines_finish
 //     (what the whole command line decides, after every option: the sanitizers and the options clang's driver reads
 //     only the last of) and predefines_sanitizer_feature (the sanitizer features of the oracle's mode).
@@ -1205,6 +1205,47 @@ static const PredefinesNeutralValue predefines_neutral_values[] = {
     { "-mtls-dialect=", PREDEFINES_RULE_NAME, "gnu,gnu2" },
 };
 _Static_assert(BUSTER_ARRAY_LENGTH(predefines_neutral_values) == BUSTER_PREDEFINES_NEUTRAL_VALUES, "a slot per value option");
+
+// clang's -m aliases of other options (Options.td's Alias, with its AliasArgs), each with the option it stands for:
+// pp_parse_options reads an alias as that option, so that its handling is the option's and the last of either spelling
+// wins. clang's messages name -mpure-code as written, and -msse4, -m80387 and -mapxf stand for values of their own:
+// predefines_option reads those under their own spellings. The others clang 23.1.3 has are other targets' (-marm,
+// -mfix-cortex-*, Darwin's version options, -mmfcrf, -mv5...: refused like their options) or -mllvm's (refused).
+static const char* const predefines_aliases[][2] = {
+    { "-mpascal-strings", "-fpascal-strings" },
+    { "-mno-pascal-strings", "-fno-pascal-strings" },
+    { "-mzvector", "-fzvector" },
+    { "-mno-zvector", "-fno-zvector" },
+    { "-munsafe-fp-atomics", "-fatomic-ignore-denormal-mode" },
+    { "-mno-unsafe-fp-atomics", "-fno-atomic-ignore-denormal-mode" },
+    { "-mno-fp-ret-in-387", "-mno-x87" },
+    { "-mips1", "-march=mips1" },
+    { "-mips2", "-march=mips2" },
+    { "-mips3", "-march=mips3" },
+    { "-mips4", "-march=mips4" },
+    { "-mips5", "-march=mips5" },
+    { "-mips32", "-march=mips32" },
+    { "-mips32r2", "-march=mips32r2" },
+    { "-mips32r3", "-march=mips32r3" },
+    { "-mips32r5", "-march=mips32r5" },
+    { "-mips32r6", "-march=mips32r6" },
+    { "-mips64", "-march=mips64" },
+    { "-mips64r2", "-march=mips64r2" },
+    { "-mips64r3", "-march=mips64r3" },
+    { "-mips64r5", "-march=mips64r5" },
+    { "-mips64r6", "-march=mips64r6" },
+};
+
+// `argument`, or the option it is clang's alias of (predefines_aliases).
+static __attribute__((unused)) const char* predefines_alias(const char* argument)
+{
+    const char* result = argument;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_aliases) && result == argument; i += 1)
+    {
+        result = strcmp(argument, predefines_aliases[i][0]) == 0 ? predefines_aliases[i][1] : result;
+    }
+    return result;
+}
 
 // predefines_option's -m options that change no macro: true where `argument` (an -m option) is one, keeping what
 // predefines_finish_neutral checks.

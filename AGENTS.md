@@ -2353,17 +2353,19 @@ the features:
 - `c_predefines.c`'s generated tables (each x86-64 feature's flag, closures and
   macros, each `-march` CPU's macro name and features, the `-mtune` names) must
   be what `c_predefines_test.c`'s generator learns from clang now;
-- about 2,100 option sets must give `clang -dM -E`'s macros, and be accepted or
+- about 2,200 option sets must give `clang -dM -E`'s macros, and be accepted or
   refused alike: every `-march` CPU and `native`, every feature flag on and off
   on x86-64 and on the CPUs with the most features, each `-O`, `-f`, `-g` and
   `-m` option `c_predefines.c` reads, alone and in the orders that matter (an
   invalid value before the last of an option clang reads only the last of among
   them), each `-m` option that changes no macro (each flag alone, the hardening
-  flags against each other, and each value option's rule at its edges), `-m`
+  flags against each other, and each value option's rule at its edges), each of
+  clang's `-m` aliases alone and against its option in either order, `-m`
   options clang refuses too (`-mavx512`), the 16 sanitizers with a macro or in clang's incompatible pairs, alone,
   in pairs and in pairs with either one turned off after them, each of them and
   each other group with `-fno-sanitize=all` after it and before it, and 400
-  random combinations, some with those `-m` flags (`--seed N` changes them);
+  random combinations, some with those `-m` flags and aliases (`--seed N`
+  changes them);
 - `-E -dM` of a file with every kind of definition must be clang's byte for byte
   (but `__BUSTER__`), and `__FLT_EVAL_METHOD__` clang's under
   `-ffp-eval-method=` and without SSE;
