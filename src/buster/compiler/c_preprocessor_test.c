@@ -889,6 +889,7 @@ static const PPTestFile pp_test_files_includes[] = {
 // #254's second review's headers: a name with a backslash before a '>', and one reached through "//".
 static const PPTestFile pp_test_files_header_tails[] = {
     { "a\\>b.h", "int escaped;\n" },
+    { " x.h", "int one_space;\n" },
     { "x.h", "int x_h;\n" },
     { "dir/x.h", "int dir_x;\n" },
     { 0, 0 },
@@ -1766,6 +1767,26 @@ static const PPTestCase pp_test_cases[] = {
         .standard = "gnu17",
         .expected = "undefined",
         .options = "-UUNICODE -municodeX",
+    },
+    {
+        .name = "#254's third review: condition links ignore directives hidden by a raw query's comment",
+        .source = "#if __has_include(<dir//x.h>) /* comment\n#else\n#define IGNORED */ && 0\nint wrong_branch;\n#endif\n"
+                  "#ifdef IGNORED\nint wrong_define;\n#endif\n#if __has_include(<dir//x.h>) /* comment\n#elifdef IGNORED\n*/ && 0\nwrong\n"
+                  "#else\nint real_else;\n#endif\nint end;\n",
+        .standard = "c17",
+        .expected = "int real_else; int end;",
+        .options = "-I%d",
+        .files = pp_test_files_header_tails,
+    },
+    {
+        .name = "#254's third review: later queries retain raw names in a re-lexed suffix",
+        .source = "#if __has_include(<dir//x.h>) && __has_include(<  x.h>)\nint wrong_branch;\n#else\nint expected_branch;\n#endif\n"
+                  "#if __has_include(<dir//x.h>) && __has_include(<dir//x.h>) && __has_embed(<dir//x.h> limit(1)) == 1\nint repeated;\n#endif\n"
+                  "#if __has_include(<dir//x.h>) && (1 + (2 * 3) == 7) && __has_include(<dir//x.h>)\nint parentheses;\n#endif\n",
+        .standard = "c23",
+        .expected = "int expected_branch; int repeated; int parentheses;",
+        .options = "-I%d --embed-dir=%d",
+        .files = pp_test_files_header_tails,
     },
 };
 

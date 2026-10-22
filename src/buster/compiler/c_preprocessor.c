@@ -711,6 +711,11 @@ struct PPContext
     // A file: this inclusion took the group of the file's include guard (its #ifndef was true). Only such an inclusion
     // tells clang the guard (its multiple-include optimization), and from its end on the guard skips the file.
     bool guard_taken;
+    // A source piece of a condition lexed again after a raw header: continue at this byte when it ends. A piece ends
+    // after each '(' so a header query can read its operand raw before the ordinary lexer sees comments in its name.
+    bool relexed;
+    uint32_t relex_position;
+    uint32_t relex_file;
     // The macro to enable again when the context is popped.
     PPMacroId macro;
     uint32_t position;
@@ -3145,17 +3150,16 @@ typedef enum PPHeaderForm
 // the name, a '>' too: `<a\>b.h>` names `a\>b.h`. Writes the name's bytes to `name` as far as `capacity` holds them
 // (`*length` of them; `*whole` says whether that is all of them). Returns the offset past the '>', or 0 if the line has
 // none.
-static uint32_t pp_scan_header_name(uint32_t refine_flags, const PPFileData* data, uint32_t first, uint32_t end, uint8_t* name, uint32_t capacity,
-                                    uint32_t* length, bool* whole)
+static uint32_t pp_scan_header_bytes(uint32_t refine_flags, const PPFileData* data, uint32_t first, uint32_t line_end, uint8_t* name, uint32_t capacity,
+                                     uint32_t* length, bool* whole)
 {
-    const uint32_t line_end = end < data->token_count ? data->starts[end] : data->length;
     const ScalarLexer lexer = {
         .source = data->bytes,
         .length = line_end,
         .trigraphs = (refine_flags & C_TOKENIZER_TRIGRAPHS) != 0,
         .cplusplus = false,
     };
-    uint64_t p = data->starts[first] + 1;
+    uint64_t p = (uint64_t)first + 1;
     bool closed = false;
     bool line_ended = false;
     bool escaped = false;
@@ -3180,6 +3184,13 @@ static uint32_t pp_scan_header_name(uint32_t refine_flags, const PPFileData* dat
         p += size != 0 ? size : 1;
     }
     return closed ? (uint32_t)p : 0;
+}
+
+static uint32_t pp_scan_header_name(uint32_t refine_flags, const PPFileData* data, uint32_t first, uint32_t end, uint8_t* name, uint32_t capacity,
+                                    uint32_t* length, bool* whole)
+{
+    const uint32_t line_end = end < data->token_count ? data->starts[end] : data->length;
+    return pp_scan_header_bytes(refine_flags, data, data->starts[first], line_end, name, capacity, length, whole);
 }
 
 // The header name of directive d, an #include, #include_next or #import of a prepared file: `<...>` read from the
@@ -4391,9 +4402,15 @@ static void pp_end_regions(Preprocessor* pp, bool main_file)
     }
 }
 
+static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end);
+
 BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
+    const bool relexed = context->relexed;
+    const uint32_t relex_position = context->relex_position;
+    const uint32_t relex_file = context->relex_file;
+    const uint32_t expansion_end = context->expansion_end;
     pp->macros[context->macro].disabled -= context->macro != 0;
     if (context->kind == BUSTER_PP_CONTEXT_BUFFER)
     {
@@ -4428,6 +4445,10 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
     if (context->kind == BUSTER_PP_CONTEXT_BUFFER && !context->barrier && passed != 0 && pp->context_count != 0)
     {
         pp->contexts[pp->context_count - 1].pending_flags |= passed;
+    }
+    if (relexed && relex_position != 0)
+    {
+        pp_continue_relex(pp, relex_file, relex_position, expansion_end);
     }
 }
 
@@ -6174,8 +6195,28 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
     const uint8_t builtin = pp->macros[invocation->macro].builtin;
     const bool header = builtin == PP_BUILTIN_HAS_INCLUDE || builtin == PP_BUILTIN_HAS_INCLUDE_NEXT || builtin == PP_BUILTIN_HAS_EMBED;
     const PPCapture* line = pp->capture_count != 0 ? &pp->capture_frames[pp->capture_count - 1] : 0;
-    if (header && context->barrier && line != 0 && line->kind == BUSTER_PP_CAPTURE_CONDITION && context->position < context->end &&
-        context->tokens->kinds[context->position] == C_TOKEN_LESS)
+    if (header && context->relexed && context->position == context->end && context->relex_position != 0)
+    {
+        const PPContext* file = &pp->contexts[context->relex_file];
+        const PPFileData* data = &pp->datas[pp->files[file->file].data];
+        const uint32_t base = pp->ranges[file->range].base;
+        const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+        const uint32_t first = (uint32_t)pp_skip_blanks(&lexer, context->relex_position);
+        uint64_t size;
+        uint64_t at;
+        const int32_t c = get_char(&lexer, first, &size, &at);
+        uint32_t length;
+        bool whole;
+        const uint32_t stop = c == '<' ? pp_scan_header_bytes(pp->refine_flags, data, first, data->length, 0, 0, &length, &whole) : 0;
+        if (stop != 0)
+        {
+            const PPToken token = { .kind = C_TOKEN_LESS, .value = base + stop, .location = base + first };
+            context->relex_position = stop;
+            result = pp_collect_token(pp, invocation, token, pp_expansion_end(context, token));
+        }
+    }
+    else if (header && context->barrier && line != 0 && line->kind == BUSTER_PP_CAPTURE_CONDITION && context->position < context->end &&
+             context->tokens->kinds[context->position] == C_TOKEN_LESS)
     {
         // The barrier holds the line's tokens from the one after the directive's name (pp_start_condition).
         PPContext* file = &pp->contexts[line->context];
@@ -6195,12 +6236,9 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
             const uint32_t expansion_end = pp_expansion_end(context, token);
             context->position = relex != stop ? context->end : context->position + (after - first);
             result = pp_collect_token(pp, invocation, token, expansion_end);
-            // The file goes on past the line as clang lexes it (pp_resume_after).
-            pp_resume_after(file, data, relex);
-            const uint32_t start = pp->expansions.count;
-            if (relex != stop && pp_copy_relexed(pp, file, stop, relex, &pp->expansions) && pp->expansions.count != start)
+            if (relex != stop)
             {
-                result = pp_push_buffer(pp, &pp->expansions, start, pp->expansions.count, 0, context->expansion_end, false, true) != 0 ? result : PP_COLLECTED_INVALID;
+                pp_continue_relex(pp, line->context, stop, context->expansion_end);
             }
         }
     }
@@ -7760,6 +7798,7 @@ static __attribute__((noinline, cold)) void pp_check_limit(Preprocessor* pp)
         while (!popped)
         {
             popped = pp->contexts[pp->context_count - 1].barrier;
+            pp->contexts[pp->context_count - 1].relexed = false;
             pp_pop_context(pp);
         }
         pp_finish_capture(pp);
@@ -7868,6 +7907,84 @@ static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t
     }
     scratch_end(scratch);
     return result;
+}
+
+// Continue a condition's file-sourced suffix in pieces. Stop each piece after '(' so an include-like builtin can read
+// the next header name raw (pp_collect_written_header). Other parentheses just continue ordinary lexing when their
+// piece ends. Windows grow geometrically until they contain a parenthesis, the line's end, or a complete token prefix;
+// the last three tokens of an incomplete window are withheld because a punctuator or literal may span its edge.
+// Thus each byte is lexed a bounded number of times, including a line with many names containing '//'. This is a rare
+// correction of file tokens that were lexed before a header name was known; ordinary conditions keep their file runs.
+static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end)
+{
+    PPContext* file = &pp->contexts[file_context];
+    const PPFileData* data = &pp->datas[pp->files[file->file].data];
+    const uint32_t remaining = data->length - begin;
+    uint32_t window = remaining < 128 ? remaining : 128;
+    uint32_t end = begin;
+    uint32_t next = 0;
+    bool done = false;
+    bool valid = true;
+    while (!done && valid)
+    {
+        Scratch scratch = scratch_begin(0);
+        const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY((uint64_t)window);
+        uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
+        uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
+        uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
+        valid = kinds != 0 && starts != 0 && ends != 0;
+        uint64_t resume = window;
+        const uint64_t count = valid ? c_tokenize_scalar_range(data->bytes + begin, window, 0, false, 0, kinds, starts, ends, 0, pp->refine_flags, &resume) : 0;
+        uint32_t paren = 0;
+        while (paren < count && (kinds[paren] & 0x7F) != C_TOKEN_L_PAREN)
+        {
+            paren += 1;
+        }
+        const bool line_ended = resume < window || window == remaining;
+        if (paren < count)
+        {
+            end = begin + ends[paren];
+            next = end;
+            done = true;
+        }
+        else if (line_ended)
+        {
+            end = begin + (uint32_t)resume;
+            done = true;
+        }
+        else if (count > 3)
+        {
+            end = begin + ends[count - 4];
+            next = end;
+            done = true;
+        }
+        else
+        {
+            const uint64_t grown = (uint64_t)window * 2;
+            window = grown < remaining ? (uint32_t)grown : remaining;
+        }
+        scratch_end(scratch);
+    }
+    if (!valid)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "out of memory re-lexing a header query");
+    }
+    const uint32_t start = pp->expansions.count;
+    if (valid && pp_copy_relexed(pp, file, begin, end, &pp->expansions))
+    {
+        pp_check_poison_range(pp, data, pp->ranges[file->range].base, &pp->expansions, start, pp->expansions.count, BUSTER_PP_NONE, true);
+        pp_resume_after(file, data, end);
+        if (pp->expansions.count != start)
+        {
+            PPContext* piece = pp_push_buffer(pp, &pp->expansions, start, pp->expansions.count, 0, expansion_end, false, true);
+            if (piece != 0)
+            {
+                piece->relexed = true;
+                piece->relex_position = next;
+                piece->relex_file = file_context;
+            }
+        }
+    }
 }
 
 // Enters a file (prepared on first use) included at `include_location` from range `parent`, unless its guard is defined
@@ -7992,29 +8109,68 @@ static void pp_report_skipped(Preprocessor* pp, const PPContext* context, const 
     }
 }
 
-// Skips to the next directive of directive d's conditional group (or to the end of the file if it is unterminated): the
-// file's pairing gives it (directive_next), but where a line lexed again hid directives (pp_resume_after), which that
-// pairing counted, the nesting is counted again from d on. The hidden directives are before d, as a line hides them when
-// it runs, and those the count passes are the skipped group's, which the context then passes over: each is counted once.
+// A condition's corrected source hid directives from the file's table. Find its next branch from the first directive
+// not consumed by that source, and check the nested skipped groups' structure too: their precomputed notes may have
+// paired an opener or an else with a directive that turned out to be inside a comment. Each skipped directive is read
+// once. Ordinary contexts use their precomputed links and notes.
+static uint32_t pp_skip_relexed_group(Preprocessor* pp, const PPContext* context, const PPFileData* data)
+{
+    Scratch scratch = scratch_begin(0);
+    const uint32_t capacity = data->directive_count - context->next_directive;
+    uint32_t* openers = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 4);
+    uint8_t* seen_else = arena_push(scratch.arena, capacity, 1);
+    const bool valid = capacity == 0 || (openers != 0 && seen_else != 0);
+    uint32_t next = BUSTER_PP_NONE;
+    uint32_t depth = 0;
+    if (!valid)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory checking a re-lexed condition");
+    }
+    for (uint32_t e = context->next_directive; valid && next == BUSTER_PP_NONE && e < data->directive_count; e += 1)
+    {
+        const uint8_t kind = data->directive_kind[e];
+        const bool opens = kind == PP_DIRECTIVE_IF || kind == PP_DIRECTIVE_IFDEF || kind == PP_DIRECTIVE_IFNDEF;
+        const bool branch = kind == PP_DIRECTIVE_ELIF || kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF || kind == PP_DIRECTIVE_ELSE;
+        const bool closes = kind == PP_DIRECTIVE_ENDIF;
+        next = depth == 0 && (branch || closes) ? e : BUSTER_PP_NONE;
+        if (opens)
+        {
+            openers[depth] = e;
+            seen_else[depth] = false;
+            depth += 1;
+        }
+        else if (branch && depth != 0)
+        {
+            const uint32_t location = pp_token_location(pp, context, data, data->directive_hash[e] + 1);
+            const char* name = pp_conditional_name(kind);
+            if ((kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF) && pp->options.language.standard < 2023)
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "use of a '#%s' directive is a C23 extension", name);
+            }
+            if (seen_else[depth - 1])
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#%s after #else", name);
+            }
+            seen_else[depth - 1] |= kind == PP_DIRECTIVE_ELSE;
+        }
+        else if (closes && depth != 0)
+        {
+            depth -= 1;
+        }
+    }
+    for (uint32_t i = depth; next == BUSTER_PP_NONE && i > 0; i -= 1)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, pp_token_location(pp, context, data, data->directive_hash[openers[i - 1]] + 1), "unterminated conditional directive");
+    }
+    scratch_end(scratch);
+    return next;
+}
+
+// Skip to the next branch of d's group, reporting the skipped directives' structural diagnostics.
 static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
-    uint32_t next = data->directive_next[d];
-    if (context->hidden_directives)
-    {
-        next = BUSTER_PP_NONE;
-        uint32_t depth = 0;
-        for (uint32_t e = d + 1; next == BUSTER_PP_NONE && e < data->directive_count; e += 1)
-        {
-            const uint8_t kind = data->directive_kind[e];
-            const bool opens = kind == PP_DIRECTIVE_IF || kind == PP_DIRECTIVE_IFDEF || kind == PP_DIRECTIVE_IFNDEF;
-            const bool branch = kind == PP_DIRECTIVE_ELIF || kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF || kind == PP_DIRECTIVE_ELSE;
-            const bool closes = kind == PP_DIRECTIVE_ENDIF;
-            next = depth == 0 && (branch || closes) ? e : BUSTER_PP_NONE;
-            depth += opens;
-            depth -= closes && depth != 0;
-        }
-    }
+    const uint32_t next = context->hidden_directives ? pp_skip_relexed_group(pp, context, data) : data->directive_next[d];
     if (next == BUSTER_PP_NONE)
     {
         context->position = data->token_count;
@@ -8029,7 +8185,7 @@ static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
     {
         pp->conditionals[pp->conditional_count - 1].skipping = true;
     }
-    if (data->note_count != 0)
+    if (!context->hidden_directives && data->note_count != 0)
     {
         pp_report_skipped(pp, context, data, d, context->next_directive);
     }
