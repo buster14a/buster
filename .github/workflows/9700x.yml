@@ -81,6 +81,30 @@ jobs:
       - name: Test generated-code ISA policy
         run: ./build/compiler test-x86-target
 
+      - name: Test the partial Zen 5 model and instruction harness
+        run: ./build/compiler test-x86-zen5
+
+      - name: Measure the Zen 5 instruction cases
+        # The job hook holds the shared lock. Preserve three separate processes, with each process interleaving
+        # its experiments. These observations are informational; counter/protocol failures still fail the step.
+        run: |
+          cpu=2
+          sha256sum build/compiler src/buster/compiler/x86_zen5.c src/buster/compiler/x86_zen5_measure.c
+          for sample in 1 2 3; do
+            echo "Zen 5 observation process $sample"
+            taskset -c "$cpu" ./build/compiler measure-x86-zen5 --passes 11 --iterations 20000
+          done
+
+      - name: Benchmark Zen 5 cost lookup
+        run: |
+          cpu=2
+          for sample in 1 2 3; do
+            echo "Zen 5 lookup sample $sample"
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
+          done
+
       - name: Test the x86-64 disassembler against GNU tools
         run: |
           clang -O3 -march=znver5 -c examples/disassembler/corpus.c -o /tmp/buster-disassembler-corpus.o

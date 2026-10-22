@@ -159,6 +159,15 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
+  observation table and scalar/AVX-512 cost-column lookups. `test-x86-zen5`
+  checks unknowns, guard-page tails and generated microbenchmark loops;
+  `measure-x86-zen5` measures instruction cases on the approved 9700X;
+  `benchmark-x86-zen5 [--only scalar|vector] [--after-scalar MS]` times lookups.
+  Each build/test/measurement takes the shared host lock separately. Pin
+  measurements to CPU 2. [The model guide](docs/x86-zen5.md) records what is
+  measured and the coverage, pipe data and real consumers still pending for #181.
+
 - `src/buster/compiler/x86_target.c` defines generated-code ISA profiles, with
   x86-64 baseline as the default, independently of the compiler host.
   `x86_target_forms.c` supplies explicit, fail-closed form eligibility and

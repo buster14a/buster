@@ -252,6 +252,9 @@ int run_c_lexer_benchmark(int argc, char** argv);
 // The x86-64 encoder and its tests, for the test-x86-encoder command. Its benchmark is another translation unit.
 #include "buster/compiler/x86_64_encoder.c"
 #include "buster/compiler/x86_64_encoder_test.c"
+#include "buster/compiler/x86_zen5.c"
+#include "buster/compiler/x86_zen5_measure.c"
+#include "buster/compiler/x86_zen5_test.c"
 #include "buster/compiler/x86_64_disassembler.c"
 #include "buster/compiler/x86_64_disassembler_test.c"
 #include "buster/compiler/x86_64_disassembler_cli.c"
@@ -416,6 +419,18 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
     {
         result = run_x86_target_tests();
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-x86-zen5") == 0)
+    {
+        result = run_x86_zen5_tests();
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-zen5") == 0)
+    {
+        result = run_x86_zen5_benchmark(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "measure-x86-zen5") == 0)
+    {
+        result = run_x86_zen5_measure(argc - 2, argv + 2);
     }
     else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
     {
