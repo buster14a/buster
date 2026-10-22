@@ -637,6 +637,30 @@ result clang gives differently for its cases alone:
 | The cost fixes, `fde8698` | 7940HS | 13 | 200,000 | 0, 0 | 0 | none |
 | Merged with main, `4c6160f` | 7940HS | 14 | 300,000 | 0, 1 | 0 | none |
 | The paste's line start, `fbddd2e` | 7940HS | 14 and 15 | 600,000 | 0, 0 | 0 | none |
+| Every case by tokens (first review), `ffed99c` | 9700X | 91 and 92 | 2,000,000 | 3, 2 | 0 | none |
+| | 7940HS | 81 | 1,000,000 | 0, 1 | 0 | none |
+| Printed-token boundaries, `8fb1cd5` | 9700X | 101 and 102 | 1,600,000 (stopped) | 0, 0 | 0 | none |
+| | 7940HS | 111 to 113 | 2,500,000 (stopped) | 0, 0 | 0 | none |
+| Clang token-dump confirmation (second review), `7d5779b` | 9700X | 141 to 144 | 3,200,000 (stopped) | 0, 0 | 0 | none |
+| | 7940HS | 131 to 134 | 3,500,000 (stopped) | 1, 0 | 0 | comparator false positive |
+
+These review-era counts are the previous owner's handoff evidence, not new
+qualification of the merged implementation. The first review removed a
+whitespace-stripping fallback that could hide token or literal differences.
+The second added Clang token-dump confirmation for ambiguous token ends and
+made invalid comparisons fail instead of counting as compared. The `8fb1cd5`
+runs were stopped for that second finding. The final `7d5779b` local run's
+reported difference was seed 133, case 832692, C17: an unterminated literal
+expanded on a continuing `#pragma omp` line. `9a52464` marks this comparison
+unverified rather than guessing its boundary; it is not a preprocessor fix.
+
+The integration based on compiler sources `b0977a0` includes current main's
+predefines and explicit feature-query modes and #247's skipped-group checks.
+The fuzz adapter selects Clang's feature answers. The four deferred
+case-modes below are now in the same tree. Fresh current-source tests and
+CI must validate this integration separately. No ten-million-per-mode
+campaign on either host qualifies this merged tree yet: #109 remains open
+for those campaigns and any resulting permanent regression fixtures.
 
 A crashed worker's cases have no count: 33,333 cases each. The first freeze's
 local run on seed 11 was stopped after its first six differences, which the
