@@ -1459,7 +1459,7 @@ full-corpus reproduction and frozen CI subset.
   splices, CRLF lines, unterminated comments, and conditionals nested to 64
   levels, balanced and not. With `--tables PATH...`, every `.c` and `.h` file
   under the paths is checked the same way: this repository's sources and the
-  C library corpus (8,983 files, 598,310 directives) agree. Then 17 fixtures
+  C library corpus (8,983 files, 598,310 directives) agree. Then 26 fixtures
   of the conditionals' structure must give the same diagnostics by both
   kernels, and under `--clang` clang's, byte for byte, columns included.
 - **Definitions** (#121). Ten fixtures of `#define`'s and `#undef`'s
