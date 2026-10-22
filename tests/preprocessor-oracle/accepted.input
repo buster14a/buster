@@ -11,3 +11,12 @@ const char *date = __DATE__, *time = __TIME__;
 const char *feature = STRING(__has_builtin(__builtin_expect));
 int line = __LINE__;
 int header = ORACLE_HEADER;
+/* The target queries answer for the oracle's fixed target, x86_64-linux-gnu, whose vendor is unknown. */
+#if __is_target_vendor(unknown)
+int from_unknown;
+#else
+int from_pc;
+#endif
+#if __is_target_arch(x86_64) && __is_target_os(linux) && __is_target_environment(gnu)
+int x86_64_linux_gnu;
+#endif
