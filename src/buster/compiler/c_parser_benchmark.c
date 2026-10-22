@@ -43,6 +43,7 @@
 #include "buster/compiler/lane.c"
 #include "buster/compiler/c_intern.c"
 #include "buster/compiler/c_refine.c"
+#include "buster/compiler/c_predefines.c"
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_parser.c"
 
