@@ -185,7 +185,10 @@ static uint8_t x86_zen5_id(const X86Instruction* instruction)
         }
         else if (form == X86_FORM_LEA_R32_M || form == X86_FORM_LEA_R64_M)
         {
-            if (instruction->mode == BUSTER_X86_MEMORY_BASE_INDEX(0) && instruction->displacement == 0)
+            // RBP/R13 force an encoded displacement even when it is zero. On the measured LEA stream that changes
+            // the macro-op count; do not average those address shapes into the no-displacement case.
+            if (instruction->mode == BUSTER_X86_MEMORY_BASE_INDEX(0) && instruction->displacement == 0 &&
+                instruction->rm != X86_REGISTER_RBP && instruction->rm != X86_REGISTER_R13)
             {
                 operands = X86_COST_LEA_SIMPLE;
             }

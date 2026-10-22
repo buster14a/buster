@@ -103,6 +103,8 @@ static bool x86_zen5_test_cases(void)
         { .form = X86_FORM_SHL_RM64_IMM8, .immediate = 0 },
         { .form = X86_FORM_SHL_RM64_IMM8, .immediate = 64 },
         { .form = X86_FORM_LEA_R64_M, .mode = BUSTER_X86_MEMORY_RIP },
+        { .form = X86_FORM_LEA_R64_M, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .rm = X86_REGISTER_RBP, .index = X86_REGISTER_RDX },
+        { .form = X86_FORM_LEA_R64_M, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .rm = X86_REGISTER_R13, .index = X86_REGISTER_RDX },
         { .form = X86_FORM_MOV_R64_RM64, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 1 },
         { .form = X86_FORM_MOV_R64_IMM64, .immediate = 4660, .displacement = 1 },
         { .form = X86_FORM_IMUL_RM64 },

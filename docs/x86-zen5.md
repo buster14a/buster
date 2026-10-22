@@ -72,6 +72,13 @@ case assumes an aligned, ordinary, cacheable L1 hit; record inspection cannot
 prove that runtime condition. Tuning never grants permission to emit an ISA
 feature: that remains `x86_target.c`'s job.
 
+The simple-LEA case excludes RBP/R13 bases: those force an encoded displacement
+even for displacement zero. An initial twelve-register sweep reported 1.1667
+retired macro-ops per simple LEA because two of its twelve bases had that
+encoding. The final throughput fixture keeps the base at R14 and varies the
+index; the base and index dependency chains remain separate. The excluded
+address cases return unknown rather than inheriting an average of two cases.
+
 ## Measurement method
 
 `measure-x86-zen5` runs original C-generated fixtures through the existing

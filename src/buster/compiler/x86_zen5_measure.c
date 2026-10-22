@@ -127,7 +127,10 @@ static bool x86_zen5_program(uint8_t id, X86CostExperiment experiment, X86CostPr
             {
                 source = chain ? (source_path ? registers[i % 12] : destination) : X86_REGISTER_RSI;
             }
-            records[count] = x86_zen5_fixture(id, destination, source, source_path);
+            // Keep simple LEA's base at R14 in the throughput experiments: RBP/R13 as a base force a disp8=0
+            // and are a different cost case. The index can use all twelve destinations without that change.
+            const bool simple_index = !chain && x86_zen5_cases[id].operands == X86_COST_LEA_SIMPLE;
+            records[count] = x86_zen5_fixture(id, destination, simple_index ? destination : source, source_path || simple_index);
             valid &= x86_zen5_id(&records[count]) == id;
             count += 1;
             if (mix)
