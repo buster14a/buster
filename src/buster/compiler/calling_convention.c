@@ -25,7 +25,8 @@
 // (BUSTER_ABI_PASS_UNCOUNTED), which shifts the arguments after them; records with a flexible array member go in memory;
 // __fp16 is MEMORY; vectors of 4 bytes or less are INTEGER whatever their elements. And where clang's LLVM types decide
 // the registers (abi_storage and abi_layout model the types it needs): an i128 at a record's offset 0 makes it one value
-// LLVM never splits (BUSTER_ABI_PASS_PAIR); a narrow low part with a high part not aligned to 8 goes in a general
+// LLVM never splits (BUSTER_ABI_PASS_PAIR), as a run of bit-fields wider than an eightbyte is where 16 bytes fit for it
+// (abi_bit_field_run); a narrow low part with a high part not aligned to 8 goes in a general
 // register (LOW_GENERAL); a vector result LLVM demotes to a hidden pointer isn't in clang's count (DEMOTED); a vector of
 // one element is its element's value (HALVES for a <1 x i128>).
 //
@@ -350,10 +351,12 @@ struct AbiVaArg
 // AVX, AVX-512F), which decides how 32- and 64-byte vectors pass.
 typedef struct AbiTable AbiTable;
 // AbiTable.storage: clang's LLVM type of each type, as far as passing needs it (abi_storage): the log2 of its alignment
-// in LLVM's layout, and whether its storage at offset 0 is an i128 (which makes a record's two INTEGER eightbytes one
-// value that LLVM never splits).
+// in LLVM's layout, whether its storage at offset 0 is an i128 (which makes a record's two INTEGER eightbytes one value
+// that LLVM never splits), and EMPTY: a record clang's layout counts empty (isEmptyRecordForLayout: each member a
+// zero-width bit-field or of such a record's type), which doesn't end a run of bit-fields' room (abi_bit_field_run).
 #define BUSTER_ABI_STORAGE_ALIGNMENT 0x0fu
 #define BUSTER_ABI_STORAGE_I128 0x10u
+#define BUSTER_ABI_STORAGE_EMPTY 0x20u
 
 // AbiTable.layout: the scalars of clang's LLVM type of each type in its first 16 bytes, as GetSSETypeAtOffset and
 // GetINTEGERTypeAtOffset find them (abi_layout): 4 bits for each even offset (bits 0 to 31: the kind of the scalar that
@@ -861,9 +864,9 @@ static uint8_t abi_canonical_alignment_log2(const AbiTable* abi, const TypeTable
 
 // A member's storage in clang's LLVM type of its record (see abi_storage): its type's, or for a bit-field an integer: in
 // a union iN for N the smaller of its width and its type's bits rounded up to bytes (lowerUnion's getStorageType, an
-// i128 for 121 to 128 bits);
-// in a struct, an i128 for one wider than an eightbyte of a 16-byte type, and otherwise as aligned as its type (clang's
-// access units, which this doesn't work out, are integers no wider than the storage units). `bytes` is its size there.
+// i128 for 121 to 128 bits); in a struct, as aligned as its type, unless its run of bit-fields is wider than an
+// eightbyte (abi_storage takes the run's unit from abi_bit_field_run; clang's smaller units, which this doesn't work
+// out, are integers no wider than an eightbyte). `bytes` is its size there.
 static uint8_t abi_member_storage(const AbiTable* abi, const TypeTable* table, uint32_t member, bool in_union, uint64_t* bytes)
 {
     const uint32_t resolved = abi_resolved_index(table, table->members.type[member]);
@@ -883,8 +886,50 @@ static uint8_t abi_member_storage(const AbiTable* abi, const TypeTable* table, u
     }
     else if (bit_field)
     {
-        const bool wide = width > 64 && table->types.size[resolved] == 16;
-        result = wide ? (uint8_t)(4 | BUSTER_ABI_STORAGE_I128) : (uint8_t)(abi->storage[resolved] & BUSTER_ABI_STORAGE_ALIGNMENT);
+        result = (uint8_t)(abi->storage[resolved] & BUSTER_ABI_STORAGE_ALIGNMENT);
+    }
+    return result;
+}
+
+// The access unit clang gives a run of a struct's bit-fields (CGRecordLowering::accumulateBitFields, with x86-64's cheap
+// unaligned accesses): the run starts with `member`, a bit-field at a byte's start, and takes the bit-fields after it
+// that start inside a byte. Past an eightbyte, clang adds no other run to its unit, which is the integer its bytes
+// round up to (16 for 9 to 16: an i128, aligned to 16) when that fits before the next member with storage (but a
+// zero-width bit-field and an empty record) or else the struct's end, and otherwise an array of its bytes, aligned to 1:
+// `struct { unsigned __int128 x : 65; }` stores an i128, and packed or followed by a char, a [9 x i8]. Returns the
+// unit's storage, or UINT8_MAX for a run of an eightbyte or less (its bit-fields keep their types' alignments, see
+// abi_member_storage), and in `run_end` the member after the run. `members` end at `end`, in a struct of `size` bytes.
+static uint8_t abi_bit_field_run(const AbiTable* abi, const TypeTable* table, uint32_t member, uint32_t end, uint64_t size, uint32_t* run_end)
+{
+    const uint64_t start = table->members.offset[member];
+    uint64_t stop = start + table->members.bit_width[member];
+    uint32_t next = member + 1;
+    while (next < end && (table->members.flags[next] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 && (table->members.offset[next] & 7) != 0)
+    {
+        const uint64_t last = table->members.offset[next] + table->members.bit_width[next];
+        stop = last > stop ? last : stop;
+        next += 1;
+    }
+    *run_end = next;
+    const uint64_t bytes = (stop - start + 7) >> 3;
+    uint8_t result = UINT8_MAX;
+    if (bytes > 8)
+    {
+        uint64_t limit = size;
+        bool found = false;
+        for (uint32_t probe = next; probe < end && !found; probe += 1)
+        {
+            const bool bit_field = (table->members.flags[probe] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+            const bool zero_width = bit_field && table->members.bit_width[probe] == 0;
+            const uint32_t type = abi_resolved_index(table, table->members.type[probe]);
+            const bool empty = !bit_field && (abi->storage[type] & BUSTER_ABI_STORAGE_EMPTY) != 0;
+            found = !zero_width && !empty;
+            limit = found ? table->members.offset[probe] >> 3 : limit;
+        }
+        // LLVM's size of an integer of more than 8 bytes: a multiple of 16.
+        const uint64_t natural = (bytes + 15) & ~(uint64_t)15;
+        const bool fits = (start >> 3) + natural <= limit;
+        result = !fits ? 0 : natural == 16 ? (uint8_t)(4 | BUSTER_ABI_STORAGE_I128) : 4;
     }
     return result;
 }
@@ -914,12 +959,13 @@ static uint32_t abi_union_storage_member(const AbiTable* abi, const TypeTable* t
 
 // clang's LLVM type for a type whose members' are in place (AbiTable.storage), from CGRecordLowering and LLVM's
 // x86-64 data layout: a 128-bit integer is an i128, aligned to 16, and so is a _BitInt of 65 to 128 bits in memory (a
-// wider one is an integer aligned to 16 too); a struct's storage at offset 0 is its first member's there with a size,
-// and it is aligned to its members' largest alignment unless a member is off its own or the size isn't a multiple of
-// it (determinePacked: a packed struct, aligned to 1); a union's storage is its most aligned and then largest member's,
-// the first of equals (lowerUnion), packed if the size isn't a multiple of its alignment; an array's, a complex type's,
-// an enum's and an _Atomic one's are their element's, underlying type's or value's; any other type is aligned as in C.
-// A record with a flexible array member is MEMORY, its members maybe not classified yet: nothing.
+// wider one is an integer aligned to 16 too); a struct's storage at offset 0 is its first member's there with a size
+// (for a bit-field, its run's unit: abi_bit_field_run), and it is aligned to its members' largest alignment unless a
+// member is off its own or the size isn't a multiple of it (determinePacked: a packed struct, aligned to 1); a union's
+// storage is its most aligned and then largest member's, the first of equals (lowerUnion), packed if the size isn't a
+// multiple of its alignment; an array's, a complex type's, an enum's and an _Atomic one's are their element's,
+// underlying type's or value's (never EMPTY); any other type is aligned as in C. A record with a flexible array member
+// is MEMORY, its members maybe not classified yet: nothing.
 static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const uint8_t kind = table->types.kind[index];
@@ -938,7 +984,7 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
     else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || kind == BUSTER_TYPE_KIND_COMPLEX || kind == BUSTER_TYPE_KIND_ENUM ||
              kind == BUSTER_TYPE_KIND_ATOMIC)
     {
-        result = abi->storage[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
+        result = (uint8_t)(abi->storage[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT] & ~BUSTER_ABI_STORAGE_EMPTY);
     }
     else if (record && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0)
     {
@@ -954,13 +1000,21 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
         uint8_t chosen = 0;
         bool found = false;
         bool packed = false;
+        bool empty = true;
+        uint32_t run_end = begin;
+        uint8_t run_storage = UINT8_MAX;
         const uint32_t stored = in_union ? abi_union_storage_member(abi, table, index) : UINT32_MAX;
         for (uint32_t member = begin; member < end; member += 1)
         {
             const bool bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
             const bool zero_width = bit_field && table->members.bit_width[member] == 0;
             uint64_t bytes = 0;
-            const uint8_t storage = abi_member_storage(abi, table, member, in_union, &bytes);
+            uint8_t storage = abi_member_storage(abi, table, member, in_union, &bytes);
+            // A struct's bit-fields share their run's unit when it is wider than an eightbyte.
+            const bool in_run = !in_union && bit_field && !zero_width;
+            run_storage = in_run && member >= run_end ? abi_bit_field_run(abi, table, member, end, size, &run_end) : run_storage;
+            storage = in_run && run_storage != UINT8_MAX ? run_storage : storage;
+            empty = empty && (zero_width || (!bit_field && (storage & BUSTER_ABI_STORAGE_EMPTY) != 0));
             const uint8_t alignment = storage & BUSTER_ABI_STORAGE_ALIGNMENT;
             const uint64_t offset = table->members.offset[member];
             if (member == stored)
@@ -980,7 +1034,7 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
             }
         }
         packed = packed || (size & ((1ull << largest) - 1)) != 0;
-        result = (uint8_t)((packed ? 0 : largest) | (chosen & BUSTER_ABI_STORAGE_I128));
+        result = (uint8_t)((packed ? 0 : largest) | (chosen & BUSTER_ABI_STORAGE_I128) | (empty ? BUSTER_ABI_STORAGE_EMPTY : 0));
     }
     return result;
 }
@@ -2370,13 +2424,20 @@ static void abi_assign_scalar(const AbiTable* abi, AbiSignatures signatures, Abi
 
 // The vector path's lane flags, which its setup writes per argument: the first and last arguments of a call, an unnamed
 // one, the first of a call whose result goes in memory (the hidden pointer takes rdi before it) and whether that result
-// is DEMOTED, and an argument of a variadic call.
+// is DEMOTED, an argument of a variadic call, and the first of a call with more arguments than the sums of its
+// registers can count (LONG: see BUSTER_ABI_COUNTED_ARGUMENTS).
 #define BUSTER_ABI_LANE_START 0x01
 #define BUSTER_ABI_LANE_END 0x02
 #define BUSTER_ABI_LANE_UNNAMED 0x04
 #define BUSTER_ABI_LANE_HIDDEN 0x08
 #define BUSTER_ABI_LANE_VARIADIC 0x10
 #define BUSTER_ABI_LANE_DEMOTED 0x20
+#define BUSTER_ABI_LANE_LONG 0x40
+
+// The most arguments a call may have for the vector path to assign it: each class's prefix sum of registers has 16 bits
+// of a lane, and an argument needs at most two registers of a class, the hidden pointer one more (2 * 32,767 + 1 =
+// 65,535). A longer call goes to the twin: past it, the general registers' sum would carry into the vector ones'.
+#define BUSTER_ABI_COUNTED_ARGUMENTS 32767u
 #define BUSTER_ABI_LANES 16
 
 // A segmented scan's windows: steps[k] holds the lanes that add the lane 2^k below them (no segment starts between),
@@ -2437,6 +2498,7 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
 //   - a stack argument is EMPTY, whose slot depends on clang's count, or one is LOW_GENERAL, whose low eightbyte clang
 //     counts as SSE and LLVM puts in a general register, or the result is one LLVM demotes to a hidden pointer, which
 //     clang doesn't count (DEMOTED);
+//   - the call has more than BUSTER_ABI_COUNTED_ARGUMENTS arguments, whose sums 16 bits a class can't hold;
 // and the calls with one of those (rare in compiled code) go to the twin, which assigns them one argument at a time.
 static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
 {
@@ -2477,7 +2539,8 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             if (count != 0)
             {
                 const bool demoted = hidden && (result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
-                flags[first] |= BUSTER_ABI_LANE_START | (hidden ? BUSTER_ABI_LANE_HIDDEN : 0) | (demoted ? BUSTER_ABI_LANE_DEMOTED : 0);
+                flags[first] |= BUSTER_ABI_LANE_START | (hidden ? BUSTER_ABI_LANE_HIDDEN : 0) | (demoted ? BUSTER_ABI_LANE_DEMOTED : 0) |
+                                (count > BUSTER_ABI_COUNTED_ARGUMENTS ? BUSTER_ABI_LANE_LONG : 0);
                 flags[first + count - 1] |= BUSTER_ABI_LANE_END;
                 for (uint32_t i = 0; i < count; i += 1)
                 {
@@ -2565,7 +2628,8 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __mmask16 empty = on_stack & _mm512_test_epi32_mask(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_EMPTY));
             const __mmask16 general_low = _mm512_test_epi32_mask(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_LOW_GENERAL));
             const __mmask16 demoted = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_DEMOTED));
-            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | wide_named | empty | general_low | demoted);
+            const __mmask16 long_call = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_LONG));
+            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | wide_named | empty | general_low | demoted | long_call);
             // The registers: the low eightbyte's, then the high one's (first for a value whose low one is padding).
             const __mmask16 low_integer_lanes = _mm512_test_epi32_mask(low_integer, low_integer);
             const __mmask16 low_sse_lanes = _mm512_test_epi32_mask(low_sse, low_sse);

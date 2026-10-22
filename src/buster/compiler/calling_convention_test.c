@@ -20,17 +20,19 @@
 //     and each type at each offset it can be at against the oracle: clang's classify transcribed as clang has it, its
 //     recursion over members as a stack of frames, from the type table alone (no rows).
 //   - Assignment: random calls over a world's types, named and variadic, with results in memory and in registers,
-//     assigned by the vector path and by the twin, which must agree on every location and total; and the vector path
-//     with its argument and location columns ending at a PROT_NONE page.
+//     assigned by the vector path and by the twin, which must agree on every location and total; calls around the
+//     vector path's most arguments (abi_test_long_calls); and the vector path with its argument and location columns
+//     ending at a PROT_NONE page.
 //   - With --cross-check, against clang and GCC (abi_test_cross_check): for each compiler and target vector width (16,
-//     32 and 64 bytes, the C built with -march=x86-64, x86-64-v3 and x86-64-v4), a world and --signatures random
-//     signatures (400) over its passable types, written as C (the types, every argument's and result's bytes, a C
-//     callee and a C caller of ours) and as our side (a caller of the C callee and a callee: X86Instruction records
-//     through x86_encode, link_add_code_fixups and the object writer), linked by the compiler's driver and run: each
-//     side checks every argument, result, hidden pointer, al and va_arg value against the bytes. GCC's worlds leave
-//     out what GCC lays out or passes otherwise (each named where it is left out, GCC's own bugs among them); an
-//     argument clang would pass as an i0 becomes a long, as does an unnamed one clang's va_arg reads elsewhere than
-//     its call puts it (abi_test_va_disagreement); and bytes clang doesn't pass aren't checked (abi_test_mask_unpassed).
+//     32 and 64 bytes, the C built with -march=x86-64, x86-64-v3 and x86-64-v4), a world and --signatures signatures
+//     (400) over its passable types, random but for clang's first few, which pass runs of bit-fields where its count of
+//     registers runs ahead of LLVM's (abi_test_world_directed), written as C (the types, every argument's and result's
+//     bytes, a C callee and a C caller of ours) and as our side (a caller of the C callee and a callee: X86Instruction
+//     records through x86_encode, link_add_code_fixups and the object writer), linked by the compiler's driver and run:
+//     each side checks every argument, result, hidden pointer, al and va_arg value against the bytes. GCC's worlds
+//     leave out what GCC lays out or passes otherwise (each named where it is left out, GCC's own bugs among them); an
+//     argument clang would pass as an i0 becomes a long, as does an unnamed one clang's va_arg reads elsewhere than its
+//     call puts it (abi_test_va_disagreement); and bytes clang doesn't pass aren't checked (abi_test_mask_unpassed).
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally and helpers; merge; the oracle; fixtures; worlds; assignment; the cross-check;
@@ -940,6 +942,35 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     m[1] = abi_test_bits(builder, type_bit_int(table, 128, true), 120, false);
     abi_test_in_registers(builder, "union {unsigned _BitInt(32), unsigned _BitInt(128) : 120}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
                           BUSTER_ABI_TEST_INTEGER_ONLY, 0, BUSTER_ABI_PASS_PAIR, rax, BUSTER_ABI_TEST_NONE);
+    // A struct's run of bit-fields past an eightbyte is an i128 only where 16 bytes fit before the next member with
+    // storage, or the struct's end (accumulateBitFields): packed, or followed by a char or an array of no elements, it
+    // is an array of bytes (an i64 and an i8, or two i64s); an empty struct after it takes no room, and a bit-field that
+    // starts inside a byte joins the run, one that starts at a byte doesn't.
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 65, true);
+    abi_test_in_registers(builder, "{unsigned __int128 : 65}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), BUSTER_ABI_TEST_INTEGERS,
+                          BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    abi_test_in_registers(builder, "packed {unsigned __int128 : 65}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0), BUSTER_ABI_TEST_INTEGERS, 0,
+                          BUSTER_ABI_PASS_PAIR, rax, rdx);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    abi_test_in_registers(builder, "{unsigned __int128 : 65, char}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS, 0,
+                          BUSTER_ABI_PASS_PAIR, rax, rdx);
+    m[1] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 0, false, 0));
+    abi_test_in_registers(builder, "{unsigned __int128 : 65, struct {}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS,
+                          BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_INT, 0));
+    abi_test_in_registers(builder, "{unsigned __int128 : 65, int[0]}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS, 0,
+                          BUSTER_ABI_PASS_PAIR, rax, rdx);
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 60, true);
+    m[1] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 10, true);
+    abi_test_in_registers(builder, "{unsigned __int128 : 60, unsigned __int128 : 10}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 72, true);
+    m[1] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 8, true);
+    abi_test_in_registers(builder, "{unsigned __int128 : 72, unsigned __int128 : 8}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, 0, BUSTER_ABI_PASS_PAIR, rax, rdx);
+    m[0] = abi_test_bits(builder, type_bit_int(table, 128, false), 65, true);
+    abi_test_in_registers(builder, "packed {_BitInt(128) : 65}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0), BUSTER_ABI_TEST_INTEGERS, 0,
+                          BUSTER_ABI_PASS_PAIR, rax, rdx);
     // clang widens a narrow low part (a bfloat, <2 x half> or <2 x bfloat>) to an i64 when its high part isn't aligned
     // to 8 (GetX86_64ByValArgumentPair), a general register for an eightbyte it counts as SSE; a half, to a double.
     const TypeId bf16 = BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_BF16);
@@ -1044,8 +1075,10 @@ static bool abi_test_same_location(AbiLocation got, AbiTestLocation expected)
 // Calls whose locations clang and LLVM give: f(long x4, nullptr_t, struct {long, long}, long) splits the struct;
 // f(long x5, __int128, long) puts the __int128 on the stack and the long in r9; a result in memory shifts the general
 // registers by one; a struct of a flexible array member alone takes an 8-byte slot while a general register is free,
-// and none after (clang's i0); {__bf16, _Alignas(8) char} takes two general registers (LOW_GENERAL); and a union
-// stored as an i128, which clang counts as two registers, goes on the stack after five longs, the long after it in r9.
+// and none after (clang's i0); {__bf16, _Alignas(8) char} takes two general registers (LOW_GENERAL); a union stored
+// as an i128, which clang counts as two registers, goes on the stack after five longs, the long after it in r9; and
+// after an uncounted _Atomic int and four longs, packed {unsigned __int128 : 65} (an i64 and an i8) splits between r9
+// and the stack, while {unsigned __int128 : 60, unsigned __int128 : 10} (one i128) goes on the stack, the long in r9.
 static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t vector_bytes, bool vector)
 {
     TypeTable* table = &tables->types.table;
@@ -1081,6 +1114,12 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     m[0] = abi_test_member(&builder, type_bit_int(table, 32, true));
     m[1] = abi_test_bits(&builder, type_bit_int(table, 128, true), 127, false);
     const TypeId stored = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
+    m[0] = abi_test_bits(&builder, BUSTER_TYPE_UINT128, 65, true);
+    const TypeId packed_wide = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0);
+    m[0] = abi_test_bits(&builder, BUSTER_TYPE_UINT128, 60, true);
+    m[1] = abi_test_bits(&builder, BUSTER_TYPE_UINT128, 10, true);
+    const TypeId run = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+    const TypeId atomic_int = type_atomic(table, BUSTER_TYPE_INT);
     const TypeId aligned_long = type_aligned(table, BUSTER_TYPE_LONG, 5);
     if (vector)
     {
@@ -1161,6 +1200,22 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         L,
         stored,
         L,
+        // 58: _Atomic int, long x4, packed {unsigned __int128 : 65}, long
+        atomic_int,
+        L,
+        L,
+        L,
+        L,
+        packed_wide,
+        L,
+        // 65: _Atomic int, long x4, {unsigned __int128 : 60, unsigned __int128 : 10}, long
+        atomic_int,
+        L,
+        L,
+        L,
+        L,
+        run,
+        L,
     };
     const AbiTestLocation expected[] = {
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
@@ -1221,6 +1276,20 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_SPLIT, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
     };
     const uint32_t counts[] = {
         7,
@@ -1231,6 +1300,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         2,
         8,
         3,
+        7,
+        7,
         7,
     };
     const uint32_t named[] = {
@@ -1243,6 +1314,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         8,
         3,
         7,
+        7,
+        7,
     };
     const TypeId results[] = {
         BUSTER_TYPE_VOID,
@@ -1254,8 +1327,12 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         BUSTER_TYPE_VOID,
         BUSTER_TYPE_VOID,
         BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
     };
     const uint8_t variadic[] = {
+        0,
+        0,
         0,
         0,
         0,
@@ -1301,6 +1378,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     abi_test_expect(tally, calls[6].stack_bytes == 8 && calls[6].integer_registers == 6, "fixtures", "call 6's totals");
     abi_test_expect(tally, calls[7].stack_bytes == 0 && calls[7].integer_registers == 3 && calls[7].vector_registers == 1, "fixtures", "call 7's totals");
     abi_test_expect(tally, calls[8].stack_bytes == 16 && calls[8].integer_registers == 6, "fixtures", "call 8's totals");
+    abi_test_expect(tally, calls[9].stack_bytes == 16 && calls[9].integer_registers == 6, "fixtures", "call 9's totals");
+    abi_test_expect(tally, calls[10].stack_bytes == 16 && calls[10].stack_alignment_log2 == 4 && calls[10].integer_registers == 6, "fixtures", "call 10's totals");
     // va_arg aligns the overflow area as the canonical type is aligned (EmitVAArg): long aligned(32) reads from 8.
     const AbiVaArg plan = abi_va_arg(&tables->abi, table, aligned_long);
     abi_test_expect(tally, plan.kind == BUSTER_ABI_LOCATION_REGISTERS && plan.overflow_alignment_log2 == 3 && plan.stack_bytes == 8, "fixtures",
@@ -1586,6 +1665,50 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
     }
     table->last_error = TYPE_ERROR_NONE;
     return result;
+}
+
+// The records clang's directed signatures pass (abi_test_cross_signatures): runs of bit-fields past an eightbyte that
+// are one i128 or two parts, packed and not (see abi_bit_field_run). Returns how many it made into `directed`.
+#define BUSTER_ABI_TEST_DIRECTED 5
+
+static uint32_t abi_test_world_directed(AbiTestWorld* world, TypeId* directed)
+{
+    TypeTable* table = &world->types.test.table;
+    const TypeId bit_int = type_bit_int(table, 128, false);
+    const uint32_t widths[BUSTER_ABI_TEST_DIRECTED][2] = {
+        { 65, 0 },
+        { 65, 0 },
+        { 65, 0 },
+        { 60, 10 },
+        { 65, 0 },
+    };
+    uint32_t count = 0;
+    for (uint32_t d = 0; d < BUSTER_ABI_TEST_DIRECTED; d += 1)
+    {
+        // {unsigned __int128 : 65} and packed; followed by a char; two bit-fields in one run; packed _BitInt(128) : 65.
+        const TypeId type = d == 4 ? bit_int : BUSTER_TYPE_UINT128;
+        TypeMember members[2] = {
+            type_test_member(type_test_new_name(&world->types), type, widths[d][0]),
+            widths[d][1] != 0 ? type_test_member(type_test_new_name(&world->types), type, widths[d][1])
+                              : type_test_member(type_test_new_name(&world->types), BUSTER_TYPE_CHAR, BUSTER_TYPE_NOT_BIT_FIELD),
+        };
+        const uint32_t member_count = d == 2 || d == 3 ? 2 : 1;
+        const TypeRecordAttributes attributes = {
+            .packed = d == 1 || d == 4,
+            .pack_log2 = 0,
+            .alignment_log2 = 0,
+        };
+        const TypeId record = type_tag(table, BUSTER_TYPE_KIND_STRUCT, type_test_new_name(&world->types));
+        if (record != 0 && type_complete_record(table, record, members, member_count, attributes))
+        {
+            type_test_world_completed(&world->types, record);
+            abi_test_world_add(world, record);
+            directed[count] = record;
+            count += 1;
+        }
+        table->last_error = TYPE_ERROR_NONE;
+    }
+    return count;
 }
 
 static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t count)
@@ -1969,6 +2092,83 @@ static void abi_test_compare_assignment(AbiTestTally* tally, const AbiTable* abi
     }
 }
 
+// Calls longer than the vector path's 16-bit register sums count (BUSTER_ABI_COUNTED_ARGUMENTS), which it leaves to
+// the twin, and as long as they hold: 65,542 longs, whose general registers' sum would carry into the vector ones' and
+// give the last six rdi to r9 again; 32,767 __int128s after a hidden pointer (the most a sum holds: 65,535 registers)
+// and 32,768 without one; the same counts of _Complex double, for the vector registers' sum; then a short call. Both
+// paths must agree, and the longs' call must have its stack: 65,536 slots, no vector register.
+static void abi_test_long_calls(AbiTestTally* tally, const AbiTable* abi, const TypeId* passable, uint32_t passable_count)
+{
+    TypeId hidden = BUSTER_TYPE_VOID;
+    for (uint32_t i = 0; i < passable_count && hidden == BUSTER_TYPE_VOID; i += 2)
+    {
+        const AbiReturn result = abi->results[passable[i] >> BUSTER_TYPE_INDEX_SHIFT];
+        hidden = result.kind == BUSTER_ABI_RESULT_MEMORY && (result.flags & BUSTER_ABI_FLAG_DEMOTED) == 0 ? passable[i] : hidden;
+    }
+    const uint32_t counts[6] = {
+        65542,
+        BUSTER_ABI_COUNTED_ARGUMENTS,
+        BUSTER_ABI_COUNTED_ARGUMENTS + 1,
+        BUSTER_ABI_COUNTED_ARGUMENTS,
+        BUSTER_ABI_COUNTED_ARGUMENTS + 1,
+        3,
+    };
+    const TypeId types[6] = {
+        BUSTER_TYPE_LONG,
+        BUSTER_TYPE_INT128,
+        BUSTER_TYPE_INT128,
+        BUSTER_TYPE_COMPLEX_DOUBLE,
+        BUSTER_TYPE_COMPLEX_DOUBLE,
+        BUSTER_TYPE_LONG,
+    };
+    const TypeId results[6] = {
+        BUSTER_TYPE_VOID,
+        hidden,
+        BUSTER_TYPE_VOID,
+        hidden,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+    };
+    const uint8_t variadic[6] = { 0 };
+    uint64_t total = 0;
+    for (uint32_t c = 0; c < 6; c += 1)
+    {
+        total += counts[c];
+    }
+    TypeId* arguments = malloc(sizeof(TypeId) * total);
+    AbiLocation* vector_locations = malloc(sizeof(AbiLocation) * total);
+    AbiLocation* scalar_locations = malloc(sizeof(AbiLocation) * total);
+    if (abi_test_expect(tally, arguments != 0 && vector_locations != 0 && scalar_locations != 0, "assignment", "no memory for the long calls"))
+    {
+        uint64_t first = 0;
+        for (uint32_t c = 0; c < 6; c += 1)
+        {
+            for (uint32_t a = 0; a < counts[c]; a += 1)
+            {
+                arguments[first + a] = types[c];
+            }
+            first += counts[c];
+        }
+        const AbiSignatures signatures = {
+            .results = results,
+            .counts = counts,
+            .named = counts,
+            .variadic = variadic,
+            .count = 6,
+            .arguments = arguments,
+        };
+        AbiCall vector_calls[6];
+        AbiCall scalar_calls[6];
+        abi_test_compare_assignment(tally, abi, signatures, total, vector_locations, scalar_locations, vector_calls, scalar_calls, "long calls");
+        abi_test_expect(tally, vector_calls[0].stack_bytes == (65542 - 6) * 8 && vector_calls[0].vector_registers == 0 && vector_calls[0].integer_registers == 6 &&
+                                   vector_locations[65536].kind == BUSTER_ABI_LOCATION_STACK && vector_locations[65536].stack_offset == (65536 - 6) * 8,
+                        "assignment", "the long call of longs");
+    }
+    free(arguments);
+    free(vector_locations);
+    free(scalar_locations);
+}
+
 static bool abi_test_assignment(uint64_t seed, uint32_t count)
 {
     AbiTestTally tally = { 0 };
@@ -2017,6 +2217,10 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
                 abi_test_compare_assignment(&tally, &abi, abi_test_signatures(&calls), calls.argument_count, vector_locations, scalar_locations, vector_calls, scalar_calls,
                                             "random calls");
                 arguments += calls.argument_count;
+                if (round == 0)
+                {
+                    abi_test_long_calls(&tally, &abi, passable, passable_count);
+                }
                 // Every prefix of the arguments ending at a PROT_NONE page: one call of them, then the locations too.
                 const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
                 uint8_t* guarded = mmap(0, 4 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -2465,9 +2669,12 @@ static uint32_t abi_test_va_disagreement(const AbiTestCross* cross, uint32_t n, 
     return result;
 }
 
-// Random signatures over `types`, their bytes, and their locations (abi_assign's).
-static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, uint32_t type_count, const TypeId* unnamed_types, uint32_t unnamed_count, uint64_t* random,
-                                      AbiTestFillItem* stack)
+// Signatures over `types`, their bytes, and their locations (abi_assign's): first one per `directed` record,
+// (nullptr_t, long x4, the record, long), where clang's count of general registers runs ahead of LLVM's (the uncounted
+// nullptr_t takes rdi) and the record finds two counted and one left (a split, or one i128 on the stack and the long
+// in r9); then random ones.
+static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, uint32_t type_count, const TypeId* unnamed_types, uint32_t unnamed_count,
+                                      const TypeId* directed, uint32_t directed_count, uint64_t* random, AbiTestFillItem* stack)
 {
     const TypeTable* table = &cross->world->types.test.table;
     uint32_t argument = 0;
@@ -2476,11 +2683,13 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
     for (uint32_t n = 0; n < cross->signature_count; n += 1)
     {
         AbiTestSignature* signature = &cross->signatures[n];
+        const bool directed_one = n < directed_count;
         const uint64_t shape = type_test_below(random, 16);
-        const uint32_t named = (uint32_t)(shape < 10 ? type_test_below(random, 6) : shape < 15 ? 4 + type_test_below(random, 10) : 12 + type_test_below(random, 10));
-        const uint32_t unnamed = unnamed_count != 0 && type_test_below(random, 4) == 0 ? (uint32_t)type_test_below(random, 7) : 0;
-        const bool variadic = unnamed != 0 || (unnamed_count != 0 && type_test_below(random, 16) == 0);
-        signature->result = type_test_below(random, 5) == 0 ? BUSTER_TYPE_VOID : types[type_test_below(random, type_count)];
+        const uint32_t random_named = (uint32_t)(shape < 10 ? type_test_below(random, 6) : shape < 15 ? 4 + type_test_below(random, 10) : 12 + type_test_below(random, 10));
+        const uint32_t named = directed_one ? 7 : random_named;
+        const uint32_t unnamed = !directed_one && unnamed_count != 0 && type_test_below(random, 4) == 0 ? (uint32_t)type_test_below(random, 7) : 0;
+        const bool variadic = !directed_one && (unnamed != 0 || (unnamed_count != 0 && type_test_below(random, 16) == 0));
+        signature->result = directed_one || type_test_below(random, 5) == 0 ? BUSTER_TYPE_VOID : types[type_test_below(random, type_count)];
         for (uint32_t attempt = 0; cross->gcc && attempt < 64 && abi_test_gcc_result_differs(cross->abi, signature->result); attempt += 1)
         {
             signature->result = types[type_test_below(random, type_count)];
@@ -2494,6 +2703,7 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
             TypeId type = a < named ? types[type_test_below(random, type_count)] : unnamed_types[type_test_below(random, unnamed_count)];
+            type = directed_one ? (a == 0 ? BUSTER_TYPE_NULLPTR : a == 5 ? directed[n] : BUSTER_TYPE_LONG) : type;
             for (uint32_t attempt = 0; cross->gcc && variadic && a < named && attempt < 64 && abi_test_gcc_variadic_differs(cross->abi, type); attempt += 1)
             {
                 type = types[type_test_below(random, type_count)];
@@ -3367,6 +3577,9 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
     {
         world.gcc = gcc;
         abi_test_world_build(&world, seed, 600);
+        // GCC's worlds have neither nullptr_t nor packing.
+        TypeId directed[BUSTER_ABI_TEST_DIRECTED];
+        const uint32_t directed_count = gcc ? 0 : abi_test_world_directed(&world, directed);
         type_test_spell_world(&world.types);
         // GCC has no __fp16 on x86-64, nor a spelling of _Complex __float128, and it passes a _Complex __bf16 in two
         // SSE registers but counts one, as neither its va_arg nor clang reads it (nothing in its world is made of these).
@@ -3435,7 +3648,8 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 }
             }
             uint64_t random = seed * 0x9E3779B97F4A7C15ull + vector_bytes;
-            result = abi_test_cross_signatures(&cross, types, type_count, unnamed_types, unnamed_count, &random, stack);
+            result = abi_test_cross_signatures(&cross, types, type_count, unnamed_types, unnamed_count, directed, directed_count < count ? directed_count : count, &random,
+                                               stack);
             Arena text_arena = arena_reserve(BUSTER_ABI_TEST_ARENA_BYTES);
             TypeTestText text = {
                 .arena = &text_arena,

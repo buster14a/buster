@@ -169,18 +169,29 @@ columns keep what those choices need, which `abi_finish` works out from the
 members' own:
 
 - **`storage`**, a byte: the log2 of the type's alignment in LLVM's layout,
-  and `STORAGE_I128` when its storage at offset 0 is an `i128`
-  (`abi_storage`). An `__int128` is an `i128` aligned to 16, and so is a
+  `STORAGE_I128` when its storage at offset 0 is an `i128` (`abi_storage`),
+  and `STORAGE_EMPTY` for a record clang's layout counts empty
+  (`isEmptyRecordForLayout`: each member a zero-width bit-field or of such a
+  record's type). An `__int128` is an `i128` aligned to 16, and so is a
   `_BitInt` of 65 to 128 bits as LLVM stores it (a wider one is aligned to 16
   too). A struct's storage at offset 0 is its first member's there, and the
   struct is aligned to its members' largest alignment unless `determinePacked`
   packs it (a member off its own alignment, or a size that isn't a multiple of
-  it). A union is stored as the member LLVM aligns most, then the largest, the
-  first of equals (`CGRecordLowering::lowerUnion`); a bit-field there is an
-  `iN` of its width, or of its type's bits if fewer, rounded up to bytes
-  (`getIntNType`: 121 to 128 bits make an `i128`). An array, a complex type,
-  an enum and an `_Atomic` type take their element's, underlying type's or
-  value's.
+  it). A struct's bit-fields share access units (`accumulateBitFields`): a run
+  of them, from one that starts a byte through those that start inside a byte
+  after it, wider than an eightbyte is the integer its bytes round up to, an
+  `i128` for 9 to 16, where that fits before the next member with storage (but
+  a zero-width bit-field and an empty record) or the struct's end, and
+  otherwise an array of its bytes (`abi_bit_field_run`). So `struct { unsigned
+  __int128 x : 65; }` stores an `i128`, and packed, or followed by a `char` or
+  an `int[0]`, a `[9 x i8]`; a run's narrower units are left as its
+  bit-fields' types are aligned. A union is stored as the member LLVM aligns
+  most, then the largest, the first of equals
+  (`CGRecordLowering::lowerUnion`); a bit-field there is an `iN` of its width,
+  or of its type's bits if fewer, rounded up to bytes (`getIntNType`: 121 to
+  128 bits make an `i128`). An array, a complex type, an enum and an `_Atomic`
+  type take their element's, underlying type's or value's, never
+  `STORAGE_EMPTY`.
 - **`layout`**, 8 bytes, which only a type of 16 bytes or less gets, since
   only such types read their own and their members' and elements': the scalars
   of the LLVM type, as `GetSSETypeAtOffset` and `GetINTEGERTypeAtOffset` find
@@ -421,8 +432,8 @@ the twin, in passes over the table, until a pass classifies nothing.
   (`abi_is_pair`): `__int128` and `_BitInt(128)` by themselves, and aggregates
   whose `storage` at offset 0 is an `i128` (`GetINTEGERTypeAtOffset` returns
   the `i128` it finds there): a struct whose first member is an `__int128`, a
-  `_BitInt` of 65 to 128 bits, a bit-field wider than 64 bits of a 128-bit
-  type or an aggregate stored so; a union that stores one; an array of them.
+  `_BitInt` of 65 to 128 bits or an aggregate stored so, or whose first run of
+  bit-fields is one; a union that stores one; an array of them.
   `_BitInt(65)` to `_BitInt(127)` by themselves pass as two `i64`s, which LLVM
   can split. A union stored as an `i128` whose high eightbyte is NO_CLASS
   (`union { int a; unsigned _BitInt(128) b : 127; }`) is a `PAIR` too, with
@@ -582,7 +593,12 @@ a lane:
 - makes the counts differ: it is `UNCOUNTED` or `LOW_GENERAL`, a named
   `WIDE` vector in a variadic call, or the first of a call whose result is
   `DEMOTED`;
-- or is `EMPTY` on the stack, which may take no slot.
+- is `EMPTY` on the stack, which may take no slot;
+- or is the first of a call of more than 32,767 arguments
+  (`BUSTER_ABI_COUNTED_ARGUMENTS`), whose sums 16 bits a class can't hold: an
+  argument needs at most two registers of a class and the hidden pointer one
+  more, 65,535 in all, and past that the general registers' sum would carry
+  into the vector ones'.
 
 A call with such a lane is listed, and after the loop the twin assigns it
 again, over what the vector path wrote: 1.7% of the benchmark's calls, which
@@ -728,7 +744,12 @@ and has a fixture:
   16 whatever the record's alignment. With a NO_CLASS high eightbyte too, as
   in a union stored as an `i128`, clang still counts and passes two INTEGER
   eightbytes: a probe after five `long`s tells, since the union then goes
-  `byval` rather than in r9.
+  `byval` rather than in r9. A run of bit-fields is an `i128` only where its
+  16 bytes fit (see "clang's LLVM types"): after an uncounted `_Atomic int`
+  and four `long`s, `struct { unsigned __int128 x : 65; }` goes whole on the
+  stack and a `long` after it takes r9, while packed (an `i64` and an `i8`) it
+  is split between r9 and the stack, as is `{ unsigned __int128 x : 65; char
+  c; }`, and `{ unsigned __int128 a : 60, b : 10; }` is one `i128`.
 - **Demoted results.** A vector result that would need more than four
   registers, or of `__int128`s wider than 16 bytes, is a value in clang's IR,
   and LLVM's demotion adds the hidden pointer, which clang doesn't count
@@ -842,25 +863,29 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (1,012 checks): about 100 types whose classes, pass bits and
+- **Fixtures** (1,156 checks): about 110 types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
   the twin: every scalar, `_BitInt` and complex type, `__fp16`, `nullptr_t`
   and `_Atomic` ones, small and wide vectors, vectors of one element, and
   records with bit-fields, padding, packing, alignment, flexible and `_Atomic`
-  members, x87 members in unions, wide vectors in records and unions,
-  nesting, `i128` storage (`_BitInt`s and bit-fields in structs and unions)
-  and narrow low parts (`{__bf16, _Alignas(8) char}` and its kin). Then nine
-  calls whose locations clang and LLVM give, with their totals: an
+  members, x87 members in unions, wide vectors in records and unions, nesting,
+  `i128` storage (`_BitInt`s and bit-fields in structs and unions, and runs of
+  bit-fields that are an `i128` or, packed, followed by a member or split at a
+  byte, not) and narrow low parts (`{__bf16, _Alignas(8) char}` and its kin).
+  Then eleven calls whose locations clang and LLVM give, with their totals: an
   `UNCOUNTED` `nullptr_t` that splits a struct; a `PAIR` on the stack with r9
   taken by the `long` after it; a high eightbyte alone on the stack; an
   `UNCOUNTED` `_Atomic double` in xmm7; a hidden pointer; a struct of a
   flexible array member alone, in an 8-byte slot while a general register is
   free and in none after (an `i0`); a `LOW_GENERAL` struct in two general
-  registers; and a union stored as an `i128`, counted as two registers, on
-  the stack after five `long`s. And `va_arg`'s plan for a `long` aligned to
-  32, which reads the overflow area aligned to 8.
+  registers; a union stored as an `i128`, counted as two registers, on the
+  stack after five `long`s; and after an `UNCOUNTED` `_Atomic int` and four
+  `long`s, a packed run of bit-fields split between r9 and the stack, and a
+  run that is an `i128` on the stack with r9 taken by the `long` after it. And
+  `va_arg`'s plan for a `long` aligned to 32, which reads the overflow area
+  aligned to 8.
 - **Worlds and the oracle** (77,192 offsets compared, 109,826 checks): random
   worlds of types (scalars, vectors, complex types, `_BitInt`s, `_Atomic` and
   aligned types, and records and unions of them, small ones mostly, with
@@ -871,32 +896,42 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   then have the oracle's classes: clang's `classify` transcribed as clang has
   it, its recursion over members and elements a stack of frames, from the
   type table alone (no rows); and as an unnamed argument too.
-- **Assignment** (33,221 arguments, 39,353 checks): random calls over a
-  world's types, at each vector width, named and variadic, short and past the
-  registers, with results in memory and in registers, assigned by the vector
-  path and by the twin, which must give the same locations and totals; and
-  the vector path on every prefix of up to 40 arguments, with the argument and
-  location columns ending at a `PROT_NONE` page.
+- **Assignment** (33,221 arguments of random calls, 235,976 checks): random
+  calls over a world's types, at each vector width, named and variadic, short
+  and past the registers, with results in memory and in registers, assigned by
+  the vector path and by the twin, which must give the same locations and
+  totals; calls around the vector path's most arguments, which both paths must
+  assign alike: 65,542 `long`s (the last six of which would take rdi to r9
+  again if the vector path kept them), 32,767 `__int128`s after a hidden
+  pointer (65,535 general registers in its sum) and 32,768 without one, and
+  the same of `_Complex double`; and the vector path on every prefix of up to
+  40 arguments, with the argument and location columns ending at a `PROT_NONE`
+  page.
 
 ### The cross-check
 
 `--cross-check`, contract 4 on #135, needs no front end. For each compiler
 (clang and GCC; `--clang`, `--gcc`) and each vector width it builds a world of
-types (600 random ones beside the builtin, `_BitInt` and vector ones), random
-signatures over its passable ones (`--signatures`, 400 by default; up to 21
-named arguments and 6 unnamed, a fifth of the results `void`), and their
-locations from `abi_assign`:
+types (600 random ones beside the builtin, `_BitInt` and vector ones),
+signatures over its passable ones (`--signatures`, 400 by default), and their
+locations from `abi_assign`. clang's first five are directed
+(`abi_test_world_directed`): `(nullptr_t, long × 4, R, long)` for five structs
+R of runs of bit-fields wider than an eightbyte (an `i128`, packed, followed
+by a `char`, two bit-fields in one run, and a packed `_BitInt(128)` one),
+which the uncounted `nullptr_t` leaves one general register where clang counts
+two; the rest are random, with up to 21 named arguments and 6 unnamed, a fifth
+of the results `void`:
 
 - **The C file** has the world's typedefs, written by `c_types_test.c`'s
   oracle, every signature's argument and result bytes (each value a valid
-  representation of its type, floating values finite so that no copy through
-  a register quiets a NaN's payload, with a mask of its meaningful bits: no
+  representation of its type, floating values finite so that no copy through a
+  register quiets a NaN's payload, with a mask of its meaningful bits: no
   padding, nor a `_BitInt`'s bits past its width, nor bytes clang doesn't
-  pass), and per signature a C callee, which
-  checks its parameters and its `va_arg`s, a C caller of our callee, which
-  checks what our callee stored of its arguments, the al it got and the
-  result it returned, and `main`, which runs them and checks what our caller
-  stored of the C callee's result and the hidden pointer it got back.
+  pass), and per signature a C callee, which checks its parameters and its
+  `va_arg`s, a C caller of our callee, which checks what our callee stored of
+  its arguments, the al it got and the result it returned, and `main`, which
+  runs them and checks what our caller stored of the C callee's result and the
+  hidden pointer it got back.
 - **Our object** has, per signature, a caller of the C callee and a callee of
   the C caller, generated as encoder records from the locations: stack
   arguments copied with `rep movsb`, register ones loaded (extended as their
