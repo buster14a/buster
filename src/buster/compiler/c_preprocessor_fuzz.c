@@ -131,6 +131,7 @@ static PPOptions pp_fuzz_options(bool c23, bool scalar, bool quiet)
         .expansion_starts = true,
         .trigraphs = !c23,
         .undefine = true,
+        .clang_features = true,
         .quiet = quiet,
     };
     return result;
