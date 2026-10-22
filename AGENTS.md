@@ -731,18 +731,27 @@ order, at most `--jobs` at once, unpinned: by default one per core of the CPUs
 the process may run on, 8 on the 9700X, whose 15 CPUs online would put two tests
 on a core's SMT siblings, which slow each other down, as do the lanes' spinning
 waits (the job's tests took 21.3 to 22.4 s with 8 jobs, and 22.9 to 23.3 s with
-15, test-lanes 2.3 to 2.9 s of them rather than 0.2). Each one's heading, with
-its outcome and time, then its output, are printed in the list's order as soon
-as it and every command before it have ended; with `--github`, between
+15, test-lanes 2.3 to 2.9 s of them rather than 0.2). The report gives each
+one's heading, with its outcome and time, then its output, in the list's order
+as soon as it and every command before it have ended; with `--github`, between
 `::group::` and `::endgroup::`, and an `::error::` annotation for each that
 failed. Then come a summary line and a line naming each command that failed. The
-exit status is 1 if a command failed or couldn't start, or a signal stopped the
-run. Whatever a command's shell leaves running in its group is killed when the
-shell ends, and a command still running `--timeout` seconds after it started is
-killed with its group and fails. SIGINT, SIGTERM and SIGHUP stop the run, and so
-does SIGPIPE, from a report with no reader (`parallel | head`): the signal goes
-on to every running command's group (a second one sends SIGKILL), nothing more
-starts, and what every command wrote is printed.
+exit status is 1 if a command failed or couldn't start, a signal stopped the
+run, or the report was lost. The report never holds up the run (#276's review):
+a command's output is read into memory when it ends and its capture closed, so
+that only running commands hold one, and the report goes out only as fast as its
+reader takes it, at most `PIPE_BUF` bytes at a time into a pipe or a terminal
+once `poll` says it has room, while the runner keeps starting commands,
+enforcing their timeouts and taking signals, all from one `poll` on a
+`signalfd`. Whatever a command's shell leaves running in its group is killed
+when the shell ends, and a command still running `--timeout` seconds after it
+started is killed with its group and fails, though its shell may end before the
+runner reaps it. SIGINT, SIGTERM and SIGHUP stop the run: the signal goes on to
+every running command's group (a second one sends SIGKILL), nothing more starts,
+and the report gives what every command wrote; once every command has ended, one
+drops the rest of the report rather than wait for its reader. A report that
+can't be written (EPIPE: `parallel | head`, whether or not SIGPIPE is ignored)
+stops the run, and its commands are killed.
 
 The 9700X job's test step ("Run the tests at once") runs every test through it,
 with `--timeout 180`, before the benchmarks, which run one at a time and pinned.
@@ -758,7 +767,7 @@ under its lock, as one run):
 sed -n "/<<'TESTS'$/,/^ *TESTS$/{//!{s/^ \{10\}//;p}}" .github/workflows/9700x.yml | ./build/compiler parallel
 ```
 
-`./build/compiler test-parallel` (about 2.2 s) checks it, each report exactly
+`./build/compiler test-parallel` (about 7 s) checks it, each report exactly
 as expected with its times written as `*`:
 
 - lists: headings, scripts, blank lines and comments before the first heading,
@@ -770,8 +779,10 @@ as expected with its times written as `*`:
   its standard output and errors in the order it wrote them, output that
   doesn't end in a newline and none at all, an exit status and a signal; then
   `--github`'s groups and annotations, with a title GitHub must read escaped;
-  and a command's descriptors: standard input `/dev/null` when the runner's is
-  a file, and no other than the three though the runner has one open without
+  and a command's descriptors, without `/proc` (whose PID namespace may not be
+  the shell's): standard input reads nothing though the runner's is a file
+  with a line in it, and no other than the three is open (an external `true`
+  redirected to each from 3 to 63), though the runner has one open without
   `FD_CLOEXEC`;
 - at once: three commands that each wait for the other two pass with 3 jobs;
   with one job, four commands' starts and ends in a log come in turn; and eight
@@ -780,6 +791,13 @@ as expected with its times written as `*`:
 - processes: a command past its timeout killed with the process it started,
   what a command leaves running killed when its shell ends, and a shell that
   can't start;
+- a slow reader (#276's review): a report whose pipe its reader leaves full for
+  1 s while a command passes its timeout, which must be killed at its deadline
+  and fail, and while a command sends SIGTERM, which must go on to it at once;
+  SIGTERM once every command has ended, which must drop the rest of the report
+  rather than wait for the reader; and 61 commands with room for 32
+  descriptors, 60 of them ending before the first, whose captures must close
+  as they end;
 - signals: SIGTERM from a command stops the run, goes on to the command's
   group, and what didn't start is reported so; a run stopped while its command
   passes fails; SIGINT then SIGTERM, from a command that ignores both, kill it;
@@ -788,8 +806,11 @@ as expected with its times written as `*`:
   mask and the dispositions as they were;
 - the command: its report and exit status for lists on standard input and in a
   file that pass and fail, a report with no reader (the run stops, and the
-  runner ends at once with its command killed), a list's error, a list that
-  can't be read, and invalid options;
+  runner ends at once with its command killed), with SIGPIPE at its default and
+  ignored, a reader that leaves after the first line (the run fails though its
+  command passes), a command that ends past its deadline while the runner is
+  stopped (SIGSTOP), which must fail, a list's error, a list that can't be
+  read, and invalid options;
 - the cores: `--jobs`' default against the distinct physical and core ids that
   `/proc/cpuinfo` gives the CPUs the process may use.
 

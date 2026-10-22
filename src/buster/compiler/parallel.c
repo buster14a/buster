@@ -10,26 +10,34 @@
 // The runner starts the commands in the list's order, at most --jobs at once (by default as many as the cores of the
 // CPUs this process may run on), each script in a bash of its own as GitHub Actions runs a step's `run` with `shell:
 // bash` (`bash --noprofile --norc -e -o pipefail`), in a process group of its own, with standard input from /dev/null
-// and standard output and error into one capture (a memfd) of its own, and no other descriptor. It prints each
+// and standard output and error into one capture (a memfd) of its own, and no other descriptor. Its report gives each
 // command's heading with its outcome and time, then its output, in the list's order, each as soon as it and every
 // command before it have ended; with --github between `::group::` and `::endgroup::`, so that GitHub's log folds each
 // one under its heading, and with an `::error::` annotation for each that failed. Last comes a summary line, and a line
 // naming each command that failed. The exit status is 0 when every command exited with status 0, and 1 otherwise.
 //
+// The report never holds up the run. A command's output is read into memory when it ends and its capture closed, so
+// that only running commands hold one, however many have ended before the report reaches them; and the report goes out
+// only as fast as its reader takes it, at most PIPE_BUF bytes at a time into a pipe or a terminal once poll says it has
+// room, which takes that many without waiting, while the runner keeps starting commands, enforcing their timeouts and
+// taking signals, all from one poll on a signalfd.
+//
 // When a command's shell ends, whatever it left running in its process group is killed, so that nothing it started
-// outlives it or writes into its output after it is printed. A command still running --timeout seconds after it
-// started is killed with its group, and fails. SIGINT, SIGTERM and SIGHUP stop the run, and so does SIGPIPE, from a
-// report that has no reader: the runner sends the signal to every running command's group (a second one sends
-// SIGKILL), starts nothing more, and prints what every command wrote.
+// outlives it or writes into its output after it is read. A command still running --timeout seconds after it started is
+// killed with its group, and fails, though its shell may end before the runner reaps it. SIGINT, SIGTERM and SIGHUP stop
+// the run: the runner sends the signal to every running command's group (a second one sends SIGKILL), starts nothing
+// more, and reports what every command wrote; once every command has ended, one drops the rest of the report rather
+// than wait for its reader. A report that can't be written (EPIPE: nothing reads it, whether or not SIGPIPE is ignored)
+// stops the run, and its commands are killed.
 //
 // The commands aren't pinned: tests that run lanes need the CPUs the job may use (test-lanes' syncs on 3 lanes don't
 // end within its watchdog's 60 s on one CPU). The runner is test tooling outside the compile path and has no vector
 // path: a list is a few dozen commands, and the time goes into them.
 //
 // main.c includes this file after lane.c, for its arenas, and parallel_test.c after it. Layout, in this order: the list
-// (ParallelList, parallel_list_parse), the run (ParallelOptions, ParallelResult, ParallelSummary, parallel_start,
-// parallel_reap, parallel_print, parallel_take_signals, parallel_run), and the command (parallel_core_count,
-// run_parallel_command).
+// (ParallelList, parallel_list_parse), the run (ParallelOptions, ParallelResult, ParallelSummary, parallel_start, the
+// report's parts: parallel_render, parallel_render_summary and parallel_part, ParallelOutput and parallel_output_write,
+// parallel_reap, parallel_stop, parallel_run), and the command (parallel_core_count, run_parallel_command).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -40,20 +48,25 @@
 
 // OS-dependent includes
 #include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <spawn.h>
 #include <unistd.h>
+#include <sys/signalfd.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <linux/memfd.h>
 
 extern char** environ;
 
-// The command's arena: the list and the scripts copied from it. Its pages are committed only as they are touched.
+// The command's arena: the list, the scripts copied from it, and the report's parts. Its pages are committed only as they
+// are touched.
 #define BUSTER_PARALLEL_ARENA_CAPACITY (16ull << 30)
 // sched_getaffinity's mask of 1,024 CPUs, as glibc's cpu_set_t.
 #define BUSTER_PARALLEL_CPUS 1024
-// Reads of the list and of a command's capture take this many bytes at a time.
+// Reads of the list take this many bytes at a time, and so do writes of the report into a regular file.
 #define BUSTER_PARALLEL_CHUNK_BYTES (64ull << 10)
 #define BUSTER_PARALLEL_NANOSECONDS 1000000000ull
 // The longest --timeout, in seconds: a day.
@@ -279,7 +292,7 @@ struct ParallelResult
     uint64_t end;
     // Its shell, the leader of its process group.
     pid_t pid;
-    // The capture of its output and errors, until it is printed, or -1.
+    // The capture of its output and errors while it runs, or -1.
     int capture;
     // waitpid's status, once it has ended.
     int status;
@@ -289,8 +302,11 @@ struct ParallelResult
     // The runner killed it at its timeout, or sent its group the signal that stopped the run.
     bool timed_out;
     bool interrupted;
-    // It ended with exit status 0.
+    // It ended with exit status 0, before its timeout.
     bool passed;
+    // Its part of the report, its heading with its outcome and time and then its output, once it has ended (or the run
+    // stopped before it started): null until then.
+    String8 report;
 };
 
 typedef struct ParallelSummary ParallelSummary;
@@ -305,7 +321,11 @@ struct ParallelSummary
     uint64_t elapsed;
     // The signal that stopped the run, or 0.
     int signal;
-    // Every command passed, and no signal stopped the run.
+    // A write of the report failed (EPIPE, when nothing reads it), or a signal dropped the rest of it, or the arena
+    // couldn't hold a part of it.
+    bool report_lost;
+    bool memory_full;
+    // Every command passed, no signal stopped the run, and the report went out whole.
     bool succeeded;
 };
 
@@ -321,27 +341,21 @@ static double parallel_seconds(uint64_t nanoseconds)
     return (double)nanoseconds / (double)BUSTER_PARALLEL_NANOSECONDS;
 }
 
-static void parallel_write(int fd, const char* bytes, uint64_t length)
+// Appends bytes at the arena's end, where the part of the report being built grows. False when the arena is full.
+static bool parallel_append(Arena* arena, const char* bytes, uint64_t length)
 {
-    uint64_t written = 0;
-    bool writing = true;
-    while (writing && written < length)
+    char* destination = arena_push(arena, length, 1);
+    if (destination != 0)
     {
-        const ssize_t count = write(fd, bytes + written, length - written);
-        if (count > 0)
-        {
-            written += (uint64_t)count;
-        }
-        else
-        {
-            writing = count < 0 && errno == EINTR;
-        }
+        memcpy(destination, bytes, length);
     }
+    return destination != 0;
 }
 
 // Text inside a workflow command, which GitHub reads with '%', CR and LF escaped, and in a property also ':' and ','.
-static void parallel_write_escaped(int fd, String8 text, bool property)
+static bool parallel_append_escaped(Arena* arena, String8 text, bool property)
 {
+    bool appended = true;
     uint64_t start = 0;
     for (uint64_t i = 0; i < text.length; i += 1)
     {
@@ -349,13 +363,15 @@ static void parallel_write_escaped(int fd, String8 text, bool property)
         const char* escape = c == '%' ? "%25" : c == '\r' ? "%0D" : c == '\n' ? "%0A" : property && c == ':' ? "%3A" : property && c == ',' ? "%2C" : 0;
         if (escape != 0)
         {
-            parallel_write(fd, text.pointer + start, i - start);
-            parallel_write(fd, escape, 3);
+            appended = appended && parallel_append(arena, text.pointer + start, i - start) && parallel_append(arena, escape, 3);
             start = i + 1;
         }
     }
-    parallel_write(fd, text.pointer + start, text.length - start);
+    return appended && parallel_append(arena, text.pointer + start, text.length - start);
 }
+
+// What a part of the report says when the arena can't hold it, which fails the run.
+static const char parallel_lost_part[] = "parallel: out of memory for this part of the report\n";
 
 // What became of a command: "passed", "failed (exit status 1)" and the others, with its time when it ran.
 static void parallel_outcome(const ParallelResult* result, const ParallelOptions* options, char* text, uint64_t size)
@@ -487,9 +503,158 @@ static void parallel_start(const ParallelCommand* command, const ParallelOptions
     }
 }
 
-// Reaps every running command whose shell has ended, at `now`, after killing whatever it left in its process group:
-// its shell, a zombie until it is reaped, still holds the group's id. Returns how many it reaped.
-static uint64_t parallel_reap(ParallelResult* results, uint64_t count, uint64_t now)
+// Builds a command's part of the report at the arena's end: its heading, with its outcome and time, then what it wrote,
+// read from its capture, which is then closed, so that only running commands hold one. Returns whether the arena held
+// it; a part it can't hold is parallel_lost_part.
+static bool parallel_render(Arena* arena, const ParallelCommand* command, const ParallelOptions* options, ParallelResult* result)
+{
+    char outcome[BUSTER_PARALLEL_OUTCOME_BYTES];
+    parallel_outcome(result, options, outcome, sizeof(outcome));
+    const String8 outcome_text = { .pointer = outcome, .length = strlen(outcome) };
+    const uint64_t mark = arena->length;
+    bool built = options->github ? parallel_append(arena, "::group::", 9) && parallel_append_escaped(arena, command->title, false) && parallel_append(arena, ": ", 2) &&
+                                       parallel_append_escaped(arena, outcome_text, false)
+                                 : parallel_append(arena, "== ", 3) && parallel_append(arena, command->title.pointer, command->title.length) && parallel_append(arena, ": ", 2) &&
+                                       parallel_append(arena, outcome_text.pointer, outcome_text.length);
+    built = built && parallel_append(arena, "\n", 1);
+    struct stat stats;
+    const uint64_t size = built && result->capture >= 0 && fstat(result->capture, &stats) == 0 && stats.st_size > 0 ? (uint64_t)stats.st_size : 0;
+    char* bytes = size != 0 ? arena_push(arena, size, 1) : 0;
+    built = built && (size == 0 || bytes != 0);
+    uint64_t read_bytes = 0;
+    bool reading = bytes != 0;
+    while (reading && read_bytes < size)
+    {
+        const ssize_t count = pread(result->capture, bytes + read_bytes, size - read_bytes, (off_t)read_bytes);
+        if (count > 0)
+        {
+            read_bytes += (uint64_t)count;
+        }
+        else
+        {
+            reading = count < 0 && errno == EINTR;
+        }
+    }
+    if (bytes != 0)
+    {
+        arena_pop_to(arena, (uint64_t)(bytes - (char*)arena->base) + read_bytes);
+    }
+    // The next heading, or the group's end, starts a line of its own.
+    built = built && (read_bytes == 0 || bytes[read_bytes - 1] == '\n' || parallel_append(arena, "\n", 1));
+    built = built && (!options->github || parallel_append(arena, "::endgroup::\n", 13));
+    if (result->capture >= 0)
+    {
+        close(result->capture);
+        result->capture = -1;
+    }
+    if (!built)
+    {
+        arena_pop_to(arena, mark);
+    }
+    result->report = built ? (String8){ .pointer = (char*)arena->base + mark, .length = arena->length - mark }
+                           : (String8){ .pointer = (char*)parallel_lost_part, .length = sizeof(parallel_lost_part) - 1 };
+    return built;
+}
+
+// The report's last part, built at the arena's end once every command has ended or won't start: the summary line, then a
+// line (or with --github an annotation) for each command that failed. Sets *full when the arena can't hold it.
+static String8 parallel_render_summary(Arena* arena, const ParallelList* list, const ParallelOptions* options, const ParallelResult* results, const ParallelSummary* summary,
+                                       uint64_t jobs, int signal_error, bool* full)
+{
+    const uint64_t mark = arena->length;
+    char line[BUSTER_PARALLEL_OUTCOME_BYTES];
+    int length = snprintf(line, sizeof(line), "parallel: %llu commands in %.1f s, at most %llu at once: %llu passed, %llu failed, %llu not started", (unsigned long long)list->count,
+                          parallel_seconds(summary->elapsed), (unsigned long long)jobs, (unsigned long long)summary->passed, (unsigned long long)summary->failed,
+                          (unsigned long long)summary->not_started);
+    bool built = length > 0 && parallel_append(arena, line, (uint64_t)length);
+    if (summary->signal != 0)
+    {
+        length = snprintf(line, sizeof(line), ", stopped by signal %d: %s", summary->signal, strsignal(summary->signal));
+        built = built && length > 0 && parallel_append(arena, line, (uint64_t)length);
+    }
+    if (signal_error != 0)
+    {
+        length = snprintf(line, sizeof(line), ", can't wait for the commands' signals: %s", strerror(signal_error));
+        built = built && length > 0 && parallel_append(arena, line, (uint64_t)length);
+    }
+    built = built && parallel_append(arena, "\n", 1);
+    for (uint64_t i = 0; i < list->count; i += 1)
+    {
+        if (!results[i].passed && results[i].state == PARALLEL_STATE_ENDED)
+        {
+            char outcome[BUSTER_PARALLEL_OUTCOME_BYTES];
+            parallel_outcome(&results[i], options, outcome, sizeof(outcome));
+            const String8 outcome_text = { .pointer = outcome, .length = strlen(outcome) };
+            const String8 title = list->commands[i].title;
+            built = built && (options->github ? parallel_append(arena, "::error title=", 14) && parallel_append_escaped(arena, title, true) && parallel_append(arena, "::", 2) &&
+                                                    parallel_append_escaped(arena, outcome_text, false)
+                                              : parallel_append(arena, "parallel: ", 10) && parallel_append(arena, title.pointer, title.length) && parallel_append(arena, " ", 1) &&
+                                                    parallel_append(arena, outcome_text.pointer, outcome_text.length));
+            built = built && parallel_append(arena, "\n", 1);
+        }
+    }
+    if (!built)
+    {
+        arena_pop_to(arena, mark);
+        *full = true;
+    }
+    return built ? (String8){ .pointer = (char*)arena->base + mark, .length = arena->length - mark }
+                 : (String8){ .pointer = (char*)parallel_lost_part, .length = sizeof(parallel_lost_part) - 1 };
+}
+
+// The report's part at `index`: the opening line, then each command's, then the summary; null while it isn't built yet,
+// which holds back every part after it.
+static String8 parallel_part(const ParallelList* list, const ParallelResult* results, String8 opening, String8 closing, uint64_t index)
+{
+    String8 part = { 0 };
+    if (index == 0)
+    {
+        part = opening;
+    }
+    else if (index <= list->count)
+    {
+        part = results[index - 1].report;
+    }
+    else if (index == list->count + 1)
+    {
+        part = closing;
+    }
+    return part;
+}
+
+typedef struct ParallelOutput ParallelOutput;
+struct ParallelOutput
+{
+    int fd;
+    // Anything but a regular file (a pipe, a terminal, a socket), whose writes may wait for its reader: each write into
+    // it is at most PIPE_BUF bytes, once poll says it has room, which takes that many without waiting. A regular file
+    // takes BUSTER_PARALLEL_CHUNK_BYTES at a time without waiting for anyone.
+    bool pollable;
+    // A write failed (EPIPE, when nothing reads it), or a signal dropped the rest of the report.
+    bool lost;
+};
+
+// Writes what the reader takes now of `part`, from *offset, and moves *offset past it. A failed write loses the rest
+// of the report.
+static void parallel_output_write(ParallelOutput* output, String8 part, uint64_t* offset)
+{
+    const uint64_t limit = output->pollable ? PIPE_BUF : BUSTER_PARALLEL_CHUNK_BYTES;
+    const uint64_t left = part.length - *offset;
+    const ssize_t count = left != 0 ? write(output->fd, part.pointer + *offset, left < limit ? left : limit) : 0;
+    if (count > 0)
+    {
+        *offset += (uint64_t)count;
+    }
+    else if (left != 0 && (count == 0 || (errno != EINTR && errno != EAGAIN)))
+    {
+        output->lost = true;
+    }
+}
+
+// Reaps every running command whose shell has ended, at `now`, after killing whatever it left in its process group (its
+// shell, a zombie until it is reaped, still holds the group's id), and builds its part of the report. Returns how many it
+// reaped; sets *full when the arena can't hold a part.
+static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const ParallelOptions* options, ParallelResult* results, uint64_t count, uint64_t now, bool* full)
 {
     uint64_t reaped = 0;
     for (uint64_t i = 0; i < count; i += 1)
@@ -508,144 +673,170 @@ static uint64_t parallel_reap(ParallelResult* results, uint64_t count, uint64_t 
                 waited = waitpid(result->pid, &status, 0);
             } while (waited < 0 && errno == EINTR);
             result->status = status;
-            result->passed = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+            result->passed = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !result->timed_out;
             result->state = PARALLEL_STATE_ENDED;
             result->end = now;
+            *full = !parallel_render(arena, &list->commands[i], options, result) || *full;
             reaped += 1;
         }
     }
     return reaped;
 }
 
-// Prints a command's heading, with its outcome and time, and what it wrote, then closes its capture.
-static void parallel_print(const ParallelCommand* command, const ParallelOptions* options, ParallelResult* result)
+// A stop signal. Before the run has finished, the first goes on to every running command's group, and stops the run
+// (nothing more starts), and another kills them; once every command has ended and only the report's reader keeps the
+// run, it drops the rest of the report.
+static void parallel_stop(ParallelResult* results, uint64_t started, int signal, bool finished, uint64_t* stops, ParallelSummary* summary, ParallelOutput* output)
 {
-    char outcome[BUSTER_PARALLEL_OUTCOME_BYTES];
-    parallel_outcome(result, options, outcome, sizeof(outcome));
-    const String8 outcome_text = { .pointer = outcome, .length = strlen(outcome) };
-    parallel_write(options->output, options->github ? "::group::" : "== ", options->github ? 9 : 3);
-    if (options->github)
+    summary->signal = summary->signal != 0 ? summary->signal : signal;
+    *stops += 1;
+    if (finished)
     {
-        parallel_write_escaped(options->output, command->title, false);
-        parallel_write(options->output, ": ", 2);
-        parallel_write_escaped(options->output, outcome_text, false);
+        output->lost = true;
     }
-    else
+    for (uint64_t i = 0; !finished && i < started; i += 1)
     {
-        parallel_write(options->output, command->title.pointer, command->title.length);
-        parallel_write(options->output, ": ", 2);
-        parallel_write(options->output, outcome_text.pointer, outcome_text.length);
+        if (results[i].state == PARALLEL_STATE_RUNNING)
+        {
+            kill(-results[i].pid, *stops == 1 ? signal : SIGKILL);
+            results[i].interrupted = true;
+        }
     }
-    parallel_write(options->output, "\n", 1);
-    char buffer[BUSTER_PARALLEL_CHUNK_BYTES];
-    uint64_t offset = 0;
-    char last = '\n';
-    bool reading = result->capture >= 0;
+}
+
+// Takes the signals the signalfd holds without waiting: each stop signal goes to parallel_stop, and SIGCHLD, which only
+// says to reap, needs nothing more.
+static void parallel_take_signals(int signal_fd, ParallelResult* results, uint64_t started, bool finished, uint64_t* stops, ParallelSummary* summary, ParallelOutput* output)
+{
+    struct signalfd_siginfo infos[8];
+    bool reading = signal_fd >= 0;
     while (reading)
     {
-        const ssize_t count = pread(result->capture, buffer, sizeof(buffer), (off_t)offset);
-        if (count > 0)
+        const ssize_t count = read(signal_fd, infos, sizeof(infos));
+        reading = count > 0;
+        for (uint64_t i = 0; reading && i < (uint64_t)count / sizeof(infos[0]); i += 1)
         {
-            parallel_write(options->output, buffer, (uint64_t)count);
-            offset += (uint64_t)count;
-            last = buffer[count - 1];
+            if ((int)infos[i].ssi_signo != SIGCHLD)
+            {
+                parallel_stop(results, started, (int)infos[i].ssi_signo, finished, stops, summary, output);
+            }
         }
-        else
-        {
-            reading = count < 0 && errno == EINTR;
-        }
-    }
-    // The next heading, or the group's end, starts a line of its own.
-    if (last != '\n')
-    {
-        parallel_write(options->output, "\n", 1);
-    }
-    if (options->github)
-    {
-        parallel_write(options->output, "::endgroup::\n", 13);
-    }
-    if (result->capture >= 0)
-    {
-        close(result->capture);
-        result->capture = -1;
     }
 }
 
-// Takes every pending signal of the set, which the run keeps blocked, and returns the first, or 0.
-static int parallel_take_signals(const sigset_t* signals)
-{
-    const struct timespec now = { 0 };
-    int first = 0;
-    int pending = 0;
-    while ((pending = sigtimedwait(signals, 0, &now)) > 0)
-    {
-        first = first != 0 ? first : pending;
-    }
-    return first;
-}
-
-// Runs the list's commands, prints the report into options->output, and returns what became of them, each command's in
-// `results` (one per command).
-static ParallelSummary parallel_run(const ParallelList* list, const ParallelOptions* options, ParallelResult* results)
+// Runs the list's commands, writes the report into options->output, and returns what became of them, each command's in
+// `results` (one per command); the report's parts are built in the arena.
+static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, const ParallelOptions* options, ParallelResult* results)
 {
     ParallelSummary summary = { 0 };
     for (uint64_t i = 0; i < list->count; i += 1)
     {
         results[i] = (ParallelResult){ .pid = -1, .capture = -1 };
     }
-    // The signals the run waits for, blocked until sigtimedwait takes them: the commands' SIGCHLD, and the signals that
-    // stop the run, unless they were ignored (as nohup does with SIGHUP). SIGCHLD must not be ignored either, or the
-    // kernel would reap the commands itself. A write into a pipe with no reader (`parallel | head`) raises SIGPIPE,
-    // which then stops the run rather than ending the runner with its commands left running.
+    // The signals the run takes from its signalfd, blocked meanwhile: the commands' SIGCHLD, and the signals that stop
+    // the run, unless they were ignored (as nohup does with SIGHUP). SIGCHLD must not be ignored either, or the kernel
+    // would reap the commands itself. SIGPIPE, which a write into a pipe with no reader raises, is blocked too unless
+    // it's ignored, so that the failed write stops the run rather than the signal ending the runner with its commands
+    // left running.
     sigset_t handled;
     sigemptyset(&handled);
     sigaddset(&handled, SIGCHLD);
-    const int stops[] = {
+    const int stops_handled[] = {
         SIGINT,
         SIGTERM,
         SIGHUP,
-        SIGPIPE,
     };
-    for (uint64_t i = 0; i < sizeof(stops) / sizeof(stops[0]); i += 1)
+    for (uint64_t i = 0; i < sizeof(stops_handled) / sizeof(stops_handled[0]); i += 1)
     {
         struct sigaction current;
-        if (sigaction(stops[i], 0, &current) == 0 && current.sa_handler != SIG_IGN)
+        if (sigaction(stops_handled[i], 0, &current) == 0 && current.sa_handler != SIG_IGN)
         {
-            sigaddset(&handled, stops[i]);
+            sigaddset(&handled, stops_handled[i]);
         }
     }
+    sigset_t blocked = handled;
+    struct sigaction pipe_action;
+    const bool pipe_blocked = sigaction(SIGPIPE, 0, &pipe_action) == 0 && pipe_action.sa_handler != SIG_IGN;
+    if (pipe_blocked)
+    {
+        sigaddset(&blocked, SIGPIPE);
+    }
     sigset_t previous_mask;
-    sigprocmask(SIG_BLOCK, &handled, &previous_mask);
+    sigprocmask(SIG_BLOCK, &blocked, &previous_mask);
     struct sigaction child_default = { .sa_handler = SIG_DFL };
     struct sigaction previous_child;
     sigaction(SIGCHLD, &child_default, &previous_child);
+    const int signal_fd = signalfd(-1, &handled, SFD_CLOEXEC | SFD_NONBLOCK);
+    const int signal_error = signal_fd < 0 ? errno : 0;
+    struct stat output_stats;
+    ParallelOutput output = {
+        .fd = options->output,
+        .pollable = !(fstat(options->output, &output_stats) == 0 && S_ISREG(output_stats.st_mode)),
+    };
 
     const uint64_t jobs = options->jobs != 0 ? options->jobs : 1;
     const uint64_t origin = parallel_clock();
-    dprintf(options->output, "parallel: %llu commands, at most %llu at once\n", (unsigned long long)list->count, (unsigned long long)jobs);
+    char line[BUSTER_PARALLEL_OUTCOME_BYTES];
+    const int line_length = snprintf(line, sizeof(line), "parallel: %llu commands, at most %llu at once\n", (unsigned long long)list->count, (unsigned long long)jobs);
+    const uint64_t opening_mark = arena->length;
+    const bool opened = line_length > 0 && parallel_append(arena, line, (uint64_t)line_length);
+    const String8 opening = opened ? (String8){ .pointer = (char*)arena->base + opening_mark, .length = (uint64_t)line_length }
+                                   : (String8){ .pointer = (char*)parallel_lost_part, .length = sizeof(parallel_lost_part) - 1 };
+    summary.memory_full = !opened;
+    String8 closing = { 0 };
     uint64_t started = 0;
     uint64_t running = 0;
-    uint64_t printed = 0;
-    while (running != 0 || (summary.signal == 0 && started < list->count))
+    uint64_t stops = 0;
+    // The part of the report being written, and how much of it is.
+    uint64_t part = 0;
+    uint64_t offset = 0;
+    // Every command has ended or won't start, and the summary is built.
+    bool finished = false;
+    // The report was lost while commands ran, which were then killed.
+    bool killed = false;
+    bool done = false;
+    while (!done)
     {
-        while (summary.signal == 0 && running < jobs && started < list->count)
+        while (stops == 0 && !killed && signal_fd >= 0 && running < jobs && started < list->count)
         {
-            parallel_start(&list->commands[started], options, &previous_mask, &results[started], parallel_clock() - origin);
-            running += results[started].state == PARALLEL_STATE_RUNNING;
+            ParallelResult* result = &results[started];
+            parallel_start(&list->commands[started], options, &previous_mask, result, parallel_clock() - origin);
+            running += result->state == PARALLEL_STATE_RUNNING;
             summary.peak = running > summary.peak ? running : summary.peak;
+            // A command that couldn't start has ended.
+            if (result->state == PARALLEL_STATE_ENDED)
+            {
+                summary.memory_full = !parallel_render(arena, &list->commands[started], options, result) || summary.memory_full;
+            }
             started += 1;
         }
-        // Each command is printed once it and every command before it have ended.
-        while (printed < list->count && results[printed].state == PARALLEL_STATE_ENDED)
+        if (!finished && running == 0 && (stops != 0 || killed || signal_fd < 0 || started == list->count))
         {
-            parallel_print(&list->commands[printed], options, &results[printed]);
-            printed += 1;
+            // The run's end: what didn't start, a stop signal that came as the last command ended, then the summary.
+            for (uint64_t i = started; i < list->count; i += 1)
+            {
+                summary.memory_full = !parallel_render(arena, &list->commands[i], options, &results[i]) || summary.memory_full;
+            }
+            parallel_take_signals(signal_fd, results, started, false, &stops, &summary, &output);
+            summary.elapsed = parallel_clock() - origin;
+            for (uint64_t i = 0; i < list->count; i += 1)
+            {
+                summary.passed += results[i].passed;
+                summary.not_started += results[i].state == PARALLEL_STATE_WAITING;
+            }
+            summary.failed = list->count - summary.passed - summary.not_started;
+            closing = parallel_render_summary(arena, list, options, results, &summary, jobs, signal_error, &summary.memory_full);
+            finished = true;
         }
-        if (running != 0)
+        const String8 next = parallel_part(list, results, opening, closing, part);
+        const bool pending = !output.lost && next.pointer != 0;
+        done = finished && !pending;
+        if (!done)
         {
-            // Wait for a signal, or the next command's timeout.
+            // Wait for a signal, the reader's room for the next part, or the next timeout; a regular file takes the part
+            // at once.
             const uint64_t now = parallel_clock() - origin;
-            uint64_t wait = UINT64_MAX;
+            uint64_t wait = pending && !output.pollable ? 0 : UINT64_MAX;
             for (uint64_t i = 0; options->timeout != 0 && i < started; i += 1)
             {
                 const uint64_t deadline = results[i].start + options->timeout;
@@ -655,27 +846,24 @@ static ParallelSummary parallel_run(const ParallelList* list, const ParallelOpti
                     wait = left < wait ? left : wait;
                 }
             }
-            const struct timespec timeout = {
-                .tv_sec = (time_t)(wait / BUSTER_PARALLEL_NANOSECONDS),
-                .tv_nsec = (long)(wait % BUSTER_PARALLEL_NANOSECONDS),
-            };
-            const int received = sigtimedwait(&handled, 0, wait == UINT64_MAX ? 0 : &timeout);
-            if (received > 0 && received != SIGCHLD)
-            {
-                // The first signal goes to every running command's group, and stops the run; another kills them.
-                const int forwarded = summary.signal == 0 ? received : SIGKILL;
-                summary.signal = summary.signal == 0 ? received : summary.signal;
-                for (uint64_t i = 0; i < started; i += 1)
+            const uint64_t milliseconds = wait == UINT64_MAX ? 0 : (wait + 999999) / 1000000;
+            const int timeout = wait == UINT64_MAX ? -1 : milliseconds < INT32_MAX ? (int)milliseconds : INT32_MAX;
+            struct pollfd fds[2] = {
                 {
-                    if (results[i].state == PARALLEL_STATE_RUNNING)
-                    {
-                        kill(-results[i].pid, forwarded);
-                        results[i].interrupted = true;
-                    }
-                }
-            }
+                    .fd = signal_fd,
+                    .events = POLLIN,
+                },
+                {
+                    .fd = output.fd,
+                    .events = POLLOUT,
+                },
+            };
+            const bool polling_output = pending && output.pollable;
+            poll(fds, polling_output ? 2 : 1, timeout);
+            parallel_take_signals(signal_fd, results, started, finished, &stops, &summary, &output);
+            // Timeouts before reaping: a command still running at its deadline ran past it, though its shell may have
+            // ended since.
             const uint64_t after = parallel_clock() - origin;
-            running -= parallel_reap(results, started, after);
             for (uint64_t i = 0; options->timeout != 0 && i < started; i += 1)
             {
                 if (results[i].state == PARALLEL_STATE_RUNNING && !results[i].timed_out && after >= results[i].start + options->timeout)
@@ -684,69 +872,46 @@ static ParallelSummary parallel_run(const ParallelList* list, const ParallelOpti
                     results[i].timed_out = true;
                 }
             }
+            running -= parallel_reap(arena, list, options, results, started, after, &summary.memory_full);
+            if (pending && !output.lost && (!polling_output || fds[1].revents != 0))
+            {
+                parallel_output_write(&output, next, &offset);
+                if (!output.lost && offset == next.length)
+                {
+                    part += 1;
+                    offset = 0;
+                }
+            }
+            // A report that can't be written has no reader: the run stops, and its commands are killed.
+            for (uint64_t i = 0; output.lost && !finished && !killed && i < started; i += 1)
+            {
+                if (results[i].state == PARALLEL_STATE_RUNNING)
+                {
+                    kill(-results[i].pid, SIGKILL);
+                    results[i].interrupted = true;
+                }
+            }
+            killed = killed || (output.lost && !finished);
         }
     }
-    // After a signal, the commands that didn't start too.
-    while (printed < list->count)
+    // A stop signal that came as the run ended fails it too. A write into a pipe with no reader left a SIGPIPE pending,
+    // taken here before the mask is put back.
+    summary.report_lost = output.lost;
+    parallel_take_signals(signal_fd, results, started, true, &stops, &summary, &output);
+    if (signal_fd >= 0)
     {
-        parallel_print(&list->commands[printed], options, &results[printed]);
-        printed += 1;
+        close(signal_fd);
     }
-    // A signal that came as the last command ended stops the run too.
-    sigset_t stopping = handled;
-    sigdelset(&stopping, SIGCHLD);
-    const int last = parallel_take_signals(&stopping);
-    summary.signal = summary.signal != 0 ? summary.signal : last;
-    summary.elapsed = parallel_clock() - origin;
-    for (uint64_t i = 0; i < list->count; i += 1)
+    sigset_t pipe_signal;
+    sigemptyset(&pipe_signal);
+    sigaddset(&pipe_signal, SIGPIPE);
+    const struct timespec zero = { 0 };
+    while (pipe_blocked && sigtimedwait(&pipe_signal, 0, &zero) > 0)
     {
-        summary.passed += results[i].passed;
-        summary.not_started += results[i].state == PARALLEL_STATE_WAITING;
     }
-    summary.failed = list->count - summary.passed - summary.not_started;
-    dprintf(options->output, "parallel: %llu commands in %.1f s, at most %llu at once: %llu passed, %llu failed, %llu not started", (unsigned long long)list->count,
-            parallel_seconds(summary.elapsed), (unsigned long long)jobs, (unsigned long long)summary.passed, (unsigned long long)summary.failed,
-            (unsigned long long)summary.not_started);
-    if (summary.signal != 0)
-    {
-        dprintf(options->output, ", stopped by signal %d: %s", summary.signal, strsignal(summary.signal));
-    }
-    parallel_write(options->output, "\n", 1);
-    for (uint64_t i = 0; i < list->count; i += 1)
-    {
-        if (!results[i].passed && results[i].state == PARALLEL_STATE_ENDED)
-        {
-            char outcome[BUSTER_PARALLEL_OUTCOME_BYTES];
-            parallel_outcome(&results[i], options, outcome, sizeof(outcome));
-            const String8 outcome_text = { .pointer = outcome, .length = strlen(outcome) };
-            if (options->github)
-            {
-                parallel_write(options->output, "::error title=", 14);
-                parallel_write_escaped(options->output, list->commands[i].title, true);
-                parallel_write(options->output, "::", 2);
-                parallel_write_escaped(options->output, outcome_text, false);
-            }
-            else
-            {
-                parallel_write(options->output, "parallel: ", 10);
-                parallel_write(options->output, list->commands[i].title.pointer, list->commands[i].title.length);
-                parallel_write(options->output, " ", 1);
-                parallel_write(options->output, outcome_text.pointer, outcome_text.length);
-            }
-            parallel_write(options->output, "\n", 1);
-        }
-    }
-    // A report with no reader raised SIGPIPE as the summary was printed, which then fails the run, here rather than
-    // ending the runner once the mask is put back. Then the handlers and the mask are put back.
-    const int late = parallel_take_signals(&stopping);
-    summary.signal = summary.signal != 0 ? summary.signal : late;
-    summary.succeeded = summary.passed == list->count && summary.signal == 0;
-    sigset_t children;
-    sigemptyset(&children);
-    sigaddset(&children, SIGCHLD);
-    parallel_take_signals(&children);
     sigaction(SIGCHLD, &previous_child, 0);
     sigprocmask(SIG_SETMASK, &previous_mask, 0);
+    summary.succeeded = summary.passed == list->count && summary.signal == 0 && !summary.report_lost && !summary.memory_full;
     return summary;
 }
 
@@ -907,7 +1072,7 @@ static int run_parallel_command(int argc, char** argv)
             {
                 options.jobs = options.jobs != 0 ? options.jobs : parallel_core_count();
                 fflush(stdout);
-                result = parallel_run(&list, &options, results).succeeded ? 0 : 1;
+                result = parallel_run(&arena, &list, &options, results).succeeded ? 0 : 1;
             }
         }
         arena_release(&arena);

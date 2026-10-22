@@ -14,8 +14,8 @@
 //   - order: commands that end out of order, printed in the list's order, with what each wrote to its standard output
 //     and errors in the order it wrote it, output that doesn't end in a newline and none at all, an exit status and a
 //     signal; then --github's groups and annotations, with a title GitHub must read escaped; and a command's
-//     descriptors: standard input /dev/null when this process's is a file, and no other than the three though this
-//     process has one open without FD_CLOEXEC;
+//     descriptors, without /proc: standard input reads nothing though this process's is a file with a line in it, and
+//     no other descriptor than the three is open, though this process has one open without FD_CLOEXEC;
 //   - at once: three commands that each wait for the other two (files in the test's directory) pass with 3 jobs; with
 //     one job, four commands write their starts and ends into a log in turn; and eight with 3 jobs are never more than
 //     3 at once, by the times the runner took;
@@ -26,9 +26,16 @@
 //     run stopped while its command passes fails; SIGINT then SIGTERM, from a command that ignores both, kill it;
 //     SIGHUP while ignored (as under nohup) doesn't stop it, and SIGCHLD ignored doesn't keep the runner from its
 //     commands; each run leaves the signal mask and the dispositions as they were;
+//   - a slow reader: a report whose pipe its reader leaves full for 1 s while a command passes its timeout, which must
+//     be killed at its deadline and fail, and while a command sends SIGTERM, which must go on to it at once; SIGTERM
+//     once every command has ended, which must drop the rest of the report rather than wait for the reader; and 61
+//     commands with room for 32 descriptors, 60 of them ending before the first, whose output must be read and their
+//     captures closed as they end (#276's review);
 //   - the command: build/compiler parallel's report and exit status, for lists on standard input and in a file that
-//     pass and fail, a report with no reader (SIGPIPE stops the run, and the runner ends at once), a list's error, a
-//     list that can't be read, and invalid options;
+//     pass and fail, a report with no reader (its failed write stops the run, and the runner ends at once), with SIGPIPE
+//     at its default and ignored, a reader that leaves after the first line, which fails a run whose command passes, a
+//     command that ends past its deadline while the runner is stopped (SIGSTOP), which must fail, a list's error, a list
+//     that can't be read, and invalid options;
 //   - the cores: --jobs' default, the cores of the CPUs this process may use, against the distinct physical and core
 //     ids /proc/cpuinfo gives those CPUs.
 //
@@ -47,6 +54,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <unistd.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -144,13 +152,16 @@ static String8 parallel_test_read(Arena* arena, const char* path)
 static bool parallel_test_write(const char* path, String8 text)
 {
     const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    bool written = fd >= 0;
-    if (written)
+    uint64_t written = 0;
+    bool writing = fd >= 0;
+    while (writing && written < text.length)
     {
-        parallel_write(fd, text.pointer, text.length);
-        written = close(fd) == 0;
+        const ssize_t count = write(fd, text.pointer + written, text.length - written);
+        writing = count > 0 || (count < 0 && errno == EINTR);
+        written += count > 0 ? (uint64_t)count : 0;
     }
-    return written;
+    const bool closed = fd >= 0 && close(fd) == 0;
+    return closed && written == text.length;
 }
 
 // Runs a list (which must be valid) with the options, the report into a temporary file, and returns the report with
@@ -166,7 +177,7 @@ static String8 parallel_test_run(ParallelTest* test, String8 text, ParallelOptio
     {
         options.output = fileno(file);
         options.shell = options.shell != 0 ? options.shell : "bash";
-        *summary = parallel_run(&list, &options, *results);
+        *summary = parallel_run(&test->arena, &list, &options, *results);
         report = lseek(options.output, 0, SEEK_SET) == 0 ? parallel_test_normalize(&test->arena, parallel_read(&test->arena, options.output)) : (String8){ 0 };
         fclose(file);
     }
@@ -367,15 +378,23 @@ static void parallel_test_order(ParallelTest* test)
                         "::error title=50%25 done%2C step%3A 1::failed (exit status 1) in * s\n");
     test->arena.length = 0;
 
-    // A command's standard input is /dev/null, though this process's is a file for the run, and its shell has no other
-    // descriptor than the three, though this process has the report's open without FD_CLOEXEC (tmpfile's).
+    // A command's standard input is /dev/null (it reads nothing, though this process's is a file with a line in it for
+    // the run), and its shell has no other descriptor than the three, though this process has the report's open
+    // without FD_CLOEXEC (tmpfile's): an external true, redirected to each descriptor from 3 to 63 in turn, starts only
+    // if the shell has it. Neither needs /proc, whose PID namespace may not be the shell's.
     char input_path[600];
     parallel_test_path(test, input_path, sizeof(input_path), "input");
     const int saved_input = dup(STDIN_FILENO);
     const bool input_ready = saved_input >= 0 && parallel_test_write(input_path, parallel_test_string("input\n"));
     const int input = input_ready ? open(input_path, O_RDONLY | O_CLOEXEC) : -1;
     const bool redirected = input >= 0 && dup2(input, STDIN_FILENO) == STDIN_FILENO;
-    report = parallel_test_run(test, parallel_test_string("== descriptors\n[ /dev/stdin -ef /dev/null ]\nls /proc/$$/fd | tr '\\n' ' '\n"), options, &summary, &results);
+    report = parallel_test_run(test,
+                               parallel_test_string("== descriptors\n"
+                                                    "if IFS= read -r line; then echo \"standard input: $line\"; fi\n"
+                                                    "t=\"$(type -P true)\"\n"
+                                                    "for ((fd = 3; fd < 64; fd++)); do if \"$t\" 2>/dev/null >&\"$fd\"; then echo \"descriptor $fd\"; fi; done\n"
+                                                    "echo checked\n"),
+                               options, &summary, &results);
     const bool restored = saved_input >= 0 && dup2(saved_input, STDIN_FILENO) == STDIN_FILENO;
     if (input >= 0)
     {
@@ -389,7 +408,7 @@ static void parallel_test_order(ParallelTest* test)
     parallel_test_check(test, "descriptors", redirected && restored && summary.succeeded, report,
                         "parallel: 1 commands, at most 5 at once\n"
                         "== descriptors: passed in * s\n"
-                        "0 1 2 \n"
+                        "checked\n"
                         "parallel: 1 commands in * s, at most 5 at once: 1 passed, 0 failed, 0 not started\n");
     test->arena.length = 0;
 }
@@ -513,6 +532,155 @@ static void parallel_test_processes(ParallelTest* test)
                         "parallel: 2 commands in * s, at most 1 at once: 0 passed, 2 failed, 0 not started\n"
                         "parallel: a failed (can't start /nonexistent/bash: No such file or directory) in * s\n"
                         "parallel: b failed (can't start /nonexistent/bash: No such file or directory) in * s\n");
+    test->arena.length = 0;
+}
+
+// Runs a list with its report into a pipe whose reader, `sh -c 'DELAY; cat > FILE'`, takes nothing while DELAY runs (a
+// sleep), so that the report's writes would wait for it; returns the report as the reader got it, with its times written
+// as `*`, and the run's own time in *run_time.
+static String8 parallel_test_slow_run(ParallelTest* test, String8 text, ParallelOptions options, const char* delay, ParallelSummary* summary, ParallelResult** results,
+                                      uint64_t* run_time)
+{
+    char report_path[600];
+    parallel_test_path(test, report_path, sizeof(report_path), "slow");
+    char script[800];
+    snprintf(script, sizeof(script), "%s; cat > '%s'", delay, report_path);
+    int ends[2] = {
+        -1,
+        -1,
+    };
+    bool ready = pipe(ends) == 0 && fcntl(ends[0], F_SETFD, FD_CLOEXEC) == 0 && fcntl(ends[1], F_SETFD, FD_CLOEXEC) == 0;
+    pid_t reader = -1;
+    posix_spawn_file_actions_t actions;
+    const bool actions_ready = ready && posix_spawn_file_actions_init(&actions) == 0;
+    if (actions_ready)
+    {
+        char* arguments[] = {
+            "sh",
+            "-c",
+            script,
+            0,
+        };
+        ready = posix_spawn_file_actions_adddup2(&actions, ends[0], STDIN_FILENO) == 0 && posix_spawnp(&reader, "sh", &actions, 0, arguments, environ) == 0;
+        posix_spawn_file_actions_destroy(&actions);
+    }
+    if (ends[0] >= 0)
+    {
+        close(ends[0]);
+    }
+    const ParallelList list = parallel_list_parse(&test->arena, text);
+    *results = ready && actions_ready && list.error == 0 ? BUSTER_ARENA_PUSH_ARRAY(&test->arena, ParallelResult, list.count) : 0;
+    *summary = (ParallelSummary){ 0 };
+    if (*results != 0)
+    {
+        options.output = ends[1];
+        options.shell = "bash";
+        const uint64_t run_start = parallel_clock();
+        *summary = parallel_run(&test->arena, &list, &options, *results);
+        *run_time = parallel_clock() - run_start;
+    }
+    if (ends[1] >= 0)
+    {
+        close(ends[1]);
+    }
+    int status = 0;
+    pid_t waited = -1;
+    do
+    {
+        waited = reader > 0 ? waitpid(reader, &status, 0) : -1;
+    } while (waited < 0 && errno == EINTR);
+    const String8 report = waited == reader && *results != 0 ? parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, report_path)) : (String8){ 0 };
+    unlink(report_path);
+    return report;
+}
+
+// Whether `report` is `head`, 1 MB of 'x' and a newline, then `tail`.
+static bool parallel_test_large(String8 report, const char* head, const char* tail)
+{
+    const uint64_t head_length = strlen(head);
+    const uint64_t tail_length = strlen(tail);
+    bool same = report.length == head_length + BUSTER_PARALLEL_TEST_LARGE_BYTES + 1 + tail_length && memcmp(report.pointer, head, head_length) == 0 &&
+                report.pointer[head_length + BUSTER_PARALLEL_TEST_LARGE_BYTES] == '\n' &&
+                memcmp(report.pointer + head_length + BUSTER_PARALLEL_TEST_LARGE_BYTES + 1, tail, tail_length) == 0;
+    for (uint64_t i = 0; same && i < BUSTER_PARALLEL_TEST_LARGE_BYTES; i += 1)
+    {
+        same = report.pointer[head_length + i] == 'x';
+    }
+    return same;
+}
+
+// #276's review: a report whose reader is slow doesn't hold up the run. Its first part, 1 MB, fills the pipe while the
+// reader sleeps for 1 s; meanwhile a command past its timeout must be killed at its deadline, and fail (it would end
+// after it, before the reader wakes), and SIGTERM from a command, sent once the first part has filled the pipe, must
+// go on to it at once. And with a low limit of descriptors, commands that end before the report reaches them (a slow
+// first one, then many quick ones) must all start: each one's output is read when it ends, and its capture closed.
+static void parallel_test_slow_reader(ParallelTest* test)
+{
+    struct sigaction original;
+    sigaction(SIGTERM, 0, &original);
+    struct sigaction default_action = { .sa_handler = SIG_DFL };
+    sigaction(SIGTERM, &default_action, 0);
+    ParallelSummary summary;
+    ParallelResult* results = 0;
+    uint64_t run_time = 0;
+    const ParallelOptions timeout = { .jobs = 2, .timeout = BUSTER_PARALLEL_NANOSECONDS / 5 };
+    String8 report = parallel_test_slow_run(test, parallel_test_string("== large\nhead -c 1048576 /dev/zero | tr '\\0' x\necho\n== deadline\nsleep 0.8\necho finished\n"), timeout,
+                                            "sleep 1", &summary, &results, &run_time);
+    bool killed = results != 0 && results[1].timed_out && !results[1].passed && results[1].end - results[1].start < 7 * BUSTER_PARALLEL_NANOSECONDS / 10;
+    parallel_test_check(test, "a slow reader, and a timeout", killed && summary.passed == 1 && summary.failed == 1 &&
+                                                                 parallel_test_large(report, "parallel: 2 commands, at most 2 at once\n== large: passed in * s\n",
+                                                                                     "== deadline: failed (timed out) in * s\n"
+                                                                                     "parallel: 2 commands in * s, at most 2 at once: 1 passed, 1 failed, 0 not started\n"
+                                                                                     "parallel: deadline failed (timed out) in * s\n"),
+                        report.length < 4096 ? report : (String8){ 0 }, 0);
+    test->arena.length = 0;
+
+    // The second command waits for the first to end, and 0.2 s more for its 1 MB to fill the pipe.
+    char text[BUSTER_PARALLEL_TEST_TEXT_BYTES];
+    uint64_t length = (uint64_t)snprintf(text, sizeof(text),
+                                         "== large\nhead -c 1048576 /dev/zero | tr '\\0' x\necho\ntouch '%s/large'\n"
+                                         "== stops\nwhile [ ! -e '%s/large' ]; do sleep 0.01; done\nsleep 0.2\nkill -TERM $PPID\nsleep 5\n",
+                                         test->directory, test->directory);
+    const ParallelOptions plain = { .jobs = 2 };
+    report = parallel_test_slow_run(test, (String8){ .pointer = text, .length = length }, plain, "sleep 1", &summary, &results, &run_time);
+    killed = results != 0 && results[1].interrupted && results[1].end - results[1].start < 7 * BUSTER_PARALLEL_NANOSECONDS / 10;
+    parallel_test_check(test, "a slow reader, and a signal", killed && summary.signal == SIGTERM &&
+                                                                parallel_test_large(report, "parallel: 2 commands, at most 2 at once\n== large: passed in * s\n",
+                                                                                    "== stops: failed (killed by signal 15: Terminated) in * s\n"
+                                                                                    "parallel: 2 commands in * s, at most 2 at once: 1 passed, 1 failed, 0 not started, stopped by "
+                                                                                    "signal 15: Terminated\n"
+                                                                                    "parallel: stops failed (killed by signal 15: Terminated) in * s\n"),
+                        report.length < 4096 ? report : (String8){ 0 }, 0);
+    test->arena.length = 0;
+
+    // Every command has ended and only the reader holds the run up, which sends SIGTERM at 0.3 s: the rest of the report
+    // is dropped then, rather than when the reader wakes, though the run's one command passed.
+    run_time = UINT64_MAX;
+    report = parallel_test_slow_run(test, parallel_test_string("== large\nhead -c 1048576 /dev/zero | tr '\\0' x\necho\n"), plain, "sleep 0.3; kill -TERM $PPID; sleep 0.7", &summary,
+                                    &results, &run_time);
+    parallel_test_check(test, "a slow reader, and a signal once every command has ended", summary.report_lost && summary.signal == SIGTERM && summary.passed == 1 && !summary.succeeded &&
+                                                                                             run_time < 8 * BUSTER_PARALLEL_NANOSECONDS / 10 && report.length < BUSTER_PARALLEL_TEST_LARGE_BYTES,
+                        (String8){ 0 }, 0);
+    sigaction(SIGTERM, &original, 0);
+    test->arena.length = 0;
+
+    // A slow command, then 60 quick ones that end before it, with room for 32 descriptors.
+    length = (uint64_t)snprintf(text, sizeof(text), "== slow\nsleep 0.5\n");
+    for (uint64_t i = 1; i <= 60; i += 1)
+    {
+        length += (uint64_t)snprintf(text + length, sizeof(text) - length, "== quick %llu\ntrue\n", (unsigned long long)i);
+    }
+    struct rlimit saved;
+    const bool known = getrlimit(RLIMIT_NOFILE, &saved) == 0;
+    struct rlimit low = {
+        .rlim_cur = 32,
+        .rlim_max = known ? saved.rlim_max : 32,
+    };
+    const bool lowered = known && saved.rlim_cur > low.rlim_cur && setrlimit(RLIMIT_NOFILE, &low) == 0;
+    report = lowered ? parallel_test_run(test, (String8){ .pointer = text, .length = length }, plain, &summary, &results) : (String8){ 0 };
+    const bool restored = !lowered || setrlimit(RLIMIT_NOFILE, &saved) == 0;
+    parallel_test_check(test, "many ended before the report reaches them, with 32 descriptors", lowered && restored && summary.succeeded && summary.passed == 61,
+                        (String8){ 0 }, 0);
     test->arena.length = 0;
 }
 
@@ -710,30 +878,121 @@ static void parallel_test_command_line(ParallelTest* test)
     parallel_test_check(test, "the command, an invalid list", status == 1, parallel_test_read(&test->arena, errors), "parallel: standard input:1: a command without a script\n");
     test->arena.length = 0;
 
-    // A report with no reader (`parallel | head`): its first line raises SIGPIPE, which stops the run, so that the
-    // command that started is killed rather than left running, and the runner ends at once with status 1.
-    int pipe_ends[2] = {
+    // A report with no reader (`parallel | head`): its first write fails, which stops the run, so that the command that
+    // started is killed rather than left running, and the runner ends at once with status 1: with SIGPIPE at its
+    // default, and ignored (#276's review: the runner then gets EPIPE alone), which the runner inherits.
+    struct sigaction pipe_original;
+    sigaction(SIGPIPE, 0, &pipe_original);
+    for (uint64_t ignored = 0; ignored < 2; ignored += 1)
+    {
+        struct sigaction pipe_action = { .sa_handler = ignored != 0 ? SIG_IGN : SIG_DFL };
+        sigaction(SIGPIPE, &pipe_action, 0);
+        unlink(stuck_pid);
+        int pipe_ends[2] = {
+            -1,
+            -1,
+        };
+        const bool piped = ready && pipe(pipe_ends) == 0 && fcntl(pipe_ends[1], F_SETFD, FD_CLOEXEC) == 0;
+        if (piped)
+        {
+            close(pipe_ends[0]);
+        }
+        char* into_pipe[] = { "compiler", "parallel", stuck, 0 };
+        const uint64_t pipe_start = parallel_clock();
+        status = piped ? parallel_test_command(test, into_pipe, "/dev/null", pipe_ends[1]) : -1;
+        const uint64_t pipe_time = parallel_clock() - pipe_start;
+        if (piped)
+        {
+            close(pipe_ends[1]);
+        }
+        // The command may have been killed before it wrote its pid; if it did, the process must be gone.
+        struct stat pid_stat;
+        const bool wrote_pid = stat(stuck_pid, &pid_stat) == 0;
+        parallel_test_check(test, ignored != 0 ? "the command, a report with no reader, SIGPIPE ignored" : "the command, a report with no reader",
+                            piped && status == 1 && pipe_time < 10 * BUSTER_PARALLEL_NANOSECONDS && (!wrote_pid || parallel_test_gone(test, "piped")), (String8){ 0 }, 0);
+        test->arena.length = 0;
+    }
+    sigaction(SIGPIPE, &pipe_original, 0);
+
+    // A reader that leaves after the first line, before the one command passes: the report is lost, which fails the run
+    // though its command passed and no signal stopped it.
+    char leaving[600];
+    parallel_test_path(test, leaving, sizeof(leaving), "leaving.list");
+    int leave_ends[2] = {
         -1,
         -1,
     };
-    const bool piped = ready && pipe(pipe_ends) == 0 && fcntl(pipe_ends[1], F_SETFD, FD_CLOEXEC) == 0;
-    if (piped)
+    bool leave_ready = ready && parallel_test_write(leaving, parallel_test_string("== passes\nsleep 0.3\n")) && pipe(leave_ends) == 0 &&
+                       fcntl(leave_ends[0], F_SETFD, FD_CLOEXEC) == 0 && fcntl(leave_ends[1], F_SETFD, FD_CLOEXEC) == 0;
+    pid_t first_line = -1;
+    posix_spawn_file_actions_t leave_actions;
+    if (leave_ready && posix_spawn_file_actions_init(&leave_actions) == 0)
     {
-        close(pipe_ends[0]);
+        char* head_arguments[] = {
+            "head",
+            "-n",
+            "1",
+            0,
+        };
+        leave_ready = posix_spawn_file_actions_adddup2(&leave_actions, leave_ends[0], STDIN_FILENO) == 0 &&
+                      posix_spawn_file_actions_addopen(&leave_actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0) == 0 &&
+                      posix_spawnp(&first_line, "head", &leave_actions, 0, head_arguments, environ) == 0;
+        posix_spawn_file_actions_destroy(&leave_actions);
     }
-    char* into_pipe[] = { "compiler", "parallel", stuck, 0 };
-    const uint64_t pipe_start = parallel_clock();
-    status = piped ? parallel_test_command(test, into_pipe, "/dev/null", pipe_ends[1]) : -1;
-    const uint64_t pipe_time = parallel_clock() - pipe_start;
-    if (piped)
+    if (leave_ends[0] >= 0)
     {
-        close(pipe_ends[1]);
+        close(leave_ends[0]);
     }
-    // The command may have been killed before it wrote its pid; if it did, the process must be gone.
-    struct stat pid_stat;
-    const bool wrote_pid = stat(stuck_pid, &pid_stat) == 0;
-    parallel_test_check(test, "the command, a report with no reader", piped && status == 1 && pipe_time < 10 * BUSTER_PARALLEL_NANOSECONDS && (!wrote_pid || parallel_test_gone(test, "piped")),
-                        (String8){ 0 }, 0);
+    char* into_leaving[] = { "compiler", "parallel", leaving, 0 };
+    status = leave_ready ? parallel_test_command(test, into_leaving, "/dev/null", leave_ends[1]) : -1;
+    if (leave_ends[1] >= 0)
+    {
+        close(leave_ends[1]);
+    }
+    int head_status = 0;
+    pid_t head_waited = -1;
+    do
+    {
+        head_waited = first_line > 0 ? waitpid(first_line, &head_status, 0) : -1;
+    } while (head_waited < 0 && errno == EINTR);
+    parallel_test_check(test, "the command, a reader that leaves after the first line", leave_ready && status == 1 && head_waited == first_line, (String8){ 0 }, 0);
+    unlink(leaving);
+    test->arena.length = 0;
+
+    // #276's review: a command that ends after its deadline, while the runner can't see it, fails. The runner, stopped
+    // (SIGSTOP) from 0.4 s to 2 s, misses both the deadline (1 s after the command started) and the command's end (1.3 s
+    // after), and when it goes on it finds the command past its deadline before it reaps it.
+    char late[600];
+    parallel_test_path(test, late, sizeof(late), "late.list");
+    char* stopped_runner[] = { "compiler", "parallel", "--jobs", "1", "--timeout", "1", late, 0 };
+    pid_t runner = -1;
+    posix_spawn_file_actions_t late_actions;
+    const bool late_ready = ready && parallel_test_write(late, parallel_test_string("== late\nsleep 1.3\n")) && posix_spawn_file_actions_init(&late_actions) == 0;
+    if (late_ready)
+    {
+        const bool spawned = posix_spawn_file_actions_addopen(&late_actions, STDOUT_FILENO, output, O_WRONLY | O_CREAT | O_TRUNC, 0644) == 0 &&
+                             posix_spawn(&runner, "/proc/self/exe", &late_actions, 0, stopped_runner, environ) == 0;
+        runner = spawned ? runner : -1;
+        posix_spawn_file_actions_destroy(&late_actions);
+    }
+    usleep(400000);
+    const bool stopped = runner > 0 && kill(runner, SIGSTOP) == 0;
+    usleep(1600000);
+    const bool continued = stopped && kill(runner, SIGCONT) == 0;
+    int late_status = 0;
+    pid_t late_waited = -1;
+    do
+    {
+        late_waited = runner > 0 ? waitpid(runner, &late_status, 0) : -1;
+    } while (late_waited < 0 && errno == EINTR);
+    report = parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output));
+    parallel_test_check(test, "the command, a command that ends past its deadline unseen", continued && late_waited == runner && WIFEXITED(late_status) && WEXITSTATUS(late_status) == 1,
+                        report,
+                        "parallel: 1 commands, at most 1 at once\n"
+                        "== late: failed (timed out) in * s\n"
+                        "parallel: 1 commands in * s, at most 1 at once: 0 passed, 1 failed, 0 not started\n"
+                        "parallel: late failed (timed out) in * s\n");
+    unlink(late);
     test->arena.length = 0;
 
     char* unreadable[] = { "compiler", "parallel", "/nonexistent/list", 0 };
@@ -859,12 +1118,15 @@ static int run_parallel_tests(int argc, char** argv)
             parallel_test_at_once(&test);
             parallel_test_output(&test);
             parallel_test_processes(&test);
+            parallel_test_slow_reader(&test);
             parallel_test_signals(&test);
             parallel_test_command_line(&test);
             parallel_test_cores(&test);
             if (test.failures == 0)
             {
                 static const char* const names[] = {
+                    "slow",
+                    "large",
                     "barrier1",
                     "barrier2",
                     "barrier3",
