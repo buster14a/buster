@@ -10176,9 +10176,10 @@ struct ParseCheckVectorTables
     uint8_t ends[512] __attribute__((aligned(64)));
     uint8_t class_bits[128] __attribute__((aligned(64)));
     uint8_t mode_bits[64] __attribute__((aligned(64)));
-    // The refinements of a class by the token's virtual kind: OPERAND's, SPECIFIER's, PREFIX's, LEAF_RIGHT's,
-    // QUALIFIER_LEFT's, RETURN's and OPEN_CASE's (index 0 unused); and the typed variant of each class.
-    uint8_t refine[8][128] __attribute__((aligned(64)));
+    // A virtual kind selects an eight-byte row of the seven role refinements (index 0 unused). Kinds with the same
+    // row share it, so one joint lookup replaces seven lookups and blends. refine_index holds the byte offset.
+    uint8_t refine_index[128] __attribute__((aligned(64)));
+    uint8_t refine[256] __attribute__((aligned(64)));
     uint8_t typed[128] __attribute__((aligned(64)));
     uint8_t role_bits[128] __attribute__((aligned(64)));
     uint8_t closer_kind[128] __attribute__((aligned(64)));
@@ -10340,12 +10341,26 @@ static void parse_check_vector_init(void)
                                     (pred == PARSE_PRED_ITEM || pred == PARSE_PRED_HEAD ? BUSTER_PARSE_CHECK_ITEM_AFTER : 0) |
                                     (role == PARSE_ROLE_LEAF_RIGHT || role == PARSE_ROLE_CLOSE_SPECIFIER ? BUSTER_PARSE_CHECK_RARE : 0));
     }
-    for (uint32_t k = 1; k < 8; k += 1)
+    uint32_t refinement_rows = 0;
+    for (uint32_t vkind = 0; vkind < 128; vkind += 1)
     {
-        for (uint32_t vkind = 0; vkind < 128; vkind += 1)
+        uint8_t row[8] = { 0 };
+        for (uint32_t k = 1; k < 8; k += 1)
         {
-            v->refine[k][vkind] = vkind < BUSTER_PARSE_VKINDS ? parse_check_class(refined[k], (uint8_t)vkind, 0, false) : refined[k];
+            row[k] = vkind < BUSTER_PARSE_VKINDS ? parse_check_class(refined[k], (uint8_t)vkind, 0, false) : refined[k];
         }
+        uint32_t found = 0;
+        while (found < refinement_rows && memcmp(v->refine + found * 8, row, sizeof(row)) != 0)
+        {
+            found += 1;
+        }
+        if (found == refinement_rows)
+        {
+            assert(refinement_rows < sizeof(v->refine) / sizeof(row));
+            memcpy(v->refine + found * 8, row, sizeof(row));
+            refinement_rows += 1;
+        }
+        v->refine_index[vkind] = (uint8_t)(found * 8);
     }
     // The pseudo-groups: (group, item's place) with the same modes in each state are one.
     uint8_t rows[128][6];
@@ -10436,6 +10451,20 @@ BUSTER_INLINE __m512i parse_check_table256(const uint8_t* table, __m512i index)
     const __m512i low = parse_table8(table, index);
     const __m512i high = parse_table8(table + 128, index);
     return _mm512_mask_blend_epi8(_mm512_movepi8_mask(index), low, high);
+}
+
+// The common classes, before the sparse name-dependent refinements. The seven role refinements have 28 distinct
+// rows over virtual kinds; their table and the kind-to-row map replace a lookup and a blend for each role.
+BUSTER_INLINE __m512i parse_check_classes_avx512(__m512i role, __m512i vkind, __m512i role_bits, __mmask64 typed)
+{
+    const ParseCheckVectorTables* v = &parse_check_vector;
+    const __m512i refine = _mm512_and_si512(role_bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_REFINE));
+    const __m512i index = _mm512_or_si512(parse_table8(v->refine_index, vkind), refine);
+    __m512i classes = _mm512_mask_mov_epi8(role, _mm512_test_epi8_mask(refine, refine), parse_check_table256(v->refine, index));
+    // `->` is the member operator that only an expression may use.
+    classes = _mm512_mask_mov_epi8(classes, parse_equal8(role, PARSE_ROLE_MEMBER_OPERATOR) & parse_equal8(vkind, PARSE_KIND_ARROW), _mm512_set1_epi8(PARSE_CLASS_ARROW));
+    classes = _mm512_mask_mov_epi8(classes, typed, parse_table8(v->typed, classes));
+    return classes;
 }
 
 // The nearest previous lane whose key is below the lane's threshold, from the windows of minima of the keys (as
@@ -10534,16 +10563,8 @@ static bool parse_check_block_avx512(ParseKernels* kernels, const uint32_t* name
         const __m512i role = _mm512_loadu_si512(kernels->roles + block);
         const __m512i vkind = _mm512_loadu_si512(kernels->vkinds + block);
         const __m512i role_bits = parse_table8(v->role_bits, role);
-        const __m512i refine = _mm512_and_si512(role_bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_REFINE));
-        __m512i c = role;
-        for (uint32_t k = 1; k < 8; k += 1)
-        {
-            c = _mm512_mask_mov_epi8(c, parse_equal8(refine, (uint8_t)k), parse_table8(v->refine[k], vkind));
-        }
-        // `->`, the one member operator the refinements above leave out.
-        c = _mm512_mask_mov_epi8(c, parse_equal8(role, PARSE_ROLE_MEMBER_OPERATOR) & parse_equal8(vkind, PARSE_KIND_ARROW), _mm512_set1_epi8(PARSE_CLASS_ARROW));
         const __mmask64 typed_lanes = _mm512_test_epi8_mask(_mm512_loadu_si512(typed + block), _mm512_set1_epi8(1));
-        c = _mm512_mask_mov_epi8(c, typed_lanes, parse_table8(v->typed, c));
+        __m512i c = parse_check_classes_avx512(role, vkind, role_bits, typed_lanes);
         ParseCheckBlock state;
         _mm512_store_si512(state.classes, c);
         // A keyword's class by its name (the builtins, _BitInt).

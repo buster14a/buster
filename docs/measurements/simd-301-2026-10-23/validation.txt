@@ -1,0 +1,40 @@
+
+=== buster-simd-integrated-bindings.log ===
+bindings: 4255777 checks, 0 failures
+
+=== buster-simd-integrated-builtins.log ===
+builtin names, guarded columns and tails 0..33: pass
+builtin full-id checks with aliased descriptor indices: pass (8224 Clang oracle rows)
+builtin batch partitions 1..17: pass
+builtin overflow destination boundaries: pass (221184 Clang oracle rows)
+builtin integer folds: pass (1019519 Clang oracle rows, seed=148)
+
+=== buster-simd-integrated-parser.log ===
+K6 compact tables: 0 failures
+snippets: 230, 0 failures
+fixtures: 4 trees checked by hand, 0 failures
+streams: 2000 random streams (half with balanced brackets), 2000 rejected, 0 where the paths or a kernel and its twin differ
+alignments: 14720 inputs (the snippets at 64 alignments), 0 where the paths or a kernel and its twin differ
+nesting: 100000 levels of `(` ... `)`: parsed
+nesting: 100000 levels of `(` ... `)`: parsed
+nesting: 100000 levels of `{` ... `}`: parsed
+nesting: 100000 levels of `(` ... `)`: parsed
+nesting: 100000 levels of `a[` ... `]`: parsed
+nesting: 100000 levels of `1 ? ` ... ` : 3`: parsed
+nesting: 100000 levels of `1 ? 0, ` ... ` : 3`: parsed
+nesting: 100000 levels of `(int)` ... ``: parsed
+nesting: 100000 levels of `if (q) ` ... ``: parsed
+nesting: 100000 levels of `__attribute__((unused)) ` ... ``: parsed
+driver: 11 cases, 176 runs: the expected statuses and messages, nothing left behind
+driver: a valid file: 77 reservations and mappings failed in turn, each reported and released
+driver: an invalid file: 78 reservations and mappings failed in turn, each reported and released
+test-parser: passed
+
+=== buster-simd-bindings-sanitize.log ===
+bindings: 4255777 checks, 0 failures
+
+=== buster-simd-call-graph.log ===
+allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_conditional -> main_unit_frontend.ll:preprocessor_fuzz_random_group -> main_unit_frontend.ll:preprocessor_fuzz_random_statement -> main_unit_frontend.ll:preprocessor_fuzz_random_conditional
+allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_expression -> main_unit_frontend.ll:preprocessor_fuzz_random_expression
+allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_invocation -> main_unit_frontend.ll:preprocessor_fuzz_random_argument -> main_unit_frontend.ll:preprocessor_fuzz_random_invocation
+call graph: 30 translation units, 15316 functions, 83571 calls between them, 0 cycles, 3 allowed
