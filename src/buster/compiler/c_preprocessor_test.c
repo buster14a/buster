@@ -3030,7 +3030,7 @@ static bool pp_test_raw_query_capacity(const char* directory)
     result = result && pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
     static InternTable table;
     static Preprocessor run;
-    for (uint32_t repairs = BUSTER_PP_MAX_RAW_QUERY_REPAIRS; result && repairs <= BUSTER_PP_MAX_RAW_QUERY_REPAIRS + 1; repairs += 1)
+    for (uint32_t repairs = BUSTER_PP_MAX_QUERY_REPAIRS; result && repairs <= BUSTER_PP_MAX_QUERY_REPAIRS + 1; repairs += 1)
     {
         uint32_t length = (uint32_t)snprintf(source, sizeof(source), "#define RAW_QUERY __has_include\n");
         for (uint32_t i = 0; i < repairs; i += 1)
@@ -3052,11 +3052,11 @@ static bool pp_test_raw_query_capacity(const char* directory)
             {
                 views += run.datas[d].lexical_bytes != 0;
             }
-            const bool exceeded = repairs > BUSTER_PP_MAX_RAW_QUERY_REPAIRS;
-            result = saved >= 0 && ran != exceeded && run.fatal == exceeded && run.errors == (uint32_t)exceeded && views == BUSTER_PP_MAX_RAW_QUERY_REPAIRS;
+            const bool exceeded = repairs > BUSTER_PP_MAX_QUERY_REPAIRS;
+            result = saved >= 0 && ran != exceeded && run.fatal == exceeded && run.errors == (uint32_t)exceeded && views == BUSTER_PP_MAX_QUERY_REPAIRS;
             if (exceeded)
             {
-                result = result && strstr(messages, "raw header query recovery capacity exceeded (8 repairs per inclusion)") != 0;
+                result = result && strstr(messages, "header query recovery capacity exceeded (8 repairs per inclusion)") != 0;
             }
             else
             {

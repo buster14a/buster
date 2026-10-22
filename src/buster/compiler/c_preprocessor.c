@@ -134,7 +134,8 @@ _Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_vector looks
 #define BUSTER_PP_MAX_CONTEXTS (1u << 20)
 #define BUSTER_PP_MAX_INCLUDE_DEPTH 200
 // A confirmed header query may need a private lexical view; bound full-file repairs per inclusion.
-#define BUSTER_PP_MAX_RAW_QUERY_REPAIRS 8
+#define BUSTER_PP_MAX_QUERY_REPAIRS 8
+#define BUSTER_PP_MAX_DIRECT_REPAIRS 64
 #define BUSTER_PP_MAX_PARAMETERS 4096
 // Token arrays get whole-vector stores past their last token.
 #define BUSTER_PP_TOKEN_SLACK 64
@@ -756,7 +757,8 @@ struct PPContext
     // A file: this inclusion took the group of the file's include guard (its #ifndef was true). Only such an inclusion
     // tells clang the guard (its multiple-include optimization), and from its end on the guard skips the file.
     bool guard_taken;
-    uint8_t raw_query_repairs;
+    uint8_t opaque_query_repairs;
+    uint8_t opaque_direct_repairs;
     // A source piece of a condition lexed again after a raw header: continue at this byte when it ends. A piece ends
     // after each '(' so a header query can read its operand raw before the ordinary lexer sees comments in its name.
     bool relexed;
@@ -6304,25 +6306,25 @@ static bool pp_query_raw_overlap(const Preprocessor* pp, const PPFileData* data,
     return result;
 }
 
-// A query has proved that [first, stop) is a source header name, after macro expansion identified its builtin. A raw
-// string lexed inside that name may have swallowed later lines and their directives. Prepare a private view for this
-// inclusion with only that header's interior hidden from the ordinary lexer. Source bytes and offsets stay original;
-// earlier macro definitions keep their old data indexes, as do other inclusions and the immutable shared cache.
-// Each view retains the previous masks. At most eight full-file preparations per inclusion bound work and storage;
-// exceeding that capacity is a fatal error, never a successful truncated stream. Ordinary multiline raw arguments
-// have no confirmed header context and never enter this path.
-static bool pp_recover_query_raw(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t first, uint32_t stop)
+// The executing directive or expanded query has proved [begin, stop) opaque to ordinary C lexing. Prepare a
+// private view for this inclusion with only that span masked. Original source bytes/offsets, old macro data indexes,
+// other inclusions and shared cache records stay unchanged. Previous masks are retained. Callers invoke this only
+// for an exceptional lexical overlap, and reload their data afterward: position moves to the rebuilt directive end.
+// Separate per-inclusion budgets of 64 direct repairs and 8 queries bound full-file copy/preparation work and retained
+// storage by O((64 + 8) * N). Capacity/allocation exhaustion is fatal, never a successful truncated stream.
+static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t begin, uint32_t stop, bool query)
 {
     PPContext* file = &pp->contexts[file_context];
     const PPFileData* data = &pp->datas[file->data];
-    const bool overlap = (pp->refine_flags & C_TOKENIZER_RAW_STRINGS) && pp_query_raw_overlap(pp, data, first, stop);
+    uint8_t* repairs = query ? &file->opaque_query_repairs : &file->opaque_direct_repairs;
+    const uint32_t capacity = query ? BUSTER_PP_MAX_QUERY_REPAIRS : BUSTER_PP_MAX_DIRECT_REPAIRS;
     bool result = true;
-    if (overlap && file->raw_query_repairs >= BUSTER_PP_MAX_RAW_QUERY_REPAIRS)
+    if (*repairs >= capacity)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + first, "raw header query recovery capacity exceeded (%u repairs per inclusion)", BUSTER_PP_MAX_RAW_QUERY_REPAIRS);
+        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "%s recovery capacity exceeded (%u repairs per inclusion)", query ? "header query" : "opaque directive", capacity);
         result = false;
     }
-    else if (overlap)
+    else
     {
         uint8_t* lexical = pp->data_count < BUSTER_PP_MAX_FILES ? arena_push(&pp->arena, data->length, 1) : 0;
         result = lexical != 0;
@@ -6330,15 +6332,15 @@ static bool pp_recover_query_raw(Preprocessor* pp, uint32_t file_context, uint32
         {
             memcpy(lexical, data->lexical_bytes != 0 ? data->lexical_bytes : data->bytes, data->length);
             const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
-            uint64_t p = first + 1;
-            while (p < stop - 1)
+            uint64_t p = begin;
+            while (p < stop)
             {
                 uint64_t size;
                 uint64_t at;
                 get_char(&lexer, p, &size, &at);
                 // get_char skips physical line splices before `at`: leave those bytes intact, so the same logical
                 // line and all original source offsets survive. Only the returned character's bytes become spaces.
-                const uint64_t end = p + size < stop - 1 ? p + size : stop - 1;
+                const uint64_t end = p + size < stop ? p + size : stop;
                 memset(lexical + at, ' ', at < end ? end - at : 0);
                 p += size;
             }
@@ -6357,7 +6359,7 @@ static bool pp_recover_query_raw(Preprocessor* pp, uint32_t file_context, uint32
                 pp->datas[pp->data_count] = recovered;
                 file->data = pp->data_count;
                 pp->data_count += 1;
-                file->raw_query_repairs += 1;
+                *repairs += 1;
                 file->end = recovered.token_count;
                 file->position = recovered.directive_end[directive];
                 file->next_directive = directive + 1;
@@ -6365,10 +6367,20 @@ static bool pp_recover_query_raw(Preprocessor* pp, uint32_t file_context, uint32
         }
         if (!result)
         {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + first, "out of memory recovering a raw header query");
+            pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "out of memory recovering an opaque directive span");
         }
     }
     return result;
+}
+
+// Raw-looking header bytes need this correction only after expansion confirms the query's source header context.
+// Genuine multiline raw macro arguments never call the primitive merely because they appear on a directive line.
+static bool pp_recover_query_raw(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t first, uint32_t stop)
+{
+    const PPContext* file = &pp->contexts[file_context];
+    const PPFileData* data = &pp->datas[file->data];
+    const bool overlap = (pp->refine_flags & C_TOKENIZER_RAW_STRINGS) && pp_query_raw_overlap(pp, data, first, stop);
+    return !overlap || pp_recover_opaque_span(pp, file_context, directive, first + 1, stop - 1, true);
 }
 
 // An include-like builtin's '(' (__has_include's, __has_include_next's or __has_embed's) was just read from its #if or
