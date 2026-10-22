@@ -474,6 +474,19 @@ static const uint8_t c_char_properties[128] __attribute__((aligned(64))) =
     0x00, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
+// c_char_properties without BUSTER_LEX_CHAR_SEPARATOR_FOLLOWER (written here, not generated): without digit separators
+// (C_TOKENIZER_NO_DIGIT_SEPARATORS), no character follows one.
+static const uint8_t c_char_properties_no_separators[128] __attribute__((aligned(64))) =
+{
+    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08, 0x04, 0x04, 0x08, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x80, 0x00, 0x00, 0x01,
+    0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
 static const uint8_t c_operator_classes[128] __attribute__((aligned(64))) =
 {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1868,8 +1881,8 @@ static int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t
 //
 // C++ (C_TOKENIZER_CPLUSPLUS) is a specialization of the same chunk loop: it adds "<=>", "->*" and ".*", the "<::"
 // rule and user-defined literal suffixes. So are numbers without digit separators (C_TOKENIZER_NO_DIGIT_SEPARATORS),
-// in either language: no '\'' continues a pp-number, so every one outside of literals and comments starts a
-// character constant.
+// in either language, by their property table alone: no character follows a digit separator there, so no '\''
+// continues a pp-number, and every one outside of literals and comments starts a character constant.
 
 // The channels of 2-character punctuators, and those that need the same character twice.
 #define BUSTER_LEX_OP2_CHANNELS (BUSTER_LEX_CHANNEL_EQ | BUSTER_LEX_CHANNEL_SELF | BUSTER_LEX_CHANNEL_SHIFT | BUSTER_LEX_CHANNEL_GT | BUSTER_LEX_CHANNEL_LTDIG | BUSTER_LEX_CHANNEL_HASHDIG)
@@ -2316,11 +2329,13 @@ BUSTER_INLINE void transpose_property_masks(const __m512i rows[BUSTER_LEX_LOOKAH
     *(U64x8*)o[7] = t2_7;
 }
 
-// Phase I for one 64-byte vector: eight packed property masks and the remaining masks in `o[...][lane]`.
-BUSTER_INLINE void classify(__m512i raw, uint64_t o[][BUSTER_LEX_MASK_LANES], unsigned lane, __m512i* properties_out, __m512i* previous_classes, __m512i* previous_pairs, const bool cplusplus)
+// Phase I for one 64-byte vector: eight packed property masks and the remaining masks in `o[...][lane]`. Without
+// digit separators, no character follows one (c_char_properties_no_separators).
+BUSTER_INLINE void classify(__m512i raw, uint64_t o[][BUSTER_LEX_MASK_LANES], unsigned lane, __m512i* properties_out, __m512i* previous_classes, __m512i* previous_pairs, const bool cplusplus,
+                            const bool separators)
 {
     const uint64_t nonascii = _mm512_movepi8_mask(raw);
-    __m512i properties = perm2b(c_char_properties, raw);
+    __m512i properties = perm2b(separators ? c_char_properties : c_char_properties_no_separators, raw);
     __m512i classes = perm2b(c_operator_classes, raw);
     if (BUSTER_UNLIKELY(nonascii != 0))
     {
@@ -2643,7 +2658,9 @@ __attribute__((noinline)) static OutputCursors write_chunk_outlined(const ChunkT
 }
 
 // Tokenizes the source from `begin` (the start of the source, or of a line) to its end, or until a chunk that needs
-// the scalar lexer (see BUSTER_LEX_NEEDS_SCALAR). `separators`: a digit separator continues a pp-number.
+// the scalar lexer (see BUSTER_LEX_NEEDS_SCALAR). Without `separators`, Phase I classifies with
+// c_char_properties_no_separators, in which no character follows a digit separator: `apostrophe_separator` is then
+// empty, and every other mask and step is as with them, so the two loops are the same code.
 BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool separators, const uint8_t* source, uint64_t length, uint64_t begin,
                                uint8_t* restrict kinds_out, uint32_t* restrict starts_out, uint32_t* restrict ends_out, uint64_t* written, uint64_t* restart,
                                uint64_t* scalar_until)
@@ -2701,7 +2718,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool separator
     for (unsigned j = 0; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
     {
         raws[0][j] = load_lane(base, base_offset, begin, length, first_chunk + BUSTER_LEX_VECTOR_BYTES * j);
-        classify(raws[0][j], masks[0], j, &properties[0][j], &previous_classes, &previous_pairs, cplusplus);
+        classify(raws[0][j], masks[0], j, &properties[0][j], &previous_classes, &previous_pairs, cplusplus, separators);
     }
     // The vectors of the chunk being analyzed: in the source itself if they (and the next chunk's first one) are all
     // inside it, else in `raws`, with what is outside of it read as newlines.
@@ -2729,7 +2746,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool separator
                 const __m512i* next_raw = (const __m512i*)(base + chunk + BUSTER_LEX_CHUNK_BYTES);
                 for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
                 {
-                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus);
+                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, separators);
                 }
                 chunk_vectors = next_raw;
             }
@@ -2740,7 +2757,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool separator
                 for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
                 {
                     next_raw[j] = load_lane(base, base_offset, begin, length, chunk + BUSTER_LEX_CHUNK_BYTES + BUSTER_LEX_VECTOR_BYTES * j);
-                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus);
+                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, separators);
                 }
                 chunk_vectors = next_raw;
             }
@@ -2880,22 +2897,21 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool separator
         const U64x8 line_break = newline & ~splice;
 
         // pp-numbers: a digit (or a '.' and a digit) that doesn't continue an identifier, and everything that
-        // continues it: identifier characters, '.', a sign after e/E/p/P and a digit separator. (Without separators,
-        // no number has a '\'', and so no "'e" whose sign the check below keeps out.)
-        const U64x8 apostrophe_separator = separators ? apostrophe & shr_next(separator_follower, BUSTER_LEX_NEXT(M_SEPARATOR_FOLLOWER), 1) : zero;
-        const U64x8 number_sign = separators ? exponent_sign & ~shl_carry(apostrophe, previous_apostrophe, 2) : exponent_sign; // Not "1'e+".
+        // continues it: identifier characters, '.', a sign after e/E/p/P and a digit separator (none without digit
+        // separators, whose property table has no character that follows one).
+        const U64x8 apostrophe_separator = apostrophe & shr_next(separator_follower, BUSTER_LEX_NEXT(M_SEPARATOR_FOLLOWER), 1);
+        const U64x8 number_sign = exponent_sign & ~shl_carry(apostrophe, previous_apostrophe, 2); // Not "1'e+".
         const U64x8 number_continue = identifier | dot | number_sign | apostrophe_separator;
         const U64x8 number_head = (digit & ~shl_carry(identifier, previous_identifier, 1)) | (dot & shr_next(digit, BUSTER_LEX_NEXT(M_DIGIT), 1));
         uint32_t number_carry_out;
         const U64x8 number_sum = add_carry(number_continue, number_head, number_carry, &number_carry_out);
         const U64x8 number_region = ((number_sum ^ number_continue) | number_head) & number_continue;
 
-        // Delimiters of literals and comments. A digit separator isn't a quote (without separators, every '\'' is
-        // one, so the scan needn't wait for the numbers). Comment delimiters are marked at their '/': the first
-        // character of "//" and "/*", and the last of "*/".
+        // Delimiters of literals and comments. A digit separator isn't a quote. Comment delimiters are marked at
+        // their '/': the first character of "//" and "/*", and the last of "*/".
         const U64x8 quote_bounds = quote & ~escaped;
         const U64x8 apostrophe_closers = apostrophe & ~escaped;
-        const U64x8 apostrophe_bounds = separators ? apostrophe_closers & ~number_region : apostrophe_closers;
+        const U64x8 apostrophe_bounds = apostrophe_closers & ~number_region;
         const U64x8 line_comment_marks = slash & shr_next(slash, BUSTER_LEX_NEXT(M_SLASH), 1);
         const U64x8 block_comment_marks = slash & shr_next(star, BUSTER_LEX_NEXT(M_STAR), 1);
         const U64x8 block_comment_closers = slash & shl_carry(star, previous_star, 1);
@@ -3180,9 +3196,8 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool separator
         {
             return BUSTER_LEX_NEEDS_SCALAR; // A digit separator that is really a quote, as in 'a'b'c'.
         }
-        const uint64_t next_number_continues = separators ? (BUSTER_LEX_NEXT(M_IDENTIFIER) | BUSTER_LEX_NEXT(M_DOT) | (BUSTER_LEX_NEXT(M_EXPSIGN) & ~((apostrophe[7] >> 62) & 1)) |
-                                                             (BUSTER_LEX_NEXT(M_APOSTROPHE) & (BUSTER_LEX_NEXT(M_SEPARATOR_FOLLOWER) >> 1))) & 1
-                                                          : (BUSTER_LEX_NEXT(M_IDENTIFIER) | BUSTER_LEX_NEXT(M_DOT) | BUSTER_LEX_NEXT(M_EXPSIGN)) & 1;
+        const uint64_t next_number_continues = (BUSTER_LEX_NEXT(M_IDENTIFIER) | BUSTER_LEX_NEXT(M_DOT) | (BUSTER_LEX_NEXT(M_EXPSIGN) & ~((apostrophe[7] >> 62) & 1)) |
+                                                (BUSTER_LEX_NEXT(M_APOSTROPHE) & (BUSTER_LEX_NEXT(M_SEPARATOR_FOLLOWER) >> 1))) & 1;
         const U64x8 number_ends = number_token & ~shr_next(number_token, next_number_continues, 1);
         const U64x8 identifier_token = identifier & outside & ~number_token;
         const U64x8 identifier_starts = identifier_token & ~shl_carry(identifier_token, previous_identifier_token, 1);

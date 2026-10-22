@@ -123,9 +123,9 @@ What they pay for, each a difference from clang that the fuzzing found:
 - arguments expanded in the order of their parameters' first uses: a macro
   without `__VA_OPT__` lists that order when it is compiled, and one with it
   walks its body;
-- at that revision, before C23, the search for digit separators, which reads
-  every number's bytes, and the prefixes the mode lacks on unknown tokens
-  (`u8''`); #264 removes the separator search, keeping prefix splitting;
+- before C23, the search for digit separators, which read every number's
+  bytes (until #264, below), and the prefixes the mode lacks on unknown
+  tokens (`u8''`);
 - a paste's check of its operands for bytes past 0x7F, 64 at a time: an
   identifier written with UCNs pastes as written.
 
@@ -134,17 +134,26 @@ Their first versions cost 21% more instructions on `main.c` and 7.5% on
 order and checking pastes 64 bytes at a time took back more than half of
 `main.c`'s.
 
-**#264's separator flag.** `pp_prepare_options` sets
-`C_TOKENIZER_NO_DIGIT_SEPARATORS` in `PPPrepare.refine_flags` before C23.
-The same flags reach file preparation, cache workers, scratch text and pasted
-spellings. Both lexer implementations end a pp-number before `'` directly,
-so `pp_lex_mode` now only splits literal prefixes and
-`pp_find_separator_vector` and its scalar twin are removed. The standalone
-lexer's default keeps C23's numbers. [The lexer guide](c-lexer.md#pre-c23-pp-numbers-264)
-describes the new flag, boundary tests and reproducible qualification.
-The new locked-9700X A/B and 300,000-case C17 differential are pending in
-[PR #278](https://github.com/buster14a/buster/pull/278); the historical cost
-table above remains attributed to `4c6160f`.
+**#264's digit separators.** The lexer now ends a number before a `'` itself
+before C23 (`C_TOKENIZER_NO_DIGIT_SEPARATORS`, in "Lexing by the language
+mode" below), and the search is gone. `pp_prepare_options` sets it in
+`PPPrepare.refine_flags`, which the lanes that prepare a cache's files take
+too; the lexer's own default keeps C23's numbers. In an A/B on the 9700X of
+`main` (f8e4834), #109's branch (7d5779b) and #264's merged with it
+(e9f86d6), medians of two interleaved rounds:
+
+| Translation unit | `main` | #109's fixes | With #264 | Lex phase | Instructions/input token |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 11.35 ms | 12.00 ms | 11.71 ms | 2.39 → 2.76 → 2.40 ms | 123.22 → 132.59 → 130.79 |
+| `main.c` (`main`'s) | 26.15 ms | 27.40 ms | 27.27 ms | 2.30 → 2.57 → 2.35 ms | 320.23 → 346.71 → 344.59 |
+
+The lex phase is `main`'s again, within 0.01 ms on `sqlite3.c` and 0.05 ms on
+`main.c`: the chunk loop without separators is the C23 one with another table
+(`docs/c-lexer.md`, "Numbers without digit separators"). The scalar twins'
+lex phase goes from 3.84 to 3.21 ms on `sqlite3.c` and from 3.70 to 2.89 ms on
+`main.c`. What remains above `main`'s (2.43 and 2.36 ms) is their count of the
+prefixes the mode lacks, which tests every token for an unknown one (`u8''`):
+about 12 instructions per token, where the vectorized count takes one.
 
 **Budget.** The front-end plan (#115) proposed 2 ms to preprocess `sqlite3.c`,
 about 16 cycles per output token, next to 2 ms for lexing every input and
@@ -352,8 +361,17 @@ prepared fields when it first enters the file, and keeps its own state about it
 makes its own; with one, the units and lanes that share it read each file once
 (`docs/c-files.md`, #150).
 
-- **Lexing by the language mode.** The lexer has no language mode, so two of
-  clang's rules are applied around it:
+- **Lexing by the language mode.** The lexer has no language mode of its own:
+  the mode's rules reach it as flags, or are applied after it:
+  - Digit separators are C23's. Before it, a `'` ends a pp-number and starts a
+    character constant: clang lexes `1'000` as `1` and the unterminated
+    `'000`. The lexer does that itself with `C_TOKENIZER_NO_DIGIT_SEPARATORS`,
+    which `pp_prepare_options` sets in those modes, in both of its paths (the
+    chunk loop's copy for it classifies with a table in which no character
+    follows a separator, and is otherwise the same code), so files, scratch
+    text and pastes are all lexed so, at no cost. Until #264 a pass after the
+    lexer read every number's bytes for a `'` and lexed the rest of the file
+    again from each one (#109's cost, above).
   - The `u`, `U` and `u8` prefixes are C11's, and `u8` on a character constant
     is C23's (`L` is every mode's). Before those modes, clang lexes `u'a'` as
     the identifier `u` and the constant `'a'`, so a macro named `u` expands
