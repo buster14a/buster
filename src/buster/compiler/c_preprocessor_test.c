@@ -144,12 +144,13 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
     return result;
 }
 
-// Lexes a text as the language mode does (`split`, pp_split_kinds): c_tokenize, then pp_lex_mode's scalar path. Returns
-// the count, or -1.
+// Lexes a text as the language mode does (`split`, pp_split_kinds, which is nonzero exactly before C23): c_tokenize,
+// without digit separators before C23 as pp_prepare_options has it, then pp_lex_mode's scalar path. Returns the count,
+// or -1.
 static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
 {
-    const int64_t count = c_tokenize(text, length, kinds, starts, ends, 0);
-    return pp_lex_mode(text, (uint32_t)length, kinds, starts, ends, count, split, 0, false);
+    const int64_t count = c_tokenize(text, length, kinds, starts, ends, split != 0 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0);
+    return pp_lex_mode(text, kinds, starts, ends, count, split, false);
 }
 
 // The spellings of a text's tokens, as the language mode lexes them (`split`, pp_split_kinds).

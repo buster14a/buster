@@ -124,6 +124,70 @@ jobs:
           ./build/compiler test-lexer
           ./build/compiler test-lexer --cplusplus
 
+
+      # Temporary #264 qualification; removed once its frozen results are recorded in the guides.
+      - name: Qualify C17 preprocessor digit separators against Clang
+        run: ./build/compiler test-preprocessor --clang --fuzz 300000 --std c17 --jobs 15
+
+      - name: Check out the frozen main baseline for issue 264
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: f3a68dd2c280ecb2a851a1a41128084f18e191a6
+          path: _issue264_main
+          persist-credentials: false
+
+      - name: Check out the frozen fuzzing baseline for issue 264
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: 8fb1cd5a8b44115d55c73b46f6157d1452cc5939
+          path: _issue264_fuzz
+          persist-credentials: false
+
+      - name: Build issue 264 comparison executables
+        run: |
+          (cd _issue264_main && ./build.sh)
+          (cd _issue264_fuzz && ./build.sh)
+          clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.issue264.h
+          sha256sum build/compiler _issue264_main/build/compiler _issue264_fuzz/build/compiler
+          sha256sum _issue264_main/src/buster/compiler/main.c /var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite/sqlite3.c
+          objdump -d build/compiler | sed -n '/<tokenize_c_no_separators>:/,/^$/p' > build/issue264-no-separators.asm
+          test -s build/issue264-no-separators.asm
+          cat build/issue264-no-separators.asm
+
+      - name: Measure issue 264 against both frozen baselines
+        # The existing runner hook holds the shared host lock; each command is pinned to CPU 2.
+        run: |
+          set -euo pipefail
+          candidate="$GITHUB_WORKSPACE/build/compiler"
+          main="$GITHUB_WORKSPACE/_issue264_main"
+          fuzz="$GITHUB_WORKSPACE/_issue264_fuzz"
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite/sqlite3.c
+          predefines="$GITHUB_WORKSPACE/build/predefines.issue264.h"
+          for sample in 1 2 3; do
+            case "$sample" in
+              1) order="main fuzz candidate" ;;
+              2) order="fuzz candidate main" ;;
+              3) order="candidate main fuzz" ;;
+            esac
+            for variant in $order; do
+              case "$variant" in
+                main) compiler="$main/build/compiler" ;;
+                fuzz) compiler="$fuzz/build/compiler" ;;
+                candidate) compiler="$candidate" ;;
+              esac
+              for source in "$sqlite" "$main/src/buster/compiler/main.c"; do
+                echo "ISSUE264 preprocessor sample=$sample variant=$variant source=$source"
+                taskset -c 2 "$compiler" benchmark-preprocessor -std=gnu17 -march=native -I"$main/src" -fwrapv -funsigned-char --predefines "$predefines" "$source"
+                echo "ISSUE264 lexer sample=$sample variant=$variant source=$source"
+                taskset -c 2 "$compiler" benchmark-lexer "$source"
+                if [ "$variant" = candidate ]; then
+                  echo "ISSUE264 lexer-no-separators sample=$sample variant=$variant source=$source"
+                  taskset -c 2 "$compiler" benchmark-lexer --no-digit-separators "$source"
+                fi
+              done
+            done
+          done
+
       - name: Benchmark the C lexer on the repository sources
         run: |
           # Pin to one permitted CPU to avoid migration noise in throughput measurements.
