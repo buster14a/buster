@@ -7,12 +7,16 @@
 // (c_lexer.c, then c_refine.c) to one token stream, and `-E`'s text from that stream. docs/c-preprocessor.md has the
 // design and its 9700X measurements.
 //
-// Files. Every file is read (mapped), lexed, refined and given a directive table once (pp_prepare_data), and kept for
+// Files. Every file is read (mapped), lexed, refined and given a directive table once (pp_prepare_into), and kept for
 // the translation unit, since macro definitions point into the tokens of the file that defines them. The directive
 // table lists each '#' that starts a line, with its kind and the token where its line ends; conditional directives are
 // paired with an explicit stack, each pointing to the next directive of its group, so that skipping a group that isn't
 // taken is a jump. A file whose tokens are all inside `#ifndef X` ... `#endif` (or `#if !defined X`) has X as its
-// include guard: an inclusion while X is defined reads nothing, as an inclusion after `#pragma once` doesn't.
+// include guard: an inclusion while X is defined reads nothing, as an inclusion after `#pragma once` doesn't. What is
+// prepared from a file is kept in a FileCache, by the file's identity, with every path looked up and what it found
+// there: the translation units that preprocess with one cache share it, and c_files.c fills it from several lanes
+// ahead of them (#150). A translation unit keeps its own state about each file (PPFile, PPFileData), copied from the
+// cache's record when it first needs it.
 //
 // Macros. The macro table is indexed by IdentId (`macro_of`, with a bitset of the names that are macros for the main
 // loop's scan). A definition records where its replacement list is in the defining file's tokens; a function-like one
@@ -51,9 +55,12 @@
 // this order:
 //   - API: PPOptions, PPTokens, the flags and internal kinds, PPStatistics, Preprocessor and the entry points.
 //   - Diagnostics, token stacks, location ranges and scratch spellings.
-//   - Files: PPFileData, PPFile, the directive scan (pp_scan_directives_vector, pp_finish_directives, pp_find_guard),
-//     pp_prepare_data, pp_count_lines and pp_line_of, pp_read_data and pp_lookup_path.
-//   - Include search: pp_find_include (pp_dedupe_directories drops missing and repeated directories).
+//   - Files: PPFileData, PPFile, the file cache's records and paths (FileCache), the directive scan
+//     (pp_scan_directives_vector, pp_finish_directives, pp_find_guard), pp_prepare_into, pp_count_lines and pp_line_of,
+//     the cache's functions (file_cache_lookup_path, file_cache_prepare and the ones they're made of), and a translation
+//     unit's paths (pp_lookup_path) and preparation (pp_prepare_data).
+//   - Include search: pp_include_candidate and pp_find_include (pp_dedupe_directories drops missing and repeated
+//     directories), and the literal header names (pp_literal_header_name).
 //   - Macros: PPMacro, pp_define, pp_same_definition, pp_compile_macro.
 //   - The main loop: contexts, the token copies, pp_read_token, substitution (pp_paste, pp_stringize, pp_paste_in_place,
 //     pp_substitute),
@@ -177,9 +184,15 @@ typedef enum PPPhase
     PP_PHASE_COUNT,
 } PPPhase;
 
+// Every file a preprocessor reads, and what is prepared from it, shared by the translation units that use it ("Files").
+typedef struct FileCache FileCache;
+
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
+    // The file cache to read files through, made with file_cache_initialize for the same language mode and intern
+    // table; or null, for a cache of the translation unit's own.
+    FileCache* files;
     CLanguage language;
     X86Target target;
     // Retained independently for the future scheduler; it cannot enable an ISA feature.
@@ -294,7 +307,10 @@ typedef enum PPDirectiveKind
     PP_DIRECTIVE_EMBED,
 } PPDirectiveKind;
 
-// A file's contents and everything prepared from them, shared by the paths that name it (by device and inode).
+// A file's contents and everything prepared from them, shared by the paths that name it (by device and inode). The file
+// cache's record of a file is one, and so is a translation unit's copy of it, which also has the unit's own state about
+// the file: `once`, the line cursor, and `prepared`, which says the unit has copied the record's prepared fields (a
+// copy's other fields are the record's).
 typedef struct PPFileData PPFileData;
 struct PPFileData
 {
@@ -305,8 +321,11 @@ struct PPFileData
     bool has_modified;
     const uint8_t* bytes;
     uint32_t length;
-    // The bytes are a mapping of the file (pp_release unmaps it), not memory of the arena.
+    // The bytes are a mapping of the file, which the record's cache unmaps (file_cache_release), not arena memory.
     bool mapped;
+    // A translation unit's copy: the file cache's record it copies, or BUSTER_PP_NONE for a file the unit made (the
+    // predefines, the command line), which isn't in the cache.
+    uint32_t record;
     uint32_t token_count;
     // The lexer's kinds and starts, refinement's values (in place of the ends) and leading-space bits.
     uint8_t* kinds;
@@ -355,6 +374,110 @@ struct PPFile
 #define BUSTER_PP_USER_FILE 0
 #define BUSTER_PP_SYSTEM_FILE 1
 #define BUSTER_PP_EXTERN_C_FILE 2
+
+// The file cache. A record per file, by identity (device and inode), holds its bytes (a read-only mapping) and, once it
+// is prepared (file_cache_prepare), its tokens, leading-space bits, directive table and guard: a record never changes
+// after that, so that any number of translation units and lanes read it at once. A path entry per path looked up names
+// the path's record, or no record (no file, a directory, a file too big or unreadable), so that a translation unit's
+// search makes no system call for a path the cache already looked up. One lane at a time adds paths and records, but
+// lanes prepare different records at once, each into arenas of its own (FileCacheArenas) and with an intern table only
+// it writes (c_files.c).
+
+// The system calls lookups made, counted for whoever made them: the opens (one per path probed, whether or not a file
+// is there), and the files mapped and the files read.
+typedef struct FileCacheCounts FileCacheCounts;
+struct FileCacheCounts
+{
+    uint64_t opens;
+    uint64_t maps;
+    uint64_t reads;
+};
+
+// What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
+// modification time, and either the record that already had that identity when it looked (BUSTER_PP_NONE if none) or
+// its bytes, which the probe mapped (`mapped`) or read into an arena.
+typedef struct FileProbe FileProbe;
+struct FileProbe
+{
+    uint64_t device;
+    uint64_t inode;
+    int64_t modified;
+    const uint8_t* bytes;
+    uint32_t length;
+    uint32_t record;
+    bool found;
+    bool mapped;
+};
+
+// How a probe gets a file's bytes: mapped with MAP_POPULATE (a translation unit's, and one lane's), mapped without it
+// (the mapping holds the process's memory map lock for less time, and its pages are faulted in as they are first read),
+// or read into an arena. A lane reads small files whatever this says (file_cache_probe's `read_limit`).
+typedef enum FileCacheBytes
+{
+    FILE_CACHE_MAP_POPULATED,
+    FILE_CACHE_MAP,
+    FILE_CACHE_READ,
+} FileCacheBytes;
+
+// A path entry's record from its probe until file_cache_identify gives it one.
+#define BUSTER_FILE_CACHE_PENDING (UINT32_MAX - 1)
+
+// A path the cache looked up: its record, BUSTER_PP_NONE if no file can be read there, or BUSTER_FILE_CACHE_PENDING.
+typedef struct FileCachePath FileCachePath;
+struct FileCachePath
+{
+    uint64_t hash;
+    const char* path; // NUL-terminated.
+    uint32_t length;
+    uint32_t record;
+    FileProbe probe;
+};
+
+// The arenas a lane prepares records into: the token columns (kinds, starts, values), each in an arena of its own as a
+// translation unit's are, the leading-space words and directive tables, and the bytes of the files it reads.
+typedef struct FileCacheArenas FileCacheArenas;
+struct FileCacheArenas
+{
+    Arena columns[3];
+    Arena arena;
+    Arena bytes;
+};
+
+// How files are prepared: the lexer's and refinement's flags (trigraphs), the literal prefixes the language mode splits
+// (pp_split_kinds), whether '$' is punctuation (assembly), and whether by the vectorized kernels or by their scalar
+// twins, which prepare the same records.
+typedef struct PPPrepare PPPrepare;
+struct PPPrepare
+{
+    uint32_t refine_flags;
+    uint64_t split_kinds;
+    bool assembly;
+    bool vectorized;
+};
+
+struct FileCache
+{
+    PPPrepare prepare;
+    // The intern table file_cache_prepare refines records with.
+    InternTable* table;
+    // The records, and their index by identity (a record's index + 1, or 0).
+    PPFileData* records;
+    uint32_t record_count;
+    uint32_t* identity_slots;
+    uint32_t identity_slot_mask;
+    // The paths, their index by the path's hash (a path's index + 1, or 0), and their bytes.
+    FileCachePath* paths;
+    uint32_t path_count;
+    uint32_t* path_slots;
+    uint32_t path_slot_mask;
+    Arena path_arena;
+    Arena arrays[4];
+    // Each lane's arenas, reserved when the lane first prepares a record.
+    FileCacheArenas lanes[BUSTER_LANE_MAX_COUNT];
+    // The records prepared, and their tokens (for the tests and the benchmark).
+    uint64_t prepared_records;
+    uint64_t prepared_tokens;
+};
 
 // A range of the location space: one inclusion of a file, or a chunk of scratch spellings (`file` BUSTER_PP_NONE).
 typedef struct PPRange PPRange;
@@ -783,13 +906,20 @@ struct Preprocessor
     PPTokens arguments;
     PPTokens captures;
     PPTokens expansions;
-    // Files: data by device and inode, paths by name, and both lookups' tables.
+    // Files: the cache they're read through (PPOptions.files, or one of the unit's own, in `arena`), this unit's data of
+    // each (its copies of the cache's records, and the files it makes) and of each record (the data's index + 1, or 0),
+    // and its paths by name, with their table.
+    FileCache* cache;
+    bool owns_cache;
     PPFileData* datas;
     uint32_t data_count;
+    uint32_t* record_data;
     PPFile* files;
     uint32_t file_count;
     uint32_t* file_slots; // A PPFile index + 1, or 0, by the path's hash.
     uint32_t file_slot_mask;
+    // The system calls this unit's path lookups made (none for a path the cache had looked up already).
+    FileCacheCounts probes;
     // The search directories: quoted ones first, then -I, then the system ones.
     char** directories;
     uint32_t* directory_lengths;
@@ -1110,17 +1240,16 @@ static const uint8_t* pp_location_bytes(const Preprocessor* pp, uint32_t locatio
     return range != BUSTER_PP_NONE ? pp->ranges[range].bytes + (location - pp->ranges[range].base) : 0;
 }
 
-// `length` bytes without the line splices in them (and trigraphs, with trigraphs on): the bytes themselves if they have
-// none or are a clean scratch spelling (in its arena: pp_scratch_clean), else a copy in `buffer`, which needs room for
-// `length` bytes. Returns the length.
-static uint32_t pp_without_splices(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint8_t* buffer, const uint8_t** spelling)
+// `length` bytes of source without the line splices in them (and trigraphs, with C_TOKENIZER_TRIGRAPHS in
+// `refine_flags`): the bytes themselves if they have none, else a copy in `buffer`, which needs room for `length` bytes.
+// Returns the length.
+static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t* buffer, const uint8_t** spelling)
 {
-    const Arena* clean = &pp->scratch[1];
-    const bool final = bytes >= clean->base && bytes < clean->base + clean->capacity;
+    const bool trigraphs = (refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
     bool cleaned = false;
-    for (uint32_t i = 0; !final && !cleaned && i < length; i += 1)
+    for (uint32_t i = 0; !cleaned && i < length; i += 1)
     {
-        cleaned = bytes[i] == '\\' || (bytes[i] == '?' && (pp->refine_flags & C_TOKENIZER_TRIGRAPHS));
+        cleaned = bytes[i] == '\\' || (bytes[i] == '?' && trigraphs);
     }
     uint32_t result = length;
     *spelling = bytes;
@@ -1130,7 +1259,7 @@ static uint32_t pp_without_splices(const Preprocessor* pp, const uint8_t* bytes,
         const ScalarLexer lexer = {
             .source = bytes,
             .length = length,
-            .trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0,
+            .trigraphs = trigraphs,
             .cplusplus = false,
         };
         uint64_t p = 0;
@@ -1148,6 +1277,21 @@ static uint32_t pp_without_splices(const Preprocessor* pp, const uint8_t* bytes,
             p += size != 0 ? size : 1;
         }
         *spelling = buffer;
+    }
+    return result;
+}
+
+// `length` bytes without the line splices in them (pp_remove_splices), unless they are a clean scratch spelling (in its
+// arena: pp_scratch_clean), which is final and is the bytes themselves.
+static uint32_t pp_without_splices(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint8_t* buffer, const uint8_t** spelling)
+{
+    const Arena* clean = &pp->scratch[1];
+    const bool final = bytes >= clean->base && bytes < clean->base + clean->capacity;
+    uint32_t result = length;
+    *spelling = bytes;
+    if (!final)
+    {
+        result = pp_remove_splices(bytes, length, pp->refine_flags, buffer, spelling);
     }
     return result;
 }
@@ -1565,7 +1709,7 @@ static bool pp_pair_conditionals_vector(PPFileData* data, uint32_t* scratch_indi
 
 // Each directive's kind and line end, then the conditional groups' pairing (pp_pair_conditionals_vector, or
 // pp_pair_conditionals_scalar for the scalar kernels and for files the vectorized pairing leaves to it).
-static bool pp_finish_directives(Preprocessor* pp, PPFileData* data, const uint64_t* lines)
+static bool pp_finish_directives(bool vectorized, PPFileData* data, const uint64_t* lines)
 {
     for (uint32_t d = 0; d < data->directive_count; d += 1)
     {
@@ -1584,7 +1728,7 @@ static bool pp_finish_directives(Preprocessor* pp, PPFileData* data, const uint6
     Scratch scratch = scratch_begin(0);
     uint32_t* indices = arena_push_array(scratch.arena, (uint64_t)data->directive_count + 32, sizeof(uint32_t), 64);
     const bool result = indices != 0;
-    if (result && !(pp->vectorized && pp_pair_conditionals_vector(data, indices)))
+    if (result && !(vectorized && pp_pair_conditionals_vector(data, indices)))
     {
         pp_pair_conditionals_scalar(data, indices);
     }
@@ -1776,7 +1920,7 @@ static uint32_t pp_find_separator_vector(const uint8_t* bytes, const uint8_t* ki
 // splices and numeric local references. Scratch columns leave the original columns intact on allocation failure.
 // A slice can lex into several tokens (the pp-number 1$e+5 into 1, $, e, + and 5), at most one per byte: the bytes of
 // the tokens that contain '$' bound the columns, not their dollars.
-static int64_t pp_split_dollars(const Preprocessor* pp, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count)
+static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count)
 {
     // Most sources have no '$' at all, which one scan of their extent finds.
     const bool dollars = count != 0 && memchr(bytes + starts[0], '$', ends[count - 1] - starts[0]) != 0;
@@ -1822,7 +1966,7 @@ static int64_t pp_split_dollars(const Preprocessor* pp, const uint8_t* bytes, ui
                         {
                             at += 1;
                         }
-                        const int64_t added = c_tokenize_scalar(bytes + begin, at - begin, split_kinds + result, split_starts + result, split_ends + result, pp->refine_flags);
+                        const int64_t added = c_tokenize_scalar(bytes + begin, at - begin, split_kinds + result, split_starts + result, split_ends + result, refine_flags);
                         for (int64_t n = 0; n < added; n += 1)
                         {
                             split_kinds[result + n] &= 0x7F;
@@ -1922,12 +2066,12 @@ static int64_t pp_lex_mode(const uint8_t* bytes, uint32_t length, uint8_t* kinds
 
 // A file's (or a scratch text's) freshly lexed tokens, lexed as the language mode does (pp_lex_mode), then with
 // assembly's '$' punctuation (pp_split_dollars). Returns the new count, or -1 if the lexer or an allocation fails.
-static int64_t pp_lex_for_mode(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, bool vectorized)
+static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, bool vectorized)
 {
-    int64_t result = pp_lex_mode(bytes, length, kinds, starts, ends, count, pp->split_kinds, pp->refine_flags, vectorized);
-    if (pp->options.assembly && result > 0)
+    int64_t result = pp_lex_mode(bytes, length, kinds, starts, ends, count, mode->split_kinds, mode->refine_flags, vectorized);
+    if (mode->assembly && result > 0)
     {
-        result = pp_split_dollars(pp, bytes, kinds, starts, ends, (uint32_t)result);
+        result = pp_split_dollars(mode->refine_flags, bytes, kinds, starts, ends, (uint32_t)result);
     }
     return result;
 }
@@ -1939,34 +2083,47 @@ BUSTER_INLINE bool pp_is_unterminated_comment(const uint8_t* bytes, uint8_t kind
     return (kind & 0x7F) == C_TOKEN_UNKNOWN && bytes[start] == '/';
 }
 
-// Lexes, refines and indexes a file's bytes: tokens, values, leading-space bits and the directive table. Returns false
-// if memory runs out or the file is too big for 32-bit positions.
-static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path)
+// What preparing a file came to (pp_prepare_into).
+typedef enum PPPrepareStatus
+{
+    PP_PREPARE_DONE,
+    // The lexer can't take the file: its positions must fit 32 bits.
+    PP_PREPARE_TOO_BIG,
+    // No room for the lexer's columns.
+    PP_PREPARE_NO_COLUMNS,
+    // No room for the rest, or the intern table is full.
+    PP_PREPARE_NO_MEMORY,
+} PPPrepareStatus;
+
+// Lexes, refines and indexes a file's bytes, `data`: its tokens, values (its identifiers interned in `table`),
+// leading-space bits, directive table and guard, in `columns` (kinds, starts and values, an arena each) and `arena` (the
+// directive table). Adds each phase's TSC ticks to `ticks` (by PPPhase) unless it is null.
+static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t* ticks)
 {
     const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY((uint64_t)data->length);
-    Arena* columns = pp->columns;
     data->kinds = arena_push(&columns[0], capacity, 64);
     data->starts = arena_push_array(&columns[1], capacity, sizeof(uint32_t), 64);
     data->values = arena_push_array(&columns[2], capacity, sizeof(uint32_t), 64);
-    bool result = data->kinds != 0 && data->starts != 0 && data->values != 0;
-    const bool timing = pp->options.timing;
-    uint64_t tick = timing ? __rdtsc() : 0;
+    const bool pushed = data->kinds != 0 && data->starts != 0 && data->values != 0;
+    PPPrepareStatus result = PP_PREPARE_DONE;
+    uint64_t tick = ticks != 0 ? __rdtsc() : 0;
     int64_t count = -1;
-    if (result)
+    if (pushed)
     {
-        count = pp->options.assembly && !pp->vectorized ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, pp->refine_flags) : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, pp->refine_flags);
+        count = prepare->assembly && !prepare->vectorized ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags)
+                                                           : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags);
     }
-    count = count > 0 ? pp_lex_for_mode(pp, data->bytes, data->length, data->kinds, data->starts, data->values, count, pp->vectorized) : count;
-    if (timing)
+    const bool lexed = count >= 0;
+    count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds, data->starts, data->values, count, prepare->vectorized) : count;
+    if (ticks != 0)
     {
         const uint64_t now = __rdtsc();
-        pp->ticks[PP_PHASE_LEX] += now - tick;
+        ticks[PP_PHASE_LEX] += now - tick;
         tick = now;
     }
     if (count < 0)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "%s: can't tokenize (%s)", path, result ? "too big" : "out of memory");
-        result = false;
+        result = !pushed ? PP_PREPARE_NO_COLUMNS : !lexed ? PP_PREPARE_TOO_BIG : PP_PREPARE_NO_MEMORY;
     }
     else
     {
@@ -1977,7 +2134,6 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
             count -= 1;
         }
         data->token_count = (uint32_t)count;
-        pp->input_tokens += data->token_count;
         // Each column keeps what the file has, with the lexer's slack, and the next file's starts after it. The lexer
         // needs room for a token per byte, but a file has about one per six: with the columns of every file in one
         // arena, the room between them would be cleared too wherever a huge page holds a used byte, which for sqlite3.c
@@ -1989,40 +2145,40 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
         arena_pop_to(&columns[1], (uint64_t)((uint8_t*)data->starts - columns[1].base) + kept * sizeof(uint32_t));
         arena_pop_to(&columns[2], (uint64_t)((uint8_t*)data->values - columns[2].base) + kept * sizeof(uint32_t));
         data->space = arena_push_array(&columns[0], (uint64_t)count / 64 + 2, sizeof(uint64_t), 64);
-        result = data->space != 0;
-        if (result && pp->vectorized)
+        bool refined = data->space != 0;
+        if (refined && prepare->vectorized)
         {
-            result = refine_tokens(pp->table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values, data->space,
-                                   pp->refine_flags);
+            refined = refine_tokens(table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values, data->space,
+                                    prepare->refine_flags);
         }
-        else if (result)
+        else if (refined)
         {
-            result = refine_tokens_scalar(pp->table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values,
-                                          data->space, pp->refine_flags);
+            refined = refine_tokens_scalar(table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values,
+                                           data->space, prepare->refine_flags);
         }
-        if (timing)
+        if (ticks != 0)
         {
             const uint64_t now = __rdtsc();
-            pp->ticks[PP_PHASE_REFINE] += now - tick;
+            ticks[PP_PHASE_REFINE] += now - tick;
             tick = now;
         }
         Scratch scratch = scratch_begin(0);
-        uint64_t* lines = result ? arena_push_array(scratch.arena, data->token_count / 64 + 1, sizeof(uint64_t), 64) : 0;
-        result = lines != 0;
-        if (result)
+        uint64_t* lines = refined ? arena_push_array(scratch.arena, data->token_count / 64 + 1, sizeof(uint64_t), 64) : 0;
+        bool indexed = lines != 0;
+        if (indexed)
         {
-            const uint32_t directive_count = pp->vectorized ? pp_scan_directives_vector(data->kinds, data->token_count, 0, lines)
-                                                            : pp_scan_directives_scalar(data->kinds, data->token_count, 0, lines);
+            const uint32_t directive_count = prepare->vectorized ? pp_scan_directives_vector(data->kinds, data->token_count, 0, lines)
+                                                                 : pp_scan_directives_scalar(data->kinds, data->token_count, 0, lines);
             data->directive_count = directive_count;
-            data->directive_hash = arena_push_array(&pp->arena, directive_count + 1, sizeof(uint32_t), 4);
-            data->directive_end = arena_push_array(&pp->arena, directive_count + 1, sizeof(uint32_t), 4);
-            data->directive_kind = arena_push(&pp->arena, directive_count + 1, 1);
-            data->directive_next = arena_push_array(&pp->arena, directive_count + 1, sizeof(uint32_t), 4);
-            result = data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
+            data->directive_hash = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
+            data->directive_end = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
+            data->directive_kind = arena_push(arena, directive_count + 1, 1);
+            data->directive_next = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
+            indexed = data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
         }
-        if (result)
+        if (indexed)
         {
-            if (pp->vectorized)
+            if (prepare->vectorized)
             {
                 pp_scan_directives_vector(data->kinds, data->token_count, data->directive_hash, lines);
             }
@@ -2030,19 +2186,19 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
             {
                 pp_scan_directives_scalar(data->kinds, data->token_count, data->directive_hash, lines);
             }
-            result = pp_finish_directives(pp, data, lines);
+            indexed = pp_finish_directives(prepare->vectorized, data, lines);
         }
         scratch_end(scratch);
-        if (result)
+        if (indexed)
         {
             data->guard = pp_find_guard(data);
             data->prepared = true;
         }
-        else
+        result = indexed ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
+        if (ticks != 0)
         {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "%s: out of memory", path);
+            ticks[PP_PHASE_DIRECTIVES] += __rdtsc() - tick;
         }
-        pp->ticks[PP_PHASE_DIRECTIVES] += timing ? __rdtsc() - tick : 0;
     }
     return result;
 }
@@ -2156,47 +2312,446 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
     return result;
 }
 
-// Maps a regular file's bytes (read-only: the page cache's pages, which costs neither a copy nor clearing new pages),
-// sharing the data of a path already read that names the same file. Returns the data's index, or BUSTER_PP_NONE if the
-// file can't be read.
-static uint32_t pp_read_data(Preprocessor* pp, int fd, const struct stat* stats)
+// The file cache's limits: paths (and their bytes) and records, and a lane's arenas. Its slot tables start small and
+// double when they are half full, as a translation unit's path table does (pp_grow_file_slots), so that the pages they
+// touch are about the ones they need.
+#define BUSTER_FILE_CACHE_MAX_PATHS (1u << 22)
+#define BUSTER_FILE_CACHE_PATH_BYTES (1ull << 32)
+#define BUSTER_FILE_CACHE_INITIAL_SLOTS 1024u
+#define BUSTER_FILE_CACHE_ARENA_BYTES (64ull << 30)
+
+// Reserves a cache's memory, for files prepared as `prepare` says and refined with `table`. Returns false if it can't be
+// reserved (file_cache_release then releases what was).
+static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, InternTable* table, PPPrepare prepare)
 {
-    uint32_t result = BUSTER_PP_NONE;
-    for (uint32_t d = 0; result == BUSTER_PP_NONE && d < pp->data_count; d += 1)
+    *cache = (FileCache){ 0 };
+    cache->prepare = prepare;
+    cache->table = table;
+    cache->arrays[0] = arena_reserve((uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData) + 64);
+    cache->arrays[1] = arena_reserve(2ull * BUSTER_PP_MAX_FILES * sizeof(uint32_t) + 64);
+    cache->arrays[2] = arena_reserve((uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath) + 64);
+    cache->arrays[3] = arena_reserve(2ull * BUSTER_FILE_CACHE_MAX_PATHS * sizeof(uint32_t) + 64);
+    cache->path_arena = arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES);
+    cache->records = arena_push_array(&cache->arrays[0], BUSTER_PP_MAX_FILES, sizeof(PPFileData), 64);
+    cache->identity_slots = arena_push_array(&cache->arrays[1], 2ull * BUSTER_PP_MAX_FILES, sizeof(uint32_t), 64);
+    cache->paths = arena_push_array(&cache->arrays[2], BUSTER_FILE_CACHE_MAX_PATHS, sizeof(FileCachePath), 64);
+    cache->path_slots = arena_push_array(&cache->arrays[3], 2ull * BUSTER_FILE_CACHE_MAX_PATHS, sizeof(uint32_t), 64);
+    cache->identity_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
+    cache->path_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
+    return cache->records != 0 && cache->identity_slots != 0 && cache->paths != 0 && cache->path_slots != 0 && cache->path_arena.base != 0;
+}
+
+// Unmaps the records' files, and the files of paths whose probe mapped one that no record took, and releases the
+// cache's memory.
+static __attribute__((unused)) void file_cache_release(FileCache* cache)
+{
+    for (uint32_t r = 0; r < cache->record_count; r += 1)
     {
-        if (pp->datas[d].device == (uint64_t)stats->st_dev && pp->datas[d].inode == (uint64_t)stats->st_ino)
+        if (cache->records[r].mapped)
         {
-            result = d;
+            munmap((void*)cache->records[r].bytes, cache->records[r].length);
         }
     }
-    if (result == BUSTER_PP_NONE && (uint64_t)stats->st_size <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK && pp->data_count < BUSTER_PP_MAX_FILES)
+    for (uint32_t p = 0; p < cache->path_count; p += 1)
     {
-        const uint64_t start = pp->options.timing ? __rdtsc() : 0;
-        const uint32_t length = (uint32_t)stats->st_size;
-        static const uint8_t empty[1] = { 0 };
-        const uint8_t* bytes = empty;
-        if (length != 0)
+        if (cache->paths[p].probe.mapped)
         {
-            void* mapped = mmap(0, length, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
-            bytes = mapped != MAP_FAILED ? mapped : 0;
+            munmap((void*)cache->paths[p].probe.bytes, cache->paths[p].probe.length);
         }
-        if (bytes != 0)
+    }
+    for (uint32_t lane = 0; lane < BUSTER_LANE_MAX_COUNT; lane += 1)
+    {
+        FileCacheArenas* arenas = &cache->lanes[lane];
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(arenas->columns); i += 1)
         {
-            result = pp->data_count;
-            pp->datas[result] = (PPFileData){
-                .device = (uint64_t)stats->st_dev,
-                .inode = (uint64_t)stats->st_ino,
-                .modified = (int64_t)stats->st_mtime,
-                .has_modified = true,
-                .bytes = bytes,
-                .length = length,
-                .mapped = length != 0,
-            };
-            pp->data_count += 1;
+            arena_release(&arenas->columns[i]);
         }
-        pp->ticks[PP_PHASE_READ] += pp->options.timing ? __rdtsc() - start : 0;
+        arena_release(&arenas->arena);
+        arena_release(&arenas->bytes);
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
+    {
+        arena_release(&cache->arrays[i]);
+    }
+    arena_release(&cache->path_arena);
+    *cache = (FileCache){ 0 };
+}
+
+// The arenas lane `lane` prepares records into, reserved the first time. Reserving takes the process's memory map lock,
+// which the lanes of a group are better off taking one after another: c_files.c reserves them before its lanes start.
+static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
+{
+    FileCacheArenas* result = &cache->lanes[lane];
+    if (result->arena.base == 0)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(result->columns); i += 1)
+        {
+            result->columns[i] = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+        }
+        result->arena = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+        result->bytes = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
     }
     return result;
+}
+
+// The hash of a file's identity, for the identity table: wyhash's mixing of the device and the inode.
+static uint64_t file_cache_identity_hash(uint64_t device, uint64_t inode)
+{
+    uint64_t x = (device * BUSTER_INTERN_SECRET0) ^ inode;
+    x = (x ^ (x >> 32)) * BUSTER_INTERN_SECRET1;
+    return x ^ (x >> 29);
+}
+
+// The record of the file with this identity, or BUSTER_PP_NONE.
+static uint32_t file_cache_find_identity(const FileCache* cache, uint64_t device, uint64_t inode)
+{
+    uint32_t slot = (uint32_t)file_cache_identity_hash(device, inode) & cache->identity_slot_mask;
+    uint32_t result = BUSTER_PP_NONE;
+    bool done = false;
+    while (!done)
+    {
+        const uint32_t entry = cache->identity_slots[slot];
+        done = entry == 0 || (cache->records[entry - 1].device == device && cache->records[entry - 1].inode == inode);
+        result = entry != 0 && done ? entry - 1 : result;
+        slot = (slot + 1) & cache->identity_slot_mask;
+    }
+    return result;
+}
+
+// Places record `record` in the identity table, which has room for it.
+static void file_cache_place_identity(FileCache* cache, uint32_t record)
+{
+    uint32_t slot = (uint32_t)file_cache_identity_hash(cache->records[record].device, cache->records[record].inode) & cache->identity_slot_mask;
+    while (cache->identity_slots[slot] != 0)
+    {
+        slot = (slot + 1) & cache->identity_slot_mask;
+    }
+    cache->identity_slots[slot] = record + 1;
+}
+
+// A new record for the file a probe mapped (whose identity no record has): the cache now owns its bytes. Returns the
+// record's index, or BUSTER_PP_NONE (having unmapped the bytes) if the cache has as many records as it can hold.
+static uint32_t file_cache_add_record(FileCache* cache, const FileProbe* probe)
+{
+    uint32_t result = BUSTER_PP_NONE;
+    if (cache->record_count < BUSTER_PP_MAX_FILES)
+    {
+        result = cache->record_count;
+        cache->records[result] = (PPFileData){
+            .device = probe->device,
+            .inode = probe->inode,
+            .modified = probe->modified,
+            .has_modified = true,
+            .bytes = probe->bytes,
+            .length = probe->length,
+            .mapped = probe->mapped,
+            .record = result,
+        };
+        cache->record_count += 1;
+        // The table is never more than half full, and can grow to twice as large as the most records there can be.
+        if (2 * cache->record_count > cache->identity_slot_mask + 1)
+        {
+            const uint32_t slots = 2 * (cache->identity_slot_mask + 1);
+            memset(cache->identity_slots, 0, slots * sizeof(uint32_t));
+            cache->identity_slot_mask = slots - 1;
+            for (uint32_t r = 0; r < cache->record_count; r += 1)
+            {
+                file_cache_place_identity(cache, r);
+            }
+        }
+        else
+        {
+            file_cache_place_identity(cache, result);
+        }
+    }
+    else if (probe->mapped)
+    {
+        munmap((void*)probe->bytes, probe->length);
+    }
+    return result;
+}
+
+// The entry of a path (`length` bytes) with `hash` (intern_hash_bytes's), or 0 if the cache never looked it up. Lanes may
+// find paths at once while no lane adds one.
+static FileCachePath* file_cache_find_path(FileCache* cache, const char* path, uint32_t length, uint64_t hash)
+{
+    uint32_t slot = (uint32_t)hash & cache->path_slot_mask;
+    FileCachePath* result = 0;
+    bool done = false;
+    while (!done)
+    {
+        const uint32_t entry = cache->path_slots[slot];
+        FileCachePath* candidate = entry != 0 ? &cache->paths[entry - 1] : 0;
+        done = entry == 0 || (candidate->hash == hash && candidate->length == length && memcmp(candidate->path, path, length) == 0);
+        result = entry != 0 && done ? candidate : result;
+        slot = (slot + 1) & cache->path_slot_mask;
+    }
+    return result;
+}
+
+// Probes the file system for a regular file at `path` (NUL-terminated): opens it and reads its identity, and unless a
+// record already has that identity, gets its bytes as `how` says. A mapping is read-only: the page cache's pages, which
+// costs neither a copy nor clearing new pages, but each mapping holds the process's memory map lock, on which lanes that
+// map at once queue. A file of up to `read_limit` bytes, or any with FILE_CACHE_READ, is read into `bytes_arena`
+// instead (unless it is null), followed by 64 zero bytes. A file too big for 32-bit positions, or that can't be mapped
+// or read whole, is none. The probe reads the identity table only, so lanes probe at once while no lane adds records;
+// the system calls go to `counts`.
+static void file_cache_probe(const FileCache* cache, const char* path, FileCacheBytes how, uint32_t read_limit, Arena* bytes_arena, FileProbe* probe,
+                             FileCacheCounts* counts)
+{
+    static const uint8_t empty[1] = { 0 };
+    *probe = (FileProbe){ .record = BUSTER_PP_NONE };
+    // Without blocking: opening a FIFO waits for a writer otherwise, also for the walk's speculative probes of includes
+    // no unit reaches. A FIFO, a device or a directory then isn't a regular file, and is none. O_NONBLOCK changes
+    // nothing for a regular file, and O_NOCTTY keeps a terminal from becoming the process's controlling one.
+    const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+    counts->opens += 1;
+    struct stat stats;
+    if (fd >= 0 && fstat(fd, &stats) == 0 && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
+    {
+        probe->device = (uint64_t)stats.st_dev;
+        probe->inode = (uint64_t)stats.st_ino;
+        probe->modified = (int64_t)stats.st_mtime;
+        probe->length = (uint32_t)stats.st_size;
+        probe->record = file_cache_find_identity(cache, probe->device, probe->inode);
+        const uint8_t* bytes = empty;
+        const bool read = bytes_arena != 0 && (how == FILE_CACHE_READ || probe->length <= read_limit);
+        if (probe->record == BUSTER_PP_NONE && probe->length != 0 && !read)
+        {
+            void* mapped = mmap(0, probe->length, PROT_READ, MAP_PRIVATE | (how == FILE_CACHE_MAP_POPULATED ? MAP_POPULATE : 0), fd, 0);
+            bytes = mapped != MAP_FAILED ? mapped : 0;
+            probe->mapped = bytes != 0;
+            counts->maps += 1;
+        }
+        else if (probe->record == BUSTER_PP_NONE && probe->length != 0)
+        {
+            uint8_t* buffer = arena_push(bytes_arena, (uint64_t)probe->length + 64, 64);
+            uint64_t done = 0;
+            int64_t got = 1;
+            while (buffer != 0 && done < probe->length && got > 0)
+            {
+                got = pread(fd, buffer + done, probe->length - done, (off_t)done);
+                done += got > 0 ? (uint64_t)got : 0;
+            }
+            if (buffer != 0 && done == probe->length)
+            {
+                memset(buffer + done, 0, 64);
+            }
+            bytes = buffer != 0 && done == probe->length ? buffer : 0;
+            counts->reads += 1;
+        }
+        probe->bytes = bytes;
+        probe->found = bytes != 0;
+    }
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+}
+
+// Adds a path the cache never looked up, with `hash` (intern_hash_bytes's) and what its probe found: its record is
+// BUSTER_FILE_CACHE_PENDING until file_cache_identify gives it one, or BUSTER_PP_NONE if no file can be read there.
+// Returns 0, leaving the probe's mapping to the caller, if the cache has as many paths as it can hold.
+static FileCachePath* file_cache_add_path(FileCache* cache, const char* path, uint32_t length, uint64_t hash, const FileProbe* probe)
+{
+    FileCachePath* result = 0;
+    char* copy = cache->path_count < BUSTER_FILE_CACHE_MAX_PATHS ? arena_push(&cache->path_arena, (uint64_t)length + 1, 1) : 0;
+    if (copy != 0)
+    {
+        memcpy(copy, path, length);
+        copy[length] = 0;
+        const uint32_t index = cache->path_count;
+        cache->paths[index] = (FileCachePath){
+            .hash = hash,
+            .path = copy,
+            .length = length,
+            .record = probe->found ? BUSTER_FILE_CACHE_PENDING : BUSTER_PP_NONE,
+            .probe = *probe,
+        };
+        cache->path_count += 1;
+        // The table is never more than half full, and can grow to twice as large as the most paths there can be. When it
+        // grows, every path is placed again.
+        const bool grows = 2 * cache->path_count > cache->path_slot_mask + 1;
+        if (grows)
+        {
+            const uint32_t slots = 2 * (cache->path_slot_mask + 1);
+            memset(cache->path_slots, 0, slots * sizeof(uint32_t));
+            cache->path_slot_mask = slots - 1;
+        }
+        for (uint32_t p = grows ? 0 : index; p <= index; p += 1)
+        {
+            uint32_t slot = (uint32_t)cache->paths[p].hash & cache->path_slot_mask;
+            while (cache->path_slots[slot] != 0)
+            {
+                slot = (slot + 1) & cache->path_slot_mask;
+            }
+            cache->path_slots[slot] = p + 1;
+        }
+        result = &cache->paths[index];
+    }
+    return result;
+}
+
+// Gives a path whose probe found a file its record: the record that has the file's identity (unmapping the probe's
+// bytes, if it mapped them, since another path's probe mapped the same file first), or a new one.
+static void file_cache_identify(FileCache* cache, FileCachePath* entry)
+{
+    if (entry->record == BUSTER_FILE_CACHE_PENDING)
+    {
+        const FileProbe* probe = &entry->probe;
+        uint32_t record = probe->record != BUSTER_PP_NONE ? probe->record : file_cache_find_identity(cache, probe->device, probe->inode);
+        if (record != BUSTER_PP_NONE && probe->mapped)
+        {
+            munmap((void*)probe->bytes, probe->length);
+        }
+        else if (record == BUSTER_PP_NONE)
+        {
+            record = file_cache_add_record(cache, probe);
+        }
+        entry->record = record;
+        entry->probe.mapped = false;
+    }
+}
+
+// The record of the file at `path` (`length` bytes, NUL-terminated), probing the file system only the first time the
+// cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full. One lane at a
+// time.
+static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, FileCacheCounts* counts)
+{
+    const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
+    FileCachePath* entry = file_cache_find_path(cache, path, length, hash);
+    if (entry == 0)
+    {
+        FileProbe probe;
+        file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, 0, 0, &probe, counts);
+        entry = file_cache_add_path(cache, path, length, hash, &probe);
+        if (entry != 0)
+        {
+            file_cache_identify(cache, entry);
+        }
+        else if (probe.mapped)
+        {
+            munmap((void*)probe.bytes, probe.length);
+        }
+    }
+    return entry != 0 ? entry->record : BUSTER_PP_NONE;
+}
+
+// Prepares record `record` (pp_prepare_into) unless it is prepared, into lane `lane`'s arenas and with the cache's intern
+// table, which only one lane at a time may write. Adds each phase's TSC ticks to `ticks` unless it is null.
+static PPPrepareStatus file_cache_prepare(FileCache* cache, uint32_t record, uint32_t lane, uint64_t* ticks)
+{
+    PPFileData* data = &cache->records[record];
+    PPPrepareStatus result = PP_PREPARE_DONE;
+    if (!data->prepared)
+    {
+        FileCacheArenas* arenas = file_cache_arenas(cache, lane);
+        result = pp_prepare_into(&cache->prepare, cache->table, arenas->columns, &arenas->arena, data, ticks);
+        cache->prepared_records += result == PP_PREPARE_DONE;
+        cache->prepared_tokens += result == PP_PREPARE_DONE ? data->token_count : 0;
+    }
+    return result;
+}
+
+// How a unit with these options prepares files: trigraphs or not, the literal prefixes its language mode splits, and its
+// kernels. A file cache that units share is made with it (file_cache_initialize).
+static PPPrepare pp_prepare_options(const PPOptions* options)
+{
+    return (PPPrepare){
+        .refine_flags = options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0,
+        .split_kinds = pp_split_kinds(options->language),
+        .assembly = options->assembly,
+        .vectorized = !options->scalar,
+    };
+}
+
+// How this unit prepares files (pp_prepare_options of its options).
+static PPPrepare pp_prepare_config(const Preprocessor* pp)
+{
+    return (PPPrepare){
+        .refine_flags = pp->refine_flags,
+        .split_kinds = pp->split_kinds,
+        .assembly = pp->options.assembly,
+        .vectorized = pp->vectorized,
+    };
+}
+
+// This unit's data of cache record `record`: made the first time the unit names the record's file, with the record's
+// bytes but nothing prepared yet (pp_prepare_data copies that when the unit first enters the file). Returns
+// BUSTER_PP_NONE if the unit has as many files as it can hold.
+static uint32_t pp_data_of_record(Preprocessor* pp, uint32_t record)
+{
+    uint32_t result = pp->record_data[record] - 1;
+    if (pp->record_data[record] == 0 && pp->data_count < BUSTER_PP_MAX_FILES)
+    {
+        const PPFileData* shared = &pp->cache->records[record];
+        result = pp->data_count;
+        pp->datas[result] = (PPFileData){
+            .device = shared->device,
+            .inode = shared->inode,
+            .modified = shared->modified,
+            .has_modified = shared->has_modified,
+            .bytes = shared->bytes,
+            .length = shared->length,
+            .record = record,
+        };
+        pp->data_count += 1;
+        pp->record_data[record] = result + 1;
+    }
+    return result;
+}
+
+// A unit's data of a cache record takes what the record has prepared.
+static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
+{
+    data->token_count = record->token_count;
+    data->kinds = record->kinds;
+    data->starts = record->starts;
+    data->values = record->values;
+    data->space = record->space;
+    data->directive_count = record->directive_count;
+    data->directive_hash = record->directive_hash;
+    data->directive_end = record->directive_end;
+    data->directive_kind = record->directive_kind;
+    data->directive_next = record->directive_next;
+    data->guard = record->guard;
+    data->unterminated_comment = record->unterminated_comment;
+    data->prepared = true;
+}
+
+// Prepares a file this unit enters for the first time: one it made (the predefines, the command line) into its own
+// arenas, and any other through the file cache, which prepares each file once for every unit (file_cache_prepare) and
+// whose record the unit's data then copies. Diagnoses a file that can't be prepared, and returns false.
+static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path)
+{
+    uint64_t* ticks = pp->options.timing ? pp->ticks : 0;
+    PPPrepareStatus status;
+    if (data->record == BUSTER_PP_NONE)
+    {
+        const PPPrepare prepare = pp_prepare_config(pp);
+        status = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, data, ticks);
+    }
+    else
+    {
+        status = file_cache_prepare(pp->cache, data->record, lane_index(), ticks);
+        if (status == PP_PREPARE_DONE)
+        {
+            pp_copy_prepared(data, &pp->cache->records[data->record]);
+        }
+    }
+    if (status == PP_PREPARE_DONE)
+    {
+        pp->input_tokens += data->token_count;
+    }
+    else if (status == PP_PREPARE_NO_MEMORY)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "%s: out of memory", path);
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "%s: can't tokenize (%s)", path, status == PP_PREPARE_TOO_BIG ? "too big" : "out of memory");
+    }
+    return status == PP_PREPARE_DONE;
 }
 
 // Doubles the path table and places every path again. The table starts small and doubles when it is half full, so
@@ -2218,8 +2773,9 @@ static void pp_grow_file_slots(Preprocessor* pp)
     }
 }
 
-// The record of `path` (`length` bytes, not NUL-terminated): looked up by name, and opened the first time. Its data is
-// BUSTER_PP_NONE if there is no regular file by that name. Returns BUSTER_PP_NONE if memory runs out.
+// This unit's record of `path` (`length` bytes, not NUL-terminated): looked up by name, and the first time through the
+// file cache (file_cache_lookup_path), which probes the file system only for a path it never looked up. Its data is
+// BUSTER_PP_NONE if no file can be read there. Returns BUSTER_PP_NONE if memory runs out.
 static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t length, uint8_t system)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
@@ -2256,17 +2812,10 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
             {
                 directory_length = path[i] == '/' ? i : directory_length;
             }
-            uint32_t data = BUSTER_PP_NONE;
-            const int fd = open(copy, O_RDONLY | O_CLOEXEC);
-            struct stat stats;
-            if (fd >= 0 && fstat(fd, &stats) == 0 && S_ISREG(stats.st_mode))
-            {
-                data = pp_read_data(pp, fd, &stats);
-            }
-            if (fd >= 0)
-            {
-                close(fd);
-            }
+            const uint64_t start = pp->options.timing ? __rdtsc() : 0;
+            const uint32_t record = file_cache_lookup_path(pp->cache, copy, length, &pp->probes);
+            const uint32_t data = record != BUSTER_PP_NONE ? pp_data_of_record(pp, record) : BUSTER_PP_NONE;
+            pp->ticks[PP_PHASE_READ] += pp->options.timing ? __rdtsc() - start : 0;
             result = pp->file_count;
             pp->files[result] = (PPFile){
                 .path = copy,
@@ -2286,58 +2835,208 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
     return result;
 }
 
-// Finds the file an include names, `name` in `#include "name"` or (`angled`) `#include <name>`: from the includer's
-// directory (quoted only), then the search directories (the quoted ones only for a quoted name), or for #include_next
-// (`next`) from the directory after the one the includer's inclusion was found in (`includer_search`). Returns the
-// PPFile, or BUSTER_PP_NONE if no file has the name; `*found_in` gets the search directory it was found in, or
-// BUSTER_PP_NONE (the includer's directory, or an absolute path).
+// What includes a file, for the search of a header it includes: the path the includer was found by (whose directory a
+// quoted name is looked for in first) and how it was found (its system level), or `present` false for no file.
+typedef struct PPIncluder PPIncluder;
+struct PPIncluder
+{
+    const char* path;
+    // The length of the path's directory part, or BUSTER_PP_NONE if it has none (the directory is then ".").
+    uint32_t directory_length;
+    uint8_t system;
+    bool present;
+};
+
+// What candidate `index` of an include's search is (pp_include_candidate).
+typedef enum PPCandidate
+{
+    // A path to look for the header at, in `path`.
+    PP_CANDIDATE_PATH,
+    // No path: the directory and the name together are too long for one.
+    PP_CANDIDATE_SKIP,
+    // There are no more candidates.
+    PP_CANDIDATE_END,
+} PPCandidate;
+
+// Candidate `index` (from 0) of the search for the file an include names, `name` in `#include "name"` or (`angled`)
+// `#include <name>`: an absolute name itself; else the includer's directory (quoted only), then the search directories
+// (the quoted ones only for a quoted name), or for #include_next (`next`) the directories after the one the includer's
+// inclusion was found in (`includer_search`). For a path, writes it to `path` (PATH_MAX bytes, not NUL-terminated),
+// its length, the system level a file found there has, and the search directory it is in (BUSTER_PP_NONE for the
+// includer's directory or an absolute path). pp_find_include and the run-ahead (c_files.c) both go through the
+// candidates in order, so that they look at the same paths.
+static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* name, uint32_t length, bool angled, bool next, const PPIncluder* includer,
+                                        uint32_t includer_search, uint32_t index, char* path, uint32_t* path_length, uint8_t* system, uint32_t* directory)
+{
+    PPCandidate result = PP_CANDIDATE_END;
+    *directory = BUSTER_PP_NONE;
+    if (length != 0 && length < PATH_MAX && name[0] == '/')
+    {
+        // An absolute path: its record, if a file is there (a record is kept for a missing one too).
+        if (index == 0)
+        {
+            memcpy(path, name, length);
+            *path_length = length;
+            *system = BUSTER_PP_USER_FILE;
+            result = PP_CANDIDATE_PATH;
+        }
+    }
+    else if (length != 0 && length < PATH_MAX)
+    {
+        const bool resumes = next && includer->present && includer_search != BUSTER_PP_NONE;
+        const bool local = !resumes && !angled && includer->present;
+        const uint32_t start = resumes ? includer_search + 1 : angled ? pp->angled_first : 0;
+        if (local && index == 0)
+        {
+            // The includer's directory: the directory part of its path as it was found, or "." for a path without one.
+            const char* directory_path = includer->directory_length != BUSTER_PP_NONE ? includer->path : ".";
+            const uint32_t directory_length = includer->directory_length != BUSTER_PP_NONE ? includer->directory_length : 1;
+            result = PP_CANDIDATE_SKIP;
+            if ((uint64_t)directory_length + 1 + length < PATH_MAX)
+            {
+                memcpy(path, directory_path, directory_length);
+                path[directory_length] = '/';
+                memcpy(path + directory_length + 1, name, length);
+                *path_length = directory_length + 1 + length;
+                *system = includer->system;
+                result = PP_CANDIDATE_PATH;
+            }
+        }
+        else
+        {
+            const uint64_t i = (uint64_t)start + index - (local ? 1 : 0);
+            if (i < pp->directory_count)
+            {
+                const uint32_t directory_length = pp->directory_lengths[i];
+                result = PP_CANDIDATE_SKIP;
+                if ((uint64_t)directory_length + 1 + length < PATH_MAX)
+                {
+                    memcpy(path, pp->directories[i], directory_length);
+                    path[directory_length] = '/';
+                    memcpy(path + directory_length + 1, name, length);
+                    *path_length = directory_length + 1 + length;
+                    *system = pp->directory_system[i];
+                    *directory = (uint32_t)i;
+                    result = PP_CANDIDATE_PATH;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// Finds the file an include names, looking at each of its search's candidates in turn (pp_include_candidate) until a
+// file is at one. Returns the PPFile, or BUSTER_PP_NONE if no file has the name; `*found_in` gets the search directory
+// it was found in, or BUSTER_PP_NONE (the includer's directory, or an absolute path).
 static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t length, bool angled, bool next, uint32_t includer, uint32_t includer_search,
                                 uint32_t* found_in)
 {
     char path[PATH_MAX];
+    const PPFile* from = includer != BUSTER_PP_NONE ? &pp->files[includer] : 0;
+    PPIncluder source = { 0 };
+    if (from != 0)
+    {
+        source = (PPIncluder){ .path = from->path, .directory_length = from->directory_length, .system = from->system, .present = true };
+    }
     uint32_t result = BUSTER_PP_NONE;
     *found_in = BUSTER_PP_NONE;
-    if (length != 0 && length < PATH_MAX && name[0] == '/')
+    PPCandidate candidate = PP_CANDIDATE_SKIP;
+    for (uint32_t index = 0; result == BUSTER_PP_NONE && candidate != PP_CANDIDATE_END; index += 1)
     {
-        // An absolute path: its record, if a file is there (a record is kept for a missing one too).
-        const uint32_t candidate = pp_lookup_path(pp, (const char*)name, length, BUSTER_PP_USER_FILE);
-        result = candidate != BUSTER_PP_NONE && pp->files[candidate].data != BUSTER_PP_NONE ? candidate : BUSTER_PP_NONE;
+        uint32_t path_length = 0;
+        uint8_t system = 0;
+        uint32_t directory = BUSTER_PP_NONE;
+        candidate = pp_include_candidate(pp, name, length, angled, next, &source, includer_search, index, path, &path_length, &system, &directory);
+        if (candidate == PP_CANDIDATE_PATH)
+        {
+            const uint32_t file = pp_lookup_path(pp, path, path_length, system);
+            result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE ? file : BUSTER_PP_NONE;
+            *found_in = result != BUSTER_PP_NONE ? directory : BUSTER_PP_NONE;
+        }
     }
-    else if (length != 0 && length < PATH_MAX)
+    return result;
+}
+
+// The forms of an include's header name (pp_literal_header_name).
+typedef enum PPHeaderForm
+{
+    // `<...>`, or a string literal, first on the line: the name is known without expanding the line.
+    PP_HEADER_LITERAL,
+    // Anything else: the line must be expanded first, and then be one of the literal forms.
+    PP_HEADER_COMPUTED,
+    // An empty line, `<` without its `>`, or a name longer than the room for it.
+    PP_HEADER_INVALID,
+} PPHeaderForm;
+
+// The header name of directive d, an #include, #include_next or #import of a prepared file: `<...>` read from the
+// source, up to the '>' on the line, or a string literal, both without line splices (translation phase 2 removed them).
+// For a literal form, writes the name to `name` (`capacity` bytes) and its length, whether it is angled, and whether
+// tokens follow it on the line (`*extra`), which clang warns about and reads as they are (CheckEndOfDirective).
+// `scratch` holds the string literal's spelling while its splices are removed (room for the token's bytes).
+static PPHeaderForm pp_literal_header_name(const PPFileData* data, uint32_t d, uint32_t refine_flags, uint8_t* name, uint32_t capacity, uint32_t* length, bool* angled,
+                                           bool* extra, Arena* scratch)
+{
+    const uint32_t hash = data->directive_hash[d];
+    const uint32_t end = data->directive_end[d];
+    const uint32_t first = hash + 2;
+    PPHeaderForm result = PP_HEADER_INVALID;
+    *length = 0;
+    *angled = false;
+    *extra = false;
+    if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_LESS)
     {
-        uint32_t start = angled ? pp->angled_first : 0;
-        const PPFile* from = includer != BUSTER_PP_NONE ? &pp->files[includer] : 0;
-        if (next && from != 0 && includer_search != BUSTER_PP_NONE)
+        // The lexer doesn't make header names: read <...> from the source, up to the '>' on the line, through the scalar
+        // lexer's characters, which skip line splices.
+        const uint32_t line_end = end < data->token_count ? data->starts[end] : data->length;
+        const ScalarLexer lexer = {
+            .source = data->bytes,
+            .length = line_end,
+            .trigraphs = (refine_flags & C_TOKENIZER_TRIGRAPHS) != 0,
+            .cplusplus = false,
+        };
+        uint64_t p = data->starts[first] + 1;
+        bool closed = false;
+        bool line_ended = false;
+        while (!closed && !line_ended && p < line_end && *length < capacity)
         {
-            start = includer_search + 1;
-        }
-        else if (!angled && from != 0)
-        {
-            // The includer's directory: the directory part of its path as it was found, or "." for a path without one.
-            const char* directory = from->directory_length != BUSTER_PP_NONE ? from->path : ".";
-            const uint32_t directory_length = from->directory_length != BUSTER_PP_NONE ? from->directory_length : 1;
-            if ((uint64_t)directory_length + 1 + length < PATH_MAX)
+            uint64_t size;
+            uint64_t char_start;
+            const int32_t c = get_char(&lexer, p, &size, &char_start);
+            closed = c == '>';
+            line_ended = c == '\n' || c == '\r' || c == BUSTER_LEX_END_OF_FILE;
+            if (!closed && !line_ended)
             {
-                memcpy(path, directory, directory_length);
-                path[directory_length] = '/';
-                memcpy(path + directory_length + 1, name, length);
-                const uint32_t candidate = pp_lookup_path(pp, path, directory_length + 1 + length, from->system);
-                result = candidate != BUSTER_PP_NONE && pp->files[candidate].data != BUSTER_PP_NONE ? candidate : BUSTER_PP_NONE;
+                name[*length] = (uint8_t)c;
+                *length += 1;
             }
+            p += size != 0 ? size : 1;
         }
-        for (uint32_t i = start; result == BUSTER_PP_NONE && i < pp->directory_count; i += 1)
+        result = closed ? PP_HEADER_LITERAL : PP_HEADER_INVALID;
+        *angled = closed;
+        // A token after the '>'.
+        *extra = closed && end > first + 1 && data->starts[end - 1] >= p;
+    }
+    else if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_STRING_LITERAL)
+    {
+        *extra = first + 1 < end;
+        // The string literal without its line splices.
+        const uint32_t start = data->starts[first];
+        const uint32_t stop = data->values[first];
+        const uint64_t mark = scratch->length;
+        uint8_t* buffer = arena_push(scratch, (uint64_t)(stop - start) + 1, 1);
+        const uint8_t* spelling = 0;
+        const uint32_t spelled = buffer != 0 ? pp_remove_splices(data->bytes + start, stop - start, refine_flags, buffer, &spelling) : 0;
+        if (spelled >= 2 && spelled - 2 < capacity && spelling[0] == '"')
         {
-            const uint32_t directory_length = pp->directory_lengths[i];
-            if ((uint64_t)directory_length + 1 + length < PATH_MAX)
-            {
-                memcpy(path, pp->directories[i], directory_length);
-                path[directory_length] = '/';
-                memcpy(path + directory_length + 1, name, length);
-                const uint32_t candidate = pp_lookup_path(pp, path, directory_length + 1 + length, pp->directory_system[i]);
-                result = candidate != BUSTER_PP_NONE && pp->files[candidate].data != BUSTER_PP_NONE ? candidate : BUSTER_PP_NONE;
-                *found_in = result != BUSTER_PP_NONE ? i : BUSTER_PP_NONE;
-            }
+            *length = spelled - 2;
+            memcpy(name, spelling + 1, *length);
+            result = PP_HEADER_LITERAL;
         }
+        arena_pop_to(scratch, mark);
+    }
+    else if (first < end)
+    {
+        result = PP_HEADER_COMPUTED;
     }
     return result;
 }
@@ -3575,7 +4274,8 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
-    count = count > 0 ? pp_lex_for_mode(pp, bytes, length, kinds, starts, ends, count, false) : count;
+    const PPPrepare mode = pp_prepare_config(pp);
+    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, count, false) : count;
     *comment = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
     count -= *comment;
     uint32_t result = count >= 0 && pp_room(pp, into, (uint32_t)count) ? (uint32_t)count : BUSTER_PP_NONE;
@@ -3690,7 +4390,8 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             // As the mode lexes it (pp_lex_for_mode): a prefix or a digit separator it doesn't have makes two tokens, and
             // in assembly '$' is punctuation (pp_split_dollars), so `$ ## x` gives two tokens. A '/' and a '*' make no
             // token, but an unterminated comment.
-            count = count > 0 ? pp_lex_for_mode(pp, joined, length, kinds, starts, ends, count, false) : count;
+            const PPPrepare mode = pp_prepare_config(pp);
+            count = count > 0 ? pp_lex_for_mode(&mode, joined, length, kinds, starts, ends, count, false) : count;
             valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_is_unterminated_comment(joined, kinds[0], 0);
             kind = valid ? kinds[0] & 0x7F : kind;
         }
@@ -6965,13 +7666,12 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     uint8_t name[PATH_MAX];
     uint32_t length = 0;
     bool angled = false;
-    bool literal = false;
-    uint32_t after = end;
     bool started = false;
-    const uint32_t first = hash + 2;
-    const bool valid = pp_read_header_name(pp, data, first, end, name, sizeof(name), &length, &angled, &literal, &after);
-    const bool extra = valid && after < end;
-    if (!literal && first < end)
+    bool extra = false;
+    Scratch scratch = scratch_begin(0);
+    const PPHeaderForm form = pp_literal_header_name(data, d, pp->refine_flags, name, sizeof(name), &length, &angled, &extra, scratch.arena);
+    scratch_end(scratch);
+    if (form == PP_HEADER_COMPUTED)
     {
         // A computed include: the line expanded, then a string literal or <...> from its tokens, and one token more,
         // after which clang reads the line as it is (pp_check_limit).
@@ -6985,14 +7685,14 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
             .location = location,
             .limit = 2,
         };
-        started = pp_copy_line(pp, context, first, end) && pp_start_capture(pp, capture, line, pp->arguments.count, location);
+        started = pp_copy_line(pp, context, hash + 2, end) && pp_start_capture(pp, capture, line, pp->arguments.count, location);
         pp->arguments.count = started ? pp->arguments.count : line;
     }
-    if (!valid && !started)
+    if (form != PP_HEADER_LITERAL && !started)
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "expected \"FILENAME\" or <FILENAME>");
     }
-    else if (valid)
+    else if (form == PP_HEADER_LITERAL)
     {
         if (extra)
         {
@@ -10740,7 +11440,7 @@ static uint32_t pp_virtual_file(Preprocessor* pp, const char* name, const char* 
         memcpy(bytes, text, length);
         memset(bytes + length, 0, 64);
         const uint32_t data = pp->data_count;
-        pp->datas[data] = (PPFileData){ .device = 0, .inode = UINT64_MAX - data, .bytes = bytes, .length = length };
+        pp->datas[data] = (PPFileData){ .device = 0, .inode = UINT64_MAX - data, .bytes = bytes, .length = length, .record = BUSTER_PP_NONE };
         pp->data_count += 1;
         result = pp->file_count;
         pp->files[result] = (PPFile){
@@ -10888,9 +11588,10 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->diagnostic_include_range = BUSTER_PP_NONE;
     pp->options = *options;
     pp->table = table;
-    pp->vectorized = !options->scalar;
-    pp->refine_flags = options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0;
-    pp->split_kinds = pp_split_kinds(options->language);
+    const PPPrepare prepare = pp_prepare_options(options);
+    pp->vectorized = prepare.vectorized;
+    pp->refine_flags = prepare.refine_flags;
+    pp->split_kinds = prepare.split_kinds;
     pp->arena = arena_reserve(BUSTER_PP_ARENA_BYTES);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {
@@ -10904,6 +11605,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
                   pp_tokens_reserve(&pp->captures, BUSTER_PP_MAX_STACK_TOKENS) && pp_tokens_reserve(&pp->expansions, BUSTER_PP_MAX_STACK_TOKENS);
     pp->ranges = pp_array(pp, BUSTER_PP_MAX_RANGES, sizeof(PPRange));
     pp->datas = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(PPFileData));
+    pp->record_data = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
     pp->files = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(PPFile));
     pp->file_slots = pp_array(pp, BUSTER_PP_FILE_SLOTS, sizeof(uint32_t));
     pp->file_slot_mask = BUSTER_PP_INITIAL_FILE_SLOTS - 1;
@@ -10946,7 +11648,21 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         }
         result = result && pp->history != 0 && pp->substitutions != 0 && pp->generated != 0 && pp->history_sources != 0 && pp->history_runs != 0;
     }
-    result = result && pp->ranges != 0 && pp->datas != 0 && pp->files != 0 && pp->file_slots != 0 && pp->directories != 0 && pp->directory_lengths != 0 &&
+    // The file cache: the options', made for the same language mode and intern table, or one of the unit's own.
+    pp->cache = options->files;
+    if (pp->cache == 0)
+    {
+        pp->cache = arena_push(&pp->arena, sizeof(FileCache), 64);
+        pp->owns_cache = pp->cache != 0;
+        result = result && pp->cache != 0 && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
+    }
+    else if (pp->cache->table != table || pp->cache->prepare.refine_flags != pp->refine_flags || pp->cache->prepare.split_kinds != pp->split_kinds ||
+             pp->cache->prepare.assembly != (bool)options->assembly)
+    {
+        fprintf(stderr, "error: the file cache was made for another language mode or intern table\n");
+        result = false;
+    }
+    result = result && pp->ranges != 0 && pp->datas != 0 && pp->record_data != 0 && pp->files != 0 && pp->file_slots != 0 && pp->directories != 0 && pp->directory_lengths != 0 &&
              pp->directory_system != 0 && pp->line_directives != 0 && pp->expansion_starts != 0 && pp->silent_pragmas != 0 && pp->embeds != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->poisoned != 0 && pp->macros != 0 && pp->items != 0 &&
              pp->parameters != 0 && pp->pushed_names != 0 && pp->pushed_macros != 0 && pp->contexts != 0 && pp->conditionals != 0 && pp->invocations != 0 &&
              pp->argument_records != 0 && pp->capture_frames != 0 && pp->scratch[0].base != 0 && pp->scratch[1].base != 0;
@@ -11064,12 +11780,10 @@ static void pp_release(Preprocessor* pp)
     pp_tokens_release(&pp->arguments);
     pp_tokens_release(&pp->captures);
     pp_tokens_release(&pp->expansions);
-    for (uint32_t d = 0; d < pp->data_count; d += 1)
+    // The cache's records own the files' mappings, and a unit's own cache is in its arena.
+    if (pp->owns_cache)
     {
-        if (pp->datas[d].mapped)
-        {
-            munmap((void*)pp->datas[d].bytes, pp->datas[d].length);
-        }
+        file_cache_release(pp->cache);
     }
     arena_release(&pp->scratch[0]);
     arena_release(&pp->scratch[1]);
