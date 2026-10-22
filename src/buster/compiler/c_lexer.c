@@ -398,10 +398,10 @@ typedef enum CTokenizerFlags
     C_TOKENIZER_NO_DOLLARS = 4,
     // Lex without digraphs, as clang's `-std=c89` and `-fno-digraphs` do: `<:`, `:>`, `<%`, `%>` and `%:` are two
     // punctuators each (`<%=` is `<` and `%=`, and `%:%:` four tokens).
-    C_TOKENIZER_NO_DIGRAPHS = 8,
+    C_TOKENIZER_NO_DIGRAPHS = 32,
     // Lex without `//` comments, as clang's `-E` does in `-std=c89` and `-std=iso9899:199409`: `//` is two `/`, and what
     // follows them on the line is lexed (`a //* c */ b` is `a`, `/` and `b`).
-    C_TOKENIZER_NO_LINE_COMMENTS = 16,
+    C_TOKENIZER_NO_LINE_COMMENTS = 64,
 } CTokenizerFlags;
 
 typedef enum CTokenizerError
