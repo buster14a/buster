@@ -108,7 +108,9 @@ about 16 cycles per output token, next to 2 ms for lexing every input and
 refinement 3.6 ms, and directive tables and the main loop 5.7 ms, 2.8 times
 the 2 ms proposed. Each phase's time includes the kernel clearing the fresh
 pages it writes, 13% of the samples (see "Where the time goes"). "Next steps"
-lists what would close the gap.
+lists what would close the gap. Since then, #116's budget work has brought
+refinement to 1.67 ms and the whole run to 10.0 ms (measured on 2026-10-22,
+`docs/c-refinement.md`).
 
 ## Object-macro eligibility cache experiment (#110)
 
@@ -812,7 +814,7 @@ differ by up to 1% from code placement alone.
 
 | Piece | Vectorized design | Scalar twin and rare cases | 9700X comparison |
 | --- | --- | --- | --- |
-| Refinement (#116) | Pass A per 64 tokens; pass B batches of 64 identifiers (`docs/c-refinement.md`) | `refine_tokens_scalar`; spliced, UCN and long identifiers | 4.2 times the scalar twin on `sqlite3.c` |
+| Refinement (#116) | Pass A per 64 tokens; pass B batches of 64 identifiers (`docs/c-refinement.md`) | `refine_tokens_scalar`; spliced, UCN and long identifiers | 6.2 times the scalar twin on `sqlite3.c` (4.2 before #116's budget work) |
 | Directive scan (#118) | A compare of 64 kinds with `#` and the start-of-line bit | Token at a time | Part of the directive tables' 1.9%; 0.62 cycles per token on the C library corpus, against 3.99 |
 | Directive tables (#118) | The scan, the kinds and line ends, the pairing below, and the notes only where the pairing finds a file can have any | The stack, and the notes for every file | 2.31 cycles per token and 51 per directive on the C library corpus (`benchmark-preprocessor --tables`), against 6.50 and 143 |
 | Conditional pairing (#118) | Depth as a prefix sum, pairing as nearest smaller values by pointer jumping, 32 conditionals at a time | The stack; files with a continuation too many | 16% faster on a file of 36,868 conditionals; within noise on `sqlite3.c` |
@@ -1242,7 +1244,12 @@ cleared once and reused.
   about their own benchmarks' speeds here: `tokenize_c`'s samples come to 7.8
   cycles per input token and `refine_tokens`' to about 12, against 7.89 and
   10.50 in their benchmarks. So their next steps apply (`docs/c-lexer.md`,
-  `docs/c-refinement.md`).
+  `docs/c-refinement.md`). Refinement has since come to 1.67 ms of a 10.0 ms
+  run. Its phase takes 0.12 ms more than its kernel does with everything in
+  the caches. The columns, the source and the table come from memory, because
+  a whole file is lexed before it is refined. A lexer that hands over a block
+  at a time would keep them in the caches (`docs/c-refinement.md`, "Next
+  steps").
 - **Streaming to the parser.** The first version preprocesses a whole
   translation unit before the parser reads it. Streaming needs a rule for when
   a block of output is final, since a function-like macro name at the end of an

@@ -10,14 +10,15 @@
 //
 // main.c includes this file after c_lexer.c, lane.c, c_intern.c and c_refine.c, and calls run_refinement_tests for
 // that command. The checks, in this order:
-//   - hash: intern_hash_bytes, and intern_hash_vector up to 64 bytes, agree with intern_hash_bytes_scalar on random
-//     spellings of every length from 0 to 200 bytes.
+//   - hash: intern_hash_bytes, intern_hash_vector up to 64 bytes, and intern_hash_vectors4_short up to 32 (four at a
+//     time, with their first lanes), agree with intern_hash_bytes_scalar on random spellings of every length from 0 to
+//     200 bytes.
 //   - structured hashes: long spellings made of repeated or swapped 64-byte chunks and 16-byte lanes, and 32-byte ones
 //     whose two lanes change in bits their rotations line up, all hash differently; and a bit flipped in one lane with
 //     the bit its rotation lines up with in another always changes the hash.
 //   - names: every predefined name has its C_NAME id and spelling, and is a keyword in exactly the language modes
 //     clang makes it one in (every name in every mode from c89 to gnu23).
-//   - table: random spellings of 1 to 200 bytes, enough to grow the table seven times, get ids in the order they are
+//   - table: random spellings of 1 to 200 bytes, enough to grow the table three times, get ids in the order they are
 //     first added, and the same id again; absent ones aren't found.
 //   - fixtures: the boundary cases of docs/c-refinement.md, each with the leading-space bits and identifier equalities
 //     it must have, at each of the 64 misalignments from a cache line: line splices between tokens (with and without
@@ -460,6 +461,11 @@ static bool refine_check_hash(uint64_t* random)
 {
     uint8_t bytes[BUSTER_REFINE_TEST_HASH_LENGTHS] __attribute__((aligned(64)));
     uint64_t failures = 0;
+    // The last four spellings of up to 32 bytes, for intern_hash_vectors4_short: their vectors, lengths and hashes.
+    __m256i short_group[4];
+    uint32_t short_lengths[16] __attribute__((aligned(64))) = { 0 };
+    uint64_t short_hashes[4];
+    uint32_t short_grouped = 0;
     for (uint64_t round = 0; round < BUSTER_REFINE_TEST_HASH_ROUNDS; round += 1)
     {
         const uint32_t length = (uint32_t)(round % BUSTER_REFINE_TEST_HASH_LENGTHS);
@@ -473,6 +479,29 @@ static bool refine_check_hash(uint64_t* random)
         {
             const __m512i vector = _mm512_maskz_loadu_epi8(length >= 64 ? ~0ull : _bzhi_u64(~0ull, length), bytes);
             failures += intern_hash_vector(vector, length) != expected;
+        }
+        if (length <= 32)
+        {
+            short_group[short_grouped] = _mm256_maskz_loadu_epi8(_bzhi_u32(~0u, length), bytes);
+            short_lengths[4 * short_grouped] = length;
+            short_hashes[short_grouped] = expected;
+            short_grouped += 1;
+            if (short_grouped == 4)
+            {
+                uint64_t hashes[8];
+                __m128i firsts[4];
+                __m512i first_lanes;
+                const __m512i ab = _mm512_inserti64x4(_mm512_castsi256_si512(short_group[0]), short_group[1], 1);
+                const __m512i cd = _mm512_inserti64x4(_mm512_castsi256_si512(short_group[2]), short_group[3], 1);
+                _mm512_storeu_si512(hashes, intern_hash_vectors4_short(ab, cd, _mm512_load_si512(short_lengths), intern_hash_zero_lanes(), &first_lanes));
+                _mm512_storeu_si512(firsts, first_lanes);
+                for (uint32_t i = 0; i < 4; i += 1)
+                {
+                    failures += hashes[2 * i] != short_hashes[i];
+                    failures += _mm_movemask_epi8(_mm_cmpeq_epi8(firsts[i], _mm256_castsi256_si128(short_group[i]))) != 0xFFFF;
+                }
+                short_grouped = 0;
+            }
         }
     }
     printf("hash: %lu differences in %u spellings of 0 to %u bytes\n", (unsigned long)failures, BUSTER_REFINE_TEST_HASH_ROUNDS, BUSTER_REFINE_TEST_HASH_LENGTHS - 1);
