@@ -88,7 +88,7 @@ jobs:
         # The job hook holds the shared lock. Preserve three separate processes, with each process interleaving
         # its experiments. These observations are informational; counter/protocol failures still fail the step.
         run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          cpu=2
           sha256sum build/compiler src/buster/compiler/x86_zen5.c src/buster/compiler/x86_zen5_measure.c
           for sample in 1 2 3; do
             echo "Zen 5 observation process $sample"
@@ -97,7 +97,7 @@ jobs:
 
       - name: Benchmark Zen 5 cost lookup
         run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          cpu=2
           taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
           taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
           taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
