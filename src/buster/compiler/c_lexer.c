@@ -394,8 +394,9 @@ typedef enum CTokenizerFlags
     C_TOKENIZER_CPLUSPLUS = 2,
     // '$' is punctuation (a C_TOKEN_UNKNOWN token of its own) rather than an identifier and pp-number character, as
     // clang has it with -fno-dollars-in-identifiers and for assembler-with-cpp (its DollarIdents off). The scalar
-    // lexer's alone: c_tokenize gives such a source to it, and c_tokenize_vectorized refuses it.
-    C_TOKENIZER_NO_DOLLARS = 4,
+    // lexer's alone: c_tokenize gives such a source to it, and c_tokenize_vectorized refuses it. 128 keeps it apart from
+    // the flags other branches add (#278's 4, #285's 8 and 16, #292's 32 and 64).
+    C_TOKENIZER_NO_DOLLARS = 128,
     // Lex without digraphs, as clang's `-std=c89` and `-fno-digraphs` do: `<:`, `:>`, `<%`, `%>` and `%:` are two
     // punctuators each (`<%=` is `<` and `%=`, and `%:%:` four tokens).
     C_TOKENIZER_NO_DIGRAPHS = 32,
