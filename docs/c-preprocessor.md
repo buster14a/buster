@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 112 | |
+| The built-in cases (`pp_test_cases`) | 128 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -833,6 +833,15 @@ decides after every argument:
     one, so `-fno-gnu-keywords -fasm` turns them off. `CLanguage.gnu_keywords`
     holds the choice (`c_language_gnu_keywords`), which `__is_identifier` and the
     output's keyword kinds read. C23 keeps `typeof` without them.
+  - Raw strings follow the last `-fraw-string-literals` or
+    `-fno-raw-string-literals`, or the mode: on in GNU modes from C99,
+    including assembly. `R` and `LR` work in every mode with raw strings;
+    `uR`, `UR` and `u8R` need C11. The mode and options reach files, cached
+    files, pastes and scratch text through `PPPrepare.refine_flags`.
+    Raw bodies retain line splices and trigraphs when printed and stringized;
+    `_Pragma`, line file names and `__has_warning` read their bodies. Raw
+    strings cannot supply header names. The printers count newlines in
+    unknown tokens, including an invalid raw delimiter, and keep its spelling.
   - `$` in identifiers and pp-numbers: `-fno-dollars-in-identifiers` makes it
     punctuation in C, as it is in assembly, and `-fdollars-in-identifiers` gives
     assembly's identifiers it back (`pp_dollar_punctuation`, which the file
@@ -866,8 +875,7 @@ decides after every argument:
     `-fdefer-ts`, and `-fzvector` whatever follows it (clang's driver never
     passes `-fno-zvector` on), but in assembly, where clang ignores it;
   - lexing buster doesn't do: `-fno-digraphs`, `-fdigraphs` in `c89` (which
-    clang makes C94, with `__STDC_VERSION__` `199409L`), and
-    `-fraw-string-literals`;
+    clang makes C94, with `__STDC_VERSION__` `199409L`);
   - `-E`'s other modes (`-fdirectives-only`, `-fkeep-system-includes`,
     `-fminimize-whitespace`, `-fuse-line-directives`, `-frewrite-includes` and
     `-frewrite-imports`) and modules (`-fmodules` and
@@ -1236,7 +1244,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 112 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 128 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -1363,7 +1371,7 @@ full-corpus reproduction and frozen CI subset.
     keyword.
   - In each mode, `__has_feature` and `__has_extension` of every name in clang
     23's `Features.def` (251) must give clang's answers.
-- **`-f` options** (#281, `pp_test_option_refusals`). Each of 63 option sets
+- **`-f` options** (#281, `pp_test_option_refusals`). Each of 67 option sets
   must be refused, with a message naming the option, or taken without one: every
   refused family where its last option turns it on, after its `-fno-` form, and
   turned off again; `-fzvector` before `-fno-zvector` and in assembly; digraphs
@@ -1502,9 +1510,11 @@ spellings alone would miss this change (#272).
   `-fno-gnu-inline-asm` and the other options that change clang's answers
   (#281's item 5) don't change ours.
 - `-std=c89` lexes digraphs and `//` comments, neither of which clang's c89
-  has, and the GNU modes lex no raw string literals (`R"x(...)x"`), which
-  clang's do. The `-f` options that would change these are refused
+  has. The `-f` options that would change these are refused
   ("The `-f` options").
+- Invalid raw delimiters and unterminated raw strings still lack Clang's
+  lexer diagnostics. Their token spelling is retained; the malformed input's
+  diagnostic acceptance is separate from the raw-string token model.
 - The printer's spacing differs from clang's in places. It puts a space between
   `<` and `>`, where clang doesn't, and it doesn't indent a line's first token
   to its column. Line markers differ in form but not in what they say: clang

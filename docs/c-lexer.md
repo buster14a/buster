@@ -386,3 +386,29 @@ Discarded, measured the same way (C, C++):
 The A/B harness and `trees/` are as in the second round. Also in the harness directory: `rounds.sh N name...` (N
 interleaved runs and their medians), `stat_remote.sh` (dispatch-stall and misprediction counters per variant) and
 `spills_cpp.sh` (the spill profile on the C++ corpus). Build and run each under `exclusive.sh`.
+
+## GNU C raw strings (#285)
+
+`C_TOKENIZER_RAW_STRINGS` (8) enables `R` and `LR` raw literals in C;
+`C_TOKENIZER_UTF_RAW_STRINGS` (16) adds `uR`, `UR` and `u8R`, whose
+prefixes need C11. C++ keeps its raw literals and user-defined suffixes;
+C never takes a user-defined suffix. The ordinary C chunk specialization
+still has no raw-string check.
+
+The raw specialization checks identifier-start and quote bitstrings in the
+existing rare prefixed-literal branch. It looks three bytes into the next
+chunk for `u8R"`, and hands a chunk containing a raw literal to the scalar
+lexer, which reads its delimiter and body. C99 conservatively detects UTF
+raw prefixes too, then the scalar lexer recognizes their identifier tokens.
+This bounds the extra work to chunks with possible literal prefixes and
+preserves exact scalar/vector token equality.
+
+`test-lexer --raw-strings` and `--raw-strings-c99` cover raw literals,
+near misses, randomized pieces and every placement around 64-byte and
+512-byte boundaries, with guarded pages. `benchmark-lexer` accepts the
+same flags so the specialization can be timed directly. The preprocessor
+covers modes, option order, pasting, stringizing, skipped directives,
+splices/trigraphs, dollar punctuation, `_Pragma`, line names and printers.
+An invalid delimiter containing a line splice pins its verbatim spelling.
+
+Target-host measurements and final validation are recorded below when complete.

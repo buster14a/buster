@@ -751,6 +751,7 @@ int run_c_lexer_benchmark(int argc, char** argv)
 {
     int result = 1;
     CorpusLoader loader = {0};
+    uint32_t raw_flags = 0;
     bool valid_options = true;
     uint64_t path_count = 0;
     for (int i = 1; i < argc; i += 1)
@@ -758,6 +759,14 @@ int run_c_lexer_benchmark(int argc, char** argv)
         if (strcmp(argv[i], "--cplusplus") == 0)
         {
             loader.cplusplus = true;
+        }
+        else if (strcmp(argv[i], "--raw-strings") == 0)
+        {
+            raw_flags = C_TOKENIZER_RAW_STRINGS | C_TOKENIZER_UTF_RAW_STRINGS;
+        }
+        else if (strcmp(argv[i], "--raw-strings-c99") == 0)
+        {
+            raw_flags = C_TOKENIZER_RAW_STRINGS;
         }
         else if (argv[i][0] == '-')
         {
@@ -771,7 +780,7 @@ int run_c_lexer_benchmark(int argc, char** argv)
 
     if (!valid_options || path_count == 0)
     {
-        fprintf(stderr, "usage: %s [--cplusplus] path...\n", argv[0]);
+        fprintf(stderr, "usage: %s [--cplusplus] [--raw-strings|--raw-strings-c99] path...\n", argv[0]);
     }
     else if (!arena_initialize(&loader.memory, BUSTER_BENCHMARK_MEMORY_RESERVE) || !arena_initialize(&loader.sources, BUSTER_BENCHMARK_SOURCES_RESERVE))
     {
@@ -808,7 +817,7 @@ int run_c_lexer_benchmark(int argc, char** argv)
                 .total_bytes = loader.total_bytes,
                 .max_length = loader.max_length,
             };
-            const uint32_t flags = loader.cplusplus ? C_TOKENIZER_CPLUSPLUS : 0;
+            const uint32_t flags = (loader.cplusplus ? C_TOKENIZER_CPLUSPLUS : 0) | raw_flags;
             printf("%lu files, %lu bytes\n", (unsigned long)corpus.count, (unsigned long)corpus.total_bytes);
             uint64_t different = check_corpus(&corpus, &outputs[IMPLEMENTATION_VECTORIZED], &outputs[IMPLEMENTATION_SCALAR], &outputs[IMPLEMENTATION_COUNT], flags);
             if (corpus.total_bytes != 0)

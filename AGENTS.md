@@ -655,7 +655,10 @@ with the scalar lexer token by token on:
 
 `--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces. The
 command prints each check's counts and first differences, and exits with status
-1 if anything fails. The 9700X job's test step runs both modes. On that
+1 if anything fails. `--raw-strings` enables C11's raw prefixes in C,
+and `--raw-strings-c99` enables only `R` and `LR`; both paths check raw
+strings and near misses across chunk and page boundaries. The 9700X job's
+test step runs all four modes. On that
 machine, with `build.sh`'s unoptimized build, the C and C++ runs take about
 5.7 s and 6.1 s. For a longer run:
 
@@ -2449,7 +2452,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 112 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 128 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
