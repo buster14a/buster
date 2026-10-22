@@ -1783,6 +1783,19 @@ static void link_test_place(const Link* link, uint8_t class, uint64_t* offsets, 
 }
 
 // Whether a symbol's name is `text`.
+static bool link_test_named(const Link* link, SymbolId symbol, const char* text);
+
+// The first symbol named `text`, or 0.
+static SymbolId link_test_named_symbol(const Link* link, const char* text)
+{
+    SymbolId result = 0;
+    for (SymbolId symbol = 1; result == 0 && symbol < link->symbols.count; symbol += 1)
+    {
+        result = link_test_named(link, symbol, text) ? symbol : 0;
+    }
+    return result;
+}
+
 static bool link_test_named(const Link* link, SymbolId symbol, const char* text)
 {
     const NameId name = link->symbols.name[symbol];
@@ -2377,14 +2390,98 @@ static void link_test_program_options(LinkProgramOptions* options, uint64_t seed
     options[6].libc = true;
 }
 
+// The shared libraries' sets (LinkProgramOptions.shared): the two that call libc, as libraries, from seeds of their own.
+// The other checks that take test-link's sets bind and write executables, so these are apart.
+#define BUSTER_LINK_TEST_SHARED_PROGRAMS 2
+static const char* const link_test_shared_names[BUSTER_LINK_TEST_SHARED_PROGRAMS] = {
+    "a shared library",
+    "a shared library, many units, without sizes",
+};
+static const char* const link_test_shared_directories[BUSTER_LINK_TEST_SHARED_PROGRAMS] = {
+    "shared-defaults",
+    "shared-units-no-sizes",
+};
+
+static void link_test_shared_options(LinkProgramOptions* options, uint64_t seed, uint32_t functions)
+{
+    LinkProgramOptions sets[BUSTER_LINK_TEST_PROGRAMS];
+    link_test_program_options(sets, seed, functions);
+    for (uint32_t i = 0; i < BUSTER_LINK_TEST_SHARED_PROGRAMS; i += 1)
+    {
+        options[i] = sets[5 + i];
+        options[i].seed = seed + BUSTER_LINK_TEST_PROGRAMS + i;
+        options[i].shared = true;
+    }
+}
+
+// test-link's sets, then the shared libraries', with each one's name and directory: the sets the programs check, the
+// object writer's checks and --print-assembly take.
+#define BUSTER_LINK_TEST_ALL_PROGRAMS (BUSTER_LINK_TEST_PROGRAMS + BUSTER_LINK_TEST_SHARED_PROGRAMS)
+static void link_test_all_options(LinkProgramOptions* options, const char** names, const char** directories, uint64_t seed, uint32_t functions)
+{
+    link_test_program_options(options, seed, functions);
+    link_test_shared_options(options + BUSTER_LINK_TEST_PROGRAMS, seed, functions);
+    for (uint32_t i = 0; i < BUSTER_LINK_TEST_ALL_PROGRAMS; i += 1)
+    {
+        const bool shared = i >= BUSTER_LINK_TEST_PROGRAMS;
+        names[i] = shared ? link_test_shared_names[i - BUSTER_LINK_TEST_PROGRAMS] : link_test_program_names[i];
+        directories[i] = shared ? link_test_shared_directories[i - BUSTER_LINK_TEST_PROGRAMS] : link_test_program_directories[i];
+    }
+}
+
+// What a shared library's position-independent code needs (see link_program.c's orientation comment): no local-exec
+// access; no PC32, PC64, SIZE32 or SIZE64 to a symbol another object may preempt (a global or weak definition of the
+// program's with default visibility); its exports exactly its functions, the workers, buster_mix and
+// buster_library_main; and each FDE pointing at a local symbol.
+static void link_test_shared_rules(LinkTestTally* tally, const Link* link, uint32_t functions, uint64_t index)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    bool local_exec = false;
+    bool preempted = false;
+    bool anchored = true;
+    for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+    {
+        const bool eh_frame = link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME;
+        for (FixupId fixup = link->atoms.fixup_begin[atom]; fixup < link->atoms.fixup_begin[atom] + link->atoms.fixup_count[atom]; fixup += 1)
+        {
+            const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+            const SymbolId target = link->fixups.target[fixup];
+            const uint8_t flags = symbols->flags[target];
+            const bool global = (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
+            const bool preemptible = global && (flags & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT && symbols->source[target] == BUSTER_LINK_SOURCE_PROGRAM;
+            const bool measured =
+                kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64 || kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64;
+            local_exec = local_exec || kind == BUSTER_LINK_FIXUP_TPOFF32;
+            preempted = preempted || (measured && preemptible);
+            anchored = anchored && (!eh_frame || !global);
+        }
+    }
+    link_test_expect(tally, !local_exec, "a shared library without local-exec accesses", index);
+    link_test_expect(tally, !preempted, "no PC32, PC64 or size of a symbol another object may preempt", index);
+    link_test_expect(tally, anchored, "each FDE at a local symbol", index);
+    uint32_t exports = 0;
+    bool functions_only = true;
+    for (SymbolId symbol = 1; symbol < symbols->count; symbol += 1)
+    {
+        const uint8_t flags = symbols->flags[symbol];
+        const bool exported = (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL &&
+                              (flags & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT && symbols->atom[symbol] != 0;
+        exports += exported ? 1 : 0;
+        functions_only = functions_only && (!exported || (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION);
+    }
+    const SymbolId entry = link_test_named_symbol(link, "buster_library_main");
+    link_test_expect(tally, exports == functions + 2 && functions_only && entry != 0, "the exports: the workers, buster_mix and buster_library_main", exports);
+}
+
 static bool link_test_programs(uint64_t seed, uint32_t functions)
 {
     LinkTestTally tally = {
         .check = "programs",
     };
-    LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
-    link_test_program_options(options, seed, functions);
-    const char* const* names = link_test_program_names;
+    LinkProgramOptions options[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* names[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* directories[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    link_test_all_options(options, names, directories, seed, functions);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(options); i += 1)
     {
         LinkProgram program;
@@ -2424,7 +2521,10 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
             const uint32_t sizes = (1u << BUSTER_LINK_FIXUP_SIZE32) | (1u << BUSTER_LINK_FIXUP_SIZE64);
             // The general- and local-dynamic kinds, which only imported objects have.
             const uint32_t imported = (1u << BUSTER_LINK_FIXUP_TLSGD) | (1u << BUSTER_LINK_FIXUP_TLSLD) | (1u << BUSTER_LINK_FIXUP_DTPOFF32);
-            const uint32_t expected = ((1u << BUSTER_LINK_FIXUP_KINDS) - 2) & ~imported & ~(options[i].absolute ? 0 : absolute) & ~(options[i].sizes ? 0 : sizes);
+            // A shared library has no local-exec access.
+            const uint32_t local_exec = options[i].shared ? 1u << BUSTER_LINK_FIXUP_TPOFF32 : 0;
+            const uint32_t expected =
+                ((1u << BUSTER_LINK_FIXUP_KINDS) - 2) & ~imported & ~local_exec & ~(options[i].absolute ? 0 : absolute) & ~(options[i].sizes ? 0 : sizes);
             const uint32_t runtime = (1u << BUSTER_LINK_CLASS_INIT) | (1u << BUSTER_LINK_CLASS_FINI);
             uint32_t classes = 0;
             uint32_t kinds = 0;
@@ -2437,6 +2537,10 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
                 kinds |= 1u << (program.link.fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND);
             }
             link_test_expect(&tally, classes == (((1u << BUSTER_LINK_CLASS_COUNT) - 2) & ~runtime) && kinds == expected, "every class and every kind the options allow", i);
+        }
+        if (generated && options[i].shared)
+        {
+            link_test_shared_rules(&tally, &program.link, options[i].functions, i);
         }
         // The lea of the hexadecimal digits in buster_write_hex, one byte off, which changes every digit printed.
         if (generated && i == 0)
@@ -2717,22 +2821,24 @@ static bool link_test_print_program(const LinkProgram* program, const char* dire
 // link_test_program_directories.
 static bool link_test_print_programs(const char* directory, uint64_t seed, uint32_t functions)
 {
-    LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
-    link_test_program_options(options, seed, functions);
+    LinkProgramOptions options[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* names[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* directories[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    link_test_all_options(options, names, directories, seed, functions);
     bool result = mkdir(directory, 0777) == 0 || errno == EEXIST;
     if (!result)
     {
         fprintf(stderr, "can't make %s\n", directory);
     }
-    for (uint32_t i = 0; result && i < BUSTER_LINK_TEST_PROGRAMS; i += 1)
+    for (uint32_t i = 0; result && i < BUSTER_LINK_TEST_ALL_PROGRAMS; i += 1)
     {
         char path[4096];
-        snprintf(path, sizeof(path), "%s/%s", directory, link_test_program_directories[i]);
+        snprintf(path, sizeof(path), "%s/%s", directory, directories[i]);
         LinkProgram program;
         result = link_program_generate(&program, options[i]);
         if (!result)
         {
-            fprintf(stderr, "%s: %s\n", link_test_program_names[i], program.problem);
+            fprintf(stderr, "%s: %s\n", names[i], program.problem);
         }
         else if (mkdir(path, 0777) != 0 && errno != EEXIST)
         {
@@ -2742,7 +2848,7 @@ static bool link_test_print_programs(const char* directory, uint64_t seed, uint3
         result = result && link_test_print_program(&program, path);
         if (result)
         {
-            printf("%s: %s, %u units\n", path, link_test_program_names[i], options[i].units);
+            printf("%s: %s, %u units\n", path, names[i], options[i].units);
         }
         link_program_release(&program);
     }
