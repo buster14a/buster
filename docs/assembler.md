@@ -71,7 +71,11 @@ before trusted encoding. Addressing is 64-bit base plus index times 1/2/4/8
 plus a signed 32-bit displacement, RIP relative, or absolute displacement;
 FS and GS overrides are supported. An Intel scale can come before or after its
 index (`4*rsi`, as LLVM writes it, or `rsi*4`), and a term can carry a sign
-(`[rax + -8]`). Intel memory can specify `byte` through `zmmword ptr`.
+(`[rax + -8]`); a register term takes only unary pluses (`[rax + +rsi]`). As in
+GNU as, without register prefixes a register's name is never a symbol: in an
+expression (`.quad rsi`, `dword ptr eax`, `[rax + -rsi]`) it is refused as an
+invalid use of a register, and so is a parenthesized one (`(rsi)`), which GNU
+as reads as the register. Intel memory can specify `byte` through `zmmword ptr`.
 Ambiguous memory width is an error. Intel `offset symbol` requests an
 immediate address; a bare symbol in an ordinary operand denotes memory, and in
 a branch its destination, unless a width asks for memory: `call qword ptr
@@ -211,7 +215,8 @@ Fixtures cover immediate/operand boundaries, section changes, expressions,
 labels, relocation addends, branch growth across data/alignment and failures,
 the defects of #235, and code padding of every length to 135 bytes after an
 instruction and after data, which the cross-check compares with GNU as byte
-for byte.
+for byte when GNU as pads as binutils 2.47 does (2.42 orders its long NOPs
+differently; the test says so and keeps its known-byte padding checks).
 The cross-check compares section bytes/properties, symbols and relocations
 with GNU as using the existing object comparator, and links/runs the examples.
 Different ELF file layouts and automatic stack notes are normalized. Existing
