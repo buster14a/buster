@@ -16,10 +16,10 @@
 // token (the tokens of every file the runs prepared) and per output token, each phase's share of the time and its median
 // time (PPPhase: reading, lexing, refining and directive tables; the rest is the main loop with its directives), and what
 // a run did (PPStatistics). With --clang it also times `clang -E -P` with the same options (but --predefines, which is
-// ours) writing to /dev/null, a process per file, the median of as many runs, for scale. --only runs one
-// implementation (for profiles). --embed measures the text -E prints for an #embed's bytes instead
-// (pp_benchmark_embed). Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments are invalid
-// or a run fails.
+// ours, and --buster-headers, which clang gets as the search it makes: pp_clang_arguments) writing to /dev/null, a
+// process per file, the median of as many runs, for scale. --only runs one implementation (for profiles). --embed
+// measures the text -E prints for an #embed's bytes instead (pp_benchmark_embed). Run it pinned to one CPU
+// (taskset -c 2 ...). The exit status is 1 if the arguments are invalid or a run fails, ours or clang's.
 //
 // Layout: the clock and the counters, the passes, the #embed text (pp_benchmark_embed), and run_preprocessor_benchmark.
 
@@ -176,11 +176,13 @@ static bool pp_benchmark_pass(const PPOptions* base, bool scalar, bool no_histor
     return result;
 }
 
-// The wall time of `clang -E -P` with the options on each file, writing to /dev/null.
-static uint64_t pp_benchmark_clang(char** arguments, int argument_count, char** files, int file_count)
+// The wall time of `clang -E -P` with the options on each file, writing to /dev/null, in `*nanoseconds`. Returns whether
+// every run exited with status 0, naming the first that didn't.
+static bool pp_benchmark_clang(char** arguments, int argument_count, char** files, int file_count, uint64_t* nanoseconds)
 {
-    uint64_t result = 0;
-    for (int f = 0; f < file_count; f += 1)
+    bool result = true;
+    *nanoseconds = 0;
+    for (int f = 0; result && f < file_count; f += 1)
     {
         const uint64_t start = pp_benchmark_nanoseconds();
         const pid_t child = fork();
@@ -205,8 +207,18 @@ static uint64_t pp_benchmark_clang(char** arguments, int argument_count, char** 
             _exit(127);
         }
         int status = 0;
-        waitpid(child, &status, 0);
-        result += pp_benchmark_nanoseconds() - start;
+        pid_t waited = -1;
+        do
+        {
+            waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        }
+        while (waited < 0 && child > 0 && errno == EINTR);
+        *nanoseconds += pp_benchmark_nanoseconds() - start;
+        result = waited == child && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (!result)
+        {
+            fprintf(stderr, "clang -E failed on %s (wait status %d)\n", files[f], status);
+        }
     }
     return result;
 }
@@ -359,11 +371,24 @@ int run_preprocessor_benchmark(int argc, char** argv)
         memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
         with_input[passed_count] = files[0];
     }
+    // clang's arguments: ours but --predefines, and --buster-headers as the search it makes (pp_clang_arguments), its
+    // links in a directory of their own under $TMPDIR (or /tmp).
+    char** clang_arguments = calloc((size_t)clang_passed_count + BUSTER_PP_CLANG_SEARCH_ARGUMENTS + 1, sizeof(char*));
+    char ours[PATH_MAX];
+    char links[4096];
+    const char* temporary = getenv("TMPDIR");
+    snprintf(links, sizeof(links), "%s/buster-pp-clang-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    bool linked = false;
+    int clang_count = 0;
+    if (with_clang && embed == 0)
+    {
+        clang_count = clang_arguments != 0 ? pp_clang_arguments(clang_passed_count, clang_passed, clang_arguments, ours, links, &linked) : -1;
+    }
     if (embed != 0)
     {
         result = pp_benchmark_embed(embed);
     }
-    else if (file_count == 0 || with_input == 0 || only == 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
+    else if (file_count == 0 || with_input == 0 || only == 0 || clang_count < 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
     {
         fprintf(stderr, "usage: %s [--clang] [--history-cost] [--only vectorized|scalar] [-E's options] file... | --embed bytes\n", argv[0]);
     }
@@ -409,9 +434,9 @@ int run_preprocessor_benchmark(int argc, char** argv)
                     samples[implementation][pass - 1] = sample;
                 }
             }
-            if (with_clang && pass > 0)
+            if (ran && with_clang && pass > 0)
             {
-                clang_times[pass - 1] = pp_benchmark_clang(clang_passed, clang_passed_count, files, file_count);
+                ran = pp_benchmark_clang(clang_arguments, clang_count, files, file_count, &clang_times[pass - 1]);
             }
         }
         if (!ran)
@@ -518,9 +543,14 @@ int run_preprocessor_benchmark(int argc, char** argv)
             close(instructions_fd);
         }
     }
+    if (linked)
+    {
+        pp_clang_remove_links(links);
+    }
     free(with_input);
     free(passed);
     free(clang_passed);
+    free(clang_arguments);
     free(files);
     arena_release(&arena);
     return result;

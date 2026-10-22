@@ -2149,7 +2149,9 @@ corpus...` is #125's real-source oracle. It accepts directories or
 `--files-from LIST --root DIR`, compares lexical kinds, spellings and locations,
 and reports every Clang rejection as an explicit skip. Process/configuration
 failures fail the run. `--report NEW.tsv` records every file's result and skip
-reason. `c_preprocessor_oracle.c` implements this interface;
+reason. It refuses `--buster-headers`: both sides search as clang does, which
+leaves ours no headers of its own to select. `c_preprocessor_oracle.c`
+implements this interface;
 [the frozen oracle guide](docs/preprocessor-oracle.md) records the pinned
 headers/corpora, manifest identities, CI subset and on-demand commands.
 
@@ -2202,9 +2204,14 @@ spellings.
 options, token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
 prints the first difference with the tokens around it. For files, our side
-reads clang's own predefines for the options through `--predefines`. Without
-files, `--clang` also checks the built-in predefines, the keywords and the
-features:
+reads clang's own predefines for the options through `--predefines`, and clang
+gets `--buster-headers`, which it hasn't, as the search the flag makes
+(`pp_clang_arguments`): `-nobuiltininc`, then `-isystem` buster's directory and
+`-isystem` a directory of links to clang's other resource headers, after every
+other `-isystem`, or nothing with `-nostdinc` or `-nobuiltininc`; the files it
+finds through the links are compared under their names in clang's resource
+directory, as ours names them. Without files, `--clang` also checks the
+built-in predefines, the keywords and the features:
 - in 22 option sets (the ten modes from `c89` to `gnu23`, `-ffreestanding`,
   `-O2`, the six ISA profiles and independent tuning), `pp_predefines` must give `clang -dM -E` line for line, but for
   the patch release's three macros;
@@ -2226,8 +2233,13 @@ features:
   (`-Wsystem-headers`), must warn about nothing in the headers and expand every
   macro as clang's own headers do, and our preprocessor must give its tokens,
   with no warnings from the headers; `-nobuiltininc` and `-nostdinc` must
-  leave out buster's headers and clang's after them alike; and a quoted name
+  leave out buster's headers and clang's after them alike; a quoted name
   beside one of clang's headers must come from buster's when buster's has it;
+  and the files' comparison with `--buster-headers` must agree with clang on a
+  unit of buster's and clang's headers (`<inttypes.h>`, which reaches buster's
+  `<stdint.h>` through glibc's) and an `-isystem` directory's `<limits.h>`
+  given after the flag, and on `__has_include` with the flag alone, with
+  `-nobuiltininc` and with `-nostdinc`;
 - the fuzz batch's cases must give clang's acceptance, and an accepted case's
   stream, printed with clang's -P spacing, must lex into clang's tokens.
 
@@ -2265,8 +2277,10 @@ passes after a warm-up, and reports the medians of time, cycles and instructions
 per input token and per output token, IPC, each phase's share and time (read,
 lex, refine, directive tables, main loop) and what a run did (directives, runs,
 expansions, invocations, pastes, and the `#if` lines and their lengths).
-`--clang` also times `clang -E -P` with the same options, a process per file.
-`-march` selects the shared target's predefines. `--predefines FILE` can replace
+`--clang` also times `clang -E -P` with the same options, a process per file,
+with `--buster-headers` as the search it makes, as the tests give it; a clang
+run that fails fails the benchmark, which then reports no timing. `-march`
+selects the shared target's predefines. `--predefines FILE` can replace
 them with `clang -dM -E` output (the benchmark leaves this option out of clang's
 command line), as the smoke commands above do for `main.c`. The default 9700X
 job runs that one, pinned to one allowed CPU; like the others, its measurements

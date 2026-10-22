@@ -15,8 +15,11 @@ duplicate paths removed. An empty inventory fails.
 The shared configuration is `--no-default-config --target=x86_64-linux-gnu`, C
 input, and `-std=gnu17` unless overridden. Without `-nostdinc`, the harness asks
 the selected Clang for its include search and passes that order explicitly to
-both sides. Frozen runs use `-nostdinc` and the pinned `-isystem` paths. Clang's
-`CPATH` and `C_INCLUDE_PATH` are cleared; Buster does not read them. One
+both sides. Frozen runs use `-nostdinc` and the pinned `-isystem` paths.
+Either way both sides search as Clang does, which leaves Buster no headers of
+its own to select, so `--buster-headers` is refused (`test-preprocessor --clang
+--buster-headers file...` compares that mode). Clang's `CPATH` and
+`C_INCLUDE_PATH` are cleared; Buster does not read them. One
 `clang -dM -E` dump per configuration supplies Buster's predefines, without
 adding `__BUSTER__`. Both sides inherit `SOURCE_DATE_EPOCH`, defaulted to
 `1792454400` (2026-10-20 UTC) for this run. The existing Clang feature tables

@@ -650,6 +650,17 @@ quoted name beside one of clang's headers must come from buster's when
 buster's has it, and from beside it otherwise; no header of clang 23's
 includes one of buster's names so, so the check asks the search itself.
 
+The files' comparison (`test-preprocessor --clang --buster-headers file...`)
+must work in that mode too (#255's review): a unit that includes clang's
+`<inttypes.h>`, whose `#include_next` reaches glibc's, which includes buster's
+`<stdint.h>`, then more of buster's headers and clang's `<cpuid.h>`, with an
+`-isystem` directory's `<limits.h>` given after the flag, whose token's include
+stack shows that it comes before buster's; and `__has_include` of buster's,
+clang's and glibc's headers with the flag alone, with `-nobuiltininc` and with
+`-nostdinc`. Each run has an `-iquote` whose value spells `-nostdinc`, which
+must stay a directory's name. `benchmark-preprocessor --clang` times clang with
+the same search, and fails rather than report a time when a clang run fails.
+
 With these headers, `sqlite3.c` (also in C23) and Lua 5.4.8 preprocess token
 for token as clang does, and compile with clang.
 
@@ -1298,7 +1309,14 @@ full-corpus reproduction and frozen CI subset.
 - **Files.** With files, each is preprocessed with the options, by both
   kernels, and compared. With `--clang`, our side reads clang's own predefines
   for the same options (`clang -dM -E`, through `--predefines`), so both start
-  from the same macros. clang's `-E` text, without its line markers' lines, is
+  from the same macros. clang has no `--buster-headers`, so it gets the search
+  the flag makes, as the header checks give it (`pp_clang_arguments`):
+  `-nobuiltininc`, then `-isystem src/buster/include` and `-isystem` a
+  directory of links to clang's resource headers but buster's names, after
+  every other `-isystem` as ours searches them, and nothing with `-nostdinc` or
+  `-nobuiltininc`, which leave out both. The files clang finds through the
+  links are compared under their names in clang's resource directory, where
+  ours finds them. clang's `-E` text, without its line markers' lines, is
   lexed with `c_tokenize` and compared with our stream's spellings, token for
   token. Then the places its markers give the tokens are compared with ours.
   The first difference is printed with the tokens around it.

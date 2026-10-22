@@ -64,6 +64,7 @@
 //   - #if expressions (pp_evaluate), and the feature tables the __has_* builtins read (pp_feature).
 //   - The predefines, pp_initialize, pp_release and pp_run.
 //   - Output: pp_resolve_keywords and pp_print, and the -E command (pp_parse_options).
+//   - clang's arguments for ours (pp_clang_arguments), for the commands that run clang with them.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -12894,5 +12895,147 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
         }
     }
     arena_release(&arena);
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// clang's arguments for ours
+//
+// test-preprocessor and benchmark-preprocessor run clang with the options ours reads, to compare with it and to time it.
+// clang has no --buster-headers, and no rule like pp_find_include's that keeps its resource directory from supplying a
+// name buster's directory has, so it gets the search that flag makes spelled out, as the header checks give it
+// (pp_test_headers): -nobuiltininc, then -isystem buster's directory and -isystem a directory of links to the rest of
+// clang's resource directory.
+
+// The arguments pp_clang_search writes.
+#define BUSTER_PP_CLANG_SEARCH_ARGUMENTS 5
+
+// Removes the directory pp_clang_fallback_links made, with its links.
+static void pp_clang_remove_links(const char* links)
+{
+    DIR* directory = opendir(links);
+    for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
+    {
+        char link[PATH_MAX];
+        const bool dots = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0;
+        if (!dots && (size_t)snprintf(link, sizeof(link), "%s/%s", links, entry->d_name) < sizeof(link))
+        {
+            unlink(link);
+        }
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+    rmdir(links);
+}
+
+// What --buster-headers searches after buster's directory `ours`, for clang: a new directory, made from the template
+// `links` (mkdtemp's, which gives it its name), with a link to each entry of clang's resource directory that `ours`
+// hasn't. Returns whether it made it; if not, it leaves nothing.
+static bool pp_clang_fallback_links(const char* ours, char* links)
+{
+    char resource[PATH_MAX];
+    const bool made = pp_clang_resource_directory(resource, sizeof(resource)) && mkdtemp(links) != 0;
+    DIR* directory = made ? opendir(resource) : 0;
+    bool result = directory != 0;
+    for (struct dirent* entry = result ? readdir(directory) : 0; result && entry != 0; entry = readdir(directory))
+    {
+        char target[PATH_MAX];
+        char shadow[PATH_MAX];
+        char link[PATH_MAX];
+        struct stat stats;
+        const bool dots = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0;
+        result = (size_t)snprintf(target, sizeof(target), "%s/%s", resource, entry->d_name) < sizeof(target) &&
+                 (size_t)snprintf(shadow, sizeof(shadow), "%s/%s", ours, entry->d_name) < sizeof(shadow) &&
+                 (size_t)snprintf(link, sizeof(link), "%s/%s", links, entry->d_name) < sizeof(link);
+        if (result && !dots && stat(shadow, &stats) != 0)
+        {
+            result = symlink(target, link) == 0;
+        }
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+    if (made && !result)
+    {
+        pp_clang_remove_links(links);
+    }
+    return result;
+}
+
+// --buster-headers' search as clang's arguments, written at `arguments`: -nobuiltininc, then -isystem buster's directory
+// `ours` and -isystem the links' directory `links` (pp_clang_fallback_links). After every other -isystem, they are
+// searched where ours searches buster's directory and clang's resource directory. Returns how many it wrote.
+static int pp_clang_search(char** arguments, const char* ours, const char* links)
+{
+    arguments[0] = "-nobuiltininc";
+    arguments[1] = "-isystem";
+    arguments[2] = (char*)ours;
+    arguments[3] = "-isystem";
+    arguments[4] = (char*)links;
+    return BUSTER_PP_CLANG_SEARCH_ARGUMENTS;
+}
+
+// Is `argument` an option whose value is the next argument (pp_parse_options)?
+static bool pp_option_takes_value(const char* argument)
+{
+    static const char* const options[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter", "--predefines" };
+    bool result = false;
+    for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(options); i += 1)
+    {
+        result = strcmp(argument, options[i]) == 0;
+    }
+    return result;
+}
+
+// clang's arguments for ours (`count` of `arguments`), into `clang` (room for count + BUSTER_PP_CLANG_SEARCH_ARGUMENTS):
+// the same, but --buster-headers, whose search (pp_clang_search) comes last instead, so that it follows every other
+// -isystem as ours does, with buster's directory in `ours` (PATH_MAX bytes) and the links in a new directory made from
+// the template `links` (pp_clang_fallback_links). Nothing comes in its place with -nostdinc or -nobuiltininc, which leave
+// out buster's headers and clang's alike. An option's value is copied as it is, whatever it spells. `*linked` says
+// whether the links were made, for pp_clang_remove_links. Returns how many arguments clang gets, or -1 if the search
+// can't be made.
+static int pp_clang_arguments(int count, char** arguments, char** clang, char* ours, char* links, bool* linked)
+{
+    int result = 0;
+    bool buster = false;
+    bool builtin = true;
+    for (int i = 0; i < count; i += 1)
+    {
+        const char* argument = arguments[i];
+        const bool flag = strcmp(argument, "--buster-headers") == 0;
+        buster = buster || flag;
+        builtin = builtin && strcmp(argument, "-nostdinc") != 0 && strcmp(argument, "-nobuiltininc") != 0;
+        if (!flag)
+        {
+            clang[result] = arguments[i];
+            result += 1;
+        }
+        if (pp_option_takes_value(argument) && i + 1 < count)
+        {
+            i += 1;
+            clang[result] = arguments[i];
+            result += 1;
+        }
+    }
+    const bool search = buster && builtin;
+    const bool found = search && pp_buster_headers_directory(ours, PATH_MAX);
+    *linked = found && pp_clang_fallback_links(ours, links);
+    if (*linked)
+    {
+        result += pp_clang_search(clang + result, ours, links);
+    }
+    else if (search && !found)
+    {
+        fprintf(stderr, "--buster-headers: no src/buster/include beside the executable's build directory\n");
+        result = -1;
+    }
+    else if (search)
+    {
+        fprintf(stderr, "--buster-headers: can't link clang's resource headers into %s\n", links);
+        result = -1;
+    }
     return result;
 }
