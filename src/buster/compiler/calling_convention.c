@@ -74,8 +74,8 @@
 //     abi_shifted_row, abi_member_entry, abi_write_entries, abi_merge_vector, abi_post_merge_vector, abi_store_rows,
 //     abi_fold_groups, abi_store_row and abi_classify_vector.
 //   - The drivers: abi_capacity_bytes, abi_initialize, abi_classify_scalar, abi_classify, abi_classifiable,
-//     abi_is_classified, abi_members_classified, abi_dependencies_classified, abi_is_larger_root, abi_classify_levels,
-//     abi_classify_all, abi_classify_all_scalar and abi_classes.
+//     abi_is_classified, abi_wide_classified, abi_members_classified, abi_dependencies_classified, abi_is_larger_root,
+//     abi_classify_levels, abi_classify_all, abi_classify_all_scalar and abi_classes.
 //   - Assignment: abi_stack_place, abi_assign_call (the twin, one call), abi_assign_scalar, the vector path's AbiScan,
 //     abi_scan, abi_scan_add, abi_scan_or and abi_assign.
 //   - va_arg: abi_va_arg.
@@ -995,6 +995,9 @@ static uint32_t abi_wide_record(const TypeTable* table, TypeId type)
     return wide ? index : 0;
 }
 
+// abi_wide_alignment's flag for a walk that read the storage of a type not classified yet.
+#define BUSTER_ABI_WIDE_UNREADY 0x100u
+
 // A record on abi_wide_alignment's stack: its next member, the largest alignment of its members so far, whether one
 // is off its own, whether one's storage is INEXACT, the member of the record below it whose type holds it, and its
 // current run of bit-fields' end and unit (abi_bit_field_run's).
@@ -1016,9 +1019,11 @@ struct AbiWideFrame
 // bit-field's run's unit's past an eightbyte, abi_bit_field_run) and a union's most aligned member's
 // (abi_member_storage's), unless a struct's member is off its own or the size isn't a multiple of it (determinePacked:
 // 1); and INEXACT if a member's storage is. A member that holds such a record by value has its storage, walked in turn
-// on an explicit stack in scratch memory (no record holds itself, so it is no deeper than the table has types). *ready
-// is cleared if a type whose storage it reads isn't classified yet.
-static uint32_t abi_wide_alignment(const AbiTable* abi, const TypeTable* table, uint32_t record, bool* ready)
+// on an explicit stack in scratch memory (no record holds itself, so it is no deeper than the table has types). With
+// BUSTER_ABI_WIDE_UNREADY if a type whose storage it reads isn't classified yet, or the scratch memory can't hold the
+// stack: a flag in the result rather than through a pointer, which would make its callers take a local's address, and
+// so check a stack protector's canary at every call (abi_dependencies_classified's, once a type, at every level).
+__attribute__((cold, noinline)) static uint32_t abi_wide_alignment(const AbiTable* abi, const TypeTable* table, uint32_t record)
 {
     Scratch scratch = scratch_begin(0);
     AbiWideFrame* stack = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, AbiWideFrame, table->types.count);
@@ -1038,7 +1043,7 @@ static uint32_t abi_wide_alignment(const AbiTable* abi, const TypeTable* table, 
         };
         depth = 1;
     }
-    *ready = *ready && stack != 0;
+    bool ready = stack != 0;
     while (depth != 0)
     {
         AbiWideFrame* frame = &stack[depth - 1];
@@ -1075,7 +1080,7 @@ static uint32_t abi_wide_alignment(const AbiTable* abi, const TypeTable* table, 
                                                                         : frame->run_storage;
                 const uint8_t storage = in_run && frame->run_storage != UINT8_MAX ? frame->run_storage : abi_member_storage(abi, table, member, in_union, false, &bytes);
                 const uint8_t alignment = storage & BUSTER_ABI_STORAGE_ALIGNMENT;
-                *ready = *ready && (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
+                ready = ready && (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
                 frame->largest = alignment > frame->largest ? alignment : frame->largest;
                 frame->packed = frame->packed || (!in_union && !bit_field && ((table->members.offset[member] >> 3) & ((1ull << alignment) - 1)) != 0);
                 frame->inexact = frame->inexact || (storage & BUSTER_ABI_STORAGE_INEXACT) != 0;
@@ -1103,7 +1108,7 @@ static uint32_t abi_wide_alignment(const AbiTable* abi, const TypeTable* table, 
         }
     }
     scratch_end(scratch);
-    return result;
+    return result | (ready ? 0 : BUSTER_ABI_WIDE_UNREADY);
 }
 
 // A flexible array member's storage (abi_member_storage's `open`), an array of no elements of its element: the element's,
@@ -1112,9 +1117,8 @@ static uint8_t abi_open_storage(const AbiTable* abi, const TypeTable* table, uin
 {
     const uint32_t resolved = abi_resolved_index(table, table->members.type[member]);
     const uint32_t wide = abi_wide_record(table, table->types.base[resolved]);
-    bool ready = true;
     const uint8_t storage = abi_member_storage(abi, table, member, in_union, true, bytes);
-    return wide != 0 ? (uint8_t)abi_wide_alignment(abi, table, wide, &ready) : storage;
+    return wide != 0 ? (uint8_t)abi_wide_alignment(abi, table, wide) : storage;
 }
 
 // The member clang stores a union as (lowerUnion): the one whose storage (abi_member_storage) LLVM aligns most, then
@@ -1179,8 +1183,7 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
         const uint32_t wide = kind == BUSTER_TYPE_KIND_ARRAY && size == 0 ? abi_wide_record(table, table->types.base[index]) : 0;
         if (wide != 0)
         {
-            bool ready = true;
-            result = (uint8_t)abi_wide_alignment(abi, table, wide, &ready);
+            result = (uint8_t)abi_wide_alignment(abi, table, wide);
         }
     }
     else if (record && (size > BUSTER_ABI_REGISTER_BYTES || ((table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0 && size != 0)))
@@ -2652,8 +2655,17 @@ static bool abi_is_classified(const AbiTable* abi, TypeId type)
     return (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
 }
 
+// Whether every type abi_wide_alignment reads for an array of no elements of `element` is classified: none but for a
+// record larger than 16 bytes (abi_wide_record). Cold, as only such arrays get here.
+__attribute__((cold, noinline)) static bool abi_wide_classified(const AbiTable* abi, const TypeTable* table, TypeId element)
+{
+    const uint32_t wide = abi_wide_record(table, element);
+    return wide == 0 || (abi_wide_alignment(abi, table, wide) & BUSTER_ABI_WIDE_UNREADY) == 0;
+}
+
 // Whether a record's members are classified, but for a flexible array member, which is no complete type and is never
-// classified, its element (the flexible array member is the last).
+// classified, its element (the flexible array member is the last); and for a flexible record of no size, which takes
+// its flexible array member's storage (abi_open_storage), what abi_wide_alignment reads for it.
 __attribute__((cold, noinline)) static bool abi_members_classified(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const bool flexible = (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0;
@@ -2667,8 +2679,8 @@ __attribute__((cold, noinline)) static bool abi_members_classified(const AbiTabl
     }
     if (result && flexible)
     {
-        const uint32_t resolved = abi_resolved_index(table, table->members.type[fixed]);
-        result = abi_is_classified(abi, table->types.base[resolved]);
+        const TypeId element = table->types.base[abi_resolved_index(table, table->members.type[fixed])];
+        result = abi_is_classified(abi, element) && (table->types.size[index] != 0 || abi_wide_classified(abi, table, element));
     }
     return result;
 }
@@ -2680,7 +2692,8 @@ __attribute__((cold, noinline)) static bool abi_members_classified(const AbiTabl
 // only when `all`, for a LARGER member, which makes its copy LARGER (abi_copy_bytes): only a table with an _Atomic of a
 // type of no size, the root of every LARGER type, has one (abi_classify_levels), and waiting would add a level for
 // every nesting of records; but a flexible one of no size always waits, as an _Atomic of it takes its alignment as its
-// size. Each is complete when the type is, so no type waits forever.
+// size. Each is complete when the type is, so no type waits forever. The rare cases are out of line, which keeps this
+// small enough for clang to inline into abi_classify_levels' loop: a call there costs some 30 instructions a type.
 static bool abi_dependencies_classified(const AbiTable* abi, const TypeTable* table, uint32_t index, bool all)
 {
     const uint8_t kind = table->types.kind[index];
@@ -2688,12 +2701,8 @@ static bool abi_dependencies_classified(const AbiTable* abi, const TypeTable* ta
     bool result = true;
     if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
     {
-        result = abi_is_classified(abi, table->types.base[index]);
-        const uint32_t wide = kind == BUSTER_TYPE_KIND_ARRAY && table->types.size[index] == 0 ? abi_wide_record(table, table->types.base[index]) : 0;
-        if (wide != 0)
-        {
-            abi_wide_alignment(abi, table, wide, &result);
-        }
+        const TypeId base = table->types.base[index];
+        result = abi_is_classified(abi, base) && (kind != BUSTER_TYPE_KIND_ARRAY || table->types.size[index] != 0 || abi_wide_classified(abi, table, base));
     }
     else if (record && table->types.size[index] <= BUSTER_ABI_MAX_CLASSIFIED_BYTES && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) == 0)
     {
@@ -2708,15 +2717,6 @@ static bool abi_dependencies_classified(const AbiTable* abi, const TypeTable* ta
     else if (record && (all || ((table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0 && table->types.size[index] == 0)))
     {
         result = abi_members_classified(abi, table, index);
-        // A flexible one of no size takes its flexible array member's storage (abi_open_storage), the last.
-        const uint32_t tag = table->types.index[index];
-        const uint32_t open = table->tags.member_begin[tag] + table->tags.member_count[tag] - 1;
-        const bool walks = (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0 && table->types.size[index] == 0;
-        const uint32_t wide = walks ? abi_wide_record(table, table->types.base[abi_resolved_index(table, table->members.type[open])]) : 0;
-        if (wide != 0)
-        {
-            abi_wide_alignment(abi, table, wide, &result);
-        }
     }
     return result;
 }
