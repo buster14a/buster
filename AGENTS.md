@@ -2393,14 +2393,18 @@ others, its measurements are informational.
   zero-size members, bit-fields, flexible array members, `_Atomic` and
   `nullptr_t` members, `i128` storage, which LLVM never splits, runs of
   bit-fields that are an `i128` and that aren't, and the narrow low parts
-  clang widens into a general register), and calls whose locations clang and
-  LLVM give (an `UNCOUNTED` argument that splits the next record, an
-  `__int128` without two registers left, a hidden pointer, a record of a
-  flexible array member alone as an `i0`, a struct whose narrow low part takes
-  a general register, a union stored as an `i128`, which clang counts as two
-  registers, and runs of bit-fields where an uncounted `_Atomic int` leaves
-  one register, split or whole on the stack), and `va_arg`'s plan for an
-  aligned `long`;
+  clang widens into a general register; and the `_Atomic` types whose LLVM
+  types decide: of types of no size, which LLVM makes larger, as the records
+  ending in one, with their slots, the records it lays out otherwise than C,
+  and vectors LLVM keeps whole, splits or, of bools, passes as integers), and
+  calls whose locations clang and LLVM give (an `UNCOUNTED` argument that
+  splits the next record, an `__int128` without two registers left, a hidden
+  pointer, a record of a flexible array member alone as an `i0`, a struct
+  whose narrow low part takes a general register, a union stored as an
+  `i128`, which clang counts as two registers, runs of bit-fields where an
+  uncounted `_Atomic int` leaves one register, split or whole on the stack,
+  the larger copies' slots, byval or an integer by clang's count, and
+  `_Atomic` bool vectors), and `va_arg`'s plan for an aligned `long`;
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's
@@ -2424,12 +2428,14 @@ and a callee per signature as `X86Instruction` records through `x86_encode`,
 and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. GCC's worlds leave out
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
-own bugs among them, and `docs/calling-convention.md` lists them); an argument
-clang would pass as an `i0` becomes a long (its passes crash on them now and
-then), as does an unnamed one clang's `va_arg` reads elsewhere than its call
-puts it; and bytes clang doesn't pass aren't compared. The files go in a new
-directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure.
-The 9700X job runs it with `--cross-check` after the type table's benchmark.
+own bugs among them, and `docs/calling-convention.md` lists them), and clang's
+a type in registers that holds an array of elements of no size, on which
+clang 23 crashes now and then; an argument clang would pass as an `i0` becomes
+a long (its passes crash on them now and then), as does an unnamed one clang's
+`va_arg` reads elsewhere than its call puts it; and bytes clang doesn't pass
+aren't compared. The files go in a new directory under `$TMPDIR` (or `/tmp`),
+removed unless `--keep` or a failure. The 9700X job runs it with
+`--cross-check` after the type table's benchmark.
 
 ## Calling convention benchmark
 
