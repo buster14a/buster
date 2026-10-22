@@ -864,6 +864,7 @@ static const PPTestFile pp_test_files_embed_directories[] = {
 // limit and there includes another three times.
 static const PPTestFile pp_test_files_includes[] = {
     { "a/b.h", "ab\n" },
+    { "dir/*x.h", "opaque_header\n" },
     { "a/*x*/b.h", "axb\n" },
     { "a\\b.h", "backslash\n" },
     { "a b.h", "joined\n" },
@@ -1777,6 +1778,42 @@ static const PPTestCase pp_test_cases[] = {
         .expected = "int real_else; int end;",
         .options = "-I%d",
         .files = pp_test_files_header_tails,
+    },
+    // An ordinary comment delimiter belongs to an opaque header name too. Its original file token must not hide the
+    // source after the name or report a comment error; a real comment after the name must still be diagnosed.
+    {
+        .name = "opaque header: an unclosed comment delimiter in an include name",
+        .source = "#include <dir/*x.h>\nafter\n",
+        .standard = "c17",
+        .expected = "opaque_header after",
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "opaque header: an unclosed comment delimiter in an embed name",
+        .source = "int a[] = {\n#embed <dir/*x.bin> limit(1)\n};\nafter\n",
+        .standard = "c23",
+        .expected = "int a[] = {66}; after",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "opaque header: an unclosed comment delimiter in a query name",
+        .source = "#if __has_include(<dir/*x.h>)\nfound\n#else\nwrong\n#endif\nafter\n",
+        .standard = "c23",
+        .expected = "found after",
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "opaque header: a real unclosed comment after an opaque name",
+        .source = "#include <dir/*x.h> /* unclosed\nafter\n",
+        .standard = "c17",
+        .expected = "opaque_header",
+        .fails = true,
+        .errors = 1,
+        .options = "-I%d",
+        .files = pp_test_files_includes,
     },
     {
         .name = "#254's third review: later queries retain raw names in a re-lexed suffix",
