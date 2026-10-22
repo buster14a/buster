@@ -16,15 +16,16 @@
 // token (the tokens of every file the runs prepared) and per output token, each phase's share of the time and its median
 // time (PPPhase: reading, lexing, refining and directive tables; the rest is the main loop with its directives), -E -P's
 // throughput with its printing (to /dev/null, timed after each run: input bytes and output tokens per second), and what
-// a run did (PPStatistics). With --clang it also times `clang -E -P` with the same options (but --predefines, which is
-// ours) writing to /dev/null, a process per file, the median of as many runs, for scale. --history-cost and
-// --guard-cost replace the scalar twins with the vectorized kernels without recording macro expansion history, or
-// without skipping the inclusions of guarded files (#120), whose output must be the same. --only runs one
-// implementation (for profiles). --read-limit takes a list of the largest files a run reads into an arena rather than
-// maps (its cache's read limit: BUSTER_FILE_CACHE_READ_LIMIT unless given; 0 maps every file), and each pass runs each
-// implementation with each of them in turn, which must all give the same output. It also reports the median time of
-// releasing a run's memory (pp_release and intern_release), which the run's time leaves out: the files' mappings among
-// it. Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments are invalid or a run fails.
+// a run did (PPStatistics). With --clang it also times `clang -E -P` with the same options (but --predefines and
+// --location-limit, which are ours) writing to /dev/null, a process per file, the median of as many runs, for scale.
+// --history-cost and --guard-cost replace the scalar twins with the vectorized kernels without recording macro
+// expansion history, or without skipping the inclusions of guarded files (#120), whose output must be the same. --only
+// runs one implementation (for profiles). --read-limit takes a list of the largest files a run reads into an arena
+// rather than maps (its cache's read limit: BUSTER_FILE_CACHE_READ_LIMIT unless given; 0 maps every file), and each
+// pass runs each implementation with each of them in turn, which must all give the same output. It also reports the
+// median time of releasing a run's memory (pp_release and intern_release), which the run's time leaves out: the files'
+// mappings among it. Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments are invalid or
+// a run fails.
 //
 // With --tables, the arguments are paths, and it times the directive tables alone (#118): every .c and .h file under
 // them is read and prepared once, then each pass builds every file's table (pp_directive_table) by each kernel, whose
