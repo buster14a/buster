@@ -1675,11 +1675,14 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
 }
 
 #include "c_preprocessor_history_test.c"
+#include "c_preprocessor_order_test.c"
 
 static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
 {
     bool with_clang = false;
     bool keep = false;
+    uint64_t id_order = 153;
+    bool valid = true;
     // The arguments without ours, for clang and pp_parse_options; the files are those that don't start with '-' and
     // aren't an option's value.
     char** passed = calloc((size_t)argument_count + 1, sizeof(char*));
@@ -1691,7 +1694,15 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         const char* argument = arguments[i];
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0;
-        if (strcmp(argument, "--clang") == 0)
+        if (strcmp(argument, "--id-order") == 0 && i + 1 < argument_count)
+        {
+            char* end;
+            errno = 0;
+            i += 1;
+            id_order = strtoull(arguments[i], &end, 10);
+            valid = valid && errno == 0 && end != arguments[i] && *end == 0 && arguments[i][0] != '-';
+        }
+        else if (strcmp(argument, "--clang") == 0)
         {
             with_clang = true;
         }
@@ -1716,7 +1727,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     char directory[4096];
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
-    bool passed_all = passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    bool passed_all = valid && passed != 0 && files != 0 && mkdtemp(directory) != 0;
     if (passed_all && file_count == 0)
     {
         uint32_t failures = 0;
@@ -1728,6 +1739,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all = failures == 0;
         passed_all &= pp_test_timestamps(directory, with_clang);
         passed_all &= pp_test_history(directory, with_clang);
+        passed_all &= pp_test_id_order(directory, id_order);
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);

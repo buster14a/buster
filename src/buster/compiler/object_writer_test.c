@@ -2214,10 +2214,10 @@ static void object_test_lanes_full_main(void* argument)
 }
 
 // Writes every unit's object of a many-units program, and of a unit after them without atoms, with groups of 1, 2, 3
-// and 8 lanes, each into a directory of its own under `directory` (with function sections in the groups of 2 and 8),
-// and compares each object with the one object_build builds alone, byte for byte. Then a group of 3 in which a lane has
+// and 8 lanes in both section modes, with permuted names, each into a directory of its own under `directory`,
+// against bytes frozen before permutation. Then a group of 3 in which a lane has
 // no room to start: no object, and every unit's error OBJECT_ERROR_FULL.
-static bool object_test_lanes(uint64_t seed, const char* directory, bool keep, Arena* arena)
+static bool object_test_lanes(uint64_t seed, uint64_t id_order, const char* directory, bool keep, Arena* arena)
 {
     ObjectTestTally tally = {
         .check = "lanes",
@@ -2249,10 +2249,26 @@ static bool object_test_lanes(uint64_t seed, const char* directory, bool keep, A
         source_names[unit] = object_test_source_name(source_bytes + (uint64_t)unit * 32, 32, unit);
         paths[unit] = path_bytes + (uint64_t)unit * BUSTER_OBJECT_TEST_PATH_BYTES;
     }
-    for (uint32_t c = 0; allocated && c < BUSTER_ARRAY_LENGTH(lane_counts); c += 1)
+    // Freeze both output modes before changing any NameId, so a writer that accidentally emits in intern order
+    // cannot make its own changed output the oracle. Every lane count writes both modes from this same baseline.
+    Object* baseline = allocated ? BUSTER_ARENA_PUSH_ARRAY(arena, Object, 2 * count) : 0;
+    bool ordered = allocated && baseline != 0;
+    for (uint32_t mode = 0; ordered && mode < 2; mode += 1)
     {
+        for (uint32_t unit = 0; ordered && unit < count; unit += 1)
+        {
+            baseline[mode * count + unit] = object_build(&program.link, &units, &symbols, unit, (ObjectOptions){ .function_sections = mode != 0 }, source_names[unit], arena);
+            ordered = baseline[mode * count + unit].error == OBJECT_ERROR_NONE;
+        }
+    }
+    object_test_expect(&tally, ordered, "original-ID baseline for both section modes", 0);
+    for (uint32_t c = 0; ordered && c < 2 * BUSTER_ARRAY_LENGTH(lane_counts); c += 1)
+    {
+        const uint32_t lanes = lane_counts[c / 2];
+        ordered = link_test_permute_names(&program.link, id_order + c, arena);
+        object_test_expect(&tally, ordered, "permuted NameIds", c);
         char lanes_directory[BUSTER_OBJECT_TEST_PATH_BYTES];
-        snprintf(lanes_directory, sizeof(lanes_directory), "%s/lanes%u", directory, lane_counts[c]);
+        snprintf(lanes_directory, sizeof(lanes_directory), "%s/lanes%u-mode%u", directory, lanes, c % 2);
         object_test_expect(&tally, mkdir(lanes_directory, 0755) == 0, "mkdir", c);
         for (uint32_t unit = 0; unit < count; unit += 1)
         {
@@ -2268,22 +2284,22 @@ static bool object_test_lanes(uint64_t seed, const char* directory, bool keep, A
             .source_names = source_names,
             .errors = errors,
         };
-        const bool ran = lane_run(lane_counts[c], object_test_lanes_main, &test, 0);
+        const bool ran = ordered && lane_run(lanes, object_test_lanes_main, &test, 0);
         bool written = ran;
-        for (uint32_t lane = 0; lane < lane_counts[c]; lane += 1)
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
         {
             written = written && test.written[lane];
         }
-        object_test_expect(&tally, written, "object_write_units", lane_counts[c]);
+        object_test_expect(&tally, written, "object_write_units", lanes);
         for (uint32_t unit = 0; written && unit < count; unit += 1)
         {
             const uint64_t before = arena->length;
             const String8 written_bytes = object_test_read_file(arena, paths[unit]);
-            const Object expected = object_build(&program.link, &units, &symbols, unit, test.options, source_names[unit], arena);
+            const Object expected = baseline[(c % 2) * count + unit];
             object_test_expect(&tally,
                                written_bytes.pointer != 0 && expected.error == OBJECT_ERROR_NONE && written_bytes.length == expected.size &&
                                    memcmp(written_bytes.pointer, expected.bytes, expected.size) == 0,
-                               "an object the lanes wrote, against one built alone", (uint64_t)lane_counts[c] * 1000 + unit);
+                               "same object with permuted names and every lane count", (uint64_t)lanes * 1000 + unit);
             arena_pop_to(arena, before);
         }
         for (uint32_t unit = 0; !keep && unit < count; unit += 1)
@@ -3020,6 +3036,7 @@ static bool object_test_parse_u64(const char* text, uint64_t* value)
 static int run_object_writer_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
+    uint64_t id_order = 153;
     bool cross_check = false;
     bool keep = false;
     bool valid = true;
@@ -3028,6 +3045,11 @@ static int run_object_writer_tests(int argc, char** argv)
         if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
         {
             valid = valid && object_test_parse_u64(argv[i + 1], &seed);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--id-order") == 0 && i + 1 < argc)
+        {
+            valid = valid && object_test_parse_u64(argv[i + 1], &id_order);
             i += 1;
         }
         else if (strcmp(argv[i], "--cross-check") == 0)
@@ -3050,7 +3072,7 @@ static int run_object_writer_tests(int argc, char** argv)
     Arena arena = arena_reserve(BUSTER_OBJECT_TEST_ARENA_BYTES);
     if (!valid)
     {
-        fprintf(stderr, "usage: test-object-writer [--seed N] [--cross-check] [--keep]\n");
+        fprintf(stderr, "usage: test-object-writer [--seed N] [--id-order N] [--cross-check] [--keep]\n");
     }
     else if (!x86_encoder_initialized && !x86_encoder_initialize())
     {
@@ -3064,7 +3086,7 @@ static int run_object_writer_tests(int argc, char** argv)
     {
         bool passed = object_test_objects(seed, &arena);
         passed = object_test_many_sections(seed, &arena) && passed;
-        passed = object_test_lanes(seed, directory, keep, &arena) && passed;
+        passed = object_test_lanes(seed, id_order, directory, keep, &arena) && passed;
         passed = object_test_files(directory, &arena) && passed;
         if (cross_check)
         {

@@ -118,6 +118,9 @@ jobs:
       - name: Test the lanes
         run: ./build/compiler test-lanes
 
+      - name: Test deterministic diagnostic ordering
+        run: ./build/compiler test-diagnostics
+
       - name: Benchmark the lanes
         # It pins each lane to an allowed CPU of its own.
         run: ./build/compiler benchmark-lanes
