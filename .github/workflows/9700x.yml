@@ -64,6 +64,9 @@ jobs:
           ./build/compiler test-call-graph
           ./build.sh check-call-graph
 
+      - name: Test the profiling tools
+        run: ./build/compiler test-profile
+
       - name: Test the C lexer
         run: |
           ./build/compiler test-lexer
@@ -80,6 +83,30 @@ jobs:
 
       - name: Test generated-code ISA policy
         run: ./build/compiler test-x86-target
+
+      - name: Test the partial Zen 5 model and instruction harness
+        run: ./build/compiler test-x86-zen5
+
+      - name: Measure the Zen 5 instruction cases
+        # The job hook holds the shared lock. Preserve three separate processes, with each process interleaving
+        # its experiments. These observations are informational; counter/protocol failures still fail the step.
+        run: |
+          cpu=2
+          sha256sum build/compiler src/buster/compiler/x86_zen5.c src/buster/compiler/x86_zen5_measure.c
+          for sample in 1 2 3; do
+            echo "Zen 5 observation process $sample"
+            taskset -c "$cpu" ./build/compiler measure-x86-zen5 --passes 11 --iterations 20000
+          done
+
+      - name: Benchmark Zen 5 cost lookup
+        run: |
+          cpu=2
+          for sample in 1 2 3; do
+            echo "Zen 5 lookup sample $sample"
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
+          done
 
       - name: Test the x86-64 disassembler against GNU tools
         run: |
@@ -281,6 +308,18 @@ jobs:
             -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
             --files-from tests/preprocessor-oracle/musl-subset.txt --root "$musl" --report build/oracle-musl.tsv
           awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 4 && NR == 5) }' build/oracle-musl.tsv
+
+      - name: Test the per-file jobs
+        # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams, and
+        # each unit the spellings it gives alone. Uses the predefines "Benchmark the preprocessor on main.c" wrote.
+        run: |
+          ./build/compiler test-files
+          ./build/compiler test-files --flat src
+          ./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+
+      - name: Benchmark the per-file jobs on the repository's translation units
+        # Without taskset: it pins each lane to an allowed CPU of its own.
+        run: ./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: Test the C type table
         # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a

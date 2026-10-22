@@ -317,12 +317,20 @@ comparison.
 
 ### Files
 
-Every file is read once per translation unit. It is mapped with `MAP_POPULATE`,
-lexed, refined and given a directive table (`pp_prepare_data`), and it stays
-for the whole translation unit, because macro definitions point into the tokens
-of the file that defines them. Files are found by path (`pp_lookup_path`, a
-table that starts at 1,024 slots and doubles) and shared by device and inode,
-so that two paths to one file are one file.
+Every file is read once per process. It is mapped (with `MAP_POPULATE` when a
+unit or one lane maps it; lanes read the files of up to 16 KB instead), lexed,
+refined and given a directive table (`pp_prepare_into`), and it stays as long as
+the file cache that holds it, because macro definitions point into the tokens of
+the file that defines them. The cache (`FileCache`) keeps a record per file
+identity (device and inode), so that two paths to one file are one file, and a
+path entry per path looked up, with the file there or none, so that a search
+makes no system call for a path the cache knows. A translation unit finds files
+by path in a table of its own (`pp_lookup_path`, which starts at 1,024 slots and
+doubles) and asks the cache the first time; it copies a record's prepared fields
+when it first enters the file, and keeps its own state about it (`#pragma once`,
+the line cursor). Without a cache in `PPOptions.files`, a unit makes its own;
+with one, the units and lanes that share it read each file once
+(`docs/c-files.md`, #150).
 
 - **Lexing by the language mode.** The lexer has no language mode, so two of
   clang's rules are applied around it:
@@ -1242,9 +1250,10 @@ cleared once and reused.
   translation unit before the parser reads it. Streaming needs a rule for when
   a block of output is final, since a function-like macro name at the end of an
   expansion can take a `(` from the input after it (#117).
-- **The rest of C23** (`#embed`), the compiler's own headers (#117's open
-  question; this version uses clang's resource directory), and per-file jobs
-  cached for the process (#150).
+- **The rest of C23** (`#embed`), and the compiler's own headers (#117's open
+  question; this version uses clang's resource directory). Per-file jobs cached
+  for the process, which lanes fill ahead of the preprocessor, are
+  `docs/c-files.md`'s (#150).
 
 ## Reproduction
 
