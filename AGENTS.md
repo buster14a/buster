@@ -3158,16 +3158,31 @@ others, its measurements are informational.
 - fixtures: types whose classes, pass bits and results clang's IR shows
   (scalars, vectors, complex types, `_BitInt`s, records with unaligned and
   zero-size members, bit-fields, flexible array members, `_Atomic` and
-  `nullptr_t` members, `i128` storage, which LLVM never splits, runs of
+  `nullptr_t` members, `i128` storage, which LLVM never splits, whatever the
+  high eightbyte under an INTEGER low one and refused under another, runs of
   bit-fields that are an `i128` and that aren't, and the narrow low parts
-  clang widens into a general register), and calls whose locations clang and
-  LLVM give (an `UNCOUNTED` argument that splits the next record, an
-  `__int128` without two registers left, a hidden pointer, a record of a
-  flexible array member alone as an `i0`, a struct whose narrow low part takes
-  a general register, a union stored as an `i128`, which clang counts as two
-  registers, and runs of bit-fields where an uncounted `_Atomic int` leaves
-  one register, split or whole on the stack), and `va_arg`'s plan for an
-  aligned `long`;
+  clang widens into a general register; and the `_Atomic` types whose LLVM
+  types decide: of types of no size, which LLVM makes larger (to 32 KB, and
+  refused past the alignment the module keeps or for a run of bit-fields
+  whose unit it doesn't work out) or doesn't (one aligned by
+  `_BitInt(129)`s, which LLVM stores as arrays of their bytes), as the
+  records ending in one, with their slots, the records it lays out otherwise
+  than C, and
+  vectors LLVM keeps whole, splits or, of bools (not of an enum of bool),
+  passes as integers), and
+  calls whose locations clang and LLVM give (an `UNCOUNTED` argument that
+  splits the next record, an `__int128` without two registers left, a hidden
+  pointer, a record of a flexible array member alone as an `i0`, a struct
+  whose narrow low part takes a general register, unions stored as an
+  `i128`, which clang counts as two registers with a NO_CLASS or SSE high
+  eightbyte, runs of bit-fields where an uncounted `_Atomic int` leaves one
+  register, split or whole on the stack, the larger copies' slots, byval or
+  an integer by clang's count, `_Atomic` bool vectors, and a vector of bools
+  that isn't `_Atomic` returned through a hidden pointer), `va_arg`'s plans
+  for an aligned `long` and an `i128` with an SSE high eightbyte, and the
+  levels across calls (a record larger than 64 bytes that waits for a
+  `LARGER` member, and a flexible record of no size that an `_Atomic` of it in
+  a later call reads);
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's
@@ -3194,12 +3209,14 @@ then GCC's, each at 16, 32 and 64 bytes) go at once, a child process each, and
 the test prints their lines in that order; a run that fails keeps its files.
 GCC's worlds leave out
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
-own bugs among them, and `docs/calling-convention.md` lists them); an argument
-clang would pass as an `i0` becomes a long (its passes crash on them now and
-then), as does an unnamed one clang's `va_arg` reads elsewhere than its call
-puts it; and bytes clang doesn't pass aren't compared. The files go in a new
-directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure.
-The 9700X job's test step runs it with `--cross-check`.
+own bugs among them, and `docs/calling-convention.md` lists them), and clang's
+a type in registers that holds an array of elements of no size, on which
+clang 23 crashes now and then; an argument clang would pass as an `i0` becomes
+a long (its passes crash on them now and then), as does an unnamed one clang's
+`va_arg` reads elsewhere than its call puts it; and bytes clang doesn't pass
+aren't compared. The files go in a new directory under `$TMPDIR` (or `/tmp`),
+removed unless `--keep` or a failure. The 9700X job's test step runs it with
+`--cross-check`.
 
 ## Calling convention benchmark
 
