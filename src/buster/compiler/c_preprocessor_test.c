@@ -798,6 +798,12 @@ static const PPTestFile pp_test_files_raw_header[] = {
     { 0, 0 },
 };
 
+// Angle header bytes that resemble an unterminated raw literal must not consume following source.
+static const PPTestFile pp_test_files_opaque_raw[] = {
+    { "R\"(x", "header\n" },
+    { 0, 0 },
+};
+
 static const PPTestCase pp_test_cases[] = {
     // The topics of C 6.10.4.5's examples, in cases of our own: rescanning and redefinitions, # and ## with indirection,
     // placemarkers, and variadic macros (the expected text is clang's output).
@@ -958,6 +964,11 @@ static const PPTestCase pp_test_cases[] = {
     { "line breaks in an unknown token and in a raw string literal", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", 0, "gnu17", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\nR\"x\ny\" z\nw\nR\"(a\nb)\" c\n\nd\n" },
     { "invalid raw delimiter keeps its line splice", "R\"a\\\nb\" c\n", 0, "gnu17", "R\"a\\\nb\" c\n", false, 0, 0, 0,
       "# 1 \"%d/case.c\"\nR\"a\\\nb\" c\n" },
+    { "raw-looking direct angle header preserves following source", "#include <R\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
+    { "spliced raw-looking direct angle header", "#include <R\\\n\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
+    { "raw-looking warning text preserves following source", "#warning R\"(\nafter\n", 0, "gnu17", "after\n", false, 1, 0, 0 },
+    { "raw-looking error text preserves following source", "#error R\"(\nafter\n", 0, "gnu17", "after\n", true, 0, 0, 0 },
+    { "repeated raw-looking direct headers use one recovery", "#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\nafter\n", 0, "gnu17", "header\nheader\nheader\nheader\nheader\nheader\nheader\nheader\nheader\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
     // c89 lexes neither digraphs nor "//" comments, as clang's -E has it: "%:define" is no directive, a digraph is two
     // punctuators ("<%=" is '<' and "%=", and "<::>" '<', "::" and '>'), and "//" two slashes, of which the second starts
     // a block comment before a '*'. Pasting a digraph's characters or "//" forms no token (#288).

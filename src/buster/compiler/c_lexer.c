@@ -1558,8 +1558,27 @@ static uint8_t punctuator2(const ScalarLexer* lexer, uint64_t* position, int32_t
 // writing the tokens to `kinds`, `starts` and `ends` from `count` on. Stops at the end of the source, or after the
 // first newline at or past `stop_at` that is outside of tokens and comments: `resume` is then the position after it
 // (else the length). Returns the new count. c_tokenize uses this for the parts its vectorized path can't do.
-static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, uint64_t position, bool start_of_line, uint64_t stop_at,
-                                 uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint64_t count, uint32_t flags, uint64_t* resume)
+// A directive name before refinement, through translation phases 1 and 2.
+static bool scalar_spelling_is(const ScalarLexer* lexer, uint64_t begin, uint64_t end, const char* name)
+{
+    uint64_t position = begin;
+    uint32_t letter = 0;
+    bool result = true;
+    while (result && position < end && name[letter] != 0)
+    {
+        uint64_t size;
+        uint64_t start;
+        result = get_char(lexer, position, &size, &start) == name[letter];
+        position += size != 0 ? size : 1;
+        letter += 1;
+    }
+    return result && position == end && name[letter] == 0;
+}
+
+// `raw_directives` is the preprocessor's rare whole-file recovery: raw-looking bytes in a diagnostic message or a
+// direct angle header belong to that directive's text. Ordinary calls leave the generic lexer's grammar unchanged.
+static uint64_t c_tokenize_scalar_context(const uint8_t* source, uint64_t length, uint64_t position, bool start_of_line, uint64_t stop_at,
+                                 uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint64_t count, uint32_t flags, uint64_t* resume, bool raw_directives)
 {
     ScalarLexer lexer_value = {
         .source = source,
@@ -1576,6 +1595,9 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
     };
     const ScalarLexer* lexer = &lexer_value;
     TokenOutput output = { .kinds = kinds, .starts = starts, .ends = ends, .count = count, .start_of_line = start_of_line };
+    const bool raw_strings = lexer_value.raw_strings;
+    const bool utf_raw_strings = lexer_value.utf_raw_strings;
+    uint8_t directive = 0;
     uint64_t p = position;
     *resume = length;
 
@@ -1599,6 +1621,9 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
                 continue;
             case '\n': case '\r':
                 output.start_of_line = true;
+                directive = 0;
+                lexer_value.raw_strings = raw_strings;
+                lexer_value.utf_raw_strings = utf_raw_strings;
                 if (start >= stop_at)
                 {
                     *resume = p;
@@ -1883,10 +1908,45 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
                 }
                 break;
         }
+        if (raw_directives)
+        {
+            if (output.start_of_line)
+            {
+                directive = kind == C_TOKEN_HASH ? 1 : 0;
+            }
+            else if (directive == 1)
+            {
+                const bool identifier = kind == C_TOKEN_RAW_IDENTIFIER;
+                const bool text = identifier && (scalar_spelling_is(lexer, start, p, "warning") || scalar_spelling_is(lexer, start, p, "error"));
+                const bool header = identifier && (scalar_spelling_is(lexer, start, p, "include") || scalar_spelling_is(lexer, start, p, "include_next") ||
+                                                   scalar_spelling_is(lexer, start, p, "import"));
+                directive = header ? 2 : 0;
+                if (text)
+                {
+                    lexer_value.raw_strings = false;
+                    lexer_value.utf_raw_strings = false;
+                }
+            }
+            else if (directive == 2)
+            {
+                directive = 0;
+                if (kind == C_TOKEN_LESS)
+                {
+                    lexer_value.raw_strings = false;
+                    lexer_value.utf_raw_strings = false;
+                }
+            }
+        }
         emit(&output, kind, start, p);
     }
 
     return output.count;
+}
+
+static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, uint64_t position, bool start_of_line, uint64_t stop_at,
+                                 uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint64_t count, uint32_t flags, uint64_t* resume)
+{
+    return c_tokenize_scalar_context(source, length, position, start_of_line, stop_at, kinds, starts, ends, count, flags, resume, false);
 }
 
 static int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
