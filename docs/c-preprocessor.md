@@ -528,6 +528,9 @@ arenas. Popping a context gives its tokens back when they are on top.
   `test-preprocessor` checks both against `snprintf` on every count to 300,
   random and every value in turn, at the end of a readable page before a
   `PROT_NONE` one. `benchmark-preprocessor --embed N` times them (see below).
+  The text is the only part of `#embed` that grows with the file. The rest is
+  scalar: reading the parameters, looking up the file and the join's scan of the
+  bytes after the line. It costs a line's worth of work once per directive.
 - **Where `-E` prints it.** No token of an `#embed` starts a line, so the data
   goes on the line of the output before it. After its tokens, the file's next
   token joins their line too (`pp_embed_joins`, `BUSTER_PP_JOIN_LINE`). Clang's
