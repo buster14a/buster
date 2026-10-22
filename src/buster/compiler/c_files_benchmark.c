@@ -4,8 +4,8 @@
 // The per-file jobs' benchmark (c_files.c): a file cache filled on one lane to eight, as a process that compiles from
 // nothing fills it, and how the time scales.
 //
-// Usage: build/compiler benchmark-files [--lanes LIST] [--cpus LIST] [--runs N] [--spin MS] [--flat] [--bytes map|read|populate] [options]
-//                                       path...
+// Usage: build/compiler benchmark-files [--lanes LIST] [--cpus LIST] [--runs N] [--spin MS] [--flat] [--bytes map|read|populate]
+//                                       [--lane-bytes N] [options] path...
 //
 // The paths (files, or the .c and .h files under directories) are the walk's roots, with -E's options (-I, -isystem,
 // -D, --predefines, -std=, ...); with --flat they are only prepared, without following their includes (a corpus such as
@@ -154,9 +154,9 @@ static void files_benchmark_lane(void* argument)
 
 // One run from nothing on `lanes` lanes (pinned to `cpus`): its times in `sample` and what it did in `counts`. Leaves
 // the cache and its table filled when `keep` (for files_benchmark_unused), else releases them.
-static bool files_benchmark_run(const PPOptions* options, const char* const* roots, uint32_t root_count, bool follow, FileCacheBytes bytes, uint32_t lanes,
-                                const uint32_t* cpus, uint64_t spin_ticks, FilesBenchmarkSample* sample, FilesBenchmarkCounts* counts, InternTable* table, FileCache* cache,
-                                bool keep)
+static bool files_benchmark_run(const PPOptions* options, const char* const* roots, uint32_t root_count, bool follow, FileCacheBytes bytes, uint64_t lane_bytes,
+                                uint32_t lanes, const uint32_t* cpus, uint64_t spin_ticks, FilesBenchmarkSample* sample, FilesBenchmarkCounts* counts,
+                                InternTable* table, FileCache* cache, bool keep)
 {
     static Preprocessor search;
     static FilesBenchmark benchmark;
@@ -165,6 +165,7 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
     with.files = cache;
     result = result && pp_initialize(&search, &with, table) && files_run_initialize(&benchmark.run, cache, &search, roots, root_count, follow, lanes);
     benchmark.run.bytes = bytes;
+    benchmark.run.lane_bytes = lane_bytes;
     benchmark.spin_ticks = spin_ticks;
     benchmark.ticks = 0;
     result = result && lane_run(lanes, files_benchmark_lane, &benchmark, cpus) && !benchmark.run.failed;
@@ -213,11 +214,13 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
 // The unused files
 
 // Preprocesses each root as a translation unit with a filled cache, and prints how many of the files the walk prepared
-// no unit entered, with their tokens and bytes.
+// no unit entered, with their tokens and bytes. The walk's records come first: a unit may add others after them (the
+// predefines' file, a computed include's), which aren't counted.
 static bool files_benchmark_unused(const PPOptions* options, const char* const* roots, uint32_t root_count, InternTable* table, FileCache* cache)
 {
     static Preprocessor unit;
-    uint8_t* used = calloc(cache->record_count + 1, 1);
+    const uint32_t walked = cache->record_count;
+    uint8_t* used = calloc((size_t)walked + 1, 1);
     PPOptions with = *options;
     with.files = cache;
     bool result = used != 0;
@@ -228,7 +231,7 @@ static bool files_benchmark_unused(const PPOptions* options, const char* const* 
         units_failed += result && !pp_run(&unit, roots[u]);
         for (uint32_t d = 0; result && d < unit.data_count; d += 1)
         {
-            if (unit.datas[d].record != BUSTER_PP_NONE && unit.datas[d].prepared)
+            if (unit.datas[d].record < walked && unit.datas[d].prepared)
             {
                 used[unit.datas[d].record] = 1;
             }
@@ -240,7 +243,7 @@ static bool files_benchmark_unused(const PPOptions* options, const char* const* 
     uint64_t unused_tokens = 0;
     uint64_t tokens = 0;
     uint64_t unused_bytes = 0;
-    for (uint32_t r = 0; result && r < cache->record_count; r += 1)
+    for (uint32_t r = 0; result && r < walked; r += 1)
     {
         const PPFileData* record = &cache->records[r];
         files += record->prepared;
@@ -258,7 +261,7 @@ static bool files_benchmark_unused(const PPOptions* options, const char* const* 
         for (uint32_t shown = 0; shown < 8; shown += 1)
         {
             uint32_t largest = BUSTER_PP_NONE;
-            for (uint32_t r = 0; r < cache->record_count; r += 1)
+            for (uint32_t r = 0; r < walked; r += 1)
             {
                 const bool candidate = cache->records[r].prepared && used[r] == 0;
                 largest = candidate && (largest == BUSTER_PP_NONE || cache->records[r].token_count > cache->records[largest].token_count) ? r : largest;
@@ -345,6 +348,7 @@ int run_files_benchmark(int argc, char** argv)
     uint32_t spin = 2;
     bool flat = false;
     FileCacheBytes bytes = BUSTER_FILES_BYTES;
+    uint64_t lane_bytes = BUSTER_FILES_LANE_BYTES;
     char** passed = calloc((size_t)argc + 2, sizeof(char*));
     int passed_count = 0;
     FilesSources sources = { 0 };
@@ -383,6 +387,11 @@ int run_files_benchmark(int argc, char** argv)
         {
             flat = true;
         }
+        else if (strcmp(argument, "--lane-bytes") == 0 && next != 0)
+        {
+            lane_bytes = strtoull(next, 0, 10);
+            i += 1;
+        }
         else if (strcmp(argument, "--bytes") == 0 && next != 0)
         {
             bytes = strcmp(next, "populate") == 0 ? FILE_CACHE_MAP_POPULATED : strcmp(next, "read") == 0 ? FILE_CACHE_READ : FILE_CACHE_MAP;
@@ -408,10 +417,19 @@ int run_files_benchmark(int argc, char** argv)
         }
     }
     cpu_count = cpu_count != 0 ? cpu_count : files_benchmark_allowed_cpus(cpus, BUSTER_FILES_BENCHMARK_MAX_LANES);
+    // Lane counts past the CPUs are left out (a CI job may allow fewer CPUs than the machine has).
+    uint32_t kept = 0;
     for (uint32_t l = 0; valid && l < lane_count; l += 1)
     {
-        valid = lanes[l] >= 1 && lanes[l] <= cpu_count;
+        if (lanes[l] > cpu_count)
+        {
+            printf("benchmark-files: %u lanes left out: %u CPUs\n", lanes[l], cpu_count);
+        }
+        lanes[kept] = lanes[l];
+        kept += lanes[l] >= 1 && lanes[l] <= cpu_count;
     }
+    lane_count = kept;
+    valid = valid && lane_count != 0;
     valid = valid && sources.count != 0;
     Arena arena = arena_reserve(1ull << 30);
     PPOptions options;
@@ -426,9 +444,8 @@ int run_files_benchmark(int argc, char** argv)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: %s [--lanes LIST] [--cpus LIST] [--runs N] [--spin MS] [--flat] [--bytes map|read|populate] [options] path...\n"
-                        "(each lane count must be at most the CPUs: %u)\n",
-                argv[0], cpu_count);
+        fprintf(stderr, "usage: %s [--lanes LIST] [--cpus LIST] [--runs N] [--spin MS] [--flat] [--bytes map|read|populate] [--lane-bytes N] [options] path...\n",
+                argv[0]);
     }
     const double ticks_per_nanosecond = valid ? files_benchmark_ticks_per_nanosecond() : 1.0;
     const uint64_t spin_ticks = (uint64_t)((double)spin * 1e6 * ticks_per_nanosecond);
@@ -453,10 +470,10 @@ int run_files_benchmark(int argc, char** argv)
     for (uint32_t l = 0; result && l < lane_count; l += 1)
     {
         // A warm-up run, then the measured ones.
-        result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, lanes[l], cpus, spin_ticks, &samples[0], &counts, &table, &cache, false);
+        result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, lane_bytes, lanes[l], cpus, spin_ticks, &samples[0], &counts, &table, &cache, false);
         for (uint32_t r = 0; result && r < runs; r += 1)
         {
-            result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, lanes[l], cpus, spin_ticks, &samples[r], &counts, &table, &cache, false);
+            result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, lane_bytes, lanes[l], cpus, spin_ticks, &samples[r], &counts, &table, &cache, false);
         }
         if (result)
         {
@@ -510,7 +527,7 @@ int run_files_benchmark(int argc, char** argv)
     if (result && !flat)
     {
         FilesBenchmarkSample sample;
-        result = files_benchmark_run(&options, sources.paths, sources.count, true, bytes, 1, cpus, 0, &sample, &counts, &table, &cache, true) &&
+        result = files_benchmark_run(&options, sources.paths, sources.count, true, bytes, lane_bytes, 1, cpus, 0, &sample, &counts, &table, &cache, true) &&
                  files_benchmark_unused(&options, sources.paths, sources.count, &table, &cache);
         file_cache_release(&cache);
         intern_release(&table);

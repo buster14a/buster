@@ -341,7 +341,19 @@ designs and the compilers already built this way.
   (as `clang -E`). `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
-  `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`.
+  `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`. Its
+  `FileCache` holds what is prepared from each file (by identity) and every
+  path looked up, for every translation unit that preprocesses with it
+  (`PPOptions.files`; a unit without one makes its own).
+- `src/buster/compiler/c_files.c` is #150's per-file jobs: files prepared on a
+  group of lanes into a `FileCache`, each lane interning into a table of its
+  own that a merge (rule 4's exchange) gives the shared table's ids in the
+  order of first occurrences, so that they don't depend on the lane count; and
+  the run-ahead, a frontier walk over the files' literal includes by the
+  preprocessor's own search. `docs/c-files.md` has the design and the 9700X
+  measurements. `c_files_test.c` holds its tests (`main.c` includes it;
+  `./build/compiler test-files` runs them) and `c_files_benchmark.c` provides
+  `benchmark-files`.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -386,6 +398,10 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
 ./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+./build/compiler test-files
+./build/compiler test-files --flat src
+./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 ./build/compiler test-types
 ./build/compiler benchmark-types
 ```
@@ -1907,6 +1923,64 @@ Target options don't change our predefines: give `--predefines FILE` from
 command line), as the smoke commands above do for `main.c`. The default 9700X
 job runs that one, pinned to one allowed CPU; like the others, its measurements
 are informational.
+
+## Per-file jobs tests
+
+`./build/compiler test-files [--lanes LIST] [--seed N] [--keep] [--flat]
+[options] [path...]` (about 0.3 s without paths) checks `c_files.c`. Every
+check fills a file cache on each lane count of `--lanes` (1, 2, 3 and 8), each
+time with a new intern table and cache, and must give the first lane count's
+results byte for byte: the shared table's ids and spellings, every record's
+tokens, values, leading-space bits, directive table and guard, what the walk
+did, and each translation unit's output stream (kinds, flags, values and
+locations) when it preprocesses with the cache. One lane refines straight into
+the shared table, so it is the merge's scalar twin. Each unit's spellings must
+also be those it gives with a cache of its own, with as many errors and
+warnings, and nothing may be written to stderr while the cache is filled:
+
+- the tree: a directory of the test's own (under `$TMPDIR` or `/tmp`) with
+  three translation units and the headers they include, by every kind of
+  include the walk resolves: the includer's directory, `-I` and `-isystem`, an
+  `#include_next` chain through three directories, a header reached by four
+  paths (a symbolic link and `..` among them), a hard link to a header a
+  computed include names, guarded and `#pragma once` headers included twice, a
+  header under `#if 0` that exists and one that doesn't, and a missing header
+  in an active line. The counts are exact: 13 files prepared (each identity
+  once) in 4 rounds, 1 unused, 2 requests not found (no diagnostic), and the
+  units' system calls after the walk (only the computed include's). It runs
+  with the vectorized kernels and with their scalar twins, cut into parts and
+  split once, on every lane (`FilesRun.lane_bytes` 0);
+- spellings: 240 generated files of identifiers (a shared vocabulary drawn
+  unevenly, names of their own, long names, line splices and UCNs) prepared
+  without following includes, 165,562 ids, so that the shared table grows in a
+  merge: in parts, split once, and with two lanes working, and in two runs into
+  one cache, which must equal one run on one lane;
+- with paths, their `.c` and `.h` files as translation units with `-E`'s
+  options (`-I`, `-isystem`, `-D`, `--predefines`, `-std=`, ...), all the walk's
+  roots; with `--flat`, only prepared (a corpus such as the C library's).
+
+`--seed N` changes the spellings, and `--keep` leaves the directory. On the
+9700X, `sqlite3.c`, Lua 5.4.8 and the C library corpus (`--flat`) pass too.
+The 9700X job runs it, on `src` with `--flat`, and on the repository's
+translation units.
+
+## Per-file jobs benchmark
+
+`./build/compiler benchmark-files [--lanes LIST] [--cpus LIST] [--runs N]
+[--spin MS] [--flat] [--bytes map|read|populate] [--lane-bytes N] [options]
+path...` fills a cache from the paths (with `--flat`, without following their
+includes) on each lane count of `--lanes` (1 to 8), lane i pinned to the i-th
+CPU of `--cpus` (the allowed CPUs, in order), every run from nothing after
+`--spin` ms (2) of spinning on every lane. It reports medians of `--runs` (21):
+the run's time, speedup and time to the roots' round, the tokens per second,
+each phase on the lane that spent the most on it (preparing, the merge's
+lookups, exchange, additions and rewrite, the include lines, the searches, the
+work one lane does alone, and the waits), how busy the lanes were, what a run
+did, and without `--flat` the files the walk prepared that no unit entered,
+with the largest. Run it under the 9700X's lock without `taskset`: it pins its
+lanes. `docs/c-files.md` has the numbers for the C library corpus, `sqlite3.c`,
+musl and this repository. The default 9700X job runs it on the repository's
+translation units; like the others, its measurements are informational.
 
 ## Type tests
 

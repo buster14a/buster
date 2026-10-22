@@ -378,12 +378,14 @@ static bool files_test_work(const FilesTestWork* work, const uint32_t* lanes, ui
     return result;
 }
 
-// The records the walk prepared that no unit entered (a unit's own cache prepares nothing the walk didn't): counted
-// through units run again with the reference's cache, each record a unit prepares marked.
+// The records the walk prepared that no unit entered: counted through units run again with the reference's cache, each
+// record a unit prepares marked. The walk's records come first: a unit may add others after them (the predefines'
+// file, a computed include's), which aren't counted.
 static uint32_t files_test_unused(const FilesTestWork* work, FilesTestRun* reference)
 {
     static Preprocessor unit;
-    uint8_t* used = calloc(reference->cache.record_count + 1, 1);
+    const uint32_t walked = reference->cache.record_count;
+    uint8_t* used = calloc((size_t)walked + 1, 1);
     uint32_t result = 0;
     PPOptions options = work->options;
     options.files = &reference->cache;
@@ -395,7 +397,7 @@ static uint32_t files_test_unused(const FilesTestWork* work, FilesTestRun* refer
             for (uint32_t d = 0; d < unit.data_count; d += 1)
             {
                 const uint32_t record = unit.datas[d].record;
-                if (record != BUSTER_PP_NONE && unit.datas[d].prepared)
+                if (record < walked && unit.datas[d].prepared)
                 {
                     used[record] = 1;
                 }
@@ -403,7 +405,7 @@ static uint32_t files_test_unused(const FilesTestWork* work, FilesTestRun* refer
         }
         pp_release(&unit);
     }
-    for (uint32_t r = 0; used != 0 && r < reference->cache.record_count; r += 1)
+    for (uint32_t r = 0; used != 0 && r < walked; r += 1)
     {
         result += reference->cache.records[r].prepared && used[r] == 0;
     }

@@ -396,8 +396,8 @@ On the 9700X, run each one under `EXCLUSIVE_OWNER=<name>
 - **The C library corpus** misses in the L2 cache: its 597,439 spellings make
   16 MB of buckets. Prefetching deeper (two batches ahead) or smaller slots
   would trade instructions for misses; measure both.
-- **Interning from several threads** (#150): per-file refinement in parallel,
-  with ids from a shared table or a merge that keeps them independent of the
-  schedule.
+- **Interning from several threads** (#150) is `docs/c-files.md`'s: each lane
+  refines into a table of its own, and a merge gives the shared table's ids in
+  the order of first occurrences, so that they don't depend on the lanes.
 - **Named UCNs:** intern them by their code point, which needs Unicode's name
   table, or diagnose them (#116's open question).

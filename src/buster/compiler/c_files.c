@@ -66,11 +66,12 @@
 // A spelling's first occurrence, in the top bit of FilesSpelling.file.
 #define BUSTER_FILES_FIRST (1u << 31)
 // A round is prepared by one lane per BUSTER_FILES_LANE_BYTES of its files' bytes, up to every lane of the group: a lane
-// that joins a round pays for the fresh memory of its own arenas and table (their first huge pages), which a round of
-// little more than that doesn't pay back on the 9700X. With all the group's lanes, a round of fewer bytes per lane than
+// that joins a round pays for the fresh memory of its own arenas and table and for the merge, which on the 9700X rounds
+// of 1 to 2 MB per working lane didn't pay back (with a lane per MB, sqlite3.c's walk took 16% longer on 8 lanes than on
+// one: docs/c-files.md, "Where the time goes"). With all the group's lanes, a round of fewer bytes per lane than
 // BUSTER_FILES_SPLIT_BYTES is split once (lane_range_by_cost) rather than cut into parts (rule 1): preparing takes about
 // 3 cycles a byte, so 128 KB is about the 64 µs a phase needs per lane to pay for taking parts.
-#define BUSTER_FILES_LANE_BYTES (1u << 20)
+#define BUSTER_FILES_LANE_BYTES (4u << 20)
 #define BUSTER_FILES_SPLIT_BYTES (128u << 10)
 // A lane's own table starts with a bucket for every this many bytes of its share of its first round (at least
 // BUSTER_FILES_MIN_BUCKETS), about what the C library's files need, so that it rarely grows.
