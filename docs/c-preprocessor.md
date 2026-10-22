@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units (at fbddd2e, with `main` at e71d7fd), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,070,090 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 224 | |
+| The built-in cases (`pp_test_cases`) | 236 | |
 | #109's generated cases in C17 and C23, against `clang -E -P`: the last campaign's and those after it, but for 4 that #247 fixes ([the fuzzing](preprocessor-fuzz.md), "Qualification") | 42,800,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
@@ -1418,7 +1418,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 224 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 236 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
