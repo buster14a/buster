@@ -26,8 +26,8 @@
 //     libc, bound against the system's runtime (runtime.c and bind.c) and written as dynamic PIEs, the same way (--only
 //     dynamic for these alone); bound against its static runtime (runtime_import_static) and written as static
 //     executables (--only static); and bound against the static PIE's runtime (runtime_import_static_pie) and written
-//     as static PIEs (--only static-pie), whose GOT relaxation takes the forms it writes, so that a write over them
-//     again writes the same file.
+//     as static PIEs (--only static-pie). Every kind's GOT relaxation takes the forms it writes, so that a write over
+//     them again writes the same file.
 // The exit status is 1 if the arguments are invalid, a variant's bytes differ, the runtime doesn't import, or a link
 // fails.
 
@@ -369,42 +369,106 @@ static bool executable_benchmark_kernel_case(uint64_t size, uint64_t count, uint
     return result;
 }
 
+// Whether fixup `fixup` of a program is a load or a call through the GOT that relaxes, by `relaxable`'s bit of its
+// target (executable_relaxes's rule).
+static bool executable_benchmark_relaxes(const Link* link, const uint64_t* relaxable, FixupId fixup)
+{
+    const uint8_t kind = link->fixups.kind[fixup];
+    const SymbolId target = link->fixups.target[fixup];
+    const bool loads = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT;
+    return loads && link->fixups.addend[fixup] == -4 && (relaxable[target / 64] >> (target % 64) & 1) != 0;
+}
+
+// Puts back a written program's relaxed loads and calls through the GOT as the code generator wrote them, from the
+// forms the relaxation wrote: addr32 call (67 e8) as call [rip + slot] (ff 15), jmp (e9) as jmp [rip + slot] (ff 25),
+// and lea (8d) as mov (8b); the fields, which the relaxation writes, are left as they are.
+static void executable_benchmark_unrelax(Link* link, const uint64_t* relaxable)
+{
+    for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+    {
+        uint8_t* bytes = link->atoms.bytes[atom];
+        const FixupId first = link->atoms.fixup_begin[atom];
+        for (FixupId fixup = first; fixup < first + link->atoms.fixup_count[atom]; fixup += 1)
+        {
+            const uint32_t offset = link->fixups.offset[fixup];
+            const bool relaxes = executable_benchmark_relaxes(link, relaxable, fixup);
+            if (relaxes && link->fixups.kind[fixup] == BUSTER_LINK_FIXUP_LOAD_GOT)
+            {
+                bytes[offset - 2] = 0x8b;
+            }
+            else if (relaxes)
+            {
+                const bool jump = bytes[offset - 2] == 0xe9;
+                bytes[offset - 2] = 0xff;
+                bytes[offset - 1] = jump ? 0x25 : 0x15;
+            }
+        }
+    }
+}
+
 // executable_patch_range over every atom of a generated program, as executable_write's chunks run it: the mix of kinds
-// a program has. The program has been written once, so its layout columns are filled.
+// a program has, three ways. Without relaxation, every load and call through the GOT reading its slot, as before #85
+// relaxed them in every executable; relaxing them (to the symbols of relocation class RELATIVE that aren't IFUNCs,
+// executable_mark_relaxable's) from the instructions as the code generator writes them, put back before each run
+// outside the time (executable_benchmark_unrelax), as a link's are; and relaxing them again over the forms the
+// relaxation wrote, as each of this benchmark's writes after the first does. The program has been written once, so its
+// layout columns are filled; the last way leaves the bytes as the write left them.
 static void executable_benchmark_program_kernel(Link* link, uint64_t got)
 {
-    const ExecutablePatch patch = {
-        .offsets = link->fixups.offset,
-        .targets = link->fixups.target,
-        .addends = link->fixups.addend,
-        .kinds = link->fixups.kind,
-        .wide_addends = link->fixups.wide_addends,
-        .reference = link->symbols.reference,
-        .got_slots = link->symbols.got_slot,
-        .sizes = link->symbols.size,
-        .base = BUSTER_EXECUTABLE_BASE,
-        .got = got,
-        .checked = false,
-    };
-    uint64_t others = 0;
-    for (FixupId fixup = 1; fixup < link->fixups.count; fixup += 1)
+    uint64_t* relaxable = calloc(link->symbols.count / 64 + 1, sizeof(uint64_t));
+    for (SymbolId symbol = 1; relaxable != 0 && symbol < link->symbols.count; symbol += 1)
     {
-        others += link->fixups.kind[fixup] != BUSTER_LINK_FIXUP_CALL && link->fixups.kind[fixup] != BUSTER_LINK_FIXUP_PC32 ? 1 : 0;
+        const bool image = executable_relocation_class(link, symbol, false) == BUSTER_EXECUTABLE_RELOCATION_RELATIVE && !executable_is_ifunc(link, symbol);
+        relaxable[symbol / 64] |= image ? 1ull << (symbol % 64) : 0;
     }
-    uint64_t times[BUSTER_EXECUTABLE_BENCHMARK_RUNS];
-    for (uint32_t run = 0; run < BUSTER_EXECUTABLE_BENCHMARK_RUNS; run += 1)
+    uint64_t others = 0;
+    uint64_t relaxed = 0;
+    for (FixupId fixup = 1; relaxable != 0 && fixup < link->fixups.count; fixup += 1)
     {
-        const uint64_t begin = executable_now();
-        for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+        const uint8_t kind = link->fixups.kind[fixup];
+        others += kind != BUSTER_LINK_FIXUP_CALL && kind != BUSTER_LINK_FIXUP_PC32 ? 1 : 0;
+        relaxed += executable_benchmark_relaxes(link, relaxable, fixup) ? 1 : 0;
+    }
+    double nanoseconds[3] = { 0 };
+    for (uint32_t way = 0; relaxable != 0 && way < 3; way += 1)
+    {
+        const ExecutablePatch patch = {
+            .offsets = link->fixups.offset,
+            .targets = link->fixups.target,
+            .addends = link->fixups.addend,
+            .kinds = link->fixups.kind,
+            .wide_addends = link->fixups.wide_addends,
+            .reference = link->symbols.reference,
+            .got_slots = link->symbols.got_slot,
+            .sizes = link->symbols.size,
+            .base = BUSTER_EXECUTABLE_BASE,
+            .got = got,
+            .relaxable = way != 0 ? relaxable : 0,
+            .checked = false,
+        };
+        uint64_t times[BUSTER_EXECUTABLE_BENCHMARK_RUNS];
+        for (uint32_t run = 0; run < BUSTER_EXECUTABLE_BENCHMARK_RUNS; run += 1)
         {
-            const FixupId first = link->atoms.fixup_begin[atom];
-            executable_patch_range(&patch, link->atoms.bytes[atom], (uint32_t)link->atoms.address[atom], first, first + link->atoms.fixup_count[atom]);
+            if (way == 1)
+            {
+                executable_benchmark_unrelax(link, relaxable);
+            }
+            const uint64_t begin = executable_now();
+            for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+            {
+                const FixupId first = link->atoms.fixup_begin[atom];
+                executable_patch_range(&patch, link->atoms.bytes[atom], (uint32_t)link->atoms.address[atom], first, first + link->atoms.fixup_count[atom]);
+            }
+            times[run] = executable_now() - begin;
         }
-        times[run] = executable_now() - begin;
+        nanoseconds[way] = executable_benchmark_median(times, BUSTER_EXECUTABLE_BENCHMARK_RUNS) / (double)(link->fixups.count - 1);
     }
     const uint64_t count = link->fixups.count - 1;
-    printf("  a generated program: %llu fixups in %u atoms, %.1f%% of other kinds: %.3f ns per fixup\n", (unsigned long long)count, link->atoms.count - 1,
-           100.0 * (double)others / (double)count, executable_benchmark_median(times, BUSTER_EXECUTABLE_BENCHMARK_RUNS) / (double)count);
+    printf("  a generated program: %llu fixups in %u atoms, %.1f%% of other kinds, %llu loads and calls through the GOT that relax: %.3f ns per fixup relaxing "
+           "them from the code generator's instructions, %.3f over relaxed bytes, %.3f without relaxing them\n",
+           (unsigned long long)count, link->atoms.count - 1, 100.0 * (double)others / (double)count, (unsigned long long)relaxed, nanoseconds[1], nanoseconds[2],
+           nanoseconds[0]);
+    free(relaxable);
 }
 
 // The unwind tables' passes over a generated program's .eh_frame atoms, as executable_write runs them on one lane, the

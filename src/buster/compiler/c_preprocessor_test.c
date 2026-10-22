@@ -813,6 +813,8 @@ static const PPTestFile pp_test_files_embed_review[] = {
     { "dir/bytes.bin", "A\n" },
     { "hi.txt", "Hi!\n" },
     { "sys.h", "unsigned char a[] = {\n#pragma GCC system_header\n#embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
+    { "sys_indent.h", "unsigned char b[] = {\n#pragma GCC system_header\n  #embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
+    { "sys_blank.h", "unsigned char c[] = {\n#pragma GCC system_header\n\n#embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
     { 0, 0 },
 };
 
@@ -1095,6 +1097,9 @@ static const PPTestCase pp_test_cases[] = {
     // #109's differential fuzzing against clang: a case for each difference it found (minimized) and for each that
     // probing around one found, with clang's -P text, which test-preprocessor --clang checks again.
     { "-undef", "__STDC__ __STDC_VERSION__ __STDC_HOSTED__ __STDC_UTF_16__ __STDC_UTF_32__\n__STDC_EMBED_NOT_FOUND__ __STDC_EMBED_FOUND__ __STDC_EMBED_EMPTY__\n__x86_64__ __clang__ __BUSTER__ __GNUC__ __CHAR_BIT__\n", 0, "c23", "1 202311L 1 1 1\n0 1 2\n__x86_64__ __clang__ __BUSTER__ __GNUC__ __CHAR_BIT__\n", false, 0, "-undef" },
+    // Assembly's language macro stays with -undef, as the standard ones do: a header shared with C keeps its C apart.
+    { "-undef in assembly", "#ifdef __ASSEMBLER__\nassembly\n#else\nc\n#endif\n__STDC_VERSION__ __STDC_HOSTED__ __x86_64__\n", 0, "c17", "assembly\n201710L 1 __x86_64__\n", false, 0,
+      "-undef -x assembler-with-cpp" },
     { "feature answers' spelling", "__has_c_attribute(nodiscard) __has_c_attribute(deprecated) __has_c_attribute(fallthrough) __has_c_attribute(maybe_unused)\n__has_c_attribute(gnu::packed) __has_attribute(cold) __has_attribute(__nonnull__) __has_builtin(__builtin_expect) __has_feature(c_atomic) __has_extension(c_atomic)\n__has_cpp_attribute(nodiscard) __has_declspec_attribute(dllexport)\n#if __has_embed(\"/dev/null\") == 2\nempty\n#endif\n", 0, "c23", "202003L 201904L 201910L 202106L\n1 1 1 1 1 1\n__has_cpp_attribute(nodiscard) 0\nempty\n", false, 0 },
     { "__has_warning", "__has_warning(\"-Wall\") __has_warning(\"-Wunused-macros\") __has_warning(\"-Wppf-none\") __has_warning(\"-W\" \"shadow\") __has_warning(\"-Rpass\")\n", 0, "c17", "1 1 0 1 0\n", false, 0 },
     { "__VA_OPT__ without variadic parameters", "#define F(a) [__VA_OPT__(x a) a]\nF(1)\n", 0, "c23", "\n[ 1]\n", false, 0 },
@@ -1436,6 +1441,30 @@ static const PPTestCase pp_test_cases[] = {
         .files = pp_test_files_embed_review,
         .markers = "# 1 \"%d/case.c\"\n# 1 \"%d/sys.h\" 1\nunsigned char a[] = {\n# 3 \"%d/sys.h\" 3\n72, 300 };\n# 2 \"%d/case.c\" 2\nint after;\n",
     },
+    // #252's second review, against clang 23: the line lexed again past a "//" name runs on through a block comment's
+    // newlines, as clang's does, and the file goes on after it (a #define in that comment is none, and the next token
+    // joins the data's line); a gap of line splices alone in it isn't a space (STR(a\ +b) is "a+b"); and the system
+    // header's note starts where the printer resumes after #pragma GCC system_header, before an #embed indented or after
+    // a blank line.
+    {
+        .name = "#252's second review: an #embed's line past a \"//\" name, through a block comment's newlines",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) /* comment\n*/ suffix(,42)\n};\nint b[] = {\n#embed <dir//bytes.bin> prefix(1 /* c\n */ ,) limit(1)\n};\n"
+                  "int c[] = {\n#embed <dir//bytes.bin> limit(1) /* c\n#define X 1\n*/\n};\nX\n#define STR(x) #x\nint d[] = {\n"
+                  "#embed <dir//bytes.bin> prefix(STR(a\\\n+b),) limit(1)\n};\nend\n",
+        .standard = "c23",
+        .expected = "int a[] = {65 ,42}; int b[] = {1 ,65 }; int c[] = {65 }; X int d[] = {\"a+b\",65 }; end",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's second review: an #embed after #pragma GCC system_header, indented or after a blank line",
+        .source = "#include \"sys_indent.h\"\n#include \"sys_blank.h\"\nint after;\n",
+        .standard = "c23",
+        .expected = "unsigned char b[] = { 72, 300 }; unsigned char c[] = { 72, 300 }; int after;",
+        .files = pp_test_files_embed_review,
+        .markers = "# 1 \"%d/case.c\"\n# 1 \"%d/sys_indent.h\" 1\nunsigned char b[] = {\n# 3 \"%d/sys_indent.h\" 3\n72, 300 };\n# 2 \"%d/case.c\" 2\n"
+                   "# 1 \"%d/sys_blank.h\" 1\nunsigned char c[] = {\n# 3 \"%d/sys_blank.h\" 3\n72, 300 };\n# 3 \"%d/case.c\" 2\nint after;\n",
+    },
     {
         .name = "#252's review: comment delimiters a line splice splits, after an #embed and in a #line's comment",
         .source = "int a[] = {\n#embed \"hi.txt\" limit(1)\n/* comment *\\\n/\n\n};\nint b[] = {\n#embed \"hi.txt\" limit(1)\n/\\\n* comment */\n\n};\n"
@@ -1587,7 +1616,8 @@ static const PPTestCase pp_test_cases[] = {
     // the name, a '>' too, as clang's LexAngledStringLiteral reads it; and the rest of the line past such a name is what
     // clang lexes on from its '>', where the file's tokens ran past it: a "//" in the name began a comment there (the
     // #if line's `&& 0` and `|| defined(NOPE)` count, an #include's `junk` is a warning and __has_embed's parameters are
-    // read), or a token the '>' starts ("x.h>>", "x.h>=", "x.h>>=") stays in the operand, an error.
+    // read, also on past a block comment's newlines, and the file goes on after that line), or a token the '>' starts
+    // ("x.h>>", "x.h>=", "x.h>>=") stays in the operand, an error.
     {
         .name = "#254's second review: a backslash in a header name written out escapes its '>'",
         .source = "#if __has_include(<a\\>b.h>) && __has_include(\"a\\>b.h\")\nyes\n#endif\n#include <a\\>b.h>\nend\n",
@@ -1605,6 +1635,16 @@ static const PPTestCase pp_test_cases[] = {
         .expected = "yes2 yes4 yes5 yes6 int dir_x; end",
         .warnings = 1,
         .options = "-I%d --embed-dir=%d",
+        .files = pp_test_files_header_tails,
+    },
+    {
+        .name = "#254's second review: a \"//\" name's line, through a block comment's newlines",
+        .source = "#include <dir//x.h> /* c\n*/ junk\nmid\n#if __has_include(<dir//x.h>) /* c\n#define Y 1\n*/ && 0\nno\n#endif\n#ifdef Y\nY_defined\n#endif\n"
+                  "#if __has_include(<dir//x.h>) /* c\n*/ || 0\nyes\n#endif\nend\n",
+        .standard = "c17",
+        .expected = "int dir_x; mid yes end",
+        .warnings = 1,
+        .options = "-I%d",
         .files = pp_test_files_header_tails,
     },
     {
