@@ -1170,13 +1170,18 @@ static bool files_test_read_strategy(const char* directory)
                 counts.maps += run.lanes[l].counts.maps;
                 counts.reads += run.lanes[l].counts.reads;
             }
+            uint32_t prepared = 0;
+            for (uint32_t r = 0; r < cache.record_count; r += 1)
+            {
+                prepared += cache.records[r].prepared;
+            }
             const uint64_t kept = defer != 0 && lanes > 1 ? BUSTER_ARRAY_LENGTH(roots) : 0;
-            result = result && run.failed == (way == 3) && cache.prepared_records == (way == 3 ? 0 : BUSTER_ARRAY_LENGTH(roots)) && counts.maps == 0 &&
+            result = result && run.failed == (way == 3) && prepared == (way == 3 ? 0 : BUSTER_ARRAY_LENGTH(roots)) && counts.maps == 0 &&
                      counts.reads == BUSTER_ARRAY_LENGTH(roots) && run.kept == kept;
             if (!result)
             {
-                printf("read strategy: way %u defer %u: %lu reads, %lu maps, %lu kept (%lu): FAILED\n", way, defer, (unsigned long)counts.reads,
-                       (unsigned long)counts.maps, (unsigned long)run.kept, (unsigned long)kept);
+                printf("read strategy: way %u defer %u: %lu reads, %lu maps, %lu kept (%lu), %u prepared, failed %u: FAILED\n", way, defer, (unsigned long)counts.reads,
+                       (unsigned long)counts.maps, (unsigned long)run.kept, (unsigned long)kept, prepared, run.failed);
             }
             files_run_release(&run);
             pp_release(&search);
