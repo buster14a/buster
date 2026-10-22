@@ -357,6 +357,10 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(void) { do ; }\n", "1:21: expected 'while' in do/while loop", 0 },
     { "void f(void) { do ; while (1) }\n", "1:30: expected ';' after do/while statement", 0 },
     { "int (*p)(int;\n", "1:13: expected ')'", 0 },
+    // A declarator's group holds one declarator.
+    { "int (*f, g);\n", "1:8: expected ')'", 0 },
+    { "struct S { int (*f, g); };\n", "1:19: expected ')'", 0 },
+    { "void m(void (*f (void *), int a));\n", "1:25: expected ')'", 0 },
     { "int x = sizeof int;\n", "1:15: expected parentheses around type name in sizeof expression", 0 },
     { "void f(void) { if (1) int y; }\n", "1:23: expected expression", 0 },
     { "void f(void) { int g(void) { return 1; } }\n", "1:28: function definition is not allowed here", 0 },
@@ -443,6 +447,8 @@ static const ParseTestSnippet parse_test_snippets[] =
     // K&R definitions: the name's own identifier list, through the declarator's groups, in C17 and before.
     { "int (f(x)) int x; { return x; }\nint (*g(y)) int y; { return 0; }\n", "", 0 },
     { "int f(x) int x; 5\n", "1:17: expected function body after function declarator", 0 },
+    { "int f(x) int x; { return x; }\n", "1:7: unknown type name 'x'", "c23", true },
+    { "int g(const x);\n", "1:13: unknown type name 'x'", "c23", true },
     // A K&R definition's parameter declarations declare its parameters, each once, with `register` at most, without
     // initializers, in a scope of their own, which the body ends; and its identifier list names each once.
     { "int f(a, a) { return 0; }\n", "1:10: redefinition of parameter 'a'", 0 },
@@ -458,13 +464,13 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int f(a, b) int a,\n{ return 0; }\n", "2:1: expected identifier or '('", 0 },
     { "int f(a) 5\n", "1:10: expected function body after function declarator", 0 },
     { "int f(a) int a; __extension__ int b; { return 0; }\n", "1:17: expected function body after function declarator", 0 },
+    // The list's names are ordinary identifiers in the body, where a K&R list may name them again (which only clang's
+    // semantic analysis rejects, there).
     { "int f(a) { int g(a, b); return 0; }\n", "", 0, true },
     // An attribute list where clang takes none: after a K&R identifier list, an operand or a designator's member.
     { "int f(a) [[deprecated]] int a; { return a; }\n", "1:10: an attribute list cannot appear here", 0 },
     { "int a[2]; int b = a[[0]];\n", "1:20: an attribute list cannot appear here", 0 },
     { "struct S { int a; }; int x = __builtin_offsetof(struct S, a [[x]]);\n", "1:61: an attribute list cannot appear here", 0 },
-    { "int f(x) int x; { return x; }\n", "1:7: unknown type name 'x'", "c23", true },
-    { "int g(const x);\n", "1:13: unknown type name 'x'", "c23", true },
     // An identifier where a type would be is the name, with an implicit int, if what follows may follow a name, and
     // else an unknown type name.
     { "int f(int a, x);\n", "", "c89" },
@@ -476,6 +482,11 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "x;\n", "1:1: a type specifier is required for all declarations", "c23", true },
     { "__extension__ x;\n", "1:15: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
     { "__extension__;\n", "", 0 },
+    // A declarator without specifiers is an implicit int, as an identifier is; its group holds the name.
+    { "(x);\n", "1:2: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "(x);\n", "", "c89" },
+    { "(\"x\");\n", "1:2: expected identifier or '('", 0 },
+    { "static (x);\n", "1:9: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
     // A _Static_assert's message is string literals.
     { "_Static_assert(1, \"x\" \"y\" \"z\");\n", "", 0 },
     { "_Static_assert(1, \"x\" + 1);\n", "1:23: expected ')'", 0 },

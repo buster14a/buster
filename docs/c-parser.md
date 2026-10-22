@@ -129,7 +129,8 @@ once, with `register` at most and no initializer. Elsewhere an identifier
 that isn't a type name, where a type would be, is what clang's
 `ParseImplicitInt` makes it: the declarator's name with an implicit int if what
 follows may follow a name, and else an unknown type name, as a parameter's
-always is in C23. Selection and iteration statements are blocks, and so is
+always is in C23; and at file scope a declarator without specifiers (`(x);`,
+`*p;`) has an implicit int too. Selection and iteration statements are blocks, and so is
 each of their substatements (C 6.8.4p3, 6.8.5p5): what a condition declares
 ends with its statement, and what a then-statement or a do's body declares ends
 with it. `__builtin_offsetof`'s member designator and `_Static_assert`'s
@@ -317,28 +318,33 @@ On the 9700X, at `bfeee15`, with `--clang`:
   translation units (11,705,844 tokens, 6.0 s): every file accepted, as clang
   accepts it, with both paths' trees and every kernel's twin agreeing.
 
-Locally, on a Ryzen 9 7940HS: Lua 5.4.8's 34 files (572,263 tokens) with
-`--clang` as well, the fixtures, and mutations of the corpora, checked against
-clang and through both paths, none with a mismatch:
+Locally, on a Ryzen 9 7940HS, at the same head: Lua 5.4.8's 34 files (572,263
+tokens) with `--clang` as well, the fixtures, and mutations of the corpora,
+checked against clang and through both paths, none with a mismatch:
 
 | Mutations checked against clang | Lua 5.4.8 | `sqlite3.c` | libc |
 | --- | ---: | ---: | ---: |
-| Copies | 1,000 | 300 | 3,000 |
-| clang accepts them (so must the parser) | 204 | 25 | 688 |
-| clang's first error is a parse issue (the parser must fail on its line) | 603 | 243 | 1,771 |
-| clang's first error is another kind (either is right) | 193 | 32 | 541 |
+| Copies (seeds) | 7,500 (32 to 36) | 1,200 (22, 33 to 35) | 13,500 (32 to 40) |
+| clang accepts them (so must the parser) | 1,486 | 106 | 3,058 |
+| clang's first error is a parse issue (the parser must fail on its line) | 4,739 | 945 | 8,028 |
+| clang's first error is another kind (either is right) | 1,275 | 149 | 2,414 |
 | Mismatches | 0 | 0 | 0 |
 
-Through both paths, without clang: 20,000 copies of Lua's files, 20,000 of
-libc's and 1,000 of `sqlite3.c`, of which the scalar parser rejected 14,840,
-14,167 and 861, with no difference between the paths in any.
+Through both paths, without clang: 5,000 copies of Lua's files, 5,000 of
+libc's and 1,000 of `sqlite3.c`, of which the scalar parser rejected 3,747,
+3,555 and 833, with no difference between the paths in any. The mutations
+found three divergences older than #244's reviews, which the parser now
+follows clang in: `}` right after a tag's body, a comma inside a declarator's
+group, and a declarator without specifiers at file scope. And each fix of
+#244's second review and of its follow-up, undone, is a mutant `test-parser`
+fails on (29 of them), while the unchanged parser passes.
 
 The kernels' checks put every array in an arena followed by 4 GB and its own
 size of address space that may not be touched, so that a load past an array, or
 through an index that wrapped below 0, faults. And `main.c` built alone with
 `-fsanitize=address,undefined` (the other units' benchmarks stubbed out) runs
 the tests without files, Lua, `sqlite3.c`, the libc corpus and 3,000 mutations
-each of Lua and libc without a report.
+each of Lua and libc without a report, at the same head.
 
 ## Measurements
 

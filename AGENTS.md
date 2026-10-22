@@ -2230,13 +2230,14 @@ the scalar parser's. Those checks put every array in an arena followed by 4 GB
 and its own size of address space that may not be touched, so that a load past
 an array, or through a 32-bit index that wrapped below 0, faults. On:
 
-- snippets: 167 of valid and invalid code, each with the first error clang gives
+- snippets: 174 of valid and invalid code, each with the first error clang gives
   (or none), which the parser must give at the same line and column with the
   same message; `--clang` checks each expectation against clang too, which
   must be a parse issue but for the snippets marked as the errors clang's
   semantic analysis gives where its parser took a declaration as ours does (an
   unknown type name, a missing type specifier, a type name where an operand
-  would be), and the oracle itself: clang given an option it doesn't know must
+  would be), or as code only its semantic analysis rejects, which the parser
+  takes; and the oracle itself: clang given an option it doesn't know must
   count as no answer, and an error in a header a file includes must reject the
   file;
 - fixtures: four trees checked by hand, parent by parent, among them #127's

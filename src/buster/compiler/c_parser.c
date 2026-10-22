@@ -2543,6 +2543,11 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
             // name (parse_scalar_specifiers).
             parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_NAME_REQUIRED, step);
         }
+        else if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_STAR)
+        {
+            // A declarator without specifiers: an implicit int, which C99 and later make an error at its name.
+            parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_NAME_REQUIRED | BUSTER_PARSE_FRAME_SPECIFIED, step);
+        }
         else
         {
             parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN, BUSTER_PARSE_AT_TOKEN);
@@ -2747,11 +2752,12 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
     const uint8_t previous_role = i > 0 ? parser->roles[i - 1] : PARSE_ROLE_NONE;
     const bool new_line = (parser->flags[i] & BUSTER_PP_START_OF_LINE) != 0;
     bool after_tag = false;
-    if (!parse_scalar_valid_after_tag(parser, i, frame))
+    if ((previous_role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || previous_role == PARSE_ROLE_CLOSE_STRUCT || previous_role == PARSE_ROLE_CLOSE_ENUM ||
+         (previous_role == PARSE_ROLE_TAG && new_line)) && !parse_scalar_valid_after_tag(parser, i, frame))
     {
         // The role before, past the attributes after a struct's body (`struct S { ... } __attribute__((packed))`), which
-        // are the struct specifier's own. Only a token that can't follow a tag looks, so that the token after a run of
-        // attributes walks it, and none of the run's own.
+        // are the struct specifier's own. Only a token after a tag or an attribute that can't follow a tag looks, so
+        // that the token after a run of attributes walks it, and none of the run's own.
         int64_t before = (int64_t)i - 1;
         while (before > 0 && parser->roles[before] == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER)
         {
@@ -3029,16 +3035,16 @@ static void parse_scalar_declarator(ParseScalar* parser, uint32_t i, ParseFrame*
     else if (kind == PARSE_KIND_IDENTIFIER)
     {
         step->role = PARSE_ROLE_OPERAND;
-        if (frame->flags & BUSTER_PARSE_FRAME_TYPELESS)
-        {
-            // clang reports the implicit int at the declarator's name, which C23 has none of.
-            const uint8_t message = parser->language.standard >= 2023 ? PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED : PARSE_MESSAGE_TYPE_SPECIFIER_MISSING;
-            parse_scalar_note(parser, i, message, BUSTER_PARSE_NONE, true);
-            frame->flags &= ~BUSTER_PARSE_FRAME_TYPELESS;
-        }
         // The name is bound once its declarator is complete (parse_scalar_complete_declarator), and what the declarator
         // derives it as is decided as it goes on, from this frame out.
         ParseFrame* declaration = parse_scalar_declaration_frame(parser, parser->frame_count - 1);
+        if (declaration->flags & BUSTER_PARSE_FRAME_TYPELESS)
+        {
+            // clang reports the implicit int at the declarator's name (in its groups too), which C23 has none of.
+            const uint8_t message = parser->language.standard >= 2023 ? PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED : PARSE_MESSAGE_TYPE_SPECIFIER_MISSING;
+            parse_scalar_note(parser, i, message, BUSTER_PARSE_NONE, true);
+            declaration->flags &= ~BUSTER_PARSE_FRAME_TYPELESS;
+        }
         declaration->name = parse_scalar_binds(parser) ? i : BUSTER_PARSE_NONE;
         declaration->name_meaning = (frame->flags & BUSTER_PARSE_FRAME_TYPEDEF) ? PARSE_MEANING_TYPEDEF : PARSE_MEANING_ORDINARY;
         declaration->derivation = PARSE_DERIVATION_PENDING;
@@ -3140,8 +3146,9 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         // A comma, then a line break and what can't start a declarator: clang takes the comma for a `;`.
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION, BUSTER_PARSE_AT_TOKEN);
     }
-    else if (kind == PARSE_KIND_COMMA && !(abstract && group != PARSE_ROLE_OPEN_KEYWORD))
+    else if (kind == PARSE_KIND_COMMA && !(abstract && group != PARSE_ROLE_OPEN_KEYWORD) && group != PARSE_ROLE_OPEN_GROUP)
     {
+        // (A declarator's group holds one declarator: a comma there is a missing `)`.)
         parse_scalar_complete_declarator(parser, declaration, false);
         step->role = parse_frame_comma_role(parser);
         frame->mode = step->role == PARSE_ROLE_COMMA ? PARSE_MODE_DECLARATOR : PARSE_MODE_ITEM;
