@@ -17,15 +17,21 @@ permissions:
   contents: read
 
 # Keep each PR/ref's pending runs separate: older branches using a single repository-wide pending slot otherwise
-# cancel another PR's qualification. The runner's job hooks serialize all jobs with the shared host lock (AGENTS.md).
+# cancel another PR's qualification. Each group keeps one pending run, GitHub's default: a newer push replaces its
+# pending run, which would only qualify a commit already superseded. A newer push to a PR also cancels the PR's run in
+# progress, which is mostly a job waiting for the 9700X (the slot is held from then on, so a run waiting hours would
+# otherwise still run for its stale commit); a push to main lets main's run finish. The runner's job hooks serialize all
+# jobs with the shared host lock (AGENTS.md).
 concurrency:
   group: buster-fast-9700x-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
-  queue: max
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Whether a pull request changes anything but documentation (`docs/**` and `*.md`, as `push`'s paths-ignore), on a
-  # GitHub-hosted runner so that it doesn't wait for the 9700X. When this job fails, `test` runs.
+  # GitHub-hosted runner so that it doesn't wait for the 9700X. When this job fails, `test` runs. And whether it changes
+  # the harnesses of the baselines, the linkers' times and the floors (link_benchmark.c and floors_benchmark.c): they
+  # measure other programs and the machine, the same for every pull request, so `test` measures them on pushes to main,
+  # dispatched runs and pull requests that change these harnesses, as when this job is skipped or fails.
   changes:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -34,6 +40,7 @@ jobs:
       pull-requests: read
     outputs:
       code: ${{ steps.files.outputs.code }}
+      baselines: ${{ steps.files.outputs.baselines }}
     steps:
       - id: files
         env:
@@ -44,9 +51,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The API lists at most 3,000 files of a pull request: past that, take it as changing code.
+          # The API lists at most 3,000 files of a pull request: past that, take it as changing code and the harnesses.
           if [ "$COUNT" -ge 3000 ]; then
               code=true
+              baselines=true
           else
               gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" \
                   --jq '.[] | .filename, (.previous_filename // empty)' > files
@@ -56,9 +64,16 @@ jobs:
               else
                   code=false
               fi
+              if grep -Ex 'src/buster/compiler/(link|floors)_benchmark\.c' files > /dev/null; then
+                  baselines=true
+              else
+                  baselines=false
+              fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "baselines=$baselines" >> "$GITHUB_OUTPUT"
           echo "Changes code: $code"
+          echo "Changes the baselines' harnesses: $baselines"
 
   test:
     name: Build and execute on Ryzen 7 9700X
@@ -97,228 +112,80 @@ jobs:
       - name: Execute compiler
         run: ./build/compiler
 
-      - name: Check the no-recursion rule on the call graph
-        # Writes the translation units' LLVM IR to a temporary directory and fails on any cycle not in the allowlist.
+      - name: Run the tests at once
+        # Tests don't need the machine to themselves, unlike the benchmarks after them, which run one at a time and
+        # pinned. build/compiler parallel (AGENTS.md, "The parallel runner") runs each test below in a bash of its own,
+        # as a step's `run` runs, one per core of the CPUs the job may use and unpinned (test-lanes and test-files run
+        # lanes of their own), and prints each test's output in a group of its own in this order, then names the tests
+        # that failed. A test still running after 180 s is killed and fails. The longest come first, so that they
+        # start first.
         run: |
+          ./build/compiler parallel --github --timeout 180 <<'TESTS'
+          == Test the calling convention
+          # --cross-check also links random signatures between our side, encoded and written as objects, and C that
+          # clang and GCC compile, at 16-, 32- and 64-byte vectors, and checks every argument, result and va_arg both
+          # ways.
+          ./build/compiler test-calling-convention --cross-check
+          == Test the object writer
+          # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
+          # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
+          # and runs them.
+          ./build/compiler test-object-writer --cross-check
+          == Test the preprocessor on the repository's translation units against clang
+          # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
+          # tokens. -target and its triple (clang's default) go to both.
+          ./build/compiler test-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          == Test the static executables with libc
+          # Each program bound against the system's static runtime and written as a static executable by 1, 2, 3 and 8
+          # lanes and by the writer's exact twins must be the same file, run as cc -static's link of the same object
+          # does, and with --cross-check as lld's does, with as many IRELATIVE relocations and the same TLS segment's
+          # alignment and init and fini arrays' sizes.
+          ./build/compiler test-static --cross-check
+          == Test branch sizing
+          # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
+          # relaxation of them must give the bytes of the sized records.
+          ./build/compiler test-branch-sizing --cross-check
+          == Check the no-recursion rule on the call graph
+          # Writes the translation units' LLVM IR to a temporary directory and fails on any cycle not in the allowlist.
           ./build/compiler test-call-graph
           ./build.sh check-call-graph
-
-      - name: Test the profiling tools
-        run: ./build/compiler test-profile
-
-      - name: Test the C lexer
-        run: |
-          ./build/compiler test-lexer
-          ./build/compiler test-lexer --cplusplus
-
-      - name: Benchmark the C lexer on the repository sources
-        run: |
-          # Pin to one permitted CPU to avoid migration noise in throughput measurements.
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-lexer src
-
-      - name: Test the x86-64 encoder
-        run: ./build/compiler test-x86-encoder
-
-      - name: Test generated-code ISA policy
-        run: ./build/compiler test-x86-target
-
-      - name: Test the partial Zen 5 model and instruction harness
-        run: ./build/compiler test-x86-zen5
-
-      - name: Measure the Zen 5 instruction cases
-        # The job hook holds the shared lock. Preserve three separate processes, with each process interleaving
-        # its experiments. These observations are informational; counter/protocol failures still fail the step.
-        run: |
-          cpu=2
-          sha256sum build/compiler src/buster/compiler/x86_zen5.c src/buster/compiler/x86_zen5_measure.c
-          for sample in 1 2 3; do
-            echo "Zen 5 observation process $sample"
-            taskset -c "$cpu" ./build/compiler measure-x86-zen5 --passes 11 --iterations 20000
-          done
-
-      - name: Benchmark Zen 5 cost lookup
-        run: |
-          cpu=2
-          for sample in 1 2 3; do
-            echo "Zen 5 lookup sample $sample"
-            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
-            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
-            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
-          done
-
-      - name: Test the x86-64 disassembler against GNU tools
-        run: |
-          clang -O3 -march=znver5 -c examples/disassembler/corpus.c -o /tmp/buster-disassembler-corpus.o
-          objcopy -O binary -j .text /tmp/buster-disassembler-corpus.o /tmp/buster-disassembler-corpus.text
-          ./build/compiler test-x86-disassembler --objdump --file /tmp/buster-disassembler-corpus.text
-
-      - name: Benchmark x86-64 disassembly
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-x86-disassembler
-
-      - name: Benchmark the x86-64 encoder
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-x86-encoder
-
-      - name: Test branch sizing
-        # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
-        # relaxation of them must give the bytes of the sized records.
-        run: ./build/compiler test-branch-sizing --cross-check
-
-      - name: Test the scalar and AVX-512 assembly frontends
-        run: ./build/compiler test-assembler --cross-check
-
-      - name: Benchmark assembly phases
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-assembler
-
-      - name: Benchmark branch sizing
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-branch-sizing
-
-      - name: Test the lanes
-        run: ./build/compiler test-lanes
-
-      - name: Test deterministic diagnostic ordering
-        run: ./build/compiler test-diagnostics
-
-      - name: Benchmark the lanes
-        # It pins each lane to an allowed CPU of its own.
-        run: ./build/compiler benchmark-lanes
-
-      - name: Test the link representation
-        run: ./build/compiler test-link
-
-      - name: Test dataflow bitsets
-        run: ./build/compiler test-dataflow
-
-      - name: Benchmark dataflow bitsets
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-dataflow
-
-      - name: Test the independent preprocessor fuzz harness
-        run: |
-          ./build/compiler test-preprocessor-fuzz --std c17
-          ./build/compiler test-preprocessor-fuzz --std c23
-
-      - name: Benchmark the preprocessor fuzz harness
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor-fuzz
-
-      - name: Test the object writer
-        # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
-        # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
-        # and runs them.
-        run: ./build/compiler test-object-writer --cross-check
-
-      - name: Benchmark the object writer
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-object-writer
-
-      - name: Test the import path
-        # --cross-check also compares libc.so.6's exports and references, and the relocations of the crt objects and
-        # libc_nonshared.a's members, with readelf's.
-        run: ./build/compiler test-import --cross-check
-
-      - name: Benchmark the import path
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-import
-
-      - name: Test binding
-        # --cross-check also links the bound programs with ld.lld and ld.bfd and runs them, and compares what binding
-        # found with lld's link of the programs' own objects.
-        run: ./build/compiler test-bind --cross-check
-
-      - name: Benchmark binding
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-bind
-
-      - name: Test the direct path's executables
-        run: ./build/compiler test-executable
-
-      - name: Test the dynamic PIEs
-        # --cross-check also links each bound program's objects with ld.lld as a PIE and compares the two files' dynamic
-        # symbols and relocations.
-        run: ./build/compiler test-dynamic --cross-check
-
-      - name: Test the static executables with libc
-        # Each program bound against the system's static runtime and written as a static executable by 1, 2, 3 and 8
-        # lanes and by the writer's exact twins must be the same file, run as cc -static's link of the same object does,
-        # and with --cross-check as lld's does, with as many IRELATIVE relocations and the same TLS segment's alignment
-        # and init and fini arrays' sizes.
-        run: ./build/compiler test-static --cross-check
-
-      - name: Benchmark the direct path's executables
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-executable
-
-      - name: Test the runtime snapshot
-        run: ./build/compiler test-snapshot
-
-      - name: Benchmark the runtime snapshot
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-snapshot
-
-      - name: Benchmark the whole link against GNU ld, lld, mold and wild
-        # Without taskset: it pins its own lane and the linkers' runs on one thread, and the linkers' other runs need
-        # every CPU.
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          ./build/compiler benchmark-link --cpus "$cpu"
-
-      - name: Benchmark the floors
-        # Without taskset too: it pins itself, and its writes from several threads take the first CPUs it may use.
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          ./build/compiler benchmark-floors --cpu "$cpu"
-
-      - name: Test token refinement
-        run: ./build/compiler test-refinement src
-
-      - name: Benchmark token refinement on the repository sources
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-refinement src
-
-      - name: Test the preprocessor
-        # --clang also preprocesses each case, and the repository's own translation units (with clang's predefines for
-        # their options), with clang -E and compares the tokens.
-        run: |
+          == Test the runner
+          ./build/compiler test-parallel
+          == Test the preprocessor's cases against clang
+          # --clang also preprocesses each case with clang -E and compares the tokens.
           ./build/compiler test-preprocessor --clang
-          ./build/compiler test-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
-
-      - name: Benchmark the preprocessor on main.c
-        # --predefines also supplies the macro effects of flags such as -funsigned-char.
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
-
-      - name: Test the corpus oracle's accounting and process failures
-        run: |
-          ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/clang -nostdinc --files-from tests/preprocessor-oracle/inputs.txt --root tests/preprocessor-oracle --report build/oracle-accounting.tsv
-          awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 1 && counts["skipped"] == 1 && NR == 3) }' build/oracle-accounting.tsv
-          if ./build/compiler test-preprocessor --compare-clang --clang /no-such-buster-clang tests/preprocessor-oracle/accepted.input; then exit 1; fi
-          if ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/false tests/preprocessor-oracle/accepted.input; then exit 1; fi
-          if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/rejected.input; then exit 1; fi
-          if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/no-such-input.c; then exit 1; fi
-
-      - name: Compare a frozen preprocessor corpus subset with Clang
-        # The runner hooks hold the shared host lock for this whole job. This copy is readable by the runner,
-        # unlike the original bundle under /home/david. Verify the manifests and every input/header byte first.
-        run: |
+          == Test the C lexer as C++
+          ./build/compiler test-lexer --cplusplus
+          == Test the C lexer
+          ./build/compiler test-lexer
+          == Test the x86-64 encoder
+          ./build/compiler test-x86-encoder
+          == Test the per-file jobs on the repository's translation units
+          # The predefines follow the options as clang's do (c_predefines.c).
+          ./build/compiler test-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          == Test the x86-64 disassembler against GNU tools
+          corpus="$(mktemp -d)"
+          trap 'rm -rf "$corpus"' EXIT
+          clang -O3 -march=znver5 -c examples/disassembler/corpus.c -o "$corpus/corpus.o"
+          objcopy -O binary -j .text "$corpus/corpus.o" "$corpus/corpus.text"
+          ./build/compiler test-x86-disassembler --objdump --file "$corpus/corpus.text"
+          == Test binding
+          # --cross-check also links the bound programs with ld.lld and ld.bfd and runs them, and compares what binding
+          # found with lld's link of the programs' own objects.
+          ./build/compiler test-bind --cross-check
+          == Test the independent preprocessor fuzz harness in C17
+          ./build/compiler test-preprocessor-fuzz --std c17
+          == Test the independent preprocessor fuzz harness in C23
+          ./build/compiler test-preprocessor-fuzz --std c23
+          == Test the dynamic PIEs
+          # --cross-check also links each bound program's objects with ld.lld as a PIE and compares the two files'
+          # dynamic symbols and relocations.
+          ./build/compiler test-dynamic --cross-check
+          == Test token refinement
+          ./build/compiler test-refinement src
+          == Compare a frozen preprocessor corpus subset with Clang
+          # The runner hooks hold the shared host lock for this whole job. This copy is readable by the runner, unlike
+          # the original bundle under /home/david. Verify the manifests and every input/header byte first.
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           export SOURCE_DATE_EPOCH=1792454400
           printf '%s  %s\n' \
@@ -350,36 +217,186 @@ jobs:
             -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
             --files-from tests/preprocessor-oracle/musl-subset.txt --root "$musl" --report build/oracle-musl.tsv
           awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 4 && NR == 5) }' build/oracle-musl.tsv
-
-      - name: Test the per-file jobs
-        # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams, -E
-        # text and diagnostics, and each unit the spellings it gives alone; and again with the shared table's ids in
-        # another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and locations, each id
-        # spelled the same. Uses the predefines "Benchmark the preprocessor on main.c" wrote.
-        run: |
+          == Test the import path
+          # --cross-check also compares libc.so.6's exports and references, and the relocations of the crt objects and
+          # libc_nonshared.a's members, with readelf's.
+          ./build/compiler test-import --cross-check
+          == Test the runtime snapshot
+          ./build/compiler test-snapshot
+          == Test the scalar and AVX-512 assembly frontends
+          ./build/compiler test-assembler --cross-check
+          == Test generated-code ISA policy
+          ./build/compiler test-x86-target
+          == Test the C type table
+          # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a
+          # random world of types against clang's: clang -fsyntax-only on _Static_asserts, the same file compiled and
+          # run, and clang's AST dump.
+          ./build/compiler test-types
+          == Test the per-file jobs
+          # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams,
+          # -E text and diagnostics, and each unit the spellings it gives alone; and again with the shared table's ids
+          # in another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and
+          # locations, each id spelled the same. Its forms with paths (the translation units, src flat) do the same.
           ./build/compiler test-files
+          == Test the lanes
+          ./build/compiler test-lanes
+          == Test the direct path's executables
+          ./build/compiler test-executable
+          == Test the profiling tools
+          ./build/compiler test-profile
+          == Test deterministic diagnostic ordering
+          ./build/compiler test-diagnostics
+          == Test the corpus oracle's accounting and process failures
+          ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/clang -nostdinc --files-from tests/preprocessor-oracle/inputs.txt --root tests/preprocessor-oracle --report build/oracle-accounting.tsv
+          awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 1 && counts["skipped"] == 1 && NR == 3) }' build/oracle-accounting.tsv
+          # Another vendor by -target and its triple, which both sides must get: accepted.input's other branch.
+          ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/clang -nostdinc -target x86_64-pc-linux-gnu tests/preprocessor-oracle/accepted.input
+          if ./build/compiler test-preprocessor --compare-clang --clang /no-such-buster-clang tests/preprocessor-oracle/accepted.input; then exit 1; fi
+          if ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/false tests/preprocessor-oracle/accepted.input; then exit 1; fi
+          if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/rejected.input; then exit 1; fi
+          if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/no-such-input.c; then exit 1; fi
+          == Test integer builtin actions against Clang
+          ./build/compiler test-builtins
+          == Test the per-file jobs on the repository's sources, flat
           ./build/compiler test-files --flat src
-          ./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          == Test the link representation
+          ./build/compiler test-link
+          == Test dataflow bitsets
+          ./build/compiler test-dataflow
+          == Test the partial Zen 5 model and instruction harness
+          ./build/compiler test-x86-zen5
+          TESTS
+
+      - name: Benchmark the C lexer on the repository sources
+        run: |
+          # Pin to one permitted CPU to avoid migration noise in throughput measurements.
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-lexer src
+
+      - name: Measure the Zen 5 instruction cases
+        # The job hook holds the shared lock. Preserve three separate processes, with each process interleaving
+        # its experiments. These observations are informational; counter/protocol failures still fail the step.
+        run: |
+          cpu=2
+          sha256sum build/compiler src/buster/compiler/x86_zen5.c src/buster/compiler/x86_zen5_measure.c
+          for sample in 1 2 3; do
+            echo "Zen 5 observation process $sample"
+            taskset -c "$cpu" ./build/compiler measure-x86-zen5 --passes 11 --iterations 20000
+          done
+
+      - name: Benchmark Zen 5 cost lookup
+        run: |
+          cpu=2
+          for sample in 1 2 3; do
+            echo "Zen 5 lookup sample $sample"
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
+          done
+
+      - name: Benchmark x86-64 disassembly
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-x86-disassembler
+
+      - name: Benchmark the x86-64 encoder
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-x86-encoder
+
+      - name: Benchmark assembly phases
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-assembler
+
+      - name: Benchmark branch sizing
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-branch-sizing
+
+      - name: Benchmark the lanes
+        # It pins each lane to an allowed CPU of its own.
+        run: ./build/compiler benchmark-lanes
+
+      - name: Benchmark dataflow bitsets
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-dataflow
+
+      - name: Benchmark the preprocessor fuzz harness
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor-fuzz
+
+      - name: Benchmark the object writer
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-object-writer
+
+      - name: Benchmark the import path
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-import
+
+      - name: Benchmark binding
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-bind
+
+      - name: Benchmark the direct path's executables
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-executable
+
+      - name: Benchmark the runtime snapshot
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-snapshot
+
+      - name: Benchmark the whole link against GNU ld, lld, mold and wild
+        # Without taskset: it pins its own lane and the linkers' runs on one thread, and the linkers' other runs need
+        # every CPU. Its linkers' side, about 121 s of the step's 122, times GNU ld, lld, mold and wild, which no pull
+        # request changes: it runs where `changes` doesn't rule it out (its baselines).
+        if: needs.changes.outputs.baselines != 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          ./build/compiler benchmark-link --cpus "$cpu"
+
+      - name: Benchmark the whole link by the direct path
+        # Every other pull request's: the direct path's times, and its programs must still run as their models predict.
+        if: needs.changes.outputs.baselines == 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          ./build/compiler benchmark-link --cpus "$cpu" --only direct
+
+      - name: Benchmark the floors
+        # Without taskset too: it pins itself, and its writes from several threads take the first CPUs it may use. What
+        # the machine and the kernel charge doesn't depend on a pull request either: it runs with the linkers'.
+        if: needs.changes.outputs.baselines != 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          ./build/compiler benchmark-floors --cpu "$cpu"
+
+      - name: Benchmark token refinement on the repository sources
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-refinement src
+
+      - name: Benchmark the preprocessor on main.c
+        # The preprocessor's own predefines follow the options as clang's do (c_predefines.c): -march=native's and
+        # -funsigned-char's among them.
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 
       - name: Benchmark the per-file jobs on the repository's translation units
         # Without taskset: it pins each lane to an allowed CPU of its own.
-        run: ./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
-
-      - name: Test the C type table
-        # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a
-        # random world of types against clang's: clang -fsyntax-only on _Static_asserts, the same file compiled and
-        # run, and clang's AST dump.
-        run: ./build/compiler test-types
+        run: ./build/compiler benchmark-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: Benchmark the C type table
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-types
-
-      - name: Test the calling convention
-        # --cross-check also links random signatures between our side, encoded and written as objects, and C that
-        # clang and GCC compile, at 16-, 32- and 64-byte vectors, and checks every argument, result and va_arg both ways.
-        run: ./build/compiler test-calling-convention --cross-check
 
       - name: Benchmark the calling convention
         run: |
