@@ -264,6 +264,14 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
         {
             keep = true;
         }
+        else if (strcmp(argument, "--buster-headers") == 0)
+        {
+            // Both sides search as clang does (-nostdinc and its directories), which leaves ours no headers of its own to
+            // select; clang has no such flag.
+            fprintf(stderr, "oracle: --buster-headers isn't supported, since both sides get clang's search; compare it with test-preprocessor --clang "
+                            "--buster-headers file...\n");
+            ready = false;
+        }
         else if (argument[0] != '-')
         {
             ready = pp_oracle_paths(&paths, argument);
