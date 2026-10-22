@@ -4068,18 +4068,48 @@ static uint64_t abi_test_round(uint64_t value, uint64_t alignment)
 
 // What clang passes of a value in registers: no byte of an eightbyte that is NO_CLASS, padding or the part of a scalar
 // past the eightbyte it starts in, which clang classifies by its start alone (an 8-byte enum at offset 4 of a record
-// passes its low half). Clears those bytes' mask.
-static void abi_test_mask_unpassed(const AbiTable* abi, const TypeTable* table, TypeId type, uint8_t* mask)
+// passes its low half); and of an SSE eightbyte, only its type's bytes (GetSSETypeAtOffset over its LLVM type, as
+// abi_sse_part reads the module's layout), but for a low one GetX86_64ByValArgumentPair widens to 8 bytes, as it does
+// one before a high part that doesn't start at 8 by its alignment. `union { struct { char
+// __attribute__((vector_size(16))) z[0]; _Complex float c; float f; } s; long __attribute__((vector_size(16))) w; }` is
+// stored as its struct, which the array aligns to 16 in LLVM, and passes as (<2 x float>, float): none of the vector's
+// bytes 12 to 15 (GCC passes the eightbyte whole: `clang` says whose). Clears those bytes' mask. Our side passes and
+// stores every byte of its registers' eightbytes, so the mask never hides a register the module gives wrongly.
+static void abi_test_mask_unpassed(const AbiTable* abi, const TypeTable* table, TypeId type, uint8_t* mask, bool clang)
 {
-    const uint8_t classes = abi->rows[(uint64_t)(type >> BUSTER_TYPE_INDEX_SHIFT) * BUSTER_ABI_ROW_BYTES];
+    const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+    const uint8_t classes = abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES];
+    const uint8_t low = classes & 7;
+    const uint8_t high = classes >> 4;
     const uint64_t size = table->types.size[abi_resolved_index(table, type)];
-    if ((classes & 7) == BUSTER_ABI_NO_CLASS)
+    const uint64_t low_end = size < 8 ? size : 8;
+    const uint64_t high_end = size < 16 ? size : 16;
+    if (low == BUSTER_ABI_NO_CLASS)
     {
-        memset(mask, 0, size < 8 ? size : 8);
+        memset(mask, 0, low_end);
     }
-    if ((classes >> 4) == BUSTER_ABI_NO_CLASS && size > 8)
+    if (high == BUSTER_ABI_NO_CLASS && size > 8)
     {
-        memset(mask + 8, 0, (size < 16 ? size : 16) - 8);
+        memset(mask + 8, 0, high_end - 8);
+    }
+    if (clang && (low == BUSTER_ABI_SSE || high == BUSTER_ABI_SSE) && size <= 16)
+    {
+        const uint64_t layout = abi->layout[index];
+        bool narrow = false;
+        const uint64_t low_bytes = low == BUSTER_ABI_SSE ? 1ull << abi_sse_part(layout, 0, size, &narrow) : 8;
+        const uint32_t high_alignment_log2 = high == BUSTER_ABI_SSE ? abi_sse_part(layout, 8, size, &narrow) : high == BUSTER_ABI_INTEGER ? abi_integer_part(layout, size) : 3;
+        const uint64_t high_alignment = 1ull << high_alignment_log2;
+        const bool paired = size > 8 && (high == BUSTER_ABI_SSE || high == BUSTER_ABI_INTEGER) && low != BUSTER_ABI_NO_CLASS;
+        const bool widened = paired && (low_bytes + high_alignment - 1) / high_alignment * high_alignment != 8;
+        const uint64_t low_passed = widened ? 8 : low_bytes;
+        if (low == BUSTER_ABI_SSE && low_passed < low_end)
+        {
+            memset(mask + low_passed, 0, low_end - low_passed);
+        }
+        if (high == BUSTER_ABI_SSE && 8 + high_alignment < high_end)
+        {
+            memset(mask + 8 + high_alignment, 0, high_end - 8 - high_alignment);
+        }
     }
 }
 
@@ -4324,12 +4354,12 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
                 const uint8_t kind = cross->locations[i].kind;
                 if (kind == BUSTER_ABI_LOCATION_REGISTERS || kind == BUSTER_ABI_LOCATION_SPLIT)
                 {
-                    abi_test_mask_unpassed(cross->abi, table, cross->arguments[i], cross->data_mask + cross->data_begin[n] + cross->offsets[i]);
+                    abi_test_mask_unpassed(cross->abi, table, cross->arguments[i], cross->data_mask + cross->data_begin[n] + cross->offsets[i], !cross->gcc);
                 }
             }
             if (cross->calls[n].result.kind == BUSTER_ABI_RESULT_REGISTERS)
             {
-                abi_test_mask_unpassed(cross->abi, table, signature->result, cross->result_mask + cross->result_begin[n]);
+                abi_test_mask_unpassed(cross->abi, table, signature->result, cross->result_mask + cross->result_begin[n], !cross->gcc);
             }
         }
     }

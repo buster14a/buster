@@ -1298,11 +1298,15 @@ of the results `void`:
   representation of its type, floating values finite so that no copy through a
   register quiets a NaN's payload, with a mask of its meaningful bits: no
   padding, nor a `_BitInt`'s bits past its width, nor bytes clang doesn't
-  pass), and per signature a C callee, which checks its parameters and its
-  `va_arg`s, a C caller of our callee, which checks what our callee stored of
-  its arguments, the al it got and the result it returned, and `main`, which
-  runs them and checks what our caller stored of the C callee's result and the
-  hidden pointer it got back.
+  pass: a NO_CLASS eightbyte's, and an SSE one's past its LLVM type's part, as
+  `union { struct { char __attribute__((vector_size(16))) z[0]; _Complex float
+  c; float f; } s; long __attribute__((vector_size(16))) w; }`, stored as its
+  struct (the array aligns it to 16 in LLVM), passes as `(<2 x float>,
+  float)`, without the vector's bytes 12 to 15), and per signature a C callee,
+  which checks its parameters and its `va_arg`s, a C caller of our callee,
+  which checks what our callee stored of its arguments, the al it got and the
+  result it returned, and `main`, which runs them and checks what our caller
+  stored of the C callee's result and the hidden pointer it got back.
 - **Our object** has, per signature, a caller of the C callee and a callee of
   the C caller, generated as encoder records from the locations: stack
   arguments copied with `rep movsb`, register ones loaded (extended as their
