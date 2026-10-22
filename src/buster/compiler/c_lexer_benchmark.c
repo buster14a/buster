@@ -754,6 +754,7 @@ int run_c_lexer_benchmark(int argc, char** argv)
     int result = 1;
     CorpusLoader loader = {0};
     bool valid_options = true;
+    bool no_digit_separators = false;
     uint64_t path_count = 0;
     uint32_t mode_flags = 0;
     for (int i = 1; i < argc; i += 1)
@@ -761,6 +762,10 @@ int run_c_lexer_benchmark(int argc, char** argv)
         if (strcmp(argv[i], "--cplusplus") == 0)
         {
             loader.cplusplus = true;
+        }
+        else if (strcmp(argv[i], "--no-digit-separators") == 0)
+        {
+            no_digit_separators = true;
         }
         else if (strcmp(argv[i], "--no-digraphs") == 0)
         {
@@ -820,7 +825,7 @@ int run_c_lexer_benchmark(int argc, char** argv)
                 .total_bytes = loader.total_bytes,
                 .max_length = loader.max_length,
             };
-            const uint32_t flags = (loader.cplusplus ? C_TOKENIZER_CPLUSPLUS : 0) | mode_flags;
+            const uint32_t flags = (loader.cplusplus ? C_TOKENIZER_CPLUSPLUS : 0) | mode_flags | (no_digit_separators ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0);
             printf("%lu files, %lu bytes\n", (unsigned long)corpus.count, (unsigned long)corpus.total_bytes);
             uint64_t different = check_corpus(&corpus, &outputs[IMPLEMENTATION_VECTORIZED], &outputs[IMPLEMENTATION_SCALAR], &outputs[IMPLEMENTATION_COUNT], flags);
             if (corpus.total_bytes != 0)

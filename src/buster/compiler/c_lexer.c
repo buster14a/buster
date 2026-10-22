@@ -392,6 +392,8 @@ typedef enum CTokenizerFlags
     C_TOKENIZER_TRIGRAPHS = 1,
     // Tokenize C++ (C++26) instead of C.
     C_TOKENIZER_CPLUSPLUS = 2,
+    // End pp-numbers before an apostrophe, as C17 and C++11 and earlier do.
+    C_TOKENIZER_NO_DIGIT_SEPARATORS = 4,
     // '$' is punctuation (a C_TOKEN_UNKNOWN token of its own) rather than an identifier and pp-number character, as
     // clang has it with -fno-dollars-in-identifiers and for assembler-with-cpp (its DollarIdents off). The scalar
     // lexer's alone: c_tokenize gives such a source to it, and c_tokenize_vectorized refuses it. 128 keeps it apart from
@@ -485,6 +487,18 @@ static const uint8_t c_char_properties[128] __attribute__((aligned(64))) =
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x80, 0x00, 0x00, 0x11,
     0x00, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+// Without digit separators no byte has BUSTER_LEX_CHAR_SEPARATOR_FOLLOWER (#264).
+static const uint8_t c_char_properties_no_separators[128] __attribute__((aligned(64))) =
+{
+    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08, 0x04, 0x04, 0x08, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x80, 0x00, 0x00, 0x01,
+    0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 static const uint8_t c_operator_classes[128] __attribute__((aligned(64))) =
 {
@@ -852,6 +866,7 @@ struct ScalarLexer
     bool no_dollars;
     bool no_digraphs; // C_TOKENIZER_NO_DIGRAPHS
     bool no_line_comments; // C_TOKENIZER_NO_LINE_COMMENTS
+    bool no_digit_separators; // C_TOKENIZER_NO_DIGIT_SEPARATORS
 };
 
 typedef struct TokenOutput TokenOutput;
@@ -1257,7 +1272,7 @@ static uint64_t lex_numeric_constant(const ScalarLexer* lexer, uint64_t position
             p += size;
             continue;
         }
-        if (c == '\'')
+        if (c == '\'' && !lexer->no_digit_separators)
         {
             uint64_t next_size;
             if (is_ascii_identifier_continue(peek_char(lexer, p + size, &next_size)))
@@ -1540,6 +1555,7 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
         .no_dollars = (flags & C_TOKENIZER_NO_DOLLARS) != 0,
         .no_digraphs = (flags & C_TOKENIZER_NO_DIGRAPHS) != 0,
         .no_line_comments = (flags & C_TOKENIZER_NO_LINE_COMMENTS) != 0,
+        .no_digit_separators = (flags & C_TOKENIZER_NO_DIGIT_SEPARATORS) != 0,
     };
     const ScalarLexer* lexer = &lexer_value;
     TokenOutput output = { .kinds = kinds, .starts = starts, .ends = ends, .count = count, .start_of_line = start_of_line };
@@ -2345,10 +2361,10 @@ BUSTER_INLINE void transpose_property_masks(const __m512i rows[BUSTER_LEX_LOOKAH
 // Phase I for one 64-byte vector: eight packed property masks and the remaining masks in `o[...][lane]`. Without
 // `digraphs`, no digraph pairs (c_first_char_channels_no_digraphs).
 BUSTER_INLINE void classify(__m512i raw, uint64_t o[][BUSTER_LEX_MASK_LANES], unsigned lane, __m512i* properties_out, __m512i* previous_classes, __m512i* previous_pairs, const bool cplusplus,
-                            const bool digraphs)
+                            const bool digraphs, const bool separators)
 {
     const uint64_t nonascii = _mm512_movepi8_mask(raw);
-    __m512i properties = perm2b(c_char_properties, raw);
+    __m512i properties = perm2b(separators ? c_char_properties : c_char_properties_no_separators, raw);
     __m512i classes = perm2b(c_operator_classes, raw);
     if (BUSTER_UNLIKELY(nonascii != 0))
     {
@@ -2674,7 +2690,7 @@ __attribute__((noinline)) static OutputCursors write_chunk_outlined(const ChunkT
 // the scalar lexer (see BUSTER_LEX_NEEDS_SCALAR). Without `digraphs`, Phase I classifies with
 // c_first_char_channels_no_digraphs, and every other step is as with them, so the two loops are the same code; without
 // `line_comments`, "//" marks no comment.
-BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs, const bool line_comments, const uint8_t* source, uint64_t length, uint64_t begin,
+BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs, const bool line_comments, const bool separators, const uint8_t* source, uint64_t length, uint64_t begin,
                                uint8_t* restrict kinds_out, uint32_t* restrict starts_out, uint32_t* restrict ends_out, uint64_t* written, uint64_t* restart,
                                uint64_t* scalar_until)
 {
@@ -2731,7 +2747,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
     for (unsigned j = 0; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
     {
         raws[0][j] = load_lane(base, base_offset, begin, length, first_chunk + BUSTER_LEX_VECTOR_BYTES * j);
-        classify(raws[0][j], masks[0], j, &properties[0][j], &previous_classes, &previous_pairs, cplusplus, digraphs);
+        classify(raws[0][j], masks[0], j, &properties[0][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators);
     }
     // The vectors of the chunk being analyzed: in the source itself if they (and the next chunk's first one) are all
     // inside it, else in `raws`, with what is outside of it read as newlines.
@@ -2759,7 +2775,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
                 const __m512i* next_raw = (const __m512i*)(base + chunk + BUSTER_LEX_CHUNK_BYTES);
                 for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
                 {
-                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, digraphs);
+                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators);
                 }
                 chunk_vectors = next_raw;
             }
@@ -2770,7 +2786,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
                 for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
                 {
                     next_raw[j] = load_lane(base, base_offset, begin, length, chunk + BUSTER_LEX_CHUNK_BYTES + BUSTER_LEX_VECTOR_BYTES * j);
-                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, digraphs);
+                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators);
                 }
                 chunk_vectors = next_raw;
             }
@@ -3372,32 +3388,44 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
 __attribute__((noinline)) static int64_t tokenize_c(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                     uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_no_digraphs(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+__attribute__((noinline)) static int64_t tokenize_c_no_digraphs(const bool separators, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                 uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, false, true, separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_no_line_comments(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+__attribute__((noinline)) static int64_t tokenize_c_no_line_comments(const bool separators, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                      uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, true, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, true, false, separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_no_digraphs_no_line_comments(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds,
+__attribute__((noinline)) static int64_t tokenize_c_no_digraphs_no_line_comments(const bool separators, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds,
                                                                                  uint32_t* starts, uint32_t* ends, uint64_t* written, uint64_t* restart,
                                                                                  uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, false, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, false, false, separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 __attribute__((noinline)) static int64_t tokenize_cpp(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                       uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+}
+
+__attribute__((noinline)) static int64_t tokenize_c_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+                                                                  uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
+{
+    return tokenize_chunks(false, true, true, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+}
+
+__attribute__((noinline)) static int64_t tokenize_cpp_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+                                                                    uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
+{
+    return tokenize_chunks(true, true, true, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 // The chunk loop that `flags` ask for (C_TOKENIZER_CPLUSPLUS, C_TOKENIZER_NO_DIGRAPHS and C_TOKENIZER_NO_LINE_COMMENTS;
@@ -3407,20 +3435,23 @@ static int64_t tokenize_with_flags(uint32_t flags, const uint8_t* source, uint64
 {
     const bool digraphs = (flags & C_TOKENIZER_NO_DIGRAPHS) == 0;
     const bool line_comments = (flags & C_TOKENIZER_NO_LINE_COMMENTS) == 0;
+    const bool separators = (flags & C_TOKENIZER_NO_DIGIT_SEPARATORS) == 0;
     int64_t result;
     if (flags & C_TOKENIZER_CPLUSPLUS)
     {
-        result = tokenize_cpp(source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+        result = separators ? tokenize_cpp(source, length, begin, kinds, starts, ends, written, restart, scalar_until)
+                            : tokenize_cpp_no_separators(source, length, begin, kinds, starts, ends, written, restart, scalar_until);
     }
     else if (line_comments)
     {
-        result = digraphs ? tokenize_c(source, length, begin, kinds, starts, ends, written, restart, scalar_until)
-                          : tokenize_c_no_digraphs(source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+        result = !digraphs ? tokenize_c_no_digraphs(separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until)
+                           : separators ? tokenize_c(source, length, begin, kinds, starts, ends, written, restart, scalar_until)
+                                        : tokenize_c_no_separators(source, length, begin, kinds, starts, ends, written, restart, scalar_until);
     }
     else
     {
-        result = digraphs ? tokenize_c_no_line_comments(source, length, begin, kinds, starts, ends, written, restart, scalar_until)
-                          : tokenize_c_no_digraphs_no_line_comments(source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+        result = digraphs ? tokenize_c_no_line_comments(separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until)
+                          : tokenize_c_no_digraphs_no_line_comments(separators, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
     }
     return result;
 }

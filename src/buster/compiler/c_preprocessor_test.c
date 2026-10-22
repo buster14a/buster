@@ -3,7 +3,7 @@
 //
 // The preprocessor tests (c_preprocessor.c), for the test-preprocessor command:
 //
-//   build/compiler test-preprocessor [--clang] [--keep] [clang-style options] [file...]
+//   build/compiler test-preprocessor [--clang] [--keep] [--fuzz N] [--seed N] [--std c17|c23] [--jobs N] [clang-style options] [file...]
 //
 // Without files, it runs the built-in cases (pp_test_cases): small sources on the topics of the C standard's examples
 // (6.10.4.5), the cases where GCC's and clang's behavior was probed (docs/c-preprocessor.md), and inputs past the
@@ -21,6 +21,9 @@
 // feature name (pp_test_features), with clang's; and each refused option set must change clang's -E, and each taken one
 // give clang's tokens (pp_test_option_refusals).
 //
+// After the cases comes the fuzz batch (c_preprocessor_fuzz.c, #109): --fuzz generated cases in each mode (1,500 by
+// default, 0 for none), from --seed, by both kernels, which must agree, and with --clang against clang too.
+//
 // With files, each is preprocessed with the options (-I, -isystem, -D, -std=, -ffreestanding, ... as for -E) by both
 // kernels, which must agree, and with --clang compared with `clang -E` and the same options, spellings and line
 // markers: our side then reads clang's own predefines (`clang -dM -E` with the options, as --predefines), so that both
@@ -33,6 +36,7 @@
 // comparison, clang's side (pp_test_clang), the line markers' places (PPPlaced), the cases, the files, the predefines,
 // keywords, features, -f option sets and timestamps checks, and run_preprocessor_tests.
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -47,6 +51,9 @@
 
 #define BUSTER_PP_TEST_CONTEXT 6
 #define BUSTER_PP_TEST_MAX_OUTPUT (1ull << 32)
+
+// Set while the fuzz runs minimize a difference (c_preprocessor_fuzz.c): the comparisons below then print nothing.
+static bool pp_test_quiet;
 
 // A sequence of token spellings: the bytes, and each token's offset and length.
 typedef struct PPSpellings PPSpellings;
@@ -91,31 +98,51 @@ static void pp_spellings_add(PPSpellings* spellings, const uint8_t* bytes, uint3
     }
 }
 
-// The spellings of a preprocessor's output stream (without the pragmas' end markers).
+// The spellings of a preprocessor's output stream (without the pragmas' end markers), as -E spells them: a pragma
+// line's identifiers as written (pp_spelled_as_written).
 static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
 {
     const PPTokens* out = &pp->output;
-    uint64_t bytes = 0;
-    for (uint32_t i = 0; i < out->count; i += 1)
-    {
-        const uint8_t kind = out->kinds[i];
-        bytes += kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END) ? intern_length(pp->table, out->values[i])
-                 : kind == BUSTER_PP_KIND_PRAGMA_END ? 0 : kind == BUSTER_PP_KIND_INTEGER ? 24 : out->values[i] - out->locations[i];
-    }
-    bool result = pp_spellings_initialize(spellings, (uint64_t)out->count + 1, bytes + 64);
     Scratch scratch = scratch_begin(0);
-    uint8_t* buffer = arena_push(scratch.arena, bytes + 64, 1);
-    result = result && buffer != 0;
+    uint64_t bytes = 0;
+    uint32_t pragma = BUSTER_PP_PRAGMA_OUTSIDE;
+    bool result = true;
     for (uint32_t i = 0; result && i < out->count; i += 1)
     {
-        if (out->kinds[i] != BUSTER_PP_KIND_PRAGMA_END)
+        const uint8_t kind = out->kinds[i];
+        const uint64_t mark = scratch.arena->length;
+        const uint8_t* written = 0;
+        bytes += pp_spelled_as_written(pragma, kind) ? pp_written_spelling(pp, out->values[i], out->locations[i], scratch.arena, &written)
+                 : kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END) ? intern_length(pp->table, out->values[i])
+                 : kind == BUSTER_PP_KIND_PRAGMA_END ? 0 : kind == BUSTER_PP_KIND_INTEGER ? 24 : out->values[i] - out->locations[i];
+        result = !pp_spelled_as_written(pragma, kind) || written != 0;
+        arena_pop_to(scratch.arena, mark);
+        pragma = pp_pragma_state(pp, pragma, kind, out->locations[i]);
+    }
+    result = result && pp_spellings_initialize(spellings, (uint64_t)out->count + 1, bytes + 64);
+    uint8_t* buffer = arena_push(scratch.arena, bytes + 64, 1);
+    result = result && buffer != 0;
+    pragma = BUSTER_PP_PRAGMA_OUTSIDE;
+    for (uint32_t i = 0; result && i < out->count; i += 1)
+    {
+        const uint8_t kind = out->kinds[i];
+        if (kind != BUSTER_PP_KIND_PRAGMA_END)
         {
-            const uint8_t* spelling;
-            const uint32_t length = pp_spelling(pp, out->kinds[i], out->values[i], out->locations[i], buffer, &spelling);
-            const uint8_t kind = out->kinds[i] >= BUSTER_PP_KIND_KEYWORD && out->kinds[i] < BUSTER_PP_KIND_PRAGMA_END ? C_TOKEN_RAW_IDENTIFIER :
-                                 out->kinds[i] == BUSTER_PP_KIND_INTEGER ? C_TOKEN_NUMERIC_CONSTANT : out->kinds[i];
-            pp_spellings_add(spellings, spelling, length, out->locations[i], kind);
+            const uint64_t mark = scratch.arena->length;
+            const uint8_t* spelling = 0;
+            const uint32_t length = pp_spelled_as_written(pragma, kind) ? pp_written_spelling(pp, out->values[i], out->locations[i], scratch.arena, &spelling)
+                                                                        : pp_spelling(pp, kind, out->values[i], out->locations[i], buffer, &spelling);
+            result = spelling != 0;
+            const uint8_t lexed = kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END ? C_TOKEN_RAW_IDENTIFIER
+                                  : kind == BUSTER_PP_KIND_INTEGER                                  ? C_TOKEN_NUMERIC_CONSTANT
+                                                                                                    : kind;
+            if (result)
+            {
+                pp_spellings_add(spellings, spelling, length, out->locations[i], lexed);
+            }
+            arena_pop_to(scratch.arena, mark);
         }
+        pragma = pp_pragma_state(pp, pragma, kind, out->locations[i]);
     }
     scratch_end(scratch);
     return result;
@@ -134,7 +161,7 @@ static uint32_t pp_test_lex_flags(const Preprocessor* pp)
 static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, uint32_t flags, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
 {
     int64_t result = c_tokenize(text, length, kinds, starts, ends, flags);
-    const uint32_t splits = result > 0 ? pp_count_splits_scalar(kinds, (uint32_t)result, split) : 0;
+    const uint32_t splits = result > 0 ? pp_count_splits_scalar(text, kinds, starts, ends, (uint32_t)result, split) : 0;
     result = splits != 0 ? pp_split_prefixes(text, kinds, starts, ends, (uint32_t)result, splits, split) : result;
     return result;
 }
@@ -167,7 +194,7 @@ static bool pp_compare_spellings(Preprocessor* pp, const PPSpellings* ours, cons
         i += 1;
     }
     const bool result = i == ours->count && i == theirs->count;
-    if (!result)
+    if (!result && !pp_test_quiet)
     {
         printf("%s: token %lu differs (%lu tokens, %s %lu)\n", name, (unsigned long)i, (unsigned long)ours->count, their_name, (unsigned long)theirs->count);
         if (i < ours->count && i < theirs->count && ours->kinds[i] != theirs->kinds[i])
@@ -218,7 +245,7 @@ static bool pp_same_streams(const Preprocessor* a, const Preprocessor* b, const 
                          memcmp(a->history_sources, b->history_sources, (uint64_t)a->history_source_count * sizeof(PPSource)) == 0 &&
                          memcmp(a->history_runs, b->history_runs, (uint64_t)a->history_run_count * sizeof(PPHistoryRun)) == 0;
     const bool result = i == x->count && i == y->count && history;
-    if (!result)
+    if (!result && !pp_test_quiet)
     {
         if (!history)
         {
@@ -251,14 +278,14 @@ static bool pp_same_directive_tables(const Preprocessor* a, const Preprocessor* 
         {
             result = x->directive_hash[d] == y->directive_hash[d] && x->directive_end[d] == y->directive_end[d] &&
                      x->directive_kind[d] == y->directive_kind[d] && x->directive_next[d] == y->directive_next[d];
-            if (!result)
+            if (!result && !pp_test_quiet)
             {
                 printf("%s: the kernels' directive tables differ in file %u at directive %u (kind %u/%u, next %u/%u)\n", name, f, d,
                        x->directive_kind[d], y->directive_kind[d], x->directive_next[d], y->directive_next[d]);
             }
         }
     }
-    if (!result && a->data_count != b->data_count)
+    if (!result && a->data_count != b->data_count && !pp_test_quiet)
     {
         printf("%s: the kernels read %u and %u files\n", name, a->data_count, b->data_count);
     }
@@ -271,6 +298,8 @@ static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* o
 {
     PPOptions with_starts = *options;
     with_starts.expansion_starts = true;
+    // The statistics too: the files' checks compare the inclusions skipped by guards with clang's.
+    with_starts.timing = true;
     bool result = intern_initialize(table) && pp_initialize(pp, &with_starts, table);
     if (result)
     {
@@ -312,7 +341,7 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
         char* vector_text = pp_test_print(pp, true, markers != 0, &vector_length);
         char* scalar_text = pp_test_print(pp, false, markers != 0, &scalar_length);
         result = vector_text != 0 && scalar_text != 0 && vector_length == scalar_length && memcmp(vector_text, scalar_text, vector_length) == 0;
-        if (!result)
+        if (!result && !pp_test_quiet)
         {
             size_t at = 0;
             while (vector_text != 0 && scalar_text != 0 && at < vector_length && at < scalar_length && vector_text[at] == scalar_text[at])
@@ -816,7 +845,7 @@ static const PPTestCase pp_test_cases[] = {
       "#ifndef OTHER_H\n#define OTHER_H\ntypedef int other_t;\n#endif\n", "c17", "typedef int other_t;\nother_t x;\n", false },
     { "pragmas", "#pragma once\n#pragma GCC system_header\n#pragma STDC FP_CONTRACT ON\n#define P(x) _Pragma(#x) after\nP(omp parallel for)\n#pragma push_macro(\"X\")\n"
                  "#define X 1\n#pragma pop_macro(\"X\")\nX\n",
-      0, "c17", "#pragma STDC FP_CONTRACT ON\n#pragma omp parallel for\nafter\nX\n", false },
+      0, "c17", "#pragma STDC FP_CONTRACT ON\n#pragma omp parallel for\nafter\nX\n", false, 2 },
     { "#if arithmetic", "#if -1 < 0u\nunsigned\n#endif\n#if (2 || 1/0) && (0 ? 1/0 : 3) == 3 && 0x10 == 16 && 010 == 8 && 0b101 == 5 && 1'000 == 1000 && 'A' == 65 && '\\377' < 0\nok\n#endif\n"
                      "#if (-9223372036854775807 - 1) / -1 == (-9223372036854775807 - 1) && 18446744073709551615u == -1\nwraps\n#endif\n#if 1 ? 2 : 3 ? 4 : 5\nternary\n#endif\n",
       0, "c23", "ok\nwraps\nternary\n", false },
@@ -841,7 +870,7 @@ static const PPTestCase pp_test_cases[] = {
     // macro; a computed #include; #line with a macro, and a line marker.
     { "directives among a macro's arguments", "#define F(a, b) [a | b]\n#define ONE 1\nF(x,\n#if ONE + 1 == 2\nyes\n#else\nno\n#endif\n)\nF(\n#ifdef ONE\np\n#endif\n, q)\nF(r,\n#define LATE 7\nLATE)\nLATE\n#define G F\nG(\n#if defined(ONE) && __has_include(\"other.h\")\ns\n#endif\n, t)\n", "", "c17", "[x | yes]\n[p | q]\n[r | 7]\n7\n[s | t]\n", false },
     { "builtins' operands, a computed #include and #line", "#define H __has_attribute\nint a = H(noreturn) + H(\nnot_an_attribute\n);\nint b = __has_attribute(\n#define Z 1\nnoreturn) + Z;\n#define PR _Pragma\nPR(\"message(\\\"hi\\\")\") after\n#define HDR \"other.h\"\n#include HDR\n#define N 100\n#line N\nint line = __LINE__;\n# 50 \"renamed.c\"\nint again = __LINE__;\n#if __has_include(HDR) && !__has_include(\"missing.h\")\nboth\n#endif\n", "typedef int other_t;\n", "c17",
-      "int a = 1 + 0;\nint b = 1 + 1;\n#pragma message(\"hi\")\nafter\ntypedef int other_t;\nint line = 100;\nint again = 50;\nboth\n", false },
+      "int a = 1 + 0;\nint b = 1 + 1;\n#pragma message(\"hi\")\nafter\ntypedef int other_t;\nint line = 100;\nint again = 50;\nboth\n", false, 1 },
     { "unterminated invocation", "#define f(x) x\nf(1\n", 0, "c17", "", true },
     // An identifier is printed as it is interned (a UCN as UTF-8), but stringized as written, without its splices.
     { "identifiers written with UCNs and splices", "#define S(x) #x\ncaf\\u00e9 S(caf\\u00e9) S(caf\xC3\xA9) S(fo\\\no) S(\\U000000E9t\\\n\\u00e9)\n", 0,
@@ -1012,6 +1041,169 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "\"\?\?=\"\nL\"#\"\n", false, 0, 0, 0 },
     { "#include of a missing absolute path", "#include \"/buster-missing-directory/absent.h\"\nafter\n", 0, "c17", "", true },
     { "-include of a missing absolute path", "x\n", 0, "c17", "", true, 0, "-include /buster-missing-directory/absent.h", 0 },
+    // #109's differential fuzzing against clang: a case for each difference it found (minimized) and for each that
+    // probing around one found, with clang's -P text, which test-preprocessor --clang checks again.
+    { "-undef", "__STDC__ __STDC_VERSION__ __STDC_HOSTED__ __STDC_UTF_16__ __STDC_UTF_32__\n__STDC_EMBED_NOT_FOUND__ __STDC_EMBED_FOUND__ __STDC_EMBED_EMPTY__\n__x86_64__ __clang__ __BUSTER__ __GNUC__ __CHAR_BIT__\n", 0, "c23", "1 202311L 1 1 1\n0 1 2\n__x86_64__ __clang__ __BUSTER__ __GNUC__ __CHAR_BIT__\n", false, 0, "-undef" },
+    // Assembly's language macro stays with -undef, as the standard ones do: a header shared with C keeps its C apart.
+    { "-undef in assembly", "#ifdef __ASSEMBLER__\nassembly\n#else\nc\n#endif\n__STDC_VERSION__ __STDC_HOSTED__ __x86_64__\n", 0, "c17", "assembly\n201710L 1 __x86_64__\n", false, 0,
+      "-undef -x assembler-with-cpp" },
+    { "feature answers' spelling", "__has_c_attribute(nodiscard) __has_c_attribute(deprecated) __has_c_attribute(fallthrough) __has_c_attribute(maybe_unused)\n__has_c_attribute(gnu::packed) __has_attribute(cold) __has_attribute(__nonnull__) __has_builtin(__builtin_expect) __has_feature(c_atomic) __has_extension(c_atomic)\n__has_cpp_attribute(nodiscard) __has_declspec_attribute(dllexport)\n#if __has_embed(\"/dev/null\") == 2\nempty\n#endif\n", 0, "c23", "202003L 201904L 201910L 202106L\n1 1 1 1 1 1\n__has_cpp_attribute(nodiscard) 0\nempty\n", false, 0 },
+    { "__has_warning", "__has_warning(\"-Wall\") __has_warning(\"-Wunused-macros\") __has_warning(\"-Wppf-none\") __has_warning(\"-W\" \"shadow\") __has_warning(\"-Rpass\")\n", 0, "c17", "1 1 0 1 0\n", false, 0 },
+    { "__VA_OPT__ without variadic parameters", "#define F(a) [__VA_OPT__(x a) a]\nF(1)\n", 0, "c23", "\n[ 1]\n", false, 0 },
+    { "a stringized trailing backslash", "#define S(x) #x\nS(\\) S(a \\) S(\\\\)\n", 0, "c17", "\n\"\" \"a \" \"\\\\\"\n", false, 2 },
+    { "an unterminated comment", "a\n/* b\nc\n", 0, "c17", "a\n", true, 0 },
+    { "a comma in #if", "#if 1, 2\nyes\n#endif\n#if (1, 2)\nparenthesized\n#endif\n#if 0 ? 1, 2 : 3\nconditional\n#endif\n", 0, "c17", "", true, 0 },
+    { "digit separators before C23", "#define N 1'000\nx N\n", 0, "c17", "\nx 1'000\n", false, 0 },
+    { "digit separators in C23", "#define N 1'000\nx N y\n#if 1'0 == 10\nten\n#endif\n", 0, "c23", "\nx 1'000 y\nten\n", false, 0 },
+    { "target queries", "__is_target_arch(x86_64) __is_target_arch(amd64) __is_target_arch(i386) __is_target_vendor(pc) __is_target_vendor(apple)\n__is_target_os(linux) __is_target_os(windows) __is_target_environment(gnu) __is_target_environment(msvc)\n__is_target_variant_os(linux) __is_target_variant_environment(gnu)\n", 0, "c17", "1 1 0 1 0\n1 0 1 0\n0 0\n", false, 0 },
+    { "UCNs pasted and stringized", "#define P(a, b) a ## b\n#define S(x) #x\n#define T(x) S(x)\nT(P(caf\\u00e9, x) P(y, z))\nT(P(caf\\u00e9, x)P(y, z))\nP(caf\\u00e9, x)\n", 0, "c17", "\"caf\\u00e9x yz\"\n\"caf\\u00e9xyz\"\ncaf\xC3""\xA9""x\n", false, 0 },
+    { "UCNs in pragma lines", "#pragma ppf caf\\u00e9 x\\u0301 caf\xC3""\xA9""\n_Pragma(\"ppf caf\\\\u00e9\")\n#define M caf\\u00e9\n#pragma omp M\n#pragma STDC FP_CONTRACT x\\u0301\n", 0, "c17", "#pragma ppf caf\\u00e9 x\\u0301 caf\xC3""\xA9""\n#pragma ppf caf\\u00e9\n#pragma omp caf\\u00e9\n#pragma STDC FP_CONTRACT x\\u0301\n", false, 0 },
+    { "_Pragma in an expanded argument", "#define S(x) #x\n#define T(x) S(x) [x]\nT(_Pragma(\"ppf one\") a)\n#define P(a, b) a ## b\n#define Q(x, y) P(x, y) [x]\nQ(_Pragma(\"ppf two\") l, r)\n#define PR _Pragma(\"ppf three\")\nT(PR b)\n#define D(x) x x\nD(_Pragma(\"ppf four\"))\n", 0, "c17", "\"_Pragma(\\\"ppf one\\\") a\" [\n#pragma ppf one\n a]\n#pragma ppf two\n lr [\n#pragma ppf two\n l]\n\"_Pragma(\\\"ppf three\\\") b\" [\n#pragma ppf three\n b]\n#pragma ppf four\n#pragma ppf four\n", false, 0 },
+    { "a _Pragma's unterminated comment", "_Pragma(\"ppf /* x\")\ny\n", 0, "c17", "#pragma ppf\ny\n", true, 0 },
+    { "pasting a comment's start", "#define P(a, b) a ## b\nP(/, *) x\n", 0, "c17", "\n/ * x\n", true, 0 },
+    { "arguments expanded in order of use", "#define F(a, b) b a\nF(__COUNTER__, __COUNTER__)\n#define G(a, ...) __VA_OPT__(x) a\nG(__COUNTER__, __COUNTER__)\n#define H(a, b) #a b a\nH(__COUNTER__, __COUNTER__)\n#define K(a, ...) [__VA_OPT__(a)]\nK(__has_include)\nK(_Pragma(\"ppf\"))\n", 0, "c23", "\n0 1\nx 3\n\"__COUNTER__\" 4 5\n[]\n[]\n", false, 0 },
+    { "#pragma message's forms", "#pragma message(\"a\\x41\\n\")\n#pragma message \"b\"\n#pragma message(\"c\" \"d\")\n#pragma GCC warning \"e\"\n#pragma GCC warning (\"f\")\n#define MSG \"g\"\n#pragma message(MSG)\n_Pragma(\"message(\\\"h\\\")\")\n", 0, "c17", "#pragma message(\"aA\\012\")\n#pragma message(\"b\")\n#pragma message(\"cd\")\n#pragma GCC warning \"e\"\n#pragma GCC warning \"f\"\n#pragma message(\"g\")\n#pragma message(\"h\")\n", false, 7 },
+    { "#pragma GCC error", "#pragma GCC error \"stop\"\nx\n", 0, "c17", "#pragma GCC error \"stop\"\nx\n", true, 0 },
+    { "diagnostic pragmas", "#pragma clang diagnostic push\n#pragma GCC diagnostic push\n#pragma clang diagnostic ignored \"-Wunused-macros\"\n#pragma GCC diagnostic warning \"-W\" \"shadow\"\n#pragma clang diagnostic ignored \"-Wppf-none\"\n#pragma clang diagnostic remark \"-Wall\"\n#pragma clang diagnostic ignored \"-Rpass\"\n#pragma clang diagnostic ignored \"-Weverything\"\n#pragma clang diagnostic pop\n#pragma clang diagnostic pop\n#pragma clang diagnostic pop\n#pragma clang diagnostic\n#pragma GCC diagnostic ignored\n", 0, "c17", "#pragma clang diagnostic push\n#pragma GCC diagnostic push\n#pragma clang diagnostic ignored \"-Wunused-macros\"\n#pragma GCC diagnostic warning \"-Wshadow\"\n#pragma clang diagnostic ignored \"-Rpass\"\n#pragma clang diagnostic ignored \"-Weverything\"\n#pragma clang diagnostic pop\n#pragma clang diagnostic pop\n", true, 4 },
+    { "omp pragmas expand", "#define N 4\n#define PAR parallel\n#pragma omp PAR num_threads(N)\n_Pragma(\"omp for N\")\n#pragma ppf N\n#pragma STDC FP_CONTRACT N\n", 0, "c17", "#pragma omp parallel num_threads(4)\n#pragma omp for 4\n#pragma ppf N\n#pragma STDC FP_CONTRACT N\n", false, 0 },
+    { "silent pragmas", "#pragma mark - x\n#pragma region a\n#pragma endregion a\n#pragma clang max_tokens_here 1\n#pragma once\n#pragma GCC system_header\nafter\n", 0, "c17", "#pragma clang max_tokens_here 1\nafter\n", false, 2 },
+    { "push_macro and pop_macro", "#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\nX\n#pragma pop_macro(\"X\")\nX\n#pragma pop_macro(\"X\")\nX\n#pragma push_macro(\"Y\") tail\n", 0, "c17", "2\n1\n1\n", false, 0 },
+    { "push_macro malformed", "#pragma push_macro(X)\n", 0, "c17", "\n", true, 0 },
+    { "GCC poison", "#pragma GCC poison p q\nx\n#ifdef p\n#endif\n", 0, "c17", "\nx\n", true, 0 },
+    { "GCC poison used", "#pragma GCC poison p\np\n", 0, "c17", "\np\n", true, 0 },
+    { "GCC dependency", "#pragma GCC dependency \"other.h\"\nx\n", "int other;\n", "c17", "\nx\n", false, 0 },
+    { "GCC dependency missing", "#pragma GCC dependency \"ppf_missing.h\"\nx\n", 0, "c17", "", true, 0 },
+    { "assume_nonnull regions", "#pragma clang assume_nonnull begin\nx\n#pragma clang assume_nonnull end\n#pragma clang arc_cf_code_audited begin\n#pragma clang arc_cf_code_audited end\n#pragma clang unsafe_buffer_usage begin\n#pragma clang unsafe_buffer_usage end\n", 0, "c17", "#pragma clang assume_nonnull begin\nx\n#pragma clang assume_nonnull end\n", false, 0 },
+    { "an assume_nonnull region left open", "#pragma clang assume_nonnull begin\nx\n", 0, "c17", "#pragma clang assume_nonnull begin\nx\n", true, 0 },
+    { "macro notes", "#define M 1\n#pragma clang deprecated(M)\n#pragma clang deprecated(M, \"use N\")\n#pragma clang final(M)\n#pragma clang restrict_expansion(M)\nM\n", 0, "c17", "1\n", false, 0 },
+    { "macro notes malformed", "#pragma clang deprecated(ppf_undefined)\n", 0, "c17", "\n", true, 0 },
+    { "#ident and #sccs", "#ident \"one\"\n#sccs \"two\"\n#define ID \"three\"\n#ident ID\n#ident L\"four\" tail\n", 0, "c17", "#ident \"one\"\n#ident \"two\"\n#ident \"three\"\n#ident L\"four\"\n", false, 1 },
+    { "#ident malformed", "#ident x\n", 0, "c17", "\n", true, 0 },
+    { "__has_embed", "#if __has_embed(\"/dev/null\") == 2 && __has_embed(\"ppf_missing\") == 0 && __has_embed(<ppf_missing>) == 0\nok\n#endif\n#if __has_embed(\"/dev/null\" limit(0)) == 2 && __has_embed(\"/dev/null\" prefix(x) suffix(y) if_empty(z)) == 2 && __has_embed(\"/dev/null\" ppf::unknown) == 0\nparameters\n#endif\n#if __has_embed(\"other.h\" clang::offset(1) limit(2)) == 1\nfound\n#endif\n", "int other;\n", "c23", "\nok\nparameters\nfound\n", false, 0 },
+    { "__has_embed outside #if", "__has_embed(\"/dev/null\")\n", 0, "c23", "", true, 0 },
+    { "UCN identifiers stringized", "#define S(x) #x\n#define T(x) S(x)\n#define P(a, b) a ## b\nT(P(\\u00e9, \\u00e9) P(\\U000000E9x, y))\n", 0, "c17", "\"\\u00e9\\u00e9 \\U000000E9xy\"\n", false, 0 },
+    { "#pragma GCC poison's uses", "#define BEFORE p\n#pragma GCC poison p\nBEFORE\n#if 0\np\n#ifdef p\n#endif\n#endif\n#define P(a, b) a ## b\n#pragma GCC poison p\n", 0, "c17", "p\n", false, 0 },
+    { "a poisoned name read from the file", "#pragma GCC poison p\np\n", 0, "c17", "\np\n", true, 0 },
+    { "a poisoned name in #ifdef", "#pragma GCC poison p\n#ifdef p\n#endif\n", 0, "c17", "\n", true, 0 },
+    { "a poisoned name among arguments", "#define F(x) 1\n#pragma GCC poison p\nF(p)\n", 0, "c17", "1\n", true, 0 },
+    { "a poisoned name from a paste", "#define P(a, b) a ## b\n#pragma GCC poison pq\nP(p, q)\n", 0, "c17", "pq\n", true, 0 },
+    { "a poisoned name in _Pragma's text", "#pragma GCC poison p\n_Pragma(\"ppf p\")\n", 0, "c17", "\n#pragma ppf p\n", true, 0 },
+    { "poisoning a macro", "#define p 1\n#pragma GCC poison p\n#if 0\np\n#endif\n#define Q p\n", 0, "c17", "\n", true, 1 },
+    { "poisoning defined", "#pragma GCC poison defined\n", 0, "c17", "\n", false, 0 },
+    { "two ## in a row", "#define A x ## ## y\nA\n", 0, "c17", "\nx ## y\n", true, 0 },
+    { "two ## and an empty argument", "#define F(y) x ## ## y z\nF()\n#define G(y, w) x ## ## y w\nG(,q)\n#define H(x, y) x ## ## y\nH(,1)\n", 0, "c17", "\nxz\nxq\n##1\n", false, 0 },
+    { "GNU's comma paste after an argument", "#define G(...) __VA_ARGS__ ## __VA_ARGS__\nG(,)\n#define D(c, e...) e ## e\nD( , , )\n", 0, "c17", "\n,,\n, ,\n", false, 0 },
+    { "#line with digit separators", "#line 1'000\n__LINE__\n", 0, "c23", "1000\n", false, 0 },
+    { "line marker flags", "# 3 \"h\" 3 4\n__LINE__\n# 7 \"g\" 3\n__LINE__\n# 9 \"f\"\n__LINE__\n", 0, "c17", "3\n7\n9\n", false, 0 },
+    { "a line marker's flag 2 without 1", "# 5 \"f\" 2\n", 0, "c17", "\n", true, 0 },
+    { "a line marker's invalid flags", "# 5 \"f\" 1 2\n", 0, "c17", "\n", true, 0 },
+    { "#include with extra tokens", "#include \"other.h\" y\n#define H \"other.h\"\n#include H z\nx\n", "int other;\n", "c17", "int other;\n\nint other;\nx\n", false, 2 },
+    { "extra tokens after directives", "#define X\n#undef X y\n#if 0\n#elifdef X y\n#else x\n#endif x\n#if 1\n#else x\n#endif\n", 0, "c23", "\n", false, 5 },
+    { "#elifdef without a name", "#if 0\n#elifdef\n#endif\n", 0, "c23", "\n", true, 0 },
+    { "#ifdef defined", "#ifdef defined\nyes\n#else\nno\n#endif\n", 0, "c17", "no\n", false, 0 },
+    { "defined from macros in #if", "#define ID(x) x\n#if ID(defined Y)\nyes\n#else\nno\n#endif\n#define D defined\n#define X\n#if D X\nyes\n#endif\n#define DX defined(X)\n#if DX\nyes\n#endif\n", 0, "c17", "no\nyes\nyes\n", false, 0 },
+    { "defined from an argument that expands", "#define ID(x) x\n#define X\n#if ID(defined X)\n#endif\n", 0, "c17", "\n", true, 0 },
+    { "an inactive __VA_OPT__'s spacing", "#define S(x) #x\n#define T(x) S(x)\n#define D(c, ...) #__VA_OPT__( c)\nT((D(x)))\n#define E(c, ...) [__VA_OPT__( c)]\nT(E(q))\n", 0, "c23", "\"(\\\"\\\" )\"\n\"[ ]\"\n", false, 0 },
+    { "an empty __VA_OPT__ expands nothing", "#define H(d, a, ...) __VA_OPT__()\nH(,,H())\n", 0, "c23", "\n", false, 0 },
+    { "__VA_ARGS__ as a parameter", "#define F(__VA_ARGS__) [__VA_ARGS__]\nF(1)\n#define G(__VA_ARGS__, ...) [__VA_ARGS__]\nG(1, 2)\n", 0, "c23", "\n[1]\n[1]\n", false, 0 },
+    { "#__VA_ARGS__ in a named variadic macro", "#define F(x...) #__VA_ARGS__\n", 0, "c17", "\n", true, 0 },
+    { "right shifts in #if", "#if (~0u >> 97) == 1 && (8 >> 4294967297) == 4 && (-8 >> 64) == -1 && (4 >> 0x100000000) == 4 && (1 << 64) == 0\nok\n#endif\n", 0, "c23", "\nok\n", false, 0 },
+    { "push_macro allows a redefinition", "#define X 1\n#pragma push_macro(\"X\")\n#define X 2\nX\n#pragma pop_macro(\"X\")\nX\n", 0, "c17", "2\n1\n", false, 0 },
+    { "#pragma once with extra tokens", "#pragma once x\n", 0, "c17", "\n", false, 2 },
+    // An attribute query reads its operand expanded, a token at a time, to the ')' that closes it, wherever that comes
+    // from; and its scope (for __has_c_attribute) after a name it reads as it is.
+    { "an attribute query's operand read expanded", "#define R ) + 1\n#define D noreturn )\n__has_attribute(x R\n__has_attribute(D\n#define G gnu::\n__has_c_attribute(G noreturn)\n#define E\n__has_attribute(x E)\n#if __has_attribute(D\nyes\n#endif\n#define F(a) a\nF(__has_attribute(x R))\n",
+      0, "c23", "\n0 + 1\n1\n1\n0\nyes\n0 + 1 )\n", false, 0 },
+    { "an attribute query's operand across a directive", "__has_attribute(x\n#define Y 1\n) Y\n#define Z(a) a\n__has_attribute(\n#if 1\nnoreturn\n#endif\n) Z(1)\n", 0, "c17", "0 1\n1 1\n", false, 0 },
+    { "an attribute query's operand nested", "#define RR ) )\n__has_attribute(__has_attribute(x RR\n", 0, "c17", "", true, 0 },
+    { "a scope only in __has_c_attribute", "__has_attribute(gnu::noreturn)\n", 0, "c23", "", true, 0 },
+    { "a macro after __has_c_attribute's name", "#define E\n__has_c_attribute(x E)\n", 0, "c23", "", true, 0 },
+    { "an attribute query's operand unterminated", "__has_attribute(x\n", 0, "c17", "", true, 0 },
+    { "a scoped attribute query's operand at the end of the file", "__has_c_attribute(x", 0, "c23", "", true, 0 },
+    // A _Pragma in a directive's line runs, as clang reads the line: its pragma line comes first.
+    { "_Pragma in directives' lines", "#if _Pragma(\"ppf a\") 1\nyes\n#endif\n#line _Pragma(\"ppf b\") 5\n__LINE__\n#pragma message(_Pragma(\"ppf c\") \"s\")\n__has_attribute(_Pragma(\"ppf d\") x) after\n",
+      0, "c17", "#pragma ppf a\nyes\n#pragma ppf b\n5\n#pragma ppf c\n#pragma message(\"s\")\n#pragma ppf d\n0 after\n", false, 1 },
+    // Spaces in a substitution are clang's NextTokGetsSpace: none after ##, and __VA_OPT__'s tokens and ')' give the next
+    // token one even when the __VA_OPT__ gives nothing.
+    { "spaces around __VA_OPT__", "#define S(x) #x\n#define T(x) S(x)\n#define B(...) >= ## __VA_OPT__( )( )\nT(B())\n#define C(...) >= ## __VA_OPT__(x)( )\nT(C())\n#define D(...) x __VA_OPT__(a )y\nT(D(1))\n#define E(...) x #__VA_OPT__()y\nT(E())\n#define F(...) x ## __VA_OPT__()y\nT(F())\n",
+      0, "c23", "\n\">= ( )\"\n\">=( )\"\n\"x a y\"\n\"x \\\"\\\" y\"\n\"xy\"\n", false, 0 },
+    { "GNU's comma paste's spaces and placemarkers", "#define S(...) #__VA_ARGS__\n#define T(...) S(__VA_ARGS__)\n#define f(x, ...) [x , ## __VA_ARGS__]\nT(f(a,b))\nT(f(a, b))\n#define g(p, q, ...) [p ,q ## __VA_ARGS__]\nT(g(a,))\n#define h(p, ...) [, __VA_OPT__(__VA_ARGS__ ## a) ## __VA_ARGS__ ## b]\nT(h(u))\n#define X(p, ...) [p ## , ## __VA_ARGS__]\nT(X(a))\n",
+      0, "c17", "\n\"[a ,b]\"\n\"[a , b]\"\n\"[a]\"\n\"[, b]\"\n\"[a]\"\n", false, 0 },
+    { "GNU's comma paste with ## after __VA_ARGS__", "#define e(d, ...) , ## __VA_ARGS__ ## )\ne( )\n", 0, "c23", "", true, 0 },
+    // GNU's comma before __VA_OPT__ whose variadic argument follows empty arguments pasted onto it: clang drops their
+    // placemarkers with their ##, and the comma stays apart (seed 54's case 566182, C23).
+    { "GNU's comma before __VA_OPT__ past empty arguments", "#define c(d, e...) e ## __VA_OPT__( d ## e)\nc(,,)\n#define h(d, g, ...) , ## __VA_OPT__(d ## g ## __VA_ARGS__)\nh(,,y)\n",
+      0, "c23", "\n,,\n,y\n", false, 0 },
+    // There the variadic argument keeps its first token's own space, which a string shows (seed 70's case 208758, C17).
+    { "GNU's comma before __VA_OPT__ past empty arguments, stringized", "#define vs(...) #__VA_ARGS__\n#define vt(...) vs(__VA_ARGS__)\n#define vm(p, q, ...) __VA_OPT__(,) ## __VA_OPT__( q ## __VA_ARGS__ )\nvt(vm( ,,u ))\nvt(vm( ,, u ))\n",
+      0, "c17", "\n\",u\"\n\", u\"\n", false, 0 },
+    // The campaigns' differences (docs/preprocessor-fuzz.md): a function-like macro without parameters substitutes
+    // nothing, so its __VA_OPT__ and a # before it stay tokens (TokenLexer::Init).
+    { "__VA_OPT__ in a macro without parameters", "#define Z() a ## __VA_OPT__(b) # __VA_OPT__(c)\nZ()\n#define Y() __VA_OPT__ ( )\nY()\n", 0, "c23", "\na__VA_OPT__(b) # __VA_OPT__(c)\n__VA_OPT__ ( )\n", false, 0 },
+    // A token right after a line splice starts at the splice for clang's lexer: an expansion's ')' or name there gives
+    // __LINE__ the splice's line, and so does a #line's number.
+    { "__LINE__ at a ')' that starts at a line splice", "#define L() __LINE__\nL(\n\\\n)\n#define M __LINE__\nx\n\\\nM\n", 0, "c17", "\n3\nx\n7\n", false, 0 },
+    { "#line's number after a _Pragma and an empty macro", "#lin\\\ne _Pragma(\"ppf_lin\\\ne\") 010\n__LINE__\n#define E\n#line E \\\n 30\n__LINE__\n#line E \\\n40\n__LINE__\n",
+      0, "c17", "\n#pragma ppf_line\n10\n30\n41\n", false, 1 },
+    { "__LINE__ at a ')' that starts at a trigraph's line splice", "#define L() __LINE__\nL(\n?\?/\n)\n", 0, "c17", "\n3\n", false, 0 },
+    // A line marker's tokens after its digits are read expanded (Preprocessor::HandleDigitDirective's Lex).
+    { "a line marker's name and flags from macros", "#define F \"named.c\"\n# 20 F\n__FILE__ __LINE__\n#define E\n# 30 E\n__LINE__\n", 0, "c17", "\n\"named.c\" 20\n30\n", false, 0 },
+    // A _Pragma's text gets a newline after it (prepare_PragmaString), which splices away a `\` that ends it.
+    { "a _Pragma's text that ends in a backslash", "#define P(x) _Pragma(x)\nP(\"\\\\\")\nx\n", 0, "c17", "\n#pragma\nx\n", false, 0 },
+    // Character constants in #if as clang's CharLiteralParser reads them.
+    { "character constants' values", "#if 'ab' == 24930 && '\\xff\\x01' == 65281 && '\\377' == -1 && L'\\xffffffff' == -1 && u'\\xffff' == 65535 && U'\\U0010FFFF' == 0x10FFFF && '\\e' == 27 && '\\q' == 'q'\nok\n#endif\n",
+      0, "c17", "\nok\n", false, 3 },
+    { "a character constant's UCN past ASCII", "#if '\\u00e9'\n#endif\n", 0, "c17", "", true, 0 },
+    { "UCNs of basic characters in C23 character constants", "#if '\\u0041' == 65 && u8'\\u0024' == 36\nyes\n#endif\n", 0, "c23", "\nyes\n", false, 0 },
+    { "a UCN of a basic character before C23", "#if '\\u0041' == 65\n#endif\n", 0, "c17", "", true, 0 },
+    { "several characters in a wide character constant", "#if L'ab'\n#endif\n", 0, "c17", "", true, 0 },
+    { "an octal escape out of range", "#if '\\400' == 0\nzero\n#endif\n", 0, "c17", "\nzero\n", true, 0 },
+    // _Pragma reads its '(', string literal and ')' expanded, a token at a time (Preprocessor::Handle_Pragma).
+    { "_Pragma's operand read expanded", "#define A(c) ( #c\n_Pragma A(ppf a) )\n#define P (\"ppf p\")\n_Pragma P after\n#define S \"ppf s\"\n_Pragma(S)\n",
+      0, "c17", "\n#pragma ppf a\n#pragma ppf p\nafter\n#pragma ppf s\n", false, 0 },
+    { "_Pragma without its operand", "_Pragma x y\n", 0, "c17", "", true, 0 },
+    // A __VA_OPT__'s content pastes left to right with a ## before it, as clang's TokenLexer does: (.5 e) .5, and GNU's
+    // comma before `__VA_ARGS__ ##` in it (VaArgsPseudoPaste).
+    { "__VA_OPT__'s content pasted left to right", "#define C(...) .5 ## __VA_OPT__(e ## .5)\nC(1)\n#define V(...) __VA_OPT__(, ) ## __VA_OPT__(__VA_ARGS__ ## __VA_ARGS__)\nV(u)\n",
+      0, "c23", "\n.5e.5\n,uu\n", false, 0 },
+    // A prefix the mode doesn't have before an empty character constant is an identifier before C23 (`u8` and `''`), so
+    // pasting them forms two tokens there, and one in C23.
+    { "a prefix pasted onto an empty character constant before C23", "#define P(a, b) a ## b\nP(u8,'')\n", 0, "c17", "", true, 0 },
+    { "a prefix pasted onto an empty character constant in C23", "#define P(a, b) a ## b\nP(u8,'')\n", 0, "c23", "\nu8''\n", false, 0 },
+    // Among a macro's arguments clang's macro expansion is off, and only #if and #elif turn it back on: #line's and
+    // #ident's operands stay as written.
+    { "#line among a macro's arguments, unexpanded", "#define F(x) [x]\n#define N 10\nF(\n#line N\n)\n", 0, "c17", "", true, 0 },
+    { "#line among a macro's arguments", "#define F(x) [x]\nF(a\n#line 20\n__LINE__)\n__LINE__\n", 0, "c17", "\n[a 20]\n21\n", false, 0 },
+    { "#ident among a macro's arguments, unexpanded", "#define F(x) [x]\n#define ID \"s\"\nF(\n#ident ID\n)\n#ident ID\n", 0, "c17", "\n[]\n#ident \"s\"\n", true, 0 },
+    // After a _Pragma that prints nothing, clang's lexer starts a line, which its printer moves to when the next token
+    // is on another one.
+    { "the token after a _Pragma that prints nothing", "#define h(x) _Pragma(x)\na h(\"once\") \\\n    b\n#define g(x) _Pragma(x) y\nc g(\"once\") \\\nd\n",
+      0, "c17", "\na\nb\nc y d\n", false, 2 },
+    // A name of a macro whose expansion an argument is read from is painted there: the expansion ends at the ')' after
+    // it, before the argument expands (Preprocessor::ReadMacroCallArgumentList).
+    { "a disabled macro's name among its arguments", "#define e a ( e\n#define a(...) __VA_ARGS__\ne )\n#define f g ( f\n#define g(x) [x]\nf )\n", 0, "c17", "\ne\n[f]\n", false, 0 },
+    // A token that started a line among a macro's arguments (but the first) starts one in clang's printer too, which
+    // moves to the expansion's line when that is another one: the name's, after a line splice.
+    { "line markers: a line among a macro's arguments", "#define h(...) __VA_ARGS__\nL\\\n h(\nU\n\"#\")\nx\\\n  h(7\n  y\nz)\n", 0, "c17", "L U \"#\" x 7 y z", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\n\nL U\n\"#\"\n\n\nx 7\ny z\n" },
+    // A paste's result takes its left operand's line start among the arguments, as clang's TokenLexer::pasteTokens
+    // gives it the left one's flags, so the printer moves to the expansion's line at the result, not at the token
+    // after it (seed 14's case 452, C23).
+    { "line markers: a paste of a line among a macro's arguments", "#define E(a) X a ## a .\nx \\\ny \\\nE(f\nz)\n", 0, "c17", "x y X f zf z .", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\n\nx y X f\nzf z .\n" },
+    // Directives that read only part of their line expanded, and the rest as it is (Preprocessor::CheckEndOfDirective):
+    // #ident its string, #line its number, its name and one token more, a computed #include its header name and one token
+    // more, and push_macro and pop_macro their '(', string and ')'. What comes after never expands.
+    { "#ident's string read expanded, and the rest as it is", "#define c(x) x\n#define d(e) e\n#define h d(\"s\") c(\n#ident h\n#ident \"t\" _Pragma(\"message(\\\"m\\\")\")\n#ident \"u\" __COUNTER__\n__COUNTER__\n",
+      0, "c17", "\n#ident \"s\"\n#ident \"t\"\n#ident \"u\"\n0\n", false, 3 },
+    { "#line's operands read expanded, and the rest as it is", "#define c(x) x\n#line 10 \"f.c\" x c(\n__LINE__\n#line 20 \"g.c\" x __COUNTER__\n__COUNTER__ __LINE__\n", 0, "c17", "\n10\n0 20\n", false, 2 },
+    { "a computed #include's name read expanded, and the rest as it is", "#define c(x) x\n#define H \"other.h\"\n#include H x c(\nafter\n", "in_other\n", "c17", "\nin_other\nafter\n", false, 1 },
+    { "push_macro's and pop_macro's operands read expanded, and the rest as it is", "#define c(x) x\n#define m 1\n#pragma push_macro(\"m\") x c(\n#undef m\n#define m 2\n#pragma pop_macro(\"m\") y c(\nm\n",
+      0, "c17", "\n1\n", false, 0 },
+    // A pragma line that a directive among a macro's arguments gives while a _Pragma waits for its '(' stays before the
+    // expansion, where the _Pragma has read it (seed 45's case 610823 crashed reading past it).
+    { "a pragma line among a macro's arguments while a _Pragma waits", "_Pragma\n#define f(a, b)\nf(a\n#if _Pragma(\"ppf_if\") 1\n#endif\n,b)\nafter\n", 0, "c17",
+      "\n#pragma ppf_if\nafter\n", true, 0 },
     {
         .name = "builtin and feature names are raw, attribute names may expand",
         .source = "#define BUILTIN_NAME __builtin_expect\n#define FEATURE_NAME c_atomic\n#define ATTRIBUTE_NAME __const__\n"
@@ -1473,8 +1665,11 @@ static bool pp_test_assembly_printing(const char* directory)
     return failures == 0;
 }
 
-// One accepted file, by both kernels, and (when supplied) against Clang's already-collected output.
-static bool pp_test_file_output(const PPOptions* base, const char* path, bool with_clang, const char* text, size_t length, uint64_t* tokens)
+static int64_t pp_directive_test_clang_guards(char** arguments, int argument_count, const char* path);
+
+// One accepted file, by both kernels, and (when supplied) against Clang's already-collected output. Adds to *guards
+// (if it isn't null) the inclusions the run skipped by their guards, which pp_test_file compares with clang's (#120).
+static bool pp_test_file_output(const PPOptions* base, const char* path, bool with_clang, const char* text, size_t length, uint64_t* tokens, uint64_t* guards)
 {
     PPOptions options = *base;
     static InternTable tables[2];
@@ -1496,6 +1691,10 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
                  pp_test_placed(&runs[0], &theirs, path);
         pp_placed_release(&theirs);
     }
+    if (guards != 0)
+    {
+        *guards += runs[0].statistics.skipped_guards;
+    }
     arena_release(&ours.arena);
     for (uint32_t k = 0; k < 2; k += 1)
     {
@@ -1505,6 +1704,8 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
     return result;
 }
 
+// One file, by both kernels, and with --clang against clang with the same options: the tokens, their places, and the
+// inclusions skipped by their guards (#120), as many as clang's multiple-include optimization skips.
 static bool pp_test_file(int argument_count, char** arguments, const PPOptions* base, const char* path, bool with_clang, const char* directory, uint64_t* tokens)
 {
     PPOptions options = *base;
@@ -1513,7 +1714,14 @@ static bool pp_test_file(int argument_count, char** arguments, const PPOptions* 
     size_t length = 0;
     char* text = with_clang ? pp_test_clang(arguments, argument_count, path, predefines, &length) : 0;
     options.predefines_path = with_clang ? predefines : options.predefines_path;
-    bool result = (!with_clang || text != 0) && pp_test_file_output(&options, path, with_clang, text, length, tokens);
+    uint64_t guards = 0;
+    bool result = (!with_clang || text != 0) && pp_test_file_output(&options, path, with_clang, text, length, tokens, &guards);
+    const int64_t clang_guards = result && with_clang ? pp_directive_test_clang_guards(arguments, argument_count, path) : -1;
+    if (result && with_clang && clang_guards != (int64_t)guards)
+    {
+        printf("%s: %lu inclusions skipped by their guards, clang %ld\n", path, (unsigned long)guards, (long)clang_guards);
+        result = false;
+    }
     // Then, with our own predefines, the macros at the file's end against clang's.
     result = result && (!with_clang || pp_test_macros(argument_count, arguments, base, path));
     free(text);
@@ -2415,6 +2623,42 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
     return result;
 }
 
+// The fuzz batch's options, which c_preprocessor_fuzz.c (included after this file) runs with pp_fuzz.
+#define BUSTER_PP_FUZZ_CASES 1500
+#define BUSTER_PP_FUZZ_MAX_JOBS 256
+
+typedef struct PPFuzzOptions PPFuzzOptions;
+struct PPFuzzOptions
+{
+    // Cases per mode, ids first to first + count - 1 (BUSTER_PP_FUZZ_CASES from 0 by default: test-preprocessor's
+    // batch, which needs no clang).
+    uint64_t count;
+    uint64_t first;
+    uint64_t seed;
+    // C17, then C23.
+    bool modes[2];
+    bool with_clang;
+    const char* clang_path;
+    uint32_t jobs;
+};
+
+static bool pp_fuzz(const PPFuzzOptions* options);
+static bool pp_fuzz_print_case(const PPFuzzOptions* options, uint64_t id);
+
+// A decimal option's value (--fuzz, --seed, --jobs). Returns false if it isn't one.
+static bool pp_test_number(const char* text, uint64_t* value)
+{
+    char* end = 0;
+    errno = 0;
+    const unsigned long long parsed = text != 0 ? strtoull(text, &end, 10) : 0;
+    const bool result = text != 0 && text[0] >= '0' && text[0] <= '9' && end != text && *end == 0 && errno == 0;
+    if (result)
+    {
+        *value = parsed;
+    }
+    return result;
+}
+
 // Outside the oracle's mode, the feature queries answer what buster implements (pp_implemented_*): of builtins only the
 // preprocessor's __is_target_*, and no attribute, feature, extension or constexpr builtin; __has_warning answers as
 // clang does in both modes, and so do the queries that aren't about the compiler (__has_include, __is_identifier,
@@ -2447,7 +2691,7 @@ static bool pp_test_implemented_features(const char* directory)
         PPSpellings ours = { 0 };
         PPSpellings wanted = { 0 };
         passed = passed && pp_test_run(&pp, &table, &options, path) && pp_stream_spellings(&pp, &ours) &&
-                 pp_text_spellings((const uint8_t*)expected[clang], strlen(expected[clang]), pp.split_kinds, pp_dollar_punctuation(&pp.options), &wanted) &&
+                 pp_text_spellings((const uint8_t*)expected[clang], strlen(expected[clang]), pp.split_kinds, pp_test_lex_flags(&pp), &wanted) &&
                  pp_compare_spellings(&pp, &ours, &wanted, clang == 1 ? "clang's feature answers" : "implemented feature answers", "wanted");
         pp_release(&pp);
         intern_release(&table);
@@ -2474,28 +2718,49 @@ static bool predefines_test_target(void);
 static bool predefines_test_refused(void);
 
 #include "c_preprocessor_history_test.c"
+#include "c_preprocessor_directives_test.c"
 #include "c_preprocessor_order_test.c"
 
 static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
 {
     bool with_clang = false;
     bool keep = false;
+    // The fuzz batch (c_preprocessor_fuzz.c), which runs with the cases: --fuzz cases per mode, --seed, --std for one
+    // mode, --jobs workers.
+    PPFuzzOptions fuzz = {
+        .count = BUSTER_PP_FUZZ_CASES,
+        .seed = 1,
+        .modes = {
+            true,
+            true,
+        },
+        .clang_path = "clang",
+        .jobs = 1,
+    };
     bool generate_targets = false;
-    uint64_t seed = 1;
     uint64_t id_order = 153;
     bool valid = true;
+    // --print-case: print that fuzz case (as clang reads it), and nothing else.
+    bool print_case = false;
+    uint64_t printed_case = 0;
     // The arguments without ours, for clang and pp_parse_options; the files are those that don't start with '-' and
     // aren't an option's value.
+    bool tables = false;
+    uint64_t count = BUSTER_PP_DIRECTIVE_TEST_SOURCES;
     char** passed = calloc((size_t)argument_count + 1, sizeof(char*));
+    char** clang_passed = calloc((size_t)argument_count + 1, sizeof(char*));
     char** files = calloc((size_t)argument_count + 1, sizeof(char*));
     int passed_count = 0;
+    int clang_passed_count = 0;
     int file_count = 0;
-    for (int i = 0; passed != 0 && files != 0 && i < argument_count; i += 1)
+    for (int i = 0; passed != 0 && clang_passed != 0 && files != 0 && i < argument_count; i += 1)
     {
         const char* argument = arguments[i];
-        const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
-                                 strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
-                                 strcmp(argument, "-target") == 0;
+        const char* next = i + 1 < argument_count ? arguments[i + 1] : 0;
+        const bool ours = pp_own_option_with_value(argument);
+        const bool takes_value = ours || strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
+                                 strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-target") == 0;
+        uint64_t number = 0;
         if (strcmp(argument, "--id-order") == 0 && i + 1 < argument_count)
         {
             char* end;
@@ -2516,22 +2781,56 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         {
             keep = true;
         }
+        else if (strcmp(argument, "--fuzz") == 0 || strcmp(argument, "--seed") == 0 || strcmp(argument, "--jobs") == 0 || strcmp(argument, "--first") == 0)
+        {
+            valid = valid && pp_test_number(next, &number);
+            fuzz.count = argument[2] == 'f' && argument[3] == 'u' ? number : fuzz.count;
+            fuzz.first = argument[2] == 'f' && argument[3] == 'i' ? number : fuzz.first;
+            fuzz.seed = argument[2] == 's' ? number : fuzz.seed;
+            fuzz.jobs = argument[2] == 'j' ? (uint32_t)(number < UINT32_MAX ? number : UINT32_MAX) : fuzz.jobs;
+            i += 1;
+        }
+        else if (strcmp(argument, "--print-case") == 0)
+        {
+            print_case = true;
+            valid = valid && pp_test_number(next, &printed_case);
+            i += 1;
+        }
+        else if (strcmp(argument, "--std") == 0)
+        {
+            fuzz.modes[0] = next != 0 && strcmp(next, "c17") == 0;
+            fuzz.modes[1] = next != 0 && strcmp(next, "c23") == 0;
+            valid = valid && (fuzz.modes[0] || fuzz.modes[1]);
+            i += 1;
+        }
         else if (strcmp(argument, "--generate-targets") == 0)
         {
             generate_targets = true;
         }
-        else if (strcmp(argument, "--seed") == 0 && i + 1 < argument_count)
+        else if (strcmp(argument, "--tables") == 0)
+        {
+            tables = true;
+        }
+        else if (strcmp(argument, "--count") == 0 && i + 1 < argument_count)
         {
             i += 1;
-            seed = strtoull(arguments[i], 0, 10);
+            count = strtoull(arguments[i], 0, 10);
         }
         else if (argument[0] == '-')
         {
             passed[passed_count++] = arguments[i];
+            if (!ours)
+            {
+                clang_passed[clang_passed_count++] = arguments[i];
+            }
             if (takes_value && i + 1 < argument_count)
             {
                 i += 1;
                 passed[passed_count++] = arguments[i];
+                if (!ours)
+                {
+                    clang_passed[clang_passed_count++] = arguments[i];
+                }
             }
         }
         else
@@ -2539,10 +2838,15 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             files[file_count++] = arguments[i];
         }
     }
+    fuzz.with_clang = with_clang;
+    if (!valid || fuzz.jobs == 0 || fuzz.jobs > BUSTER_PP_FUZZ_MAX_JOBS)
+    {
+        fprintf(stderr, "usage: test-preprocessor [--clang] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--print-case N] [options] [file...]\n");
+    }
     char directory[4096];
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
-    const bool created = valid && passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    const bool created = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && clang_passed != 0 && files != 0 && mkdtemp(directory) != 0;
     bool passed_all = created;
     if (passed_all && generate_targets)
     {
@@ -2563,17 +2867,27 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= predefines_test_target();
         passed_all &= predefines_test_refused();
         passed_all &= pp_test_history(directory, with_clang);
+        passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);
-            passed_all &= predefines_test_run(directory, seed);
+            passed_all &= predefines_test_run(directory, fuzz.seed);
             passed_all &= pp_test_keywords(directory);
             passed_all &= pp_test_features(directory);
             passed_all &= pp_test_option_features(directory);
         }
+        if (fuzz.count != 0)
+        {
+            fflush(stdout);
+            passed_all &= pp_fuzz(&fuzz);
+        }
+    }
+    else if (passed_all && tables)
+    {
+        passed_all = pp_directive_test_paths(files, file_count);
     }
     else if (passed_all)
     {
@@ -2594,14 +2908,18 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         uint64_t tokens = 0;
         for (int i = 0; passed_all && i < file_count; i += 1)
         {
-            failures += !pp_test_file(passed_count, passed, &options, files[i], with_clang, directory, &tokens);
+            failures += !pp_test_file(clang_passed_count, clang_passed, &options, files[i], with_clang, directory, &tokens);
         }
         printf("files: %u of %d differ (%lu tokens)\n", failures, file_count, (unsigned long)tokens);
         passed_all = passed_all && failures == 0;
         free(with_input);
         arena_release(&arena);
     }
-    if (!keep && created)
+    if (valid && print_case)
+    {
+        passed_all = pp_fuzz_print_case(&fuzz, printed_case);
+    }
+    else if (!keep && created)
     {
         // The files the cases and the clang runs write, then the directory.
         static const char* const names[] = { "case.c", "other.h", "predefines.h" };
@@ -2614,6 +2932,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         rmdir(directory);
     }
     free(passed);
+    free(clang_passed);
     free(files);
     return passed_all ? 0 : 1;
 }
