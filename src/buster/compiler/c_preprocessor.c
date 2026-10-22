@@ -7,7 +7,7 @@
 // (c_lexer.c, then c_refine.c) to one token stream, and `-E`'s text from that stream. docs/c-preprocessor.md has the
 // design and its 9700X measurements.
 //
-// Files. Every file is read (mapped), lexed, refined and given a directive table once (pp_prepare_into), and kept for
+// Files. Every file is read or mapped, lexed, refined and given a directive table once (pp_prepare_into), and kept for
 // the translation unit, since macro definitions point into the tokens of the file that defines them. The directive
 // table lists each '#' that starts a line, with its kind and the token where its line ends; conditional directives are
 // paired with an explicit stack, each pointing to the next directive of its group, so that skipping a group that isn't
@@ -377,7 +377,8 @@ struct FileProbe
 
 // How a probe gets a file's bytes: mapped with MAP_POPULATE (a translation unit's, and one lane's), mapped without it
 // (the mapping holds the process's memory map lock for less time, and its pages are faulted in as they are first read),
-// or read into an arena; a lane reads small files whatever this says (file_cache_probe's `read_limit`).
+// or read into an arena. A translation unit and a lane read small files whatever this says (file_cache_probe's
+// `read_limit`).
 typedef enum FileCacheBytes
 {
     FILE_CACHE_MAP_POPULATED,
@@ -443,6 +444,9 @@ struct FileCache
     // The records prepared, and their tokens (for the tests and the benchmark).
     uint64_t prepared_records;
     uint64_t prepared_tokens;
+    // The largest file a lookup (file_cache_lookup_path: a translation unit's) reads into its lane's bytes arena rather
+    // than maps: BUSTER_FILE_CACHE_READ_LIMIT, unless benchmark-preprocessor's --read-limit sets another.
+    uint32_t read_limit;
 };
 
 // A range of the location space: one inclusion of a file, or a chunk of scratch spellings (`file` BUSTER_PP_NONE).
@@ -1936,6 +1940,13 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 #define BUSTER_FILE_CACHE_PATH_BYTES (1ull << 32)
 #define BUSTER_FILE_CACHE_INITIAL_SLOTS 1024u
 #define BUSTER_FILE_CACHE_ARENA_BYTES (64ull << 30)
+// The largest file a translation unit's lookup reads into its lane's bytes arena rather than maps
+// (file_cache_lookup_path), as c_files.c's lanes read theirs (BUSTER_FILES_READ_LIMIT): a read saves the file's mmap
+// and, when the cache is released, its munmap. On the 9700X, reading the files of up to 16 KB took 1.9% to 2.3% off the
+// run and release of sqlite3.c, main.c and musl's units. 4 KB took 0.2% more off musl's and 0.7% to 0.8% less off the
+// others', larger limits less, and reading every file (sqlite3.c's 9.5 MB too) made sqlite3.c's slower than mapping
+// them all (docs/c-preprocessor.md, "Files").
+#define BUSTER_FILE_CACHE_READ_LIMIT (16u << 10)
 
 // Reserves a cache's memory, for files prepared as `prepare` says and refined with `table`. Returns false if it can't be
 // reserved (file_cache_release then releases what was).
@@ -1944,6 +1955,7 @@ static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, Inte
     *cache = (FileCache){ 0 };
     cache->prepare = prepare;
     cache->table = table;
+    cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
     cache->arrays[0] = arena_reserve((uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData) + 64);
     cache->arrays[1] = arena_reserve(2ull * BUSTER_PP_MAX_FILES * sizeof(uint32_t) + 64);
     cache->arrays[2] = arena_reserve((uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath) + 64);
@@ -2304,9 +2316,20 @@ static void file_cache_identify(FileCache* cache, FileCachePath* entry)
     }
 }
 
+// The arena a translation unit reads small files into (file_cache_lookup_path): its lane's bytes arena, or none (every
+// file mapped) if it can't be reserved.
+static Arena* file_cache_unit_bytes(FileCache* cache)
+{
+    Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
+    return bytes->base != 0 ? bytes : 0;
+}
+
 // The record of the file at `path` (`length` bytes, NUL-terminated), probing the file system only the first time the
-// cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full. A record whose
-// bytes c_files.c's walk left unread (a walk that stopped early) is read now. One lane at a time.
+// cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full. A file of up to
+// the cache's read limit is read into the calling lane's bytes arena, which the cache keeps as long as its records, and
+// a larger one is mapped with MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation,
+// which needs the lane's other arenas, says why it fails). A record whose bytes c_files.c's walk left unread (a walk
+// that stopped early) is read now, the same way. One lane at a time.
 static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, FileCacheCounts* counts)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
@@ -2314,7 +2337,7 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
     if (entry == 0)
     {
         FileProbe probe;
-        file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, 0, UINT32_MAX, 0, &probe, counts);
+        file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, cache->read_limit, UINT32_MAX, file_cache_unit_bytes(cache), &probe, counts);
         entry = file_cache_add_path(cache, path, length, hash, &probe);
         if (entry != 0)
         {
@@ -2326,7 +2349,9 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
         }
     }
     const uint32_t record = entry != 0 ? entry->record : BUSTER_PP_NONE;
-    return record != BUSTER_PP_NONE && file_cache_load(cache, record, FILE_CACHE_MAP_POPULATED, 0, 0, counts) ? record : BUSTER_PP_NONE;
+    const bool readable = record != BUSTER_PP_NONE &&
+                          (cache->records[record].bytes != 0 || file_cache_load(cache, record, FILE_CACHE_MAP_POPULATED, cache->read_limit, file_cache_unit_bytes(cache), counts));
+    return readable ? record : BUSTER_PP_NONE;
 }
 
 // Prepares record `record` (pp_prepare_into) unless it is prepared, into lane `lane`'s arenas and with the cache's intern
