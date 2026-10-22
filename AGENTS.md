@@ -1119,11 +1119,14 @@ allocation failures. Jobs run in forward and reverse order with delayed
 completion at 1, 2, 3 and 8 lanes; the bytes must agree.
 
 `test-preprocessor` (without files), `test-object-writer`, `test-executable`,
-`test-dynamic` and `test-static` also check output after changing opaque
-identifier assignments. Each accepts `--id-order N` (default 153). The object
-test covers both section modes at every lane count; the preprocessor compares
-both `-E` text modes and diagnostics through both kernels and both job orders.
-The 9700X workflow runs these checks as part of the stage commands.
+`test-dynamic`, `test-static` and `test-files` also check output after changing
+opaque identifier assignments. Each accepts `--id-order N` (default 153). The
+object test covers both section modes at every lane count; the preprocessor
+compares both `-E` text modes and diagnostics through both kernels and both job
+orders; the per-file jobs' test primes the shared table before the walk fills
+the cache, and compares every translation unit's `-E` text, diagnostics and
+locations and every cached file's tokens at every lane count. The 9700X workflow
+runs these checks as part of the stage commands.
 
 `./build/compiler benchmark-diagnostics [--only scalar|selected]
 [--after-scalar MS]` compares the
@@ -1132,7 +1135,7 @@ ticks/key. Run both isolated `--only selected` and
 `--only selected --after-scalar 100`, across several processes pinned to CPU 2
 under the host's lock. [The determinism guide](docs/determinism.md) specifies
 the caller's source-order and lifetime contracts and the integration still
-required by #150, #151 and #152.
+required by #151 and #152.
 
 ## Lane benchmark
 
@@ -2543,17 +2546,35 @@ CPU; like the others, its measurements are informational.
 
 ## Per-file jobs tests
 
-`./build/compiler test-files [--lanes LIST] [--seed N] [--keep] [--flat]
-[options] [path...]` (about 0.3 s without paths) checks `c_files.c`. Every
-check fills a file cache on each lane count of `--lanes` (1, 2, 3 and 8), each
-time with a new intern table and cache, and must give the first lane count's
-results byte for byte: the shared table's ids and spellings, every record's
-tokens, values, leading-space bits, directive table and guard, what the walk
-did, and each translation unit's output stream (kinds, flags, values and
-locations) when it preprocesses with the cache. One lane refines straight into
-the shared table, so it is the merge's scalar twin. Each unit's spellings must
-also be those it gives with a cache of its own, with as many errors and
-warnings, and nothing may be written to stderr while the cache is filled:
+`./build/compiler test-files [--lanes LIST] [--seed N] [--id-order N] [--keep]
+[--flat] [options] [path...]` (about 0.7 s without paths) checks `c_files.c`.
+Every check fills a file cache on each lane count of `--lanes` (1, 2, 3 and 8),
+each time with a new intern table and cache, and must give the first lane
+count's results byte for byte: the shared table's ids and spellings, every
+record's tokens, values, leading-space bits, directive table and guard, what the
+walk did, and each translation unit's output stream (kinds, flags, values and
+locations), the text `-E` prints for it with and without line markers and its
+diagnostics when it preprocesses with the cache. One lane refines straight into
+the shared table, so it is the merge's scalar twin. Each unit's spellings and
+diagnostics must also be those it gives with a cache of its own, with as many
+errors and warnings, and nothing may be written to stderr while the cache is
+filled.
+
+Then every check runs again on each lane count with the shared table's ids
+handed out in another order (#153: ids are opaque, and nothing may depend on
+their order), as `test-preprocessor --id-order` does for its cases. Before the
+walk fills the cache, the table is primed with 17 to 47 names no file has, then
+with every other name of the first run's table, in reverse from a place the
+seed picks (`--id-order N`, 153 by default, plus the lane count's place in the
+list), so that the walk finds those in the table and gives the others ids after
+them; every lane prepares every round, so that on more than one lane the merge
+does. The predefined names keep their fixed ids. The first run's other names
+must all be in the table, which may hold no others, and both those primed and
+those added after them must have changed ids. Every unit must give the first
+run's `-E` text (both modes) and diagnostics byte for byte, and its stream's
+kinds, flags and locations, each identifier's and keyword's id spelled as the
+first run's; every record must be the first run's, each identifier's value and
+the guard spelled the same, and the walk must do what it did:
 
 - the tree: a directory of the test's own (under `$TMPDIR` or `/tmp`) with
   three translation units and the headers they include, by every kind of
@@ -2562,16 +2583,20 @@ warnings, and nothing may be written to stderr while the cache is filled:
   paths (a symbolic link and `..` among them), a hard link to a header a
   computed include names, guarded and `#pragma once` headers included twice, a
   header under `#if 0` that exists and one that doesn't, and a missing header
-  in an active line. The counts are exact: 13 files prepared (each identity
-  once) in 4 rounds, 1 unused, 2 requests not found (no diagnostic), and the
-  units' system calls after the walk (only the computed include's). It runs
-  with the vectorized kernels and with their scalar twins, cut into parts and
-  split once, on every lane (`FilesRun.lane_bytes` 0);
+  in an active line; and two warnings that name identifiers: an `#if` in a
+  header two units include, whose notes name the macros it was expanded from,
+  and a macro redefined. The counts are exact: 13 files prepared (each identity
+  once) in 4 rounds, 1 unused, 2 requests not found (no diagnostic), the units'
+  errors and warnings, and their system calls after the walk (only the
+  computed include's). It runs with the vectorized kernels and with their
+  scalar twins, cut into parts and split once, on every lane
+  (`FilesRun.lane_bytes` 0);
 - spellings: 240 generated files of identifiers (a shared vocabulary drawn
   unevenly, names of their own, long names, line splices and UCNs) prepared
   without following includes, 165,562 ids, so that the shared table grows in a
-  merge: in parts, split once, and with two lanes working, and in two runs into
-  one cache, which must equal one run on one lane;
+  merge, and a translation unit that includes them all: in parts, split once,
+  and with two lanes working, and in two runs into one cache, which must equal
+  one run on one lane;
 - contexts: a guarded header that includes itself through `./` and `sub/..`,
   which the walk must take once (an alias of a file in the same context, by
   its directory's device and inode, isn't walked again), and one header in two
@@ -2590,9 +2615,10 @@ warnings, and nothing may be written to stderr while the cache is filled:
 The checks that would hang if they regressed run under a 60-second alarm, which
 fails the test.
 
-`--seed N` changes the spellings, and `--keep` leaves the directory. On the
-9700X, `sqlite3.c`, Lua 5.4.8, musl 1.2.5's 1,357 sources and the C library
-corpus (`--flat`) pass too.
+`--seed N` changes the spellings, `--id-order N` the ids' order, and `--keep`
+leaves the directory. On the 9700X, `sqlite3.c`, musl 1.2.5's 1,357 sources and
+the C library corpus (`--flat`) pass too, and Lua 5.4.8 did before the ids'
+order and the units' `-E` text and diagnostics were checked.
 The 9700X job's test step runs it, on `src` with `--flat`, and on the
 repository's translation units.
 

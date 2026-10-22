@@ -234,7 +234,9 @@ jobs:
           ./build/compiler test-types
           == Test the per-file jobs
           # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams,
-          # and each unit the spellings it gives alone.
+          # -E text and diagnostics, and each unit the spellings it gives alone; and again with the shared table's ids
+          # in another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and
+          # locations, each id spelled the same. Its forms with paths (the translation units, src flat) do the same.
           ./build/compiler test-files
           == Test the lanes
           ./build/compiler test-lanes
