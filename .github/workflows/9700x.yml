@@ -17,12 +17,14 @@ permissions:
   contents: read
 
 # Keep each PR/ref's pending runs separate: older branches using a single repository-wide pending slot otherwise
-# cancel another PR's qualification. Each group keeps one pending run, GitHub's default: a newer push to the PR (or
-# main) replaces its pending run, which would only qualify a commit already superseded, and a running one finishes. The
-# runner's job hooks serialize all jobs with the shared host lock (AGENTS.md).
+# cancel another PR's qualification. Each group keeps one pending run, GitHub's default: a newer push replaces its
+# pending run, which would only qualify a commit already superseded. A newer push to a PR also cancels the PR's run in
+# progress, which is mostly a job waiting for the 9700X (the slot is held from then on, so a run waiting hours would
+# otherwise still run for its stale commit); a push to main lets main's run finish. The runner's job hooks serialize all
+# jobs with the shared host lock (AGENTS.md).
 concurrency:
   group: buster-fast-9700x-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Whether a pull request changes anything but documentation (`docs/**` and `*.md`, as `push`'s paths-ignore), on a
