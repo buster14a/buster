@@ -1197,11 +1197,15 @@ static const char* const pp_fuzz_emulation_cases[] = {
     "#define e(...) __VA_ARGS__\n#define P(a, b) a ## b\ne(u8\nP(,\"\"))\n",
     "#define e(...) __VA_ARGS__\n#define c(d, ...) #d\ne(u8\n  c())\n",
     "#define e(...) __VA_ARGS__\n#define c(d, ...) #d\ne(u8\n/**/c())\n",
-    // An empty expansion's name passes its space on to a token that starts the next line, as clang ORs them: a space
-    // before either gives one.
+    // An empty expansion's name passes its space on to a token that starts the next line among a macro's arguments,
+    // as clang ORs them: a space before either gives one.
     "#define e(...) __VA_ARGS__\n#define E\ne(u8 E\n\"\")\n",
     "#define e(...) __VA_ARGS__\n#define E\ne(u8\nE\n\"\")\n",
     "#define e(...) __VA_ARGS__\n#define E\ne(u8\n E\n\"\")\n",
+    // In a file, only to the next token on the same line: clang's lexer clears the space at a newline, so after a `\`
+    // that ends its line, the next line's token stays in column 1 (seed 62's case 47024, C17).
+    "#define E\nu8 E\"\"\n",
+    "#define e(...)\na\\ \n\\ e(\n)\nc\n",
 };
 
 // Each source of pp_fuzz_emulation_cases against clang, alone, in both modes (pp_fuzz_clang_difference). Returns

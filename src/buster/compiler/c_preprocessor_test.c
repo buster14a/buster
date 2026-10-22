@@ -1062,6 +1062,10 @@ static const PPTestCase pp_test_cases[] = {
     { "GNU's comma paste's spaces and placemarkers", "#define S(...) #__VA_ARGS__\n#define T(...) S(__VA_ARGS__)\n#define f(x, ...) [x , ## __VA_ARGS__]\nT(f(a,b))\nT(f(a, b))\n#define g(p, q, ...) [p ,q ## __VA_ARGS__]\nT(g(a,))\n#define h(p, ...) [, __VA_OPT__(__VA_ARGS__ ## a) ## __VA_ARGS__ ## b]\nT(h(u))\n#define X(p, ...) [p ## , ## __VA_ARGS__]\nT(X(a))\n",
       0, "c17", "\n\"[a ,b]\"\n\"[a , b]\"\n\"[a]\"\n\"[, b]\"\n\"[a]\"\n", false, 0 },
     { "GNU's comma paste with ## after __VA_ARGS__", "#define e(d, ...) , ## __VA_ARGS__ ## )\ne( )\n", 0, "c23", "", true, 0 },
+    // GNU's comma before __VA_OPT__ whose variadic argument follows empty arguments pasted onto it: clang drops their
+    // placemarkers with their ##, and the comma stays apart (seed 54's case 566182, C23).
+    { "GNU's comma before __VA_OPT__ past empty arguments", "#define c(d, e...) e ## __VA_OPT__( d ## e)\nc(,,)\n#define h(d, g, ...) , ## __VA_OPT__(d ## g ## __VA_ARGS__)\nh(,,y)\n",
+      0, "c23", "\n,,\n,y\n", false, 0 },
     // The campaigns' differences (docs/preprocessor-fuzz.md): a function-like macro without parameters substitutes
     // nothing, so its __VA_OPT__ and a # before it stay tokens (TokenLexer::Init).
     { "__VA_OPT__ in a macro without parameters", "#define Z() a ## __VA_OPT__(b) # __VA_OPT__(c)\nZ()\n#define Y() __VA_OPT__ ( )\nY()\n", 0, "c23", "\na__VA_OPT__(b) # __VA_OPT__(c)\n__VA_OPT__ ( )\n", false, 0 },

@@ -467,6 +467,22 @@ locally, 1,000,000 cases per mode each, before what it found stopped it:
   error in clang. #247's directive structure diagnoses it, and its build
   rejects both cases as clang does; this branch leaves it to #247.
 
+The third freeze (`7696788`, below) found, while it ran:
+
+- **An empty expansion's space across a line in a file** (seed 62's case
+  47024, C17): the OR above holds among a macro's arguments, but a file's
+  token that starts a line keeps its own space, since clang's lexer clears a
+  leading space at a newline. The emulation had indented the next line's
+  token, which after a `\` ending the line before kept it apart where
+  clang's text joins it.
+- **GNU's comma before `__VA_OPT__` past empty arguments** (seed 54's case
+  566182, C23): in `e ## __VA_OPT__(d ## e)` with `d` empty and `e` the
+  variadic `,`, clang drops `d`'s placemarker with its `##`, so `e` is the
+  operand of the `##` after a comma, and stays apart (VaArgsPseudoPaste). We
+  pasted `,,`, an error.
+- seed 62's case 629259 (both modes), another of #247's skipped-group
+  structure.
+
 Each harness change came from a case the comparison couldn't place. They
 cover the printer's emulation, the by-spellings cases, the isolation rules,
 the attribution of a rejected batch's errors, the line-based marker split
