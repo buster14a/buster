@@ -114,7 +114,8 @@ decides where their tokens are joined. There are two kinds:
 
 - A stream with an unterminated literal. It runs to the end of its line in
   either text, so the line breaks clang chooses decide which tokens it takes.
-- A case with two or more tokens on presumed line 1. Clang's printer takes a
+- A case with two or more tokens on presumed line 1, where clang's lexer
+  starts them (at a line splice right before one). Clang's printer takes a
   token that started a line inside a macro's arguments for the file's first
   (`MoveToLine`'s `IsFirstInFile`), and indents it by its column in place of
   a space, which can join it to the token before.
@@ -466,6 +467,28 @@ locally, 1,000,000 cases per mode each, before what it found stopped it:
   group** (seed 35's case 46995, C23, and the first campaign's 111819) is an
   error in clang. #247's directive structure diagnoses it, and its build
   rejects both cases as clang does; this branch leaves it to #247.
+
+The third freeze (`7696788`, below) found, while it ran:
+
+- **An empty expansion's space across a line in a file** (seed 62's case
+  47024, C17): the OR above holds among a macro's arguments, but a file's
+  token that starts a line keeps its own space, since clang's lexer clears a
+  leading space at a newline. The emulation had indented the next line's
+  token, which after a `\` ending the line before kept it apart where
+  clang's text joins it.
+- **GNU's comma before `__VA_OPT__` past empty arguments** (seed 54's case
+  566182, C23): in `e ## __VA_OPT__(d ## e)` with `d` empty and `e` the
+  variadic `,`, clang drops `d`'s placemarker with its `##`, so `e` is the
+  operand of the `##` after a comma, and stays apart (VaArgsPseudoPaste). We
+  pasted `,,`, an error.
+- **Presumed line 1 at a line splice** (seed 65's case 702022, C17, a fault
+  of the comparison's own): after `# 1`, a macro whose name followed a lone
+  `\` line is on presumed line 1 for clang, whose token starts at the splice,
+  so its printer joins `.5_z` and the `4ll` that started a line in its
+  argument; the check for line 1's cases read the name's own place, on line
+  2. It now reads where clang's lexer starts the token.
+- seed 62's case 629259 (both modes), another of #247's skipped-group
+  structure.
 
 Each harness change came from a case the comparison couldn't place. They
 cover the printer's emulation, the by-spellings cases, the isolation rules,

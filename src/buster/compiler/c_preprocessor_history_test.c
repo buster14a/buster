@@ -24,7 +24,8 @@ static void pp_test_normalize_scratch(char* text)
     }
 }
 
-static char* pp_test_clang_diagnostics(const char* path, bool parser)
+// Clang's diagnostics for `path`, preprocessed (or with `parser`, compiled) with `directory` as an -I directory.
+static char* pp_test_clang_diagnostics(const char* path, const char* directory, bool parser)
 {
     char* result = 0;
     FILE* errors = tmpfile();
@@ -40,7 +41,7 @@ static char* pp_test_clang_diagnostics(const char* path, bool parser)
         unsetenv("CPATH");
         unsetenv("C_INCLUDE_PATH");
         execlp("clang", "clang", parser ? "-fsyntax-only" : "-E", "-std=gnu17", "-fno-caret-diagnostics", "-fno-diagnostics-show-option",
-               "-fmacro-backtrace-limit=0", path, (char*)0);
+               "-fmacro-backtrace-limit=0", "-I", directory, path, (char*)0);
         _exit(127);
     }
     int status = 0;
@@ -74,6 +75,8 @@ struct PPHistoryCase
     bool parser;
 };
 
+// A case's history.c (and history.h), with its directory as an -I directory too, by both kernels and with `with_clang`
+// by clang: the diagnostics must be the same text.
 static bool pp_test_history_case(const PPHistoryCase* test, const char* directory, bool with_clang)
 {
     char path[4096];
@@ -87,6 +90,7 @@ static bool pp_test_history_case(const PPHistoryCase* test, const char* director
     {
         0,
     };
+    const char* includes[] = { directory };
     for (uint32_t mode = 0; result && mode < 2; mode += 1)
     {
         size_t length = 0;
@@ -98,6 +102,8 @@ static bool pp_test_history_case(const PPHistoryCase* test, const char* director
                 .gnu = true,
             },
             .scalar = mode != 0,
+            .include_directories = includes,
+            .include_directory_count = 1,
             .diagnostics = stream,
         };
         result = stream != 0 && intern_initialize(&tables[mode]) && pp_initialize(&runs[mode], &options, &tables[mode]);
@@ -126,7 +132,7 @@ static bool pp_test_history_case(const PPHistoryCase* test, const char* director
         }
     }
     result = result && pp_same_streams(&runs[0], &runs[1], test->name) && diagnostics[0] != 0 && diagnostics[1] != 0 && strcmp(diagnostics[0], diagnostics[1]) == 0;
-    char* oracle = result && with_clang ? pp_test_clang_diagnostics(path, test->parser) : 0;
+    char* oracle = result && with_clang ? pp_test_clang_diagnostics(path, directory, test->parser) : 0;
     if (result && with_clang)
     {
         pp_test_normalize_scratch(diagnostics[0]);
@@ -475,6 +481,34 @@ static bool pp_test_history(const char* directory, bool with_clang)
         {
             .name = "CRLF",
             .source = "#define OBJ \"bad\"\r\n#line 22 \"logical.c\"\r\n#if OBJ\r\n#endif\r\n",
+        },
+        // #254's review: header names written out that are too long for a path (clang's fatal error about the first
+        // path the search tries, and #embed's file not found), the header refused at the depth limit (one error, the
+        // includes of it after that left out: the main file includes itself to the limit), and the limit at a name a
+        // macro made (at its expansion, with the macro's note).
+        {
+            .name = "include: an angled name too long for a path",
+            .source = "#define " BUSTER_PP_TEST_A4096 " history.h\n#include <" BUSTER_PP_TEST_A4096 ">\n",
+            .header = "int found;\n",
+        },
+        {
+            .name = "include: a quoted name too long for a path",
+            .source = "#include \"" BUSTER_PP_TEST_A4096 "\"\n",
+        },
+        {
+            .name = "embed: an angled name too long for a path",
+            .source = "#define " BUSTER_PP_TEST_A4096 " history.h\n#embed <" BUSTER_PP_TEST_A4096 ">\n",
+            .header = "int found;\n",
+        },
+        {
+            .name = "include: the header refused at the depth limit",
+            .source = "#if __INCLUDE_LEVEL__ < 199\n#include \"history.c\"\n#else\n#include \"history.h\"\n#include \"history.h\"\n#endif\n#include \"history.h\"\n",
+            .header = "int leaf;\n",
+        },
+        {
+            .name = "include: the depth limit at a name a macro made",
+            .source = "#define H \"history.h\"\n#include H\n",
+            .header = "#include H\n",
         },
     };
     uint32_t failures = 0;

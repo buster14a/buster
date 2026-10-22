@@ -841,7 +841,9 @@ static const PPTestFile pp_test_files_embed_directories[] = {
 // #119's header names and search: names with "//", "/*...*/" and a backslash written out, the file a comment that runs
 // on to the next line makes a name of ("a b.h"), a computed name's file, #include_next through three directories, a
 // header that includes itself, and one file reached through a symbolic link and a hard link, with #pragma once and
-// with a guard.
+// with a guard. Then #254's review's: the file a header name too long for a path would name if its identifier were
+// expanded, headers named " x.h" and "  x.h", each alone in a directory, and a header that includes itself to the depth
+// limit and there includes another three times.
 static const PPTestFile pp_test_files_includes[] = {
     { "a/b.h", "ab\n" },
     { "a/*x*/b.h", "axb\n" },
@@ -858,8 +860,19 @@ static const PPTestFile pp_test_files_includes[] = {
     { "guarded.h", "#ifndef G\n#define G\nguarded\n#endif\n" },
     { .path = "gsym.h", .link = "guarded.h" },
     { "local.h", "local\n" },
+    { "short.h", "short\n" },
+    { "one/ x.h", "one_space\n" },
+    { "two/  x.h", "two_spaces\n" },
+    { "loop.h", "#if __INCLUDE_LEVEL__ < 199\n#include \"loop.h\"\n#else\n#include \"leaf.h\"\n#include \"leaf.h\"\n#include \"leaf.h\"\n#endif\n" },
+    { "leaf.h", "LEAF\n" },
     { 0, 0 },
 };
+
+// 4,096 'A's: an identifier, and a header name too long for any path (#254's review).
+#define BUSTER_PP_TEST_A64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+#define BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64
+#define BUSTER_PP_TEST_A4096 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512
+_Static_assert(sizeof(BUSTER_PP_TEST_A4096) == 4097, "BUSTER_PP_TEST_A4096 must be 4,096 letters");
 
 static const PPTestCase pp_test_cases[] = {
     // The topics of C 6.10.4.5's examples, in cases of our own: rescanning and redefinitions, # and ## with indirection,
@@ -1147,6 +1160,10 @@ static const PPTestCase pp_test_cases[] = {
     { "GNU's comma paste's spaces and placemarkers", "#define S(...) #__VA_ARGS__\n#define T(...) S(__VA_ARGS__)\n#define f(x, ...) [x , ## __VA_ARGS__]\nT(f(a,b))\nT(f(a, b))\n#define g(p, q, ...) [p ,q ## __VA_ARGS__]\nT(g(a,))\n#define h(p, ...) [, __VA_OPT__(__VA_ARGS__ ## a) ## __VA_ARGS__ ## b]\nT(h(u))\n#define X(p, ...) [p ## , ## __VA_ARGS__]\nT(X(a))\n",
       0, "c17", "\n\"[a ,b]\"\n\"[a , b]\"\n\"[a]\"\n\"[, b]\"\n\"[a]\"\n", false, 0 },
     { "GNU's comma paste with ## after __VA_ARGS__", "#define e(d, ...) , ## __VA_ARGS__ ## )\ne( )\n", 0, "c23", "", true, 0 },
+    // GNU's comma before __VA_OPT__ whose variadic argument follows empty arguments pasted onto it: clang drops their
+    // placemarkers with their ##, and the comma stays apart (seed 54's case 566182, C23).
+    { "GNU's comma before __VA_OPT__ past empty arguments", "#define c(d, e...) e ## __VA_OPT__( d ## e)\nc(,,)\n#define h(d, g, ...) , ## __VA_OPT__(d ## g ## __VA_ARGS__)\nh(,,y)\n",
+      0, "c23", "\n,,\n,y\n", false, 0 },
     // The campaigns' differences (docs/preprocessor-fuzz.md): a function-like macro without parameters substitutes
     // nothing, so its __VA_OPT__ and a # before it stay tokens (TokenLexer::Init).
     { "__VA_OPT__ in a macro without parameters", "#define Z() a ## __VA_OPT__(b) # __VA_OPT__(c)\nZ()\n#define Y() __VA_OPT__ ( )\nY()\n", 0, "c23", "\na__VA_OPT__(b) # __VA_OPT__(c)\n__VA_OPT__ ( )\n", false, 0 },
@@ -1455,6 +1472,58 @@ static const PPTestCase pp_test_cases[] = {
         .fails = true,
         .warnings = 1,
         .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    // #254's review, against clang 23: a header name written out that is too long for any path is one still, refused
+    // (clang's fatal error about the path, which the history cases compare), and never a computed one whose identifier
+    // expands to another header's name, nor is an #embed's longer than the buffer it reads into; __has_include's and
+    // __has_embed's operands written in their #if line are read as the line writes them, and the same operands from a
+    // macro or an argument joined from their tokens; and a header that the depth limit refused is included as clang
+    // marks it: three #includes of it give one error, and an #include after the cycle unwinds doesn't enter it.
+    {
+        .name = "#254's review: a header name written out, too long for a path",
+        .source = "#define " BUSTER_PP_TEST_A4096 " short.h\n#include <" BUSTER_PP_TEST_A4096 ">\nEND\n",
+        .standard = "c17",
+        .expected = "",
+        .fails = true,
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's review: an #embed name written out, longer than its buffer",
+        .source = "#define " BUSTER_PP_TEST_A4096 "A short.h\n#embed <" BUSTER_PP_TEST_A4096 "A>\nEND\n",
+        .standard = "c23",
+        .expected = "",
+        .fails = true,
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's review: __has_include's and __has_embed's operands as their line writes them, \" x.h\" alone",
+        .source = "#define ID(x) x\n#define HI __has_include\n#define ARG <  x.h>\n#if __has_include(<  x.h>)\nraw\n#endif\n#if HI(<  x.h>)\nhi\n#endif\n"
+                  "#if ID(__has_include(<  x.h>))\nargument\n#endif\n#if __has_include(ARG)\nmacro\n#endif\n#if __has_embed(<  x.h>) == 0 && "
+                  "ID(__has_embed(<  x.h>)) == 1\nembed\n#endif\n#if __has_include(<  x.h>)\n#include <  x.h>\n#endif\nvalid_translation_unit\n",
+        .standard = "c23",
+        .expected = "argument macro embed valid_translation_unit",
+        .options = "-I%d/one --embed-dir=%d/one",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's review: __has_include's and __has_embed's operands as their line writes them, \"  x.h\" alone",
+        .source = "#define ID(x) x\n#define HI __has_include\n#define ARG <  x.h>\n#if __has_include(<  x.h>)\nraw\n#endif\n#if HI(<  x.h>)\nhi\n#endif\n"
+                  "#if ID(__has_include(<  x.h>))\nargument\n#endif\n#if __has_include(ARG)\nmacro\n#endif\n#if __has_embed(<  x.h>) == 1 && "
+                  "__has_embed(<  x.h> limit(0)) == 2 && ID(__has_embed(<  x.h>)) == 0\nembed\n#endif\n#include <  x.h>\n",
+        .standard = "c23",
+        .expected = "raw hi embed two_spaces",
+        .options = "-I%d/two --embed-dir=%d/two",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's review: a header refused at the depth limit is included",
+        .source = "#include \"loop.h\"\n#include \"leaf.h\"\nEND\n",
+        .standard = "c17",
+        .expected = "END",
+        .fails = true,
         .files = pp_test_files_includes,
     },
 };
@@ -2840,11 +2909,11 @@ static bool pp_test_header_beside(void)
         const uint32_t includer = result ? pp_lookup_path(&pp, includer_path, (uint32_t)strlen(includer_path), BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
         result = includer != BUSTER_PP_NONE && pp.files[includer].data != BUSTER_PP_NONE;
         uint32_t found_in = BUSTER_PP_NONE;
-        const uint32_t stddef = result ? pp_find_include(&pp, (const uint8_t*)"stddef.h", 8, false, false, includer, search, &found_in) : BUSTER_PP_NONE;
+        const uint32_t stddef = result ? pp_find_include(&pp, (const uint8_t*)"stddef.h", 8, false, false, includer, search, &found_in, BUSTER_PP_NONE) : BUSTER_PP_NONE;
         const char* expected = buster != 0 ? pp.buster_directory : resource;
         const size_t expected_length = expected != 0 ? strlen(expected) : 0;
         const bool stddef_right = stddef != BUSTER_PP_NONE && strncmp(pp.files[stddef].path, expected, expected_length) == 0 && pp.files[stddef].path[expected_length] == '/';
-        const uint32_t other = result ? pp_find_include(&pp, (const uint8_t*)"mmintrin.h", 10, false, false, includer, search, &found_in) : BUSTER_PP_NONE;
+        const uint32_t other = result ? pp_find_include(&pp, (const uint8_t*)"mmintrin.h", 10, false, false, includer, search, &found_in, BUSTER_PP_NONE) : BUSTER_PP_NONE;
         const bool other_right = other != BUSTER_PP_NONE && found_in == BUSTER_PP_NONE && strncmp(pp.files[other].path, resource, strlen(resource)) == 0;
         if (result && (!stddef_right || !other_right))
         {
