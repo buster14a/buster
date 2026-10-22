@@ -1178,7 +1178,7 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
     }
     else if (kind == BUSTER_TYPE_KIND_BIT_INT)
     {
-        result = size <= 8 ? (uint8_t)__builtin_ctzll(size) : (uint8_t)(4 | (size == 16 ? BUSTER_ABI_STORAGE_I128 : 0));
+        result = size <= 8 ? (uint8_t)__builtin_ctzll(size) : (size & 15) == 0 ? (uint8_t)(4 | (size == 16 ? BUSTER_ABI_STORAGE_I128 : 0)) : 0;
     }
     else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || kind == BUSTER_TYPE_KIND_COMPLEX || kind == BUSTER_TYPE_KIND_ENUM ||
              kind == BUSTER_TYPE_KIND_ATOMIC)
@@ -1222,7 +1222,7 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
             run_storage = in_run && member >= run_end ? abi_bit_field_run(abi, table, member, end, size, &run_end) : run_storage;
             storage = in_run && run_storage != UINT8_MAX ? run_storage : storage;
             empty = empty && (zero_width || (!bit_field && (storage & BUSTER_ABI_STORAGE_EMPTY) != 0));
-            inexact |= storage & BUSTER_ABI_STORAGE_INEXACT;
+            inexact |= (storage & BUSTER_ABI_STORAGE_INEXACT) | (in_run && run_storage == UINT8_MAX ? BUSTER_ABI_STORAGE_INEXACT : 0);
             const uint8_t alignment = storage & BUSTER_ABI_STORAGE_ALIGNMENT;
             const uint64_t offset = table->members.offset[member];
             if (member == stored)
