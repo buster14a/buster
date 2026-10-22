@@ -122,7 +122,10 @@ the declarator and its attributes see what they hid
 body binds again, after the function's own name. A K&R definition's identifier
 list is the name's own, through the declarator's groups
 (`int (f(x)) int x; {...}`), in C17 and before (#154), and clang reads one only
-where its first identifier is followed by `,` or `)`. Elsewhere an identifier
+where its first identifier is followed by `,` or `)`; its parameter
+declarations, as clang's `ParseKNRParamDeclarations` reads them, are in a scope
+of their own, which the body ends, and each declares one of the list's names,
+once, with `register` at most and no initializer. Elsewhere an identifier
 that isn't a type name, where a type would be, is what clang's
 `ParseImplicitInt` makes it: the declarator's name with an implicit int if what
 follows may follow a name, and else an unknown type name, as a parameter's
@@ -140,9 +143,11 @@ attributes in a row, parse in time linear in their count. Nesting is bounded by
 memory, not by the native stack: 100,000 levels of every kind of group parse.
 
 It rejects what C's grammar rejects, at the token clang names, with clang's
-message (63 messages, `BUSTER_PARSE_MESSAGES`), and after an error skips to the
-end of the top-level declaration and goes on. It reports one error per
-top-level declaration, the first; clang may report more. Its places follow
+message (68 messages, `BUSTER_PARSE_MESSAGES`), and after an error skips to the
+end of the top-level declaration and goes on. It reports one syntax error per
+top-level declaration, the first, after the errors clang gives without
+changing how it parses (a missing type specifier, an unknown type name); clang
+may report more. Its places follow
 clang's rules, among them: a missing `;` after the token before it; an
 unbalanced closer at the end of the file; after a tag's body, the tokens clang's
 `isValidAfterTypeSpecifier` allows, and none on a new line.

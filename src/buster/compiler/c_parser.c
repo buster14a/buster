@@ -1003,6 +1003,11 @@ static const uint8_t parse_closer_roles[PARSE_ROLE_COUNT] =
     X(EXPECTED_FUNCTION_BODY, "expected function body after function declarator") \
     X(UNEXPECTED_TYPE_NAME, "unexpected type name '%s': expected identifier") \
     X(UNEXPECTED_TYPE_NAME_EXPRESSION, "unexpected type name '%s': expected expression") \
+    X(PARAMETER_REDEFINITION, "redefinition of parameter '%s'") \
+    X(PARAMETER_MISSING, "parameter named '%s' is missing") \
+    X(DECLARATION_WITHOUT_PARAMETER, "declaration does not declare a parameter") \
+    X(PARAMETER_STORAGE_CLASS, "invalid storage class specifier in function declarator") \
+    X(ATTRIBUTE_LIST_NOT_ALLOWED, "an attribute list cannot appear here") \
     X(MEMBER_STORAGE_CLASS, "type name does not allow storage class to be specified") \
     X(MEMBER_FUNCTION_SPECIFIER, "type name does not allow function specifier to be specified") \
     X(UNEXPECTED_TOKEN, "unexpected token") \
@@ -1255,10 +1260,16 @@ struct ParseFrame
     uint8_t comma_role;
 };
 
+// What a name is bound as: an ordinary identifier or a typedef name, and for a K&R identifier list's names, which are
+// ordinary identifiers as far as parsing goes: one in the list being read, a definition's parameter its declarations
+// haven't declared yet, and one they have.
 typedef enum ParseMeaning
 {
     PARSE_MEANING_ORDINARY,
     PARSE_MEANING_TYPEDEF,
+    PARSE_MEANING_KR_LISTED,
+    PARSE_MEANING_KR_PARAMETER,
+    PARSE_MEANING_KR_DECLARED,
 } ParseMeaning;
 
 typedef enum ParseStatementState
@@ -1359,8 +1370,9 @@ struct ParseScalar
     uint32_t* kept_names;
     uint8_t* kept_meanings;
     uint32_t kept_count;
-    // A K&R definition's body's scope, which its parameters' declarations, before the body's `{`, are in.
+    // A K&R definition's parameter declarations' scope, which its body's `{` ends, and the first token of the current one.
     uint32_t body_scope;
+    uint32_t kr_declaration;
     ParseStatement* statements;
     uint32_t statement_count;
     // Recovery's stack of open brackets.
@@ -1487,16 +1499,18 @@ BUSTER_INLINE void parse_scalar_restore(ParseScalar* parser, uint32_t mark)
 }
 
 // A definition's parameter list ends: what it bound since `scope` (its parameters, and the tags and enumerators they
-// declare) is kept, with the meaning each name has now, then unbound, so that what follows in the declarator sees what
-// they hid. A body binds them again (parse_scalar_open_body).
+// declare) is kept, with the meaning each name has now (a K&R list's names as ordinary identifiers, which they are in
+// the body), then unbound, so that what follows in the declarator sees what they hid. A body binds them again
+// (parse_scalar_open_body).
 static void parse_scalar_keep_parameters(ParseScalar* parser, uint32_t scope)
 {
     parser->kept_count = 0;
     for (uint32_t k = scope; k < parser->log_count; k += 1)
     {
         const uint32_t name = parser->log_names[k];
+        const uint8_t meaning = parser->meanings[name];
         parser->kept_names[parser->kept_count] = name;
-        parser->kept_meanings[parser->kept_count] = parser->meanings[name];
+        parser->kept_meanings[parser->kept_count] = meaning == PARSE_MEANING_KR_LISTED ? PARSE_MEANING_ORDINARY : meaning;
         parser->kept_count += 1;
     }
     parse_scalar_restore(parser, scope);
@@ -1514,14 +1528,27 @@ BUSTER_INLINE bool parse_frame_is_block(const ParseFrame* frame)
 }
 
 // The declarator in declaration frame `frame` is complete: its name is bound, as its scope begins there (C 6.2.1p7).
-// Without `definition` (no body follows), the parameters a declarator in a file or a block kept are dropped.
+// Without `definition` (no body follows), the parameters a declarator in a file or a block kept are dropped. A K&R
+// definition's parameter declaration must declare one of its parameters, once, as clang's ParseKNRParamDeclarations
+// checks it once the declarator ends.
 static void parse_scalar_complete_declarator(ParseScalar* parser, ParseFrame* frame, bool definition)
 {
-    if (frame->name != BUSTER_PARSE_NONE)
+    const bool kr = (frame->flags & BUSTER_PARSE_FRAME_KR_DECLARATIONS) != 0;
+    if (frame->name != BUSTER_PARSE_NONE && kr)
+    {
+        const uint8_t meaning = parser->meanings[parser->names[frame->name]];
+        if (meaning != PARSE_MEANING_KR_PARAMETER)
+        {
+            const uint8_t message = meaning == PARSE_MEANING_KR_DECLARED ? PARSE_MESSAGE_PARAMETER_REDEFINITION : PARSE_MESSAGE_PARAMETER_MISSING;
+            parse_scalar_error_argument(parser, frame->name, message, BUSTER_PARSE_AT_TOKEN, frame->name);
+        }
+        parse_scalar_bind(parser, frame->name, PARSE_MEANING_KR_DECLARED);
+    }
+    else if (frame->name != BUSTER_PARSE_NONE)
     {
         parse_scalar_bind(parser, frame->name, frame->name_meaning);
     }
-    if (!definition && (frame->role == PARSE_ROLE_NONE || parse_frame_is_block(frame)))
+    if (!definition && !kr && (frame->role == PARSE_ROLE_NONE || parse_frame_is_block(frame)))
     {
         parser->kept_count = 0;
     }
@@ -1943,8 +1970,8 @@ static void parse_scalar_unexpected(ParseScalar* parser, uint32_t i, const Parse
         parse_scalar_error_argument(parser, i, PARSE_MESSAGE_EXTRANEOUS_BEFORE_SEMI, BUSTER_PARSE_AT_TOKEN, i);
     }
     else if (frame->role == PARSE_ROLE_NONE && frame->mode == PARSE_MODE_AFTER_DECLARATOR && frame->derivation == PARSE_DERIVATION_FUNCTION &&
-             (frame->flags & BUSTER_PARSE_FRAME_LATER_DECLARATOR) == 0 &&
-             (frame->flags & BUSTER_PARSE_FRAME_KR) == 0 && kind != PARSE_KIND_END && (kind == PARSE_KIND_EXTENSION || !parse_scalar_starts_declaration(parser, i, false)))
+             (frame->flags & BUSTER_PARSE_FRAME_LATER_DECLARATOR) == 0 && kind != PARSE_KIND_END &&
+             (kind == PARSE_KIND_EXTENSION || !parse_scalar_starts_declaration(parser, i, false)))
     {
         // After a function's declarator, what can't continue the declaration is taken for a missing body, but a
         // declaration specifier for the next declaration after a missing `;`.
@@ -2423,7 +2450,13 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
                                                     (parser->kinds[i + 1] == PARSE_KIND_COMMA || parser->kinds[i + 1] == PARSE_KIND_R_PAREN))))
         {
             // A K&R identifier list, which C23 removed (#154 takes them in C17 and before): clang reads one only if its
-            // first identifier is followed by `,` or `)` (isFunctionDeclaratorIdentifierList).
+            // first identifier is followed by `,` or `)` (isFunctionDeclaratorIdentifierList). Its names are bound in its
+            // scope, so that one may come once.
+            if (parser->meanings[parser->names[i]] == PARSE_MEANING_KR_LISTED)
+            {
+                parse_scalar_error_argument(parser, i, PARSE_MESSAGE_PARAMETER_REDEFINITION, BUSTER_PARSE_AT_TOKEN, i);
+            }
+            parse_scalar_bind(parser, i, PARSE_MEANING_KR_LISTED);
             step->role = PARSE_ROLE_OPERAND;
             frame->mode = PARSE_MODE_IDENTIFIER_LIST;
             frame->flags |= BUSTER_PARSE_FRAME_KR;
@@ -2687,7 +2720,9 @@ static bool parse_scalar_valid_after_tag(const ParseScalar* parser, uint32_t i, 
         case PARSE_KIND_COMMA:
         case PARSE_KIND_L_SQUARE:
         case PARSE_KIND_L_PAREN:
-        case PARSE_KIND_ATTRIBUTE: result = true; break;
+        case PARSE_KIND_ATTRIBUTE:
+        // A struct's last member may go without its `;` in C: what follows decides (a member's missing name).
+        case PARSE_KIND_R_BRACE: result = true; break;
         case PARSE_KIND_COLON: result = frame->role == PARSE_ROLE_OPEN_STRUCT; break;
         case PARSE_KIND_QUALIFIER:
         case PARSE_KIND_STORAGE:
@@ -2696,6 +2731,14 @@ static bool parse_scalar_valid_after_tag(const ParseScalar* parser, uint32_t i, 
         default: break;
     }
     return result;
+}
+
+// Whether token `i`, of kind PARSE_KIND_STORAGE or PARSE_KIND_TYPEDEF, is a storage class (not a function specifier or
+// `__module_private__`).
+BUSTER_INLINE bool parse_scalar_storage_class(const ParseScalar* parser, uint32_t i)
+{
+    const IdentId name = parser->names[i];
+    return name != C_NAME_INLINE && name != C_NAME_GNU_INLINE && name != C_NAME_GNU_INLINE2 && name != C_NAME_NORETURN && name != C_NAME_MODULE_PRIVATE;
 }
 
 static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
@@ -2741,6 +2784,12 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
     {
         // `__extension__` starts a declaration, before its specifiers.
         step->role = PARSE_ROLE_SPECIFIER;
+    }
+    else if ((kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEDEF) && (frame->flags & BUSTER_PARSE_FRAME_KR_DECLARATIONS) &&
+             parse_scalar_storage_class(parser, i) && parser->names[i] != C_NAME_REGISTER)
+    {
+        // A K&R definition's parameter takes `register` only.
+        parse_scalar_error(parser, i, PARSE_MESSAGE_PARAMETER_STORAGE_CLASS, BUSTER_PARSE_AT_TOKEN);
     }
     else if ((kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEDEF) && frame->role == PARSE_ROLE_OPEN_STRUCT)
     {
@@ -2824,6 +2873,11 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
             frame->flags |= BUSTER_PARSE_FRAME_SPECIFIED;
             parse_scalar_end_specifiers(parser, i, frame, step);
         }
+    }
+    else if (kind == PARSE_KIND_SEMI && (frame->flags & BUSTER_PARSE_FRAME_KR_DECLARATIONS))
+    {
+        // A K&R definition's parameter declaration declares a parameter (C 6.9.1p6).
+        parse_scalar_error(parser, parser->kr_declaration, PARSE_MESSAGE_DECLARATION_WITHOUT_PARAMETER, BUSTER_PARSE_AT_TOKEN);
     }
     else if (kind == PARSE_KIND_SEMI && (frame->flags & BUSTER_PARSE_FRAME_NAME_REQUIRED))
     {
@@ -3004,10 +3058,11 @@ static void parse_scalar_declarator(ParseScalar* parser, uint32_t i, ParseFrame*
     }
 }
 
-// A function's body opens at `i`, its scope beginning at `scope`: the parameters its declarator kept are bound again in
-// it, as the body is their scope.
+// A function's body opens at `i`, its scope beginning at `scope` (where a K&R definition's parameter declarations'
+// began, which it ends): the parameters its declarator kept are bound again in it, as the body is their scope.
 static void parse_scalar_open_body(ParseScalar* parser, uint32_t i, uint32_t scope, ParseStep* step)
 {
+    parse_scalar_restore(parser, scope);
     ParseFrame* body = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_BODY, PARSE_MODE_ITEM, PARSE_MODE_ITEM, false, step);
     body->scope = scope;
     body->flags |= BUSTER_PARSE_FRAME_IN_FUNCTION;
@@ -3025,14 +3080,17 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
     const uint8_t group = frame->role;
     const bool abstract = (frame->flags & BUSTER_PARSE_FRAME_ABSTRACT) != 0;
     const bool definition_scope = group == PARSE_ROLE_NONE || parse_frame_is_block(frame);
+    const bool kr = (frame->flags & BUSTER_PARSE_FRAME_KR_DECLARATIONS) != 0;
     // The frame the declarator's name belongs to, and whether this suffix is the first applied to the name, which
     // decides what the name is.
     ParseFrame* declaration = parse_scalar_declaration_frame(parser, parser->frame_count - 1);
     const bool first = declaration->derivation == PARSE_DERIVATION_PENDING && declaration->name_frame == parser->frame_count - 1;
     if (kind == PARSE_KIND_L_PAREN)
     {
-        // The name's own parameters, in a file or a block, are a definition's if a body follows the declarator.
-        const bool definition = first && (declaration->role == PARSE_ROLE_NONE || parse_frame_is_block(declaration));
+        // The name's own parameters, in a file or a block, are a definition's if a body follows the declarator (which a
+        // K&R definition's parameter declarations never have).
+        const bool definition = first && (declaration->role == PARSE_ROLE_NONE || parse_frame_is_block(declaration)) &&
+                                (declaration->flags & BUSTER_PARSE_FRAME_KR_DECLARATIONS) == 0;
         declaration->derivation = first ? PARSE_DERIVATION_FUNCTION : declaration->derivation;
         ParseFrame* parameters = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_FUNCTION, PARSE_MODE_ITEM, PARSE_MODE_AFTER_DECLARATOR, true, step);
         parameters->flags |= definition ? BUSTER_PARSE_FRAME_DEFINITION_PARAMETERS : 0;
@@ -3045,7 +3103,7 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         array->flags |= BUSTER_PARSE_FRAME_ARRAY_DECLARATOR | BUSTER_PARSE_FRAME_EMPTY_OK;
         frame->flags &= ~BUSTER_PARSE_FRAME_KR;
     }
-    else if (kind == PARSE_KIND_ATTRIBUTE || (kind == PARSE_KIND_ASM && definition_scope))
+    else if (kind == PARSE_KIND_ATTRIBUTE || (kind == PARSE_KIND_ASM && definition_scope && !kr))
     {
         // An attribute after the declarator, or an asm label, which renames the declared symbol.
         step->role = PARSE_ROLE_LEAF_RIGHT;
@@ -3053,9 +3111,21 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE;
         frame->attribute_continuation = PARSE_MODE_AFTER_DECLARATOR;
     }
+    else if (parse_scalar_standard_attribute(parser, i) && (declaration->flags & BUSTER_PARSE_FRAME_KR))
+    {
+        // After a K&R identifier list, clang takes no C23 attribute list.
+        parse_scalar_error(parser, i, PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
+    }
     else if (parse_scalar_standard_attribute(parser, i))
     {
         parse_scalar_standard_attribute_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE, PARSE_MODE_AFTER_DECLARATOR, step);
+    }
+    else if (kr && kind != PARSE_KIND_COMMA && kind != PARSE_KIND_SEMI)
+    {
+        // A K&R definition's parameter declaration: its declarator is checked, then only `,` or `;` may come (no
+        // initializer, asm label or body), as clang reads it.
+        parse_scalar_complete_declarator(parser, declaration, false);
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION, BUSTER_PARSE_AFTER_PREVIOUS);
     }
     else if (kind == PARSE_KIND_EQUAL && !abstract)
     {
@@ -3065,7 +3135,7 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         frame->mode = PARSE_MODE_INITIALIZER;
     }
     else if (kind == PARSE_KIND_COMMA && parse_frame_comma_role(parser) == PARSE_ROLE_COMMA && (parser->flags[i + 1] & BUSTER_PP_START_OF_LINE) &&
-             !parse_scalar_might_be_declarator(parser, i + 1))
+             !parse_scalar_might_be_declarator(parser, i + 1) && !kr)
     {
         // A comma, then a line break and what can't start a declarator: clang takes the comma for a `;`.
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION, BUSTER_PARSE_AT_TOKEN);
@@ -3122,9 +3192,15 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
     }
     else if ((frame->flags & BUSTER_PARSE_FRAME_KR) && group == PARSE_ROLE_NONE && parse_scalar_starts_declaration(parser, i, false))
     {
-        // A K&R definition's parameter declarations, before its body, in its scope.
+        // A K&R definition's parameter declarations, before its body, in a scope of their own, in which its
+        // identifier list's names are parameters to declare; the body binds them again (parse_scalar_open_body), as
+        // ordinary identifiers, and nothing else the declarations declare.
         parse_scalar_complete_declarator(parser, frame, true);
         parser->body_scope = parser->log_count;
+        for (uint32_t k = 0; k < parser->kept_count; k += 1)
+        {
+            parse_scalar_bind_name(parser, parser->kept_names[k], PARSE_MEANING_KR_PARAMETER);
+        }
         frame->mode = PARSE_MODE_KR_PARAMETERS;
         step->again = true;
     }
@@ -3148,8 +3224,10 @@ static void parse_scalar_kr_parameters(ParseScalar* parser, uint32_t i, ParseFra
         parser->body_scope = BUSTER_PARSE_NONE;
         frame->flags &= ~(BUSTER_PARSE_FRAME_ITEM_STATE | BUSTER_PARSE_FRAME_KR_DECLARATIONS);
     }
-    else if (parse_scalar_starts_declaration(parser, i, false))
+    else if (kind != PARSE_KIND_EXTENSION && parse_scalar_starts_declaration(parser, i, false))
     {
+        // clang takes no `__extension__` here: what follows is a missing body.
+        parser->kr_declaration = i;
         parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_NAME_REQUIRED | BUSTER_PARSE_FRAME_KR_DECLARATIONS, step);
     }
     else
@@ -3433,6 +3511,11 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
         const bool operand = (flags & BUSTER_PARSE_FRAME_ASM) && parser->kinds[(int64_t)i - 1] == PARSE_KIND_STRING;
         ParseFrame* call = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_CALL, PARSE_MODE_OPERAND, PARSE_MODE_OPERATOR, false, step);
         call->flags |= operand ? 0 : BUSTER_PARSE_FRAME_EMPTY_OK;
+    }
+    else if (kind == PARSE_KIND_L_SQUARE && parse_scalar_standard_attribute(parser, i))
+    {
+        // `[[` after an operand is an attribute list, which clang takes nowhere in an expression.
+        parse_scalar_error(parser, i, PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
     }
     else if (kind == PARSE_KIND_L_SQUARE)
     {
@@ -3895,6 +3978,10 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
                         step.role = PARSE_ROLE_MEMBER_OPERATOR;
                         frame->mode = PARSE_MODE_OFFSETOF_MEMBER;
                     }
+                    else if (kind == PARSE_KIND_L_SQUARE && parse_scalar_standard_attribute(parser, i))
+                    {
+                        parse_scalar_error(parser, i, PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
+                    }
                     else if (kind == PARSE_KIND_L_SQUARE)
                     {
                         parse_scalar_open(parser, i, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_MODE_OPERAND, PARSE_MODE_OFFSETOF_DESIGNATOR, false, &step);
@@ -4044,6 +4131,7 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->candidate_count = 1;
     parser->waiting_count = 1;
     parser->body_scope = BUSTER_PARSE_NONE;
+    parser->kr_declaration = BUSTER_PARSE_NONE;
     parser->kept_count = 0;
     parser->error_token = BUSTER_PARSE_NONE;
 }
@@ -4121,6 +4209,7 @@ static ParseScalarResult parse_scalar(const uint8_t* kinds, const uint32_t* name
         .kept_meanings = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, slots),
         .kept_count = 0,
         .body_scope = BUSTER_PARSE_NONE,
+        .kr_declaration = BUSTER_PARSE_NONE,
         .statements = BUSTER_ARENA_PUSH_ARRAY(scratch, ParseStatement, slots),
         .statement_count = 0,
         .brackets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, 2 * slots),

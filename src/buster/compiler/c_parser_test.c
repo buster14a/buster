@@ -279,7 +279,8 @@ static bool parse_test_clang(const char* clang_path, const char* const* argument
 // A snippet and the first error clang gives for it ("" for none), as "line:column: message", in gnu17 unless `std`
 // says otherwise. clang's first error must be a parse issue, but where `semantic` says it is one of the errors clang's
 // semantic analysis gives as the parser hands it a declaration it took as clang's parser does (an unknown type name, a
-// missing type specifier, a type name where an expression would be).
+// missing type specifier, a type name where an expression would be). A `semantic` snippet without an error is one
+// clang's semantic analysis rejects and the parser takes.
 typedef struct ParseTestSnippet ParseTestSnippet;
 struct ParseTestSnippet
 {
@@ -329,6 +330,8 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(int a) { f(a)); }\n", "1:21: extraneous ')' before ';'", 0 },
     { "void f(int a) { a ]; }\n", "1:19: extraneous ']' before ';'", 0 },
     { "struct S { int a; } int y;\n", "1:20: expected ';' after struct", 0 },
+    { "struct S { union { int a; }\n};\n", "2:1: expected member name or ';' after declaration specifiers", 0 },
+    { "struct T { int a; } }\n", "1:21: expected identifier or '('", 0 },
     { "int ();\n", "1:6: expected identifier or '('", 0 },
     { "int (*);\n", "1:7: expected identifier or '('", 0 },
     { "int *;\n", "1:6: expected identifier or '('", 0 },
@@ -440,6 +443,26 @@ static const ParseTestSnippet parse_test_snippets[] =
     // K&R definitions: the name's own identifier list, through the declarator's groups, in C17 and before.
     { "int (f(x)) int x; { return x; }\nint (*g(y)) int y; { return 0; }\n", "", 0 },
     { "int f(x) int x; 5\n", "1:17: expected function body after function declarator", 0 },
+    // A K&R definition's parameter declarations declare its parameters, each once, with `register` at most, without
+    // initializers, in a scope of their own, which the body ends; and its identifier list names each once.
+    { "int f(a, a) { return 0; }\n", "1:10: redefinition of parameter 'a'", 0 },
+    { "int f(a) int a; int b; { return a; }\n", "1:21: parameter named 'b' is missing", 0 },
+    { "int f(a, b) int a, b, a; { return 0; }\n", "1:23: redefinition of parameter 'a'", 0 },
+    { "int f(a) int a; int; { return 0; }\n", "1:17: declaration does not declare a parameter", 0 },
+    { "int f(a) static int a; { return 0; }\n", "1:10: invalid storage class specifier in function declarator", 0 },
+    { "int f(a, b) register int a; int b; { return a + b; }\n", "", 0 },
+    { "int f(a) int a = 1, b; { return 0; }\n", "1:15: expected ';' at end of declaration", 0 },
+    { "int f(a) int g(void) { return 0; }\n", "1:14: parameter named 'g' is missing", 0 },
+    { "int f(a) int a __attribute__((unused)), b; { return 0; }\n", "1:41: parameter named 'b' is missing", 0 },
+    { "typedef int B; int f(a) enum { B } a; { B x; return 0; }\n", "", 0 },
+    { "int f(a, b) int a,\n{ return 0; }\n", "2:1: expected identifier or '('", 0 },
+    { "int f(a) 5\n", "1:10: expected function body after function declarator", 0 },
+    { "int f(a) int a; __extension__ int b; { return 0; }\n", "1:17: expected function body after function declarator", 0 },
+    { "int f(a) { int g(a, b); return 0; }\n", "", 0, true },
+    // An attribute list where clang takes none: after a K&R identifier list, an operand or a designator's member.
+    { "int f(a) [[deprecated]] int a; { return a; }\n", "1:10: an attribute list cannot appear here", 0 },
+    { "int a[2]; int b = a[[0]];\n", "1:20: an attribute list cannot appear here", 0 },
+    { "struct S { int a; }; int x = __builtin_offsetof(struct S, a [[x]]);\n", "1:61: an attribute list cannot appear here", 0 },
     { "int f(x) int x; { return x; }\n", "1:7: unknown type name 'x'", "c23", true },
     { "int g(const x);\n", "1:13: unknown type name 'x'", "c23", true },
     // An identifier where a type would be is the name, with an implicit int, if what follows may follow a name, and
@@ -526,11 +549,13 @@ static uint32_t parse_test_check_snippets(const char* directory, const char* cla
                 snprintf(expected, sizeof(expected), "%u:%u: %s", theirs.line, theirs.column, theirs.message);
             }
             const bool kind_differs = theirs.rejected && theirs.parse_issue == snippet->semantic;
-            if (!good || strcmp(expected, snippet->error) != 0 || kind_differs)
+            const bool grammatical = snippet->semantic && snippet->error[0] == 0;
+            if (!good || (grammatical ? !theirs.rejected || theirs.parse_issue : strcmp(expected, snippet->error) != 0 || kind_differs))
             {
                 failures += 1;
-                printf("snippet %u: clang gives \"%s\"%s, the table \"%s\"\n    %s", i, expected,
-                       kind_differs ? (theirs.parse_issue ? " (a parse issue)" : " (not a parse issue)") : "", snippet->error, snippet->source);
+                printf("snippet %u: clang gives \"%s\"%s, the table \"%s\"%s\n    %s", i, expected,
+                       kind_differs ? (theirs.parse_issue ? " (a parse issue)" : " (not a parse issue)") : "", snippet->error,
+                       grammatical ? " (and a semantic issue from clang)" : "", snippet->source);
             }
         }
         remove(path);
