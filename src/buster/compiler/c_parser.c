@@ -11186,6 +11186,8 @@ struct ParseOptions
 {
     // The scalar parser alone, for test-parser's differential checks.
     bool scalar;
+    // Build the syntax tree and diagnostics without the postorder and subtree sizes that later stages consume.
+    bool tree_only;
 };
 
 // What a parse did, for benchmark-parser and test-parser.
@@ -11319,6 +11321,8 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
     bool result = output->count <= BUSTER_PARSE_MAX_TOKENS / 2;
     const uint64_t capacity = 2 * (uint64_t)output->count + 64;
     parser->diagnostic_count = 0;
+    parser->postorder = 0;
+    parser->sizes = 0;
     parser->errors = 0;
     parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_TOO_MANY_TOKENS;
     parser->statistics = (ParseStatistics){ 0 };
@@ -11413,7 +11417,7 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
     {
         parser->diagnostic_count = 0;
     }
-    if (result)
+    if (result && !parser->options.tree_only)
     {
         // The postorder and the subtree sizes, with the scratch arena's room for the passes.
         const uint32_t count = parser->tokens.count;
@@ -11566,7 +11570,7 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
         static InternTable table;
         static Preprocessor pp;
         static Parser parser;
-        const ParseOptions parse_options = { .scalar = scalar };
+        const ParseOptions parse_options = { .scalar = scalar, .tree_only = true };
         if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table) || !parse_initialize(&parser, &parse_options, options.language))
         {
             fprintf(stderr, "fatal error: can't reserve memory\n");
