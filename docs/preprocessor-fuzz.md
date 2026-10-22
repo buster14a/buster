@@ -480,15 +480,16 @@ The third freeze (`7696788`, below) found, while it ran:
   566182, C23): in `e ## __VA_OPT__(d ## e)` with `d` empty and `e` the
   variadic `,`, clang drops `d`'s placemarker with its `##`, so `e` is the
   operand of the `##` after a comma, and stays apart (VaArgsPseudoPaste). We
-  pasted `,,`, an error.
+  pasted `,,`, an error. The variadic argument then keeps its first token's
+  own space, which a string of it shows (seed 70's case 208758, C17).
 - **Presumed line 1 at a line splice** (seed 65's case 702022, C17, a fault
   of the comparison's own): after `# 1`, a macro whose name followed a lone
   `\` line is on presumed line 1 for clang, whose token starts at the splice,
   so its printer joins `.5_z` and the `4ll` that started a line in its
   argument; the check for line 1's cases read the name's own place, on line
   2. It now reads where clang's lexer starts the token.
-- seed 62's case 629259 (both modes), another of #247's skipped-group
-  structure.
+- seed 62's case 629259 and seed 70's case 894231 (both modes), more of
+  #247's skipped-group structure (an `#elifdef` after `#else` among them).
 
 Each harness change came from a case the comparison couldn't place. They
 cover the printer's emulation, the by-spellings cases, the isolation rules,

@@ -1164,6 +1164,9 @@ static const PPTestCase pp_test_cases[] = {
     // placemarkers with their ##, and the comma stays apart (seed 54's case 566182, C23).
     { "GNU's comma before __VA_OPT__ past empty arguments", "#define c(d, e...) e ## __VA_OPT__( d ## e)\nc(,,)\n#define h(d, g, ...) , ## __VA_OPT__(d ## g ## __VA_ARGS__)\nh(,,y)\n",
       0, "c23", "\n,,\n,y\n", false, 0 },
+    // There the variadic argument keeps its first token's own space, which a string shows (seed 70's case 208758, C17).
+    { "GNU's comma before __VA_OPT__ past empty arguments, stringized", "#define vs(...) #__VA_ARGS__\n#define vt(...) vs(__VA_ARGS__)\n#define vm(p, q, ...) __VA_OPT__(,) ## __VA_OPT__( q ## __VA_ARGS__ )\nvt(vm( ,,u ))\nvt(vm( ,, u ))\n",
+      0, "c17", "\n\",u\"\n\", u\"\n", false, 0 },
     // The campaigns' differences (docs/preprocessor-fuzz.md): a function-like macro without parameters substitutes
     // nothing, so its __VA_OPT__ and a # before it stay tokens (TokenLexer::Init).
     { "__VA_OPT__ in a macro without parameters", "#define Z() a ## __VA_OPT__(b) # __VA_OPT__(c)\nZ()\n#define Y() __VA_OPT__ ( )\nY()\n", 0, "c23", "\na__VA_OPT__(b) # __VA_OPT__(c)\n__VA_OPT__ ( )\n", false, 0 },
