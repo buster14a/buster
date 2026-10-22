@@ -22,7 +22,8 @@ covered subset and how to add a form, and the 9700X's measurements.
 - `x86_semantics.c`: the effects (`X86Effects`, `BUSTER_X86_EFFECT_ROWS`,
   `x86_effects`), the immediate's contract (`x86_immediate_encodes`,
   `x86_immediate_field`, `x86_immediate_value`), the flags
-  (`x86_instruction_flags`, `x86_flags_substitutable`), operand-resolved effects
+  (`x86_instruction_flags`, `x86_flags_substitutable` and
+  `x86_instruction_flags_substitutable`), operand-resolved effects
   (`x86_instructions_effects` and its twin `x86_instructions_effects_scalar`),
   and form choice (`x86_choice_row`, `x86_choose_forms` and its twin
   `x86_choose_forms_scalar`, `x86_choice_instruction`).
@@ -96,7 +97,8 @@ follow Intel's and AMD's manuals, and where those differ they take the union:
 bt's ZF is kept by Intel and undefined by AMD, so it is undefined here. A shift
 or rotate by a count (`BUSTER_X86_EFFECT_COUNT`) is described for any count:
 a count of 0 keeps every flag, so its record reads the flags it may keep and
-leaves undefined those it may change.
+leaves undefined those it may change. Those are not flags nothing may rely on:
+with a count of 0 they are kept, which `x86_flags_substitutable` respects.
 
 **Memory** (`BUSTER_X86_MEMORY_EFFECT_*`):
 
@@ -144,7 +146,10 @@ record:
   - with a count of 0, it touches no flag;
   - with another count, it defines CF (and for a shift PF, ZF and SF), defines
     OF only for a count of 1, and leaves AF undefined;
-  - an 8- or 16-bit shift by its width or more leaves CF undefined.
+  - an 8- or 16-bit SHL or SHR by its width or more leaves CF undefined.
+    That's the SDM's exception, and it isn't SAR's: SAR's CF is the last bit
+    shifted out, by then the sign bit (`sar bx, 16` of 0x8000 gives 0xffff and
+    CF 1).
 - `x86_instructions_effects` gives each record's resources as two 64-bit sets,
   read and written. `BUSTER_X86_RESOURCE_*` lays them out: general registers,
   vector registers, the flags, MXCSR, memory, control and call. This is what
@@ -259,6 +264,17 @@ keeping a second copy of the flags. A candidate that claims too much is still
 caught: inc's CF is undefined to the table, so naming CF among its alike flags
 changes nothing.
 
+A counted shift's flags are the exception: its record leaves undefined the
+flags it may change, but a count of 0 keeps them. So for a counted original
+those flags are counted, not free, and only a substitute counted alike stands
+for them: another encoding of the same shift. `or r/m32, imm8` doesn't stand
+for `shl r/m32, imm8` with CF live, since `shl ebx, 0` keeps CF and
+`or ebx, 0` clears it. `x86_instruction_flags_substitutable` answers the same
+for two records, resolving an immediate count first
+(`x86_instruction_flags`): `shl r/m32, 1` stands for `shl r/m32, imm8` with a
+count of 1 (or 33) whatever is live. That's how initialization takes a shift
+row's candidate for the value 1; a count in CL stays counted.
+
 `x86_choice_instruction` builds the record of a chosen form from a destination
 operand and the value:
 
@@ -359,6 +375,17 @@ run checks that:
 
 cmov and setcc run on all 64 combinations of the status flags, against a model
 of the conditions in C, at each width.
+
+Shifts' CF runs against a model too: SAR, SHR and SHL at every width, by an
+immediate and by CL, at counts around their widths and the masks', from
+values with the sign bit clear and set and with CF clear and set. SAR's CF must
+be the last bit shifted out (the sign bit by the width or more), and SHR's and
+SHL's below the width, and `x86_instruction_flags` must define CF exactly where
+the model does. Then pairs of records go through
+`x86_instruction_flags_substitutable` for every set of live flags and run from
+every state of the status flags. Where it takes a live flag the original doesn't
+leave undefined, the two must leave that flag alike. `shl ebx, 0` and
+`or ebx, 0`, which it refuses with CF live, must show CF apart in some run.
 
 **The immediate's contract**, on all 189 covered forms with an immediate,
 against about 60 boundary values: a field that takes a value gives it back,

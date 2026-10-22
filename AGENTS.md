@@ -987,6 +987,13 @@ and a fault names the record. The checks:
     listed as missing coverage, not failed.
 - cmov and setcc of all 16 conditions on all 64 combinations of the status
   flags, against a model of the conditions;
+- shifts' CF: SAR, SHR and SHL at every width, by an immediate and by CL,
+  around their widths, against a model (SAR's CF by the width or more is the
+  sign bit, defined), with `x86_instruction_flags` defining CF where the model
+  does; and pairs of records through `x86_instruction_flags_substitutable`, run
+  from every state of the status flags: a live flag it takes must come out
+  alike, and `or ebx, 0` for `shl ebx, 0`, refused with CF live, must show CF
+  apart;
 - fixtures:
   - division's, mul's and the sign extensions' fixed registers, variable
     shifts' CL, partial writes and 32-bit zero extension, inc's CF, the SSE

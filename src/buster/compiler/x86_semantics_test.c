@@ -806,7 +806,12 @@ static bool x86_semantics_check_resolved(void)
         { X86_FORM_SHL_RM64_IMM8, 65, BUSTER_X86_FLAGS_LOGICAL, BUSTER_X86_FLAG_AF },
         { X86_FORM_SHR_RM32_IMM8, 32, 0, 0 },
         { X86_FORM_SHR_RM8_IMM8, 9, BUSTER_X86_FLAGS_LOGICAL & ~(BUSTER_X86_FLAG_OF | BUSTER_X86_FLAG_CF), BUSTER_X86_FLAG_AF | BUSTER_X86_FLAG_OF | BUSTER_X86_FLAG_CF },
-        { X86_FORM_SAR_RM16_IMM8, 16, BUSTER_X86_FLAGS_LOGICAL & ~(BUSTER_X86_FLAG_OF | BUSTER_X86_FLAG_CF), BUSTER_X86_FLAG_AF | BUSTER_X86_FLAG_OF | BUSTER_X86_FLAG_CF },
+        { X86_FORM_SHL_RM16_IMM8, 16, BUSTER_X86_FLAGS_LOGICAL & ~(BUSTER_X86_FLAG_OF | BUSTER_X86_FLAG_CF), BUSTER_X86_FLAG_AF | BUSTER_X86_FLAG_OF | BUSTER_X86_FLAG_CF },
+        // SAR's CF by its width or more is the last bit shifted out, the sign bit: defined.
+        { X86_FORM_SAR_RM16_IMM8, 15, BUSTER_X86_FLAGS_LOGICAL & ~BUSTER_X86_FLAG_OF, BUSTER_X86_FLAG_AF | BUSTER_X86_FLAG_OF },
+        { X86_FORM_SAR_RM16_IMM8, 16, BUSTER_X86_FLAGS_LOGICAL & ~BUSTER_X86_FLAG_OF, BUSTER_X86_FLAG_AF | BUSTER_X86_FLAG_OF },
+        { X86_FORM_SAR_RM8_IMM8, 8, BUSTER_X86_FLAGS_LOGICAL & ~BUSTER_X86_FLAG_OF, BUSTER_X86_FLAG_AF | BUSTER_X86_FLAG_OF },
+        { X86_FORM_SAR_RM8_IMM8, 31, BUSTER_X86_FLAGS_LOGICAL & ~BUSTER_X86_FLAG_OF, BUSTER_X86_FLAG_AF | BUSTER_X86_FLAG_OF },
         { X86_FORM_ROL_RM64_IMM8, 1, BUSTER_X86_FLAGS_CO, 0 },
         { X86_FORM_ROR_RM8_IMM8, 3, BUSTER_X86_FLAG_CF, BUSTER_X86_FLAG_OF },
     };
@@ -845,6 +850,14 @@ static bool x86_semantics_check_resolved(void)
         { X86_FORM_LEA_R64_M, X86_FORM_ADD_RM64_IMM32, 0, BUSTER_X86_FLAGS_STATUS },
         { X86_FORM_TEST_RM64_IMM32, X86_FORM_TEST_RM32_IMM32, BUSTER_X86_SAME_NARROW_TEST, BUSTER_X86_FLAG_SF },
         { X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, BUSTER_X86_SAME_ALL, 0 },
+        // A counted shift keeps its flags for a count of zero, and the form doesn't know its count: or doesn't stand for
+        // it with any flag live (shl eax, 0 keeps CF, or eax, 0 clears it), nor does the shift by 1, nor it for that one
+        // but where the shift by 1 leaves AF undefined; another encoding of the same shift does.
+        { X86_FORM_SHL_RM32_IMM8, X86_FORM_OR_RM32_IMM8, 0, BUSTER_X86_FLAGS_STATUS },
+        { X86_FORM_SHL_RM32_IMM8, X86_FORM_SHL_RM32_1, BUSTER_X86_SAME_ALL, BUSTER_X86_FLAGS_STATUS },
+        { X86_FORM_SAR_RM8_1, X86_FORM_SAR_RM8_IMM8, BUSTER_X86_SAME_ALL, BUSTER_X86_FLAGS_LOGICAL },
+        { X86_FORM_SHL_RM32_IMM8, X86_FORM_SHL_RM32_IMM8, BUSTER_X86_SAME_ALL, 0 },
+        { X86_FORM_ROL_RM64_CL, X86_FORM_ROL_RM64_CL, BUSTER_X86_SAME_ALL, 0 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(substitutions); i += 1)
     {
@@ -1396,6 +1409,206 @@ static bool x86_semantics_check_conditions(X86SemanticsMachine* machine, uint64_
 }
 
 // push, pop and leave move RSP as they say: push writes the 8 bytes below it, pop and leave read [rsp] and [rbp].
+// Shifts' CF on the processor against a model, and x86_instruction_flags_substitutable's counts. SAR, SHR and SHL at
+// every width, by an immediate and by CL, at counts around their widths and the masks', from values with the sign bit
+// clear and set and with CF clear and set: SAR's CF is the last bit shifted out, the sign bit by the width or more, and
+// SHR's and SHL's below the width, and x86_instruction_flags must define CF exactly where the model does. Then pairs of
+// records x86_instruction_flags_substitutable answers for every set of live flags, run from every state of the status
+// flags: where it takes a live flag the original doesn't leave undefined, the two must leave it alike, and where a pair
+// names a witness, a flag it refuses, some run must show it apart (#239's review: shl ebx, 0 keeps CF, or ebx, 0 clears
+// it).
+static bool x86_semantics_check_shift_flags(X86SemanticsMachine* machine, uint64_t seed)
+{
+    X86SemanticsTally tally = {
+        .check = "effects: shifts' carry and substitutions by count",
+    };
+    uint64_t state = seed * 0x9E3779B97F4A7C15ull + 31;
+    static X86SemanticsState input;
+    static X86SemanticsState output;
+    const uint16_t forms[] = {
+        X86_FORM_SAR_RM8_IMM8, X86_FORM_SAR_RM16_IMM8, X86_FORM_SAR_RM32_IMM8, X86_FORM_SAR_RM64_IMM8, X86_FORM_SAR_RM8_CL, X86_FORM_SAR_RM16_CL,
+        X86_FORM_SAR_RM32_CL,  X86_FORM_SAR_RM64_CL,   X86_FORM_SHR_RM8_IMM8,  X86_FORM_SHR_RM16_IMM8, X86_FORM_SHL_RM8_IMM8, X86_FORM_SHL_RM16_IMM8,
+        X86_FORM_SHR_RM32_IMM8, X86_FORM_SHL_RM64_IMM8,
+    };
+    const uint32_t counts[] = { 0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64 };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(forms); f += 1)
+    {
+        const X86Effects* effects = x86_effects(forms[f]);
+        const uint32_t bits = 8 * effects->width;
+        const uint64_t mask = x86_width_mask(effects->width);
+        const bool by_cl = x86_effects_immediate_kind(effects) != BUSTER_X86_IMMEDIATE_COUNT;
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+        {
+            const uint32_t count = counts[c] & x86_count_mask(effects->width);
+            const X86Instruction record = {
+                .form = forms[f],
+                .rm = X86_REGISTER_RBX,
+                .immediate = by_cl ? 0 : (int32_t)counts[c],
+            };
+            // The model: CF defined, and its value, with the result.
+            const bool sar = effects->operation == X86_OPERATION_SAR;
+            const bool carry_defined = count != 0 && (sar || count < bits);
+            if (!by_cl)
+            {
+                uint8_t read = 0;
+                uint8_t written = 0;
+                uint8_t undefined = 0;
+                x86_instruction_flags(&record, &read, &written, &undefined);
+                const bool carry_written = (written & BUSTER_X86_FLAG_CF) != 0;
+                const bool carry_undefined = (undefined & BUSTER_X86_FLAG_CF) != 0;
+                x86_semantics_expect(&tally, carry_written == carry_defined && carry_undefined == (count != 0 && !carry_defined),
+                                     "%s by %u: CF written %d and undefined %d", x86_semantics_test_name(forms[f]), counts[c], carry_written, carry_undefined);
+            }
+            for (uint32_t run = 0; run < 8; run += 1)
+            {
+                const bool sign = (run & 1) != 0;
+                const bool carry_in = (run & 2) != 0;
+                snprintf(x86_semantics_test_case, sizeof(x86_semantics_test_case), "%s by %u, run %u", x86_semantics_test_name(forms[f]), counts[c], run);
+                x86_semantics_random_state(&state, machine, &input);
+                uint64_t value = input.gpr[X86_REGISTER_RBX] & mask;
+                value = sign ? value | (1ull << (bits - 1)) : value & ~(1ull << (bits - 1));
+                input.gpr[X86_REGISTER_RBX] = (input.gpr[X86_REGISTER_RBX] & ~mask) | value;
+                input.gpr[X86_REGISTER_RCX] = (input.gpr[X86_REGISTER_RCX] & ~0xffull) | counts[c];
+                const uint8_t flags_in = (uint8_t)((x86_random_below(&state, 64) & ~BUSTER_X86_FLAG_CF) | (carry_in ? BUSTER_X86_FLAG_CF : 0));
+                input.flags = BUSTER_X86_SEMANTICS_TEST_RFLAGS_BASE | x86_semantics_rflags(flags_in);
+                output = input;
+                if (x86_semantics_expect(&tally, x86_semantics_machine_load(machine, &record, 1), "%s encodes", x86_semantics_test_case))
+                {
+                    x86_semantics_machine_run(machine, &output);
+                    const uint32_t shift = 64 - bits;
+                    const int64_t signed_value = (int64_t)(value << shift) >> shift;
+                    uint64_t result = value;
+                    bool carry = carry_in;
+                    if (count != 0 && sar)
+                    {
+                        result = (uint64_t)(signed_value >> count) & mask;
+                        carry = ((uint64_t)(signed_value >> (count - 1)) & 1) != 0;
+                    }
+                    else if (count != 0 && effects->operation == X86_OPERATION_SHR)
+                    {
+                        result = count < bits ? value >> count : 0;
+                        carry = count <= bits && ((value >> (count - 1)) & 1) != 0;
+                    }
+                    else if (count != 0)
+                    {
+                        result = count < bits ? (value << count) & mask : 0;
+                        carry = count <= bits && ((value >> (bits - count)) & 1) != 0;
+                    }
+                    // A 32-bit write zeroes the rest of the register; a narrower one keeps it.
+                    const uint64_t rest = bits == 32 ? 0 : input.gpr[X86_REGISTER_RBX] & ~mask;
+                    const uint64_t expected = rest | result;
+                    const bool carry_out = (x86_semantics_flags(output.flags) & BUSTER_X86_FLAG_CF) != 0;
+                    x86_semantics_expect(&tally, output.gpr[X86_REGISTER_RBX] == expected, "%s: %#llx, not %#llx", x86_semantics_test_case,
+                                         (unsigned long long)output.gpr[X86_REGISTER_RBX], (unsigned long long)expected);
+                    x86_semantics_expect(&tally, !(carry_defined || count == 0) || carry_out == carry, "%s: CF %d, not %d", x86_semantics_test_case, carry_out,
+                                         carry);
+                }
+            }
+        }
+    }
+    // Pairs of records that compute the same result (CL is 3), and the flags that must be dead for the substitute.
+    typedef struct X86SemanticsCountedPair X86SemanticsCountedPair;
+    struct X86SemanticsCountedPair
+    {
+        X86Instruction original;
+        X86Instruction substitute;
+        uint8_t same;
+        uint8_t dead;
+        uint8_t witness;
+    };
+    const X86SemanticsCountedPair pairs[] = {
+        // shl ebx, 0 keeps CF, and or ebx, 0 clears it.
+        {
+            .original = { .form = X86_FORM_SHL_RM32_IMM8, .rm = X86_REGISTER_RBX, .immediate = 0 },
+            .substitute = { .form = X86_FORM_OR_RM32_IMM8, .rm = X86_REGISTER_RBX, .immediate = 0 },
+            .same = 0,
+            .dead = BUSTER_X86_FLAGS_STATUS,
+            .witness = BUSTER_X86_FLAG_CF,
+        },
+        // A count of 1, and one of 33, which masks to 1, is the shift by 1 whatever is live.
+        {
+            .original = { .form = X86_FORM_SHL_RM32_IMM8, .rm = X86_REGISTER_RBX, .immediate = 1 },
+            .substitute = { .form = X86_FORM_SHL_RM32_1, .rm = X86_REGISTER_RBX },
+            .same = BUSTER_X86_SAME_ALL,
+        },
+        {
+            .original = { .form = X86_FORM_SHL_RM32_IMM8, .rm = X86_REGISTER_RBX, .immediate = 33 },
+            .substitute = { .form = X86_FORM_SHL_RM32_1, .rm = X86_REGISTER_RBX },
+            .same = BUSTER_X86_SAME_ALL,
+        },
+        {
+            .original = { .form = X86_FORM_SAR_RM16_IMM8, .rm = X86_REGISTER_RBX, .immediate = 1 },
+            .substitute = { .form = X86_FORM_SAR_RM16_1, .rm = X86_REGISTER_RBX },
+            .same = BUSTER_X86_SAME_ALL,
+        },
+        {
+            .original = { .form = X86_FORM_ROR_RM8_IMM8, .rm = X86_REGISTER_RBX, .immediate = 1 },
+            .substitute = { .form = X86_FORM_ROR_RM8_1, .rm = X86_REGISTER_RBX },
+            .same = BUSTER_X86_SAME_ALL,
+        },
+        // A count in CL stays unknown: only the same shift by CL stands for it.
+        {
+            .original = { .form = X86_FORM_SAR_RM8_CL, .rm = X86_REGISTER_RBX },
+            .substitute = { .form = X86_FORM_SAR_RM8_CL, .rm = X86_REGISTER_RBX },
+            .same = BUSTER_X86_SAME_ALL,
+        },
+        {
+            .original = { .form = X86_FORM_SAR_RM8_CL, .rm = X86_REGISTER_RBX },
+            .substitute = { .form = X86_FORM_SAR_RM8_IMM8, .rm = X86_REGISTER_RBX, .immediate = 3 },
+            .same = BUSTER_X86_SAME_ALL,
+            .dead = BUSTER_X86_FLAGS_STATUS,
+        },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pairs); i += 1)
+    {
+        const X86SemanticsCountedPair* pair = &pairs[i];
+        const char* original_name = x86_semantics_test_name(pair->original.form);
+        const char* substitute_name = x86_semantics_test_name(pair->substitute.form);
+        for (uint32_t live = 0; live <= BUSTER_X86_FLAGS_STATUS; live += 1)
+        {
+            const bool expected = (live & pair->dead) == 0;
+            const bool substitutable = x86_instruction_flags_substitutable(&pair->original, &pair->substitute, pair->same, (uint8_t)live);
+            x86_semantics_expect(&tally, substitutable == expected, "%s by %d for %s by %d with flags %#x live: %s", substitute_name, pair->substitute.immediate,
+                                 original_name, pair->original.immediate, live, substitutable ? "substitutable" : "not");
+        }
+        uint8_t read = 0;
+        uint8_t written = 0;
+        uint8_t undefined = 0;
+        x86_instruction_flags(&pair->original, &read, &written, &undefined);
+        const uint8_t compared = BUSTER_X86_FLAGS_STATUS & ~pair->dead & ~undefined;
+        uint8_t shown = 0;
+        for (uint32_t flags = 0; flags <= BUSTER_X86_FLAGS_STATUS; flags += 1)
+        {
+            snprintf(x86_semantics_test_case, sizeof(x86_semantics_test_case), "%s by %d for %s by %d with flags %#x", substitute_name, pair->substitute.immediate,
+                     original_name, pair->original.immediate, flags);
+            x86_semantics_random_state(&state, machine, &input);
+            input.gpr[X86_REGISTER_RCX] = (input.gpr[X86_REGISTER_RCX] & ~0xffull) | 3;
+            input.flags = BUSTER_X86_SEMANTICS_TEST_RFLAGS_BASE | x86_semantics_rflags((uint8_t)flags);
+            static X86SemanticsState substituted;
+            output = input;
+            substituted = input;
+            const bool loaded = x86_semantics_machine_load(machine, &pair->original, 1);
+            if (x86_semantics_expect(&tally, loaded, "%s: the original encodes", x86_semantics_test_case))
+            {
+                x86_semantics_machine_run(machine, &output);
+            }
+            const bool substitute_loaded = x86_semantics_machine_load(machine, &pair->substitute, 1);
+            if (x86_semantics_expect(&tally, substitute_loaded, "%s: the substitute encodes", x86_semantics_test_case))
+            {
+                x86_semantics_machine_run(machine, &substituted);
+            }
+            const uint8_t apart = x86_semantics_flags(output.flags) ^ x86_semantics_flags(substituted.flags);
+            x86_semantics_expect(&tally, output.gpr[X86_REGISTER_RBX] == substituted.gpr[X86_REGISTER_RBX], "%s: results %#llx and %#llx", x86_semantics_test_case,
+                                 (unsigned long long)output.gpr[X86_REGISTER_RBX], (unsigned long long)substituted.gpr[X86_REGISTER_RBX]);
+            x86_semantics_expect(&tally, (apart & compared) == 0, "%s: flags %#x apart, which it takes live", x86_semantics_test_case, apart & compared);
+            shown |= apart;
+        }
+        x86_semantics_expect(&tally, (shown & pair->witness) == pair->witness, "%s by %d for %s by %d: flags %#x never apart", substitute_name,
+                             pair->substitute.immediate, original_name, pair->original.immediate, pair->witness & ~shown);
+    }
+    return x86_semantics_report(&tally);
+}
+
 static bool x86_semantics_check_stack(X86SemanticsMachine* machine, uint64_t seed)
 {
     X86SemanticsTally tally = {
@@ -2458,6 +2671,7 @@ static int run_x86_semantics_tests(int argc, char** argv)
             result = x86_semantics_check_table(&machine, seed, (uint32_t)runs) && result;
             result = x86_semantics_check_stack(&machine, seed) && result;
             result = x86_semantics_check_conditions(&machine, seed) && result;
+            result = x86_semantics_check_shift_flags(&machine, seed) && result;
             result = x86_semantics_check_choices(&machine, seed) && result;
         }
         if (cross_check && initialized)

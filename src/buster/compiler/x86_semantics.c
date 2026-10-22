@@ -28,8 +28,9 @@
 //     allow, which initialization works out from the effects (x86_flags_substitutable). Which forms the generated code
 //     may use is #180's, and which sequence is faster #181's: the rows hold baseline forms only.
 // Entry points: x86_semantics_initialize (builds the tables; call it once), x86_effects, x86_effects_role,
-// x86_immediate_encodes, x86_immediate_field, x86_immediate_value, x86_instruction_flags, x86_flags_substitutable,
-// x86_instructions_effects (and _scalar), x86_choice_row, x86_choose_forms (and _scalar) and x86_choice_instruction.
+// x86_immediate_encodes, x86_immediate_field, x86_immediate_value, x86_instruction_flags, x86_flags_substitutable (and
+// x86_instruction_flags_substitutable), x86_instructions_effects (and _scalar), x86_choice_row, x86_choose_forms (and
+// _scalar) and x86_choice_instruction.
 // docs/x86-semantics.md has the contract, the covered subset, how to add a form and the 9700X's numbers. Files that use
 // it include it after the encoder; every function in it is static.
 //
@@ -40,7 +41,7 @@
 //     X86Operation, X86Effects, the covered forms (BUSTER_X86_EFFECT_ROWS, with X86Pattern), the tables
 //     (x86_effects_index and x86_effects_records), x86_semantics_row, x86_effects and x86_effects_role.
 //   - The immediate's contract (x86_immediate_encodes, x86_immediate_field and x86_immediate_value) and the flags
-//     (x86_instruction_flags and x86_flags_substitutable).
+//     (x86_instruction_flags, X86FlagEffects, x86_flags_substitutable and x86_instruction_flags_substitutable).
 //   - Operand-resolved effects: BUSTER_X86_RESOURCE_*, x86_instruction_effects_scalar, x86_instructions_effects_scalar
 //     and x86_instructions_effects.
 //   - Form choice: the classes and the context (BUSTER_X86_CHOICE_* and BUSTER_X86_CONTEXT_*), the rows
@@ -129,7 +130,8 @@
 //   - FP_EXCEPTION: may raise floating-point exceptions (setting MXCSR's status flags, or trapping if unmasked).
 //   - COUNT: a shift or rotate by a count (CL, or an immediate that x86_instruction_flags reads): a count of zero (after
 //     masking) leaves the flags as they were, and one other than 1 leaves OF undefined. X86Effects describes any count,
-//     so it reads the flags it may keep and leaves undefined those it may change.
+//     so it reads the flags it may keep and leaves undefined those it may change; those are kept for a count of zero, so
+//     x86_flags_substitutable doesn't take them for flags nothing may rely on.
 //   - ZERO_SOURCE: bsf and bsr: with a zero source the destination is undefined (Intel) or kept (AMD), so it is read.
 //   - CONDITIONAL: writes its destination (cmov), or rm and RAX (cmpxchg), only under a condition; cmov's 32-bit form
 //     zeroes the upper half either way, and cmpxchg's RAX keeps all of its bits when it isn't written.
@@ -690,7 +692,8 @@ static __attribute__((unused)) uint64_t x86_immediate_value(uint32_t form, int32
 // The flags a record reads, defines and changes to undefined values: x86_effects's, refined by a shift's immediate count
 // (masked as the processor masks it). With a count of zero the instruction touches no flag; with another it reads none
 // and defines CF, and for a shift PF, ZF and SF, and OF only for a count of 1 (undefined otherwise), and leaves AF
-// undefined; and an 8- or 16-bit shift by its width or more leaves CF undefined.
+// undefined; and an 8- or 16-bit SHL or SHR by its width or more leaves CF undefined (the SDM's exception, which isn't
+// SAR's: its CF is the last bit shifted out, the sign bit by then).
 static __attribute__((unused)) void x86_instruction_flags(const X86Instruction* instruction, uint8_t* read, uint8_t* written, uint8_t* undefined)
 {
     const X86Effects* effects = x86_effects(instruction->form);
@@ -705,7 +708,8 @@ static __attribute__((unused)) void x86_instruction_flags(const X86Instruction* 
         flags_read &= ~BUSTER_X86_FLAGS_STATUS;
         flags_written = rotate ? BUSTER_X86_FLAG_CF | overflow : (BUSTER_X86_FLAGS_LOGICAL & ~BUSTER_X86_FLAG_OF) | overflow;
         flags_undefined = (rotate ? 0 : BUSTER_X86_FLAG_AF) | (BUSTER_X86_FLAG_OF & ~overflow);
-        if (!rotate && count >= 8 * effects->width)
+        const bool logical = effects->operation == X86_OPERATION_SHL || effects->operation == X86_OPERATION_SHR;
+        if (logical && count >= 8 * effects->width)
         {
             flags_written &= ~BUSTER_X86_FLAG_CF;
             flags_undefined |= BUSTER_X86_FLAG_CF;
@@ -721,18 +725,68 @@ static __attribute__((unused)) void x86_instruction_flags(const X86Instruction* 
     *undefined = flags_undefined;
 }
 
+// The status flags a form or a record changes, as x86_flags_substitutable compares them: those it defines, those it
+// leaves undefined, and among those the ones it may keep instead, as its count says (a counted shift's or rotate's whose
+// count isn't known: a count of zero keeps them all).
+typedef struct X86FlagEffects X86FlagEffects;
+struct X86FlagEffects
+{
+    uint8_t written;
+    uint8_t undefined;
+    uint8_t counted;
+};
+
+// The rule of x86_flags_substitutable and x86_instruction_flags_substitutable.
+static bool x86_flag_effects_substitutable(X86FlagEffects original, X86FlagEffects substitute, uint8_t same, uint8_t live)
+{
+    const uint8_t kept = (uint8_t)~(original.written | original.undefined | substitute.written | substitute.undefined);
+    const uint8_t alike = original.written & substitute.written & same;
+    // A counted flag is kept or changed as the count says, so only a substitute counted alike stands for it (another
+    // encoding of the same shift), and it isn't one nothing may rely on.
+    const uint8_t counted_alike = original.counted & substitute.counted & same;
+    const uint8_t allowed = kept | alike | counted_alike | (original.undefined & ~original.counted);
+    return (live & BUSTER_X86_FLAGS_STATUS & ~allowed) == 0;
+}
+
+// A form's flags for x86_flag_effects_substitutable: a counted form's undefined ones are counted.
+static X86FlagEffects x86_effects_flag_effects(const X86Effects* effects)
+{
+    const bool counted = (effects->properties & BUSTER_X86_EFFECT_COUNT) != 0;
+    return (X86FlagEffects){
+        .written = effects->flags_written,
+        .undefined = effects->flags_undefined,
+        .counted = counted ? effects->flags_undefined : 0,
+    };
+}
+
 // Whether `substitute` can stand for `original`, two forms that compute the same result, when the status flags in `live`
 // are read after them: each live flag must be one both keep, one both define with the same value (`same`: a fact about
-// the pair, which the caller knows from what they compute: inc and add 1 define all but CF alike), or one the original
-// leaves undefined, which nothing may rely on.
+// the pair, which the caller knows from what they compute: inc and add 1 define all but CF alike), one the original
+// leaves undefined, which nothing may rely on, or for a counted form one it may keep or change as its count says, which
+// only a substitute counted alike does (another encoding of the same shift: `same` says so). shl r/m32, imm8 doesn't
+// take or r/m32, imm8 with CF live: shl by 0 keeps CF, and or clears it. For two records with their counts,
+// x86_instruction_flags_substitutable.
 static __attribute__((unused)) bool x86_flags_substitutable(const X86Effects* original, const X86Effects* substitute, uint8_t same, uint8_t live)
 {
-    const uint8_t original_changes = original->flags_written | original->flags_undefined;
-    const uint8_t substitute_changes = substitute->flags_written | substitute->flags_undefined;
-    const uint8_t kept = (uint8_t)~(original_changes | substitute_changes);
-    const uint8_t alike = original->flags_written & substitute->flags_written & same;
-    const uint8_t allowed = kept | alike | original->flags_undefined;
-    return (live & BUSTER_X86_FLAGS_STATUS & ~allowed) == 0;
+    return x86_flag_effects_substitutable(x86_effects_flag_effects(original), x86_effects_flag_effects(substitute), same, live);
+}
+
+// x86_flags_substitutable for two records: an immediate count resolves a shift's flags (x86_instruction_flags), so shl
+// by 1 stands for shl r/m32, imm8 of 1 whatever is live, and nothing that changes a live flag stands for one of 0. A count
+// in CL leaves the flags counted.
+static __attribute__((unused)) bool x86_instruction_flags_substitutable(const X86Instruction* original, const X86Instruction* substitute, uint8_t same, uint8_t live)
+{
+    X86FlagEffects effects[2] = { 0 };
+    const X86Instruction* records[2] = { original, substitute };
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        const X86Effects* form = x86_effects(records[i]->form);
+        uint8_t read = 0;
+        x86_instruction_flags(records[i], &read, &effects[i].written, &effects[i].undefined);
+        const bool counted = (form->properties & BUSTER_X86_EFFECT_COUNT) && x86_effects_immediate_kind(form) != BUSTER_X86_IMMEDIATE_COUNT;
+        effects[i].counted = counted ? effects[i].undefined : 0;
+    }
+    return x86_flag_effects_substitutable(effects[0], effects[1], same, live);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1603,10 +1657,23 @@ static bool x86_choice_build(void)
             if (entry->form != X86_FORM_NONE)
             {
                 const X86Effects* substitute = x86_effects(entry->form);
+                // A shift's candidate for the value 1 stands for the original shifting by 1, whose flags that count resolves
+                // (x86_instruction_flags_substitutable); any other stands for the original at every count.
+                const bool by_one = source->kind == BUSTER_X86_IMMEDIATE_COUNT && (entry->conditions & BUSTER_X86_CHOICE_ONE);
+                const X86Instruction original_by_one = {
+                    .form = source->original,
+                    .immediate = 1,
+                };
+                const X86Instruction substitute_by_one = {
+                    .form = entry->form,
+                    .immediate = 1,
+                };
                 uint32_t dead = 0;
                 for (uint32_t flag = 1; flag <= BUSTER_X86_FLAG_OF; flag <<= 1)
                 {
-                    dead |= x86_flags_substitutable(original, substitute, entry->same, (uint8_t)flag) ? 0 : flag;
+                    const bool substitutable = by_one ? x86_instruction_flags_substitutable(&original_by_one, &substitute_by_one, entry->same, (uint8_t)flag)
+                                                      : x86_flags_substitutable(original, substitute, entry->same, (uint8_t)flag);
+                    dead |= substitutable ? 0 : flag;
                 }
                 conditions = entry->conditions | BUSTER_X86_CHOICE_VALID;
                 conditions |= (dead & BUSTER_X86_FLAG_CF) ? BUSTER_X86_CHOICE_CF_DEAD : 0;
