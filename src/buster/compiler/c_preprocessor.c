@@ -1470,7 +1470,7 @@ static uint32_t pp_written_spelling(Preprocessor* pp, uint32_t value, uint32_t l
     {
         const PPRange* bytes_range = &pp->ranges[range];
         const uint32_t start = location - bytes_range->base;
-        const uint32_t end = refine_identifier_end(bytes_range->bytes, bytes_range->length, start, pp->refine_flags);
+        const uint32_t end = pp_identifier_end(pp, bytes_range->bytes, bytes_range->length, start);
         uint8_t* buffer = arena_push(arena, (uint64_t)(end - start) + 1, 1);
         result = buffer != 0 ? pp_without_splices(pp, bytes_range->bytes + start, end - start, buffer, spelling) : 0;
         *spelling = buffer != 0 ? *spelling : 0;
