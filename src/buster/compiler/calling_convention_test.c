@@ -1472,6 +1472,17 @@ static void abi_test_build_atomics(AbiTestBuilder* builder)
     m[0] = abi_test_member(builder, a64k);
     abi_test_expectation(builder, "packed {_Atomic {float vector(65536)[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0),
                          BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+    // The same through a record larger than 16 bytes that holds the vector, whose alignment abi_wide_alignment walks
+    // (byval({ %struct.s, [1 x i8] }) align 32768, and the 64 KB one INEXACT from its member).
+    m[0] = abi_test_member(builder, abi_test_vector(builder, BUSTER_TYPE_FLOAT, 32768));
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {{float vector(32768)}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | aligned_32k, grown | refused | (BUSTER_ABI_PASS_ALIGNMENT & ~aligned_32k), hidden, none, none);
+    abi_test_slot(builder, 32768);
+    m[0] = abi_test_member(builder, abi_test_vector(builder, BUSTER_TYPE_FLOAT, 65536));
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {{float vector(65536)}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
     // _Atomic vectors: in one vector register, as LLVM widens them to one it has (16 bytes for <9 x i8>, v8f16 for
     // <3 x half>), or split into their elements as no class says; a <1 x _BitInt(128)> in two halves.
     const uint32_t vector = abi_test_value(BUSTER_ABI_VALUE_VECTOR);

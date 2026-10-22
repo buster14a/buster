@@ -1070,7 +1070,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (2,382 checks): about 175 types whose classes, pass bits and
+- **Fixtures** (2,394 checks): about 180 types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -1094,16 +1094,17 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   show: `_Atomic`s of structs of no size, `LARGER` and `GROWN` ones among them
   (of a packed one, of a flexible array member's `unsigned _BitInt(127)`, of
   one aligned by an array of none of a record larger than 64 bytes, and of an
-  array of none of a 32 KB vector, 32 KB to LLVM), and of aligned typedefs of
-  an empty struct and of a 32-byte one, aligned to 8; packed structs ending in
-  one (17 to 117 bytes to LLVM, and 32 KB and a byte), structs and a union
-  with room for one, the C layout, and the structs refused (a member after the
-  overrun, a member of no size or a flexible one, a struct ending in one, an
-  `_Atomic` of one; `_Atomic`s of a struct and a union of an array of none of
-  a struct with a flexible array member and a size, and of a struct of an
-  array of none of a struct of 32 bytes holding one: `STORAGE_INEXACT`; and an
-  `_Atomic` of a struct of no size aligned by a vector of 64 KB, past what the
-  storage holds, and a packed struct ending in it); a union at offset 1 of an
+  array of none of a 32 KB vector or of a record holding one, 32 KB to LLVM),
+  and of aligned typedefs of an empty struct and of a 32-byte one, aligned to
+  8; packed structs ending in one (17 to 117 bytes to LLVM, and 32 KB and a
+  byte), structs and a union with room for one, the C layout, and the structs
+  refused (a member after the overrun, a member of no size or a flexible one,
+  a struct ending in one, an `_Atomic` of one; `_Atomic`s of a struct and a
+  union of an array of none of a struct with a flexible array member and a
+  size, and of a struct of an array of none of a struct of 32 bytes holding
+  one: `STORAGE_INEXACT`; and `_Atomic`s of structs of no size aligned by a
+  vector of 64 KB, past what the storage holds, or by a record holding one,
+  and a packed struct ending in the first); a union at offset 1 of an
   empty struct and an array of none of an `_Atomic` of an `aligned(16)`
   typedef of one (through an `aligned(1)` typedef), which passes as an `i8`,
   since clang checks a member's offset against its canonical type's
