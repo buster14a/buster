@@ -24,14 +24,14 @@
 // Every run takes the whole table or every call once, and the defaults are more types and arguments than Zen 5's
 // branch predictor learns from run to run (#144's lesson): on the 9700X, with a table of 4,096 types the
 // classification mispredicts 3 to 10 times less often than with 16,384 or more, and runs up to 2.3 times as fast.
-// Each case first checks that its paths agree (the classification's rows, pass bits, stack bytes, alignments and
-// results; the assignment's locations and calls), then reports the median of BUSTER_ABI_BENCHMARK_PASSES passes that
-// alternate which path runs first, each sample runs lasting at least BUSTER_ABI_BENCHMARK_SAMPLE_NS: nanoseconds, and
-// cycles, instructions, branch mispredictions and the throttle from the hardware counters (zero when unavailable), per
-// item. The throttle is PMCx1A0's umask 0x08, which #199 reads as the dispatch slots Zen 5's per-core power cap takes.
-// --path times one path alone, back to back; --after-scalar MS runs the case's twin, untimed, for MS ms before each
-// sample of the vector path, the state a compiler's vector phases run in after lighter ones (#199: 100 to 300). The
-// exit status is 1 if the arguments are invalid or the paths disagree.
+// Each case first checks that its paths agree (the classification's rows, pass bits, stack bytes, alignments, storage,
+// layouts and results; the assignment's locations and calls), then reports the median of BUSTER_ABI_BENCHMARK_PASSES
+// passes that alternate which path runs first, each sample runs lasting at least BUSTER_ABI_BENCHMARK_SAMPLE_NS:
+// nanoseconds, and cycles, instructions, branch mispredictions and the throttle from the hardware counters (zero when
+// unavailable), per item. The throttle is PMCx1A0's umask 0x08, which #199 reads as the dispatch slots Zen 5's per-core
+// power cap takes. --path times one path alone, back to back; --after-scalar MS runs the case's twin, untimed, for MS
+// ms before each sample of the vector path, the state a compiler's vector phases run in after lighter ones (#199: 100
+// to 300). The exit status is 1 if the arguments are invalid or the paths disagree.
 //
 // Layout, in this order: the clock, the counters, the medians and the random numbers; the world of types
 // (abi_benchmark_world_build); the measurement (AbiBenchmarkCase, the timed wrappers, abi_benchmark_measure); the
@@ -438,13 +438,14 @@ static void abi_benchmark_world_build(AbiBenchmarkWorld* world, uint64_t seed, u
     }
 }
 
-// The types a type's row is made from (a record's members', an array's element and an aligned typedef's base) into
-// `dependencies`, which has room for BUSTER_ABI_BENCHMARK_MEMBERS; returns how many.
+// The types a type's row is made from (a record's members', an array's element and an aligned typedef's base), and an
+// _Atomic type's value, whose storage and layout it takes (abi_dependencies_classified's), into `dependencies`, which has
+// room for BUSTER_ABI_BENCHMARK_MEMBERS; returns how many.
 static uint32_t abi_benchmark_dependencies(const TypeTable* table, uint32_t index, uint32_t* dependencies)
 {
     const uint8_t kind = table->types.kind[index];
     uint32_t result = 0;
-    if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ARRAY)
+    if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
     {
         dependencies[0] = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
         result = 1;
@@ -705,7 +706,7 @@ static void abi_benchmark_print(const char* name, uint32_t timed, const AbiBench
 // Classification
 
 // Whether two tables classified the same types alike: the same pass bits for every type, and for each classified one
-// the same row, stack bytes, alignment and result. Names the first type that differs.
+// the same row, stack bytes, alignment, storage, layout and result. Names the first type that differs.
 static bool abi_benchmark_same_tables(const AbiTable* left, const AbiTable* right, uint32_t count, const char* what)
 {
     uint32_t differing = 0;
@@ -715,7 +716,8 @@ static bool abi_benchmark_same_tables(const AbiTable* left, const AbiTable* righ
         const uint64_t row = (uint64_t)index * BUSTER_ABI_ROW_BYTES;
         const bool same = left->pass[index] == right->pass[index] &&
                           (!classified || (memcmp(left->rows + row, right->rows + row, BUSTER_ABI_ROW_BYTES) == 0 && left->stack_bytes[index] == right->stack_bytes[index] &&
-                                           left->alignment_log2[index] == right->alignment_log2[index] &&
+                                           left->alignment_log2[index] == right->alignment_log2[index] && left->storage[index] == right->storage[index] &&
+                                           left->layout[index] == right->layout[index] &&
                                            memcmp(&left->results[index], &right->results[index], sizeof(AbiReturn)) == 0));
         differing = same ? 0 : index;
     }
@@ -1282,10 +1284,11 @@ struct AbiBenchmarkDeferred
 // abi_assign's deferred_lanes), since its results don't tell: the twin's are the same. The prefix sums of a call's
 // registers and stack slots count every argument that needs a register as using it, so a call goes to the twin when an
 // argument is UNCOUNTED, doesn't fit (the sum of a class it needs past the registers) while a register it needs is
-// still free (inexact), goes to the stack at an offset its alignment doesn't divide (padded), is a named WIDE vector of
-// a variadic call, is on the stack with a slot that depends on clang's count (EMPTY, which may take none, or GROWN), or
-// has a LOW_GENERAL low eightbyte, or when the call's result is a vector demoted to a hidden pointer, which clang doesn't
-// count, or the call has more arguments than its 16-bit register sums can count (BUSTER_ABI_COUNTED_ARGUMENTS).
+// still free (inexact), goes to the stack at an offset its alignment doesn't divide or aligned to more than 32 bits hold
+// (padded), is a named WIDE vector of a variadic call, is on the stack with a slot that depends on clang's count (EMPTY,
+// which may take none, or GROWN), or has a LOW_GENERAL low eightbyte, or when the call's result is a vector demoted to a
+// hidden pointer, which clang doesn't count, or the call has more arguments than its 16-bit register sums can count
+// (BUSTER_ABI_COUNTED_ARGUMENTS).
 static AbiBenchmarkDeferred abi_benchmark_deferred(const AbiTable* abi, AbiSignatures signatures)
 {
     AbiBenchmarkDeferred result = { 0 };
@@ -1321,10 +1324,11 @@ static AbiBenchmarkDeferred abi_benchmark_deferred(const AbiTable* abi, AbiSigna
                               (need_vectors == 0 || vectors + need_vectors <= BUSTER_ABI_VECTOR_ARGUMENTS);
             const bool spills = need_integers + need_vectors != 0 && !fits;
             const bool on_stack = (in_memory || spills) && (pass & BUSTER_ABI_PASS_IGNORE) == 0;
-            const uint64_t alignment = 1ull << ((pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT);
+            const uint32_t alignment_log2 = (pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT;
+            const uint64_t alignment = 1ull << alignment_log2;
             uncounted = uncounted || (pass & BUSTER_ABI_PASS_UNCOUNTED) != 0;
             inexact = inexact || (spills && ((need_integers != 0 && integers < BUSTER_ABI_INTEGER_ARGUMENTS) || (need_vectors != 0 && vectors < BUSTER_ABI_VECTOR_ARGUMENTS)));
-            padded = padded || (on_stack && (stack & (alignment - 1)) != 0);
+            padded = padded || (on_stack && ((stack & (alignment - 1)) != 0 || alignment_log2 > 31));
             wide_named = wide_named || (wide && variadic && !unnamed);
             empty = empty || (on_stack && (pass & (BUSTER_ABI_PASS_EMPTY | BUSTER_ABI_PASS_GROWN)) != 0);
             general_low = general_low || (pass & BUSTER_ABI_PASS_LOW_GENERAL) != 0;

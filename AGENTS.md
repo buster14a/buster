@@ -3160,33 +3160,39 @@ others, its measurements are informational.
   zero-size members, bit-fields, flexible array members, `_Atomic` and
   `nullptr_t` members, `i128` storage, which LLVM never splits, whatever the
   high eightbyte under an INTEGER low one and refused under another, runs of
-  bit-fields that are an `i128` and that aren't, and the narrow low parts
-  clang widens into a general register; and the `_Atomic` types whose LLVM
-  types decide: of types of no size, which LLVM makes larger (to 32 KB, and
-  refused past the alignment the module keeps or for a run of bit-fields
-  whose unit it doesn't work out) or doesn't (one aligned by
-  `_BitInt(129)`s, which LLVM stores as arrays of their bytes), as the
-  records ending in one, with their slots, the records it lays out otherwise
-  than C, and
-  vectors LLVM keeps whole, splits or, of bools (not of an enum of bool),
-  passes as integers), and
-  calls whose locations clang and LLVM give (an `UNCOUNTED` argument that
-  splits the next record, an `__int128` without two registers left, a hidden
-  pointer, a record of a flexible array member alone as an `i0`, a struct
-  whose narrow low part takes a general register, unions stored as an
-  `i128`, which clang counts as two registers with a NO_CLASS or SSE high
-  eightbyte, runs of bit-fields where an uncounted `_Atomic int` leaves one
-  register, split or whole on the stack, the larger copies' slots, byval or
-  an integer by clang's count, `_Atomic` bool vectors, and a vector of bools
-  that isn't `_Atomic` returned through a hidden pointer), `va_arg`'s plans
-  for an aligned `long` and an `i128` with an SSE high eightbyte, and the
-  levels across calls (a record larger than 64 bytes that waits for a
-  `LARGER` member, and a flexible record of no size that an `_Atomic` of it in
-  a later call reads);
+  bit-fields that are an `i128` and that aren't, unions whose storage member a
+  zero-length array of a larger record decides (each of the walk's rules alone
+  among them), and the narrow low parts clang widens into a general register;
+  and the `_Atomic` types whose LLVM types decide: of types of no size, which
+  LLVM makes larger (to 32 KB, and refused past the alignment the module
+  keeps), as the records ending in one, with their slots, the records it lays
+  out otherwise than C, and vectors LLVM keeps whole, splits or, of bools,
+  passes as integers), and calls whose locations clang and LLVM give (an
+  `UNCOUNTED` argument that splits the next record, an `__int128` without two
+  registers left, a hidden pointer, a record of a flexible array member alone
+  as an `i0`, a struct whose narrow low part takes a general register, unions
+  stored as an `i128`, which clang counts as two registers with a NO_CLASS or
+  SSE high eightbyte, runs of bit-fields where an uncounted `_Atomic int`
+  leaves one register, split or whole on the stack, the larger copies' slots,
+  byval or an integer by clang's count, `_Atomic` bool vectors, a vector of
+  bools that isn't `_Atomic` returned through a hidden pointer, and a result
+  LLVM demotes to a hidden pointer clang doesn't count), `va_arg`'s plans for
+  an aligned `long` and an `i128` with an SSE high eightbyte, and the levels
+  across calls (a record larger than 64 bytes that waits for a `LARGER`
+  member, and records of no size that an `_Atomic` of them in a later call
+  reads: a flexible one, and two that hold a struct of 128 bytes by an array
+  of none, which wait for what its alignment reads), the walk without scratch
+  memory for its stack, after which every type must be classified and an
+  `_Atomic` it aligns be right or refused, and the walk over 64 unions of two
+  members of the one before, 2^64 paths, under an alarm;
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's
-  `classify` transcribed with an explicit stack of frames;
+  `classify` transcribed with an explicit stack of frames; then classified
+  again by the twin, every type at once, into the same table (zero-length
+  arrays of large records among the types, which wait in the levels for the
+  types their alignment reads), which a world without `_Atomic`s of types of
+  no size checks, its levels ordered by the waits alone;
 - assignment: random calls over a world's types, named and variadic, by both
   paths, which must give the same locations and totals, also with the columns
   ending at a `PROT_NONE` page; and calls of 65,542 `long`s and of 32,767 and
@@ -3210,13 +3216,14 @@ the test prints their lines in that order; a run that fails keeps its files.
 GCC's worlds leave out
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
 own bugs among them, and `docs/calling-convention.md` lists them), and clang's
-a type in registers that holds an array of elements of no size, on which
-clang 23 crashes now and then; an argument clang would pass as an `i0` becomes
-a long (its passes crash on them now and then), as does an unnamed one clang's
-`va_arg` reads elsewhere than its call puts it; and bytes clang doesn't pass
-aren't compared. The files go in a new directory under `$TMPDIR` (or `/tmp`),
-removed unless `--keep` or a failure. The 9700X job's test step runs it with
-`--cross-check`.
+a type in registers that holds an array of elements of no size, on which clang
+23 crashes now and then, and one with an SSE low eightbyte and bit-fields in
+an INTEGER high one, whose access units the module doesn't work out yet; an
+argument clang would pass as an `i0` becomes a long (its passes crash on them
+now and then), as does an unnamed one clang's `va_arg` reads elsewhere than
+its call puts it; and bytes clang doesn't pass aren't compared. The files go
+in a new directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a
+failure. The 9700X job's test step runs it with `--cross-check`.
 
 ## Calling convention benchmark
 
@@ -3224,10 +3231,10 @@ removed unless `--keep` or a failure. The 9700X job's test step runs it with
 [--only classification|assignment] [--path vector|scalar] [--after-scalar
 MS]` (about 1 s on the 9700X) checks that each vector path of
 `calling_convention.c` agrees with its twin (the classification's rows, pass
-bits, stack bytes, alignments and results; the assignment's locations and
-calls), then reports 21 interleaved-pass medians per item (time, cycles,
-instructions, IPC, branch mispredictions and the throttle, PMCx1A0's umask
-0x08, #199):
+bits, stack bytes, alignments, storage, layouts and results; the
+assignment's locations and calls), then reports 21 interleaved-pass medians
+per item (time, cycles, instructions, IPC, branch mispredictions and the
+throttle, PMCx1A0's umask 0x08, #199):
 
 - classification: a table of `--count` types (32,768), records and unions of
   0 to 8 members mostly, with the pointers, arrays, vectors and aligned
