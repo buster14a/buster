@@ -3158,7 +3158,7 @@ static bool dynamic_test_shared(const ExecutableTestDirectory* directory, const 
         Scratch scratch = scratch_begin(0);
         ExecutableResult result = { 0 };
         String8 file = { 0 };
-        const bool written = built && dynamic_test_lanes(&tally, &bound.program.link, &bound.bind, runtime, path, name, &result, &file, scratch.arena);
+        const bool written = built && dynamic_test_lanes(&tally, &bound.program.link, &bound.bind, runtime, path, name, &result, &file, directory->id_order, scratch.arena);
         if (written)
         {
             dynamic_test_structure(&tally, &bound.program.link, &bound.bind, runtime, file, dynamic_test_relr_supported(runtime), i);
@@ -3408,7 +3408,7 @@ static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* director
             dynamic_test_expect(&tally, clean, "refused by every lane count", (exact ? 100 : 0) + lanes);
             refused = refused && clean;
         }
-        const bool linked = bound_ok && !library->refused && dynamic_test_lanes(&tally, &bound.link, &bound.bind, runtime, path, library->name, &result, &bytes, scratch.arena);
+        const bool linked = bound_ok && !library->refused && dynamic_test_lanes(&tally, &bound.link, &bound.bind, runtime, path, library->name, &result, &bytes, directory->id_order, scratch.arena);
         if (linked)
         {
             dynamic_test_structure(&tally, &bound.link, &bound.bind, runtime, bytes, dynamic_test_relr_supported(runtime), s);
