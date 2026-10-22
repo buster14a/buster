@@ -8,8 +8,9 @@ to diagnostics, preprocessed text, literal pools, objects and executables.
 
 `src/buster/compiler/diagnostic.c` supplies bounded lane buffers. Before a
 phase starts, its caller assigns each job its translation-unit ordinal and
-its source-order job ordinal. A job has one writer and its own diagnostic
-sequence counter; jobs may move between lanes before they start.
+its unique source-order job ordinal within that unit. A job has one writer
+and its own diagnostic sequence counter; jobs may move between lanes before
+they start.
 
 `diagnostic_append` copies a rendered group into the lane's text arena. A
 group contains a primary diagnostic and all of its notes, including include
@@ -38,7 +39,8 @@ Placement uses those ranks and scalar stores, avoiding gathers and scatters.
 Inactive tail lanes cannot enter the histogram. Counts up to 256 use insertion
 sort, which is also the exact scalar oracle.
 
-A fatal stops its own job. It does not cancel another job on whichever lane
+A fatal stops its own job. Further appends from that job return false without
+marking the buffer as failed. It does not cancel another job on whichever lane
 happens to observe it first. The merge retains the canonical prefix through
 the earliest fatal group, including its notes. Earlier jobs must finish;
 later results may be discarded. Resource failures are separate: a full record
@@ -110,6 +112,29 @@ Run it on CPU 2 under the shared lock. The default interleaves the two paths;
 the large radix sort. `--only selected --after-scalar 100` conditions each
 short timed batch with 100 ms of lighter insertion sorts. Repeat each in
 several processes: an interleaved run alone does not establish either state.
+
+## 9700X measurements
+
+Measured on 2026-10-22 with Clang 23.1.1, `build.sh`'s `-O3 -march=native`,
+CPU 2 and the shared exclusive lock. Inputs are the benchmark's frozen seed
+153 keys; copying the input is included. Each number below is the range of
+21-sample medians from three fresh processes, in nanoseconds per key.
+
+The cutoff experiment at `b1b1168fd4fe5d058b6c01ded14a152aee1b989e`
+selected radix above 32 records, allowing both algorithms to be measured at
+64 and 256. The two paths alternate within each process. Conditioning, when
+enabled, precedes each timed sample.
+
+| Records | Insertion, default | Radix, default | Insertion, after 100 ms scalar | Radix, after 100 ms scalar |
+| ---: | ---: | ---: | ---: | ---: |
+| 64 | 8.93–8.97 | 51.81–53.61 | 8.97–8.98 | 51.98–53.71 |
+| 256 | 43.59–43.74 | 43.41–44.14 | 43.02–43.83 | 43.61–44.21 |
+| 4,096 | 614.48–614.67 | 43.26–43.44 | 614.84–616.10 | 43.34–43.37 |
+
+Insertion clearly wins at 64, the paths overlap at 256, and radix wins at
+4,096. The selected path therefore uses insertion through 256. These are
+sorting measurements on random keys, not whole-compiler throughput claims
+or a claim that radix wins on every already ordered input.
 
 ## Integration boundary
 
