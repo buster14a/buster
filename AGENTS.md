@@ -474,6 +474,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-parallel
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
+./build/compiler test-lexer --no-digraphs --no-line-comments
 ./build/compiler benchmark-lexer src
 ./build/compiler test-preprocessor-fuzz --std c17
 ./build/compiler test-preprocessor-fuzz --std c23
@@ -648,11 +649,15 @@ with the scalar lexer token by token on:
   comment), a spliced closer, a `/*/` whose `*/` ends the comment, and a
   comment inside a preprocessing directive.
 
-`--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces. The
-command prints each check's counts and first differences, and exits with status
-1 if anything fails. The 9700X job's test step runs both modes. On that
-machine, with `build.sh`'s unoptimized build, the C and C++ runs take about
-5.7 s and 6.1 s. For a longer run:
+`--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces.
+`--no-digraphs` and `--no-line-comments` tokenize C without digraphs and without
+`//` comments (`C_TOKENIZER_NO_DIGRAPHS` and `C_TOKENIZER_NO_LINE_COMMENTS`), as
+the preprocessor lexes `-std=c89` (both), C94 (the second) and `-fno-digraphs`
+(the first): the same inputs, lexed otherwise, through every check; C++ takes
+neither (#288). The command prints each check's counts and first differences,
+and exits with status 1 if anything fails. The 9700X job's test step runs C++,
+C and C's three other modes. On that machine, with `build.sh`'s unoptimized
+build, the C and C++ runs take about 5.7 s and 6.1 s. For a longer run:
 
 ```sh
 ./build/compiler test-lexer --cplusplus --seed 7 --fuzz 2000000
@@ -668,11 +673,13 @@ without replacing the driver being developed under #116, #117 and #145.
 
 ## Lexer benchmarks
 
-`./build/compiler benchmark-lexer [--cplusplus] path...` checks each matching
-source against the scalar lexer and reports 21 interleaved-pass median
-throughput, cycles per byte, instructions per byte and IPC (hardware counters
-are zero when unavailable). Paths can be files or directories; `--cplusplus`
-selects C++ source/header extensions. The default 9700X job runs
+`./build/compiler benchmark-lexer [--cplusplus | [--no-digraphs]
+[--no-line-comments]] path...` checks each matching source against the scalar
+lexer and reports 21 interleaved-pass median throughput, cycles per byte,
+instructions per byte and IPC (hardware counters are zero when unavailable).
+Paths can be files or directories; `--cplusplus` selects C++ source/header
+extensions, and `--no-digraphs` and `--no-line-comments` C's modes, as
+`test-lexer` takes them. The default 9700X job runs
 `benchmark-lexer src` after the tests, pinned to one allowed CPU. Measurements
 are informational: correctness failures fail CI, but throughput values are not
 yet compared against a performance baseline. Keep just one compiler executable.
@@ -2444,7 +2451,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 107 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 116 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2456,7 +2463,9 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   - #193's review fixes, line markers among them;
   - the `-f` options it models (#281): GNU's keywords, `$` (what follows it
     joining the tokens after it, as clang lexes them) and char's signedness in
-    `#if`.
+    `#if`;
+  - c89's and C94's lexing without `//` comments, and c89's without digraphs,
+    pasted and stringized too, and `-f[no-]digraphs` in four modes (#288).
 
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
@@ -2480,10 +2489,12 @@ prints the first difference with the tokens around it. For files, our side
 reads clang's own predefines for the options through `--predefines`. Without
 files, `--clang` also checks the built-in predefines, the keywords and the
 features:
-- in 22 option sets (the ten modes from `c89` to `gnu23`, `-ffreestanding`,
-  `-O2`, the six ISA profiles and independent tuning), `pp_predefines` must give `clang -dM -E` line for line, but for
+- in 26 option sets (the ten modes from `c89` to `gnu23`, C94 as
+  `-std=iso9899:199409` and as `-std=c89 -fdigraphs`, C94 and `gnu89` without
+  digraphs, `-ffreestanding`, `-O2`, the six ISA profiles and independent
+  tuning), `pp_predefines` must give `clang -dM -E` line for line, but for
   the patch release's three macros;
-- in each mode, `__is_identifier` of every predefined name, and of clang's
+- in each mode (the ten and C94), `__is_identifier` of every predefined name, and of clang's
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
   must give clang's answer, and so must it in 25 sets of `-f` options
   (`pp_test_keyword_sets`: GNU's keywords on and off, in each order of

@@ -308,8 +308,23 @@ prepared fields when it first enters the file, and keeps its own state about it
 makes its own; with one, the units and lanes that share it read each file once
 (`docs/c-files.md`, #150).
 
-- **Lexing by the language mode.** The lexer has no language mode, so two of
-  clang's rules are applied around it:
+- **Lexing by the language mode.** The lexer takes some of clang's rules as
+  flags, and the others are applied around it:
+  - clang's `c89` (`c90`, `iso9899:1990`) has neither digraphs nor `//`
+    comments under `-E`, and its `iso9899:199409` (C94) is c89 with digraphs;
+    `-f[no-]digraphs` sets digraphs in any mode ("The `-f` options"). The lexer
+    lexes them so with `C_TOKENIZER_NO_DIGRAPHS` (`<:`, `:>`, `<%`, `%>` and `%:`
+    are two punctuators each, so `%:define` is no directive and `<%=` is `<` and
+    `%=`) and `C_TOKENIZER_NO_LINE_COMMENTS` (`//` is two slashes, so
+    `a //* c */ b` is `a`, `/` and `b`), which `c_language_lexer_flags` gives
+    for the mode (#288). They are among the prepare flags, so files, `_Pragma`'s
+    text, pastes (`<` `##` `:` and `/` `##` `/` form no token in c89) and the
+    file cache's key follow them. The vectorized lexer has a chunk loop for
+    each mode: without digraphs it is the default loop with another table of
+    first-character channels (the same instructions), and without `//` comments
+    its line-comment marks are empty (`docs/c-lexer.md`). clang compiles c89
+    otherwise: there `//` starts a comment, with a warning, but for a `//*`
+    before a file's first line comment, which is `/` and a block comment.
   - The `u`, `U` and `u8` prefixes are C11's, and `u8` on a character constant
     is C23's (`L` is every mode's). Before those modes, clang lexes `u'a'` as
     the identifier `u` and the constant `'a'`, so a macro named `u` expands
@@ -619,6 +634,13 @@ decides after every argument:
     separators can free a quote, as in `$1'2'`) has the whole file lexed so
     instead, since the literal takes the rest of the line. The literal prefixes
     the mode doesn't have are split after that.
+  - Digraphs follow the last of `-fdigraphs` and `-fno-digraphs`, or else the
+    mode, which has them but in `c89` (#288). So `-std=c89 -fdigraphs` is C94,
+    whose `__STDC_VERSION__` is `199409L` (clang's `LangOptions::getCLangStd`
+    gives it to any C89 mode that isn't GNU and has digraphs), and
+    `-std=iso9899:199409 -fno-digraphs` is c89, without `__STDC_VERSION__`.
+    `CLanguage.digraphs` holds the choice (`c_language_digraphs`), and
+    `-std=iso9899:199409` sets it. No option changes `//` comments.
   - Character constants in `#if` follow the last of `-funsigned-char` and
     `-fno-signed-char` (unsigned) and `-fsigned-char` and `-fno-unsigned-char`
     (signed, the default). With unsigned char, `'\xff'` is 255 and an ordinary
@@ -633,9 +655,7 @@ decides after every argument:
     `-fborland-extensions`, `-fdeclspec`, `-fzos-extensions`, `-ffixed-point`,
     `-fdefer-ts`, and `-fzvector` whatever follows it (clang's driver never
     passes `-fno-zvector` on), but in assembly, where clang ignores it;
-  - lexing buster doesn't do: `-fno-digraphs`, `-fdigraphs` in `c89` (which
-    clang makes C94, with `__STDC_VERSION__` `199409L`), and
-    `-fraw-string-literals`;
+  - lexing buster doesn't do: `-fraw-string-literals`;
   - `-fshort-wchar`, whose 16-bit unsigned `wchar_t` changes wide character
     constants in `#if`;
   - `-E`'s other modes (`-fdirectives-only`, `-fkeep-system-includes`,
@@ -1086,7 +1106,12 @@ full-corpus reproduction and frozen CI subset.
     `$` joining the tokens after it, in C, C23 and assembly (#283's review):
     prefixed literals (`u8'x'` from C23 only), one across a line splice,
     pp-numbers, and a quote a digit separator frees; and character constants in
-    `#if` with unsigned and signed char, multi-character ones among them.
+    `#if` with unsigned and signed char, multi-character ones among them;
+  - c89's and C94's lexing (#288): digraphs and `//` in both (`%:define`, `<%=`,
+    `<::>`, `//*` and a macro whose body takes `//`), stringized and pasted
+    (`<` `##` `:`, `/` `##` `/` and `%:` `##` `%:` in c89, which fail, and in
+    C94, where `%:%:` pastes), and `-f[no-]digraphs` in `c89`, C94, `gnu89` and
+    `gnu17`.
 
   A case can name more files, and options for both sides (`-I`, `-include`,
   with `%d` for its directory), and the text `-E` prints with line markers. A
@@ -1104,9 +1129,10 @@ full-corpus reproduction and frozen CI subset.
   `--clang` by clang.
 - **Predefines and keywords.** The cases and files under `--clang` give our side
   clang's predefines, so `--clang` checks our built-in ones separately:
-  - In ten language modes (`c89` to `gnu23`), with `-ffreestanding` and with
-    `-O2`, the six target profiles and independent tuning, 22 option sets in all,
-    `pp_predefines` must give `clang -dM -E` line
+  - In ten language modes (`c89` to `gnu23`) and C94 (`iso9899:199409`, and
+    `c89` with `-fdigraphs`), with `-ffreestanding` and with `-O2`, without
+    digraphs in C94 and `gnu89`, the six target profiles and independent tuning,
+    26 option sets in all, `pp_predefines` must give `clang -dM -E` line
     for line. Only the three macros that name clang's patch release are left
     out.
   - In each mode, `__is_identifier` of every predefined name (keywords,
@@ -1121,11 +1147,12 @@ full-corpus reproduction and frozen CI subset.
     keyword.
   - In each mode, `__has_feature` and `__has_extension` of every name in clang
     23's `Features.def` (251) must give clang's answers.
-- **`-f` options** (#281, `pp_test_option_refusals`). Each of 60 option sets
+- **`-f` options** (#281, `pp_test_option_refusals`). Each of 63 option sets
   must be refused, with a message naming the option, or taken without one: every
   refused family where its last option turns it on, after its `-fno-` form, and
   turned off again; `-fzvector` before `-fno-zvector` and in assembly; digraphs
-  off, and on in `c89`; the charsets in either case. With `--clang`, clang's `-E`
+  on and off in `c17`, on in `c89` and off in C94, and both modes alone (#288);
+  the charsets in either case. With `--clang`, clang's `-E`
   of a probe must change with each refused set, from the set's `-std=` alone or
   no options, which is why it is refused; and each taken set must give clang's
   tokens, by both kernels.
@@ -1261,10 +1288,12 @@ spellings alone would miss this change (#272).
   clang's without options, so `-fblocks`, `-fno-builtin`, `-fno-gnu-inline-asm`
   and the other options that change clang's answers (#281's item 5) don't
   change ours.
-- `-std=c89` lexes digraphs and `//` comments, neither of which clang's c89
-  has, and the GNU modes lex no raw string literals (`R"x(...)x"`), which
-  clang's do. The `-f` options that would change these are refused
-  ("The `-f` options").
+- The GNU modes lex no raw string literals (`R"x(...)x"`), which clang's do.
+  `-fraw-string-literals`, which would change it, is refused ("The `-f`
+  options").
+- c89 and C94 are lexed as clang's `-E` lexes them, without `//` comments. A
+  compile driver would need clang's compiling rule there (`//` comments but for a
+  `//*` before a file's first one), or to refuse those modes (#288).
 - The printer's spacing differs from clang's in places. It puts a space between
   `<` and `>`, where clang doesn't, and it doesn't indent a line's first token
   to its column. Line markers differ in form but not in what they say: clang
