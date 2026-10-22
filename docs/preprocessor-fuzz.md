@@ -135,7 +135,8 @@ are lexed as `preprocessor_fuzz_lex_printed` says:
 - A pragma's tokens aren't among clang's either. A pragma whose tokens are
   expanded (`#pragma omp`) can go on past such a token on its line, and
   there nothing confirms its end: the case counts as unverified, apart from
-  the cases compared. Seed 133's case 832692, in C17, was the first, in 3.5
+  the cases compared. A run with any unverified case fails qualification.
+  Seed 133's case 832692, in C17, was the first, in 3.5
   million cases per mode.
 - A comment can only be a `/` printed before a `*` or a `/`, and a line
   splice a `\` before a newline. Their `/` and `\` are tokens, and lexing goes
@@ -266,7 +267,9 @@ five sources whose output has a token that clang's text runs on past
 (`pp_fuzz_ends_cases`), each of which must agree with clang, confirmed by
 clang's tokens (or unverified, on a `#pragma omp`'s line), and must differ
 with its first such token one byte shorter, the first source by clang's
-tokens alone (`pp_fuzz_check_ends_cases`); and a
+tokens alone (`pp_fuzz_check_ends_cases`). The pragma source also runs through
+the actual comparison-accounting path and must count as unverified, with
+zero verified comparisons; and a
 comparison whose tokens don't fit its arena, which must leave its case
 without a result (`pp_fuzz_check_failed_comparison`). The harness's own tests
 (`test-preprocessor-fuzz`) check the reader of clang's token dump on lines
