@@ -971,6 +971,17 @@ test prints their lines and adds their counts in the runs' order (clang's,
 then GCC's, each at 16, 32 and 64 bytes), and a run that fails keeps its
 files. Seeds 1 to 100 pass, with clang 23.1.3 and GCC 16.2.1.
 
+Capture descriptors stay above stderr, even when the command starts with
+standard streams closed. Before the ordinary cross-check, bounded child
+processes exercise all eight combinations of open/closed standard descriptors
+with `/bin/false` as both compilers. Each must exit 1, preserve the standard
+descriptors' state and retain all six runs' failure files; the regression
+then removes its own files. A 10-second alarm and an 8 MiB file-size limit
+bound a replay that regresses into writing back into its capture. Two more
+children exhaust the descriptor limit at duplication and at the second
+capture, checking cleanup and failure accounting. These checks have their
+own tally and were added after the timings above.
+
 ## Measurements on the 9700X
 
 `benchmark-calling-convention` (AGENTS.md has its options) on the Ryzen 7

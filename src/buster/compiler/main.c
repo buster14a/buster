@@ -193,6 +193,14 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/assembler_test.c"
 #include "buster/compiler/assembler_benchmark.c"
 
+// What the x86 forms a code generator emits mean (their effects, the immediate's contract, the operand-resolved effects
+// and the value-preserving form choice) and its tests, for the test-x86-semantics command (which takes the encoder's
+// tests' printer and branch sizing's tests' runner, and checks x86_match.c's ranges). Its benchmark is another
+// translation unit.
+#include "buster/compiler/x86_semantics.c"
+#include "buster/compiler/x86_semantics_test.c"
+int run_x86_semantics_benchmark(int argc, char** argv);
+
 // The C type table (TypeIds, hash-consing, layout, conversions, compatibility and printing) and its tests, for the
 // test-types command. Its benchmark is another translation unit.
 #include "buster/compiler/c_types.c"
@@ -251,6 +259,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && (strcmp(argv[1], "assemble") == 0 || strcmp(argv[1], "-c") == 0))
     {
         result = run_assembler_command(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-x86-semantics") == 0)
+    {
+        result = run_x86_semantics_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-semantics") == 0)
+    {
+        result = run_x86_semantics_benchmark(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "test-assembler") == 0)
     {
