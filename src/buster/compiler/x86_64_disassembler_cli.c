@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// Raw binary command-line adapter; the core decoder does no allocation or I/O.
+// Raw binary command-line adapter. Initialization retains compact lookup storage; decoding itself allocates
+// nothing and performs no I/O. The command buffers complete lines and reports delayed stdout failures too.
 
 static int run_x86_disassembler(int argc, char** argv)
 {
@@ -40,7 +41,7 @@ static int run_x86_disassembler(int argc, char** argv)
     }
     if (valid && assembly)
     {
-        printf(".intel_syntax noprefix\n.arch .mpx\n.arch .amx_transpose\n.arch .amx_tf32\n.text\n");
+        valid = printf(".intel_syntax noprefix\n.arch .mpx\n.arch .amx_transpose\n.arch .amx_tf32\n.text\n") >= 0;
     }
     uint64_t consumed = 0;
     X86DecodeStatus status = X86_DECODE_OK;
@@ -48,29 +49,23 @@ static int run_x86_disassembler(int argc, char** argv)
     {
         X86Decoded decoded[1024];
         const X86DecodeResult result = scalar ? x86_disassemble_scalar(bytes + consumed, size - consumed, decoded, BUSTER_ARRAY_LENGTH(decoded)) : x86_disassemble(bytes + consumed, size - consumed, decoded, BUSTER_ARRAY_LENGTH(decoded));
+        char text[64 * 1024];
+        uint32_t used = 0;
         for (uint64_t i = 0; i < result.count && valid; i += 1)
         {
-            char text[512];
-            valid = x86_disassembly_format(&decoded[i], text, sizeof(text)) >= 0;
+            const int64_t length = assembly ? (scalar ? x86_disassembly_format_scalar(&decoded[i], text + used, sizeof(text) - used - 1) : x86_disassembly_format(&decoded[i], text + used, sizeof(text) - used - 1)) :
+                                             x86_disassembly_listing(&decoded[i], bytes + consumed, (uint32_t)consumed, text + used, sizeof(text) - used - 1, scalar);
+            valid = length >= 0;
             if (valid)
             {
-                if (!assembly)
+                used += (uint32_t)length;
+                text[used] = '\n';
+                used += 1;
+                if (sizeof(text) - used < 1024 || i + 1 == result.count)
                 {
-                    printf("%08llx  ", (unsigned long long)(consumed + decoded[i].offset));
-                    for (uint32_t j = 0; j < 15; j += 1)
-                    {
-                        if (j < decoded[i].length)
-                        {
-                            printf("%02x ", bytes[consumed + decoded[i].offset + j]);
-                        }
-                        else
-                        {
-                            printf("   ");
-                        }
-                    }
-                    printf(" ");
+                    valid = fwrite(text, 1, used, stdout) == used;
+                    used = 0;
                 }
-                printf("%s\n", text);
             }
         }
         consumed += result.consumed;
@@ -81,9 +76,11 @@ static int run_x86_disassembler(int argc, char** argv)
     {
         munmap(bytes, size);
     }
+    const bool flushed = fflush(stdout) == 0;
+    valid = valid && flushed && !ferror(stdout);
     if (!valid)
     {
         fprintf(stderr, "disassemble: %s at byte 0x%llx; usage: disassemble [--scalar] [--assembly] raw-binary\n", status == X86_DECODE_TRUNCATED ? "truncated instruction" : status == X86_DECODE_UNSUPPORTED ? "unsupported instruction or prefix sequence" : "input or formatting failure", (unsigned long long)consumed);
     }
-    return valid && !ferror(stdout) ? 0 : 1;
+    return valid ? 0 : 1;
 }

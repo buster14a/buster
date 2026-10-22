@@ -5,6 +5,8 @@ slices into the encoder's semantic instruction records and retains each input
 instruction's offset and encoded length. Its AVX-512 path and scalar reference
 share the form catalogue; the scalar reference retains the full operand validator
 as an independent check on optimized validation. It does not execute input.
+`x86_64_disassembly.c` supplies planned Intel formatting and SIMD address/byte
+listings, with the original bounded scalar formatter retained as a separate oracle.
 
 ```sh
 ./build/compiler disassemble input.text
@@ -32,6 +34,9 @@ An instruction's presence does not imply that the Zen 5 host can execute it.
 APX BMI/NF encodings in EVEX maps 1–3 are also excluded. UD0 and UD1 use the
 ModRM interpretation; their operand-less two-byte catalogue aliases are not
 decoded as complete instructions. A two-byte `0f ff` or `0f b9` is truncated.
+The current catalogue has 5,807 admitted rows and 11,609 valid row/address-size
+combinations. This pass completes verification of that contract; it does not
+add APX, the other excluded EVEX maps, or another execution mode.
 
 Legacy prefixes must match a catalogue sequence, followed by at most one REX.
 FS/GS and address-size overrides are extracted separately. Repeated overrides,
@@ -42,6 +47,9 @@ Clang's long alignment NOPs: repeated `66` and ignored `2e` prefixes before
 valid machine code outside this supported subset. No byte-skipping recovery is
 attempted; `consumed` identifies the first undecodable instruction.
 Ignored W/L settings without a matching catalogue row are also outside the subset.
+`9b` is a standalone FWAIT unless the following bytes complete a supported waiting
+x87 form. For example, `9b 9b db e3` decodes as FWAIT followed by FINIT, not one
+instruction with repeated waiting prefixes.
 An incomplete supported encoding is `TRUNCATED`; required bytes beyond x86's
 15-byte limit are `UNSUPPORTED`. Output exhaustion returns `OUTPUT_FULL` after
 the complete prefix of records. Null pointers for nonempty slices, a source larger
@@ -74,6 +82,9 @@ targets use `. + encoded_length + displacement`, rather than a bare numeric
 displacement that GNU as would interpret as an absolute target. Formatting
 preserves the decoded instruction's semantics; it is not an exact byte dump or
 a claim that the assembly frontend implements every printed catalogue form.
+`--assembly` emits the GNU-as syntax and MPX/AMX feature directives used by the
+reassembly oracle. The listing command buffers complete lines and explicitly
+flushes stdout, so delayed output failures produce a failing exit status.
 
 ## Data layout and vector work
 
@@ -85,6 +96,15 @@ post-opcode bytes, ModRM `/digit` and memory/register admission where applicable
 Embedded-rounding forms mask the length bits used for rounding. Missing trailing
 bytes are excluded from signature comparison so an incomplete candidate still
 receives the correct truncation result.
+
+The default path additionally compresses VEX/EVEX signature lookup. Each bucket
+checks its common bits once; `PEXT` packs the remaining varying bits into an
+exact-size cell table. A unique cell names a candidate, an empty cell rejects it,
+and an ambiguous cell retains the ordered SIMD scan. Wildcard rows populate all
+matching cells. Incomplete headers still take the ordinary matcher so missing
+signature bytes do not turn truncation into unsupported input. Candidate construction
+and operand validation remain mandatory after a direct lookup. The basic `avx512`
+and `compact` benchmark controls retain the original bucket scan.
 
 The basic AVX-512 matcher classifies 64 input bytes at once using two nibble-table byte
 shuffles and a mask intersection. It reuses the prefix mask across instructions
@@ -118,10 +138,23 @@ windows and zero-length tails. Neither input padding nor readable bytes after
 the slice are required. Output stores publish one complete record at a time
 within capacity. Initialization must finish before concurrent readers begin;
 the public initializer also initializes the encoder's validation prerequisites.
-Tables are read-only thereafter and decode calls allocate nothing. Source and
+It allocates two retained regions: the exact padded signature arrays and compressed
+index cells. Initialization returns false on allocation failure, releases a partial
+allocation and permits a later retry. Storage lasts for the process; no reset or
+destructor is provided. Tables are read-only thereafter and decode calls allocate nothing. Source and
 output record storage must not overlap; in-place expansion is unsupported.
 Formatting accepts a successfully decoded record and a separate bounded output
 buffer, returns its NUL-terminated text length, or `-1` when capacity is insufficient.
+
+Formatting plans resolve operand roles, register classes, prefixes, memory sizes
+and a conservative output bound once per supported form. With enough capacity,
+the writer copies packed register tokens, converts decimal digits in pairs and
+uses an XMM nibble shuffle for hexadecimal immediates. Smaller buffers retain the
+fully bounded scalar writer. A listing converts up to fifteen instruction bytes
+with masked loads and in-register byte permutations, then stores the exact fixed
+56-byte address/byte prefix. The scalar text and listing paths remain independent
+references. Operand selection and decimal conversion are still scalar; formatting
+is not described as entirely vectorized.
 
 The design follows uops.info's measured Zen 5 costs:
 [VPSHUFB](https://uops.info/html-instr/VPSHUFB_ZMM_ZMM_ZMM.html#ZEN5) is one
@@ -137,6 +170,12 @@ has the same cost. These permutations use FP1/FP2.
 costs 64 executed uops and about 12.6 cycles per instruction. The decoder uses
 contiguous loads and in-register tables, with no gather. These measurements
 explain candidates; actual 9700X measurements select the implementation.
+For the compressed index, [PEXT](https://uops.info/html-instr/PEXT_R64_R64_R64.html#ZEN5)
+is one executed uop with three-cycle measured latency and 0.33-cycle throughput.
+The formatter's [XMM VPSHUFB](https://uops.info/html-instr/VPSHUFB_XMM_XMM_XMM.html#ZEN5)
+has two-cycle measured latency, unlike the one-cycle ZMM form above; both have
+0.5-cycle throughput. These widths and operand forms are kept distinct when
+explaining the emitted code.
 
 ## Validation and measurement
 
@@ -147,11 +186,23 @@ truncation, bounded formatting and input/output guard pages. The fixtures includ
 non-shortest displacements and VEX prefixes, high EVEX registers, masks, signed
 relative targets and immediates, broadcasts and rounding. GNU objdump supplies
 an independent boundary/mnemonic oracle; GNU as reassembles formatted operands
-for a generated stream whose encoding choices are pinned independently of the
-decoder. Scalar/vector agreement alone cannot validate shared catalogue facts.
+for both the exhaustive supported catalogue and a random generated stream whose
+encoding choices are pinned independently of the decoder. A NOP separates a
+standalone FWAIT in generated streams so objdump cannot fold it into the next
+instruction. Raw byte fixtures separately test waiting-instruction boundaries.
+GNU objdump's PCLMUL immediate-02/03 display aliases are accepted only for the
+mnemonic comparison; exact GNU-as operand roundtrips still check the original
+immediate. Scalar/vector agreement alone cannot validate shared catalogue facts.
+
+Every decoded record also compares the optimized and full scalar text and listing
+writers. All supported forms exercise capacities from zero through their planned
+bound at a guard page. Command tests compare empty, one-instruction and 3,073-instruction
+files against the original scalar output convention in both modes and paths, and
+check delayed `/dev/full` failures. The larger file crosses record and text-buffer
+boundaries.
 
 The benchmark reports decode, a standalone prefix-classification diagnostic,
-and decode plus formatting separately. The classification diagnostic scans
+decode plus Intel formatting, and decode plus address/byte listing separately. The classification diagnostic scans
 nonoverlapping 64-byte chunks; it is not a measurement of all header/boundary
 work inside the decoder. The ordinary stream mixes arithmetic, loads/stores, addressing,
 branches, stack operations and SSE. The vector stream adds masked AVX-512
@@ -163,13 +214,16 @@ Each result is a median of 21 interleaved passes with retained batches of at
 least 2 ms, reporting ns, hardware cycles and instructions per instruction
 (per byte for classification). The min/max are observed samples, not confidence
 intervals. `--only scalar|compact|avx512|batched` isolates an implementation.
-`--phase decode|classify|format` isolates work for profiling; `--iterations N`
+`--phase decode|classify|format|listing` isolates work for profiling; `--iterations N`
 fixes the number of stream decodes per sample instead of calibrating to 2 ms.
 `--after-scalar MS` runs the scalar decoder as warm work before each sample;
 this is a transition-sensitive burst measurement, distinct from sustained
 back-to-back runs. Hardware counters are zero when unavailable. Initialization,
 input generation and file I/O are excluded; the decode-plus-format phase
-includes formatting but excludes terminal I/O.
+includes formatting but excludes terminal I/O. Compiler memory barriers make all
+published records and all rendered text observable. Initialization reports the
+normal and address32 encoder prerequisites separately from decoder/formatter setup;
+table bytes include the formatting plans and compressed lookup cells.
 
 ## Recorded validation
 
@@ -192,7 +246,7 @@ An `-O1 -fsanitize=address,undefined -fno-omit-frame-pointer` harness with the
 unchanged `d2c7561` decoder also passed seed 7, dense streams, guards and the raw
 Clang corpus without sanitizer findings.
 
-## Zen 5 measurements
+## Initial implementation measurements (PR #240)
 
 These results use the production `build/compiler` built at `d2c7561` on the
 Ryzen 7 9700X with Clang 23.1.1, `-O3 -march=native`, pinned to CPU 2 and taking
@@ -233,7 +287,7 @@ ordinary mix, and 1.88 times on the Clang corpus. Its vector-heavy result is
 7.8% slower than the basic SIMD matcher and 4.3% slower than compact scalar;
 this is an explicit workload tradeoff, not a universal batching win.
 
-Formatting remains a scalar bounded writer. Adding it changes ordinary default
+At this revision formatting used the original scalar bounded writer. Adding it changes ordinary default
 time from 7.579 to 42.056 ns/instruction, so decode-only speedups do not describe
 the full command. Replacing repeated formatted-print calls with bounded text and
 integer writers reduced that cost during development. Signature comparison and
