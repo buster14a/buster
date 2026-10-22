@@ -920,7 +920,17 @@ informational.
   and a fini function must have every class but the C runtime's (`INIT` and
   `FINI`) and every kind its options allow, and a copy of the defaults'
   program with the hexadecimal digits' fixup one byte off must print
-  something else.
+  something else;
+- and two shared libraries, the two sets that call libc as libraries
+  (`LinkProgramOptions.shared`, from seeds of their own; the other checks that
+  take test-link's sets don't): position-independent code whose exports are
+  its functions (the workers, `buster_mix` and the entry,
+  `buster_library_main`, which takes `main`'s arguments), every other global
+  symbol hidden, the thread-locals reached with initial-exec, and each
+  function's FDE at a local symbol at its start. Each is generated and run as
+  the others are, through its entry, and must have no local-exec access, no
+  `PC32`, `PC64` or size of a symbol another object may preempt, its exports
+  exactly its functions, and each FDE at a local symbol.
 
 `--seed N` changes the random records and programs. The programs check is
 what scales: `--functions 1000000` builds three programs of a million workers
@@ -933,7 +943,10 @@ class's section, with a label at each symbol and a `.reloc` for each fixup, so
 GNU as's object of a unit is a reference for the object writer's. To check
 the programs with real toolchains, assemble every unit, then link each
 program, run it and compare what it prints (the `static-*` directories with
-`-static -e _start`, the `libc-*` ones through `cc`):
+`-static -e _start`, the `libc-*` ones through `cc`, and the `shared-*` ones
+with `cc -shared`, each loaded by a program that calls its
+`buster_library_main` with `main`'s arguments, as test-object-writer's
+harness does):
 
 ```sh
 ./build/compiler test-link --print-assembly build/programs
@@ -943,6 +956,9 @@ for d in build/programs/static-*; do
 done
 for d in build/programs/libc-*; do
     cc -o $d/program $d/unit_*.o && $d/program | cmp - $d/expected
+done
+for d in build/programs/shared-*; do
+    cc -shared -o $d/library.so $d/unit_*.o && ./harness $d/library.so | cmp - $d/expected
 done
 ```
 
@@ -960,12 +976,12 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 `./build/compiler test-object-writer [--seed N] [--cross-check] [--keep]` checks
 `object_writer.c`:
 
-- objects: each unit's object of `test-link`'s seven programs (with 500 workers
-  in the one that takes `--functions`), of a link made by hand (gaps between
-  atoms, an atom of no size, weak, hidden and protected symbols, pointers into
-  a string pool, a call to and a pointer to a local IFUNC, units without atoms
-  between and after the others) and of a link without atoms, with and without
-  function sections.
+- objects: each unit's object of `test-link`'s seven programs and two shared
+  libraries (with 500 workers in the one that takes `--functions`), of a link
+  made by hand (gaps between atoms, an atom of no size, weak, hidden and
+  protected symbols, pointers into a string pool, a call to and a pointer to a
+  local IFUNC, units without atoms between and after the others) and of a link
+  without atoms, with and without function sections.
   Each is built twice, the second time over poisoned memory, and must come out
   the same; the test's own ELF reader reads it back and checks the rules every
   object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC`);
@@ -996,10 +1012,12 @@ segment off its alignment when told where: seed 1's `static-defaults` with
     symbols and relocations, which must be what the test's reader read, field
     by field;
   - GNU ld, lld, mold and wild link each program's objects, without errors or
-    warnings: the static programs with `-static -e _start`, and the ones that
-    call libc through `cc` as a PIE, with `-no-pie` and with `-static`. The
-    executable must exit with status 0 having printed what the program's model
-    predicts. wild links only the programs without `SIZE32` and `SIZE64`, which
+    warnings: the static programs with `-static -e _start`, the ones that
+    call libc through `cc` as a PIE, with `-no-pie` and with `-static`, and
+    the shared libraries through `cc -shared`, each loaded by a harness that
+    `cc` builds, which calls its `buster_library_main` with `main`'s
+    arguments (`dlopen` and `dlsym`). The executable (or the harness) must
+    exit with status 0 having printed what the program's model predicts. wild links only the programs without `SIZE32` and `SIZE64`, which
     wild 0.10 refuses, and among them one of 33,000 functions past
     `SHN_LORESERVE` sections. The same linkers link, the same three ways, a
     program whose `main` calls a local IFUNC directly and through a pointer,
