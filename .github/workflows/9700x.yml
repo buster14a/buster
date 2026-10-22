@@ -294,6 +294,18 @@ jobs:
             --files-from tests/preprocessor-oracle/musl-subset.txt --root "$musl" --report build/oracle-musl.tsv
           awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 4 && NR == 5) }' build/oracle-musl.tsv
 
+      - name: Test the per-file jobs
+        # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams, and
+        # each unit the spellings it gives alone. Uses the predefines "Benchmark the preprocessor on main.c" wrote.
+        run: |
+          ./build/compiler test-files
+          ./build/compiler test-files --flat src
+          ./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+
+      - name: Benchmark the per-file jobs on the repository's translation units
+        # Without taskset: it pins each lane to an allowed CPU of its own.
+        run: ./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+
       - name: Test the C type table
         # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a
         # random world of types against clang's: clang -fsyntax-only on _Static_asserts, the same file compiled and
