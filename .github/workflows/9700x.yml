@@ -98,9 +98,12 @@ jobs:
       - name: Benchmark Zen 5 cost lookup
         run: |
           cpu=2
-          taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
-          taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
-          taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
+          for sample in 1 2 3; do
+            echo "Zen 5 lookup sample $sample"
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
+          done
 
       - name: Test the x86-64 disassembler against GNU tools
         run: |

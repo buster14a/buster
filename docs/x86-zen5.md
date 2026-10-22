@@ -148,12 +148,43 @@ nanoseconds and core cycles per ID, and can run each implementation alone or aft
 conditioning. It measures a hot 65,536-ID synthetic column and its outputs.
 It is not a whole-compiler or generated-program speed measurement.
 
+## Recorded observations
+
+The [2026-10-22 evidence](measurements/x86-zen5-2026-10-22/README.md) retains
+three complete 9700X processes, their source/binary identities, generated-code
+hashes, reductions and lookup observations. All three agree on every code hash;
+their independent-throughput medians differ by at most 0.0535%.
+
+| Observed case | GPR latency (cycles) | Block throughput (cycles/instruction) | Retired macro-ops |
+| --- | ---: | ---: | ---: |
+| Regular integer ALU and simple LEA | 1 | about 0.18836 | 1 |
+| Zeroing XOR | unknown | 0.14172 | 1 |
+| Immediate shifts | 1 | 0.33475 | 1 |
+| Two-/three-operand IMUL | 3 | 0.33336 | 1 |
+| Scaled LEA plus displacement | 2 | about 0.45686 | 2 |
+| MOV r32, imm32 | unknown | 0.16741 | 1 |
+| MOV r64, imm64 | unknown | 0.33478 | 1 |
+| Aligned L1 MOV load | 4 (address to data) | 0.25003 | about 1 |
+
+These are the explicit fixtures' measurements, including loop overhead. The
+table stores throughput and macro-ops rounded to 1/256, and dependent GPR
+latencies rounded to whole cycles. It does not extrapolate them to all operand
+values, addresses, flags or layouts. Of the 57 cases, all have measured
+throughput and retired macro-ops; 53 have measured GPR dependency latency.
+The other four columns remain unknown for every case.
+
 ## Validation and provenance
 
 `test-x86-zen5` compares every byte ID for every length from 0 through 256,
 every column, and tails ending at guard pages. It checks operand distinctions,
 unknown fields and unsupported cases, then validates, cross-encodes and runs
 every generated loop. Timing values are not hard correctness thresholds in CI.
+
+The local ASan/UBSan run also executes these tests. Only Clang's function-type
+metadata probe is disabled at the generated-code call boundary: the generated
+entry point has no Clang metadata before it. Address checks and the other
+undefined-behavior checks still cover the wrapper, fixture construction, model
+and lookups.
 
 The implementation, fixtures and measurement data are original project work.
 No uops.info XML, XED data, LLVM scheduling table, nanoBench implementation or

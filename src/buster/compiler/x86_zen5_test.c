@@ -82,8 +82,18 @@ static bool x86_zen5_test_cases(void)
     bool valid = true;
     for (uint32_t id = 1; id < X86_COST_COUNT; id += 1)
     {
+        const X86CostCase* entry = &x86_zen5_cases[id];
         X86Instruction instruction = x86_zen5_fixture(id, X86_REGISTER_RAX, X86_REGISTER_R14, false);
         valid &= x86_validate(&instruction, 1) == 1 && x86_zen5_id(&instruction) == id;
+        const uint32_t observed = (1u << X86_COST_THROUGHPUT) | (1u << X86_COST_RETIRED_OPS);
+        valid &= x86_zen5_missing(&instruction, 1, observed) == 0;
+        valid &= entry->throughput != 0 && entry->retired_ops != 0;
+        // A repeated destination is not an input dependency for zeroing XOR or an immediate move. Their measured
+        // throughput must not turn into a fabricated fractional GPR latency when refreshing the observations.
+        const bool dependency = entry->operands != X86_COST_ZERO && entry->form != X86_FORM_MOV_R32_IMM32 && entry->form != X86_FORM_MOV_R64_IMM64;
+        valid &= x86_zen5_missing(&instruction, 1, 1u << X86_COST_GPR_LATENCY) == !dependency;
+        valid &= x86_zen5_missing(&instruction, 1, 1u << X86_COST_FLAGS_LATENCY) == 1;
+        valid &= x86_zen5_missing(&instruction, 1, 1u << X86_COST_LOAD_EXTRA) == 1;
         valid &= x86_zen5_missing(&instruction, 1, 1u << X86_COST_PIPES) == 1;
         valid &= x86_zen5_missing(&instruction, 1, 1u << X86_COST_EXECUTED_UOPS) == 1;
         for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
