@@ -2045,7 +2045,7 @@ __attribute__((cold, noinline)) static AbiRare abi_vector_llvm(AbiTable* abi, co
     }
     else if (x87 || narrow)
     {
-        abi->storage[index] = (uint8_t)packed_log2;
+        abi->storage[index] = packed_log2 > BUSTER_ABI_STORAGE_ALIGNMENT ? BUSTER_ABI_STORAGE_INEXACT : (uint8_t)packed_log2;
     }
     // A copy: the LLVM type's bytes, which may be fewer than the C type's (SMALLER: the rest is padding there).
     const uint64_t integer_bytes = (((integer_bits + 7) / 8) + (1ull << integer_log2) - 1) & ~((1ull << integer_log2) - 1);

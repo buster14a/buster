@@ -1004,6 +1004,22 @@ static void abi_test_build_split_vectors(AbiTestBuilder* builder)
     abi_test_vector_refused(builder, "enum : bool ext16", type_vector(table, bool_enum, 16, true), any, none, none);
     abi_test_vector_copy(builder, "enum : bool ext65", type_vector(table, bool_enum, 65, true), 16, 7, none, none);
     abi_test_result_detail(builder, demoted, 0, none);
+    // Packed vector alignments past 2^15 do not fit the storage column. Preserve INEXACT rather than wrapping into I128.
+    const TypeId wide_packed[] = {
+        type_vector(table, BUSTER_TYPE_LONG_DOUBLE, 4096, true),
+        type_vector(table, type_bit_int(table, 4, true), 131072, true),
+    };
+    const char* wide_names[] = {
+        "_Atomic {long double ext4096[0]}",
+        "_Atomic {unsigned _BitInt(4) ext131072[0]}",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(wide_packed); i += 1)
+    {
+        m[0] = abi_test_member(builder, type_array(table, wide_packed[i], 0));
+        const TypeId atomic = type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+        abi_test_expectation(builder, wide_names[i], atomic, BUSTER_ABI_IN_MEMORY,
+                             BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_AGGREGATE | BUSTER_ABI_PASS_LARGER | refused, 0, any, none, none);
+    }
     // Long doubles.
     const TypeId long_double1 = abi_test_vector(builder, BUSTER_TYPE_LONG_DOUBLE, 16);
     const TypeId long_double2 = abi_test_vector(builder, BUSTER_TYPE_LONG_DOUBLE, 32);
