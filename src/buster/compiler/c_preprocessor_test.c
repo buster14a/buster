@@ -120,26 +120,33 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
     return result;
 }
 
-// Lexes a text as the language mode does: c_tokenize, with '$' as punctuation where it is (`dollars`,
-// pp_dollar_punctuation: C_TOKENIZER_NO_DOLLARS, the scalar lexer's, not the stream's pp_split_dollars), then the
-// prefixed literals the mode doesn't have split, by `split` (pp_split_kinds). Returns the count, or -1.
-static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
+// The lexer's flags a run's printed text lexes back with, and clang's text and a case's expected text: the mode's, without
+// trigraphs (no printer leaves one) and with C_TOKENIZER_NO_DOLLARS where '$' is punctuation (pp_dollar_punctuation, the
+// scalar lexer's, not the stream's pp_split_dollars).
+static uint32_t pp_test_lex_flags(const Preprocessor* pp)
 {
-    int64_t result = c_tokenize(text, length, kinds, starts, ends, dollars ? C_TOKENIZER_NO_DOLLARS : 0);
+    return (pp->refine_flags & ~(uint32_t)C_TOKENIZER_TRIGRAPHS) | (pp_dollar_punctuation(&pp->options) ? C_TOKENIZER_NO_DOLLARS : 0);
+}
+
+// Lexes a text as the language mode does: c_tokenize with the mode's `flags` (pp_test_lex_flags), then the prefixed
+// literals the mode doesn't have split, by `split` (pp_split_kinds). Returns the count, or -1.
+static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, uint32_t flags, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
+{
+    int64_t result = c_tokenize(text, length, kinds, starts, ends, flags);
     const uint32_t splits = result > 0 ? pp_count_splits_scalar(kinds, (uint32_t)result, split) : 0;
     result = splits != 0 ? pp_split_prefixes(text, kinds, starts, ends, (uint32_t)result, splits, split) : result;
     return result;
 }
 
-// The spellings of a text's tokens, as the language mode lexes them (`split` and `dollars`, as pp_test_lex takes them).
-static bool pp_text_spellings(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, PPSpellings* spellings)
+// The spellings of a text's tokens, as the language mode lexes them (`split` and `flags`, as pp_test_lex takes them).
+static bool pp_text_spellings(const uint8_t* text, uint64_t length, uint64_t split, uint32_t flags, PPSpellings* spellings)
 {
     const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(length);
     Arena arena = arena_reserve(capacity * 9 + 256);
     uint8_t* kinds = arena_push(&arena, capacity, 64);
     uint32_t* starts = arena_push_array(&arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(&arena, capacity, sizeof(uint32_t), 64);
-    const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? pp_test_lex(text, length, split, dollars, kinds, starts, ends) : -1;
+    const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? pp_test_lex(text, length, split, flags, kinds, starts, ends) : -1;
     bool result = count >= 0 && pp_spellings_initialize(spellings, (uint64_t)count + 1, length + 64);
     for (int64_t i = 0; result && i < count; i += 1)
     {
@@ -317,7 +324,7 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
         free(scalar_text);
     }
     PPSpellings printed = { 0 };
-    result = result && pp_text_spellings((const uint8_t*)text, length, pp->split_kinds, pp_dollar_punctuation(&pp->options), &printed);
+    result = result && pp_text_spellings((const uint8_t*)text, length, pp->split_kinds, pp_test_lex_flags(pp), &printed);
     if (result)
     {
         char label[256];
@@ -529,7 +536,7 @@ static bool pp_marker_line(const uint8_t* text, uint64_t at, uint64_t end, uint3
     return result;
 }
 
-static bool pp_placed_tokens(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, PPPlaced* placed)
+static bool pp_placed_tokens(const uint8_t* text, uint64_t length, uint64_t split, uint32_t flags, PPPlaced* placed)
 {
     uint64_t line_count = 1;
     for (uint64_t i = 0; i < length; i += 1)
@@ -595,7 +602,7 @@ static bool pp_placed_tokens(const uint8_t* text, uint64_t length, uint64_t spli
             at = end + 1;
         }
         line_starts[line_count] = UINT64_MAX;
-        const int64_t count = pp_test_lex(blank, length, split, dollars, kinds, starts, ends);
+        const int64_t count = pp_test_lex(blank, length, split, flags, kinds, starts, ends);
         result = count >= 0 && pp_spellings_initialize(&placed->spellings, (uint64_t)count + 1, length + 64);
         placed->lines = result ? arena_push_array(&placed->arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
         placed->states = result ? arena_push_array(&placed->arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
@@ -696,7 +703,7 @@ static bool pp_test_placed(Preprocessor* pp, const PPPlaced* theirs, const char*
     size_t length = 0;
     char* text = pp_test_print(pp, true, true, &length);
     PPPlaced ours = { 0 };
-    const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, pp_dollar_punctuation(&pp->options), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
+    const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, pp_test_lex_flags(pp), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
     pp_placed_release(&ours);
     free(text);
     return result;
@@ -891,6 +898,23 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "yes\n", false, 0, "-fsigned-char -fno-signed-char", 0 },
     { "signed char in #if", "#if '\\xff' == -1 && 'a' - 'b' < 0 && '\\377\\377' == 65535 && '\\377abc' < 0 && 'abcde' == 0x62636465\nyes\n#endif\n",
       0, "c17", "yes\n", false, 0, "-funsigned-char -fno-unsigned-char", 0 },
+    // c89 lexes neither digraphs nor "//" comments, as clang's -E has it: "%:define" is no directive, a digraph is two
+    // punctuators ("<%=" is '<' and "%=", and "<::>" '<', "::" and '>'), and "//" two slashes, of which the second starts
+    // a block comment before a '*'. Pasting a digraph's characters or "//" forms no token (#288).
+    { "c89 without digraphs or // comments", "%:define D 1\nD <: :> <% %> %: %:%: <%= <::>\na //* c */ b\nx // y\n#define S(x) #x\nS(<:) S(a //* c */ b) S(%:%:)\n#define F(x) %:x\n#define C(a, b) a %:%: b\nF(y) C(p, q)\n#define X a // b\nX\n",
+      0, "c89", "% : define D 1\nD < : : > < % % > % : % : % : < %= < :: >\na / b\nx / / y\n\"<:\" \"a / b\" \"%:%:\"\n% : y p % : % : q\na / / b\n", false, 0, 0, 0 },
+    { "pasting a digraph's characters in c89", "#define P(a, b) a ## b\nP(<, :)\n", 0, "c89", "< :\n", true, 0, 0, 0 },
+    { "pasting // in c89", "#define P(a, b) a ## b\nP(/, /)\n", 0, "c89", "/ /\n", true, 0, 0, 0 },
+    { "pasting %: and %: in c89", "#define P(a, b) a ## b\nP(%:, %:)\n", 0, "c89", "% : % :\n", true, 0, 0, 0 },
+    // C94 (iso9899:199409) is c89 with digraphs, and __STDC_VERSION__ 199409L (#288).
+    { "C94's digraphs without // comments", "%:define D 1\nD __STDC_VERSION__ <%= <::>\nx // y\n#define C(a, b) a %:%: b\n#define F(x) %:x\n#define P(a, b) a ## b\nC(p, q) F(y) P(%:, %:) P(<, :)\n",
+      0, "iso9899:199409", "1 199409L <% = <: :>\nx / / y\npq \"y\" %:%: <:\n", false, 0, 0, 0 },
+    // The last -f[no-]digraphs wins over the mode: c89 with -fdigraphs is C94, C94 with -fno-digraphs is c89 (no
+    // __STDC_VERSION__), and any other mode has no digraphs with -fno-digraphs, but its "//" comments (#288).
+    { "-fdigraphs in c89", "%:define D 1\nD __STDC_VERSION__ x // y\n", 0, "c89", "1 199409L x / / y\n", false, 0, "-fno-digraphs -fdigraphs", 0 },
+    { "-fno-digraphs in C94", "%:define D 1\nD __STDC_VERSION__\n", 0, "iso9899:199409", "% : define D 1\nD __STDC_VERSION__\n", false, 0, "-fdigraphs -fno-digraphs", 0 },
+    { "-fno-digraphs", "%:define D 1\nD <%= <::> a // b\n", 0, "gnu17", "% : define D 1\nD < %= < :: > a\n", false, 0, "-fno-digraphs", 0 },
+    { "-fno-digraphs in gnu89", "%:define D 1\nD __STDC_VERSION__ a // b\n", 0, "gnu89", "% : define D 1\nD __STDC_VERSION__ a\n", false, 0, "-fno-digraphs", 0 },
     { "true in C99", "#if true\nyes\n#else\nno\n#endif\n",
       0, "c99", "no\n", false, 0, 0, 0 },
     // Where clang and GCC differ, clang's answer: a #line continued on the next line counts from the line of its # (GCC
@@ -1202,7 +1226,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     {
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
-        result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), &expected) &&
+        result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &expected) &&
                  pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name) &&
                  (test->markers == 0 || pp_test_markers(&runs[0], test, directory));
         if (result && with_clang)
@@ -1210,7 +1234,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
-            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), &theirs) &&
+            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) &&
                      pp_compare_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
             pp_placed_release(&theirs);
             free(clang_text);
@@ -1375,7 +1399,7 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
     if (result && with_clang)
     {
         PPPlaced theirs = { 0 };
-        result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
+        result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
                  pp_test_placed(&runs[0], &theirs, path);
         pp_placed_release(&theirs);
     }
@@ -1450,6 +1474,7 @@ static bool pp_test_predefines(const char* directory)
     static const char* const modes[][2] = {
         { "-std=c89", 0 }, { "-std=gnu89", 0 }, { "-std=c99", 0 }, { "-std=gnu99", 0 }, { "-std=c11", 0 }, { "-std=gnu11", 0 },
         { "-std=c17", 0 }, { "-std=gnu17", 0 }, { "-std=c23", 0 }, { "-std=gnu23", 0 }, { "-ffreestanding", 0 }, { "-O2", 0 },
+        { "-std=iso9899:199409", 0 }, { "-std=c89", "-fdigraphs" }, { "-std=iso9899:199409", "-fno-digraphs" }, { "-std=gnu89", "-fno-digraphs" },
         { "-std=c99", "-ffreestanding" }, { "-std=c23", "-O2" },
         { "-march=x86-64", 0 },
         { "-march=x86-64-v2", 0 },
@@ -1650,7 +1675,8 @@ static void pp_test_write_names(FILE* file, const char* names, const char* first
 
 // The language modes, as sets of options (null after the last).
 static const char* const pp_test_mode_sets[][BUSTER_PP_TEST_SET_ARGUMENTS] = {
-    { "-std=c89" }, { "-std=gnu89" }, { "-std=c99" }, { "-std=gnu99" }, { "-std=c11" }, { "-std=gnu11" }, { "-std=c17" }, { "-std=gnu17" }, { "-std=c23" }, { "-std=gnu23" },
+    { "-std=c89" }, { "-std=iso9899:199409" }, { "-std=gnu89" }, { "-std=c99" }, { "-std=gnu99" }, { "-std=c11" }, { "-std=gnu11" }, { "-std=c17" }, { "-std=gnu17" },
+    { "-std=c23" }, { "-std=gnu23" },
 };
 
 // The -f options that change clang's keywords, and those beside them that leave them (#281): GNU's keywords turned on in
@@ -1756,7 +1782,7 @@ static bool pp_test_keywords(const char* directory)
     const uint32_t failures = result ? pp_test_modes(directory, path, "keywords") : 1;
     const uint32_t set_failures = result ? pp_test_sets(directory, path, "keywords", pp_test_keyword_sets, BUSTER_ARRAY_LENGTH(pp_test_keyword_sets)) : 1;
     unlink(path);
-    printf("keywords: %u of 10 modes and %u of %lu -f option sets differ from clang's __is_identifier (%u names)\n", failures, set_failures,
+    printf("keywords: %u of %lu modes and %u of %lu -f option sets differ from clang's __is_identifier (%u names)\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_mode_sets), set_failures,
            (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_keyword_sets), count);
     return result && failures == 0 && set_failures == 0;
 }
@@ -1782,7 +1808,7 @@ static bool pp_test_features(const char* directory)
     }
     const uint32_t failures = result ? pp_test_modes(directory, path, "features") : 1;
     unlink(path);
-    printf("features: %u of 10 modes differ from clang's __has_feature and __has_extension (%u names)\n", failures, count);
+    printf("features: %u of %lu modes differ from clang's __has_feature and __has_extension (%u names)\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_mode_sets), count);
     return result && failures == 0;
 }
 
@@ -1831,7 +1857,7 @@ struct PPTestOptionSet
 
 static const PPTestOptionSet pp_test_option_sets[] = {
     // Refused: each family buster doesn't follow, where its last option turns it on; -fzvector whatever follows it (clang's
-    // driver ignores -fno-zvector); -fno-digraphs, and -fdigraphs in c89 (C94); and the options without a -fno- form.
+    // driver ignores -fno-zvector); and the options without a -fno- form.
     { { "-fms-extensions" }, "-fms-extensions" },
     { { "-fno-ms-extensions", "-fms-extensions" }, "-fms-extensions" },
     { { "-fms-compatibility" }, "-fms-compatibility" },
@@ -1842,8 +1868,6 @@ static const PPTestOptionSet pp_test_option_sets[] = {
     { { "-fno-zos-extensions", "-fzos-extensions" }, "-fzos-extensions" },
     { { "-ffixed-point" }, "-ffixed-point" },
     { { "-fdefer-ts" }, "-fdefer-ts" },
-    { { "-fdigraphs", "-fno-digraphs" }, "-fno-digraphs" },
-    { { "-std=c89", "-fdigraphs" }, "-fdigraphs" },
     { { "-std=c17", "-fno-raw-string-literals", "-fraw-string-literals" }, "-fraw-string-literals" },
     { { "-fno-short-wchar", "-fshort-wchar" }, "-fshort-wchar" },
     { { "-fno-directives-only", "-fdirectives-only" }, "-fdirectives-only" },
@@ -1864,9 +1888,9 @@ static const PPTestOptionSet pp_test_option_sets[] = {
     { { "-ffile-prefix-map=%d=/remapped" }, "-ffile-prefix-map=" },
     { { "-fexec-charset=UTF-8", "-fexec-charset=latin1" }, "-fexec-charset=latin1" },
     { { "-finput-charset=UTF8" }, "-finput-charset=UTF8" },
-    // Taken: the modeled families, each refused family turned off again, -fzvector in assembly, digraphs where the mode
-    // has them, and raw strings off (buster lexes none), each in c17, where clang's lexes none either (a GNU mode's
-    // would differ); and UTF-8 charsets in any case.
+    // Taken: the modeled families, each refused family turned off again, -fzvector in assembly, digraphs on and off in
+    // any mode (c89 with them is C94, and C94 without them c89: #288), and raw strings off (buster lexes none), each in
+    // c17, where clang's lexes none either (a GNU mode's would differ); and UTF-8 charsets in any case.
     { { "-std=c17", "-fgnu-keywords" }, 0 },
     { { "-std=gnu17", "-fno-raw-string-literals", "-fno-asm" }, 0 },
     { { "-std=c17", "-fno-dollars-in-identifiers" }, 0 },
@@ -1883,6 +1907,11 @@ static const PPTestOptionSet pp_test_option_sets[] = {
     { { "-std=c17", "-fdefer-ts", "-fno-defer-ts" }, 0 },
     { { "-std=c17", "-fno-digraphs", "-fdigraphs" }, 0 },
     { { "-std=gnu89", "-fno-raw-string-literals", "-fdigraphs" }, 0 },
+    { { "-std=c17", "-fdigraphs", "-fno-digraphs" }, 0 },
+    { { "-std=c89", "-fdigraphs" }, 0 },
+    { { "-std=iso9899:199409", "-fno-digraphs" }, 0 },
+    { { "-std=iso9899:199409" }, 0 },
+    { { "-std=c89" }, 0 },
     { { "-std=gnu17", "-fraw-string-literals", "-fno-raw-string-literals" }, 0 },
     { { "-std=c17", "-fshort-wchar", "-fno-short-wchar" }, 0 },
     { { "-std=c17", "-fdirectives-only", "-fno-directives-only" }, 0 },
@@ -1899,14 +1928,14 @@ static const PPTestOptionSet pp_test_option_sets[] = {
 };
 
 // What the families change in clang's -E: the names that are keywords under them, '$', digraphs and __STDC_VERSION__
-// (C94's with -fdigraphs in c89), raw strings, character constants' signs, __FILE__ (remapped) and __MODULE__ (named), and
-// a system header for the output modes and the modules.
+// (C94's with -fdigraphs in c89), "//" comments (none in c89 and C94), raw strings, character constants' signs,
+// __FILE__ (remapped) and __MODULE__ (named), and a system header for the output modes and the modules.
 static const char pp_test_option_probe[] =
     "#include <stddef.h>\n"
     "__is_identifier(__int64) __is_identifier(_pascal) __is_identifier(__declspec) __is_identifier(__vector) __is_identifier(__ptr32)\n"
     "__is_identifier(_Accum) __is_identifier(_Defer) __is_identifier(asm) __is_identifier(typeof)\n"
     "#define bb BB\naa$bb 1$bb\n"
-    "%:define DIGRAPH __STDC_VERSION__\nDIGRAPH <: :>\n"
+    "%:define DIGRAPH __STDC_VERSION__\nDIGRAPH <: :> <%= a //* c */ b x // y\n"
     "#define R RR\nR\"x(raw)x\"\n"
     "#if (L'\\0' - 1) < 0\nwide_signed\n#endif\n"
     "#if '\\xff' < 0\nchar_signed\n#endif\n"
@@ -2084,14 +2113,14 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
         result = result && pp_same_streams(&preprocessors[0], &preprocessors[1], test.name) && pp_stream_spellings(&preprocessors[0], &ours) &&
-                 pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), preprocessors[0].split_kinds, pp_dollar_punctuation(&preprocessors[0].options), &expected) &&
+                 pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), preprocessors[0].split_kinds, pp_test_lex_flags(&preprocessors[0]), &expected) &&
                  pp_compare_spellings(&preprocessors[0], &ours, &expected, test.name, "wanted");
         if (result && with_clang)
         {
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
-            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, preprocessors[0].split_kinds, pp_dollar_punctuation(&preprocessors[0].options), &theirs) &&
+            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, preprocessors[0].split_kinds, pp_test_lex_flags(&preprocessors[0]), &theirs) &&
                      pp_compare_spellings(&preprocessors[0], &ours, &theirs.spellings, test.name, "clang");
             pp_placed_release(&theirs);
             free(clang_text);
