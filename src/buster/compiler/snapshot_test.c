@@ -237,18 +237,23 @@ static void snapshot_test_same_runtime(SnapshotTestTally* tally, const Runtime* 
         found = runtime_find_global_name(b, runtime_global_name(a, e), a->length[e], a->hash[e]) == e + 1;
     }
     snapshot_test_expect(tally, found, "each global name found in the loaded runtime", index);
-    const ImportLibrary* x = &imported->libc;
-    const ImportLibrary* y = &loaded->libc;
-    bool versions = x->version_count == y->version_count && snapshot_test_same_string(x->soname, y->soname);
-    for (uint32_t v = 0; versions && v < x->version_count; v += 1)
+    // libc.so.6's, then the loader's.
+    for (uint32_t library = 0; library < 2; library += 1)
     {
-        versions = snapshot_test_same_string(x->versions[v].name, y->versions[v].name) && x->versions[v].hash == y->versions[v].hash &&
-                   x->versions[v].index == y->versions[v].index && x->versions[v].base == y->versions[v].base;
+        const ImportLibrary* x = library == 0 ? &imported->libc : &imported->loader;
+        const ImportLibrary* y = library == 0 ? &loaded->libc : &loaded->loader;
+        bool versions = x->version_count == y->version_count && snapshot_test_same_string(x->soname, y->soname);
+        for (uint32_t v = 0; versions && v < x->version_count; v += 1)
+        {
+            versions = snapshot_test_same_string(x->versions[v].name, y->versions[v].name) && x->versions[v].hash == y->versions[v].hash &&
+                       x->versions[v].index == y->versions[v].index && x->versions[v].base == y->versions[v].base;
+        }
+        snapshot_test_expect(tally, versions, library == 0 ? "libc.so.6's soname and versions" : "the loader's soname and versions", index);
+        snapshot_test_expect(tally,
+                             x->exports.count == y->exports.count && snapshot_test_same_column(x->exports.version, y->exports.version, x->exports.count * sizeof(uint16_t)) &&
+                                 snapshot_test_same_column(x->exports.flags, y->exports.flags, x->exports.count),
+                             library == 0 ? "libc.so.6's exports' versions and types" : "the loader's exports' versions and types", index);
     }
-    snapshot_test_expect(tally, versions, "libc.so.6's soname and versions", index);
-    snapshot_test_expect(tally, x->exports.count == y->exports.count && snapshot_test_same_column(x->exports.version, y->exports.version, x->exports.count * sizeof(uint16_t)) &&
-                                    snapshot_test_same_column(x->exports.flags, y->exports.flags, x->exports.count),
-                         "libc.so.6's exports' versions and types", index);
     bool paths = snapshot_test_same_string(imported->gcc_directory, loaded->gcc_directory) && snapshot_test_same_string(imported->gcc_versions, loaded->gcc_versions) &&
                  snapshot_test_same_string(imported->libc_script, loaded->libc_script) && snapshot_test_same_string(imported->libc_path, loaded->libc_path) &&
                  snapshot_test_same_string(imported->loader_path, loaded->loader_path) && snapshot_test_same_string(imported->abi_note, loaded->abi_note);
@@ -414,6 +419,43 @@ static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDir
     bind_test_release(&b);
 }
 
+// test-bind's loader case (main reads _r_debug and __libc_stack_end, which only the loader exports) bound against a
+// dynamic PIE's imported runtime and its loaded one by both paths: the same links and bindings, and the loaded
+// runtime's executable runs with the case's status.
+static void snapshot_test_loader_case(SnapshotTestTally* tally, const ExecutableTestDirectory* directory, const Runtime* imported, const Runtime* loaded)
+{
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        const BindPath bind_path = path == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT;
+        BindTestCaseProgram a;
+        BindTestCaseProgram b;
+        bind_test_case_program(&a, imported, BIND_TEST_CASE_LOADER, bind_path, true);
+        bind_test_case_program(&b, loaded, BIND_TEST_CASE_LOADER, bind_path, true);
+        const bool bound = a.bound && b.bound;
+        snapshot_test_expect(tally, bound && bind_test_same_links(&a.test.link, &b.test.link) && bind_test_same_binds(&a.test.bind, &b.test.bind),
+                             "the loader's case: the same link and binding", path);
+        char program[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        snapshot_test_path(program, directory->path, "loader");
+        Scratch scratch = scratch_begin(0);
+        const uint8_t* saved = bound ? static_test_save(&b.test.link, scratch.arena) : 0;
+        ExecutableResult result;
+        const bool written = saved != 0 && snapshot_test_write_link(&b.test.link, &b.test.bind, loaded, saved, program, 1, &result);
+        uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
+        uint64_t length = 0;
+        int status = -1;
+        const bool ran = written && executable_test_run(program, output, &length, &status);
+        snapshot_test_expect(tally, ran && WIFEXITED(status) && WEXITSTATUS(status) == bind_test_cases[BIND_TEST_CASE_LOADER].status,
+                             "the loader's case runs with its status", path);
+        scratch_end(scratch);
+        if (!directory->keep)
+        {
+            unlink(program);
+        }
+        bind_test_link_end(&a.test);
+        bind_test_link_end(&b.test);
+    }
+}
+
 // The links of programs bound against the imported runtime and against its snapshot loaded, as the check `check`, in a
 // directory of its own, `name`.
 static bool snapshot_test_links(const ExecutableTestDirectory* directory, const Runtime* imported, const RuntimeProbe* compiler, uint64_t seed, uint32_t functions,
@@ -442,6 +484,10 @@ static bool snapshot_test_links(const ExecutableTestDirectory* directory, const 
             snapshot_test_link(&tally, directory, imported, &loaded, options[i], path == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT, name, (uint64_t)i * 2 + path);
             linked += 1;
         }
+    }
+    if (status == SNAPSHOT_STATUS_LOADED && imported->kind == RUNTIME_KIND_DYNAMIC)
+    {
+        snapshot_test_loader_case(&tally, directory, imported, &loaded);
     }
     printf("  %u programs bound and written against both runtimes\n", linked / 2);
     if (status == SNAPSHOT_STATUS_LOADED)

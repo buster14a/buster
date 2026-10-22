@@ -40,7 +40,7 @@ can bring that close to what the kernel needs to put a file in the page cache.
   link costs mold and wild (0.59 of wild's 1.09 ms on hello world go to
   opening them and reading their symbols). The compiler digests them once into
   a *runtime snapshot*, a cache file mapped and checked on each link with one
-  `stat` per file it was made from: 9.2 µs on the 9700X, against 146 µs for
+  `stat` per file it was made from: 9.2 µs on the 9700X, against 152 µs for
   importing the runtime.
 - **One representation serves every path.** Atoms, symbols, fixups and names,
   each a column array indexed by a 32-bit id, carry the direct path, the object
@@ -725,7 +725,11 @@ A dynamic PIE on this system needs:
 - `libc.so.6` itself: 3,189 dynamic symbols, and version definitions from
   `GLIBC_2.2.5` to `GLIBC_2.44`, `GLIBC_ABI_DT_RELR` among them. It is found
   through `/usr/lib/libc.so`, a linker script naming it,
-  `libc_nonshared.a` and `ld-linux-x86-64.so.2`.
+  `libc_nonshared.a` and `ld-linux-x86-64.so.2`;
+- the loader, `ld-linux-x86-64.so.2`, which the script names as needed: 38
+  exports, among them `__tls_get_addr` (at `GLIBC_2.3`), `_r_debug` and
+  `__libc_stack_end`. A link takes them only for a name that `libc.so.6`
+  doesn't export, and GNU ld and lld then add the loader to `DT_NEEDED`.
 
 mold and wild open, map and parse all of this on every link. The compiler does
 it once and keeps the result in a snapshot under `$XDG_CACHE_HOME/buster/`.
@@ -738,11 +742,14 @@ it once and keeps the result in a snapshot under `$XDG_CACHE_HOME/buster/`.
   through the GOT, `_init`/`_fini`, `__dso_handle`, the `.init_array` entries
   (`frame_dummy`), and weak undefined references (`__gmon_start__`, the
   `_ITM_*` clone table functions) that resolve to 0.
-- **libc.so.6's exports:** each name's default version and type, and the
-  runtime's *global names*: each distinct name of the runtime objects' global
-  symbols and of libc.so.6's exports and undefined names, with what binding
-  needs of it (its definition, its export, whether libc.so.6 refers to it,
-  which decides the program's exports, and whether the linker defines it),
+- **libc.so.6's and the loader's exports:** each name's default version and
+  type, the loader's version indices numbered after libc.so.6's, so that a
+  symbol's version names one library's; and the runtime's *global names*:
+  each distinct name of the runtime objects' global symbols, of libc.so.6's
+  exports and undefined names and of the loader's exports, with what binding
+  needs of it (its definition, its export, libc.so.6's before the loader's,
+  whether libc.so.6 refers to it, which decides the program's exports, and
+  whether the linker defines it),
   indexed by the front end's name hash in buckets filled by a counting sort,
   with a blocked Bloom filter ("Step 5's phases, data-parallel"). The other
   shared libraries in the link will get the same.
@@ -783,8 +790,9 @@ kind, which the loader checks: the other kind's file at its name is stale.
     joins: the link's columns, the bindings and the symbols' global names,
     then the data, the names run and each piece's atoms' bytes.
 
-  The dynamic runtime's is 197 KB on the 9700X: 2,673 global names with their
-  index and filter, and 2,630 exports. The "few tens of kilobytes" this
+  The dynamic runtime's is 198 KB on the 9700X: 2,685 global names with their
+  index and filter, and `libc.so.6`'s 2,630 exports and the loader's 38. The
+  "few tens of kilobytes" this
   section first expected were the exports' columns alone. The static
   runtime's is 8.6 MB, 5 MB of it the members' bytes.
 - **Loading** maps it privately. The runtime's columns point into the mapping
@@ -1233,15 +1241,17 @@ the scalar hash.
   read, imported and bound) takes 96 µs, against about 13 µs for the readers
   alone. The rest is the probes and reading the files, above all
   `libc.so.6`'s 2.2 MB, of which the import reads only the dynamic sections.
-  The snapshot saves all of it on a link. Reading only those sections, with
-  `pread` after the section table, is what is left for the snapshot's
-  rebuild. A static executable's runtime (`runtime_import_static`) takes
-  1.75 ms: the search's 20 probes 20 µs, reading its 10.6 MB of files 0.37 ms,
-  the archives' indices and members 80 µs, sizing the link by each object's
-  headers 0.15 ms, the 2,627 objects 0.71 ms, binding the runtime 0.14 ms, its
-  5,800 global names 0.28 ms, and the members' references and groups 18 µs
-  (medians of 21 runs of each phase, one CPU). Each import starts from new
-  arenas, whose first touches are in these figures.
+  Importing the loader too added about 7 µs: `benchmark-snapshot`'s
+  `runtime_import` and `runtime_release` take 152 µs on the 9700X, against 145
+  without it. The snapshot saves all of it on a link. Reading only those
+  sections, with `pread` after the section table, is what is left for the
+  snapshot's rebuild. A static executable's runtime (`runtime_import_static`)
+  takes 1.75 ms: the search's 20 probes 20 µs, reading its 10.6 MB of files
+  0.37 ms, the archives' indices and members 80 µs, sizing the link by each
+  object's headers 0.15 ms, the 2,627 objects 0.71 ms, binding the runtime
+  0.14 ms, its 5,800 global names 0.28 ms, and the members' references and
+  groups 18 µs (medians of 21 runs of each phase, one CPU). Each import
+  starts from new arenas, whose first touches are in these figures.
 
 Each vector path is tested against its exact path on every input the tests
 have: every unit's object of test-link's programs, the objects, archives and
@@ -1802,6 +1812,12 @@ compares each with lld's link of the same objects.
   symbol is refused for the same reason, as GNU ld and lld refuse it; its
   `ABS64` fields, GOT slot and `ABS32` fields need no relocation, wherever
   they are (GNU ld refuses the `ABS32`, lld takes it).
+- **Libraries.** `DT_NEEDED` names `libc.so.6`, then the loader when an
+  import is its (`__tls_get_addr`, `_r_debug` or `__libc_stack_end`), as GNU
+  ld and lld take `libc.so`'s `AS_NEEDED`. `.gnu.version_r` has an entry per
+  library with a needed version, all of them before their auxiliary entries,
+  as lld lays them out. `test-dynamic` compares both, library by library,
+  with lld's link.
 - **Stubs.** A `CALL` to a dynamic symbol (GCC 13's `crtbeginS.o` calls
   `__cxa_finalize` so, where GCC 16's reads the slot itself) goes to a stub
   in `.plt.got`, `jmp [rip + slot]` and a two-byte nop, GNU ld's form for a
@@ -1824,7 +1840,7 @@ compares each with lld's link of the same objects.
   Bloom filter of 12 bits per export in the next power of two of 64-bit words
   above them, with shift 26; and the exports sorted by bucket (a stable
   counting sort) after the undefined symbols. The versions are numbered from
-  2 in the library's order of them.
+  2 in the libraries' order of them, `libc.so.6`'s first.
 
 Every pass is data-parallel and vectorized, with an exact twin, scalar, that
 `ExecutableOptions.exact` selects; the tests write each program both ways and
@@ -2476,7 +2492,7 @@ static executables (`--kinds static,static-pie`), whose figures came within
 | Section | Contents |
 | --- | --- |
 | `.interp` | `/lib64/ld-linux-x86-64.so.2` |
-| `.dynamic` | `DT_NEEDED` for each runtime library actually referenced (as `--as-needed`), `DT_FLAGS`, `DT_FLAGS_1`, `DT_DEBUG`, `DT_INIT`/`DT_FINI` and the array entries, the table addresses and sizes, `DT_RELR`/`DT_RELRSZ`/`DT_RELRENT` or `DT_RELA`/`DT_RELACOUNT`, `DT_VERNEED`/`DT_VERSYM` |
+| `.dynamic` | `DT_NEEDED` for `libc.so.6`, and for the loader when an import is its (`libc.so`'s `AS_NEEDED`), `DT_FLAGS`, `DT_FLAGS_1`, `DT_DEBUG`, `DT_INIT`/`DT_FINI` and the array entries, the table addresses and sizes, `DT_RELR`/`DT_RELRSZ`/`DT_RELRENT` or `DT_RELA`/`DT_RELACOUNT`, `DT_VERNEED`/`DT_VERSYM` |
 | `.dynsym`, `.dynstr` | imports, and the program's definitions that a shared library in the link also defines or refers to (see "Exports") |
 | `.gnu.hash` | those exported definitions, so the loader can find them (empty when there are none); every global definition with `-rdynamic` and in shared libraries |
 | `.gnu.version`, `.gnu.version_r` | each import's default version from the snapshot, and the needed version names per library |
