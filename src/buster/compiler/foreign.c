@@ -3,10 +3,11 @@
 //
 // Linking other compilers' objects, steps 1 to 5 (docs/object-writer-and-linker.md, "Linking other compilers'
 // objects"): a command line of ELF relocatable objects, archives (thin ones too), shared libraries and linker scripts
-// of libc.so's subset (import.c's readers) opened, parsed and resolved; the archive members the link needs loaded; and
-// COMDAT groups picked. What comes after (garbage collection, the relocation scan, merged strings, .eh_frame and the
-// write) reads what this leaves: each loaded object's headers and global symbols, each global name's winner, and each
-// group's fate.
+// of libc.so's subset (import.c's readers) opened, parsed and resolved; the archive members the link needs loaded,
+// for the objects' references and for the needed libraries' (each library's undefined symbols join the resolution as
+// an object's, at the library's place); and COMDAT groups picked. What comes after (garbage collection, the relocation
+// scan, merged strings, .eh_frame and the write) reads what this leaves: each loaded object's headers and global
+// symbols, each global name's winner, and each group's fate.
 //
 // Every phase is one function that every lane of a group runs (lane.c; docs/object-writer-and-linker.md, "Lanes"),
 // meeting at syncs, each lane writing only what it owns:
@@ -20,14 +21,20 @@
 //      exchange over 2^partition_bits partitions by the hash's top bits (rule 4, without compare-and-swap), into each
 //      partition's tables, which its lane keeps from round to round.
 //   4. Load archive members (foreign_resolve's decisions, foreign_load): each name a round touched decides whether its
-//      first archive member loads; lane 0 marks the members the lanes need, and the next round parses them: a frontier
-//      walk in rounds, until a round loads nothing.
+//      first archive member loads, and whether it makes a library under --as-needed needed; lane 0 marks what the
+//      lanes need, and the next round parses the members and the libraries' references: a frontier walk in rounds,
+//      until a round loads nothing.
 //   5. COMDAT groups and the winners (foreign_groups, foreign_winners): each signature's group earliest by position
 //      kept, the others' sections discarded; then each name's winner, its id, and each symbol's name id.
 //
 // Positions: an input's place in link order (scripts' inputs where the script is), and an archive member's at its
 // archive's place, in member order (foreign_position). Every comparison of definitions goes by position, so ties go to
 // the earlier input, whichever lane or round met them first.
+//
+// Failures: after each phase every lane decides whether to go on (foreign_proceed), and every lane must decide alike,
+// or one would wait for good at a sync of a phase another skipped. So a failure carries how many decisions its lane had
+// taken, and a decision counts only the failures from before it, which the sync before it shows every lane; a failure
+// in the next phase, of a lane that has gone on, waits for the next decision.
 //
 // The results are GNU ld's, except where GNU ld's depend on the archives' order (a name two archives define, an archive
 // that an input after it needs); there they are lld's and mold's. foreign_decide says how a member loads; the
@@ -41,6 +48,10 @@
 //     go by member order, as mold's do; GNU ld and lld order a member loaded for a member after it after that one.
 //   - loading only adds: a member a round loads stays, where lld, which loads in input order, might find a definition
 //     first that a later round of this walk finds.
+//   - a library under --as-needed that nothing needs: GNU ld's, which drops it, so that its own references load
+//     nothing; lld loads the members they name.
+//   - a thin archive's member of another archive (GNU ar's "/N:M"): GNU ld reads it, as this path does, and lld 23
+//     refuses the archive.
 //
 // Each phase has a vector path and an exact scalar twin (ForeignPath), which give the same result (foreign_test.c
 // compares them on every input, with groups of 1, 2, 3 and 8 lanes): the readers' two paths; the headers eight section
@@ -56,7 +67,7 @@
 //     ForeignInput, ForeignArchive, ForeignLibrary, ForeignObject, ForeignSymbols, ForeignGroups, ForeignRecord,
 //     ForeignEntry, ForeignGroupEntry, ForeignTable, ForeignNames, ForeignRound, ForeignPhase, ForeignFailure,
 //     ForeignLane, Foreign and the entry points' prototypes.
-//   - Positions and failures: foreign_position, foreign_failure, foreign_fail and foreign_failed.
+//   - Positions and failures: foreign_position, foreign_failure, foreign_fail, foreign_failed and foreign_proceed.
 //   - The command line: foreign_arguments.
 //   - Opening: foreign_kind, foreign_find, foreign_map, foreign_open_input, foreign_expand_scripts and foreign_open.
 //   - Archives' and libraries' indices: foreign_list_inputs, foreign_read_archive, foreign_read_library and
@@ -64,12 +75,13 @@
 //   - The first round: foreign_first_round.
 //   - The parse: foreign_thin_member, foreign_member_bytes, foreign_check_tables, foreign_headers_exact,
 //     foreign_headers_vector, foreign_object_headers, foreign_class, foreign_symbol_exact, foreign_symbols_vector,
-//     foreign_fill_symbols, foreign_object_groups, foreign_partitions, foreign_round_columns and foreign_parse.
+//     foreign_library_symbols, foreign_fill_symbols, foreign_object_groups, foreign_partitions, foreign_round_columns
+//     and foreign_parse.
 //   - The exchange: foreign_partition, foreign_records_vector, foreign_count_items, foreign_exchange_items and
 //     foreign_exchange.
 //   - Resolution and archive members: the tables (foreign_entry, foreign_group_entry), foreign_touch, foreign_fold,
 //     foreign_resolve_records, foreign_probe_archives, foreign_probe_libraries, foreign_member_defines_data,
-//     foreign_decide, foreign_resolve and foreign_load.
+//     foreign_needed_library, foreign_decide, foreign_resolve and foreign_load.
 //   - COMDAT groups and the winners: foreign_groups, foreign_win and foreign_winners.
 //   - Running: foreign_lane_main, foreign_run, foreign_release and the accessors.
 
@@ -2429,9 +2441,10 @@ static void foreign_exchange(Foreign* foreign, uint32_t index, ForeignLane* lane
 // Each lane owns a range of the partitions (lane_range: the same in every round, so that a partition's tables stay with
 // its lane) and takes each round's records of them, which come from every lane in input order. A name's entry keeps
 // what loading needs (ForeignEntry): its earliest strong reference, definition and common symbol by position, the most
-// constraining visibility, once a round touched it without a definition the archive member that defines it first (by
-// position: the first archive in link order whose index has it, and its lowest member among the entries there), and
-// once a decision or the winners need it, the first shared library that exports it. A decision needs only the libraries
+// constraining visibility, once a round touched it with a strong reference before every definition the archive member
+// that defines it first before them (by position: the first archive in link order whose index has it, and its lowest
+// member among the entries there), and once a decision or the winners need it, the first shared library that exports
+// it. A decision needs only the libraries
 // before the member and the reference: a link whose first object refers to every name of an archive after it (the
 // benchmark's members kind) would otherwise look each name up in every library after it too, three lookups for the
 // archive's one. A group signature's entry keeps its earliest group by position. The tables add names in the order of
@@ -2442,12 +2455,17 @@ static void foreign_exchange(Foreign* foreign, uint32_t index, ForeignLane* lane
 // ld's result depends on the archives' order, and so as GNU ld does where it doesn't (an archive after the inputs that
 // need it). The member loads if a strong reference refers to the name and both the member and the earliest strong
 // reference come before the name's earliest definition, which a shared library's export is too when every symbol of
-// the name has default visibility (GNU ld and lld bind no other to a shared library). A weak reference loads nothing.
+// the name has default visibility (GNU ld and lld bind no other to a shared library). A definition after the reference
+// doesn't stop it: GNU ld loads the member that an archive between the two offers. A weak reference loads nothing.
 // As GNU ld does, a common symbol with no strong definition loads the first member after it, in index order, that
 // defines the name as global data (STB_GLOBAL or GNU_UNIQUE, not a function, not common); lld loads nothing for a
-// common symbol, and mold any member that defines it. Each lane lists the members it needs; lane 0 marks them in their
-// archives' bitsets after a sync, and the next round loads those not loaded before, in position order. Loading only
-// ever adds: a member a round loaded stays loaded whatever a later round finds.
+// common symbol, and mold any member that defines it. A library under --as-needed is needed once a strong reference
+// with default visibility finds the name undefined before it: the first such library after the reference that exports
+// the name, before the name's earliest definition and the member that loads for it, unless a needed library before the
+// reference exports it already (foreign_needed_library, as GNU ld decides it left to right). Each lane lists the members
+// and libraries it needs; lane 0 marks the members in their archives' bitsets after a sync, and the next round loads
+// those not loaded before and the newly needed libraries' references, in position order. Loading only ever adds: a
+// member a round loaded stays loaded whatever a later round finds.
 
 #define BUSTER_FOREIGN_ENTRY_ARCHIVES_PROBED 0x01
 #define BUSTER_FOREIGN_ENTRY_STRONG_DEFINED 0x02

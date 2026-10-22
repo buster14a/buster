@@ -2963,25 +2963,33 @@ are the later parts.
   depend on which lane or which round met a record first.
 - **Open** (step 1). The inputs are found (`-l` as GNU ld searches, a
   script's inputs as lld finds them) and mapped privately, split across the
-  lanes by count; lane 0 reads the scripts and puts their inputs in their
-  place. Then each archive's symbol index alone (`import_archive_lazy`: the
-  index and the headers of the members it names, no member's bytes; a thin
-  archive's member is a file of its own, mapped when it loads), its names
-  hashed eight at a time and indexed as a library's exports are
-  (`import_index_build`), with each entry's name, length and member copied
-  into the index's order, so that a probe reads its bucket's entries one after
-  another; and each library's exports (`import_library`).
+  lanes by count, each opened without blocking, so that a FIFO is refused
+  rather than waited on; lane 0 reads the scripts and puts their inputs in
+  their place. Then each archive's symbol index alone (`import_archive_lazy`:
+  the index and the headers of the members it names, no member's bytes; a
+  thin archive's member is a file of its own, mapped when it loads, or, where
+  GNU ar added a regular archive to a thin one, a member of that archive,
+  named `/N:M` and read from its header there), its names hashed eight at a
+  time and indexed as a library's exports are (`import_index_build`), with
+  each entry's name, length and member copied into the index's order, so that
+  a probe reads its bucket's entries one after another; and each library's
+  exports (`import_library`).
 - **Rounds** (steps 2 to 4). The first round's objects are the command
-  line's. Each round parses its objects, exchanges their records, resolves
-  them and decides which members load, which are the next round's objects,
-  until a round loads none. A round's columns are pushed once its headers
-  have counted them, so the link touches no more memory than it uses.
+  line's, with an object of references for each shared library not under
+  `--as-needed`: its undefined symbols, weak or not, at its place, which load
+  the members that define them as an object's references do (as GNU ld and
+  lld load them). Each round parses its objects, exchanges their records,
+  resolves them and decides which members load, which are the next round's
+  objects, until a round loads none. A round's columns are pushed once its
+  headers have counted them, so the link touches no more memory than it uses.
   - *The parse:* each object's header, section table, COMDAT groups and
     relocation sections, by object, eight section headers at a time on the
     vector path (transposed by `link_transpose_words`); then the global
     symbols, by symbol across objects, in a count, place and fill over the
     round (rule 3): eight entries at a time, their classes, visibilities and
-    sections as masks, their names' lengths by masked loads, their hashes by
+    sections as masks (`SHN_ABS` and `SHN_COMMON` kept out of the range of
+    the sections `SHN_XINDEX` reaches, which number them too past 65,280
+    sections), their names' lengths by masked loads, their hashes by
     `link_hash_rows`, and a copy of each name, which the resolution compares,
     made by a masked store of the row the hash read.
   - *The partitions* come from round 0's counted records and the archives'
@@ -3015,18 +3023,25 @@ are the later parts.
     without any prefetch), and its members kind, whose second round resolves
     310,000 records against the first's entries, 9.5 and 10.4.
   - *Loading:* each name the round touched decides (`foreign_decide`). Its
-    first member by position, found by probing the archives' indices once,
-    when the name is first undefined or common, loads when a strong
-    reference to it exists and both the member and the earliest strong
+    first member by position, found by probing once the indices of the
+    archives before the name's earliest definition when a strong reference
+    comes before it, loads when both the member and the earliest strong
     reference come before the earliest definition, and before the first
     shared library that exports the name if every symbol of it has default
-    visibility. Only the libraries before that bound can shadow the member,
-    so only they are looked in; the winners look in the rest for a name left
-    without a definition. Then GNU ld's common rule: a common symbol without a
-    strong definition loads the first member after it that defines the name
-    as global data, read from the member's symbol table without loading it.
-    Lane 0 marks the needs in each archive's bitset, and the members not
-    loaded before are the next round's objects, in position order.
+    visibility. A later definition doesn't stop it: for `start.o libfoo.a
+    weak.o`, GNU ld loads the member, whose strong definition wins, and with
+    a strong definition in place of the weak one the two are a duplicate.
+    Only the libraries before that bound can shadow the member, so only they
+    are looked in; the winners look in the rest for a name left without a
+    definition. Then GNU ld's common rule: a common symbol without a strong
+    definition loads the first member after it that defines the name as
+    global data, read from the member's symbol table without loading it. And
+    a library under `--as-needed` becomes needed when a strong reference with
+    default visibility finds a name it exports still undefined before it, as
+    GNU ld decides it left to right (`foreign_needed_library`). Lane 0 marks
+    the needs, and the members not loaded before and the newly needed
+    libraries' objects of references are the next round's objects, in
+    position order.
 - **COMDAT groups** (step 5). A group's record goes through the exchange with
   the symbols', and its partition's group table keeps each signature's
   earliest group by position. After the last round each object's sections in
@@ -3037,6 +3052,14 @@ are the later parts.
   earliest weak definition, its shared library's export, or nothing: a strong
   reference to nothing is an error the link reports unless garbage collection
   drops every reference, a weak one is 0. Then each symbol's name id.
+- **Failures.** After each phase every lane decides whether to go on
+  (`foreign_proceed`), and all must decide alike: a lane that skipped a phase
+  another took would leave that one waiting at the phase's syncs. A failure
+  carries the number of decisions its lane had taken, and a decision counts
+  only the failures from before it, which the sync before it shows every
+  lane; a failure in the next phase, of a lane that has gone on, waits for
+  the next decision. A group that `lane_run` couldn't start fails as
+  `FOREIGN_ERROR_LANES`.
 
 The members loaded and each name's winner are GNU ld's, except where GNU ld's
 result depends on the order of the archives on the command line; there they
@@ -3054,7 +3077,12 @@ Where the three linkers differ:
   one;
 - **loading only adds:** a member a round loads stays, where lld, which loads
   in input order, can find a definition first that a later round of this walk
-  finds.
+  finds;
+- **a library under `--as-needed` that nothing needs:** GNU ld's, which drops
+  it, so that its own references load nothing; lld loads the members they
+  name;
+- **a thin archive of another archive's members** (GNU ar's `/N:M`): GNU
+  ld's, which reads them as this path does; lld 23 refuses the archive.
 
 The tests count each documented difference and print it on a line of its own
 rather than as a failure.

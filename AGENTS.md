@@ -357,9 +357,10 @@ designs and the compilers already built this way.
   header when it loads, `import_archive_member`), each round's objects'
   headers and global symbols parsed into columns of the round's own, their
   records exchanged over fixed hash partitions into each partition's tables,
-  archive members loaded in frontier rounds, and COMDAT groups picked by
-  signature; GNU ld's results where they don't depend on the archives' order,
-  lld's where they do. Each phase has a vector path and an exact twin.
+  archive members loaded in frontier rounds (for the needed shared libraries'
+  references too), and COMDAT groups picked by signature; GNU ld's results
+  where they don't depend on the archives' order, lld's where they do. Each
+  phase has a vector path and an exact twin.
   `foreign_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-foreign` runs them) and `foreign_benchmark.c`
   provides `benchmark-foreign`.
@@ -2076,8 +2077,14 @@ and every COMDAT group's fate.
   an earlier member of its own archive, a thin archive, `--whole-archive` and
   `-u`; back references; a shared library beside an archive in all five orders
   with the object; a duplicate; undefined names; a PIE linked with libc as
-  GCC's driver links one; and COMDAT groups in objects and archive members,
-  among them a member loaded for a later one;
+  GCC's driver links one; COMDAT groups in objects and archive members,
+  among them a member loaded for a later one; a strong reference before an
+  archive whose member defines the name and an object after it that defines
+  it too, weakly (the member loads and its definition wins) and strongly (a
+  duplicate); a shared library that refers to a name an archive after it
+  defines, needed and under `--as-needed` (the member loads), and under
+  `--as-needed` with nothing needing it (nothing loads); and a thin archive
+  that holds another archive's member (GNU ar's `/N:M`);
 - with `--cross-check`, which needs `ld.bfd`, `ld.lld`, `cc` and (for the C++
   cases) `g++`: each program and case linked by GNU ld (`--trace` twice, `-Map`
   and `-y`) and by lld (`--why-extract`, `-Map` and `-y`). The members each
@@ -2092,8 +2099,10 @@ and every COMDAT group's fate.
   the resolution leaves a name undefined or defines one twice. Where a case
   says a linker differs as `foreign.c` documents (GNU ld with back references
   and an archive before a shared library and its object; lld with GNU ld's
-  common rule; both for a member loaded for a later one, whose COMDAT group
-  they keep), its differences are counted apart and printed as a count;
+  common rule, an as-needed library nothing needs, whose references it
+  counts, and a thin archive of another archive's member, which lld 23
+  refuses; both for a member loaded for a later one, whose COMDAT group they
+  keep), its differences are counted apart and printed as a count;
 - malformed inputs, each refused naming its place (the failure's error, input
   and member, and the reader's error, section, symbol, type and offset): a
   compiled object with one field changed (a symbol's binding, type, section
@@ -2101,11 +2110,24 @@ and every COMDAT group's fate.
   relocation section's link, target or type), a broken archive member (refused
   only once it loads), a thin archive's missing member, a member that isn't an
   object, a script that doesn't parse, a `-l` name no directory has, a missing
-  file and an unknown option;
+  file, a FIFO (refused, not waited on), an input of four bytes (the ELF
+  magic alone) and an unknown option. Each malformed object and each file
+  that fails is resolved again on 2 and 3 lanes, each lane in turn slow at
+  every decision to go on (`ForeignCommand.slow_lane`), so that the others go
+  on to the next phase and fail there while it decides: the failure must be
+  the same, and a watchdog fails the test if the lanes wait for each other
+  for 60 s. Then a group that can't start (in a child whose `RLIMIT_NPROC`
+  leaves no room for a thread, which doesn't bind root) must fail as
+  `FOREIGN_ERROR_LANES`, with CPUs given and without;
 - page edges: inputs given in memory (`ForeignArgument.bytes`) ending at a
   `PROT_NONE` page: every prefix of an object and of an archive, and the object
   with each byte set to 0, 0xff and a random value, each resolved by both paths
-  alike or refused alike; a read past the end faults.
+  alike or refused alike; a read past the end faults;
+- extended sections: an object made by hand of 65,527 sections, its global
+  symbols in sections 65522 and 65521 through `SHN_XINDEX` (the values of
+  `SHN_COMMON` and `SHN_ABS`) beside an absolute and a common one: each must
+  be what its `st_shndx` says, by both paths, and with a second object that
+  defines the first strongly too, a duplicate.
 
 The files go in a new directory under `--directory` (`TMPDIR` or `/tmp`),
 removed unless `--keep`. `--seed N` changes the generated programs, and
