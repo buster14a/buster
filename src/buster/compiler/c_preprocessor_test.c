@@ -931,9 +931,9 @@ static const PPTestCase pp_test_cases[] = {
     // Character constants in #if are unsigned with -funsigned-char (or -fno-signed-char), and a multi-character one's
     // first byte isn't sign-extended (#281).
     { "-funsigned-char in #if", "#if '\\xff' == 255 && 'a' - 'b' > 0 && -'\\x01' > 0 && '\\377\\377' == 65535 && '\\377abc' > 0\nyes\n#endif\n",
-      0, "c17", "yes\n", false, 0, "-fsigned-char -fno-signed-char", 0 },
+      0, "c17", "yes\n", false, 1, "-fsigned-char -fno-signed-char", 0 },
     { "signed char in #if", "#if '\\xff' == -1 && 'a' - 'b' < 0 && '\\377\\377' == 65535 && '\\377abc' < 0 && 'abcde' == 0x62636465\nyes\n#endif\n",
-      0, "c17", "yes\n", false, 0, "-funsigned-char -fno-unsigned-char", 0 },
+      0, "c17", "yes\n", false, 3, "-funsigned-char -fno-unsigned-char", 0 },
     // Raw string literals (#285): R and LR ones in GNU modes from C99 on, u8R, uR and UR ones from C11 (whose prefixes
     // they need), in any mode with -fraw-string-literals and in none with -fno-raw-string-literals, in skipped groups
     // too; their spellings as written after the opening quote (line splices and trigraphs kept), pasted, stringized
