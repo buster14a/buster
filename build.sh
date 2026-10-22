@@ -48,6 +48,7 @@ elif [ "$1" = lexer-variant ]; then
     rm -rf build || true
     mkdir -p build
     variants=""
+    tags=""
     objects=()
     for variant in "$@"; do
         name="${variant%%=*}"
@@ -57,6 +58,12 @@ elif [ "$1" = lexer-variant ]; then
         object="$(mktemp -d)/$name.o"
         if [[ "$source" == *.s ]]; then
             grep -q "^c_lexer_variant_$name:" "$source" || { echo "build.sh lexer-variant: $source doesn't define c_lexer_variant_$name; write it with ./build.sh lexer-variant-assembly $name" >&2; exit 1; }
+            # Two labeled variants of one tag would share their symbols, and spill-report would mix their samples.
+            tag="$(grep -m1 -o '^buster_spill\.[A-Za-z0-9_]*\.' "$source" || true)"
+            if [ -n "$tag" ]; then
+                [[ " $tags " != *" $tag "* ]] || { echo "build.sh lexer-variant: $source is labeled with the tag of another variant (${tag:13:-1}); give label-spills each variant's own" >&2; exit 1; }
+                tags="$tags $tag"
+            fi
             clang -c "$source" -o "$object"
         else
             clang -c src/buster/compiler/c_lexer_variant.c -o "$object" -g "${flags[@]}" "$optimization" \

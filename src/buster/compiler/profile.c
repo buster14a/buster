@@ -7,7 +7,7 @@
 //
 //   build/compiler ab [--rounds N] [--cpu N] [--lock PATH] TREE... -- ARGUMENT... [-- ARGUMENT...]...
 //   build/compiler hot-loops FUNCTION DISASSEMBLY SAMPLES [--loops N]
-//   build/compiler label-spills FUNCTION INPUT.s OUTPUT.s
+//   build/compiler label-spills FUNCTION TAG INPUT.s OUTPUT.s
 //   build/compiler spill-report FUNCTION LABELED.s SAMPLES [--slots N]
 //   build/compiler branch-misses BRSTACK [--bias ADDRESS] [--disassembly FILE] [--branches N]
 //
@@ -22,8 +22,9 @@
 //   most, and ranks its loops (each backward jump's range) by their share of the samples, then prints the smallest loop
 //   with at least half of them, instruction by instruction with its samples.
 // - label-spills copies clang's assembly (`clang -S`) with a label before every spill and reload of one function
-//   (clang's annotations on them, `# 64-byte Spill` and the others), and a static function renamed, so that the
-//   labeled copy's samples are its own; spill-report reads samples (IBS's) of the program built from it, by
+//   (clang's annotations on them, `# 64-byte Spill` and the others), and a static function renamed: the labels and the
+//   name carry TAG (a variant's name), so that the labeled copy's samples are its own beside the function's copies in
+//   other translation units and other labeled variants, and strings and comments stay as they were; spill-report reads samples (IBS's) of the program built from it, by
 //   `perf script -F ip,sym,symoff`: each label's own samples are its spill's or reload's, by stack slot, with the
 //   source location of each slot's hottest, against all the labeled copy's samples.
 // - branch-misses reads `perf script -F brstack` of last-branch records (`perf record -j any,u`) and ranks the branches
@@ -62,11 +63,11 @@
 #define BUSTER_PROFILE_DEFAULT_BRANCHES 30
 // branch-misses' table of branch addresses starts this large (a power of two) and doubles past half full.
 #define BUSTER_PROFILE_BRANCH_TABLE_START 4096
-// label-spills' labels: BUSTER_PROFILE_SPILL_LABEL then the spill's number.
-#define BUSTER_PROFILE_SPILL_LABEL "buster_spill_"
-// label-spills renames a static function to its name and this, so that its samples are its own: every other translation
-// unit that includes its file has a copy of the same name.
-#define BUSTER_PROFILE_LABELED_SUFFIX ".labeled"
+// label-spills' labels: BUSTER_PROFILE_SPILL_LABEL, the tag, '.', then the spill's number (`buster_spill.k1.0`). It
+// renames a static function to its name, '.' and the tag (`tokenize_c.k1`), so that its samples are its own: every other
+// translation unit that includes its file has a copy of the same name, and so may another labeled variant, of another
+// tag.
+#define BUSTER_PROFILE_SPILL_LABEL "buster_spill."
 // ab's --cpu: sched_setaffinity's mask of 1,024 CPUs, as glibc's cpu_set_t.
 #define BUSTER_PROFILE_CPUS 1024
 
@@ -748,19 +749,49 @@ static bool profile_is_symbol_char(char c)
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '$';
 }
 
-// Appends `line` with every whole symbol `name` in it followed by BUSTER_PROFILE_LABELED_SUFFIX.
-static void profile_append_renamed(ProfileReport* output, String8 line, String8 name)
+// Whether `tag` can name a labeled copy: letters, digits and '_', so that it ends at the '.' after it.
+static bool profile_valid_tag(String8 tag)
+{
+    bool result = tag.length != 0;
+    for (uint64_t i = 0; i < tag.length; i += 1)
+    {
+        result = result && profile_is_symbol_char(tag.pointer[i]) && tag.pointer[i] != '.' && tag.pointer[i] != '$';
+    }
+    return result;
+}
+
+// Appends `line` with every whole symbol `name` in it followed by '.' and `tag`: in the assembler's text, not in a
+// quoted string (`.asciz "f"`, `__func__`'s bytes) or a comment, which the program and the reader see as they were.
+static void profile_append_renamed(ProfileReport* output, String8 line, String8 name, String8 tag)
 {
     uint64_t copied = 0;
     uint64_t i = 0;
-    while (name.length != 0 && i + name.length <= line.length)
+    bool quoted = false;
+    bool comment = false;
+    while (!comment && name.length != 0 && i < line.length)
     {
+        const char c = line.pointer[i];
         const bool before = i == 0 || !profile_is_symbol_char(line.pointer[i - 1]);
-        const bool after = i + name.length == line.length || !profile_is_symbol_char(line.pointer[i + name.length]);
-        if (before && after && memcmp(line.pointer + i, name.pointer, name.length) == 0)
+        const bool fits = i + name.length <= line.length;
+        const bool after = fits && (i + name.length == line.length || !profile_is_symbol_char(line.pointer[i + name.length]));
+        if (quoted && c == '\\')
+        {
+            i += 2;
+        }
+        else if (c == '"')
+        {
+            quoted = !quoted;
+            i += 1;
+        }
+        else if (!quoted && c == '#')
+        {
+            comment = true;
+        }
+        else if (!quoted && before && after && memcmp(line.pointer + i, name.pointer, name.length) == 0)
         {
             profile_append(output, profile_slice(line, copied, i + name.length));
-            profile_append(output, profile_string(BUSTER_PROFILE_LABELED_SUFFIX));
+            profile_append(output, profile_string("."));
+            profile_append(output, tag);
             copied = i + name.length;
             i = copied;
         }
@@ -794,17 +825,19 @@ static bool profile_is_global(String8 assembly, String8 name)
     return result;
 }
 
-// Copies clang's assembly with BUSTER_PROFILE_SPILL_LABEL and a number before each spill and reload of `function`,
-// numbered from 0 in order, and a static function renamed (BUSTER_PROFILE_LABELED_SUFFIX) everywhere in the file.
-// Returns false, with the reason in the report, if the function isn't in the assembly; the output is then empty.
-static bool profile_label_spills(ProfileReport* output, ProfileReport* report, String8 function, String8 assembly)
+// Copies clang's assembly with a label (BUSTER_PROFILE_SPILL_LABEL, the tag and a number) before each spill and reload
+// of `function`, numbered from 0 in order, and a static function renamed `function.tag` wherever the file names it.
+// Returns false, with the reason in the report, if the tag isn't valid or the function isn't in the assembly; the output
+// is then empty.
+static bool profile_label_spills(ProfileReport* output, ProfileReport* report, String8 function, String8 tag, String8 assembly)
 {
+    const bool valid = profile_valid_tag(tag);
     const bool rename = !profile_is_global(assembly, function);
     uint64_t labels = 0;
     bool found = false;
     bool inside = false;
     uint64_t position = 0;
-    while (position < assembly.length)
+    while (valid && position < assembly.length)
     {
         const uint64_t start = position;
         const String8 line = profile_line(assembly, &position);
@@ -819,13 +852,13 @@ static bool profile_label_spills(ProfileReport* output, ProfileReport* report, S
         }
         else if (inside && profile_spill_kind(line) != PROFILE_SPILL_NONE)
         {
-            profile_print(output, BUSTER_PROFILE_SPILL_LABEL "%llu:\n", (unsigned long long)labels);
+            profile_print(output, BUSTER_PROFILE_SPILL_LABEL "%.*s.%llu:\n", (int)tag.length, tag.pointer, (unsigned long long)labels);
             labels += 1;
         }
         const String8 whole = profile_slice(assembly, start, position);
         if (rename)
         {
-            profile_append_renamed(output, whole, function);
+            profile_append_renamed(output, whole, function, tag);
         }
         else
         {
@@ -833,7 +866,11 @@ static bool profile_label_spills(ProfileReport* output, ProfileReport* report, S
         }
     }
     const bool result = found && !output->full;
-    if (!found)
+    if (!valid)
+    {
+        profile_print(report, "label-spills: the tag %.*s isn't letters, digits and '_'\n", (int)tag.length, tag.pointer);
+    }
+    else if (!found)
     {
         output->arena.length = 0;
         profile_print(report, "label-spills: %.*s isn't in the assembly\n", (int)function.length, function.pointer);
@@ -843,7 +880,7 @@ static bool profile_label_spills(ProfileReport* output, ProfileReport* report, S
         profile_print(report, "label-spills: %llu spills and reloads labeled in %.*s", (unsigned long long)labels, (int)function.length, function.pointer);
         if (rename)
         {
-            profile_print(report, ", renamed %.*s" BUSTER_PROFILE_LABELED_SUFFIX, (int)function.length, function.pointer);
+            profile_print(report, ", renamed %.*s.%.*s", (int)function.length, function.pointer, (int)tag.length, tag.pointer);
         }
         profile_print(report, "\n");
     }
@@ -942,6 +979,25 @@ static void profile_print_location(ProfileReport* report, const char* what, cons
     profile_append(report, profile_slice(location, start, location.length));
 }
 
+// Whether `line` is the label of `function` as label-spills renames it, `function.TAG:`, and the tag.
+static bool profile_renamed_label(String8 line, String8 function, String8* tag)
+{
+    const bool prefixed = line.length > function.length + 1 && profile_starts_with(line, function) && line.pointer[function.length] == '.';
+    uint64_t end = function.length + 1;
+    while (prefixed && end < line.length && line.pointer[end] != ':')
+    {
+        end += 1;
+    }
+    const String8 candidate = profile_slice(line, prefixed ? function.length + 1 : 0, prefixed ? end : 0);
+    const String8 rest = prefixed && end < line.length ? profile_trim(profile_slice(line, end + 1, line.length)) : line;
+    const bool result = prefixed && end < line.length && profile_valid_tag(candidate) && (rest.length == 0 || rest.pointer[0] == '#');
+    if (result)
+    {
+        *tag = candidate;
+    }
+    return result;
+}
+
 // Attributes the samples in `samples_text` (perf script -F ip,sym,symoff of a program built from label-spills' output)
 // to the spills and reloads of `function` in `labeled` (that output), and ranks their stack slots.
 static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 function, String8 labeled, String8 samples_text, uint64_t slot_count)
@@ -956,21 +1012,39 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
     }
     ProfileSpill* spills = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileSpill, lines + 1);
     ProfileSlot* slots = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileSlot, lines + 1);
-    // The labeled function's name: renamed if it is static, as label-spills renames it.
-    char* renamed = arena_push(arena, function.length + sizeof(BUSTER_PROFILE_LABELED_SUFFIX), 1);
+    // The labeled function's name and tag: `function.TAG` if label-spills renamed a static function, else `function`,
+    // with the tag of the first label. The labels' prefix is BUSTER_PROFILE_SPILL_LABEL, the tag and '.', which another
+    // labeled variant linked beside it doesn't have.
     String8 name = function;
-    if (renamed != 0)
+    String8 tag = { 0 };
+    bool renamed = false;
+    position = 0;
+    while (position < labeled.length)
     {
-        memcpy(renamed, function.pointer, function.length);
-        memcpy(renamed + function.length, BUSTER_PROFILE_LABELED_SUFFIX, sizeof(BUSTER_PROFILE_LABELED_SUFFIX) - 1);
-        const String8 candidate = { .pointer = renamed, .length = function.length + sizeof(BUSTER_PROFILE_LABELED_SUFFIX) - 1 };
-        position = 0;
-        while (position < labeled.length)
+        const String8 line = profile_line(labeled, &position);
+        const bool this_one = !renamed && profile_renamed_label(line, function, &tag);
+        renamed = renamed || this_one;
+        if (!renamed && tag.length == 0 && profile_starts_with(line, profile_string(BUSTER_PROFILE_SPILL_LABEL)))
         {
-            name = profile_is_label(profile_line(labeled, &position), candidate) ? candidate : name;
+            const String8 after = profile_slice(line, sizeof(BUSTER_PROFILE_SPILL_LABEL) - 1, line.length);
+            tag = profile_slice(after, 0, profile_find(after, profile_string(".")));
         }
     }
-    if (spills == 0 || slots == 0 || renamed == 0)
+    char* bytes = arena_push(arena, function.length + tag.length + sizeof(BUSTER_PROFILE_SPILL_LABEL) + 2, 1);
+    String8 label = { 0 };
+    if (bytes != 0)
+    {
+        memcpy(bytes, BUSTER_PROFILE_SPILL_LABEL, sizeof(BUSTER_PROFILE_SPILL_LABEL) - 1);
+        memcpy(bytes + sizeof(BUSTER_PROFILE_SPILL_LABEL) - 1, tag.pointer, tag.length);
+        bytes[sizeof(BUSTER_PROFILE_SPILL_LABEL) - 1 + tag.length] = '.';
+        label = (String8){ .pointer = bytes, .length = sizeof(BUSTER_PROFILE_SPILL_LABEL) + tag.length };
+        char* named = bytes + label.length;
+        memcpy(named, function.pointer, function.length);
+        named[function.length] = '.';
+        memcpy(named + function.length + 1, tag.pointer, tag.length);
+        name = renamed ? (String8){ .pointer = named, .length = function.length + 1 + tag.length } : function;
+    }
+    if (spills == 0 || slots == 0 || bytes == 0)
     {
         profile_print(report, "spill-report: out of memory\n");
     }
@@ -983,7 +1057,6 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
         bool numbered = true;
         bool pending = false;
         String8 location = { 0 };
-        const String8 label = profile_string(BUSTER_PROFILE_SPILL_LABEL);
         position = 0;
         while (position < labeled.length)
         {
@@ -998,10 +1071,11 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
             {
                 inside = false;
             }
-            else if (inside && profile_starts_with(line, label) && line.pointer[line.length - 1] == ':')
+            else if (inside && profile_starts_with(line, profile_string(BUSTER_PROFILE_SPILL_LABEL)))
             {
                 uint64_t number = 0;
-                numbered = numbered && profile_decimal(profile_slice(line, label.length, line.length - 1), &number) && number == spill_count;
+                const bool ours = profile_starts_with(line, label) && line.pointer[line.length - 1] == ':';
+                numbered = numbered && ours && profile_decimal(profile_slice(line, label.length, line.length - 1), &number) && number == spill_count;
                 pending = true;
             }
             else if (inside && profile_starts_with(trimmed, profile_string(".loc")))
@@ -1599,14 +1673,14 @@ static int run_profile_text_command(Arena* arena, ProfileReport* report, int arg
     }
     else if (strcmp(argv[0], "label-spills") == 0)
     {
-        valid = argc == 4;
-        const String8 assembly = valid ? profile_read_file(arena, argv[2]) : (String8){ 0 };
+        valid = argc == 5;
+        const String8 assembly = valid ? profile_read_file(arena, argv[3]) : (String8){ 0 };
         ProfileReport labeled = { .arena = arena_reserve(BUSTER_PROFILE_REPORT_CAPACITY) };
         if (assembly.pointer != 0)
         {
-            succeeded = profile_label_spills(&labeled, report, profile_string(argv[1]), assembly);
+            succeeded = profile_label_spills(&labeled, report, profile_string(argv[1]), profile_string(argv[2]), assembly);
             output = profile_report_text(&labeled);
-            output_path = argv[3];
+            output_path = argv[4];
         }
         if (succeeded)
         {
@@ -1615,7 +1689,7 @@ static int run_profile_text_command(Arena* arena, ProfileReport* report, int arg
         arena_release(&labeled.arena);
         if (!valid)
         {
-            fprintf(stderr, "usage: label-spills FUNCTION INPUT.s OUTPUT.s\n");
+            fprintf(stderr, "usage: label-spills FUNCTION TAG INPUT.s OUTPUT.s\n");
         }
     }
     else if (strcmp(argv[0], "spill-report") == 0)

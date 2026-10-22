@@ -120,11 +120,14 @@ The 9700X allows IBS (`perf_event_paranoid` is -1 there); on a Zen 4 laptop at 2
 
 Clang marks every spill and reload in its assembly (`# 64-byte Spill`, `# 8-byte Folded Reload`). `label-spills` puts a
 label before each one of a function's, and the program built from that assembly then has a symbol at every spill, so
-that `perf script` names each sample by the spill before it:
+that `perf script` names each sample by the spill before it. The labels carry a tag, the variant's name
+(`buster_spill.k1.0`), and a static function is renamed with it (`tokenize_c.k1`), so that neither the copies of the
+function in other translation units nor another labeled variant share its names; strings and comments stay as they
+were, so the program behaves as it did. `build.sh lexer-variant` refuses two labeled variants of one tag:
 
 ```sh
 ./build.sh lexer-variant-assembly k1 ../variants/k1.c k1.s
-./build/compiler label-spills tokenize_c k1.s k1_labeled.s
+./build/compiler label-spills tokenize_c k1 k1.s k1_labeled.s
 ./build.sh lexer-variant k1=k1_labeled.s
 perf record -e ibs_op/cnt_ctl=1/ -c 100003 -o spills.data -- taskset -c 2 ./build/compiler benchmark-lexer ~/azp-bench/c-tokenizer/corpus/libc
 perf script -i spills.data -F ip,sym,symoff > spills.txt
