@@ -380,6 +380,9 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 
+      - name: Test scoped name-resolution kernels
+        run: ./build/compiler test-bindings
+
       - name: Test the C type table
         # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a
         # random world of types against clang's: clang -fsyntax-only on _Static_asserts, the same file compiled and

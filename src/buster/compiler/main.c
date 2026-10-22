@@ -101,6 +101,11 @@ int run_files_benchmark(int argc, char** argv);
 #include "buster/compiler/c_parser_test.c"
 int run_parser_benchmark(int argc, char** argv);
 
+// Scoped name-resolution kernels and their event-stream oracle, independent of the parser's pending adapter.
+#include "buster/compiler/c_bindings.c"
+#include "buster/compiler/c_bindings_test.c"
+#include "buster/compiler/c_bindings_benchmark.c"
+
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test
 // programs generated in it, and their tests, for the test-link command.
 #include "buster/compiler/link.c"
@@ -227,6 +232,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-parser") == 0)
     {
         result = run_parser_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-bindings") == 0)
+    {
+        result = run_c_bindings_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-bindings") == 0)
+    {
+        result = run_c_bindings_benchmark(argc - 2, argv + 2);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
     {
