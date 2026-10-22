@@ -38,6 +38,8 @@
 //     va_arg reads elsewhere than its call puts it (abi_test_va_disagreement); and bytes clang doesn't pass aren't
 //     checked (abi_test_mask_unpassed).
 // The exit status is 1 if the arguments are invalid or a check fails.
+// With --cross-check, bounded child processes also check capture ownership with closed standard descriptors and
+// descriptor exhaustion, before running the ordinary six configurations.
 //
 // Layout, in this order: the tally and helpers; merge; the oracle; fixtures; worlds; assignment; the cross-check;
 // run_calling_convention_tests.
@@ -48,10 +50,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <errno.h>
 
 // OS-dependent includes
+#include <dirent.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <linux/memfd.h>
@@ -4722,6 +4729,20 @@ struct AbiTestCrossRun
     int errors;
 };
 
+// A capture must never occupy a standard descriptor: replay would otherwise write back into the capture when the
+// caller closed stdout or stderr, and the child's dup2 calls could overwrite the other capture.
+static int abi_test_cross_capture(const char* name)
+{
+    int descriptor = (int)syscall(SYS_memfd_create, name, MFD_CLOEXEC);
+    if (descriptor >= 0 && descriptor <= STDERR_FILENO)
+    {
+        const int original = descriptor;
+        descriptor = fcntl(original, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+        close(original);
+    }
+    return descriptor;
+}
+
 // Starts run `index` (clang's at 16-, 32- and 64-byte vectors, then GCC's) in a child process, whose tally goes to
 // `tally`, in memory it shares with the parent. The parent must have flushed its stdout and stderr, which the child
 // would otherwise print again.
@@ -4733,8 +4754,8 @@ static AbiTestCrossRun abi_test_cross_start(uint32_t index, AbiTestTally* tally,
         .name = gcc_run ? "gcc" : "clang",
         .vector_bytes = 16u << (index % BUSTER_ABI_TEST_CROSS_WIDTHS),
         .child = -1,
-        .output = (int)syscall(SYS_memfd_create, "cross-check output", MFD_CLOEXEC),
-        .errors = (int)syscall(SYS_memfd_create, "cross-check errors", MFD_CLOEXEC),
+        .output = abi_test_cross_capture("cross-check output"),
+        .errors = abi_test_cross_capture("cross-check errors"),
     };
     if (run.output >= 0 && run.errors >= 0)
     {
@@ -4849,6 +4870,183 @@ static bool abi_test_cross_check(uint64_t seed, uint32_t count, const char* clan
     return tally.failures == 0;
 }
 
+// The regression children start with known standard streams, then close the selected ones. Limit both time and file
+// size: a replay that writes back into its capture must fail without hanging the tests or filling memory.
+static bool abi_test_cross_descriptor_setup(uint32_t closed)
+{
+    const int null = open("/dev/null", O_RDWR);
+    bool ready = null >= 0;
+    for (int descriptor = STDIN_FILENO; ready && descriptor <= STDERR_FILENO; descriptor += 1)
+    {
+        ready = dup2(null, descriptor) == descriptor;
+    }
+    if (null > STDERR_FILENO)
+    {
+        close(null);
+    }
+    for (int descriptor = STDIN_FILENO; ready && descriptor <= STDERR_FILENO; descriptor += 1)
+    {
+        if ((closed & (1u << descriptor)) != 0)
+        {
+            ready = close(descriptor) == 0;
+        }
+    }
+    clearerr(stdout);
+    clearerr(stderr);
+    struct rlimit limit;
+    ready = ready && getrlimit(RLIMIT_FSIZE, &limit) == 0;
+    if (ready)
+    {
+        limit.rlim_cur = limit.rlim_cur < (8u << 20) ? limit.rlim_cur : (8u << 20);
+        ready = setrlimit(RLIMIT_FSIZE, &limit) == 0;
+    }
+    sigset_t signals;
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGALRM);
+    sigaddset(&signals, SIGXFSZ);
+    ready = ready && signal(SIGALRM, SIG_DFL) != SIG_ERR && signal(SIGXFSZ, SIG_DFL) != SIG_ERR && sigprocmask(SIG_UNBLOCK, &signals, 0) == 0;
+    alarm(10);
+    return ready;
+}
+
+static bool abi_test_cross_standard_descriptors(uint32_t closed)
+{
+    bool same = true;
+    for (int descriptor = STDIN_FILENO; descriptor <= STDERR_FILENO; descriptor += 1)
+    {
+        const int flags = fcntl(descriptor, F_GETFD);
+        const bool expected_closed = (closed & (1u << descriptor)) != 0;
+        same = (expected_closed ? flags == -1 && errno == EBADF : flags >= 0) && same;
+    }
+    return same;
+}
+
+// Verify that all six runs reached the failing compiler, then remove only their known files in this test's private
+// TMPDIR. A setup failure also exits 1, but cannot leave all 24 files. The ordinary cross-check keeps its failed runs.
+static bool abi_test_cross_descriptor_files(const char* temporary)
+{
+    DIR* root = opendir(temporary);
+    bool complete = root != 0;
+    uint32_t directories = 0;
+    const char* suffixes[] = {
+        ".c",
+        "_buster.o",
+        ".out",
+        ".err",
+    };
+    struct dirent* entry;
+    while (root != 0 && (entry = readdir(root)) != 0)
+    {
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
+        {
+            char directory[BUSTER_ABI_TEST_PATH_BYTES + sizeof(entry->d_name)];
+            snprintf(directory, sizeof(directory), "%s/%s", temporary, entry->d_name);
+            directories += 1;
+            for (uint32_t r = 0; r < BUSTER_ABI_TEST_CROSS_RUNS; r += 1)
+            {
+                const char* name = r < BUSTER_ABI_TEST_CROSS_WIDTHS ? "clang" : "gcc";
+                const uint32_t width = 16u << (r % BUSTER_ABI_TEST_CROSS_WIDTHS);
+                for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(suffixes); s += 1)
+                {
+                    char path[sizeof(directory) + 64];
+                    snprintf(path, sizeof(path), "%s/%s_%u%s", directory, name, width, suffixes[s]);
+                    complete = unlink(path) == 0 && complete;
+                }
+            }
+            complete = rmdir(directory) == 0 && complete;
+        }
+    }
+    if (root != 0)
+    {
+        complete = closedir(root) == 0 && complete;
+    }
+    return complete && directories == 1;
+}
+
+// Both capture duplications fail with a limit of 3 and closed output streams; with a limit of 4 and open standard
+// streams, only the first memfd fits. In either case, finishing must release every capture and count one failed run.
+static bool abi_test_cross_descriptor_failure(rlim_t descriptors, const char* directory)
+{
+    const uint32_t closed = descriptors == 3 ? 6 : 0;
+    struct rlimit limit;
+    bool ready = abi_test_cross_descriptor_setup(closed) && getrlimit(RLIMIT_NOFILE, &limit) == 0;
+    close(STDERR_FILENO + 1);
+    if (ready)
+    {
+        limit.rlim_cur = descriptors;
+        ready = setrlimit(RLIMIT_NOFILE, &limit) == 0;
+    }
+    bool passed = false;
+    if (ready)
+    {
+        AbiTestTally tally = { 0 };
+        const AbiTestTally shared = { 0 };
+        AbiTestCrossRun run = abi_test_cross_start(0, &tally, 1, 20, "/bin/false", "/bin/false", directory, false);
+        const bool failed = run.child == -1 && run.errors == -1 && (descriptors == 3 ? run.output == -1 : run.output == STDERR_FILENO + 1);
+        abi_test_cross_finish(&tally, run, &shared);
+        const int flags = fcntl(STDERR_FILENO + 1, F_GETFD);
+        passed = failed && flags == -1 && errno == EBADF && tally.checks == 1 && tally.failures == 1 && abi_test_cross_standard_descriptors(closed);
+    }
+    return passed;
+}
+
+static bool abi_test_cross_descriptors(void)
+{
+    AbiTestTally tally = { 0 };
+    char directory[BUSTER_ABI_TEST_PATH_BYTES];
+    const char* temporary = getenv("TMPDIR");
+    const int length = snprintf(directory, sizeof(directory), "%s/buster-abi-descriptors-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    if (abi_test_expect(&tally, length > 0 && (uint64_t)length < sizeof(directory) && mkdtemp(directory) != 0, "cross-check descriptors", "can't make the test directory"))
+    {
+        for (uint32_t closed = 0; closed < 8; closed += 1)
+        {
+            fflush(stdout);
+            fflush(stderr);
+            const pid_t child = fork();
+            if (child == 0)
+            {
+                if (!abi_test_cross_descriptor_setup(closed) || setenv("TMPDIR", directory, 1) != 0)
+                {
+                    _exit(127);
+                }
+                const bool passed = abi_test_cross_check(1, 20, "/bin/false", "/bin/false", false);
+                _exit(abi_test_cross_standard_descriptors(closed) ? (passed ? 0 : 1) : 127);
+            }
+            int status = 0;
+            pid_t waited;
+            do
+            {
+                waited = child > 0 ? waitpid(child, &status, 0) : -1;
+            } while (child > 0 && waited < 0 && errno == EINTR);
+            char detail[128];
+            snprintf(detail, sizeof(detail), "closed mask %u: the failing compiler must exit 1 and leave the standard descriptors unchanged", closed);
+            abi_test_expect(&tally, waited == child && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 1, "cross-check descriptors", detail);
+            abi_test_expect(&tally, abi_test_cross_descriptor_files(directory), "cross-check descriptors", "all six failed runs must retain their files");
+        }
+        for (rlim_t descriptors = 3; descriptors <= 4; descriptors += 1)
+        {
+            fflush(stdout);
+            fflush(stderr);
+            const pid_t child = fork();
+            if (child == 0)
+            {
+                _exit(abi_test_cross_descriptor_failure(descriptors, directory) ? 0 : 127);
+            }
+            int status = 0;
+            pid_t waited;
+            do
+            {
+                waited = child > 0 ? waitpid(child, &status, 0) : -1;
+            } while (child > 0 && waited < 0 && errno == EINTR);
+            abi_test_expect(&tally, waited == child && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0, "cross-check descriptors",
+                            descriptors == 3 ? "failed duplication must close the original descriptors" : "failed second capture must close the first capture");
+        }
+        abi_test_expect(&tally, rmdir(directory) == 0, "cross-check descriptors", "the test directory must be empty");
+    }
+    abi_test_report("cross-check descriptors", tally);
+    return tally.failures == 0;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
@@ -4913,6 +5111,7 @@ static int run_calling_convention_tests(int argc, char** argv)
         passed = abi_test_fixtures() && passed;
         passed = abi_test_worlds(seed, (uint32_t)count) && passed;
         passed = abi_test_assignment(seed, (uint32_t)count) && passed;
+        passed = (!cross_check || abi_test_cross_descriptors()) && passed;
         passed = (!cross_check || abi_test_cross_check(seed, (uint32_t)signatures, clang, gcc, keep)) && passed;
         result = passed ? 0 : 1;
     }
