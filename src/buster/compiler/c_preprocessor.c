@@ -3376,7 +3376,7 @@ static void pp_scan_body_scalar(const uint8_t* kinds, const uint32_t* values, ui
     }
 }
 
-static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start);
+static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start, bool trigraphs);
 
 // Where clang reports what a directive's line lacks ("macro name missing"): its end, the newline after its last token
 // (`last`), past blanks, comments and line splices, or the end of the file.
@@ -3424,7 +3424,7 @@ static uint32_t pp_line_end_location(const Preprocessor* pp, const PPFileData* d
 // Where clang reports token t of a definition's line, [.., end): the token, or the line's end if t is past its last.
 static uint32_t pp_define_location(const Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t t, uint32_t end)
 {
-    return t < end ? base + pp_start_with_splices(data->bytes, data->starts[t]) : pp_line_end_location(pp, data, base, end - 1);
+    return t < end ? base + pp_start_with_splices(data->bytes, data->starts[t], pp->options.trigraphs) : pp_line_end_location(pp, data, base, end - 1);
 }
 
 // The punctuators' spellings, from C_TOKEN_L_SQUARE on (a digraph's is the token it stands for).
@@ -7521,7 +7521,7 @@ static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin
 // line splices right before it (pp_start_with_splices).
 static uint32_t pp_token_location(const Preprocessor* pp, const PPContext* context, const PPFileData* data, uint32_t t)
 {
-    return pp->ranges[context->range].base + pp_start_with_splices(data->bytes, data->starts[t]);
+    return pp->ranges[context->range].base + pp_start_with_splices(data->bytes, data->starts[t], pp->options.trigraphs);
 }
 
 // A conditional directive's name, for diagnostics.
@@ -11154,6 +11154,8 @@ static const char pp_predefines_undefined[] =
     "#define __STDC__ 1\n"
     ;
 
+_Static_assert(sizeof(pp_predefines_undefined) <= sizeof(pp_predefines_base), "-undef fits in the predefines buffer");
+
 // The most bytes pp_predefines writes.
 #define BUSTER_PP_PREDEFINES_BYTES (sizeof(pp_predefines_base) + sizeof(pp_predefines_c23) + 512 + BUSTER_PREDEFINES_TEXT_BYTES)
 
@@ -11164,9 +11166,9 @@ static const char pp_predefines_undefined[] =
 static uint32_t pp_predefines(const PPOptions* options, char* buffer, uint32_t* flt_eval_method)
 {
     uint32_t length = 0;
-    *flt_eval_method = predefines_eval_method(&options->predefines);
     if (options->undefine)
     {
+        *flt_eval_method = predefines_eval_method(&options->predefines);
         memcpy(buffer, pp_predefines_undefined, sizeof(pp_predefines_undefined) - 1);
         length += sizeof(pp_predefines_undefined) - 1;
     }
