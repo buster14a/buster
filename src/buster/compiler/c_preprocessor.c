@@ -670,6 +670,9 @@ struct PPContext
     // A buffer: the leading space its expansion left after its last token (an empty argument there), which the next
     // token read after it takes.
     uint8_t trailing_flags;
+    // A file: whether a line lexed again from a header name hid some of its directives in a comment (pp_resume_after), so
+    // that the file's conditional pairing, which counted them, doesn't hold for it (pp_skip_group).
+    bool hidden_directives;
     // The macro to enable again when the context is popped.
     PPMacroId macro;
     uint32_t position;
@@ -3355,24 +3358,27 @@ static uint64_t pp_line_end(const ScalarLexer* lexer, uint64_t p)
 
 // The end of a directive's line as clang lexes it on from byte `stop` of a file, past a header name the file's tokens
 // didn't know (pp_header_name_tail): its first newline outside a block comment, which carries the line on past its
-// newlines, or the end of the file. The line is lexed from `stop` to its next newline (pp_line_end) until it doesn't end
-// inside a block comment, each time past that comment's end.
+// newlines, or the end of the file. Each piece of the line, from where the lexer is between tokens (`stop`, or the end
+// of a block comment) to the next newline (pp_line_end), is lexed once: when it ends inside a block comment, the next
+// piece starts past that comment's end.
 static uint32_t pp_relex_end(uint32_t refine_flags, const PPFileData* data, uint32_t stop)
 {
     const ScalarLexer lexer = pp_file_lexer(refine_flags, data);
-    uint64_t result = pp_line_end(&lexer, stop);
+    uint64_t from = stop;
+    uint64_t result = pp_line_end(&lexer, from);
     bool inside = true;
     while (inside && result < data->length)
     {
-        const uint32_t length = (uint32_t)result - stop;
+        const uint32_t length = (uint32_t)(result - from);
         Scratch scratch = scratch_begin(0);
         const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY((uint64_t)length);
         uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
         uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
         uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-        const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(data->bytes + stop, length, kinds, starts, ends, refine_flags) : 0;
-        inside = count > 0 && pp_is_unterminated_comment(data->bytes + stop, kinds[count - 1], starts[count - 1]);
-        result = inside ? pp_line_end(&lexer, pp_skip_comment(&lexer, stop + starts[count - 1])) : result;
+        const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(data->bytes + from, length, kinds, starts, ends, refine_flags) : 0;
+        inside = count > 0 && pp_is_unterminated_comment(data->bytes + from, kinds[count - 1], starts[count - 1]);
+        from = inside ? pp_skip_comment(&lexer, from + starts[count - 1]) : from;
+        result = inside ? pp_line_end(&lexer, from) : result;
         scratch_end(scratch);
     }
     return (uint32_t)result;
@@ -3384,19 +3390,21 @@ static uint32_t pp_relex_end(uint32_t refine_flags, const PPFileData* data, uint
 // the line's end), and then its tokens from `stop` on aren't those clang lexes there, on from the name. `*relex` gets
 // the end of what must then be lexed again, the end of the line as clang lexes it from `stop` (pp_relex_end), which may
 // be past the directive's end in the file's tokens (pp_resume_after); else `stop`.
-static uint32_t pp_header_name_tail(uint32_t refine_flags, const PPFileData* data, uint32_t first, uint32_t end, uint32_t stop, uint32_t* relex)
+static uint32_t pp_header_name_tail(const Preprocessor* pp, const PPFileData* data, uint32_t first, uint32_t end, uint32_t stop, uint32_t* relex)
 {
     uint32_t result = first + 1;
     while (result < end && data->starts[result] < stop)
     {
         result += 1;
     }
-    // Where clang lexes its first token past the name, or the line's end, against where the file's next token is.
-    const ScalarLexer lexer = pp_file_lexer(refine_flags, data);
+    // Where clang lexes its first token past the name, or the line's end, against where the file's next token is. With
+    // none of the file's tokens past the name on its line, both lines must end at the same newline: a block comment clang
+    // begins after the name may carry its line past the one the file's tokens end at (`<a//b> /*` with `*/` below).
+    const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
     const uint64_t next = pp_skip_blanks(&lexer, stop);
     const bool line_ended = next >= data->length || data->bytes[next] == '\n' || data->bytes[next] == '\r';
-    const bool same = result < end ? next == data->starts[result] : line_ended;
-    *relex = same ? stop : pp_relex_end(refine_flags, data, stop);
+    const bool same = result < end ? next == data->starts[result] : line_ended && next == pp_skip_blanks(&lexer, pp_file_token_end(pp, data, result - 1));
+    *relex = same ? stop : pp_relex_end(pp->refine_flags, data, stop);
     return result;
 }
 
@@ -3412,6 +3420,7 @@ static void pp_resume_after(PPContext* context, const PPFileData* data, uint32_t
     while (context->next_directive < data->directive_count && data->directive_hash[context->next_directive] < context->position)
     {
         context->next_directive += 1;
+        context->hidden_directives = true;
     }
 }
 
@@ -5882,7 +5891,7 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
         if (stop != 0)
         {
             uint32_t relex;
-            const uint32_t after = pp_header_name_tail(pp->refine_flags, data, first, end, stop, &relex);
+            const uint32_t after = pp_header_name_tail(pp, data, first, end, stop, &relex);
             token.value = base + stop;
             const uint32_t expansion_end = pp_expansion_end(context, token);
             context->position = relex != stop ? context->end : context->position + (after - first);
@@ -7516,7 +7525,7 @@ static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t be
 
 // Lexes bytes [begin, end) of the context's file again and appends their tokens to `into` as pp_copy_line copies a
 // line's: the rest of a line past a header name read from it, where the file's tokens aren't those clang lexes
-// (pp_header_name_tail). An unterminated block comment at their end is left out, as the line ends there. Returns false
+// (pp_header_name_tail). An unterminated block comment at their end is an error, and left out. Returns false
 // if they don't fit.
 static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end, PPTokens* into)
 {
@@ -7532,7 +7541,14 @@ static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t
     int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
     const PPPrepare mode = pp_prepare_config(pp);
     count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, count, false) : count;
-    count -= count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
+    // An unterminated block comment at their end runs to the file's end (pp_relex_end), which clang's lexer reports where
+    // it starts: the file's tokens, which read it as part of a line comment, didn't.
+    const bool unterminated = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
+    if (unterminated)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, base + begin + starts[count - 1], "unterminated /* comment");
+    }
+    count -= unterminated;
     bool result = count >= 0 && pp_room(pp, into, (uint32_t)count);
     for (uint32_t i = 0; result && i < (uint32_t)count; i += 1)
     {
@@ -7618,11 +7634,29 @@ static void pp_line_text(const Preprocessor* pp, const PPFileData* data, uint32_
 
 static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location);
 
-// Skips to the next directive of directive d's conditional group (or to the end of the file if it is unterminated).
+// Skips to the next directive of directive d's conditional group (or to the end of the file if it is unterminated): the
+// file's pairing gives it (directive_next), but where a line lexed again hid directives (pp_resume_after), which that
+// pairing counted, the nesting is counted again from d on. The hidden directives are before d, as a line hides them when
+// it runs, and those the count passes are the skipped group's, which the context then passes over: each is counted once.
 static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
-    const uint32_t next = data->directive_next[d];
+    uint32_t next = data->directive_next[d];
+    if (context->hidden_directives)
+    {
+        next = BUSTER_PP_NONE;
+        uint32_t depth = 0;
+        for (uint32_t e = d + 1; next == BUSTER_PP_NONE && e < data->directive_count; e += 1)
+        {
+            const uint8_t kind = data->directive_kind[e];
+            const bool opens = kind == PP_DIRECTIVE_IF || kind == PP_DIRECTIVE_IFDEF || kind == PP_DIRECTIVE_IFNDEF;
+            const bool branch = kind == PP_DIRECTIVE_ELIF || kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF || kind == PP_DIRECTIVE_ELSE;
+            const bool closes = kind == PP_DIRECTIVE_ENDIF;
+            next = depth == 0 && (branch || closes) ? e : BUSTER_PP_NONE;
+            depth += opens;
+            depth -= closes && depth != 0;
+        }
+    }
     if (next == BUSTER_PP_NONE)
     {
         context->position = data->token_count;
@@ -8010,7 +8044,7 @@ static bool pp_read_header_name(Preprocessor* pp, const PPFileData* data, uint32
         valid = *literal && whole;
         *angled = valid;
         // The first token at or after the '>''s end, and what must be lexed again from there (pp_header_name_tail).
-        *after = *literal ? pp_header_name_tail(pp->refine_flags, data, first, end, stop, relex_end) : end;
+        *after = *literal ? pp_header_name_tail(pp, data, first, end, stop, relex_end) : end;
         *relex_begin = *literal ? stop : 0;
     }
     else if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_STRING_LITERAL)
@@ -8090,7 +8124,7 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
         }
         // The file goes on past the line as clang lexes it (pp_resume_after), before the header is entered.
         uint32_t relex;
-        pp_header_name_tail(pp->refine_flags, data, first, end, stop, &relex);
+        pp_header_name_tail(pp, data, first, end, stop, &relex);
         pp_resume_after(context, data, relex);
         pp_include_file(pp, context, kind, name, length, angled, location, name_location, 0);
     }
@@ -9227,10 +9261,12 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
     if (pp->poison_count != 0 && kind != PP_DIRECTIVE_PRAGMA && kind != PP_DIRECTIVE_IDENT)
     {
         // The line's poisoned names (pp_is_poisoned): #error's and #warning's text isn't lexed, a pragma's are
-        // pp_pragma's, and an #include's header name is one token.
+        // pp_pragma's, and an #include's header name is one token. An #embed's line past an angled name is pp_embed's,
+        // as clang may lex it otherwise than the file's tokens (pp_header_name_tail).
         const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
         const bool include = kind == PP_DIRECTIVE_INCLUDE || kind == PP_DIRECTIVE_INCLUDE_NEXT || kind == PP_DIRECTIVE_IMPORT || kind == PP_DIRECTIVE_EMBED;
-        pp_check_poison_range(pp, data, base, 0, hash + 1, text ? hash + 2 : end, include ? hash + 2 : BUSTER_PP_NONE, true);
+        const bool angled_embed = kind == PP_DIRECTIVE_EMBED && hash + 2 < end && (data->kinds[hash + 2] & 0x7F) == C_TOKEN_LESS;
+        pp_check_poison_range(pp, data, base, 0, hash + 1, text || angled_embed ? hash + 2 : end, include ? hash + 2 : BUSTER_PP_NONE, true);
     }
     switch (kind)
     {
@@ -10563,15 +10599,17 @@ static uint64_t pp_has_embed(Preprocessor* pp, const PPTokens* tokens, uint32_t 
 // comments between it and the line's end, and isn't a directive's '#': after an #embed's tokens clang's lexer starts no
 // line there, since the end of the tokens it entered passes no line start on (Preprocessor::HandleEndOfFile's
 // PropagateLineStartLeadingSpaceInfo), so its printer prints the token on the line of the embed's output.
-static bool pp_embed_joins(const Preprocessor* pp, const PPFileData* data, const PPContext* context)
+static bool pp_embed_joins(const Preprocessor* pp, const PPFileData* data, const PPContext* context, uint32_t line_end)
 {
     // The token after the line: the context's next one, past the line as clang lexes it when it was lexed again
-    // (pp_resume_after), from the end of the token before it.
+    // (pp_resume_after), from the line's end: the end of the token before it, or where the line lexed again ends
+    // (`line_end`; 0 when it wasn't), since the token before may be the file's, inside the header name.
     const uint32_t end = context->position;
     const bool directive = context->next_directive < data->directive_count && data->directive_hash[context->next_directive] == end;
     const uint32_t stop = end < data->token_count && !directive ? data->starts[end] : 0;
     const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
-    uint64_t p = pp_file_token_end(pp, data, end - 1);
+    const uint64_t last = pp_file_token_end(pp, data, end - 1);
+    uint64_t p = line_end > last ? line_end : last;
     uint32_t newlines = 0;
     // The newlines outside comments, at each of which pp_skip_blanks stops (a CR LF is one).
     while (p < stop)
@@ -10606,9 +10644,10 @@ static bool pp_embed_push(Preprocessor* pp, const PPTokens* tokens, uint32_t beg
 // and `angled`), then its parameters. The file is found (pp_find_embed) and its bytes past clang::offset and up to limit
 // go in as one BUSTER_PP_KIND_EMBED token between prefix's tokens and suffix's, or if_empty's tokens go in when there are
 // none (C23 6.10.3), in a buffer the main loop reads next (pp_embed_push), as clang enters them
-// (HandleEmbedDirectiveImpl). Then the file's next token may join their line (pp_embed_joins).
+// (HandleEmbedDirectiveImpl). Then the file's next token may join their line (pp_embed_joins), which ends at
+// `relexed_end` when it was lexed again from the header name (pp_copy_relexed; else 0).
 static void pp_embed_line(Preprocessor* pp, PPContext* context, uint32_t d, const PPTokens* tokens, uint32_t begin, uint32_t end, bool literal, uint8_t* name,
-                          uint32_t length, bool angled)
+                          uint32_t length, bool angled, uint32_t relexed_end)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
     const uint32_t base = pp->ranges[context->range].base;
@@ -10697,7 +10736,7 @@ static void pp_embed_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
                         pp_note_expansion(pp, pp->file_change_location);
                     }
                 }
-                const bool joins = !pp_collecting(pp) && pp_embed_joins(pp, data, context);
+                const bool joins = !pp_collecting(pp) && pp_embed_joins(pp, data, context, relexed_end);
                 if (pp_push_buffer(pp, &pp->expansions, start, pp->expansions.count, 0, 0, false, true) != 0 && joins)
                 {
                     context->pending_flags |= BUSTER_PP_JOIN_LINE;
@@ -10724,7 +10763,8 @@ static void pp_finish_embed(Preprocessor* pp)
     pp_read_header_name(pp, data, hash + 2, data->directive_end[capture.directive], name, sizeof(name), &length, &angled, &literal, &after, &relex_begin,
                         &relex_end);
     pp->capture_count -= 1;
-    pp_embed_line(pp, context, capture.directive, &pp->captures, capture.begin, pp->captures.count, literal, name, length, angled);
+    pp_embed_line(pp, context, capture.directive, &pp->captures, capture.begin, pp->captures.count, literal, name, length, angled,
+                  relex_begin != relex_end ? relex_end : 0);
     pp->captures.count = capture.begin;
     pp->arguments.count = capture.arguments_begin;
 }
@@ -10762,6 +10802,16 @@ static void pp_embed(Preprocessor* pp, PPContext* context, uint32_t d)
     else if (relex_begin != relex_end ? pp_copy_relexed(pp, context, relex_begin, relex_end, &pp->arguments) : pp_copy_line(pp, context, literal ? after : hash + 2, end))
     {
         pp_resume_after(context, data, relex_end);
+        // The poisoned names of the line past an angled name, which pp_directive leaves to this: the line lexed again
+        // (where the file's tokens may have none of them, in a comment, or others), or else the file's tokens past it.
+        if (relex_begin != relex_end)
+        {
+            pp_check_poison_range(pp, data, base, &pp->arguments, line, pp->arguments.count, BUSTER_PP_NONE, true);
+        }
+        else if (angled)
+        {
+            pp_check_poison_range(pp, data, base, 0, after, end, BUSTER_PP_NONE, true);
+        }
         bool expands = !literal;
         for (uint32_t i = line; i < pp->arguments.count; i += 1)
         {
@@ -10777,7 +10827,7 @@ static void pp_embed(Preprocessor* pp, PPContext* context, uint32_t d)
         };
         if (!(expands && line < pp->arguments.count && !pp_collecting(pp) && pp_start_capture(pp, capture, line, pp->arguments.count, location)))
         {
-            pp_embed_line(pp, context, d, &pp->arguments, line, pp->arguments.count, literal, name, length, angled);
+            pp_embed_line(pp, context, d, &pp->arguments, line, pp->arguments.count, literal, name, length, angled, relex_begin != relex_end ? relex_end : 0);
             pp->arguments.count = line;
         }
     }

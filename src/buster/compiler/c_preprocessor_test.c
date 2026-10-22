@@ -783,6 +783,8 @@ struct PPTestCase
     const PPTestFile* files;
     // The text -E prints with line markers (compared byte for byte, %d for the directory), or null.
     const char* markers;
+    // The errors each run must give, for a case that fails; 0 doesn't count them.
+    uint32_t errors;
 };
 
 static const PPTestFile pp_test_files_include_next[] = {
@@ -806,10 +808,11 @@ static const PPTestFile pp_test_files_stack[] = {
 
 // #embed's resources: text, bytes of every kind (a zero, 255, the edges of one, two and three digits), every value in
 // turn, nothing, and headers that end with an #embed, with and without a newline after it.
-// #252's review's #embed files: a resource in a directory of its own, for a name with "//", and a header that becomes a
-// system header before it embeds one.
+// #252's review's #embed files: a resource in a directory of its own, for a name with "//" (and one whose name starts
+// with '*', for "/*"), and a header that becomes a system header before it embeds one.
 static const PPTestFile pp_test_files_embed_review[] = {
     { "dir/bytes.bin", "A\n" },
+    { "dir/*x.bin", "B\n" },
     { "hi.txt", "Hi!\n" },
     { "sys.h", "unsigned char a[] = {\n#pragma GCC system_header\n#embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
     { "sys_indent.h", "unsigned char b[] = {\n#pragma GCC system_header\n  #embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
@@ -1472,6 +1475,80 @@ static const PPTestCase pp_test_cases[] = {
         .expected = "int a[] = {72 }; int b[] = {72 }; int c[] = {72 }; 72 int z;",
         .files = pp_test_files_embed_review,
     },
+    // #252's third review, against clang 23, on lines lexed again past a name with "//" (or "/*"): a block comment right
+    // after the name carries the line on (the file's tokens had nothing past the name to differ); directives that a
+    // comment in such a line hides, which the file's conditional pairing counted (an #endif there leaves the #else, #elif
+    // and #elifdef after it to a count of the nesting, through #if, #ifdef, #ifndef and #elifndef); poisoned names in it,
+    // each an error once, and none in its comments, where the file's tokens may have them; an unterminated block comment
+    // at its end (clang's error); comments that end and begin again on its lines, each piece lexed once; and the file's
+    // next token, which joins the data's line from where the line lexed again ends (`// */` is in its comment).
+    {
+        .name = "#252's third review: a block comment right after an #embed's \"//\" name",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> /* comment\n*/\n};\nint b[] = {\n#embed <dir//bytes.bin> /* c\n*/ limit(1)\n};\n"
+                  "int c[] = {\n#embed <dir//bytes.bin> /* c */ /* d\n*/ limit(1) /* e\n*/\n};\nafter\n",
+        .standard = "c23",
+        .expected = "int a[] = {65, 10 }; int b[] = {65 }; int c[] = {65 }; after",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: directives hidden in an #embed's line lexed again",
+        .source = "#if 1\n#embed <dir//bytes.bin> limit(1) /* comment\n#endif\n*/\n#else\nbad\n#endif\ngood\n"
+                  "#ifdef __STDC__\n#embed <dir//bytes.bin> limit(1) /* comment\n#endif\n*/\n#elifdef __STDC__\nbad\n#else\n#ifndef X\nbad\n"
+                  "#elifndef Y\nbad\n#else\nbad\n#endif\n#if 1\n#endif\nbad\n#endif\ngood2\n",
+        .standard = "c23",
+        .expected = "65 good 65 good2",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: poisoned names in an #embed's line lexed again",
+        .source = "#pragma GCC poison bad\nint a[] = {\n#embed <dir//bytes.bin> limit(1) prefix(bad,)\n};\nint b[] = {\n"
+                  "#embed <dir/bytes.bin>> limit(1) > bad\n};\nint c[] = {\n#embed <dir/bytes.bin> limit(1) prefix(bad,)\n};\nx\n",
+        .standard = "c23",
+        .expected = "int a[] = {bad,65 }; int b[] = { }; int c[] = {bad,65 }; x",
+        .fails = true,
+        .errors = 4,
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: poisoned names in comments of an #embed's line lexed again",
+        .source = "#pragma GCC poison bad\nint a[] = {\n#embed <dir/*x.bin> limit(1) /*/ > bad */\n};\nint b[] = {\n"
+                  "#embed <dir//bytes.bin> limit(1) /* bad\n*/\n};\nx\n",
+        .standard = "c23",
+        .expected = "int a[] = {66 }; int b[] = {65 }; x",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: an unterminated block comment in an #embed's line lexed again",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) /* unclosed\n};\n",
+        .standard = "c23",
+        .expected = "int a[] = {65",
+        .fails = true,
+        .errors = 1,
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: comments that end and begin again in an #embed's line lexed again",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) prefix(/*\n*/1,/*\n*/2, /* x */ /*\n\n*/3,) /* y */ /*\n*/ suffix(,/*\n\n*/4)\n};\nend\n",
+        .standard = "c23",
+        .expected = "int a[] = {1,2,3,65,4}; end",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: the token after an #embed's line lexed again",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) /* comment\n// */\n, __builtin_LINE()\n};\nint b[] = {\n"
+                  "#embed <dir//bytes.bin> limit(1) /* comment\n// */\n\n, 3\n};\n",
+        .standard = "c23",
+        .expected = "int a[] = {65 , __builtin_LINE() }; int b[] = {65 , 3 };",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+        .markers = "# 1 \"%d/case.c\"\nint a[] = {65 , __builtin_LINE()\n\n\n\n};\nint b[] = {65\n\n\n\n, 3\n};\n",
+    },
     {
         .name = "__has_embed: clang's limit and clang::offset",
         .source = "#if __has_embed(\"hi.txt\") == 1 && __has_embed(\"hi.txt\" limit(4)) == 1 && __has_embed(\"hi.txt\" "
@@ -1868,6 +1945,11 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
             if (runs[k].warnings != test->warnings)
             {
                 printf("%s: %u warnings (%s kernels), not %u\n", test->name, runs[k].warnings, k == 0 ? "vectorized" : "scalar", test->warnings);
+                result = false;
+            }
+            if (test->errors != 0 && runs[k].errors != test->errors)
+            {
+                printf("%s: %u errors (%s kernels), not %u\n", test->name, runs[k].errors, k == 0 ? "vectorized" : "scalar", test->errors);
                 result = false;
             }
         }
