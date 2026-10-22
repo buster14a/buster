@@ -26,7 +26,10 @@
 //   - PredefinesFeatures and the generated tables: predefines_features (each feature's flag, closures and macros),
 //     predefines_cpus (each -march CPU's macro name and features) and predefines_tunes (the -mtune names).
 //   - The host: predefines_host, -march=native's CPU and features from CPUID, as LLVM's Host.cpp finds them.
-//   - The options: PredefinesOptions, predefines_options_initialize and predefines_option (one argument).
+//   - The options: PredefinesOptions, predefines_options_initialize, the -m options that change no macro
+//     (predefines_neutral, the flags and value options clang uses for x86-64 Linux, beside which pp_parse_options
+//     refuses every other -m option, and predefines_finish_neutral, their values and combinations checked as clang
+//     checks them) and predefines_option (one argument).
 //   - The sanitizers: clang's sanitizers and groups, predefines_sanitizers (clang's SanitizerArgs), predefines_finish
 //     (what the whole command line decides, after every option: the sanitizers and the options clang's driver reads
 //     only the last of) and predefines_sanitizer_feature (the sanitizer features of the oracle's mode).
@@ -788,6 +791,21 @@ typedef enum PredefinesFloat
     PREDEFINES_FLOAT_NO_FAST,
 } PredefinesFloat;
 
+// The hardening flags clang's driver weighs against each other (predefines_finish_neutral), each with its -mno- form.
+typedef enum PredefinesHardening
+{
+    PREDEFINES_HARDENING_RETPOLINE,
+    PREDEFINES_HARDENING_SPECULATIVE_LOAD,
+    PREDEFINES_HARDENING_EXTERNAL_THUNK,
+    PREDEFINES_HARDENING_LVI,
+    PREDEFINES_HARDENING_LVI_CFI,
+    PREDEFINES_HARDENING_SESES,
+    PREDEFINES_HARDENING_COUNT,
+} PredefinesHardening;
+
+// The -m options with a value that change no macro (predefines_neutral_values).
+#define BUSTER_PREDEFINES_NEUTRAL_VALUES 19
+
 // What the options say about the predefined macros, as parsed in command-line order. All zero is clang's defaults with
 // no option, so a zeroed PPOptions has them.
 typedef struct PredefinesOptions PredefinesOptions;
@@ -891,7 +909,19 @@ struct PredefinesOptions
     bool openacc;
     bool target_os_macros;
     bool pascal_strings;
+    // clang's driver reads two families, -f[no-]constant-cfstrings and -m[no-]constant-cfstrings, each by its last
+    // option: __CONSTANT_CFSTRINGS__ goes when either family's is the no- one.
     bool no_constant_cfstrings;
+    bool no_constant_cfstrings_m;
+    // -municode (or -municodeANYTHING, a joined option), which clang's driver turns into a -DUNICODE ahead of the
+    // command line's own -D and -U: pp_run puts it first in <command line>.
+    bool unicode;
+    // The -m options that change no macro but whose values or combinations clang checks (predefines_finish_neutral): each
+    // value option's last value (null for none), and the last of each hardening flag and its -mno- form, 1 for the flag
+    // and 2 for the -mno- one (0 for neither), with whether -mno-lvi-cfi came at all.
+    const char* neutral_values[BUSTER_PREDEFINES_NEUTRAL_VALUES];
+    uint8_t hardening[PREDEFINES_HARDENING_COUNT];
+    bool no_lvi_cfi;
     // The profile-generating options' families, each last-wins (-fprofile-generate, -fprofile-instr-generate,
     // -fcs-profile-generate and -fprofile-generate-cold-function-coverage).
     uint8_t profile_generate[4];
@@ -1020,6 +1050,7 @@ static bool predefines_unsupported(const char* argument)
         "-m32",
         "-mx32",
         "-m16",
+        "-miamcu",
         "-mkernel",
         "-fapple-kext",
         "-fms-compatibility",
@@ -1052,6 +1083,364 @@ static bool predefines_unsupported(const char* argument)
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(prefixes) && !result; i += 1)
     {
         result = predefines_starts(argument, prefixes[i]);
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The -m options that change no macro
+
+// The -m options clang 23.1.3 uses for x86-64 Linux that change nothing `clang -E -dM` gives, beside those predefines_option
+// reads for their macros: predefines_neutral takes them, and pp_parse_options refuses every other -m option, as clang
+// refuses one it doesn't know (-mavx512) or doesn't support for the target (-mfpu=), rather than keep the baseline's
+// macros. Found from `clang --autocomplete=-m`, each option tried alone with `clang -E -dM`: accepted, with the same
+// macros and no warning. Another target's options, which clang takes on x86-64 with a warning that it ignores them
+// (-mthumb, -moutline-atomics), are refused too. test-preprocessor --clang compares each with clang, alone and among the
+// other options. The flags without a value (but the hardening ones below):
+static const char* const predefines_neutral_flags[] = {
+    "-m64",
+    "-malign-double",
+    "-mbranches-within-32B-boundaries",
+    "-mcmse",
+    "-mfentry",
+    "-mimplicit-float",
+    "-mincremental-linker-compatible",
+    "-mindirect-branch-cs-prefix",
+    "-mlittle-endian",
+    "-mms-bitfields",
+    "-mno-gather",
+    "-mno-iamcu",
+    "-mno-implicit-float",
+    "-mno-incremental-linker-compatible",
+    "-mno-ms-bitfields",
+    "-mno-omit-leaf-frame-pointer",
+    "-mno-outline",
+    "-mno-red-zone",
+    "-mno-relax-all",
+    "-mno-reserve-frame-pointer-reg",
+    "-mno-restrict-it",
+    "-mno-rtd",
+    "-mno-scatter",
+    "-mno-skip-rax-setup",
+    "-mno-soft-float",
+    "-mno-stack-arg-probe",
+    "-mno-stackrealign",
+    "-mno-tls-direct-seg-refs",
+    "-mno-vzeroupper",
+    "-momit-leaf-frame-pointer",
+    "-moutline",
+    "-mred-zone",
+    "-mrelax-all",
+    "-mreserve-frame-pointer-reg",
+    "-mrestrict-it",
+    "-mskip-rax-setup",
+    "-msoft-float",
+    "-mstack-arg-probe",
+    "-mstackrealign",
+    "-mtls-direct-seg-refs",
+    "-mvzeroupper",
+};
+
+// The hardening flags' names, each with its -mno- form, by PredefinesHardening.
+static const char* const predefines_hardening_names[] = {
+    "retpoline",
+    "speculative-load-hardening",
+    "retpoline-external-thunk",
+    "lvi-hardening",
+    "lvi-cfi",
+    "seses",
+};
+_Static_assert(BUSTER_ARRAY_LENGTH(predefines_hardening_names) == PREDEFINES_HARDENING_COUNT, "a name per pair");
+
+// How clang checks a value option's last value, as its driver reads it and then cc1, which reads an option's number in
+// any radix (0x, 0b, 0o, or a leading 0 for octal).
+typedef enum PredefinesRule
+{
+    PREDEFINES_RULE_ANY, // Any value: clang reads none on x86-64.
+    PREDEFINES_RULE_NAME, // One of the names (separated by commas in `names`).
+    PREDEFINES_RULE_NAMES, // Names separated by commas, empty ones dropped (clang's CommaJoined): any number of them.
+    PREDEFINES_RULE_FUNCTION_RETURN, // One of the names, but thunk-extern under -mcmodel=large.
+    PREDEFINES_RULE_UNSIGNED, // An unsigned 32-bit decimal number.
+    PREDEFINES_RULE_BOUNDARY, // That, a power of two from 16.
+    PREDEFINES_RULE_WIDTH, // "none", or an unsigned 32-bit decimal number.
+    PREDEFINES_RULE_CC1_UNSIGNED, // cc1's unsigned 32-bit number.
+    PREDEFINES_RULE_PROBE_SIZE, // Empty (0), or cc1's unsigned 32-bit number.
+    PREDEFINES_RULE_THRESHOLD, // cc1's unsigned 32-bit number under -mcmodel=medium or large, and any value otherwise.
+    PREDEFINES_RULE_ALIGNMENT, // 0 or a power of two, as a signed 64-bit decimal number, then cc1's unsigned 32-bit one.
+    PREDEFINES_RULE_OFFSET, // A signed 32-bit decimal number, then cc1's signed 32-bit one.
+    PREDEFINES_RULE_SYMBOL, // A symbol's name: letters, digits and '_', not starting with a digit.
+    PREDEFINES_RULE_RECIP, // -mrecip='s estimates (predefines_recip).
+} PredefinesRule;
+
+typedef struct PredefinesNeutralValue PredefinesNeutralValue;
+struct PredefinesNeutralValue
+{
+    const char* option;
+    PredefinesRule rule;
+    const char* names;
+};
+
+// The value options, each read by its last value (clang's driver reads only the last of each; -mrecip is -mrecip=
+// without one), and their rules, from clang's driver (Clang.cpp, CommonArgs.cpp, X86.cpp and OptionUtils.cpp) and cc1
+// (CompilerInvocation.cpp and Options.td's marshalling).
+static const PredefinesNeutralValue predefines_neutral_values[] = {
+    { "-malign-branch-boundary=", PREDEFINES_RULE_BOUNDARY, 0 },
+    { "-malign-branch=", PREDEFINES_RULE_NAMES, "fused,jcc,jmp,call,ret,indirect" },
+    { "-masm=", PREDEFINES_RULE_NAME, "att,intel" },
+    { "-mfunction-return=", PREDEFINES_RULE_FUNCTION_RETURN, "keep,thunk-extern" },
+    { "-mharden-sls=", PREDEFINES_RULE_NAME, "none,all,return,indirect-jmp" },
+    { "-mlarge-data-threshold=", PREDEFINES_RULE_THRESHOLD, 0 },
+    { "-mlinker-version=", PREDEFINES_RULE_ANY, 0 },
+    { "-mpad-max-prefix-size=", PREDEFINES_RULE_UNSIGNED, 0 },
+    { "-mprefer-vector-width=", PREDEFINES_RULE_WIDTH, 0 },
+    { "-mprintf-kind=", PREDEFINES_RULE_ANY, 0 },
+    { "-mrecip=", PREDEFINES_RULE_RECIP, 0 },
+    { "-mregparm=", PREDEFINES_RULE_CC1_UNSIGNED, 0 },
+    { "-mstack-alignment=", PREDEFINES_RULE_ALIGNMENT, 0 },
+    { "-mstack-probe-size=", PREDEFINES_RULE_PROBE_SIZE, 0 },
+    { "-mstack-protector-guard-offset=", PREDEFINES_RULE_OFFSET, 0 },
+    { "-mstack-protector-guard-reg=", PREDEFINES_RULE_NAME, "fs,gs" },
+    { "-mstack-protector-guard-symbol=", PREDEFINES_RULE_SYMBOL, 0 },
+    { "-mstack-protector-guard=", PREDEFINES_RULE_NAME, "tls,global" },
+    { "-mtls-dialect=", PREDEFINES_RULE_NAME, "gnu,gnu2" },
+};
+_Static_assert(BUSTER_ARRAY_LENGTH(predefines_neutral_values) == BUSTER_PREDEFINES_NEUTRAL_VALUES, "a slot per value option");
+
+// predefines_option's -m options that change no macro: true where `argument` (an -m option) is one, keeping what
+// predefines_finish_neutral checks.
+static bool predefines_neutral(PredefinesOptions* options, const char* argument)
+{
+    bool result = false;
+    for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(predefines_neutral_flags); i += 1)
+    {
+        result = strcmp(argument, predefines_neutral_flags[i]) == 0;
+    }
+    const bool no = predefines_starts(argument, "-mno-");
+    for (uint32_t h = 0; !result && h < PREDEFINES_HARDENING_COUNT; h += 1)
+    {
+        result = strcmp(argument + (no ? 5 : 2), predefines_hardening_names[h]) == 0;
+        options->hardening[h] = result ? (no ? 2 : 1) : options->hardening[h];
+        options->no_lvi_cfi |= result && no && h == PREDEFINES_HARDENING_LVI_CFI;
+    }
+    // -mrecip is -mrecip= without a value: all estimates.
+    const bool recip = !result && strcmp(argument, "-mrecip") == 0;
+    for (uint32_t v = 0; !result && v < BUSTER_ARRAY_LENGTH(predefines_neutral_values); v += 1)
+    {
+        const char* option = predefines_neutral_values[v].option;
+        const bool taken = recip ? strcmp(option, "-mrecip=") == 0 : predefines_starts(argument, option);
+        options->neutral_values[v] = taken ? (recip ? "" : argument + strlen(option)) : options->neutral_values[v];
+        result = taken;
+    }
+    return result;
+}
+
+// llvm::StringRef::getAsInteger's reading of a whole text as a number, as clang's driver reads one in `radix` 10 and
+// cc1 in radix 0 (the radix from a prefix: 0x, 0b, 0o, or a 0 before a digit for octal), with a '-' first where
+// `signed_number` allows one. *magnitude gets the number without its sign and *minus whether it had the '-'. Returns
+// false where the text isn't such a number or its magnitude passes 64 bits.
+static bool predefines_integer(const char* text, uint32_t radix, bool signed_number, uint64_t* magnitude, bool* minus)
+{
+    *minus = signed_number && text[0] == '-';
+    const char* digits = text + *minus;
+    const bool zero = digits[0] == '0';
+    const bool hexadecimal = radix == 0 && zero && (digits[1] == 'x' || digits[1] == 'X');
+    const bool binary = radix == 0 && zero && (digits[1] == 'b' || digits[1] == 'B');
+    const bool octal = radix == 0 && zero && digits[1] == 'o';
+    const bool leading = radix == 0 && zero && digits[1] >= '0' && digits[1] <= '9';
+    const uint32_t base = radix != 0 ? radix : hexadecimal ? 16 : binary ? 2 : octal || leading ? 8 : 10;
+    digits += hexadecimal || binary || octal ? 2 : leading ? 1 : 0;
+    uint64_t value = 0;
+    bool result = digits[0] != 0;
+    for (const char* p = digits; result && *p != 0; p += 1)
+    {
+        const char c = *p;
+        const uint32_t digit = c >= '0' && c <= '9'   ? (uint32_t)(c - '0')
+                               : c >= 'a' && c <= 'z' ? (uint32_t)(c - 'a') + 10
+                               : c >= 'A' && c <= 'Z' ? (uint32_t)(c - 'A') + 10
+                                                      : 36;
+        const uint64_t next = value * base + digit;
+        result = digit < base && next / base >= value;
+        value = next;
+    }
+    *magnitude = value;
+    return result;
+}
+
+// An unsigned 32-bit number in `radix` (predefines_integer's), its value in *value.
+static bool predefines_unsigned(const char* text, uint32_t radix, uint64_t* value)
+{
+    bool minus;
+    return predefines_integer(text, radix, false, value, &minus) && *value <= UINT32_MAX;
+}
+
+// A signed 32-bit number in `radix`.
+static bool predefines_signed(const char* text, uint32_t radix)
+{
+    uint64_t magnitude;
+    bool minus;
+    return predefines_integer(text, radix, true, &magnitude, &minus) && magnitude <= (minus ? 0x80000000ull : 0x7fffffffull);
+}
+
+// Whether `length` bytes at `name` are one of `names` (separated by commas).
+static bool predefines_name_in(const char* name, size_t length, const char* names)
+{
+    bool result = false;
+    for (const char* p = names; !result && *p != 0;)
+    {
+        const char* end = strchr(p, ',');
+        end = end != 0 ? end : p + strlen(p);
+        result = (size_t)(end - p) == length && memcmp(p, name, length) == 0;
+        p = *end != 0 ? end + 1 : end;
+    }
+    return result;
+}
+
+// clang's parseMRecipOption (OptionUtils.cpp) on -mrecip='s value: items separated by commas, empty ones dropped. None
+// means all; a single one may be all, none or default; and otherwise each names an estimate (div, vec-div, sqrt or
+// vec-sqrt) after an optional '!', which turns it off, with its precision's letter (d, f or h; none for all three), each
+// precision of an estimate once. Every item may end in a refinement step, ':' and one digit. Returns whether clang
+// takes it.
+static bool predefines_recip(const char* value)
+{
+    static const char* const estimates[] = { "div", "vec-div", "sqrt", "vec-sqrt" };
+    // Each estimate's precisions named so far, a bit each: d, f and h.
+    uint8_t named[4] = { 0 };
+    uint32_t items = 0;
+    for (const char* p = value; *p != 0; p += *p != 0)
+    {
+        const char* end = strchr(p, ',');
+        end = end != 0 ? end : p + strlen(p);
+        items += end > p;
+        p = end;
+    }
+    bool result = true;
+    bool decided = items == 0;
+    for (const char* p = value; result && !decided && *p != 0; p += *p != 0)
+    {
+        const char* end = strchr(p, ',');
+        end = end != 0 ? end : p + strlen(p);
+        if (end > p)
+        {
+            const char* step = memchr(p, ':', (size_t)(end - p));
+            const size_t base_length = step != 0 ? (size_t)(step - p) : (size_t)(end - p);
+            const bool step_valid = step == 0 || (end - step == 2 && step[1] >= '0' && step[1] <= '9');
+            decided = items == 1 && step_valid && predefines_name_in(p, base_length, "all,none,default");
+            // An estimate: its name and precision after the '!'.
+            const bool off = *p == '!';
+            const char* name = p + off;
+            const size_t length = base_length - off;
+            int32_t estimate = -1;
+            uint32_t precision = 0;
+            for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(estimates); e += 1)
+            {
+                const size_t estimate_length = strlen(estimates[e]);
+                const char letter = length == estimate_length + 1 ? name[estimate_length] : 0;
+                const uint32_t bit = letter == 'd' ? 1 : letter == 'f' ? 2 : letter == 'h' ? 4 : 0;
+                const bool same = length >= estimate_length && memcmp(name, estimates[e], estimate_length) == 0 && (length == estimate_length || bit != 0);
+                estimate = same ? (int32_t)e : estimate;
+                // No letter names all three, none of which may be named already.
+                precision = same ? (bit != 0 ? bit : 7) : precision;
+            }
+            const uint8_t before = estimate >= 0 ? named[estimate] : 0;
+            result = step_valid && (decided || (estimate >= 0 && (before & precision) == 0));
+            if (estimate >= 0)
+            {
+                named[estimate] = (uint8_t)(before | precision);
+            }
+        }
+        p = end;
+    }
+    return result;
+}
+
+// Whether `value` is the last value of `entry`'s option clang takes, reporting clang's error where it isn't.
+static bool predefines_neutral_value(const PredefinesOptions* options, const PredefinesNeutralValue* entry, const char* value)
+{
+    uint64_t number = 0;
+    uint64_t magnitude = 0;
+    bool minus = false;
+    const bool large = options->code_model == BUSTER_PREDEFINES_CODE_MODEL_LARGE;
+    const bool medium = options->code_model == BUSTER_PREDEFINES_CODE_MODEL_MEDIUM;
+    bool items = true;
+    for (const char* p = value; entry->rule == PREDEFINES_RULE_NAMES && *p != 0; p += *p != 0)
+    {
+        const char* end = strchr(p, ',');
+        end = end != 0 ? end : p + strlen(p);
+        items &= end == p || predefines_name_in(p, (size_t)(end - p), entry->names);
+        p = end;
+    }
+    bool symbol = value[0] != 0 && !(value[0] >= '0' && value[0] <= '9');
+    for (const char* p = value; entry->rule == PREDEFINES_RULE_SYMBOL && *p != 0; p += 1)
+    {
+        const char c = *p;
+        symbol &= (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    }
+    const PredefinesRule rule = entry->rule;
+    const bool thunk_large = rule == PREDEFINES_RULE_FUNCTION_RETURN && strcmp(value, "thunk-extern") == 0 && large;
+    const bool result =
+        rule == PREDEFINES_RULE_ANY                ? true
+        : rule == PREDEFINES_RULE_NAME             ? predefines_name_in(value, strlen(value), entry->names)
+        : rule == PREDEFINES_RULE_NAMES            ? items
+        : rule == PREDEFINES_RULE_FUNCTION_RETURN  ? predefines_name_in(value, strlen(value), entry->names) && !thunk_large
+        : rule == PREDEFINES_RULE_UNSIGNED         ? predefines_unsigned(value, 10, &number)
+        : rule == PREDEFINES_RULE_BOUNDARY         ? predefines_unsigned(value, 10, &number) && number >= 16 && (number & (number - 1)) == 0
+        : rule == PREDEFINES_RULE_WIDTH            ? strcmp(value, "none") == 0 || predefines_unsigned(value, 10, &number)
+        : rule == PREDEFINES_RULE_CC1_UNSIGNED     ? predefines_unsigned(value, 0, &number)
+        : rule == PREDEFINES_RULE_PROBE_SIZE       ? value[0] == 0 || predefines_unsigned(value, 0, &number)
+        : rule == PREDEFINES_RULE_THRESHOLD        ? !(medium || large) || predefines_unsigned(value, 0, &number)
+        : rule == PREDEFINES_RULE_ALIGNMENT        ? predefines_integer(value, 10, true, &magnitude, &minus) && magnitude <= (minus ? 0ull : 0x7fffffffffffffffull) &&
+                                                     (magnitude & (magnitude - 1)) == 0 && predefines_unsigned(value, 0, &number)
+        : rule == PREDEFINES_RULE_OFFSET           ? predefines_signed(value, 10) && predefines_signed(value, 0)
+        : rule == PREDEFINES_RULE_SYMBOL           ? symbol
+                                                   : predefines_recip(value);
+    if (thunk_large)
+    {
+        fprintf(stderr, "error: invalid argument '-mfunction-return=thunk-extern' not allowed with '-mcmodel=large'\n");
+    }
+    else if (!result)
+    {
+        fprintf(stderr, "error: invalid value '%s' in '%s%s'\n", value, entry->option, value);
+    }
+    return result;
+}
+
+// The -m options that change no macro, as clang checks them after every option: each value option's last value, and the
+// hardening flags against each other as X86.cpp's getX86TargetFeatures weighs them: one of Spectre's (retpolines, then
+// load hardening; the external thunk only without either's flags), and one of LVI's (its load hardening, then its CFI),
+// not both, and SESES with neither but LVI's CFI, which it turns on unless -mno-lvi-cfi came at all. Reports clang's
+// errors; false after one.
+static bool predefines_finish_neutral(const PredefinesOptions* options)
+{
+    bool result = true;
+    for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(predefines_neutral_values); v += 1)
+    {
+        const char* value = options->neutral_values[v];
+        result = (value == 0 || predefines_neutral_value(options, &predefines_neutral_values[v], value)) && result;
+    }
+    const uint8_t* h = options->hardening;
+    const bool spectre_flags = h[PREDEFINES_HARDENING_RETPOLINE] != 0 || h[PREDEFINES_HARDENING_SPECULATIVE_LOAD] != 0;
+    const char* spectre = h[PREDEFINES_HARDENING_RETPOLINE] == 1                            ? "mretpoline"
+                          : spectre_flags && h[PREDEFINES_HARDENING_SPECULATIVE_LOAD] == 1  ? "mspeculative-load-hardening"
+                          : !spectre_flags && h[PREDEFINES_HARDENING_EXTERNAL_THUNK] == 1   ? "mretpoline-external-thunk"
+                                                                                            : 0;
+    const bool lvi_hardening = h[PREDEFINES_HARDENING_LVI] == 1;
+    const char* lvi = lvi_hardening ? "mlvi-hardening" : h[PREDEFINES_HARDENING_LVI_CFI] == 1 ? "mlvi-cfi" : 0;
+    const bool seses = h[PREDEFINES_HARDENING_SESES] == 1;
+    if (seses && lvi_hardening)
+    {
+        fprintf(stderr, "error: invalid argument 'mlvi-hardening' not allowed with 'mseses'\n");
+        result = false;
+    }
+    if (seses && spectre != 0)
+    {
+        fprintf(stderr, "error: invalid argument '%s' not allowed with 'mseses'\n", spectre);
+        result = false;
+    }
+    lvi = seses && !options->no_lvi_cfi ? "mlvi-cfi" : lvi;
+    if (spectre != 0 && lvi != 0)
+    {
+        fprintf(stderr, "error: invalid argument '%s' not allowed with '%s'\n", spectre, lvi);
+        result = false;
     }
     return result;
 }
@@ -1168,6 +1557,10 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     {
         // Only the last, which predefines_finish checks.
         options->abi = argument + 6;
+    }
+    else if (m && predefines_neutral(options, argument))
+    {
+        // An option that changes no macro, which predefines_finish_neutral checks.
     }
     else if (strcmp(argument, "-target") == 0 || predefines_starts(argument, "--target="))
     {
@@ -1467,6 +1860,14 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     else if (strcmp(argument, "-fconstant-cfstrings") == 0 || strcmp(argument, "-fno-constant-cfstrings") == 0)
     {
         options->no_constant_cfstrings = argument[2] == 'n';
+    }
+    else if (strcmp(argument, "-mconstant-cfstrings") == 0 || strcmp(argument, "-mno-constant-cfstrings") == 0)
+    {
+        options->no_constant_cfstrings_m = argument[2] == 'n';
+    }
+    else if (predefines_starts(argument, "-municode"))
+    {
+        options->unicode = true;
     }
     else if (predefines_starts(argument, "-fprofile-generate") || predefines_starts(argument, "-fprofile-instr-generate") ||
              predefines_starts(argument, "-fcs-profile-generate") || strcmp(argument, "-fno-profile-generate") == 0 ||
@@ -2343,6 +2744,8 @@ static bool predefines_finish_options(PredefinesOptions* options)
         fprintf(stderr, "error: invalid value '%s' in '-fvisibility=%s'\n", visibility, visibility);
         result = false;
     }
+    // After the code model, which some of them depend on.
+    result = predefines_finish_neutral(options) && result;
     return result;
 }
 
@@ -2930,7 +3333,7 @@ static __attribute__((unused)) uint32_t predefines_text(const PredefinesOptions*
                                                     : "#define __WCHAR_MAX__ 2147483647\n#define __WCHAR_MIN__ (-__WCHAR_MAX__ - 1)\n#define __WCHAR_TYPE__ int\n"
                                                       "#define __WCHAR_WIDTH__ 32\n#define __SIZEOF_WCHAR_T__ 4\n#define __clang_wide_literal_encoding__ \"UTF-32\"\n");
     length = predefines_append(buffer, length, capacity, predefines_long_double[options->long_double]);
-    length = !options->no_constant_cfstrings ? predefines_append(buffer, length, capacity, "#define __CONSTANT_CFSTRINGS__ 1\n") : length;
+    length = !options->no_constant_cfstrings && !options->no_constant_cfstrings_m ? predefines_append(buffer, length, capacity, "#define __CONSTANT_CFSTRINGS__ 1\n") : length;
     // The CFI directives: by default when there are unwind tables (asynchronous ones unless freestanding),
     // exceptions or debug information.
     const bool asynchronous = options->asynchronous_unwind_tables != 0 ? options->asynchronous_unwind_tables == BUSTER_PREDEFINES_ON : !freestanding;

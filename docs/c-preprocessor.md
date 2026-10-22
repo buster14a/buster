@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 92 | |
+| The built-in cases (`pp_test_cases`) | 95 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -675,12 +675,13 @@ for one of them wins. An unknown host is x86-64, as in clang's driver.
 | `-fcf-protection[=]` | `__CET__` |
 | `-f[no-]sanitize=` and the options its rules read (below) | `__SANITIZE_*__` (address, hwaddress, thread and alloc-token, a kernel form sharing its user space form's) |
 | `-f[no-]blocks`; `-f[no-]openmp[=]`, `-fopenmp-version=`; `-fopenacc` | `__block`, `__BLOCKS__`; `_OPENMP`; `_OPENACC` |
-| `-f[no-]define-target-os-macros`, `-f[no-]pascal-strings`, `-f[no-]constant-cfstrings`, the profile-generating options | `TARGET_OS_*`, `__PASCAL_STRINGS__`, `__CONSTANT_CFSTRINGS__`, `__LLVM_INSTR_PROFILE_GENERATE` |
+| `-f[no-]define-target-os-macros`, `-f[no-]pascal-strings`, `-f[no-]constant-cfstrings` and `-m[no-]constant-cfstrings` (two families, each by its last: either's `no-` drops the macro), the profile-generating options | `TARGET_OS_*`, `__PASCAL_STRINGS__`, `__CONSTANT_CFSTRINGS__`, `__LLVM_INSTR_PROFILE_GENERATE` |
+| `-municode` (joined: `-municodeANYTHING` too) | `UNICODE`, in `<command line>` before the command line's `-D` and `-U`, as clang's driver adds it |
 | `-mcmodel=`, `-mlong-double-64`/`80`/`128` | `__code_model_*__`, the `long double` macros |
 | `-mfpmath=` | none, but it must agree with SSE |
 
 The options that would make clang predefine or compile something buster doesn't
-follow are refused by name: `-m32`, `-mx32`, `-m16`, `-mcpu=`, `-mkernel`,
+follow are refused by name: `-m32`, `-mx32`, `-m16`, `-miamcu`, `-mcpu=`, `-mkernel`,
 `-fapple-kext`, `-fms-compatibility`, `-ffixed-point`, `-fdefer-ts`,
 `-foffload-via-llvm`, the profile-using and pointer-field-protection options,
 and the CUDA, HIP, SYCL and pointer-authentication ones. So are a `--target`
@@ -691,8 +692,24 @@ refuses (an unknown CPU, a bad `-fcf-protection=`, `-fsanitize=address,thread`,
 `-march`, `-mtune`, `-mfpmath=`, `-mcmodel=`, `-mabi=`, `-fveclib=`, `-O`,
 `-fgnuc-version=`, `-fcf-protection=`, `-fopenmp=`'s runtime, `-flto=`,
 `-fvisibility=` and `-std=`), `predefines_finish` checks that one after every
-option, so an earlier invalid one doesn't count. Any other `-f` or `-m` option
-changes no macro and is accepted.
+option, so an earlier invalid one doesn't count. Any other `-f` option changes
+no macro and is accepted.
+
+**The `-m` options** are taken only where clang 23.1.3 uses them for x86-64
+Linux: those above, and those that change no macro (`predefines_neutral`, found
+by trying each option `clang --autocomplete=-m` lists): 41 flags, the Spectre,
+LVI and SESES hardening flags, and 19 options with a value. `predefines_finish`
+checks them as clang does: the hardening flags against each other, as its
+driver weighs them (one of Spectre's and one of LVI's not together, and SESES
+with neither but LVI's CFI), `-mfunction-return=thunk-extern` against
+`-mcmodel=large`, and each value option's last value as clang's driver and then
+cc1 read it (cc1 reads a number in any radix: `0x10`, or `010` in octal),
+`-mlarge-data-threshold=`'s only under `-mcmodel=medium` or `large`, and
+`-mrecip=`'s estimates as `parseMRecipOption` does. Every other `-m` option is
+refused, so that no switch silently leaves the baseline's macros: one clang
+doesn't know (`-mavx512`, for `-mavx512f`) or refuses for the target, and
+another target's, which clang takes with a warning that it ignores it
+(`-mthumb`, `-moutline-atomics`).
 
 **The sanitizers.** `predefines_finish` reads the sanitizer options after every
 option, as clang 23's driver does (`SanitizerArgs`): from the last back, so a
@@ -1092,7 +1109,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 92 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 95 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against

@@ -227,7 +227,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
         const char* argument = argv[i];
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
-                                 strcmp(argument, "--predefines") == 0;
+                                 strcmp(argument, "--predefines") == 0 || strcmp(argument, "-target") == 0;
         // --predefines (clang's predefines for the options, from `clang -dM -E`) is ours alone.
         const bool ours = strcmp(argument, "--predefines") == 0;
         if (strcmp(argument, "--clang") == 0)

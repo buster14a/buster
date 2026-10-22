@@ -2307,7 +2307,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 92 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 95 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2321,9 +2321,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
   modification times of their own must give each file's time (in UTC), and
-  `SOURCE_DATE_EPOCH`'s when it is set;
+  `SOURCE_DATE_EPOCH`'s when it is set; and the `-m` options buster refuses
+  though clang takes them (another target's, which clang ignores with a
+  warning, and those that change the target) must be refused, and each `-m`
+  flag that changes no macro taken;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
-  `-ffreestanding`, ...), by both kernels, which must agree.
+  `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree.
 
 In both, the vectorized printer's text must be the scalar printer's byte for
 byte, with line markers and without, and must lex back into the stream's
@@ -2350,15 +2353,17 @@ the features:
 - `c_predefines.c`'s generated tables (each x86-64 feature's flag, closures and
   macros, each `-march` CPU's macro name and features, the `-mtune` names) must
   be what `c_predefines_test.c`'s generator learns from clang now;
-- about 1,900 option sets must give `clang -dM -E`'s macros, and be accepted or
+- about 2,100 option sets must give `clang -dM -E`'s macros, and be accepted or
   refused alike: every `-march` CPU and `native`, every feature flag on and off
   on x86-64 and on the CPUs with the most features, each `-O`, `-f`, `-g` and
   `-m` option `c_predefines.c` reads, alone and in the orders that matter (an
   invalid value before the last of an option clang reads only the last of among
-  them), the 16 sanitizers with a macro or in clang's incompatible pairs, alone,
+  them), each `-m` option that changes no macro (each flag alone, the hardening
+  flags against each other, and each value option's rule at its edges), `-m`
+  options clang refuses too (`-mavx512`), the 16 sanitizers with a macro or in clang's incompatible pairs, alone,
   in pairs and in pairs with either one turned off after them, each of them and
   each other group with `-fno-sanitize=all` after it and before it, and 400
-  random combinations (`--seed N` changes them);
+  random combinations, some with those `-m` flags (`--seed N` changes them);
 - `-E -dM` of a file with every kind of definition must be clang's byte for byte
   (but `__BUSTER__`), and `__FLT_EVAL_METHOD__` clang's under
   `-ffp-eval-method=` and without SSE;

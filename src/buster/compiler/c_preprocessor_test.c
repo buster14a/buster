@@ -989,6 +989,21 @@ static const PPTestCase pp_test_cases[] = {
         .standard = "gnu17",
         .expected = "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint after = 503;\n",
     },
+    {
+        .name = "-municode's UNICODE is <command line>'s first macro, before -D and -U",
+        .source = "UNICODE\n",
+        .standard = "gnu17",
+        .expected = "2",
+        .warnings = 1,
+        .options = "-DUNICODE=2 -municode",
+    },
+    {
+        .name = "-municode is a joined option, and a -U before it undefines its UNICODE",
+        .source = "#ifdef UNICODE\ndefined\n#else\nundefined\n#endif\n",
+        .standard = "gnu17",
+        .expected = "undefined",
+        .options = "-UUNICODE -municodeX",
+    },
 };
 
 // Writes a text to a file; returns whether it could.
@@ -1953,6 +1968,7 @@ static bool pp_test_implemented_features(const char* directory)
 static bool predefines_test_run(const char* directory, uint64_t seed);
 static bool predefines_test_print_tables(const char* directory);
 static bool predefines_test_target(void);
+static bool predefines_test_refused(void);
 
 #include "c_preprocessor_history_test.c"
 #include "c_preprocessor_order_test.c"
@@ -1975,7 +1991,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     {
         const char* argument = arguments[i];
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
-                                 strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0;
+                                 strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
+                                 strcmp(argument, "-target") == 0;
         if (strcmp(argument, "--id-order") == 0 && i + 1 < argument_count)
         {
             char* end;
@@ -2041,6 +2058,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_timestamps(directory, with_clang);
         passed_all &= pp_test_implemented_features(directory);
         passed_all &= predefines_test_target();
+        passed_all &= predefines_test_refused();
         passed_all &= pp_test_history(directory, with_clang);
         passed_all &= pp_test_id_order(directory, id_order);
         if (with_clang)

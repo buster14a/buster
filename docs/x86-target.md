@@ -25,7 +25,8 @@ fills the `X86Target` from the result (`predefines_target`): the features this
 file knows by name, with RDTSCP and CLFLUSH, which clang has no feature for,
 from the profile where `-march` names one of the six above, and that profile's
 architecture (`X86_ARCH_OTHER` for clang's other CPUs). An unknown name or
-switch is an error, as in clang, so no option silently leaves baseline macros
+switch is an error, as in clang (the preprocessor takes only the `-m` options
+clang 23 uses for x86-64 Linux), so no option silently leaves baseline macros
 active. `-mtune=` accepts clang's names and `generic`, independently of the
 ISA. It is recorded for the future scheduler, and currently changes no costs,
 scheduling or allowed instructions. As with Clang 23, CPU identity macros,

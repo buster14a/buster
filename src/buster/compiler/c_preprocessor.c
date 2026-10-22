@@ -8167,8 +8167,8 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the predefined macros for these options");
         }
     }
-    // The command line: -D and -U in order, then -include.
-    uint64_t room = 1;
+    // The command line: -municode's UNICODE, then -D and -U in order, then -include.
+    uint64_t room = 32;
     for (uint32_t i = 0; i < pp->options.macro_count; i += 1)
     {
         room += strlen(pp->options.macros[i]) + 16;
@@ -8180,7 +8180,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     char* command_line = result ? arena_push(&pp->arena, room, 1) : 0;
     if (command_line != 0)
     {
-        uint64_t length = 0;
+        uint64_t length = pp->options.predefines.unicode ? (uint64_t)sprintf(command_line, "#define UNICODE 1\n") : 0;
         for (uint32_t i = 0; i < pp->options.macro_count; i += 1)
         {
             const char* macro = pp->options.macros[i];
@@ -9294,10 +9294,17 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             trigraphs = strcmp(argument, "-fno-trigraphs") != 0;
         }
-        else if (strncmp(argument, "-m", 2) == 0 || strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0)
+        else if (strncmp(argument, "-m", 2) == 0)
         {
-            // The other target, code generation and warning options: none changes what -E gives (predefines_option
-            // takes the ones that do, and refuses those buster doesn't follow).
+            // predefines_option takes every -m option clang uses for x86-64 Linux: this one clang doesn't know, or
+            // refuses or ignores for the target.
+            fprintf(stderr, "error: unknown or unsupported option '%s' for x86-64 Linux\n", argument);
+            result = false;
+        }
+        else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0)
+        {
+            // The other code generation and warning options: none changes what -E gives (predefines_option takes the
+            // ones that do, and refuses those buster doesn't follow).
         }
         else if (strncmp(argument, "-std=", 5) == 0 || strcmp(argument, "-ansi") == 0)
         {

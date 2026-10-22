@@ -1074,6 +1074,49 @@ static const char* const predefines_test_option_sets[] = {
     // OpenMP: on with the last of -fopenmp, -fopenmp= and -fno-openmp, with the last -fopenmp='s runtime.
     "-fopenmp=bogus", "-fopenmp=bogus -fopenmp", "-fopenmp=bogus -fno-openmp", "-fopenmp=libgomp -fopenmp", "-fopenmp -fopenmp=libgomp",
     "-fopenmp=libgomp -fopenmp=libomp", "-fopenmp=libomp -fno-openmp -fopenmp",
+    // The -m options that change no macro (predefines_neutral; its flags come alone besides these): the hardening flags
+    // against each other, and each value option's rule at its edges, as clang's driver and then cc1 read the value.
+    "-mretpoline -mlvi-cfi", "-mretpoline -mlvi-hardening", "-mspeculative-load-hardening -mlvi-cfi", "-mretpoline-external-thunk -mlvi-cfi",
+    "-mretpoline -mno-retpoline -mretpoline-external-thunk -mlvi-cfi", "-mretpoline-external-thunk -mno-speculative-load-hardening -mlvi-cfi", "-mseses",
+    "-mseses -mlvi-hardening", "-mseses -mretpoline", "-mseses -mno-lvi-cfi", "-mseses -mno-lvi-cfi -mlvi-cfi", "-mno-lvi-cfi -mlvi-cfi -mseses -mretpoline",
+    "-mseses -mretpoline-external-thunk", "-mseses -mretpoline-external-thunk -mno-retpoline", "-mseses -mno-seses -mretpoline -mlvi-cfi",
+    "-mretpoline -mspeculative-load-hardening", "-mlvi-hardening -mlvi-cfi", "-mlvi-hardening -mno-lvi-hardening -mretpoline", "-mspeculative-load-hardening -mseses",
+    "-mlvi-hardening -mseses -mno-lvi-cfi", "-mseses -mno-lvi-cfi -mretpoline", "-mseses -mno-lvi-cfi -mspeculative-load-hardening",
+    "-mseses -mno-lvi-cfi -mretpoline-external-thunk", "-mno-lvi-cfi -mseses", "-malign-branch-boundary=16", "-malign-branch-boundary=8", "-malign-branch-boundary=48", "-malign-branch-boundary=032",
+    "-malign-branch-boundary=2147483648", "-malign-branch-boundary=4294967296", "-malign-branch-boundary=+32", "-malign-branch-boundary=0x20", "-malign-branch=",
+    "-malign-branch=,", "-malign-branch=jcc,,jmp", "-malign-branch=fused,jcc,jmp,call,ret,indirect", "-malign-branch=jcc+jmp", "-malign-branch=bogus", "-masm=att",
+    "-masm=intel", "-masm=bogus", "-masm=", "-masm=bogus -masm=att", "-masm=att -masm=bogus", "-mfunction-return=keep", "-mfunction-return=thunk-extern",
+    "-mfunction-return=thunk", "-mfunction-return=thunk-extern -mcmodel=large", "-mcmodel=large -mfunction-return=thunk-extern -mcmodel=small",
+    "-mfunction-return=thunk-extern -mcmodel=large -mfunction-return=keep", "-mharden-sls=all", "-mharden-sls=none", "-mharden-sls=return",
+    "-mharden-sls=indirect-jmp", "-mharden-sls=bogus", "-mharden-sls=all,return", "-mlarge-data-threshold=bogus", "-mlarge-data-threshold=",
+    "-mcmodel=medium -mlarge-data-threshold=bogus", "-mcmodel=medium -mlarge-data-threshold=65536", "-mcmodel=large -mlarge-data-threshold=0x10",
+    "-mcmodel=large -mlarge-data-threshold=4294967296", "-mcmodel=medium -mlarge-data-threshold=", "-mcmodel=kernel -mlarge-data-threshold=bogus",
+    "-mlarge-data-threshold=5 -mcmodel=medium", "-mcmodel=medium -mlarge-data-threshold=08", "-mlinker-version=bogus", "-mlinker-version=",
+    "-mpad-max-prefix-size=0", "-mpad-max-prefix-size=4294967295", "-mpad-max-prefix-size=4294967296", "-mpad-max-prefix-size=-1", "-mpad-max-prefix-size=",
+    "-mprefer-vector-width=none", "-mprefer-vector-width=512", "-mprefer-vector-width=0512", "-mprefer-vector-width=bogus", "-mprefer-vector-width=-1",
+    "-mprefer-vector-width=", "-mprintf-kind=bogus", "-mprintf-kind=", "-mrecip", "-mrecip=", "-mrecip=all", "-mrecip=all:2", "-mrecip=all:22",
+    "-mrecip=none,divf", "-mrecip=divf,!sqrtd:3", "-mrecip=div,divf", "-mrecip=divf,div", "-mrecip=divd,divd", "-mrecip=divh,div", "-mrecip=vec-sqrt",
+    "-mrecip=!all", "-mrecip=bogus", "-mrecip=,,", "-mrecip=div:x", "-mrecip=div:1:2", "-mrecip=div:", "-mrecip=!", "-mrecip=:1", "-mrecip=default:1",
+    "-mrecip=all,none", "-mrecip=bogus -mrecip", "-mrecip -mrecip=bogus", "-mrecip=!div,vec-divh,sqrtf:0,!vec-sqrtd:9", "-mregparm=0", "-mregparm=3",
+    "-mregparm=0x3", "-mregparm=08", "-mregparm=-1", "-mregparm=", "-mregparm=4294967296", "-mregparm=bogus", "-mstack-alignment=0", "-mstack-alignment=16",
+    "-mstack-alignment=24", "-mstack-alignment=016", "-mstack-alignment=08", "-mstack-alignment=-0", "-mstack-alignment=-16", "-mstack-alignment=4294967296",
+    "-mstack-alignment=2147483648", "-mstack-alignment=", "-mstack-alignment=0x10", "-mstack-probe-size=", "-mstack-probe-size=4096", "-mstack-probe-size=0x1000",
+    "-mstack-probe-size=010", "-mstack-probe-size=08", "-mstack-probe-size=bogus", "-mstack-probe-size=-1", "-mstack-probe-size=4294967296",
+    "-mstack-probe-size=0b101", "-mstack-probe-size=0o17", "-mstack-probe-size=0X1F", "-mstack-probe-size=0x", "-mstack-protector-guard-offset=0",
+    "-mstack-protector-guard-offset=-8", "-mstack-protector-guard-offset=-0", "-mstack-protector-guard-offset=2147483647", "-mstack-protector-guard-offset=2147483648",
+    "-mstack-protector-guard-offset=-2147483648", "-mstack-protector-guard-offset=-2147483649", "-mstack-protector-guard-offset=010",
+    "-mstack-protector-guard-offset=08", "-mstack-protector-guard-offset=-010", "-mstack-protector-guard-offset=-08", "-mstack-protector-guard-offset=0x10",
+    "-mstack-protector-guard-offset=", "-mstack-protector-guard-offset=+5", "-mstack-protector-guard-symbol=__stack_chk_guard",
+    "-mstack-protector-guard-symbol=a.b", "-mstack-protector-guard-symbol=1abc", "-mstack-protector-guard-symbol=", "-mstack-protector-guard-symbol=_",
+    "-mstack-protector-guard=tls", "-mstack-protector-guard=global", "-mstack-protector-guard=sysreg", "-mstack-protector-guard=bogus -mstack-protector-guard=tls",
+    "-mstack-protector-guard-reg=fs", "-mstack-protector-guard-reg=gs", "-mstack-protector-guard-reg=es", "-mtls-dialect=gnu", "-mtls-dialect=gnu2",
+    "-mtls-dialect=bogus", "-mtls-dialect=", "-mtls-dialect=bogus -mtls-dialect=gnu", "-mtls-dialect=gnu -mtls-dialect=bogus",
+    // The -m options with macros of their own: both constant CFString families, and -municode's UNICODE (from
+    // <command line>); and -m options clang refuses too: unknown (a misspelled ISA switch among them), another target's,
+    // and big-endian x86-64.
+    "-mconstant-cfstrings", "-mno-constant-cfstrings", "-mno-constant-cfstrings -mconstant-cfstrings", "-mno-constant-cfstrings -fconstant-cfstrings",
+    "-fno-constant-cfstrings -mconstant-cfstrings", "-municode", "-municode -municode", "-municodeX", "-mavx512", "-mavx512f2", "-mbogus", "-mno-bogus", "-m68000",
+    "-mfpu=neon", "-mindirect-branch=thunk", "-mbig-endian", "-mrtd", "-mfentry -mnop-mcount", "-mrecord-mcount",
 };
 
 // Our predefines for `arguments` (as pp_parse_options and pp_predefines make them) into `*text`, or false where the
@@ -1096,10 +1139,15 @@ static bool predefines_test_ours(const char* arguments, const char* input, char*
     const char* output;
     bool markers;
     bool result = pp_parse_options(count + 1, words, &options, &arena, &parsed_input, &output, &markers);
-    *text = result ? malloc(BUSTER_PP_PREDEFINES_BYTES) : 0;
+    *text = result ? malloc(BUSTER_PP_PREDEFINES_BYTES + 32) : 0;
     uint32_t flt_eval_method;
     *length = *text != 0 ? pp_predefines(&options, *text, &flt_eval_method) : BUSTER_PP_PREDEFINES_BYTES + 1;
     result = result && *length <= BUSTER_PP_PREDEFINES_BYTES;
+    // -municode's UNICODE, which pp_run puts in <command line> (the sets have no -D or -U): -dM prints it too.
+    if (result && options.predefines.unicode)
+    {
+        *length += (uint32_t)sprintf(*text + *length, "#define UNICODE 1\n");
+    }
     arena_release(&arena);
     return result;
 }
@@ -1210,6 +1258,16 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
     {
         BUSTER_PREDEFINES_TEST_SET("%s", predefines_test_option_sets[i]);
     }
+    // Each -m flag that changes no macro, alone, and each hardening flag and its -mno- form.
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_neutral_flags); i += 1)
+    {
+        BUSTER_PREDEFINES_TEST_SET("%s", predefines_neutral_flags[i]);
+    }
+    for (uint32_t h = 0; h < PREDEFINES_HARDENING_COUNT; h += 1)
+    {
+        BUSTER_PREDEFINES_TEST_SET("-m%s", predefines_hardening_names[h]);
+        BUSTER_PREDEFINES_TEST_SET("-mno-%s", predefines_hardening_names[h]);
+    }
     // The sanitizers clang's incompatible pairs name and those with macros: each alone, each pair, and each pair with
     // either one turned off after it, which clang accepts.
     static const char* const sanitizers[] = {
@@ -1266,10 +1324,24 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
                 }
                 used += (size_t)snprintf(line + used, sizeof(line) - used, " -m%s%s", predefines_test_random(&state) % 2 ? "no-" : "", predefines_features[f].name);
             }
-            else
+            else if (kind < 9)
             {
                 const uint64_t pick = predefines_test_random(&state) % BUSTER_ARRAY_LENGTH(predefines_test_option_sets);
                 used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", predefines_test_option_sets[pick]);
+            }
+            else
+            {
+                // A flag that changes no macro, or a hardening flag (on or off), which clang weighs against the others.
+                const uint64_t pick = predefines_test_random(&state) % (BUSTER_ARRAY_LENGTH(predefines_neutral_flags) + 2 * PREDEFINES_HARDENING_COUNT);
+                const uint64_t hardening = pick - BUSTER_ARRAY_LENGTH(predefines_neutral_flags);
+                if (pick < BUSTER_ARRAY_LENGTH(predefines_neutral_flags))
+                {
+                    used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", predefines_neutral_flags[pick]);
+                }
+                else
+                {
+                    used += (size_t)snprintf(line + used, sizeof(line) - used, " -m%s%s", hardening % 2 ? "no-" : "", predefines_hardening_names[hardening / 2]);
+                }
             }
         }
         char copy_line[4096];
@@ -1464,6 +1536,48 @@ static bool predefines_test_target(void)
     result &= switches;
     printf("predefines target: %s (x86_target.c's features, its six profiles, -m switches, other CPUs and -mtune)\n", result ? "as expected" : "WRONG");
     return result;
+}
+
+// The -m options buster refuses though clang takes them, without clang: other targets' options, which clang takes on
+// x86-64 warning that it ignores them, those that make it compile for another target, and the separate-value ones. Each
+// must be refused, as an unknown one is, and each -m flag that changes no macro taken.
+static bool predefines_test_refused(void)
+{
+    static const char* const refused[] = {
+        "-mthumb", "-moutline-atomics", "-mno-outline-atomics", "-mglibc", "-mcf-branch-label-scheme=unlabeled", "-miamcu", "-m32", "-mllvm", "-mavx512",
+    };
+    // Their errors aren't the test's output.
+    fflush(stderr);
+    const int saved = dup(STDERR_FILENO);
+    const int null = open("/dev/null", O_WRONLY);
+    bool result = saved >= 0 && null >= 0 && dup2(null, STDERR_FILENO) >= 0;
+    uint32_t wrong = 0;
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(refused) + BUSTER_ARRAY_LENGTH(predefines_neutral_flags); i += 1)
+    {
+        const bool taken = i >= BUSTER_ARRAY_LENGTH(refused);
+        const char* option = taken ? predefines_neutral_flags[i - BUSTER_ARRAY_LENGTH(refused)] : refused[i];
+        char* text = 0;
+        uint32_t length = 0;
+        const bool accepted = predefines_test_ours(option, "/dev/null", &text, &length);
+        free(text);
+        if (accepted != taken)
+        {
+            printf("predefines: buster %s %s\n", accepted ? "takes" : "refuses", option);
+            wrong += 1;
+        }
+    }
+    fflush(stderr);
+    result = saved >= 0 && dup2(saved, STDERR_FILENO) >= 0 && result;
+    if (saved >= 0)
+    {
+        close(saved);
+    }
+    if (null >= 0)
+    {
+        close(null);
+    }
+    printf("predefines: -m options refused though clang takes them, and those taken: %s\n", result && wrong == 0 ? "as expected" : "WRONG");
+    return result && wrong == 0;
 }
 
 // The checks --clang runs (see the file's comment).
