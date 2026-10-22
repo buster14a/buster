@@ -100,7 +100,9 @@ one to read is the innermost. A static function has a copy in every translation 
 lexer's `tokenize_c` has four), and `objdump --disassemble=NAME` (binutils 2.47) prints only one, so give it the whole
 file's disassembly, with its program headers (`-p`): each sample's file and offset in it (`dsoff`), through the file's
 LOAD segments (offsets and addresses differ in lld's executables), give its address, which says which copy it is in,
-and it takes the busiest. Samples of other files (shared libraries, whose offsets are their own) don't count.
+and it takes the busiest. Only samples of the disassembled file count, by its path: objdump's first line, resolved from
+the directory the command runs in, against perf's absolute path. Shared libraries' samples, and another tree's
+`build/compiler` in an `ab` run, don't.
 `--loops N` sets how many loops it ranks. The encoder's rounds read the loop this way to count its instructions and stack
 references, and found that clang had stopped unrolling it.
 
@@ -125,7 +127,9 @@ label before each one of a function's, and the program built from that assembly 
 that the disassembly shows where each spill is. The labels carry a tag, the variant's name (`buster_spill.k1.0`), and
 the assembly is otherwise unchanged. `spill-report` finds the labeled copy by address (the function's symbol before its
 first label, up to the next symbol that isn't one of its labels) and counts samples by their offsets in the file, so
-neither the function's copies in other translation units nor another labeled variant count. `build.sh lexer-variant`
+neither the function's copies in other translation units nor another labeled variant count. It needs the symbol table
+too (`-t`): a spill that is the function's first instruction has its label at the function's address, where objdump's
+headers name only the function. `build.sh lexer-variant`
 refuses two labeled variants of one tag:
 
 ```sh
@@ -134,7 +138,7 @@ refuses two labeled variants of one tag:
 ./build.sh lexer-variant k1=k1_labeled.s
 perf record -e ibs_op/cnt_ctl=1/ -c 100003 -o spills.data -- taskset -c 2 ./build/compiler benchmark-lexer ~/azp-bench/c-tokenizer/corpus/libc
 perf script -i spills.data -F ip,sym,symoff,dsoff > spills.txt
-objdump -d -p --no-show-raw-insn build/compiler > compiler.dis
+objdump -d -p -t --no-show-raw-insn build/compiler > compiler.dis
 ./build/compiler spill-report tokenize_c k1_labeled.s compiler.dis spills.txt
 ```
 

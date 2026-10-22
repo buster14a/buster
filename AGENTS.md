@@ -622,12 +622,15 @@ must be exactly the expected one:
   their samples by stack slot and source location, the labeled copy found by
   address, without the samples of a static function of the same name in
   another unit (after it too), of the function's static local (`f.counter`),
-  of another tag or of a shared library at the same offsets, and in an lld
-  executable; labels out of order or of another tag, missing from the disassembly
+  of another tag, of a shared library at the same offsets or of another
+  tree's file of the same name, and in an lld executable; a label at the
+  function's address, from the symbol table (`objdump -t`); labels out of order or of another tag, missing from the disassembly
   or in it twice, samples without file offsets, and an invalid tag (errors);
   and clang's assembly of a program whose static function `function` (also
   an assembler keyword) prints `__func__`, labeled, assembled and run, which
   must print the same;
+  and one whose first instruction is a spill, labeled, linked and
+  disassembled, whose report must find its labels (clang and objdump);
 - `branch-misses`: records mispredicted, predicted and neither, fields that
   aren't records, the load bias and the disassembly's instructions, and
   10,000 branches, which grow its table;

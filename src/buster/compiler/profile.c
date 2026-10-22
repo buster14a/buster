@@ -366,10 +366,17 @@ struct ProfileDisassembly
     uint64_t count;
     ProfileSymbol* symbols;
     uint64_t symbol_count;
-    // The file objdump read (its first line, `FILE:     file format elf64-x86-64`), and its LOAD segments (-p).
+    // The file objdump read (its first line, `FILE:     file format elf64-x86-64`), its path as perf names it (absolute,
+    // with symbolic links resolved: realpath of the file, or the file as written when it is absolute and isn't here),
+    // empty if the file is a relative path that doesn't resolve, and its LOAD segments (-p).
     String8 file;
+    String8 image;
     ProfileSegment* segments;
     uint64_t segment_count;
+    // The symbol table (-t): every symbol, those at the same address as another among them, which the disassembly's
+    // headers show only one of. Its `first` is unused.
+    ProfileSymbol* table;
+    uint64_t table_count;
     // Every instruction is under a symbol, and their addresses increase.
     bool valid;
     // The arena was too small.
@@ -392,14 +399,32 @@ static ProfileDisassembly profile_disassembly_read(Arena* arena, String8 text)
     result.instructions = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileInstruction, lines);
     result.symbols = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileSymbol, lines);
     result.segments = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileSegment, lines);
-    result.full = lines != 0 && (result.instructions == 0 || result.symbols == 0 || result.segments == 0);
-    // A LOAD line's `filesz` is on the line after it.
+    result.table = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileSymbol, lines);
+    result.full = lines != 0 && (result.instructions == 0 || result.symbols == 0 || result.segments == 0 || result.table == 0);
+    // A LOAD line's `filesz` is on the line after it. The symbol table runs from `SYMBOL TABLE:` to a blank line.
     bool segment_pending = false;
+    bool in_table = false;
     position = 0;
     while (!result.full && position < text.length)
     {
         const String8 line = profile_line(text, &position);
         const String8 trimmed = profile_trim(line);
+        uint64_t table_at = 0;
+        uint64_t table_address = 0;
+        if (in_table && profile_hex(line, &table_at, &table_address) && table_at == 16)
+        {
+            uint64_t name_start = trimmed.length;
+            while (name_start > 0 && !profile_is_blank(trimmed.pointer[name_start - 1]))
+            {
+                name_start -= 1;
+            }
+            result.table[result.table_count] = (ProfileSymbol){
+                .name = profile_slice(trimmed, name_start, trimmed.length),
+                .address = table_address,
+            };
+            result.table_count += 1;
+        }
+        in_table = profile_equal(trimmed, profile_string("SYMBOL TABLE:")) || (in_table && trimmed.length != 0);
         const uint64_t format = profile_find(line, profile_string(":     file format "));
         if (result.file.length == 0 && format != line.length && format != 0)
         {
@@ -461,26 +486,35 @@ static ProfileDisassembly profile_disassembly_read(Arena* arena, String8 text)
             }
         }
     }
+    // The image's path, which perf's dsoff field gives: two trees' build/compiler share a name, not a path.
+    char* name = result.file.length != 0 ? arena_push(arena, result.file.length + 1, 1) : 0;
+    if (name != 0)
+    {
+        memcpy(name, result.file.pointer, result.file.length);
+        name[result.file.length] = 0;
+        char* resolved = realpath(name, 0);
+        const uint64_t length = resolved != 0 ? strlen(resolved) : 0;
+        char* copy = resolved != 0 ? arena_push(arena, length, 1) : 0;
+        if (copy != 0)
+        {
+            memcpy(copy, resolved, length);
+            result.image = (String8){ .pointer = copy, .length = length };
+        }
+        else if (name[0] == '/')
+        {
+            result.image = result.file;
+        }
+        free(resolved);
+    }
     return result;
 }
 
-// The path's last part.
-static String8 profile_basename(String8 path)
-{
-    uint64_t start = 0;
-    for (uint64_t i = 0; i < path.length; i += 1)
-    {
-        start = path.pointer[i] == '/' ? i + 1 : start;
-    }
-    return profile_slice(path, start, path.length);
-}
-
-// Whether a sample is in the disassembly's file (by name: perf gives the path it was run from), and its address there,
-// through the LOAD segment that maps its offset in the file. A shared library's offsets are its own, whatever they
-// coincide with.
+// Whether a sample is in the disassembly's file (by its path: another tree's build/compiler isn't this one), and its
+// address there, through the LOAD segment that maps its offset in the file. A shared library's offsets are its own,
+// whatever they coincide with.
 static bool profile_same_file(const ProfileDisassembly* disassembly, const ProfileSample* sample)
 {
-    return sample->has_file_offset && profile_equal(profile_basename(sample->file), profile_basename(disassembly->file));
+    return sample->has_file_offset && disassembly->image.length != 0 && profile_equal(sample->file, disassembly->image);
 }
 
 static bool profile_sample_address(const ProfileDisassembly* disassembly, const ProfileSample* sample, uint64_t* address)
@@ -499,10 +533,10 @@ static bool profile_sample_address(const ProfileDisassembly* disassembly, const 
     return result;
 }
 
-// Whether the disassembly names its file and has its LOAD segments, which profile_sample_address needs.
+// Whether the disassembly's file has a path and LOAD segments, which profile_sample_address needs.
 static bool profile_has_image(const ProfileDisassembly* disassembly)
 {
-    return disassembly->file.length != 0 && disassembly->segment_count != 0;
+    return disassembly->image.length != 0 && disassembly->segment_count != 0;
 }
 
 // The index of the last instruction at or before `address` among instructions[first, end), or `end` if there is none.
@@ -677,7 +711,7 @@ static bool profile_hot_loops(Arena* arena, ProfileReport* report, String8 funct
     }
     else if (!profile_has_image(&disassembly))
     {
-        profile_print(report, "hot-loops: the disassembly has no file name or LOAD segments (objdump -d -p)\n");
+        profile_print(report, "hot-loops: the disassembly needs its file's LOAD segments (objdump -d -p) and path (absolute, or found from here)\n");
     }
     else if (without_offset != 0)
     {
@@ -1099,15 +1133,18 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
         {
             addresses[n] = UINT64_MAX;
         }
-        for (uint64_t i = 0; label.length != 0 && i < disassembly.symbol_count; i += 1)
+        // The headers, then the symbol table (-t), which also has a label at its function's address, as a spill that is
+        // the first instruction's.
+        for (uint64_t i = 0; label.length != 0 && i < disassembly.symbol_count + disassembly.table_count; i += 1)
         {
-            const String8 symbol = disassembly.symbols[i].name;
+            const ProfileSymbol* entry = i < disassembly.symbol_count ? &disassembly.symbols[i] : &disassembly.table[i - disassembly.symbol_count];
             uint64_t number = 0;
-            if (profile_starts_with(symbol, label) && profile_decimal(profile_slice(symbol, label.length, symbol.length), &number) && number < spill_count)
+            if (profile_starts_with(entry->name, label) && profile_decimal(profile_slice(entry->name, label.length, entry->name.length), &number) &&
+                number < spill_count)
             {
-                repeated += addresses[number] != UINT64_MAX;
+                repeated += addresses[number] != UINT64_MAX && addresses[number] != entry->address;
                 label_count += addresses[number] == UINT64_MAX;
-                addresses[number] = disassembly.symbols[i].address;
+                addresses[number] = entry->address;
             }
         }
         bool ordered = true;
@@ -1154,7 +1191,7 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
         }
         else if (repeated != 0 || label_count != spill_count)
         {
-            profile_print(report, "spill-report: the disassembly has %llu of the %llu labels %.*s0 to %.*s%llu, %llu more than once\n", (unsigned long long)label_count,
+            profile_print(report, "spill-report: the disassembly (objdump -d -p -t) has %llu of the %llu labels %.*s0 to %.*s%llu, %llu at two addresses\n", (unsigned long long)label_count,
                           (unsigned long long)spill_count, (int)label.length, label.pointer, (int)label.length, label.pointer, (unsigned long long)(spill_count - 1),
                           (unsigned long long)repeated);
         }
@@ -1168,7 +1205,7 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
         }
         else if (!profile_has_image(&disassembly))
         {
-            profile_print(report, "spill-report: the disassembly has no file name or LOAD segments (objdump -d -p)\n");
+            profile_print(report, "spill-report: the disassembly needs its file's LOAD segments (objdump -d -p) and path (absolute, or found from here)\n");
         }
         else
         {

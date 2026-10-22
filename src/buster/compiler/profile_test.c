@@ -33,9 +33,9 @@
 #include <string.h>
 #include <stdio.h>
 
-// objdump -p's lines for a file `bin` whose LOAD segment maps the file at its own addresses, as GNU ld's do.
+// objdump -p's lines for a file /t/bin whose LOAD segment maps the file at its own addresses, as GNU ld's do.
 #define BUSTER_PROFILE_TEST_IMAGE                                                                          \
-    "bin:     file format elf64-x86-64\n"                                                               \
+    "/t/bin:     file format elf64-x86-64\n"                                                            \
     "\n"                                                                                                \
     "Program Header:\n"                                                                                 \
     "    LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**12\n" \
@@ -159,7 +159,7 @@ static const char profile_test_labeled[] = "\t.file\t0 \"/src\" \"ReduceSpills.c
                                            "\t.asciz\t\"f\"\n";
 
 static const char profile_test_spill_disassembly[] = "\n"
-                                                     "program:     file format elf64-x86-64\n"
+                                                     "/p/program:     file format elf64-x86-64\n"
                                                     "\n"
                                                     "Program Header:\n"
                                                     "    LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**12\n"
@@ -367,7 +367,7 @@ static void profile_test_text_tools(ProfileTest* test)
                        "gpr  64(%rsp)     spills      1 reloads      0  | hottest spill 1 at -\n");
 
     // An lld executable: its executable segment at file offset 0x6c0 and address 0x16c0.
-    const String8 lld = profile_test_string("lld_prog:     file format elf64-x86-64\n\nProgram Header:\n"
+    const String8 lld = profile_test_string("/b/lld_prog:     file format elf64-x86-64\n\nProgram Header:\n"
                                             "    LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**12\n"
                                             "         filesz 0x0000000000000658 memsz 0x0000000000000658 flags r--\n"
                                             "    LOAD off    0x00000000000006c0 vaddr 0x00000000000016c0 paddr 0x00000000000016c0 align 2**12\n"
@@ -394,10 +394,54 @@ static void profile_test_text_tools(ProfileTest* test)
     const String8 bare = profile_test_string("0000000000001140 <f>:\n    1140:\tpush   %rbp\n0000000000001141 <buster_spill.a.0>:\n    1141:\tret\n");
     ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), adjacent_labeled, bare, profile_test_string(""), 24);
     profile_test_check(test, "spill-report without program headers", ok, false, profile_report_text(&test->report),
-                       "spill-report: the disassembly has no file name or LOAD segments (objdump -d -p)\n");
+                       "spill-report: the disassembly needs its file's LOAD segments (objdump -d -p) and path (absolute, or found from here)\n");
     ok = profile_hot_loops(&test->arena, &test->report, profile_test_string("f"), bare, profile_test_string(""), 6);
     profile_test_check(test, "hot-loops without program headers", ok, false, profile_report_text(&test->report),
-                       "hot-loops: the disassembly has no file name or LOAD segments (objdump -d -p)\n");
+                       "hot-loops: the disassembly needs its file's LOAD segments (objdump -d -p) and path (absolute, or found from here)\n");
+
+    // #236's fifth review: another tree's build/compiler shares the name, not the path; a relative path that doesn't
+    // resolve is no identity; and a spill that is the first instruction has its label at the function's address, which
+    // only the symbol table (-t) shows.
+    const String8 tree_a = profile_test_string("/w/tree-a/build/compiler:     file format elf64-x86-64\n\nProgram Header:\n"
+                                               "    LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**12\n"
+                                               "         filesz 0x0000000000100000 memsz 0x0000000000100000 flags r-x\n\n"
+                                               "0000000000001140 <f>:\n    1140:\tpush   %rbp\n"
+                                               "0000000000001141 <buster_spill.a.0>:\n    1141:\tmov    %rsi,0x40(%rsp)\n    1146:\tret\n"
+                                               "0000000000001170 <external>:\n    1170:\tret\n");
+    const String8 two_trees = profile_test_string("401141 buster_spill.a.0+0x0 (/w/tree-a/build/compiler+0x1141)\n"
+                                                  "401141 buster_spill.a.0+0x0 (/w/tree-b/build/compiler+0x1141)\n"
+                                                  "401140 f+0x0 (/w/tree-b/build/compiler+0x1140)\n401140 f+0x0 (/w/tree-b/build/compiler+0x1140)\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), adjacent_labeled, tree_a, two_trees, 24);
+    profile_test_check(test, "spill-report with another tree's samples", ok, true, profile_report_text(&test->report),
+                       "spill-report: 1 samples in f at 1140, 1 (100.00%) at its 1 spills and reloads: 1 spills, 0 reloads, in 1 slots\n"
+                       "gpr  64(%rsp)     spills      1 reloads      0  | hottest spill 1 at -\n");
+    ok = profile_hot_loops(&test->arena, &test->report, profile_test_string("f"), tree_a, two_trees, 6);
+    profile_test_check(test, "hot-loops with another tree's samples", ok, true, profile_report_text(&test->report),
+                       "hot-loops: 1 samples in f (3 instructions, 0 loops)\nloops by samples:\nno loop has half the samples\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), adjacent_labeled,
+                              profile_test_string("buster-test-profile-no-such-file:     file format elf64-x86-64\n\nProgram Header:\n"
+                                                  "    LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**12\n"
+                                                  "         filesz 0x0000000000100000 memsz 0x0000000000100000 flags r-x\n\n"
+                                                  "0000000000001140 <f>:\n    1140:\tpush   %rbp\n0000000000001141 <buster_spill.a.0>:\n    1141:\tret\n"),
+                              profile_test_string(""), 24);
+    profile_test_check(test, "spill-report of a relative path that doesn't resolve", ok, false, profile_report_text(&test->report),
+                       "spill-report: the disassembly needs its file's LOAD segments (objdump -d -p) and path (absolute, or found from here)\n");
+    const String8 entry_labeled = profile_test_string("f:\nbuster_spill.a.0:\n\tmovss\t%xmm0, -4(%rsp)  # 4-byte Spill\n\tret\n.Lfunc_end0:\n");
+    const String8 entry_headers = profile_test_string(BUSTER_PROFILE_TEST_IMAGE "0000000000001140 <f>:\n    1140:\tvmovss %xmm0,-0x4(%rsp)\n    1146:\tret\n"
+                                                      "0000000000001150 <main>:\n    1150:\tret\n");
+    const String8 entry_table = profile_test_string(BUSTER_PROFILE_TEST_IMAGE "SYMBOL TABLE:\n"
+                                                    "0000000000001140 l       .text\t0000000000000000              buster_spill.a.0\n"
+                                                    "0000000000001140 g     F .text\t0000000000000010              f\n\n"
+                                                    "0000000000001140 <f>:\n    1140:\tvmovss %xmm0,-0x4(%rsp)\n    1146:\tret\n"
+                                                    "0000000000001150 <main>:\n    1150:\tret\n");
+    const String8 entry_samples = profile_test_string("401140 f+0x0 (/t/bin+0x1140)\n401146 f+0x6 (/t/bin+0x1146)\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), entry_labeled, entry_table, entry_samples, 24);
+    profile_test_check(test, "spill-report of a spill at the function's address", ok, true, profile_report_text(&test->report),
+                       "spill-report: 2 samples in f at 1140, 1 (50.00%) at its 1 spills and reloads: 1 spills, 0 reloads, in 1 slots\n"
+                       "xmm  -4(%rsp)     spills      1 reloads      0  | hottest spill 1 at -\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), entry_labeled, entry_headers, entry_samples, 24);
+    profile_test_check(test, "spill-report of a spill at the function's address without the symbol table", ok, false, profile_report_text(&test->report),
+                       "spill-report: the disassembly (objdump -d -p -t) has 0 of the 1 labels buster_spill.a.0 to buster_spill.a.0, 0 at two addresses\n");
 
     // Errors: samples without file offsets, labels the disassembly lacks or has twice, no copy before them, labels out
     // of order or of another tag, and a label last.
@@ -407,12 +451,12 @@ static void profile_test_text_tools(ProfileTest* test)
     ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), spill_labeled,
                               profile_test_string("0000000000001000 <f>:\n    1000:\tret\n0000000000001010 <buster_spill.a.0>:\n    1010:\tret\n"), profile_test_string(""), 24);
     profile_test_check(test, "spill-report with labels missing", ok, false, profile_report_text(&test->report),
-                       "spill-report: the disassembly has 1 of the 4 labels buster_spill.a.0 to buster_spill.a.3, 0 more than once\n");
+                       "spill-report: the disassembly (objdump -d -p -t) has 1 of the 4 labels buster_spill.a.0 to buster_spill.a.3, 0 at two addresses\n");
     ok = profile_spill_report(&test->arena, &test->report, profile_test_string("e"), profile_test_string("e:\nbuster_spill.a.0:\n\tret\n"),
                               profile_test_string("0000000000001000 <e>:\n    1000:\tret\n0000000000001010 <buster_spill.a.0>:\n    1010:\tret\n"
                                                   "0000000000002010 <buster_spill.a.0>:\n    2010:\tret\n"), profile_test_string(""), 24);
     profile_test_check(test, "spill-report with a label twice", ok, false, profile_report_text(&test->report),
-                       "spill-report: the disassembly has 1 of the 1 labels buster_spill.a.0 to buster_spill.a.0, 1 more than once\n");
+                       "spill-report: the disassembly (objdump -d -p -t) has 1 of the 1 labels buster_spill.a.0 to buster_spill.a.0, 1 at two addresses\n");
     ok = profile_spill_report(&test->arena, &test->report, profile_test_string("e"), profile_test_string("e:\nbuster_spill.a.0:\n\tret\nbuster_spill.a.1:\n\tret\n"),
                               profile_test_string("0000000000001000 <e>:\n    1000:\tret\n0000000000001010 <buster_spill.a.1>:\n    1010:\tret\n"
                                                   "0000000000001020 <buster_spill.a.0>:\n    1020:\tret\n"), profile_test_string(""), 24);
@@ -666,6 +710,74 @@ static void profile_test_program(ProfileTest* test)
     test->arena.length = 0;
 }
 
+// #236's fifth review: a function whose first instruction is a spill (its argument, around an asm that clobbers every
+// vector register), labeled, linked and disassembled with objdump -d -p -t, whose headers show only the function at the
+// label's address: spill-report must find the label in the symbol table. Needs clang and objdump on PATH.
+static void profile_test_entry_program(ProfileTest* test)
+{
+    static const char source[] = "__attribute__((noinline)) float f(float a)\n"
+                                 "{\n"
+                                 "    __asm__ volatile(\"\"\n"
+                                 "                     :\n"
+                                 "                     :\n"
+                                 "                     : \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\",\n"
+                                 "                       \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\",\n"
+                                 "                       \"xmm16\", \"xmm17\", \"xmm18\", \"xmm19\", \"xmm20\", \"xmm21\", \"xmm22\", \"xmm23\",\n"
+                                 "                       \"xmm24\", \"xmm25\", \"xmm26\", \"xmm27\", \"xmm28\", \"xmm29\", \"xmm30\", \"xmm31\");\n"
+                                 "    return a;\n"
+                                 "}\n"
+                                 "int main(int argc, char** argv)\n"
+                                 "{\n"
+                                 "    (void)argv;\n"
+                                 "    return f((float)argc) != (float)argc;\n"
+                                 "}\n";
+    const char* temporary = getenv("TMPDIR");
+    char directory[512];
+    snprintf(directory, sizeof(directory), "%s/buster-test-profile-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    char paths[6][600];
+    static const char* const names[6] = { "entry.c", "entry.s", "labeled.s", "entry", "entry.dis", "samples.txt" };
+    const bool made = mkdtemp(directory) != 0;
+    for (uint64_t i = 0; i < 6; i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%s", directory, names[i]);
+    }
+    bool ok = made && profile_write_file(paths[0], profile_test_string(source)) && profile_write_file(paths[5], profile_test_string(""));
+    char* compile[] = { "clang", "-O3", "-g", "-march=native", "-S", paths[0], "-o", paths[1], 0 };
+    ok = ok && profile_test_command(compile, "/dev/null");
+    const String8 assembly = ok ? profile_read_file(&test->arena, paths[1]) : (String8){ 0 };
+    ProfileReport labeled = { .arena = arena_reserve(BUSTER_PROFILE_REPORT_CAPACITY) };
+    ok = ok && assembly.pointer != 0 && profile_label_spills(&labeled, &test->report, profile_test_string("f"), profile_test_string("entry"), assembly);
+    // The first spill must be the function's first instruction: its label right after the function's prologue lines.
+    const String8 text = profile_report_text(&labeled);
+    ok = ok && profile_find(text, profile_string("buster_spill.entry.0:")) != text.length && profile_write_file(paths[2], text);
+    char* link[] = { "clang", paths[2], "-o", paths[3], 0 };
+    char* run[] = { paths[3], 0 };
+    char* disassemble[] = { "objdump", "-d", "-p", "-t", "--no-show-raw-insn", paths[3], 0 };
+    ok = ok && profile_test_command(link, "/dev/null") && profile_test_command(run, "/dev/null") && profile_test_command(disassemble, paths[4]);
+    const String8 disassembly = ok ? profile_read_file(&test->arena, paths[4]) : (String8){ 0 };
+    test->report.arena.length = 0;
+    ok = ok && disassembly.pointer != 0 && profile_spill_report(&test->arena, &test->report, profile_test_string("f"), text, disassembly, profile_test_string(""), 24);
+    const String8 report = profile_report_text(&test->report);
+    ok = ok && profile_starts_with(report, profile_string("spill-report: 0 samples in f at "));
+    test->cases += 1;
+    if (!ok)
+    {
+        test->failures += 1;
+        printf("  a spill at a function's address: FAILED (%.*s; files in %s)\n", (int)report.length, report.pointer, directory);
+    }
+    else
+    {
+        for (uint64_t i = 0; i < 6; i += 1)
+        {
+            unlink(paths[i]);
+        }
+        rmdir(directory);
+    }
+    arena_release(&labeled.arena);
+    test->report.arena.length = 0;
+    test->arena.length = 0;
+}
+
 static int run_profile_tests(int argc, char** argv)
 {
     (void)argv;
@@ -684,6 +796,7 @@ static int run_profile_tests(int argc, char** argv)
         profile_test_text_tools(&test);
         profile_test_branch_growth(&test);
         profile_test_program(&test);
+        profile_test_entry_program(&test);
         profile_test_ab(&test);
         printf("test-profile: %llu checks, %llu failed\n", (unsigned long long)test.cases, (unsigned long long)test.failures);
         result = test.failures == 0 ? 0 : 1;
