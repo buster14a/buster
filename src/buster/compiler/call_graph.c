@@ -53,7 +53,16 @@ struct CallGraphAllowed
 };
 
 // The recursion the style permits. Each entry is preceded by a comment saying what bounds its depth.
-static const CallGraphAllowed call_graph_allowed[] = {};
+static const CallGraphAllowed call_graph_allowed[] = {
+    // The preprocessor fuzz generator's random programs (preprocessor_fuzz_generate.c), nested to fixed depths: a
+    // statement two groups down has no conditional, so groups nest at most twice.
+    { .functions = BUSTER_S8_INIT("preprocessor_fuzz_random_conditional preprocessor_fuzz_random_group preprocessor_fuzz_random_statement") },
+    // A #if expression's operands are one level shallower, and one at depth 0 has none (the deepest starts at 4).
+    { .functions = BUSTER_S8_INIT("preprocessor_fuzz_random_expression") },
+    // Tokens' invocations and parenthesized groups, and an argument's invocation and tokens, are one level shallower,
+    // and there are none at depth 0 (BUSTER_PPF_RANDOM_DEPTH, 3, at most).
+    { .functions = BUSTER_S8_INIT("preprocessor_fuzz_random_argument preprocessor_fuzz_random_invocation preprocessor_fuzz_random_tokens") },
+};
 
 typedef struct CallGraphInput CallGraphInput;
 struct CallGraphInput

@@ -297,7 +297,9 @@ int run_lane_benchmark(int argc, char** argv);
 #include "buster/compiler/dataflow_test.c"
 int run_dataflow_benchmark(int argc, char** argv);
 
-// Independent preprocessor fuzz tooling (#109); command names await agreement with #117.
+// The preprocessor's fuzz tooling (#109): the generator, the clang oracle, the comparison and the minimizer, and their
+// self-tests, for the test-preprocessor-fuzz command. test-preprocessor --fuzz runs the preprocessor against them
+// (c_preprocessor_fuzz.c).
 #include "buster/compiler/preprocessor_fuzz.c"
 #include "buster/compiler/preprocessor_fuzz_generate.c"
 #include "buster/compiler/preprocessor_fuzz_clang.c"
@@ -317,6 +319,7 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_preprocessor_test.c"
 #include "buster/compiler/c_predefines_test.c"
+#include "buster/compiler/c_preprocessor_fuzz.c"
 #include "buster/compiler/c_preprocessor_oracle.c"
 #include "buster/compiler/x86_target_forms.c"
 #include "buster/compiler/x86_target_test.c"

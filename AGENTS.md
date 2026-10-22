@@ -210,6 +210,10 @@ designs and the compilers already built this way.
   The benchmark is linked into this executable rather than built separately.
   It compiles the translation units at once, a clang process each, and links
   them in order: the same executable as one clang command for all of them.
+- `C_TOKENIZER_NO_DIGIT_SEPARATORS` makes both lexer paths end pp-numbers
+  before `'`; the preprocessor sets it in modes before C23, including file
+  caches, scratch text and pastes. The standalone lexer's default keeps C23
+  separators. `benchmark-lexer --no-digit-separators` measures the flag.
 - `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
   it, and `./build/compiler test-lexer` runs them.
   The same command also runs `main_test.c`'s input-loader error and cleanup
@@ -219,18 +223,20 @@ designs and the compilers already built this way.
   default. `docs/c-lexer.md` records the GFNI classifier, the leading-comment
   skip, branch-free chunk state, the pipelined write-out, table-driven
   punctuator kinds, the delimiter scan, chunks read in place, the raw string
-  check and their 9700X measurements. `c_lexer_variant.c` is one variant of the
+  check, numbers without digit separators (`C_TOKENIZER_NO_DIGIT_SEPARATORS`,
+  C17's) and their 9700X measurements. `c_lexer_variant.c` is one variant of the
   lexer as a translation unit of its own, which `./build.sh lexer-variant`
   compiles in for `benchmark-lexer` to compare (see "Lexer benchmarks").
 - `src/buster/compiler/preprocessor_fuzz.c` provides bounded output comparison
   and the minimizer for the independent preprocessor test harness.
   `preprocessor_fuzz_generate.c` generates cases, `preprocessor_fuzz_clang.c`
-  runs the Clang oracle, `preprocessor_fuzz_test.c` provides
-  `test-preprocessor-fuzz`, and `preprocessor_fuzz_benchmark.c` provides
-  `benchmark-preprocessor-fuzz`, measuring the external test harness; `main.c`
-  includes all five. `docs/preprocessor-fuzz.md` records
-  its contract. These names and locations are provisional pending agreement
-  with the #117 session; no Buster preprocessor is attached yet.
+  runs the Clang oracle, and `preprocessor_fuzz_test.c` provides
+  `test-preprocessor-fuzz`, the harness's own checks; `main.c` includes all
+  four. `preprocessor_fuzz_benchmark.c` provides `benchmark-preprocessor-fuzz`,
+  measuring the external test harness. `c_preprocessor_fuzz.c` attaches the
+  preprocessor to it: `test-preprocessor --fuzz`, below.
+  `docs/preprocessor-fuzz.md` records the contract, the comparison and the
+  qualification runs.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
   of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder,
   and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
@@ -438,13 +444,14 @@ designs and the compilers already built this way.
   provides `benchmark-refinement`.
 - `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
   unit's token stream from its files' refined tokens, and `./build/compiler -E`
-  (as `clang -E`, with `-dM`). `docs/c-preprocessor.md` explains the design, the
-  `clang -E` oracle and the 9700X measurements. `c_preprocessor_test.c` holds its
-  tests (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
-  `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`. Its
-  `FileCache` holds what is prepared from each file (by identity) and every
-  path looked up, for every translation unit that preprocesses with it
-  (`PPOptions.files`; a unit without one makes its own).
+  (as `clang -E`, with `-dM`). `docs/c-preprocessor.md` explains the design, the `clang -E`
+  oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
+  (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
+  `c_preprocessor_fuzz.c` its differential fuzzing (#109; `main.c` includes
+  it after the tests) and `c_preprocessor_benchmark.c` provides
+  `benchmark-preprocessor`. Its `FileCache` holds what is prepared from each
+  file (by identity) and every path looked up, for every translation unit that
+  preprocesses with it (`PPOptions.files`; a unit without one makes its own).
   `c_predefines.c` gives the predefined macros the target and the options decide,
   as clang does (`-march`, the `-m` feature flags, `-march=native` from CPUID,
   `-O`, `-f...`, `-g`), from tables generated from clang 23; `c_predefines_test.c`
@@ -495,6 +502,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-parallel
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
+./build/compiler test-lexer --no-digraphs --no-line-comments
 ./build/compiler benchmark-lexer src
 ./build/compiler test-preprocessor-fuzz --std c17
 ./build/compiler test-preprocessor-fuzz --std c23
@@ -527,6 +535,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
 ./build/compiler test-preprocessor --clang
+./build/compiler test-preprocessor --tables src
+./build/compiler benchmark-preprocessor --tables src
 ./build/compiler -E -march=native -Isrc -fwrapv -funsigned-char -o build/main.i src/buster/compiler/main.c
 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 ./build/compiler test-files
@@ -620,8 +630,10 @@ then a summary line, and exits with status 1 on a cycle not in
 can't read. An entry names a component's functions, each as many times as
 the component has a function of that name; add one only for the
 style's "trivial statically bounded recursion", with a comment saying what
-bounds its depth. The list is empty: the tree has no cycle. The 9700X job's
-test step runs `test-call-graph` and the check; the check, which captures the
+bounds its depth. The list has three entries, the preprocessor fuzz generator's
+recursions (conditionals in groups, expressions, invocations in arguments),
+each bounded by its depth argument. The 9700X job runs
+`test-call-graph` and the check after the build; the check, which captures the
 units' IR at once, takes about 2 s.
 
 `./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
@@ -643,7 +655,10 @@ ring of 100,000, deeper than a recursive walk's stack.
 `./build/compiler test-lexer` needs no corpus. Its checks are ports of the
 snippet and random-input checks of `c/c_tokenizer_test.c` in
 Accelerated-Zig-Parser, where the lexer comes from. They compare `c_tokenize`
-with the scalar lexer token by token on:
+with the scalar lexer token by token, each input twice: with C23's digit
+separators, and without them (`C_TOKENIZER_NO_DIGIT_SEPARATORS`, as C17 lexes
+numbers, which the preprocessor asks for before C23). Each check prints the
+second's counts after the first's. The inputs:
 
 - the boundary snippet after 0 to 1,099 bytes of padding at each of the 64
   misalignments from a cache line: 70,400 placements, none of which may need
@@ -651,7 +666,8 @@ with the scalar lexer token by token on:
 - 200,000 random inputs made of weighted C pieces. `--fuzz N` sets how many,
   and `--seed N` picks another sequence (the same inputs as upstream's
   `--seed N`). The first inputs that differ are saved as `fuzz_failure_N.c` in
-  the current directory;
+  the current directory (`fuzz_failure_no_separators_N.c` without
+  separators);
 - page edges: every length from 0 to 1,099 bytes, cut as a prefix and as a
   suffix from the repeated snippet, four strings of random inputs (which
   continue the random sequence) and three comment templates, placed to end
@@ -668,16 +684,28 @@ with the scalar lexer token by token on:
   leading-comment scan's 64-byte loads and around 512-byte chunk boundaries,
   including closers whose `*` ends a chunk (also a chunk wholly inside the
   comment), a spliced closer, a `/*/` whose `*/` ends the comment, and a
-  comment inside a preprocessing directive.
+  comment inside a preprocessing directive;
+- numbers: 17 pp-numbers (every kind of digit, prefix and suffix, a `.` and
+  exponents, and numbers that have separators already) with a `'` at every
+  place in them, each before 18 followers (the end of the source, what a
+  separator may join, quotes, other literals and comments), with no line
+  splice around the `'`, one on either side, or `\r\n` ones on both, placed so
+  that the `'` is at byte 0 to 2, 62 to 65 or 509 to 514 of a source that
+  starts a chunk: 80,946 cases. Without separators, a case without a splice
+  must stay on the vectorized path;
+- 20 numbers with a `'` (16 in C and 4 in C++) whose tokens must be the ones
+  clang 23.1.3's raw lexer gives them (`-std=c17`, `c23`, `c++11` and
+  `c++26`), from both lexers.
 
-`--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces. The
-command prints each check's counts and first differences, and exits with status
-1 if anything fails. `--raw-strings` enables C11's raw prefixes in C,
-and `--raw-strings-c99` enables only `R` and `LR`; both paths check raw
-strings and near misses across chunk and page boundaries. The 9700X job's
-test step runs all four modes. On that
-machine, with `build.sh`'s unoptimized build, the C and C++ runs take about
-5.7 s and 6.1 s. For a longer run:
+`--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces.
+`--no-digraphs` and `--no-line-comments` tokenize C without digraphs and without
+`//` comments (`C_TOKENIZER_NO_DIGRAPHS` and `C_TOKENIZER_NO_LINE_COMMENTS`), as
+the preprocessor lexes `-std=c89` (both), C94 (the second) and `-fno-digraphs`
+(the first): the same inputs, lexed otherwise, through every check; C++ takes
+neither (#288). The command prints each check's counts and first differences,
+and exits with status 1 if anything fails. The 9700X job's test step runs C++,
+C and C's three other modes. Before adding the C89 modes, the C and C++
+runs took about 2.8 s and 3.0 s on the 9700X. For a longer run:
 
 ```sh
 ./build/compiler test-lexer --cplusplus --seed 7 --fuzz 2000000
@@ -693,11 +721,16 @@ without replacing the driver being developed under #116, #117 and #145.
 
 ## Lexer benchmarks
 
-`./build/compiler benchmark-lexer [--cplusplus] path...` checks each matching
-source against the scalar lexer and reports 21 interleaved-pass median
-throughput, cycles per byte, instructions per byte and IPC (hardware counters
-are zero when unavailable). Paths can be files or directories; `--cplusplus`
-selects C++ source/header extensions. The default 9700X job runs
+`./build/compiler benchmark-lexer [--cplusplus] [--no-digraphs]
+[--no-line-comments] [--no-digit-separators] path...` checks each matching source against the scalar
+lexer and reports 21 interleaved-pass median throughput, cycles per byte,
+instructions per byte and IPC (hardware counters are zero when unavailable).
+Paths can be files or directories; `--cplusplus` selects C++ source/header
+extensions, and `--no-digraphs` and `--no-line-comments` C's modes, as
+`test-lexer` takes them, and
+`--no-digit-separators` lexes numbers as C17 does, as the preprocessor does
+before C23 (`docs/c-lexer.md`, "Numbers without digit separators"). The default
+9700X job runs
 `benchmark-lexer src` after the tests, pinned to one allowed CPU. Measurements
 are informational: correctness failures fail CI, but throughput values are not
 yet compared against a performance baseline. Keep just one compiler executable.
@@ -2482,7 +2515,10 @@ both C17 and C23. The checks cover:
 - isolation of cases, line information and predefined counter behavior.
   `__COUNTER__` cases run alone because its state belongs to the Clang process;
 - output comparison, including unequal acceptance, token counts, kinds and
-  spellings, whitespace-only changes, and invalid oracle results;
+  spellings, whitespace-only changes, and invalid oracle results; and the
+  reader of clang's `-dump-tokens` text, on lines as clang 23 writes them
+  (escapes, keywords, annotations, and tokens written with line splices, whose
+  bytes as written go on to more lines), and the lines it must refuse;
 - a planted comparison for the minimizer: delete complete lines, then tokens,
   while preserving the difference, until only the two required identifier
   tokens remain. Saving and reading a `fuzz_failure_N.c` fixture must preserve
@@ -2491,15 +2527,17 @@ both C17 and C23. The checks cover:
 
 The oracle runs `clang -E -P -undef -nostdinc -std=c17` or `-std=c23` with
 `-x c`. It resets each case's source filename and line number identically in
-batched and individual runs, tokenizes the output with `c_tokenize` and splits
-it at exact marker identifiers. Infrastructure failures are distinct from
-source rejection.
+batched and individual runs, and splits the output at its markers, each a
+whole identifier that ends its printed line (found by its bytes outside
+literals, since a case's output can hold text that doesn't lex back); any
+other marker fails the split. A batch's output is tokenized with `c_tokenize`
+as the mode lexes. Infrastructure failures are distinct from source
+rejection.
 
 This is test tooling outside the compile path and has no new vector path.
-The minimizer currently uses only the planted comparison; these checks do
-not establish the correctness of a Buster preprocessor. The command
-names and file locations remain provisional until agreed with #117.
-`docs/preprocessor-fuzz.md` describes the extension points and remaining work.
+These self-tests check the harness alone, with the minimizer on its planted
+comparison; `test-preprocessor --fuzz` (below) runs the preprocessor through
+it. `docs/preprocessor-fuzz.md` has the harness's contract and its use.
 
 ## Preprocessor harness benchmark
 
@@ -2587,9 +2625,10 @@ reason. `c_preprocessor_oracle.c` implements this interface;
 [the frozen oracle guide](docs/preprocessor-oracle.md) records the pinned
 headers/corpora, manifest identities, CI subset and on-demand commands.
 
-`./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
+`./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
+[options] [file...]`, or `test-preprocessor --tables path...`:
 
-- without files, the 128 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 228 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2601,7 +2640,11 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   - #193's review fixes, line markers among them;
   - the `-f` options it models (#281): GNU's keywords, `$` (what follows it
     joining the tokens after it, as clang lexes them), char's signedness and
-    `-f[no-]short-wchar`'s width and signedness in `#if`.
+    `-f[no-]short-wchar`'s width and signedness in `#if`;
+  - c89's and C94's lexing without `//` comments, and c89's without digraphs,
+    pasted and stringized too, and `-f[no-]digraphs` in four modes (#288);
+  - each difference from clang that #109's fuzzing found, minimized, and the
+    ones probing around it found.
 
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
@@ -2613,9 +2656,47 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   refused, its message naming the option, or taken without one: the `-f`
   options that change clang's keywords, lexing or `-E` output, which
   `pp_parse_options` models or refuses where their family's last option turns
-  them on (docs/c-preprocessor.md, "The `-f` options");
+  them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; and
+  the fuzz batch: its isolation rules checked on small sources (what a case
+  leaves open makes clang read it alone), its comparison on pairs of texts
+  (whitespace between tokens doesn't count, a literal's contents and joined
+  tokens do, and our tokens that don't lex back, as an unterminated literal,
+  end where ours do in both texts), with `--clang` its emulation of clang's
+  -P printer checked on fixtures of its own, then 1,500 cases of the
+  independent harness's generator in each of C17 and C23
+  (`c_preprocessor_fuzz.c`), which both kernels must give
+  alike (streams, directive tables, diagnostics' counts, history and both
+  printers' bytes), with -P text that lexes back into the stream. Then the directive tables (#118,
+  `c_preprocessor_directives_test.c`): 2,000 random sources (`--count N`,
+  `--seed N`) of directives, `%:`, `#` alone, line markers, unknown names,
+  `#`s inside lines, literals and comments and after line splices, and
+  conditionals nested to many levels, balanced and not, and nests past the
+  vectorized pairing's depth limit, each prepared by both kernels, whose tables
+  (directives, line ends, kinds, pairing, notes and include guard) must be the
+  oracle's: a walk of the tokens one at a time, of the test's own. And 17
+  fixtures of a file's conditional structure (`#else` and `#elif` after
+  `#else`, a directive without `#if`, groups left open, in skipped groups and in
+  an included file, extra tokens, `#elifdef` before C23), whose diagnostics
+  both kernels must give alike, and ten of `#define`'s and `#undef`'s
+  constraints and redefinitions (#121). And 20 fixtures of include guards and
+  `#pragma once` (#120): the guard's shapes clang's multiple-include
+  optimization takes and those it doesn't, `#undef` between inclusions, an
+  inclusion from inside the file, the macro defined before the first, links to
+  a `#pragma once` file, `#import`. Each run must skip as many inclusions by
+  guards and by `#pragma once` as expected, by both kernels. Then a location
+  space shrunk to end where an inclusion, and then the first pasted spelling,
+  would start (`--location-limit N`, #124): both kernels must stop there, with
+  the output before it, and report the inclusion at its `#include` and the
+  spelling without a place. And `test-preprocessor` with a file and
+  `benchmark-preprocessor` (with `--clang`, and `--compare-clang`), run as
+  children on a small file, must take `--location-limit N` with its value as
+  ours, kept from clang, succeeding in a space the file fits in and running
+  out of one of a byte;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
-  `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree.
+  `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree;
+- with `--tables`, the directive tables of every `.c` and `.h` file under each
+  path, by both kernels, against the oracle (about 0.02 s for `src`, 0.6 s for
+  the C library corpus).
 
 In both, the vectorized printer's text must be the scalar printer's byte for
 byte, with line markers and without, and must lex back into the stream's
@@ -2626,7 +2707,7 @@ Every case and file runs with clang's answers to the feature queries
 ways: by default they answer what buster implements.
 
 `--clang` also compares every case and file with `clang -E` and the same
-options, token spelling by token spelling, and then where clang's line markers
+options (but `--predefines` and `--location-limit`, ours alone), token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
 prints the first difference with the tokens around it. For files, our side
 reads clang's own predefines for the options through `--predefines`, so that
@@ -2635,10 +2716,11 @@ then, with our own predefines, the macros defined at the file's end must be
 `clang -dM -E`'s byte for byte, but for those three macros and `__BUSTER__`.
 Without files, `--clang` also checks the built-in predefines, the keywords and
 the features:
-- in 22 option sets (the ten modes from `c89` to `gnu23`, `-ffreestanding`,
-  `-O2`, two combinations, the six ISA profiles of `docs/x86-target.md` and two
-  with `-mtune`), `pp_predefines` must give `clang -dM -E` line for line, but for
-  the patch release's three macros;
+- in 26 option sets (the ten modes from `c89` to `gnu23`, C94 as
+  `-std=iso9899:199409` and as `-std=c89 -fdigraphs`, C94 and `gnu89` without
+  digraphs, `-ffreestanding`, `-O2`, two combinations, the six ISA profiles of
+  `docs/x86-target.md` and two with `-mtune`), `pp_predefines` must give
+  `clang -dM -E` line for line, but for the patch release's three macros;
 - `c_predefines.c`'s generated tables (each x86-64 feature's flag, closures and
   macros, each `-march` CPU's macro name and features, the `-mtune` names) must
   be what `c_predefines_test.c`'s generator learns from clang now;
@@ -2658,7 +2740,7 @@ the features:
 - `-E -dM` of a file with every kind of definition must be clang's byte for byte
   (but `__BUSTER__`), and `__FLT_EVAL_METHOD__` clang's under
   `-ffp-eval-method=` and without SSE;
-- in each mode, `__is_identifier` of every predefined name, and of clang's
+- in each mode (the ten and C94), `__is_identifier` of every predefined name, and of clang's
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
   must give clang's answer, and so must it in 25 sets of `-f` options
   (`pp_test_keyword_sets`: GNU's keywords on and off, in each order of
@@ -2669,11 +2751,51 @@ the features:
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers, and so must they under 45
   sanitizer option sets, and the four `__is_target_*` of 41 names under eight
-  kinds of target triple. `sqlite3.c`, musl 1.2.5's 1,357 sources,
-Lua 5.4.8 and this repository's translation units are token-identical;
-`docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs
-the cases and the repository's translation units with `--clang`.
+  kinds of target triple;
+- the fuzz batch's cases must give clang's acceptance, and an accepted case's
+  stream, printed with clang's -P spacing, must lex into clang's tokens (with
+  a comment's `/` and a line splice's `\` as tokens, which only tokens printed
+  next to each other make, and our tokens that don't lex back whole:
+  `preprocessor_fuzz_lex_printed`). Where clang's text can't show where such a
+  token ends (an unterminated literal off a pragma's line), clang's own tokens
+  for the case alone (`clang -Xclang -dump-tokens`) must confirm ours; on a
+  pragma's line that goes on past one (`#pragma omp` expands its tokens),
+  which clang's tokens don't have, the case counts as unverified; a
+  comparison that can't be made leaves its case without a result. With
+  `--clang`, the batch first checks these on fixtures of its own, among them
+  #263's second review's probes.
 
+- the structure and definition fixtures' diagnostics must be clang's, byte for byte, and the
+  guard fixtures' output and skips by guards clang's (`-Xclang -print-stats`),
+  as every file's skips by guards must be. `sqlite3.c`, musl 1.2.5's 1,357 sources,
+Lua 5.4.8 and this repository's translation units are token-identical;
+`docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs the cases
+and the repository's translation units with `--clang`, and `--tables src`.
+
+`sqlite3.c`, musl 1.2.5's 1,357 sources, Lua 5.4.8 and this repository's
+translation units are token-identical; `docs/c-preprocessor.md` has the
+configurations. The 9700X job runs the cases and the repository's translation
+units with `--clang`.
+
+The fuzz batch's options: `--fuzz N` cases per mode (0 for none), `--first N`
+the first case's id, `--seed N` (1 by default), `--std c17|c23` one mode,
+`--jobs N` worker processes (1 by default; the cases don't depend on it), and
+`--print-case N`, which prints case N as clang reads it alone. Each
+difference from clang is confirmed on the case alone; the first 4 that each
+worker finds in a mode are minimized and saved as `fuzz_failure_N.c` in the
+current directory. One block of 64 cases in 128 has every case read alone
+too, which must give its batch's result, and a batch clang gives no result
+for has its cases read alone. It exits with status 1 on any difference, a
+batch that differs from its cases alone, or a case without a result. For a
+qualification run (a million cases in each mode take about 7 minutes on the
+9700X's 15 threads, and 15 to 24 on a 7940HS's 16, mostly clang's processes):
+
+```sh
+./build/compiler test-preprocessor --clang --fuzz 1000000 --seed 11 --jobs 16
+```
+
+`docs/preprocessor-fuzz.md` has the comparison's rules, the generator's
+constructs and the qualification runs.
 `./build/compiler test-preprocessor --generate-targets` prints `c_predefines.c`'s
 generated block from clang 23 (on `PATH`), to paste over the old one when clang
 changes; `docs/c-preprocessor.md` ("The predefined macros") has the procedure.
@@ -2686,8 +2808,10 @@ run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
 and time (read, lex, refine, directive tables, main loop), the release after the
-run (the files' mappings among it), and what a run did (directives, runs,
-expansions, invocations, pastes, and the `#if` lines and their lengths).
+run (the files' mappings among it), `-E -P`'s throughput with its printing
+(input bytes and output tokens per second, #124) and what a run did
+(directives, runs, expansions, invocations, pastes, the `#if` lines and their
+lengths, and the inclusions skipped by guards and by `#pragma once`).
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.
@@ -2698,6 +2822,28 @@ runs answer the feature queries as clang does (`--clang-features`), so that they
 do the work `clang -E` does. The
 default 9700X job runs the smoke command above on `main.c`, pinned to one allowed
 CPU; like the others, its measurements are informational.
+
+`./build/compiler benchmark-preprocessor --defines [--only vectorized|scalar]
+path...` times definitions and lookups alone (#121): every `.c` and `.h` file
+under the paths is read and prepared once, then each of 21 passes after a
+warm-up, file by file, defines its `#define`s, compiles its macros and looks up
+its identifiers as the main loop's runs test them, by each kernel, which must
+make the same macros. It reports the medians in cycles per `#define`, per macro
+compiled and per lookup. `docs/c-preprocessor.md` has the numbers for the C
+library corpus.
+
+`--guard-cost` times the vectorized kernels with the skip of guarded files and
+without it (`PPOptions.no_guard_skip`), in place of the scalar twins: the
+output's tokens must be the same (#120).
+
+`./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
+path...` times the directive tables alone (#118): every `.c` and `.h` file under
+the paths is read and prepared once, then each of 21 passes after a warm-up
+builds every file's table by each kernel, whose tables must be the same, and it
+reports the medians per input token and per directive, IPC, and the scan's
+share. Run it under the 9700X's lock with `taskset -c 2`;
+`docs/c-preprocessor.md` has the numbers for the C library corpus. The default
+9700X job runs it on `src`, pinned to one allowed CPU.
 
 ## Per-file jobs tests
 

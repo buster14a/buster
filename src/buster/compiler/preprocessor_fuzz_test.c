@@ -124,6 +124,79 @@ static void preprocessor_fuzz_test_comparison(PreprocessorFuzzTestTally* tally, 
     arena_pop_to(memory, mark);
 }
 
+// Clang's -dump-tokens text (preprocessor_fuzz_clang_dump), as clang 23 writes it: escapes, a spelling with quotes and
+// padding in it, a keyword's and an annotation's lines, tokens written with line splices, whose bytes as written go on
+// to more lines, and the case's marker; then lines it can't read (without "Loc=<", with two ends its spelling could
+// have, with an escape it doesn't know, a diagnostic's), a dump without the marker before its end, one without its last
+// newline, and one whose bytes as written never end.
+static void preprocessor_fuzz_test_dump(PreprocessorFuzzTestTally* tally, Arena* memory)
+{
+    const uint64_t mark = memory->length;
+    const String8 dump = BUSTER_S8("unknown          ''a  '                          Loc=<ppf_7.c:2:1 <Spelling=ppf_7.c:1:11>> [StartOfLine]\n"
+                                   "identifier       'x'                             Loc=<ppf_7.c:3:1>     [StartOfLine]\n"
+                                   "string_literal   '\\\"\\\"a b\\\"'                     Loc=<ppf_7.c:4:1>     [StartOfLine]\n"
+                                   "unknown          ''a\\tb\\\\q\\\"\\001\\303\\251 \\177'   Loc=<ppf_7.c:5:1>     [StartOfLine]\n"
+                                   "__int128         '__int128'                      Loc=<ppf_7.c:6:1>     [StartOfLine]\n"
+                                   "annot_embed                                      Loc=<ppf_7.c:7:1>    \n"
+                                   "unknown          '\\\\'                            Loc=<ppf_7.c:7:2>     [UnClean='\\ \n\\']\n"
+                                   "identifier       'abc'                           Loc=<ppf_7.c:8:1>     [StartOfLine] [UnClean='a\\\nb\\\nc']\n"
+                                   "identifier       'BUSTER_PPF_END_0'              Loc=<ppf_7.c:9:1>     [StartOfLine]\n"
+                                   "eof              ''                              Loc=<ppf_7.c:9:17>   \n");
+    static const char* const kinds[] = {
+        "unknown",
+        "identifier",
+        "string_literal",
+        "unknown",
+        "__int128",
+        "annot_embed",
+        "unknown",
+        "identifier",
+    };
+    static const char* const spellings[] = {
+        "'a  ",
+        "x",
+        "\"\"a b\"",
+        "'a\tb\\q\"\001\303\251 \177",
+        "__int128",
+        "",
+        "\\",
+        "abc",
+    };
+    PreprocessorFuzzClangTokens tokens = { 0 };
+    const bool read = preprocessor_fuzz_clang_dump(memory, dump, &tokens);
+    bool same = read && tokens.count == BUSTER_ARRAY_LENGTH(kinds);
+    for (uint64_t i = 0; same && i < tokens.count; i += 1)
+    {
+        const String8 kind = tokens.tokens[i].kind;
+        const String8 spelling = tokens.tokens[i].spelling;
+        same = kind.length == strlen(kinds[i]) && memcmp(kind.pointer, kinds[i], kind.length) == 0 && spelling.length == strlen(spellings[i]) &&
+               memcmp(spelling.pointer, spellings[i], spelling.length) == 0;
+    }
+    preprocessor_fuzz_test_expect(tally, same, "clang's token dump read wrong");
+    static const char* const unreadable[] = {
+        "unknown          ''a'\nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+        "unknown          ''a' Loc=<b'   Loc=<p.c:1:1>\nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+        "unknown          ''a\\q'   Loc=<p.c:1:1>\nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+        "p.c:1:1: error: something\nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+        "identifier       'x'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+        "identifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>",
+        "unknown          '\\\\'     Loc=<p.c:1:1>     [UnClean='\\ \nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
+    };
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(unreadable); i += 1)
+    {
+        const String8 text = {
+            .pointer = (char*)unreadable[i],
+            .length = strlen(unreadable[i]),
+        };
+        const uint64_t before = memory->length;
+        PreprocessorFuzzClangTokens none = { 0 };
+        tally->case_id = i;
+        preprocessor_fuzz_test_expect(tally, !preprocessor_fuzz_clang_dump(memory, text, &none) && memory->length == before, "an unreadable token dump was read");
+    }
+    tally->case_id = 0;
+    arena_pop_to(memory, mark);
+}
+
 // Check source witnesses as well as the generator's coverage mask. Semantic transport checks below additionally
 // require rejected argument/paste families to be rejected, and compare every accepted expansion with its own process.
 static bool preprocessor_fuzz_test_construct(PreprocessorFuzzCase test_case, uint64_t family, bool c23)
@@ -165,6 +238,18 @@ static bool preprocessor_fuzz_test_construct(PreprocessorFuzzCase test_case, uin
         BUSTER_S8_INIT(" #\n"),
         BUSTER_S8_INIT("# 1\n"),
         BUSTER_S8_INIT("(+,*)"),
+        BUSTER_S8_INIT("/* ppf_random 0 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 1 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 2 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 3 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 4 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 5 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 6 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 7 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 8 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 9 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 10 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 11 */\n"),
     };
     bool result = preprocessor_fuzz_test_contains(test_case.source, witnesses[family]);
     if (family == 10 && c23)
@@ -218,7 +303,7 @@ static void preprocessor_fuzz_test_generation(PreprocessorFuzzTestTally* tally, 
     for (uint64_t family = 0; family < BUSTER_PPF_CONSTRUCT_COUNT; family += 1)
     {
         const uint64_t mark = memory->length;
-        tally->case_id = 10 * BUSTER_PPF_CONSTRUCT_COUNT + family;
+        tally->case_id = 10 * BUSTER_PPF_FAMILY_CYCLE + family;
         PreprocessorFuzzCase baseline = { 0 };
         const bool baseline_valid = preprocessor_fuzz_generate(memory, seeds[0], tally->case_id, c23, &baseline);
         preprocessor_fuzz_test_expect(tally, baseline_valid, "generator baseline failed");
@@ -299,8 +384,8 @@ static void preprocessor_fuzz_test_batch(PreprocessorFuzzTestTally* tally, Arena
                 tally->case_id = cases[i].id;
                 preprocessor_fuzz_test_expect(tally, preprocessor_fuzz_compare(memory, batched[i], individual[i]) == BUSTER_PPF_EQUAL,
                     "batch output differs from an individual process");
-                const uint64_t family = cases[i].id % BUSTER_PPF_CONSTRUCT_COUNT;
-                if (family == 8 || family == 16 || family == 17 || family == 19 || family >= 32)
+                const uint64_t family = preprocessor_fuzz_family(cases[i].id);
+                if (family == 8 || family == 16 || family == 17 || family == 19 || (family >= 32 && family < BUSTER_PPF_TEMPLATE_FAMILIES))
                 {
                     preprocessor_fuzz_test_expect(tally, !individual[i].accepted, "invalid paste or argument family was accepted");
                 }
@@ -580,6 +665,25 @@ static void preprocessor_fuzz_test_oracle(PreprocessorFuzzTestTally* tally, Aren
     preprocessor_fuzz_test_expect(tally, recovered && preprocessor_fuzz_compare(memory, rejected[1], forty_two) == BUSTER_PPF_EQUAL,
         "rejected batch did not recover its accepted case");
 
+    // Clang reports this case's only error at no location: it is still the case's rejection, alone and in a batch.
+    const PreprocessorFuzzCase unplaced_cases[] = {
+        {
+            .source = BUSTER_S8_INIT("#define ppf_10014_f(a) __has_include a ~\n#if ppf_10014_f() 1\n#endif\n"),
+            .id = 10014,
+        },
+        {
+            .source = BUSTER_S8_INIT("43\n"),
+            .id = 10015,
+        },
+    };
+    PreprocessorFuzzOutput unplaced[2] = { 0 };
+    const bool unplaced_alone = preprocessor_fuzz_clang(memory, clang_path, c23, unplaced_cases, 1, true, unplaced);
+    preprocessor_fuzz_test_expect(tally, unplaced_alone && unplaced[0].valid && !unplaced[0].accepted, "an error at no location wasn't the case's rejection");
+    const bool unplaced_batch = preprocessor_fuzz_clang(memory, clang_path, c23, unplaced_cases, 2, false, unplaced);
+    const PreprocessorFuzzOutput forty_three = preprocessor_fuzz_test_output(BUSTER_S8("43"), true);
+    preprocessor_fuzz_test_expect(tally, unplaced_batch && unplaced[0].valid && !unplaced[0].accepted && preprocessor_fuzz_compare(memory, unplaced[1], forty_three) == BUSTER_PPF_EQUAL,
+        "a batch with an error at no location wasn't read case by case");
+
     const uint64_t failure_mark = memory->length;
     PreprocessorFuzzOutput failed = { 0 };
     const bool launched = preprocessor_fuzz_clang(memory, "/this/path/does/not/exist/buster-clang", c23, cases, 1, false, &failed);
@@ -682,8 +786,11 @@ static void preprocessor_fuzz_test_minimizer(PreprocessorFuzzTestTally* tally, A
     {
         preprocessor_fuzz_test_expect(tally, !preprocessor_fuzz_planted(memory, false_matches[i]), "planted adapter matched a comment, string, substring or missing token");
     }
+    const PreprocessorFuzzOracle planted = {
+        .kind = BUSTER_PPF_ORACLE_PLANTED,
+    };
     String8 minimized = { 0 };
-    const bool reduced = preprocessor_fuzz_minimize(memory, noise, &minimized);
+    const bool reduced = preprocessor_fuzz_minimize(memory, &planted, noise, &minimized);
     preprocessor_fuzz_test_expect(tally, reduced, "planted mismatch did not minimize");
     if (reduced)
     {
@@ -697,11 +804,11 @@ static void preprocessor_fuzz_test_minimizer(PreprocessorFuzzTestTally* tally, A
     const uint64_t failure_mark = memory->length;
     String8 unchanged = BUSTER_S8("unchanged");
     const String8 before = unchanged;
-    const bool equal_minimized = preprocessor_fuzz_minimize(memory, BUSTER_S8("BUSTER_PPF_LEFT"), &unchanged);
+    const bool equal_minimized = preprocessor_fuzz_minimize(memory, &planted, BUSTER_S8("BUSTER_PPF_LEFT"), &unchanged);
     preprocessor_fuzz_test_expect(tally, !equal_minimized && memory->length == failure_mark
         && unchanged.pointer == before.pointer && unchanged.length == before.length, "failed minimization changed its result or arena");
     Arena no_memory = { 0 };
-    const bool no_memory_minimized = preprocessor_fuzz_minimize(&no_memory, exact, &unchanged);
+    const bool no_memory_minimized = preprocessor_fuzz_minimize(&no_memory, &planted, exact, &unchanged);
     preprocessor_fuzz_test_expect(tally, !no_memory_minimized && no_memory.length == 0
         && unchanged.pointer == before.pointer && unchanged.length == before.length, "minimizer allocation failure changed its result");
     arena_pop_to(memory, mark);
@@ -766,12 +873,15 @@ static int run_preprocessor_fuzz_tests(int argc, char** argv)
     }
     else
     {
+        // Batched and individual processes must give __DATE__ and __TIME__ alike.
+        setenv("SOURCE_DATE_EPOCH", BUSTER_PPF_EPOCH, 1);
         Arena memory = arena_reserve(BUSTER_PPF_TEST_ARENA_BYTES);
         PreprocessorFuzzTestTally tally = { 0 };
         preprocessor_fuzz_test_expect(&tally, memory.base != 0, "test arena reservation failed");
         if (memory.base != 0)
         {
             preprocessor_fuzz_test_comparison(&tally, &memory);
+            preprocessor_fuzz_test_dump(&tally, &memory);
             preprocessor_fuzz_test_generation(&tally, &memory, c23);
             preprocessor_fuzz_test_minimizer(&tally, &memory);
             preprocessor_fuzz_test_oracle(&tally, &memory, clang_path, c23);
