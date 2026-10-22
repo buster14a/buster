@@ -402,6 +402,33 @@ designs and the compilers already built this way.
   runs them) and `branch_sizing_benchmark.c` provides
   `benchmark-branch-sizing`. `docs/branch-sizing.md` explains its design and
   measurements.
+- `src/buster/compiler/x86_semantics.c` is what the forms a code generator
+  emits mean (#221), in tables keyed by `X86Form` beside the encoder's:
+  - each covered form's effects (`x86_effects`): its operands' reads and
+    writes by encoding role (tied ones both), its fixed registers, what a
+    narrower write does to the rest of a register, its flags read, defined
+    and left undefined, its memory, control, faults and MXCSR, and how its
+    immediate's bits become a value. An uncovered form gets a conservative
+    record, and a call has only its architectural effects (its callee's
+    clobbers are #137's);
+  - the immediate's contract (`x86_immediate_encodes`, `x86_immediate_field`
+    and `x86_immediate_value`): a selector's value against a field's bits;
+  - each record's resources read and written, its operands resolved
+    (`x86_instructions_effects`, AVX-512, and its scalar twin);
+  - value-preserving form choice for an operation with an immediate
+    (`x86_choice_row`, `x86_choose_forms`, AVX-512, its scalar twin
+    `x86_choose_forms_scalar`, and `x86_choice_instruction`): the
+    sign-extended imm8, the accumulator's form, constant materialization, and
+    other instructions (xor, test r, r, a narrower test, opt-in inc and dec)
+    only where the live flags allow, which initialization works out from the
+    effects.
+
+  `x86_semantics_test.c` holds its tests (`main.c` includes it after the
+  assembler's, taking the encoder tests' printer and branch sizing tests'
+  runner; `./build/compiler test-x86-semantics` runs them) and
+  `x86_semantics_benchmark.c` provides `benchmark-x86-semantics`.
+  `docs/x86-semantics.md` has the contract, the covered subset, how to add a
+  form and the measurements.
 - `src/buster/compiler/c_types.c` is the C type table (#132, contract 5 for
   #133 and #137): `TypeId`s, hash-consed one at a time and in batches, tags,
   clang's record layout (one record at a time, and 16 at once in vectors), the
@@ -513,6 +540,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-x86-encoder
 ./build/compiler test-branch-sizing --cross-check
 ./build/compiler benchmark-branch-sizing
+./build/compiler test-x86-semantics --cross-check
+./build/compiler benchmark-x86-semantics
 ./build/compiler test-lanes
 ./build/compiler benchmark-lanes
 ./build/compiler test-dataflow
@@ -537,6 +566,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
 ./build/compiler test-preprocessor --clang
+./build/compiler test-preprocessor --tables src
+./build/compiler benchmark-preprocessor --tables src
 ./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler test-files
@@ -1102,6 +1133,98 @@ one measurement (an entry point's name, or a path's run through a phase, as
 lock with `taskset -c 2`. `docs/branch-sizing.md` has the numbers. The default
 9700X job runs it after the tests, pinned to one allowed CPU; like the others,
 its measurements are informational.
+
+## x86 semantics tests
+
+`./build/compiler test-x86-semantics [--seed N] [--runs N] [--cross-check]
+[--keep]` (about 0.2 s on the 9700X) checks `x86_semantics.c`. The processor is
+the oracle: a harness runs records in the test's process, loading every
+general register, the flags and ZMM0 to ZMM15 from a state, then storing them
+back. Memory operands are RIP-relative into a data page, RSP is its own stack,
+and a fault names the record. The checks:
+
+- the effects table: every covered form but those that branch or trap, from
+  `--runs` random states (12), with register and memory operands in turn.
+  Each run checks that:
+  - what the form doesn't write stays as it was: registers, vector registers
+    to bit 511, flags, and the memory around its operand and below the stack;
+  - a narrower write keeps or zeroes the rest as its record says;
+  - defined flags and results don't change when everything it doesn't read
+    changes, every register compared whole (vector ones to bit 511);
+  - a destination that only merges doesn't read the bytes it defines;
+  - every write shows a change in some run: one that no run showed gets up
+    to 256 more runs, with register operands, and one that never shows is
+    listed as missing coverage, not failed.
+- cmov and setcc of all 16 conditions on all 64 combinations of the status
+  flags, against a model of the conditions;
+- shifts' CF: SAR, SHR and SHL at every width, by an immediate and by CL,
+  around their widths, against a model (SAR's CF by the width or more is the
+  sign bit, defined), with `x86_instruction_flags` defining CF where the model
+  does; and pairs of records through `x86_instruction_flags_substitutable`, run
+  from every state of the status flags: a live flag it takes must come out
+  alike, and `or ebx, 0` for `shl ebx, 0`, refused with CF live, must show CF
+  apart;
+- fixtures:
+  - division's, mul's and the sign extensions' fixed registers, variable
+    shifts' CL, partial writes and 32-bit zero extension, inc's CF, the SSE
+    merges and legacy SSE's upper lanes;
+  - a call's architectural effects, register and memory operands, zero
+    idioms, shift counts;
+  - the substitutions' legality for every set of live flags;
+  - uncovered forms, which must get the conservative record;
+- the immediate's contract on every covered form with an immediate and about
+  60 boundary values: a field that takes a value gives it back, and one that
+  doesn't can't (an imm8 of `0xc8` is −56, not 200);
+- form choice:
+  - fixtures of the values −129 to 256 at each width, constant
+    materialization (INT32_MAX, 0x80000000, UINT32_MAX, negative 64-bit
+    values), shift counts and the substitutions by their live flags;
+  - every row with the boundary values and random ones, six live-flag
+    contexts and three destinations. Each chosen record is validated and run
+    against a reference sequence that holds the value in R11 and uses the
+    operation's register form, and must leave the same registers, memory and
+    live flags;
+  - every candidate chosen by some request;
+- `x86_choose_forms` and `x86_instructions_effects` against their scalar
+  twins on random inputs, and with every column ending at a `PROT_NONE` page at
+  every count to 100;
+- #180's check: every row's forms allowed at the baseline target
+  (`x86_target_forms`), every chosen record valid there
+  (`x86_target_validate`);
+- `x86_match.c`'s immediate ranges against the shared rule on the forms the
+  assembler's syntax supports. It refuses the unsigned spellings of sign-extended
+  patterns, which the shared rule takes; those are counted, not failed.
+
+`--cross-check` also prints every chosen record with the encoder tests'
+printer: GNU as must assemble them to the chosen forms' bytes. `--keep` leaves
+its directory under `$TMPDIR` (or `/tmp`). The 9700X job's test step runs it
+with `--cross-check`.
+
+## x86 semantics benchmark
+
+`./build/compiler benchmark-x86-semantics [--requests N] [--functions N]
+[--seed N] [--after-scalar MS] [--only NAME]` (about 3 s) checks that the
+vector paths agree with their scalar twins, then reports:
+
+- the tables' bytes, and `x86_semantics_initialize`'s time;
+- form choice per request: `--requests` requests (65,536) shaped like a code
+  generator's constants, by `choose-scalar` and `choose-avx512`. Also the
+  chosen forms' bytes against an imm32 for every value;
+- operand-resolved effects per record, on `--functions` functions (2,048) of
+  96 records shaped like clang's -O0 and -O2 code (branch sizing's generator),
+  by `effects-scalar` and `effects-avx512`, beside `encode` (`x86_encode` of
+  the same records);
+- `code`: the run time and size of the choices that change the instruction
+  sequence or its encoding (an imm8 against an imm32, inc, xor, test r, r, a
+  narrower test, `mov r32` against movabs), in blocks of 64 over 8 registers.
+
+Each case reports 21 interleaved-pass medians: nanoseconds, cycles,
+instructions, IPC, and the throttle (PMCx1A0's umask 0x08, as in #199).
+`--only NAME` times one path alone, back to back. `--after-scalar MS` runs the
+case's scalar twin for MS ms (100 to 300) before every AVX-512 sample. Run it
+under the 9700X's lock with `taskset -c 2`. `docs/x86-semantics.md` has the
+numbers in both states. The default 9700X job runs it after the tests; like
+the others, its measurements are informational.
 
 ## Lane tests
 
@@ -2588,7 +2711,8 @@ reason. `c_preprocessor_oracle.c` implements this interface;
 [the frozen oracle guide](docs/preprocessor-oracle.md) records the pinned
 headers/corpora, manifest identities, CI subset and on-demand commands.
 
-`./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
+`./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
+[options] [file...]`, or `test-preprocessor --tables path...`:
 
 - without files, the 95 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
@@ -2607,9 +2731,37 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `SOURCE_DATE_EPOCH`'s when it is set; and the `-m` options buster refuses
   though clang takes them (another target's, which clang ignores with a
   warning, and those that change the target) must be refused, and each `-m`
-  flag that changes no macro taken;
+  flag that changes no macro taken. Then the directive tables (#118,
+  `c_preprocessor_directives_test.c`): 2,000 random sources (`--count N`,
+  `--seed N`) of directives, `%:`, `#` alone, line markers, unknown names,
+  `#`s inside lines, literals and comments and after line splices, and
+  conditionals nested to many levels, balanced and not, and nests past the
+  vectorized pairing's depth limit, each prepared by both kernels, whose tables
+  (directives, line ends, kinds, pairing, notes and include guard) must be the
+  oracle's: a walk of the tokens one at a time, of the test's own. And 17
+  fixtures of a file's conditional structure (`#else` and `#elif` after
+  `#else`, a directive without `#if`, groups left open, in skipped groups and in
+  an included file, extra tokens, `#elifdef` before C23), whose diagnostics
+  both kernels must give alike, and ten of `#define`'s and `#undef`'s
+  constraints and redefinitions (#121). And 20 fixtures of include guards and
+  `#pragma once` (#120): the guard's shapes clang's multiple-include
+  optimization takes and those it doesn't, `#undef` between inclusions, an
+  inclusion from inside the file, the macro defined before the first, links to
+  a `#pragma once` file, `#import`. Each run must skip as many inclusions by
+  guards and by `#pragma once` as expected, by both kernels. Then a location
+  space shrunk to end where an inclusion, and then the first pasted spelling,
+  would start (`--location-limit N`, #124): both kernels must stop there, with
+  the output before it, and report the inclusion at its `#include` and the
+  spelling without a place. And `test-preprocessor` with a file and
+  `benchmark-preprocessor` (with `--clang`, and `--compare-clang`), run as
+  children on a small file, must take `--location-limit N` with its value as
+  ours, kept from clang, succeeding in a space the file fits in and running
+  out of one of a byte;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
-  `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree.
+  `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree;
+- with `--tables`, the directive tables of every `.c` and `.h` file under each
+  path, by both kernels, against the oracle (about 0.02 s for `src`, 0.6 s for
+  the C library corpus).
 
 In both, the vectorized printer's text must be the scalar printer's byte for
 byte, with line markers and without, and must lex back into the stream's
@@ -2620,7 +2772,7 @@ Every case and file runs with clang's answers to the feature queries
 ways: by default they answer what buster implements.
 
 `--clang` also compares every case and file with `clang -E` and the same
-options, token spelling by token spelling, and then where clang's line markers
+options (but `--predefines` and `--location-limit`, ours alone), token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
 prints the first difference with the tokens around it. For files, our side
 reads clang's own predefines for the options through `--predefines`, so that
@@ -2658,10 +2810,13 @@ the features:
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers, and so must they under 45
   sanitizer option sets, and the four `__is_target_*` of 41 names under eight
-  kinds of target triple. `sqlite3.c`, musl 1.2.5's 1,357 sources,
+  kinds of target triple.
+- the structure and definition fixtures' diagnostics must be clang's, byte for byte, and the
+  guard fixtures' output and skips by guards clang's (`-Xclang -print-stats`),
+  as every file's skips by guards must be. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
-`docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs
-the cases and the repository's translation units with `--clang`.
+`docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs the cases
+and the repository's translation units with `--clang`, and `--tables src`.
 
 `./build/compiler test-preprocessor --generate-targets` prints `c_predefines.c`'s
 generated block from clang 23 (on `PATH`), to paste over the old one when clang
@@ -2675,8 +2830,10 @@ run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
 and time (read, lex, refine, directive tables, main loop), the release after the
-run (the files' mappings among it), and what a run did (directives, runs,
-expansions, invocations, pastes, and the `#if` lines and their lengths).
+run (the files' mappings among it), `-E -P`'s throughput with its printing
+(input bytes and output tokens per second, #124) and what a run did
+(directives, runs, expansions, invocations, pastes, the `#if` lines and their
+lengths, and the inclusions skipped by guards and by `#pragma once`).
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.
@@ -2687,6 +2844,28 @@ runs answer the feature queries as clang does (`--clang-features`), so that they
 do the work `clang -E` does. The
 default 9700X job runs the smoke command above on `main.c`, pinned to one allowed
 CPU; like the others, its measurements are informational.
+
+`./build/compiler benchmark-preprocessor --defines [--only vectorized|scalar]
+path...` times definitions and lookups alone (#121): every `.c` and `.h` file
+under the paths is read and prepared once, then each of 21 passes after a
+warm-up, file by file, defines its `#define`s, compiles its macros and looks up
+its identifiers as the main loop's runs test them, by each kernel, which must
+make the same macros. It reports the medians in cycles per `#define`, per macro
+compiled and per lookup. `docs/c-preprocessor.md` has the numbers for the C
+library corpus.
+
+`--guard-cost` times the vectorized kernels with the skip of guarded files and
+without it (`PPOptions.no_guard_skip`), in place of the scalar twins: the
+output's tokens must be the same (#120).
+
+`./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
+path...` times the directive tables alone (#118): every `.c` and `.h` file under
+the paths is read and prepared once, then each of 21 passes after a warm-up
+builds every file's table by each kernel, whose tables must be the same, and it
+reports the medians per input token and per directive, IPC, and the scan's
+share. Run it under the 9700X's lock with `taskset -c 2`;
+`docs/c-preprocessor.md` has the numbers for the C library corpus. The default
+9700X job runs it on `src`, pinned to one allowed CPU.
 
 ## Per-file jobs tests
 

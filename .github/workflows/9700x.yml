@@ -185,6 +185,8 @@ jobs:
           == Test the preprocessor's cases against clang
           # --clang also preprocesses each case with clang -E and compares the tokens.
           ./build/compiler test-preprocessor --clang
+          == Test the preprocessor directive tables
+          ./build/compiler test-preprocessor --tables src
           == Test the C lexer as C++
           ./build/compiler test-lexer --cplusplus
           == Test the C lexer
@@ -269,6 +271,10 @@ jobs:
           # in another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and
           # locations, each id spelled the same. Its forms with paths (the translation units, src flat) do the same.
           ./build/compiler test-files
+          == Test the x86 semantics
+          # The effects table is checked by executing every covered form; --cross-check also assembles the chosen forms
+          # with GNU as and compares the bytes.
+          ./build/compiler test-x86-semantics --cross-check
           == Test the lanes
           ./build/compiler test-lanes
           == Test the direct path's executables
@@ -344,6 +350,11 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-branch-sizing
+
+      - name: Benchmark the x86 semantics
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-x86-semantics
 
       - name: Benchmark the lanes
         # It pins each lane to an allowed CPU of its own.
@@ -434,6 +445,11 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+
+      - name: Benchmark the directive tables on the repository sources
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --tables src
 
       - name: Benchmark the per-file jobs on the repository's translation units
         # Without taskset: it pins each lane to an allowed CPU of its own.
