@@ -249,7 +249,7 @@ static int run_assembler_command(int count, char** arguments)
     int status = 1;
     if (!valid || input == 0)
     {
-        fprintf(stderr, "usage: compiler assemble [--intel] [--scalar] [-march=x86-64|x86-64-v2|x86-64-v3|x86-64-v4|znver5|native] [-mtune=CPU] [--timing] [-I dir] [-D name[=value]] [-U name] -o output.o input.s|input.S\n");
+        fprintf(stderr, "usage: compiler assemble [--intel] [--scalar] [-march=CPU] [-mtune=CPU] [--timing] [-I dir] [-D name[=value]] [-U name] -o output.o input.s|input.S\n");
     }
     else
     {

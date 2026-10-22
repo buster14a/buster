@@ -268,7 +268,8 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
         else
         {
             const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
-                                     strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-x") == 0;
+                                     strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-x") == 0 ||
+                                     strcmp(argument, "-target") == 0;
             no_standard_includes |= strcmp(argument, "-nostdinc") == 0;
             clang_arguments[count++] = arguments[i];
             if (takes_value)
@@ -302,7 +303,8 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
     for (int i = 0; ready && i < count; i += 1)
     {
         const char* argument = clang_arguments[i];
-        if (strcmp(argument, "--no-default-config") != 0 && strcmp(argument, "--target=x86_64-linux-gnu") != 0 && strcmp(argument, "-pipe") != 0 && strcmp(argument, "-H") != 0)
+        // The fixed target reaches pp_parse_options too, for __is_target_vendor and the other target queries.
+        if (strcmp(argument, "--no-default-config") != 0 && strcmp(argument, "-pipe") != 0 && strcmp(argument, "-H") != 0)
         {
             own_arguments[own_count++] = clang_arguments[i];
         }
@@ -320,6 +322,8 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
     {
         own_arguments[own_count] = paths.items[0];
         ready = pp_parse_options(own_count + 1, own_arguments, &options, &paths.arena, &input, &output, &markers) && output == 0;
+        // The oracle's mode (#125): the feature queries answer as clang's do.
+        options.clang_features = true;
     }
     char predefines[BUSTER_PP_ORACLE_MAX_PATH + 32];
     snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
