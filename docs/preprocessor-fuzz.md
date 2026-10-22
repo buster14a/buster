@@ -24,11 +24,11 @@ tooling merges before the preprocessor's first part.
 - `preprocessor_fuzz_clang.c`: process invocation, batching and result
   extraction.
 - `preprocessor_fuzz_test.c`: self-tests and the provisional test command.
+- `preprocessor_fuzz_benchmark.c`: the provisional benchmark command.
 
-`preprocessor_fuzz_benchmark.c` is a separate translation unit linked into
-the same compiler executable. This is external test tooling with scalar
-control flow, outside the compile path; there is no vector twin for the
-harness. Tokenization uses the existing `c_tokenize` API.
+This is external test tooling with scalar control flow, outside the compile
+path; there is no vector twin for the harness. Tokenization uses the existing
+`c_tokenize` API.
 
 `PreprocessorFuzzCase` carries source bytes, a case ID, a construct mask and
 whether the case needs a separate process. `PreprocessorFuzzOutput` carries
