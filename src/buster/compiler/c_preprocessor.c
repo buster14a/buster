@@ -5854,7 +5854,7 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
         context->tokens->kinds[context->position] == C_TOKEN_LESS)
     {
         // The barrier holds the line's tokens from the one after the directive's name (pp_start_condition).
-        const PPContext* file = &pp->contexts[line->context];
+        PPContext* file = &pp->contexts[line->context];
         const PPFileData* data = &pp->datas[pp->files[file->file].data];
         const uint32_t base = pp->ranges[file->range].base;
         const uint32_t first = data->directive_hash[line->directive] + 2 + (context->position - line->arguments_begin);
@@ -5871,6 +5871,8 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
             const uint32_t expansion_end = pp_expansion_end(context, token);
             context->position = relex != stop ? context->end : context->position + (after - first);
             result = pp_collect_token(pp, invocation, token, expansion_end);
+            // The file goes on past the line as clang lexes it (pp_resume_after).
+            pp_resume_after(file, data, relex);
             const uint32_t start = pp->expansions.count;
             if (relex != stop && pp_copy_relexed(pp, file, stop, relex, &pp->expansions) && pp->expansions.count != start)
             {
@@ -8070,6 +8072,10 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
         {
             pp_diagnose(pp, PP_SEVERITY_WARNING, base + (uint32_t)next, "extra tokens at end of #%s directive", pp_include_name(kind));
         }
+        // The file goes on past the line as clang lexes it (pp_resume_after), before the header is entered.
+        uint32_t relex;
+        pp_header_name_tail(pp->refine_flags, data, first, end, stop, &relex);
+        pp_resume_after(context, data, relex);
         pp_include_file(pp, context, kind, name, length, angled, location, name_location, 0);
     }
     scratch_end(scratch);

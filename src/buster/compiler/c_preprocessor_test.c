@@ -1615,7 +1615,8 @@ static const PPTestCase pp_test_cases[] = {
     // the name, a '>' too, as clang's LexAngledStringLiteral reads it; and the rest of the line past such a name is what
     // clang lexes on from its '>', where the file's tokens ran past it: a "//" in the name began a comment there (the
     // #if line's `&& 0` and `|| defined(NOPE)` count, an #include's `junk` is a warning and __has_embed's parameters are
-    // read), or a token the '>' starts ("x.h>>", "x.h>=", "x.h>>=") stays in the operand, an error.
+    // read, also on past a block comment's newlines, and the file goes on after that line), or a token the '>' starts
+    // ("x.h>>", "x.h>=", "x.h>>=") stays in the operand, an error.
     {
         .name = "#254's second review: a backslash in a header name written out escapes its '>'",
         .source = "#if __has_include(<a\\>b.h>) && __has_include(\"a\\>b.h\")\nyes\n#endif\n#include <a\\>b.h>\nend\n",
@@ -1633,6 +1634,16 @@ static const PPTestCase pp_test_cases[] = {
         .expected = "yes2 yes4 yes5 yes6 int dir_x; end",
         .warnings = 1,
         .options = "-I%d --embed-dir=%d",
+        .files = pp_test_files_header_tails,
+    },
+    {
+        .name = "#254's second review: a \"//\" name's line, through a block comment's newlines",
+        .source = "#include <dir//x.h> /* c\n*/ junk\nmid\n#if __has_include(<dir//x.h>) /* c\n#define Y 1\n*/ && 0\nno\n#endif\n#ifdef Y\nY_defined\n#endif\n"
+                  "#if __has_include(<dir//x.h>) /* c\n*/ || 0\nyes\n#endif\nend\n",
+        .standard = "c17",
+        .expected = "int dir_x; mid yes end",
+        .warnings = 1,
+        .options = "-I%d",
         .files = pp_test_files_header_tails,
     },
     {
