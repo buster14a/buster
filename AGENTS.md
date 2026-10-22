@@ -160,6 +160,15 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
+  #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
+  AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
+  undefined/invalid cases and guarded tails. `benchmark-builtins [--only
+  scalar|vector] [--after-scalar MS]` measures synthetic action batches on the
+  locked 9700X, pinned to CPU 2. [The builtin guide](docs/c-builtins.md) records
+  the API and the checking, C selector, feature-query and corpus integration
+  still required before #148 can close.
+
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
   observation table and scalar/AVX-512 cost-column lookups. `test-x86-zen5`
   checks unknowns, guard-page tails and generated microbenchmark loops;

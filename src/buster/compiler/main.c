@@ -393,6 +393,10 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/c_types_test.c"
 int run_type_benchmark(int argc, char** argv);
 
+#include "buster/compiler/c_builtin.c"
+#include "buster/compiler/c_builtin_test.c"
+int run_builtin_benchmark(int argc, char** argv);
+
 // The System V calling convention (each type's classes, and each call's argument locations) and its tests, for the
 // test-calling-convention command. Its benchmark is another translation unit.
 #include "buster/compiler/calling_convention.c"
@@ -628,6 +632,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-calling-convention") == 0)
     {
         result = run_calling_convention_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtins") == 0)
+    {
+        result = run_builtin_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-builtins") == 0)
+    {
+        result = run_builtin_benchmark(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-calling-convention") == 0)
     {
