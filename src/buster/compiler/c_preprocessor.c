@@ -10773,6 +10773,11 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer)
         length += (uint32_t)sprintf(buffer + length, "#define __STDC_VERSION__ %s\n", version);
     }
     length += (uint32_t)sprintf(buffer + length, "#define __STDC_HOSTED__ %d\n", options->freestanding ? 0 : 1);
+    // The language's, which -undef keeps too (clang's InitializeStandardPredefinedMacros).
+    if (options->assembly)
+    {
+        length += (uint32_t)sprintf(buffer + length, "#define __ASSEMBLER__ 1\n");
+    }
     if (!options->undefine)
     {
         if (!language.gnu)
@@ -10797,10 +10802,6 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer)
         // The one macro that isn't clang's (#117: clang's configuration, plus this). --predefines replaces it too, so
         // that test-preprocessor --clang starts from clang's own macros alone.
         length += (uint32_t)sprintf(buffer + length, "#define __BUSTER__ 1\n");
-        if (options->assembly)
-        {
-            length += (uint32_t)sprintf(buffer + length, "#define __ASSEMBLER__ 1\n");
-        }
     }
     return length;
 }
