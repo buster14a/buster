@@ -7522,16 +7522,31 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
     }
 }
 
-// The bytes of a file's line from token `begin` to the end of token `end - 1` (for #error and #warning).
-static void pp_line_text(const Preprocessor* pp, const PPFileData* data, uint32_t begin, uint32_t end, const uint8_t** text, uint32_t* length)
+// #error and #warning read text, not tokens: retain comments, quote characters and trailing blanks, removing only
+// translation phases 1 and 2 and the leading blanks after the directive name, as clang does.
+static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_t name, uint32_t location, PPSeverity severity)
 {
-    *text = (const uint8_t*)"";
-    *length = 0;
-    if (begin < end)
+    const uint32_t begin = pp_file_token_end(pp, data, name);
+    const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = pp->options.trigraphs };
+    const uint32_t end = (uint32_t)skip_line_comment(&lexer, begin);
+    Scratch scratch = scratch_begin(0);
+    uint8_t* buffer = arena_push(scratch.arena, (uint64_t)(end - begin) + 1, 1);
+    if (buffer != 0)
     {
-        *text = data->bytes + data->starts[begin];
-        *length = pp_file_token_end(pp, data, end - 1) - data->starts[begin];
+        const uint8_t* text;
+        const uint32_t length = pp_remove_splices(data->bytes + begin, end - begin, pp->refine_flags, buffer, &text);
+        uint32_t first = 0;
+        while (first < length && (text[first] == ' ' || text[first] == '\t' || text[first] == '\v' || text[first] == '\f'))
+        {
+            first += 1;
+        }
+        pp_diagnose(pp, severity, location, "%.*s", (int)(length - first), (const char*)text + first);
     }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, location, "out of memory reading diagnostic text");
+    }
+    scratch_end(scratch);
 }
 
 static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location);
@@ -9145,10 +9160,8 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
         case PP_DIRECTIVE_ERROR:
         case PP_DIRECTIVE_WARNING:
         {
-            const uint8_t* text;
-            uint32_t length;
-            pp_line_text(pp, data, hash + 2, end, &text, &length);
-            pp_diagnose(pp, kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, location, "%.*s", (int)length, (const char*)text);
+            pp_diagnostic_text(pp, data, hash + 1, pp_token_location(pp, context, data, hash + 1),
+                               kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING);
             break;
         }
         case PP_DIRECTIVE_PRAGMA:

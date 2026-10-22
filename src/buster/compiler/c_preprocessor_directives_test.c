@@ -706,6 +706,18 @@ static const PPDirectiveTestStructure pp_directive_test_structures[] = {
     { "digraphs and splices", "%:if 0\n%:  if 1\n#el\\\nse\n%:else\n%:endif\n#endif\n#\\\nendif\n", 0, 0 },
 };
 
+// Diagnostic messages are original source text, including comments and trailing blanks. A skipped directive still
+// belongs to raw excluded input; an active one must not let its comment text swallow the source after its newline.
+static const PPDirectiveTestStructure pp_directive_test_messages[] = {
+    { "an active warning's comment text", "#warning /* never closed\ntail\n", 0, 0 },
+    { "an active error's comment text", "#error /* never closed\ntail\n", 0, 0 },
+    { "comments, quotes and trailing blanks", "#warning /* comment */ x   \t\n#error '\n", 0, 0 },
+    { "a spliced name and message", "#war\\\nning /* op\\\nen\ntail\n", 0, 0 },
+    { "an excluded warning's comment", "#if 0\n#warning /* never closed\n#endif\ntail\n", 0, 0 },
+    { "an excluded error's comment", "#if 0\n#error /* never closed\n#endif\ntail\n", 0, 0 },
+    { "repeated inclusions", "#include \"structure.h\"\n#include \"structure.h\"\n", "#warning /* never closed\ntail\n", 0 },
+};
+
 // Fixtures of #define's and #undef's constraints and of redefinitions (C 6.10.4, #121), reported as clang reports them.
 static const PPDirectiveTestStructure pp_directive_test_definitions[] = {
     { "'#' without a parameter", "#define F(x) #y\n#define G() #\n#define H(a) a #\n#define O #y\n#define P(x) #x x ## ##\n", 0, 0 },
@@ -1254,6 +1266,7 @@ static bool pp_test_directives(const char* directory, bool with_clang, uint64_t 
 {
     bool result = pp_directive_test_streams(seed, count);
     result &= pp_directive_test_diagnostics(pp_directive_test_structures, BUSTER_ARRAY_LENGTH(pp_directive_test_structures), "directive structure", directory, with_clang);
+    result &= pp_directive_test_diagnostics(pp_directive_test_messages, BUSTER_ARRAY_LENGTH(pp_directive_test_messages), "diagnostic text", directory, with_clang);
     result &= pp_directive_test_diagnostics(pp_directive_test_definitions, BUSTER_ARRAY_LENGTH(pp_directive_test_definitions), "definitions", directory, with_clang);
     result &= pp_directive_test_guards(directory, with_clang);
     result &= pp_directive_test_location_space(directory);
