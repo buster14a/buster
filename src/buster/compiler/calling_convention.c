@@ -1352,6 +1352,14 @@ static uint32_t abi_value_type(const TypeTable* table, uint32_t index)
     return value;
 }
 
+// Whether a vector's element is bool as written (clang's isExtVectorBoolType): the builtin bool, which clang stores as
+// a bit of an integer, and not an enum of bool, whose vector LLVM has as <N x i1>.
+static bool abi_is_bool_vector(const TypeTable* table, uint32_t vector)
+{
+    const uint32_t element = abi_resolved_index(table, table->types.base[vector]);
+    return table->types.kind[element] == BUSTER_TYPE_KIND_INTEGER && table->types.code[element] == BUSTER_TYPE_CODE_BOOL;
+}
+
 // A vector's element as LLVM has it: an enum's integer type.
 static uint32_t abi_vector_element(const TypeTable* table, uint32_t vector)
 {
@@ -1368,7 +1376,8 @@ static uint32_t abi_vector_element(const TypeTable* table, uint32_t vector)
 // bytes, whose halves it splits as it never does an i128 (<1 x i128>, <1 x _BitInt(128)>). clang stores a vector of
 // bools as an integer of its bits, at least 8 (ConvertTypeForMem), and passes an _Atomic one as that: a general register
 // up to 64 bits, two halves past them (an i65 to an i127 isn't an i128), and an i128 for 128 bits. One that isn't _Atomic
-// is a vector, <N x i1> (abi_result reaches it as one MEMORY by its size).
+// is a vector, <N x i1> (abi_result reaches it as one MEMORY by its size), and so is any of an enum of bool
+// (abi_is_bool_vector).
 static uint32_t abi_value_class(const TypeTable* table, uint32_t index)
 {
     const uint32_t value = abi_value_type(table, index);
@@ -1377,7 +1386,7 @@ static uint32_t abi_value_class(const TypeTable* table, uint32_t index)
     const uint8_t kind = table->types.kind[element];
     const uint64_t count = table->types.extent[value];
     const bool atomic = table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC;
-    const bool bits = atomic && vector && kind == BUSTER_TYPE_KIND_INTEGER && table->types.code[element] == BUSTER_TYPE_CODE_BOOL;
+    const bool bits = atomic && vector && abi_is_bool_vector(table, value);
     const bool single = vector && count == 1 && !bits;
     const bool wide_integer = (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && table->types.size[element] == 16;
     uint32_t result = BUSTER_ABI_VALUE_GENERAL;
@@ -1406,7 +1415,9 @@ static uint32_t abi_value_class(const TypeTable* table, uint32_t index)
 // holds; one of less than 16 bytes whose length isn't a power of two, but of 16-bit floating elements (an xmm register,
 // X86's v8f16): LLVM has no vector type of the next power of two (<4 x i8>, <8 x i8>, <4 x i16>), and passes each
 // element as a value of its own (getVectorTypeBreakdown); and an integer of more than 128 bits, a vector of one _BitInt
-// of more or of more than 128 bools.
+// of more or of more than 128 bools. A vector of an enum of bool is <N x i1>, which X86 passes in one vector register
+// for N a power of two up to 16, and 32 with registers of 32 bytes (v64i1 goes in two ymm halves with AVX-512), and
+// otherwise as its elements one by one.
 __attribute__((cold, noinline)) static bool abi_value_splits(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const uint32_t value = abi_value_type(table, index);
@@ -1420,7 +1431,8 @@ __attribute__((cold, noinline)) static bool abi_value_splits(const AbiTable* abi
         const uint64_t element_size = table->types.size[element];
         const uint64_t size = table->types.size[value];
         const uint64_t count = table->types.extent[value];
-        const bool bits = kind == BUSTER_TYPE_KIND_INTEGER && code == BUSTER_TYPE_CODE_BOOL;
+        const bool bits = abi_is_bool_vector(table, value);
+        const bool enum_bits = !bits && kind == BUSTER_TYPE_KIND_INTEGER && code == BUSTER_TYPE_CODE_BOOL;
         const bool half = kind == BUSTER_TYPE_KIND_FLOATING && (code == BUSTER_TYPE_CODE_FLOAT16 || code == BUSTER_TYPE_CODE_BF16 || code == BUSTER_TYPE_CODE_HALF);
         const bool power = (count & (count - 1)) == 0;
         if (bits)
@@ -1430,6 +1442,10 @@ __attribute__((cold, noinline)) static bool abi_value_splits(const AbiTable* abi
         else if (count == 1)
         {
             result = element_size > 16;
+        }
+        else if (enum_bits)
+        {
+            result = !power || size > BUSTER_ABI_REGISTER_BYTES * 2 || size > abi->vector_bytes;
         }
         else
         {

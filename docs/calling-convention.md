@@ -885,7 +885,12 @@ and has a fixture:
   clang's atomic loads of most of them (every width that isn't 8, 16, 32, 64 or
   128 bits) crash its instruction selection, so a caller clang compiles can't
   pass one. Its callee compiles. A vector of bools that isn't `_Atomic` stays
-  `<N x i1>`, a vector (see "Next steps").
+  `<N x i1>`, a vector (see "Next steps"), and so does any vector of an enum
+  of bool, since clang's `isExtVectorBoolType` reads the element as written
+  (`abi_is_bool_vector`). X86 passes an `_Atomic` one in a vector register
+  for 2 to 16 elements, a power of two, and 32 with 32-byte registers, and
+  otherwise breaks it into its elements (two ymm halves for 64 with
+  AVX-512), which the module refuses (`UNSUPPORTED`).
 
 ## Where GCC passes otherwise
 
@@ -983,7 +988,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (2,300 checks): about 180 types whose classes, pass bits and
+- **Fixtures** (2,408 checks): about 185 types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -1015,7 +1020,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   `<5 x i8>`, `<3 x i16>`, two `__int128`s, `long double`s or `__float128`s,
   a `_BitInt(256)`, `<17 x i8>` without AVX), in two halves (`<1 x
   _BitInt(128)>`) and of bools (10 and 64 in a general register, 65 in
-  halves, 128 a `PAIR`, 129 refused). Then twenty-eight calls whose locations
+  halves, 128 a `PAIR`, 129 refused). Then thirty calls whose locations
   clang and LLVM give, with their totals: an `UNCOUNTED` `nullptr_t` that
   splits a struct; a `PAIR` on the stack with r9 taken by the `long` after
   it; a high eightbyte alone on the stack; an `UNCOUNTED` `_Atomic double` in
@@ -1041,7 +1046,10 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   KB, and a packed struct ending in it, 32 KB and a byte in a slot of 32,776
   after five `long`s, with r9 left for the `long` after it, and an `i8` after
   six; and `_Atomic {{_BitInt(129), char[4]}[0]}`, 1 byte to LLVM, in an
-  8-byte slot before seven `long`s, the last of them at 8. And `va_arg`'s
+  8-byte slot before seven `long`s, the last of them at 8, and `_Atomic
+  {unsigned _BitInt(129)[0]}` after five, with r9 left for the `long` after
+  it; and an `_Atomic` vector of 8 of an enum of bool, `<8 x i1>`, in xmm0,
+  the `long` after it in rdi. And `va_arg`'s
   plans for a `long` aligned to 32, which reads the
   overflow area aligned to 8, and for that union, from two general registers'
   slots. Last the levels across four calls by each path: a struct of 101 bytes

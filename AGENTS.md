@@ -2401,7 +2401,8 @@ others, its measurements are informational.
   `_BitInt(129)`s, which LLVM stores as arrays of their bytes), as the
   records ending in one, with their slots, the records it lays out otherwise
   than C, and
-  vectors LLVM keeps whole, splits or, of bools, passes as integers), and
+  vectors LLVM keeps whole, splits or, of bools (not of an enum of bool),
+  passes as integers), and
   calls whose locations clang and LLVM give (an `UNCOUNTED` argument that
   splits the next record, an `__int128` without two registers left, a hidden
   pointer, a record of a flexible array member alone as an `i0`, a struct
