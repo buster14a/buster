@@ -1254,10 +1254,15 @@ lists. The cross-check doesn't see a missing extension (each side compares a
 value's own bytes), which the fixtures' `SIGN` and `ZERO` check instead. The
 files go in a directory under `$TMPDIR` (or `/tmp`), removed unless `--keep`
 or a failure.
+
 With the defaults (seed 1), each run has 400 signatures of 2,300 to 2,600
 arguments, and the six runs make about 34,500 checks; on the 9700X the whole
-`--cross-check` takes 18 s. Seeds 1 to 100 pass, with clang 23.1.3 and GCC
-16.2.1.
+`--cross-check` takes 4.8 s, about a clang run's time. The runs are
+independent and nearly all of each one's time is its compiler's, so they go
+at once, a child process each (one after another, they took 18.1 s); the
+test prints their lines and adds their counts in the runs' order (clang's,
+then GCC's, each at 16, 32 and 64 bytes), and a run that fails keeps its
+files. Seeds 1 to 100 pass, with clang 23.1.3 and GCC 16.2.1.
 
 ## Measurements on the 9700X
 
