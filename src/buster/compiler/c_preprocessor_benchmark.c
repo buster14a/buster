@@ -6,7 +6,8 @@
 // The preprocessor benchmark: preprocesses translation units from scratch, as `-E` does without printing, with the
 // vectorized kernels and with their scalar twins, and reports per token what each costs.
 //
-// Usage: build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar] [-E's options] file...
+// Usage: build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar] [--read-limit N,...]
+//        [-E's options] file...
 //
 // Each pass preprocesses every file once with each implementation in turn, each run from nothing: a new intern table
 // and preprocessor, so that every file it includes is read, lexed, refined and given its directive table, as a
@@ -19,8 +20,11 @@
 // ours) writing to /dev/null, a process per file, the median of as many runs, for scale. --history-cost and
 // --guard-cost replace the scalar twins with the vectorized kernels without recording macro expansion history, or
 // without skipping the inclusions of guarded files (#120), whose output must be the same. --only runs one
-// implementation (for profiles). Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments
-// are invalid or a run fails.
+// implementation (for profiles). --read-limit takes a list of the largest files a run reads into an arena rather than
+// maps (its cache's read limit: BUSTER_FILE_CACHE_READ_LIMIT unless given; 0 maps every file), and each pass runs each
+// implementation with each of them in turn, which must all give the same output. It also reports the median time of
+// releasing a run's memory (pp_release and intern_release), which the run's time leaves out: the files' mappings among
+// it. Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments are invalid or a run fails.
 //
 // With --tables, the arguments are paths, and it times the directive tables alone (#118): every .c and .h file under
 // them is read and prepared once, then each pass builds every file's table (pp_directive_table) by each kernel, whose
@@ -55,6 +59,7 @@
 
 #define BUSTER_PP_BENCHMARK_PASSES 21
 #define BUSTER_PP_BENCHMARK_IMPLEMENTATIONS 2
+#define BUSTER_PP_BENCHMARK_READ_LIMITS 8
 
 typedef struct PPBenchmarkSample PPBenchmarkSample;
 struct PPBenchmarkSample
@@ -67,6 +72,7 @@ struct PPBenchmarkSample
     uint64_t print_nanoseconds;
     uint64_t input_bytes;
     uint64_t ticks[PP_PHASE_COUNT + 1]; // The phases', and the whole runs'.
+    uint64_t release_nanoseconds; // Releasing the runs' memory, after their time.
     uint64_t history_bytes;
     uint64_t history_max_bytes;
     uint64_t temporary_max_bytes;
@@ -125,10 +131,10 @@ static void pp_benchmark_sort(uint64_t* values, uint64_t count)
     }
 }
 
-// One pass of one implementation (its options) over the files: each preprocessed from nothing. Adds the files' input
-// and output tokens to `tokens` (the first time).
-static bool pp_benchmark_pass(const PPOptions* run, char** files, int file_count, int cycles_fd, int instructions_fd, PPBenchmarkSample* sample, uint64_t* input_tokens,
-                              uint64_t* output_tokens)
+// One pass of one implementation (its options) over the files: each preprocessed from nothing, its cache reading files
+// of up to `read_limit` bytes. Adds the files' input and output tokens to `tokens` (the first time).
+static bool pp_benchmark_pass(const PPOptions* run, uint32_t read_limit, char** files, int file_count, int cycles_fd, int instructions_fd, PPBenchmarkSample* sample,
+                              uint64_t* input_tokens, uint64_t* output_tokens)
 {
     static InternTable table;
     static Preprocessor pp;
@@ -144,7 +150,13 @@ static bool pp_benchmark_pass(const PPOptions* run, char** files, int file_count
         const uint64_t cycles = pp_benchmark_read_counter(cycles_fd);
         const uint64_t instructions = pp_benchmark_read_counter(instructions_fd);
         const uint64_t ticks = __rdtsc();
-        result = intern_initialize(&table) && pp_initialize(&pp, &options, &table) && pp_run(&pp, files[f]);
+        result = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        if (result)
+        {
+            // The unit's own cache, which no lookup has used yet.
+            pp.cache->read_limit = read_limit;
+        }
+        result = result && pp_run(&pp, files[f]);
         sample->ticks[PP_PHASE_COUNT] += __rdtsc() - ticks;
         sample->instructions += pp_benchmark_read_counter(instructions_fd) - instructions;
         sample->cycles += pp_benchmark_read_counter(cycles_fd) - cycles;
@@ -198,8 +210,10 @@ static bool pp_benchmark_pass(const PPOptions* run, char** files, int file_count
             to[k] += from[k];
         }
         sample->statistics.longest_condition = pp.statistics.longest_condition > longest ? pp.statistics.longest_condition : longest;
+        const uint64_t release = pp_benchmark_nanoseconds();
         pp_release(&pp);
         intern_release(&table);
+        sample->release_nanoseconds += pp_benchmark_nanoseconds() - release;
     }
     return result;
 }
@@ -699,6 +713,10 @@ int run_preprocessor_benchmark(int argc, char** argv)
     bool tables = false;
     bool defines = false;
     uint32_t only = 3;
+    uint32_t read_limits[BUSTER_PP_BENCHMARK_READ_LIMITS] = { BUSTER_FILE_CACHE_READ_LIMIT };
+    uint32_t read_limit_count = 1;
+    bool read_limits_given = false;
+    bool valid = true;
     char** passed = calloc((size_t)argc + 1, sizeof(char*));
     char** clang_passed = calloc((size_t)argc + 1, sizeof(char*));
     char** files = calloc((size_t)argc + 1, sizeof(char*));
@@ -737,6 +755,25 @@ int run_preprocessor_benchmark(int argc, char** argv)
         {
             i += 1;
             only = strcmp(argv[i], "vectorized") == 0 ? 1 : strcmp(argv[i], "scalar") == 0 ? 2 : 0;
+        }
+        else if (strcmp(argument, "--read-limit") == 0 && i + 1 < argc)
+        {
+            // A list of byte counts, separated by commas.
+            i += 1;
+            read_limit_count = 0;
+            read_limits_given = true;
+            const char* next = argv[i];
+            bool more = true;
+            while (valid && more)
+            {
+                char* end = 0;
+                const unsigned long long value = strtoull(next, &end, 10);
+                valid = next[0] >= '0' && next[0] <= '9' && (*end == 0 || *end == ',') && value <= UINT32_MAX && read_limit_count < BUSTER_PP_BENCHMARK_READ_LIMITS;
+                read_limits[valid ? read_limit_count : 0] = (uint32_t)value;
+                read_limit_count += valid ? 1 : 0;
+                more = valid && *end == ',';
+                next = end + more;
+            }
         }
         else if (argument[0] == '-')
         {
@@ -785,9 +822,9 @@ int run_preprocessor_benchmark(int argc, char** argv)
     {
         // --tables or --defines ran above.
     }
-    else if (file_count == 0 || with_input == 0 || only == 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
+    else if (!valid || file_count == 0 || with_input == 0 || only == 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
     {
-        fprintf(stderr, "usage: %s [--clang] [--history-cost | --guard-cost] [--only vectorized|scalar] [-E's options] file...\n"
+        fprintf(stderr, "usage: %s [--clang] [--history-cost | --guard-cost] [--only vectorized|scalar] [--read-limit N] [-E's options] file...\n"
                         "       %s --tables|--defines [--only vectorized|scalar] path...\n", argv[0], argv[0]);
     }
     else
@@ -798,19 +835,27 @@ int run_preprocessor_benchmark(int argc, char** argv)
         {
             fprintf(stderr, "perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0\n");
         }
-        static PPBenchmarkSample samples[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS][BUSTER_PP_BENCHMARK_PASSES];
+        static PPBenchmarkSample samples[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS][BUSTER_PP_BENCHMARK_READ_LIMITS][BUSTER_PP_BENCHMARK_PASSES];
         uint64_t clang_times[BUSTER_PP_BENCHMARK_PASSES];
         uint64_t input_tokens = 0;
         uint64_t output_tokens = 0;
         bool ran = true;
-        uint64_t expected_digest = 0;
+        // The output's digest, which every run of an implementation must give whatever its read limit, and with
+        // --history-cost every run of both; and with --guard-cost, the tokens every run of both must give.
+        uint64_t expected_digest[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { 0 };
+        bool have_digest[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { false };
         uint64_t expected_token_digest = 0;
-        bool have_digest = false;
+        bool have_token_digest = false;
+        const uint32_t variant_count = BUSTER_PP_BENCHMARK_IMPLEMENTATIONS * read_limit_count;
         for (uint32_t pass = 0; ran && pass <= BUSTER_PP_BENCHMARK_PASSES; pass += 1)
         {
-            for (uint32_t order = 0; ran && order < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; order += 1)
+            // Each pass runs every implementation with every read limit, in turns: in order on even passes, and in the
+            // opposite order on odd ones.
+            for (uint32_t order = 0; ran && order < variant_count; order += 1)
             {
-                const uint32_t implementation = order ^ (pass & 1);
+                const uint32_t variant = (pass & 1) != 0 ? variant_count - 1 - order : order;
+                const uint32_t implementation = variant / read_limit_count;
+                const uint32_t limit = variant % read_limit_count;
                 if (((only >> implementation) & 1) == 0)
                 {
                     continue;
@@ -823,21 +868,31 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 run.scalar = !control && implementation == 1;
                 run.no_history = history_cost && implementation == 1;
                 run.no_guard_skip = guard_cost && implementation == 1;
-                ran = pp_benchmark_pass(&run, files, file_count, cycles_fd, instructions_fd, &sample, &input_tokens, &output_tokens);
-                if (!have_digest)
+                ran = pp_benchmark_pass(&run, read_limits[limit], files, file_count, cycles_fd, instructions_fd, &sample, &input_tokens, &output_tokens);
+                const uint32_t compared = history_cost ? 0 : implementation;
+                if (!have_digest[compared])
                 {
-                    expected_digest = sample.digest;
-                    expected_token_digest = sample.token_digest;
-                    have_digest = true;
+                    expected_digest[compared] = sample.digest;
+                    have_digest[compared] = true;
                 }
-                else if ((history_cost && sample.digest != expected_digest) || (guard_cost && sample.token_digest != expected_token_digest))
+                else if (sample.digest != expected_digest[compared])
+                {
+                    fprintf(stderr, history_cost ? "recording changed the output token digest\n" : "the read limit changed the output token digest\n");
+                    ran = false;
+                }
+                if (guard_cost && !have_token_digest)
+                {
+                    expected_token_digest = sample.token_digest;
+                    have_token_digest = true;
+                }
+                else if (guard_cost && sample.token_digest != expected_token_digest)
                 {
                     fprintf(stderr, "the control changed the output token digest\n");
                     ran = false;
                 }
                 if (pass > 0)
                 {
-                    samples[implementation][pass - 1] = sample;
+                    samples[implementation][limit][pass - 1] = sample;
                 }
             }
             if (with_clang && pass > 0)
@@ -855,8 +910,10 @@ int run_preprocessor_benchmark(int argc, char** argv)
             static const char* const phase_names[PP_PHASE_COUNT + 1] = { "read", "lex", "refine", "directives", "main loop" };
             printf("%d files, %lu input tokens, %lu output tokens; %d passes, medians:\n", file_count, (unsigned long)input_tokens, (unsigned long)output_tokens,
                    BUSTER_PP_BENCHMARK_PASSES);
-            for (uint32_t implementation = 0; implementation < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; implementation += 1)
+            for (uint32_t variant = 0; variant < variant_count; variant += 1)
             {
+                const uint32_t implementation = variant / read_limit_count;
+                const uint32_t limit = variant % read_limit_count;
                 if (((only >> implementation) & 1) == 0)
                 {
                     continue;
@@ -866,15 +923,17 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 uint64_t instructions[BUSTER_PP_BENCHMARK_PASSES];
                 uint64_t with_printing[BUSTER_PP_BENCHMARK_PASSES];
                 uint64_t printing[BUSTER_PP_BENCHMARK_PASSES];
+                uint64_t releases[BUSTER_PP_BENCHMARK_PASSES];
                 uint64_t phases[PP_PHASE_COUNT + 1][BUSTER_PP_BENCHMARK_PASSES];
                 for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
                 {
-                    const PPBenchmarkSample* sample = &samples[implementation][pass];
+                    const PPBenchmarkSample* sample = &samples[implementation][limit][pass];
                     nanoseconds[pass] = sample->nanoseconds;
                     cycles[pass] = sample->cycles;
                     instructions[pass] = sample->instructions;
                     with_printing[pass] = sample->nanoseconds + sample->print_nanoseconds;
                     printing[pass] = sample->print_nanoseconds;
+                    releases[pass] = sample->release_nanoseconds;
                     uint64_t phase_sum = 0;
                     for (uint32_t phase = 0; phase < PP_PHASE_COUNT; phase += 1)
                     {
@@ -886,11 +945,16 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 pp_benchmark_sort(nanoseconds, BUSTER_PP_BENCHMARK_PASSES);
                 pp_benchmark_sort(cycles, BUSTER_PP_BENCHMARK_PASSES);
                 pp_benchmark_sort(instructions, BUSTER_PP_BENCHMARK_PASSES);
+                pp_benchmark_sort(releases, BUSTER_PP_BENCHMARK_PASSES);
                 const double median_cycles = (double)cycles[BUSTER_PP_BENCHMARK_PASSES / 2];
                 const double median_instructions = (double)instructions[BUSTER_PP_BENCHMARK_PASSES / 2];
                 const char* name = history_cost ? (implementation == 0 ? "history" : "no-history")
                                    : guard_cost ? (implementation == 0 ? "guards" : "no-guards")
                                                 : names[implementation];
+                if (read_limits_given)
+                {
+                    printf("  %s, files of up to %u bytes read:\n", name, read_limits[limit]);
+                }
                 printf("  %-10s %8.3f ms  %6.2f cycles/input token  %6.2f cycles/output token  %6.2f instructions/input token  IPC %.2f\n", name,
                        (double)nanoseconds[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6, median_cycles / (double)input_tokens, median_cycles / (double)output_tokens,
                        median_instructions / (double)input_tokens, median_cycles != 0 ? median_instructions / median_cycles : 0.0);
@@ -901,8 +965,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 uint64_t run_nanoseconds = 0;
                 for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
                 {
-                    run_ticks += samples[implementation][pass].ticks[PP_PHASE_COUNT];
-                    run_nanoseconds += samples[implementation][pass].nanoseconds;
+                    run_ticks += samples[implementation][limit][pass].ticks[PP_PHASE_COUNT];
+                    run_nanoseconds += samples[implementation][limit][pass].nanoseconds;
                 }
                 const double milliseconds_per_tick = run_ticks != 0 ? (double)run_nanoseconds / (double)run_ticks / 1e6 : 0.0;
                 for (uint32_t phase = 0; phase <= PP_PHASE_COUNT; phase += 1)
@@ -921,12 +985,12 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 {
                     printf("  %s %.3f ms", phase_names[phase], (double)medians[phase] * milliseconds_per_tick);
                 }
-                printf("\n");
-                const PPBenchmarkSample* memory = &samples[implementation][0];
+                printf("\n             then the release %.3f ms\n", (double)releases[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6);
+                const PPBenchmarkSample* memory = &samples[implementation][limit][0];
                 pp_benchmark_sort(with_printing, BUSTER_PP_BENCHMARK_PASSES);
                 pp_benchmark_sort(printing, BUSTER_PP_BENCHMARK_PASSES);
                 const double whole = (double)with_printing[BUSTER_PP_BENCHMARK_PASSES / 2];
-                const uint64_t bytes = samples[implementation][0].input_bytes;
+                const uint64_t bytes = samples[implementation][limit][0].input_bytes;
                 printf("             -E -P with printing %.3f ms (printing %.3f ms): %.0f MB/s of input (%lu bytes), %.1f million output tokens/s\n", whole / 1e6,
                        (double)printing[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6, whole != 0 ? (double)bytes / whole * 1e3 : 0.0, (unsigned long)bytes,
                        whole != 0 ? (double)output_tokens / whole * 1e3 : 0.0);
@@ -936,7 +1000,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 printf("             records: %lu expansions, %lu argument runs, %lu generated tokens, %lu output runs\n", (unsigned long)memory->expansions,
                        (unsigned long)memory->substitutions, (unsigned long)memory->generated, (unsigned long)memory->runs);
             }
-            const PPStatistics* statistics = &samples[only == 2 ? 1 : 0][0].statistics;
+            const PPStatistics* statistics = &samples[only == 2 ? 1 : 0][0][0].statistics;
             printf("  per pass: %lu directives, %lu file runs (%lu tokens), %lu buffer runs (%lu tokens), %lu object-like expansions copied out and %lu "
                    "buffered, %lu invocations (%lu arguments, %lu expanded first), %lu pastes, %lu builtins, %lu includes skipped by their guards and "
                    "%lu by #pragma once\n",
