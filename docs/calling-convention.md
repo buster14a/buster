@@ -141,11 +141,11 @@ what it is (`abi_finish`):
 | 6 | `MEMORY` | on the stack as an argument: the classes MEMORY, X87 and COMPLEX_X87 |
 | 7 | `UNCOUNTED` | MEMORY by its class, but a scalar clang passes as its value, in a register clang doesn't count, or on the stack once LLVM has none: `nullptr_t` and `_Atomic` scalars |
 | 8 | `IGNORE` | nothing to pass: both classes NO_CLASS (an empty struct, a struct of unnamed bit-fields) |
-| 9 | `PAIR` | one 128-bit integer value (clang's `i128`), which LLVM never splits between a register and the stack; with a NO_CLASS high eightbyte too (an `i128` a union stores), which clang counts and passes as two INTEGER eightbytes |
+| 9 | `PAIR` | one 128-bit integer value (clang's `i128`), which LLVM never splits between a register and the stack; with a NO_CLASS or SSE high eightbyte too (an `i128` a union stores), which clang counts and passes as two INTEGER eightbytes |
 | 10, 11 | `SIGN`, `ZERO` | clang's `Extend`: the caller extends the value to 32 bits (the callee, a result) |
 | 12 | `AGGREGATE` | clang's `byval`: in memory as an argument, a copy on the stack (or an integer value: see "Two counts") |
 | 13 | `END_MEMORY` | a type of no size that is MEMORY at offset 16 though not at 0 |
-| 14 | `UNSUPPORTED` | what the module doesn't place as clang and LLVM do, which the code generator refuses: an `UNCOUNTED` value LLVM splits into more parts than a location holds, as no class says (an `_Atomic` vector wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer of more than 128 bits), and a type holding a `LARGER` one that clang lays out otherwise than the C type, or whose LLVM size the module doesn't keep (see "Where clang's LLVM types decide") |
+| 14 | `UNSUPPORTED` | what the module doesn't place as clang and LLVM do, which the code generator refuses: an `UNCOUNTED` value LLVM splits into more parts than a location holds, as no class says (an `_Atomic` vector wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer of more than 128 bits), a type holding a `LARGER` one that clang lays out otherwise than the C type, or whose LLVM size the module doesn't keep, and one whose INTEGER high eightbyte clang reads as an `i128` from offset 8, under an SSE or NO_CLASS low one (see "Where clang's LLVM types decide") |
 | 15 | `CLASSIFIED` | the row and these bits are in the table |
 | 16 to 18 | `VALUE` | the kind of value a scalar in memory passes as: a general register (`GENERAL`), two (`PAIR`), a vector register (`VECTOR`), x87's (`X87`), which always goes on the stack, so that such a type isn't `UNCOUNTED`, or two halves, each in a general register while one is left and then on the stack (`HALVES`: a `<1 x i128>`, which LLVM splits as it never does an `i128`) |
 | 20 to 25 | `ALIGNMENT` | the log2 of the stack slot's alignment: 3, or the type's own if larger (an aggregate's own, an `_Atomic` one's canonical type's, a scalar's value's natural one) |
@@ -441,8 +441,13 @@ nothing.
   bit-fields is one; a union that stores one; an array of them.
   `_BitInt(65)` to `_BitInt(127)` by themselves pass as two `i64`s, which LLVM
   can split. A union stored as an `i128` whose high eightbyte is NO_CLASS
-  (`union { int a; unsigned _BitInt(128) b : 127; }`) is a `PAIR` too, with
-  `HIGH_INTEGER`: clang counts and passes two INTEGER eightbytes;
+  (`union { int a; unsigned _BitInt(128) b : 127; }`) or SSE (a `struct {
+  long l; double d; }` beside the struct of an unnamed bit-field that holds
+  the `i128`) is a `PAIR` too, with `HIGH_INTEGER` and without `HIGH_SSE`:
+  `classifyArgumentType` returns the `i128` an INTEGER low eightbyte reads
+  before it looks at the high one, and clang counts and passes two INTEGER
+  eightbytes. Under an SSE or NO_CLASS low eightbyte, an INTEGER high one
+  reads the `i128` from offset 8, which the module refuses (`UNSUPPORTED`);
 - **`LOW_GENERAL`** when the low eightbyte is SSE but clang's type for it, by
   `GetSSETypeAtOffset` over `layout`, is narrow (a `bfloat`, `<2 x half>` or
   `<2 x bfloat>`) and the high part's isn't aligned to 8 (`abi_low_general`):
@@ -775,12 +780,22 @@ and has a fixture:
   16 whatever the record's alignment. With a NO_CLASS high eightbyte too, as
   in a union stored as an `i128`, clang still counts and passes two INTEGER
   eightbytes: a probe after five `long`s tells, since the union then goes
-  `byval` rather than in r9. A run of bit-fields is an `i128` only where its
-  16 bytes fit (see "clang's LLVM types"): after an uncounted `_Atomic int`
-  and four `long`s, `struct { unsigned __int128 x : 65; }` goes whole on the
-  stack and a `long` after it takes r9, while packed (an `i64` and an `i8`) it
-  is split between r9 and the stack, as is `{ unsigned __int128 x : 65; char
-  c; }`, and `{ unsigned __int128 a : 60, b : 10; }` is one `i128`.
+  `byval` rather than in r9. So it does with an SSE high eightbyte, since
+  `classifyArgumentType` returns the `i128` an INTEGER low eightbyte reads
+  before it looks at the high one: a union of `struct { unsigned __int128 :
+  125; }`, which has no class and is an `i128` to LLVM, and `struct { long l;
+  double d; }` passes in rdi and rsi, and a `double` after it takes xmm0. An
+  INTEGER high eightbyte under another low one reads that `i128` too, from
+  offset 8 (`GetINTEGERTypeAtOffset` returns an `i128` at any offset into
+  it): after an SSE low eightbyte the value is `{i64, i128}`, three general
+  registers that hold none of the high eightbyte's bytes, and alone it is an
+  `i128` in two general registers that clang counts as one. The module
+  refuses both (`UNSUPPORTED`). A run of bit-fields is an `i128` only where
+  its 16 bytes fit (see "clang's LLVM types"): after an uncounted `_Atomic
+  int` and four `long`s, `struct { unsigned __int128 x : 65; }` goes whole on
+  the stack and a `long` after it takes r9, while packed (an `i64` and an
+  `i8`) it is split between r9 and the stack, as is `{ unsigned __int128 x :
+  65; char c; }`, and `{ unsigned __int128 a : 60, b : 10; }` is one `i128`.
 - **Demoted results.** A vector result that would need more than four
   registers, or of `__int128`s wider than 16 bytes, is a value in clang's IR,
   and LLVM's demotion adds the hidden pointer, which clang doesn't count
@@ -941,7 +956,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (1,882 checks): about 160 types whose classes, pass bits and
+- **Fixtures** (1,996 checks): about 170 types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -949,9 +964,12 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   and `_Atomic` ones, small and wide vectors, vectors of one element, and
   records with bit-fields, padding, packing, alignment, flexible and `_Atomic`
   members, x87 members in unions, wide vectors in records and unions, nesting,
-  `i128` storage (`_BitInt`s and bit-fields in structs and unions, and runs of
+  `i128` storage (`_BitInt`s and bit-fields in structs and unions, runs of
   bit-fields that are an `i128` or, packed, followed by a member or split at a
-  byte, not) and narrow low parts (`{__bf16, _Alignas(8) char}` and its kin).
+  byte, not, and unions of a struct of an unnamed bit-field, one `PAIR` under
+  an SSE high eightbyte too and refused with an INTEGER high eightbyte under
+  another low one) and narrow low parts (`{__bf16, _Alignas(8) char}` and its
+  kin).
   Then the `_Atomic` types clang's LLVM types decide, with the slots that
   `-mllvm -stop-after=finalize-isel`'s fixed stack objects show: `_Atomic`s of
   structs of no size, `LARGER` and `GROWN` ones among them (of a packed one,
@@ -965,7 +983,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   `<5 x i8>`, `<3 x i16>`, two `__int128`s, `long double`s or `__float128`s,
   a `_BitInt(256)`, `<17 x i8>` without AVX), in two halves (`<1 x
   _BitInt(128)>`) and of bools (10 and 64 in a general register, 65 in
-  halves, 128 a `PAIR`, 129 refused). Then twenty calls whose locations
+  halves, 128 a `PAIR`, 129 refused). Then twenty-two calls whose locations
   clang and LLVM give, with their totals: an `UNCOUNTED` `nullptr_t` that
   splits a struct; a `PAIR` on the stack with r9 taken by the `long` after
   it; a high eightbyte alone on the stack; an `UNCOUNTED` `_Atomic double` in
@@ -980,8 +998,12 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   packed structs ending in one, and a `GROWN` one's 16 or its integer's 8 by
   clang's count); and `_Atomic` bool vectors after five `long`s (an `i10` in
   r9, which leaves the `long` after it on the stack; an `i65` `SPLIT`; an
-  `i128` whole on the stack, the `long` after it in r9). And `va_arg`'s plan
-  for a `long` aligned to 32, which reads the overflow area aligned to 8.
+  `i128` whole on the stack, the `long` after it in r9); and a union stored as
+  an `i128` with an SSE high eightbyte, counted as two general registers too,
+  on the stack after five `long`s and in rdi and rsi before a `double` in
+  xmm0. And `va_arg`'s plans for a `long` aligned to 32, which reads the
+  overflow area aligned to 8, and for that union, from two general registers'
+  slots.
 - **Worlds and the oracle** (77,807 offsets compared, 110,753 checks): random
   worlds of types (scalars, vectors, complex types, `_BitInt`s, `_Atomic` and
   aligned types, structs of arrays of no size and `_Atomic`s of them, any of

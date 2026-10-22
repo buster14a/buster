@@ -2391,7 +2391,8 @@ others, its measurements are informational.
 - fixtures: types whose classes, pass bits and results clang's IR shows
   (scalars, vectors, complex types, `_BitInt`s, records with unaligned and
   zero-size members, bit-fields, flexible array members, `_Atomic` and
-  `nullptr_t` members, `i128` storage, which LLVM never splits, runs of
+  `nullptr_t` members, `i128` storage, which LLVM never splits, whatever the
+  high eightbyte under an INTEGER low one and refused under another, runs of
   bit-fields that are an `i128` and that aren't, and the narrow low parts
   clang widens into a general register; and the `_Atomic` types whose LLVM
   types decide: of types of no size, which LLVM makes larger, as the records
@@ -2400,11 +2401,12 @@ others, its measurements are informational.
   calls whose locations clang and LLVM give (an `UNCOUNTED` argument that
   splits the next record, an `__int128` without two registers left, a hidden
   pointer, a record of a flexible array member alone as an `i0`, a struct
-  whose narrow low part takes a general register, a union stored as an
-  `i128`, which clang counts as two registers, runs of bit-fields where an
-  uncounted `_Atomic int` leaves one register, split or whole on the stack,
-  the larger copies' slots, byval or an integer by clang's count, and
-  `_Atomic` bool vectors), and `va_arg`'s plan for an aligned `long`;
+  whose narrow low part takes a general register, unions stored as an
+  `i128`, which clang counts as two registers with a NO_CLASS or SSE high
+  eightbyte, runs of bit-fields where an uncounted `_Atomic int` leaves one
+  register, split or whole on the stack, the larger copies' slots, byval or
+  an integer by clang's count, and `_Atomic` bool vectors), and `va_arg`'s
+  plans for an aligned `long` and an `i128` with an SSE high eightbyte;
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's

@@ -25,8 +25,9 @@
 // (BUSTER_ABI_PASS_UNCOUNTED), which shifts the arguments after them; records with a flexible array member go in memory;
 // __fp16 is MEMORY; vectors of 4 bytes or less are INTEGER whatever their elements. And where clang's LLVM types decide
 // the registers (abi_storage and abi_layout model the types it needs): an i128 at a record's offset 0 makes it one value
-// LLVM never splits (BUSTER_ABI_PASS_PAIR), as a run of bit-fields wider than an eightbyte is where 16 bytes fit for it
-// (abi_bit_field_run); a narrow low part with a high part not aligned to 8 goes in a general
+// LLVM never splits (BUSTER_ABI_PASS_PAIR) when its low eightbyte is INTEGER, whatever the high one is, as a run of
+// bit-fields wider than an eightbyte is where 16 bytes fit for it (abi_bit_field_run), and with another low eightbyte an
+// INTEGER high one is refused (UNSUPPORTED); a narrow low part with a high part not aligned to 8 goes in a general
 // register (LOW_GENERAL); a vector result LLVM demotes to a hidden pointer isn't in clang's count (DEMOTED); a vector of
 // one element is its element's value (HALVES for a <1 x i128>); an _Atomic of a type of no size is larger to LLVM than
 // in C, and so is a packed struct that ends in one, whose copies take LLVM's size (LARGER, GROWN: abi_copy_bytes); an
@@ -195,8 +196,9 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 //     which kind) and clang doesn't count, or on the stack once there is none: nullptr_t and _Atomic scalars.
 //   - IGNORE: nothing to pass (both classes NO_CLASS: an empty struct, a struct of unnamed bit-fields).
 //   - PAIR: one 128-bit integer value (clang's i128) that LLVM never splits between a register and the stack; with a
-//     high eightbyte NO_CLASS too (an i128 a union stores, as union { int a; unsigned _BitInt(128) : 127; }), which
-//     clang counts and passes as two INTEGER eightbytes (HIGH_INTEGER is set, though the row says NO_CLASS).
+//     high eightbyte NO_CLASS or SSE too (an i128 a union stores, as union { int a; unsigned _BitInt(128) : 127; }),
+//     which clang counts and passes as two INTEGER eightbytes (HIGH_INTEGER is set and HIGH_SSE isn't, whatever the
+//     row says).
 //   - SIGN, ZERO: clang's Extend: the caller sign- or zero-extends the value to 32 bits (the callee, for a result).
 //   - AGGREGATE: clang's byval: a copy of it on the stack (and, 8 bytes or less with no general register left in
 //     clang's count, an integer value instead). Results don't read it: a vector LLVM has no register type for is
@@ -206,8 +208,9 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 //   - UNSUPPORTED: what the module doesn't place as clang and LLVM do, which the code generator refuses: an UNCOUNTED
 //     value LLVM splits into more parts than a location holds, as no class says (abi_value_splits: an _Atomic vector
 //     wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer
-//     of more than 128 bits); and a type holding a LARGER one that clang lays out otherwise than the C type, or whose
-//     LLVM size the module doesn't keep (abi_copy_bytes).
+//     of more than 128 bits); a type holding a LARGER one that clang lays out otherwise than the C type, or whose LLVM
+//     size the module doesn't keep (abi_copy_bytes); and one whose INTEGER high eightbyte clang reads as an i128 from
+//     offset 8, under an SSE or NO_CLASS low one (abi_finish).
 //   - CLASSIFIED: the type's row and these bits are in the table.
 //   - VALUE (bits 16 to 18): an UNCOUNTED value's kind: a general register (GENERAL), two (PAIR), a vector register
 //     (VECTOR), x87's, always on the stack (X87), or two halves, each in a general register while one is left and
@@ -1289,9 +1292,9 @@ static bool abi_low_general(const AbiTable* abi, const TypeTable* table, uint32_
     return result;
 }
 
-// Whether clang passes the type's two INTEGER eightbytes as one i128, which LLVM never splits: __int128 and
-// _BitInt(128) by themselves (a _BitInt of 65 to 127 bits alone passes as two i64), and aggregates whose LLVM storage
-// at offset 0 is an i128 (abi_storage).
+// Whether clang's LLVM type for the type is an i128 at offset 0, which LLVM never splits (and which clang passes whole
+// for an INTEGER low eightbyte, see abi_finish): __int128 and _BitInt(128) by themselves (a _BitInt of 65 to 127 bits
+// alone passes as two i64), and aggregates whose LLVM storage at offset 0 is an i128 (abi_storage).
 static bool abi_is_pair(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const uint8_t kind = table->types.kind[index];
@@ -1729,16 +1732,21 @@ static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
     }
     else
     {
+        // An i128 at offset 0 makes clang's type for an INTEGER low eightbyte the whole i128, which clang then counts and
+        // passes as two INTEGER eightbytes whatever the high one is (classifyArgumentType returns it before it reads the
+        // high class): NO_CLASS or SSE too. Its type for an INTEGER high eightbyte is that i128 too, read from offset 8:
+        // after an SSE low eightbyte, {i64, i128}, three general registers and none of the high eightbyte's bytes, and
+        // alone an i128 in two general registers, which clang counts as one (UNSUPPORTED).
+        const bool i128 = size == 16 && (low == BUSTER_ABI_INTEGER || high == BUSTER_ABI_INTEGER) && abi_is_pair(abi, table, index);
+        const bool pair = i128 && low == BUSTER_ABI_INTEGER;
         pass |= low == BUSTER_ABI_INTEGER ? BUSTER_ABI_PASS_LOW_INTEGER : 0;
         pass |= low == BUSTER_ABI_SSE ? BUSTER_ABI_PASS_LOW_SSE : 0;
-        pass |= high == BUSTER_ABI_INTEGER ? BUSTER_ABI_PASS_HIGH_INTEGER : 0;
-        pass |= high == BUSTER_ABI_SSE || high == BUSTER_ABI_X87UP ? BUSTER_ABI_PASS_HIGH_SSE : 0;
+        pass |= high == BUSTER_ABI_INTEGER || pair ? BUSTER_ABI_PASS_HIGH_INTEGER : 0;
+        pass |= (high == BUSTER_ABI_SSE || high == BUSTER_ABI_X87UP) && !pair ? BUSTER_ABI_PASS_HIGH_SSE : 0;
         pass |= high == BUSTER_ABI_SSEUP ? BUSTER_ABI_PASS_VECTOR : 0;
         pass |= high == BUSTER_ABI_SSEUP && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_PASS_WIDE : 0;
-        // An i128 at offset 0 makes clang's type for the low eightbyte the whole i128, a high one NO_CLASS too, which
-        // clang then counts and passes as two INTEGER eightbytes.
-        const bool pair_classes = low == BUSTER_ABI_INTEGER && (high == BUSTER_ABI_INTEGER || (high == BUSTER_ABI_NO_CLASS && size == 16));
-        pass |= pair_classes && abi_is_pair(abi, table, index) ? BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_HIGH_INTEGER : 0;
+        pass |= pair ? BUSTER_ABI_PASS_PAIR : 0;
+        pass |= i128 && !pair && high == BUSTER_ABI_INTEGER ? BUSTER_ABI_PASS_UNSUPPORTED : 0;
         pass |= low == BUSTER_ABI_INTEGER && high == BUSTER_ABI_NO_CLASS ? abi_extension(table, index) : 0;
         pass |= abi_low_general(abi, table, index, low, high) ? BUSTER_ABI_PASS_LOW_GENERAL : 0;
     }

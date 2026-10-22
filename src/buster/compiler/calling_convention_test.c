@@ -960,6 +960,53 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     m[1] = abi_test_bits(builder, type_bit_int(table, 128, true), 120, false);
     abi_test_in_registers(builder, "union {unsigned _BitInt(32), unsigned _BitInt(128) : 120}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
                           BUSTER_ABI_TEST_INTEGER_ONLY, 0, BUSTER_ABI_PASS_PAIR, rax, BUSTER_ABI_TEST_NONE);
+    // The i128 an INTEGER low eightbyte reads is the whole value whatever the high eightbyte is, SSE too: a union of a
+    // struct of an unnamed bit-field (no class, an i128 to LLVM) and {long, double}, or a vector and a packed bit-field,
+    // stored as the struct (lowerUnion's first of the most aligned; with the vector first, {i64, double}). An INTEGER high
+    // eightbyte reads it from offset 8: {i64, i128} after an SSE low one, and an i128 alone (refused). Two SSE eightbytes
+    // are two doubles.
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 125, false);
+    const TypeId unnamed_i128 = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+    const TypeId bytes16 = abi_test_vector(builder, BUSTER_TYPE_UCHAR, 16);
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_CHAR, 6, true);
+    const TypeId packed_bits = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0);
+    const AbiClasses integer_sse = BUSTER_ABI_CLASSES(BUSTER_ABI_INTEGER, BUSTER_ABI_SSE);
+    const uint32_t i128_pair = BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_HIGH_INTEGER;
+    const uint32_t not_pair = BUSTER_ABI_PASS_HIGH_SSE | BUSTER_ABI_PASS_UNSUPPORTED;
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_DOUBLE);
+    m[1] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0));
+    m[0] = abi_test_member(builder, unnamed_i128);
+    abi_test_in_registers(builder, "union {struct {unsigned __int128 : 125}, {long, double}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          integer_sse, i128_pair, not_pair, rax, rdx);
+    m[0] = abi_test_member(builder, unnamed_i128);
+    m[1] = abi_test_member(builder, bytes16);
+    m[2] = abi_test_member(builder, packed_bits);
+    abi_test_in_registers(builder, "union {struct {unsigned __int128 : 125}, char vector(16), packed {char : 6}}",
+                          abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 3, false, 0), integer_sse, i128_pair, not_pair, rax, rdx);
+    m[0] = abi_test_member(builder, bytes16);
+    m[1] = abi_test_member(builder, unnamed_i128);
+    abi_test_in_registers(builder, "union {char vector(16), struct {unsigned __int128 : 125}, packed {char : 6}}",
+                          abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 3, false, 0), integer_sse, BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_HIGH_SSE,
+                          BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_HIGH_INTEGER | BUSTER_ABI_PASS_UNSUPPORTED, rax, BUSTER_ABI_TEST_XMM(0));
+    m[0] = abi_test_member(builder, BUSTER_TYPE_DOUBLE);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0));
+    m[0] = abi_test_member(builder, unnamed_i128);
+    abi_test_expectation(builder, "union {struct {unsigned __int128 : 125}, {double, long}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                         BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_INTEGER), BUSTER_ABI_PASS_UNSUPPORTED, BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_PAIR,
+                         BUSTER_ABI_TEST_RESULT_ANY, BUSTER_ABI_TEST_NONE, BUSTER_ABI_TEST_NONE);
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_LONG, 64, false);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0));
+    m[0] = abi_test_member(builder, unnamed_i128);
+    abi_test_expectation(builder, "union {struct {unsigned __int128 : 125}, {long : 64, long}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                         BUSTER_ABI_CLASSES(BUSTER_ABI_NO_CLASS, BUSTER_ABI_INTEGER), BUSTER_ABI_PASS_UNSUPPORTED, BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_PAIR,
+                         BUSTER_ABI_TEST_RESULT_ANY, BUSTER_ABI_TEST_NONE, BUSTER_ABI_TEST_NONE);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_DOUBLE, 2));
+    abi_test_in_registers(builder, "union {struct {unsigned __int128 : 125}, double[2]}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_SSE), BUSTER_ABI_PASS_LOW_SSE | BUSTER_ABI_PASS_HIGH_SSE,
+                          BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_UNSUPPORTED, BUSTER_ABI_TEST_XMM(0), BUSTER_ABI_TEST_XMM(1));
     // A struct's run of bit-fields past an eightbyte is an i128 only where 16 bytes fit before the next member with
     // storage, or the struct's end (accumulateBitFields): packed, or followed by a char or an array of no elements, it
     // is an array of bytes (an i64 and an i8, or two i64s); an empty struct after it takes no room, and a bit-field that
@@ -1306,7 +1353,8 @@ static bool abi_test_same_location(AbiLocation got, AbiTestLocation expected)
 // the stack, while {unsigned __int128 : 60, unsigned __int128 : 10} (one i128) goes on the stack, the long in r9. And
 // the LARGER copies (16 bytes for _Atomic(struct { __int128 x[0]; }), 17 and 26 for packed structs ending in one, a
 // GROWN one's 8 once clang has no general register), and _Atomic bool vectors (an i10 in r9, uncounted; an i65's
-// halves split; an i128 whole on the stack).
+// halves split; an i128 whole on the stack); and a union stored as an i128 with an SSE high eightbyte, which clang
+// counts as two general registers too: on the stack after five longs, and in rdi and rsi before a double in xmm0.
 static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t vector_bytes, bool vector)
 {
     TypeTable* table = &tables->types.table;
@@ -1360,6 +1408,13 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     const TypeId bits10 = type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 10, true));
     const TypeId bits65 = type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 65, true));
     const TypeId bits128 = type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 128, true));
+    m[0] = abi_test_bits(&builder, BUSTER_TYPE_UINT128, 125, false);
+    const TypeId unnamed_i128 = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+    m[0] = abi_test_member(&builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(&builder, BUSTER_TYPE_DOUBLE);
+    m[1] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0));
+    m[0] = abi_test_member(&builder, unnamed_i128);
+    const TypeId sse_pair = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
     if (vector)
     {
         abi_classify_all(&tables->abi, table);
@@ -1533,6 +1588,18 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         L,
         bits128,
         L,
+        // 141: long x5, union {struct {unsigned __int128 : 125}, {long, double}}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        sse_pair,
+        L,
+        // 148: the union, double, long
+        sse_pair,
+        D,
+        L,
     };
     const AbiTestLocation expected[] = {
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
@@ -1685,6 +1752,19 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        // 141: an i128 with an SSE high eightbyte, which clang counts as two general registers: a copy on the stack
+        // after five longs, the long after it in r9.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        // 148: in rdi and rsi and no vector register: the double in xmm0, the long in rdx.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, BUSTER_ABI_RSI, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_TEST_XMM(0), none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
     };
     const uint32_t counts[] = {
         7,
@@ -1707,6 +1787,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         7,
         7,
         7,
+        7,
+        3,
     };
     const uint32_t named[] = {
         7,
@@ -1729,6 +1811,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         7,
         7,
         7,
+        7,
+        3,
     };
     const TypeId results[] = {
         BUSTER_TYPE_VOID,
@@ -1751,8 +1835,12 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         BUSTER_TYPE_VOID,
         BUSTER_TYPE_VOID,
         BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
     };
     const uint8_t variadic[] = {
+        0,
+        0,
         0,
         0,
         0,
@@ -1820,10 +1908,16 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     abi_test_expect(tally, calls[17].stack_bytes == 8 && calls[17].integer_registers == 6, "fixtures", "call 17's totals");
     abi_test_expect(tally, calls[18].stack_bytes == 16 && calls[18].integer_registers == 6, "fixtures", "call 18's totals");
     abi_test_expect(tally, calls[19].stack_bytes == 16 && calls[19].stack_alignment_log2 == 4 && calls[19].integer_registers == 6, "fixtures", "call 19's totals");
+    abi_test_expect(tally, calls[20].stack_bytes == 16 && calls[20].integer_registers == 6 && calls[20].vector_registers == 0, "fixtures", "call 20's totals");
+    abi_test_expect(tally, calls[21].stack_bytes == 0 && calls[21].integer_registers == 3 && calls[21].vector_registers == 1, "fixtures", "call 21's totals");
     // va_arg aligns the overflow area as the canonical type is aligned (EmitVAArg): long aligned(32) reads from 8.
     const AbiVaArg plan = abi_va_arg(&tables->abi, table, aligned_long);
     abi_test_expect(tally, plan.kind == BUSTER_ABI_LOCATION_REGISTERS && plan.overflow_alignment_log2 == 3 && plan.stack_bytes == 8, "fixtures",
                     "va_arg of long aligned(32)");
+    // And the union of calls 20 and 21 from two general registers' slots, as its calls pass it.
+    const AbiVaArg pair_plan = abi_va_arg(&tables->abi, table, sse_pair);
+    abi_test_expect(tally, pair_plan.kind == BUSTER_ABI_LOCATION_REGISTERS && pair_plan.integer_registers == 2 && pair_plan.vector_registers == 0, "fixtures",
+                    "va_arg of an i128 with an SSE high eightbyte");
 }
 
 static bool abi_test_fixtures(void)
