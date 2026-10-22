@@ -2638,6 +2638,139 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
                     "va_arg of an i128 with an SSE high eightbyte");
 }
 
+// Short atomic vectors use 128-bit legalized register types, including a single half. Once eight vector registers
+// are occupied, two take 16-byte slots and the next integer starts at 32. Single ordinary elements and builtin bool
+// vectors use scalar 8-byte slots: controls against widening the memory representation instead of the register type.
+static void abi_test_atomic_vector_overflow(AbiTestTally* tally, AbiTestTables* tables, uint32_t vector_bytes, bool vector)
+{
+    TypeTable* table = &tables->types.table;
+    const TypeId bool_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 30000);
+    abi_test_expect(tally, type_enum_complete(table, bool_enum, BUSTER_TYPE_BOOL, 0), "fixtures", "overflow enum completion");
+    const TypeId elements[] = {
+        BUSTER_TYPE_FLOAT16,
+        BUSTER_TYPE_BF16,
+        bool_enum,
+        BUSTER_TYPE_CHAR,
+        BUSTER_TYPE_SHORT,
+        BUSTER_TYPE_FLOAT,
+        BUSTER_TYPE_BOOL,
+    };
+    const uint32_t lengths[][4] = {
+        {
+            1,
+            2,
+            3,
+            4,
+        },
+        {
+            1,
+            2,
+            3,
+            4,
+        },
+        {
+            1,
+            2,
+            4,
+            8,
+        },
+        {
+            1,
+            2,
+            4,
+            8,
+        },
+        {
+            1,
+            2,
+            4,
+            8,
+        },
+        {
+            1,
+            2,
+            3,
+            4,
+        },
+        {
+            1,
+            2,
+            4,
+            8,
+        },
+    };
+    TypeId atomics[BUSTER_ARRAY_LENGTH(elements)][BUSTER_ARRAY_LENGTH(lengths[0])];
+    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(elements); e += 1)
+    {
+        for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(lengths[e]); n += 1)
+        {
+            atomics[e][n] = type_atomic(table, type_vector(table, elements[e], lengths[e][n], true));
+        }
+    }
+    if (vector)
+    {
+        abi_classify_all(&tables->abi, table);
+    }
+    else
+    {
+        abi_classify_all_scalar(&tables->abi, table);
+    }
+    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(elements); e += 1)
+    {
+        for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(lengths[e]); n += 1)
+        {
+            TypeId arguments[17];
+            for (uint32_t a = 0; a < 14; a += 1)
+            {
+                arguments[a] = a < 8 ? BUSTER_TYPE_DOUBLE : BUSTER_TYPE_LONG;
+            }
+            arguments[14] = atomics[e][n];
+            arguments[15] = atomics[e][n];
+            arguments[16] = BUSTER_TYPE_LONG;
+            const uint32_t counts[] = {
+                BUSTER_ARRAY_LENGTH(arguments),
+            };
+            const TypeId results[] = {
+                BUSTER_TYPE_VOID,
+            };
+            const uint8_t variadic[] = {
+                0,
+            };
+            const AbiSignatures signatures = {
+                .results = results,
+                .counts = counts,
+                .named = counts,
+                .variadic = variadic,
+                .count = 1,
+                .arguments = arguments,
+            };
+            AbiLocation locations[BUSTER_ARRAY_LENGTH(arguments)];
+            AbiCall calls[1];
+            if (vector)
+            {
+                abi_assign(&tables->abi, signatures, locations, calls);
+            }
+            else
+            {
+                abi_assign_scalar(&tables->abi, signatures, locations, calls);
+            }
+            const uint32_t index = atomics[e][n] >> BUSTER_TYPE_INDEX_SHIFT;
+            const uint32_t pass = tables->abi.pass[index];
+            const uint32_t slot = e < 2 || (e != 6 && lengths[e][n] > 1) ? 16 : 8;
+            const uint32_t alignment = slot == 16 ? 4 : 3;
+            const bool supported = (pass & BUSTER_ABI_PASS_UNSUPPORTED) == 0 && tables->abi.stack_bytes[index] == slot &&
+                                   ((pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT) == alignment;
+            const bool slots = locations[14].kind == BUSTER_ABI_LOCATION_STACK && locations[14].stack_offset == 0 &&
+                               locations[15].kind == BUSTER_ABI_LOCATION_STACK && locations[15].stack_offset == slot &&
+                               locations[16].kind == BUSTER_ABI_LOCATION_STACK && locations[16].stack_offset == slot * 2;
+            const bool totals = calls[0].stack_bytes == slot * 2 + 8 && calls[0].stack_alignment_log2 == alignment && calls[0].integer_registers == 6 && calls[0].vector_registers == 8;
+            char detail[160];
+            snprintf(detail, sizeof(detail), "atomic vector overflow: element %u, length %u, %u-byte vectors, %s", e, lengths[e][n], vector_bytes, vector ? "vector" : "scalar");
+            abi_test_expect(tally, supported && slots && totals, "fixtures", detail);
+        }
+    }
+}
+
 static bool abi_test_fixtures(void)
 {
     AbiTestTally tally = { 0 };
@@ -2695,6 +2828,7 @@ static bool abi_test_fixtures(void)
                     abi_test_expect(&tally, same, "fixtures", detail);
                 }
                 abi_test_calls(&tally, &tables, widths[w], path == 0);
+                abi_test_atomic_vector_overflow(&tally, &tables, widths[w], path == 0);
                 abi_test_tables_close(&tables);
             }
         }

@@ -1651,7 +1651,23 @@ static uint32_t abi_value_alignment_log2(const TypeTable* table, uint32_t index)
     {
         value = table->types.base[value] >> BUSTER_TYPE_INDEX_SHIFT;
     }
-    return table->types.alignment_log2[value];
+    uint32_t result = table->types.alignment_log2[value];
+    if (table->types.kind[value] == BUSTER_TYPE_KIND_ATOMIC)
+    {
+        const uint32_t vector = abi_value_type(table, value);
+        const uint8_t kind = table->types.kind[vector];
+        if ((kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && table->types.size[vector] < 16)
+        {
+            const uint32_t element = abi_vector_element(table, vector);
+            const uint8_t code = table->types.code[element];
+            const bool half = table->types.kind[element] == BUSTER_TYPE_KIND_FLOATING &&
+                              (code == BUSTER_TYPE_CODE_FLOAT16 || code == BUSTER_TYPE_CODE_BF16 || code == BUSTER_TYPE_CODE_HALF);
+            const bool widened = !abi_is_bool_vector(table, vector) && (table->types.extent[vector] > 1 || half);
+            // Calling-convention legalization widens genuine short vectors to 128 bits, including a single half.
+            result = widened ? 4 : result;
+        }
+    }
+    return result;
 }
 
 // Whether clang treats the type as an aggregate: by value as a copy (byval) when it goes in memory as an argument, and
@@ -2006,6 +2022,10 @@ static void abi_finish_passing(AbiTable* abi, const TypeTable* table, uint32_t i
         pass |= !unknown && slot > BUSTER_ABI_SLOT_BYTES && size <= BUSTER_ABI_SLOT_BYTES && own_alignment_log2 <= BUSTER_ABI_SLOT_LOG2 ? BUSTER_ABI_PASS_GROWN : 0;
         abi->larger += 1;
     }
+    // A small atomic vector may occupy a legalized 128-bit register even though its memory object is smaller.
+    const bool vector_value = (pass & BUSTER_ABI_PASS_UNCOUNTED) != 0 &&
+                              (pass & BUSTER_ABI_PASS_VALUE) == (BUSTER_ABI_VALUE_VECTOR << BUSTER_ABI_PASS_VALUE_SHIFT);
+    slot = vector_value && alignment_log2 == 4 && slot < 16 ? 16 : slot;
     abi->stack_bytes[index] = slot > UINT32_MAX ? UINT32_MAX : (uint32_t)slot;
     abi->pass[index] = pass;
 }
