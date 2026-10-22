@@ -2699,10 +2699,10 @@ static int run_parser_tests(int argument_count, char** arguments)
         }
         else
         {
-            // -E's options, for our preprocessor and for clang (but --predefines, ours only, with its file, and --scalar).
+            // -E's options go to both preprocessors; our own valued options and --scalar stay on our side.
             rest[rest_count] = arguments[i];
             rest_count += 1;
-            if (strcmp(argument, "--predefines") == 0 && i + 1 < argument_count)
+            if (pp_own_option_with_value(argument) && i + 1 < argument_count)
             {
                 rest[rest_count] = arguments[i + 1];
                 rest_count += 1;
@@ -2710,9 +2710,10 @@ static int run_parser_tests(int argument_count, char** arguments)
             }
             else if (strcmp(argument, "--scalar") != 0)
             {
-                // Everything but our own options (--predefines and --scalar) goes to clang too.
+                // Everything but our own options goes to clang too.
                 const bool takes = (strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
-                                    strcmp(argument, "-include") == 0 || strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0) && i + 1 < argument_count;
+                                    strcmp(argument, "-include") == 0 || strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 ||
+                                    strcmp(argument, "-x") == 0 || strcmp(argument, "-target") == 0) && i + 1 < argument_count;
                 clang_arguments[clang_argument_count] = argument;
                 clang_argument_count += 1;
                 if (takes)

@@ -701,7 +701,7 @@ int run_parser_benchmark(int argc, char** argv)
         const char* argument = argv[i];
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
-                                 strcmp(argument, "--predefines") == 0;
+                                 pp_own_option_with_value(argument) || strcmp(argument, "-x") == 0 || strcmp(argument, "-target") == 0;
         if (strcmp(argument, "--passes") == 0 && i + 1 < argc)
         {
             i += 1;
