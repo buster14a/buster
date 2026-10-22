@@ -196,9 +196,14 @@ designs and the compilers already built this way.
   syntax, limitations, example and measurement method are in
   [docs/assembler.md](docs/assembler.md). `.S` uses the shared preprocessor's
   explicit assembly mode, including `-I`, `-D`, `-U` and source line markers.
-- `src/buster/compiler/main.c` is the executable entry point. It includes most
-  of the compiler and all of its tests, and `build.sh` compiles it as eight
-  translation units: `main.c` itself, the driver's unit, and each
+- `src/buster/compiler/main.c` is the executable entry point: its commands, and
+  for anything else the driver (`run_parse_command`, in `c_parser.c`):
+  `./build/compiler [-fsyntax-only] [-E's options] [--scalar] file.c`
+  preprocesses and parses the file and prints the diagnostics as clang does,
+  with exit status 0 for a unit without errors and 1 otherwise. Nothing is
+  written yet. With no file it prints its usage and exits with status 1. It
+  includes most of the compiler and all of its tests, and `build.sh` compiles
+  it as eight translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
@@ -216,8 +221,6 @@ designs and the compilers already built this way.
   separators. `benchmark-lexer --no-digit-separators` measures the flag.
 - `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
   it, and `./build/compiler test-lexer` runs them.
-  The same command also runs `main_test.c`'s input-loader error and cleanup
-  regressions; these require no corpus or performance measurement.
 - `src/buster/compiler/c_lexer_benchmark.c` provides the `benchmark-lexer`
   command. The 9700X CI workflow runs it on the repository's C sources by
   default. `docs/c-lexer.md` records the GFNI classifier, the leading-comment
@@ -504,6 +507,17 @@ designs and the compilers already built this way.
   measurements. `c_files_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-files` runs them) and `c_files_benchmark.c` provides
   `benchmark-files`.
+- `src/buster/compiler/c_parser.c` is the parser (#127): the preprocessor's
+  token stream to a tree, a parent, a role and a node depth for every token,
+  and for a unit without errors its postorder with each subtree's size. The
+  vector path builds it with kernels in AVX-512, each with an exact scalar
+  twin, and a pass of checks that flags what C's grammar doesn't allow, whose
+  top-level declarations go to the scalar parser; the scalar parser alone
+  (`--scalar`) builds the same tree and gives the diagnostics, at clang's
+  places with clang's messages. It also holds the driver. `docs/c-parser.md`
+  explains the design and its 9700X measurements. `c_parser_test.c` holds its
+  tests (`main.c` includes it; `./build/compiler test-parser` runs them) and
+  `c_parser_benchmark.c` provides `benchmark-parser`.
 - `src/buster/compiler/profile.c` is the profiling tools: `ab` (builds of
   several trees run in turn, under the 9700X's lock) and the reports of perf's
   and objdump's text, `hot-loops`, `label-spills`, `spill-report` and
@@ -522,7 +536,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 
 ```sh
 ./build.sh
-./build/compiler
+clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
+./build/compiler -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler test-call-graph
 ./build.sh check-call-graph
 ./build/compiler test-profile
@@ -566,12 +581,15 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-preprocessor --clang
 ./build/compiler test-preprocessor --tables src
 ./build/compiler benchmark-preprocessor --tables src
-./build/compiler -E -march=native -Isrc -fwrapv -funsigned-char -o build/main.i src/buster/compiler/main.c
-./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
+./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler test-files
 ./build/compiler test-files --flat src
-./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
-./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler test-parser --clang
+./build/compiler test-parser --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler test-types
 ./build/compiler benchmark-types
 ./build/compiler test-calling-convention --cross-check
@@ -739,14 +757,6 @@ runs took about 2.8 s and 3.0 s on the 9700X. For a longer run:
 ```sh
 ./build/compiler test-lexer --cplusplus --seed 7 --fuzz 2000000
 ```
-
-Both modes also check the entry point's loader: empty and missing files,
-a borrowed source and a sparse file past the lexer's length limit, and repeated
-successful loads whose descriptor and four mappings must be released. A child
-limits its address space to fail each token-array mapping in turn, including
-`ends`, and the source mapping; each failure must retain its cause, return zero tokens and
-leave no mappings or descriptor behind. This checks the existing stub only,
-without replacing the driver being developed under #116, #117 and #145.
 
 ## Lexer benchmarks
 
@@ -3067,6 +3077,110 @@ lanes. `docs/c-files.md` has the numbers for the C library corpus, `sqlite3.c`,
 musl and this repository. The default 9700X job runs it on the repository's
 translation units; like the others, its measurements are informational.
 
+## Parser tests
+
+`./build/compiler test-parser [--clang [PATH]] [--mutations N] [--seed N]
+[--streams N] [--reports N] [--keep] [options] [file or directory...]`
+(about 7 s on the 9700X without files, with `--clang`) checks `c_parser.c`; `--clang` needs
+clang 23 on `PATH`, or the one PATH names. Each unit goes through both paths,
+the vector path with its fallback and the scalar parser alone, which must read
+the same tokens and give the same outcome, and on a unit without errors the same
+tree: the same parent, node depth and role on every token. The tree must keep
+its invariants (every parent another token or the root, at no greater depth;
+every opener's parent its closer, after it; no cycle), and its postorder and
+subtree sizes must be a depth-first walk's, whose in-order walk gives the tokens
+back in order. Then each kernel against its scalar twin, from the twins'
+outputs before it: K1 (depths, enclosing openers and each block's view), K3's
+classification, K2 (roles, flags, typed states and statement contexts, also
+from random roles and with every block in the twin's loop), K1's second part,
+K4 (with the stack's top in registers and with windows of 1, 3 and 8 lanes),
+K5, and K6 (flags and classes, also with every second and every third block
+left to the twin); and the twins together with the fallback, whose tree must be
+the scalar parser's. Those checks put every array in an arena followed by 4 GB
+and its own size of address space that may not be touched, so that a load past
+an array, or through a 32-bit index that wrapped below 0, faults. On:
+
+- snippets: 202 of valid and invalid code, each with the first error clang gives
+  (or none), which the parser must give at the same line and column with the
+  same message; `--clang` checks each expectation against clang too, which
+  must be a parse issue but for the snippets marked as the errors clang's
+  semantic analysis gives where its parser took a declaration as ours does (an
+  unknown type name, a missing type specifier, a type name where an operand
+  would be), or as code only its semantic analysis rejects, which the parser
+  takes; and the oracle itself: clang given an option it doesn't know must
+  count as no answer, and an error in a header a file includes must reject the
+  file;
+- fixtures: four trees checked by hand, parent by parent, among them #127's
+  comma case (`f(a ? b, c : d, e)` has two arguments), its cast case (`(T) * p`
+  is a cast where `T` names a type and a product where it doesn't) and a
+  declarator's spine (`(*a[3])(double)`: array, pointer, function);
+- generated inputs, without files: `--streams N` random streams of C's tokens
+  (2,000; half with balanced brackets), the snippets after 0 to 63 file-scope
+  `;`, at every block alignment, and nine kinds of nesting 100,000 levels deep
+  (commas in nested ternaries among them) and a run of 100,000 attributes, which
+  mustn't grow the native stack, nor make a token cost more for what is open
+  around it;
+- the driver, without files: eleven cases' exit statuses and exact messages (a
+  valid, an empty and an invalid file, the last with `--scalar` too, an
+  `#error`, a missing header, a missing file, a directory, a sparse file past
+  the preprocessor's size limit, no file and an unknown option), 16 runs of
+  each, after which the address space and the descriptors must be as they were;
+  then every reservation and mapping of a run on a valid and on an invalid file
+  failed in turn (74 and 75), in children whose address space may grow a page
+  less than a run reached: the last fails, then, a page below the peak that run
+  reached, the one before it, down to the first. Each run must exit with status
+  1 having said why in a fatal error, and leave nothing behind;
+- files: every `.c` file under each path, preprocessed with -E's options, must
+  parse; with `--clang`, the parser must accept exactly what `clang
+  -fsyntax-only` with the same options accepts (our side reads clang's
+  predefines for target options from `--predefines`);
+- mutations (`--mutations N`, with files): N copies of the files' -E text with
+  a token deleted, duplicated or swapped with the next. With `--clang`, a copy
+  clang accepts must parse, and one whose first error is a parse issue must fail
+  with its first error on the same line; without, both paths must agree as on
+  any file.
+
+`--explain` tallies instead why the checks sent valid code to the scalar parser,
+by signature, with an example of each, and `--print-tree FILE [FIRST LAST]`
+prints each token's role, node depth and parent by both paths, with the
+differences marked. `--seed N` changes the random inputs and the mutations,
+`--reports N` how many differences are printed (200), and `--keep` keeps the
+files in the directory the command makes under `$TMPDIR` (or `/tmp`). On the
+9700X, `sqlite3.c`, the 733 files of the libc corpus that clang accepts and the
+repository's translation units pass with `--clang`, and so does Lua 5.4.8
+locally; `docs/c-parser.md` has the corpora and the mutations' counts. The 9700X job runs
+it without files and on the repository's translation units, both with `--clang`.
+
+## Parser benchmark
+
+`./build/compiler benchmark-parser [--passes N] [--only NAME|stages] [--repeat N]
+[--counters pipeline|branches|memory|stalls] [options] file...` preprocesses
+each file with -E's options and turns its tokens into the parser's outside the
+timing, checks that the vector path gives the scalar parser's outcome and tree,
+and times `--passes` interleaved passes (21) after a warm-up: the whole paths
+over every file (the input's conversion and its twin, the scalar parser, the
+twins together and the vector path), then each stage per file on shared arrays,
+after the stages before it (each kernel and its twin, K4's three loops, the
+fallback, and the postorder by its branch-free passes and by a walk). It reports
+medians per token of time, cycles (with the fastest and slowest pass) and
+instructions, the events of the `--counters` set, and the share of top-level
+declarations and tokens the fallback took. `--only` times one path or stage
+(`stages` for every stage), and a stage named alone runs `--repeat` times per
+file, for perf. Run it under the 9700X's lock with `taskset -c 2`;
+`docs/c-parser.md` has the numbers for `sqlite3.c`, the libc corpus and `main.c`.
+The default 9700X job runs it on `main.c`, pinned to one allowed CPU; like the
+others, its measurements are informational.
+
+## Scoped binding kernels
+
+`./build/compiler test-bindings [--seed N]` checks the standalone scoped C
+binding kernels: stack replay and the vector batch against an independent
+scope oracle, 100,000-level nesting, protected-page tails and allocation
+failure. `benchmark-bindings [--events N] [--names N] [--only scalar|batch|sort]
+[--after-scalar MS]` measures synthetic events under the 9700X lock, pinned to
+CPU 2. The parser adapter and corpus acceptance for #128 remain pending;
+[docs/c-bindings.md](docs/c-bindings.md) describes the contract and boundaries.
+
 ## Type tests
 
 `./build/compiler test-types [--seed N] [--count N] [--clang PATH] [--keep]`
@@ -3155,20 +3269,50 @@ others, its measurements are informational.
 - fixtures: types whose classes, pass bits and results clang's IR shows
   (scalars, vectors, complex types, `_BitInt`s, records with unaligned and
   zero-size members, bit-fields, flexible array members, `_Atomic` and
-  `nullptr_t` members, `i128` storage, which LLVM never splits, runs of
-  bit-fields that are an `i128` and that aren't, and the narrow low parts
-  clang widens into a general register), and calls whose locations clang and
+  `nullptr_t` members, `i128` storage, which LLVM never splits, whatever the
+  high eightbyte under an INTEGER low one and refused under another, runs of
+  bit-fields that are an `i128` and that aren't, unions whose storage member a
+  zero-length array of a larger record decides (each of the walk's rules alone
+  among them), and the narrow low parts clang widens into a general register;
+  and the `_Atomic` types whose LLVM types decide: of types of no size, which
+  LLVM makes larger (to 32 KB, and refused past the alignment the module
+  keeps), as the records ending in one, with their slots, the records it lays
+  out otherwise than C, and vectors LLVM keeps whole, splits or, of bools,
+  passes as integers; and the vectors that aren't `_Atomic` which LLVM breaks
+  up or packs: of bools, with their integer storage and layout, refused from
+  16 bytes up where clang passes them as `<N x i1>`, with the records of one,
+  and smaller copies past 128 (`SMALLER`), of `_BitInt`s narrower than a byte,
+  of long doubles (refused in registers, st0 and st1 as results), of
+  `__float128`s, of `_BitInt`s of 128 bits and more, and of lengths that
+  aren't a power of two in memory, returned in rax, rdx and rcx, in xmm0, xmm1
+  and st0, or through a hidden pointer), and calls whose locations clang and
   LLVM give (an `UNCOUNTED` argument that splits the next record, an
   `__int128` without two registers left, a hidden pointer, a record of a
   flexible array member alone as an `i0`, a struct whose narrow low part takes
-  a general register, a union stored as an `i128`, which clang counts as two
-  registers, and runs of bit-fields where an uncounted `_Atomic int` leaves
-  one register, split or whole on the stack), and `va_arg`'s plan for an
-  aligned `long`;
+  a general register, unions stored as an `i128`, which clang counts as two
+  registers with a NO_CLASS or SSE high eightbyte, runs of bit-fields where an
+  uncounted `_Atomic int` leaves one register, split or whole on the stack,
+  the larger copies' slots, byval or an integer by clang's count, `_Atomic`
+  bool vectors, a vector of bools that isn't `_Atomic` returned through a
+  hidden pointer, a result LLVM demotes to a hidden pointer clang doesn't
+  count, and 513 bools, an 80-byte copy, and as a result a hidden pointer
+  clang doesn't count), `va_arg`'s plans for an aligned `long` and an `i128`
+  with an SSE high eightbyte, and the levels across calls (a record larger
+  than 64 bytes that waits for a `LARGER` member, and records of no size that
+  an `_Atomic` of them in a later call reads: a flexible one, and two that
+  hold a struct of 128 bytes by an array of none, which wait for what its
+  alignment reads), the walk without scratch memory for its stack, after which
+  every type must be classified and an `_Atomic` it aligns be right or
+  refused, and the walk over 64 unions of two members of the one before, 2^64
+  paths, under an alarm;
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's
-  `classify` transcribed with an explicit stack of frames;
+  `classify` transcribed with an explicit stack of frames; then classified
+  again by the twin, every type at once, into the same table (zero-length
+  arrays of large records among the types, which wait in the levels for the
+  types their alignment reads), which a world without `_Atomic`s of types of
+  no size checks, its levels ordered by the waits alone;
 - assignment: random calls over a world's types, named and variadic, by both
   paths, which must give the same locations and totals, also with the columns
   ending at a `PROT_NONE` page; and calls of 65,542 `long`s and of 32,767 and
@@ -3191,12 +3335,21 @@ then GCC's, each at 16, 32 and 64 bytes) go at once, a child process each, and
 the test prints their lines in that order; a run that fails keeps its files.
 GCC's worlds leave out
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
-own bugs among them, and `docs/calling-convention.md` lists them); an argument
-clang would pass as an `i0` becomes a long (its passes crash on them now and
-then), as does an unnamed one clang's `va_arg` reads elsewhere than its call
-puts it; and bytes clang doesn't pass aren't compared. The files go in a new
-directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure.
-The 9700X job's test step runs it with `--cross-check`.
+own bugs among them, and `docs/calling-convention.md` lists them), and clang's
+a type in registers that holds an array of elements of no size, on which clang
+23 crashes now and then, one with an SSE low eightbyte and bit-fields in an
+INTEGER high one, whose access units the module doesn't work out yet, an
+aligned typedef of an `_Atomic` vector of bools, whose atomic loads crash it,
+a record SSE, SSEUP of a size other than 16, 32 or 64 bytes and one SSE, SSE
+that holds a `__float128`, which the module doesn't model yet either, and a
+union of a vector LLVM packs into fewer bits than its bytes, whose copies lose
+the other members' bits; an argument clang would pass as an `i0` becomes a
+long (its passes crash on them now and then), as does an unnamed one clang's
+`va_arg` reads elsewhere than its call puts it; bytes clang doesn't pass
+aren't compared; and the C side copies a `SMALLER` type's LLVM bytes, all that
+clang's objects of it hold. The files go in a new directory under `$TMPDIR`
+(or `/tmp`), removed unless `--keep` or a failure. The 9700X job's test step
+runs it with `--cross-check`.
 
 ## Calling convention benchmark
 
@@ -3204,10 +3357,10 @@ The 9700X job's test step runs it with `--cross-check`.
 [--only classification|assignment] [--path vector|scalar] [--after-scalar
 MS]` (about 1 s on the 9700X) checks that each vector path of
 `calling_convention.c` agrees with its twin (the classification's rows, pass
-bits, stack bytes, alignments and results; the assignment's locations and
-calls), then reports 21 interleaved-pass medians per item (time, cycles,
-instructions, IPC, branch mispredictions and the throttle, PMCx1A0's umask
-0x08, #199):
+bits, stack bytes, alignments, storage, layouts and results; the
+assignment's locations and calls), then reports 21 interleaved-pass medians
+per item (time, cycles, instructions, IPC, branch mispredictions and the
+throttle, PMCx1A0's umask 0x08, #199):
 
 - classification: a table of `--count` types (32,768), records and unions of
   0 to 8 members mostly, with the pointers, arrays, vectors and aligned

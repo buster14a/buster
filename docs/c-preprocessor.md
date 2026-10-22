@@ -1580,6 +1580,16 @@ full-corpus reproduction and frozen CI subset.
   C library corpus (8,983 files, 598,310 directives) agree. Then 26 fixtures
   of the conditionals' structure must give the same diagnostics by both
   kernels, and under `--clang` clang's, byte for byte, columns included.
+  Seven diagnostic-text fixtures also compare literal comments, quotes,
+  splices and trailing blanks in `#error` and `#warning` messages. Active
+  messages preserve the source after their logical newline; excluded ones
+  retain the skipped group's raw lexing. Exceptional lexical overlaps get a
+  private prepared view for that inclusion, retaining macro snapshots and
+  shared cache/once/guard state. At most 64 direct and 8 query repairs per
+  inclusion bound full-file copying/preparation and retained storage by
+  `O((64 + 8) * file size)`; capacity exhaustion is an explicit fatal error.
+  Ordinary diagnostic lines consume no repairs. Boundary checks exercise
+  64 successful repairs, the 65th fatal repair, and 65 ordinary messages.
 - **Definitions** (#121). Ten fixtures of `#define`'s and `#undef`'s
   constraints and of redefinitions (the groups above, C90's and C99's
   whitespace, and identical and different redefinitions) must give the same
