@@ -81,6 +81,9 @@ jobs:
       - name: Test generated-code ISA policy
         run: ./build/compiler test-x86-target
 
+      - name: Test the partial Zen 5 model and instruction harness
+        run: ./build/compiler test-x86-zen5
+
       - name: Test the x86-64 disassembler against GNU tools
         run: |
           clang -O3 -march=znver5 -c examples/disassembler/corpus.c -o /tmp/buster-disassembler-corpus.o
