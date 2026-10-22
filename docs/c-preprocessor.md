@@ -1477,6 +1477,54 @@ full-corpus reproduction and frozen CI subset.
   of a probe must change with each refused set, from the set's `-std=` alone or
   no options, which is why it is refused; and each taken set must give clang's
   tokens, by both kernels.
+- **Directive tables and structure** (#118, `c_preprocessor_directives_test.c`).
+  2,000 random sources (`--count`, `--seed`) and nests past the vectorized
+  pairing's depth limit are prepared by both kernels, whose tables must be an
+  oracle's: a walk of the tokens one at a time, of the test's own, that finds
+  each directive and its line's end, classifies it by its name's spelling,
+  pairs the conditionals with a stack and finds the notes and the include
+  guard. The sources mix every directive name, `%:`, `#` alone, line markers,
+  unknown names, `#`s inside lines, in literals and comments and after line
+  splices, CRLF lines, unterminated comments, and conditionals nested to 64
+  levels, balanced and not. With `--tables PATH...`, every `.c` and `.h` file
+  under the paths is checked the same way: this repository's sources and the
+  C library corpus (8,983 files, 598,310 directives) agree. Then 26 fixtures
+  of the conditionals' structure must give the same diagnostics by both
+  kernels, and under `--clang` clang's, byte for byte, columns included.
+- **Definitions** (#121). Ten fixtures of `#define`'s and `#undef`'s
+  constraints and of redefinitions (the groups above, C90's and C99's
+  whitespace, and identical and different redefinitions) must give the same
+  diagnostics by both kernels, and under `--clang` clang's, byte for byte.
+  They avoid redefining a predefined macro other than `__STDC_*`: clang's note
+  for it gives a line of its `<built-in>` buffer, whose lines ours doesn't
+  keep in clang's order.
+- **The location space** (#124). A file runs in a space shrunk to end where
+  an inclusion would start (`PPOptions.location_limit`, `--location-limit N`),
+  and another where its first pasted spelling would: both kernels must stop
+  there, with the output before it, reporting the inclusion at its `#include`
+  and the spelling without a place, as clang reports running out. Then the
+  commands that split `-E`'s options from their files, run on a small file,
+  must take `--location-limit N` with its value as an option of ours, which
+  clang doesn't get: `test-preprocessor` with the file and
+  `benchmark-preprocessor`, with `--clang` when the test has it, and
+  `--compare-clang`. Each must succeed in a space the file fits in, and run
+  out of a space of one byte.
+- **Include guards** (#120). 20 fixtures:
+  - the issue's: a guarded file included twice, `#undef` between inclusions,
+    `#if !defined X` and `#if !defined(X)`, `#else` in the group, a token
+    before the `#ifndef` or after the `#endif`, comments outside the group;
+  - the guard's other shapes: parentheses and three `!`, two `!`, `|| 0`,
+    `#elif`, directives before and after the group, null directives around
+    it, extra tokens;
+  - the macro defined before the first inclusion, an inclusion from inside
+    the file, an inclusion in a skipped group;
+  - `#pragma once` reached through a symbolic link and a hard link, and
+    `#import`.
+
+  Each must make its skips, by guards and by `#pragma once`, by both kernels,
+  and under `--clang` give clang's output and clang's own count of skips by
+  guards (`-Xclang -print-stats`). Every file under `--clang` must skip as many
+  inclusions by guards as clang does too.
 - **Files.** With files, each is preprocessed with the options, by both
   kernels, and compared. With `--clang`, our side reads clang's own predefines
   for the same options (`clang -dM -E`, through `--predefines`), so both start
