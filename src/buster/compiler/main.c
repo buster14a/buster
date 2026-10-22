@@ -1,6 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
+// The executable's entry point, main, which includes most of the compiler and all of its tests. build.sh compiles this
+// file once per unit, in parallel, so that the build waits for the largest unit rather than for all of this code in one
+// clang process (#270): main.c alone is the driver's unit, and each main_unit_*.c names another unit and includes this
+// file. Every unit reads all of it, and so has the whole file's diagnostics, but emits only its own commands' code: each
+// of main_command's branches first tests its unit, so that the other units' branches fold to false, and clang, which
+// emits a static function only once emitted code refers to it, emits none of theirs. main, in the driver's unit, asks
+// each other unit for the command in turn, then its own commands, then runs the compiler itself.
+#define BUSTER_UNIT_DRIVER 0
+#define BUSTER_UNIT_X86 1
+#define BUSTER_UNIT_FRONTEND 2
+#define BUSTER_UNIT_ASSEMBLER 3
+#define BUSTER_UNIT_LINK 4
+#define BUSTER_UNIT_EXECUTABLE 5
+#define BUSTER_UNIT_DYNAMIC 6
+#define BUSTER_UNIT_TYPES 7
+#ifndef BUSTER_UNIT
+#define BUSTER_UNIT BUSTER_UNIT_DRIVER
+#endif
+#define BUSTER_IN_UNIT(unit) (BUSTER_UNIT == (unit))
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -282,7 +302,7 @@ int run_dataflow_benchmark(int argc, char** argv);
 #include "buster/compiler/preprocessor_fuzz_generate.c"
 #include "buster/compiler/preprocessor_fuzz_clang.c"
 #include "buster/compiler/preprocessor_fuzz_test.c"
-int run_preprocessor_fuzz_benchmark(int argc, char** argv);
+#include "buster/compiler/preprocessor_fuzz_benchmark.c"
 
 // Token refinement: identifier interning (c_intern.c) and the per-file pass after the lexer (c_refine.c), and their
 // tests, for the test-refinement command. Its benchmark is another translation unit.
@@ -291,9 +311,12 @@ int run_preprocessor_fuzz_benchmark(int argc, char** argv);
 #include "buster/compiler/c_refine_test.c"
 int run_refinement_benchmark(int argc, char** argv);
 
-// The preprocessor (c_preprocessor.c) and its tests, for the -E and test-preprocessor commands.
+// The preprocessor (c_preprocessor.c, with the predefined macros of c_predefines.c) and its tests, for the -E and
+// test-preprocessor commands.
+#include "buster/compiler/c_predefines.c"
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_preprocessor_test.c"
+#include "buster/compiler/c_predefines_test.c"
 #include "buster/compiler/c_preprocessor_oracle.c"
 #include "buster/compiler/x86_target_forms.c"
 #include "buster/compiler/x86_target_test.c"
@@ -349,6 +372,13 @@ int run_executable_benchmark(int argc, char** argv);
 #include "buster/compiler/snapshot.c"
 #include "buster/compiler/snapshot_test.c"
 int run_snapshot_benchmark(int argc, char** argv);
+
+// Foreign inputs (other compilers' objects, archives, shared libraries and scripts: opened, parsed and resolved, with
+// the archive members the link needs loaded and COMDAT groups picked) and their tests, for the test-foreign command. Its
+// benchmark is another translation unit.
+#include "buster/compiler/foreign.c"
+#include "buster/compiler/foreign_test.c"
+int run_foreign_benchmark(int argc, char** argv);
 // The link benchmark (the direct path against the object writer and the linkers, on the same programs) and the floors'
 // (what the machine and the kernel charge a linker) are other translation units.
 int run_link_benchmark(int argc, char** argv);
@@ -373,6 +403,10 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/c_types_test.c"
 int run_type_benchmark(int argc, char** argv);
 
+#include "buster/compiler/c_builtin.c"
+#include "buster/compiler/c_builtin_test.c"
+int run_builtin_benchmark(int argc, char** argv);
+
 // The System V calling convention (each type's classes, and each call's argument locations) and its tests, for the
 // test-calling-convention command. Its benchmark is another translation unit.
 #include "buster/compiler/calling_convention.c"
@@ -389,42 +423,60 @@ int run_calling_convention_benchmark(int argc, char** argv);
 #include "buster/compiler/profile.c"
 #include "buster/compiler/profile_test.c"
 
-int main(int argc, char** argv)
+// The runner the 9700X job runs its tests through (a list of commands at once, each one's output printed in the list's
+// order) and its tests, for the parallel and test-parallel commands.
+#include "buster/compiler/parallel.c"
+#include "buster/compiler/parallel_test.c"
+
+// The other units' main_command, each in its own unit (at the top).
+int main_unit_x86(int argc, char** argv, bool* found);
+int main_unit_frontend(int argc, char** argv, bool* found);
+int main_unit_assembler(int argc, char** argv, bool* found);
+int main_unit_link(int argc, char** argv, bool* found);
+int main_unit_executable(int argc, char** argv, bool* found);
+int main_unit_dynamic(int argc, char** argv, bool* found);
+int main_unit_types(int argc, char** argv, bool* found);
+
+// Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
+// is, so that the other units' branches fold to false (at the top). The driver's last branch, which no command takes,
+// runs the compiler itself.
+static int main_command(int argc, char** argv, bool* found)
 {
     int result = 0;
-    if (argc == 2 && strcmp(argv[1], "test-diagnostics") == 0)
+    *found = true;
+    if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc == 2 && strcmp(argv[1], "test-diagnostics") == 0)
     {
         result = run_diagnostic_tests();
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-diagnostics") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-diagnostics") == 0)
     {
         result = run_diagnostic_benchmark(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && (strcmp(argv[1], "assemble") == 0 || strcmp(argv[1], "-c") == 0))
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && (strcmp(argv[1], "assemble") == 0 || strcmp(argv[1], "-c") == 0))
     {
         result = run_assembler_command(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-assembler") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "test-assembler") == 0)
     {
         result = run_assembler_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-assembler") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "benchmark-assembler") == 0)
     {
         result = run_assembler_benchmark(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "-E") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "-E") == 0)
     {
         result = run_preprocessor_command(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-preprocessor") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-preprocessor") == 0)
     {
         result = run_preprocessor_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-preprocessor") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-preprocessor") == 0)
     {
         result = run_preprocessor_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
     {
         result = run_c_lexer_tests(argv[0], argc - 2, argv + 2);
         if (result == 0)
@@ -432,196 +484,297 @@ int main(int argc, char** argv)
             result = run_main_tests();
         }
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-lexer") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-lexer") == 0)
     {
         result = run_c_lexer_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-x86-encoder") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-x86-encoder") == 0)
     {
         result = run_x86_encoder_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
     {
         result = run_x86_target_tests();
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-x86-zen5") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-x86-zen5") == 0)
     {
         result = run_x86_zen5_tests();
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-zen5") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "benchmark-x86-zen5") == 0)
     {
         result = run_x86_zen5_benchmark(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "measure-x86-zen5") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "measure-x86-zen5") == 0)
     {
         result = run_x86_zen5_measure(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
     {
         result = run_x86_target_benchmark(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-encoder") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-encoder") == 0)
     {
         result = run_x86_encoder_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-x86-disassembler") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-x86-disassembler") == 0)
     {
         result = run_x86_disassembler_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "disassemble") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "disassemble") == 0)
     {
         result = run_x86_disassembler(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-disassembler") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-disassembler") == 0)
     {
         result = run_x86_disassembler_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-lanes") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-lanes") == 0)
     {
         result = run_lane_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-lanes") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-lanes") == 0)
     {
         result = run_lane_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-dataflow") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-dataflow") == 0)
     {
         result = run_dataflow_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-dataflow") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-dataflow") == 0)
     {
         result = run_dataflow_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-preprocessor-fuzz") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-preprocessor-fuzz") == 0)
     {
         result = run_preprocessor_fuzz_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-preprocessor-fuzz") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-preprocessor-fuzz") == 0)
     {
         result = run_preprocessor_fuzz_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-refinement") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-refinement") == 0)
     {
         result = run_refinement_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-refinement") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-refinement") == 0)
     {
         result = run_refinement_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-link") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-link") == 0)
     {
         result = run_link_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-object-writer") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-object-writer") == 0)
     {
         result = run_object_writer_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-object-writer") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-object-writer") == 0)
     {
         result = run_object_writer_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-import") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-import") == 0)
     {
         result = run_import_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-import") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-import") == 0)
     {
         result = run_import_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-bind") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-bind") == 0)
     {
         result = run_bind_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-bind") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-bind") == 0)
     {
         result = run_bind_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-executable") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-executable") == 0)
     {
         result = run_executable_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-executable") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-executable") == 0)
     {
         result = run_executable_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-dynamic") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) && argc >= 2 && strcmp(argv[1], "test-dynamic") == 0)
     {
         result = run_dynamic_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-static") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) && argc >= 2 && strcmp(argv[1], "test-static") == 0)
     {
         result = run_static_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-snapshot") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-snapshot") == 0)
     {
         result = run_snapshot_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-snapshot") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-snapshot") == 0)
     {
         result = run_snapshot_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-link") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-foreign") == 0)
+    {
+        result = run_foreign_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-foreign") == 0)
+    {
+        result = run_foreign_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-link") == 0)
     {
         result = run_link_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-floors") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-floors") == 0)
     {
         result = run_floors_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-branch-sizing") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-branch-sizing") == 0)
     {
         result = run_branch_sizing_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-branch-sizing") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-branch-sizing") == 0)
     {
         result = run_branch_sizing_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-files") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-files") == 0)
     {
         result = run_files_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-files") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-files") == 0)
     {
         result = run_files_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-types") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-types") == 0)
     {
         result = run_type_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-types") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-types") == 0)
     {
         result = run_type_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-calling-convention") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-calling-convention") == 0)
     {
         result = run_calling_convention_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "benchmark-calling-convention") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtins") == 0)
+    {
+        result = run_builtin_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-builtins") == 0)
+    {
+        result = run_builtin_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-calling-convention") == 0)
     {
         result = run_calling_convention_benchmark(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
     {
         result = run_check_call_graph(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-call-graph") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-call-graph") == 0)
     {
         result = run_call_graph_tests(argc - 2, argv + 2);
     }
-    else if (argc >= 2 && (strcmp(argv[1], "ab") == 0 || strcmp(argv[1], "hot-loops") == 0 || strcmp(argv[1], "label-spills") == 0 ||
-                           strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0))
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 &&
+             (strcmp(argv[1], "ab") == 0 || strcmp(argv[1], "hot-loops") == 0 || strcmp(argv[1], "label-spills") == 0 ||
+              strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0))
     {
         result = run_profile_command(argc - 1, argv + 1);
     }
-    else if (argc >= 2 && strcmp(argv[1], "test-profile") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-profile") == 0)
     {
         result = run_profile_tests(argc - 2, argv + 2);
     }
-    else
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "parallel") == 0)
+    {
+        result = run_parallel_command(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-parallel") == 0)
+    {
+        result = run_parallel_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {
         printf("Hello world\n");
         const CompileResult compiled = compile(BUSTER_S8(__FILE__), (CompileOptions){0});
         result = compiled.success ? 0 : 1;
     }
+    else
+    {
+        *found = false;
+    }
     return result;
 }
+
+#if BUSTER_UNIT == BUSTER_UNIT_DRIVER
+int main(int argc, char** argv)
+{
+    bool found = false;
+    int result = main_unit_x86(argc, argv, &found);
+    if (!found)
+    {
+        result = main_unit_frontend(argc, argv, &found);
+    }
+    if (!found)
+    {
+        result = main_unit_assembler(argc, argv, &found);
+    }
+    if (!found)
+    {
+        result = main_unit_link(argc, argv, &found);
+    }
+    if (!found)
+    {
+        result = main_unit_executable(argc, argv, &found);
+    }
+    if (!found)
+    {
+        result = main_unit_dynamic(argc, argv, &found);
+    }
+    if (!found)
+    {
+        result = main_unit_types(argc, argv, &found);
+    }
+    if (!found)
+    {
+        result = main_command(argc, argv, &found);
+    }
+    return result;
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_X86
+int main_unit_x86(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_FRONTEND
+int main_unit_frontend(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
+int main_unit_assembler(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_LINK
+int main_unit_link(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
+int main_unit_executable(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
+int main_unit_dynamic(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_TYPES
+int main_unit_types(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#endif

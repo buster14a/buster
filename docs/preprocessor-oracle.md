@@ -18,7 +18,10 @@ the selected Clang for its include search and passes that order explicitly to
 both sides. Frozen runs use `-nostdinc` and the pinned `-isystem` paths. Clang's
 `CPATH` and `C_INCLUDE_PATH` are cleared; Buster does not read them. One
 `clang -dM -E` dump per configuration supplies Buster's predefines, without
-adding `__BUSTER__`. Both sides inherit `SOURCE_DATE_EPOCH`, defaulted to
+adding `__BUSTER__`. The target, the fixed one and any `--target=` or `-target
+TRIPLE` after it, reaches both sides, so the target queries
+(`__is_target_vendor` and the others) answer for the same triple;
+`accepted.input` checks the vendor's. Both sides inherit `SOURCE_DATE_EPOCH`, defaulted to
 `1792454400` (2026-10-20 UTC) for this run. The existing Clang feature tables
 supply the feature queries in oracle mode.
 
@@ -120,6 +123,9 @@ explicit skips. Its input lists live
 under `tests/preprocessor-oracle/`. The runner hooks hold the lock for the job.
 The `buster-fast-9700x` concurrency prefix is scoped per PR/ref, so an older
 branch's repository-wide pending slot cannot cancel another PR's qualification.
-Each queue uses `queue: max` to retain pending runs, as
-[GitHub documents](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
-while the runner hooks serialize all CI jobs with the shared machine lock.
+Each queue keeps one pending run, GitHub's default `queue: single`, as
+[GitHub documents](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency):
+a newer push to the same PR replaces its pending run, whose commit is no longer
+the PR's to qualify, and cancels its run in progress for the same reason (a
+push to main lets main's run finish). The runner hooks serialize all CI jobs
+with the shared machine lock.

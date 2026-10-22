@@ -17,12 +17,22 @@ Ryzen 7 9700X.
 and 8 lanes and requires the same results byte for byte: the shared intern
 table's ids and spellings, every file's tokens, values, leading-space bits,
 directive table and guard, what the walk did, and each translation unit's
-output stream (kinds, flags, values and locations) when it preprocesses with
-the cache. Each unit's spellings are also those it gives with a cache of its
-own, as the preprocessor runs alone. On the 9700X and locally this holds for
-the test's tree and generated spellings, `sqlite3.c`, Lua 5.4.8's 34 units,
-musl 1.2.5's 1,357 units (on the 9700X), this repository's 20 units, and,
-prepared without their includes, the C library corpus (8,983 files).
+output stream (kinds, flags, values and locations), `-E` text and diagnostics
+when it preprocesses with the cache. Each unit's spellings and diagnostics are
+also those it gives with a cache of its own, as the preprocessor runs alone. On
+the 9700X this holds for the test's tree and generated spellings, `sqlite3.c`,
+musl 1.2.5's 1,357 units, this repository's 22 units, and, prepared without
+their includes, the C library corpus (8,983 files). Lua 5.4.8's 34 units passed
+too before the units' `-E` text and diagnostics were compared.
+
+**The same output whatever the ids.** Ids are opaque (#153): nothing a unit
+prints, or a record holds, may depend on the order the shared table hands them
+out in. `test-files` runs every check again with the table primed before the
+walk, so that it gives its names other ids, on every lane count: every unit's
+`-E` text, diagnostics and locations, and every record, spelled the same. On
+the 9700X this holds for the same inputs, where every name but at most one in
+each run changes ids (597,429 of the C library corpus's 597,430, 41,698 of
+`sqlite3.c`'s 41,699 and 15,330 of musl's 15,331).
 
 **Speed**, measured on 2026-10-22 on the 9700X (clang 23.1.1, `build.sh`'s
 `-O3 -march=native`), under the `exclusive.sh` lock, lane i on CPU i, by
@@ -352,12 +362,30 @@ unless said otherwise, medians of 7 to 21 runs):
 
 ## Correctness
 
-`./build/compiler test-files [--lanes LIST] [--seed N] [--keep] [--flat]
-[options] [path...]` (about 0.3 s without paths on the 9700X) runs every check
-on each lane count of `--lanes` (1, 2, 3 and 8), each time with a new intern
-table and cache, and compares the results with the first lane count's, byte for
-byte, as "Results" says, and every unit with itself run alone; and nothing may
-be written to stderr while the cache is filled:
+`./build/compiler test-files [--lanes LIST] [--seed N] [--id-order N] [--keep]
+[--flat] [options] [path...]` (about 0.7 s without paths on the 9700X) runs
+every check on each lane count of `--lanes` (1, 2, 3 and 8), each time with a
+new intern table and cache, and compares the results with the first lane
+count's, byte for byte, as "Results" says, and every unit with itself run
+alone; and nothing may be written to stderr while the cache is filled.
+
+Then it runs every check on each lane count again with the shared table's ids
+in another order, as `test-preprocessor --id-order` does for its cases
+(`docs/determinism.md`). Before the walk fills the cache, the table is primed
+with 17 to 47 names no file has, then with every other name of the first run's
+table, in reverse from a place the seed picks (`--id-order N`, 153 by default,
+plus the lane count's place in the list). The walk finds those in the table and
+gives the others ids after them, and every lane prepares every round, so that
+on more than one lane the merge does: its lookups find the primed spellings,
+and its additions number the rest from past them. The predefined names keep
+their fixed ids, the table's contract. The first run's other names must all be
+in the table, which may hold no others, and both those primed and those added
+after them must have changed ids (all but about one name in each run do). Every
+unit must give the first run's `-E` text, with and without line markers, and
+its diagnostics, byte for byte, and its stream's kinds, flags and locations,
+each identifier's and keyword's id spelled as the first run's; every record must
+be the first run's, its identifiers' values and its guard spelled the same, and
+the walk must do what it did. The checks:
 
 - **The tree:** three translation units and the headers they include in a
   directory of the test's own. It has includes by the includer's directory and
@@ -367,16 +395,20 @@ be written to stderr while the cache is filled:
   can't follow: the unit finds the file prepared under its other name), guarded
   and `#pragma once` headers included twice, a header under `#if 0` that exists
   (prepared but never entered) and one that doesn't (no diagnostic), and a
-  missing header in an active line, which the unit reports. The counts are
-  exact: 13 files prepared, each identity once, in 4 rounds; 1 unused; 2
-  requests not found; and after the walk, the unit with the computed include
-  opens one path and the others none. It runs with the vectorized kernels and
-  their scalar twins, its rounds cut into parts and split once, all on every
-  lane (its rounds are small enough for lane 0 alone otherwise).
+  missing header in an active line, which the unit reports. Two warnings name
+  identifiers, through their ids: an `#if` in a header that two units include,
+  whose notes name the macros it was expanded from, and a macro redefined. The
+  counts are exact: 13 files prepared, each identity once, in 4 rounds; 1
+  unused; 2 requests not found; the units' errors (0, 0, 1) and warnings (1, 2,
+  0); and after the walk, the unit with the computed include opens one path and
+  the others none. It runs with the vectorized kernels and their scalar twins,
+  its rounds cut into parts and split once, all on every lane (its rounds are
+  small enough for lane 0 alone otherwise).
 - **Spellings:** 240 generated files of identifiers (a shared vocabulary drawn
   unevenly, names of their own, names past 16 and 63 bytes, line splices and
-  UCNs), prepared without following includes. They make 165,562 ids, so the
-  shared table grows during a merge. They run in parts, split once, and with
+  UCNs), prepared without following includes, and a translation unit that
+  includes them all, which reads them from the cache. They make 165,562 ids, so
+  the shared table grows during a merge. They run in parts, split once, and with
   two lanes working and the others idle, and in two runs into one cache, which
   must equal one run on one lane.
 - **Contexts:** a guarded header that includes itself through `./` and
@@ -412,6 +444,23 @@ end) and the probe's non-blocking open (it blocks); reading `run->failed` on
 each lane at the walk's start, the race the memory check found, hangs only
 when the lanes' timing goes one way. It also passes under AddressSanitizer and
 UndefinedBehaviorSanitizer.
+
+Output that depends on the ids passes every lane count's comparison, since
+every lane count gives the same ids; the check with the ids in another order
+fails it. Three mutations show it, each built and run with that check and
+without it:
+
+- the vectorized printer doubling the space before an identifier whose id is
+  odd: only that check fails, on the tree's, the spellings', the contexts' and
+  the special paths' `-E` text (the tree's scalar ways print with the scalar
+  printer);
+- a macro's id after its name in the "expanded from macro" note: that check
+  fails on the tree's diagnostics, and without it so does the comparison with
+  each unit alone, whose table gives the names other ids;
+- the merge numbering a round's new spellings from the predefined names' end,
+  as if the shared table held nothing else: on the spellings, a single round,
+  only that check fails (a third of the first run's names go missing from the
+  table); the tree's lane counts fail too, from its second round on.
 
 ## Reproduction
 
@@ -451,9 +500,6 @@ lanes. `--read-limit N` sets the largest file the lanes read rather than map
   alone, is 8% slower on 8 lanes than on one. Reading each file on the lane
   that prepares it, once the round is known, would keep it in that lane's
   caches.
-- **A unit alone.** A translation unit with a cache of its own still maps every
-  file with `MAP_POPULATE`; reading the small ones made musl's walk 21% faster
-  on one lane, and would help a unit alone too.
 - **Searching earlier.** A file's literal includes need its kinds, starts and
   bytes, not its refined values: its searches could start while it is refined.
 - **`__has_include`.** A unit still probes the paths its `__has_include`

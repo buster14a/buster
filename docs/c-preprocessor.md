@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 92 | |
+| The built-in cases (`pp_test_cases`) | 95 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -111,6 +111,12 @@ pages it writes, 13% of the samples (see "Where the time goes"). "Next steps"
 lists what would close the gap. Since then, #116's budget work has brought
 refinement to 1.67 ms and the whole run to 10.0 ms (measured on 2026-10-22,
 `docs/c-refinement.md`).
+
+**Small files read.** Since #261, a unit reads its files of up to 16 KB rather
+than mapping them ("Files"). Measured on 2026-10-22, that takes 1.9% to 2.3% off
+a run and its release on `sqlite3.c`, `main.c` and musl's units, and 1.2% and
+1.4% off whole `-E` processes on `sqlite3.c` (17.96 to 17.74 ms) and `main.c`
+(37.60 to 37.08 ms).
 
 ## Object-macro eligibility cache experiment (#110)
 
@@ -286,19 +292,20 @@ comparison.
 
 ### Files
 
-Every file is read once per process. It is mapped (with `MAP_POPULATE` when a
-unit or one lane maps it; lanes read the files of up to 16 KB instead), lexed,
-refined and given a directive table (`pp_prepare_into`), and it stays as long as
-the file cache that holds it, because macro definitions point into the tokens of
-the file that defines them. The cache (`FileCache`) keeps a record per file
-identity (device and inode), so that two paths to one file are one file, and a
-path entry per path looked up, with the file there or none, so that a search
-makes no system call for a path the cache knows. A translation unit finds files
-by path in a table of its own (`pp_lookup_path`, which starts at 1,024 slots and
-doubles) and asks the cache the first time; it copies a record's prepared fields
-when it first enters the file, and keeps its own state about it (`#pragma once`,
-the line cursor). Without a cache in `PPOptions.files`, a unit makes its own;
-with one, the units and lanes that share it read each file once
+Every file is read once per process: a file of up to 16 KB into an arena of the
+file cache's, by a unit and by the lanes alike, and a larger one mapped (with
+`MAP_POPULATE` when a unit or one lane maps it; "Small files read" below). It is
+lexed, refined and given a directive table (`pp_prepare_into`), and it stays as
+long as the file cache that holds it, because macro definitions point into the
+tokens of the file that defines them. The cache (`FileCache`) keeps a record per
+file identity (device and inode), so that two paths to one file are one file,
+and a path entry per path looked up, with the file there or none, so that a
+search makes no system call for a path the cache knows. A translation unit finds
+files by path in a table of its own (`pp_lookup_path`, which starts at 1,024
+slots and doubles) and asks the cache the first time; it copies a record's
+prepared fields when it first enters the file, and keeps its own state about it
+(`#pragma once`, the line cursor). Without a cache in `PPOptions.files`, a unit
+makes its own; with one, the units and lanes that share it read each file once
 (`docs/c-files.md`, #150).
 
 - **Lexing by the language mode.** The lexer has no language mode, so two of
@@ -346,6 +353,47 @@ with one, the units and lanes that share it read each file once
   token per byte, then trimmed to the tokens it has. Before this, the columns
   of every file shared one arena, and the unused room between them was cleared
   too wherever a huge page held a used byte: 9 bytes per input byte.
+- **Small files read** (#261). A unit reads each file of up to 16 KB that it
+  opens into its lane's bytes arena in the cache
+  (`BUSTER_FILE_CACHE_READ_LIMIT`), as `c_files.c`'s lanes read theirs, and maps
+  the larger ones. A mapping costs an `mmap` and, when the unit is released, an
+  `munmap`; a read costs a copy into the arena, whose pages the kernel clears
+  when they are first touched. `benchmark-preprocessor --read-limit` measured
+  the limits against each other on the 9700X on 2026-10-22, each limit in turn
+  in every pass of one process, pinned to CPU 2. Each figure is in ms, the
+  median of three processes' medians of 21 passes: the run, then the release
+  after it (`pp_release` and `intern_release`), which the run's time leaves out:
+
+  | Files read | `sqlite3.c` | Release | `main.c` | Release | musl's 1,357 units in all | Release |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | None (every file mapped) | 11.40 | 0.66 | 25.54 | 1.02 | 450.3 | 176.8 |
+  | Up to 4 KB | 11.38 | 0.50 | 25.48 | 0.75 | 444.9 | 166.3 |
+  | Up to 16 KB (the default) | 11.35 | 0.45 | 25.45 | 0.60 | 449.3 | 163.6 |
+  | Up to 64 KB | 11.37 | 0.42 | 25.60 | 0.49 | 451.8 | 162.5 |
+  | Up to 256 KB | 11.54 | 0.44 | 26.02 | 0.38 | 452.8 | 164.0 |
+  | Every file | 12.04 | 0.28 | 26.20 | 0.35 | not run | not run |
+
+  With 16 KB, the run and its release take 2.2% less on `sqlite3.c` (12.07 to
+  11.81 ms), 1.9% on `main.c` (26.55 to 26.06) and 2.3% on musl's units (627.1
+  to 612.6). Most of it is the release, which no longer unmaps the small files:
+  `sqlite3.c`'s unit reads 159 of the 175 files it opens, and `main.c`'s unit
+  293 of the 397 it opens. The run gains 0.2% to 0.4%, in its probes: 0.69 to
+  0.66 ms on `sqlite3.c`, 1.55 to 1.47 on `main.c` and 65.2 to 61.9 on musl.
+  Reading larger files loses: `sqlite3.c` itself is 9.5 MB, which a read copies
+  into fresh huge pages where a mapping takes the page cache's own (its probes
+  take 1.40 ms). On musl, 4 KB runs 1.0% faster than 16 KB and releases 1.7%
+  slower, 0.2% less in all: at 16 KB, 228 of the 1,357 units read more than the
+  arena's first 64 KB, which are base pages, and touch a huge page that the
+  kernel clears whole (15 µs; at 4 KB, a unit reads 12 KB on average, and none
+  does). On `sqlite3.c` and `main.c`, 16 KB is 0.8% and 0.7% better than 4 KB.
+
+  As whole `-E` processes (`perf stat -r 21` of `-E -P` into `/dev/null`, pinned
+  to CPU 2, three rounds by turns with `main`'s compiler at 7b1b0ce; the median
+  round's mean), `sqlite3.c` took 17.74 ms against 17.96 (1.2% less), and
+  `main.c` 37.08 ms against 37.60 (1.4%). musl's 1,357 units, a process each,
+  one after another, took 1.914 s either way: the 11 µs a unit saves is within
+  that loop's noise (0.7%), since a unit's run and release are 0.45 ms of each
+  process's 1.41 ms.
 
 ### Macros
 
@@ -486,9 +534,9 @@ arenas. Popping a context gives its tokens back when they are on top.
 `__FILE__`, `__LINE__`, `__COUNTER__`, `__INCLUDE_LEVEL__`, `__BASE_FILE__`,
 `__FILE_NAME__`, and `__DATE__`, `__TIME__` and `__TIMESTAMP__` (from
 `SOURCE_DATE_EPOCH` when it is set) are built in. So are the feature queries:
-`__has_attribute`, `__has_builtin`, `__has_feature`, `__has_extension`,
-`__has_c_attribute`, `__has_declspec_attribute`, `__has_warning`,
-`__is_identifier` and the `__is_target_*` queries. Without `SOURCE_DATE_EPOCH`,
+`__has_attribute`, `__has_builtin`, `__has_constexpr_builtin`, `__has_feature`,
+`__has_extension`, `__has_c_attribute`, `__has_declspec_attribute`,
+`__has_warning`, `__is_identifier` and the `__is_target_*` queries. Without `SOURCE_DATE_EPOCH`,
 `__TIMESTAMP__` is the modification time of the file being read, in local time,
 as clang's is.
 
@@ -496,9 +544,39 @@ as clang's is.
 language mode (`c_name_is_keyword`), as clang answers. Its operand isn't
 expanded, so a macro's name is an identifier.
 
-The feature queries answer from tables of what clang 23 answers nonzero, for
-x86-64 Linux in C. They were generated by asking clang about every name the
-corpora query:
+The feature queries about the compiler have two sets of answers (the owner's
+decisions in #154 and on #117's configuration):
+
+- **By default, what buster implements** (`pp_implemented_*`). Until the
+  compiler implements everything clang supports, they say exactly what it does:
+  of builtins only the preprocessor's own `__is_target_*` (which clang's
+  `__has_builtin` answers 1 for too), and no attribute, feature, extension or
+  constexpr builtin. The parser, the checker and the code generators add theirs
+  to these tables as they implement them (#127, #133, #147, #148).
+- **In the oracle's mode, clang's** (`--clang-features`, #125). That is
+  `__has_builtin`, `__has_constexpr_builtin`, `__has_attribute`,
+  `__has_c_attribute`, `__has_feature` and `__has_extension`.
+  `test-preprocessor` turns it on for every case and file it compares with
+  clang, and `benchmark-preprocessor` for its runs, so that they do the work
+  `clang -E` does on the same headers.
+
+`__has_warning` and `__has_declspec_attribute` answer as clang does in both
+modes, and so do the queries that aren't about the compiler (`__has_include`,
+`__has_embed`, `__is_identifier`, `__is_target_*`).
+
+In the oracle's mode, clang's sanitizer features (`address_sanitizer`,
+`undefined_behavior_sanitizer`, `coverage_sanitizer` and the rest of
+`Features.def`'s) follow the sanitizers the options leave on, which the
+predefines read too ("The sanitizers" below). `__is_target_vendor` answers for the
+target triple's vendor: `pc` (clang's default triple is `x86_64-pc-linux-gnu`)
+without `-target`, the triple's own, or `unknown` for one that names none. The
+four `__is_target_*` compare a name as clang does, ASCII case aside, and read an
+operating system or an environment as clang's triple parser does (`linux2` is
+Linux, and `gnu2` is GNU but `gnux32` isn't).
+
+clang's answers come from tables of what clang 23 answers nonzero, for x86-64
+Linux in C. They were generated by asking clang about every name the corpora
+query:
 
 1. Collect the arguments of every `__has_attribute(...)`, `__has_builtin(...)`,
    `__has_feature(...)`, `__has_extension(...)`, `__has_c_attribute(...)` and
@@ -519,23 +597,219 @@ corpora query:
    features hold from C11 on, and `c_fixed_enum` from C23. `PPFeature.standard`
    keeps the first standard of each, while `__has_extension` answers 1 in every
    mode.
+5. For `__has_constexpr_builtin`, ask about every name of `__has_builtin`'s table
+   (no corpus queries it). 38 answer 1, in gnu17 and c23 alike.
 
 The configuration is clang's (the owner's decision in #117): `-std=gnu17` by
-default, clang's include search, and clang's predefined macros plus
-`__BUSTER__` defined to 1. The predefined macros are clang 23.1.3's for
-`x86_64-pc-linux-gnu` in gnu17 (`clang -dM -E -x c /dev/null`), without the
-ones the language mode and options decide. `pp_predefines` adds those:
-`__STDC_VERSION__`, `__STRICT_ANSI__` or `linux` and `unix`, the inline
-semantics, `__STDC_HOSTED__`, `__OPTIMIZE__` or `__NO_INLINE__`, C23's
-additions, and `__BUSTER__`. The C23 additions are the difference between that
-command's output under `-std=c23` and under the default.
+default, clang's include search, and clang's predefined macros for the same
+options plus `__BUSTER__` defined to 1. `pp_predefines` writes them in three
+parts:
 
-`-march=` selects the target feature and CPU identity macros described in
-[Generated-code instruction set](x86-target.md), with x86-64 baseline as the
-default. `-mtune=` is independent and changes no ISA macros. `--predefines FILE`
-replaces the built-in predefines (`__BUSTER__` too) with a file of `#define` lines, such
-as `clang -dM -E` gives for the same options. The oracle uses this, so its runs
-start from clang's macros alone.
+- the fixed part, `pp_predefines_base`: clang 23.1.3's for
+  `x86_64-pc-linux-gnu` in gnu17 (`clang -dM -E -x c /dev/null`), without the
+  ones the language mode and the options decide, and clang's two
+  `#pragma push_macro` of `__GCC_DESTRUCTIVE_SIZE` and
+  `__GCC_CONSTRUCTIVE_SIZE`, so that `#pragma pop_macro` gets them back;
+- the language mode's: `__STDC_VERSION__` (`199409L` for
+  `-std=iso9899:199409`), `__STRICT_ANSI__` or `linux` and `unix`,
+  `__STDC_HOSTED__` and C23's additions (the difference between that command's
+  output under `-std=c23` and under the default);
+- the target's and the other options', from `c_predefines.c`
+  (`predefines_text`, "The predefined macros" below), and `__BUSTER__`.
+
+`--predefines FILE` still replaces all of them (`__BUSTER__` too) with a file of
+`#define` lines, such as `clang -dM -E` gives for the same options. The oracle's
+file runs use it, so that they start from clang's macros alone and compare only
+preprocessing: the 9700X's clang is 23.1.1, whose `__clang_patchlevel__` and
+`__clang_version__` differ from the generator's.
+
+`__FLT_EVAL_METHOD__` is a builtin, as in clang: 0, or 1 and 2 with
+`-ffp-eval-method=double` and `extended`, and 2 when SSE is off (x87 math).
+Under `-E`, clang's `#pragma clang fp eval_method` doesn't change it, and it
+doesn't here.
+
+`-E -dM` prints every macro defined at the end instead of the tokens, as
+`clang -dM -E` does (`pp_print_macros`): sorted by name, the parameters as
+written without spaces (`__VA_ARGS__` as `...`, GNU's `x...`), one space before
+the replacement list and one before each token that had whitespace before it,
+each token spelled as clang spells it (an identifier's interned name, or its
+spelling as written when it has a UCN). On an empty file it prints clang's
+output byte for byte, but `__BUSTER__`.
+
+### The predefined macros
+
+`c_predefines.c` gives the macros that the target and the command-line options
+decide, as clang 23 gives them for x86-64 Linux: `-march`, the `-m` feature
+flags, `-march=native`, and `-O`, `-f...`, `-g`, `-pthread`, `-mcmodel` and
+`-mlong-double`.
+
+**The target.** clang's model, read from its driver and LLVM's
+`X86TargetParser`:
+
+- A CPU has a set of features. `-march` picks it (x86-64 by default), and
+  x86-64 always has `sse2`.
+- The `-m` flags turn features on and off, in command-line order. The driver
+  keeps only each feature's last flag (a later `-mavx2` drops an earlier
+  `-mno-avx2`, so `-mavx2 -mno-avx2` leaves `avx` as the CPU has it).
+- Turning a feature on turns on everything it implies (its `implies` closure).
+  Turning it off turns off everything that implies it (`implied_by`).
+- Then four soft rules: `popcnt` and `crc32` come with `sse4.2`, `mmx` with
+  `sse` and `xsave` with `avx`, unless the list turned them off.
+- Special flags:
+  - `-msse4` is `-msse4.2`, and `-mno-sse4` is `-mno-sse4.1`;
+  - `-m80387` is `-mx87`;
+  - `-mgeneral-regs-only` is `-mno-x87 -mno-mmx -mno-sse` in its place;
+  - `-mapxf` turns on APX's features but `cf`, and `-mapx-features=` and
+    `-mno-apx-features=` name them one by one;
+  - `-mapx-inline-asm-use-gpr32` comes after the others.
+- Each feature has its own macros (`avx512f` has `__AVX512F__`, `sse2` has
+  `__SSE2__`, `__SSE2_MATH__` and the `__FLT16_*` macros, `cx16` has
+  `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16`), but two need several:
+  - `__APX_F__` needs the eight features `-mapxf` turns on;
+  - `__APX_INLINE_ASM_USE_GPR32__` needs `egpr` and
+    `-mapx-inline-asm-use-gpr32`.
+- A CPU has macros of its own (`__znver5`, `__znver5__`, `__tune_znver5__`;
+  most Intel CPUs are `corei7`), which `-mtune` doesn't change.
+
+**The generated tables.** The CPUs, the features and their closures and macros
+are clang's answers, and `./build/compiler test-preprocessor --generate-targets`
+prints them as `c_predefines.c`'s generated block (`predefines_features`,
+`predefines_cpus`, `predefines_tunes`). It asks clang 23 (on `PATH`, with
+`CPATH` unset) these questions:
+
+- The CPUs: from its errors for an unknown `-march` (the 79 of x86-64) and an
+  unknown `-mtune` (105).
+- The features: the IR's `"target-features"` of a function, which lists the
+  whole feature map. That is every CPU's features, the names `-march=native`
+  passes, `x87` and `inline-asm-use-gpr32` (117 in all).
+- Each feature's closures: its `implies` from a configuration that turns
+  nothing else on, then `-mFEATURE` (or `-mapx-features=`); its `implied_by`
+  from `-mno-FEATURE`'s list. The two must agree.
+- Each CPU's features, without what only a soft rule adds. That is checked by
+  turning each rule's trigger off: none of clang 23's CPUs needs it.
+- Each feature's own macros: those that `config(implies)` defines and
+  `config(implies without it)` doesn't. config(T) is `-march=x86-64` with
+  exactly the features T: `-mno-` of x86-64's features and of the soft rules'
+  features outside T, then T's flags. The macros that no feature owns, in the
+  configuration with every feature, must be the two above.
+
+**`-march=native`** finds the host's CPU and features from CPUID and XCR0, by
+LLVM 23's rules (`Host.cpp`'s `getHostCPUName` and `getHostCPUFeatures`, read
+for their rules and written again here):
+
+- the CPU from the vendor, family and model, with LLVM's guesses from the
+  features for unknown Intel models;
+- each feature from its CPUID bit, with AVX's, AVX-512's, AMX's and APX's
+  state saved by the OS (XCR0).
+
+The driver passes the host's features before the `-m` flags, so a later flag
+for one of them wins. An unknown host is x86-64, as in clang's driver.
+
+**The other options**, each read as clang's driver reads it:
+
+| Options | Macros |
+| --- | --- |
+| `-O0` to `-O3` (higher is 3), `-O`, `-Og`, `-Os`, `-Oz`, `-Ofast`; `-fno-inline`, `-finline`, `-f[no-]inline-functions`, `-finline-hint-functions` | `__OPTIMIZE__`, `__OPTIMIZE_SIZE__`, `__NO_INLINE__` (at -O0, or when only always-inline functions inline) |
+| The floating-point options, through clang's state machine (`RenderFloatingPointOptions`): `-f[no-]fast-math`, `-ffp-model=`, `-f[no-]finite-math-only`, `-f[no-]math-errno`, `-f[no-]honor-infinities`, `-f[no-]honor-nans`, `-f[no-]signed-zeros`, `-f[no-]associative-math`, `-f[no-]reciprocal-math`, `-f[no-]approx-func`, `-f[no-]trapping-math`, `-ffp-exception-behavior=`, `-f[no-]rounding-math`, `-f[no-]unsafe-math-optimizations`, `-Ofast` (when it is the last `-O`) | `__FAST_MATH__`, `__FINITE_MATH_ONLY__`, `__NO_MATH_ERRNO__` |
+| `-ffp-eval-method=` | `__FLT_EVAL_METHOD__`'s value |
+| `-f[no-]signed-char`, `-f[no-]unsigned-char` | `__CHAR_UNSIGNED__` |
+| `-f[no-]short-wchar` | the `wchar_t` macros |
+| `-f[no-]pic`, `-f[no-]PIC`, `-f[no-]pie`, `-f[no-]PIE` (level 2 PIE by default) | `__pic__`, `__PIC__`, `__pie__`, `__PIE__` |
+| `-f[no-]stack-protector[-strong\|-all]` (this clang's default is `-strong`, which `-fstack-protector` keeps) | `__SSP__`, `__SSP_STRONG__`, `__SSP_ALL__` |
+| `-f[no-]asynchronous-unwind-tables`, `-f[no-]unwind-tables`, `-f[no-]dwarf2-cfi-asm`, `-f[no-]exceptions`, the `-g` options (the last of clang's `g_Group`, `-gcodeview` among them; `-gmodules` turns debug information on unless `-gno-modules` follows it), `-ffreestanding` | `__GCC_HAVE_DWARF2_CFI_ASM` |
+| `-f[no-]exceptions`; `-fsjlj-exceptions`, `-fseh-exceptions`, `-fdwarf-exceptions`, `-fwasm-exceptions` | `__EXCEPTIONS`; `__USING_SJLJ_EXCEPTIONS__`, `__SEH__` |
+| `-fgnuc-version=` (0 turns them off); `-f[no-]gnu89-inline` | `__GNUC__` and the others, GCC's atomics; `__GNUC_GNU_INLINE__` or `__GNUC_STDC_INLINE__` |
+| `-pthread` | `_REENTRANT` |
+| `-fcf-protection[=]` | `__CET__` |
+| `-f[no-]sanitize=` and the options its rules read (below) | `__SANITIZE_*__` (address, hwaddress, thread and alloc-token, a kernel form sharing its user space form's) |
+| `-f[no-]blocks`; `-f[no-]openmp[=]`, `-fopenmp-version=`; `-fopenacc` | `__block`, `__BLOCKS__`; `_OPENMP`; `_OPENACC` |
+| `-f[no-]define-target-os-macros`, `-f[no-]pascal-strings`, `-f[no-]constant-cfstrings` and `-m[no-]constant-cfstrings` (two families, each by its last: either's `no-` drops the macro), the profile-generating options | `TARGET_OS_*`, `__PASCAL_STRINGS__`, `__CONSTANT_CFSTRINGS__`, `__LLVM_INSTR_PROFILE_GENERATE` |
+| `-municode` (joined: `-municodeANYTHING` too) | `UNICODE`, in `<command line>` before the command line's `-D` and `-U`, as clang's driver adds it |
+| `-mcmodel=`, `-mlong-double-64`/`80`/`128` | `__code_model_*__`, the `long double` macros |
+| `-mfpmath=` | none, but it must agree with SSE |
+
+The options that would make clang predefine or compile something buster doesn't
+follow are refused by name: `-m32`, `-mx32`, `-m16`, `-miamcu`, `-mcpu=`, `-mkernel`,
+`-fapple-kext`, `-fms-compatibility`, `-ffixed-point`, `-fdefer-ts`,
+`-foffload-via-llvm`, the profile-using and pointer-field-protection options,
+and the CUDA, HIP, SYCL and pointer-authentication ones. So are a `--target`
+other than x86-64 Linux with glibc (`x86_64` or `amd64`, any vendor or none,
+`linux-gnu`: clang's predefines are the same for every vendor), and values clang
+refuses (an unknown CPU, a bad `-fcf-protection=`, `-fsanitize=address,thread`,
+...). Where clang's driver reads only an option's last value (`-target`,
+`-march`, `-mtune`, `-mfpmath=`, `-mcmodel=`, `-mabi=`, `-fveclib=`, `-O`,
+`-fgnuc-version=`, `-fcf-protection=`, `-fopenmp=`'s runtime, `-flto=`,
+`-fvisibility=` and `-std=`), `predefines_finish` checks that one after every
+option, so an earlier invalid one doesn't count. Any other `-f` option changes
+no macro and is accepted.
+
+**The `-m` options** are taken only where clang 23.1.3 uses them for x86-64
+Linux: those above, and those that change no macro (`predefines_neutral`, found
+by trying each option `clang --autocomplete=-m` lists): 41 flags, the Spectre,
+LVI and SESES hardening flags, and 19 options with a value. `predefines_finish`
+checks them as clang does: the hardening flags against each other, as its
+driver weighs them (one of Spectre's and one of LVI's not together, and SESES
+with neither but LVI's CFI), `-mfunction-return=thunk-extern` against
+`-mcmodel=large`, and each value option's last value as clang's driver and then
+cc1 read it (cc1 reads a number in any radix: `0x10`, or `010` in octal),
+`-mlarge-data-threshold=`'s only under `-mcmodel=medium` or `large`, and
+`-mrecip=`'s estimates as `parseMRecipOption` does. clang's `-m` aliases of
+other options (`Options.td`'s `Alias`) are read as those options
+(`predefines_alias`, before anything else reads the argument), so the last of
+either spelling wins: `-m[no-]pascal-strings` as `-f[no-]pascal-strings`,
+`-m[no-]zvector` and `-m[no-]unsafe-fp-atomics` as their `-f` options,
+`-mno-fp-ret-in-387` as `-mno-x87`, and `-mips1` to `-mips64r6` as
+`-march=mips1` and so on (an unknown CPU, unless a later `-march` wins).
+`-msse4`, `-m80387`, `-mapxf` and `-mpure-code` keep branches of their own.
+Every other `-m` option is refused, so that no switch silently leaves the
+baseline's macros: one clang doesn't know (`-mavx512`, for `-mavx512f`) or
+refuses for the target, another target's, which clang takes with a warning that
+it ignores it (`-mthumb`, `-moutline-atomics`), and `-mcpu=help` and
+`-mtune=help`, which ask clang for its CPUs instead of compiling.
+
+**The sanitizers.** `predefines_finish` reads the sanitizer options after every
+option, as clang 23's driver does (`SanitizerArgs`): from the last back, so a
+later `-fno-sanitize=` turns off what an earlier `-fsanitize=` turned on and
+resolves a pair the whole set wouldn't allow. Each of clang's 63 sanitizers keeps
+its own state (`address` and `kernel-address` share `__SANITIZE_ADDRESS__`, not
+their state), and a group (`undefined`, `integer`, `cfi`, ...) gives its members.
+`-fno-sanitize=all` turns off every sanitizer and every group, as clang's `all`
+holds every bit, a group's own too: an earlier `-fsanitize=memtag`, which x86-64
+doesn't support, is then no error.
+`-fsanitize=object-size` is off without `-O` or with `-O0` (`-O00` keeps it, as
+clang's does), `-fwrapv` (or `-fno-strict-overflow`) keeps `undefined` from
+checking signed overflow and `-fwrapv-pointer` pointer overflow,
+`-mexecute-only` drops `function` and `kcfi`, and `-fsanitize-cfi-cross-dso`
+drops `cfi-mfcall`. Then the rules that need the whole set, in clang's order and
+words: its incompatible pairs (each dropping the others), the sanitizers x86-64
+Linux doesn't support (MTE's and `objc-cast`), `-flto` for CFI, `-fvisibility=`
+for CFI's class checks, `address` for the pointer pairs, `-mcmodel=small` for an
+explicit `function`, `-frtti` for `vptr`, and `kcfi` beside CFI.
+`-fsanitize-coverage=` and `-fno-sanitize-coverage=` (and `fuzzer`) decide
+`coverage_sanitizer`, and `-fsanitize-ignore-for-ubsan-feature=` the checks
+`undefined_behavior_sanitizer` leaves out. clang's rules that read
+`-fsanitize-trap=`, `-fsanitize-minimal-runtime` and `-fsanitize-recover=`
+aren't followed: they only refuse `vptr` or a recovery mode, and change no macro
+or feature. `test-preprocessor --clang` compares every sanitizer that has a macro
+or appears in clang's incompatible pairs alone, in pairs and in pairs with
+either one turned off after them (376 sets), each of them and each other group
+with `-fno-sanitize=all` after it and before it, and beside `memtag` (81), and
+the features under 46 option sets.
+
+This is cold code: it runs once per translation unit, on a few dozen options
+and two-word feature sets, so it has no vector path. Generating the text costs
+about 13,000 instructions (an empty file's `-E` run is 1.6 million, mostly
+preprocessing the 470 `#define` lines), and `-march=native`'s CPUID adds a few
+microseconds.
+
+**The generated code's instruction set.** `predefines_target` gives
+`x86_target.c`'s `X86Target` from the same resolution
+([Generated-code instruction set](x86-target.md)): the features it knows by
+name, with RDTSCP and CLFLUSH, which clang has no feature for, from its profile
+where `-march` names one of its six (`native`'s from CPUID), and the profile's
+architecture (`X86_ARCH_OTHER` for clang's other CPUs). The assembler's forms
+and `__has_builtin`'s target builtins follow it, and the test checks the map
+against the generated tables (each name a feature, with `x86_target.c`'s macro).
 
 ### Tokens, locations and the output
 
@@ -891,7 +1165,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 92 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 95 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -986,6 +1260,18 @@ full-corpus reproduction and frozen CI subset.
     `pp_predefines` must give `clang -dM -E` line
     for line. Only the three macros that name clang's patch release are left
     out.
+  - `c_predefines.c`'s generated tables must be what the generator learns from
+    clang now, field by field (`c_predefines_test.c`).
+  - About 1,300 option sets must give `clang -dM -E`'s macros, and both must
+    accept or refuse each. They are every `-march` CPU and `native`; every
+    feature flag on and off, on x86-64 and on the CPUs with the most features
+    (`diamondrapids`, `znver5`, `native`); each option of the table above,
+    alone and in the orders that matter (last-wins families, the floating-point
+    state machine, the soft rules, a feature's last flag); and 400 random
+    combinations of them (`--seed N`).
+  - `-E -dM` of a file with every kind of definition must be clang's byte for
+    byte (but `__BUSTER__`), and `__FLT_EVAL_METHOD__` clang's under
+    `-ffp-eval-method=` and without SSE.
   - In each mode, `__is_identifier` of every predefined name (keywords,
     directive names, the preprocessor's names) must give clang's answer, and so
     must that of 568 candidates chosen apart from them, so that a keyword
@@ -1000,7 +1286,11 @@ full-corpus reproduction and frozen CI subset.
   from the same macros. clang's `-E` text, without its line markers' lines, is
   lexed with `c_tokenize` and compared with our stream's spellings, token for
   token. Then the places its markers give the tokens are compared with ours.
-  The first difference is printed with the tokens around it.
+  The first difference is printed with the tokens around it. Last, with our own
+  predefines, the macros defined at the file's end must be `clang -dM -E`'s
+  byte for byte, but for the patch release's three macros and `__BUSTER__`
+  (`pp_test_macros`, #121): the whole table, predefines, definitions and
+  `#undef`s. `main.c` ends with 10,894 macros, `sqlite3.c` with 5,596.
 
 In both, the two printers must give the same bytes, with line markers and
 without, and the text must lex back into the stream's spellings.
@@ -1095,16 +1385,24 @@ token), the intern table, and the unused part of each arena's last huge page.
 In a process that preprocesses many translation units (#152), that memory is
 cleared once and reused.
 
+## Assembly output spacing
+
+In `-x assembler-with-cpp` mode, the lexer splits `$` from names and
+numbers so that macros beside it still expand. Both printers use that same
+boundary: `$VALUE` can print as `$4`, and `foo$bar` stays a single GNU as
+symbol in the printed text. Whitespace and comments that separate tokens in
+the input still produce spaces. C mode retains its identifier-separation rules.
+
+The vector printer clears `$`'s entry in both byte-class tables once per
+call, and applies the same classification to the token carried between
+64-token chunks. Its scalar twin uses the language mode in its word-character
+test. `test-preprocessor` checks exact output bytes, including assembly macro
+arguments, explicit whitespace, and the chunk boundary; comparing token
+spellings alone would miss this change (#272).
+
 ## Not yet
 
 - `#embed` is an error, and `__has_embed` isn't answered (C23).
-- Individual feature switches (`-m*`, other than the supported `-march=` and
-  `-mtune=`) are rejected. Other options such as `-funsigned-char` still need
-  `--predefines` for their macro effects. The target-builtin query table remains
-  a bounded subset; see [the target contract](x86-target.md).
-- The feature tests (`__has_attribute` and the others) always answer from
-  clang's table, which #117 and #125 keep for the oracle's mode. Outside it, they
-  are to answer what the compiler implements (#123, #148).
 - The printer's spacing differs from clang's in places. It puts a space between
   `<` and `>`, where clang doesn't, and it doesn't indent a line's first token
   to its column. Line markers differ in form but not in what they say: clang
@@ -1112,7 +1410,7 @@ cleared once and reused.
   where a token needs it.
 - Diagnostics include presumed locations, include stacks and macro backtraces
   (#108, above). Source excerpts and carets remain unimplemented.
-- C++ (`-x c++`), dependency output (`-M`) and `-dM` aren't supported.
+- C++ (`-x c++`) and dependency output (`-M`) aren't supported.
 - Stringizing an identifier that pasting made from a UCN gives its UTF-8
   spelling, where clang keeps the UCN.
 - `defined` that a macro's argument brings into a `#if` line (`ID(defined X)`)
@@ -1160,10 +1458,10 @@ cleared once and reused.
 ./build/compiler test-preprocessor --clang
 ./build/compiler test-preprocessor --clang path/to/sqlite3.c
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang path/to/sqlite3.c
-clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char \
-    --predefines build/predefines.h src/buster/compiler/main.c
-./build/compiler -E [-P] [-o file] [options] file.c
+    src/buster/compiler/main.c
+./build/compiler -E [-P] [-dM] [-o file] [options] file.c
+./build/compiler test-preprocessor --generate-targets   # c_predefines.c's generated tables, from clang
 ```
 
 On the 9700X, run each one under `EXCLUSIVE_OWNER=<name>
