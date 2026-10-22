@@ -48,6 +48,7 @@
 #include "buster/compiler/lane.c"
 #include "buster/compiler/c_intern.c"
 #include "buster/compiler/c_refine.c"
+#include "buster/compiler/c_predefines.c"
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_files.c"
 
@@ -363,7 +364,7 @@ int run_files_benchmark(int argc, char** argv)
         const char* argument = argv[i];
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
-                                 pp_own_option_with_value(argument) || strcmp(argument, "-x") == 0;
+                                 pp_own_option_with_value(argument) || strcmp(argument, "-x") == 0 || strcmp(argument, "-target") == 0;
         const char* next = i + 1 < argc ? argv[i + 1] : 0;
         if (strcmp(argument, "--lanes") == 0 && next != 0)
         {

@@ -112,11 +112,6 @@ jobs:
       - name: Execute compiler
         run: ./build/compiler
 
-      - name: Write clang's predefines for the compiler's flags
-        # For the tests and benchmarks that preprocess the compiler's own translation units: --predefines supplies the
-        # macro effects of flags such as -funsigned-char.
-        run: clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
-
       - name: Run the tests at once
         # Tests don't need the machine to themselves, unlike the benchmarks after them, which run one at a time and
         # pinned. build/compiler parallel (AGENTS.md, "The parallel runner") runs each test below in a bash of its own,
@@ -138,8 +133,8 @@ jobs:
           ./build/compiler test-object-writer --cross-check
           == Test the preprocessor on the repository's translation units against clang
           # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
-          # tokens.
-          ./build/compiler test-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          # tokens. -target and its triple (clang's default) go to both.
+          ./build/compiler test-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
           == Test the static executables with libc
           # Each program bound against the system's static runtime and written as a static executable by 1, 2, 3 and 8
           # lanes and by the writer's exact twins must be the same file, run as cc -static's link of the same object
@@ -166,8 +161,8 @@ jobs:
           == Test the x86-64 encoder
           ./build/compiler test-x86-encoder
           == Test the per-file jobs on the repository's translation units
-          # Uses the predefines that "Write clang's predefines for the compiler's flags" wrote.
-          ./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          # The predefines follow the options as clang's do (c_predefines.c).
+          ./build/compiler test-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
           == Test the x86-64 disassembler against GNU tools
           corpus="$(mktemp -d)"
           trap 'rm -rf "$corpus"' EXIT
@@ -252,6 +247,8 @@ jobs:
           == Test the corpus oracle's accounting and process failures
           ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/clang -nostdinc --files-from tests/preprocessor-oracle/inputs.txt --root tests/preprocessor-oracle --report build/oracle-accounting.tsv
           awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 1 && counts["skipped"] == 1 && NR == 3) }' build/oracle-accounting.tsv
+          # Another vendor by -target and its triple, which both sides must get: accepted.input's other branch.
+          ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/clang -nostdinc -target x86_64-pc-linux-gnu tests/preprocessor-oracle/accepted.input
           if ./build/compiler test-preprocessor --compare-clang --clang /no-such-buster-clang tests/preprocessor-oracle/accepted.input; then exit 1; fi
           if ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/false tests/preprocessor-oracle/accepted.input; then exit 1; fi
           if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/rejected.input; then exit 1; fi
@@ -392,10 +389,11 @@ jobs:
           ./build/compiler test-preprocessor --tables src
 
       - name: Benchmark the preprocessor on main.c
-        # --predefines also supplies the macro effects of flags such as -funsigned-char.
+        # The preprocessor's own predefines follow the options as clang's do (c_predefines.c): -march=native's and
+        # -funsigned-char's among them.
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 
       - name: Benchmark the directive tables on the repository sources
         run: |
@@ -457,7 +455,7 @@ jobs:
 
       - name: Benchmark the per-file jobs on the repository's translation units
         # Without taskset: it pins each lane to an allowed CPU of its own.
-        run: ./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+        run: ./build/compiler benchmark-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: Benchmark the C type table
         run: |

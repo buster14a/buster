@@ -423,13 +423,18 @@ designs and the compilers already built this way.
   provides `benchmark-refinement`.
 - `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
   unit's token stream from its files' refined tokens, and `./build/compiler -E`
-  (as `clang -E`). `docs/c-preprocessor.md` explains the design, the `clang -E`
-  oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
-  (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
+  (as `clang -E`, with `-dM`). `docs/c-preprocessor.md` explains the design, the
+  `clang -E` oracle and the 9700X measurements. `c_preprocessor_test.c` holds its
+  tests (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
   `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`. Its
   `FileCache` holds what is prepared from each file (by identity) and every
   path looked up, for every translation unit that preprocesses with it
   (`PPOptions.files`; a unit without one makes its own).
+  `c_predefines.c` gives the predefined macros the target and the options decide,
+  as clang does (`-march`, the `-m` feature flags, `-march=native` from CPUID,
+  `-O`, `-f...`, `-g`), from tables generated from clang 23; `c_predefines_test.c`
+  checks them against clang under `test-preprocessor --clang` and regenerates the
+  tables (`test-preprocessor --generate-targets`).
 - `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
   records macro expansion history in cold records and compressed output runs;
   `pp_diagnose_output` renders a diagnostic for an output-token index.
@@ -502,13 +507,12 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-preprocessor --clang
 ./build/compiler test-preprocessor --tables src
 ./build/compiler benchmark-preprocessor --tables src
-clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
-./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
-./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+./build/compiler -E -march=native -Isrc -fwrapv -funsigned-char -o build/main.i src/buster/compiler/main.c
+./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 ./build/compiler test-files
 ./build/compiler test-files --flat src
-./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
-./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 ./build/compiler test-types
 ./build/compiler benchmark-types
 ./build/compiler test-calling-convention --cross-check
@@ -516,8 +520,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
-`#error` without AVX-512's). The built-in predefines now follow `-march`;
-`--predefines` additionally supplies Clang's effects for the other host flags.
+`#error` without AVX-512's), which the preprocessor's predefines give as clang's
+do for the same options (`c_predefines.c`).
 
 ## Sharing the 9700X
 
@@ -530,9 +534,12 @@ there at a time, so everything takes one lock:
   Also set `EXCLUSIVE_TITLE` to the session's title and `EXCLUSIVE_LINK` to
   its link (its claude.ai page, or else the PR or issue it works on): whoever
   waits sees them in `/var/lib/buster-9700x/owner`.
-- The runner's job hooks take the same lock for every CI job, and a waiting CI
-  job goes first. A CI job's owner lines give its workflow, job, PR number and
-  title (or a push's first line), the run's link and the PR's.
+- The runner's job hooks take the same lock for every CI job, and CI goes
+  first: `exclusive.sh` doesn't take the lock while a CI job waits for it or
+  for 20 s after one ends (the runner's next job starts waiting about 8 s
+  later), and gives it back if it got it then. While CI jobs queue, a session's
+  run waits for all of them. A CI job's owner lines give its workflow, job, PR
+  number and title (or a push's first line), the run's link and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
@@ -2439,7 +2446,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 `./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
 [options] [file...]`, or `test-preprocessor --tables path...`:
 
-- without files, the 92 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 95 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2453,7 +2460,10 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
   modification times of their own must give each file's time (in UTC), and
-  `SOURCE_DATE_EPOCH`'s when it is set. Then the directive tables (#118,
+  `SOURCE_DATE_EPOCH`'s when it is set; and the `-m` options buster refuses
+  though clang takes them (another target's, which clang ignores with a
+  warning, and those that change the target) must be refused, and each `-m`
+  flag that changes no macro taken. Then the directive tables (#118,
   `c_preprocessor_directives_test.c`): 2,000 random sources (`--count N`,
   `--seed N`) of directives, `%:`, `#` alone, line markers, unknown names,
   `#`s inside lines, literals and comments and after line splices, and
@@ -2480,7 +2490,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   ours, kept from clang, succeeding in a space the file fits in and running
   out of one of a byte;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
-  `-ffreestanding`, ...), by both kernels, which must agree;
+  `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree;
 - with `--tables`, the directive tables of every `.c` and `.h` file under each
   path, by both kernels, against the oracle (about 0.02 s for `src`, 0.6 s for
   the C library corpus).
@@ -2489,28 +2499,60 @@ In both, the vectorized printer's text must be the scalar printer's byte for
 byte, with line markers and without, and must lex back into the stream's
 spellings.
 
+Every case and file runs with clang's answers to the feature queries
+(`--clang-features`, the oracle's mode), and a check runs a line of queries both
+ways: by default they answer what buster implements.
+
 `--clang` also compares every case and file with `clang -E` and the same
-options (but `--predefines` and `--location-limit`, ours alone), token spelling
-by token spelling, and then where clang's line markers put each token (its
-presumed line and include stack) with where ours put it. It prints the first
-difference with the tokens around it. For files, our side
-reads clang's own predefines for the options through `--predefines`. Without
-files, `--clang` also checks the built-in predefines, the keywords and the
-features:
+options (but `--predefines` and `--location-limit`, ours alone), token spelling by token spelling, and then where clang's line markers
+put each token (its presumed line and include stack) with where ours put it. It
+prints the first difference with the tokens around it. For files, our side
+reads clang's own predefines for the options through `--predefines`, so that
+only preprocessing is compared (the 9700X's clang names another patch release);
+then, with our own predefines, the macros defined at the file's end must be
+`clang -dM -E`'s byte for byte, but for those three macros and `__BUSTER__`.
+Without files, `--clang` also checks the built-in predefines, the keywords and
+the features:
 - in 22 option sets (the ten modes from `c89` to `gnu23`, `-ffreestanding`,
-  `-O2`, the six ISA profiles and independent tuning), `pp_predefines` must give `clang -dM -E` line for line, but for
+  `-O2`, two combinations, the six ISA profiles of `docs/x86-target.md` and two
+  with `-mtune`), `pp_predefines` must give `clang -dM -E` line for line, but for
   the patch release's three macros;
+- `c_predefines.c`'s generated tables (each x86-64 feature's flag, closures and
+  macros, each `-march` CPU's macro name and features, the `-mtune` names) must
+  be what `c_predefines_test.c`'s generator learns from clang now;
+- about 2,200 option sets must give `clang -dM -E`'s macros, and be accepted or
+  refused alike: every `-march` CPU and `native`, every feature flag on and off
+  on x86-64 and on the CPUs with the most features, each `-O`, `-f`, `-g` and
+  `-m` option `c_predefines.c` reads, alone and in the orders that matter (an
+  invalid value before the last of an option clang reads only the last of among
+  them), each `-m` option that changes no macro (each flag alone, the hardening
+  flags against each other, and each value option's rule at its edges), each of
+  clang's `-m` aliases alone and against its option in either order, `-m`
+  options clang refuses too (`-mavx512`), the 16 sanitizers with a macro or in clang's incompatible pairs, alone,
+  in pairs and in pairs with either one turned off after them, each of them and
+  each other group with `-fno-sanitize=all` after it and before it, and 400
+  random combinations, some with those `-m` flags and aliases (`--seed N`
+  changes them);
+- `-E -dM` of a file with every kind of definition must be clang's byte for byte
+  (but `__BUSTER__`), and `__FLT_EVAL_METHOD__` clang's under
+  `-ffp-eval-method=` and without SSE;
 - in each mode, `__is_identifier` of every predefined name, and of clang's
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
   must give clang's answer;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
-  23's `Features.def` must give clang's answers;
+  23's `Features.def` must give clang's answers, and so must they under 45
+  sanitizer option sets, and the four `__is_target_*` of 41 names under eight
+  kinds of target triple.
 - the structure and definition fixtures' diagnostics must be clang's, byte for byte, and the
   guard fixtures' output and skips by guards clang's (`-Xclang -print-stats`),
   as every file's skips by guards must be. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
 `docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs the cases
 and the repository's translation units with `--clang`, and `--tables src`.
+
+`./build/compiler test-preprocessor --generate-targets` prints `c_predefines.c`'s
+generated block from clang 23 (on `PATH`), to paste over the old one when clang
+changes; `docs/c-preprocessor.md` ("The predefined macros") has the procedure.
 
 ## Preprocessor benchmark
 
@@ -2528,11 +2570,12 @@ lengths, and the inclusions skipped by guards and by `#pragma once`).
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.
 `--clang` also times `clang -E -P` with the same options, a process per file.
-`-march` selects the shared target's predefines. `--predefines FILE` can replace
-them with `clang -dM -E` output (the benchmark leaves this option out of clang's
-command line, as it does `--location-limit N`), as the smoke commands above do
-for `main.c`. The default 9700X job runs that one, pinned to one allowed CPU;
-like the others, its measurements are informational.
+Our predefines follow the target options as clang's do; `--predefines FILE`
+still replaces them (the benchmark leaves it out of clang's command line). The
+runs answer the feature queries as clang does (`--clang-features`), so that they
+do the work `clang -E` does. The
+default 9700X job runs the smoke command above on `main.c`, pinned to one allowed
+CPU; like the others, its measurements are informational.
 
 `./build/compiler benchmark-preprocessor --defines [--only vectorized|scalar]
 path...` times definitions and lookups alone (#121): every `.c` and `.h` file
@@ -2710,7 +2753,7 @@ others, its measurements are informational.
 
 `./build/compiler test-calling-convention [--seed N] [--count N]
 [--cross-check] [--signatures N] [--clang PATH] [--gcc PATH] [--keep]`
-(about 0.05 s on the 9700X, and 18 s with `--cross-check`) checks
+(about 0.05 s on the 9700X, and 4.8 s with `--cross-check`) checks
 `calling_convention.c`, by its vector paths and their twins at 16-, 32- and
 64-byte vectors:
 
@@ -2751,7 +2794,10 @@ result's bytes, a C callee and a C caller of ours) and as our side, a caller
 and a callee per signature as `X86Instruction` records through `x86_encode`,
 `link_add_code_fixups` and the object writer. The compiler's driver links them
 and the program runs: each side checks every argument, result, hidden pointer,
-`al` and `va_arg` value against the bytes, both ways. GCC's worlds leave out
+`al` and `va_arg` value against the bytes, both ways. The six runs (clang's,
+then GCC's, each at 16, 32 and 64 bytes) go at once, a child process each, and
+the test prints their lines in that order; a run that fails keeps its files.
+GCC's worlds leave out
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
 own bugs among them, and `docs/calling-convention.md` lists them); an argument
 clang would pass as an `i0` becomes a long (its passes crash on them now and
