@@ -276,8 +276,10 @@ designs and the compilers already built this way.
   (`crt1.o`, `crtbeginT.o` and `crtend.o`, and the archives of GCC's group:
   `libgcc.a`, `libgcc_eh.a`, `libatomic.a` where GCC has it, and `libc.a`),
   with each member's strong references and COMDAT groups (step 6's first
-  part), and `runtime_import_static_pie` for a static PIE's (`rcrt1.o`,
-  `crtbeginS.o` and `crtendS.o` with the same archives; step 6's fifth part).
+  part), `runtime_import_static_pie` for a static PIE's (`rcrt1.o`,
+  `crtbeginS.o` and `crtendS.o` with the same archives; step 6's fifth part),
+  and `runtime_import_shared` for a shared library's (the dynamic runtime
+  without `Scrt1.o`, its unit and piece empty).
   The object reader gives `GOTPCRELX` and `REX_GOTPCRELX` relocations the
   kinds a linker may rewrite (`CALL_GOT` and `LOAD_GOT`) only on the
   instructions those kinds are (`call` or `jmp` through the slot, a `mov`
@@ -297,7 +299,11 @@ designs and the compilers already built this way.
   It binds against the static runtime too (step 6's second part): the
   archives' members the link needs, found as GNU ld's group finds them, joined
   in archive order with the COMDAT groups after the first of each signature
-  discarded, and no name bound to a shared library.
+  discarded, and no name bound to a shared library. And against a shared
+  library's runtime (step 6's fifth part), as GNU ld and lld bind `-shared`:
+  no start object, a strong reference to a name no library exports left
+  undefined for the loader, and every definition with default or protected
+  visibility exported (`bind_shared_exports`).
   `bind_test.c` holds its tests (`main.c` includes it; `./build/compiler
   test-bind` runs them) and `bind_benchmark.c` provides `benchmark-bind`.
 - `src/buster/compiler/executable.c` writes the direct path's executables: a
@@ -322,15 +328,14 @@ designs and the compilers already built this way.
   test-static`); `main.c` includes all three, and `executable_benchmark.c`
   provides `benchmark-executable`.
 - `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
-  part, and step 6's for the static runtimes): what `runtime_import` (or
-  `runtime_import_static`, or `runtime_import_static_pie`) makes of the C
-  runtime, kept in a file per kind in the cache directory
-  (`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster`), which `runtime_open`
-  (or `runtime_open_static`, or `runtime_open_static_pie`) maps and uses in
-  place when
-  this executable wrote it, it is of the kind, its directory hashes right and
-  every file the import probed is as it was, and otherwise rebuilds and renames
-  into place. Binding checks each piece of it (a crt object or a member) when
+  part, and step 6's for the other kinds): what `runtime_import` (or
+  `runtime_import_static`, `runtime_import_static_pie` or
+  `runtime_import_shared`) makes of the C runtime, kept in a file per kind in
+  the cache directory (`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster`),
+  which `runtime_open` (or `runtime_open_static`, `runtime_open_static_pie` or
+  `runtime_open_shared`) maps and uses in place when this executable wrote
+  it, it is of the kind, its directory hashes right and every file the import
+  probed is as it was, and otherwise rebuilds and renames into place. Binding checks each piece of it (a crt object or a member) when
   it first reads it (`runtime_piece_current`). `snapshot_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-snapshot` runs them) and `snapshot_benchmark.c`
   provides `benchmark-snapshot`.
@@ -1174,7 +1179,14 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   `_DYNAMIC` to the linker; the IRELATIVE relocations' bounds, which
   `libc.a` refers to weakly and a static PIE's linker doesn't define, to
   nothing; and with `--cross-check`, every relocation compared with
-  readelf's, as the static runtime's are.
+  readelf's, as the static runtime's are;
+- the shared library's runtime: `runtime_import_shared`, without a start
+  object (its piece empty, no ABI note); `crti.o`, `crtbeginS.o`, `crtendS.o`
+  and `crtn.o`; `libc.so.6`, the loader and `libc_nonshared.a`; nothing
+  referring to `main`, which is no global name; `_init` crti.o's and
+  `__dso_handle` crtbeginS.o's; the names its linker defines (`_DYNAMIC`
+  among them), and no other; and every crt object and member taking the
+  vector path.
 
 `--cross-check`, which needs `readelf`, compares `libc.so.6`'s and the
 loader's exports (name, version, type, binding and size) and references with
@@ -1220,7 +1232,7 @@ informational.
 ## Bind tests
 
 `./build/compiler test-bind [--seed N] [--cross-check] [--keep]` (about
-71 ms on the 9700X, and 0.92 s with `--cross-check`) checks `bind.c` against
+72 ms on the 9700X, and 1.05 s with `--cross-check`) checks `bind.c` against
 this system's runtime (`runtime_import`). Every check binds by both paths,
 which must make the same link, column by column, and the same imports,
 exports and members:
@@ -1347,6 +1359,30 @@ linked by `cc -static-pie` with GNU ld (`--trace` twice) and with lld
 (`--why-extract`), which must load the same members and run as the model
 predicts, or with the program's status.
 
+Then against a shared library's runtime (`runtime_import_shared`), by both
+paths, which must make the same link and binding:
+
+- shared programs: test-link's two sets that call libc, bound as libraries:
+  `link_check`; no `_start`, as there is no start object; `_init`, `_fini` and
+  `__dso_handle` hidden and not exported; and the exports exactly the link's
+  definitions with default or protected visibility, global or weak, in
+  symbol order, `main` among them;
+- shared rules, on links made by hand without `main`: a strong reference
+  with default visibility to a name nothing defines stays undefined, neither
+  an import nor an export, and a hidden one is an error naming it;
+  definitions with default, protected and hidden visibility and a weak one,
+  all but the hidden one exports; and references to `__tls_get_addr` and
+  `puts`, imports of the loader's at `GLIBC_2.3` and of `libc.so.6`'s at
+  `GLIBC_2.2.5`;
+- with `--cross-check`, three C libraries that `cc` compiles with `-fPIC`
+  (exports of every visibility; imports from `libc.so.6` and the loader,
+  general-dynamic TLS with `-mtls-dialect=gnu`, and undefined and weak
+  references; and `atexit`, whose member joins), each imported, bound and
+  checked as the programs are, then linked by `cc -shared` with GNU ld, which
+  must link it, and with lld, whose `.dynsym` must have the imports at their
+  versions, the undefined and weak references and the exports binding found,
+  and whose `--why-extract` the members that joined.
+
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
 removed at the end unless `--keep`. The default 9700X job runs it with
 `--cross-check` after the import benchmark.
@@ -1357,7 +1393,8 @@ removed at the end unless `--keep`. The default 9700X job runs it with
 generated programs that call libc, of 1, 64, 2,000 and 102,400 workers by
 default (`--functions` takes a list), 200 workers per unit as synth's
 translation units have, by each path, against the dynamic PIE's runtime, a
-static executable's and a static PIE's, and reports 21-run medians (time,
+static executable's, a static PIE's and a shared library's, and reports
+21-run medians (time,
 cycles, instructions, IPC) of the match (the program's global symbols looked
 up in the runtime's names, per global symbol), `bind_begin`, the static
 runtimes' closure (the members the link needs, per member) and `bind_end`,
@@ -1707,9 +1744,9 @@ like the others, its measurements are informational.
 
 `./build/compiler test-snapshot [--seed N] [--functions N] [--directory PATH]
 [--keep]` (about 0.31 s on the 9700X) checks `snapshot.c` with this system's
-runtimes, a dynamic PIE's, a static executable's and a static PIE's, in a
-directory of its own under `--directory` (`TMPDIR` or `/tmp` by default),
-which it removes unless `--keep`:
+runtimes, a dynamic PIE's, a static executable's, a static PIE's and a
+shared library's, in a directory of its own under `--directory` (`TMPDIR` or
+`/tmp` by default), which it removes unless `--keep`:
 
 - round trip: the imported runtime written as a snapshot and loaded back must
   have the import's records, every one that binding and a dynamic PIE read
@@ -1719,7 +1756,9 @@ which it removes unless `--keep`:
   over the file it maps. Then the same for the static runtime
   (`runtime_import_static`), with its kind, its archives, its members'
   references (with the members they load) and COMDAT groups and its global
-  names' members, and for the static PIE's (`runtime_import_static_pie`);
+  names' members, for the static PIE's (`runtime_import_static_pie`), and
+  for the shared library's (`runtime_import_shared`), its start object's
+  piece empty;
 - links, static links and static PIE links: test-link's two sets that call
   libc and a program of `--functions` workers (2,000 by default), bound by
   both of binding's paths against the imported runtime and against a loaded
@@ -1732,10 +1771,11 @@ which it removes unless `--keep`:
   which it makes private: imported and written, then loaded; with no
   directory, or without an identity, imported and nothing written; and where
   the directory can't be made, the runtime still imported, the failure named;
-- kinds: `runtime_open_static` and `runtime_open_static_pie`, each imported
-  and written, then loaded, with its kind's records; the dynamic runtime's
-  snapshot beside them, the three (`runtime.snapshot`,
-  `runtime-static.snapshot` and `runtime-static-pie.snapshot`) the
+- kinds: `runtime_open_static`, `runtime_open_static_pie` and
+  `runtime_open_shared`, each imported and written, then loaded, with its
+  kind's records; the dynamic runtime's snapshot beside them, the four
+  (`runtime.snapshot`, `runtime-static.snapshot`,
+  `runtime-static-pie.snapshot` and `runtime-shared.snapshot`) the
   directory's only files; each kind's snapshot loaded as each other kind,
   stale; and each kind's snapshot renamed to the next kind's name in turn,
   stale there, imported again and written over;
@@ -1778,11 +1818,12 @@ it after benchmark-executable.
 ## Snapshot benchmark
 
 `./build/compiler benchmark-snapshot [--directory PATH] [--runs N] [--only
-dynamic|static|static-pie]` reports, for a dynamic PIE's runtime, a static
-executable's and a static PIE's (`--only` one of them), medians of `--runs`
-runs (41 by default) of the import without a snapshot, `snapshot_write` into
-a directory under `--directory` (`TMPDIR` or `/tmp`), `runtime_open` (or
-`runtime_open_static`, `runtime_open_static_pie`) from the snapshot phase by
+dynamic|static|static-pie|shared]` reports, for a dynamic PIE's runtime, a
+static executable's, a static PIE's and a shared library's (`--only` one of
+them), medians of `--runs` runs (41 by default) of the import without a
+snapshot, `snapshot_write` into a directory under `--directory` (`TMPDIR` or
+`/tmp`), `runtime_open` (or `runtime_open_static`, `runtime_open_static_pie`,
+`runtime_open_shared`) from the snapshot phase by
 phase (the compiler's identity, the mapping, the header and the directory's
 hash, the view, the probes' `stat`s), `runtime_release` of a loaded runtime,
 the alternatives the design weighed (the snapshot read with `pread` into new

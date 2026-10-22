@@ -73,18 +73,21 @@ static const char* const snapshot_benchmark_kind_options[RUNTIME_KINDS] = {
     [RUNTIME_KIND_DYNAMIC] = "dynamic",
     [RUNTIME_KIND_STATIC] = "static",
     [RUNTIME_KIND_STATIC_PIE] = "static-pie",
+    [RUNTIME_KIND_SHARED] = "shared",
 };
 
 static const char* const snapshot_benchmark_kind_names[RUNTIME_KINDS] = {
     [RUNTIME_KIND_DYNAMIC] = "dynamic",
     [RUNTIME_KIND_STATIC] = "static",
     [RUNTIME_KIND_STATIC_PIE] = "static PIE",
+    [RUNTIME_KIND_SHARED] = "shared library",
 };
 
 static const char* const snapshot_benchmark_imports[RUNTIME_KINDS] = {
     [RUNTIME_KIND_DYNAMIC] = "runtime_import",
     [RUNTIME_KIND_STATIC] = "runtime_import_static",
     [RUNTIME_KIND_STATIC_PIE] = "runtime_import_static_pie",
+    [RUNTIME_KIND_SHARED] = "runtime_import_shared",
 };
 
 static int snapshot_benchmark_compare(const void* a, const void* b)
@@ -488,6 +491,7 @@ int run_snapshot_benchmark(int argc, char** argv)
         [RUNTIME_KIND_DYNAMIC] = true,
         [RUNTIME_KIND_STATIC] = true,
         [RUNTIME_KIND_STATIC_PIE] = true,
+        [RUNTIME_KIND_SHARED] = true,
     };
     bool valid = true;
     for (int i = 1; i < argc; i += 1)
@@ -521,7 +525,7 @@ int run_snapshot_benchmark(int argc, char** argv)
     bool result = valid && (x86_encoder_initialized || x86_encoder_initialize());
     if (!valid)
     {
-        fprintf(stderr, "usage: benchmark-snapshot [--directory PATH] [--runs N] [--only dynamic|static|static-pie]\n");
+        fprintf(stderr, "usage: benchmark-snapshot [--directory PATH] [--runs N] [--only dynamic|static|static-pie|shared]\n");
     }
     for (uint32_t kind = 0; result && kind < RUNTIME_KINDS; kind += 1)
     {
