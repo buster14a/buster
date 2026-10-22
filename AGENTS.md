@@ -578,7 +578,7 @@ the component has a function of that name; add one only for the
 style's "trivial statically bounded recursion", with a comment saying what
 bounds its depth. The list is empty: the tree has no cycle. The 9700X job runs
 `test-call-graph` and the check after the build; the check, which captures the
-units' IR at once, takes about 1.8 s.
+units' IR at once, takes about 2 s.
 
 `./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
 on IR of the call forms clang writes and of what must be left out, a
