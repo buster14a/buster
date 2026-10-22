@@ -31,7 +31,9 @@ jobs:
   # GitHub-hosted runner so that it doesn't wait for the 9700X. When this job fails, `test` runs. And whether it changes
   # the harnesses of the baselines, the linkers' times and the floors (link_benchmark.c and floors_benchmark.c): they
   # measure other programs and the machine, the same for every pull request, so `test` measures them on pushes to main,
-  # dispatched runs and pull requests that change these harnesses, as when this job is skipped or fails.
+  # dispatched runs and pull requests that change these harnesses, as when this job is skipped or fails. The same for
+  # benchmark-foreign's mold and wild (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the
+  # foreign path's phases.
   changes:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -41,6 +43,7 @@ jobs:
     outputs:
       code: ${{ steps.files.outputs.code }}
       baselines: ${{ steps.files.outputs.baselines }}
+      foreign: ${{ steps.files.outputs.foreign }}
     steps:
       - id: files
         env:
@@ -55,6 +58,7 @@ jobs:
           if [ "$COUNT" -ge 3000 ]; then
               code=true
               baselines=true
+              foreign=true
           else
               gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" \
                   --jq '.[] | .filename, (.previous_filename // empty)' > files
@@ -69,11 +73,18 @@ jobs:
               else
                   baselines=false
               fi
+              if grep -Ex 'src/buster/compiler/foreign_benchmark\.c' files > /dev/null; then
+                  foreign=true
+              else
+                  foreign=false
+              fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "baselines=$baselines" >> "$GITHUB_OUTPUT"
+          echo "foreign=$foreign" >> "$GITHUB_OUTPUT"
           echo "Changes code: $code"
           echo "Changes the baselines' harnesses: $baselines"
+          echo "Changes the foreign inputs' benchmark: $foreign"
 
   test:
     name: Build and execute on Ryzen 7 9700X
@@ -141,6 +152,11 @@ jobs:
           # does, and with --cross-check as lld's does, with as many IRELATIVE relocations and the same TLS segment's
           # alignment and init and fini arrays' sizes.
           ./build/compiler test-static --cross-check
+          == Test the foreign inputs
+          # Generated programs' objects split into archives and compiled C and C++ cases, resolved by both paths on 1,
+          # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the
+          # winners, the COMDAT groups and -y's lines with the resolution's.
+          ./build/compiler test-foreign --cross-check
           == Test branch sizing
           # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
           # relaxation of them must give the bytes of the sized records.
@@ -240,7 +256,9 @@ jobs:
           ./build/compiler test-types
           == Test the per-file jobs
           # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams,
-          # and each unit the spellings it gives alone.
+          # -E text and diagnostics, and each unit the spellings it gives alone; and again with the shared table's ids
+          # in another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and
+          # locations, each id spelled the same. Its forms with paths (the translation units, src flat) do the same.
           ./build/compiler test-files
           == Test the lanes
           ./build/compiler test-lanes
@@ -356,6 +374,21 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-snapshot
+
+      - name: Benchmark the foreign inputs against mold and wild
+        # --linkers also times mold's and wild's reading and resolving on one thread on the same command lines, which no
+        # pull request changes: it runs where `changes` doesn't rule it out (foreign_benchmark.c's harness).
+        if: needs.changes.outputs.foreign != 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-foreign --linkers
+
+      - name: Benchmark the foreign inputs
+        # Every other pull request's: the resolution's times by the vector path and the exact one.
+        if: needs.changes.outputs.foreign == 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-foreign
 
       - name: Benchmark the whole link against GNU ld, lld, mold and wild
         # Without taskset: it pins its own lane and the linkers' runs on one thread, and the linkers' other runs need
