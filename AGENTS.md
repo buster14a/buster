@@ -973,6 +973,30 @@ A watchdog ends the run with status 1 if a group doesn't finish within 60 s,
 which is how a lost wake-up would show. `--rounds N` and `--seed N` change the
 rounds and the random inputs.
 
+## Deterministic output tests
+
+`./build/compiler test-diagnostics` checks the buffered diagnostic merge:
+the AVX-512 radix sort against stable insertion sort, guard-page tails,
+complete 64-bit keys, grouped notes, the earliest fatal cutoff, and bounded
+allocation failures. Jobs run in forward and reverse order with delayed
+completion at 1, 2, 3 and 8 lanes; the bytes must agree.
+
+`test-preprocessor` (without files), `test-object-writer`, `test-executable`,
+`test-dynamic` and `test-static` also check output after changing opaque
+identifier assignments. Each accepts `--id-order N` (default 153). The object
+test covers both section modes at every lane count; the preprocessor compares
+both `-E` text modes and diagnostics through both kernels and both job orders.
+The 9700X workflow runs these checks as part of the stage commands.
+
+`./build/compiler benchmark-diagnostics [--only scalar|selected]
+[--after-scalar MS]` compares the
+ordering paths with 21 interleaved samples, in ns/key and invariant-TSC
+ticks/key. Run both isolated `--only selected` and
+`--only selected --after-scalar 100`, across several processes pinned to CPU 2
+under the host's lock. [The determinism guide](docs/determinism.md) specifies
+the caller's source-order and lifetime contracts and the integration still
+required by #150, #151 and #152.
+
 ## Lane benchmark
 
 `./build/compiler benchmark-lanes [--lanes N] [--cpus LIST] [--rounds N]` pins
