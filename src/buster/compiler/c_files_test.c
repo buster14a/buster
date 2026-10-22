@@ -11,8 +11,9 @@
 // what the walk did, and each translation unit's output stream (kinds, flags, values and locations) when it
 // preprocesses with the cache. One lane refines straight into the shared table, so it is the merge's scalar twin, and
 // the others must give its ids. Each unit's spellings must also be those it gives with a cache of its own (the
-// preprocessor as it runs alone), with as many errors and warnings, and nothing may be written to stderr while the
-// cache is filled.
+// preprocessor as it runs alone), with as many errors and warnings; nothing may be written to stderr while the cache is
+// filled, no walk may leave a file open (/proc/self/fd's entries before and after it), and one lane may leave no file's
+// bytes for later.
 //   - The tree: a directory of the test's own under $TMPDIR (or /tmp), with three translation units and the headers they
 //     include: by the includer's directory and through -I and -isystem, an #include_next chain through three
 //     directories, a header reached by four paths (a symbolic link and `..` among them), a hard link to a header that a
@@ -20,7 +21,8 @@
 //     header and a #pragma once header included twice, a header under #if 0 that exists (prepared but never entered) and
 //     one that doesn't (no diagnostic), and a missing header in an active line, which the unit reports. The counts are
 //     exact: the files prepared (each identity once), the rounds, the unused files, the headers not found, and the system
-//     calls each unit made after the walk (only the computed include's).
+//     calls each unit made after the walk (only the computed include's). Every file's bytes are left to the lane that
+//     prepares it, then read by the probes, then left only by the waves that 4 files kept open can hold: the same.
 //   - Spellings: generated files of identifiers (a shared vocabulary drawn unevenly, names of their own, long ones, line
 //     splices and UCNs) prepared without following includes, enough new spellings for the shared table to grow during a
 //     merge; and again in two runs into one cache, whose second finds most of its spellings in the shared table, against
@@ -29,8 +31,9 @@
 //     header in two directories (a hard link) whose own local.h differ, which it must walk in both.
 //   - Special paths: a FIFO that an include under #if 0 names (the walk's probe mustn't block) and an active one
 //     names, and a quoted name of 2,400 bytes in a directory of 2,539, whose three requests must share one search.
-//   - Memory: runs short of the round's arena or of one lane's scratch memory, which may fail, but after which every
-//     unit must give what it gives alone.
+//   - Unread files: the cache's own functions on files whose probes left their bytes unread and kept them open.
+//   - Memory: runs short of the round's arena, of one lane's scratch memory or of the round's files, which may fail, but
+//     after which every unit must give what it gives alone, and no file may be left open.
 //   The checks that would hang if they regressed run under a 60-second alarm, which fails the test.
 //   - Files: each file (or each .c and .h file under a directory) as a translation unit with the options (as for -E:
 //     -I, -isystem, -D, --predefines, -std=, ...), all of them the walk's roots. With --flat, the files are only prepared,

@@ -55,9 +55,10 @@
 // main.c includes this file after c_preprocessor.c; every function is static. Layout: FilesSpelling, FilesLane and
 // FilesRun; the merge (files_find_new, files_make_candidates, files_place_candidates, files_find_first,
 // files_count_first, files_sum_first, files_add_first, files_take_ids, files_remap); a round's preparation (files_read,
-// files_close, files_prepare); the walk's requests and searches (files_read_requests, files_search_requests, files_advance,
-// files_collect_probes, files_add_probes, files_search, files_next_round); files_run_ahead, files_run_initialize and
-// files_run_release; and the sources under a path, for the tests' and the benchmark's corpora (files_list_sources).
+// files_close, files_prepare); the walk's requests and searches (files_read_requests, files_search_requests,
+// files_advance, files_collect_probes, files_add_probes, files_search, files_next_round); files_run_ahead,
+// files_run_initialize and files_run_release; and the sources under a path, for the tests' and the benchmark's corpora
+// (files_list_sources).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -99,8 +100,8 @@
 // the lane that prepares it, which lexes them in its own caches rather than another core's: lane 0 alone prepares a
 // round of less than BUSTER_FILES_LANE_BYTES per lane, the walks' usual round, and the lanes that just woke to probe it
 // run slowly ("Lanes" in docs/object-writer-and-linker.md). A probe keeps the file open for it, and the lanes close a
-// share each after the round, since closing a file another core opened cost lane 0 about 0.7 us, five times one it
-// opened itself. A smaller file costs lane 0 more to read than to lex where a probe left it, and a wave of more than
+// share each after the round, since closing a file another core opened cost lane 0 about 0.5 us, against 0.14 us for
+// one it opened itself. A smaller file costs lane 0 more to read than to lex where a probe left it, and a wave of more than
 // BUSTER_FILES_DEFER_PROBES probes (a flat corpus, a project's roots) is most often the start of a round that lanes
 // share, where reading on the preparing lane measured slower (the C library corpus) or no faster (musl's 1,357 roots):
 // its probes read their files themselves. The walk keeps open only what the process's limit holds, less

@@ -29,41 +29,52 @@ prepared without their includes, the C library corpus (8,983 files).
 `benchmark-files`: medians of 21 runs, each from nothing (a new intern table
 and cache, and every file opened, read or mapped, lexed, refined and indexed):
 
-| Lanes | C library corpus, flat | `sqlite3.c` and its headers | musl, 1,357 units | This repository, 20 units |
+| Lanes | C library corpus, flat | `sqlite3.c` and its headers | musl, 1,357 units | This repository, 23 units |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 73.93 ms | 7.45 ms | 4.07 ms | 5.68 ms |
-| 2 | 58.41 ms (1.27×) | 7.48 ms | 3.15 ms (1.29×) | **5.50 ms (1.03×)** |
-| 3 | 46.73 ms (1.58×) | **7.43 ms (1.00×)** | 3.03 ms (1.34×) | 5.57 ms |
-| 4 | 41.90 ms (1.76×) | 7.51 ms | **2.99 ms (1.36×)** | 5.67 ms |
-| 5 | 39.59 ms (1.87×) | 7.57 ms | 3.07 ms | 5.73 ms |
-| 6 | **38.88 ms (1.90×)** | 7.60 ms | 3.16 ms | 5.84 ms |
-| 7 | 39.37 ms (1.88×) | 7.80 ms | 3.24 ms | 6.09 ms |
-| 8 | 40.37 ms (1.83×) | 7.77 ms | 3.40 ms (1.20×) | 6.14 ms |
+| 1 | 74.60 ms | 7.45 ms | 4.06 ms | 6.36 ms |
+| 2 | 58.88 ms (1.27×) | 7.40 ms (1.01×) | 3.17 ms (1.28×) | 6.20 ms (1.03×) |
+| 3 | 47.19 ms (1.58×) | 7.28 ms (1.02×) | 3.13 ms (1.30×) | **6.01 ms (1.06×)** |
+| 4 | 42.05 ms (1.77×) | 7.28 ms (1.02×) | **3.11 ms (1.31×)** | 6.06 ms (1.05×) |
+| 5 | 39.94 ms (1.87×) | **7.19 ms (1.04×)** | 3.13 ms (1.30×) | 6.07 ms (1.05×) |
+| 6 | **39.51 ms (1.89×)** | 7.28 ms (1.02×) | 3.41 ms (1.19×) | 6.17 ms (1.03×) |
+| 7 | 40.19 ms (1.86×) | 7.31 ms (1.02×) | 3.42 ms (1.19×) | 6.26 ms (1.02×) |
+| 8 | 40.52 ms (1.84×) | 7.59 ms (0.98×) | 3.55 ms (1.14×) | 6.25 ms (1.02×) |
 
-What a run does (the reads and mappings are those of 8 lanes):
+What a run does (the reads and mappings are those of 8 lanes, and the files
+left to the lanes that prepared them, #262's, too):
 
-| Roots | Rounds | Files | Bytes | Tokens | Shared ids | Opens | Reads, mappings |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| The C library corpus (Zig 0.14.1 `lib/libc`), without includes | 1 | 8,983 | 93.8 MB | 13,152,141 | 597,638 | 8,983 | 8,188, 765 |
-| `sqlite3.c` 3.53 | 8 | 420 | 15.1 MB | 1,665,617 | 40,093 | 1,085 | 354, 66 |
-| musl 1.2.5's sources, with its build's options | 4 | 1,598 | 2.4 MB | 580,440 | 15,026 | 2,535 | 1,571, 16 |
-| This repository's translation units, with `-march=native` | 7 | 449 | 10.6 MB | 1,384,621 | 37,034 | 1,326 | 334, 115 |
+| Roots | Rounds | Files | Bytes | Tokens | Shared ids | Opens | Reads, mappings | Left to the preparing lane |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| The C library corpus (Zig 0.14.1 `lib/libc`), without includes | 1 | 8,983 | 93.8 MB | 13,152,141 | 597,638 | 8,983 | 8,188, 765 | 0 |
+| `sqlite3.c` 3.53 | 8 | 420 | 15.1 MB | 1,665,617 | 40,093 | 1,085 | 354, 66 | 341 |
+| musl 1.2.5's sources, with its build's options | 4 | 1,598 | 2.4 MB | 580,440 | 15,026 | 2,535 | 1,571, 16 | 100 |
+| This repository's translation units, with `-march=native` | 7 | 468 | 11.6 MB | 1,529,548 | 38,564 | 1,360 | 343, 125 | 392 |
 
 - **The C library corpus** is the one large round: 94 MB prepared by every
-  lane, 1.90 times as fast on 6 lanes as on one, 338 million tokens a second.
+  lane, 1.89 times as fast on 6 lanes as on one, 333 million tokens a second.
   It scales no further because eight lanes are bound by memory: their IPC falls
   from 2.15 on one lane to 0.79, while the clock falls only from 5.54 to 4.97
-  GHz (`perf stat` of whole runs). "Where the time goes" has the phases.
+  GHz (`perf stat` of whole runs). "Where the time goes" has the phases. Its
+  one wave of 8,983 probes reads as before #262 (with `--defer off`, 38.90 ms
+  on 6 lanes and 74.68 on one: runs of the same code differ by about 1.5%).
 - **The walks** are made of rounds below 4 MB per lane
-  (`BUSTER_FILES_LANE_BYTES`), which one lane prepares while every lane probes
-  paths. musl's walk gains from its 2,535 probes, which take 0.74 ms on 4 lanes
-  against 2.00 ms on one. Round 0 of `sqlite3.c`'s walk is `sqlite3.c` itself,
-  9.5 MB that one lane lexes and refines in 3.8 ms; its headers take 3.7 ms on
-  one lane and 3.5 ms on 3, and on 7 or 8 lanes the walk is 4% slower than on
-  one. The repository's walk is 3% faster on 2 lanes and 8% slower on 8: lane
-  0, which prepares all of its rounds, spends 0.6 ms more there (4.68 ms
-  preparing against 4.26 on one lane, and 0.45 ms of work alone against 0.25),
-  lexing files that other lanes read ("Not yet").
+  (`BUSTER_FILES_LANE_BYTES`), which lane 0 prepares alone while every lane
+  probes paths, and since #262 lane 0 reads their files' bytes itself, just
+  before it lexes them ("Reading where the bytes are lexed"). This
+  repository's walk is now 2 to 6% faster on 2 to 8 lanes than on one; with
+  the probes reading every file, as before (`--defer off`, in the same round of
+  measurements), it is 3% slower on 6 lanes and 8% on 8 (6.83 ms against
+  6.33). On 8 lanes, lane 0 still spends more preparing than on one (5.49 ms
+  against 4.78, the files' reads now its own) and more alone (0.43 against
+  0.28), but the lanes' searches take 0.26 ms rather than 0.84.
+  `sqlite3.c`'s walk is up to 3.5% faster on 2 to 7 lanes, where with the
+  probes reading it was up to 4% slower (7.79 ms on 7 lanes against 7.50), and
+  2% slower on 8 (7.59 ms against 7.45), whose round 0 took 4.79 ms against
+  about 3.9 on the other lane counts. Round 0 is `sqlite3.c` itself, 9.5 MB
+  that one lane lexes and refines in 3.8 ms. musl's walk gains from its
+  2,535 probes, which take 0.78 ms on 4 lanes against 1.99 on one; its headers,
+  mostly small, gain nothing from lane 0 reading them, and lose up to a few
+  per cent on 6 to 8 lanes (3.55 ms on 8 against 3.40 with the probes reading).
 
 **Speculation.** The walk follows every literal include, also those under an
 `#if` that turns out to be false. What it prepared that no unit entered:
@@ -72,7 +83,7 @@ What a run does (the reads and mappings are those of 8 lanes):
 | --- | ---: | ---: | ---: |
 | `sqlite3.c` | 420 | 250 | 423,621 of 1,665,617 (25.4%) |
 | musl's sources | 1,598 | 0 | 0 |
-| This repository's units | 449 | 42 | 18,793 of 1,384,621 (1.4%) |
+| This repository's units | 468 | 42 | 18,793 of 1,529,548 (1.2%) |
 
 `sqlite3.c`'s unused tokens are 85% of its headers' 497,487: clang's AVX-512
 intrinsic headers (`avx512fintrin.h` alone is 64,533 tokens), which an
@@ -102,9 +113,13 @@ fortified headers. musl's units enter every header the walk reaches.
   before: `-E`'s text is byte-identical, and `test-preprocessor --clang`
   passes.
 - **System calls in one place:** `file_cache_probe` opens a path, reads its
-  identity, and unless a record has that identity, maps or reads its bytes.
-  `FileCacheCounts` counts its opens, mappings and reads for whoever called
-  it: a unit's `Preprocessor.probes`, or a run's lanes.
+  identity, and unless a record has that identity, maps or reads its bytes;
+  or, for a file larger than its `defer_above`, leaves them unread and keeps
+  the file open, for `file_cache_read_record` to read them later from that
+  descriptor and `file_cache_close` to close it (`file_cache_load` does both).
+  A unit's lookup reads a record that a walk which stopped early left unread.
+  `FileCacheCounts` counts the opens, mappings and reads for whoever made them:
+  a unit's `Preprocessor.probes`, or a run's lanes.
 
 ### Per-file jobs on lanes
 
@@ -232,6 +247,20 @@ preparing ("Where the time goes").
   the process's memory map lock, on which lanes that map at once queue, so one
   lane maps with `MAP_POPULATE` and several map without it, which holds the
   lock for less time; their pages fault in as the lexer reads them.
+- **Bytes where they are lexed.** With more than one lane, a wave's probes
+  leave the bytes of each file of more than 1 KB (`BUSTER_FILES_DEFER_ABOVE`)
+  to the lane that prepares it: the probe keeps the file open, and the lane
+  reads it as above just before it lexes it, with `MAP_POPULATE` when it
+  prepares the round alone (no other lane maps then). Lane 0 alone prepares a
+  walk's usual round, so it lexes bytes in its own caches rather than in
+  those of the lanes that probed them, and the probing lanes, which have just
+  woken from waiting through the last round and run slowly, do less. After the
+  round, every lane closes a share of the round's files. A wave of more than
+  1,024 probes (`BUSTER_FILES_DEFER_PROBES`: a flat corpus, a project's roots)
+  reads as before, and so does one whose files would take the walk past the
+  process's limit of open files, less 256; so does one lane, which probes and
+  prepares every file itself. "Reading where the bytes are lexed" has the
+  measurements.
 - **Contexts.** What a file's includes resolve to depends on the file, the
   search directory it was found in (for `#include_next`), whether it is a root,
   and the directory its path is in. A path that leads to a file the walk has
@@ -255,7 +284,8 @@ preparing ("Where the time goes").
 - **Failures.** A run that runs out of memory stops, and every lane takes lane
   0's word on it at the same place (a broadcast), so that no lane waits at a
   sync the others skipped. A round whose merge can't finish leaves its files
-  unprepared.
+  unprepared. Lane 0 then reads the files that probes kept open and no lane
+  read, as a unit maps a file, so that no file stays open past the walk.
 
 ### Memory
 
@@ -350,14 +380,79 @@ unless said otherwise, medians of 7 to 21 runs):
   At 4 MB per lane (and at 8 MB, which measured the same) they took 7.62 against
   7.47 and 5.32 against 5.37 (both before the files' reads).
 
+### Reading where the bytes are lexed
+
+[#262](https://github.com/buster14a/buster/issues/262) measured where a walk's
+lanes should read the files' bytes. Lane 0 alone prepares a round of less than
+4 MB per lane, the walks' usual round, while every lane probes the paths; and a
+probe that read a file left its bytes in its own core's caches. So the
+repository's walk took 6.14 ms on 8 lanes against 5.68 on one, lane 0 spending
+4.68 ms preparing against 4.26. The probing lanes have also just waited
+through the round before (lane 0 prepares one of the repository's in 0.6 ms on
+average), long enough to sleep and to run slowly once they wake ("Lanes" in
+`docs/object-writer-and-linker.md`), so whatever a probe does delays its wave.
+
+Each way measured is a probe that opens the file and reads its identity, and
+leaves the bytes to the lane that prepares the file, keeping it open. That lane
+then closes the file as soon as it has read it; or every lane closes a share of
+the round's files after the round; and the second way again for files of more
+than 1 KB alone. In one process, the ways in turns run by run, each figure the
+median of 21 runs (separate processes differed by up to 5%, too much to tell 1
+or 2% apart):
+
+| Workload, lanes | Probes read | The lane reads and closes | The lane reads, the lanes close after the round | The same, files over 1 KB |
+| --- | ---: | ---: | ---: | ---: |
+| This repository, 1 | 6.15 ms | 6.23 ms | 6.18 ms | 6.16 ms |
+| This repository, 4 | 6.08 ms | 6.02 ms | 5.89 ms | 5.87 ms |
+| This repository, 8 | 6.56 ms | 6.21 ms | 6.01 ms | 6.04 ms |
+| `sqlite3.c`, 1 | 7.46 ms | 7.52 ms | 7.53 ms | 7.49 ms |
+| `sqlite3.c`, 8 | 7.77 ms | 7.48 ms | 7.36 ms | 7.36 ms |
+| musl, 4 | 3.02 ms | 3.12 ms | 3.08 ms | 3.05 ms |
+| musl, 8 | 3.44 ms | 3.51 ms | 3.50 ms | 3.52 ms |
+| The C library corpus, 1 | 74.78 ms | 79.37 ms | 81.15 ms | |
+| The C library corpus, 6 | 39.12 ms | 39.74 ms | 40.14 ms | |
+| The C library corpus, 8 | 40.58 ms | 40.87 ms | 41.36 ms | |
+
+(The corpus with room for every file open; its round is one wave of 8,983
+probes. musl with the 9700X's default limit of 1,024 open files, which kept
+its 1,357 roots' wave from deferring: only its headers did.)
+
+- **One lane** probes and prepares every file itself, and reading each file
+  just before lexing it, a system call between one file and the next, cost
+  more than reading them in the probes' batch: about 1% for the walks and 6%
+  for the corpus. One lane reads in its probes, as before.
+- **Closing a file** another core opened cost lane 0 about 0.5 µs, against
+  0.14 µs for a file it opened itself (the repository's 451 files: the
+  preparing phase, 0.23 ms longer on 8 lanes when lane 0 closed them, and on
+  one lane the closes alone, 0.06 ms). Every lane closing a share after the
+  round made the repository's walk 3% faster on 8 lanes, and `sqlite3.c`'s
+  2%.
+- **Small files.** A file of a kilobyte costs lane 0 more to read than to lex
+  where a probe left it. Leaving files of 1 KB or less to the probes measured
+  the same for the repository and `sqlite3.c`, and for musl, whose headers
+  are mostly smaller, about 1% faster on 2 and 4 lanes and 0.6% slower on 8:
+  files of more than 1 KB are left (`BUSTER_FILES_DEFER_ABOVE`).
+- **Big waves.** The corpus, a round that lanes share, gains nothing from its
+  lanes reading their own files and loses 1 to 3% on 4 to 8 lanes (the closes
+  after its round take 0.72 ms on 8 lanes); musl's roots, deferred with room
+  for every file, measured the same as read by the probes (separate
+  processes). The walks' largest waves are 198 probes (this repository's) and
+  142 (`sqlite3.c`'s): a wave of more than 1,024 probes
+  (`BUSTER_FILES_DEFER_PROBES`) reads in its probes.
+- **Batches.** Reading the next 64 KB or 256 KB of files before lexing them, so
+  that their system calls run together, measured within 1% of reading each
+  file on its own, either way, and the lanes read one file at a time.
+
 ## Correctness
 
 `./build/compiler test-files [--lanes LIST] [--seed N] [--keep] [--flat]
 [options] [path...]` (about 0.3 s without paths on the 9700X) runs every check
 on each lane count of `--lanes` (1, 2, 3 and 8), each time with a new intern
 table and cache, and compares the results with the first lane count's, byte for
-byte, as "Results" says, and every unit with itself run alone; and nothing may
-be written to stderr while the cache is filled:
+byte, as "Results" says, and every unit with itself run alone; nothing may
+be written to stderr while the cache is filled, no walk may leave a file open
+(the entries of `/proc/self/fd` before and after it), and one lane may leave no
+file's bytes for later:
 
 - **The tree:** three translation units and the headers they include in a
   directory of the test's own. It has includes by the includer's directory and
@@ -372,7 +467,11 @@ be written to stderr while the cache is filled:
   requests not found; and after the walk, the unit with the computed include
   opens one path and the others none. It runs with the vectorized kernels and
   their scalar twins, its rounds cut into parts and split once, all on every
-  lane (its rounds are small enough for lane 0 alone otherwise).
+  lane (its rounds are small enough for lane 0 alone otherwise), every file's
+  bytes left to the lane that prepares it however small. Then again with the
+  probes reading every file and with at most 4 files kept open, which defers
+  some waves and not others: the same results, with 13 files read by the
+  lanes that prepared them, none and 1 to 12.
 - **Spellings:** 240 generated files of identifiers (a shared vocabulary drawn
   unevenly, names of their own, names past 16 and 63 bytes, line splices and
   UCNs), prepared without following includes. They make 165,562 ids, so the
@@ -389,11 +488,20 @@ be written to stderr while the cache is filled:
   unit gives alone); and a quoted name of 2,400 bytes under `#if 0`, twice in a
   file and once in another, whose directory is 2,539 bytes long: the three
   requests' search key holds both whole, and they share one search.
+- **Unread files:** the cache's own functions on a file, a hard link to it, a
+  file that shrinks after its probe and one left unread: probes that leave the
+  bytes and keep the files open, the hard link's path given the first's record
+  and its file closed, a unit's lookup that reads what it finds unread, the
+  shrunk file none (its bytes can't be read whole), and a release that closes
+  the file left open.
 - **Memory:** runs on 2 and 3 lanes that all work, with the round's arena
-  from 64 bytes to 32 KB (half again each time) or the first or last lane's
-  scratch memory from 8 bytes to 512 (four times each time): 48 runs, of which
-  38 fail, at the walk's arrays, the merge's or a file's preparation. Every
-  unit must give what it gives alone.
+  from 64 bytes to 32 KB (half again each time), the first or last lane's
+  scratch memory from 8 bytes to 512 (four times each time), or the round's
+  files (`FilesRun.files`) from 64 bytes to 1 KB (twice each time), which fails
+  the next round's lists after its probes kept its files open: 58 runs, of
+  which 48 fail, at the walk's arrays, the merge's or a file's preparation.
+  Every unit must give what it gives alone, the probes must have kept files
+  open for the lanes, and no run may leave one open.
 - **Files:** each path's `.c` and `.h` files as translation units with `-E`'s
   options, all the walk's roots; with `--flat`, only prepared. Their files of
   more than 16 KB are mapped and the others read, as all the tree's are.
@@ -411,7 +519,11 @@ steps after an allocation failure (a crash), the aliases (the walk doesn't
 end) and the probe's non-blocking open (it blocks); reading `run->failed` on
 each lane at the walk's start, the race the memory check found, hangs only
 when the lanes' timing goes one way. It also passes under AddressSanitizer and
-UndefinedBehaviorSanitizer.
+UndefinedBehaviorSanitizer. And eight mutations of #262's reading each fail it:
+a walk that stops early not reading what its probes kept open, a path's
+duplicate file not closed, the round's files not closed, a unit's lookup not
+closing what it reads, a release not closing what is left open, the kept files
+not counted, no wave deferring, and one lane deferring.
 
 ## Reproduction
 
@@ -433,8 +545,11 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 On the 9700X, run each under `EXCLUSIVE_OWNER=<name>
 ~/buster-fast-bench/exclusive.sh`, without `taskset`: the benchmark pins its
 lanes. `--read-limit N` sets the largest file the lanes read rather than map
-(16 KB), `--bytes map|read|populate` how they get the larger ones, and
-`--lane-bytes N` a round's bytes per working lane (4 MB).
+(16 KB), `--bytes map|read|populate` how they get the larger ones,
+`--lane-bytes N` a round's bytes per working lane (4 MB), `--defer off` makes
+the probes read every file's bytes themselves, as before #262, and
+`--defer-above N` sets the largest file a deferring wave's probes still read
+(1 KB).
 
 ## Not yet
 
@@ -445,12 +560,19 @@ lanes. `--read-limit N` sets the largest file the lanes read rather than map
   Refinement could take a file's token ranges on several lanes (each range's
   first gap needs the token before it, which `refine_tokens` doesn't take yet),
   and the merge already orders occurrences by file and lane-local id.
-- **Preparing where the bytes are.** The lanes that probe a round's files read
-  the small ones, and the lane that prepares the round lexes them from the
-  other cores' caches: the repository's walk, whose rounds lane 0 prepares
-  alone, is 8% slower on 8 lanes than on one. Reading each file on the lane
-  that prepares it, once the round is known, would keep it in that lane's
-  caches.
+- **The work alone.** On 8 lanes, lane 0's work alone in this repository's
+  walk takes 0.43 ms against 0.28 on one: it gathers the requests, paths and
+  probes' results the other lanes wrote, reading other cores' lines one record
+  at a time. Prefetching them, or partitioning the gathering, could take most
+  of the difference.
+- **Waking lanes.** Lanes that waited through a round lane 0 prepared alone
+  wake slowly (`lane.c`), and probing is the work they wake for: the search
+  phase is the walks' remaining cost of more lanes.
+- **Deciding by the round.** A wave's probes leave the bytes by the wave (its
+  probes and the files open), not by whether its round turns out to be one
+  that lanes share, which isn't known until the round's last wave: such a round
+  found in waves of at most 1,024 probes is read by its preparing lanes, which
+  for the corpus cost 1 to 3%. No workload here has one.
 - **Searching earlier.** A file's literal includes need its kinds, starts and
   bytes, not its refined values: its searches could start while it is refined.
 - **`__has_include`.** A unit still probes the paths its `__has_include`

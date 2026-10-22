@@ -288,7 +288,8 @@ struct PPFileData
     uint32_t length;
     // The bytes are a mapping of the file, which the record's cache unmaps (file_cache_release), not arena memory.
     bool mapped;
-    // A cache record whose bytes are still unread (null): the descriptor its probe left open for them (file_cache_load).
+    // A cache record's file that its probe left open (else -1): its bytes unread (null) until file_cache_read_record,
+    // and the file open until file_cache_close.
     int32_t descriptor;
     // A translation unit's copy: the file cache's record it copies, or BUSTER_PP_NONE for a file the unit made (the
     // predefines, the command line), which isn't in the cache.
@@ -1718,7 +1719,7 @@ typedef enum PPPrepareStatus
     PP_PREPARE_NO_COLUMNS,
     // No room for the rest, or the intern table is full.
     PP_PREPARE_NO_MEMORY,
-    // The file's bytes can't be read (c_files.c reads a file's bytes as it prepares it: file_cache_load).
+    // The file's bytes can't be read (c_files.c's lanes read the bytes the probes left as they prepare a file).
     PP_PREPARE_UNREADABLE,
 } PPPrepareStatus;
 
@@ -2146,11 +2147,11 @@ static FileCachePath* file_cache_find_path(FileCache* cache, const char* path, u
 // The bytes of an empty file.
 static const uint8_t file_cache_empty[1] = { 0 };
 
-// The bytes of the regular file of `length` bytes open as `descriptor`, as `how` says. A mapping is read-only: the page cache's pages, which costs neither a copy nor
-// clearing new pages, but each mapping holds the process's memory map lock, on which lanes that map at once queue. A file
-// of up to `read_limit` bytes, or any with FILE_CACHE_READ, is read into `bytes_arena` instead (unless it is null),
-// followed by 64 zero bytes. Returns 0 if they can't be mapped or read whole; `*mapped` says whether they are a mapping,
-// and the system calls go to `counts`.
+// The bytes of the regular file of `length` bytes open as `descriptor`, as `how` says. A mapping is read-only: the page
+// cache's pages, which costs neither a copy nor clearing new pages, but each mapping holds the process's memory map lock,
+// on which lanes that map at once queue. A file of up to `read_limit` bytes, or any with FILE_CACHE_READ, is read into
+// `bytes_arena` instead (unless it is null), followed by 64 zero bytes. Returns 0 if they can't be mapped or read whole;
+// `*mapped` says whether they are a mapping, and the system calls go to `counts`.
 static const uint8_t* file_cache_read(int descriptor, uint32_t length, FileCacheBytes how, uint32_t read_limit, Arena* bytes_arena, bool* mapped, FileCacheCounts* counts)
 {
     const uint8_t* result = file_cache_empty;
@@ -2222,9 +2223,9 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
     }
 }
 
-// Reads the bytes of record `record` if its probe left them unread (file_cache_probe's `defer_above`), as `how`, `read_limit` and
-// `bytes_arena` say (file_cache_read), from its descriptor, which stays open until file_cache_close. Returns whether the
-// record has its bytes. Lanes read different records at once.
+// Reads the bytes of record `record` if its probe left them unread (file_cache_probe's `defer_above`), as `how`,
+// `read_limit` and `bytes_arena` say (file_cache_read), from its descriptor, which stays open until file_cache_close.
+// Returns whether the record has its bytes. Lanes read different records at once.
 static bool file_cache_read_record(FileCache* cache, uint32_t record, FileCacheBytes how, uint32_t read_limit, Arena* bytes_arena, FileCacheCounts* counts)
 {
     PPFileData* data = &cache->records[record];

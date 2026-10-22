@@ -2394,7 +2394,9 @@ did, and each translation unit's output stream (kinds, flags, values and
 locations) when it preprocesses with the cache. One lane refines straight into
 the shared table, so it is the merge's scalar twin. Each unit's spellings must
 also be those it gives with a cache of its own, with as many errors and
-warnings, and nothing may be written to stderr while the cache is filled:
+warnings; nothing may be written to stderr while the cache is filled, no walk
+may leave a file open (counted in `/proc/self/fd`), and one lane may leave no
+file's bytes for later:
 
 - the tree: a directory of the test's own (under `$TMPDIR` or `/tmp`) with
   three translation units and the headers they include, by every kind of
@@ -2407,7 +2409,11 @@ warnings, and nothing may be written to stderr while the cache is filled:
   once) in 4 rounds, 1 unused, 2 requests not found (no diagnostic), and the
   units' system calls after the walk (only the computed include's). It runs
   with the vectorized kernels and with their scalar twins, cut into parts and
-  split once, on every lane (`FilesRun.lane_bytes` 0);
+  split once, on every lane (`FilesRun.lane_bytes` 0), every file's bytes left
+  to the lane that prepares it however small; then with the probes reading
+  every file and with at most 4 files kept open (some waves deferring and some
+  not), which must give the same results, with 13, none and 1 to 12 files
+  read by the lanes that prepared them;
 - spellings: 240 generated files of identifiers (a shared vocabulary drawn
   unevenly, names of their own, long names, line splices and UCNs) prepared
   without following includes, 165,562 ids, so that the shared table grows in a
@@ -2421,9 +2427,16 @@ warnings, and nothing may be written to stderr while the cache is filled:
   probe mustn't block) and an active one names (an error, as alone), and a
   quoted name of 2,400 bytes in a directory of 2,539, three requests of which
   must share one search;
-- memory: runs on 2 and 3 lanes short of the round's arena or of one lane's
-  scratch memory, at sizes that fail the walk's, the merge's and a file's
-  allocations: every unit must give what it gives alone;
+- unread files: the cache's own functions on probes that leave the bytes and
+  keep the files open: a hard link's path given the first path's record and
+  its file closed, a unit's lookup that reads what it finds unread, a file
+  that shrank after its probe (none), and a release that closes a file left
+  open;
+- memory: runs on 2 and 3 lanes short of the round's arena, of one lane's
+  scratch memory or of the round's files, at sizes that fail the walk's, the
+  merge's and a file's allocations and the next round's lists after its probes
+  kept files open: every unit must give what it gives alone, some runs must
+  keep files open for the lanes, and none may leave one open;
 - with paths, their `.c` and `.h` files as translation units with `-E`'s
   options (`-I`, `-isystem`, `-D`, `--predefines`, `-std=`, ...), all the walk's
   roots; with `--flat`, only prepared (a corpus such as the C library's).
@@ -2441,13 +2454,17 @@ translation units.
 
 `./build/compiler benchmark-files [--lanes LIST] [--cpus LIST] [--runs N]
 [--spin MS] [--flat] [--bytes map|read|populate] [--read-limit N]
-[--lane-bytes N] [options] path...` fills a cache from the paths (with
+[--lane-bytes N] [--defer on|off] [--defer-above N] [options] path...` fills a
+cache from the paths (with
 `--flat`, without following their includes) on each lane count of `--lanes`
 (1 to 8), lane i pinned to the i-th CPU of `--cpus` (the allowed CPUs, in
 order), every run from nothing after `--spin` ms (2) of spinning on every lane.
 `--read-limit` sets the largest file the lanes read rather than map (16 KB),
-`--bytes` how lanes map the larger ones (or read them), and `--lane-bytes` a
-round's bytes per working lane (4 MB). It reports medians of `--runs` (21):
+`--bytes` how lanes map the larger ones (or read them), `--lane-bytes` a
+round's bytes per working lane (4 MB), `--defer off` makes the probes read
+every file's bytes themselves rather than leave them to the lanes that prepare
+the files, and `--defer-above` the largest file a deferring wave's probes
+still read (1 KB). It reports medians of `--runs` (21):
 the run's time, speedup and time to the roots' round, the tokens per second,
 each phase on the lane that spent the most on it (preparing, the merge's
 lookups, exchange, additions and rewrite, the include lines, the searches, the
