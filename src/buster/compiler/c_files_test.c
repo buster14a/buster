@@ -25,6 +25,13 @@
 //     splices and UCNs) prepared without following includes, enough new spellings for the shared table to grow during a
 //     merge; and again in two runs into one cache, whose second finds most of its spellings in the shared table, against
 //     one run of all of them on one lane.
+//   - Contexts: a guarded header that includes itself through ./ and sub/.., which the walk must take once, and one
+//     header in two directories (a hard link) whose own local.h differ, which it must walk in both.
+//   - Special paths: a FIFO that an include under #if 0 names (the walk's probe mustn't block) and an active one
+//     names, and a quoted name of 2,400 bytes in a directory of 2,539, whose three requests must share one search.
+//   - Memory: runs short of the round's arena or of one lane's scratch memory, which may fail, but after which every
+//     unit must give what it gives alone.
+//   The checks that would hang if they regressed run under a 60-second alarm, which fails the test.
 //   - Files: each file (or each .c and .h file under a directory) as a translation unit with the options (as for -E:
 //     -I, -isystem, -D, --predefines, -std=, ...), all of them the walk's roots. With --flat, the files are only prepared,
 //     without following their includes or preprocessing them (a corpus such as the C library's, which is files rather
@@ -39,6 +46,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -568,6 +576,339 @@ static void files_test_identifier(uint64_t* state, char* out, uint32_t length)
     out[length] = 0;
 }
 
+// What would hang if it regressed (a probe that blocks on a FIFO, a walk whose paths never end) runs under an alarm,
+// whose watchdog ends the test with status 1.
+static void files_test_watchdog(int signal_number)
+{
+    (void)signal_number;
+    static const char message[] = "test-files: a check didn't finish within 60 s (a probe blocked, or the walk didn't end)\n";
+    const ssize_t written = write(1, message, sizeof(message) - 1);
+    (void)written;
+    _exit(1);
+}
+
+// The contexts' check: a guarded header that includes itself through ./ and through sub/.. (each path a new spelling
+// of one file in one directory), which the walk must take once rather than make paths of without end; and one header
+// in two directories (a hard link) whose own local.h differ, which it must walk in both.
+static bool files_test_contexts(const char* directory, const uint32_t* lanes, uint32_t lane_count)
+{
+    static const char* const directories[] = { "sub", "one", "two" };
+    static const char* const files[][2] = {
+        { "contexts.c", "#include \"cycle.h\"\n#include \"one/h.h\"\n#include \"two/h.h\"\nint contexts = CYCLE + ONE + TWO;\n" },
+        { "cycle.h", "#ifndef CYCLE_H\n#define CYCLE_H\n#include \"./cycle.h\"\n#include \"sub/../cycle.h\"\n#define CYCLE 1\n#endif\n" },
+        { "one/h.h", "#include \"local.h\"\n" },
+        { "one/local.h", "#define ONE 2\n" },
+        { "two/local.h", "#define TWO 3\n" },
+    };
+    char path[4200];
+    char target[4200];
+    bool result = true;
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(directories); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, directories[i]);
+        result = mkdir(path, 0700) == 0;
+    }
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(files); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, files[i][0]);
+        result = files_test_write(path, files[i][1]);
+    }
+    snprintf(target, sizeof(target), "%s/one/h.h", directory);
+    snprintf(path, sizeof(path), "%s/two/h.h", directory);
+    result = result && link(target, path) == 0;
+    char unit[4200];
+    snprintf(unit, sizeof(unit), "%s/contexts.c", directory);
+    const char* units[1] = { unit };
+    FilesTestWork work = {
+        .name = "contexts",
+        .options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true },
+        .roots = units,
+        .root_count = 1,
+        .follow = true,
+        .units = units,
+        .unit_count = 1,
+    };
+    FilesTestRun reference = { 0 };
+    alarm(60);
+    result = result && files_test_work(&work, lanes, lane_count, directory, &reference);
+    alarm(0);
+    if (result)
+    {
+        // 5 files in 3 rounds: the unit; cycle.h (by three spellings, walked once) and h.h; the two local.h. After the
+        // walk the unit opens nothing.
+        const bool counts = reference.prepared == 5 && reference.rounds == 3 && reference.absent == 0 && reference.units[0].errors == 0 &&
+                            reference.units[0].probes.opens == 0;
+        if (!counts)
+        {
+            printf("contexts: %lu files prepared (5) in %u rounds (3), %lu not found (0), the unit's errors %u (0) and opens %lu (0)\n",
+                   (unsigned long)reference.prepared, reference.rounds, (unsigned long)reference.absent, reference.units[0].errors,
+                   (unsigned long)reference.units[0].probes.opens);
+        }
+        else
+        {
+            printf("contexts: a header that includes itself through ./ and sub/.. walked once, and one in two directories in both\n");
+        }
+        result = counts;
+    }
+    files_test_release_run(&reference);
+    unlink(path);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, files[BUSTER_ARRAY_LENGTH(files) - 1 - i][0]);
+        unlink(path);
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(directories); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, directories[i]);
+        rmdir(path);
+    }
+    return result;
+}
+
+#define BUSTER_FILES_TEST_DEEP_LEVELS 10
+#define BUSTER_FILES_TEST_DEEP_NAME 250
+#define BUSTER_FILES_TEST_LONG_NAME 2400
+
+// The special paths' check: a FIFO, which an #include under #if 0 names (the walk mustn't block opening it, and leaves
+// it to the unit, which never reaches it) and an active one names (an error, as the unit gives alone); and a quoted
+// name of 2,400 bytes under #if 0, twice in a file and once in another of the same directory, which is more than 2,500
+// bytes long: the three requests' key holds both whole, and they must share one search.
+static bool files_test_special(const char* directory, const uint32_t* lanes, uint32_t lane_count)
+{
+    char path[4200];
+    char deep[4200];
+    char units_paths[4][4200];
+    bool result = true;
+    uint32_t length = (uint32_t)snprintf(deep, sizeof(deep), "%s", directory);
+    for (uint32_t level = 0; result && level < BUSTER_FILES_TEST_DEEP_LEVELS; level += 1)
+    {
+        deep[length] = '/';
+        memset(deep + length + 1, 'd', BUSTER_FILES_TEST_DEEP_NAME);
+        length += 1 + BUSTER_FILES_TEST_DEEP_NAME;
+        deep[length] = 0;
+        result = mkdir(deep, 0700) == 0;
+    }
+    // The long name, twice in long.c and once in long2.c.
+    const uint32_t capacity = 2 * BUSTER_FILES_TEST_LONG_NAME + 128;
+    char* name = malloc(BUSTER_FILES_TEST_LONG_NAME + 1);
+    char* text = malloc(capacity);
+    char* text2 = malloc(capacity);
+    result = result && name != 0 && text != 0 && text2 != 0;
+    if (result)
+    {
+        memset(name, 'n', BUSTER_FILES_TEST_LONG_NAME);
+        name[BUSTER_FILES_TEST_LONG_NAME] = 0;
+        snprintf(text, capacity, "#if 0\n#include \"%s\"\n#include \"%s\"\n#endif\nint special_long;\n", name, name);
+        snprintf(text2, capacity, "#if 0\n#include \"%s\"\n#endif\nint special_long2;\n", name);
+    }
+    snprintf(units_paths[0], sizeof(units_paths[0]), "%s/fifo.c", directory);
+    snprintf(units_paths[1], sizeof(units_paths[1]), "%s/fifo2.c", directory);
+    snprintf(units_paths[2], sizeof(units_paths[2]), "%s/long.c", deep);
+    snprintf(units_paths[3], sizeof(units_paths[3]), "%s/long2.c", deep);
+    snprintf(path, sizeof(path), "%s/never.h", directory);
+    result = result && mkfifo(path, 0600) == 0 && files_test_write(units_paths[0], "#if 0\n#include \"never.h\"\n#endif\nint special_fifo;\n") &&
+             files_test_write(units_paths[1], "#include \"never.h\"\nint special_fifo2;\n") && files_test_write(units_paths[2], text) &&
+             files_test_write(units_paths[3], text2);
+    const char* units[4] = { units_paths[0], units_paths[1], units_paths[2], units_paths[3] };
+    FilesTestWork work = {
+        .name = "special paths",
+        .options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true },
+        .roots = units,
+        .root_count = 4,
+        .follow = true,
+        .units = units,
+        .unit_count = 4,
+    };
+    FilesTestRun reference = { 0 };
+    alarm(60);
+    result = result && files_test_work(&work, lanes, lane_count, directory, &reference);
+    alarm(0);
+    if (result)
+    {
+        // The units alone; 9 requests (the 4 roots, never.h twice, the long name three times) in 6 searches (the roots',
+        // never.h's and the long name's), none of never.h's and the long name's found; and fifo2.c's include an error.
+        const bool counts = reference.prepared == 4 && reference.requests == 9 && reference.searches == 6 && reference.absent == 5 &&
+                            reference.units[0].errors == 0 && reference.units[1].errors == 1 && reference.units[2].errors == 0 && reference.units[3].errors == 0;
+        if (!counts)
+        {
+            printf("special paths: %lu files prepared (4), %lu requests (9) in %lu searches (6), %lu not found (5), the units' errors %u, %u, %u, %u (0, 1, 0, 0)\n",
+                   (unsigned long)reference.prepared, (unsigned long)reference.requests, (unsigned long)reference.searches, (unsigned long)reference.absent,
+                   reference.units[0].errors, reference.units[1].errors, reference.units[2].errors, reference.units[3].errors);
+        }
+        else
+        {
+            printf("special paths: a FIFO under #if 0 and active, and a name of %u bytes in a directory of %u, as each unit alone\n", BUSTER_FILES_TEST_LONG_NAME,
+                   length);
+        }
+        result = counts;
+    }
+    files_test_release_run(&reference);
+    for (uint32_t u = 0; u < 4; u += 1)
+    {
+        unlink(units_paths[u]);
+    }
+    unlink(path);
+    for (uint32_t level = 0; level < BUSTER_FILES_TEST_DEEP_LEVELS && length > (uint32_t)strlen(directory); level += 1)
+    {
+        rmdir(deep);
+        length -= 1 + BUSTER_FILES_TEST_DEEP_NAME;
+        deep[length] = 0;
+    }
+    free(name);
+    free(text);
+    free(text2);
+    return result;
+}
+
+// A run in which lane `lane` (BUSTER_PP_NONE for none) has only `scratch` bytes of scratch memory.
+typedef struct FilesTestShort FilesTestShort;
+struct FilesTestShort
+{
+    FilesRun* run;
+    uint32_t lane;
+    uint64_t scratch;
+};
+
+static void files_test_short_lane(void* argument)
+{
+    FilesTestShort* test = argument;
+    const bool shortened = lane_index() == test->lane;
+    if (shortened)
+    {
+        arena_release(&thread_context.scratch[0]);
+        thread_context.scratch[0] = arena_reserve(test->scratch);
+    }
+    files_run_ahead(test->run);
+    if (shortened)
+    {
+        // The thread's next scratch_begin reserves its usual arena again.
+        arena_release(&thread_context.scratch[0]);
+    }
+}
+
+#define BUSTER_FILES_TEST_MEMORY_FILES 4
+
+// The memory check: runs on 2 and 3 lanes that all work, short of the round's arena at sizes up to what the merge
+// needs, or of one lane's scratch memory (the first's, then the last's): a run may fail, but every unit must give what it
+// gives alone, since what the run couldn't finish is left unprepared for the unit to prepare.
+static bool files_test_memory(const char* directory, uint64_t seed)
+{
+    static const uint32_t lane_counts[] = { 2, 3 };
+    static Preprocessor alone;
+    static Preprocessor cached;
+    static InternTable alone_table;
+    char paths[BUSTER_FILES_TEST_MEMORY_FILES][4200];
+    const char* units[BUSTER_FILES_TEST_MEMORY_FILES];
+    PPSpellings alone_spellings[BUSTER_FILES_TEST_MEMORY_FILES] = { 0 };
+    uint32_t alone_errors[BUSTER_FILES_TEST_MEMORY_FILES] = { 0 };
+    char* text = malloc(1u << 16);
+    uint64_t state = seed;
+    bool result = text != 0;
+    for (uint32_t f = 0; result && f < BUSTER_FILES_TEST_MEMORY_FILES; f += 1)
+    {
+        // Names of the file's own, and of a vocabulary the files share.
+        uint32_t length = 0;
+        for (uint32_t i = 0; i < 100; i += 1)
+        {
+            char name[32];
+            files_test_identifier(&state, name, 3 + (uint32_t)(files_test_random(&state) % 10));
+            length += (uint32_t)snprintf(text + length, (1u << 16) - length, "int %s%s_%u;\n", files_test_random(&state) % 2 == 0 ? "shared_" : "own_", name,
+                                         files_test_random(&state) % 2 == 0 ? 0 : f);
+        }
+        snprintf(paths[f], sizeof(paths[f]), "%s/memory%u.c", directory, f);
+        units[f] = paths[f];
+        result = files_test_write(paths[f], text);
+    }
+    const PPOptions base = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    // Each unit alone, once.
+    for (uint32_t u = 0; result && u < BUSTER_FILES_TEST_MEMORY_FILES; u += 1)
+    {
+        result = intern_initialize(&alone_table) && pp_initialize(&alone, &base, &alone_table) && pp_run(&alone, units[u]) &&
+                 pp_stream_spellings(&alone, &alone_spellings[u]);
+        alone_errors[u] = alone.errors;
+        pp_release(&alone);
+        intern_release(&alone_table);
+    }
+    uint32_t runs = 0;
+    uint32_t failed = 0;
+    for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(lane_counts); c += 1)
+    {
+        const uint32_t lanes = lane_counts[c];
+        // Way 0: the round's arena, from 64 bytes to 32 KB, half again each time (the walk's arrays, then the merge's,
+        // fail at some of them); ways 1 and 2: the first or the last lane's scratch memory, from 8 bytes to 512, four
+        // times as much each time (a file's line words, then a partition's table of first occurrences, fail).
+        for (uint32_t way = 0; result && way < 3; way += 1)
+        {
+            const uint64_t first = way == 0 ? 64 : 8;
+            const uint64_t last = way == 0 ? 32768 : 512;
+            for (uint64_t size = first; result && size <= last; size += way == 0 ? size / 2 : 3 * size)
+            {
+                static Preprocessor search;
+                InternTable table;
+                FileCache cache;
+                PPOptions options = base;
+                result = intern_initialize(&table) && file_cache_initialize(&cache, &table, pp_prepare_options(&options));
+                options.files = &cache;
+                result = result && pp_initialize(&search, &options, &table);
+                FilesRun files;
+                result = result && files_run_initialize(&files, &cache, &search, units, BUSTER_FILES_TEST_MEMORY_FILES, true, lanes);
+                if (result)
+                {
+                    files.lane_bytes = 0;
+                    files.split_bytes = 0;
+                    if (way == 0)
+                    {
+                        arena_release(&files.round);
+                        files.round = arena_reserve(size);
+                    }
+                    FilesTestShort test = { .run = &files, .lane = way == 1 ? 0 : way == 2 ? lanes - 1 : BUSTER_PP_NONE, .scratch = size };
+                    alarm(60);
+                    result = lane_run(lanes, files_test_short_lane, &test, 0);
+                    alarm(0);
+                    failed += files.failed;
+                    runs += 1;
+                    files_run_release(&files);
+                }
+                pp_release(&search);
+                // Each unit with what the run left in the cache, against the unit alone.
+                for (uint32_t u = 0; result && u < BUSTER_FILES_TEST_MEMORY_FILES; u += 1)
+                {
+                    PPSpellings ours = { 0 };
+                    result = pp_initialize(&cached, &options, &table) && pp_run(&cached, units[u]) && cached.errors == alone_errors[u] &&
+                             pp_stream_spellings(&cached, &ours) && pp_compare_spellings(&cached, &ours, &alone_spellings[u], units[u], "alone");
+                    arena_release(&ours.arena);
+                    pp_release(&cached);
+                }
+                if (!result)
+                {
+                    printf("memory: on %u lanes, with %lu bytes of %s\n", lanes, (unsigned long)size,
+                           way == 0 ? "the round's arena" : way == 1 ? "lane 0's scratch memory" : "the last lane's scratch memory");
+                }
+                file_cache_release(&cache);
+                intern_release(&table);
+            }
+        }
+    }
+    // The sizes must reach both: runs that fail, and runs with room enough.
+    const bool both = failed != 0 && failed < runs;
+    if (result && !both)
+    {
+        printf("memory: %u of %u runs failed: the sizes don't reach both outcomes\n", failed, runs);
+    }
+    result = result && both;
+    if (result)
+    {
+        printf("memory: %u runs short of the round's arena or a lane's scratch memory, %u of them failed; every unit as alone\n", runs, failed);
+    }
+    for (uint32_t f = 0; f < BUSTER_FILES_TEST_MEMORY_FILES; f += 1)
+    {
+        unlink(paths[f]);
+        arena_release(&alone_spellings[f].arena);
+    }
+    free(text);
+    return result;
+}
+
 #define BUSTER_FILES_TEST_SPELLING_FILES 240
 #define BUSTER_FILES_TEST_VOCABULARY 30000
 
@@ -841,6 +1182,11 @@ static int run_files_tests(int argument_count, char** arguments)
             }
         }
         passed_all &= files_test_spellings(directory, lanes, lane_count, seed);
+        signal(SIGALRM, files_test_watchdog);
+        passed_all &= files_test_contexts(directory, lanes, lane_count);
+        passed_all &= files_test_special(directory, lanes, lane_count);
+        passed_all &= files_test_memory(directory, seed);
+        signal(SIGALRM, SIG_DFL);
     }
     else if (passed_all)
     {

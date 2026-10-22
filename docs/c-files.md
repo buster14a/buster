@@ -232,12 +232,30 @@ preparing ("Where the time goes").
   the process's memory map lock, on which lanes that map at once queue, so one
   lane maps with `MAP_POPULATE` and several map without it, which holds the
   lock for less time; their pages fault in as the lexer reads them.
+- **Contexts.** What a file's includes resolve to depends on the file, the
+  search directory it was found in (for `#include_next`), whether it is a root,
+  and the directory its path is in. A path that leads to a file the walk has
+  already taken in the same context is an alias, whose includes the walk
+  doesn't read again. The directories compare as directories, by device and
+  inode, since `./`, `sub/..` and symbolic links spell one directory many ways:
+  a guarded header that includes itself through `./` and `sub/..` would
+  otherwise make paths of its own without end. Spellings compare cheaply and
+  identities exactly, so a directory's identity is read (one `stat`) only when
+  a file has two items to compare. An alias's own path entries are still
+  made, but not those of its includes: a unit that follows the alias looks
+  those up itself.
 - **Speculation stays invisible.** The walk prepares headers that sit under an
   inactive `#if`, which costs time but changes nothing: it runs no macro,
   takes no branch and reports nothing. A missing header is a path entry with
   no record, which a unit reports only if it reaches the include, and a file
   the walk couldn't prepare is left unprepared, for the unit that enters it to
-  prepare and say why it can't.
+  prepare and say why it can't. A probe opens a path without blocking
+  (`O_NONBLOCK`), so that a FIFO is a path with no file, not a wait for a
+  writer: the walk probes paths that no unit opens.
+- **Failures.** A run that runs out of memory stops, and every lane takes lane
+  0's word on it at the same place (a broadcast), so that no lane waits at a
+  sync the others skipped. A round whose merge can't finish leaves its files
+  unprepared.
 
 ### Memory
 
@@ -361,14 +379,38 @@ be written to stderr while the cache is filled:
   shared table grows during a merge. They run in parts, split once, and with
   two lanes working and the others idle, and in two runs into one cache, which
   must equal one run on one lane.
+- **Contexts:** a guarded header that includes itself through `./` and
+  through `sub/..`, which the walk must take once rather than make paths of
+  without end, and one header in two directories (a hard link) whose own
+  `local.h` differ, which it must walk in both: 5 files in 3 rounds, and the
+  unit opens nothing after the walk.
+- **Special paths:** a FIFO that an `#include` under `#if 0` names, which the
+  walk mustn't block opening, and that an active one names (an error, as the
+  unit gives alone); and a quoted name of 2,400 bytes under `#if 0`, twice in a
+  file and once in another, whose directory is 2,539 bytes long: the three
+  requests' search key holds both whole, and they share one search.
+- **Memory:** runs on 2 and 3 lanes that all work, with the round's arena
+  from 64 bytes to 32 KB (half again each time) or the first or last lane's
+  scratch memory from 8 bytes to 512 (four times each time): 48 runs, of which
+  38 fail, at the walk's arrays, the merge's or a file's preparation. Every
+  unit must give what it gives alone.
 - **Files:** each path's `.c` and `.h` files as translation units with `-E`'s
   options, all the walk's roots; with `--flat`, only prepared. Their files of
   more than 16 KB are mapped and the others read, as all the tree's are.
 
+The checks that would hang if they regressed (a probe blocking on a FIFO, a walk
+without end, lanes waiting at different syncs) run under a 60-second alarm,
+which fails the test.
+
 Six mutations of the merge each fail it: taking the last occurrence instead of
 the first, skipping the rewrite, taking parts costliest first, not writing a
 slot's prefix, records at one offset, and a candidate taking its own id instead
-of its first's. It also passes under AddressSanitizer and
+of its first's. So do reverting the fixes of #249's review, one at a time:
+the search key's room (the long name's requests take 3 searches), the merge's
+steps after an allocation failure (a crash), the aliases (the walk doesn't
+end) and the probe's non-blocking open (it blocks); reading `run->failed` on
+each lane at the walk's start, the race the memory check found, hangs only
+when the lanes' timing goes one way. It also passes under AddressSanitizer and
 UndefinedBehaviorSanitizer.
 
 ## Reproduction

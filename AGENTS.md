@@ -2126,9 +2126,23 @@ warnings, and nothing may be written to stderr while the cache is filled:
   without following includes, 165,562 ids, so that the shared table grows in a
   merge: in parts, split once, and with two lanes working, and in two runs into
   one cache, which must equal one run on one lane;
+- contexts: a guarded header that includes itself through `./` and `sub/..`,
+  which the walk must take once (an alias of a file in the same context, by
+  its directory's device and inode, isn't walked again), and one header in two
+  directories (a hard link) whose own `local.h` differ, walked in both;
+- special paths: a FIFO that an `#include` under `#if 0` names (the walk's
+  probe mustn't block) and an active one names (an error, as alone), and a
+  quoted name of 2,400 bytes in a directory of 2,539, three requests of which
+  must share one search;
+- memory: runs on 2 and 3 lanes short of the round's arena or of one lane's
+  scratch memory, at sizes that fail the walk's, the merge's and a file's
+  allocations: every unit must give what it gives alone;
 - with paths, their `.c` and `.h` files as translation units with `-E`'s
   options (`-I`, `-isystem`, `-D`, `--predefines`, `-std=`, ...), all the walk's
   roots; with `--flat`, only prepared (a corpus such as the C library's).
+
+The checks that would hang if they regressed run under a 60-second alarm, which
+fails the test.
 
 `--seed N` changes the spellings, and `--keep` leaves the directory. On the
 9700X, `sqlite3.c`, Lua 5.4.8, musl 1.2.5's 1,357 sources and the C library

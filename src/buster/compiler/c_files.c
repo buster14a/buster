@@ -41,9 +41,13 @@
 // prepares the files it found, until a round finds none. The searches advance in waves: each goes through its
 // candidates in order until a path the cache never looked up; the waves' new paths are probed on every lane at once
 // (file_cache_probe), then added to the cache on one lane, so that each search ends where the preprocessor's will.
+// A path that leads to a file the walk has already taken in the same context (the same search directory, and a
+// directory that is the same directory by its device and inode, as ./ and sub/.. make) is an alias, whose includes
+// aren't read again: a header that includes itself through ./ would otherwise make paths of its own without end.
 // Speculation stays invisible: the walk reads headers that turn out to sit under an inactive #if, which costs time but
 // changes nothing, since it runs no macro, takes no branch and reports nothing; a missing header is a path the cache
-// knows has none, which a unit reports only if it reaches the include.
+// knows has none, which a unit reports only if it reaches the include; and a probe opens a path without blocking, so
+// that a FIFO no unit opens is a path with no file rather than a wait for a writer.
 //
 // main.c includes this file after c_preprocessor.c; every function is static. Layout: FilesSpelling, FilesLane and
 // FilesRun; the merge (files_find_new, files_make_candidates, files_place_candidates, files_find_first,
@@ -211,14 +215,35 @@ struct FilesLane
 
 // An item of the walk: a path a file was reached by (its entry in the cache's paths), the search directory the path was
 // found in (BUSTER_PP_NONE for the includer's directory, an absolute path or a root), and whether it is a root, whose
-// #include_next is an #include, as for a main file.
+// #include_next is an #include, as for a main file. What its includes resolve to depends on its file, that search
+// directory, whether it is a root, and the directory its path is in, as a directory (its device and inode) rather than
+// as spelled (./, sub/.., a symbolic link): a path that leads to an item's file in the same context is an alias of
+// that item, whose includes the walk doesn't read again (a file that includes itself through ./ would make paths of
+// its own without end). The items of a file are a list (`next`), and the identity of an item's directory is read once,
+// only for comparing it with another's.
 typedef struct FilesItem FilesItem;
 struct FilesItem
 {
     uint32_t path;
     uint32_t search;
+    uint32_t record;
+    uint32_t next;
+    // The item this one is an alias of, or BUSTER_PP_NONE.
+    uint32_t alias;
+    // The directory's identity: FILES_DIRECTORY_UNREAD until read, then known or unknown (its stat failed).
+    uint8_t directory;
     bool root;
+    uint64_t device;
+    uint64_t inode;
 };
+
+// What an item knows of its directory's identity.
+typedef enum FilesDirectory
+{
+    FILES_DIRECTORY_UNREAD,
+    FILES_DIRECTORY_KNOWN,
+    FILES_DIRECTORY_UNKNOWN,
+} FilesDirectory;
 
 // A search: the requests of one key (the same candidates), by the first of them, and how far it got: the next candidate
 // to look at, and once it is done, the path it found (BUSTER_PP_NONE for none) and the directory it was found in.
@@ -286,6 +311,8 @@ struct FilesRun
     uint32_t round_items;
     uint32_t* item_slots;
     uint32_t item_slot_mask;
+    // Each record's first item + 1 (the head of its list), or 0.
+    uint32_t* record_items;
     uint8_t* queued;
     FilesSearch* searches;
     uint32_t search_count;
@@ -308,12 +335,13 @@ struct FilesRun
     uint64_t absent;
     uint64_t candidates_exchanged;
     uint64_t shared_found;
-    // Memory: the run's arrays (`arena`, which lasts the run, and an arena each for the items, their table and the queued
-    // records), the round's files and their arrays (`files`, made for each round), and the round's exchange, requests
+    // Memory: the run's arrays (`arena`, which lasts the run, and an arena each for the items, their table, the records'
+    // lists of items and the queued records), the round's files and their arrays (`files`, made for each round), and the round's exchange, requests
     // and searches (`round`, reset each round).
     Arena arena;
     Arena item_arena;
     Arena item_slot_arena;
+    Arena record_item_arena;
     Arena queued_arena;
     Arena files;
     Arena round;
@@ -733,6 +761,12 @@ static void files_prepare(FilesRun* run)
                     *slot = (uint32_t)file;
                     mine->file_count += 1;
                 }
+                else
+                {
+                    // Unlisted, its values are never rewritten to shared ids: a unit that enters it prepares it again.
+                    data->prepared = false;
+                    run->file_status[file] = (uint8_t)PP_PREPARE_NO_MEMORY;
+                }
             }
         }
         files_sync(mine, FILES_PHASE_PREPARE);
@@ -765,14 +799,22 @@ static void files_prepare(FilesRun* run)
         }
         scratch_end(scratch);
         files_sync(mine, FILES_PHASE_EXCHANGE);
-        files_count_first(run, mine);
+        // Lane 0's word, the same on every lane, on whether every candidate has its first occurrence: there are none
+        // without the candidates' arrays, and a lane whose scratch memory ran out (run->failed, now that every lane has
+        // passed files_find_first) left its partitions' undecided. Every later step reads them, so without them the
+        // round's files stay unprepared, for the units to prepare.
+        const bool found = files_broadcast(mine, FILES_PHASE_EXCHANGE, lane == 0 && placed && !__atomic_load_n(&run->failed, __ATOMIC_RELAXED)) != 0;
+        if (found)
+        {
+            files_count_first(run, mine);
+        }
         files_sync(mine, FILES_PHASE_EXCHANGE);
-        if (lane == 0 && placed)
+        if (lane == 0 && found)
         {
             files_sum_first(run);
             files_tick(mine, FILES_PHASE_ALONE);
         }
-        const bool room = files_broadcast(mine, FILES_PHASE_ADD, lane == 0 && placed && run->bulk_ok) != 0;
+        const bool room = files_broadcast(mine, FILES_PHASE_ADD, lane == 0 && found && run->bulk_ok) != 0;
         if (room)
         {
             // The fresh parts of the shared table the lanes write: its buckets and spans if it grew, else the new ids'
@@ -840,7 +882,8 @@ static void files_read_requests(FilesRun* run, FilesLane* mine)
         const FilesItem* item = &run->items[i];
         const uint32_t record = cache->paths[item->path].record;
         const PPFileData* data = record < cache->record_count ? &cache->records[record] : 0;
-        for (uint32_t d = 0; run->follow && data != 0 && data->prepared && d < data->directive_count; d += 1)
+        // An alias's includes are its item's (see FilesItem).
+        for (uint32_t d = 0; run->follow && item->alias == BUSTER_PP_NONE && data != 0 && data->prepared && d < data->directive_count; d += 1)
         {
             const uint8_t kind = data->directive_kind[d];
             if (kind == PP_DIRECTIVE_INCLUDE || kind == PP_DIRECTIVE_INCLUDE_NEXT || kind == PP_DIRECTIVE_IMPORT)
@@ -887,9 +930,18 @@ static PPIncluder files_includer(const FilesRun* run, const FilesRequest* reques
     return result;
 }
 
+// The most bytes files_search_key writes for a request: the start and the kind, the includer's directory (at most its
+// item's path, or ".") and a separator, and the name. A header name is shorter than PATH_MAX, but a root's is any
+// length, and an includer's directory and a name each may come close to PATH_MAX.
+static uint64_t files_search_key_bound(const FilesRun* run, const FilesRequest* request)
+{
+    const uint64_t directory = request->item != BUSTER_PP_NONE ? (uint64_t)run->cache->paths[run->items[request->item].path].length + 1 : 0;
+    return sizeof(uint32_t) + 1 + directory + 1 + request->length;
+}
+
 // The key of a request's search, which decides its candidates: its first search directory (or none for an absolute
-// name or a root), the includer's directory when the name is looked for there first, and the name, into `key`
-// (PATH_MAX + 64 bytes). Returns its length.
+// name or a root), the includer's directory when the name is looked for there first, and the name, whole, into `key`
+// (files_search_key_bound's bytes). Returns its length.
 static uint32_t files_search_key(const FilesRun* run, const FilesRequest* request, uint8_t* key)
 {
     const PPIncluder includer = files_includer(run, request);
@@ -907,15 +959,13 @@ static uint32_t files_search_key(const FilesRun* run, const FilesRequest* reques
     {
         const char* directory = includer.directory_length != BUSTER_PP_NONE ? includer.path : ".";
         const uint32_t directory_length = includer.directory_length != BUSTER_PP_NONE ? includer.directory_length : 1;
-        const uint32_t kept = directory_length < PATH_MAX ? directory_length : PATH_MAX;
-        memcpy(key + length, directory, kept);
-        length += kept;
+        memcpy(key + length, directory, directory_length);
+        length += directory_length;
         key[length] = 0;
         length += 1;
     }
-    const uint32_t name_length = request->length < PATH_MAX ? request->length : PATH_MAX;
-    memcpy(key + length, request->name, name_length);
-    length += name_length;
+    memcpy(key + length, request->name, request->length);
+    length += request->length;
     return length;
 }
 
@@ -940,7 +990,17 @@ static void files_search_requests(FilesRun* run)
     run->search_slots = arena_push_array(round, slots, sizeof(uint32_t), 64);
     run->search_slot_mask = slots - 1;
     uint64_t* hashes = arena_push_array(round, (uint64_t)total + 1, sizeof(uint64_t), 8);
-    uint8_t* keys = arena_push(round, 2 * (PATH_MAX + 64), 1);
+    // Room for two keys, the request's and one it is compared with, of the round's longest.
+    uint64_t bound = 0;
+    for (uint32_t l = 0; l < run->lane_count; l += 1)
+    {
+        for (uint32_t r = 0; r < run->lanes[l].request_count; r += 1)
+        {
+            const uint64_t request_bound = files_search_key_bound(run, &run->lanes[l].requests[r]);
+            bound = request_bound > bound ? request_bound : bound;
+        }
+    }
+    uint8_t* keys = arena_push(round, 2 * bound + 1, 1);
     const bool room = run->requests != 0 && run->request_search != 0 && run->searches != 0 && run->search_slots != 0 && hashes != 0 && keys != 0;
     files_fail(run, !room);
     run->request_count = 0;
@@ -962,8 +1022,8 @@ static void files_search_requests(FilesRun* run)
             while (search == BUSTER_PP_NONE && run->search_slots[slot] != 0)
             {
                 const uint32_t other = run->search_slots[slot] - 1;
-                const uint32_t other_length = hashes[other] == hash ? files_search_key(run, run->searches[other].request, keys + PATH_MAX + 64) : 0;
-                search = hashes[other] == hash && other_length == key_length && memcmp(keys, keys + PATH_MAX + 64, key_length) == 0 ? other : BUSTER_PP_NONE;
+                const uint32_t other_length = hashes[other] == hash ? files_search_key(run, run->searches[other].request, keys + bound) : 0;
+                search = hashes[other] == hash && other_length == key_length && memcmp(keys, keys + bound, key_length) == 0 ? other : BUSTER_PP_NONE;
                 slot = (slot + 1) & run->search_slot_mask;
             }
             if (search == BUSTER_PP_NONE)
@@ -1169,8 +1229,36 @@ static void files_search(FilesRun* run)
     }
 }
 
-// The item of a path and search directory: found in the walk's table, or added (a root's if the request had no item).
-// Returns its index, or BUSTER_PP_NONE if the walk has as many items as it can hold; `*added` says whether it is new.
+// The identity of an item's directory (as files_includer takes it from the item's path), read once.
+static bool files_item_directory(FilesItem* item, const FileCachePath* path)
+{
+    if (item->directory == FILES_DIRECTORY_UNREAD)
+    {
+        uint32_t length = BUSTER_PP_NONE;
+        for (uint32_t i = 0; i < path->length; i += 1)
+        {
+            length = path->path[i] == '/' ? i : length;
+        }
+        char directory[PATH_MAX];
+        const char* name = length == BUSTER_PP_NONE ? "." : length == 0 ? "/" : directory;
+        struct stat stats;
+        const bool fits = length == BUSTER_PP_NONE || length < sizeof(directory);
+        if (fits && length != BUSTER_PP_NONE && length != 0)
+        {
+            memcpy(directory, path->path, length);
+            directory[length] = 0;
+        }
+        const bool known = fits && stat(name, &stats) == 0;
+        item->device = known ? (uint64_t)stats.st_dev : 0;
+        item->inode = known ? (uint64_t)stats.st_ino : 0;
+        item->directory = known ? FILES_DIRECTORY_KNOWN : FILES_DIRECTORY_UNKNOWN;
+    }
+    return item->directory == FILES_DIRECTORY_KNOWN;
+}
+
+// The item of a path and search directory: found in the walk's table, or added (a root's if the request had no item),
+// as an alias of an earlier item of its file whose context is the same (see FilesItem). Returns its index, or
+// BUSTER_PP_NONE if the walk has as many items as it can hold; `*added` says whether it is new.
 static uint32_t files_item(FilesRun* run, uint32_t path, uint32_t search, bool root, bool* added)
 {
     const uint64_t hash = file_cache_identity_hash(path, search);
@@ -1185,8 +1273,33 @@ static uint32_t files_item(FilesRun* run, uint32_t path, uint32_t search, bool r
     }
     if (result == BUSTER_PP_NONE && run->item_count < BUSTER_FILES_MAX_ITEMS)
     {
+        const FileCache* cache = run->cache;
+        const uint32_t record = cache->paths[path].record;
+        const bool listed = record < cache->record_count;
         result = run->item_count;
-        run->items[result] = (FilesItem){ .path = path, .search = search, .root = root };
+        FilesItem* item = &run->items[result];
+        *item = (FilesItem){
+            .path = path,
+            .search = search,
+            .record = record,
+            .next = listed && run->record_items[record] != 0 ? run->record_items[record] - 1 : BUSTER_PP_NONE,
+            .alias = BUSTER_PP_NONE,
+            .root = root,
+        };
+        // An earlier item of the file in the same context, by the identity of their directories (read only when the
+        // file has another item of the same search directory and kind).
+        for (uint32_t other = item->next; item->alias == BUSTER_PP_NONE && other != BUSTER_PP_NONE; other = run->items[other].next)
+        {
+            FilesItem* earlier = &run->items[other];
+            const bool same = earlier->alias == BUSTER_PP_NONE && earlier->search == search && earlier->root == root &&
+                              files_item_directory(earlier, &cache->paths[earlier->path]) && files_item_directory(item, &cache->paths[path]) &&
+                              earlier->device == item->device && earlier->inode == item->inode;
+            item->alias = same ? other : BUSTER_PP_NONE;
+        }
+        if (listed)
+        {
+            run->record_items[record] = result + 1;
+        }
         run->item_count += 1;
         run->item_slots[slot] = result + 1;
         *added = true;
@@ -1320,7 +1433,9 @@ static void files_run_ahead(FilesRun* run)
     mine->tick = __rdtsc();
     files_fail(run, !files_lane_begin(run, mine));
     files_sync(mine, FILES_PHASE_ALONE);
-    const bool ready = !run->failed;
+    // Lane 0's word, the same on every lane: a lane that read run->failed itself could read lane 0's failure in
+    // files_search_requests below, skip files_search and leave the others waiting at its syncs.
+    const bool ready = files_broadcast(mine, FILES_PHASE_ALONE, lane == 0 && !__atomic_load_n(&run->failed, __ATOMIC_RELAXED)) != 0;
     if (ready && lane == 0)
     {
         files_root_requests(run);
@@ -1401,9 +1516,11 @@ static __attribute__((unused)) bool files_run_initialize(FilesRun* run, FileCach
     run->partition_starts = arena_push_array(&run->arena, (uint64_t)run->partition_count + 1, sizeof(uint64_t), 64);
     run->item_arena = arena_reserve((uint64_t)BUSTER_FILES_MAX_ITEMS * sizeof(FilesItem) + 64);
     run->item_slot_arena = arena_reserve(2ull * BUSTER_FILES_MAX_ITEMS * sizeof(uint32_t) + 64);
+    run->record_item_arena = arena_reserve((uint64_t)BUSTER_PP_MAX_FILES * sizeof(uint32_t) + 64);
     run->queued_arena = arena_reserve(BUSTER_PP_MAX_FILES + 64);
     run->items = arena_push_array(&run->item_arena, BUSTER_FILES_MAX_ITEMS, sizeof(FilesItem), 64);
     run->item_slots = arena_push_array(&run->item_slot_arena, 2ull * BUSTER_FILES_MAX_ITEMS, sizeof(uint32_t), 64);
+    run->record_items = arena_push_array(&run->record_item_arena, BUSTER_PP_MAX_FILES, sizeof(uint32_t), 64);
     run->queued = arena_push(&run->queued_arena, BUSTER_PP_MAX_FILES, 64);
     run->item_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
     for (uint32_t lane = 0; lane < lane_count && lane < BUSTER_LANE_MAX_COUNT; lane += 1)
@@ -1411,8 +1528,7 @@ static __attribute__((unused)) bool files_run_initialize(FilesRun* run, FileCach
         file_cache_arenas(cache, lane);
     }
     bool result = lane_count >= 1 && lane_count <= BUSTER_LANE_MAX_COUNT && run->lanes != 0 && run->counts != 0 && run->partition_starts != 0 && run->items != 0 &&
-                  run->item_slots != 0 &&
-                  run->queued != 0 && run->files.base != 0 && run->round.base != 0;
+                  run->item_slots != 0 && run->record_items != 0 && run->queued != 0 && run->files.base != 0 && run->round.base != 0;
     if (result)
     {
         memset(run->lanes, 0, lane_count * sizeof(FilesLane));
@@ -1439,6 +1555,7 @@ static __attribute__((unused)) void files_run_release(FilesRun* run)
     arena_release(&run->arena);
     arena_release(&run->item_arena);
     arena_release(&run->item_slot_arena);
+    arena_release(&run->record_item_arena);
     arena_release(&run->queued_arena);
     arena_release(&run->files);
     arena_release(&run->round);

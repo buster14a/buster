@@ -309,8 +309,11 @@ static uint32_t files_benchmark_parse_list(const char* text, uint32_t* values, u
         for (unsigned long value = first; valid && value <= last; value += 1)
         {
             valid = count < capacity && value < UINT32_MAX;
-            values[count] = (uint32_t)value;
-            count += valid;
+            if (valid)
+            {
+                values[count] = (uint32_t)value;
+                count += 1;
+            }
         }
         valid = valid && (*p == 0 || (*p == ',' && p[1] != 0));
         p += *p == ',';

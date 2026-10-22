@@ -2111,7 +2111,10 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
 {
     static const uint8_t empty[1] = { 0 };
     *probe = (FileProbe){ .record = BUSTER_PP_NONE };
-    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    // Without blocking: opening a FIFO waits for a writer otherwise, also for the walk's speculative probes of includes
+    // no unit reaches. A FIFO, a device or a directory then isn't a regular file, and is none. O_NONBLOCK changes
+    // nothing for a regular file, and O_NOCTTY keeps a terminal from becoming the process's controlling one.
+    const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
     counts->opens += 1;
     struct stat stats;
     if (fd >= 0 && fstat(fd, &stats) == 0 && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
