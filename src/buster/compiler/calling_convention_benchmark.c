@@ -1272,14 +1272,18 @@ struct AbiBenchmarkDeferred
     uint32_t inexact;
     uint32_t padded;
     uint32_t wide_named;
+    uint32_t empty;
+    uint32_t general_low;
+    uint32_t demoted;
 };
 
 // abi_assign's rules for which calls go to its twin, mirrored here a call at a time (keep them in step with
 // abi_assign's deferred_lanes), since its results don't tell: the twin's are the same. The prefix sums of a call's
 // registers and stack slots count every argument that needs a register as using it, so a call goes to the twin when an
-// argument is UNCOUNTED, doesn't fit (its sums of either class past the registers) while a register it needs is still
-// free (inexact), goes to the stack at an offset its alignment doesn't divide (padded), or is a named WIDE vector of a
-// variadic call.
+// argument is UNCOUNTED, doesn't fit (the sum of a class it needs past the registers) while a register it needs is
+// still free (inexact), goes to the stack at an offset its alignment doesn't divide (padded), is a named WIDE vector of
+// a variadic call, is of no size on the stack (EMPTY, which may take no slot), or has a LOW_GENERAL low eightbyte, or
+// when the call's result is a vector demoted to a hidden pointer, which clang doesn't count.
 static AbiBenchmarkDeferred abi_benchmark_deferred(const AbiTable* abi, AbiSignatures signatures)
 {
     AbiBenchmarkDeferred result = { 0 };
@@ -1289,13 +1293,18 @@ static AbiBenchmarkDeferred abi_benchmark_deferred(const AbiTable* abi, AbiSigna
         const uint32_t count = signatures.counts[c];
         const uint32_t named = signatures.named[c] < count ? signatures.named[c] : count;
         const bool variadic = signatures.variadic[c] != 0;
-        uint32_t integers = abi->results[signatures.results[c] >> BUSTER_TYPE_INDEX_SHIFT].kind == BUSTER_ABI_RESULT_MEMORY ? 1 : 0;
+        const AbiReturn call_result = abi->results[signatures.results[c] >> BUSTER_TYPE_INDEX_SHIFT];
+        const bool hidden = call_result.kind == BUSTER_ABI_RESULT_MEMORY;
+        uint32_t integers = hidden ? 1 : 0;
         uint32_t vectors = 0;
         uint64_t stack = 0;
         bool uncounted = false;
         bool inexact = false;
         bool padded = false;
         bool wide_named = false;
+        bool empty = false;
+        bool general_low = false;
+        const bool demoted = count != 0 && hidden && (call_result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint32_t index = signatures.arguments[first + i] >> BUSTER_TYPE_INDEX_SHIFT;
@@ -1305,7 +1314,8 @@ static AbiBenchmarkDeferred abi_benchmark_deferred(const AbiTable* abi, AbiSigna
             const bool in_memory = (pass & BUSTER_ABI_PASS_MEMORY) != 0 || (wide && unnamed);
             const uint32_t need_integers = in_memory ? 0 : ((pass & BUSTER_ABI_PASS_LOW_INTEGER) != 0 ? 1u : 0u) + ((pass & BUSTER_ABI_PASS_HIGH_INTEGER) != 0 ? 1u : 0u);
             const uint32_t need_vectors = in_memory ? 0 : ((pass & BUSTER_ABI_PASS_LOW_SSE) != 0 ? 1u : 0u) + ((pass & BUSTER_ABI_PASS_HIGH_SSE) != 0 ? 1u : 0u);
-            const bool fits = integers + need_integers <= BUSTER_ABI_INTEGER_ARGUMENTS && vectors + need_vectors <= BUSTER_ABI_VECTOR_ARGUMENTS;
+            const bool fits = (need_integers == 0 || integers + need_integers <= BUSTER_ABI_INTEGER_ARGUMENTS) &&
+                              (need_vectors == 0 || vectors + need_vectors <= BUSTER_ABI_VECTOR_ARGUMENTS);
             const bool spills = need_integers + need_vectors != 0 && !fits;
             const bool on_stack = (in_memory || spills) && (pass & BUSTER_ABI_PASS_IGNORE) == 0;
             const uint64_t alignment = 1ull << ((pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT);
@@ -1313,17 +1323,22 @@ static AbiBenchmarkDeferred abi_benchmark_deferred(const AbiTable* abi, AbiSigna
             inexact = inexact || (spills && ((need_integers != 0 && integers < BUSTER_ABI_INTEGER_ARGUMENTS) || (need_vectors != 0 && vectors < BUSTER_ABI_VECTOR_ARGUMENTS)));
             padded = padded || (on_stack && (stack & (alignment - 1)) != 0);
             wide_named = wide_named || (wide && variadic && !unnamed);
+            empty = empty || (on_stack && (pass & BUSTER_ABI_PASS_EMPTY) != 0);
+            general_low = general_low || (pass & BUSTER_ABI_PASS_LOW_GENERAL) != 0;
             integers += need_integers;
             vectors += need_vectors;
             stack += on_stack ? abi->stack_bytes[index] : 0;
         }
-        const bool deferred = uncounted || inexact || padded || wide_named;
+        const bool deferred = uncounted || inexact || padded || wide_named || empty || general_low || demoted;
         result.arguments += deferred ? count : 0;
         result.calls += deferred ? 1 : 0;
         result.uncounted += uncounted ? 1 : 0;
         result.inexact += inexact ? 1 : 0;
         result.padded += padded ? 1 : 0;
         result.wide_named += wide_named ? 1 : 0;
+        result.empty += empty ? 1 : 0;
+        result.general_low += general_low ? 1 : 0;
+        result.demoted += demoted ? 1 : 0;
         first += count;
     }
     return result;
@@ -1400,9 +1415,10 @@ static bool abi_benchmark_assign_mix(const AbiTable* abi, const TypeTable* table
                    benchmark.name, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES, calls.count, calls.variadic_count, calls.argument_count, arguments / calls.count,
                    100.0 * kinds[BUSTER_ABI_LOCATION_REGISTERS] / arguments, 100.0 * kinds[BUSTER_ABI_LOCATION_STACK] / arguments,
                    100.0 * kinds[BUSTER_ABI_LOCATION_SPLIT] / arguments, 100.0 * kinds[BUSTER_ABI_LOCATION_IGNORE] / arguments);
-            printf("%s: the vector path left %.2f%% of the arguments (%u calls, %.2f%%) to the twin: %u calls uncounted, %u inexact, %u padded, %u named wide\n", benchmark.name,
-                   100.0 * (double)deferred.arguments / arguments, deferred.calls, 100.0 * deferred.calls / calls.count, deferred.uncounted, deferred.inexact, deferred.padded,
-                   deferred.wide_named);
+            printf("%s: the vector path left %.2f%% of the arguments (%u calls, %.2f%%) to the twin: %u calls uncounted, %u inexact, %u padded, %u named wide, %u empty, "
+                   "%u general low, %u demoted\n",
+                   benchmark.name, 100.0 * (double)deferred.arguments / arguments, deferred.calls, 100.0 * deferred.calls / calls.count, deferred.uncounted, deferred.inexact,
+                   deferred.padded, deferred.wide_named, deferred.empty, deferred.general_low, deferred.demoted);
             abi_benchmark_print(benchmark.name, options.timed, &samples, "argument", 0, 0);
         }
     }
