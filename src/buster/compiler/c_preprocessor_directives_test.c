@@ -493,7 +493,8 @@ static bool pp_directive_test_compare(PPDirectiveTest* test, const uint8_t* byte
         {
             column_lengths[c] = pp->columns[c].length;
         }
-        PPFileData data = { .bytes = copy, .length = (uint32_t)length };
+        // A file of the unit's own, prepared into its arenas (no cache record).
+        PPFileData data = { .bytes = copy, .length = (uint32_t)length, .record = BUSTER_PP_NONE };
         result = pp_prepare_data(pp, &data, name);
         PPDirectiveTestTable oracle = { 0 };
         const uint64_t scratch_length = test->arena.length;

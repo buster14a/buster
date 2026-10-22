@@ -278,7 +278,8 @@ static bool pp_benchmark_tables_file(PPBenchmarkTables* tables, const char* path
         {
             memset(bytes + length, 0, 64);
             PPFileData* data = &tables->datas[tables->count];
-            *data = (PPFileData){ .bytes = bytes, .length = (uint32_t)length };
+            // A file of the unit's own, prepared into its arenas (no cache record).
+            *data = (PPFileData){ .bytes = bytes, .length = (uint32_t)length, .record = BUSTER_PP_NONE };
             result = pp_prepare_data(&tables->pp, data, path);
             tables->count += result;
             tables->tokens += result ? data->token_count : 0;
@@ -368,7 +369,7 @@ static bool pp_benchmark_tables_pass(PPBenchmarkTables* tables, bool vectorized,
     const uint64_t instructions = pp_benchmark_read_counter(instructions_fd);
     for (uint32_t f = 0; result && f < tables->count; f += 1)
     {
-        result = pp_directive_table(pp, &tables->datas[f]);
+        result = pp_directive_table(pp->vectorized, &pp->arena, &tables->datas[f]);
     }
     sample->instructions = pp_benchmark_read_counter(instructions_fd) - instructions;
     sample->cycles = pp_benchmark_read_counter(cycles_fd) - cycles;
