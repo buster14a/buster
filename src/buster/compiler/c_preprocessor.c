@@ -3051,17 +3051,20 @@ static void pp_emit(Preprocessor* pp, PPToken token)
 }
 
 // Token `token` of a prepared file read in the range at `base`, as buffers hold it.
-// A token's flags with a context's pending ones added, as clang ORs an empty expansion's name's flags into the next
-// token's: a space of its own (not a name's) stays its own, unless the pending space is real, which clang's token then
-// has whatever its own (BUSTER_PP_NAME_SPACE without BUSTER_PP_NAME_LINE says so).
-BUSTER_INLINE uint8_t pp_with_pending(uint8_t flags, uint8_t pending)
+// A token's flags with its context's pending ones added (from a `file` context, or a buffer), as clang ORs an empty
+// expansion's name's flags into the next token's: a space of its own (not a name's) stays its own, unless the pending
+// space is real, which clang's token then has whatever its own (BUSTER_PP_NAME_SPACE without BUSTER_PP_NAME_LINE says
+// so). But a file's token that starts a line keeps its own space: clang's lexer clears a leading space at a newline.
+BUSTER_INLINE uint8_t pp_with_pending(uint8_t flags, uint8_t pending, bool file)
 {
+    const bool line = file && (flags & BUSTER_PP_START_OF_LINE);
+    const uint8_t taken = (uint8_t)(line ? pending & ~(BUSTER_PP_SPACE | BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE) : pending);
     const bool own = (flags & BUSTER_PP_SPACE) && !(flags & BUSTER_PP_NAME_SPACE);
-    const bool spaced = (pending & BUSTER_PP_SPACE) && !(pending & BUSTER_PP_NAME_LINE);
+    const bool spaced = (taken & BUSTER_PP_SPACE) && !(taken & BUSTER_PP_NAME_LINE);
     const uint8_t dropped = own ? (spaced ? BUSTER_PP_NAME_LINE : BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE) : 0;
     // An #embed's BUSTER_PP_JOIN_LINE takes the token's line start away.
     const uint8_t joined = (pending & BUSTER_PP_JOIN_LINE) ? BUSTER_PP_START_OF_LINE | BUSTER_PP_JOIN_LINE : 0;
-    return (uint8_t)((flags | pending | (own && spaced ? BUSTER_PP_NAME_SPACE : 0)) & ~dropped & ~joined);
+    return (uint8_t)((flags | taken | (own && spaced ? BUSTER_PP_NAME_SPACE : 0)) & ~dropped & ~joined);
 }
 
 // BUSTER_PP_NAME_LINE for a token that takes the flags of a name (`flags`, at `location`): an expansion's first token,
@@ -4246,11 +4249,25 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     // `## __VA_OPT__(...)`: the __VA_OPT__'s first token pastes onto the left operand as soon as it is
                     // known (below), and # __VA_OPT__'s string when it is made (above). But `, ## __VA_OPT__(__VA_ARGS__
                     // ## ...)` is GNU's comma, as clang sees the comma before the ## (VaArgsPseudoPaste): the variadic
-                    // argument follows it unpasted.
+                    // argument follows it unpasted. So is one after empty arguments pasted onto what follows them
+                    // (`d ## __VA_ARGS__`), which clang drops with their ## (TokenLexer::ExpandFunctionArguments), so
+                    // that the variadic argument is the ##'s operand.
                     const uint32_t content_end = operand + 1 + next->parameter;
-                    va_opt_pseudo_paste = variadic_present && next->kind == PP_ITEM_VA_OPT && left.kind == C_TOKEN_COMMA && operand + 2 < content_end &&
-                                          items[operand + 1].kind == PP_ITEM_PARAMETER && items[operand + 1].parameter == variadic_index &&
-                                          items[operand + 2].kind == PP_ITEM_PASTE;
+                    uint32_t lead = operand + 1;
+                    bool skipping = true;
+                    while (skipping && lead + 2 < content_end && items[lead].kind == PP_ITEM_PARAMETER && items[lead].parameter != variadic_index &&
+                           items[lead + 1].kind == PP_ITEM_PASTE)
+                    {
+                        PPTokens* lead_tokens;
+                        uint32_t lead_first;
+                        uint32_t lead_last;
+                        pp_argument_range(pp, invocation, items[lead].parameter, false, &lead_tokens, &lead_first, &lead_last);
+                        skipping = lead_first == lead_last;
+                        lead += skipping ? 2 : 0;
+                    }
+                    va_opt_pseudo_paste = variadic_present && next->kind == PP_ITEM_VA_OPT && left.kind == C_TOKEN_COMMA && lead < content_end &&
+                                          items[lead].kind == PP_ITEM_PARAMETER && items[lead].parameter == variadic_index &&
+                                          (lead > operand + 1 || (lead + 1 < content_end && items[lead + 1].kind == PP_ITEM_PASTE));
                     va_opt_paste_left = !va_opt_pseudo_paste;
                     va_opt_paste_location = pp->history_anchor;
                     va_opt_paste_spelling = pp->history_spelling;
@@ -5870,7 +5887,7 @@ static void pp_stream_unexpanded(Preprocessor* pp)
             pp_check_poison(pp, token.value, token.location);
         }
         context->position += 1;
-        token.flags = (uint8_t)(pp_with_pending(token.flags, context->pending_flags) | BUSTER_PP_NO_EXPAND);
+        token.flags = (uint8_t)(pp_with_pending(token.flags, context->pending_flags, context->kind == BUSTER_PP_CONTEXT_FILE) | BUSTER_PP_NO_EXPAND);
         context->pending_flags = 0;
         pp_emit(pp, token);
     }
@@ -6142,7 +6159,7 @@ BUSTER_INLINE void pp_take_pending_flags(Preprocessor* pp, PPContext* context, u
     if (context->pending_flags != 0 && copied != 0)
     {
         PPTokens* target = pp_target(pp);
-        target->flags[target->count - copied] = pp_with_pending(target->flags[target->count - copied], context->pending_flags);
+        target->flags[target->count - copied] = pp_with_pending(target->flags[target->count - copied], context->pending_flags, context->kind == BUSTER_PP_CONTEXT_FILE);
         context->pending_flags = 0;
     }
 }
@@ -6182,7 +6199,7 @@ static void pp_expand_current(Preprocessor* pp)
         PPToken name = pp_context_token(pp, context, context->position);
         if (context->pending_flags != 0)
         {
-            name.flags = pp_with_pending(name.flags, context->pending_flags);
+            name.flags = pp_with_pending(name.flags, context->pending_flags, context->kind == BUSTER_PP_CONTEXT_FILE);
             context->pending_flags = 0;
         }
         if (pp->options.expansion_starts && context->kind == BUSTER_PP_CONTEXT_FILE && pp->capture_count == 0)
