@@ -1600,25 +1600,26 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
 // C's GNU identifier grammar includes '$'. Assembly instead needs $MACRO to expand MACRO. Only tokens containing
 // '$' take this adapter; literals stay opaque. Re-lex the intervening slices with the shared lexer, including line
 // splices and numeric local references. Scratch columns leave the original columns intact on allocation failure.
+// A slice can lex into several tokens (the pp-number 1$e+5 into 1, $, e, + and 5), at most one per byte: the bytes of
+// the tokens that contain '$' bound the columns, not their dollars.
 static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count)
 {
-    uint64_t dollars = 0;
-    for (uint32_t i = 0; i < count; i += 1)
+    // Most sources have no '$' at all, which one scan of their extent finds.
+    const bool dollars = count != 0 && memchr(bytes + starts[0], '$', ends[count - 1] - starts[0]) != 0;
+    uint64_t split_bytes = 0;
+    for (uint32_t i = 0; dollars && i < count; i += 1)
     {
         const uint8_t kind = kinds[i] & 0x7F;
-        if (kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT)
+        if ((kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT) && memchr(bytes + starts[i], '$', ends[i] - starts[i]) != 0)
         {
-            for (uint32_t at = starts[i]; at < ends[i]; at += 1)
-            {
-                dollars += bytes[at] == '$';
-            }
+            split_bytes += ends[i] - starts[i];
         }
     }
     int64_t result = count;
-    if (dollars != 0)
+    if (split_bytes != 0)
     {
         Scratch scratch = scratch_begin(0);
-        const uint64_t capacity = (uint64_t)count + 2 * dollars + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
+        const uint64_t capacity = (uint64_t)count + split_bytes + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
         uint8_t* split_kinds = arena_push(scratch.arena, capacity, 64);
         uint32_t* split_starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
         uint32_t* split_ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
@@ -3670,7 +3671,9 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
             uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-            const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, pp->refine_flags) : -1;
+            int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, pp->refine_flags) : -1;
+            // In assembly, '$' is punctuation (pp_split_dollars), so `$ ## x` gives two tokens.
+            count = count > 0 && pp->options.assembly ? pp_split_dollars(pp->refine_flags, joined, kinds, starts, ends, (uint32_t)count) : count;
             // A prefixed literal the mode doesn't have lexes as two tokens (pp_split_kinds).
             valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_splits_kind(pp->split_kinds, kinds[0]);
             kind = valid ? kinds[0] & 0x7F : kind;
@@ -3694,8 +3697,10 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             };
             result->origin = pp_history_generated(pp, PP_GENERATED_PASTE, location, pp->history_spelling, sources, 2);
         }
-        else
+        else if (!pp->options.assembly)
         {
+            // Assembler-with-cpp has no invalid paste: as in GCC and Clang, the two tokens stay, so `% ## eax` is
+            // `%eax`, and in `$ ## X` the X is rescanned, which expands a macro X.
             const uint32_t saved = pp->diagnostic_origin;
             pp->diagnostic_origin = pp->history_current;
             pp_diagnose(pp, PP_SEVERITY_ERROR, pp->history_anchor, "pasting formed '%.*s', an invalid preprocessing token", (int)length, (const char*)joined);
