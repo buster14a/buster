@@ -207,7 +207,10 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
     paths.items = arena_push_array(&paths.arena, BUSTER_PP_ORACLE_MAX_FILES, sizeof(char*), 8);
     const int capacity = argument_count + BUSTER_PP_ORACLE_EXTRA_ARGUMENTS;
     char** clang_arguments = calloc((size_t)capacity, sizeof(char*));
-    char** own_arguments = calloc((size_t)capacity, sizeof(char*));
+    // Our side's arguments: -E's options of ours (pp_own_option_with_value's, with their values), which clang doesn't
+    // get, then clang's but those only its driver takes, then the input.
+    char** own_arguments = calloc((size_t)capacity + (size_t)argument_count, sizeof(char*));
+    int own_count = 0;
     const char* executable = "clang";
     const char* list = 0;
     const char* root = ".";
@@ -273,10 +276,21 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
         {
             ready = pp_oracle_paths(&paths, argument);
         }
+        else if (pp_own_option_with_value(argument))
+        {
+            // Our side's alone (a --predefines file gives way to clang's own predefines, below).
+            ready = i + 1 < argument_count;
+            if (ready)
+            {
+                own_arguments[own_count++] = arguments[i];
+                own_arguments[own_count++] = arguments[++i];
+            }
+        }
         else
         {
             const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
-                                     strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-x") == 0;
+                                     strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-x") == 0 ||
+                                     strcmp(argument, "-target") == 0;
             no_standard_includes |= strcmp(argument, "-nostdinc") == 0;
             clang_arguments[count++] = arguments[i];
             if (takes_value)
@@ -306,11 +320,11 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
     const bool fixed_epoch = getenv("SOURCE_DATE_EPOCH") == 0;
     ready = ready && (!fixed_epoch || setenv("SOURCE_DATE_EPOCH", BUSTER_PP_ORACLE_EPOCH, 1) == 0);
     ready = ready && (no_standard_includes || pp_oracle_includes(executable, clang_arguments, &count, capacity, &paths));
-    int own_count = 0;
     for (int i = 0; ready && i < count; i += 1)
     {
         const char* argument = clang_arguments[i];
-        if (strcmp(argument, "--no-default-config") != 0 && strcmp(argument, "--target=x86_64-linux-gnu") != 0 && strcmp(argument, "-pipe") != 0 && strcmp(argument, "-H") != 0)
+        // The fixed target reaches pp_parse_options too, for __is_target_vendor and the other target queries.
+        if (strcmp(argument, "--no-default-config") != 0 && strcmp(argument, "-pipe") != 0 && strcmp(argument, "-H") != 0)
         {
             own_arguments[own_count++] = clang_arguments[i];
         }
@@ -328,6 +342,8 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
     {
         own_arguments[own_count] = paths.items[0];
         ready = pp_parse_options(own_count + 1, own_arguments, &options, &paths.arena, &input, &output, &markers) && output == 0;
+        // The oracle's mode (#125): the feature queries answer as clang's do.
+        options.clang_features = true;
     }
     char predefines[BUSTER_PP_ORACLE_MAX_PATH + 32];
     snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
@@ -376,7 +392,7 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
         uint64_t file_tokens = 0;
         if (clang.status == PP_CLANG_ACCEPTED)
         {
-            const bool same = pp_test_file_output(&options, path, true, clang.text, clang.length, &file_tokens);
+            const bool same = pp_test_file_output(&options, path, true, clang.text, clang.length, &file_tokens, 0);
             identical += same;
             different += !same;
             status = same ? "identical" : "different";

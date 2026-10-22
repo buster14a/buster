@@ -21,7 +21,10 @@ its own to select, so `--buster-headers` is refused (`test-preprocessor --clang
 --buster-headers file...` compares that mode). Clang's `CPATH` and
 `C_INCLUDE_PATH` are cleared; Buster does not read them. One
 `clang -dM -E` dump per configuration supplies Buster's predefines, without
-adding `__BUSTER__`. Both sides inherit `SOURCE_DATE_EPOCH`, defaulted to
+adding `__BUSTER__`. The target, the fixed one and any `--target=` or `-target
+TRIPLE` after it, reaches both sides, so the target queries
+(`__is_target_vendor` and the others) answer for the same triple;
+`accepted.input` checks the vendor's. Both sides inherit `SOURCE_DATE_EPOCH`, defaulted to
 `1792454400` (2026-10-20 UTC) for this run. The existing Clang feature tables
 supply the feature queries in oracle mode.
 
@@ -126,5 +129,6 @@ branch's repository-wide pending slot cannot cancel another PR's qualification.
 Each queue keeps one pending run, GitHub's default `queue: single`, as
 [GitHub documents](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency):
 a newer push to the same PR replaces its pending run, whose commit is no longer
-the PR's to qualify, and a running one finishes. The runner hooks serialize
-all CI jobs with the shared machine lock.
+the PR's to qualify, and cancels its run in progress for the same reason (a
+push to main lets main's run finish). The runner hooks serialize all CI jobs
+with the shared machine lock.

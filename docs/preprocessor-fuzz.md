@@ -121,17 +121,22 @@ are lexed as `preprocessor_fuzz_lex_printed` says:
   each such token of our stream lies in its text (`pp_fuzz_breaks`,
   `PreprocessorFuzzOutput.whole`), and the lexed token that reaches one ends
   where it does.
-- Clang's text can't show where such a token of clang's ends. On a pragma's
-  line it ends the line, so clang's lexed token must end where ours does.
-  Elsewhere clang's text follows ours: its token at the same index, when it
-  starts with the same bytes, is as long. Then clang's own tokens for the
-  case alone confirm it (`clang -Xclang -dump-tokens`,
+- Clang's text can't show where such a token of clang's ends. At a pragma's
+  line's end, where such a token is in both texts, clang's lexed token must
+  end where ours does. Elsewhere clang's text follows ours: its token at the
+  same index, when it starts with the same bytes, is as long. Then clang's
+  own tokens for the case alone confirm it (`clang -Xclang -dump-tokens`,
   `preprocessor_fuzz_clang_tokens`, `pp_fuzz_check_ends`): its unterminated
   literals, stray `\`s and broken strings must be ours, in order, with the
-  same kinds and spellings. About 2% of the cases need clang's tokens. A
-  pragma's tokens aren't among clang's. Nor are other unknown tokens, which
-  end where a lexer ends them: clang also calls unknown a `##` that it took
-  out of a macro's argument, which ours keeps a `##`.
+  same kinds and spellings. About 2% of the cases need clang's tokens. Other
+  unknown tokens aren't among them, since they end where a lexer ends them:
+  clang also calls unknown a `##` that it took out of a macro's argument,
+  which ours keeps a `##`.
+- A pragma's tokens aren't among clang's either. A pragma whose tokens are
+  expanded (`#pragma omp`) can go on past such a token on its line, and
+  there nothing confirms its end: the case counts as unverified, apart from
+  the cases compared. Seed 133's case 832692, in C17, was the first, in 3.5
+  million cases per mode.
 - A comment can only be a `/` printed before a `*` or a `/`, and a line
   splice a `\` before a newline. Their `/` and `\` are tokens, and lexing goes
   on after them.
@@ -250,17 +255,18 @@ whitespace between tokens doesn't count, but a literal's contents and two
 tokens joined into one do, as `"a b" 0` against `"ab" 0` and `a b` against
 `ab`; an unterminated literal and a broken string of ours are whole, the
 spaces after them not counting and their own bytes counting; and a
-comment's `/` and a splice's `\` are tokens; and on a pragma's line,
+comment's `/` and a splice's `\` are tokens; and at a pragma's line's end,
 clang's text gives an unterminated literal's end. With `--clang` it then
 compares the emulation's fixtures with clang in each mode
 (`pp_fuzz_emulation_cases`, `pp_fuzz_check_emulation`): the minimized cases
 the emulation once printed wrong, and those probing around them found, which
 test-preprocessor's cases can't pin, since they compare tokens and line
 markers, not the `-P` text. Then the two probes of #263's second review:
-four sources whose output has a token that clang's text runs on past
+five sources whose output has a token that clang's text runs on past
 (`pp_fuzz_ends_cases`), each of which must agree with clang, confirmed by
-clang's tokens, and must differ with its first such token one byte shorter,
-the first source by clang's tokens alone (`pp_fuzz_check_ends_cases`); and a
+clang's tokens (or unverified, on a `#pragma omp`'s line), and must differ
+with its first such token one byte shorter, the first source by clang's
+tokens alone (`pp_fuzz_check_ends_cases`); and a
 comparison whose tokens don't fit its arena, which must leave its case
 without a result (`pp_fuzz_check_failed_comparison`). The harness's own tests
 (`test-preprocessor-fuzz`) check the reader of clang's token dump on lines
@@ -631,6 +637,30 @@ result clang gives differently for its cases alone:
 | The cost fixes, `fde8698` | 7940HS | 13 | 200,000 | 0, 0 | 0 | none |
 | Merged with main, `4c6160f` | 7940HS | 14 | 300,000 | 0, 1 | 0 | none |
 | The paste's line start, `fbddd2e` | 7940HS | 14 and 15 | 600,000 | 0, 0 | 0 | none |
+| Every case by tokens (first review), `ffed99c` | 9700X | 91 and 92 | 2,000,000 | 3, 2 | 0 | none |
+| | 7940HS | 81 | 1,000,000 | 0, 1 | 0 | none |
+| Printed-token boundaries, `8fb1cd5` | 9700X | 101 and 102 | 1,600,000 (stopped) | 0, 0 | 0 | none |
+| | 7940HS | 111 to 113 | 2,500,000 (stopped) | 0, 0 | 0 | none |
+| Clang token-dump confirmation (second review), `7d5779b` | 9700X | 141 to 144 | 3,200,000 (stopped) | 0, 0 | 0 | none |
+| | 7940HS | 131 to 134 | 3,500,000 (stopped) | 1, 0 | 0 | comparator false positive |
+
+These review-era counts are the previous owner's handoff evidence, not new
+qualification of the merged implementation. The first review removed a
+whitespace-stripping fallback that could hide token or literal differences.
+The second added Clang token-dump confirmation for ambiguous token ends and
+made invalid comparisons fail instead of counting as compared. The `8fb1cd5`
+runs were stopped for that second finding. The final `7d5779b` local run's
+reported difference was seed 133, case 832692, C17: an unterminated literal
+expanded on a continuing `#pragma omp` line. `9a52464` marks this comparison
+unverified rather than guessing its boundary; it is not a preprocessor fix.
+
+The integration based on compiler sources `b0977a0` includes current main's
+predefines and explicit feature-query modes and #247's skipped-group checks.
+The fuzz adapter selects Clang's feature answers. The four deferred
+case-modes below are now in the same tree. Fresh current-source tests and
+CI must validate this integration separately. No ten-million-per-mode
+campaign on either host qualifies this merged tree yet: #109 remains open
+for those campaigns and any resulting permanent regression fixtures.
 
 A crashed worker's cases have no count: 33,333 cases each. The first freeze's
 local run on seed 11 was stopped after its first six differences, which the
