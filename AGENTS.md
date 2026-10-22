@@ -312,7 +312,10 @@ designs and the compilers already built this way.
   registers and stack slots as clang and LLVM's `CC_X86_64_C` give them, by
   prefix sums 16 arguments at a time with an exact twin; and `va_arg`'s plan.
   `calling_convention_test.c` holds its tests (`main.c` includes both;
-  `./build/compiler test-calling-convention` runs them).
+  `./build/compiler test-calling-convention` runs them) and
+  `calling_convention_benchmark.c` provides `benchmark-calling-convention`.
+  `docs/calling-convention.md` records the design, where clang's LLVM types
+  and GCC decide otherwise than the classes, and its 9700X measurements.
 - `src/buster/compiler/call_graph.c` is the call graph check, the coding
   style's rule against recursion checked mechanically: `check-call-graph`
   reads the LLVM IR of the translation units `build.sh` compiles, builds their
@@ -382,6 +385,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-types
 ./build/compiler benchmark-types
 ./build/compiler test-calling-convention --cross-check
+./build/compiler benchmark-calling-convention
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
@@ -1913,7 +1917,9 @@ others, its measurements are informational.
   narrow low parts clang widens into a general register), and calls whose
   locations clang and LLVM give (an `UNCOUNTED` argument that splits the
   next record, an `__int128` without two registers left, a hidden pointer, a
-  record of a flexible array member alone as an `i0`);
+  record of a flexible array member alone as an `i0`, a struct whose narrow
+  low part takes a general register, and a union stored as an `i128`, which
+  clang counts as two registers), and `va_arg`'s plan for an aligned `long`;
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's
@@ -1923,19 +1929,54 @@ others, its measurements are informational.
   columns ending at a `PROT_NONE` page.
 
 With `--cross-check`, which needs clang 23 and GCC 16 on `PATH` (or `--clang
-PATH` and `--gcc PATH`) and libatomic: for each compiler and vector width
-(the C built with `-march=x86-64`, `x86-64-v3` and `x86-64-v4`), a world and
-`--signatures` random signatures (400) over its passable types are written
-as C (the types, every argument's and result's bytes, a C callee and a C
-caller of ours) and as our side, a caller and a callee per signature as
+PATH` and `--gcc PATH`) and libatomic: for each compiler and vector width (the
+C built with `-march=x86-64`, `x86-64-v3` and `x86-64-v4`), a world and
+`--signatures` random signatures (400) over its passable types are written as
+C (the types, every argument's and result's bytes, a C callee and a C caller
+of ours) and as our side, a caller and a callee per signature as
 `X86Instruction` records through `x86_encode`, `link_add_code_fixups` and the
 object writer. The compiler's driver links them and the program runs: each
 side checks every argument, result, hidden pointer, `al` and `va_arg` value
 against the bytes, both ways. GCC's worlds leave out what GCC lays out or
-passes otherwise than clang (the test names each, GCC's own bugs among
-them); an argument clang would pass as an `i0` becomes a long (its passes
-crash on them now and then), as does an unnamed one clang's `va_arg` reads
-elsewhere than its call puts it; and bytes clang doesn't pass aren't
-compared. The files go in a new directory under `$TMPDIR` (or `/tmp`),
-removed unless `--keep` or a failure. The 9700X job runs it with
-`--cross-check` after the type table's benchmark.
+passes otherwise than clang (the test names each, GCC's own bugs among them,
+and `docs/calling-convention.md` lists them); an argument clang would pass as
+an `i0` becomes a long (its passes crash on them now and then), as does an
+unnamed one clang's `va_arg` reads elsewhere than its call puts it; and bytes
+clang doesn't pass aren't compared. The files go in a new directory under
+`$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure. The 9700X job
+runs it with `--cross-check` after the type table's benchmark.
+
+## Calling convention benchmark
+
+`./build/compiler benchmark-calling-convention [--seed N] [--count N]
+[--only classification|assignment] [--path vector|scalar] [--after-scalar
+MS]` (about 1 s on the 9700X) checks that each vector path of
+`calling_convention.c` agrees with its twin (the classification's rows, pass
+bits, stack bytes, alignments and results; the assignment's locations and
+calls), then reports 21 interleaved-pass medians per item (time, cycles,
+instructions, IPC, branch mispredictions and the throttle, PMCx1A0's umask
+0x08, #199):
+
+- classification: a table of `--count` types (32,768), records and unions of
+  0 to 8 members mostly, with the pointers, arrays, vectors and aligned
+  typedefs their members have, classified from nothing by `abi_classify_all`
+  and its twin at 16-, 32- and 64-byte vectors, per type and per record
+  member; then by `abi_classify` and its twin on the batches a front end
+  hands them: windows of the 1, 4 or 16 types made since its last call, a
+  call per dependency level;
+- assignment: `--count` calls over those types at 16 bytes, most of 0 to 6
+  arguments, some of 4 to 14 and a few of 15 to 22, one in four variadic, by
+  `abi_assign` and its twin per argument, with the share of arguments the
+  vector path left to its twin and why (from a mirror of its rules,
+  `abi_benchmark_deferred`, to keep in step with `abi_assign`); then the same
+  shapes with integers, pointers and doubles alone (`assign-simple`).
+
+Each run takes the whole table or every call once. Below 16,384 types the
+branch predictor learns the table from run to run: with 4,096, the
+classification mispredicts 3 to 10 times less often and runs up to 2.3 times
+as fast. `--path` times one path alone, back to back, and `--after-scalar MS`
+runs the twin for MS ms before each sample of the vector path. Run it under
+the 9700X's lock with `taskset -c 2`; `docs/calling-convention.md` has the
+numbers. The default 9700X job runs it after the calling convention's tests,
+pinned to one allowed CPU; like the others, its measurements are
+informational.
