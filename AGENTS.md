@@ -2657,9 +2657,10 @@ others, its measurements are informational.
   high eightbyte under an INTEGER low one and refused under another, runs of
   bit-fields that are an `i128` and that aren't, and the narrow low parts
   clang widens into a general register; and the `_Atomic` types whose LLVM
-  types decide: of types of no size, which LLVM makes larger, as the records
-  ending in one, with their slots, the records it lays out otherwise than C,
-  and vectors LLVM keeps whole, splits or, of bools, passes as integers), and
+  types decide: of types of no size, which LLVM makes larger (to 32 KB, and
+  refused past the alignment the module keeps), as the records ending in
+  one, with their slots, the records it lays out otherwise than C, and
+  vectors LLVM keeps whole, splits or, of bools, passes as integers), and
   calls whose locations clang and LLVM give (an `UNCOUNTED` argument that
   splits the next record, an `__int128` without two registers left, a hidden
   pointer, a record of a flexible array member alone as an `i0`, a struct
@@ -2667,7 +2668,8 @@ others, its measurements are informational.
   `i128`, which clang counts as two registers with a NO_CLASS or SSE high
   eightbyte, runs of bit-fields where an uncounted `_Atomic int` leaves one
   register, split or whole on the stack, the larger copies' slots, byval or
-  an integer by clang's count, and `_Atomic` bool vectors), `va_arg`'s plans
+  an integer by clang's count, `_Atomic` bool vectors, and a vector of bools
+  that isn't `_Atomic` returned through a hidden pointer), `va_arg`'s plans
   for an aligned `long` and an `i128` with an SSE high eightbyte, and the
   levels across calls (a record larger than 64 bytes that waits for a
   `LARGER` member, and a flexible record of no size that an `_Atomic` of it in
