@@ -1040,6 +1040,131 @@ static bool pp_directive_test_guards(const char* directory, bool with_clang)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The location space (#124)
+
+// One run of `path` in a location space of `limit` bytes (0 for the whole), by the kernels `scalar` picks: its output's
+// spellings, one space apart, and its diagnostics, in `*output` and `*diagnostics` (free them); and the bases of the
+// inclusion of a file whose name ends with "b.h" and of the first chunk of pasted spellings, or BUSTER_PP_NONE.
+static bool pp_directive_test_space_run(const char* path, uint32_t limit, bool scalar, char** output, char** diagnostics, uint32_t* include_base, uint32_t* scratch_base)
+{
+    size_t diagnostics_length = 0;
+    FILE* stream = open_memstream(diagnostics, &diagnostics_length);
+    const PPOptions options = {
+        .language = { .standard = 2017, .gnu = true },
+        .scalar = scalar,
+        .diagnostics = stream,
+        .location_limit = limit,
+    };
+    static InternTable table;
+    static Preprocessor pp;
+    PPSpellings spellings = { 0 };
+    bool result = stream != 0 && intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+    if (result)
+    {
+        pp_run(&pp, path);
+        result = pp_stream_spellings(&pp, &spellings);
+        *include_base = BUSTER_PP_NONE;
+        for (uint32_t r = 0; r < pp.range_count; r += 1)
+        {
+            const uint32_t file = pp.ranges[r].file;
+            const char* name = file != BUSTER_PP_NONE ? pp.files[file].path : "";
+            const size_t length = strlen(name);
+            *include_base = length >= 3 && strcmp(name + length - 3, "b.h") == 0 ? pp.ranges[r].base : *include_base;
+        }
+        *scratch_base = pp.scratch_range[0] != BUSTER_PP_NONE ? pp.ranges[pp.scratch_range[0]].base : BUSTER_PP_NONE;
+    }
+    pp_release(&pp);
+    intern_release(&table);
+    if (stream != 0)
+    {
+        fclose(stream);
+    }
+    size_t text_length = 0;
+    FILE* text = result ? open_memstream(output, &text_length) : 0;
+    for (uint64_t i = 0; text != 0 && i < spellings.count; i += 1)
+    {
+        fprintf(text, "%s%.*s", i != 0 ? " " : "", (int)spellings.lengths[i], (const char*)spellings.bytes + spellings.offsets[i]);
+    }
+    if (text != 0)
+    {
+        fclose(text);
+    }
+    arena_release(&spellings.arena);
+    return result && text != 0;
+}
+
+// A location space just too small for an inclusion and for the first pasted spelling (--location-limit's option): the
+// run must stop there, after the output before it, reporting the inclusion at its #include and the spelling without a
+// place, as clang reports them, by both kernels alike.
+static bool pp_directive_test_location_space(const char* directory)
+{
+    static const char header[] = "in_b\n/* a header longer than a chunk of the main file's lines */\n";
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        const char* output;
+        const char* diagnostic;
+    } cases[] = {
+        { "an inclusion", "first\n#include \"a.h\"\nsecond\n#include \"b.h\"\nthird\n", "first in_a second",
+          "space.c:4:1: fatal error: this include makes the translation unit too large: it passes the location space (" },
+        { "a pasted spelling", "before\n#define P(a,b) a##b\nP(x,y)\nafter\n", "before",
+          "fatal error: the translation unit is too large: it passes the location space (" },
+    };
+    char path[4200];
+    char a[4200];
+    char b[4200];
+    snprintf(path, sizeof(path), "%s/space.c", directory);
+    snprintf(a, sizeof(a), "%s/a.h", directory);
+    snprintf(b, sizeof(b), "%s/b.h", directory);
+    bool result = pp_test_write_file(a, "in_a\n") && pp_test_write_file(b, header);
+    uint32_t failures = 0;
+    for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        result = pp_test_write_file(path, cases[c].source);
+        char* output = 0;
+        char* diagnostics = 0;
+        uint32_t include_base = BUSTER_PP_NONE;
+        uint32_t scratch_base = BUSTER_PP_NONE;
+        // First the whole space, for where the inclusion or the chunk starts; then a space that ends there.
+        result = result && pp_directive_test_space_run(path, 0, false, &output, &diagnostics, &include_base, &scratch_base);
+        const uint32_t base = c == 0 ? include_base : scratch_base;
+        free(output);
+        free(diagnostics);
+        bool same = result && base != BUSTER_PP_NONE;
+        char* outputs[2] = { 0, 0 };
+        char* reports[2] = { 0, 0 };
+        for (uint32_t k = 0; same && k < 2; k += 1)
+        {
+            uint32_t unused[2];
+            same = pp_directive_test_space_run(path, base + 1, k == 1, &outputs[k], &reports[k], &unused[0], &unused[1]) && outputs[k] != 0 && reports[k] != 0;
+        }
+        // The diagnostic, one line: the inclusion's at its #include's place.
+        const char* found = same ? strstr(reports[0], cases[c].diagnostic) : 0;
+        same = same && strcmp(outputs[0], outputs[1]) == 0 && strcmp(reports[0], reports[1]) == 0 && strcmp(outputs[0], cases[c].output) == 0 && found != 0 &&
+               strchr(reports[0], '\n') == reports[0] + strlen(reports[0]) - 1;
+        same = same && (c != 0 || (found >= reports[0] + strlen(directory) + 1 && memcmp(found - strlen(directory) - 1, directory, strlen(directory)) == 0));
+        if (!same)
+        {
+            printf("location space %s: output \"%s\" and diagnostics:\n%s(the scalar kernels' \"%s\")\n", cases[c].name, outputs[0] != 0 ? outputs[0] : "<failed>",
+                   reports[0] != 0 ? reports[0] : "<failed>\n", outputs[1] != 0 ? outputs[1] : "<failed>");
+        }
+        failures += !same;
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            free(outputs[k]);
+            free(reports[k]);
+        }
+    }
+    unlink(path);
+    unlink(a);
+    unlink(b);
+    printf("location space: %u of %lu runs out where expected%s\n", (uint32_t)BUSTER_ARRAY_LENGTH(cases) - failures, (unsigned long)BUSTER_ARRAY_LENGTH(cases),
+           failures == 0 ? "" : " (DIFFERS)");
+    return result && failures == 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // pp_test_directives
 
 // The checks without files: random streams (`count` from `seed`), the structure and definition fixtures, and the guard
@@ -1050,5 +1175,6 @@ static bool pp_test_directives(const char* directory, bool with_clang, uint64_t 
     result &= pp_directive_test_diagnostics(pp_directive_test_structures, BUSTER_ARRAY_LENGTH(pp_directive_test_structures), "directive structure", directory, with_clang);
     result &= pp_directive_test_diagnostics(pp_directive_test_definitions, BUSTER_ARRAY_LENGTH(pp_directive_test_definitions), "definitions", directory, with_clang);
     result &= pp_directive_test_guards(directory, with_clang);
+    result &= pp_directive_test_location_space(directory);
     return result;
 }

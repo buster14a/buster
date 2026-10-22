@@ -197,6 +197,8 @@ struct PPOptions
     bool no_history;
     // Enter a file whose include guard is defined rather than skip it (#120's control: the output is the same).
     bool no_guard_skip;
+    // The location space's size, for tests that run out of it (--location-limit N; 0 is the whole 4 GB).
+    uint32_t location_limit;
     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
     FILE* diagnostics;
 };
@@ -878,9 +880,22 @@ static uint32_t pp_add_range(Preprocessor* pp, uint32_t length, uint32_t file, c
 {
     uint32_t result = BUSTER_PP_NONE;
     const uint64_t size = (uint64_t)length + 1;
-    if ((uint64_t)pp->location_top + size >= UINT32_MAX || pp->range_count == BUSTER_PP_MAX_RANGES)
+    const uint64_t limit = pp->options.location_limit != 0 ? pp->options.location_limit : UINT32_MAX;
+    if ((uint64_t)pp->location_top + size >= limit || pp->range_count == BUSTER_PP_MAX_RANGES)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "the translation unit's sources pass 4 GB");
+        // As clang reports it: an inclusion at its #include, and generated spellings without a place; once.
+        if (pp->fatal)
+        {
+        }
+        else if (include_location != 0)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, include_location, "this include makes the translation unit too large: it passes the location space (%lu bytes)",
+                        (unsigned long)limit);
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "the translation unit is too large: it passes the location space (%lu bytes)", (unsigned long)limit);
+        }
     }
     else
     {
@@ -8913,6 +8928,15 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             options->scalar = true;
         }
+        else if (strcmp(argument, "--location-limit") == 0 && next != 0)
+        {
+            // A test option: a location space this many bytes long, to run out of it (#124).
+            char* rest;
+            const unsigned long long limit = strtoull(next, &rest, 10);
+            result = *rest == 0 && limit != 0 && limit <= UINT32_MAX;
+            options->location_limit = (uint32_t)limit;
+            i += 1;
+        }
         else if (strncmp(argument, "-O", 2) == 0)
         {
             options->optimize = strcmp(argument, "-O0") != 0;
@@ -9052,7 +9076,11 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
         static Preprocessor pp;
         if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table))
         {
-            fprintf(stderr, "can't reserve memory\n");
+            // A failure pp_initialize reported (a location space too small for its first spellings) or memory.
+            if (!pp.fatal)
+            {
+                fprintf(stderr, "can't reserve memory\n");
+            }
         }
         else
         {
