@@ -493,6 +493,53 @@ arenas. Popping a context gives its tokens back when they are on top.
     - a forced include's root is the `<built-in>` file that holds the
       `-include` lines.
 
+### The compiler's own headers
+
+`src/buster/include` holds buster's own freestanding headers (#117's item 6, as
+#156 decided): `<float.h>`, `<iso646.h>`, `<limits.h>`, `<stdalign.h>`,
+`<stdarg.h>`, `<stdatomic.h>`, `<stdbool.h>`, `<stdckdint.h>`, `<stddef.h>`,
+`<stdint.h>` and `<stdnoreturn.h>`. They are written from C23 and from what
+clang 23's resource headers give, and carry the project's license
+([LICENSING.md](../LICENSING.md) has the decision).
+
+- **Selecting them.** `--buster-headers` puts them where clang's resource
+  directory goes in the search. They are found from the executable: the tree
+  whose `build/` holds it. `-nobuiltininc`, clang's flag, leaves out the
+  compiler's headers, whichever they are. Clang's resource directory stays the
+  default.
+- **What they give.** Like clang's, each gives what its language mode has, and
+  takes the target's types and limits from the predefined macros.
+- **Working with glibc.**
+  - Hosted, `<limits.h>`, `<stdint.h>`, `<stdckdint.h>` and `<stdatomic.h>`
+    use the C library's own first, through `#include_next`.
+  - `<stddef.h>` and `<stdarg.h>` answer the `__need_*` requests that glibc's
+    headers make.
+  - The guards other headers test (`_SIZE_T`, `__int8_t_defined`,
+    `_GCC_LIMITS_H_` and the like) keep clang's and GCC's names.
+- **Not among them:** the intrinsics' headers (`<immintrin.h>`). They come from
+  clang's resource directory, as the rest of #156's self-hosting work needs.
+- **`__FLT_EVAL_METHOD__`** is now a builtin, as in clang (0 on x86-64): both
+  headers' `<float.h>` define `FLT_EVAL_METHOD` with it.
+
+`test-preprocessor --clang` checks them against clang's: 11 headers, 8 language
+modes, hosted and freestanding, 176 sets in all. For each set, clang
+preprocesses the header with its own set and with ours
+(`-nobuiltininc -isystem`), and:
+
+- the two must define the same macros. Guards and helpers reserved to the
+  implementation are exempt, as each names them its own way, but the ones other
+  headers test are compared too;
+- each macro must expand to the same tokens;
+- the declarations must be the same, in any order;
+- clang's primary diagnostics must be the same.
+
+Then our preprocessor with `--buster-headers` must give clang's tokens on all
+the headers and their macros in each mode. In strict C89, clang's own
+`<stdint.h>` and `<stdckdint.h>` put their `//` comments in the output as
+tokens; the check drops those lines from clang's side. With these headers,
+`sqlite3.c` (also in C23) and Lua 5.4.8 preprocess token for token as clang
+does, and compile with clang.
+
 ### `#embed`
 
 `#embed` (C23 6.10.3) works as clang 23's does (#117).
@@ -585,7 +632,8 @@ arenas. Popping a context gives its tokens back when they are on top.
 ### Built-in macros and the predefines
 
 `__FILE__`, `__LINE__`, `__COUNTER__`, `__INCLUDE_LEVEL__`, `__BASE_FILE__`,
-`__FILE_NAME__`, and `__DATE__`, `__TIME__` and `__TIMESTAMP__` (from
+`__FILE_NAME__`, `__FLT_EVAL_METHOD__` (0 on x86-64, as clang gives it), and
+`__DATE__`, `__TIME__` and `__TIMESTAMP__` (from
 `SOURCE_DATE_EPOCH` when it is set) are built in. So are the feature queries:
 `__has_attribute`, `__has_builtin`, `__has_feature`, `__has_extension`,
 `__has_c_attribute`, `__has_declspec_attribute`, `__has_warning`,
@@ -1322,8 +1370,7 @@ cleared once and reused.
   translation unit before the parser reads it. Streaming needs a rule for when
   a block of output is final, since a function-like macro name at the end of an
   expansion can take a `(` from the input after it (#117).
-- **The compiler's own headers** (#117's open question; this version uses
-  clang's resource directory), and per-file jobs cached for the process (#150).
+- **Per-file jobs** cached for the process (#150).
 
 ## Reproduction
 

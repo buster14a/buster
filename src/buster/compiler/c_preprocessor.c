@@ -189,6 +189,11 @@ struct PPOptions
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
     bool scalar;
     bool no_standard_includes;
+    // -nobuiltininc: no compiler headers (clang's resource directory, or buster's) among the standard directories.
+    bool no_builtin_includes;
+    // --buster-headers: buster's own headers (src/buster/include, found from the executable) in place of clang's
+    // resource directory.
+    bool buster_headers;
     // Opt-in assembler-with-cpp input: '$' is punctuation, and unknown # lines are assembly comments.
     bool assembly;
     // -iquote, -I and -isystem directories, and -idirafter ones after the standard directories.
@@ -437,6 +442,7 @@ typedef enum PPBuiltin
     PP_BUILTIN_BASE_FILE,
     PP_BUILTIN_FILE_NAME,
     PP_BUILTIN_INCLUDE_LEVEL,
+    PP_BUILTIN_FLT_EVAL_METHOD,
     PP_BUILTIN_PRAGMA,
     PP_BUILTIN_DEFINED,
     PP_BUILTIN_HAS_INCLUDE,
@@ -6058,6 +6064,11 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
         case PP_BUILTIN_INCLUDE_LEVEL:
             pp_emit(pp, pp_number_token(pp, pp->include_depth, flags));
             break;
+        case PP_BUILTIN_FLT_EVAL_METHOD:
+            // How floating operations are evaluated (C23 5.2.5.3.3): clang's builtin, which <float.h>'s FLT_EVAL_METHOD
+            // names. x86-64's SSE evaluates each in its type: 0 (no #pragma clang fp eval_method changes it here).
+            pp_emit(pp, pp_number_token(pp, 0, flags));
+            break;
         case PP_BUILTIN_DATE:
             pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->date, (uint32_t)strlen(pp->date), flags));
             break;
@@ -10787,6 +10798,33 @@ static void pp_run_file(Preprocessor* pp, uint32_t file)
     }
 }
 
+// buster's own headers' directory: src/buster/include in the tree whose build/ holds the executable (as clang finds its
+// resource directory from its executable). Returns whether it exists.
+static bool pp_buster_headers_directory(char* path, uint32_t capacity)
+{
+    char executable[PATH_MAX];
+    const ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+    bool result = length > 0;
+    if (result)
+    {
+        executable[length] = 0;
+        // Up from build/compiler to the tree.
+        for (uint32_t up = 0; result && up < 2; up += 1)
+        {
+            char* slash = strrchr(executable, '/');
+            result = slash != 0 && slash != executable;
+            if (result)
+            {
+                *slash = 0;
+            }
+        }
+        result = result && (uint32_t)snprintf(path, capacity, "%s/src/buster/include", executable) < capacity;
+        struct stat stats;
+        result = result && stat(path, &stats) == 0 && S_ISDIR(stats.st_mode);
+    }
+    return result;
+}
+
 // The highest version's directory of clang's own headers (clang searches its resource directory first), if any.
 static bool pp_clang_resource_directory(char* path, uint32_t capacity)
 {
@@ -10988,10 +11026,15 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         {
             result = pp_add_directory(pp, options->system_directories[i], BUSTER_PP_SYSTEM_FILE);
         }
-        char resource[256];
+        char resource[PATH_MAX];
         if (result && !options->no_standard_includes)
         {
-            if (pp_clang_resource_directory(resource, sizeof(resource)))
+            // The compiler's headers: buster's own, or clang's resource directory (the default).
+            if (options->buster_headers && !options->no_builtin_includes && !pp_buster_headers_directory(resource, sizeof(resource)))
+            {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "--buster-headers: no src/buster/include beside the executable's build directory");
+            }
+            else if (!options->no_builtin_includes && (options->buster_headers || pp_clang_resource_directory(resource, sizeof(resource))))
             {
                 result = pp_add_directory(pp, resource, BUSTER_PP_SYSTEM_FILE);
             }
@@ -11021,6 +11064,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
             { C_NAME_BASE_FILE, PP_BUILTIN_BASE_FILE, false },
             { C_NAME_FILE_NAME, PP_BUILTIN_FILE_NAME, false },
             { C_NAME_INCLUDE_LEVEL, PP_BUILTIN_INCLUDE_LEVEL, false },
+            { C_NAME_FLT_EVAL_METHOD, PP_BUILTIN_FLT_EVAL_METHOD, false },
             { C_NAME_PRAGMA_OPERATOR, PP_BUILTIN_PRAGMA, true },
             { C_NAME_DEFINED, PP_BUILTIN_DEFINED, false },
             { C_NAME_HAS_INCLUDE, PP_BUILTIN_HAS_INCLUDE, true },
@@ -12412,6 +12456,14 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             options->no_standard_includes = true;
         }
+        else if (strcmp(argument, "-nobuiltininc") == 0)
+        {
+            options->no_builtin_includes = true;
+        }
+        else if (strcmp(argument, "--buster-headers") == 0)
+        {
+            options->buster_headers = true;
+        }
         else if (strcmp(argument, "-undef") == 0)
         {
             options->undefine = true;
@@ -12557,7 +12609,8 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
-                        "[-include file] [--embed-dir=dir] [-std=...] [-march=...] [-mtune=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [-undef] "
+                        "[-include file] [--embed-dir=dir] [-std=...] [-march=...] [-mtune=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] "
+                        "[-nobuiltininc] [--buster-headers] [-undef] "
                         "[--predefines file] [--scalar] file\n");
     }
     else

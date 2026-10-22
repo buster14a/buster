@@ -374,6 +374,9 @@ designs and the compilers already built this way.
 - `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
   unit's token stream from its files' refined tokens (C23's `#embed` among its
   directives), and `./build/compiler -E` (as `clang -E`, with `--embed-dir=`).
+  `src/buster/include` holds the compiler's own freestanding headers, which
+  `--buster-headers` selects in place of clang's resource directory (the
+  default), and `-nobuiltininc` leaves out either.
   `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
@@ -2077,6 +2080,12 @@ features:
   must give clang's answer;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers;
+- buster's own headers (`src/buster/include`) against clang's, for each header,
+  8 modes, hosted and freestanding (176 sets): with each set, clang's run must
+  define the same macros (but the guards and helpers each names its own way),
+  expand each to the same tokens, make the same declarations and give the same
+  diagnostics; and our preprocessor with `--buster-headers` must give clang's
+  tokens on all of them;
 - the fuzz batch's cases must give clang's acceptance, and an accepted case's
   stream, printed with clang's -P spacing, must lex into clang's tokens.
 

@@ -2246,6 +2246,432 @@ static bool pp_test_embed_text(uint64_t seed)
     return result && failures == 0;
 }
 
+// The names reserved to the implementation that other headers and programs test, which buster's headers must define
+// where clang's do: the rest (the guards and helpers clang names __CLANG_..., and buster __BUSTER_...) can differ.
+static const char* const pp_test_header_protocols[] = {
+    "__STDDEF_H", "__STDARG_H", "__STDBOOL_H", "__STDALIGN_H", "__STDNORETURN_H", "__ISO646_H", "__STDCKDINT_H", "__GNUC_VA_LIST", "__va_copy",
+    "__bool_true_false_are_defined", "__alignas_is_defined", "__alignof_is_defined", "__noreturn_is_defined", "__STDC_VERSION_STDCKDINT_H__",
+    "__int8_t_defined", "__uint32_t_defined", "__intptr_t_defined",
+};
+
+// A macro a header defines, from a -dM line: its name (NUL-terminated in the line), and its parameters' count, -1 for an
+// object-like one (a variadic one's `...` counts).
+typedef struct PPTestMacro PPTestMacro;
+struct PPTestMacro
+{
+    const char* name;
+    int32_t parameters;
+};
+
+static int pp_test_compare_macros(const void* a, const void* b)
+{
+    return strcmp(((const PPTestMacro*)a)->name, ((const PPTestMacro*)b)->name);
+}
+
+// Whether a header's macro of this name is compared with clang's: one not reserved to the implementation, or a protocol.
+static bool pp_test_header_compared(const char* name)
+{
+    bool result = !(name[0] == '_' && name[1] == '_');
+    for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(pp_test_header_protocols); i += 1)
+    {
+        result = strcmp(name, pp_test_header_protocols[i]) == 0;
+    }
+    return result;
+}
+
+#define BUSTER_PP_TEST_HEADER_LINES 4096
+
+// The compared macros (pp_test_header_compared) that clang's -dM output `text` has and the predefined ones (`predefines`,
+// sorted) don't, sorted by name. Their names point into `text`, which this changes. Returns how many.
+static uint32_t pp_test_header_macros(char* text, size_t length, char** predefines, uint32_t predefine_count, PPTestMacro* macros, uint32_t capacity)
+{
+    static char* lines[BUSTER_PP_TEST_HEADER_LINES];
+    const uint32_t line_count = pp_test_predefine_lines(text, length, lines, BUSTER_PP_TEST_HEADER_LINES);
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < line_count; i += 1)
+    {
+        char* line = lines[i];
+        const bool predefined = bsearch(&line, predefines, predefine_count, sizeof(predefines[0]), pp_test_compare_lines) != 0;
+        if (!predefined && strncmp(line, "#define ", 8) == 0)
+        {
+            char* name = line + 8;
+            char* end = name;
+            while (*end == '_' || (*end >= 'a' && *end <= 'z') || (*end >= 'A' && *end <= 'Z') || (*end >= '0' && *end <= '9'))
+            {
+                end += 1;
+            }
+            int32_t parameters = -1;
+            if (*end == '(')
+            {
+                parameters = end[1] == ')' ? 0 : 1;
+                for (const char* c = end + 1; *c != 0 && *c != ')'; c += 1)
+                {
+                    parameters += *c == ',';
+                }
+            }
+            *end = 0;
+            if (pp_test_header_compared(name) && result < capacity)
+            {
+                macros[result] = (PPTestMacro){ .name = name, .parameters = parameters };
+                result += 1;
+            }
+        }
+    }
+    qsort(macros, result, sizeof(macros[0]), pp_test_compare_macros);
+    return result;
+}
+
+// A text's tokens' spellings as strings: the declarations before the first line naming a checked macro (each a ';'
+// ended statement at brace depth 0, sorted, with the members of max_align_t clang names its own way renamed), and after
+// each check's marker (`buster_check_NAME_`) what the macro expanded to. Without `comments`, lines that start with
+// "//" or "/ /" are dropped: clang's own headers' line comments, which strict C89 lexes as tokens.
+typedef struct PPTestExpansions PPTestExpansions;
+struct PPTestExpansions
+{
+    char** declarations;
+    uint32_t declaration_count;
+    char** names;
+    char** expansions;
+    uint32_t expansion_count;
+    char* storage;
+};
+
+static int pp_test_compare_strings(const void* a, const void* b)
+{
+    return strcmp(*(char* const*)a, *(char* const*)b);
+}
+
+static bool pp_test_header_expansions(char* text, size_t length, bool comments, PPTestExpansions* result)
+{
+    *result = (PPTestExpansions){ 0 };
+    if (!comments)
+    {
+        size_t kept = 0;
+        size_t line = 0;
+        while (line < length)
+        {
+            size_t end = line;
+            while (end < length && text[end] != '\n')
+            {
+                end += 1;
+            }
+            size_t first = line;
+            while (first < end && (text[first] == ' ' || text[first] == '\t'))
+            {
+                first += 1;
+            }
+            const bool comment = end - first >= 2 && text[first] == '/' && (text[first + 1] == '/' || (text[first + 1] == ' ' && end - first >= 3 && text[first + 2] == '/'));
+            if (!comment)
+            {
+                memmove(text + kept, text + line, end - line + (end < length));
+                kept += end - line + (end < length);
+            }
+            line = end + 1;
+        }
+        length = kept;
+    }
+    PPSpellings spellings = { 0 };
+    bool valid = pp_text_spellings((const uint8_t*)text, length, 0, &spellings);
+    const uint64_t count = valid ? spellings.count : 0;
+    result->storage = malloc(2 * (spellings.length + count) + 64);
+    result->declarations = malloc((count + 1) * sizeof(char*));
+    result->names = malloc((count + 1) * sizeof(char*));
+    result->expansions = malloc((count + 1) * sizeof(char*));
+    valid = valid && result->storage != 0 && result->declarations != 0 && result->names != 0 && result->expansions != 0;
+    char* out = result->storage;
+    char* statement = out;
+    int64_t depth = 0;
+    bool in_declarations = true;
+    for (uint64_t i = 0; valid && i <= count; i += 1)
+    {
+        const char* spelling = i < count ? (const char*)spellings.bytes + spellings.offsets[i] : "";
+        uint32_t spelled = i < count ? spellings.lengths[i] : 0;
+        const bool marker = i < count && spelled > 14 && memcmp(spelling, "buster_check_", 13) == 0 && spelling[spelled - 1] == '_';
+        if (marker || i == count)
+        {
+            // End what came before: the last statement, or the last expansion.
+            if (in_declarations && out != statement)
+            {
+                out[-1] = 0;
+                result->declarations[result->declaration_count] = statement;
+                result->declaration_count += 1;
+            }
+            else if (!in_declarations)
+            {
+                out[out != statement ? -1 : 0] = 0;
+                out += out == statement;
+                result->expansions[result->expansion_count - 1] = statement;
+            }
+            in_declarations = false;
+            if (marker)
+            {
+                memcpy(out, spelling + 13, spelled - 14);
+                out[spelled - 14] = 0;
+                result->names[result->expansion_count] = out;
+                result->expansion_count += 1;
+                out += spelled - 13;
+                statement = out;
+            }
+        }
+        else
+        {
+            static const char* const renames[][2] = { { "__clang_max_align_nonce1", "__max_align_ll" }, { "__clang_max_align_nonce2", "__max_align_ld" } };
+            for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(renames); r += 1)
+            {
+                if (spelled == strlen(renames[r][0]) && memcmp(spelling, renames[r][0], spelled) == 0)
+                {
+                    spelling = renames[r][1];
+                    spelled = (uint32_t)strlen(renames[r][1]);
+                }
+            }
+            memcpy(out, spelling, spelled);
+            out[spelled] = ' ';
+            out += spelled + 1;
+            depth += spelled == 1 && spelling[0] == '{';
+            depth -= spelled == 1 && spelling[0] == '}';
+            if (in_declarations && depth == 0 && spelled == 1 && spelling[0] == ';')
+            {
+                out[-1] = 0;
+                result->declarations[result->declaration_count] = statement;
+                result->declaration_count += 1;
+                statement = out;
+            }
+        }
+    }
+    qsort(result->declarations, result->declaration_count, sizeof(char*), pp_test_compare_strings);
+    arena_release(&spellings.arena);
+    return valid;
+}
+
+static void pp_test_expansions_release(PPTestExpansions* expansions)
+{
+    free(expansions->storage);
+    free(expansions->declarations);
+    free(expansions->names);
+    free(expansions->expansions);
+}
+
+// The primary diagnostics clang gave for the test's file `path` (lines that start with it), for comparing two runs:
+// notes and the headers' own lines name the headers' paths, which differ.
+static void pp_test_primary_diagnostics(const char* diagnostics, const char* path, char* out, size_t capacity)
+{
+    size_t used = 0;
+    const size_t path_length = strlen(path);
+    out[0] = 0;
+    for (const char* line = diagnostics != 0 ? diagnostics : ""; *line != 0;)
+    {
+        const char* end = strchr(line, '\n');
+        const size_t length = end != 0 ? (size_t)(end - line) : strlen(line);
+        if (length > path_length && memcmp(line, path, path_length) == 0 && used + length + 2 < capacity)
+        {
+            memcpy(out + used, line, length);
+            used += length;
+            out[used] = '\n';
+            used += 1;
+            out[used] = 0;
+        }
+        line += length + (end != 0);
+    }
+}
+
+// buster's own headers (src/buster/include, #117's item 6) against clang's resource directory, for each header, language
+// mode and hosted or freestanding run. clang preprocesses the header with each set, its own and ours
+// (-nobuiltininc -isystem), and:
+// - the macros the header defines (-dM, less the predefined ones) must have the same names, but for the guards and
+//   helpers reserved to the implementation (two underscores first), which each names its own way; of those, the ones
+//   other headers test (pp_test_header_protocols) are compared too;
+// - each compared macro, named on a line of its own (a function-like one with placeholder arguments), must expand to
+//   the same tokens;
+// - the declarations the header makes must be the same, in any order (clang's <stdint.h> declares the widest types
+//   first), but for the names of max_align_t's members;
+// - clang must accept or reject both alike, with the same primary diagnostics.
+// In strict C89, clang's own <stdint.h> and <stdckdint.h> put their // comments in the output as tokens (C89 has no
+// such comments): those lines are dropped from its side. Then our preprocessor with --buster-headers must give clang's
+// tokens with ours, for every header in each mode.
+static bool pp_test_headers(const char* directory)
+{
+    static const char* const headers[] = { "stddef", "stdarg", "limits", "stdint", "float", "stdbool", "stdalign", "stdnoreturn", "iso646", "stdckdint", "stdatomic" };
+    static const char* const modes[] = { "-std=c89", "-std=c99", "-std=c11", "-std=c17", "-std=c23", "-std=gnu89", "-std=gnu17", "-std=gnu23" };
+    char ours[PATH_MAX];
+    bool result = pp_buster_headers_directory(ours, sizeof(ours));
+    if (!result)
+    {
+        printf("headers: no src/buster/include beside the executable's build directory\n");
+    }
+    char path[4096];
+    char empty[4096];
+    snprintf(path, sizeof(path), "%s/headers.c", directory);
+    snprintf(empty, sizeof(empty), "%s/headers-empty.c", directory);
+    result = result && pp_test_write_file(empty, "");
+    static PPTestMacro theirs[BUSTER_PP_TEST_HEADER_LINES];
+    static PPTestMacro mine[BUSTER_PP_TEST_HEADER_LINES];
+    static char* predefines[BUSTER_PP_TEST_HEADER_LINES];
+    // Every compared macro of every header, for the run of our preprocessor: the check lines.
+    char* checks = malloc(1 << 20);
+    uint32_t sets = 0;
+    uint32_t failures = 0;
+    uint32_t our_failures = 0;
+    result = result && checks != 0;
+    for (uint32_t m = 0; result && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+    {
+        for (uint32_t hosting = 0; result && hosting < 2; hosting += 1)
+        {
+            char* arguments[8] = { (char*)modes[m], hosting != 0 ? "-ffreestanding" : 0 };
+            const int base = hosting != 0 ? 2 : 1;
+            arguments[base] = "-nobuiltininc";
+            arguments[base + 1] = "-isystem";
+            arguments[base + 2] = ours;
+            const char* hosted = hosting != 0 ? "freestanding" : "hosted";
+            PPClangOutput predefined = pp_test_clang_process("clang", arguments, base, empty, true);
+            const uint32_t predefine_count = predefined.status == PP_CLANG_ACCEPTED ? pp_test_predefine_lines(predefined.text, predefined.length, predefines, BUSTER_PP_TEST_HEADER_LINES) : 0;
+            result = predefined.status == PP_CLANG_ACCEPTED;
+            size_t checks_length = 0;
+            for (uint32_t h = 0; result && h < BUSTER_ARRAY_LENGTH(headers); h += 1)
+            {
+                char source[64];
+                snprintf(source, sizeof(source), "#include <%s.h>\n", headers[h]);
+                checks_length += (size_t)snprintf(checks + checks_length, (1 << 20) - checks_length, "%s", source);
+                result = pp_test_write_file(path, source);
+                PPClangOutput their_macros = pp_test_clang_process("clang", arguments, base, path, true);
+                PPClangOutput my_macros = pp_test_clang_process("clang", arguments, base + 3, path, true);
+                const uint32_t their_count = their_macros.status == PP_CLANG_ACCEPTED ? pp_test_header_macros(their_macros.text, their_macros.length, predefines, predefine_count, theirs, BUSTER_PP_TEST_HEADER_LINES) : 0;
+                const uint32_t my_count = my_macros.status == PP_CLANG_ACCEPTED ? pp_test_header_macros(my_macros.text, my_macros.length, predefines, predefine_count, mine, BUSTER_PP_TEST_HEADER_LINES) : 0;
+                bool same = their_macros.status == PP_CLANG_ACCEPTED && my_macros.status == PP_CLANG_ACCEPTED;
+                // The names, merged.
+                uint32_t i = 0;
+                uint32_t j = 0;
+                while (same && (i < their_count || j < my_count))
+                {
+                    const int order = i == their_count ? 1 : j == my_count ? -1 : strcmp(theirs[i].name, mine[j].name);
+                    if (order != 0)
+                    {
+                        printf("headers: <%s.h>, %s, %s: only %s defines %s\n", headers[h], modes[m], hosted, order < 0 ? "clang's" : "ours", order < 0 ? theirs[i].name : mine[j].name);
+                        same = false;
+                    }
+                    i += order <= 0;
+                    j += order >= 0;
+                }
+                // The check lines: each compared macro named alone, or invoked with placeholder arguments.
+                char* text = malloc(1 << 20);
+                size_t text_length = (size_t)snprintf(text, 1 << 20, "%s", source);
+                for (uint32_t k = 0; same && text != 0 && k < their_count; k += 1)
+                {
+                    char line[512];
+                    int n = snprintf(line, sizeof(line), "buster_check_%s_ %s", theirs[k].name, theirs[k].name);
+                    for (int32_t a = 0; theirs[k].parameters >= 0 && a <= theirs[k].parameters; a += 1)
+                    {
+                        n += snprintf(line + n, sizeof(line) - (size_t)n, "%s", a == 0 ? "(" : "");
+                        n += a < theirs[k].parameters ? snprintf(line + n, sizeof(line) - (size_t)n, "%sa%d", a == 0 ? "" : ", ", a) : snprintf(line + n, sizeof(line) - (size_t)n, ")");
+                    }
+                    n += snprintf(line + n, sizeof(line) - (size_t)n, "\n");
+                    text_length += (size_t)snprintf(text + text_length, (1 << 20) - text_length, "%s", line);
+                    checks_length += (size_t)snprintf(checks + checks_length, (1 << 20) - checks_length, "%s", line);
+                }
+                if (same && text != 0)
+                {
+                    result = pp_test_write_file(path, text);
+                    arguments[base + 3] = "-P";
+                    char* with_p[9];
+                    memcpy(with_p, arguments, sizeof(arguments));
+                    with_p[base] = "-P";
+                    PPClangOutput their_text = pp_test_clang_process("clang", with_p, base + 1, path, false);
+                    PPClangOutput my_text = pp_test_clang_process("clang", arguments, base + 4, path, false);
+                    PPTestExpansions their_expansions;
+                    PPTestExpansions my_expansions;
+                    const bool strict_c89 = m == 0;
+                    same = their_text.status == my_text.status && their_text.status != PP_CLANG_ERROR &&
+                           pp_test_header_expansions(their_text.text, their_text.length, !strict_c89, &their_expansions) &&
+                           pp_test_header_expansions(my_text.text, my_text.length, true, &my_expansions);
+                    for (uint32_t k = 0; same && k < their_expansions.expansion_count; k += 1)
+                    {
+                        same = k < my_expansions.expansion_count && strcmp(their_expansions.names[k], my_expansions.names[k]) == 0 &&
+                               strcmp(their_expansions.expansions[k], my_expansions.expansions[k]) == 0;
+                        if (!same)
+                        {
+                            printf("headers: <%s.h>, %s, %s: %s expands to \"%s\" in clang's, \"%s\" in ours\n", headers[h], modes[m], hosted, their_expansions.names[k],
+                                   their_expansions.expansions[k], k < my_expansions.expansion_count ? my_expansions.expansions[k] : "(nothing)");
+                        }
+                    }
+                    for (uint32_t k = 0; same && k < their_expansions.declaration_count; k += 1)
+                    {
+                        same = k < my_expansions.declaration_count && strcmp(their_expansions.declarations[k], my_expansions.declarations[k]) == 0;
+                        if (!same)
+                        {
+                            printf("headers: <%s.h>, %s, %s: a declaration differs:\n  clang's %s\n  ours    %s\n", headers[h], modes[m], hosted, their_expansions.declarations[k],
+                                   k < my_expansions.declaration_count ? my_expansions.declarations[k] : "(nothing)");
+                        }
+                    }
+                    same = same && their_expansions.declaration_count == my_expansions.declaration_count && their_expansions.expansion_count == my_expansions.expansion_count;
+                    static char their_diagnostics[1 << 16];
+                    static char my_diagnostics[1 << 16];
+                    pp_test_primary_diagnostics(their_text.diagnostics, path, their_diagnostics, sizeof(their_diagnostics));
+                    pp_test_primary_diagnostics(my_text.diagnostics, path, my_diagnostics, sizeof(my_diagnostics));
+                    if (same && strcmp(their_diagnostics, my_diagnostics) != 0)
+                    {
+                        printf("headers: <%s.h>, %s, %s: the diagnostics differ:\n  clang's %s\n  ours    %s\n", headers[h], modes[m], hosted, their_diagnostics, my_diagnostics);
+                        same = false;
+                    }
+                    pp_test_expansions_release(&their_expansions);
+                    pp_test_expansions_release(&my_expansions);
+                    free(their_text.text);
+                    free(their_text.diagnostics);
+                    free(my_text.text);
+                    free(my_text.diagnostics);
+                }
+                free(text);
+                free(their_macros.text);
+                free(their_macros.diagnostics);
+                free(my_macros.text);
+                free(my_macros.diagnostics);
+                sets += 1;
+                failures += !same;
+            }
+            free(predefined.text);
+            free(predefined.diagnostics);
+            // Our preprocessor with --buster-headers, on every header and check line of the mode at once, against clang
+            // with our headers.
+            if (result)
+            {
+                result = pp_test_write_file(path, checks);
+                char* our_arguments[4] = { (char*)modes[m], hosting != 0 ? "-ffreestanding" : "--buster-headers", hosting != 0 ? "--buster-headers" : path, path };
+                Arena arena = arena_reserve(1ull << 20);
+                PPOptions options;
+                const char* input;
+                const char* output;
+                bool markers;
+                static InternTable table;
+                static Preprocessor pp;
+                bool same = pp_parse_options(base + 2, our_arguments, &options, &arena, &input, &output, &markers) && pp_test_run(&pp, &table, &options, path);
+                char* with_p[9];
+                memcpy(with_p, arguments, sizeof(arguments));
+                with_p[base + 3] = "-P";
+                PPClangOutput clang_text = pp_test_clang_process("clang", with_p, base + 4, path, false);
+                PPSpellings mine_spellings = { 0 };
+                PPSpellings their_spellings = { 0 };
+                char name[128];
+                snprintf(name, sizeof(name), "headers, ours preprocessed, %s, %s", modes[m], hosted);
+                same = same && clang_text.status == PP_CLANG_ACCEPTED && pp_stream_spellings(&pp, &mine_spellings) &&
+                       pp_text_spellings((const uint8_t*)clang_text.text, clang_text.length, pp.split_kinds, &their_spellings) &&
+                       pp_compare_spellings(&pp, &mine_spellings, &their_spellings, name, "clang");
+                our_failures += !same;
+                arena_release(&mine_spellings.arena);
+                arena_release(&their_spellings.arena);
+                free(clang_text.text);
+                free(clang_text.diagnostics);
+                pp_release(&pp);
+                intern_release(&table);
+                arena_release(&arena);
+            }
+        }
+    }
+    unlink(path);
+    unlink(empty);
+    free(checks);
+    printf("headers: %u of %u header, mode and hosting sets differ from clang's; our preprocessor differs from clang on %u of %lu modes with them\n", failures, sets, our_failures,
+           (unsigned long)(2 * BUSTER_ARRAY_LENGTH(modes)));
+    return result && failures == 0 && our_failures == 0;
+}
+
 static bool pp_fuzz(const PPFuzzOptions* options);
 static bool pp_fuzz_print_case(const PPFuzzOptions* options, uint64_t id);
 
@@ -2366,6 +2792,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);
+            passed_all &= pp_test_headers(directory);
             passed_all &= pp_test_keywords(directory);
             passed_all &= pp_test_features(directory);
         }
