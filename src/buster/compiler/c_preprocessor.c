@@ -71,6 +71,8 @@
 //   - The predefines, pp_initialize, pp_release and pp_run.
 //   - Output: pp_resolve_keywords and pp_print, and the -E command (pp_parse_options, with pp_take_family and
 //     pp_settle_families for the -f options that change clang's keywords, lexing or -E output).
+//   - clang's arguments for ours (pp_clang_arguments), and a clang run (pp_clang_preprocess), for the commands that run
+//     clang with them.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -85,6 +87,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <immintrin.h>
 #include "buster/compiler/x86_target.c"
 
@@ -222,6 +225,11 @@ struct PPOptions
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
     bool scalar;
     bool no_standard_includes;
+    // -nobuiltininc: no compiler headers (clang's resource directory, or buster's) among the standard directories.
+    bool no_builtin_includes;
+    // --buster-headers: buster's own headers (src/buster/include, found from the executable) in place of clang's
+    // resource directory.
+    bool buster_headers;
     // Opt-in assembler-with-cpp input: '$' is punctuation (unless `dollars` says otherwise), and unknown # lines are
     // assembly comments.
     bool assembly;
@@ -1024,6 +1032,12 @@ struct Preprocessor
     uint8_t* directory_system;
     uint32_t directory_count;
     uint32_t angled_first; // The first directory <...> searches.
+    // With --buster-headers: clang's resource directory, right after buster's (`buster_directory`, its path, as
+    // pp_add_directory copied it), which supplies only the names buster's doesn't have (pp_find_include); otherwise
+    // BUSTER_PP_NONE.
+    uint32_t fallback_directory;
+    const char* buster_directory;
+    uint32_t buster_directory_length;
     // The location space.
     PPRange* ranges;
     uint32_t range_count;
@@ -3055,6 +3069,27 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
     return result;
 }
 
+// Whether buster's own headers' directory has a file `name` (`length` bytes), which clang's resource directory after
+// it (pp->fallback_directory) then doesn't supply, to the search or beside one of its own headers: so a #include_next
+// in buster's header goes on past clang's header of the same name, to the C library's. The path is the one the search
+// of buster's directory looks up, so its record is usually in the table already (a #include_next in buster's header
+// names that header).
+static bool pp_buster_supplies(Preprocessor* pp, const uint8_t* name, uint32_t length)
+{
+    char path[PATH_MAX];
+    const uint32_t directory_length = pp->buster_directory_length;
+    bool result = false;
+    if ((uint64_t)directory_length + 1 + length < PATH_MAX)
+    {
+        memcpy(path, pp->buster_directory, directory_length);
+        path[directory_length] = '/';
+        memcpy(path + directory_length + 1, name, length);
+        const uint32_t record = pp_lookup_path(pp, path, directory_length + 1 + length, BUSTER_PP_SYSTEM_FILE);
+        result = record != BUSTER_PP_NONE && pp->files[record].data != BUSTER_PP_NONE;
+    }
+    return result;
+}
+
 // What includes a file, for the search of a header it includes: the path the includer was found by (whose directory a
 // quoted name is looked for in first) and how it was found (its system level), or `present` false for no file.
 typedef struct PPIncluder PPIncluder;
@@ -3156,6 +3191,9 @@ static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* n
 // a path that can't be opened for another reason than there being no file there (PPFile.error) or one PATH_MAX bytes
 // long or longer, which no system call takes (ENAMETOOLONG), is a fatal error at `report`, as clang's
 // getFileAndSuggestModule reports it, and ends the search; with `report` BUSTER_PP_NONE, it is a place without the file.
+// With --buster-headers, clang's resource directory after buster's (pp->fallback_directory) doesn't supply a name
+// buster's directory has (pp_buster_supplies), neither as a search directory nor as the directory of an includer of
+// clang's: a #include_next in buster's header goes on past clang's header of the same name, to the C library's.
 static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t length, bool angled, bool next, uint32_t includer, uint32_t includer_search,
                                 uint32_t* found_in, uint32_t report)
 {
@@ -3176,8 +3214,19 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
         uint8_t system = 0;
         uint32_t directory = BUSTER_PP_NONE;
         candidate = pp_include_candidate(pp, name, length, angled, next, &source, includer_search, index, path, &path_length, &system, &directory);
-        int error = candidate == PP_CANDIDATE_SKIP ? ENAMETOOLONG : 0;
-        if (candidate == PP_CANDIDATE_PATH)
+        // The place's directory as clang names it: the includer's, a search directory, or none for an absolute name.
+        const bool absolute = length != 0 && name[0] == '/';
+        const bool own = candidate != PP_CANDIDATE_END && !absolute && directory == BUSTER_PP_NONE;
+        const char* prefix = own ? (source.directory_length != BUSTER_PP_NONE ? source.path : ".") : directory != BUSTER_PP_NONE ? pp->directories[directory] : "";
+        const uint32_t prefix_length = own ? (source.directory_length != BUSTER_PP_NONE ? source.directory_length : 1)
+                                           : directory != BUSTER_PP_NONE ? pp->directory_lengths[directory] : 0;
+        // Clang's resource directory behind buster's, which doesn't supply a name buster's directory has.
+        const uint32_t fallback = pp->fallback_directory;
+        const bool behind = fallback != BUSTER_PP_NONE &&
+                            (own ? prefix_length == pp->directory_lengths[fallback] && memcmp(prefix, pp->directories[fallback], prefix_length) == 0 : directory == fallback);
+        const bool shadowed = candidate != PP_CANDIDATE_END && behind && pp_buster_supplies(pp, name, length);
+        int error = candidate == PP_CANDIDATE_SKIP && !shadowed ? ENAMETOOLONG : 0;
+        if (candidate == PP_CANDIDATE_PATH && !shadowed)
         {
             const uint32_t file = pp_lookup_path(pp, path, path_length, system);
             result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE ? file : BUSTER_PP_NONE;
@@ -3188,12 +3237,7 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
         failed = error != 0 && !absent && report != BUSTER_PP_NONE;
         if (failed)
         {
-            // The place as clang names it: the directory (the includer's, or a search directory), a '/' and the name, or
-            // an absolute name alone.
-            const bool absolute = name[0] == '/';
-            const bool own = !absolute && directory == BUSTER_PP_NONE;
-            const char* prefix = own ? (source.directory_length != BUSTER_PP_NONE ? source.path : ".") : absolute ? "" : pp->directories[directory];
-            const uint32_t prefix_length = own ? (source.directory_length != BUSTER_PP_NONE ? source.directory_length : 1) : absolute ? 0 : pp->directory_lengths[directory];
+            // The place as clang names it: the directory, a '/' and the name, or an absolute name alone.
             pp_diagnose(pp, PP_SEVERITY_FATAL, report, "cannot open file '%.*s%s%.*s': %s", (int)prefix_length, prefix, absolute ? "" : "/", (int)length,
                         (const char*)name, strerror(error));
         }
@@ -12763,6 +12807,33 @@ static void pp_run_file(Preprocessor* pp, uint32_t file)
     }
 }
 
+// buster's own headers' directory: src/buster/include in the tree whose build/ holds the executable (as clang finds its
+// resource directory from its executable). Returns whether it exists.
+static bool pp_buster_headers_directory(char* path, uint32_t capacity)
+{
+    char executable[PATH_MAX];
+    const ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+    bool result = length > 0;
+    if (result)
+    {
+        executable[length] = 0;
+        // Up from build/compiler to the tree.
+        for (uint32_t up = 0; result && up < 2; up += 1)
+        {
+            char* slash = strrchr(executable, '/');
+            result = slash != 0 && slash != executable;
+            if (result)
+            {
+                *slash = 0;
+            }
+        }
+        result = result && (uint32_t)snprintf(path, capacity, "%s/src/buster/include", executable) < capacity;
+        struct stat stats;
+        result = result && stat(path, &stats) == 0 && S_ISDIR(stats.st_mode);
+    }
+    return result;
+}
+
 // The highest version's directory of clang's own headers (clang searches its resource directory first), if any.
 static bool pp_clang_resource_directory(char* path, uint32_t capacity)
 {
@@ -12846,11 +12917,15 @@ static void pp_dedupe_directories(Preprocessor* pp)
         }
         uint32_t written = 0;
         uint32_t angled_first = 0;
+        // --buster-headers' fallback keeps its rule where it moves to; dropped (an earlier directory is the same), it
+        // has none.
+        uint32_t fallback = BUSTER_PP_NONE;
         for (uint32_t i = 0; i < count; i += 1)
         {
             angled_first += i < pp->angled_first && kept[i];
             if (kept[i])
             {
+                fallback = i == pp->fallback_directory ? written : fallback;
                 pp->directories[written] = pp->directories[i];
                 pp->directory_lengths[written] = pp->directory_lengths[i];
                 pp->directory_system[written] = pp->directory_system[i];
@@ -12859,6 +12934,7 @@ static void pp_dedupe_directories(Preprocessor* pp)
         }
         pp->directory_count = written;
         pp->angled_first = angled_first;
+        pp->fallback_directory = fallback;
     }
     scratch_end(scratch);
 }
@@ -12884,6 +12960,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
 {
     *pp = (Preprocessor){ 0 };
     pp->diagnostic_include_range = BUSTER_PP_NONE;
+    pp->fallback_directory = BUSTER_PP_NONE;
     pp->predefines_data = BUSTER_PP_NONE;
     pp->options = *options;
     pp->table = table;
@@ -12986,11 +13063,30 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         {
             result = pp_add_directory(pp, options->system_directories[i], BUSTER_PP_SYSTEM_FILE);
         }
-        char resource[256];
         if (result && !options->no_standard_includes)
         {
-            if (pp_clang_resource_directory(resource, sizeof(resource)))
+            // The compiler's headers, which -nobuiltininc leaves out: clang's resource directory (the default), or with
+            // --buster-headers buster's own, then clang's for the headers buster's doesn't supply. That one has no name
+            // buster's directory has (pp_find_include), so buster's headers' #include_next goes on to the C library's,
+            // and every other name is found as without the flag.
+            const bool builtin = !options->no_builtin_includes;
+            char buster[PATH_MAX];
+            char resource[PATH_MAX];
+            bool buster_added = false;
+            if (builtin && options->buster_headers && !pp_buster_headers_directory(buster, sizeof(buster)))
             {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "--buster-headers: no src/buster/include beside the executable's build directory");
+            }
+            else if (builtin && options->buster_headers)
+            {
+                result = pp_add_directory(pp, buster, BUSTER_PP_SYSTEM_FILE);
+                buster_added = result;
+                pp->buster_directory = result ? pp->directories[pp->directory_count - 1] : 0;
+                pp->buster_directory_length = result ? pp->directory_lengths[pp->directory_count - 1] : 0;
+            }
+            if (result && builtin && pp_clang_resource_directory(resource, sizeof(resource)))
+            {
+                pp->fallback_directory = buster_added ? pp->directory_count : BUSTER_PP_NONE;
                 result = pp_add_directory(pp, resource, BUSTER_PP_SYSTEM_FILE);
             }
             result = result && pp_add_directory(pp, "/usr/local/include", BUSTER_PP_EXTERN_C_FILE) && pp_add_directory(pp, "/usr/include", BUSTER_PP_EXTERN_C_FILE);
@@ -13019,6 +13115,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
             { C_NAME_BASE_FILE, PP_BUILTIN_BASE_FILE, false },
             { C_NAME_FILE_NAME, PP_BUILTIN_FILE_NAME, false },
             { C_NAME_INCLUDE_LEVEL, PP_BUILTIN_INCLUDE_LEVEL, false },
+            { C_NAME_FLT_EVAL_METHOD, PP_BUILTIN_FLT_EVAL_METHOD, false },
             { C_NAME_PRAGMA_OPERATOR, PP_BUILTIN_PRAGMA, true },
             { C_NAME_DEFINED, PP_BUILTIN_DEFINED, false },
             { C_NAME_HAS_INCLUDE, PP_BUILTIN_HAS_INCLUDE, true },
@@ -13044,15 +13141,13 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         {
             pp_define_builtin(pp, builtins[i].name, builtins[i].builtin, builtins[i].function_like);
         }
-        // Two of clang's builtins that aren't among c_intern.c's predefined names: __FLT_EVAL_METHOD__ (its value
-        // follows -ffp-eval-method and SSE) and the __has_constexpr_builtin query.
+        // Clang's query that isn't among c_intern.c's predefined names.
         static const struct
         {
             const char* name;
             PPBuiltin builtin;
             bool function_like;
         } named_builtins[] = {
-            { "__FLT_EVAL_METHOD__", PP_BUILTIN_FLT_EVAL_METHOD, false },
             { "__has_constexpr_builtin", PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, true },
         };
         for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(named_builtins); i += 1)
@@ -14766,6 +14861,14 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             options->no_standard_includes = true;
         }
+        else if (strcmp(argument, "-nobuiltininc") == 0)
+        {
+            options->no_builtin_includes = true;
+        }
+        else if (strcmp(argument, "--buster-headers") == 0)
+        {
+            options->buster_headers = true;
+        }
         else if (strcmp(argument, "-undef") == 0)
         {
             options->undefine = true;
@@ -14929,7 +15032,7 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
                         "[-include file] [--embed-dir=dir] [-dM] [-std=...] [-ansi] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-march=cpu] [-m[no-]feature] [-O...] [-f...] "
-                        "[-g...] [-pthread] [-nostdinc] [-undef] [--predefines file] [--clang-features] [--scalar] file\n");
+                        "[-g...] [-pthread] [-nostdinc] [-nobuiltininc] [--buster-headers] [-undef] [--predefines file] [--clang-features] [--scalar] file\n");
     }
     else
     {
@@ -14963,5 +15066,231 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
         intern_release(&table);
     }
     arena_release(&arena);
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// clang's arguments for ours
+//
+// test-preprocessor and benchmark-preprocessor run clang with the options ours reads, to compare with it and to time it.
+// clang has no --buster-headers, and no rule like pp_find_include's that keeps its resource directory from supplying a
+// name buster's directory has, so it gets ours' whole search instead (pp_clang_arguments), with a directory of links to
+// the rest of clang's resource directory in that directory's place.
+
+// Removes the directory pp_clang_fallback_links made, with its links.
+static void pp_clang_remove_links(const char* links)
+{
+    DIR* directory = opendir(links);
+    for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
+    {
+        char link[PATH_MAX];
+        const bool dots = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0;
+        if (!dots && (size_t)snprintf(link, sizeof(link), "%s/%s", links, entry->d_name) < sizeof(link))
+        {
+            unlink(link);
+        }
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+    rmdir(links);
+}
+
+// What --buster-headers searches after buster's directory `ours`, for clang: a new directory, made from the template
+// `links` (mkdtemp's, which gives it its name), with a link to each entry of clang's resource directory that `ours`
+// hasn't. Returns whether it made it; if not, it leaves nothing.
+static bool pp_clang_fallback_links(const char* ours, char* links)
+{
+    char resource[PATH_MAX];
+    const bool made = pp_clang_resource_directory(resource, sizeof(resource)) && mkdtemp(links) != 0;
+    DIR* directory = made ? opendir(resource) : 0;
+    bool result = directory != 0;
+    for (struct dirent* entry = result ? readdir(directory) : 0; result && entry != 0; entry = readdir(directory))
+    {
+        char target[PATH_MAX];
+        char shadow[PATH_MAX];
+        char link[PATH_MAX];
+        struct stat stats;
+        const bool dots = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0;
+        result = (size_t)snprintf(target, sizeof(target), "%s/%s", resource, entry->d_name) < sizeof(target) &&
+                 (size_t)snprintf(shadow, sizeof(shadow), "%s/%s", ours, entry->d_name) < sizeof(shadow) &&
+                 (size_t)snprintf(link, sizeof(link), "%s/%s", links, entry->d_name) < sizeof(link);
+        if (result && !dots && stat(shadow, &stats) != 0)
+        {
+            result = symlink(target, link) == 0;
+        }
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+    if (made && !result)
+    {
+        pp_clang_remove_links(links);
+    }
+    return result;
+}
+
+// Is `argument` an option whose value is the next argument (pp_parse_options)?
+static bool pp_option_takes_value(const char* argument)
+{
+    static const char* const options[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter", "-target" };
+    bool result = pp_own_option_with_value(argument);
+    for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(options); i += 1)
+    {
+        result = strcmp(argument, options[i]) == 0;
+    }
+    return result;
+}
+
+// clang's arguments for ours: `arguments` (`count` of them), from which `options` were read, in a new array with a null
+// at its end (one block, with the names it holds, for free), and their count in `*clang_count`; null if it can't be
+// made. Our own value-options are left out; any other option's value is copied as it is, whatever it spells. With
+// --buster-headers, and without -nostdinc or
+// -nobuiltininc (which leave out buster's headers and clang's alike), clang gets ours' search instead of the
+// directories' options, from a preprocessor initialized with `options`: each directory pp_dedupe_directories keeps
+// (whose decisions, by identity and a system directory over a user's, clang's links would hide from it) with its
+// option, -iquote, -I, -isystem or -idirafter, and in clang's resource directory's place, when it is kept, a new
+// directory of links made from the template `links` (pp_clang_fallback_links, with buster's directory in `ours`,
+// PATH_MAX bytes). -nobuiltininc comes first, and clang adds the standard directories, /usr/local/include and
+// /usr/include, after the -isystem ones, as ours has them. `*linked` says whether the links were made, for
+// pp_clang_remove_links.
+static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* options, int count, char** arguments, char* ours, char* links, bool* linked, int* clang_count)
+{
+    const bool search = options->buster_headers && !options->no_standard_includes && !options->no_builtin_includes;
+    // Ours' search, as pp_initialize makes it, without its diagnostics.
+    static InternTable table;
+    static Preprocessor pp;
+    PPOptions quiet = *options;
+    quiet.quiet = true;
+    const bool found = search && pp_buster_headers_directory(ours, PATH_MAX);
+    const bool interned = found && intern_initialize(&table);
+    const bool initialized = interned && pp_initialize(&pp, &quiet, &table) && !pp.fatal;
+    const uint32_t directories = initialized ? pp.directory_count : 0;
+    uint64_t bytes = 0;
+    for (uint32_t d = 0; d < directories; d += 1)
+    {
+        bytes += (uint64_t)pp.directory_lengths[d] + 1;
+    }
+    const uint64_t slots = (uint64_t)count + 2 * (uint64_t)directories + 2;
+    char** result = !search || initialized ? malloc(slots * sizeof(char*) + bytes) : 0;
+    char* names = result != 0 ? (char*)(result + slots) : 0;
+    bool ready = result != 0;
+    int n = 0;
+    *linked = false;
+    for (int i = 0; ready && i < count; i += 1)
+    {
+        const char* argument = arguments[i];
+        const bool value = pp_option_takes_value(argument) && i + 1 < count;
+        // With ours' search, the directories' options are in it.
+        const bool directory = search && (strncmp(argument, "-I", 2) == 0 || strcmp(argument, "-isystem") == 0 || strcmp(argument, "-iquote") == 0 ||
+                                          strcmp(argument, "-idirafter") == 0);
+        if (!directory && !pp_own_option_with_value(argument) && strcmp(argument, "--buster-headers") != 0)
+        {
+            result[n] = arguments[i];
+            n += 1;
+            if (value)
+            {
+                result[n] = arguments[i + 1];
+                n += 1;
+            }
+        }
+        i += value;
+    }
+    if (ready && search)
+    {
+        result[n] = "-nobuiltininc";
+        n += 1;
+        // Past a standard directory, the system ones are -idirafter's. When -isystem took the standard ones' places
+        // instead, every later one is an -isystem in clang's order too.
+        bool after = false;
+        for (uint32_t d = 0; ready && d < directories; d += 1)
+        {
+            const uint8_t system = pp.directory_system[d];
+            const bool fallback = d == pp.fallback_directory;
+            after = after || system == BUSTER_PP_EXTERN_C_FILE;
+            *linked = *linked || (fallback && pp_clang_fallback_links(ours, links));
+            ready = !fallback || *linked;
+            if (ready && system != BUSTER_PP_EXTERN_C_FILE)
+            {
+                memcpy(names, pp.directories[d], (size_t)pp.directory_lengths[d] + 1);
+                result[n] = d < pp.angled_first ? "-iquote" : system == BUSTER_PP_USER_FILE ? "-I" : after ? "-idirafter" : "-isystem";
+                result[n + 1] = fallback ? links : names;
+                n += 2;
+                names += pp.directory_lengths[d] + 1;
+            }
+        }
+    }
+    if (search && !found)
+    {
+        fprintf(stderr, "--buster-headers: no src/buster/include beside the executable's build directory\n");
+    }
+    else if (search && (!ready || !initialized))
+    {
+        fprintf(stderr, "--buster-headers: can't make clang's search, with links to clang's resource headers in %s\n", links);
+    }
+    if (interned)
+    {
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    if (ready)
+    {
+        result[n] = 0;
+        *clang_count = n;
+    }
+    else
+    {
+        free(result);
+        result = 0;
+    }
+    return result;
+}
+
+// Runs clang with `arguments` (`count` of them, as pp_clang_arguments gives them) and -E -P -o `output` `file`, as a
+// process of its own without CPATH and C_INCLUDE_PATH, and waits for it: benchmark-preprocessor's clang runs. Its command
+// is an array of its own count (#255's review: a fixed one of 256 dropped the arguments past it). Returns whether clang
+// exited with status 0, naming the file if it didn't.
+static __attribute__((unused)) bool pp_clang_preprocess(int count, char** arguments, const char* output, const char* file)
+{
+    char** command = calloc((size_t)count + 7, sizeof(char*));
+    bool result = command != 0;
+    int status = 0;
+    if (result)
+    {
+        int n = 0;
+        command[n++] = "clang";
+        for (int i = 0; i < count; i += 1)
+        {
+            command[n++] = arguments[i];
+        }
+        command[n++] = "-E";
+        command[n++] = "-P";
+        command[n++] = "-o";
+        command[n++] = (char*)output;
+        command[n++] = (char*)file;
+        command[n] = 0;
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            unsetenv("CPATH");
+            unsetenv("C_INCLUDE_PATH");
+            execvp("clang", command);
+            _exit(127);
+        }
+        pid_t waited = -1;
+        do
+        {
+            waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        }
+        while (waited < 0 && child > 0 && errno == EINTR);
+        result = waited == child && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    if (!result)
+    {
+        fprintf(stderr, "clang -E failed on %s (wait status %d)\n", file, status);
+    }
+    free(command);
     return result;
 }
