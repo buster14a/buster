@@ -808,6 +808,8 @@ static const PPTestFile pp_test_files_embed_review[] = {
     { "dir/bytes.bin", "A\n" },
     { "hi.txt", "Hi!\n" },
     { "sys.h", "unsigned char a[] = {\n#pragma GCC system_header\n#embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
+    { "sys_indent.h", "unsigned char b[] = {\n#pragma GCC system_header\n  #embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
+    { "sys_blank.h", "unsigned char c[] = {\n#pragma GCC system_header\n\n#embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
     { 0, 0 },
 };
 
@@ -1389,6 +1391,30 @@ static const PPTestCase pp_test_cases[] = {
         .expected = "unsigned char a[] = { 72, 300 }; int after;",
         .files = pp_test_files_embed_review,
         .markers = "# 1 \"%d/case.c\"\n# 1 \"%d/sys.h\" 1\nunsigned char a[] = {\n# 3 \"%d/sys.h\" 3\n72, 300 };\n# 2 \"%d/case.c\" 2\nint after;\n",
+    },
+    // #252's second review, against clang 23: the line lexed again past a "//" name runs on through a block comment's
+    // newlines, as clang's does, and the file goes on after it (a #define in that comment is none, and the next token
+    // joins the data's line); a gap of line splices alone in it isn't a space (STR(a\ +b) is "a+b"); and the system
+    // header's note starts where the printer resumes after #pragma GCC system_header, before an #embed indented or after
+    // a blank line.
+    {
+        .name = "#252's second review: an #embed's line past a \"//\" name, through a block comment's newlines",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) /* comment\n*/ suffix(,42)\n};\nint b[] = {\n#embed <dir//bytes.bin> prefix(1 /* c\n */ ,) limit(1)\n};\n"
+                  "int c[] = {\n#embed <dir//bytes.bin> limit(1) /* c\n#define X 1\n*/\n};\nX\n#define STR(x) #x\nint d[] = {\n"
+                  "#embed <dir//bytes.bin> prefix(STR(a\\\n+b),) limit(1)\n};\nend\n",
+        .standard = "c23",
+        .expected = "int a[] = {65 ,42}; int b[] = {1 ,65 }; int c[] = {65 }; X int d[] = {\"a+b\",65 }; end",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's second review: an #embed after #pragma GCC system_header, indented or after a blank line",
+        .source = "#include \"sys_indent.h\"\n#include \"sys_blank.h\"\nint after;\n",
+        .standard = "c23",
+        .expected = "unsigned char b[] = { 72, 300 }; unsigned char c[] = { 72, 300 }; int after;",
+        .files = pp_test_files_embed_review,
+        .markers = "# 1 \"%d/case.c\"\n# 1 \"%d/sys_indent.h\" 1\nunsigned char b[] = {\n# 3 \"%d/sys_indent.h\" 3\n72, 300 };\n# 2 \"%d/case.c\" 2\n"
+                   "# 1 \"%d/sys_blank.h\" 1\nunsigned char c[] = {\n# 3 \"%d/sys_blank.h\" 3\n72, 300 };\n# 3 \"%d/case.c\" 2\nint after;\n",
     },
     {
         .name = "#252's review: comment delimiters a line splice splits, after an #embed and in a #line's comment",
