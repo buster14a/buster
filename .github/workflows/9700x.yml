@@ -8,10 +8,10 @@ on:
       - 'docs/**'
       - '**.md'
   workflow_dispatch:
+  # Every pull request runs the workflow, since its job is a required check: a pull request that changes only
+  # documentation gets the job skipped by `changes`, which counts as passed, rather than no check at all, which blocks
+  # the merge.
   pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
 
 permissions:
   contents: read
@@ -24,9 +24,48 @@ concurrency:
   queue: max
 
 jobs:
+  # Whether a pull request changes anything but documentation (`docs/**` and `*.md`, as `push`'s paths-ignore), on a
+  # GitHub-hosted runner so that it doesn't wait for the 9700X. When this job fails, `test` runs.
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.files.outputs.code }}
+    steps:
+      - id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          COUNT: ${{ github.event.pull_request.changed_files }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The API lists at most 3,000 files of a pull request: past that, take it as changing code.
+          if [ "$COUNT" -ge 3000 ]; then
+              code=true
+          else
+              gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" \
+                  --jq '.[] | .filename, (.previous_filename // empty)' > files
+              test "$(sort -u files | wc -l)" -ge 1
+              if grep -Ev '^docs/|\.md$' files > /dev/null; then
+                  code=true
+              else
+                  code=false
+              fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Changes code: $code"
+
   test:
     name: Build and execute on Ryzen 7 9700X
-    if: github.repository_id == '1421805693'
+    needs: changes
+    # Runs after `changes` unless it found documentation alone; also when `changes` was skipped (not a pull request)
+    # or failed.
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.changes.outputs.code != 'false' }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -64,6 +103,9 @@ jobs:
           ./build/compiler test-call-graph
           ./build.sh check-call-graph
 
+      - name: Test the profiling tools
+        run: ./build/compiler test-profile
+
       - name: Test the C lexer
         run: |
           ./build/compiler test-lexer
@@ -80,6 +122,30 @@ jobs:
 
       - name: Test generated-code ISA policy
         run: ./build/compiler test-x86-target
+
+      - name: Test the partial Zen 5 model and instruction harness
+        run: ./build/compiler test-x86-zen5
+
+      - name: Measure the Zen 5 instruction cases
+        # The job hook holds the shared lock. Preserve three separate processes, with each process interleaving
+        # its experiments. These observations are informational; counter/protocol failures still fail the step.
+        run: |
+          cpu=2
+          sha256sum build/compiler src/buster/compiler/x86_zen5.c src/buster/compiler/x86_zen5_measure.c
+          for sample in 1 2 3; do
+            echo "Zen 5 observation process $sample"
+            taskset -c "$cpu" ./build/compiler measure-x86-zen5 --passes 11 --iterations 20000
+          done
+
+      - name: Benchmark Zen 5 cost lookup
+        run: |
+          cpu=2
+          for sample in 1 2 3; do
+            echo "Zen 5 lookup sample $sample"
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
+          done
 
       - name: Test the x86-64 disassembler against GNU tools
         run: |
@@ -117,6 +183,9 @@ jobs:
 
       - name: Test the lanes
         run: ./build/compiler test-lanes
+
+      - name: Test deterministic diagnostic ordering
+        run: ./build/compiler test-diagnostics
 
       - name: Benchmark the lanes
         # It pins each lane to an allowed CPU of its own.

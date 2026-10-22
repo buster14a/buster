@@ -159,6 +159,15 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
+  observation table and scalar/AVX-512 cost-column lookups. `test-x86-zen5`
+  checks unknowns, guard-page tails and generated microbenchmark loops;
+  `measure-x86-zen5` measures instruction cases on the approved 9700X;
+  `benchmark-x86-zen5 [--only scalar|vector] [--after-scalar MS]` times lookups.
+  Each build/test/measurement takes the shared host lock separately. Pin
+  measurements to CPU 2. [The model guide](docs/x86-zen5.md) records what is
+  measured and the coverage, pipe data and real consumers still pending for #181.
+
 - `src/buster/compiler/x86_target.c` defines generated-code ISA profiles, with
   x86-64 baseline as the default, independently of the compiler host.
   `x86_target_forms.c` supplies explicit, fail-closed form eligibility and
@@ -190,7 +199,9 @@ designs and the compilers already built this way.
   default. `docs/c-lexer.md` records the GFNI classifier, the leading-comment
   skip, branch-free chunk state, the pipelined write-out, table-driven
   punctuator kinds, the delimiter scan, chunks read in place, the raw string
-  check and their 9700X measurements.
+  check and their 9700X measurements. `c_lexer_variant.c` is one variant of the
+  lexer as a translation unit of its own, which `./build.sh lexer-variant`
+  compiles in for `benchmark-lexer` to compare (see "Lexer benchmarks").
 - `src/buster/compiler/preprocessor_fuzz.c` provides bounded output comparison
   and the minimizer for the independent preprocessor test harness.
   `preprocessor_fuzz_generate.c` generates cases, `preprocessor_fuzz_clang.c`
@@ -306,10 +317,12 @@ designs and the compilers already built this way.
   IFUNCs' stubs and IRELATIVE relocations, its general- and local-dynamic
   TLS accesses relaxed to local-exec and its init and fini arrays' priorities,
   or as a static PIE (step 6's fifth part): the PIE's layout and RELATIVE
-  relocations without dynamic symbols, the static runtime's IFUNCs with their
-  IRELATIVE relocations last in `.rela.dyn`, and its loads and calls through
-  the GOT of the image's symbols relaxed; all from vector passes with exact
-  twins. `dynamic.c` gives it what a PIE needs from the C runtime and from
+  relocations without dynamic symbols, and the static runtime's IFUNCs with
+  their IRELATIVE relocations last in `.rela.dyn`. Every kind's loads and
+  calls through the GOT of the image's symbols are relaxed, as GNU ld and lld
+  relax them, and an IFUNC whose stub only calls reach reads the stub's slot
+  through the GOT, as lld's does; all from vector passes with exact twins.
+  `dynamic.c` gives it what a PIE needs from the C runtime and from
   binding (`dynamic_inputs`), what a static executable with the C runtime
   needs (`dynamic_static_inputs`) and what a static PIE needs
   (`dynamic_static_pie_inputs`). `executable_test.c` holds the static
@@ -412,6 +425,13 @@ designs and the compilers already built this way.
   measurements. `c_files_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-files` runs them) and `c_files_benchmark.c` provides
   `benchmark-files`.
+- `src/buster/compiler/profile.c` is the profiling tools: `ab` (builds of
+  several trees run in turn, under the 9700X's lock) and the reports of perf's
+  and objdump's text, `hot-loops`, `label-spills`, `spill-report` and
+  `branch-misses`. `profile_test.c` holds their tests (`main.c` includes both;
+  `./build/compiler test-profile` runs them). `docs/profiling.md` is how the
+  lexer and the encoder were measured and profiled on the 9700X, with these
+  tools: read it before tuning a stage.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -421,6 +441,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler
 ./build/compiler test-call-graph
 ./build.sh check-call-graph
+./build/compiler test-profile
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
 ./build/compiler benchmark-lexer src
@@ -478,8 +499,12 @@ there at a time, so everything takes one lock:
 
 - Run every build, test, benchmark and perf run there through
   `EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND...`.
+  Also set `EXCLUSIVE_TITLE` to the session's title and `EXCLUSIVE_LINK` to
+  its link (its claude.ai page, or else the PR or issue it works on): whoever
+  waits sees them in `/var/lib/buster-9700x/owner`.
 - The runner's job hooks take the same lock for every CI job, and a waiting CI
-  job goes first.
+  job goes first. A CI job's owner lines give its workflow, job, PR number and
+  title (or a push's first line), the run's link and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
@@ -617,6 +642,61 @@ selects C++ source/header extensions. The default 9700X job runs
 `benchmark-lexer src` after the tests, pinned to one allowed CPU. Measurements
 are informational: correctness failures fail CI, but throughput values are not
 yet compared against a performance baseline. Keep just one compiler executable.
+
+`./build.sh lexer-variant NAME=SOURCE...` builds `build/compiler` with other
+lexers in it, each SOURCE a copy of `c_lexer.c` (or its assembly, from
+`./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s`), as
+`c_lexer_variant_NAME`. `benchmark-lexer` then also compares each with
+`c_tokenize` on every file (a difference fails it), times them in an order
+that rotates by pass, and prints each one's change from `c_tokenize`.
+Where its code lands moves a variant by up to about 1.5% even when its code
+is `c_tokenize`'s (a copy of it as a variant is the comparison's control), and
+builds in separate processes differ by about 2%: `docs/profiling.md`
+("Comparing two versions") has how to use both.
+
+## Profiling tools
+
+`./build/compiler test-profile` (about 10 ms) checks `profile.c`. Each tool
+runs on texts in objdump's, clang's and perf script's formats, and its report
+must be exactly the expected one:
+
+- `hot-loops`: a loop nested in another, an indirect jump, two copies of the
+  function (the busiest one taken by the samples' addresses: their offsets in
+  the file through its LOAD segments), samples of another function and of
+  another file, of a name that only starts with the function's, past the last
+  instruction and before the first symbol, and an lld executable, whose
+  offsets aren't its addresses; samples without file offsets, a disassembly
+  without objdump -p's headers, a missing function and disassembly out of
+  order (errors);
+- `label-spills` and `spill-report`: spills, reloads and folded reloads
+  labeled with the tag in order in the function and in no other (not source
+  paths or other comments that hold the words), and nothing else changed;
+  their samples by stack slot and source location, the labeled copy found by
+  address, without the samples of a static function of the same name in
+  another unit (after it too), of the function's static local (`f.counter`),
+  of another tag, of a shared library at the same offsets or of another
+  tree's file of the same name, and in an lld executable; a label at the
+  function's address, from the symbol table (`objdump -t`); labels out of order or of another tag, missing from the disassembly
+  or in it twice, samples without file offsets, and an invalid tag (errors);
+  and clang's assembly of a program whose static function `function` (also
+  an assembler keyword) prints `__func__`, labeled, assembled and run, which
+  must print the same;
+  and one whose first instruction is a spill, labeled, linked and
+  disassembled, whose report must find its labels (clang and objdump);
+- `branch-misses`: records mispredicted, predicted and neither, fields that
+  aren't records, the load bias and the disassembly's instructions, and
+  10,000 branches, which grow its table;
+- `ab`: the rotating order, and runs that succeed, fail and can't start, with
+  two argument lists, and through a lock (`env`) pinned to an allowed CPU.
+
+The commands are `ab [--rounds N] [--cpu N] [--lock PATH] TREE... --
+ARGUMENT... [-- ARGUMENT...]...`, `hot-loops FUNCTION DISASSEMBLY SAMPLES
+[--loops N]`, `label-spills FUNCTION TAG INPUT.s OUTPUT.s`, `spill-report
+FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]` and `branch-misses BRSTACK [--bias
+ADDRESS] [--disassembly FILE] [--branches N]`; `docs/profiling.md` has the
+perf and objdump commands that make their inputs. Run `ab` itself outside the
+9700X's lock, with `--lock ~/buster-fast-bench/exclusive.sh`, which takes it
+for each run. The 9700X job runs the tests after the call graph check.
 
 ## x86-64 disassembler
 
@@ -894,6 +974,30 @@ reference:
 A watchdog ends the run with status 1 if a group doesn't finish within 60 s,
 which is how a lost wake-up would show. `--rounds N` and `--seed N` change the
 rounds and the random inputs.
+
+## Deterministic output tests
+
+`./build/compiler test-diagnostics` checks the buffered diagnostic merge:
+the AVX-512 radix sort against stable insertion sort, guard-page tails,
+complete 64-bit keys, grouped notes, the earliest fatal cutoff, and bounded
+allocation failures. Jobs run in forward and reverse order with delayed
+completion at 1, 2, 3 and 8 lanes; the bytes must agree.
+
+`test-preprocessor` (without files), `test-object-writer`, `test-executable`,
+`test-dynamic` and `test-static` also check output after changing opaque
+identifier assignments. Each accepts `--id-order N` (default 153). The object
+test covers both section modes at every lane count; the preprocessor compares
+both `-E` text modes and diagnostics through both kernels and both job orders.
+The 9700X workflow runs these checks as part of the stage commands.
+
+`./build/compiler benchmark-diagnostics [--only scalar|selected]
+[--after-scalar MS]` compares the
+ordering paths with 21 interleaved samples, in ns/key and invariant-TSC
+ticks/key. Run both isolated `--only selected` and
+`--only selected --after-scalar 100`, across several processes pinned to CPU 2
+under the host's lock. [The determinism guide](docs/determinism.md) specifies
+the caller's source-order and lifetime contracts and the integration still
+required by #150, #151 and #152.
 
 ## Lane benchmark
 
@@ -1438,8 +1542,13 @@ like the others, its measurements are informational.
   the last file scribbled over, so that a lane that skipped a field or a chunk
   shows. The files and build IDs must be byte-identical, and each program must
   run and print what its model predicts. In each file every fixup's field must
-  hold its kind's value, the GOT must have a slot for each target of a GOT
-  kind (numbered from 1 in symbol order, holding its value), the headers must
+  hold its kind's value; a load or call through the GOT that relaxes (a
+  `CALL_GOT` or `LOAD_GOT` with the addend -4 to a symbol of the image's that
+  isn't an IFUNC: `executable_test_relaxes`, the test's own rule) must have its
+  instruction rewritten (`mov` to `lea`, `call` to `addr32 call`, `jmp` to
+  `jmp` and a `nop`) and every other must keep its own; the GOT must have a
+  slot for each target of a GOT kind that a fixup reads unrelaxed (numbered
+  from 1 in symbol order, holding its value), the headers must
   have lld's layout, no chunk boundary may split a field, and the build ID
   must be the tree of the file's chunks. The unwind tables, read back as an
   unwinder reads them (`executable_test_unwind`): `PT_GNU_EH_FRAME` exactly
@@ -1455,9 +1564,11 @@ like the others, its measurements are informational.
   named, without creating the output;
 - chunk boundaries: programs with a call's rel32 0 to 4 bytes before the
   nominal 256 KB boundary and an `ABS64` 0 to 8 bytes before 512 KB, both in
-  atoms larger than a chunk. A boundary must move to the end of a field that
-  crosses it and stay where it is otherwise, with every lane count, and the
-  program must run;
+  atoms larger than a chunk, and with a call through the GOT (`call [rip +
+  slot]`, which relaxes to `addr32 call` and so rewrites the 2 bytes before
+  its field) whose 6 bytes start 0 to 6 bytes before 256 KB. A boundary must
+  move to the end of a field (or such an instruction) that crosses it and stay
+  where it is otherwise, with every lane count, and the program must run;
 - the output file: created; overwritten in place by a smaller program (and
   truncated) and with its mode restored; written beside it and renamed over it
   when it has another link (which keeps its bytes), when it is a symbolic link,
@@ -1547,10 +1658,15 @@ before the exports, and each export at its address, found through
 `.gnu.hash` as glibc's loader looks it up); `.gnu.hash`'s shape (lld's); and
 every relocation the loader needs, from `.rela.dyn` and `.relr.dyn` decoded,
 against the GOT's slots and the `ABS64` fields of the atoms the loader writes,
-with each slot's bytes and each call's stub; and the unwind tables, by
-test-executable's rules (the runtime's FDEs among them). The writer's exact
-twins must write the same file with 1 and 8 lanes, and a write without RELR
-must have the same relocations in `.rela.dyn` alone and run alike. The checks:
+with each slot's bytes and each call's stub; the loads and calls through the
+GOT, each that relaxes by test-executable's rule rewritten and each other
+kept, with a GOT slot for each symbol that an unrelaxed GOT kind or a call to
+a dynamic symbol reaches, and for no other, in symbol order; and the unwind
+tables, by test-executable's rules (the runtime's FDEs among them). The link's
+bytes are binding's again after the writes, for the checks and the objects
+that lld links. The writer's exact twins must write the same file with 1 and 8
+lanes, and a write without RELR must have the same relocations in `.rela.dyn`
+alone and run alike. The checks:
 
 - programs: test-link's two sets that call libc, and one of `--functions`
   workers (2,000 by default) whose table of pointers has targets that the
@@ -1566,22 +1682,23 @@ must have the same relocations in `.rela.dyn` alone and run alike. The checks:
   `.gnu.hash`;
 - imports: 256 of `libc.so.6`'s functions, each called through a stub and
   pointed to, which the loader must bind at their versions;
-- refusals: a pointer to `main` in `.rodata` (a text relocation), an `ABS32`
-  to `main` and a `PC32` to a dynamic symbol in `.data`, a `lea` of and a
-  `PC64` in `.data` to a hidden weak reference to nothing, which stays at
-  address 0 wherever the program loads, and a `lea` of, a call to and a
-  `PC64` in `.data` to an absolute symbol, which stays its value (GNU ld and
-  lld refuse them too), each refused with its fixup by every lane count and
-  by the exact twins, without an output; a call to and a pointer to a weak
-  reference to nothing, and to a hidden one, loads through the GOT slots of
-  the first and of the program's data, the dynamic one's first in its word of
-  the bitsets, a pointer to `main` at an odd address, which RELR can't hold,
-  and pointers in `.data` and `.rodata` to, a load through the GOT of and an
-  `ABS32` in `.data` to an absolute symbol at 42, which need no relocation
-  (as lld links them), all of which run; and a lane short of scratch memory
-  (lane 0 of 1 and of 8 lanes, the last of 2 and of 8), with which every link
-  that fails must fail with `EXECUTABLE_ERROR_MEMORY` and no output, and one
-  with room enough must run.
+- refusals: a pointer to `main` in `.rodata` (a text relocation), an `ABS32` to
+  `main` and a `PC32` to a dynamic symbol in `.data`, a `lea` of and a `PC64`
+  in `.data` to a hidden weak reference to nothing, which stays at address 0
+  wherever the program loads, and a `lea` of, a call to and a `PC64` in `.data`
+  to an absolute symbol, which stays its value (GNU ld and lld refuse them
+  too), each refused with its fixup by every lane count and by the exact twins,
+  without an output; a call to and a pointer to a weak reference to nothing,
+  and to a hidden one, loads through the GOT slots of the first and of the
+  program's data (by `GOTPCREL`, which doesn't relax), the dynamic one's first
+  in its word of the bitsets, and a load of the data that relaxes to a `lea`, a
+  pointer to `main` at an odd address, which RELR can't hold, and pointers in
+  `.data` and `.rodata` to, a load through the GOT of and an `ABS32` in `.data`
+  to an absolute symbol at 42, which need no relocation (as lld links them),
+  all of which run; and a lane short of scratch memory (lane 0 of 1 and of 8
+  lanes, the last of 2 and of 8), with which every link that fails must fail
+  with `EXECUTABLE_ERROR_MEMORY` and no output, and one with room enough must
+  run.
 
 With `--cross-check`, which needs `ld.lld`, `cc`, `objdump` and `readelf`, the
 bound link's objects (the object writer's) are linked by lld as a PIE against
@@ -1590,14 +1707,16 @@ pack-relative-relocs` when libc defines `GLIBC_ABI_DT_RELR`), and the two files
 must have the same segments (the program headers' types in order, their flags
 and the `PT_LOAD`s' alignments), the same dynamic symbols (name, binding, type,
 whether defined, version), the same symbols with a GOT slot the loader fills,
-the same `R_X86_64_64`s with their addends, as many RELATIVE pointers outside
-the GOT, the same init and fini arrays' sizes, the same `DT_NEEDED` libraries
-in order, each with the same needed versions, the same `DT_INIT`, `DT_FINI`,
-`DT_GNU_HASH` and `DT_VERNEED`, and `.eh_frame_hdr` tables (lld's
-with `--eh-frame-hdr`, as GCC's driver asks) that index the same functions with
-the same ranges. And each program runs
-again with a library preloaded, which `cc` builds: its `write` walks the stack
-with libgcc's `_Unwind_Backtrace`, which finds each frame's FDE through
+as many GOT slots relocated RELATIVE and as many that no relocation fills (but
+for ours of thread-locals' offsets, whose initial-exec accesses lld relaxes to
+local-exec), the same `R_X86_64_64`s with their addends, as many RELATIVE
+pointers outside the GOT, the same init and fini arrays' sizes, the same
+`DT_NEEDED` libraries in order, each with the same needed versions, the same
+`DT_INIT`, `DT_FINI`, `DT_GNU_HASH` and `DT_VERNEED`, and `.eh_frame_hdr`
+tables (lld's with `--eh-frame-hdr`, as GCC's driver asks) that index the
+same functions with the same ranges. And each program runs again with a
+library preloaded, which `cc` builds: its `write` walks the stack with
+libgcc's `_Unwind_Backtrace`, which finds each frame's FDE through
 `PT_GNU_EH_FRAME` and the table, and the walk must go through `main` and end
 at `_start`, the outermost frame. And `readelf -wF`'s reading of each of the
 program's functions' FDEs (the CFA's rule and each saved register's, from each
@@ -1611,7 +1730,7 @@ push saves at the CFA less the new offset, and one a pop restores as it was.
 ## Static executable tests
 
 `./build/compiler test-static [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 2.7 s on the 9700X, and 2.9 s with
+[--cross-check] [--keep]` (about 2.9 s on the 9700X, and 3.2 s with
 `--cross-check`) checks `executable.c`'s static executables with the C
 runtime against this system's static runtime (`runtime_import_static`), then
 its static PIEs against the static PIE's (`runtime_import_static_pie`), in a
@@ -1619,11 +1738,11 @@ directory of its own under `--directory` (`TMPDIR` or `/tmp` by default),
 which it removes unless `--keep`. Each program is bound by `bind.c` and
 written by groups of 1, 2, 3 and 8 lanes and by the writer's exact twins with
 1 and 8 lanes, each time from the atoms' bytes as binding left them (the TLS
-relaxation and a static PIE's GOT relaxation rewrite them), with zeroed fields
-over the last file scribbled over, every other time over poisoned scratch
-memory: the files must be byte-identical. A static PIE without general- or
-local-dynamic TLS accesses is then written once more over the bytes the last
-write left, its loads and calls relaxed already, and must come out the same.
+relaxation and the GOT relaxation rewrite them), with zeroed fields over the
+last file scribbled over, every other time over poisoned scratch memory: the
+files must be byte-identical. A link without general- or local-dynamic TLS
+accesses is then written once more over the bytes the last write left, its
+loads and calls relaxed already, and must come out the same.
 Each file is read back and checked by the test's own rules:
 
 - the headers: `_start` the entry, no `PT_INTERP`, a `PT_NOTE` with the start
@@ -1638,26 +1757,31 @@ Each file is read back and checked by the test's own rules:
   IFUNC's GOT slot without a stub, its addend the IFUNC's resolver, in
   `.rela.iplt` (a static PIE's after its RELATIVE ones in `.rela.dyn`); each
   stub in `.iplt` a `jmp` through its own slot; an IFUNC with a stub at its
-  stub's address everywhere, its GOT slot too; and a static executable's
-  `__rela_iplt_start` and `__rela_iplt_end` at `.rela.iplt`'s bounds;
+  stub's address for its calls, and everywhere when a fixup other than a call
+  takes it (its GOT slot too), where one whose stub only calls reach reads the
+  stub's slot through the GOT, as lld's reads its `.got.plt` entry; and a
+  static executable's `__rela_iplt_start` and `__rela_iplt_end` at
+  `.rela.iplt`'s bounds;
 - a static PIE's RELATIVE relocations: one of each GOT slot that holds an
-  address in the image (an IFUNC's stub among them) and one of each `ABS64`
-  field of an atom the loader writes whose target is in the image, with the
-  value as its addend, and no others: `.relr.dyn`'s (decoded, the field
-  holding the addend) for the slots and the fields at even addresses in atoms
-  aligned to 2 or more when `libc.a` takes `DT_RELR` (it defines
-  `arc4random`, as glibc 2.36 and later do), and `.rela.dyn`'s for the others;
+  address in the image (an IFUNC's stub among them, when it stands for the
+  IFUNC's address) and one of each `ABS64` field of an atom the loader writes
+  whose target is in the image, with the value as its addend, and no others:
+  `.relr.dyn`'s (decoded, the field holding the addend) for the slots and the
+  fields at even addresses in atoms aligned to 2 or more when `libc.a` takes
+  `DT_RELR` (it defines `arc4random`, as glibc 2.36 and later do), and
+  `.rela.dyn`'s for the others;
 - every fixup's field: test-executable's kinds' values, with an IFUNC's stub
   for its address, a general- or local-dynamic access as the local-exec
   sequence it relaxes to, `DTPOFF32` as an offset from the thread pointer, an
   absolute symbol's value, and nothing for a call of `__tls_get_addr`, which
-  the access consumed; in a static PIE, each `CALL_GOT` and `LOAD_GOT` with
-  the addend -4 to a symbol of the image's that isn't an IFUNC relaxed from
-  its instruction in the link's bytes (the test checks it is the `call`,
-  `jmp` or `REX.W` `mov` the kind says): `addr32 call`, `jmp` and a `nop`, or
-  `lea`; the GOT's slots in symbol order (but for the targets whose every
-  slot read relaxed), then the stubs'; and every name of the linker's where
-  its section or segment says (`_DYNAMIC` at `.dynamic`);
+  the access consumed; each `CALL_GOT` and `LOAD_GOT` with the addend -4 to a
+  symbol of the image's that isn't an IFUNC relaxed from its instruction in
+  the link's bytes (the test checks it is the `call`, `jmp` or `REX.W` `mov`
+  the kind says): `addr32 call`, `jmp` and a `nop`, or `lea`, and every other
+  keeping its instruction; the GOT's slots in symbol order (but for the
+  targets whose every slot read relaxed, and the IFUNCs whose stubs only
+  calls reach), then the stubs'; and every name of the linker's where its
+  section or segment says (`_DYNAMIC` at `.dynamic`);
 - the init and fini arrays: their prioritized atoms first, by priority and in
   id order, then the others in id order, from their section's start to its
   end;
@@ -1668,30 +1792,31 @@ The checks:
 - programs: test-link's two sets that call libc, and one of `--functions`
   workers (2,000 by default): each must run and print what its model
   predicts, as a static executable and as a static PIE;
-- compiled: test-bind's C programs (hello, stdio, threads, jumps and
-  weak-puts) and this file's: prioritized constructors and destructors beside
-  libgcc's `cpuinfo.o`'s; decimal floating point, whose rounding mode and
-  flags are libgcc's thread-local variables, reached by general-dynamic
-  accesses, from a thread too; GCC 14's heap trampolines, whose member's
-  accesses are local-dynamic, where `cc` is GCC 14 or later (it says so
-  otherwise); and assembly with each general- and local-dynamic sequence
-  through the PLT and the GOT (status 31), with a local IFUNC called,
-  pointed to and compared, and a global one called through the GOT (status
-  53), with a weak IFUNC defined nowhere, which has no resolver, loaded
-  through the GOT, taken by a `lea` and pointed to, each 0 (status 0), and
-  with absolute symbols that another object defines (combined with `ld -r`,
-  since GNU as resolves a `lea` of an absolute symbol its file defines),
-  taken by a `lea`, through the GOT, as an immediate and pointed to (status
-  0). `cc` compiles each, and each must run as `cc -static`'s link of the
-  same object does, with the same status and output, both from directories
-  of the same length (`argv[0]`). As static PIEs, each must run as
-  `cc -static-pie`'s link does, but the IFUNC program, which must run with
-  status 53, as lld's link does (GNU ld's gives the pointer in `.data` the
-  IFUNC's implementation, where a `lea` gives its `.iplt` entry, and the
-  comparison fails: 52), and the weak IFUNC's and the absolute symbols'
+- compiled: test-bind's C programs (hello, stdio, threads, jumps and weak-puts)
+  and this file's: prioritized constructors and destructors beside libgcc's
+  `cpuinfo.o`'s; decimal floating point, whose rounding mode and flags are
+  libgcc's thread-local variables, reached by general-dynamic accesses, from a
+  thread too; GCC 14's heap trampolines, whose member's accesses are
+  local-dynamic, where `cc` is GCC 14 or later (it says so otherwise); and
+  assembly with each general- and local-dynamic sequence through the PLT and
+  the GOT (status 31), with a local IFUNC called, pointed to and compared, and
+  a global one called through the GOT (status 53), with an IFUNC called
+  directly, called through its GOT slot and loaded through it, whose stub only
+  calls reach, so that the loads read the stub's slot (status 63), with a weak
+  IFUNC defined nowhere, which has no resolver, loaded through the GOT, taken
+  by a `lea` and pointed to, each 0 (status 0), and with absolute symbols that
+  another object defines (combined with `ld -r`, since GNU as resolves a `lea`
+  of an absolute symbol its file defines), taken by a `lea`, through the GOT,
+  as an immediate and pointed to (status 0). `cc` compiles each, and each must
+  run as `cc -static`'s link of the same object does, with the same status and
+  output, both from directories of the same length (`argv[0]`). As static PIEs,
+  each must run as `cc -static-pie`'s link does, but the IFUNC program, which
+  must run with status 53, as lld's link does (GNU ld's gives the pointer in
+  `.data` the IFUNC's implementation, where a `lea` gives its `.iplt` entry,
+  and the comparison fails: 52), and the weak IFUNC's and the absolute symbols'
   programs, whose `lea` of address 0 and of an absolute symbol a static PIE
-  refuses (`EXECUTABLE_ERROR_RELOCATION`, by every write), as
-  `cc -static-pie` refuses them;
+  refuses (`EXECUTABLE_ERROR_RELOCATION`, by every write), as `cc -static-pie`
+  refuses them;
 - refusals: assembly with a call of `__tls_get_addr` outside an access
   (refused naming the symbol), a general-dynamic access without its prefixes
   (its fixup), a pointer to an absolute symbol farther than int32 from the
@@ -1715,10 +1840,14 @@ same sizes; but lld 23 links the weak IFUNC's program wrong (an `IRELATIVE`
 relocation with resolver 0, which faults at startup), so that one only has to
 link, and the static PIEs that a static PIE refuses aren't linked; lld packs
 a static PIE's RELATIVE relocations into `.relr.dyn` (`-z
-pack-relative-relocs`) as ours are. A static PIE's RELATIVE relocations are
-printed beside lld's: ours have 6 more for hello world, the GOT slots of
-IFUNCs that only calls give stubs, whose loads lld points at the stub's
-IRELATIVE slot. `--seed N` and
+pack-relative-relocs`) as ours are, and a static PIE must have as many as
+lld's. Then the GOT (`executable_test_got`, from the files' sections): our
+slots must be as many as lld's `.got` entries and IFUNCs' `.got.plt` entries,
+but for those of thread-locals' offsets, whose initial-exec accesses lld
+relaxes to local-exec, and in a static executable those that only tests and
+binops with REX read through the GOT, which lld writes with immediates
+without PIC (`static_test_immediate_slots`: 5 of the decimal program's).
+`--seed N` and
 `--functions N` change the generated programs. The default 9700X job runs it
 with `--cross-check` after test-dynamic.
 
@@ -1738,7 +1867,10 @@ with `--cross-check` after test-dynamic.
   `/tmp`) by a group of `--lanes` lanes that runs every write of a case, as a
   compiler runs its phases on one group: in place and as a new file, phase by
   phase, against the floor, one `pwrite` of the same bytes; and with one lane,
-  the patch kernel on each program's own mix of kinds, and the unwind tables'
+  the patch kernel on each program's own mix of kinds, three ways: relaxing
+  the loads and calls through the GOT from the code generator's instructions
+  (put back before each run, outside the time), relaxing them over the forms
+  the relaxation wrote, and without relaxing them; and the unwind tables'
   passes: the FDEs counted by the vector path and by the walk, their table
   entries both ways, and the table's sorted check and sort;
 - the same sizes as programs that call libc, bound against the system's
@@ -1749,14 +1881,15 @@ with `--cross-check` after test-dynamic.
   with their stubs, IRELATIVE relocations and GOT slots (`--only static`);
 - and bound against the static PIE's runtime and written as static PIEs,
   with their stubs, relocations (RELATIVE among them) and GOT slots
-  (`--only static-pie`): each write over the last one's bytes, whose loads
-  and calls through the GOT it relaxed already.
+  (`--only static-pie`).
 
-Run it under the 9700X's lock with `taskset -c 2` for one lane, or with
-`taskset -c 0-7` for 8 (one CPU per core), since the lanes' threads keep the
-affinity they start with. `docs/object-writer-and-linker.md` ("Patching and
-writing", "The first executables", "The dynamic PIE" and "The static
-executable with libc") has the numbers.
+Every write after a case's first goes over the last one's bytes, whose loads
+and calls through the GOT it relaxed already. Run it under the 9700X's lock
+with `taskset -c 2` for one lane, or with `taskset -c 0-7` for 8 (one CPU per
+core), since the lanes' threads keep the affinity they start with.
+`docs/object-writer-and-linker.md` ("Patching and writing", "The first
+executables", "The dynamic PIE", "The static executable with libc", "The
+static PIE" and "GOT relaxation in every executable") has the numbers.
 The default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
 
@@ -2214,12 +2347,16 @@ and the repository's translation units with `--clang`.
 ## Preprocessor benchmark
 
 `./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
-[options] file...` preprocesses each file from nothing per run (a new intern
-table and preprocessor), with the vectorized kernels and their scalar twins, 21
-passes after a warm-up, and reports the medians of time, cycles and instructions
-per input token and per output token, IPC, each phase's share and time (read,
-lex, refine, directive tables, main loop) and what a run did (directives, runs,
+[--read-limit N,...] [options] file...` preprocesses each file from nothing per
+run (a new intern table and preprocessor), with the vectorized kernels and their
+scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
+and instructions per input token and per output token, IPC, each phase's share
+and time (read, lex, refine, directive tables, main loop), the release after the
+run (the files' mappings among it), and what a run did (directives, runs,
 expansions, invocations, pastes, and the `#if` lines and their lengths).
+`--read-limit` gives a list of the largest files a run reads rather than maps
+(16 KB by default; 0 maps every file), each run in turn in every pass, which
+must all give the same output.
 `--clang` also times `clang -E -P` with the same options, a process per file.
 `-march` selects the shared target's predefines. `--predefines FILE` can replace
 them with `clang -dM -E` output (the benchmark leaves this option out of clang's
@@ -2393,19 +2530,20 @@ others, its measurements are informational.
   zero-size members, bit-fields, flexible array members, `_Atomic` and
   `nullptr_t` members, `i128` storage, which LLVM never splits, whatever the
   high eightbyte under an INTEGER low one and refused under another, runs of
-  bit-fields that are an `i128` and that aren't, and the narrow low parts
-  clang widens into a general register; and the `_Atomic` types whose LLVM
-  types decide: of types of no size, which LLVM makes larger, as the records
-  ending in one, with their slots, the records it lays out otherwise than C,
-  and vectors LLVM keeps whole, splits or, of bools, passes as integers; and
-  the vectors that aren't `_Atomic` which LLVM breaks up or packs: of bools,
-  with their integer storage and layout, refused from 16 bytes up where clang
+  bit-fields that are an `i128` and that aren't, unions whose storage member a
+  zero-length array of a larger record decides, and the narrow low parts clang
+  widens into a general register; and the `_Atomic` types whose LLVM types
+  decide: of types of no size, which LLVM makes larger, as the records ending
+  in one, with their slots, the records it lays out otherwise than C, and
+  vectors LLVM keeps whole, splits or, of bools, passes as integers; and the
+  vectors that aren't `_Atomic` which LLVM breaks up or packs: of bools, with
+  their integer storage and layout, refused from 16 bytes up where clang
   passes them as `<N x i1>`, with the records of one, and smaller copies past
   128 (`SMALLER`), of `_BitInt`s narrower than a byte, of long doubles
   (refused in registers, st0 and st1 as results), of `__float128`s, of
   `_BitInt`s of 128 bits and more, and of lengths that aren't a power of two
-  in memory, returned in rax, rdx and rcx, in xmm0, xmm1 and st0, or through
-  a hidden pointer), and calls whose locations clang and LLVM give (an
+  in memory, returned in rax, rdx and rcx, in xmm0, xmm1 and st0, or through a
+  hidden pointer), and calls whose locations clang and LLVM give (an
   `UNCOUNTED` argument that splits the next record, an `__int128` without two
   registers left, a hidden pointer, a record of a flexible array member alone
   as an `i0`, a struct whose narrow low part takes a general register, unions
@@ -2416,12 +2554,16 @@ others, its measurements are informational.
   an 80-byte copy, and as a result a hidden pointer clang doesn't count),
   `va_arg`'s plans for an aligned `long` and an `i128` with an SSE high
   eightbyte, and the levels across calls (a record larger than 64 bytes that
-  waits for a `LARGER` member, and a flexible record of no size that an
-  `_Atomic` of it in a later call reads);
+  waits for a `LARGER` member, and records of no size that an `_Atomic` of
+  them in a later call reads: a flexible one, and two that hold a struct of
+  128 bytes by an array of none, which wait for what its alignment reads);
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's
-  `classify` transcribed with an explicit stack of frames;
+  `classify` transcribed with an explicit stack of frames; then classified
+  again by the twin, every type at once, into the same table (zero-length
+  arrays of large records among the types, which wait in the levels for the
+  types their alignment reads);
 - assignment: random calls over a world's types, named and variadic, by both
   paths, which must give the same locations and totals, also with the columns
   ending at a `PROT_NONE` page; and calls of 65,542 `long`s and of 32,767 and
@@ -2442,18 +2584,20 @@ and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. GCC's worlds leave out
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
 own bugs among them, and `docs/calling-convention.md` lists them), and clang's
-a type in registers that holds an array of elements of no size, on which
-clang 23 crashes now and then, an aligned typedef of an `_Atomic` vector of
-bools, whose atomic loads crash it, a record SSE, SSEUP of a size other than
-16, 32 or 64 bytes and one SSE, SSE that holds a `__float128`, which the
-module doesn't model yet, and a union of a vector LLVM packs into fewer bits
-than its bytes, whose copies lose the other members' bits; an argument clang
-would pass as an `i0` becomes a long (its passes crash on them now and then),
-as does an unnamed one clang's `va_arg` reads elsewhere than its call puts it;
-bytes clang doesn't pass aren't compared; and the C side copies a `SMALLER`
-type's LLVM bytes, all that clang's objects of it hold. The files go in a new
-directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure.
-The 9700X job runs it with `--cross-check` after the type table's benchmark.
+a type in registers that holds an array of elements of no size, on which clang
+23 crashes now and then, one with an SSE low eightbyte and bit-fields in an
+INTEGER high one, whose access units the module doesn't work out yet, an
+aligned typedef of an `_Atomic` vector of bools, whose atomic loads crash it,
+a record SSE, SSEUP of a size other than 16, 32 or 64 bytes and one SSE, SSE
+that holds a `__float128`, which the module doesn't model yet either, and a
+union of a vector LLVM packs into fewer bits than its bytes, whose copies lose
+the other members' bits; an argument clang would pass as an `i0` becomes a
+long (its passes crash on them now and then), as does an unnamed one clang's
+`va_arg` reads elsewhere than its call puts it; bytes clang doesn't pass
+aren't compared; and the C side copies a `SMALLER` type's LLVM bytes, all that
+clang's objects of it hold. The files go in a new directory under `$TMPDIR`
+(or `/tmp`), removed unless `--keep` or a failure. The 9700X job runs it with
+`--cross-check` after the type table's benchmark.
 
 ## Calling convention benchmark
 
@@ -2461,10 +2605,10 @@ The 9700X job runs it with `--cross-check` after the type table's benchmark.
 [--only classification|assignment] [--path vector|scalar] [--after-scalar
 MS]` (about 1 s on the 9700X) checks that each vector path of
 `calling_convention.c` agrees with its twin (the classification's rows, pass
-bits, stack bytes, alignments and results; the assignment's locations and
-calls), then reports 21 interleaved-pass medians per item (time, cycles,
-instructions, IPC, branch mispredictions and the throttle, PMCx1A0's umask
-0x08, #199):
+bits, stack bytes, alignments, storage, layouts and results; the
+assignment's locations and calls), then reports 21 interleaved-pass medians
+per item (time, cycles, instructions, IPC, branch mispredictions and the
+throttle, PMCx1A0's umask 0x08, #199):
 
 - classification: a table of `--count` types (32,768), records and unions of
   0 to 8 members mostly, with the pointers, arrays, vectors and aligned

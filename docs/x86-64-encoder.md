@@ -510,7 +510,8 @@ as rejects them). The scalar encoder writes the segment override, `3E` and
 out (see "Next steps").
 
 In 15 interleaved rounds of `x86_encode_64` on the 9700X against main
-(`x86-opt/ab.sh`), the compiler mix took 0.620 ns per instruction against 0.627
+(`x86-opt/ab.sh`, now `build/compiler ab`: [profiling.md](profiling.md)), the
+compiler mix took 0.620 ns per instruction against 0.627
 (3.36 cycles against 3.38), and the vector and uniform mixes, calls of 16 and
 the loops with offsets and with fixup ends −1.4% to +0.6%, within the ±1.5% a
 build varies between runs; with both built with `-falign-functions=64`, the

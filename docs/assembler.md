@@ -176,16 +176,28 @@ The vector path is selected explicitly, without host dispatch:
    compresses starts/ends/kinds in registers and transposes them into 16-byte
    token records. Masked tails respect the logical slice. Long words and
    comments/strings have bounded rare paths; the full scalar lexer is the oracle.
-2. Common Intel register/immediate statements form batches of up to 16
-   instructions. Packed register keys and decimal integers are classified and
-   converted eight operands at a time. Labels and state-changing directives
-   delimit batches. Addresses, expressions, decorations and AT&T grammar use
-   the exact parser. The benchmark exposes that remaining cost separately.
-3. Mnemonic buckets index compact form columns. Sixteen candidates compare
+2. Eight bounded register spellings are classified together and cached in the
+   token's existing reserved field. Two 32-entry tables in ZMM registers resolve
+   short names by hash and full-key comparison; vector arithmetic handles
+   numbered GPRs, XMM/YMM/ZMM and opmasks. The complete scalar spelling grammar
+   remains independent. Both paths accept mixed-case register names and leave
+   noncanonical numbers such as `r08` and `xmm00` as symbols. Intel and AT&T
+   register/address/decorator parsing reuse this cache. Common Intel statements
+   still form batches of up to 16 instructions; their decimal operands reduce
+   digit pairs and quartets instead of an eight-step multiply chain. Leading-zero
+   integers retain the scalar octal grammar. Labels and directives delimit
+   batches, and expression/state decisions keep their exact source order.
+3. An open-addressed dictionary gives each canonical mnemonic its own contiguous
+   form group, preserving catalogue order. `movabs` and `pushw` retain their
+   explicit alias predicates. Sixteen candidates compare
    operand kind/class/width, fixed registers, feature level, broadcasts and
    signed/unsigned immediate ranges in parallel. Only survivors construct
    final records and run `x86_validate`; the scalar matcher independently
-   checks roles and values. Encoder rows remain the encoding authority. This
+   checks roles and values. Precomputed role/spelling columns eliminate repeated
+   string and syntax interpretation. A surviving vector candidate runs complete
+   validation once, then trusted scalar length encoding; the scalar oracle keeps
+   the public validating encoder call. Final resolved records are validated
+   separately as before. Encoder rows remain the encoding authority. This
    helper is the bounded shared slice of #221, not its IR semantics/effects work.
 4. Instruction-only layouts use the existing vector/scalar branch sizer after
    proving its index-based contract. Mixed assembly partitions fragments by
@@ -199,6 +211,21 @@ The vector path is selected explicitly, without host dispatch:
 Labels, declarations and expression state retain their source order. For
 mixed fragments, branch promotions remain an ordered pass; layout timings
 include it. No claim is made that a stage cannot be vectorized further.
+
+The register tables use Zen 5's measured
+[`VPERMW`](https://uops.info/html-instr/VPERMW_ZMM_ZMM_ZMM.html) cost:
+one micro-op, four-cycle register latency and 0.50-cycle reciprocal throughput.
+This avoids a memory gather; the measured ZMM
+[`VPGATHERDD`](https://uops.info/html-instr/VPGATHERDD_ZMM_K_VSIB_ZMM.html)
+is 64 micro-ops and about 12.6 cycles per instruction. Full-key comparison
+after the permute rejects unknown spellings that hash to the same slot.
+The decimal reductions use
+[`VPMADDUBSW`](https://uops.info/html-instr/VPMADDUBSW_ZMM_ZMM_ZMM.html) and
+[`VPMADDWD`](https://uops.info/html-instr/VPMADDWD_ZMM_ZMM_ZMM.html), each
+one micro-op on FP0/1 and 0.50-cycle reciprocal throughput. Both have measured
+latencies of three cycles from operand 2 and two from operand 3 to the result.
+These guide the algorithm; the complete
+assembler measurements decide whether its extra token pass and temporaries pay.
 
 Relaxation starts short and only promotes a branch once. It recomputes all
 alignment padding each round, stopping within `branch_count + 1` rounds.
@@ -229,6 +256,20 @@ and check included-source diagnostics and preservation of existing output
 when assembly fails. Without external tools, the test also preprocesses pastes
 and 20,000 pp-numbers that `$` splits into five tokens each through both
 kernels, and reads assembly from a pipe.
+
+The matcher tests also compare independent scalar and indexed-vector selection
+on every admitted catalogue row with 64 operand variations: range limits,
+symbols, invalid registers, implicit accumulators with inconsistent class/width,
+memory widths, broadcasts and decorations. Register classification checks every
+two-byte key, every mixed-case three-letter key, and all case combinations of
+numbered/suffixed spellings, including leading zeroes and register limits. Decimal tests replace every digit
+position with all 256 byte values at lengths 0..8 and all partial batch widths,
+checking both values and untouched inactive stores against the scalar grammar.
+Another 576 inputs place every RIP case spelling in either operand position,
+after 0..17 valid rows and with or without a later malformed directive. They
+check the exact diagnostic and byte location across the 16-row batch boundary:
+the cache recognizes RIP for addresses, but the simple batch must leave a
+standalone RIP operand to the full parser.
 
 ```sh
 ./build/compiler benchmark-assembler --external
@@ -319,3 +360,257 @@ The implementation is original; the syntax references are the GNU assembler's
 [expressions](https://sourceware.org/binutils/docs/as/Expressions.html) and
 [alignment](https://sourceware.org/binutils/docs/as/Align.html) documentation.
 No GNU implementation code was imported.
+
+### Parser and matcher optimization, 2026-10-22 (#234)
+
+The baseline is `7c291ed22e2993b53f0bd2a9202b9e1c32f779e0`: main's decoder
+implementation plus the unchanged assembler fixes from PR #237 at `b7db5bf`.
+The optimized code is `c13f5a6d013375922daeeeaab39654ed4ad1d5e4`. Both use the
+same production build and benchmark on the 9700X above, CPU 2, with a separate
+exclusive lock for every command. The baseline was rebuilt in an isolated
+directory from its exact tracked revision. The following SHA-256 values identify
+the two immutable executables used for that experiment's repeats:
+
+| Executable | SHA-256 |
+| --- | --- |
+| Baseline | `8a6d0c5cc28bf060d1be15f34c1c46967bf1f8531663467d84ed848add43ab58` |
+| Optimized | `6badd67c1b52dfb81a032b526acaf70299c2207071f2701698c2c45aa56f9304` |
+
+Each entry below is the median of three independent process medians, each of
+21 interleaved passes. Brackets give the range of those three medians; they
+are not confidence intervals. All retained processes are included, including
+the slower register-workload sample. Workloads and instruction counts are the
+same as the preceding table.
+
+| Workload | Baseline vector ms [range] | Optimized vector ms [range] | Less total time |
+| --- | ---: | ---: | ---: |
+| Mixed Intel | 2.209 [2.190, 2.218] | 1.528 [1.512, 1.556] | 30.8% |
+| Intel registers/immediates | 1.743 [1.742, 1.786] | 1.266 [1.247, 1.546] | 27.4% |
+| AVX-512 masks/broadcasts | 3.580 [3.450, 3.743] | 1.793 [1.788, 1.799] | 49.9% |
+| AT&T | 2.703 [2.697, 2.723] | 1.685 [1.682, 1.708] | 37.7% |
+
+The repeated vector phase medians show where the changes pay:
+
+| Workload | Parse baseline / optimized ms | Match baseline / optimized ms |
+| --- | ---: | ---: |
+| Mixed Intel | 0.902 / 0.522 | 0.985 / 0.681 |
+| Intel registers/immediates | 0.539 / 0.306 | 0.853 / 0.586 |
+| AVX-512 masks/broadcasts | 2.487 / 0.864 | 0.579 / 0.418 |
+| AT&T | 1.398 / 0.671 | 0.962 / 0.676 |
+
+Layout, encoding/linking and object construction are essentially unchanged.
+The scalar reference totals were 3.778 to 3.878 ms for mixed Intel (+2.6%),
+3.273 to 3.367 ms for registers (+2.9%), 3.902 to 3.697 ms for SIMD (-5.3%),
+and 3.467 to 3.488 ms for AT&T (+0.6%). Its semantic matching and validating
+encoder calls remain independent; the default-path improvement is not a claim
+that every scalar workload improved.
+
+Separate `--only vector` runs, again three processes per cell, distinguish
+sustained work from work immediately following 100 ms of scalar assembly:
+
+| Workload/state | Baseline ms [range] | Optimized ms [range] |
+| --- | ---: | ---: |
+| Mixed, sustained | 2.214 [2.164, 2.244] | 1.511 [1.504, 1.553] |
+| Mixed, after scalar | 2.211 [2.208, 2.230] | 1.538 [1.517, 1.558] |
+| SIMD, sustained | 3.536 [3.522, 3.626] | 1.834 [1.793, 1.854] |
+| SIMD, after scalar | 3.610 [3.587, 3.627] | 1.789 [1.784, 1.870] |
+
+The gain survives both states; these samples do not show a consistent large
+transition penalty. Fresh-process mixed assembly also improves, with startup
+and file I/O included. These are three independent `--external` processes,
+each rotating 21 samples of every tool:
+
+| Tool | Baseline experiment ms [range] | Optimized experiment ms [range] |
+| --- | ---: | ---: |
+| Buster vector | 4.294 [4.273, 4.295] | 3.569 [3.552, 3.581] |
+| Buster scalar | 5.647 [5.642, 5.653] | 5.732 [5.710, 5.762] |
+| GNU as | 4.815 [4.792, 4.857] | 4.816 [4.799, 4.818] |
+| Clang integrated assembler | 12.383 [12.373, 12.421] | 12.380 [12.346, 12.529] |
+
+This is a 16.9% reduction in Buster's complete vector command time on the
+mixed synthetic workload. It is not a general assembler ranking or a `.S`
+preprocessing result. Repeated mixed initialization medians were 0.734 ms
+baseline and 0.715 ms optimized, with overlapping ranges. The matcher index
+grows from 376,872 to 419,496 bytes (+42,624); cached register descriptors use
+existing token storage. Work arenas and output sizes are unchanged. Index size
+is not total RSS or the encoder's shared table storage.
+
+The production candidate passed 360,077 checks with GNU-as cross-checks.
+An `-O1 -fsanitize=address,undefined -fno-omit-frame-pointer` build passed
+396,161 checks with `--cross-check --fuzz 20000 --seed 7`, leak detection and
+undefined-behavior failures enabled, with no sanitizer diagnostics. That
+executable's SHA-256 is
+`a7b492a39d051edfb0494dc9a43d2856903308513f285656fbdd189d6077c90b`.
+The call-graph check found no cycles across 18 translation units and 6,630
+functions. Independent review found an implicit-accumulator class/width
+mismatch in the vector prefilter; it was corrected and added to the direct
+matcher tests before these final builds and measurements.
+
+Generated code inspection confirms register-form ZMM `vpermw` table lookups
+in `asm_assemble` and ZMM `vpmaddubsw`/`vpmaddwd` decimal reductions in
+`asm_parse`. A separate 9,999 Hz cycle profile of the 2,048-function vector
+benchmark collected about 3,000 samples with none lost: `asm_assemble` 23.81%,
+`x86_match` 13.32%, `asm_parse` 11.79%, `encode_one` 10.32%, and validation
+helpers 16.11% combined. These are whole-process samples, including setup and
+checks. Candidate construction/validation, ordered grammar and layout remain
+substantial costs; the results do not establish a throughput ceiling.
+
+A separate pair of `perf stat` runs on the same 2,048-function workload
+recorded 2,614,092,053 to 1,932,733,889 user cycles, 11,985,796,733 to
+9,114,257,064 instructions, 2,126,225,601 to 1,423,351,515 branches and
+3,239,703 to 1,030,654 branch misses, baseline to optimized. Counters ran
+100% of the enabled time. These whole-process counts include initialization,
+warmups, validation and the 21 passes; they are attribution evidence, not
+per-instruction kernel counters or a substitute for the repeated timings.
+
+### Final register syntax and diagnostic validation, 2026-10-22
+
+The final PR #237 fixes add case-insensitive register names, canonical register
+numbers, register-expression diagnostics and unary-plus address terms. Revision
+`2e36d2b6b9603fed5872dd2cfad4259bdb439181` preserves those rules in the scalar
+grammar and the vector cache. The latter folds ASCII letters in parallel and
+rejects noncanonical numbers such as `r08` and `xmm00`. RIP's cache entry remains
+available for addresses, while a vector class mask excludes it from standalone
+operand batches. This preserves the parser's diagnostic location and source-order
+error reporting, including when a later directive is also invalid.
+
+Both production and `-O1 -fsanitize=address,undefined -fno-omit-frame-pointer`
+builds passed 1,909,405 checks on the 9700X with
+`test-assembler --cross-check --fuzz 20000 --seed 7`. This includes the 576 RIP
+inputs above, GNU-as cross-checks, executable and `.S` fixtures, guarded memory,
+and exhaustive register/decimal tests. The sanitized run enabled leak detection
+and stopped on undefined behavior; no sanitizer diagnostics occurred. Every
+build and test held the shared lock separately. A focused follow-up review
+found no other cached register class bypassing a parse-time restriction in the
+Intel simple batch.
+
+The full [9700X CI run](https://github.com/buster14a/buster/actions/runs/39755230518)
+also passed for this head, including 1,873,321 assembler checks with seed 1 and
+2,000 fuzz cases. Its call-graph check found no cycles across 18 translation
+units and 6,860 functions. The combined disassembler/GNU-tool tests passed too.
+CI tested merge `52d8d53d3a15b86107616abd1a550acd4f347f1e`, combining this
+head with main `9713624349981908171fae1eb73d0d2bf05e351e`.
+
+| Executable at `2e36d2b` | SHA-256 |
+| --- | --- |
+| Production | `0ad5957568379c99aa4f63e86bacc0ca5a1f08fa7c0482a10d9f5aedd60d4eec` |
+| ASan/UBSan | `6313e295ce88a4ce85ec1bccdca2aef39835970ea67675606ce5929ea6756320` |
+
+Inspection of that exact production executable confirms ZMM `vpermw` register
+table lookups and masked byte case folding in `asm_assemble`. `asm_parse`
+contains the register-class mask that excludes standalone RIP, followed by
+ZMM `vpmaddubsw` and `vpmaddwd` decimal reductions. `x86_match` uses masked
+ZMM column loads and comparisons for its candidate prefilter. The executable
+copied back for inspection has the same SHA-256 as the frozen benchmark candidate.
+
+### Measurements after the final syntax fixes, 2026-10-22
+
+The following comparison includes the final register rules and RIP diagnostic
+fix. Its baseline is main `50350966fe85a88947457d7ce765d1c2b70c9148`, with
+production executable SHA-256
+`2bb8107d0def189496b920c318941c2b5aaeb0cbc97636b7433b54442768588d`.
+The candidate is the production `2e36d2b` executable identified above. Both
+are isolated builds, frozen before measurement, using the same benchmark
+source (SHA-256
+`64dcd006393830127191ddbdd589d28d960f84f5a7037043730f4226dba5f102`).
+The toolchain, host and CPU pinning are the same as above. Every invocation
+acquires and releases the shared host lock separately, including between
+baseline and candidate; waiting CI and other owners run between invocations.
+
+There are three processes per workload and variant, each with 21 internal
+passes. The second round reverses baseline/candidate order. The mixed workload
+also runs `--external`; separate `--only vector` runs measure sustained work
+and work immediately after `--after-scalar 100`. Values are medians of the
+three process medians, with their full ranges in brackets; no samples are
+discarded. Input sizes and instruction counts match the earlier tables.
+
+| Workload | Baseline vector ms [range] | Optimized vector ms [range] | Less total time |
+| --- | ---: | ---: | ---: |
+| Mixed Intel | 2.227 [2.220, 2.244] | 1.527 [1.526, 1.545] | 31.4% |
+| Intel registers/immediates | 1.793 [1.780, 1.810] | 1.256 [1.254, 1.265] | 29.9% |
+| AVX-512 masks/broadcasts | 3.568 [3.493, 3.637] | 1.823 [1.806, 1.885] | 48.9% |
+| AT&T | 2.644 [2.631, 2.767] | 1.697 [1.696, 1.704] | 35.8% |
+
+The optimized totals are 152.9, 148.7, 215.8 and 170.0 ns per instruction,
+respectively. The reductions exceed the observed process ranges for every
+workload. The repeated phase medians attribute the gains to parsing and
+matching:
+
+| Workload | Parse baseline / optimized ms | Match baseline / optimized ms |
+| --- | ---: | ---: |
+| Mixed Intel | 0.921 / 0.528 | 0.980 / 0.673 |
+| Intel registers/immediates | 0.561 / 0.310 | 0.866 / 0.590 |
+| AVX-512 masks/broadcasts | 2.474 / 0.887 | 0.580 / 0.419 |
+| AT&T | 1.339 / 0.681 | 0.965 / 0.677 |
+
+The independent scalar reference has modestly higher medians, so these gains
+apply to the default vector path:
+
+| Workload | Baseline scalar ms [range] | Optimized scalar ms [range] | More total time |
+| --- | ---: | ---: | ---: |
+| Mixed Intel | 3.834 [3.751, 3.856] | 3.998 [3.905, 4.000] | 4.3% |
+| Intel registers/immediates | 3.327 [3.259, 3.354] | 3.385 [3.351, 3.422] | 1.7% |
+| AVX-512 masks/broadcasts | 3.874 [3.805, 3.907] | 3.917 [3.863, 3.919] | 1.1% |
+| AT&T | 3.418 [3.418, 3.550] | 3.519 [3.519, 3.534] | 3.0% |
+
+The corrected candidate also retains the gain in both vector states:
+
+| Workload/state | Baseline ms [range] | Optimized ms [range] |
+| --- | ---: | ---: |
+| Mixed, sustained | 2.214 [2.195, 2.266] | 1.547 [1.516, 1.563] |
+| Mixed, after scalar | 2.258 [2.237, 2.263] | 1.534 [1.523, 1.574] |
+| SIMD, sustained | 3.525 [3.522, 3.621] | 1.815 [1.806, 1.873] |
+| SIMD, after scalar | 3.613 [3.474, 3.650] | 1.815 [1.810, 1.824] |
+
+The complete mixed-input command includes startup and file I/O:
+
+| Tool | Baseline experiment ms [range] | Optimized experiment ms [range] |
+| --- | ---: | ---: |
+| Buster vector | 4.317 [4.294, 4.323] | 3.565 [3.530, 3.588] |
+| Buster scalar | 5.558 [5.551, 5.621] | 5.772 [5.743, 5.798] |
+| GNU as | 4.821 [4.794, 4.829] | 4.815 [4.772, 4.849] |
+| Clang integrated assembler | 12.247 [12.228, 12.673] | 12.460 [12.339, 12.774] |
+
+The corrected vector command uses 17.4% less time. The external tools are
+controls run alongside each experiment, not changed implementations. These
+synthetic `.s` inputs do not measure `.S` preprocessing or general compatibility.
+Mixed initialization is 0.860 ms [0.788, 0.868] baseline and 0.870 ms
+[0.785, 0.906] optimized, with overlapping ranges. The matcher index remains
+376,872 versus 419,496 bytes; token storage, work arenas and output sizes are
+unchanged. The earlier source-pinned hardware counters describe the original
+optimization experiment, not new counter measurements of this corrected binary.
+
+### Main integration check, 2026-10-22
+
+Revision `1034885a8e4090e42049e833e484b22bce7f0152` integrates the corrected
+candidate with main `d9ee4394a758fc8d897ff4d70ea5b36571584ae0`. The assembler,
+matcher, assembler tests and benchmark sources are unchanged; main adds other
+translation-unit content and build inputs. The separately locked production
+build has SHA-256
+`374aa01093e1b9b47d133b224cba301eabfdd335d54b62cb655ab1a5ef2c3092`.
+
+Following the [profiling guide](profiling.md), a further 18 invocations check
+the integration: three processes each for mixed input with `--external` and
+SIMD input, plus three per mixed/SIMD and sustained/after-scalar cell. Each
+process uses 21 passes, CPU 2 and its own lock. The middle round reverses the
+workload order. This is a focused comparison with the frozen corrected
+candidate; it does not rerun registers or AT&T or replace the controlled
+baseline comparison above.
+
+| Case | Corrected candidate ms [range] | Integrated ms [range] |
+| --- | ---: | ---: |
+| Mixed, interleaved | 1.527 [1.526, 1.545] | 1.530 [1.526, 1.542] |
+| SIMD, interleaved | 1.823 [1.806, 1.885] | 1.839 [1.818, 1.898] |
+| Mixed, sustained | 1.547 [1.516, 1.563] | 1.546 [1.531, 1.555] |
+| Mixed, after scalar | 1.534 [1.523, 1.574] | 1.543 [1.532, 1.569] |
+| SIMD, sustained | 1.815 [1.806, 1.873] | 1.803 [1.803, 1.806] |
+| SIMD, after scalar | 1.815 [1.810, 1.824] | 1.881 [1.871, 1.884] |
+
+The mixed command is 3.568 ms [3.540, 3.578], against the corrected candidate's
+3.565 ms [3.530, 3.588]. The integrated scalar medians are 3.919 ms
+[3.895, 3.928] for mixed input and 3.876 ms [3.809, 3.929] for SIMD input.
+The vector gains remain, but integration is not free in every state: SIMD
+after scalar work takes 3.6% more time, with non-overlapping process ranges.
+These runs establish the observed difference, not its cause. The other vector
+ranges overlap or touch. This check covers the named integration revision;
+it is not a measurement of subsequent main changes.

@@ -64,18 +64,21 @@
 //     abi_resolved_index, abi_simple_floating, abi_simple, abi_simple_entry and abi_simple_row.
 //   - Entries, the scalar classification: abi_row_at, abi_alignment_bytes_log2, abi_array_entry, abi_bit_field_classes,
 //     abi_member_row_at, abi_record_entry and abi_row_entry.
-//   - Finishing a type: abi_atomic_alignment_log2, abi_canonical_alignment_log2; clang's LLVM types (abi_member_storage,
-//     abi_union_storage_member, abi_storage, abi_layout and its helpers, abi_sse_part, abi_integer_part,
-//     abi_low_general, abi_is_pair); values and results (abi_value_type, abi_vector_element, abi_value_class,
-//     abi_value_splits, abi_value_alignment_log2, abi_is_aggregate, abi_is_illegal_vector, abi_extension,
-//     abi_value_result, abi_result); abi_end_memory, abi_copy_bytes; the rare path (AbiRare, abi_demoted_result,
-//     abi_registers_result, abi_vector_llvm, abi_single_member, abi_finish_rare); abi_finish and abi_copy.
-//   - The vector classification: AbiFold, AbiFoldGroup, abi_lane_offsets, abi_aligned_lanes, abi_possible_lanes,
-//     abi_shifted_row, abi_member_entry, abi_write_entries, abi_merge_vector, abi_post_merge_vector, abi_fold_groups,
-//     abi_store_row and abi_classify_vector.
+//   - Finishing a type: abi_atomic_alignment_log2, abi_canonical_alignment_log2; clang's LLVM types
+//     (abi_member_storage, abi_bit_field_run, a large record's storage for an array of no elements of it
+//     (abi_wide_record, AbiWideFrame, abi_wide_alignment, abi_open_storage), abi_union_storage_member, abi_storage,
+//     abi_layout and its helpers, abi_sse_part, abi_integer_part, abi_low_general, abi_is_pair); values and results
+//     (abi_value_type, abi_vector_element, abi_value_class, abi_value_splits, abi_value_alignment_log2, abi_is_aggregate,
+//     abi_is_illegal_vector, abi_extension, abi_value_result, abi_result); abi_end_memory, abi_copy_bytes; the rare path
+//     (AbiRare, abi_demoted_result, abi_registers_result, abi_vector_llvm, abi_single_member, abi_finish_rare);
+//     abi_finish_passing, abi_finish and abi_copy.
+//   - The vector classification: AbiFold, AbiFoldGroup, the members' and elements' parts (AbiPart, AbiPartState,
+//     abi_member_part, abi_element_part, abi_finish_parts), abi_lane_offsets, abi_aligned_lanes, abi_possible_lanes,
+//     abi_shifted_row, abi_member_entry, abi_write_entries, abi_merge_vector, abi_post_merge_vector, abi_store_rows,
+//     abi_fold_groups, abi_store_row and abi_classify_vector.
 //   - The drivers: abi_capacity_bytes, abi_initialize, abi_classify_scalar, abi_classify, abi_classifiable,
-//     abi_is_classified, abi_dependencies_classified, abi_classify_levels, abi_classify_all, abi_classify_all_scalar and
-//     abi_classes.
+//     abi_is_classified, abi_wide_classified, abi_members_classified, abi_dependencies_classified, abi_is_larger_root,
+//     abi_classify_levels, abi_classify_all, abi_classify_all_scalar and abi_classes.
 //   - Assignment: abi_stack_place, abi_assign_call (the twin, one call), abi_assign_scalar, the vector path's AbiScan,
 //     abi_scan, abi_scan_add, abi_scan_or and abi_assign.
 //   - va_arg: abi_va_arg.
@@ -383,11 +386,12 @@ typedef struct AbiTable AbiTable;
 // AbiTable.storage: clang's LLVM type of each type, as far as passing needs it (abi_storage): the log2 of its alignment
 // in LLVM's layout, whether its storage at offset 0 is an i128 (which makes a record's two INTEGER eightbytes one value
 // that LLVM never splits), EMPTY: a record clang's layout counts empty (isEmptyRecordForLayout: each member a
-// zero-width bit-field or of such a record's type), which doesn't end a run of bit-fields' room (abi_bit_field_run), and
-// INEXACT: a record larger than 64 bytes, or with a flexible array member and a size, which may be finished before its
-// members (abi_dependencies_classified), or what holds one, whose alignment may not be LLVM's. Passing reads only the
-// storage of types of 16 bytes or less, but an _Atomic of a type of no size takes its value's alignment as its size, and
-// refuses an INEXACT one (abi_copy_bytes).
+// zero-width bit-field or of such a record's type), which doesn't end a run of bit-fields' room (abi_bit_field_run),
+// and INEXACT: its alignment may not be LLVM's, for a record larger than 16 bytes, which keeps none (abi_wide_alignment
+// works out its LLVM type's where an array of no elements of it needs it, see abi_storage), a record with a flexible
+// array member and a size, which may be finished before its members (abi_dependencies_classified), and what holds one.
+// Passing reads only the storage of types of 16 bytes or less, but an _Atomic of a type of no size takes its value's
+// alignment as its size, and refuses an INEXACT one (abi_copy_bytes).
 #define BUSTER_ABI_STORAGE_ALIGNMENT 0x0fu
 #define BUSTER_ABI_STORAGE_I128 0x10u
 #define BUSTER_ABI_STORAGE_EMPTY 0x20u
@@ -987,6 +991,147 @@ static uint8_t abi_bit_field_run(const AbiTable* abi, const TypeTable* table, ui
     return result;
 }
 
+// The record larger than 16 bytes (without a flexible array member) that a type is, or is an array, an aligned typedef
+// or an _Atomic type of, or 0: what a zero-length array holds that the table keeps no storage for.
+static uint32_t abi_wide_record(const TypeTable* table, TypeId type)
+{
+    uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+    while (table->types.kind[index] == BUSTER_TYPE_KIND_ARRAY || table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED || table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC)
+    {
+        index = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
+    }
+    const uint8_t kind = table->types.kind[index];
+    const bool wide = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && table->types.size[index] > BUSTER_ABI_REGISTER_BYTES &&
+                      (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) == 0;
+    return wide ? index : 0;
+}
+
+// abi_wide_alignment's flag for a walk that read the storage of a type not classified yet.
+#define BUSTER_ABI_WIDE_UNREADY 0x100u
+
+// A record on abi_wide_alignment's stack: its next member, the largest alignment of its members so far, whether one
+// is off its own, whether one's storage is INEXACT, the member of the record below it whose type holds it, and its
+// current run of bit-fields' end and unit (abi_bit_field_run's).
+typedef struct AbiWideFrame AbiWideFrame;
+struct AbiWideFrame
+{
+    uint32_t index;
+    uint32_t member;
+    uint32_t holder;
+    uint32_t run_end;
+    uint8_t run_storage;
+    uint8_t largest;
+    bool packed;
+    bool inexact;
+};
+
+// The storage of clang's LLVM type of a record larger than 16 bytes, which AbiTable.storage doesn't keep (abi_storage's
+// for it, but the i128 and EMPTY): the log2 of its alignment, a struct's members' largest storage alignment (a
+// bit-field's run's unit's past an eightbyte, abi_bit_field_run) and a union's most aligned member's
+// (abi_member_storage's), unless a struct's member is off its own or the size isn't a multiple of it (determinePacked:
+// 1); and INEXACT if a member's storage is. A member that holds such a record by value has its storage, walked in turn
+// on an explicit stack in scratch memory (no record holds itself, so it is no deeper than the table has types). With
+// BUSTER_ABI_WIDE_UNREADY if a type whose storage it reads isn't classified yet, or the scratch memory can't hold the
+// stack: a flag in the result rather than through a pointer, which would make its callers take a local's address, and
+// so check a stack protector's canary at every call (abi_dependencies_classified's, once a type, at every level).
+__attribute__((cold, noinline)) static uint32_t abi_wide_alignment(const AbiTable* abi, const TypeTable* table, uint32_t record)
+{
+    Scratch scratch = scratch_begin(0);
+    AbiWideFrame* stack = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, AbiWideFrame, table->types.count);
+    uint32_t depth = 0;
+    uint32_t result = 0;
+    if (stack != 0)
+    {
+        stack[0] = (AbiWideFrame){
+            .index = record,
+            .member = table->tags.member_begin[table->types.index[record]],
+            .holder = 0,
+            .run_end = 0,
+            .run_storage = UINT8_MAX,
+            .largest = 0,
+            .packed = false,
+            .inexact = false,
+        };
+        depth = 1;
+    }
+    bool ready = stack != 0;
+    while (depth != 0)
+    {
+        AbiWideFrame* frame = &stack[depth - 1];
+        const uint32_t tag = table->types.index[frame->index];
+        const uint32_t end = table->tags.member_begin[tag] + table->tags.member_count[tag];
+        const bool in_union = table->types.kind[frame->index] == BUSTER_TYPE_KIND_UNION;
+        if (frame->member < end)
+        {
+            const uint32_t member = frame->member;
+            const TypeId type = table->members.type[member];
+            const bool bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+            const uint32_t wide = bit_field ? 0 : abi_wide_record(table, type);
+            frame->member += 1;
+            if (wide != 0)
+            {
+                stack[depth] = (AbiWideFrame){
+                    .index = wide,
+                    .member = table->tags.member_begin[table->types.index[wide]],
+                    .holder = member,
+                    .run_end = 0,
+                    .run_storage = UINT8_MAX,
+                    .largest = 0,
+                    .packed = false,
+                    .inexact = false,
+                };
+                depth += 1;
+            }
+            else if (!bit_field || table->members.bit_width[member] != 0)
+            {
+                uint64_t bytes = 0;
+                // A struct's bit-fields share their run's unit when it is wider than an eightbyte.
+                const bool in_run = !in_union && bit_field;
+                frame->run_storage = in_run && member >= frame->run_end ? abi_bit_field_run(abi, table, member, end, table->types.size[frame->index], &frame->run_end)
+                                                                        : frame->run_storage;
+                const uint8_t storage = in_run && frame->run_storage != UINT8_MAX ? frame->run_storage : abi_member_storage(abi, table, member, in_union, false, &bytes);
+                const uint8_t alignment = storage & BUSTER_ABI_STORAGE_ALIGNMENT;
+                ready = ready && (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
+                frame->largest = alignment > frame->largest ? alignment : frame->largest;
+                frame->packed = frame->packed || (!in_union && !bit_field && ((table->members.offset[member] >> 3) & ((1ull << alignment) - 1)) != 0);
+                frame->inexact = frame->inexact || (storage & BUSTER_ABI_STORAGE_INEXACT) != 0;
+            }
+        }
+        else
+        {
+            const uint64_t size = table->types.size[frame->index];
+            const uint8_t alignment = frame->packed || (size & ((1ull << frame->largest) - 1)) != 0 ? 0 : frame->largest;
+            const uint32_t holder = frame->holder;
+            const bool inexact = frame->inexact;
+            depth -= 1;
+            if (depth == 0)
+            {
+                result = alignment | (inexact ? BUSTER_ABI_STORAGE_INEXACT : 0);
+            }
+            else
+            {
+                AbiWideFrame* below = &stack[depth - 1];
+                const bool below_union = table->types.kind[below->index] == BUSTER_TYPE_KIND_UNION;
+                below->largest = alignment > below->largest ? alignment : below->largest;
+                below->packed = below->packed || (!below_union && ((table->members.offset[holder] >> 3) & ((1ull << alignment) - 1)) != 0);
+                below->inexact = below->inexact || inexact;
+            }
+        }
+    }
+    scratch_end(scratch);
+    return result | (ready ? 0 : BUSTER_ABI_WIDE_UNREADY);
+}
+
+// A flexible array member's storage (abi_member_storage's `open`), an array of no elements of its element: the element's,
+// or for a record larger than 16 bytes, whose storage the table doesn't keep, its walk's (abi_wide_alignment).
+static uint8_t abi_open_storage(const AbiTable* abi, const TypeTable* table, uint32_t member, bool in_union, uint64_t* bytes)
+{
+    const uint32_t resolved = abi_resolved_index(table, table->members.type[member]);
+    const uint32_t wide = abi_wide_record(table, table->types.base[resolved]);
+    const uint8_t storage = abi_member_storage(abi, table, member, in_union, true, bytes);
+    return wide != 0 ? (uint8_t)abi_wide_alignment(abi, table, wide) : storage;
+}
+
 // The member clang stores a union as (lowerUnion): the one whose storage (abi_member_storage) LLVM aligns most, then
 // the largest, the first of equals, and no zero-width bit-field. UINT32_MAX if it has none.
 static uint32_t abi_union_storage_member(const AbiTable* abi, const TypeTable* table, uint32_t index)
@@ -1003,7 +1148,8 @@ static uint32_t abi_union_storage_member(const AbiTable* abi, const TypeTable* t
     {
         const bool zero_width = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 && table->members.bit_width[member] == 0;
         uint64_t bytes = 0;
-        const uint8_t alignment = abi_member_storage(abi, table, member, true, member == open, &bytes) & BUSTER_ABI_STORAGE_ALIGNMENT;
+        const uint8_t storage = member == open ? abi_open_storage(abi, table, member, true, &bytes) : abi_member_storage(abi, table, member, true, false, &bytes);
+        const uint8_t alignment = storage & BUSTER_ABI_STORAGE_ALIGNMENT;
         const bool better = !zero_width && (result == UINT32_MAX || alignment > largest || (alignment == largest && bytes > largest_bytes));
         result = better ? member : result;
         largest = better ? alignment : largest;
@@ -1019,10 +1165,13 @@ static uint32_t abi_union_storage_member(const AbiTable* abi, const TypeTable* t
 // member is off its own or the size isn't a multiple of it (determinePacked: a packed struct, aligned to 1); a union's
 // storage is its most aligned and then largest member's, the first of equals (lowerUnion), packed if the size isn't a
 // multiple of its alignment; an array's, a complex type's, an enum's and an _Atomic one's are their element's,
-// underlying type's or value's (never EMPTY); any other type is aligned as in C. A record with a flexible array member
-// is MEMORY, its members maybe not classified yet: nothing, and INEXACT, but for one of no size, which waits for them,
-// since an _Atomic of it takes its alignment as its LLVM size (abi_copy_bytes). A record larger than 64 bytes is
-// INEXACT, and so is one holding an INEXACT type.
+// underlying type's or value's (never EMPTY); any other type is aligned as in C. A record larger than 16 bytes gets none
+// of it, INEXACT: only a type of 16 bytes or less passes by what this says, and holds such a record only as an array of
+// no elements (a zero-length array, or a flexible array member: abi_open_storage), whose storage is the record's LLVM
+// type's (clang keeps the array in its LLVM type, [0 x %struct.big]), walked when the array is finished
+// (abi_wide_alignment); and it is never EMPTY, which takes a size of 0. So does a record with a flexible array member
+// and a size, MEMORY, its members maybe not classified yet; one of no size waits for them, since an _Atomic of it takes
+// its alignment as its LLVM size (abi_copy_bytes). A record holding an INEXACT type is INEXACT too.
 static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const uint8_t kind = table->types.kind[index];
@@ -1042,8 +1191,13 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
              kind == BUSTER_TYPE_KIND_ATOMIC)
     {
         result = (uint8_t)(abi->storage[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT] & ~BUSTER_ABI_STORAGE_EMPTY);
+        const uint32_t wide = kind == BUSTER_TYPE_KIND_ARRAY && size == 0 ? abi_wide_record(table, table->types.base[index]) : 0;
+        if (wide != 0)
+        {
+            result = (uint8_t)abi_wide_alignment(abi, table, wide);
+        }
     }
-    else if (record && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0 && size != 0)
+    else if (record && (size > BUSTER_ABI_REGISTER_BYTES || ((table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0 && size != 0)))
     {
         result = BUSTER_ABI_STORAGE_INEXACT;
     }
@@ -1060,7 +1214,7 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
         bool found = false;
         bool packed = false;
         bool empty = true;
-        uint8_t inexact = size > BUSTER_ABI_MAX_CLASSIFIED_BYTES ? BUSTER_ABI_STORAGE_INEXACT : 0;
+        uint8_t inexact = 0;
         uint32_t run_end = begin;
         uint8_t run_storage = UINT8_MAX;
         const uint32_t stored = in_union ? abi_union_storage_member(abi, table, index) : UINT32_MAX;
@@ -1069,7 +1223,7 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
             const bool bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
             const bool zero_width = bit_field && table->members.bit_width[member] == 0;
             uint64_t bytes = 0;
-            uint8_t storage = abi_member_storage(abi, table, member, in_union, member == open, &bytes);
+            uint8_t storage = member == open ? abi_open_storage(abi, table, member, in_union, &bytes) : abi_member_storage(abi, table, member, in_union, false, &bytes);
             // A struct's bit-fields share their run's unit when it is wider than an eightbyte.
             const bool in_run = !in_union && bit_field && !zero_width;
             run_storage = in_run && member >= run_end ? abi_bit_field_run(abi, table, member, end, size, &run_end) : run_storage;
@@ -1726,7 +1880,7 @@ __attribute__((cold, noinline)) static uint64_t abi_copy_bytes(const AbiTable* a
     return result;
 }
 
-// What abi_finish leaves to its rare path (abi_finish_rare): a type's stack slot and its pass bits.
+// What abi_finish_passing leaves to its rare path (abi_finish_rare): a type's stack slot and its pass bits.
 typedef struct AbiRare AbiRare;
 struct AbiRare
 {
@@ -1959,8 +2113,9 @@ __attribute__((cold, noinline)) static AbiRare abi_finish_rare(AbiTable* abi, co
     return result;
 }
 
-// The pass bits and the rest of a type whose row is in place.
-static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
+// The pass bits and the rest of a type whose row, storage and layout are in place, but for a vector LLVM packs, whose
+// storage and layout abi_vector_llvm gives (abi_finish_rare): every record holding one is finished later.
+static void abi_finish_passing(AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const AbiClasses classes = abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES];
     const uint8_t low = BUSTER_ABI_LOW(classes);
@@ -1971,10 +2126,6 @@ static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
     const bool illegal_vector = abi_is_illegal_vector(abi, table, index);
     uint32_t pass = BUSTER_ABI_PASS_CLASSIFIED;
     abi->alignment_log2[index] = abi_canonical_alignment_log2(abi, table, index);
-    abi->storage[index] = abi_storage(abi, table, index);
-    // Only a type of 16 bytes or less reads its layout, and its members' and elements' (a larger type is MEMORY or one
-    // vector, and so is any type it is in; an array of no elements reads none).
-    abi->layout[index] = size <= BUSTER_ABI_REGISTER_BYTES ? abi_layout(abi, table, index) : 0;
     if (low == BUSTER_ABI_NO_CLASS && high == BUSTER_ABI_NO_CLASS)
     {
         pass |= BUSTER_ABI_PASS_IGNORE;
@@ -2039,6 +2190,18 @@ static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
     abi->pass[index] = rare.pass;
 }
 
+// What follows from a type's row and what it is (the twin's finishing step, and the vector path's for the types it
+// doesn't fold or whose members' parts it doesn't reduce): its storage and layout from its members', elements' or
+// base's, then the rest.
+static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
+{
+    abi->storage[index] = abi_storage(abi, table, index);
+    // Only a type of 16 bytes or less reads its layout, and its members' and elements' (a larger type is MEMORY or one
+    // vector, and so is any type it is in; an array of no elements reads none).
+    abi->layout[index] = table->types.size[index] <= BUSTER_ABI_REGISTER_BYTES ? abi_layout(abi, table, index) : 0;
+    abi_finish_passing(abi, table, index);
+}
+
 // An ALIGNED type passes as its base: clang's canonical types have no typedefs. Its row, pass bits and the rest are its
 // base's.
 static void abi_copy(AbiTable* abi, const TypeTable* table, uint32_t index)
@@ -2058,16 +2221,20 @@ static void abi_copy(AbiTable* abi, const TypeTable* table, uint32_t index)
 // lane's 16 bytes are the type's 16 offsets), a member of each per step.
 //
 // A pre-pass writes each member's entry (its classes at each offset of the type: its own type's row shifted by its
-// offset, MEMORY where it would be misaligned; a bit-field's from where it starts and ends; abi_record_entry's and
-// abi_array_entry's rules, 16 offsets at once) into blocks of 64 bytes, one per step of a group of four types, sorted
-// by how many entries they fold so that a group's lanes end together; a lane that ends earlier merges NOTHING, which
-// changes nothing. The kernel then merges each group's steps (two vpermb of the merge table each), post-merges every
-// lane, and stores the four rows. Records and arrays whose rows need no fold (larger than 64 bytes, with a flexible
-// array member, wider than the target's vectors) get theirs directly.
+// offset, MEMORY where it would be misaligned; a bit-field's from where it starts and ends, NOTHING for an unnamed one;
+// abi_record_entry's and abi_array_entry's rules, 16 offsets at once) into blocks of 64 bytes, one per step of a group
+// of four types, sorted by how many entries they fold so that a group's lanes end together; a lane that ends earlier
+// merges NOTHING, which changes nothing. For a type of 16 bytes or less, the only kind whose storage and layout passing
+// reads, the pre-pass also reduces each member's or element's part, what it adds to the type's LLVM type
+// (abi_member_part, abi_element_part: an OR, and for a union's storage member an unsigned max), as it writes the
+// entries, and makes the type's storage and layout from them (abi_finish_parts). The kernel then merges each group's
+// steps (two vpermb of the merge table each), post-merges every lane, and stores the four rows. Records and arrays
+// whose rows need no fold (larger than 64 bytes, with a flexible array member, wider than the target's vectors) get
+// theirs directly.
 
-// A type the kernel folds: its index, how many entries it folds (members but unnamed bit-fields, or elements), the
-// offsets it can't be at (a bit per offset: past offset 0 the enclosing aggregate would pass 16 bytes, and an array's
-// misaligned ones), and whether it is larger than 16 bytes (post-merge then wants SSE, SSEUP at offset 0).
+// A type the kernel folds: its index, how many entries it folds (members, or elements), the offsets it can't be at (a
+// bit per offset: past offset 0 the enclosing aggregate would pass 16 bytes, and an array's misaligned ones), whether
+// it is larger than 16 bytes (post-merge then wants SSE, SSEUP at offset 0), and whether the pre-pass reduces its parts.
 typedef struct AbiFold AbiFold;
 struct AbiFold
 {
@@ -2075,6 +2242,7 @@ struct AbiFold
     uint32_t steps;
     uint16_t memory;
     bool big;
+    bool parts;
 };
 
 #define BUSTER_ABI_FOLD_LANES 4
@@ -2094,6 +2262,167 @@ struct AbiFoldGroup
     uint64_t memory;
     uint64_t big;
 };
+
+// A member's or an element's part: what it adds to its type's LLVM type (AbiTable.storage and .layout), two words that
+// the pre-pass reduces along the type's members or elements and abi_finish_parts makes the type's storage and layout:
+//   - layout: in a struct or an array, the scalars it puts at the even offsets (bits 0 to 31, as AbiTable.layout has
+//     them: a member's type's where the member is, an element's where the element is, a bit-field's integer at its
+//     storage unit's start if no member before it put a scalar there), and in a struct the bytes its storage covers
+//     (bits 48 to 63: the rest of the struct's first 16 bytes is padding, i8s); in any, its data bytes (bits 32 to 47).
+//     ORed.
+//   - storage: in a struct, bit 32 plus the log2 of its storage's alignment (the highest is the struct's), PACKED if it
+//     is off that alignment (determinePacked) and I128 if it is the first member at offset 0 with bytes and its storage
+//     is an i128 (a bit-field's storage its run's unit past an eightbyte, abi_bit_field_run). ORed. In a union, the
+//     member as a candidate for its storage member: its storage's alignment (bits 60 to 63) and bytes (55 to 59), the
+//     steps left after it (33 to 54, so that the first of equals is the largest), KEY_I128 if its storage is an i128 of
+//     some bytes, and its scalars (0 to 31): the largest, unsigned, is the member lowerUnion stores the union as
+//     (abi_union_storage_member's).
+//   - NONEMPTY and INEXACT, in a struct's storage word and in a union's layout word (whose bits past 47 a union doesn't
+//     use): the member isn't one clang's layout counts empty, a zero-width bit-field or of an EMPTY record's type, and
+//     its storage is INEXACT. ORed: a record without a NONEMPTY member is EMPTY, and one with an INEXACT member is
+//     INEXACT.
+// A zero-width bit-field adds nothing.
+typedef struct AbiPart AbiPart;
+struct AbiPart
+{
+    uint64_t layout;
+    uint64_t storage;
+};
+
+#define BUSTER_ABI_PART_COVERED_SHIFT 48
+#define BUSTER_ABI_PART_ALIGNMENT_SHIFT 32
+#define BUSTER_ABI_PART_PACKED (1ull << 48)
+#define BUSTER_ABI_PART_I128 (1ull << 49)
+#define BUSTER_ABI_PART_NONEMPTY (1ull << 50)
+#define BUSTER_ABI_PART_INEXACT (1ull << 51)
+#define BUSTER_ABI_PART_KEY_ALIGNMENT_SHIFT 60
+#define BUSTER_ABI_PART_KEY_BYTES_SHIFT 55
+#define BUSTER_ABI_PART_KEY_STEPS_SHIFT 33
+#define BUSTER_ABI_PART_KEY_I128 (1ull << 32)
+// The steps a union's keys count down from: a union of more members is finished by abi_storage and abi_layout instead.
+#define BUSTER_ABI_PART_STEPS 0x3fffffu
+#define BUSTER_ABI_PART_LEAVES 0xffffffffull
+
+// A struct's state along its members, which the pre-pass keeps: the scalars its members put so far (a bit-field's
+// integer only goes where none is), whether a member at offset 0 with bytes came (only the first's i128 counts), and
+// its current run of bit-fields' end and unit (abi_bit_field_run's), from its size and members' end.
+typedef struct AbiPartState AbiPartState;
+struct AbiPartState
+{
+    uint64_t leaves;
+    uint64_t size;
+    uint32_t end;
+    uint32_t run_end;
+    uint8_t run_storage;
+    bool found;
+};
+
+// A member's part, for a record of 16 bytes or less: abi_member_storage's, abi_union_storage_member's, abi_storage's
+// and abi_layout's rules for this member alone, `step` its place among the record's members.
+static AbiPart abi_member_part(const AbiTable* abi, const TypeTable* table, uint32_t member, uint32_t step, bool in_union, AbiPartState* state)
+{
+    const TypeId type = table->members.type[member];
+    const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+    const uint64_t unit = table->types.size[abi_resolved_index(table, type)];
+    const uint64_t offset = table->members.offset[member];
+    const uint64_t width = table->members.bit_width[member];
+    const bool bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+    const bool counts = !bit_field || width != 0;
+    const uint64_t first = offset >> 3;
+    const uint64_t type_bits = unit * 8;
+    // A union's bit-field is stored as an integer of its width, at most its type's bits, rounded up to bytes.
+    const uint64_t bits = ((width < type_bits ? width : type_bits) + 7) & ~(uint64_t)7;
+    const uint32_t integer_log2 = bits <= 8 ? 0 : bits <= 16 ? 1 : bits <= 32 ? 2 : bits <= 64 ? 3 : 4;
+    // A struct's bit-field is stored in its type's unit, at a multiple of its size: a power of two for every integer
+    // type of 16 bytes or less (a _BitInt's past that is larger than the struct, and starts at 0).
+    uint64_t unit_offset = first & ~(unit - 1);
+    if (bit_field && (unit & (unit - 1)) != 0 && type_bits != 0)
+    {
+        unit_offset = offset / type_bits * unit;
+    }
+    const uint64_t place = !bit_field ? first : in_union ? 0 : unit_offset;
+    const uint64_t bytes = bit_field && in_union ? 1ull << integer_log2 : unit;
+    const uint64_t layout = abi->layout[index];
+    const uint64_t source = bit_field ? abi_integer_leaf(bytes) : layout & BUSTER_ABI_PART_LEAVES;
+    const bool slotted = place < 16 && (place & 1) == 0;
+    const uint64_t slot = slotted ? 15ull << (place * 2) : 0;
+    const uint64_t placed = slotted ? (source << (place * 2)) & BUSTER_ABI_PART_LEAVES : 0;
+    const uint64_t data = bit_field ? abi_layout_bytes(first, ((offset + type_bits - 1) >> 3) - first + 1) : abi_layout_at(layout, first) & ~BUSTER_ABI_PART_LEAVES;
+    const bool keep = !bit_field || (state->leaves & slot) == 0;
+    const uint64_t leaves = counts && !in_union && keep ? placed : 0;
+    const uint64_t covered = in_union ? 0 : abi_layout_bytes(place, bytes) << (BUSTER_ABI_PART_COVERED_SHIFT - BUSTER_ABI_LAYOUT_DATA_SHIFT);
+    state->leaves |= leaves;
+    // Its storage, as abi_member_storage has it, and a struct's bit-field's its run's unit past an eightbyte.
+    const uint8_t own = abi->storage[index];
+    const bool in_run = !in_union && bit_field && width != 0;
+    state->run_storage = in_run && member >= state->run_end ? abi_bit_field_run(abi, table, member, state->end, state->size, &state->run_end) : state->run_storage;
+    const uint8_t bit_field_storage = in_union                               ? (uint8_t)(integer_log2 | (bits == 128 ? BUSTER_ABI_STORAGE_I128 : 0))
+                                      : in_run && state->run_storage != UINT8_MAX ? state->run_storage
+                                                                              : (uint8_t)(own & BUSTER_ABI_STORAGE_ALIGNMENT);
+    const uint8_t storage = bit_field ? bit_field_storage : own;
+    const bool nonempty = counts && (bit_field || (own & BUSTER_ABI_STORAGE_EMPTY) == 0);
+    const uint32_t alignment = storage & BUSTER_ABI_STORAGE_ALIGNMENT;
+    const bool i128 = (storage & BUSTER_ABI_STORAGE_I128) != 0;
+    const bool at_start = counts && offset == 0 && bytes != 0;
+    const bool first_at_start = at_start && !state->found;
+    state->found = state->found || at_start;
+    const bool off = !bit_field && (first & ((1ull << alignment) - 1)) != 0;
+    const uint64_t struct_storage = 1ull << (BUSTER_ABI_PART_ALIGNMENT_SHIFT + alignment) | (off ? BUSTER_ABI_PART_PACKED : 0) |
+                                    (first_at_start && i128 ? BUSTER_ABI_PART_I128 : 0);
+    const uint64_t key = (uint64_t)alignment << BUSTER_ABI_PART_KEY_ALIGNMENT_SHIFT | (bytes < 31 ? bytes : 31) << BUSTER_ABI_PART_KEY_BYTES_SHIFT |
+                         (uint64_t)(BUSTER_ABI_PART_STEPS - step) << BUSTER_ABI_PART_KEY_STEPS_SHIFT | (bytes != 0 && i128 ? BUSTER_ABI_PART_KEY_I128 : 0) | placed;
+    const uint64_t flags = (nonempty ? BUSTER_ABI_PART_NONEMPTY : 0) | (!bit_field && (own & BUSTER_ABI_STORAGE_INEXACT) != 0 ? BUSTER_ABI_PART_INEXACT : 0);
+    const AbiPart result = {
+        .layout = (counts ? leaves | data | covered : 0) | (in_union ? flags : 0),
+        .storage = !counts ? 0 : in_union ? key : struct_storage | flags,
+    };
+    return result;
+}
+
+// An element's part: its layout at its offset, as abi_layout takes it (an aligned typedef's element of its base's size).
+static AbiPart abi_element_part(uint64_t layout, uint64_t element_size, uint64_t element)
+{
+    const AbiPart result = {
+        .layout = element_size != 0 ? abi_layout_at(layout, element * element_size) : 0,
+        .storage = 0,
+    };
+    return result;
+}
+
+// A folded type's storage and layout from its reduced parts: abi_storage's and abi_layout's for a type of 16 bytes or
+// less. A struct is aligned to its members' largest alignment and a union to its storage member's, unless a member is
+// off its own or the size isn't a multiple of it; a union's scalars, the bytes it covers and its i128 are its storage
+// member's (its key's); a record without a NONEMPTY member is EMPTY, and one with an INEXACT member INEXACT; an i8 is at
+// each even offset of the padding; and an array takes its element's storage.
+static void abi_finish_parts(AbiTable* abi, const TypeTable* table, uint32_t index, uint64_t layout_part, uint64_t storage_part)
+{
+    const uint8_t kind = table->types.kind[index];
+    const uint64_t size = table->types.size[index];
+    const bool in_union = kind == BUSTER_TYPE_KIND_UNION;
+    const uint32_t alignments = (uint32_t)(storage_part >> BUSTER_ABI_PART_ALIGNMENT_SHIFT) & 0xffffu;
+    const uint32_t largest = in_union ? (uint32_t)(storage_part >> BUSTER_ABI_PART_KEY_ALIGNMENT_SHIFT) : 31 - (uint32_t)__builtin_clz(alignments | 1);
+    const bool i128 = (storage_part & (in_union ? BUSTER_ABI_PART_KEY_I128 : BUSTER_ABI_PART_I128)) != 0;
+    const bool packed = (!in_union && (storage_part & BUSTER_ABI_PART_PACKED) != 0) || (size & ((1ull << largest) - 1)) != 0;
+    const uint64_t stored_bytes = storage_part >> BUSTER_ABI_PART_KEY_BYTES_SHIFT & 31;
+    const uint64_t covered = in_union ? abi_layout_bytes(0, stored_bytes) >> BUSTER_ABI_LAYOUT_DATA_SHIFT : layout_part >> BUSTER_ABI_PART_COVERED_SHIFT;
+    const uint64_t leaves = (in_union ? storage_part : layout_part) & BUSTER_ABI_PART_LEAVES;
+    const uint64_t holes = ~covered & ((1ull << (size < 16 ? size : 16)) - 1);
+    // Each even offset's bit of the holes to its scalar's nibble, as BUSTER_ABI_LEAF_I8.
+    const uint64_t padding = _pdep_u32(_pext_u32((uint32_t)holes, 0x5555u), 0x11111111u);
+    const uint64_t flags = in_union ? layout_part : storage_part;
+    const bool empty = (flags & BUSTER_ABI_PART_NONEMPTY) == 0;
+    const bool inexact = (flags & BUSTER_ABI_PART_INEXACT) != 0;
+    uint8_t storage = (uint8_t)((packed ? 0 : largest) | (i128 ? BUSTER_ABI_STORAGE_I128 : 0) | (empty ? BUSTER_ABI_STORAGE_EMPTY : 0) |
+                                (inexact ? BUSTER_ABI_STORAGE_INEXACT : 0));
+    uint64_t layout = leaves | padding | (layout_part & (0xffffull << BUSTER_ABI_LAYOUT_DATA_SHIFT));
+    if (kind == BUSTER_TYPE_KIND_ARRAY)
+    {
+        storage = abi_storage(abi, table, index);
+        layout = layout_part & ~(0xffffull << BUSTER_ABI_PART_COVERED_SHIFT);
+    }
+    abi->storage[index] = storage;
+    abi->layout[index] = layout;
+}
 
 static __m128i abi_lane_offsets(void)
 {
@@ -2161,20 +2490,25 @@ static __m128i abi_member_entry(const AbiTable* abi, const TypeTable* table, uin
     return result;
 }
 
-// Writes a type's entries into its lane (16 bytes of each step's block, `lane` the first), and NOTHING after them up to
-// `steps`.
-static void abi_write_entries(const AbiTable* abi, const TypeTable* table, uint32_t index, uint8_t* lane, uint32_t steps)
+// Writes a type's entries into its lane (16 bytes of each step's block, `lane` the first), then NOTHING after them up
+// to `steps`; with parts, reduces its members' or elements' parts and makes its storage and layout from them.
+static void abi_write_entries(AbiTable* abi, const TypeTable* table, uint32_t index, uint8_t* lane, uint32_t steps, bool parts)
 {
     const uint8_t kind = table->types.kind[index];
+    // The reduced parts: ORed, but a union's storage word, whose largest key is its storage member's.
+    uint64_t layout_part = 0;
+    uint64_t storage_part = 0;
     uint32_t step = 0;
     if (kind == BUSTER_TYPE_KIND_ARRAY)
     {
         const uint32_t element = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
         const uint64_t element_size = table->types.size[abi_resolved_index(table, table->types.base[index])];
         const uint64_t count = table->types.extent[index];
+        const uint64_t layout = abi->layout[element];
         for (uint64_t i = 0; i < count; i += 1)
         {
             _mm_store_si128((__m128i*)(lane + (uint64_t)step * BUSTER_ABI_FOLD_BLOCK_BYTES), abi_shifted_row(abi, element, i * element_size));
+            layout_part |= parts ? abi_element_part(layout, element_size, i).layout : 0;
             step += 1;
         }
     }
@@ -2185,19 +2519,35 @@ static void abi_write_entries(const AbiTable* abi, const TypeTable* table, uint3
         const uint32_t tag = table->types.index[index];
         const uint32_t begin = table->tags.member_begin[tag];
         const uint32_t end = begin + table->tags.member_count[tag];
+        AbiPartState state = {
+            .leaves = 0,
+            .size = size,
+            .end = end,
+            .run_end = begin,
+            .run_storage = UINT8_MAX,
+            .found = false,
+        };
         for (uint32_t member = begin; member < end; member += 1)
         {
             const bool unnamed_bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 && table->members.name[member] == 0;
-            if (!unnamed_bit_field)
+            const __m128i entry = abi_member_entry(abi, table, size, is_union, member);
+            _mm_store_si128((__m128i*)(lane + (uint64_t)step * BUSTER_ABI_FOLD_BLOCK_BYTES), _mm_mask_mov_epi8(entry, unnamed_bit_field ? (__mmask16)0xffff : 0, _mm_set1_epi8((char)BUSTER_ABI_NOTHING)));
+            if (parts)
             {
-                _mm_store_si128((__m128i*)(lane + (uint64_t)step * BUSTER_ABI_FOLD_BLOCK_BYTES), abi_member_entry(abi, table, size, is_union, member));
-                step += 1;
+                const AbiPart part = abi_member_part(abi, table, member, step, is_union, &state);
+                layout_part |= part.layout;
+                storage_part = !is_union ? storage_part | part.storage : part.storage > storage_part ? part.storage : storage_part;
             }
+            step += 1;
         }
     }
     for (; step < steps; step += 1)
     {
         _mm_store_si128((__m128i*)(lane + (uint64_t)step * BUSTER_ABI_FOLD_BLOCK_BYTES), _mm_set1_epi8((char)BUSTER_ABI_NOTHING));
+    }
+    if (parts)
+    {
+        abi_finish_parts(abi, table, index, layout_part, storage_part);
     }
 }
 
@@ -2229,6 +2579,20 @@ static __m512i abi_post_merge_vector(__m512i classes, __mmask64 big, __mmask64 m
     return _mm512_mask_mov_epi8(lone_sseup, in_memory, _mm512_set1_epi8((char)BUSTER_ABI_IN_MEMORY));
 }
 
+// Stores a group's rows, as post-merged from `accumulated`.
+static void abi_store_rows(AbiTable* abi, const AbiFoldGroup* group, __m512i accumulated)
+{
+    _Alignas(64) uint8_t rows[BUSTER_ABI_FOLD_LANES * BUSTER_ABI_ROW_BYTES];
+    _mm512_store_si512((void*)rows, abi_post_merge_vector(accumulated, group->big, group->memory));
+    for (uint32_t lane = 0; lane < BUSTER_ABI_FOLD_LANES; lane += 1)
+    {
+        if (group->items[lane] != BUSTER_ABI_FOLD_EMPTY)
+        {
+            memcpy(abi->rows + (uint64_t)group->items[lane] * BUSTER_ABI_ROW_BYTES, rows + lane * BUSTER_ABI_ROW_BYTES, BUSTER_ABI_ROW_BYTES);
+        }
+    }
+}
+
 // Folds each group's blocks and stores its rows.
 static void abi_fold_groups(AbiTable* abi, const uint8_t* blocks, const AbiFoldGroup* groups, uint32_t group_count)
 {
@@ -2242,15 +2606,7 @@ static void abi_fold_groups(AbiTable* abi, const uint8_t* blocks, const AbiFoldG
         {
             accumulated = abi_merge_vector(merge, accumulated, _mm512_load_si512((const void*)(block + (uint64_t)step * BUSTER_ABI_FOLD_BLOCK_BYTES)));
         }
-        _Alignas(64) uint8_t rows[BUSTER_ABI_FOLD_LANES * BUSTER_ABI_ROW_BYTES];
-        _mm512_store_si512((void*)rows, abi_post_merge_vector(accumulated, group.big, group.memory));
-        for (uint32_t lane = 0; lane < BUSTER_ABI_FOLD_LANES; lane += 1)
-        {
-            if (group.items[lane] != BUSTER_ABI_FOLD_EMPTY)
-            {
-                memcpy(abi->rows + (uint64_t)group.items[lane] * BUSTER_ABI_ROW_BYTES, rows + lane * BUSTER_ABI_ROW_BYTES, BUSTER_ABI_ROW_BYTES);
-            }
-        }
+        abi_store_rows(abi, &group, accumulated);
     }
 }
 
@@ -2279,26 +2635,28 @@ static bool abi_classify_vector(AbiTable* abi, const TypeTable* table, const Typ
         else if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
         {
             const bool flexible = (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0;
-            if (size > BUSTER_ABI_MAX_CLASSIFIED_BYTES || flexible || (size > BUSTER_ABI_REGISTER_BYTES && size > abi->vector_bytes))
+            if (flexible)
+            {
+                abi_store_row(abi, index, _mm_set1_epi8((char)BUSTER_ABI_IN_MEMORY));
+                abi_finish(abi, table, index);
+            }
+            else if (size > BUSTER_ABI_MAX_CLASSIFIED_BYTES || (size > BUSTER_ABI_REGISTER_BYTES && size > abi->vector_bytes))
             {
                 abi_store_row(abi, index, _mm_set1_epi8((char)BUSTER_ABI_IN_MEMORY));
                 abi_finish(abi, table, index);
             }
             else
             {
-                const uint32_t tag = table->types.index[index];
-                const uint32_t begin = table->tags.member_begin[tag];
-                const uint32_t end = begin + table->tags.member_count[tag];
-                uint32_t steps = 0;
-                for (uint32_t member = begin; member < end; member += 1)
-                {
-                    steps += (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 && table->members.name[member] == 0 ? 0 : 1;
-                }
+                // A member a step, an unnamed bit-field's entry NOTHING; the parts of a record of 16 bytes or less (but a
+                // union of more members than its keys count, which abi_finish takes).
+                const uint32_t steps = table->tags.member_count[table->types.index[index]];
+                const bool parts = size <= BUSTER_ABI_REGISTER_BYTES && (kind == BUSTER_TYPE_KIND_STRUCT || steps <= BUSTER_ABI_PART_STEPS);
                 folds[fold_count] = (AbiFold){
                     .index = index,
                     .steps = steps,
                     .memory = (uint16_t)~abi_possible_lanes(size),
                     .big = size > BUSTER_ABI_REGISTER_BYTES,
+                    .parts = parts,
                 };
                 fold_count += 1;
             }
@@ -2328,11 +2686,13 @@ static bool abi_classify_vector(AbiTable* abi, const TypeTable* table, const Typ
             }
             else
             {
+                const bool parts = size <= BUSTER_ABI_REGISTER_BYTES;
                 folds[fold_count] = (AbiFold){
                     .index = index,
                     .steps = (uint32_t)table->types.extent[index],
                     .memory = (uint16_t)~(abi_possible_lanes(size) & aligned),
                     .big = size > BUSTER_ABI_REGISTER_BYTES,
+                    .parts = parts,
                 };
                 fold_count += 1;
             }
@@ -2350,13 +2710,16 @@ static bool abi_classify_vector(AbiTable* abi, const TypeTable* table, const Typ
     result = result && (fold_count == 0 || (sorted != 0 && groups != 0));
     if (result && fold_count != 0)
     {
+        // The prefix sums only up to the last bucket in use.
         uint32_t starts[BUSTER_ABI_FOLD_BUCKETS + 1] = { 0 };
+        uint32_t used = 0;
         for (uint32_t f = 0; f < fold_count; f += 1)
         {
             const uint32_t bucket = folds[f].steps < BUSTER_ABI_FOLD_BUCKETS ? folds[f].steps : BUSTER_ABI_FOLD_BUCKETS - 1;
             starts[bucket + 1] += 1;
+            used = bucket + 1 > used ? bucket + 1 : used;
         }
-        for (uint32_t b = 0; b < BUSTER_ABI_FOLD_BUCKETS; b += 1)
+        for (uint32_t b = 0; b < used; b += 1)
         {
             starts[b + 1] += starts[b];
         }
@@ -2398,17 +2761,17 @@ static bool abi_classify_vector(AbiTable* abi, const TypeTable* table, const Typ
         {
             for (uint32_t lane = 0; lane < BUSTER_ABI_FOLD_LANES; lane += 1)
             {
+                uint8_t* destination = blocks + groups[g].block * BUSTER_ABI_FOLD_BLOCK_BYTES + lane * BUSTER_ABI_ROW_BYTES;
+                const uint32_t f = g * BUSTER_ABI_FOLD_LANES + lane;
                 if (groups[g].items[lane] != BUSTER_ABI_FOLD_EMPTY)
                 {
-                    uint8_t* destination = blocks + groups[g].block * BUSTER_ABI_FOLD_BLOCK_BYTES + lane * BUSTER_ABI_ROW_BYTES;
-                    abi_write_entries(abi, table, groups[g].items[lane], destination, groups[g].steps);
+                    abi_write_entries(abi, table, groups[g].items[lane], destination, groups[g].steps, sorted[f].parts);
                 }
                 else
                 {
                     for (uint32_t step = 0; step < groups[g].steps; step += 1)
                     {
-                        uint8_t* destination = blocks + (groups[g].block + step) * BUSTER_ABI_FOLD_BLOCK_BYTES + lane * BUSTER_ABI_ROW_BYTES;
-                        _mm_store_si128((__m128i*)destination, _mm_set1_epi8((char)BUSTER_ABI_NOTHING));
+                        _mm_store_si128((__m128i*)(destination + step * BUSTER_ABI_FOLD_BLOCK_BYTES), _mm_set1_epi8((char)BUSTER_ABI_NOTHING));
                     }
                 }
             }
@@ -2418,7 +2781,14 @@ static bool abi_classify_vector(AbiTable* abi, const TypeTable* table, const Typ
             abi_fold_groups(abi, blocks, groups, group_count);
             for (uint32_t f = 0; f < fold_count; f += 1)
             {
-                abi_finish(abi, table, sorted[f].index);
+                if (sorted[f].parts)
+                {
+                    abi_finish_passing(abi, table, sorted[f].index);
+                }
+                else
+                {
+                    abi_finish(abi, table, sorted[f].index);
+                }
             }
         }
     }
@@ -2528,8 +2898,17 @@ static bool abi_is_classified(const AbiTable* abi, TypeId type)
     return (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
 }
 
+// Whether every type abi_wide_alignment reads for an array of no elements of `element` is classified: none but for a
+// record larger than 16 bytes (abi_wide_record). Cold, as only such arrays get here.
+__attribute__((cold, noinline)) static bool abi_wide_classified(const AbiTable* abi, const TypeTable* table, TypeId element)
+{
+    const uint32_t wide = abi_wide_record(table, element);
+    return wide == 0 || (abi_wide_alignment(abi, table, wide) & BUSTER_ABI_WIDE_UNREADY) == 0;
+}
+
 // Whether a record's members are classified, but for a flexible array member, which is no complete type and is never
-// classified, its element (the flexible array member is the last).
+// classified, its element (the flexible array member is the last); and for a flexible record of no size, which takes
+// its flexible array member's storage (abi_open_storage), what abi_wide_alignment reads for it.
 __attribute__((cold, noinline)) static bool abi_members_classified(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const bool flexible = (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0;
@@ -2543,19 +2922,21 @@ __attribute__((cold, noinline)) static bool abi_members_classified(const AbiTabl
     }
     if (result && flexible)
     {
-        const uint32_t resolved = abi_resolved_index(table, table->members.type[fixed]);
-        result = abi_is_classified(abi, table->types.base[resolved]);
+        const TypeId element = table->types.base[abi_resolved_index(table, table->members.type[fixed])];
+        result = abi_is_classified(abi, element) && (table->types.size[index] != 0 || abi_wide_classified(abi, table, element));
     }
     return result;
 }
 
-// Whether what a type's row, storage and copy are made from is classified: an ALIGNED type's base, an array's element,
-// an _Atomic type's value, a record's members. A record whose row doesn't depend on them (larger than 64 bytes, or with
-// a flexible array member) waits for them only when `all`, for a LARGER member, which makes its copy LARGER
-// (abi_copy_bytes): only a table with an _Atomic of a type of no size, the root of every LARGER type, has one
-// (abi_classify_levels), and waiting would add a level for every nesting of records. Its storage is INEXACT then
-// (abi_storage), but a flexible one's of no size, which always waits, as an _Atomic of it takes its alignment as its
-// size.
+// Whether what a type is finished from is classified: an ALIGNED type's base, an array's element, an _Atomic type's
+// value, whose storage and layout it takes, a record's members; and for an array of no elements of a record larger than
+// 16 bytes (a zero-length array, or a flexible array member), every type whose storage abi_wide_alignment reads. A
+// record whose row doesn't depend on its members (larger than 64 bytes, or with a flexible array member) waits for them
+// only when `all`, for a LARGER member, which makes its copy LARGER (abi_copy_bytes): only a table with an _Atomic of a
+// type of no size, the root of every LARGER type, has one (abi_classify_levels), and waiting would add a level for
+// every nesting of records; but a flexible one of no size always waits, as an _Atomic of it takes its alignment as its
+// size. Each is complete when the type is, so no type waits forever. The rare cases are out of line, which keeps this
+// small enough for clang to inline into abi_classify_levels' loop: a call there costs some 30 instructions a type.
 static bool abi_dependencies_classified(const AbiTable* abi, const TypeTable* table, uint32_t index, bool all)
 {
     const uint8_t kind = table->types.kind[index];
@@ -2563,7 +2944,8 @@ static bool abi_dependencies_classified(const AbiTable* abi, const TypeTable* ta
     bool result = true;
     if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
     {
-        result = abi_is_classified(abi, table->types.base[index]);
+        const TypeId base = table->types.base[index];
+        result = abi_is_classified(abi, base) && (kind != BUSTER_TYPE_KIND_ARRAY || table->types.size[index] != 0 || abi_wide_classified(abi, table, base));
     }
     else if (record && table->types.size[index] <= BUSTER_ABI_MAX_CLASSIFIED_BYTES && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) == 0)
     {
@@ -2922,12 +3304,11 @@ static void abi_assign_scalar(const AbiTable* abi, AbiSignatures signatures, Abi
     }
 }
 
-// The vector path's lane flags, which its setup writes per argument: the first and last arguments of a call, an unnamed
-// one, the first of a call whose result goes in memory (the hidden pointer takes rdi before it) and whether that result
-// is DEMOTED, an argument of a variadic call, and the first of a call with more arguments than the sums of its
-// registers can count (LONG: see BUSTER_ABI_COUNTED_ARGUMENTS).
+// The vector path's marks, which its setup writes per call: at the call's first argument START, HIDDEN if its result
+// goes in memory (the hidden pointer takes rdi before it) and DEMOTED if that result is one LLVM demotes, VARIADIC if
+// the callee is variadic, and LONG if the call has more arguments than the sums of its registers can count (see
+// BUSTER_ABI_COUNTED_ARGUMENTS); UNNAMED at its first unnamed argument. Past the last argument, a START ends it.
 #define BUSTER_ABI_LANE_START 0x01
-#define BUSTER_ABI_LANE_END 0x02
 #define BUSTER_ABI_LANE_UNNAMED 0x04
 #define BUSTER_ABI_LANE_HIDDEN 0x08
 #define BUSTER_ABI_LANE_VARIADIC 0x10
@@ -2939,6 +3320,8 @@ static void abi_assign_scalar(const AbiTable* abi, AbiSignatures signatures, Abi
 // 65,535). A longer call goes to the twin: past it, the general registers' sum would carry into the vector ones'.
 #define BUSTER_ABI_COUNTED_ARGUMENTS 32767u
 #define BUSTER_ABI_LANES 16
+// The bit of a call's ORed slot alignments (every one 8 or more) that says the twin must assign the call.
+#define BUSTER_ABI_LANE_DEFERRED 0x01
 
 // A segmented scan's windows: steps[k] holds the lanes that add the lane 2^k below them (no segment starts between),
 // and continuing the lanes before the vector's first start, which continue the vector before's last segment.
@@ -2992,7 +3375,8 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
 // prefix sums of the slot sizes of those on the stack their offsets. That is exactly the assignment unless:
 //   - an argument doesn't fit while a register it needs is still free (a two-eightbyte one with one free, or one of
 //     both classes with one class full), which the sums count as used though it stays free for the arguments after;
-//   - a stack argument's alignment doesn't divide the offset the sums give it, so the twin would pad before it;
+//   - a stack argument's alignment doesn't divide the offset the sums give it, so the twin would pad before it, or is
+//     more than 32 bits hold;
 //   - an argument is UNCOUNTED, whose registers clang doesn't count but LLVM does, or a named WIDE one of a variadic
 //     call, the reverse;
 //   - a stack argument is EMPTY or GROWN, whose slot depends on clang's count, or one is LOW_GENERAL, whose low
@@ -3000,6 +3384,9 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
 //     pointer, which clang doesn't count (DEMOTED);
 //   - the call has more than BUSTER_ABI_COUNTED_ARGUMENTS arguments, whose sums 16 bits a class can't hold;
 // and the calls with one of those (rare in compiled code) go to the twin, which assigns them one argument at a time.
+// No loop goes over a call's arguments: the setup marks each call's first argument and its first unnamed one, and the
+// lanes take their call's marks with a segmented OR scan; a call ends where the next argument starts one, and there the
+// scans' inclusive values are its totals, which a last pass over the calls reads.
 static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
 {
     Scratch scratch = scratch_begin(0);
@@ -3008,18 +3395,22 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
     {
         total += signatures.counts[c];
     }
-    uint8_t* flags = arena_push(scratch.arena, total + BUSTER_ABI_LANES, 64);
-    uint32_t* call_ids = flags != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, total + BUSTER_ABI_LANES) : 0;
-    uint64_t* firsts = call_ids != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, signatures.count) : 0;
-    uint32_t* deferred = firsts != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, signatures.count) : 0;
-    if (deferred == 0)
+    // Per argument, its marks (and past the last one a START), and at each call's last one the call's register counts,
+    // stack bytes and ORed alignments; and each call's first argument.
+    uint8_t* marks = arena_push(scratch.arena, total + BUSTER_ABI_LANES + 1, 64);
+    uint32_t* end_registers = marks != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, total + BUSTER_ABI_LANES) : 0;
+    uint32_t* end_stack = end_registers != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, total + BUSTER_ABI_LANES) : 0;
+    uint32_t* end_alignment = end_stack != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, total + BUSTER_ABI_LANES) : 0;
+    uint64_t* firsts = end_alignment != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, signatures.count) : 0;
+    if (firsts == 0)
     {
         abi_assign_scalar(abi, signatures, locations, calls);
     }
     else
     {
-        // The setup: each call's result and starting totals, and its arguments' lane flags and call.
-        memset(flags, 0, total);
+        // The setup: each call's result and starting totals, its first argument and its marks. A call without arguments
+        // marks nothing (its first argument is the next call's, or past the last).
+        memset(marks, 0, total + BUSTER_ABI_LANES + 1);
         uint64_t first = 0;
         for (uint32_t c = 0; c < signatures.count; c += 1)
         {
@@ -3027,6 +3418,7 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const uint32_t named = signatures.named[c] < count ? signatures.named[c] : count;
             const AbiReturn result = abi->results[signatures.results[c] >> BUSTER_TYPE_INDEX_SHIFT];
             const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
+            const bool demoted = hidden && (result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
             calls[c] = (AbiCall){
                 .stack_bytes = 0,
                 .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
@@ -3036,23 +3428,13 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
                 .result = result,
             };
             firsts[c] = first;
-            if (count != 0)
-            {
-                const bool demoted = hidden && (result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
-                flags[first] |= BUSTER_ABI_LANE_START | (hidden ? BUSTER_ABI_LANE_HIDDEN : 0) | (demoted ? BUSTER_ABI_LANE_DEMOTED : 0) |
-                                (count > BUSTER_ABI_COUNTED_ARGUMENTS ? BUSTER_ABI_LANE_LONG : 0);
-                flags[first + count - 1] |= BUSTER_ABI_LANE_END;
-                for (uint32_t i = 0; i < count; i += 1)
-                {
-                    flags[first + i] |= (i >= named ? BUSTER_ABI_LANE_UNNAMED : 0) | (signatures.variadic[c] != 0 ? BUSTER_ABI_LANE_VARIADIC : 0);
-                }
-                for (uint32_t i = 0; i < count; i += 1)
-                {
-                    call_ids[first + i] = c;
-                }
-            }
+            const uint32_t starting = BUSTER_ABI_LANE_START | (hidden ? BUSTER_ABI_LANE_HIDDEN : 0) | (demoted ? BUSTER_ABI_LANE_DEMOTED : 0) |
+                                      (signatures.variadic[c] != 0 ? BUSTER_ABI_LANE_VARIADIC : 0) | (count > BUSTER_ABI_COUNTED_ARGUMENTS ? BUSTER_ABI_LANE_LONG : 0);
+            marks[first] |= (uint8_t)(count != 0 ? starting : 0);
+            marks[first + named] |= (uint8_t)(named < count ? BUSTER_ABI_LANE_UNNAMED : 0);
             first += count;
         }
+        marks[total] = BUSTER_ABI_LANE_START;
         const __m512i zero = _mm512_setzero_si512();
         const __m512i general = _mm512_setr_epi32(BUSTER_ABI_RDI, BUSTER_ABI_RSI, BUSTER_ABI_RDX, BUSTER_ABI_RCX, BUSTER_ABI_R8, BUSTER_ABI_R9, BUSTER_ABI_REGISTER_NONE,
                                                   BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE,
@@ -3063,10 +3445,10 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
         const __m512i interleave_low = _mm512_setr_epi32(0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
         const __m512i interleave_high = _mm512_setr_epi32(8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
         const __m512i none = _mm512_set1_epi32(BUSTER_ABI_REGISTER_NONE);
+        __m512i carry_marks = zero;
         __m512i carry_registers = zero;
         __m512i carry_stack = zero;
         __m512i carry_alignment = zero;
-        uint32_t deferred_count = 0;
         for (uint64_t base = 0; base < total; base += BUSTER_ABI_LANES)
         {
             const uint64_t remaining = total - base;
@@ -3074,12 +3456,17 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __m512i indices = _mm512_srli_epi32(_mm512_maskz_loadu_epi32(valid, signatures.arguments + base), BUSTER_TYPE_INDEX_SHIFT);
             const __m512i pass = _mm512_mask_i32gather_epi32(zero, valid, indices, abi->pass, 4);
             const __m512i bytes = _mm512_mask_i32gather_epi32(zero, valid, indices, abi->stack_bytes, 4);
-            const __m512i lane_flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(valid, flags + base));
-            const __mmask16 starts = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_START));
-            const __mmask16 ends = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_END));
-            const __mmask16 unnamed = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_UNNAMED));
-            const __mmask16 hidden = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_HIDDEN));
-            const __mmask16 variadic = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_VARIADIC));
+            // Each lane's marks, its call's (the segment's, from its first lane), and the lanes whose next argument
+            // starts a call: the calls' last ones.
+            const __m512i lane_marks = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(valid, marks + base));
+            const __mmask16 starts = _mm512_test_epi32_mask(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_START));
+            const __mmask16 ends = _mm512_test_epi32_mask(_mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(valid, marks + base + 1)), _mm512_set1_epi32(BUSTER_ABI_LANE_START));
+            const AbiScan scan = abi_scan(starts);
+            const __m512i call_marks = abi_scan_or(_mm512_and_si512(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_UNNAMED | BUSTER_ABI_LANE_VARIADIC)), scan, carry_marks);
+            carry_marks = _mm512_permutexvar_epi32(last_lane, call_marks);
+            const __mmask16 unnamed = _mm512_test_epi32_mask(call_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_UNNAMED));
+            const __mmask16 variadic = _mm512_test_epi32_mask(call_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_VARIADIC));
+            const __mmask16 hidden = _mm512_test_epi32_mask(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_HIDDEN));
             const __mmask16 ignore = _mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_IGNORE));
             const __mmask16 uncounted = _mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_UNCOUNTED));
             const __mmask16 in_memory = _mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_MEMORY)) |
@@ -3093,7 +3480,6 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __m512i need_integers = _mm512_maskz_add_epi32(counted, low_integer, high_integer);
             const __m512i need_vectors = _mm512_maskz_add_epi32(counted, low_sse, high_sse);
             const __m512i need = _mm512_add_epi32(need_integers, _mm512_slli_epi32(need_vectors, 16));
-            const AbiScan scan = abi_scan(starts);
             const __m512i inclusive = abi_scan_add(_mm512_mask_add_epi32(need, hidden, need, _mm512_set1_epi32(1)), scan, carry_registers);
             carry_registers = _mm512_permutexvar_epi32(last_lane, inclusive);
             const __m512i exclusive = _mm512_sub_epi32(inclusive, need);
@@ -3112,14 +3498,13 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
                                                 (_mm512_test_epi32_mask(need_vectors, need_vectors) &
                                                  _mm512_cmplt_epu32_mask(exclusive_vectors, _mm512_set1_epi32(BUSTER_ABI_VECTOR_ARGUMENTS))));
             const __mmask16 on_stack = (in_memory | spills) & valid & (__mmask16)~ignore;
-            // The stack slots, and their alignments ORed (each a power of two, so the OR's highest bit is the largest).
-            const __m512i slot_alignment = _mm512_sllv_epi32(_mm512_set1_epi32(1), _mm512_srli_epi32(_mm512_and_si512(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_ALIGNMENT)),
-                                                                                                     BUSTER_ABI_PASS_ALIGNMENT_SHIFT));
+            // The stack slots and their alignments (each a power of two of at least 8; 2^32 doesn't fit a lane).
+            const __m512i slot_log2 = _mm512_srli_epi32(_mm512_and_si512(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_ALIGNMENT)), BUSTER_ABI_PASS_ALIGNMENT_SHIFT);
+            const __m512i slot_alignment = _mm512_sllv_epi32(_mm512_set1_epi32(1), slot_log2);
+            const __mmask16 huge = on_stack & _mm512_cmpgt_epu32_mask(slot_log2, _mm512_set1_epi32(31));
             const __m512i slot_bytes = _mm512_maskz_mov_epi32(on_stack, bytes);
             const __m512i stack_inclusive = abi_scan_add(slot_bytes, scan, carry_stack);
-            const __m512i alignment_inclusive = abi_scan_or(_mm512_maskz_mov_epi32(on_stack, slot_alignment), scan, carry_alignment);
             carry_stack = _mm512_permutexvar_epi32(last_lane, stack_inclusive);
-            carry_alignment = _mm512_permutexvar_epi32(last_lane, alignment_inclusive);
             const __m512i stack_exclusive = _mm512_sub_epi32(stack_inclusive, slot_bytes);
             const __mmask16 padded = on_stack & _mm512_test_epi32_mask(stack_exclusive, _mm512_sub_epi32(slot_alignment, _mm512_set1_epi32(1)));
             // A named wide vector in a variadic call: clang counts a register that LLVM doesn't give it. And one on the
@@ -3127,9 +3512,15 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __mmask16 wide_named = _mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_WIDE)) & variadic & (__mmask16)~unnamed;
             const __mmask16 empty = on_stack & _mm512_test_epi32_mask(pass, _mm512_set1_epi32((int)(BUSTER_ABI_PASS_EMPTY | BUSTER_ABI_PASS_GROWN)));
             const __mmask16 general_low = _mm512_test_epi32_mask(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_LOW_GENERAL));
-            const __mmask16 demoted = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_DEMOTED));
-            const __mmask16 long_call = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_LONG));
-            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | wide_named | empty | general_low | demoted | long_call);
+            // DEMOTED and LONG mark a call's first lane, and its ORed alignments take them to its last.
+            const __mmask16 demoted = _mm512_test_epi32_mask(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_DEMOTED));
+            const __mmask16 long_call = _mm512_test_epi32_mask(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_LONG));
+            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | huge | wide_named | empty | general_low | demoted | long_call);
+            // The alignments ORed (the highest bit is the largest), with DEFERRED for a lane the twin must assign.
+            const __m512i stacked_alignment = _mm512_maskz_mov_epi32(on_stack, slot_alignment);
+            const __m512i alignments = _mm512_mask_or_epi32(stacked_alignment, deferred_lanes, stacked_alignment, _mm512_set1_epi32(BUSTER_ABI_LANE_DEFERRED));
+            const __m512i alignment_inclusive = abi_scan_or(alignments, scan, carry_alignment);
+            carry_alignment = _mm512_permutexvar_epi32(last_lane, alignment_inclusive);
             // The registers: the low eightbyte's, then the high one's (first for a value whose low one is padding).
             const __mmask16 low_integer_lanes = _mm512_test_epi32_mask(low_integer, low_integer);
             const __mmask16 low_sse_lanes = _mm512_test_epi32_mask(low_sse, low_sse);
@@ -3153,46 +3544,33 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __m512i offset = _mm512_maskz_mov_epi32(on_stack, stack_exclusive);
             _mm512_mask_storeu_epi64(locations + base, (__mmask8)valid, _mm512_permutex2var_epi32(offset, interleave_low, word));
             _mm512_mask_storeu_epi64(locations + base + 8, (__mmask8)(valid >> 8), _mm512_permutex2var_epi32(offset, interleave_high, word));
-            const __mmask16 call_ends = ends & valid;
-            if ((call_ends | deferred_lanes) != 0)
-            {
-                _Alignas(64) uint32_t ids[BUSTER_ABI_LANES];
-                _Alignas(64) uint32_t registers[BUSTER_ABI_LANES];
-                _Alignas(64) uint32_t stack[BUSTER_ABI_LANES];
-                _Alignas(64) uint32_t alignment[BUSTER_ABI_LANES];
-                _mm512_store_si512((void*)ids, _mm512_maskz_loadu_epi32(valid, call_ids + base));
-                _mm512_store_si512((void*)registers, inclusive);
-                _mm512_store_si512((void*)stack, stack_inclusive);
-                _mm512_store_si512((void*)alignment, alignment_inclusive);
-                for (uint32_t bits = call_ends; bits != 0; bits &= bits - 1)
-                {
-                    const uint32_t lane = (uint32_t)__builtin_ctz(bits);
-                    AbiCall* call = calls + ids[lane];
-                    const uint32_t integers = registers[lane] & 0xffff;
-                    const uint32_t vectors = registers[lane] >> 16;
-                    const uint32_t largest = alignment[lane] == 0 ? 0 : 31 - (uint32_t)__builtin_clz(alignment[lane]);
-                    call->stack_bytes = stack[lane];
-                    call->stack_alignment_log2 = (uint8_t)(largest > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? largest : BUSTER_ABI_STACK_ALIGNMENT_LOG2);
-                    call->integer_registers = (uint8_t)(integers < BUSTER_ABI_INTEGER_ARGUMENTS ? integers : BUSTER_ABI_INTEGER_ARGUMENTS);
-                    call->vector_registers = (uint8_t)(vectors < BUSTER_ABI_VECTOR_ARGUMENTS ? vectors : BUSTER_ABI_VECTOR_ARGUMENTS);
-                }
-                for (uint32_t bits = deferred_lanes; bits != 0; bits &= bits - 1)
-                {
-                    const uint32_t id = ids[__builtin_ctz(bits)];
-                    if (deferred_count == 0 || deferred[deferred_count - 1] != id)
-                    {
-                        deferred[deferred_count] = id;
-                        deferred_count += 1;
-                    }
-                }
-            }
+            // The totals of the calls that end here.
+            _mm512_mask_storeu_epi32(end_registers + base, ends, inclusive);
+            _mm512_mask_storeu_epi32(end_stack + base, ends, stack_inclusive);
+            _mm512_mask_storeu_epi32(end_alignment + base, ends, alignment_inclusive);
         }
-        for (uint32_t i = 0; i < deferred_count; i += 1)
+        // Each call's totals from its last argument (a call without arguments keeps its starting ones), and the calls
+        // with a deferred argument by the twin.
+        for (uint32_t c = 0; c < signatures.count; c += 1)
         {
-            const uint32_t c = deferred[i];
             const uint32_t count = signatures.counts[c];
-            const uint32_t named = signatures.named[c] < count ? signatures.named[c] : count;
-            calls[c] = abi_assign_call(abi, signatures.arguments + firsts[c], count, named, signatures.variadic[c] != 0, signatures.results[c], locations + firsts[c]);
+            const bool has = count != 0;
+            const uint64_t last = has ? firsts[c] + count - 1 : 0;
+            const uint32_t registers = end_registers[last];
+            const uint32_t alignment = end_alignment[last];
+            const uint32_t integers = registers & 0xffff;
+            const uint32_t vectors = registers >> 16;
+            const uint32_t largest = 31 - (uint32_t)__builtin_clz(alignment | 1);
+            AbiCall* call = calls + c;
+            call->stack_bytes = has ? end_stack[last] : 0;
+            call->stack_alignment_log2 = (uint8_t)(has && largest > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? largest : BUSTER_ABI_STACK_ALIGNMENT_LOG2);
+            call->integer_registers = has ? (uint8_t)(integers < BUSTER_ABI_INTEGER_ARGUMENTS ? integers : BUSTER_ABI_INTEGER_ARGUMENTS) : call->integer_registers;
+            call->vector_registers = has ? (uint8_t)(vectors < BUSTER_ABI_VECTOR_ARGUMENTS ? vectors : BUSTER_ABI_VECTOR_ARGUMENTS) : 0;
+            if (has && (alignment & BUSTER_ABI_LANE_DEFERRED) != 0)
+            {
+                const uint32_t named = signatures.named[c] < count ? signatures.named[c] : count;
+                calls[c] = abi_assign_call(abi, signatures.arguments + firsts[c], count, named, signatures.variadic[c] != 0, signatures.results[c], locations + firsts[c]);
+            }
         }
     }
     scratch_end(scratch);
