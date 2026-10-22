@@ -1965,6 +1965,13 @@ spellings alone would miss this change (#272).
   `prefix(...)`). `-dE` (printing the directive rather than its data) isn't
   supported. A FIFO or a socket that `#embed` names is reported as a device
   file, where clang would read it.
+- Individual feature switches (`-m*`, other than the supported `-march=` and
+  `-mtune=`) are rejected. Other options such as `-funsigned-char` still need
+  `--predefines` for their macro effects. The target-builtin query table remains
+  a bounded subset; see [the target contract](x86-target.md).
+- The feature tests (`__has_attribute` and the others) always answer from
+  clang's table, which #117 and #125 keep for the oracle's mode. Outside it, they
+  are to answer what the compiler implements (#123, #148).
 - The printer's spacing differs from clang's in places. It puts a space between
   `<` and `>`, where clang doesn't, and it doesn't indent a line's first token
   to its column. It keeps apart tokens that clang's printer joins into one,
