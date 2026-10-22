@@ -3532,8 +3532,10 @@ BUSTER_INLINE uint32_t pp_paste_spelling(Preprocessor* pp, PPToken token, uint8_
     return non_ascii ? pp_paste_written(pp, token.location, length, arena, spelling) : length;
 }
 
-// Pastes two tokens (C 6.10.5.3): their spellings joined (pp_paste_spelling) must lex as exactly one token. Returns
-// false with an error if they don't, as clang does, and the caller keeps them both.
+// Pastes two tokens (C 6.10.5.3): their spellings joined (pp_paste_spelling) must lex as exactly one token, which takes
+// the left one's leading space and the line it started among a macro's arguments (BUSTER_PP_LINE_SPACE), as clang's
+// TokenLexer::pasteTokens gives it the left one's flags. Returns false with an error if they don't, as clang does, and
+// the caller keeps them both.
 BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPToken* result)
 {
     Scratch scratch = scratch_begin(0);
@@ -3602,7 +3604,7 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             {
                 value = refine_intern_identifier(pp->table, joined, length, 0, length, pp->refine_flags);
             }
-            *result = (PPToken){ .kind = kind, .flags = (uint8_t)((left.flags & BUSTER_PP_SPACE) | BUSTER_PP_FROM_MACRO), .value = value, .location = location };
+            *result = (PPToken){ .kind = kind, .flags = (uint8_t)((left.flags & (BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE)) | BUSTER_PP_FROM_MACRO), .value = value, .location = location };
             // A poisoned name a paste makes is an error (pp_is_poisoned).
             if (kind == C_TOKEN_RAW_IDENTIFIER)
             {
