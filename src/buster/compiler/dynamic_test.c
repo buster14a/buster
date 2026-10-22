@@ -3285,6 +3285,16 @@ static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
         .lld_refuses = true,
     },
     {
+        // Its named default-visible absolute definition is dynamic, but a direct CALL must still be refused.
+        .name = "absolute-call",
+        .source = "__asm__(\".globl buster_absolute\\n.set buster_absolute, 42\");\n"
+                  "extern int buster_absolute(void);\n"
+                  "int buster_never(void) { return buster_absolute() + 1; }\n"
+                  "int buster_check(int (*helper)(void), int* data) { return helper() != 2 || *data != 9; }\n",
+        .pic = "-fPIC",
+        .refused = true,
+    },
+    {
         // A pointer to a preemptible function in .rodata (a text relocation), from code without -fPIC.
         .name = "text-relocation",
         .source = "int buster_exported(void) { return 1; }\n"

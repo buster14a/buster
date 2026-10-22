@@ -3365,13 +3365,16 @@ static void executable_check_direct16(const Link* link, ExecutableShared* shared
     uint64_t* got_marks = shared->got_marks + lane * shared->words_per_lane;
     uint64_t* stub_marks = shared->stub_marks + lane * shared->words_per_lane;
     const uint32_t count = (uint32_t)__builtin_popcount(stubbed);
+    uint64_t absolute_calls = 0;
     for (uint32_t i = 0; i < count; i += 1)
     {
         const uint64_t bit = 1ull << (ids[i] % 64);
         got_marks[ids[i] / 64] |= bit;
         stub_marks[ids[i] / 64] |= bit;
+        // A library's named absolute definition can be dynamic, but its CALL is still refused by the exact check.
+        absolute_calls += link->symbols.source[ids[i]] == BUSTER_LINK_SOURCE_ABSOLUTE;
     }
-    *refused += (uint64_t)__builtin_popcount(dynamic & ~calls);
+    *refused += absolute_calls + (uint64_t)__builtin_popcount(dynamic & ~calls);
     for (uint32_t rare = outside & ~dynamic; rare != 0; rare &= rare - 1)
     {
         executable_check_direct(link, shared, lane, first + (FixupId)__builtin_ctz(rare), refused);
