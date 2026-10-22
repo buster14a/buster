@@ -555,7 +555,7 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(void) { asm goto goto(\"\" :::: L); L:; }\n", "1:25: duplicate asm qualifier 'goto'", 0, true },
     { "asm volatile(\"\");\n", "1:5: meaningless 'volatile' on asm outside function", 0, true },
     { "int x __asm__ inline(\"y\");\n", "1:15: meaningless 'inline' on asm outside function", 0, true },
-    { "__asm__ const(\"\");\n", "1:9: expected '(' after 'asm'", 0, true },
+    { "__asm__ const(\"\");\n", "1:9: expected '(' after 'asm'", 0 },
     { "void f(void) { asm volatile inline(\"\"); asm __inline __volatile__(\"\"); asm __inline__ __volatile(\"\"); }\n", "", 0 },
     { "#define C :\n[[gnu:C unused]] int x;\n", "2:6: expected ','", "c23" },
     { "#define C ::\n[[gnu C unused]] int x;\n", "", "c23" },
