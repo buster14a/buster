@@ -2748,7 +2748,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 `./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
 [options] [file...]`, or `test-preprocessor --tables path...`:
 
-- without files, the 236 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 259 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2760,7 +2760,15 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   - #193's review fixes, line markers among them;
   - each difference from clang that #109's fuzzing found, minimized, and the
     ones probing around it found;
-  - `#embed`: its data, parameters, errors and files, and where `-E` prints it.
+  - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
+  - #119's includes, in files and links the case makes: header names written out
+    and computed, `#include_next` through three directories, an inactive group's
+    includes, a cycle at the depth limit, one file through a symbolic link and a
+    hard link, and clang's recoveries and diagnostics' places; and #254's
+    review's: a header name written out that is too long for a path (and an
+    `#embed` one longer than its buffer), `__has_include`'s and `__has_embed`'s
+    operands as their `#if` line writes them, and the header the depth limit
+    refuses.
 
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with

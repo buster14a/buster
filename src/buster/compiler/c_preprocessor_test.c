@@ -760,6 +760,10 @@ struct PPTestFile
     const char* text;
     // The text's length, for one with zero bytes in it (an #embed's resource); 0 for strlen's.
     uint32_t length;
+    // A link instead of a text: a symbolic one to `link` as it is written, or (`hard`) a hard one to the case's file
+    // `link`, which comes earlier.
+    const char* link;
+    bool hard;
 };
 
 typedef struct PPTestCase PPTestCase;
@@ -851,6 +855,53 @@ static const PPTestFile pp_test_files_embed_directories[] = {
     { "sub/y.bin", "Y" },
     { 0, 0 },
 };
+
+// #119's header names and search: names with "//", "/*...*/" and a backslash written out, the file a comment that runs
+// on to the next line makes a name of ("a b.h"), a computed name's file, #include_next through three directories, a
+// header that includes itself, and one file reached through a symbolic link and a hard link, with #pragma once and
+// with a guard. Then #254's review's: the file a header name too long for a path would name if its identifier were
+// expanded, headers named " x.h" and "  x.h", each alone in a directory, and a header that includes itself to the depth
+// limit and there includes another three times.
+static const PPTestFile pp_test_files_includes[] = {
+    { "a/b.h", "ab\n" },
+    { "dir/*x.h", "opaque_header\n" },
+    { "dir/*x.bin", "B\n" },
+    { "a/*x*/b.h", "axb\n" },
+    { "a\\b.h", "backslash\n" },
+    { "a b.h", "joined\n" },
+    { "c.h", "computed\n" },
+    { "d1/n.h", "one\n#include_next <n.h>\n" },
+    { "d2/n.h", "two\n#include_next <n.h>\n" },
+    { "d3/n.h", "three\n" },
+    { "self.h", "#include \"self.h\"\nx\n" },
+    { "real.h", "#pragma once\nonce\n" },
+    { .path = "sym.h", .link = "real.h" },
+    { .path = "hard.h", .link = "real.h", .hard = true },
+    { "guarded.h", "#ifndef G\n#define G\nguarded\n#endif\n" },
+    { .path = "gsym.h", .link = "guarded.h" },
+    { "local.h", "local\n" },
+    { "short.h", "short\n" },
+    { "one/ x.h", "one_space\n" },
+    { "two/  x.h", "two_spaces\n" },
+    { "loop.h", "#if __INCLUDE_LEVEL__ < 199\n#include \"loop.h\"\n#else\n#include \"leaf.h\"\n#include \"leaf.h\"\n#include \"leaf.h\"\n#endif\n" },
+    { "leaf.h", "LEAF\n" },
+    { 0, 0 },
+};
+
+// #254's second review's headers: a name with a backslash before a '>', and one reached through "//".
+static const PPTestFile pp_test_files_header_tails[] = {
+    { "a\\>b.h", "int escaped;\n" },
+    { " x.h", "int one_space;\n" },
+    { "x.h", "int x_h;\n" },
+    { "dir/x.h", "int dir_x;\n" },
+    { 0, 0 },
+};
+
+// 4,096 'A's: an identifier, and a header name too long for any path (#254's review).
+#define BUSTER_PP_TEST_A64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+#define BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64
+#define BUSTER_PP_TEST_A4096 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512
+_Static_assert(sizeof(BUSTER_PP_TEST_A4096) == 4097, "BUSTER_PP_TEST_A4096 must be 4,096 letters");
 
 static const PPTestCase pp_test_cases[] = {
     // The topics of C 6.10.4.5's examples, in cases of our own: rescanning and redefinitions, # and ## with indirection,
@@ -1535,6 +1586,184 @@ static const PPTestCase pp_test_cases[] = {
         .expected = "limits offsets others",
         .files = pp_test_files_embed,
     },
+    // #119's done-when checks, against clang 23: header names written out ("//" and "/*...*/" are part of the name,
+    // and a comment that runs on to the next line makes clang join the line's tokens), computed ones, #include_next
+    // through three directories, an inactive group's includes, a cycle stopped at clang's depth limit (an error, after
+    // which the file isn't entered again), one record through links, clang's recoveries (an angled name found as a
+    // quoted one, a name found without what it starts and ends with besides letters and digits), and the diagnostics'
+    // places.
+    {
+        .name = "#119: header names written out, a comment that runs on to the next line among them",
+        .source = "#include <a//b.h>\n#include <a/*x*/b.h>\n#include \"a\\b.h\"\n#include <a/*x\n*/b.h>\n",
+        .standard = "c17",
+        .expected = "ab axb backslash joined",
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: computed names, joined as clang joins them",
+        .source = "#define H <c.h>\n#include H\n#define Q \"c.h\"\n#include Q\n#define L <\n#define R >\n#include L "
+                  "c.h R\n",
+        .standard = "c17",
+        .expected = "computed computed computed",
+        .fails = true,
+        .warnings = 1,
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: #include_next through three directories",
+        .source = "#include <n.h>\n",
+        .standard = "c17",
+        .expected = "one two three",
+        .options = "-I%d/d1 -I%d/d2 -I%d/d3",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: an inactive group's includes aren't looked for",
+        .source = "#if 0\n#include \"missing.h\"\n#include <missing.h>\n#elif 0\n#include \"missing2.h\"\n#else\n"
+                  "#endif\nok\n",
+        .standard = "c17",
+        .expected = "ok",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: an include cycle stops at clang's depth limit",
+        .source = "#include \"self.h\"\nend\n",
+        .standard = "c17",
+        .expected = "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
+                    "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
+                    "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
+                    "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
+                    "x x x end",
+        .fails = true,
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: one file through a symbolic link and a hard link",
+        .source = "#include \"real.h\"\n#include \"sym.h\"\n#include \"hard.h\"\n#include \"guarded.h\"\n#include "
+                  "\"gsym.h\"\nend\n",
+        .standard = "c17",
+        .expected = "once guarded end",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: clang's recoveries from a name not found",
+        .source = "#include <local.h>\na\n#include \"local.h \"\nb\n#include \" local.h\"\nc\n#include \"local.h.\"\n"
+                  "d\n",
+        .standard = "c17",
+        .expected = "local a local b local c local d",
+        .fails = true,
+        .warnings = 2,
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: an include's diagnostics, at clang's places",
+        .source = "#include\n#include 1\n#include \"local.h\" x\n#include <local.h\n#include \"\"\n#include <>\nz\n",
+        .standard = "c17",
+        .expected = "local z",
+        .fails = true,
+        .warnings = 1,
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    // #254's review, against clang 23: a header name written out that is too long for any path is one still, refused
+    // (clang's fatal error about the path, which the history cases compare), and never a computed one whose identifier
+    // expands to another header's name, nor is an #embed's longer than the buffer it reads into; __has_include's and
+    // __has_embed's operands written in their #if line are read as the line writes them, and the same operands from a
+    // macro or an argument joined from their tokens; and a header that the depth limit refused is included as clang
+    // marks it: three #includes of it give one error, and an #include after the cycle unwinds doesn't enter it.
+    {
+        .name = "#254's review: a header name written out, too long for a path",
+        .source = "#define " BUSTER_PP_TEST_A4096 " short.h\n#include <" BUSTER_PP_TEST_A4096 ">\nEND\n",
+        .standard = "c17",
+        .expected = "",
+        .fails = true,
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's review: an #embed name written out, longer than its buffer",
+        .source = "#define " BUSTER_PP_TEST_A4096 "A short.h\n#embed <" BUSTER_PP_TEST_A4096 "A>\nEND\n",
+        .standard = "c23",
+        .expected = "",
+        .fails = true,
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's review: __has_include's and __has_embed's operands as their line writes them, \" x.h\" alone",
+        .source = "#define ID(x) x\n#define HI __has_include\n#define ARG <  x.h>\n#if __has_include(<  x.h>)\nraw\n#endif\n#if HI(<  x.h>)\nhi\n#endif\n"
+                  "#if ID(__has_include(<  x.h>))\nargument\n#endif\n#if __has_include(ARG)\nmacro\n#endif\n#if __has_embed(<  x.h>) == 0 && "
+                  "ID(__has_embed(<  x.h>)) == 1\nembed\n#endif\n#if __has_include(<  x.h>)\n#include <  x.h>\n#endif\nvalid_translation_unit\n",
+        .standard = "c23",
+        .expected = "argument macro embed valid_translation_unit",
+        .options = "-I%d/one --embed-dir=%d/one",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's review: __has_include's and __has_embed's operands as their line writes them, \"  x.h\" alone",
+        .source = "#define ID(x) x\n#define HI __has_include\n#define ARG <  x.h>\n#if __has_include(<  x.h>)\nraw\n#endif\n#if HI(<  x.h>)\nhi\n#endif\n"
+                  "#if ID(__has_include(<  x.h>))\nargument\n#endif\n#if __has_include(ARG)\nmacro\n#endif\n#if __has_embed(<  x.h>) == 1 && "
+                  "__has_embed(<  x.h> limit(0)) == 2 && ID(__has_embed(<  x.h>)) == 0\nembed\n#endif\n#include <  x.h>\n",
+        .standard = "c23",
+        .expected = "raw hi embed two_spaces",
+        .options = "-I%d/two --embed-dir=%d/two",
+        .files = pp_test_files_includes,
+    },
+    // #254's second review, against clang 23: a backslash in a header name written out takes the character after it into
+    // the name, a '>' too, as clang's LexAngledStringLiteral reads it; and the rest of the line past such a name is what
+    // clang lexes on from its '>', where the file's tokens ran past it: a "//" in the name began a comment there (the
+    // #if line's `&& 0` and `|| defined(NOPE)` count, an #include's `junk` is a warning and __has_embed's parameters are
+    // read, also on past a block comment's newlines, and the file goes on after that line), or a token the '>' starts
+    // ("x.h>>", "x.h>=", "x.h>>=") stays in the operand, an error.
+    {
+        .name = "#254's second review: a backslash in a header name written out escapes its '>'",
+        .source = "#if __has_include(<a\\>b.h>) && __has_include(\"a\\>b.h\")\nyes\n#endif\n#include <a\\>b.h>\nend\n",
+        .standard = "c17",
+        .expected = "yes int escaped; end",
+        .options = "-I%d",
+        .files = pp_test_files_header_tails,
+    },
+    {
+        .name = "#254's second review: the rest of a line past a header name with \"//\"",
+        .source = "#if __has_include(<dir//x.h>) && 1\nyes2\n#endif\n#if __has_include(<dir//x.h>) && 0\nno3\n#endif\n"
+                  "#if __has_include(<dir//x.h>) || defined(NOPE)\nyes4\n#endif\n#if __has_embed(<dir//x.h> limit(1)) == 1\nyes5\n#endif\n"
+                  "#if __has_embed(<dir//x.h> limit(0)) == 2\nyes6\n#endif\n#include <dir//x.h> junk\nend\n",
+        .standard = "c23",
+        .expected = "yes2 yes4 yes5 yes6 int dir_x; end",
+        .warnings = 1,
+        .options = "-I%d --embed-dir=%d",
+        .files = pp_test_files_header_tails,
+    },
+    {
+        .name = "#254's second review: a \"//\" name's line, through a block comment's newlines",
+        .source = "#include <dir//x.h> /* c\n*/ junk\nmid\n#if __has_include(<dir//x.h>) /* c\n#define Y 1\n*/ && 0\nno\n#endif\n#ifdef Y\nY_defined\n#endif\n"
+                  "#if __has_include(<dir//x.h>) /* c\n*/ || 0\nyes\n#endif\nend\n",
+        .standard = "c17",
+        .expected = "int dir_x; mid yes end",
+        .warnings = 1,
+        .options = "-I%d",
+        .files = pp_test_files_header_tails,
+    },
+    {
+        .name = "#254's second review: a token a header query's '>' starts stays in its operand",
+        .source = "#if __has_include(<x.h>>)\nwrong1\n#endif\n#if __has_include(<x.h>=)\nwrong2\n#endif\n#if __has_include(<x.h>>=)\nwrong3\n#endif\n"
+                  "#if __has_include(<a\\\\>b.h>)\nwrong4\n#endif\nend\n",
+        .standard = "c17",
+        .expected = "end",
+        .fails = true,
+        .options = "-I%d",
+        .files = pp_test_files_header_tails,
+    },
+    {
+        .name = "#254's review: a header refused at the depth limit is included",
+        .source = "#include \"loop.h\"\n#include \"leaf.h\"\nEND\n",
+        .standard = "c17",
+        .expected = "END",
+        .fails = true,
+        .files = pp_test_files_includes,
+    },
     {
         .name = "-municode's UNICODE is <command line>'s first macro, before -D and -U",
         .source = "UNICODE\n",
@@ -1549,6 +1778,64 @@ static const PPTestCase pp_test_cases[] = {
         .standard = "gnu17",
         .expected = "undefined",
         .options = "-UUNICODE -municodeX",
+    },
+    {
+        .name = "#254's third review: condition links ignore directives hidden by a raw query's comment",
+        .source = "#if __has_include(<dir//x.h>) /* comment\n#else\n#define IGNORED */ && 0\nint wrong_branch;\n#endif\n"
+                  "#ifdef IGNORED\nint wrong_define;\n#endif\n#if __has_include(<dir//x.h>) /* comment\n#elifdef IGNORED\n*/ && 0\nwrong\n"
+                  "#else\nint real_else;\n#endif\nint end;\n",
+        .standard = "c17",
+        .expected = "int real_else; int end;",
+        .options = "-I%d",
+        .files = pp_test_files_header_tails,
+    },
+    // An ordinary comment delimiter belongs to an opaque header name too. Its original file token must not hide the
+    // source after the name or report a comment error; a real comment after the name must still be diagnosed.
+    {
+        .name = "opaque header: an unclosed comment delimiter in an include name",
+        .source = "#include <dir/*x.h>\nafter\n",
+        .standard = "c17",
+        .expected = "opaque_header after",
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "opaque header: an unclosed comment delimiter in an embed name",
+        .source = "int a[] = {\n#embed <dir/*x.bin> limit(1)\n};\nafter\n",
+        .standard = "c23",
+        .expected = "int a[] = {66}; after",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "opaque header: an unclosed comment delimiter in a query name",
+        .source = "#if __has_include(<dir/*x.h>) && __has_embed(<dir/*x.bin> limit(1)) == 1\nfound\n#else\nwrong\n#endif\n"
+                  "#if __has_include(<dir/*x.h>) && 0\nwrong\n#else\nfalse_branch\n#endif\n"
+                  "#if 0\nwrong\n#elif __has_include(<dir/*x.h>)\nelif_branch\n#endif\nafter\n",
+        .standard = "c23",
+        .expected = "found false_branch elif_branch after",
+        .options = "-I%d --embed-dir=%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "opaque header: a real unclosed comment after an opaque name",
+        .source = "#include <dir/*x.h> /* unclosed\nafter\n",
+        .standard = "c17",
+        .expected = "opaque_header",
+        .fails = true,
+        .errors = 1,
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#254's third review: later queries retain raw names in a re-lexed suffix",
+        .source = "#if __has_include(<dir//x.h>) && __has_include(<  x.h>)\nint wrong_branch;\n#else\nint expected_branch;\n#endif\n"
+                  "#if __has_include(<dir//x.h>) && __has_include(<dir//x.h>) && __has_embed(<dir//x.h> limit(1)) == 1\nint repeated;\n#endif\n"
+                  "#if __has_include(<dir//x.h>) && (1 + (2 * 3) == 7) && __has_include(<dir//x.h>)\nint parentheses;\n#endif\n",
+        .standard = "c23",
+        .expected = "int expected_branch; int repeated; int parentheses;",
+        .options = "-I%d --embed-dir=%d",
+        .files = pp_test_files_header_tails,
     },
 };
 
@@ -1571,8 +1858,8 @@ static bool pp_test_write_file(const char* path, const char* text)
     return pp_test_write_bytes(path, text, 0);
 }
 
-// Writes a case's files into its directory (other.h, and the others with their directories); returns the main file's
-// path (in `path`).
+// Writes a case's files into its directory (other.h, and the others with their directories, or links); returns the
+// main file's path (in `path`).
 static bool pp_test_write_case(const PPTestCase* test, const char* directory, char* path, uint32_t capacity)
 {
     snprintf(path, capacity, "%s/case.c", directory);
@@ -1585,19 +1872,29 @@ static bool pp_test_write_case(const PPTestCase* test, const char* directory, ch
     }
     for (uint32_t i = 0; result && test->files != 0 && test->files[i].path != 0; i += 1)
     {
-        const char* slash = strchr(test->files[i].path, '/');
-        if (slash != 0)
+        const PPTestFile* file = &test->files[i];
+        // Each directory on the way, outermost first.
+        for (const char* slash = strchr(file->path, '/'); slash != 0; slash = strchr(slash + 1, '/'))
         {
-            snprintf(other, sizeof(other), "%s/%.*s", directory, (int)(slash - test->files[i].path), test->files[i].path);
+            snprintf(other, sizeof(other), "%s/%.*s", directory, (int)(slash - file->path), file->path);
             mkdir(other, 0700);
         }
-        snprintf(other, sizeof(other), "%s/%s", directory, test->files[i].path);
-        result = pp_test_write_bytes(other, test->files[i].text, test->files[i].length);
+        snprintf(other, sizeof(other), "%s/%s", directory, file->path);
+        if (file->link != 0 && file->hard)
+        {
+            char target[4096];
+            snprintf(target, sizeof(target), "%s/%s", directory, file->link);
+            result = link(target, other) == 0;
+        }
+        else
+        {
+            result = file->link != 0 ? symlink(file->link, other) == 0 : pp_test_write_bytes(other, file->text, file->length);
+        }
     }
     return result;
 }
 
-// Removes the files pp_test_write_case wrote besides case.c, and their directories.
+// Removes the files pp_test_write_case wrote besides case.c, and their directories, innermost first.
 static void pp_test_remove_case(const PPTestCase* test, const char* directory)
 {
     char path[4096];
@@ -1607,11 +1904,17 @@ static void pp_test_remove_case(const PPTestCase* test, const char* directory)
     {
         snprintf(path, sizeof(path), "%s/%s", directory, test->files[i].path);
         unlink(path);
-        const char* slash = strchr(test->files[i].path, '/');
-        if (slash != 0)
+    }
+    for (uint32_t i = 0; test->files != 0 && test->files[i].path != 0; i += 1)
+    {
+        const char* file = test->files[i].path;
+        for (uint32_t end = (uint32_t)strlen(file); end > 0; end -= 1)
         {
-            snprintf(path, sizeof(path), "%s/%.*s", directory, (int)(slash - test->files[i].path), test->files[i].path);
-            rmdir(path);
+            if (file[end - 1] == '/')
+            {
+                snprintf(path, sizeof(path), "%s/%.*s", directory, (int)(end - 1), file);
+                rmdir(path);
+            }
         }
     }
 }
