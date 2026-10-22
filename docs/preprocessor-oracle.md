@@ -123,6 +123,8 @@ explicit skips. Its input lists live
 under `tests/preprocessor-oracle/`. The runner hooks hold the lock for the job.
 The `buster-fast-9700x` concurrency prefix is scoped per PR/ref, so an older
 branch's repository-wide pending slot cannot cancel another PR's qualification.
-Each queue uses `queue: max` to retain pending runs, as
-[GitHub documents](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
-while the runner hooks serialize all CI jobs with the shared machine lock.
+Each queue keeps one pending run, GitHub's default `queue: single`, as
+[GitHub documents](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency):
+a newer push to the same PR replaces its pending run, whose commit is no longer
+the PR's to qualify, and a running one finishes. The runner hooks serialize
+all CI jobs with the shared machine lock.

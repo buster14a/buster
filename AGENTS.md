@@ -100,7 +100,8 @@ old `buster14a/buster` links now address this compiler.
 Local checkout directories, `~/buster-fast-bench/`, the shared host lock,
 `~/llm-memory/projects/buster-fast/` and its memory symlinks retain their existing
 names. The repository-local `buster-fast-9700x` concurrency key is also retained.
-Queues use that prefix per PR/ref; the runner hooks serialize every CI job with
+Queues use that prefix per PR/ref, each holding one pending run (a newer push
+replaces its PR's); the runner hooks serialize every CI job with
 the shared host lock. These are operational resources, not canonical repository URLs; do not rename
 them by replacing text. Source paths, executable names and object-file metadata
 are unchanged by the repository rename.
@@ -159,6 +160,15 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
+  #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
+  AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
+  undefined/invalid cases and guarded tails. `benchmark-builtins [--only
+  scalar|vector] [--after-scalar MS]` measures synthetic action batches on the
+  locked 9700X, pinned to CPU 2. [The builtin guide](docs/c-builtins.md) records
+  the API and the checking, C selector, feature-query and corpus integration
+  still required before #148 can close.
+
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
   observation table and scalar/AVX-512 cost-column lookups. `test-x86-zen5`
   checks unknowns, guard-page tails and generated microbenchmark loops;
@@ -190,6 +200,8 @@ designs and the compilers already built this way.
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
   `-march=native`, so the machine executing the build determines the host ISA.
   The benchmark is linked into this executable rather than built separately.
+  It compiles the translation units at once, a clang process each, and links
+  them in order: the same executable as one clang command for all of them.
 - `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
   it, and `./build/compiler test-lexer` runs them.
   The same command also runs `main_test.c`'s input-loader error and cleanup
@@ -577,7 +589,8 @@ style's "trivial statically bounded recursion", with a comment saying what
 bounds its depth. The list has three entries, the preprocessor fuzz generator's
 recursions (conditionals in groups, expressions, invocations in arguments),
 each bounded by its depth argument. The 9700X job runs
-`test-call-graph` and the check after the build; the IR takes about 1.5 s.
+`test-call-graph` and the check after the build; the check, which captures the
+units' IR at once, takes about 1.8 s.
 
 `./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
 on IR of the call forms clang writes and of what must be left out, a
@@ -2064,7 +2077,11 @@ Run it under the 9700X's lock without `taskset`: it pins its lanes and the
 linkers' runs on one thread itself, and the linkers' other runs need every CPU.
 `docs/object-writer-and-linker.md` ("The whole link") has the numbers. The
 default 9700X job runs it after benchmark-snapshot, with its lane on the job's
-first allowed CPU; like the others, its measurements are informational.
+first allowed CPU; like the others, its measurements are informational. The
+linkers' side, about 121 s of its 122, times other programs on the machine,
+the same for every pull request: the job runs it on pushes to main, dispatched
+runs and pull requests that change `link_benchmark.c` or `floors_benchmark.c`,
+and only the direct path (`--only direct`, about 1 s) on other pull requests.
 
 ## Floors benchmark
 
@@ -2098,8 +2115,9 @@ write, naming its `errno`, or a child that dies before its message or its exit.
 
 Run it under the 9700X's lock without `taskset`, and with `--directory` on each
 file system to measure. `docs/object-writer-and-linker.md` ("The floors") has
-the numbers. The default 9700X job runs it after benchmark-link; like the
-others, its measurements are informational.
+the numbers. The default 9700X job runs it after benchmark-link, where that
+runs the linkers' side (the machine's floors don't depend on a pull request
+either); like the others, its measurements are informational.
 
 ## Dataflow tests
 
@@ -2209,7 +2227,10 @@ C23. The checks cover:
 - isolation of cases, line information and predefined counter behavior.
   `__COUNTER__` cases run alone because its state belongs to the Clang process;
 - output comparison, including unequal acceptance, token counts, kinds and
-  spellings, whitespace-only changes, and invalid oracle results;
+  spellings, whitespace-only changes, and invalid oracle results; and the
+  reader of clang's `-dump-tokens` text, on lines as clang 23 writes them
+  (escapes, keywords, annotations, and tokens written with line splices, whose
+  bytes as written go on to more lines), and the lines it must refuse;
 - a planted comparison for the minimizer: delete complete lines, then tokens,
   while preserving the difference, until only the two required identifier
   tokens remain. Saving and reading a `fuzz_failure_N.c` fixture must preserve
@@ -2352,8 +2373,9 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   fuzz batch: its isolation rules checked on small sources (what a case
   leaves open makes clang read it alone), its comparison on pairs of texts
   (whitespace between tokens doesn't count, a literal's contents and joined
-  tokens do), with `--clang` its emulation of clang's -P printer checked on
-  fixtures of its own, then 1,500 cases of the
+  tokens do, and our tokens that don't lex back, as an unterminated literal,
+  end where ours do in both texts), with `--clang` its emulation of clang's
+  -P printer checked on fixtures of its own, then 1,500 cases of the
   independent harness's generator in each of C17 and C23
   (`c_preprocessor_fuzz.c`), which both kernels must give
   alike (streams, directive tables, diagnostics' counts, history and both
@@ -2406,7 +2428,15 @@ built-in predefines, the keywords and the features:
   given after the flag, and on `__has_include` with the flag alone, with
   `-nobuiltininc` and with `-nostdinc`;
 - the fuzz batch's cases must give clang's acceptance, and an accepted case's
-  stream, printed with clang's -P spacing, must lex into clang's tokens.
+  stream, printed with clang's -P spacing, must lex into clang's tokens (with
+  a comment's `/` and a line splice's `\` as tokens, which only tokens printed
+  next to each other make, and our tokens that don't lex back whole:
+  `preprocessor_fuzz_lex_printed`). Where clang's text can't show where such a
+  token ends (an unterminated literal off a pragma's line), clang's own tokens
+  for the case alone (`clang -Xclang -dump-tokens`) must confirm ours; a
+  comparison that can't be made leaves its case without a result. With
+  `--clang`, the batch first checks these on fixtures of its own, among them
+  #263's second review's probes.
 
 `sqlite3.c`, musl 1.2.5's 1,357 sources, Lua 5.4.8 and this repository's
 translation units are token-identical; `docs/c-preprocessor.md` has the
@@ -2436,12 +2466,16 @@ constructs and the qualification runs.
 ## Preprocessor benchmark
 
 `./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
-[options] file...` preprocesses each file from nothing per run (a new intern
-table and preprocessor), with the vectorized kernels and their scalar twins, 21
-passes after a warm-up, and reports the medians of time, cycles and instructions
-per input token and per output token, IPC, each phase's share and time (read,
-lex, refine, directive tables, main loop) and what a run did (directives, runs,
+[--read-limit N,...] [options] file...` preprocesses each file from nothing per
+run (a new intern table and preprocessor), with the vectorized kernels and their
+scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
+and instructions per input token and per output token, IPC, each phase's share
+and time (read, lex, refine, directive tables, main loop), the release after the
+run (the files' mappings among it), and what a run did (directives, runs,
 expansions, invocations, pastes, and the `#if` lines and their lengths).
+`--read-limit` gives a list of the largest files a run reads rather than maps
+(16 KB by default; 0 maps every file), each run in turn in every pass, which
+must all give the same output.
 `--clang` also times `clang -E -P` with the same options, a process per file,
 with `--buster-headers` as the search it makes, as the tests give it; a clang
 run that fails fails the benchmark, which then reports no timing. `-march`
