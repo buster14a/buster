@@ -3124,6 +3124,13 @@ static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* n
     return result;
 }
 
+// An include candidate without a regular file is absent; other errors stop the search. The file walk uses the same
+// boundary as the preprocessor, since cached probes retain their original error.
+static bool pp_include_error_absent(int error)
+{
+    return error == ENOENT || error == ENOTDIR || error == EISDIR || error == EINVAL || error == -1;
+}
+
 // Finds the file an include names, looking at each of its search's candidates in turn (pp_include_candidate) until a
 // file is at one. Returns the PPFile, or BUSTER_PP_NONE if no file has the name; `*found_in` gets the search directory
 // it was found in, or BUSTER_PP_NONE (the includer's directory, or an absolute path). A place the search can't look in,
@@ -3158,8 +3165,7 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
             *found_in = result != BUSTER_PP_NONE ? directory : BUSTER_PP_NONE;
             error = file != BUSTER_PP_NONE ? pp->files[file].error : 0;
         }
-        const bool absent = error == ENOENT || error == ENOTDIR || error == EISDIR || error == EINVAL || error == -1;
-        failed = error != 0 && !absent && report != BUSTER_PP_NONE;
+        failed = error != 0 && !pp_include_error_absent(error) && report != BUSTER_PP_NONE;
         if (failed)
         {
             // The place as clang names it: the directory (the includer's, or a search directory), a '/' and the name, or
