@@ -688,6 +688,15 @@ static const PPDirectiveTestStructure pp_directive_test_structures[] = {
     { "unterminated inside skipped groups", "#if 1\n#if 0\n#if 1\n#ifdef X\n#else\n#else\n", 0, 0 },
     { "unterminated in an include", "#if 1\n#include \"structure.h\"\n#endif\n#endif\n", "#if 1\n#if 0\n#if 1\n", 0 },
     { "a comment that swallows the group", "#if 0\n/* never closed\n#else\n#endif\nx\n", 0, 0 },
+    { "an active comment that swallows the group", "#if 1\n/* never closed\n#else\n#endif\nx\n", 0, 0 },
+    { "a comment on the opening directive", "#if 0 /* never closed\n#else\n#endif\nx\n", 0, 0 },
+    { "a spliced comment on the opening directive", "#if 0\\\n /* never closed\n#else\n#endif\nx\n", 0, 0 },
+    { "a comment after a skipped group", "#if 0\n#else /* never closed\n#endif\nx\n", 0, 0 },
+    { "a comment after a taken group", "#if 1\n#else /* never closed\n#endif\nx\n", 0, 0 },
+    { "a comment on a selected #elif", "#if 0\n#elif 1 /* never closed\n#endif\nx\n", 0, 0 },
+    { "a comment on an excluded #elif", "#if 1\n#elif 1 /* never closed\n#endif\nx\n", 0, 0 },
+    { "a comment on a skipped group's end", "#if 0\n#endif /* never closed\nx\n", 0, 0 },
+    { "a comment in a repeated include", "#include \"structure.h\"\n#include \"structure.h\"\n", "/* never closed\n", 0 },
     { "extra tokens", "#if 1 // c\n#else junk\n#endif junk\n#if 0\n#else junk\n#endif junk\n#ifdef A B\n#endif\n#if 0\n#if 1\n#else x\n#endif y\n#endif\n",
       0, 0 },
     { "extra tokens around the structure", "#else junk\n#endif junk\n#if 0\n#else\n#else junk\n#endif\n#if 1\n#else\n#else junk\n#endif\n#if 1\n#elif 1\n#else junk\n#endif\n",
@@ -695,6 +704,18 @@ static const PPDirectiveTestStructure pp_directive_test_structures[] = {
     { "extra tokens on #elifdef", "#if 0\n#elifdef X Y\n#elifndef Z W\n#endif\n", 0, "c23" },
     { "after #line", "#line 100\n#else\n#if 0\n#else\n#else\n#endif\n#line 7 \"renamed.c\"\n#elif 1\n#if 1\n", 0, 0 },
     { "digraphs and splices", "%:if 0\n%:  if 1\n#el\\\nse\n%:else\n%:endif\n#endif\n#\\\nendif\n", 0, 0 },
+};
+
+// Diagnostic messages are original source text, including comments and trailing blanks. A skipped directive still
+// belongs to raw excluded input; an active one must not let its comment text swallow the source after its newline.
+static const PPDirectiveTestStructure pp_directive_test_messages[] = {
+    { "an active warning's comment text", "#warning /* never closed\ntail\n", 0, 0 },
+    { "an active error's comment text", "#error /* never closed\ntail\n", 0, 0 },
+    { "comments, quotes and trailing blanks", "#warning /* comment */ x   \t\n#error '\n", 0, 0 },
+    { "a spliced name and message", "#war\\\nning /* op\\\nen\ntail\n", 0, 0 },
+    { "an excluded warning's comment", "#if 0\n#warning /* never closed\n#endif\ntail\n", 0, 0 },
+    { "an excluded error's comment", "#if 0\n#error /* never closed\n#endif\ntail\n", 0, 0 },
+    { "repeated inclusions", "#include \"structure.h\"\n#include \"structure.h\"\n", "#warning /* never closed\ntail\n", 0 },
 };
 
 // Fixtures of #define's and #undef's constraints and of redefinitions (C 6.10.4, #121), reported as clang reports them.
@@ -899,6 +920,68 @@ static bool pp_directive_test_diagnostics(const PPDirectiveTestStructure* fixtur
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Include guards and #pragma once (#120)
+
+// Ordinary messages don't consume recovery capacity. At the exceptional-repair boundary the whole tail survives;
+// past it the run must fail explicitly, with no spurious comment diagnostic or extra message from the failed repair.
+static bool pp_directive_test_message_capacity(void)
+{
+    uint32_t failures = 0;
+    for (uint32_t test = 0; test < 3; test += 1)
+    {
+        char source[4096];
+        uint32_t length = 0;
+        const uint32_t count = test == 1 ? 64 : 65;
+        const char* message = test == 0 ? "#warning plain\n" : "#warning /*\n";
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "%s", message);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "tail\n");
+        for (uint32_t kernel = 0; kernel < 2; kernel += 1)
+        {
+            static Preprocessor pp;
+            static InternTable table;
+            const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true, .scalar = kernel != 0 };
+            const bool initialized = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+            const bool ran = initialized && pp_run_source(&pp, "message-capacity.c", (const uint8_t*)source, length);
+            const bool complete = test != 2;
+            bool same = initialized && ran == complete && pp.fatal == !complete && pp.errors == !complete && pp.warnings == (complete ? count : 64);
+            if (same && complete)
+            {
+                same = pp.output.count == 1 && pp.output.kinds[0] == C_TOKEN_RAW_IDENTIFIER && intern_length(&table, pp.output.values[0]) == 4 &&
+                       memcmp(intern_bytes(&table, pp.output.values[0]), "tail", 4) == 0;
+            }
+            failures += !same;
+            pp_release(&pp);
+            intern_release(&table);
+        }
+    }
+    printf("diagnostic recovery capacity: %u of 6 kernel runs differ\n", failures);
+    return failures == 0;
+}
+
+// A private prepared view doesn't change the origin of language macros read from the supplied predefines file.
+static bool pp_directive_test_predefines_origin(const char* directory)
+{
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/message-predefines.h", directory);
+    bool result = pp_test_write_file(path, "#warning /* never closed\n#define __STDC__ 1\n");
+    for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
+    {
+        static Preprocessor pp;
+        static InternTable table;
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true, .scalar = kernel != 0, .predefines_path = path };
+        const bool initialized = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        static const uint8_t source[] = "#undef __STDC__\n";
+        const bool ran = initialized && pp_run_source(&pp, "message-origin.c", source, sizeof(source) - 1);
+        result = initialized && ran && pp.errors == 0 && pp.warnings == 2;
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    unlink(path);
+    printf("diagnostic recovery predefines origin: %s\n", result ? "preserved" : "DIFFERS");
+    return result;
+}
 
 // A guard fixture: the main source, its files (a name and its text, or for a link "->target" (symbolic) or "=>target"
 // (hard) to another of them; ended by a null name), and how many inclusions it skips by guards and by #pragma once.
@@ -1245,6 +1328,9 @@ static bool pp_test_directives(const char* directory, bool with_clang, uint64_t 
 {
     bool result = pp_directive_test_streams(seed, count);
     result &= pp_directive_test_diagnostics(pp_directive_test_structures, BUSTER_ARRAY_LENGTH(pp_directive_test_structures), "directive structure", directory, with_clang);
+    result &= pp_directive_test_diagnostics(pp_directive_test_messages, BUSTER_ARRAY_LENGTH(pp_directive_test_messages), "diagnostic text", directory, with_clang);
+    result &= pp_directive_test_message_capacity();
+    result &= pp_directive_test_predefines_origin(directory);
     result &= pp_directive_test_diagnostics(pp_directive_test_definitions, BUSTER_ARRAY_LENGTH(pp_directive_test_definitions), "definitions", directory, with_clang);
     result &= pp_directive_test_guards(directory, with_clang);
     result &= pp_directive_test_location_space(directory);

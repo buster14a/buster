@@ -5,12 +5,15 @@
 // acceptance and preprocessing-token streams, a planted comparison adapter, and line/token deletion minimization.
 // A valid rejection differs from a valid acceptance; infrastructure, allocation and lexer failures are INVALID,
 // never evidence of a preprocessor disagreement. Token spellings include their source bytes, but whitespace and
-// the lexer's start-of-line flag do not participate in comparison.
+// the lexer's start-of-line flag do not participate in comparison; a printed text's tokens are its lexer's but where
+// bytes printed next to each other would hide or merge its stream's (preprocessor_fuzz_lex_printed).
 //
 // main.c includes this file after c_lexer.c, String8 and lane.c, then the generator, clang backend and tests.
 // This is test tooling outside the compile path, with no separate vector implementation. c_tokenize supplies its
-// normal checked SIMD/scalar lexer. The minimizer currently calls only the explicit planted adapter below; connecting
-// a real second preprocessor belongs to the later differential runner.
+// normal checked SIMD/scalar lexer. The minimizer keeps a candidate while its oracle (PreprocessorFuzzOracle) still
+// finds a difference of the same kind: the planted adapter below, or the preprocessor against clang or its vectorized
+// kernels against their scalar twins, which c_preprocessor_fuzz.c (included after the preprocessor) defines, with the
+// dispatch preprocessor_fuzz_difference.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -23,8 +26,16 @@
 #include <unistd.h>
 
 #define BUSTER_PPF_MAX_CASE_BYTES 32768
+// SOURCE_DATE_EPOCH while cases run, so that every process gives __DATE__, __TIME__ and __TIMESTAMP__ alike.
+#define BUSTER_PPF_EPOCH "1767225600"
 #define BUSTER_PPF_MAX_OUTPUT_BYTES (1ull << 20)
-#define BUSTER_PPF_CONSTRUCT_COUNT 36
+// The generator's families: 36 templates, then 12 random programs, each of which a cycle of ids has
+// BUSTER_PPF_RANDOM_WEIGHT times (preprocessor_fuzz_family).
+#define BUSTER_PPF_TEMPLATE_FAMILIES 36
+#define BUSTER_PPF_RANDOM_FAMILIES 12
+#define BUSTER_PPF_RANDOM_WEIGHT 5
+#define BUSTER_PPF_CONSTRUCT_COUNT (BUSTER_PPF_TEMPLATE_FAMILIES + BUSTER_PPF_RANDOM_FAMILIES)
+#define BUSTER_PPF_FAMILY_CYCLE (BUSTER_PPF_TEMPLATE_FAMILIES + BUSTER_PPF_RANDOM_WEIGHT * BUSTER_PPF_RANDOM_FAMILIES)
 
 typedef struct PreprocessorFuzzCase PreprocessorFuzzCase;
 struct PreprocessorFuzzCase
@@ -35,10 +46,25 @@ struct PreprocessorFuzzCase
     bool isolated;
 };
 
+// A token of the stream a text prints that doesn't lex back into itself, which the comparison takes whole
+// (preprocessor_fuzz_lex_printed): its range in the text, its kind (C_TOKEN_UNKNOWN or C_TOKEN_STRING_LITERAL), and
+// whether it is on a pragma's line, whose end it is in both texts.
+typedef struct PreprocessorFuzzWhole PreprocessorFuzzWhole;
+struct PreprocessorFuzzWhole
+{
+    uint32_t start;
+    uint32_t end;
+    uint8_t kind;
+    bool pragma;
+};
+
 typedef struct PreprocessorFuzzOutput PreprocessorFuzzOutput;
 struct PreprocessorFuzzOutput
 {
     String8 text;
+    // The tokens taken whole, in order. Our text has them (c_preprocessor_fuzz.c's pp_fuzz_output); clang's has none.
+    const PreprocessorFuzzWhole* whole;
+    uint64_t whole_count;
     bool accepted;
     bool valid;
 };
@@ -60,18 +86,54 @@ enum PreprocessorFuzzDifference
     BUSTER_PPF_TOKEN_COUNT,
     BUSTER_PPF_TOKEN_KIND,
     BUSTER_PPF_TOKEN_SPELLING,
+    // The preprocessor's vectorized kernels and their scalar twins disagree (BUSTER_PPF_ORACLE_KERNELS): on the
+    // acceptance or the diagnostics' counts, the streams, the directive tables, or the printers' bytes; or the -P
+    // text doesn't lex back into the stream.
+    BUSTER_PPF_KERNEL_RESULTS,
+    BUSTER_PPF_KERNEL_STREAMS,
+    BUSTER_PPF_KERNEL_TABLES,
+    BUSTER_PPF_KERNEL_PRINTERS,
+    BUSTER_PPF_KERNEL_PRINTED,
     BUSTER_PPF_INVALID,
+};
+
+// What finds a difference in a candidate while it is minimized.
+typedef enum PreprocessorFuzzOracleKind PreprocessorFuzzOracleKind;
+enum PreprocessorFuzzOracleKind
+{
+    // The planted adapter: both exact identifiers BUSTER_PPF_LEFT and BUSTER_PPF_RIGHT (the self-tests).
+    BUSTER_PPF_ORACLE_PLANTED,
+    // The preprocessor against clang, each on the case alone.
+    BUSTER_PPF_ORACLE_CLANG,
+    // The preprocessor's vectorized kernels against their scalar twins.
+    BUSTER_PPF_ORACLE_KERNELS,
+};
+
+typedef struct PreprocessorFuzzOracle PreprocessorFuzzOracle;
+struct PreprocessorFuzzOracle
+{
+    PreprocessorFuzzOracleKind kind;
+    // For the preprocessor's oracles: clang, the case's id (its #line file name) and its language mode.
+    const char* clang_path;
+    uint64_t id;
+    bool c23;
 };
 
 static __attribute__((unused)) bool preprocessor_fuzz_append(PreprocessorFuzzBuffer* buffer, String8 source);
 static __attribute__((unused)) bool preprocessor_fuzz_format(PreprocessorFuzzBuffer* buffer, const char* format, ...);
 static __attribute__((unused)) PreprocessorFuzzDifference preprocessor_fuzz_compare(Arena* scratch, PreprocessorFuzzOutput left, PreprocessorFuzzOutput right);
+// The same, with both texts lexed as the language mode reads them (`c23` false: as C17, preprocessor_fuzz_lex_c17).
+static __attribute__((unused)) PreprocessorFuzzDifference preprocessor_fuzz_compare_mode(Arena* scratch, PreprocessorFuzzOutput left, PreprocessorFuzzOutput right, bool c23);
 static __attribute__((unused)) bool preprocessor_fuzz_generate(Arena* arena, uint64_t seed, uint64_t id, bool c23, PreprocessorFuzzCase* result);
 static __attribute__((unused)) bool preprocessor_fuzz_clang_version(const char* clang_path);
 static __attribute__((unused)) bool preprocessor_fuzz_clang(Arena* arena, const char* clang_path, bool c23, const PreprocessorFuzzCase* cases, uint64_t count, bool individual, PreprocessorFuzzOutput* outputs);
-static __attribute__((unused)) bool preprocessor_fuzz_minimize(Arena* arena, String8 input, String8* result);
+static __attribute__((unused)) bool preprocessor_fuzz_minimize(Arena* arena, const PreprocessorFuzzOracle* oracle, String8 input, String8* result);
 static __attribute__((unused)) bool preprocessor_fuzz_save(String8 source, uint64_t number);
 static __attribute__((unused)) bool preprocessor_fuzz_planted(Arena* scratch, String8 source);
+static __attribute__((unused)) PreprocessorFuzzDifference preprocessor_fuzz_planted_difference(Arena* scratch, String8 source);
+// The difference `oracle` finds in `source`, or BUSTER_PPF_INVALID if it can't run: defined in c_preprocessor_fuzz.c,
+// which dispatches to the planted adapter or the preprocessor's oracles.
+static PreprocessorFuzzDifference preprocessor_fuzz_difference(Arena* scratch, const PreprocessorFuzzOracle* oracle, String8 source);
 static __attribute__((unused)) int run_preprocessor_fuzz_tests(int argc, char** argv);
 
 typedef struct PreprocessorFuzzTokens PreprocessorFuzzTokens;
@@ -131,6 +193,89 @@ static bool preprocessor_fuzz_tokenize(Arena* arena, String8 source, Preprocesso
     return preprocessor_fuzz_tokenize_limit(arena, source, BUSTER_PPF_MAX_OUTPUT_BYTES, result);
 }
 
+// What c_tokenize lexed as C23 does, lexed as C17 does: a number has no digit separator there (clang ends it before a
+// `'`, which starts a character constant, so the bytes from the `'` on are lexed again, for each such number), and u8
+// is no character constant's prefix (u8'a' is the identifier u8 and the constant 'a'). The arrays have room for a token
+// per byte. Returns false if the lexer fails. The preprocessor has a C17 lexing of its own (c_preprocessor.c's
+// pp_lex_mode): this one, the oracle's, is apart from it on purpose.
+static bool preprocessor_fuzz_lex_c17(Arena* scratch, String8 source, PreprocessorFuzzTokens* tokens)
+{
+    bool result = true;
+    uint64_t from = 0;
+    bool searching = true;
+    while (result && searching)
+    {
+        uint64_t number = tokens->count;
+        const char* quote = 0;
+        for (uint64_t t = from; quote == 0 && t < tokens->count; t += 1)
+        {
+            const bool numeric = (tokens->kinds[t] & ~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_NUMERIC_CONSTANT;
+            quote = numeric ? memchr(source.pointer + tokens->starts[t], '\'', tokens->ends[t] - tokens->starts[t]) : 0;
+            number = quote != 0 ? t : number;
+        }
+        searching = quote != 0;
+        if (searching)
+        {
+            const uint64_t mark = scratch->length;
+            const uint32_t at = (uint32_t)(quote - source.pointer);
+            const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(source.length - at);
+            uint8_t* kinds = arena_push(scratch, capacity, 64);
+            uint32_t* starts = arena_push_array(scratch, capacity, sizeof(uint32_t), 64);
+            uint32_t* ends = arena_push_array(scratch, capacity, sizeof(uint32_t), 64);
+            const int64_t tail = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize((const uint8_t*)source.pointer + at, source.length - at, kinds, starts, ends, 0) : -1;
+            result = tail >= 0;
+            tokens->ends[number] = at;
+            for (int64_t k = 0; result && k < tail; k += 1)
+            {
+                // The constant is in the middle of its line.
+                tokens->kinds[number + 1 + k] = (uint8_t)(k == 0 ? kinds[k] & ~BUSTER_C_TOKEN_START_OF_LINE : kinds[k]);
+                tokens->starts[number + 1 + k] = starts[k] + at;
+                tokens->ends[number + 1 + k] = ends[k] + at;
+            }
+            tokens->count = result ? number + 1 + (uint64_t)tail : tokens->count;
+            from = number + 1;
+            arena_pop_to(scratch, mark);
+        }
+    }
+    uint64_t splits = 0;
+    for (uint64_t token = 0; result && token < tokens->count; token += 1)
+    {
+        splits += (tokens->kinds[token] & ~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_UTF8_CHAR_CONSTANT;
+    }
+    // From the end, so that each token moves once, as far as the splits before it.
+    const uint64_t count = tokens->count;
+    for (uint64_t token = count; result && splits != 0 && token > 0; token -= 1)
+    {
+        const uint64_t at = token - 1;
+        const uint8_t kind = tokens->kinds[at];
+        const uint32_t start = tokens->starts[at];
+        const uint32_t end = tokens->ends[at];
+        if ((kind & ~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_UTF8_CHAR_CONSTANT)
+        {
+            uint32_t quote = start;
+            while (quote < end && source.pointer[quote] != '\'')
+            {
+                quote += 1;
+            }
+            tokens->kinds[at + splits] = C_TOKEN_CHAR_CONSTANT;
+            tokens->starts[at + splits] = quote;
+            tokens->ends[at + splits] = end;
+            splits -= 1;
+            tokens->kinds[at + splits] = (uint8_t)((kind & BUSTER_C_TOKEN_START_OF_LINE) | C_TOKEN_RAW_IDENTIFIER);
+            tokens->starts[at + splits] = start;
+            tokens->ends[at + splits] = quote;
+            tokens->count += 1;
+        }
+        else
+        {
+            tokens->kinds[at + splits] = kind;
+            tokens->starts[at + splits] = start;
+            tokens->ends[at + splits] = end;
+        }
+    }
+    return result;
+}
+
 static bool preprocessor_fuzz_tokenize_limit(Arena* arena, String8 source, uint64_t limit, PreprocessorFuzzTokens* result)
 {
     const uint64_t saved_length = arena->length;
@@ -170,22 +315,209 @@ static bool preprocessor_fuzz_tokenize_limit(Arena* arena, String8 source, uint6
     return success;
 }
 
+// How preprocessor_fuzz_lex_printed took a printed text's token: as the lexer made it, whole on a pragma's line where it
+// doesn't run on (preprocessor_fuzz_whole_runs_on), or whole elsewhere, where the other text's token at its index
+// follows its end.
+#define BUSTER_PPF_TAKEN_LEXED 0
+#define BUSTER_PPF_TAKEN_WHOLE 1
+#define BUSTER_PPF_TAKEN_FOLLOWED 2
+
+// Whether a whole token of `text` runs on past its end in the text, so that another text's can't show where it ends:
+// an unterminated literal, or a broken string's last quote, runs on to its line's end, unless it is there already; a
+// stray `\` only takes a newline right after it into a line splice.
+static bool preprocessor_fuzz_whole_runs_on(String8 text, const PreprocessorFuzzWhole* whole)
+{
+    const bool line_end = whole->end == text.length || text.pointer[whole->end] == '\n';
+    const bool backslash = whole->end - whole->start == 1 && text.pointer[whole->start] == '\\';
+    return !line_end && !backslash;
+}
+
+// A printed text's tokens (preprocessor_fuzz_lex_printed), with how each was taken.
+typedef struct PreprocessorFuzzPrinted PreprocessorFuzzPrinted;
+struct PreprocessorFuzzPrinted
+{
+    PreprocessorFuzzTokens tokens;
+    uint8_t* taken;
+};
+
+// The tokens of text[position..], lexed as the mode lexes (`c23` false: as C17, preprocessor_fuzz_lex_c17), into new
+// arrays in `arena`, at offsets from `position`.
+static bool preprocessor_fuzz_lex_from(Arena* arena, String8 text, uint64_t position, bool c23, PreprocessorFuzzTokens* part)
+{
+    const String8 rest = {
+        .pointer = text.pointer + position,
+        .length = text.length - position,
+    };
+    const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(rest.length);
+    *part = (PreprocessorFuzzTokens){
+        .kinds = arena_push(arena, capacity, 64),
+        .starts = arena_push_array(arena, capacity, sizeof(uint32_t), 64),
+        .ends = arena_push_array(arena, capacity, sizeof(uint32_t), 64),
+    };
+    const bool allocated = part->kinds != 0 && part->starts != 0 && part->ends != 0;
+    const int64_t count = !allocated ? -1 : rest.length == 0 ? 0 : c_tokenize((const uint8_t*)rest.pointer, rest.length, part->kinds, part->starts, part->ends, 0);
+    part->count = count > 0 ? (uint64_t)count : 0;
+    return count >= 0 && (uint64_t)count <= rest.length && (c23 || preprocessor_fuzz_lex_c17(arena, rest, part));
+}
+
+// Appends token [start, end) of `kind`, taken as `taken` says, to `printed`, which has room for `capacity`.
+static bool preprocessor_fuzz_push_printed(PreprocessorFuzzPrinted* printed, uint64_t capacity, uint64_t start, uint64_t end, uint8_t kind, uint8_t taken)
+{
+    const uint64_t at = printed->tokens.count;
+    const bool result = at < capacity;
+    if (result)
+    {
+        printed->tokens.kinds[at] = kind;
+        printed->tokens.starts[at] = (uint32_t)start;
+        printed->tokens.ends[at] = (uint32_t)end;
+        printed->taken[at] = taken;
+        printed->tokens.count = at + 1;
+    }
+    return result;
+}
+
+// A printed text's tokens for the comparison. It is lexed as the mode lexes (preprocessor_fuzz_lex_from), but where
+// that would run past a token of the stream it prints, or drop one, which only bytes printed next to each other can
+// make:
+//   - a comment's `/` and a line splice's `\` are tokens, and lexing goes on after them: neither printer writes either,
+//     so a `/` printed before a `*` or a `/` made the one, and a `\` before a newline the other;
+//   - the lexed token that reaches the start of one of output.whole's tokens ends where it does, and lexing goes on
+//     from there. A text without them (clang's) follows `reference`'s tokens (ours, lexed first) instead, but on a
+//     pragma's line where such a token doesn't run on (preprocessor_fuzz_whole_runs_on), whose end both texts show:
+//     the token at the index of one of its whole tokens is as long, when it starts with the same bytes. So an unterminated literal ends where our stream's does in both
+//     texts, rather than run on through the printer's spaces and the tokens after it to its line's end. Where it ends
+//     in clang's stream, its text can't show: clang's own tokens confirm it (c_preprocessor_fuzz.c's
+//     pp_fuzz_check_ends), but on a pragma's line, which they don't have, and which a pragma whose tokens are expanded
+//     (`#pragma omp`) can go on past such a token.
+// A whole token is unknown. Returns false if the text can't be lexed or its whole tokens are out of order or outside
+// it.
+static bool preprocessor_fuzz_lex_printed(Arena* arena, PreprocessorFuzzOutput output, bool c23, String8 reference_text, const PreprocessorFuzzPrinted* reference, PreprocessorFuzzPrinted* result)
+{
+    const String8 text = output.text;
+    const uint64_t saved_length = arena->length;
+    bool success = text.length <= BUSTER_PPF_MAX_OUTPUT_BYTES && text.length <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK && (text.length == 0 || text.pointer != 0);
+    success = success && (output.whole_count == 0 || output.whole != 0);
+    for (uint64_t range = 0; success && range < output.whole_count; range += 1)
+    {
+        success = output.whole[range].start < output.whole[range].end && output.whole[range].end <= text.length;
+        success = success && (range == 0 || output.whole[range - 1].end <= output.whole[range].start);
+    }
+    const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(text.length);
+    PreprocessorFuzzPrinted printed = { 0 };
+    if (success)
+    {
+        printed.tokens.kinds = arena_push_array(arena, capacity, sizeof(uint8_t), _Alignof(uint8_t));
+        printed.tokens.starts = arena_push_array(arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
+        printed.tokens.ends = arena_push_array(arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
+        printed.taken = arena_push_array(arena, capacity, sizeof(uint8_t), _Alignof(uint8_t));
+        success = printed.tokens.kinds != 0 && printed.tokens.starts != 0 && printed.tokens.ends != 0 && printed.taken != 0;
+    }
+    // Lexes from `position`, until a token the lexer didn't make ends elsewhere than its tokens: then again from there.
+    uint64_t position = 0;
+    uint64_t range = 0;
+    bool lexing = success;
+    while (success && lexing)
+    {
+        const uint64_t mark = arena->length;
+        PreprocessorFuzzTokens part = { 0 };
+        success = preprocessor_fuzz_lex_from(arena, text, position, c23, &part);
+        uint64_t previous = position;
+        uint64_t again = 0;
+        // The part's tokens, then the gap after the last one.
+        for (uint64_t k = 0; success && again == 0 && k <= part.count; k += 1)
+        {
+            const uint64_t start = k < part.count ? part.starts[k] + position : text.length;
+            const uint64_t end = k < part.count ? part.ends[k] + position : text.length;
+            for (uint64_t x = previous; success && again == 0 && x < start; x += 1)
+            {
+                const char c = text.pointer[x];
+                if (c == '/' || c == '\\')
+                {
+                    success = preprocessor_fuzz_push_printed(&printed, capacity, x, x + 1, c == '/' ? C_TOKEN_SLASH : C_TOKEN_UNKNOWN, BUSTER_PPF_TAKEN_LEXED);
+                    // What a splice hid is only itself, but a comment hides what follows its `/`.
+                    again = c == '/' ? x + 1 : 0;
+                }
+            }
+            if (success && again == 0 && k < part.count)
+            {
+                const uint8_t kind = part.kinds[k] & ~BUSTER_C_TOKEN_START_OF_LINE;
+                while (range < output.whole_count && output.whole[range].start < start)
+                {
+                    range += 1;
+                }
+                uint64_t stop = end;
+                uint8_t taken = BUSTER_PPF_TAKEN_LEXED;
+                if (kind == C_TOKEN_UNKNOWN && end - start >= 2 && text.pointer[start] == '/' && text.pointer[start + 1] == '*')
+                {
+                    // An unterminated comment: its `/`.
+                    stop = start + 1;
+                }
+                else if (range < output.whole_count && output.whole[range].start < end)
+                {
+                    stop = output.whole[range].end;
+                    const bool runs_on = preprocessor_fuzz_whole_runs_on(text, &output.whole[range]);
+                    taken = output.whole[range].pragma && !runs_on ? BUSTER_PPF_TAKEN_WHOLE : BUSTER_PPF_TAKEN_FOLLOWED;
+                    range += 1;
+                }
+                else if (reference != 0 && printed.tokens.count < reference->tokens.count && reference->taken[printed.tokens.count] == BUSTER_PPF_TAKEN_FOLLOWED)
+                {
+                    const uint64_t index = printed.tokens.count;
+                    const uint64_t length = (uint64_t)reference->tokens.ends[index] - reference->tokens.starts[index];
+                    const bool same = length <= text.length - start && memcmp(text.pointer + start, reference_text.pointer + reference->tokens.starts[index], length) == 0;
+                    taken = same ? BUSTER_PPF_TAKEN_FOLLOWED : BUSTER_PPF_TAKEN_LEXED;
+                    stop = same ? start + length : end;
+                }
+                const uint8_t pushed = taken != BUSTER_PPF_TAKEN_LEXED ? C_TOKEN_UNKNOWN : stop != end ? C_TOKEN_SLASH : part.kinds[k];
+                success = preprocessor_fuzz_push_printed(&printed, capacity, start, stop, pushed, taken);
+                again = stop != end ? stop : 0;
+                previous = end;
+            }
+        }
+        arena_pop_to(arena, mark);
+        lexing = again != 0;
+        position = again;
+    }
+    for (uint64_t token = 0; success && token < printed.tokens.count; token += 1)
+    {
+        const uint8_t kind = printed.tokens.kinds[token] & ~BUSTER_C_TOKEN_START_OF_LINE;
+        success = kind < C_TOKEN_KIND_COUNT && printed.tokens.starts[token] < printed.tokens.ends[token] && printed.tokens.ends[token] <= text.length;
+        success = success && (token == 0 || printed.tokens.ends[token - 1] <= printed.tokens.starts[token]);
+    }
+    if (success)
+    {
+        *result = printed;
+    }
+    else
+    {
+        arena_pop_to(arena, saved_length);
+    }
+    return success;
+}
+
 static PreprocessorFuzzDifference preprocessor_fuzz_compare(Arena* scratch, PreprocessorFuzzOutput left, PreprocessorFuzzOutput right)
+{
+    return preprocessor_fuzz_compare_mode(scratch, left, right, true);
+}
+
+static PreprocessorFuzzDifference preprocessor_fuzz_compare_mode(Arena* scratch, PreprocessorFuzzOutput left, PreprocessorFuzzOutput right, bool c23)
 {
     const uint64_t saved_length = scratch->length;
     PreprocessorFuzzDifference difference = BUSTER_PPF_EQUAL;
-    PreprocessorFuzzTokens left_tokens = { 0 };
-    PreprocessorFuzzTokens right_tokens = { 0 };
+    PreprocessorFuzzPrinted left_printed = { 0 };
+    PreprocessorFuzzPrinted right_printed = { 0 };
     bool valid = left.valid && right.valid;
-    // Validate every accepted side before classifying acceptance, so a broken result is never a difference.
+    // Validate every accepted side before classifying acceptance, so a broken result is never a difference. The right
+    // text follows the left one's whole tokens (preprocessor_fuzz_lex_printed).
     if (valid && left.accepted)
     {
-        valid = preprocessor_fuzz_tokenize(scratch, left.text, &left_tokens);
+        valid = preprocessor_fuzz_lex_printed(scratch, left, c23, left.text, 0, &left_printed);
     }
     if (valid && right.accepted)
     {
-        valid = preprocessor_fuzz_tokenize(scratch, right.text, &right_tokens);
+        valid = preprocessor_fuzz_lex_printed(scratch, right, c23, left.text, &left_printed, &right_printed);
     }
+    const PreprocessorFuzzTokens left_tokens = left_printed.tokens;
+    const PreprocessorFuzzTokens right_tokens = right_printed.tokens;
     if (!valid)
     {
         difference = BUSTER_PPF_INVALID;
@@ -267,14 +599,17 @@ static bool preprocessor_fuzz_planted(Arena* scratch, String8 source)
     return difference != BUSTER_PPF_EQUAL && difference != BUSTER_PPF_INVALID;
 }
 
-static bool preprocessor_fuzz_minimize(Arena* arena, String8 input, String8* result)
+// Deletes lines, then tokens, from `input` while `oracle` still finds the difference it finds in `input` (the same kind
+// of difference, so that the candidate keeps one failure rather than wandering to another).
+static bool preprocessor_fuzz_minimize(Arena* arena, const PreprocessorFuzzOracle* oracle, String8 input, String8* result)
 {
     const uint64_t saved_length = arena->length;
     bool success = input.length <= BUSTER_PPF_MAX_CASE_BYTES && (input.length == 0 || input.pointer != 0);
+    PreprocessorFuzzDifference wanted = BUSTER_PPF_INVALID;
     if (success)
     {
-        const PreprocessorFuzzDifference difference = preprocessor_fuzz_planted_difference(arena, input);
-        success = difference != BUSTER_PPF_EQUAL && difference != BUSTER_PPF_INVALID;
+        wanted = preprocessor_fuzz_difference(arena, oracle, input);
+        success = wanted != BUSTER_PPF_EQUAL && wanted != BUSTER_PPF_INVALID;
     }
     char* current = 0;
     char* candidate = 0;
@@ -317,9 +652,9 @@ static bool preprocessor_fuzz_minimize(Arena* arena, String8 input, String8* res
                 .pointer = candidate,
                 .length = current_length - (end - begin),
             };
-            const PreprocessorFuzzDifference difference = preprocessor_fuzz_planted_difference(arena, trial);
+            const PreprocessorFuzzDifference difference = preprocessor_fuzz_difference(arena, oracle, trial);
             success = difference != BUSTER_PPF_INVALID;
-            if (success && difference != BUSTER_PPF_EQUAL)
+            if (success && difference == wanted)
             {
                 memcpy(current, candidate, trial.length);
                 current_length = trial.length;
@@ -377,9 +712,9 @@ static bool preprocessor_fuzz_minimize(Arena* arena, String8 input, String8* res
                 .pointer = candidate,
                 .length = buffer.length,
             };
-            const PreprocessorFuzzDifference difference = buffer.valid ? preprocessor_fuzz_planted_difference(arena, trial) : BUSTER_PPF_INVALID;
+            const PreprocessorFuzzDifference difference = buffer.valid ? preprocessor_fuzz_difference(arena, oracle, trial) : BUSTER_PPF_INVALID;
             success = difference != BUSTER_PPF_INVALID;
-            if (success && difference != BUSTER_PPF_EQUAL)
+            if (success && difference == wanted)
             {
                 memcpy(current, candidate, trial.length);
                 current_length = trial.length;

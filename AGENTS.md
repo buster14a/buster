@@ -215,6 +215,10 @@ designs and the compilers already built this way.
   The benchmark is linked into this executable rather than built separately.
   It compiles the translation units at once, a clang process each, and links
   them in order: the same executable as one clang command for all of them.
+- `C_TOKENIZER_NO_DIGIT_SEPARATORS` makes both lexer paths end pp-numbers
+  before `'`; the preprocessor sets it in modes before C23, including file
+  caches, scratch text and pastes. The standalone lexer's default keeps C23
+  separators. `benchmark-lexer --no-digit-separators` measures the flag.
 - `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
   it, and `./build/compiler test-lexer` runs them.
 - `src/buster/compiler/c_lexer_benchmark.c` provides the `benchmark-lexer`
@@ -228,12 +232,13 @@ designs and the compilers already built this way.
 - `src/buster/compiler/preprocessor_fuzz.c` provides bounded output comparison
   and the minimizer for the independent preprocessor test harness.
   `preprocessor_fuzz_generate.c` generates cases, `preprocessor_fuzz_clang.c`
-  runs the Clang oracle, `preprocessor_fuzz_test.c` provides
-  `test-preprocessor-fuzz`, and `preprocessor_fuzz_benchmark.c` provides
-  `benchmark-preprocessor-fuzz`, measuring the external test harness; `main.c`
-  includes all five. `docs/preprocessor-fuzz.md` records
-  its contract. These names and locations are provisional pending agreement
-  with the #117 session; no Buster preprocessor is attached yet.
+  runs the Clang oracle, and `preprocessor_fuzz_test.c` provides
+  `test-preprocessor-fuzz`, the harness's own checks; `main.c` includes all
+  four. `preprocessor_fuzz_benchmark.c` provides `benchmark-preprocessor-fuzz`,
+  measuring the external test harness. `c_preprocessor_fuzz.c` attaches the
+  preprocessor to it: `test-preprocessor --fuzz`, below.
+  `docs/preprocessor-fuzz.md` records the contract, the comparison and the
+  qualification runs.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
   of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder,
   and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
@@ -468,13 +473,14 @@ designs and the compilers already built this way.
   provides `benchmark-refinement`.
 - `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
   unit's token stream from its files' refined tokens, and `./build/compiler -E`
-  (as `clang -E`, with `-dM`). `docs/c-preprocessor.md` explains the design, the
-  `clang -E` oracle and the 9700X measurements. `c_preprocessor_test.c` holds its
-  tests (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
-  `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`. Its
-  `FileCache` holds what is prepared from each file (by identity) and every
-  path looked up, for every translation unit that preprocesses with it
-  (`PPOptions.files`; a unit without one makes its own).
+  (as `clang -E`, with `-dM`). `docs/c-preprocessor.md` explains the design, the `clang -E`
+  oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
+  (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
+  `c_preprocessor_fuzz.c` its differential fuzzing (#109; `main.c` includes
+  it after the tests) and `c_preprocessor_benchmark.c` provides
+  `benchmark-preprocessor`. Its `FileCache` holds what is prepared from each
+  file (by identity) and every path looked up, for every translation unit that
+  preprocesses with it (`PPOptions.files`; a unit without one makes its own).
   `c_predefines.c` gives the predefined macros the target and the options decide,
   as clang does (`-march`, the `-m` feature flags, `-march=native` from CPUID,
   `-O`, `-f...`, `-g`), from tables generated from clang 23; `c_predefines_test.c`
@@ -664,8 +670,10 @@ then a summary line, and exits with status 1 on a cycle not in
 can't read. An entry names a component's functions, each as many times as
 the component has a function of that name; add one only for the
 style's "trivial statically bounded recursion", with a comment saying what
-bounds its depth. The list is empty: the tree has no cycle. The 9700X job's
-test step runs `test-call-graph` and the check; the check, which captures the
+bounds its depth. The list has three entries, the preprocessor fuzz generator's
+recursions (conditionals in groups, expressions, invocations in arguments),
+each bounded by its depth argument. The 9700X job runs
+`test-call-graph` and the check after the build; the check, which captures the
 units' IR at once, takes about 2 s.
 
 `./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
@@ -683,6 +691,13 @@ it once mustn't match, malformed IR, and a chain of a million functions and a
 ring of 100,000, deeper than a recursive walk's stack.
 
 ## Lexer tests
+
+Every lexer check runs both with and without
+`C_TOKENIZER_NO_DIGIT_SEPARATORS`, including the guarded-page cases. An
+additional 80,946-case sweep per number mode places apostrophes through
+17 number forms, 18 followers and line splices around SIMD boundaries;
+20 independent Clang token fixtures pin the modes' spellings. See
+[the lexer guide](docs/c-lexer.md#pre-c23-pp-numbers-264).
 
 `./build/compiler test-lexer` needs no corpus. Its checks are ports of the
 snippet and random-input checks of `c/c_tokenizer_test.c` in
@@ -726,7 +741,8 @@ machine, with `build.sh`'s unoptimized build, the C and C++ runs take about
 
 ## Lexer benchmarks
 
-`./build/compiler benchmark-lexer [--cplusplus] path...` checks each matching
+`./build/compiler benchmark-lexer [--cplusplus] [--no-digit-separators] path...`
+checks each matching
 source against the scalar lexer and reports 21 interleaved-pass median
 throughput, cycles per byte, instructions per byte and IPC (hardware counters
 are zero when unavailable). Paths can be files or directories; `--cplusplus`
@@ -2607,7 +2623,10 @@ both C17 and C23. The checks cover:
 - isolation of cases, line information and predefined counter behavior.
   `__COUNTER__` cases run alone because its state belongs to the Clang process;
 - output comparison, including unequal acceptance, token counts, kinds and
-  spellings, whitespace-only changes, and invalid oracle results;
+  spellings, whitespace-only changes, and invalid oracle results; and the
+  reader of clang's `-dump-tokens` text, on lines as clang 23 writes them
+  (escapes, keywords, annotations, and tokens written with line splices, whose
+  bytes as written go on to more lines), and the lines it must refuse;
 - a planted comparison for the minimizer: delete complete lines, then tokens,
   while preserving the difference, until only the two required identifier
   tokens remain. Saving and reading a `fuzz_failure_N.c` fixture must preserve
@@ -2616,15 +2635,17 @@ both C17 and C23. The checks cover:
 
 The oracle runs `clang -E -P -undef -nostdinc -std=c17` or `-std=c23` with
 `-x c`. It resets each case's source filename and line number identically in
-batched and individual runs, tokenizes the output with `c_tokenize` and splits
-it at exact marker identifiers. Infrastructure failures are distinct from
-source rejection.
+batched and individual runs, and splits the output at its markers, each a
+whole identifier that ends its printed line (found by its bytes outside
+literals, since a case's output can hold text that doesn't lex back); any
+other marker fails the split. A batch's output is tokenized with `c_tokenize`
+as the mode lexes. Infrastructure failures are distinct from source
+rejection.
 
 This is test tooling outside the compile path and has no new vector path.
-The minimizer currently uses only the planted comparison; these checks do
-not establish the correctness of a Buster preprocessor. The command
-names and file locations remain provisional until agreed with #117.
-`docs/preprocessor-fuzz.md` describes the extension points and remaining work.
+These self-tests check the harness alone, with the minimizer on its planted
+comparison; `test-preprocessor --fuzz` (below) runs the preprocessor through
+it. `docs/preprocessor-fuzz.md` has the harness's contract and its use.
 
 ## Preprocessor harness benchmark
 
@@ -2714,7 +2735,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 `./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
 [options] [file...]`, or `test-preprocessor --tables path...`:
 
-- without files, the 95 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 202 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2723,7 +2744,9 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   - the behaviors probed against GCC and clang;
   - inputs past the vectorized kernels' limits;
   - directives and builtins that nest through the main loop's frames;
-  - #193's review fixes, line markers among them.
+  - #193's review fixes, line markers among them;
+  - each difference from clang that #109's fuzzing found, minimized, and the
+    ones probing around it found.
 
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
@@ -2731,7 +2754,17 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `SOURCE_DATE_EPOCH`'s when it is set; and the `-m` options buster refuses
   though clang takes them (another target's, which clang ignores with a
   warning, and those that change the target) must be refused, and each `-m`
-  flag that changes no macro taken. Then the directive tables (#118,
+  flag that changes no macro taken; the expansion history's checks; and
+  the fuzz batch: its isolation rules checked on small sources (what a case
+  leaves open makes clang read it alone), its comparison on pairs of texts
+  (whitespace between tokens doesn't count, a literal's contents and joined
+  tokens do, and our tokens that don't lex back, as an unterminated literal,
+  end where ours do in both texts), with `--clang` its emulation of clang's
+  -P printer checked on fixtures of its own, then 1,500 cases of the
+  independent harness's generator in each of C17 and C23
+  (`c_preprocessor_fuzz.c`), which both kernels must give
+  alike (streams, directive tables, diagnostics' counts, history and both
+  printers' bytes), with -P text that lexes back into the stream. Then the directive tables (#118,
   `c_preprocessor_directives_test.c`): 2,000 random sources (`--count N`,
   `--seed N`) of directives, `%:`, `#` alone, line markers, unknown names,
   `#`s inside lines, literals and comments and after line splices, and
@@ -2810,7 +2843,20 @@ the features:
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers, and so must they under 45
   sanitizer option sets, and the four `__is_target_*` of 41 names under eight
-  kinds of target triple.
+  kinds of target triple;
+- the fuzz batch's cases must give clang's acceptance, and an accepted case's
+  stream, printed with clang's -P spacing, must lex into clang's tokens (with
+  a comment's `/` and a line splice's `\` as tokens, which only tokens printed
+  next to each other make, and our tokens that don't lex back whole:
+  `preprocessor_fuzz_lex_printed`). Where clang's text can't show where such a
+  token ends (an unterminated literal off a pragma's line), clang's own tokens
+  for the case alone (`clang -Xclang -dump-tokens`) must confirm ours; on a
+  pragma's line that goes on past one (`#pragma omp` expands its tokens),
+  which clang's tokens don't have, the case counts as unverified; a
+  comparison that can't be made leaves its case without a result. With
+  `--clang`, the batch first checks these on fixtures of its own, among them
+  #263's second review's probes.
+
 - the structure and definition fixtures' diagnostics must be clang's, byte for byte, and the
   guard fixtures' output and skips by guards clang's (`-Xclang -print-stats`),
   as every file's skips by guards must be. `sqlite3.c`, musl 1.2.5's 1,357 sources,
@@ -2818,6 +2864,30 @@ Lua 5.4.8 and this repository's translation units are token-identical;
 `docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs the cases
 and the repository's translation units with `--clang`, and `--tables src`.
 
+`sqlite3.c`, musl 1.2.5's 1,357 sources, Lua 5.4.8 and this repository's
+translation units are token-identical; `docs/c-preprocessor.md` has the
+configurations. The 9700X job runs the cases and the repository's translation
+units with `--clang`.
+
+The fuzz batch's options: `--fuzz N` cases per mode (0 for none), `--first N`
+the first case's id, `--seed N` (1 by default), `--std c17|c23` one mode,
+`--jobs N` worker processes (1 by default; the cases don't depend on it), and
+`--print-case N`, which prints case N as clang reads it alone. Each
+difference from clang is confirmed on the case alone; the first 4 that each
+worker finds in a mode are minimized and saved as `fuzz_failure_N.c` in the
+current directory. One block of 64 cases in 128 has every case read alone
+too, which must give its batch's result, and a batch clang gives no result
+for has its cases read alone. It exits with status 1 on any difference, a
+batch that differs from its cases alone, or a case without a result. For a
+qualification run (a million cases in each mode take about 7 minutes on the
+9700X's 15 threads, and 15 to 24 on a 7940HS's 16, mostly clang's processes):
+
+```sh
+./build/compiler test-preprocessor --clang --fuzz 1000000 --seed 11 --jobs 16
+```
+
+`docs/preprocessor-fuzz.md` has the comparison's rules, the generator's
+constructs and the qualification runs.
 `./build/compiler test-preprocessor --generate-targets` prints `c_predefines.c`'s
 generated block from clang 23 (on `PATH`), to paste over the old one when clang
 changes; `docs/c-preprocessor.md` ("The predefined macros") has the procedure.
