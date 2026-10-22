@@ -891,8 +891,8 @@ static void files_read_requests(FilesRun* run, FilesLane* mine)
                 uint8_t name[PATH_MAX];
                 uint32_t length = 0;
                 bool angled = false;
-                bool extra = false;
-                const PPHeaderForm form = pp_literal_header_name(data, d, cache->prepare.refine_flags, name, sizeof(name), &length, &angled, &extra, &mine->names);
+                uint32_t stop = 0;
+                const PPHeaderForm form = pp_literal_header_name(data, d, cache->prepare.refine_flags, name, sizeof(name), &length, &angled, &stop, &mine->names);
                 uint8_t* bytes = form == PP_HEADER_LITERAL ? arena_push(&mine->names, length + 1, 1) : 0;
                 FilesRequest* request = bytes != 0 ? arena_push_array(&mine->request_list, 1, sizeof(FilesRequest), _Alignof(FilesRequest)) : 0;
                 files_fail(run, form == PP_HEADER_LITERAL && request == 0);
@@ -1072,7 +1072,9 @@ static PPCandidate files_candidate(const FilesRun* run, const FilesSearch* searc
 
 // This lane's range of the round's searches goes through its candidates in order: a path the cache knows answers at
 // once (a file there ends the search; none, the next candidate), until the last candidate or a path the cache never
-// looked up, which the lane lists for this wave's probes (its bytes in the lane's names).
+// looked up, which the lane lists for this wave's probes (its bytes in the lane's names). A place the preprocessor's
+// search can't look in (a path too long for one, or one that couldn't be opened for another reason than there being no
+// file there) ends the search too, as it ends the preprocessor's with a fatal error (pp_find_include).
 static void files_advance(FilesRun* run, FilesLane* mine)
 {
     FileCache* cache = run->cache;
@@ -1115,6 +1117,10 @@ static void files_advance(FilesRun* run, FilesLane* mine)
                 search->done = true;
                 search->path = (uint32_t)(entry - cache->paths);
                 search->found_in = directory;
+            }
+            else if (candidate == PP_CANDIDATE_SKIP || entry->probe.error != 0)
+            {
+                search->done = true;
             }
             else
             {
