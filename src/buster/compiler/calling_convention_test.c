@@ -2392,9 +2392,13 @@ static void abi_test_atomic_vector_overflow(AbiTestTally* tally, AbiTestTables* 
             const bool slots = locations[14].kind == BUSTER_ABI_LOCATION_STACK && locations[14].stack_offset == 0 &&
                                locations[15].kind == BUSTER_ABI_LOCATION_STACK && locations[15].stack_offset == slot &&
                                locations[16].kind == BUSTER_ABI_LOCATION_STACK && locations[16].stack_offset == slot * 2;
-            const bool totals = calls[0].stack_bytes == slot * 2 + 8 && calls[0].stack_alignment_log2 == alignment && calls[0].integer_registers == 6 && calls[0].vector_registers == 8;
-            char detail[160];
-            snprintf(detail, sizeof(detail), "atomic vector overflow: element %u, length %u, %u-byte vectors, %s", e, lengths[e][n], vector_bytes, vector ? "vector" : "scalar");
+            const bool totals = calls[0].stack_bytes == slot * 2 + 8 && calls[0].stack_alignment_log2 == BUSTER_ABI_STACK_ALIGNMENT_LOG2 && calls[0].integer_registers == 6 && calls[0].vector_registers == 8;
+            char detail[256];
+            snprintf(detail, sizeof(detail),
+                     "atomic vector overflow: element %u, length %u, %u-byte vectors, %s: slot %u, alignment %u; offsets %u/%u/%u; call %u bytes, alignment %u, registers %u/%u",
+                     e, lengths[e][n], vector_bytes, vector ? "vector" : "scalar", tables->abi.stack_bytes[index],
+                     (pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT, locations[14].stack_offset, locations[15].stack_offset,
+                     locations[16].stack_offset, calls[0].stack_bytes, calls[0].stack_alignment_log2, calls[0].integer_registers, calls[0].vector_registers);
             abi_test_expect(tally, supported && slots && totals, "fixtures", detail);
         }
     }
