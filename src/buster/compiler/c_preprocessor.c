@@ -95,6 +95,10 @@
 // before it on its line, where ours counts the line's start too. Clang's -P printer shows that in a line's first token's
 // indentation (test-preprocessor's emulation of it reads this).
 #define BUSTER_PP_NAME_SPACE 0x20
+// Its BUSTER_PP_START_OF_LINE (or BUSTER_PP_LINE_SPACE) is a name's that had only its line's start before it: clang's
+// token has no leading space, where our BUSTER_PP_SPACE counts the line's start. Set only in runs that keep expansion
+// starts (pp_name_line), for test-preprocessor's emulation of clang's -P printer.
+#define BUSTER_PP_NAME_LINE 0x40
 
 // Kinds that only buffers hold, and the end of a pragma's tokens in the output (its '#' starts a line).
 #define BUSTER_PP_KIND_PLACEMARKER 0xFE // An empty argument next to ##, while substituting.
@@ -575,6 +579,7 @@ struct PPInvocation
     uint32_t next;
     uint32_t content_end;
     uint32_t captures_begin; // pp->captures' count before its first expanded argument.
+    uint32_t pragma_mark; // pp->pragma_lines when it started (pp_keep_pragma_lines).
     uint32_t arguments_begin; // pp->arguments' count before its first raw argument.
     uint32_t expansion_end;
     uint32_t name_location;
@@ -2953,11 +2958,35 @@ static void pp_emit(Preprocessor* pp, PPToken token)
 }
 
 // Token `token` of a prepared file read in the range at `base`, as buffers hold it.
-// A token's flags with a context's pending ones added: a space of its own (not a name's) stays its own.
+// A token's flags with a context's pending ones added, as clang ORs an empty expansion's name's flags into the next
+// token's: a space of its own (not a name's) stays its own, unless the pending space is real, which clang's token then
+// has whatever its own (BUSTER_PP_NAME_SPACE without BUSTER_PP_NAME_LINE says so).
 BUSTER_INLINE uint8_t pp_with_pending(uint8_t flags, uint8_t pending)
 {
     const bool own = (flags & BUSTER_PP_SPACE) && !(flags & BUSTER_PP_NAME_SPACE);
-    return (uint8_t)((flags | pending) & ~(own ? BUSTER_PP_NAME_SPACE : 0));
+    const bool spaced = (pending & BUSTER_PP_SPACE) && !(pending & BUSTER_PP_NAME_LINE);
+    const uint8_t dropped = own ? (spaced ? BUSTER_PP_NAME_LINE : BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE) : 0;
+    return (uint8_t)((flags | pending | (own && spaced ? BUSTER_PP_NAME_SPACE : 0)) & ~dropped);
+}
+
+// BUSTER_PP_NAME_LINE for a token that takes the flags of a name (`flags`, at `location`): an expansion's first token,
+// the token after an empty expansion, a builtin's or a feature query's answer. A name that took its own from another
+// name passes that one's on; one that started a line (BUSTER_PP_START_OF_LINE, or BUSTER_PP_LINE_SPACE among a
+// macro's arguments) gets it when only the line's start is before it, where its lexer starts it (pp_lexed_start). Only
+// runs that keep expansion starts compute it: the others' tokens never have it.
+static uint8_t pp_name_line(const Preprocessor* pp, uint8_t flags, uint32_t location)
+{
+    uint8_t result = (uint8_t)(flags & BUSTER_PP_NAME_LINE);
+    if (pp->options.expansion_starts && !(flags & BUSTER_PP_NAME_SPACE) && (flags & (BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)))
+    {
+        const uint32_t start = pp_lexed_start(pp, location);
+        const uint32_t range = pp_find_range(pp, start);
+        const PPRange* record = range != BUSTER_PP_NONE ? &pp->ranges[range] : 0;
+        const uint32_t offset = record != 0 ? start - record->base : 0;
+        const bool line = record != 0 && record->file != BUSTER_PP_NONE && (offset == 0 || record->bytes[offset - 1] == '\n' || record->bytes[offset - 1] == '\r');
+        result = line ? BUSTER_PP_NAME_LINE : 0;
+    }
+    return result;
 }
 
 BUSTER_INLINE PPToken pp_file_token(const PPFileData* data, uint32_t base, uint32_t token)
@@ -3071,7 +3100,7 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
     pp->context_count -= 1;
     // An expansion that ends passes its pending flags on to the context it was read from; an argument's or a line's
     // barrier doesn't.
-    const uint8_t passed = (uint8_t)((context->pending_flags | context->trailing_flags) & ~((context->trailing_flags & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0));
+    const uint8_t passed = (uint8_t)((context->pending_flags | context->trailing_flags) & ~((context->trailing_flags & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE : 0));
     if (context->kind == BUSTER_PP_CONTEXT_BUFFER && !context->barrier && passed != 0 && pp->context_count != 0)
     {
         pp->contexts[pp->context_count - 1].pending_flags |= passed;
@@ -3704,7 +3733,7 @@ static void pp_append_tokens(Preprocessor* pp, const PPTokens* tokens, uint32_t 
             token_flags = (uint8_t)((token_flags & ~BUSTER_PP_START_OF_LINE) | ((token_flags & BUSTER_PP_START_OF_LINE) ? BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE : 0) | BUSTER_PP_FROM_MACRO);
             if (i == begin && replace_first)
             {
-                token_flags = (uint8_t)((token_flags & ~(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_SPACE)) | (first_flags & BUSTER_PP_SPACE));
+                token_flags = (uint8_t)((token_flags & ~(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE)) | (first_flags & BUSTER_PP_SPACE));
             }
             out_kinds[count] = kinds[i];
             out_flags[count] = token_flags;
@@ -4382,6 +4411,28 @@ static void pp_finish_argument(Preprocessor* pp)
     pp_continue_invocation(pp);
 }
 
+// An invocation's captures go when it is substituted, from pp->captures' token `begin` on, but for the pragma lines
+// among them, which directives among its arguments lifted onto the capture below (pp_lift_pragma_lines): they stay
+// there, moved down to `begin` in order, where a stream below has read them. Returns the count after them.
+static uint32_t pp_keep_pragma_lines(Preprocessor* pp, uint32_t begin)
+{
+    PPTokens* tokens = &pp->captures;
+    uint32_t kept = begin;
+    uint32_t state = BUSTER_PP_PRAGMA_OUTSIDE;
+    for (uint32_t i = begin; i < tokens->count; i += 1)
+    {
+        const PPToken token = pp_stack_token(tokens, i);
+        state = pp_pragma_state(pp, state, token.kind, token.location);
+        if (state != BUSTER_PP_PRAGMA_OUTSIDE || token.kind == BUSTER_PP_KIND_PRAGMA_END)
+        {
+            pp_tokens_set(tokens, kept, token.kind, token.flags, token.value, token.location);
+            pp_history_fill(pp, tokens, kept, kept + 1, token.origin);
+            kept += 1;
+        }
+    }
+    return kept;
+}
+
 // Substitutes the top invocation, frees its arguments and pushes its expansion, with its macro disabled.
 static void pp_finish_invocation(Preprocessor* pp)
 {
@@ -4390,13 +4441,15 @@ static void pp_finish_invocation(Preprocessor* pp)
     uint8_t trailing;
     pp_substitute(pp, &invocation, &begin, &trailing);
     const uint32_t end = pp->expansions.count;
-    const uint8_t name_flags = invocation.name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE);
+    // The name's line start as clang's token has it: BUSTER_PP_LINE_SPACE among a macro's arguments, and its
+    // BUSTER_PP_NAME_LINE (which the invocation took with its name, pp_name_line).
+    const uint8_t name_flags = invocation.name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE);
     if (begin < end)
     {
         uint8_t* flags = &pp->expansions.flags[begin];
-        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
+        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
     }
-    pp->captures.count = invocation.captures_begin;
+    pp->captures.count = pp->pragma_lines != invocation.pragma_mark ? pp_keep_pragma_lines(pp, invocation.captures_begin) : invocation.captures_begin;
     pp->arguments.count = invocation.arguments_begin;
     pp->argument_record_count = invocation.arguments;
     pp->invocation_count -= 1;
@@ -4412,7 +4465,7 @@ static void pp_finish_invocation(Preprocessor* pp)
     {
         // An empty expansion: the next token read after the invocation's ')' takes its name's flags.
         const uint8_t name_space = (name_flags & BUSTER_PP_SPACE) && !(trailing & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0;
-        pp->contexts[pp->context_count - 1].pending_flags |= name_flags | trailing | name_space;
+        pp->contexts[pp->context_count - 1].pending_flags |= (uint8_t)((name_flags & ~(name_space != 0 ? 0 : BUSTER_PP_NAME_LINE)) | trailing | name_space);
     }
 }
 
@@ -4830,8 +4883,9 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
         .arguments = pp->argument_record_count,
         .arguments_begin = pp->arguments.count,
         .captures_begin = pp->captures.count,
+        .pragma_mark = pp->pragma_lines,
         .name_location = name.location,
-        .name_flags = name.flags,
+        .name_flags = (uint8_t)(name.flags | pp_name_line(pp, name.flags, name.location)),
         .opened = true,
         .content_end = BUSTER_PP_NONE,
     };
@@ -4904,15 +4958,18 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
         pp_history_fill(pp, tokens, begin, tokens->count, pp->history_current);
     }
     const bool empty = begin == tokens->count;
+    // The name's line start as clang's token has it: BUSTER_PP_LINE_SPACE among a macro's arguments, and pp_name_line's.
+    const uint8_t name_flags = (uint8_t)((name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)) | pp_name_line(pp, name.flags, name.location));
     if (!empty)
     {
         uint8_t* flags = &tokens->flags[begin];
-        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | BUSTER_PP_NAME_SPACE);
+        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
     }
     else
     {
         // An empty expansion: the next token read from this context takes the name's flags.
-        pp->contexts[pp->context_count - 1].pending_flags |= (uint8_t)((name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | ((name.flags & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0));
+        const uint8_t name_space = (name.flags & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0;
+        pp->contexts[pp->context_count - 1].pending_flags |= (uint8_t)((name_flags & ~(name_space != 0 ? 0 : BUSTER_PP_NAME_LINE)) | name_space);
     }
     if (!direct && !empty)
     {
@@ -5471,11 +5528,10 @@ BUSTER_INLINE void pp_note_expansion(Preprocessor* pp, uint32_t location)
 // Moves the pragma lines that a _Pragma or a #pragma among the top capture's tokens emitted into it (clang prints them
 // as it reads them, and the line or the operand being read keeps the rest) to the target below, before the capture's
 // other tokens, in order: into the output, or onto the end of the capture below, whose tokens end where this one's
-// begin. Returns how many tokens left pp->captures (to the output).
-static uint32_t pp_lift_pragma_lines(Preprocessor* pp)
+// begin.
+static void pp_lift_pragma_lines(Preprocessor* pp)
 {
     PPCapture* capture = &pp->capture_frames[pp->capture_count - 1];
-    uint32_t result = 0;
     if (capture->pragma_mark != pp->pragma_lines)
     {
         PPTokens* tokens = &pp->captures;
@@ -5522,7 +5578,6 @@ static uint32_t pp_lift_pragma_lines(Preprocessor* pp)
                     pp_tokens_put(pp, tokens, begin + k, kept[k]);
                 }
                 tokens->count = begin + count;
-                result = lifted - begin;
             }
             else if (pp->capture_count != 1)
             {
@@ -5536,7 +5591,6 @@ static uint32_t pp_lift_pragma_lines(Preprocessor* pp)
         scratch_end(scratch);
         capture->pragma_mark = pp->pragma_lines;
     }
-    return result;
 }
 
 // A stream ended: at its operand's ')', index `close` of pp->captures, or unterminated (BUSTER_PP_NONE) at the end of
@@ -5576,6 +5630,16 @@ static void pp_start_pragma_stream(Preprocessor* pp, PPToken name, uint8_t flags
 // (pp_defer_pragma). The pragma lines of directives among its tokens go first (pp_lift_pragma_lines).
 static void pp_end_pragma_stream(Preprocessor* pp, bool valid, uint32_t back)
 {
+    // The tokens given back are saved and taken off first, a pragma line among them too, since lifting the pragma lines
+    // before them moves the capture's tokens, and the pragma's line may take their places.
+    const uint32_t end = pp->captures.count;
+    Scratch scratch = scratch_begin(0);
+    PPToken* rest = back != 0 ? arena_push(scratch.arena, (uint64_t)back * sizeof(PPToken), _Alignof(PPToken)) : 0;
+    for (uint32_t i = 0; rest != 0 && i < back; i += 1)
+    {
+        rest[i] = pp_stack_token(&pp->captures, end - back + i);
+    }
+    pp->captures.count = end - back;
     pp_lift_pragma_lines(pp);
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
     const uint32_t saved_history = pp->history_current;
@@ -5585,18 +5649,11 @@ static void pp_end_pragma_stream(Preprocessor* pp, bool valid, uint32_t back)
     pp->diagnostic_origin = capture.history != 0 ? pp->history[capture.history - 1].parent : 0;
     pp->capture_count -= 1;
     pp->stream_count -= 1;
-    // The operand, `(` "string" `)`, is the capture's tokens before those given back, which are saved first: the
-    // pragma's line may take their places.
-    const uint32_t end = pp->captures.count;
+    // The operand, `(` "string" `)`, is the capture's tokens.
+    const uint32_t operand_end = pp->captures.count;
     const PPToken open = valid ? pp_stack_token(&pp->captures, capture.begin) : (PPToken){ 0 };
     const PPToken string = valid ? pp_stack_token(&pp->captures, capture.begin + 1) : (PPToken){ 0 };
-    const PPToken close = valid ? pp_stack_token(&pp->captures, end - back - 1) : (PPToken){ 0 };
-    Scratch scratch = scratch_begin(0);
-    PPToken* rest = back != 0 ? arena_push(scratch.arena, (uint64_t)back * sizeof(PPToken), _Alignof(PPToken)) : 0;
-    for (uint32_t i = 0; rest != 0 && i < back; i += 1)
-    {
-        rest[i] = pp_stack_token(&pp->captures, end - back + i);
-    }
+    const PPToken close = valid ? pp_stack_token(&pp->captures, operand_end - 1) : (PPToken){ 0 };
     pp->captures.count = capture.begin;
     if (valid && pp_expanding_argument(pp))
     {
@@ -5617,7 +5674,19 @@ static void pp_end_pragma_stream(Preprocessor* pp, bool valid, uint32_t back)
 
 static void pp_finish_stream(Preprocessor* pp, uint32_t close)
 {
-    const uint32_t lifted = pp_lift_pragma_lines(pp);
+    // The tokens read after the ')' are saved and taken off first, a pragma line among them too, as
+    // pp_end_pragma_stream does: lifting the pragma lines before them moves the capture's tokens.
+    const uint32_t end = pp->captures.count;
+    const uint32_t after = close != BUSTER_PP_NONE ? close + 1 : end;
+    const uint32_t back = end - after;
+    Scratch scratch = scratch_begin(0);
+    PPToken* rest = back != 0 ? arena_push(scratch.arena, (uint64_t)back * sizeof(PPToken), _Alignof(PPToken)) : 0;
+    for (uint32_t i = 0; rest != 0 && i < back; i += 1)
+    {
+        rest[i] = pp_stack_token(&pp->captures, after + i);
+    }
+    pp->captures.count = after;
+    pp_lift_pragma_lines(pp);
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
     const uint32_t saved_history = pp->history_current;
     const uint32_t saved_origin = pp->diagnostic_origin;
@@ -5626,8 +5695,6 @@ static void pp_finish_stream(Preprocessor* pp, uint32_t close)
     pp->diagnostic_origin = capture.history != 0 ? pp->history[capture.history - 1].parent : 0;
     pp->capture_count -= 1;
     pp->stream_count -= 1;
-    const uint32_t end = pp->captures.count;
-    uint32_t rest = end;
     uint64_t value = 0;
     if (close == BUSTER_PP_NONE)
     {
@@ -5636,20 +5703,19 @@ static void pp_finish_stream(Preprocessor* pp, uint32_t close)
     }
     else
     {
-        rest = close - lifted + 1;
-        value = pp_builtin_value(pp, (PPBuiltin)capture.builtin, &pp->captures, capture.begin, rest - 1, capture.location);
+        // The operand, without its ')'.
+        value = pp_builtin_value(pp, (PPBuiltin)capture.builtin, &pp->captures, capture.begin, pp->captures.count - 1, capture.location);
     }
     pp->captures.count = capture.begin;
     if (close != BUSTER_PP_NONE)
     {
         pp_emit(pp, pp_feature_token(pp, value, capture.flags));
     }
-    // Into the output, or down within pp->captures (the answer took at most the operand's place), each read before its
-    // place is written.
-    for (uint32_t i = rest; i < end; i += 1)
+    for (uint32_t i = 0; rest != 0 && i < back; i += 1)
     {
-        pp_emit(pp, pp_stack_token(&pp->captures, i));
+        pp_emit(pp, rest[i]);
     }
+    scratch_end(scratch);
     pp->history_current = saved_history;
     pp->diagnostic_origin = saved_origin;
 }
@@ -5838,7 +5904,9 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
     pp->history_anchor = name.location;
     pp->diagnostic_origin = name.origin;
     const PPBuiltin builtin = (PPBuiltin)pp->macros[id].builtin;
-    const uint8_t flags = name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE);
+    // The answer takes the name's flags, as clang's ExpandBuiltinMacro gives them: its line start among a macro's
+    // arguments too (BUSTER_PP_LINE_SPACE), and pp_name_line's.
+    const uint8_t flags = (uint8_t)((name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)) | pp_name_line(pp, name.flags, name.location));
     // A name a macro made is at the end of its outermost expansion, the last token's place as clang's lexer has it (with
     // the line splices right before it); a name in the file at its first character.
     const uint32_t where = (name.flags & BUSTER_PP_FROM_MACRO) ? pp_lexed_start(pp, expansion_end) : name.location;

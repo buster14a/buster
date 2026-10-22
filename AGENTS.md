@@ -2021,7 +2021,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 194 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 195 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2039,9 +2039,10 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   modification times of their own must give each file's time (in UTC), and
   `SOURCE_DATE_EPOCH`'s when it is set; the expansion history's checks; and
   the fuzz batch: its isolation rules checked on small sources (what a case
-  leaves open makes clang read it alone), then 1,500 cases of the independent
-  harness's generator in each of C17 and C23 (`c_preprocessor_fuzz.c`), which
-  both kernels must give
+  leaves open makes clang read it alone), with `--clang` its emulation of
+  clang's -P printer checked on fixtures of its own, then 1,500 cases of the
+  independent harness's generator in each of C17 and C23
+  (`c_preprocessor_fuzz.c`), which both kernels must give
   alike (streams, directive tables, diagnostics' counts, history and both
   printers' bytes), with -P text that lexes back into the stream;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,

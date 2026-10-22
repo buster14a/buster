@@ -1120,6 +1120,10 @@ static const PPTestCase pp_test_cases[] = {
     { "a computed #include's name read expanded, and the rest as it is", "#define c(x) x\n#define H \"other.h\"\n#include H x c(\nafter\n", "in_other\n", "c17", "\nin_other\nafter\n", false, 1 },
     { "push_macro's and pop_macro's operands read expanded, and the rest as it is", "#define c(x) x\n#define m 1\n#pragma push_macro(\"m\") x c(\n#undef m\n#define m 2\n#pragma pop_macro(\"m\") y c(\nm\n",
       0, "c17", "\n1\n", false, 0 },
+    // A pragma line that a directive among a macro's arguments gives while a _Pragma waits for its '(' stays before the
+    // expansion, where the _Pragma has read it (seed 45's case 610823 crashed reading past it).
+    { "a pragma line among a macro's arguments while a _Pragma waits", "_Pragma\n#define f(a, b)\nf(a\n#if _Pragma(\"ppf_if\") 1\n#endif\n,b)\nafter\n", 0, "c17",
+      "\n#pragma ppf_if\nafter\n", true, 0 },
     {
         .name = "builtin and feature names are raw, attribute names may expand",
         .source = "#define BUILTIN_NAME __builtin_expect\n#define FEATURE_NAME c_atomic\n#define ATTRIBUTE_NAME __const__\n"

@@ -145,6 +145,13 @@ The C rules:
   splice before the macro's name. Our printer does the same in `-E` with line
   markers, and so every expansion read from a file records where its tokens
   start (`PPExpansionStart`).
+- An expansion's first token takes its name's line start and space, and so do
+  a builtin's answer and the token after an empty expansion, as clang ORs the
+  empty one's name's flags into it. A name that started a line with only the
+  line's start before it gives no space: `BUSTER_PP_NAME_LINE` marks such a
+  token (`pp_name_line`, in runs that keep expansion starts), and a name's
+  line start among a macro's arguments passes on with its
+  `BUSTER_PP_LINE_SPACE`.
 - After a `_Pragma` that prints nothing, clang's lexer starts a line at the
   next token (`Lexer::PropagateLineStartLeadingSpaceInfo`, as the pragma's
   lexer ends). Its printer moves to that token's line only when it is another
@@ -189,7 +196,11 @@ Four kinds of case run in a clang process of their own (`isolated`):
 
 Before its cases, the fuzz batch checks these rules on 12 small sources in
 each mode (`pp_fuzz_check_isolation`), a region whose end a line splice takes
-among them.
+among them. With `--clang` it then compares the emulation's fixtures with
+clang in each mode (`pp_fuzz_emulation_cases`, `pp_fuzz_check_emulation`):
+the minimized cases the emulation once printed wrong, and those probing
+around them found, which test-preprocessor's cases can't pin, since they
+compare tokens and line markers, not the `-P` text.
 
 A case that differs from clang is read again alone, and so is every case of
 one block in 128. The batch must give what the case alone gives. A case that
@@ -426,6 +437,36 @@ test-preprocessor, and to the harness changes after them:
   (above): `L\`, then `h(`, `U` and `"#")` on lines of their own, printed
   `U` and `"#"` together, one literal.
 
+The second freeze (`8ee1e16`) ran seeds 41 to 50 on the 9700X and 31 to 35
+locally, 1,000,000 cases per mode each, before what it found stopped it:
+
+- **An expansion's first token at a line start among arguments.** With
+  `e(...)` giving `__VA_ARGS__` and `c(d, ...)` giving `#d`, clang prints
+  `e(u8`, then `c())` on the next line, as `u8""`, one literal: the `""`
+  takes `c`'s line start and no space, since only the line's start is before
+  `c` (seed 33's case 446564, C23). The emulation gave it a space. A
+  builtin's answer, an object-like macro, a name a name gave and the token
+  after an empty expansion do the same, and clang ORs an empty expansion's
+  name's space into the next token (`pp_name_line`, `pp_with_pending`, and
+  the emulation's fixtures above).
+- **A pragma line among a macro's arguments while a `_Pragma` waits for its
+  `(`** (seed 45's case 610823, which crashed one of the 9700X's workers): a
+  `_Pragma` in a `#if` line among the arguments put its pragma line onto the
+  waiting stream's tokens, which the invocation's substitution then dropped,
+  and the stream, whose scan was past it, read beyond its tokens. The lines
+  that directives among the arguments give now stay
+  (`pp_keep_pragma_lines`), and a stream's end saves the tokens it gives back
+  before it lifts its pragma lines.
+- **Pragma regions across a batch** (seeds 43 and 48, a fault of the
+  harness's own): a case whose text inside `#pragma clang
+  unsafe_buffer_usage` or `assume_nonnull` ended in a line splice took the
+  region's end into its line, and the region stayed open into later cases of
+  clang's batch, whose own end then closed it. Such a case now runs alone.
+- **A `#else` or `#elif` after `#else` in a conditional nested in a skipped
+  group** (seed 35's case 46995, C23, and the first campaign's 111819) is an
+  error in clang. #247's directive structure diagnoses it, and its build
+  rejects both cases as clang does; this branch leaves it to #247.
+
 Each harness change came from a case the comparison couldn't place. They
 cover the printer's emulation, the by-spellings cases, the isolation rules,
 the attribution of a rejected batch's errors, the line-based marker split
@@ -443,6 +484,9 @@ No difference is filtered from the comparison. The generator writes none of
 the following, which are listed in
 [the preprocessor's design](c-preprocessor.md) ("Not yet"):
 
+- `-E`'s line markers for the pragma lines that a `_Pragma` without its `(`
+  reads past: we place them on the `_Pragma`'s line, clang each on its own.
+  The comparison reads `-P`'s text, where the tokens agree.
 - `-E`'s line markers when an attribute query's operand runs past an
   included file's end. Clang prints the file's exit before the answer, and
   places it on the query's line.

@@ -347,13 +347,15 @@ static bool pp_fuzz_avoid_concat(Preprocessor* pp, const PPTokens* out, uint32_t
     return result;
 }
 
-// Whether clang's token has a leading space where ours has BUSTER_PP_SPACE: but for a token that started a line among
-// a macro's arguments (BUSTER_PP_LINE_SPACE), whose own flags clang keeps, which say so only for whitespace or a comment
-// between the line's start and the token (Lexer::SkipWhitespace looks at the character before it).
+// Whether clang's token has a leading space where ours has BUSTER_PP_SPACE: not for one whose line start is a name's
+// that had only its line's start before it (BUSTER_PP_NAME_LINE), and for another that started a line among a macro's
+// arguments (BUSTER_PP_LINE_SPACE), whose own flags clang keeps, only for whitespace or a comment between the line's
+// start and the token (Lexer::SkipWhitespace looks at the character before it). One whose line start is another
+// name's (BUSTER_PP_NAME_SPACE) has that name's space.
 static bool pp_fuzz_leading_space(Preprocessor* pp, const PPTokens* out, uint32_t i)
 {
-    bool result = true;
-    if (out->flags[i] & BUSTER_PP_LINE_SPACE)
+    bool result = !(out->flags[i] & BUSTER_PP_NAME_LINE);
+    if (result && (out->flags[i] & BUSTER_PP_LINE_SPACE) && !(out->flags[i] & BUSTER_PP_NAME_SPACE))
     {
         uint32_t offset = 0;
         uint32_t available = 0;
@@ -414,6 +416,11 @@ static bool pp_fuzz_line_start_space(Preprocessor* pp, const PPTokens* out, uint
     if (result && (out->flags[i] & BUSTER_PP_LINE_SPACE))
     {
         result = pp_fuzz_leading_space(pp, out, i);
+    }
+    else if (result && name && !(out->flags[i] & BUSTER_PP_FROM_MACRO))
+    {
+        // A file token's space is a name's only when an empty expansion before it passed one on (pp_with_pending).
+        result = !(out->flags[i] & BUSTER_PP_NAME_LINE);
     }
     else if (result && (name || !(out->flags[i] & BUSTER_PP_FROM_MACRO)))
     {
@@ -1171,6 +1178,64 @@ static void pp_fuzz_worker(const PPFuzzOptions* options, bool c23, uint64_t begi
     arena_release(&scratch);
 }
 
+// Sources the comparison once got wrong in its emulation of clang's -P printer (pp_fuzz_clang_text), minimized, with
+// the ones probing around them found: with --clang, each must give clang's tokens in both modes
+// (pp_fuzz_check_emulation), as test-preprocessor's cases pin what the preprocessor itself gives.
+static const char* const pp_fuzz_emulation_cases[] = {
+    // An expansion's first token takes its name's line start and space: a name that starts a line among a macro's
+    // arguments with only the line's start before it gives no space, so clang prints `u8""`, one literal (seed 33's
+    // case 446564, C23). So do a builtin, an object-like macro, a name a name gave, an empty expansion before the
+    // token, a name that started a line in another macro's argument, and an argument and a paste first in the
+    // expansion; a space or a comment before the name gives one.
+    "#define e(...) __VA_ARGS__\n#define c(d, ...) #d\ne(u8\nc())\n",
+    "#define e(...) __VA_ARGS__\ne(u8\n__FILE__)\n",
+    "#define e(...) __VA_ARGS__\n#define S \"\"\ne(u8\nS)\n",
+    "#define e(...) __VA_ARGS__\n#define A B\n#define B \"\"\ne(u8\nA)\n",
+    "#define e(...) __VA_ARGS__\n#define E\ne(u8\nE\"\")\n",
+    "#define e(...) __VA_ARGS__\n#define f(a) a\n#define g() \"\"\ne(f(u8\ng)())\n",
+    "#define e(...) __VA_ARGS__\n#define F(x) x\ne(u8\nF( \"\"))\n",
+    "#define e(...) __VA_ARGS__\n#define P(a, b) a ## b\ne(u8\nP(,\"\"))\n",
+    "#define e(...) __VA_ARGS__\n#define c(d, ...) #d\ne(u8\n  c())\n",
+    "#define e(...) __VA_ARGS__\n#define c(d, ...) #d\ne(u8\n/**/c())\n",
+    // An empty expansion's name passes its space on to a token that starts the next line, as clang ORs them: a space
+    // before either gives one.
+    "#define e(...) __VA_ARGS__\n#define E\ne(u8 E\n\"\")\n",
+    "#define e(...) __VA_ARGS__\n#define E\ne(u8\nE\n\"\")\n",
+    "#define e(...) __VA_ARGS__\n#define E\ne(u8\n E\n\"\")\n",
+};
+
+// Each source of pp_fuzz_emulation_cases against clang, alone, in both modes (pp_fuzz_clang_difference). Returns
+// whether every one gives clang's tokens.
+static bool pp_fuzz_check_emulation(const PPFuzzOptions* options)
+{
+    Arena scratch = arena_reserve(BUSTER_PP_FUZZ_ARENA_BYTES);
+    uint32_t failures = scratch.base == 0;
+    for (uint32_t mode = 0; scratch.base != 0 && mode < 2; mode += 1)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_fuzz_emulation_cases); i += 1)
+        {
+            const PreprocessorFuzzOracle oracle = {
+                .kind = BUSTER_PPF_ORACLE_CLANG,
+                .clang_path = options->clang_path,
+                .id = i,
+                .c23 = mode == 1,
+            };
+            const String8 source = {
+                .pointer = (char*)pp_fuzz_emulation_cases[i],
+                .length = strlen(pp_fuzz_emulation_cases[i]),
+            };
+            if (pp_fuzz_clang_difference(&scratch, &oracle, source) != BUSTER_PPF_EQUAL)
+            {
+                printf("fuzz emulation: %s, case %u differs from clang\n", mode == 1 ? "c23" : "c17", i);
+                failures += 1;
+            }
+        }
+    }
+    arena_release(&scratch);
+    printf("fuzz emulation: %u of %lu cases differ from clang\n", failures, 2 * (unsigned long)BUSTER_ARRAY_LENGTH(pp_fuzz_emulation_cases));
+    return failures == 0;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The run
 
@@ -1246,6 +1311,7 @@ static bool pp_fuzz(const PPFuzzOptions* options)
         result = false;
     }
     result = result && pp_fuzz_check_isolation();
+    result = result && (!options->with_clang || pp_fuzz_check_emulation(options));
     if (result && options->jobs == 1)
     {
         for (uint32_t mode = 0; mode < 2; mode += 1)
