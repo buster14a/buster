@@ -692,8 +692,8 @@ static const uint32_t separator_places[] = { 0, 1, 2, 62, 63, 64, 65, 509, 510, 
 #define BUSTER_TEST_SEPARATOR_BUFFER_BYTES 1024
 
 // Compares the paths on each number of separator_numbers with a '\'' at every place in it, followed by each of
-// separator_followers, with each of separator_splices around the '\'', at each of separator_places (after spaces), in
-// each number mode, and prints the counts. Without digit separators, a case without a line splice must also stay on
+// separator_followers, with each of separator_splices around the '\'', at each of separator_places (after the snippet's
+// padding of spaces and newlines), in each number mode, and prints the counts. Without digit separators, a case without a line splice must also stay on
 // the vectorized path: there, a '\'' outside of literals and comments always starts a character constant.
 static bool check_separators(TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
 {

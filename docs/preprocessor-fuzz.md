@@ -403,7 +403,9 @@ Probing around each one found more, which were fixed and pinned the same way:
 - **Lexing.**
   - Literal prefixes follow the mode.
   - Before C23, a number has no digit separator: `1'000` is 1 and an
-    unterminated `'000` (`pp_lex_mode`).
+    unterminated `'000`. A pass after the lexer cut such numbers at first
+    (`pp_lex_mode`); since #264 the lexer itself ends them
+    (`C_TOKENIZER_NO_DIGIT_SEPARATORS`).
   - A `_Pragma`'s string with an unterminated comment is an error.
   - So is a paste that would start a comment.
 - **Builtins and predefines.**
