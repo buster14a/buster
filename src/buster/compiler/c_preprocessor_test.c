@@ -2145,8 +2145,17 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
         }
         else if (with_clang && right)
         {
+            // The tokens alone, from clang's predefines, not pp_test_file's -dM too: clang's -dM leaves out every macro
+            // defined after an unknown token (the probe's '$' as punctuation), and its -x c would override a set's -x.
             uint64_t tokens = 0;
-            const bool same = pp_test_file(n, arguments, &options, path, true, directory, &tokens);
+            char predefines[4096];
+            snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
+            size_t length = 0;
+            char* text = pp_test_clang(arguments, n, path, predefines, &length);
+            PPOptions with_predefines = options;
+            with_predefines.predefines_path = predefines;
+            const bool same = text != 0 && pp_test_file_output(&with_predefines, path, true, text, length, &tokens);
+            free(text);
             if (!same)
             {
                 printf("option sets: buster's tokens with %s differ from clang's\n", shown);
