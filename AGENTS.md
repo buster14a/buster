@@ -2050,12 +2050,13 @@ others, its measurements are informational.
 ## Foreign tests
 
 `./build/compiler test-foreign [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (TEST_FOREIGN_TIME) checks `foreign.c`. Every
-resolution runs by both paths and with groups of 1, 2, 3 and 8 lanes, with
-partitions of about 16 records (`ForeignCommand.partition_records`) so that
-the cases' few records spread over every lane, which must describe it byte for
-byte alike: the loaded objects, every name's resolution, winner and counts,
-every symbol's name id and every COMDAT group's fate.
+[--cross-check] [--keep]` (about 0.5 s on the 9700X, and 1.0 s with
+`--cross-check`) checks `foreign.c`. Every resolution runs by both paths and
+with groups of 1, 2, 3 and 8 lanes, with partitions of about 16 records
+(`ForeignCommand.partition_records`) so that the cases' few records spread
+over every lane, which must describe it byte for byte alike: the loaded
+objects, every name's resolution, winner and counts, every symbol's name id
+and every COMDAT group's fate.
 
 - programs: `test-link`'s seven sets, each unit's object written by the object
   writer, resolved four ways: every unit an object; the units after the first
@@ -2115,28 +2116,28 @@ runs it with `--cross-check`.
 
 `./build/compiler benchmark-foreign [--functions LIST] [--filler N] [--seed N]
 [--lanes LIST] [--cpus LIST] [--runs N] [--directory PATH] [--kinds LIST]
-[--linkers] [--keep]` (BENCHMARK_FOREIGN_TIME) resolves `link_program.c`'s
-programs that call libc, written as objects, 200 workers per unit: one worker,
-2,000, and synth's shape (102,400 workers in 512 units, up to 64 filler
-instructions each), or with `--functions` a program of each count. Each is
-resolved as GCC's driver links it (`--kinds`: `dynamic`, a PIE against
-`libc.so`'s script, libgcc and the crt objects; `static`, against `libgcc.a`,
-`libgcc_eh.a` and `libc.a` in a group, whose members the rounds load; and
-`members`, the dynamic one with every unit but the first in an archive), by
-each path and each lane count of `--lanes` (1 by default), the lanes pinned to
-`--cpus` in order. It reports what the resolution did (its inputs, objects,
-members, rounds, global symbols, groups, names and partitions) and medians of
-`--runs` runs (21) after a warm-up: the whole resolution and each phase (open,
-indices, headers, symbols, exchange, resolve, load, groups and winners), the
-slowest lane's. With `--linkers`, mold (`--perf`) and wild (`--time`) link the
-same command lines on one thread, 11 runs after a warm-up, and the medians of
-their phases that do the same work are printed: mold's `read_input_files` and
-`resolve_symbols`, wild's opening, loading, resolving and section resolution.
-Run it under the 9700X's lock with `taskset -c 2` for one lane, or with
-`--cpus` for several. `docs/object-writer-and-linker.md` ("Steps 1 to 5, as
-built") has the numbers. The default 9700X job runs it with `--linkers` after
-the tests, pinned to one allowed CPU; like the others, its measurements are
-informational.
+[--linkers] [--keep]` (about 9.3 s on the 9700X with `--linkers`) resolves
+`link_program.c`'s programs that call libc, written as objects, 200 workers
+per unit: one worker, 2,000, and synth's shape (102,400 workers in 512 units,
+up to 64 filler instructions each), or with `--functions` a program of each
+count. Each is resolved as GCC's driver links it (`--kinds`: `dynamic`, a PIE
+against `libc.so`'s script, libgcc and the crt objects; `static`, against
+`libgcc.a`, `libgcc_eh.a` and `libc.a` in a group, whose members the rounds
+load; and `members`, the dynamic one with every unit but the first in an
+archive), by each path and each lane count of `--lanes` (1 by default), the
+lanes pinned to `--cpus` in order. It reports what the resolution did (its
+inputs, objects, members, rounds, global symbols, groups, names and
+partitions) and medians of `--runs` runs (21) after a warm-up: the whole
+resolution and each phase (open, indices, headers, symbols, exchange, resolve,
+load, groups and winners), the slowest lane's. With `--linkers`, mold
+(`--perf`) and wild (`--time`) link the same command lines on one thread, 11
+runs after a warm-up, and the medians of their phases that do the same work
+are printed: mold's `read_input_files` and `resolve_symbols`, wild's opening,
+loading, resolving and section resolution. Run it under the 9700X's lock with
+`taskset -c 2` for one lane, or with `--cpus` for several.
+`docs/object-writer-and-linker.md` ("Steps 1 to 5, as built") has the numbers.
+The default 9700X job runs it with `--linkers` after the tests, pinned to one
+allowed CPU; like the others, its measurements are informational.
 
 ## Dataflow tests
 
