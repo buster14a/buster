@@ -229,6 +229,13 @@ members' own:
   LLVM aligns integers, an `i128` at 128 bits), and one of long doubles or of
   `_BitInt`s narrower than a byte, whose elements LLVM packs, is aligned to
   its bytes rounded up to a power of two (`abi_vector_llvm`).
+  Short bit-field runs of eight bytes or less also propagate `STORAGE_INEXACT`
+  through both the scalar storage calculation and vector parts, and through the
+  wide-record walk. Their access units remain a separate follow-up. Wide
+  `_BitInt` storage uses LLVM's memory type: alignment 16 for sizes divisible
+  by 16 bytes, and a byte array aligned to 1 otherwise. An enum backed by bool
+  keeps vector storage; only a vector written with builtin bool elements uses
+  the atomic integer-coercion rule.
 - **`layout`**, 8 bytes, which only a type of 16 bytes or less gets, since
   only such types read their own and their members' and elements': the scalars
   of the LLVM type, as `GetSSETypeAtOffset` and `GetINTEGERTypeAtOffset` find

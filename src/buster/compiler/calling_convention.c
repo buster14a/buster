@@ -1048,7 +1048,8 @@ static void abi_wide_fold(const TypeTable* table, AbiWideFrame* frame, uint32_t 
 // for it, but the i128 and EMPTY): the log2 of its alignment, a struct's members' largest storage alignment (a
 // bit-field's run's unit's past an eightbyte, abi_bit_field_run) and a union's most aligned member's
 // (abi_member_storage's), unless a struct's member is off its own or the size isn't a multiple of it (determinePacked:
-// 1); and INEXACT if a member's storage is, or for a struct's bit-field run of an eightbyte or less. A member that holds such a record by value has its storage, walked in turn
+// 1); and INEXACT if a member's storage is, or for a struct's bit-field run of an eightbyte or less. A member that holds
+// such a record by value has its storage, walked in turn
 // on an explicit stack in scratch memory (no record holds itself, so it is no deeper than the table has types), once:
 // a record finished in this walk goes in a sparse set (`done[place[r]].record == r` for its index r, and `place` is
 // left uninitialized), whose storage the next record that holds it takes, so that a walk takes each distinct record and
