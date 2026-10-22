@@ -2043,7 +2043,8 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `SOURCE_DATE_EPOCH`'s when it is set; the expansion history's checks; the
   text of an `#embed`'s data, by `pp_embed_text_vector` and its scalar twin
   against `snprintf`, for every count to 300 of random bytes and of every value,
-  ending at a `PROT_NONE` page; and the fuzz batch: its isolation rules checked on small sources (what a case
+  ending at a `PROT_NONE` page; and the fuzz batch: its isolation rules checked
+  on small sources (what a case
   leaves open makes clang read it alone), with `--clang` its emulation of
   clang's -P printer checked on fixtures of its own, then 1,500 cases of the
   independent harness's generator in each of C17 and C23
