@@ -444,8 +444,12 @@ there at a time, so everything takes one lock:
 
 - Run every build, test, benchmark and perf run there through
   `EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND...`.
+  Also set `EXCLUSIVE_TITLE` to the session's title and `EXCLUSIVE_LINK` to
+  its link (its claude.ai page, or else the PR or issue it works on): whoever
+  waits sees them in `/var/lib/buster-9700x/owner`.
 - The runner's job hooks take the same lock for every CI job, and a waiting CI
-  job goes first.
+  job goes first. A CI job's owner lines give its workflow, job, PR number and
+  title (or a push's first line), the run's link and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
