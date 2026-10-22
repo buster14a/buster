@@ -2557,12 +2557,13 @@ others, its measurements are informational.
   uncounted `_Atomic int` leaves one register, split or whole on the stack,
   the larger copies' slots, byval or an integer by clang's count, `_Atomic`
   bool vectors, and 513 bools, an 80-byte copy, and as a result a hidden
-  pointer clang doesn't count), `va_arg`'s plans for an aligned `long` and an
-  `i128` with an SSE high eightbyte, and the levels across calls (a record
-  larger than 64 bytes that waits for a `LARGER` member, and records of no
-  size that an `_Atomic` of them in a later call reads: a flexible one, and
-  two that hold a struct of 128 bytes by an array of none, which wait for what
-  its alignment reads);
+  pointer clang doesn't count, and two that access units decide: a union one
+  `i128`, whole on the stack, and an `_Atomic` copy of a byte), `va_arg`'s
+  plans for an aligned `long` and an `i128` with an SSE high eightbyte, and
+  the levels across calls (a record larger than 64 bytes that waits for a
+  `LARGER` member, and records of no size that an `_Atomic` of them in a later
+  call reads: a flexible one, and two that hold a struct of 128 bytes by an
+  array of none, which wait for what its alignment reads);
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's

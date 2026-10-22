@@ -1204,7 +1204,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (2,518 checks): about 225 types whose classes, pass bits and
+- **Fixtures** (2,638 checks): about 228 types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -1231,7 +1231,10 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   units; an `i16` at 1 that packs `{char, int : 16}`, and one that packs a
   struct aligned to 16 by its `unsigned __int128 : 16` (a union of it and an
   `__int128` stores the `__int128` either way round: `PAIR`), and in a record
-  larger than 16 bytes in a zero-length array (`abi_wide_alignment`). Then the
+  larger than 16 bytes in a zero-length array (`abi_wide_alignment`);
+  `{__int128 : 8}`, an `i8` aligned to 1, which a union with an `__int128`
+  doesn't store; and an `_Atomic` of a struct of no size whose zero-length
+  array's element has such a unit, a copy of a byte. Then the
   `_Atomic` types clang's
   LLVM types decide, with the slots that `-mllvm -stop-after=finalize-isel`'s
   fixed stack objects show: `_Atomic`s of structs of no size, `LARGER` and
@@ -1273,7 +1276,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   pointer; `unsigned _BitInt(4)`s: eight in xmm0, `SMALLER`, sixteen refused,
   32 a copy of 16 bytes); and lengths that aren't a power of two in memory
   (five floats and five doubles through a hidden pointer, three `long`s in
-  rax, rdx and rcx, three doubles in xmm0, xmm1 and st0). Then twenty-four
+  rax, rdx and rcx, three doubles in xmm0, xmm1 and st0). Then twenty-six
   calls whose locations clang and LLVM give, with their totals: an `UNCOUNTED`
   `nullptr_t` that splits a struct; a `PAIR` on the stack with r9 taken by the
   `long` after it; a high eightbyte alone on the stack; an `UNCOUNTED`
@@ -1293,7 +1296,11 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   general registers too, on the stack after five `long`s and in rdi and rsi
   before a `double` in xmm0; and 513 bools after six `long`s, a copy of 80
   bytes aligned to 128, the `long` after it at 80, and as a result, whose
-  hidden pointer clang doesn't count, the sixth `long` on the stack. And
+  hidden pointer clang doesn't count, the sixth `long` on the stack; and two
+  that access units decide, the union of `{__int128 : 8}` and an `__int128`
+  whole on the stack after an `UNCOUNTED` `_Atomic int` and four `long`s, the
+  `long` after it in r9, and that `_Atomic`'s byte in a slot of 8 after six
+  `long`s, the `long` after it at 8. And
   `va_arg`'s plans for a `long` aligned to 32, which reads the overflow area
   aligned to 8, and for that union, from two general registers' slots. Last
   the levels across four calls by each path: a struct of 101 bytes ending in
