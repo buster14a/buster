@@ -623,8 +623,8 @@ the 360 files it lists for `main.c` with the compiler's options.
   identify spellings of up to 15 bytes by their prefix (92% of `sqlite3.c`'s,
   83% of the C library's, against 86% and 73%), for two more instructions per
   probe and a fourth fewer slots per bucket.
-- **Interning from several threads** (#150): per-file refinement in parallel,
-  with ids from a shared table or a merge that keeps them independent of the
-  schedule.
+- **Interning from several threads** (#150) is `docs/c-files.md`'s: each lane
+  refines into a table of its own, and a merge gives the shared table's ids in
+  the order of first occurrences, so that they don't depend on the lanes.
 - **Named UCNs:** intern them by their code point, which needs Unicode's name
   table, or diagnose them (#116's open question).
