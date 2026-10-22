@@ -393,6 +393,9 @@ jobs:
         # run, and clang's AST dump.
         run: ./build/compiler test-types
 
+      - name: Test integer builtin actions against Clang
+        run: ./build/compiler test-builtins
+
       - name: Benchmark the C type table
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
