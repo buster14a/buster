@@ -3665,49 +3665,6 @@ static void pp_scan_body_scalar(const uint8_t* kinds, const uint32_t* values, ui
 
 static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start, bool trigraphs);
 
-// Where clang reports what a directive's line lacks ("macro name missing"): its end, the newline after its last token
-// (`last`), past blanks, comments and line splices, or the end of the file.
-static uint32_t pp_line_end_location(const Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t last)
-{
-    const uint8_t* bytes = data->bytes;
-    const uint32_t length = data->length;
-    uint32_t p = pp_file_token_end(pp, data, last);
-    bool done = false;
-    while (!done && p < length)
-    {
-        const uint8_t c = bytes[p];
-        const uint32_t splice = c == '\\' && p + 1 < length && bytes[p + 1] == '\n' ? 2 : c == '\\' && p + 2 < length && bytes[p + 1] == '\r' && bytes[p + 2] == '\n' ? 3 : 0;
-        if (c == ' ' || c == '\t' || c == '\v' || c == '\f' || splice != 0)
-        {
-            p += splice != 0 ? splice : 1;
-        }
-        else if (c == '/' && p + 1 < length && bytes[p + 1] == '*')
-        {
-            p += 2;
-            while (p < length && !(bytes[p] == '*' && p + 1 < length && bytes[p + 1] == '/'))
-            {
-                p += 1;
-            }
-            p = p < length ? p + 2 : length;
-        }
-        else if (c == '/' && p + 1 < length && bytes[p + 1] == '/')
-        {
-            // To the line's newline, which a splice continues.
-            while (p < length && bytes[p] != '\n')
-            {
-                p += bytes[p] == '\\' && p + 1 < length && bytes[p + 1] == '\n' ? 2 : 1;
-            }
-            p -= p > 0 && p < length && bytes[p - 1] == '\r';
-            done = true;
-        }
-        else
-        {
-            done = true;
-        }
-    }
-    return base + p;
-}
-
 // Where clang reports token t of a definition's line, [.., end): the token, or the line's end if t is past its last.
 static uint32_t pp_define_location(const Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t t, uint32_t end)
 {
@@ -8371,10 +8328,6 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             }
             else
             {
-                if (hash + 2 < end)
-                {
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #else directive");
-                }
                 if (group->seen_else)
                 {
                     pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#else after #else");
@@ -8405,10 +8358,6 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             }
             else
             {
-                if (hash + 2 < end)
-                {
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #endif directive");
-                }
                 pp->conditional_count -= 1;
             }
             break;
@@ -13648,7 +13597,7 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
             uint8_t first;
             uint8_t last;
             pp_embed_ends(pp, out->values[i], &first, &last);
-            if (!line_start && ((flags & BUSTER_PP_SPACE) || pp_needs_separation(previous_last, previous_kind, first)))
+            if (!line_start && ((flags & BUSTER_PP_SPACE) || pp_needs_separation(previous_last, previous_kind, first, pp->options.assembly)))
             {
                 fputc(' ', stream);
             }
