@@ -3,8 +3,10 @@
 //
 // Generated-code ISA policy (#180), independent of the host build and the encoder. Zero-initialized options mean
 // x86-64 baseline. Resolve native once, before preprocessing/selection, never in an encoding or selection loop.
-// Features are a bitset shared by predefines and form eligibility. CPUID bit positions are architectural facts;
-// macro spellings and the named profiles are checked against Clang 23 (docs/x86-target.md).
+// Features are a bitset for form eligibility and target builtins. The preprocessor fills it from -march and the -m
+// flags as clang resolves them, and writes their macros, from c_predefines.c (predefines_target); x86_target_parse's
+// profiles give it what clang has no feature for. CPUID bit positions are architectural facts; macro spellings and the
+// named profiles are checked against Clang 23 (docs/x86-target.md).
 #ifndef BUSTER_X86_TARGET_INCLUDED
 #define BUSTER_X86_TARGET_INCLUDED
 
@@ -112,6 +114,8 @@ typedef enum X86Architecture
     X86_ARCH_V4,
     X86_ARCH_ZNVER5,
     X86_ARCH_NATIVE,
+    // Another of clang's CPUs (c_predefines.c's predefines_target): its features say what it has.
+    X86_ARCH_OTHER,
 } X86Architecture;
 
 typedef struct X86Target X86Target;
@@ -210,9 +214,10 @@ static bool x86_target_parse(const char* name, size_t length, X86Target* target)
     return found;
 }
 
-// One output line per feature plus the architecture's three identity lines. The caller provides this much room.
+// One output line per feature plus the architecture's three identity lines. The caller provides this much room. The
+// preprocessor's macros come from c_predefines.c; benchmark-x86-target runs this as the lighter work before its tables.
 #define BUSTER_X86_TARGET_PREDEFINES_BYTES (64 * (X86_FEATURE_COUNT + 3))
-static uint32_t x86_target_predefines(const X86Target* target, char* buffer)
+static __attribute__((unused)) uint32_t x86_target_predefines(const X86Target* target, char* buffer)
 {
     uint32_t length = 0;
     uint64_t remaining = target->features & ((UINT64_C(1) << X86_FEATURE_COUNT) - 1);
