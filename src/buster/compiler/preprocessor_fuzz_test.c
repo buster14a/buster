@@ -165,6 +165,18 @@ static bool preprocessor_fuzz_test_construct(PreprocessorFuzzCase test_case, uin
         BUSTER_S8_INIT(" #\n"),
         BUSTER_S8_INIT("# 1\n"),
         BUSTER_S8_INIT("(+,*)"),
+        BUSTER_S8_INIT("/* ppf_random 0 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 1 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 2 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 3 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 4 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 5 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 6 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 7 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 8 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 9 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 10 */\n"),
+        BUSTER_S8_INIT("/* ppf_random 11 */\n"),
     };
     bool result = preprocessor_fuzz_test_contains(test_case.source, witnesses[family]);
     if (family == 10 && c23)
@@ -218,7 +230,7 @@ static void preprocessor_fuzz_test_generation(PreprocessorFuzzTestTally* tally, 
     for (uint64_t family = 0; family < BUSTER_PPF_CONSTRUCT_COUNT; family += 1)
     {
         const uint64_t mark = memory->length;
-        tally->case_id = 10 * BUSTER_PPF_CONSTRUCT_COUNT + family;
+        tally->case_id = 10 * BUSTER_PPF_FAMILY_CYCLE + family;
         PreprocessorFuzzCase baseline = { 0 };
         const bool baseline_valid = preprocessor_fuzz_generate(memory, seeds[0], tally->case_id, c23, &baseline);
         preprocessor_fuzz_test_expect(tally, baseline_valid, "generator baseline failed");
@@ -299,8 +311,8 @@ static void preprocessor_fuzz_test_batch(PreprocessorFuzzTestTally* tally, Arena
                 tally->case_id = cases[i].id;
                 preprocessor_fuzz_test_expect(tally, preprocessor_fuzz_compare(memory, batched[i], individual[i]) == BUSTER_PPF_EQUAL,
                     "batch output differs from an individual process");
-                const uint64_t family = cases[i].id % BUSTER_PPF_CONSTRUCT_COUNT;
-                if (family == 8 || family == 16 || family == 17 || family == 19 || family >= 32)
+                const uint64_t family = preprocessor_fuzz_family(cases[i].id);
+                if (family == 8 || family == 16 || family == 17 || family == 19 || (family >= 32 && family < BUSTER_PPF_TEMPLATE_FAMILIES))
                 {
                     preprocessor_fuzz_test_expect(tally, !individual[i].accepted, "invalid paste or argument family was accepted");
                 }
@@ -682,8 +694,11 @@ static void preprocessor_fuzz_test_minimizer(PreprocessorFuzzTestTally* tally, A
     {
         preprocessor_fuzz_test_expect(tally, !preprocessor_fuzz_planted(memory, false_matches[i]), "planted adapter matched a comment, string, substring or missing token");
     }
+    const PreprocessorFuzzOracle planted = {
+        .kind = BUSTER_PPF_ORACLE_PLANTED,
+    };
     String8 minimized = { 0 };
-    const bool reduced = preprocessor_fuzz_minimize(memory, noise, &minimized);
+    const bool reduced = preprocessor_fuzz_minimize(memory, &planted, noise, &minimized);
     preprocessor_fuzz_test_expect(tally, reduced, "planted mismatch did not minimize");
     if (reduced)
     {
@@ -697,11 +712,11 @@ static void preprocessor_fuzz_test_minimizer(PreprocessorFuzzTestTally* tally, A
     const uint64_t failure_mark = memory->length;
     String8 unchanged = BUSTER_S8("unchanged");
     const String8 before = unchanged;
-    const bool equal_minimized = preprocessor_fuzz_minimize(memory, BUSTER_S8("BUSTER_PPF_LEFT"), &unchanged);
+    const bool equal_minimized = preprocessor_fuzz_minimize(memory, &planted, BUSTER_S8("BUSTER_PPF_LEFT"), &unchanged);
     preprocessor_fuzz_test_expect(tally, !equal_minimized && memory->length == failure_mark
         && unchanged.pointer == before.pointer && unchanged.length == before.length, "failed minimization changed its result or arena");
     Arena no_memory = { 0 };
-    const bool no_memory_minimized = preprocessor_fuzz_minimize(&no_memory, exact, &unchanged);
+    const bool no_memory_minimized = preprocessor_fuzz_minimize(&no_memory, &planted, exact, &unchanged);
     preprocessor_fuzz_test_expect(tally, !no_memory_minimized && no_memory.length == 0
         && unchanged.pointer == before.pointer && unchanged.length == before.length, "minimizer allocation failure changed its result");
     arena_pop_to(memory, mark);
@@ -766,6 +781,8 @@ static int run_preprocessor_fuzz_tests(int argc, char** argv)
     }
     else
     {
+        // Batched and individual processes must give __DATE__ and __TIME__ alike.
+        setenv("SOURCE_DATE_EPOCH", BUSTER_PPF_EPOCH, 1);
         Arena memory = arena_reserve(BUSTER_PPF_TEST_ARENA_BYTES);
         PreprocessorFuzzTestTally tally = { 0 };
         preprocessor_fuzz_test_expect(&tally, memory.base != 0, "test arena reservation failed");

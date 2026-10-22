@@ -85,6 +85,9 @@
 #define BUSTER_PP_START_OF_LINE 0x02 // It starts a line of the output (for -E).
 #define BUSTER_PP_NO_EXPAND 0x04 // It names a macro that was disabled when it was read: it never expands.
 #define BUSTER_PP_FROM_MACRO 0x08 // A macro's expansion made it (for __LINE__ and __FILE__).
+// Its BUSTER_PP_SPACE stands for the line it started among a macro's arguments, where clang's token keeps its own
+// flags: clang's -P printer gives it no space for that (test-preprocessor's emulation of it reads this).
+#define BUSTER_PP_LINE_SPACE 0x10
 
 // Kinds that only buffers hold, and the end of a pragma's tokens in the output (its '#' starts a line).
 #define BUSTER_PP_KIND_PLACEMARKER 0xFE // An empty argument next to ##, while substituting.
@@ -114,6 +117,8 @@ _Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_vector looks
 #define BUSTER_PP_MAX_MACROS (1u << 24)
 #define BUSTER_PP_MAX_ITEMS (1u << 26)
 #define BUSTER_PP_MAX_LINE_DIRECTIVES (1u << 20)
+// The _Pragma operators that printed nothing which a run notes (Preprocessor.silent_pragmas).
+#define BUSTER_PP_MAX_SILENT_PRAGMAS (1u << 16)
 #define BUSTER_PP_MAX_PUSHED (1u << 16)
 
 typedef uint32_t PPMacroId;
@@ -186,6 +191,12 @@ struct PPOptions
     // Replace trigraphs (translation phase 1): clang's default in the ISO modes before C23, and -trigraphs,
     // -ftrigraphs or -fno-trigraphs.
     bool trigraphs;
+    // -undef: none of the predefined macros but the ones clang keeps with it (__STDC__, __STDC_VERSION__,
+    // __STDC_HOSTED__, __STDC_UTF_16__, __STDC_UTF_32__ and #embed's results), and no __BUSTER__.
+    bool undefine;
+    // Count the diagnostics without printing them: test-preprocessor's fuzz runs compare acceptance, and print a
+    // difference's diagnostics when they run its case again.
+    bool quiet;
 };
 
 // A column array of tokens: an output stream, or a stack of buffers.
@@ -207,6 +218,7 @@ typedef struct Preprocessor Preprocessor;
 
 static __attribute__((unused)) bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table);
 static __attribute__((unused)) bool pp_run(Preprocessor* pp, const char* main_path);
+static __attribute__((unused)) bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length);
 static __attribute__((unused)) void pp_release(Preprocessor* pp);
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -275,6 +287,9 @@ struct PPFileData
     IdentId guard;
     bool once;
     bool prepared;
+    // Where an unterminated block comment starts, plus 1, or 0: the lexer makes it the last token, which preparing the
+    // file drops, and entering the file reports, as clang's lexer does.
+    uint32_t unterminated_comment;
     // A place whose line is known, from which pp_line_of counts lines forward: the preprocessor asks about later places
     // as it goes (__LINE__, diagnostics), so each file's lines are counted about once.
     uint32_t line_cursor;
@@ -317,6 +332,8 @@ struct PPRange
     uint32_t last_line_directive;
     // What the file was when this inclusion started (PPFile.system then: #pragma GCC system_header changes it later).
     uint8_t system;
+    // The line markers with flag 1 in it that no marker with flag 2 has left yet (pp_apply_line).
+    uint32_t marker_entries;
 };
 
 // A line note, from a #line or a #pragma GCC system_header: from `location` on in its range, lines are `delta` more
@@ -352,6 +369,11 @@ struct PPExpansionStart
 #define BUSTER_PP_MACRO_COMPILED 0x04 // pp_compile_macro made its body items.
 #define BUSTER_PP_MACRO_BUILTIN 0x08
 #define BUSTER_PP_MACRO_PASTES 0x10 // Its body has ## (an object-like macro then needs a buffer).
+// Its body uses its parameters expanded first in their order and has no __VA_OPT__: its arguments are expanded in
+// order (pp_continue_invocation).
+#define BUSTER_PP_MACRO_IN_ORDER 0x20
+// #pragma push_macro pushed it: a redefinition is no warning (clang's isAllowRedefinitionsWithoutWarning).
+#define BUSTER_PP_MACRO_REDEFINABLE 0x40
 
 // The built-in macros.
 typedef enum PPBuiltin
@@ -384,6 +406,8 @@ typedef enum PPBuiltin
     PP_BUILTIN_IS_TARGET_VENDOR,
     PP_BUILTIN_IS_TARGET_OS,
     PP_BUILTIN_IS_TARGET_ENVIRONMENT,
+    PP_BUILTIN_IS_TARGET_VARIANT_OS,
+    PP_BUILTIN_IS_TARGET_VARIANT_ENVIRONMENT,
     PP_BUILTIN_BUILDING_MODULE,
     PP_BUILTIN_POISONED, // A name #pragma GCC poison poisoned: using it is an error.
 } PPBuiltin;
@@ -425,11 +449,19 @@ typedef enum PPItemKind
     PP_ITEM_STRINGIZE_VA_OPT, // # __VA_OPT__( ... ), the same way.
 } PPItemKind;
 
+// An item's flags, for clang's NextTokGetsSpace (pp_substitute): a leading space on its token, but on the replacement
+// list's first token and on one after ##, and the same of the other tokens a __VA_OPT__ has (pp_compile_macro).
+#define BUSTER_PP_ITEM_SPACE 0x01 // The item's (first) token's, as BUSTER_PP_SPACE.
+#define BUSTER_PP_ITEM_VA_OPT_SPACE 0x10 // # __VA_OPT__'s __VA_OPT__'s.
+#define BUSTER_PP_ITEM_CLOSE_SPACE 0x20 // A __VA_OPT__'s closing ')''s.
+#define BUSTER_PP_ITEM_SKIP_SPACE 0x40 // Any of a __VA_OPT__'s content's tokens' and its ')''s, which a skipped one reads.
+_Static_assert(BUSTER_PP_ITEM_SPACE == BUSTER_PP_SPACE, "an item's space is its token's");
+
 typedef struct PPItem PPItem;
 struct PPItem
 {
     uint8_t kind;
-    uint8_t flags; // The body token's BUSTER_PP_SPACE.
+    uint8_t flags; // BUSTER_PP_ITEM_SPACE and the others.
     uint16_t parameter;
     uint32_t token; // The body token, in the defining file.
 };
@@ -480,6 +512,16 @@ struct PPConditional
     uint32_t location;
 };
 
+// One token, as buffers hold them.
+typedef struct PPToken PPToken;
+struct PPToken
+{
+    uint8_t kind;
+    uint8_t flags;
+    uint32_t value;
+    uint32_t location;
+};
+
 // An argument of an invocation: its raw tokens in pp->arguments, and its expanded ones (in pp->arguments too when
 // expanding it changes nothing, else in pp->captures).
 typedef struct PPArgument PPArgument;
@@ -490,6 +532,8 @@ struct PPArgument
     uint32_t expanded_begin;
     uint32_t expanded_end;
     bool expanded_captured;
+    // Whether its expanded tokens are known (pp_continue_invocation).
+    bool expanded;
 };
 
 // A function-like macro's invocation, while its arguments are collected (when they aren't all in one context, a token
@@ -501,7 +545,10 @@ struct PPInvocation
     PPMacroId macro;
     uint32_t arguments; // Index of its first PPArgument.
     uint32_t argument_count;
-    uint32_t next; // The next argument to expand.
+    // Where pp_continue_invocation's walk is: the next argument, or the next item of the body; and the end of the
+    // __VA_OPT__ content the walk is in, or BUSTER_PP_NONE.
+    uint32_t next;
+    uint32_t content_end;
     uint32_t captures_begin; // pp->captures' count before its first expanded argument.
     uint32_t arguments_begin; // pp->arguments' count before its first raw argument.
     uint32_t expansion_end;
@@ -516,6 +563,9 @@ struct PPInvocation
     bool opened;
     uint32_t depth;
     uint32_t capture_mark;
+    // Its '(' and ')', which a _Pragma in an argument's expansion gives back (pp_defer_pragma).
+    PPToken open;
+    PPToken close;
 };
 
 // What a capture is for: which continuation takes its tokens when its barrier ends (pp_finish_capture).
@@ -524,6 +574,14 @@ struct PPInvocation
 #define BUSTER_PP_CAPTURE_INCLUDE 2 // A computed #include's line (pp_finish_include).
 #define BUSTER_PP_CAPTURE_LINE 3 // A #line's line (pp_finish_line).
 #define BUSTER_PP_CAPTURE_BUILTIN 4 // A builtin's operand (pp_finish_builtin).
+#define BUSTER_PP_CAPTURE_PRAGMA 5 // A pragma's or an #ident's operands that clang reads expanded (pp_finish_pragma).
+#define BUSTER_PP_CAPTURE_STREAM 6 // An attribute query's operand, read expanded a token at a time (pp_stream_check).
+
+// A stream's stages: before its operand's first token, after a first identifier whose next token clang reads
+// unexpanded (__has_c_attribute's and __has_cpp_attribute's, for a `::`), and after that.
+#define BUSTER_PP_STREAM_FIRST 0
+#define BUSTER_PP_STREAM_UNEXPANDED 1
+#define BUSTER_PP_STREAM_REST 2
 
 typedef struct PPCapture PPCapture;
 struct PPCapture
@@ -531,8 +589,9 @@ struct PPCapture
     uint8_t kind;
     // The capture's tokens start here in pp->captures.
     uint32_t begin;
-    // An argument's: its invocation.
+    // An argument's: its invocation, and which of its arguments.
     uint32_t invocation;
+    uint32_t argument;
     // The other kinds' continuation: pp->arguments' count to give back (the copied line, or the builtin's operand);
     // a directive's: the directive, its kind and its file context; a builtin's: which one, and its name's flags and
     // location.
@@ -543,7 +602,26 @@ struct PPCapture
     uint8_t builtin;
     uint8_t flags;
     uint32_t location;
+    // _Pragma's '(' and ')', for pp_defer_pragma.
+    PPToken open;
+    PPToken close;
+    // pp->pragma_lines when the capture started: the pragma lines a _Pragma or a #pragma among its tokens emitted into it
+    // since then go to the target below (pp_lift_pragma_lines).
+    uint32_t pragma_mark;
+    // A stream's: its parentheses' depth, the tokens it has read (an index of pp->captures), whether one of them is
+    // inside a pragma line, and its stage (BUSTER_PP_STREAM_FIRST and the others).
+    uint32_t depth;
+    uint32_t scanned;
+    bool in_pragma;
+    uint8_t stage;
 };
+
+// The regions #pragma clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage open (pp_pragma_region), as
+// Preprocessor.region_locations has them.
+#define BUSTER_PP_REGION_ASSUME_NONNULL 0
+#define BUSTER_PP_REGION_ARC_CF 1
+#define BUSTER_PP_REGION_UNSAFE_BUFFER 2
+static const char* const pp_region_names[3] = { "assume_nonnull", "arc_cf_code_audited", "unsafe_buffer_usage" };
 
 // A feature query's table: the names a __has_* builtin answers nonzero for, sorted, with their values.
 typedef struct PPFeature PPFeature;
@@ -599,6 +677,11 @@ struct Preprocessor
     PPExpansionStart* expansion_starts;
     uint32_t expansion_start_count;
     uint32_t expansion_location;
+    // With expansion_starts: the _Pragma operators that printed nothing, by the output token after them and the place
+    // of their expansion, which clang's printer moves to (MoveToLine) as it handles one: test-preprocessor's fuzz runs
+    // print the line break that gives, as clang's text has it.
+    PPExpansionStart* silent_pragmas;
+    uint32_t silent_pragma_count;
     // Scratch spellings, per kind (raw, as source to be read again, or clean, which are final: pp_scratch_clean): the
     // arena, the range of the chunk being filled (BUSTER_PP_NONE before the first) and how much of it is used. A clean
     // spelling is known by its arena (pp_without_splices).
@@ -619,8 +702,13 @@ struct Preprocessor
     IdentId* pushed_names;
     PPMacroId* pushed_macros;
     uint32_t pushed_count;
-    // #pragma GCC poison.
+    // The #pragma clang (or GCC) diagnostic pushes not yet popped: a pop without one isn't printed (pp_pragma_diagnostic).
+    uint32_t diagnostic_depth;
+    // Where the open #pragma clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage regions begin, or 0.
+    uint32_t region_locations[3];
+    // #pragma GCC poison's names, by IdentId, and how many there are (pp_check_poison).
     uint64_t* poisoned;
+    uint32_t poison_count;
     // The stacks of the main loop.
     PPContext* contexts;
     uint32_t context_count;
@@ -632,6 +720,10 @@ struct Preprocessor
     uint32_t argument_record_count;
     PPCapture* capture_frames;
     uint32_t capture_count;
+    // The open streams (BUSTER_PP_CAPTURE_STREAM), which the main loop checks after each step, and how many pragma lines
+    // were emitted (PPCapture.pragma_mark).
+    uint32_t stream_count;
+    uint32_t pragma_lines;
     // Built-in state: __COUNTER__, the inclusion depth, the main file, and the spellings "0", "1" and "#".
     uint32_t counter;
     uint32_t zero_location;
@@ -651,6 +743,10 @@ struct Preprocessor
     uint32_t errors;
     uint32_t warnings;
     bool fatal;
+    // What a run leaves open, or closes without its opening: invocations and builtin operands left open where their
+    // context ended, conditionals and block comments left open at a file's end, and #elif, #else or #endif without #if.
+    // test-preprocessor's fuzz runs read such a case by clang alone, since in a batch it would reach into the next case.
+    uint32_t unterminated;
     // The output kind of each identifier id below BUSTER_PP_KEYWORD_TABLE: its keyword's in this language mode, or an
     // identifier's.
     uint8_t keyword_kinds[BUSTER_PP_KEYWORD_TABLE] __attribute__((aligned(64)));
@@ -707,10 +803,10 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** name, uint32_t* name_length);
 
 // Prints "file:line:column: error: message" to stderr for `location` (0 for none): the presumed file and line, as #line
-// gives them, and the column.
+// gives them, and the column. PPOptions.quiet only counts it.
 static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, PPSeverity severity, uint32_t location, const char* format, ...)
 {
-    const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    const uint32_t range = location != 0 && !pp->options.quiet ? pp_find_range(pp, location) : BUSTER_PP_NONE;
     if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
     {
         uint32_t column;
@@ -720,12 +816,15 @@ static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, 
         const uint32_t line = pp_presumed(pp, location, &name, &name_length);
         fprintf(stderr, "%.*s:%u:%u: ", (int)name_length, name, line, column);
     }
-    fprintf(stderr, "%s: ", severity == PP_SEVERITY_WARNING ? "warning" : severity == PP_SEVERITY_ERROR ? "error" : "fatal error");
-    va_list arguments;
-    va_start(arguments, format);
-    vfprintf(stderr, format, arguments);
-    va_end(arguments);
-    fputc('\n', stderr);
+    if (!pp->options.quiet)
+    {
+        fprintf(stderr, "%s: ", severity == PP_SEVERITY_WARNING ? "warning" : severity == PP_SEVERITY_ERROR ? "error" : "fatal error");
+        va_list arguments;
+        va_start(arguments, format);
+        vfprintf(stderr, format, arguments);
+        va_end(arguments);
+        fputc('\n', stderr);
+    }
     pp->warnings += severity == PP_SEVERITY_WARNING;
     pp->errors += severity != PP_SEVERITY_WARNING;
     pp->fatal |= severity == PP_SEVERITY_FATAL;
@@ -794,7 +893,9 @@ static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location)
     return pp->range_count != 0 && location >= pp->ranges[low].base && location - pp->ranges[low].base < pp->ranges[low].length ? low : BUSTER_PP_NONE;
 }
 
-// Copies `length` bytes into the scratch space, and returns their location (or 0 and a fatal error).
+// Copies `length` bytes into the scratch space, and returns their location (or 0 and a fatal error). A zero byte follows
+// them, so that an identifier spelled there ends where its spelling does when it is read as written
+// (pp_identifier_as_written), rather than running into the next spelling.
 static uint32_t pp_scratch_in(Preprocessor* pp, const uint8_t* bytes, uint32_t length, bool clean)
 {
     uint32_t result = 0;
@@ -802,7 +903,7 @@ static uint32_t pp_scratch_in(Preprocessor* pp, const uint8_t* bytes, uint32_t l
     uint32_t* used = &pp->scratch_used[clean];
     if (*current == BUSTER_PP_NONE || *used + length > pp->ranges[*current].length - 1)
     {
-        const uint32_t chunk = length > BUSTER_PP_SCRATCH_CHUNK_BYTES ? length : BUSTER_PP_SCRATCH_CHUNK_BYTES;
+        const uint32_t chunk = length >= BUSTER_PP_SCRATCH_CHUNK_BYTES ? length + 1 : BUSTER_PP_SCRATCH_CHUNK_BYTES;
         uint8_t* memory = arena_push(&pp->scratch[clean], chunk, 1);
         *current = memory != 0 ? pp_add_range(pp, chunk, BUSTER_PP_NONE, memory, BUSTER_PP_NONE, 0) : BUSTER_PP_NONE;
         *used = 0;
@@ -815,8 +916,9 @@ static uint32_t pp_scratch_in(Preprocessor* pp, const uint8_t* bytes, uint32_t l
     {
         const PPRange* range = &pp->ranges[*current];
         memcpy((uint8_t*)range->bytes + *used, bytes, length);
+        ((uint8_t*)range->bytes)[*used + length] = 0;
         result = range->base + *used;
-        *used += length;
+        *used += length + 1;
     }
     return result;
 }
@@ -920,6 +1022,50 @@ static uint32_t pp_identifier_as_written(Preprocessor* pp, uint32_t location, ui
         const uint32_t start = location - bytes_range->base;
         const uint32_t end = refine_identifier_end(bytes_range->bytes, bytes_range->length, start, pp->refine_flags);
         result = pp_without_splices(pp, bytes_range->bytes + start, end - start, buffer, spelling);
+    }
+    return result;
+}
+
+// The printers' place in a pragma line, which pp_pragma_state keeps from token to token: outside one, after its '#', or
+// after its name (`pragma` or `ident`). -E spells an identifier after a pragma line's name as it was written
+// (pp_written_spelling: its UCNs as written, without its splices), as clang's printer spells a pragma's tokens
+// (Preprocessor::getSpelling), where it spells any other identifier as interned (a UCN as UTF-8).
+#define BUSTER_PP_PRAGMA_OUTSIDE 0
+#define BUSTER_PP_PRAGMA_TOKENS 1
+#define BUSTER_PP_PRAGMA_NAME 2
+
+// The place after an output token of `kind` at `location`, from the place before it: a pragma line starts at its '#'
+// (the scratch "#", pp_emit_pragma_start's) and ends at its BUSTER_PP_KIND_PRAGMA_END.
+static uint32_t pp_pragma_state(const Preprocessor* pp, uint32_t state, uint8_t kind, uint32_t location)
+{
+    const bool start = kind == C_TOKEN_HASH && location == pp->hash_location;
+    const bool end = kind == BUSTER_PP_KIND_PRAGMA_END;
+    return start ? BUSTER_PP_PRAGMA_NAME : end ? BUSTER_PP_PRAGMA_OUTSIDE : state == BUSTER_PP_PRAGMA_NAME ? BUSTER_PP_PRAGMA_TOKENS : state;
+}
+
+// Whether -E spells an output token of `kind` at place `state` as written.
+static bool pp_spelled_as_written(uint32_t state, uint8_t kind)
+{
+    const bool identifier = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT);
+    return state == BUSTER_PP_PRAGMA_TOKENS && identifier;
+}
+
+// The spelling -E prints for an identifier it spells as written (pp_spelled_as_written), in `arena`:
+// pp_identifier_as_written's, or the interned one when its location is in no range. Sets *spelling to null if `arena`
+// is full. Returns the length.
+static uint32_t pp_written_spelling(Preprocessor* pp, uint32_t value, uint32_t location, Arena* arena, const uint8_t** spelling)
+{
+    const uint32_t range = pp_find_range(pp, location);
+    uint32_t result = intern_length(pp->table, value);
+    *spelling = intern_bytes(pp->table, value);
+    if (range != BUSTER_PP_NONE)
+    {
+        const PPRange* bytes_range = &pp->ranges[range];
+        const uint32_t start = location - bytes_range->base;
+        const uint32_t end = refine_identifier_end(bytes_range->bytes, bytes_range->length, start, pp->refine_flags);
+        uint8_t* buffer = arena_push(arena, (uint64_t)(end - start) + 1, 1);
+        result = buffer != 0 ? pp_without_splices(pp, bytes_range->bytes + start, end - start, buffer, spelling) : 0;
+        *spelling = buffer != 0 ? *spelling : 0;
     }
     return result;
 }
@@ -1345,17 +1491,107 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
     return count + splits;
 }
 
-// The prefixed literals among `count` freshly lexed tokens that the mode doesn't have, split (pp_split_prefixes): a scan
-// of the kinds, and the rare split. Returns the new count.
-static uint32_t pp_lex_for_mode(const Preprocessor* pp, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, bool vectorized)
+// The first token from `from` that is a number with a digit separator, at or after token `from` of `count`, and where its
+// first `'` is (`*quote`); `count` if none. 16 tokens at a time: one compare finds the numbers, and their lengths (a
+// separator needs three bytes: `1'0`) the ones whose bytes are read.
+static uint32_t pp_find_separator_vector(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t from, uint32_t count, uint32_t* quote)
 {
     uint32_t result = count;
-    if (pp->split_kinds != 0)
+    for (uint32_t t = from; result == count && t < count; t += 16)
     {
-        const uint32_t splits = vectorized ? pp_count_splits_vector(kinds, count, pp->split_kinds) : pp_count_splits_scalar(kinds, count, pp->split_kinds);
-        result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, count, splits, pp->split_kinds) : count;
+        const __mmask16 valid = (__mmask16)_bzhi_u32(0xFFFF, count - t < 16 ? count - t : 16);
+        const __m128i kind = _mm_and_si128(_mm_maskz_loadu_epi8(valid, kinds + t), _mm_set1_epi8(0x7F));
+        const __mmask16 numbers = _mm_mask_cmpeq_epi8_mask(valid, kind, _mm_set1_epi8(C_TOKEN_NUMERIC_CONSTANT));
+        const __m512i lengths = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(numbers, ends + t), _mm512_maskz_loadu_epi32(numbers, starts + t));
+        uint32_t candidates = _mm512_mask_cmpge_epu32_mask(numbers, lengths, _mm512_set1_epi32(3));
+        while (result == count && candidates != 0)
+        {
+            const uint32_t i = t + (uint32_t)__builtin_ctz(candidates);
+            const uint8_t* found = memchr(bytes + starts[i], '\'', ends[i] - starts[i]);
+            result = found != 0 ? i : count;
+            *quote = found != 0 ? (uint32_t)(found - bytes) : *quote;
+            candidates &= candidates - 1;
+        }
     }
     return result;
+}
+
+// pp_find_separator_vector's scalar twin.
+static uint32_t pp_find_separator_scalar(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t from, uint32_t count, uint32_t* quote)
+{
+    uint32_t result = count;
+    for (uint32_t i = from; result == count && i < count; i += 1)
+    {
+        const uint8_t* found = (kinds[i] & 0x7F) == C_TOKEN_NUMERIC_CONSTANT ? memchr(bytes + starts[i], '\'', ends[i] - starts[i]) : 0;
+        result = found != 0 ? i : count;
+        *quote = found != 0 ? (uint32_t)(found - bytes) : *quote;
+    }
+    return result;
+}
+
+// Lexes as a mode before C23 does `count` tokens the lexer lexed as C23 does, from `length` bytes: a number has no digit
+// separators there (clang ends it before a `'`, which starts a character constant: `1'000` is 1 and the unterminated
+// '000), and a literal's prefix the mode doesn't have isn't one (`split`, pp_split_kinds; nonzero just before C23). A
+// number with a `'` is cut there, and the bytes from the `'` on are lexed again, for each such number, which sources
+// that compile don't have; then the prefixes are split (pp_split_prefixes). The arrays have room for a token per byte.
+// Returns the new count, or -1 if the lexer fails.
+static int64_t pp_lex_mode(const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, uint64_t split, uint32_t flags, bool vectorized)
+{
+    int64_t result = count;
+    uint32_t from = 0;
+    bool searching = split != 0 && result > 0;
+    while (searching)
+    {
+        uint32_t quote = 0;
+        const uint32_t n = (uint32_t)result;
+        const uint32_t t = vectorized ? pp_find_separator_vector(bytes, kinds, starts, ends, from, n, &quote) : pp_find_separator_scalar(bytes, kinds, starts, ends, from, n, &quote);
+        searching = t < n;
+        if (searching)
+        {
+            // The number ends at its `'`; the tokens from there on are lexed again, into aligned scratch first.
+            ends[t] = quote;
+            Scratch scratch = scratch_begin(0);
+            const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY((uint64_t)(length - quote));
+            uint8_t* tail_kinds = arena_push(scratch.arena, capacity, 64);
+            uint32_t* tail_starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
+            uint32_t* tail_ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
+            const int64_t tail = tail_kinds == 0 || tail_starts == 0 || tail_ends == 0 ? -1
+                                 : vectorized ? c_tokenize(bytes + quote, length - quote, tail_kinds, tail_starts, tail_ends, flags)
+                                              : c_tokenize_scalar(bytes + quote, length - quote, tail_kinds, tail_starts, tail_ends, flags);
+            for (int64_t k = 0; k < tail; k += 1)
+            {
+                // The first is in the middle of its line.
+                kinds[t + 1 + k] = (uint8_t)(k == 0 ? tail_kinds[k] & 0x7F : tail_kinds[k]);
+                starts[t + 1 + k] = tail_starts[k] + quote;
+                ends[t + 1 + k] = tail_ends[k] + quote;
+            }
+            scratch_end(scratch);
+            result = tail >= 0 ? (int64_t)t + 1 + tail : -1;
+            searching = tail >= 0;
+            from = t + 1;
+        }
+    }
+    if (split != 0 && result > 0)
+    {
+        const uint32_t n = (uint32_t)result;
+        const uint32_t splits = vectorized ? pp_count_splits_vector(kinds, n, split) : pp_count_splits_scalar(kinds, n, split);
+        result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, n, splits, split) : result;
+    }
+    return result;
+}
+
+// A file's (or a scratch text's) freshly lexed tokens, lexed as the language mode does (pp_lex_mode). Returns the new
+// count, or -1 if the lexer fails.
+static int64_t pp_lex_for_mode(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, bool vectorized)
+{
+    return pp_lex_mode(bytes, length, kinds, starts, ends, count, pp->split_kinds, pp->refine_flags, vectorized);
+}
+
+// Whether a lexed token is an unterminated block comment, which runs to the end of its text, so that only the last token
+// can be one: an unknown token that starts with '/' (a '/' alone is a slash). Clang's lexer makes no token of it.
+BUSTER_INLINE bool pp_is_unterminated_comment(const uint8_t* bytes, uint8_t kind, uint32_t start)
+{
+    return (kind & 0x7F) == C_TOKEN_UNKNOWN && bytes[start] == '/';
 }
 
 // Lexes, refines and indexes a file's bytes: tokens, values, leading-space bits and the directive table. Returns false
@@ -1371,7 +1607,7 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
     const bool timing = pp->options.timing;
     uint64_t tick = timing ? __rdtsc() : 0;
     int64_t count = result ? c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, pp->refine_flags) : -1;
-    count = count > 0 ? pp_lex_for_mode(pp, data->bytes, data->kinds, data->starts, data->values, (uint32_t)count, pp->vectorized) : count;
+    count = count > 0 ? pp_lex_for_mode(pp, data->bytes, data->length, data->kinds, data->starts, data->values, count, pp->vectorized) : count;
     if (timing)
     {
         const uint64_t now = __rdtsc();
@@ -1385,6 +1621,12 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
     }
     else
     {
+        // An unterminated block comment (pp_is_unterminated_comment), which entering the file reports.
+        if (count > 0 && pp_is_unterminated_comment(data->bytes, data->kinds[count - 1], data->starts[count - 1]))
+        {
+            data->unterminated_comment = data->starts[count - 1] + 1;
+            count -= 1;
+        }
         data->token_count = (uint32_t)count;
         pp->input_tokens += data->token_count;
         // Each column keeps what the file has, with the lexer's slack, and the next file's starts after it. The lexer
@@ -1698,10 +1940,20 @@ BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
     return (pp->is_macro[id / 64] >> (id % 64)) & 1;
 }
 
+static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name);
+
+// Sets `name`'s macro (0 for none: a poisoned name then gets its own record back, as pp_poison makes it).
 static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
 {
-    pp->macro_of[name] = macro;
-    if (macro != 0)
+    const bool poisoned = macro == 0 && pp->poison_count != 0 && ((pp->poisoned[name / 64] >> (name % 64)) & 1);
+    const PPMacroId id = poisoned ? pp_new_macro(pp, name) : macro;
+    if (poisoned && id != 0)
+    {
+        pp->macros[id].flags = BUSTER_PP_MACRO_BUILTIN;
+        pp->macros[id].builtin = (uint8_t)PP_BUILTIN_POISONED;
+    }
+    pp->macro_of[name] = id;
+    if (id != 0)
     {
         pp->is_macro[name / 64] |= 1ull << (name % 64);
     }
@@ -1736,6 +1988,85 @@ static void pp_define_builtin(Preprocessor* pp, IdentId name, PPBuiltin builtin,
         pp->macros[macro].flags = BUSTER_PP_MACRO_BUILTIN | (function_like ? BUSTER_PP_MACRO_FUNCTION : 0);
         pp->macros[macro].builtin = (uint8_t)builtin;
         pp_set_macro(pp, name, macro);
+    }
+}
+
+// Poisoned names (#pragma GCC poison), as clang has them: a name is poisoned for good, whether or not it is a macro, and
+// an identifier with its name is an error where clang reads it with a lexer (Preprocessor::HandleIdentifier): from a
+// file or a _Pragma's text, outside a skipped group, in a directive's line (but #error's and #warning's text, a header
+// name and poison's own names), among a macro's arguments, and from a paste (TokenLexer::Lex), but not from a macro's
+// expansion otherwise. A poisoned name that isn't a macro has a record of PP_BUILTIN_POISONED, which stops the file
+// runs at it (pp_check_poison then); one that is keeps its macro, which expands after the error.
+BUSTER_INLINE bool pp_is_poisoned(const Preprocessor* pp, IdentId id)
+{
+    return pp->poison_count != 0 && ((pp->poisoned[id / 64] >> (id % 64)) & 1);
+}
+
+// Whether `id` names a macro, as #ifdef asks: a poisoned name's own record isn't one, nor is `defined`'s.
+BUSTER_INLINE bool pp_is_defined(const Preprocessor* pp, IdentId id)
+{
+    const uint8_t builtin = pp_is_macro(pp, id) ? pp->macros[pp->macro_of[id]].builtin : PP_BUILTIN_POISONED;
+    return builtin != PP_BUILTIN_POISONED && builtin != PP_BUILTIN_DEFINED;
+}
+
+static void pp_check_poison(Preprocessor* pp, IdentId id, uint32_t location)
+{
+    if (pp_is_poisoned(pp, id))
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "attempt to use a poisoned identifier");
+    }
+}
+
+// pp_check_poison for the identifiers of tokens [begin, end) of a file read in the range at `base` (`tokens` null) or of
+// a stack, but for a header name's in <...>, which clang lexes as one token: at `header` (an #include's or a dependency
+// pragma's operand, or BUSTER_PP_NONE), and after `__has_include(`, `__has_include_next(` and `__has_embed(` when
+// `queries` (a directive's line, where clang evaluates them).
+static void pp_check_poison_range(Preprocessor* pp, const PPFileData* data, uint32_t base, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t header,
+                                  bool queries)
+{
+    bool in_header = false;
+    uint8_t before = 0;
+    IdentId before_name = 0;
+    for (uint32_t t = begin; t < end; t += 1)
+    {
+        const uint8_t kind = tokens != 0 ? tokens->kinds[t] : (uint8_t)(data->kinds[t] & 0x7F);
+        const uint32_t value = tokens != 0 ? tokens->values[t] : data->values[t];
+        const uint32_t location = tokens != 0 ? tokens->locations[t] : base + data->starts[t];
+        const bool query = queries && before == C_TOKEN_L_PAREN &&
+                           (before_name == C_NAME_HAS_INCLUDE || before_name == C_NAME_HAS_INCLUDE_NEXT || before_name == C_NAME_HAS_EMBED);
+        if (in_header)
+        {
+            in_header = kind != C_TOKEN_GREATER;
+        }
+        else if (kind == C_TOKEN_LESS && (t == header || query))
+        {
+            in_header = true;
+        }
+        else if (kind == C_TOKEN_RAW_IDENTIFIER)
+        {
+            pp_check_poison(pp, value, location);
+        }
+        before_name = kind == C_TOKEN_L_PAREN ? before_name : kind == C_TOKEN_RAW_IDENTIFIER ? value : 0;
+        before = kind;
+    }
+}
+
+// Poisons `name` (pp_is_poisoned): a macro now gets a warning and stays one, `defined` stays itself, and another name gets
+// its record.
+static void pp_poison(Preprocessor* pp, IdentId name, uint32_t location)
+{
+    if (!pp_is_poisoned(pp, name))
+    {
+        if (pp_is_defined(pp, name))
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, location, "poisoning existing macro");
+        }
+        else if (!pp_is_macro(pp, name))
+        {
+            pp_define_builtin(pp, name, PP_BUILTIN_POISONED, false);
+        }
+        pp->poisoned[name / 64] |= 1ull << (name % 64);
+        pp->poison_count += 1;
     }
 }
 
@@ -1811,32 +2142,45 @@ static bool pp_same_definition(const Preprocessor* pp, const PPMacro* a, const P
     return result;
 }
 
-// Whether a replacement list's tokens [begin, end) hold a '##' (`*pastes`) and a '#' (`*hashes`), 64 kinds at a time:
-// two compares per 64, masked to the list (a masked load doesn't touch the bytes it leaves out).
-static void pp_scan_body_vector(const uint8_t* kinds, uint32_t begin, uint32_t end, bool* pastes, bool* hashes)
+// Whether a replacement list's tokens [begin, end) hold a '##' (`*pastes`), a '#' (`*hashes`) and __VA_OPT__
+// (`*va_opt`), 64 kinds at a time: three compares per 64, then one per 16 values that hold identifiers, masked to the list
+// (a masked load doesn't touch the bytes it leaves out).
+static void pp_scan_body_vector(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
 {
     uint64_t found_pastes = 0;
     uint64_t found_hashes = 0;
+    uint64_t found_va_opt = 0;
     for (uint32_t t = begin; t < end; t += 64)
     {
         const __mmask64 lanes = _bzhi_u64(~0ull, end - t < 64 ? end - t : 64);
         const __m512i kind = _mm512_and_si512(_mm512_maskz_loadu_epi8(lanes, kinds + t), _mm512_set1_epi8(0x7F));
         found_pastes |= _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_HASHHASH));
         found_hashes |= _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_HASH));
+        // An identifier's value is its id; another token's is its end, which may equal __VA_OPT__'s id.
+        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+        for (uint32_t j = 0; j < 4 && (identifiers >> (16 * j)) != 0; j += 1)
+        {
+            const __mmask16 named = (__mmask16)(identifiers >> (16 * j));
+            const __m512i ids = _mm512_maskz_loadu_epi32(named, values + t + 16 * j);
+            found_va_opt |= _mm512_mask_cmpeq_epi32_mask(named, ids, _mm512_set1_epi32(C_NAME_VA_OPT));
+        }
     }
     *pastes = found_pastes != 0;
     *hashes = found_hashes != 0;
+    *va_opt = found_va_opt != 0;
 }
 
 // pp_scan_body_vector's scalar twin.
-static void pp_scan_body_scalar(const uint8_t* kinds, uint32_t begin, uint32_t end, bool* pastes, bool* hashes)
+static void pp_scan_body_scalar(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
 {
     *pastes = false;
     *hashes = false;
+    *va_opt = false;
     for (uint32_t t = begin; t < end; t += 1)
     {
         *pastes |= (kinds[t] & 0x7F) == C_TOKEN_HASHHASH;
         *hashes |= (kinds[t] & 0x7F) == C_TOKEN_HASH;
+        *va_opt |= (kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && values[t] == C_NAME_VA_OPT;
     }
 }
 
@@ -1844,28 +2188,31 @@ static void pp_scan_body_scalar(const uint8_t* kinds, uint32_t begin, uint32_t e
 // __VA_ARGS__ when it is variadic.
 static bool pp_names_parameter(const PPFileData* data, const PPMacro* macro, IdentId id)
 {
-    bool result = id == C_NAME_VA_ARGS && (macro->flags & BUSTER_PP_MACRO_VARIADIC);
+    bool result = false;
     for (uint32_t t = macro->parameters_begin; !result && t < macro->body_begin; t += 1)
     {
-        result = (data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[t] == id;
+        // `...` alone is __VA_ARGS__; a named variadic parameter is its name (as pp_compile_macro has them).
+        const uint8_t kind = data->kinds[t] & 0x7F;
+        const bool unnamed = kind == C_TOKEN_ELLIPSIS && (data->kinds[t - 1] & 0x7F) != C_TOKEN_RAW_IDENTIFIER;
+        result = (kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == id) || (unnamed && id == C_NAME_VA_ARGS);
     }
     return result;
 }
 
 // Checks a function-like macro's replacement list as it is defined, for what pp_compile_macro would reject at its first
-// expansion: # not followed by a parameter (or by __VA_OPT__ and its '(' in a variadic macro), and __VA_OPT__ not followed
-// by '(', inside another, or left open. Returns false after a diagnostic.
+// expansion: # not followed by a parameter (or by __VA_OPT__ and its '('), __VA_OPT__ not followed by '(', inside
+// another, or left open, and ## at either end of its content. Returns false after a diagnostic. As in clang, __VA_OPT__
+// is read in a macro that isn't variadic too.
 static bool pp_check_replacement_list(Preprocessor* pp, const PPFileData* data, const PPMacro* macro)
 {
-    const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0;
     bool result = true;
     uint32_t va_opt_depth = 0;
     for (uint32_t t = macro->body_begin; result && t < macro->body_end; t += 1)
     {
         const uint8_t kind = data->kinds[t] & 0x7F;
         const bool next_is_identifier = t + 1 < macro->body_end && (data->kinds[t + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
-        const bool va_opt = variadic && kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT;
-        const bool next_va_opt = variadic && next_is_identifier && data->values[t + 1] == C_NAME_VA_OPT;
+        const bool va_opt = kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT;
+        const bool next_va_opt = next_is_identifier && data->values[t + 1] == C_NAME_VA_OPT;
         if (kind == C_TOKEN_HASH && !(next_is_identifier && pp_names_parameter(data, macro, data->values[t + 1])) && !next_va_opt)
         {
             // At the token after '#', as clang reports it.
@@ -1875,6 +2222,11 @@ static bool pp_check_replacement_list(Preprocessor* pp, const PPFileData* data, 
         else if (va_opt && (va_opt_depth != 0 || t + 1 >= macro->body_end || (data->kinds[t + 1] & 0x7F) != C_TOKEN_L_PAREN))
         {
             pp_diagnose(pp, PP_SEVERITY_ERROR, macro->base + data->starts[t], "__VA_OPT__ must be followed by '(' and can't nest");
+            result = false;
+        }
+        else if (va_opt && t + 2 < macro->body_end && (data->kinds[t + 2] & 0x7F) == C_TOKEN_HASHHASH)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, macro->base + data->starts[t + 2], "'##' cannot appear at start of __VA_OPT__ argument");
             result = false;
         }
         else if (va_opt)
@@ -1889,6 +2241,11 @@ static bool pp_check_replacement_list(Preprocessor* pp, const PPFileData* data, 
         else if (va_opt_depth != 0 && kind == C_TOKEN_R_PAREN)
         {
             va_opt_depth -= 1;
+            if (va_opt_depth == 0 && (data->kinds[t - 1] & 0x7F) == C_TOKEN_HASHHASH)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, macro->base + data->starts[t], "'##' cannot appear at end of __VA_OPT__ argument");
+                result = false;
+            }
         }
     }
     if (result && va_opt_depth != 0)
@@ -1950,11 +2307,11 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
                 else if (expect_parameter && kind == C_TOKEN_RAW_IDENTIFIER)
                 {
                     const IdentId parameter = data->values[t];
+                    // __VA_ARGS__ may name one too, as in clang (an extension it warns about only with -pedantic).
                     for (uint32_t p = macro.parameters_begin; valid && p < t; p += 1)
                     {
                         valid = !((data->kinds[p] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[p] == parameter);
                     }
-                    valid &= parameter != C_NAME_VA_ARGS;
                     macro.parameter_count += 1;
                     expect_parameter = false;
                     // GNU's named variadic parameter: `name...`.
@@ -1995,27 +2352,29 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
             }
             bool pastes;
             bool hashes;
+            bool va_opt;
             if (pp->vectorized)
             {
-                pp_scan_body_vector(data->kinds, macro.body_begin, macro.body_end, &pastes, &hashes);
+                pp_scan_body_vector(data->kinds, data->values, macro.body_begin, macro.body_end, &pastes, &hashes, &va_opt);
             }
             else
             {
-                pp_scan_body_scalar(data->kinds, macro.body_begin, macro.body_end, &pastes, &hashes);
+                pp_scan_body_scalar(data->kinds, data->values, macro.body_begin, macro.body_end, &pastes, &hashes, &va_opt);
             }
             macro.flags |= pastes ? BUSTER_PP_MACRO_PASTES : 0;
-            // A function-like macro with a '#', or a variadic one (which may have __VA_OPT__), gets the whole check.
-            const bool to_check = hashes || (macro.flags & BUSTER_PP_MACRO_VARIADIC) != 0;
+            // A function-like macro with a '#' or __VA_OPT__ gets the whole check: clang reads __VA_OPT__ in any
+            // function-like macro (with a warning in one that isn't variadic, where its content is never used).
+            const bool to_check = hashes || va_opt;
             valid = valid && (!to_check || !(macro.flags & BUSTER_PP_MACRO_FUNCTION) || pp_check_replacement_list(pp, data, &macro));
         }
         if (valid)
         {
-            const PPMacroId previous = pp->macro_of[name];
+            const PPMacroId previous = pp_is_defined(pp, name) ? pp->macro_of[name] : 0;
             if (previous != 0 && (pp->macros[previous].flags & BUSTER_PP_MACRO_BUILTIN))
             {
                 pp_diagnose(pp, PP_SEVERITY_WARNING, location, "redefining builtin macro");
             }
-            else if (previous != 0 && !pp_same_definition(pp, &pp->macros[previous], &macro))
+            else if (previous != 0 && !(pp->macros[previous].flags & BUSTER_PP_MACRO_REDEFINABLE) && !pp_same_definition(pp, &pp->macros[previous], &macro))
             {
                 pp_diagnose(pp, PP_SEVERITY_WARNING, location, "'%.*s' macro redefined", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
             }
@@ -2039,6 +2398,13 @@ static uint32_t pp_parameter_index(const Preprocessor* pp, const PPMacro* macro,
         result = parameters[p] == id ? p : BUSTER_PP_NONE;
     }
     return result;
+}
+
+// Whether clang's substitution, reading body token t, sets NextTokGetsSpace (TokenLexer::ExpandFunctionArguments): it
+// has a leading space, and it isn't the first token or one after ##.
+BUSTER_INLINE bool pp_space_read(const PPMacro* macro, const PPFileData* data, uint32_t t)
+{
+    return t != macro->body_begin && pp_file_space(data, t) && (data->kinds[t - 1] & 0x7F) != C_TOKEN_HASHHASH;
 }
 
 // Compiles a macro's replacement list into items (PPItem): its parameters by index, # with its parameter, ## and
@@ -2072,14 +2438,16 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     macro->items_begin = pp->item_count;
     macro->expanded_parameters = 0;
     uint32_t va_opt_item = BUSTER_PP_NONE; // The open __VA_OPT__'s item,
-    uint32_t va_opt_depth = 0; // and its parentheses' depth.
+    uint32_t va_opt_depth = 0; // its parentheses' depth,
+    uint32_t va_opt_content = 0; // and its content's first token.
     for (uint32_t t = macro->body_begin; result && t < macro->body_end; t += 1)
     {
         const uint8_t kind = data->kinds[t] & 0x7F;
-        const uint8_t flags = pp_file_space(data, t) ? BUSTER_PP_SPACE : 0;
+        const uint8_t flags = pp_space_read(macro, data, t) ? BUSTER_PP_ITEM_SPACE : 0;
         PPItem item = { .kind = PP_ITEM_TOKEN, .flags = flags, .token = t };
-        const uint32_t index = kind == C_TOKEN_RAW_IDENTIFIER && function_like ? pp_parameter_index(pp, macro, data->values[t]) : BUSTER_PP_NONE;
-        const bool va_opt = function_like && variadic && kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT;
+        // __VA_OPT__ is the operator even when a parameter has its name, as in clang.
+        const bool va_opt = function_like && kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT;
+        const uint32_t index = kind == C_TOKEN_RAW_IDENTIFIER && function_like && !va_opt ? pp_parameter_index(pp, macro, data->values[t]) : BUSTER_PP_NONE;
         if (index != BUSTER_PP_NONE)
         {
             item.kind = PP_ITEM_PARAMETER;
@@ -2100,12 +2468,13 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             va_opt_item = pp->item_count;
             va_opt_depth = 1;
             t += 1;
+            va_opt_content = t + 1;
         }
         else if (kind == C_TOKEN_HASH && function_like)
         {
             const uint32_t next = t + 1;
-            const bool next_va_opt = next < macro->body_end && variadic && (data->kinds[next] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[next] == C_NAME_VA_OPT;
-            const uint32_t next_index = next < macro->body_end && (data->kinds[next] & 0x7F) == C_TOKEN_RAW_IDENTIFIER ? pp_parameter_index(pp, macro, data->values[next]) : BUSTER_PP_NONE;
+            const bool next_va_opt = next < macro->body_end && (data->kinds[next] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[next] == C_NAME_VA_OPT;
+            const uint32_t next_index = next < macro->body_end && (data->kinds[next] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && !next_va_opt ? pp_parameter_index(pp, macro, data->values[next]) : BUSTER_PP_NONE;
             if (next_index != BUSTER_PP_NONE)
             {
                 item.kind = PP_ITEM_STRINGIZE;
@@ -2115,9 +2484,11 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             else if (next_va_opt && va_opt_item == BUSTER_PP_NONE && next + 1 < macro->body_end && (data->kinds[next + 1] & 0x7F) == C_TOKEN_L_PAREN)
             {
                 item.kind = PP_ITEM_STRINGIZE_VA_OPT;
+                item.flags |= pp_space_read(macro, data, next) ? BUSTER_PP_ITEM_VA_OPT_SPACE : 0;
                 va_opt_item = pp->item_count;
                 va_opt_depth = 1;
                 t += 2;
+                va_opt_content = t + 1;
             }
             else
             {
@@ -2134,7 +2505,13 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             va_opt_depth -= 1;
             if (va_opt_depth == 0)
             {
-                // The closing ')' isn't an item: the __VA_OPT__ item counts its content.
+                // The closing ')' isn't an item: the __VA_OPT__ item counts its content, and has its tokens' spaces.
+                bool skipped = false;
+                for (uint32_t k = va_opt_content; k <= t; k += 1)
+                {
+                    skipped |= pp_space_read(macro, data, k);
+                }
+                pp->items[va_opt_item].flags |= (uint8_t)((pp_space_read(macro, data, t) ? BUSTER_PP_ITEM_CLOSE_SPACE : 0) | (skipped ? BUSTER_PP_ITEM_SKIP_SPACE : 0));
                 pp->items[va_opt_item].parameter = (uint16_t)(pp->item_count - va_opt_item - 1);
                 va_opt_item = BUSTER_PP_NONE;
                 continue;
@@ -2153,27 +2530,34 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     }
     // The parameters substituted expanded: those that aren't an operand of ## (or of #, which has its own item). A
     // parameter that ends a __VA_OPT__'s content is no operand of a ## after the __VA_OPT__: the content is expanded first.
+    // Their first uses in order and no __VA_OPT__ make the macro BUSTER_PP_MACRO_IN_ORDER.
     const PPItem* items = pp->items + macro->items_begin;
     const uint32_t count = pp->item_count - macro->items_begin;
     uint32_t content_end = BUSTER_PP_NONE;
+    bool in_order = true;
     for (uint32_t i = 0; result && i < count; i += 1)
     {
         if (items[i].kind == PP_ITEM_PARAMETER)
         {
             const bool pasted = (i > 0 && items[i - 1].kind == PP_ITEM_PASTE) || (i + 1 < count && i + 1 != content_end && items[i + 1].kind == PP_ITEM_PASTE);
+            const uint64_t bit = 1ull << (items[i].parameter < 63 ? items[i].parameter : 63);
             if (!pasted)
             {
-                macro->expanded_parameters |= 1ull << (items[i].parameter < 63 ? items[i].parameter : 63);
+                // A first use after a later parameter's.
+                in_order = in_order && ((macro->expanded_parameters & bit) != 0 || macro->expanded_parameters < bit);
+                macro->expanded_parameters |= bit;
             }
         }
         else if (items[i].kind == PP_ITEM_VA_OPT || items[i].kind == PP_ITEM_STRINGIZE_VA_OPT)
         {
-            // __VA_OPT__ tests whether the expanded variadic argument has tokens.
+            // __VA_OPT__ tests whether the expanded variadic argument has tokens (a macro that isn't variadic has none).
             const uint32_t variadic_index = macro->parameter_count - 1U;
-            macro->expanded_parameters |= 1ull << (variadic_index < 63 ? variadic_index : 63);
+            macro->expanded_parameters |= variadic ? 1ull << (variadic_index < 63 ? variadic_index : 63) : 0;
             content_end = i + 1 + items[i].parameter;
+            in_order = false;
         }
     }
+    macro->flags |= in_order && macro->parameter_count < 63 ? BUSTER_PP_MACRO_IN_ORDER : 0;
     macro->item_count = result ? count : 0;
     macro->flags |= result ? BUSTER_PP_MACRO_COMPILED : 0;
     if (!result)
@@ -2185,16 +2569,6 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The main loop
-
-// One token, as buffers hold them.
-typedef struct PPToken PPToken;
-struct PPToken
-{
-    uint8_t kind;
-    uint8_t flags;
-    uint32_t value;
-    uint32_t location;
-};
 
 // Where tokens go: the innermost capture, or the output.
 BUSTER_INLINE PPTokens* pp_target(Preprocessor* pp)
@@ -2280,6 +2654,22 @@ static PPContext* pp_push_buffer(Preprocessor* pp, PPTokens* tokens, uint32_t be
     return result;
 }
 
+// A file ends: an assume_nonnull or arc_cf_code_audited region open in it is an error, and so is an unsafe_buffer_usage
+// region open at the main file's end, as clang has them (pp_pragma_region).
+static void pp_end_regions(Preprocessor* pp, bool main_file)
+{
+    for (uint32_t region = 0; region < BUSTER_ARRAY_LENGTH(pp->region_locations); region += 1)
+    {
+        if (pp->region_locations[region] != 0 && (region != BUSTER_PP_REGION_UNSAFE_BUFFER || main_file))
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp->region_locations[region], region == BUSTER_PP_REGION_UNSAFE_BUFFER ? "'#pragma unsafe_buffer_usage' was not ended"
+                                                                                                                     : "'#pragma clang %s' was not ended within this file",
+                        pp_region_names[region]);
+            pp->region_locations[region] = 0;
+        }
+    }
+}
+
 BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
@@ -2297,8 +2687,10 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
         {
             pp_diagnose(pp, PP_SEVERITY_ERROR, pp->conditionals[pp->conditional_count - 1].location, "unterminated conditional directive");
             pp->conditional_count -= 1;
+            pp->unterminated += 1;
         }
         pp->include_depth -= pp->include_depth != 0;
+        pp_end_regions(pp, context->file == pp->main_file);
     }
     pp->context_count -= 1;
     // An expansion that ends passes its pending flags on to the context it was read from; an argument's or a line's
@@ -2635,8 +3027,9 @@ BUSTER_INLINE bool pp_is_literal(uint8_t kind)
 }
 
 // Lexes `length` bytes of scratch (at `location`) and appends their tokens to `into`, as buffers hold them (identifiers
-// interned). Returns the number of tokens, or BUSTER_PP_NONE if they don't fit.
-static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t length, PPTokens* into, uint8_t first_flags)
+// interned), but for an unterminated block comment at their end, which sets *comment. Returns the number of tokens, or
+// BUSTER_PP_NONE if they don't fit.
+static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t length, PPTokens* into, uint8_t first_flags, bool* comment)
 {
     const uint8_t* bytes = pp_location_bytes(pp, location);
     Scratch scratch = scratch_begin(0);
@@ -2645,7 +3038,9 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
-    count = count > 0 ? pp_lex_for_mode(pp, bytes, kinds, starts, ends, (uint32_t)count, false) : count;
+    count = count > 0 ? pp_lex_for_mode(pp, bytes, length, kinds, starts, ends, count, false) : count;
+    *comment = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
+    count -= *comment;
     uint32_t result = count >= 0 && pp_room(pp, into, (uint32_t)count) ? (uint32_t)count : BUSTER_PP_NONE;
     for (uint32_t i = 0; result != BUSTER_PP_NONE && i < (uint32_t)count; i += 1)
     {
@@ -2664,8 +3059,29 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     return result;
 }
 
-// Pastes two tokens (C 6.10.5.3): their spellings joined must lex as exactly one token. Returns false with an error if
-// they don't, as clang does, and the caller keeps them both.
+// A token's spelling for a paste: an identifier's as it was written when its name has a byte past 0x7F (so with its
+// UCNs, as clang pastes it), and any other's from pp_spelling. `buffer` has room for pp_spelling's, and `written` for
+// ten bytes per byte of an identifier's name (\U00000024 is `$`).
+static uint32_t pp_paste_spelling(Preprocessor* pp, PPToken token, uint8_t* buffer, uint8_t* written, const uint8_t** spelling)
+{
+    uint32_t result = pp_spelling(pp, token.kind, token.value, token.location, buffer, spelling);
+    bool non_ascii = false;
+    for (uint32_t k = 0; token.kind == C_TOKEN_RAW_IDENTIFIER && k < result; k += 1)
+    {
+        non_ascii |= (*spelling)[k] >= 0x80;
+    }
+    if (non_ascii && written != 0)
+    {
+        const uint8_t* as_written = 0;
+        const uint32_t length = pp_identifier_as_written(pp, token.location, written, &as_written);
+        *spelling = length != 0 ? as_written : *spelling;
+        result = length != 0 ? length : result;
+    }
+    return result;
+}
+
+// Pastes two tokens (C 6.10.5.3): their spellings joined (pp_paste_spelling) must lex as exactly one token. Returns
+// false with an error if they don't, as clang does, and the caller keeps them both.
 BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPToken* result)
 {
     Scratch scratch = scratch_begin(0);
@@ -2673,10 +3089,14 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
     uint8_t right_buffer[24];
     const uint8_t* left_spelling;
     const uint8_t* right_spelling;
-    uint8_t* left_space = left.kind == C_TOKEN_RAW_IDENTIFIER || left.kind == BUSTER_PP_KIND_INTEGER ? left_buffer : arena_push(scratch.arena, left.value - left.location + 1, 1);
-    uint8_t* right_space = right.kind == C_TOKEN_RAW_IDENTIFIER || right.kind == BUSTER_PP_KIND_INTEGER ? right_buffer : arena_push(scratch.arena, right.value - right.location + 1, 1);
-    const uint32_t left_length = pp_spelling(pp, left.kind, left.value, left.location, left_space, &left_spelling);
-    const uint32_t right_length = pp_spelling(pp, right.kind, right.value, right.location, right_space, &right_spelling);
+    const bool left_name = left.kind == C_TOKEN_RAW_IDENTIFIER;
+    const bool right_name = right.kind == C_TOKEN_RAW_IDENTIFIER;
+    uint8_t* left_space = left_name || left.kind == BUSTER_PP_KIND_INTEGER ? left_buffer : arena_push(scratch.arena, left.value - left.location + 1, 1);
+    uint8_t* right_space = right_name || right.kind == BUSTER_PP_KIND_INTEGER ? right_buffer : arena_push(scratch.arena, right.value - right.location + 1, 1);
+    uint8_t* left_written = left_name ? arena_push(scratch.arena, 10 * (uint64_t)intern_length(pp->table, left.value) + 24, 1) : 0;
+    uint8_t* right_written = right_name ? arena_push(scratch.arena, 10 * (uint64_t)intern_length(pp->table, right.value) + 24, 1) : 0;
+    const uint32_t left_length = pp_paste_spelling(pp, left, left_space, left_written, &left_spelling);
+    const uint32_t right_length = pp_paste_spelling(pp, right, right_space, right_written, &right_spelling);
     uint8_t* joined = arena_push(scratch.arena, (uint64_t)left_length + right_length + 1, 1);
     bool valid = false;
     if (joined != 0)
@@ -2706,9 +3126,11 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
             uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-            const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, pp->refine_flags) : -1;
-            // A prefixed literal the mode doesn't have lexes as two tokens (pp_split_kinds).
-            valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_splits_kind(pp->split_kinds, kinds[0]);
+            int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, pp->refine_flags) : -1;
+            // As the mode lexes it (pp_lex_for_mode): a prefix or a digit separator it doesn't have makes two tokens. A
+            // '/' and a '*' make no token, but an unterminated comment.
+            count = count > 0 ? pp_lex_for_mode(pp, joined, length, kinds, starts, ends, count, false) : count;
+            valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_is_unterminated_comment(joined, kinds[0], 0);
             kind = valid ? kinds[0] & 0x7F : kind;
         }
         if (valid)
@@ -2724,6 +3146,11 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
                 value = refine_intern_identifier(pp->table, joined, length, 0, length, pp->refine_flags);
             }
             *result = (PPToken){ .kind = kind, .flags = (uint8_t)((left.flags & BUSTER_PP_SPACE) | BUSTER_PP_FROM_MACRO), .value = value, .location = location };
+            // A poisoned name a paste makes is an error (pp_is_poisoned).
+            if (kind == C_TOKEN_RAW_IDENTIFIER)
+            {
+                pp_check_poison(pp, value, left.location);
+            }
         }
         else
         {
@@ -2793,6 +3220,18 @@ static PPToken pp_stringize(Preprocessor* pp, const PPTokens* tokens, uint32_t b
                 first = false;
             }
         }
+        // A string can't end in an odd number of backslashes (C 6.10.3.2p2 makes it undefined): clang drops the last
+        // one and warns, as for `#define F(x) #x` and `F(\)`.
+        uint64_t backslashes = 0;
+        while (backslashes + 1 < length && text[length - 1 - backslashes] == '\\')
+        {
+            backslashes += 1;
+        }
+        if ((backslashes & 1) != 0)
+        {
+            length -= 1;
+            pp_diagnose(pp, PP_SEVERITY_WARNING, end != begin ? tokens->locations[end - 1] : 0, "invalid string literal, ignoring final '\\'");
+        }
         text[length] = '"';
         length += 1;
         result.location = pp_scratch_clean(pp, text, (uint32_t)length);
@@ -2818,6 +3257,13 @@ static void pp_argument_range(Preprocessor* pp, const PPInvocation* invocation, 
         *begin = expanded ? argument->expanded_begin : argument->raw_begin;
         *end = expanded ? argument->expanded_end : argument->raw_end;
     }
+}
+
+// Whether argument `parameter` of an invocation has no tokens as it was written.
+BUSTER_INLINE bool pp_argument_empty(const Preprocessor* pp, const PPInvocation* invocation, uint32_t parameter)
+{
+    const PPArgument* argument = &pp->argument_records[invocation->arguments + parameter];
+    return argument->raw_begin == argument->raw_end;
 }
 
 // A body token of a macro, as buffers hold it.
@@ -2849,10 +3295,10 @@ static void pp_append_tokens(Preprocessor* pp, const PPTokens* tokens, uint32_t 
         for (uint32_t i = begin; i < end; i += 1)
         {
             uint8_t token_flags = flags[i];
-            token_flags = (uint8_t)((token_flags & ~BUSTER_PP_START_OF_LINE) | ((token_flags & BUSTER_PP_START_OF_LINE) ? BUSTER_PP_SPACE : 0) | BUSTER_PP_FROM_MACRO);
+            token_flags = (uint8_t)((token_flags & ~BUSTER_PP_START_OF_LINE) | ((token_flags & BUSTER_PP_START_OF_LINE) ? BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE : 0) | BUSTER_PP_FROM_MACRO);
             if (i == begin && replace_first)
             {
-                token_flags = (uint8_t)((token_flags & ~BUSTER_PP_SPACE) | (first_flags & BUSTER_PP_SPACE));
+                token_flags = (uint8_t)((token_flags & ~(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE)) | (first_flags & BUSTER_PP_SPACE));
             }
             out_kinds[count] = kinds[i];
             out_flags[count] = token_flags;
@@ -2865,10 +3311,10 @@ static void pp_append_tokens(Preprocessor* pp, const PPTokens* tokens, uint32_t 
 }
 
 // Pastes the token at `at` in `out` onto the one before it, as ## does, when ## is on the left of a __VA_OPT__ and `at`
-// is the first token of its result: a placemarker on either side gives the other (with the left's leading space), and an
-// invalid paste keeps both (after an error). The tokens after `at` move down when the two become one, and so does
-// `*space_at` (pp_substitute's pending space), which a token pasted away drops.
-static void pp_paste_in_place(Preprocessor* pp, PPTokens* out, uint32_t at, uint32_t* space_at)
+// is the first token of its result: a placemarker on either side gives the other (the right one with its own leading
+// space, which clang gave it, since it skipped the ##), and an invalid paste keeps both (after an error). The tokens
+// after `at` move down when the two become one.
+static void pp_paste_in_place(Preprocessor* pp, PPTokens* out, uint32_t at)
 {
     const PPToken left = pp_stack_token(out, at - 1);
     const PPToken right = pp_stack_token(out, at);
@@ -2876,7 +3322,7 @@ static void pp_paste_in_place(Preprocessor* pp, PPTokens* out, uint32_t at, uint
     bool joined = true;
     if (left.kind == BUSTER_PP_KIND_PLACEMARKER)
     {
-        result.flags = (uint8_t)((right.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (left.flags & BUSTER_PP_SPACE) | BUSTER_PP_FROM_MACRO);
+        result.flags = (uint8_t)((right.flags & ~BUSTER_PP_START_OF_LINE) | BUSTER_PP_FROM_MACRO);
     }
     else if (right.kind == BUSTER_PP_KIND_PLACEMARKER)
     {
@@ -2894,7 +3340,6 @@ static void pp_paste_in_place(Preprocessor* pp, PPTokens* out, uint32_t at, uint
             pp_tokens_set(out, i - 1, out->kinds[i], out->flags[i], out->values[i], out->locations[i]);
         }
         out->count -= 1;
-        *space_at = *space_at == at ? BUSTER_PP_NONE : *space_at - (*space_at != BUSTER_PP_NONE && *space_at > at);
     }
     else
     {
@@ -2902,15 +3347,10 @@ static void pp_paste_in_place(Preprocessor* pp, PPTokens* out, uint32_t at, uint
     }
 }
 
-// A leading space (an empty argument's or a __VA_OPT__'s) for the next token pushed to `out`: `*space_at` is where that
-// token goes, and an earlier one that has its token by now gets it first. pp_substitute applies the last at its end.
-static void pp_pend_space(PPTokens* out, uint32_t* space_at)
+// Sets the leading space of `out`'s token `at`.
+BUSTER_INLINE void pp_set_space(PPTokens* out, uint32_t at, bool space)
 {
-    if (*space_at != BUSTER_PP_NONE && *space_at < out->count)
-    {
-        out->flags[*space_at] |= BUSTER_PP_SPACE;
-    }
-    *space_at = out->count;
+    out->flags[at] = (uint8_t)((out->flags[at] & ~BUSTER_PP_SPACE) | (space ? BUSTER_PP_SPACE : 0));
 }
 
 // Substitutes an invocation's arguments into its macro's compiled body (C 6.10.4), appending the result to the
@@ -2924,8 +3364,12 @@ static void pp_pend_space(PPTokens* out, uint32_t* space_at)
 // empty argument at either end of the content is a placemarker for that end's ##, as in clang: `__VA_OPT__(a x) ## y`
 // gives `a y` for an empty x.
 //
-// An empty argument's leading space goes to the next token, as clang does (`a x+b` with an empty x gives `a +b`);
-// `*trailing` gets the space left over after the last token, which the token after the expansion takes.
+// Leading spaces are clang's (TokenLexer::ExpandFunctionArguments): `next_space` is its NextTokGetsSpace, which each
+// token of the replacement list it reads sets when it has a leading space, but the first token and one after ##
+// (BUSTER_PP_ITEM_SPACE and the other item bits, from pp_compile_macro), and which the next token it gives takes: a
+// body token, an argument's first token, a string. A placemarker takes none (clang has no token there, and skips the
+// ## next to it), a ## between two tokens takes it, and a paste's result has its left operand's. A space left over after
+// the last token goes to `*trailing`, which the token after the expansion takes (TokenLexer::Lex).
 static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint32_t* begin, uint8_t* trailing)
 {
     const PPMacro* macro = &pp->macros[invocation->macro];
@@ -2948,33 +3392,26 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
     uint32_t va_opt_first = BUSTER_PP_NONE; // the content's first item,
     uint32_t va_opt_begin = 0; // where its tokens start in `out`,
     uint32_t va_opt_mark = BUSTER_PP_NONE; // and for # __VA_OPT__, where its tokens start
-    uint8_t va_opt_flags = 0;
+    uint8_t va_opt_flags = 0; // The open __VA_OPT__'s item flags.
+    bool va_opt_string_space = false; // # __VA_OPT__'s string's leading space.
     bool va_opt_pasted_after = false; // Whether ## follows the open __VA_OPT__.
     bool va_opt_paste_left = false; // Whether ## precedes the next __VA_OPT__ (set by the ##).
-    uint32_t space_at = BUSTER_PP_NONE; // Where the token that takes a pending leading space goes (pp_pend_space).
-    bool va_opt_string_space = false; // Whether #__VA_OPT__'s string takes a space pending before it.
+    bool next_space = false;
+    bool literal_paste = false; // Whether the last token is a ## that stays a token, after which a body token keeps its own space.
     bool placemarkers = false;
     for (uint32_t i = 0; i <= count && !pp->fatal; i += 1)
     {
         if (i == va_opt_end)
         {
+            // The content's ')' is read.
+            next_space |= (va_opt_flags & BUSTER_PP_ITEM_CLOSE_SPACE) != 0;
             if (va_opt_mark != BUSTER_PP_NONE)
             {
-                // A pending space whose token is in the content goes to it before the content becomes a string; one
-                // for the token after the content waits after the string.
-                if (space_at != BUSTER_PP_NONE && space_at < out->count)
-                {
-                    out->flags[space_at] |= BUSTER_PP_SPACE;
-                    space_at = BUSTER_PP_NONE;
-                }
-                const bool space_after = space_at != BUSTER_PP_NONE;
-                PPToken string = pp_stringize(pp, out, va_opt_mark, out->count, va_opt_flags);
-                string.flags |= va_opt_string_space ? BUSTER_PP_SPACE : 0;
+                // # __VA_OPT__: the content becomes a string, with the space pending at the # (which stays pending).
+                PPToken string = pp_stringize(pp, out, va_opt_mark, out->count, va_opt_string_space ? BUSTER_PP_SPACE : 0);
                 out->count = va_opt_mark;
                 pp_push_token(pp, out, string);
-                space_at = space_after ? out->count : BUSTER_PP_NONE;
                 va_opt_mark = BUSTER_PP_NONE;
-                va_opt_string_space = false;
             }
             // Content of placemarkers alone gives no tokens.
             bool only_placemarkers = true;
@@ -2983,19 +3420,18 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 only_placemarkers = out->kinds[k] == BUSTER_PP_KIND_PLACEMARKER;
             }
             out->count = only_placemarkers ? va_opt_begin : out->count;
-            space_at = space_at != BUSTER_PP_NONE && space_at > out->count ? out->count : space_at;
             if (out->count == va_opt_begin)
             {
                 // A placemarker, which ## on the right takes as its left operand and ## on the left leaves alone.
                 if (va_opt_pasted_after && !va_opt_paste_left)
                 {
-                    pp_push_token(pp, out, (PPToken){ .kind = BUSTER_PP_KIND_PLACEMARKER, .flags = va_opt_flags });
+                    pp_push_token(pp, out, (PPToken){ .kind = BUSTER_PP_KIND_PLACEMARKER });
                     placemarkers = true;
                 }
             }
             else if (va_opt_paste_left)
             {
-                pp_paste_in_place(pp, out, va_opt_begin, &space_at);
+                pp_paste_in_place(pp, out, va_opt_begin);
             }
             va_opt_paste_left = false;
             va_opt_end = BUSTER_PP_NONE;
@@ -3008,13 +3444,19 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
         const PPItem* item = &items[i];
         // ## after the item, in the same __VA_OPT__'s content when it is in one.
         const bool pasted_after = i + 1 < count && i + 1 != va_opt_end && items[i + 1].kind == PP_ITEM_PASTE;
+        const bool after_literal_paste = literal_paste;
+        literal_paste = false;
+        // The item's token is read (a ## only when clang doesn't skip it, below).
+        next_space |= item->kind != PP_ITEM_PASTE && (item->flags & BUSTER_PP_ITEM_SPACE) != 0;
         switch (item->kind)
         {
             case PP_ITEM_TOKEN:
+            {
+                const uint32_t at = out->count;
                 if (pp->vectorized)
                 {
                     // The body tokens up to the next item of another kind (or the end of a __VA_OPT__'s content) are
-                    // consecutive tokens of the definition: one copy.
+                    // consecutive tokens of the definition, whose own leading spaces are their items': one copy.
                     uint32_t last = i;
                     while (last + 1 < count && last + 1 != va_opt_end && items[last + 1].kind == PP_ITEM_TOKEN && items[last + 1].token == items[last].token + 1)
                     {
@@ -3027,30 +3469,35 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 {
                     pp_push_token(pp, out, pp_body_token(pp, macro, item));
                 }
+                if (at < out->count)
+                {
+                    pp_set_space(out, at, next_space || (after_literal_paste && pp_file_space(&pp->datas[macro->data], item->token)));
+                }
+                next_space = false;
                 break;
+            }
             case PP_ITEM_PARAMETER:
             {
+                // Expanded, but next to ## (one that a `## ##` left alone before it, too: PP_ITEM_PASTE's).
+                const bool pasted_before = i > 0 && items[i - 1].kind == PP_ITEM_PASTE;
                 PPTokens* tokens;
                 uint32_t first;
                 uint32_t last;
-                pp_argument_range(pp, invocation, item->parameter, !pasted_after, &tokens, &first, &last);
+                pp_argument_range(pp, invocation, item->parameter, !pasted_after && !pasted_before, &tokens, &first, &last);
                 if (first != last)
                 {
-                    pp_append_tokens(pp, tokens, first, last, true, item->flags);
+                    pp_append_tokens(pp, tokens, first, last, true, next_space ? BUSTER_PP_SPACE : 0);
+                    next_space = false;
                 }
                 else
                 {
                     // An empty argument: a placemarker next to ##, or at an end of a __VA_OPT__'s content next to ## outside
-                    // it; else its leading space goes to the next token.
+                    // it.
                     const bool edge = va_opt_end != BUSTER_PP_NONE && ((i == va_opt_first && va_opt_paste_left) || (i + 1 == va_opt_end && va_opt_pasted_after));
                     if (pasted_after || edge)
                     {
-                        pp_push_token(pp, out, (PPToken){ .kind = BUSTER_PP_KIND_PLACEMARKER, .flags = item->flags });
+                        pp_push_token(pp, out, (PPToken){ .kind = BUSTER_PP_KIND_PLACEMARKER });
                         placemarkers = true;
-                    }
-                    else if (item->flags & BUSTER_PP_SPACE)
-                    {
-                        pp_pend_space(out, &space_at);
                     }
                 }
                 break;
@@ -3061,7 +3508,8 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 uint32_t first;
                 uint32_t last;
                 pp_argument_range(pp, invocation, item->parameter, false, &tokens, &first, &last);
-                pp_push_token(pp, out, pp_stringize(pp, tokens, first, last, item->flags));
+                pp_push_token(pp, out, pp_stringize(pp, tokens, first, last, next_space ? BUSTER_PP_SPACE : 0));
+                next_space = false;
                 break;
             }
             case PP_ITEM_VA_OPT:
@@ -3069,11 +3517,9 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
             {
                 const uint32_t content_end = i + 1 + item->parameter;
                 const bool content_pasted_after = content_end < count && items[content_end].kind == PP_ITEM_PASTE;
-                // The first token after __VA_OPT__ (its content's first, or the next) takes its leading space, as in clang.
-                if (item->kind == PP_ITEM_VA_OPT && (item->flags & BUSTER_PP_SPACE))
-                {
-                    pp_pend_space(out, &space_at);
-                }
+                // # __VA_OPT__'s string takes the space pending at the #, which stays pending; its __VA_OPT__ is read next.
+                const bool string_space = next_space;
+                next_space |= (item->flags & BUSTER_PP_ITEM_VA_OPT_SPACE) != 0;
                 if (variadic_present)
                 {
                     va_opt_end = content_end;
@@ -3082,24 +3528,23 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     va_opt_flags = item->flags;
                     va_opt_pasted_after = content_pasted_after;
                     va_opt_mark = item->kind == PP_ITEM_STRINGIZE_VA_OPT ? out->count : BUSTER_PP_NONE;
-                    // A space pending before #__VA_OPT__ goes to its string, as clang saves it there, not to the
-                    // content's first token, whose leading space a string drops.
-                    va_opt_string_space = va_opt_mark != BUSTER_PP_NONE && space_at == out->count;
-                    space_at = va_opt_string_space ? BUSTER_PP_NONE : space_at;
+                    va_opt_string_space = string_space;
                 }
                 else
                 {
+                    // Skipped, as clang skips the content: its tokens and its ')' are read, and set the pending space.
+                    next_space |= (item->flags & BUSTER_PP_ITEM_SKIP_SPACE) != 0;
                     if (item->kind == PP_ITEM_STRINGIZE_VA_OPT)
                     {
-                        pp_push_token(pp, out, pp_stringize(pp, out, out->count, out->count, item->flags));
+                        pp_push_token(pp, out, pp_stringize(pp, out, out->count, out->count, string_space ? BUSTER_PP_SPACE : 0));
                         if (va_opt_paste_left)
                         {
-                            pp_paste_in_place(pp, out, out->count - 1, &space_at);
+                            pp_paste_in_place(pp, out, out->count - 1);
                         }
                     }
                     else if (content_pasted_after && !va_opt_paste_left)
                     {
-                        pp_push_token(pp, out, (PPToken){ .kind = BUSTER_PP_KIND_PLACEMARKER, .flags = item->flags });
+                        pp_push_token(pp, out, (PPToken){ .kind = BUSTER_PP_KIND_PLACEMARKER });
                         placemarkers = true;
                     }
                     va_opt_paste_left = false;
@@ -3110,11 +3555,80 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
             case PP_ITEM_PASTE:
             {
                 // The left operand is the last token so far (a placemarker for an empty argument); the right one is the
-                // next item's first token, whose other tokens follow the result.
-                const PPItem* next = &items[i + 1];
+                // next item's first token, whose other tokens follow the result. Two ## in a row are as clang has them
+                // (ExpandFunctionArguments, then TokenLexer::pasteTokens): an empty argument after the second takes it
+                // away, and the first's right operand is then what follows the argument; an empty left argument takes
+                // the first away, and the second pastes what came before it; else the second ## is the first's right
+                // operand, which never makes one token, and stays a token. A ## after a token takes the pending space
+                // (clang gives it the ## token); one after a placemarker is skipped, and its right operand takes it.
+                uint32_t operand = i + 1;
+                while (operand + 1 < count && operand != va_opt_end && operand + 1 != va_opt_end && items[operand].kind == PP_ITEM_PASTE &&
+                       items[operand + 1].kind == PP_ITEM_PARAMETER && pp_argument_empty(pp, invocation, items[operand + 1].parameter))
+                {
+                    operand += 2;
+                }
+                if (out->count == *begin)
+                {
+                    // A ## an empty argument left first: it is a token.
+                    PPToken hash = pp_body_token(pp, macro, item);
+                    hash.flags = (uint8_t)((hash.flags & ~BUSTER_PP_SPACE) | (next_space ? BUSTER_PP_SPACE : 0));
+                    pp_push_token(pp, out, hash);
+                    next_space = false;
+                    literal_paste = true;
+                    break;
+                }
                 PPToken left = pp_stack_token(out, out->count - 1);
-                const bool gnu_comma = variadic && left.kind == C_TOKEN_COMMA && next->kind == PP_ITEM_PARAMETER && next->parameter == variadic_index &&
-                                       items[i - 1].kind == PP_ITEM_TOKEN;
+                const bool placemarker_left = left.kind == BUSTER_PP_KIND_PLACEMARKER;
+                next_space = next_space && placemarker_left;
+                if (operand >= count || operand == va_opt_end)
+                {
+                    // Nothing after the arguments it took away: the left operand stays.
+                    i = operand - 1;
+                    break;
+                }
+                if (items[operand].kind == PP_ITEM_PASTE && placemarker_left)
+                {
+                    out->count -= 1;
+                    i = operand - 1;
+                    break;
+                }
+                if (items[operand].kind == PP_ITEM_PASTE)
+                {
+                    const PPToken hash = pp_body_token(pp, macro, &items[operand]);
+                    PPToken pasted;
+                    if (pp_paste(pp, left, hash, &pasted))
+                    {
+                        out->count -= 1;
+                        pp_push_token(pp, out, pasted);
+                    }
+                    else
+                    {
+                        pp_push_token(pp, out, hash);
+                    }
+                    i = operand;
+                    break;
+                }
+                const PPItem* next = &items[operand];
+                // GNU's `, ## __VA_ARGS__`, with the comma the last token so far wherever it came from, as clang has it
+                // (TokenLexer::MaybeRemoveCommaBeforeVaArgs): an omitted variadic argument drops it, from before an empty
+                // argument's placemarker too (`, x ## __VA_ARGS__`), where clang has no token, but not with ## after
+                // __VA_ARGS__, which clang skips first.
+                const bool variadic_right = variadic && next->kind == PP_ITEM_PARAMETER && next->parameter == variadic_index;
+                const bool variadic_pasted_after = operand + 1 < count && operand + 1 != va_opt_end && items[operand + 1].kind == PP_ITEM_PASTE;
+                uint32_t last_real = out->count;
+                while (last_real > *begin && out->kinds[last_real - 1] == BUSTER_PP_KIND_PLACEMARKER)
+                {
+                    last_real -= 1;
+                }
+                const bool comma_before = last_real > *begin && out->kinds[last_real - 1] == C_TOKEN_COMMA;
+                const bool gnu_comma = variadic_right && (invocation->variadic_omitted ? !variadic_pasted_after && (left.kind == C_TOKEN_COMMA || (placemarker_left && comma_before))
+                                                                                     : left.kind == C_TOKEN_COMMA);
+                // `X ## , ## __VA_ARGS__` with the variadic argument omitted is X: the comma goes, and the ## before it.
+                const PPFileData* body = &pp->datas[macro->data];
+                const bool comma_paste = !placemarker_left && invocation->variadic_omitted && next->kind == PP_ITEM_TOKEN &&
+                                         (body->kinds[next->token] & 0x7F) == C_TOKEN_COMMA && operand + 2 < count && operand + 1 != va_opt_end &&
+                                         operand + 2 != va_opt_end && items[operand + 1].kind == PP_ITEM_PASTE && items[operand + 2].kind == PP_ITEM_PARAMETER &&
+                                         items[operand + 2].parameter == variadic_index;
                 PPTokens* tokens = out;
                 uint32_t first = 0;
                 uint32_t last = 0;
@@ -3122,7 +3636,9 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 bool right_single = false;
                 if (next->kind == PP_ITEM_PARAMETER)
                 {
-                    pp_argument_range(pp, invocation, next->parameter, false, &tokens, &first, &last);
+                    // Unexpanded, but for an argument past one a `## ##` took away that isn't next to ## itself.
+                    const bool pasted = items[operand - 1].kind == PP_ITEM_PASTE || (operand + 1 < count && operand + 1 != va_opt_end && items[operand + 1].kind == PP_ITEM_PASTE);
+                    pp_argument_range(pp, invocation, next->parameter, !pasted, &tokens, &first, &last);
                 }
                 else if (next->kind == PP_ITEM_STRINGIZE)
                 {
@@ -3130,7 +3646,7 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     uint32_t argument_first;
                     uint32_t argument_last;
                     pp_argument_range(pp, invocation, next->parameter, false, &argument_tokens, &argument_first, &argument_last);
-                    right_token = pp_stringize(pp, argument_tokens, argument_first, argument_last, next->flags);
+                    right_token = pp_stringize(pp, argument_tokens, argument_first, argument_last, 0);
                     right_single = true;
                 }
                 else if (next->kind == PP_ITEM_TOKEN)
@@ -3138,28 +3654,34 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     right_token = pp_body_token(pp, macro, next);
                     right_single = true;
                 }
-                if (gnu_comma)
+                if (comma_paste)
                 {
-                    // `, ## __VA_ARGS__`: no paste. An omitted variadic argument drops the comma; any other is placed
-                    // after it unexpanded.
+                    next_space = false;
+                    i = operand + 2;
+                }
+                else if (gnu_comma)
+                {
+                    // `, ## __VA_ARGS__`: no paste. An omitted variadic argument drops the comma (a placemarker, which
+                    // goes with the others); any other is placed after it unexpanded, its first token with its own
+                    // leading space; and no space is pending after either (VaArgsPseudoPaste in clang).
                     if (invocation->variadic_omitted)
                     {
-                        out->count -= 1;
+                        out->kinds[last_real - 1] = BUSTER_PP_KIND_PLACEMARKER;
+                        placemarkers = true;
                     }
                     else
                     {
-                        pp_append_tokens(pp, tokens, first, last, true, next->flags);
+                        pp_append_tokens(pp, tokens, first, last, false, 0);
                     }
-                    i += 1;
+                    next_space = false;
+                    i = operand;
                 }
                 else if (next->kind == PP_ITEM_VA_OPT || next->kind == PP_ITEM_STRINGIZE_VA_OPT)
                 {
                     // `## __VA_OPT__(...)`: the __VA_OPT__ pastes its first token onto the left operand when its tokens
                     // are known (above).
                     va_opt_paste_left = true;
-                }
-                else if (next->kind == PP_ITEM_PASTE)
-                {
+                    i = operand - 1;
                 }
                 else
                 {
@@ -3171,12 +3693,13 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     else
                     {
                         const PPToken right = right_single ? right_token : pp_stack_token(tokens, first);
-                        if (left.kind == BUSTER_PP_KIND_PLACEMARKER)
+                        if (placemarker_left)
                         {
                             out->count -= 1;
                             PPToken moved = right;
-                            moved.flags = (uint8_t)((moved.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (left.flags & BUSTER_PP_SPACE) | BUSTER_PP_FROM_MACRO);
+                            moved.flags = (uint8_t)((moved.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (next_space ? BUSTER_PP_SPACE : 0) | BUSTER_PP_FROM_MACRO);
                             pp_push_token(pp, out, moved);
+                            next_space = false;
                         }
                         else
                         {
@@ -3198,18 +3721,14 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                             pp_append_tokens(pp, tokens, first + 1, last, false, 0);
                         }
                     }
-                    i += 1;
+                    i = operand;
                 }
                 break;
             }
         }
     }
-    // The pending space: the token that came after it takes it, or the token after the expansion does.
-    *trailing = space_at != BUSTER_PP_NONE && space_at >= out->count ? BUSTER_PP_SPACE : 0;
-    if (space_at != BUSTER_PP_NONE && space_at < out->count)
-    {
-        out->flags[space_at] |= BUSTER_PP_SPACE;
-    }
+    // The pending space: the token after the expansion takes it.
+    *trailing = next_space ? BUSTER_PP_SPACE : 0;
     // Remove the placemarkers.
     if (placemarkers)
     {
@@ -3245,12 +3764,12 @@ static bool pp_needs_expansion(const Preprocessor* pp, const PPTokens* tokens, u
     return result;
 }
 
-static bool pp_push_capture(Preprocessor* pp, uint8_t kind, uint32_t invocation)
+static bool pp_push_capture(Preprocessor* pp, uint8_t kind, uint32_t invocation, uint32_t argument)
 {
     const bool result = pp->capture_count < BUSTER_PP_MAX_CONTEXTS;
     if (result)
     {
-        pp->capture_frames[pp->capture_count] = (PPCapture){ .kind = kind, .begin = pp->captures.count, .invocation = invocation };
+        pp->capture_frames[pp->capture_count] = (PPCapture){ .kind = kind, .begin = pp->captures.count, .invocation = invocation, .argument = argument, .pragma_mark = pp->pragma_lines };
         pp->capture_count += 1;
     }
     else
@@ -3271,6 +3790,7 @@ static bool pp_start_capture(Preprocessor* pp, PPCapture capture, uint32_t begin
     if (result)
     {
         capture.begin = pp->captures.count;
+        capture.pragma_mark = pp->pragma_lines;
         pp->capture_frames[pp->capture_count] = capture;
         pp->capture_count += 1;
         result = pp_push_buffer(pp, &pp->arguments, begin, end, 0, expansion_end, true, false) != 0;
@@ -3283,31 +3803,89 @@ static bool pp_start_capture(Preprocessor* pp, PPCapture capture, uint32_t begin
     return result;
 }
 
-// Expands the top invocation's next arguments that need it, one at a time: each becomes a barrier context with a capture,
-// which the main loop runs (pp_finish_argument takes it from there). Once none is left, substitutes.
+// Starts expanding the top invocation's argument `parameter` if it names an enabled macro: a barrier context with a
+// capture, which the main loop runs (pp_finish_argument takes it from there). Else the argument is its own expansion.
+// Returns whether the main loop must run the capture.
+static bool pp_expand_argument(Preprocessor* pp, uint32_t parameter)
+{
+    const uint32_t index = pp->invocation_count - 1;
+    const PPInvocation* invocation = &pp->invocations[index];
+    PPArgument* argument = &pp->argument_records[invocation->arguments + parameter];
+    bool result = false;
+    if (pp_needs_expansion(pp, &pp->arguments, argument->raw_begin, argument->raw_end))
+    {
+        pp->statistics.expanded_arguments += pp->options.timing;
+        result = pp_push_capture(pp, BUSTER_PP_CAPTURE_ARGUMENT, index, parameter) &&
+                 pp_push_buffer(pp, &pp->arguments, argument->raw_begin, argument->raw_end, 0, invocation->expansion_end, true, false) != 0;
+    }
+    else
+    {
+        argument->expanded_begin = argument->raw_begin;
+        argument->expanded_end = argument->raw_end;
+        argument->expanded_captured = false;
+        argument->expanded = true;
+    }
+    return result;
+}
+
+// Expands the top invocation's arguments that need it, one at a time (pp_expand_argument), in the order clang does
+// (TokenLexer::ExpandFunctionArguments, which expands an argument at its first use): a BUSTER_PP_MACRO_IN_ORDER macro's in
+// order; any other's by walking its body, where an argument is expanded at the first use of its parameter that isn't an
+// operand of # or ## (as pp_compile_macro has them), and the variadic one at a __VA_OPT__ with content, which the walk
+// skips when that has no tokens (or the macro isn't variadic), as substituting it does. Once the walk is done, the
+// arguments it didn't expand stand for themselves, and the invocation is substituted.
 static void pp_continue_invocation(Preprocessor* pp)
 {
     const uint32_t index = pp->invocation_count - 1;
     PPInvocation* invocation = &pp->invocations[index];
     const PPMacro* macro = &pp->macros[invocation->macro];
     bool waiting = false;
-    while (!waiting && invocation->next < invocation->argument_count && !pp->fatal)
+    if (macro->flags & BUSTER_PP_MACRO_IN_ORDER)
     {
-        PPArgument* argument = &pp->argument_records[invocation->arguments + invocation->next];
-        const uint32_t parameter = invocation->next;
-        const bool expanded = (macro->expanded_parameters >> (parameter < 63 ? parameter : 63)) & 1;
-        if (expanded && pp_needs_expansion(pp, &pp->arguments, argument->raw_begin, argument->raw_end))
+        while (!waiting && invocation->next < invocation->argument_count && !pp->fatal)
         {
-            pp->statistics.expanded_arguments += pp->options.timing;
-            waiting = pp_push_capture(pp, BUSTER_PP_CAPTURE_ARGUMENT, index) &&
-                      pp_push_buffer(pp, &pp->arguments, argument->raw_begin, argument->raw_end, 0, invocation->expansion_end, true, false) != 0;
+            const uint32_t parameter = invocation->next;
+            const bool expanded = (macro->expanded_parameters >> parameter) & 1;
+            const bool known = pp->argument_records[invocation->arguments + parameter].expanded;
+            waiting = expanded && !known && pp_expand_argument(pp, parameter);
+            invocation->next += !waiting;
         }
-        else
+    }
+    else
+    {
+        const PPItem* items = pp->items + macro->items_begin;
+        const uint32_t count = macro->item_count;
+        const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0 && invocation->argument_count != 0;
+        const uint32_t variadic_index = macro->parameter_count - 1u;
+        while (!waiting && invocation->next < count && !pp->fatal)
+        {
+            const uint32_t i = invocation->next;
+            const PPItem* item = &items[i];
+            const bool va_opt = item->kind == PP_ITEM_VA_OPT || item->kind == PP_ITEM_STRINGIZE_VA_OPT;
+            const bool pasted = (i > 0 && items[i - 1].kind == PP_ITEM_PASTE) || (i + 1 < count && i + 1 != invocation->content_end && items[i + 1].kind == PP_ITEM_PASTE);
+            // An empty __VA_OPT__() expands nothing (clang looks at the variadic argument for its content's first token).
+            const bool tests = va_opt && variadic && item->parameter != 0;
+            const uint32_t parameter = item->kind == PP_ITEM_PARAMETER && !pasted ? item->parameter : tests ? variadic_index : BUSTER_PP_NONE;
+            const PPArgument* argument = parameter != BUSTER_PP_NONE ? &pp->argument_records[invocation->arguments + parameter] : 0;
+            waiting = argument != 0 && !argument->expanded && pp_expand_argument(pp, parameter);
+            if (!waiting)
+            {
+                const bool present = tests && argument->expanded_begin != argument->expanded_end;
+                invocation->content_end = present ? i + 1 + item->parameter : invocation->content_end;
+                invocation->next = va_opt && !present ? i + 1 + item->parameter : i + 1;
+                invocation->content_end = invocation->next >= invocation->content_end ? BUSTER_PP_NONE : invocation->content_end;
+            }
+        }
+    }
+    for (uint32_t a = 0; !waiting && a < invocation->argument_count; a += 1)
+    {
+        PPArgument* argument = &pp->argument_records[invocation->arguments + a];
+        if (!argument->expanded)
         {
             argument->expanded_begin = argument->raw_begin;
             argument->expanded_end = argument->raw_end;
             argument->expanded_captured = false;
-            invocation->next += 1;
+            argument->expanded = true;
         }
     }
     if (!waiting && !pp->fatal)
@@ -3316,17 +3894,18 @@ static void pp_continue_invocation(Preprocessor* pp)
     }
 }
 
-// The barrier of an argument's capture ended: the capture is the expanded argument.
+// The barrier of an argument's capture ended: the capture is the expanded argument, and the walk goes on from the use
+// that expanded it.
 static void pp_finish_argument(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
     pp->capture_count -= 1;
     PPInvocation* invocation = &pp->invocations[capture.invocation];
-    PPArgument* argument = &pp->argument_records[invocation->arguments + invocation->next];
+    PPArgument* argument = &pp->argument_records[invocation->arguments + capture.argument];
     argument->expanded_begin = capture.begin;
     argument->expanded_end = pp->captures.count;
     argument->expanded_captured = true;
-    invocation->next += 1;
+    argument->expanded = true;
     pp_continue_invocation(pp);
 }
 
@@ -3467,6 +4046,10 @@ static bool pp_collect_arguments(Preprocessor* pp, PPInvocation* invocation, boo
             const uint32_t base = pp->ranges[context->range].base;
             pp_append_file_tokens(pp, &pp->arguments, data, base, open + 1, close, false);
             invocation->expansion_end = base + data->starts[close];
+            if (pp->poison_count != 0)
+            {
+                pp_check_poison_range(pp, data, base, 0, open + 1, close, BUSTER_PP_NONE, false);
+            }
         }
         else
         {
@@ -3490,6 +4073,7 @@ static bool pp_collect_arguments(Preprocessor* pp, PPInvocation* invocation, boo
 }
 
 static void pp_close_builtin(Preprocessor* pp, bool closed);
+static void pp_start_stream(Preprocessor* pp);
 
 // Ends the top invocation's collection (`closed`: its ')' was read). A macro's: checks its arguments' count and starts
 // expanding them (pp_continue_invocation); an unterminated or invalid invocation is dropped with its tokens. A
@@ -3509,6 +4093,7 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
         const uint32_t parameter_count = macro->parameter_count;
         uint32_t count = pp->argument_record_count - invocation->arguments;
         bool valid = closed;
+        pp->unterminated += !closed;
         if (!closed && !pp->fatal)
         {
             pp_diagnose(pp, PP_SEVERITY_ERROR, invocation->name_location, "unterminated function-like macro invocation");
@@ -3560,13 +4145,24 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
     }
 }
 
-// What a collected token does: nothing more, close the invocation, or (a builtin's first token that isn't '(') end it.
+// What a collected token does: nothing more, close the invocation, (a builtin's first token that isn't '(') end it, or
+// (an attribute query's '(') start its stream.
 typedef enum PPCollected
 {
     PP_COLLECTED_MORE,
     PP_COLLECTED_CLOSED,
     PP_COLLECTED_INVALID,
+    PP_COLLECTED_STREAM,
 } PPCollected;
+
+// The builtins whose operand clang reads expanded, a token at a time, to the ')' that closes it
+// (EvaluateFeatureLikeBuiltinMacro with ExpandArgs): the attribute queries. A macro's expansion may close it, and what
+// follows the ')' there is read after the answer (pp_stream_check).
+BUSTER_INLINE bool pp_builtin_streams(uint8_t builtin)
+{
+    return builtin == PP_BUILTIN_HAS_ATTRIBUTE || builtin == PP_BUILTIN_HAS_C_ATTRIBUTE || builtin == PP_BUILTIN_HAS_CPP_ATTRIBUTE ||
+           builtin == PP_BUILTIN_HAS_DECLSPEC_ATTRIBUTE;
+}
 
 // Adds one token to the collecting invocation (C 6.10.4: commas separate arguments only outside of nested parentheses,
 // and not in the variadic argument; a builtin's operand isn't split).
@@ -3579,11 +4175,13 @@ static PPCollected pp_collect_token(Preprocessor* pp, PPInvocation* invocation, 
     if (!invocation->opened)
     {
         invocation->opened = token.kind == C_TOKEN_L_PAREN;
-        result = invocation->opened ? PP_COLLECTED_MORE : PP_COLLECTED_INVALID;
+        invocation->open = token;
+        result = !invocation->opened ? PP_COLLECTED_INVALID : pp_builtin_streams(macro->builtin) ? PP_COLLECTED_STREAM : PP_COLLECTED_MORE;
     }
     else if (token.kind == C_TOKEN_R_PAREN && invocation->depth == 0)
     {
         invocation->expansion_end = expansion_end;
+        invocation->close = token;
         result = PP_COLLECTED_CLOSED;
     }
     else if (!invocation->builtin && token.kind == C_TOKEN_COMMA && invocation->depth == 0 && !(variadic && current + 1 >= macro->parameter_count))
@@ -3646,6 +4244,10 @@ static void pp_collect_step(Preprocessor* pp)
             {
                 const PPToken token = pp_file_token(data, base, context->position);
                 context->position += 1;
+                if (token.kind == C_TOKEN_RAW_IDENTIFIER)
+                {
+                    pp_check_poison(pp, token.value, token.location);
+                }
                 collected = pp_collect_token(pp, invocation, token, token.location);
             }
         }
@@ -3690,7 +4292,11 @@ static void pp_collect_step(Preprocessor* pp)
     {
         pp_pop_context(pp);
     }
-    if (collected != PP_COLLECTED_MORE || unterminated)
+    if (collected == PP_COLLECTED_STREAM)
+    {
+        pp_start_stream(pp);
+    }
+    else if (collected != PP_COLLECTED_MORE || unterminated)
     {
         pp_close_invocation(pp, collected == PP_COLLECTED_CLOSED);
     }
@@ -3715,6 +4321,7 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
         .name_location = name.location,
         .name_flags = name.flags,
         .opened = true,
+        .content_end = BUSTER_PP_NONE,
     };
     bool valid = pp->invocation_count < BUSTER_PP_MAX_CONTEXTS;
     if (!valid)
@@ -3805,7 +4412,7 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
 // Built-in macros
 
 static void pp_run_contexts(Preprocessor* pp, uint32_t stop_depth);
-static void pp_pragma(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location, bool from_operator);
+static bool pp_pragma(Preprocessor* pp, uint32_t begin, uint32_t end, uint32_t location, bool from_operator, bool ident, uint32_t restore);
 
 // A numeric constant spelled in the scratch space.
 static PPToken pp_number_token(Preprocessor* pp, uint64_t value, uint8_t flags)
@@ -3814,6 +4421,21 @@ static PPToken pp_number_token(Preprocessor* pp, uint64_t value, uint8_t flags)
     const uint32_t length = (uint32_t)snprintf(digits, sizeof(digits), "%lu", (unsigned long)value);
     const uint32_t location = value == 0 ? pp->zero_location : value == 1 ? pp->one_location : pp_scratch_clean(pp, (const uint8_t*)digits, length);
     return (PPToken){ .kind = C_TOKEN_NUMERIC_CONSTANT, .flags = (uint8_t)(flags | BUSTER_PP_FROM_MACRO), .value = location + length, .location = location };
+}
+
+// A feature query's answer: a numeric constant, with an L after one past 1 (a date), as clang's feature-like builtins
+// spell it (EvaluateFeatureLikeBuiltinMacro); __has_include's is never past 1.
+static PPToken pp_feature_token(Preprocessor* pp, uint64_t value, uint8_t flags)
+{
+    PPToken result = pp_number_token(pp, value, flags);
+    if (value > 1)
+    {
+        char digits[24];
+        const uint32_t length = (uint32_t)snprintf(digits, sizeof(digits), "%luL", (unsigned long)value);
+        result.location = pp_scratch_clean(pp, (const uint8_t*)digits, length);
+        result.value = result.location + length;
+    }
+    return result;
 }
 
 // A string literal of `bytes`, with quotes and backslashes escaped, spelled in the scratch space.
@@ -3894,7 +4516,8 @@ BUSTER_INLINE bool pp_in_expression(const Preprocessor* pp)
 static bool pp_in_condition(const Preprocessor* pp)
 {
     uint32_t c = pp->capture_count;
-    while (c != 0 && (pp->capture_frames[c - 1].kind == BUSTER_PP_CAPTURE_ARGUMENT || pp->capture_frames[c - 1].kind == BUSTER_PP_CAPTURE_BUILTIN))
+    while (c != 0 && (pp->capture_frames[c - 1].kind == BUSTER_PP_CAPTURE_ARGUMENT || pp->capture_frames[c - 1].kind == BUSTER_PP_CAPTURE_BUILTIN ||
+                      pp->capture_frames[c - 1].kind == BUSTER_PP_CAPTURE_STREAM))
     {
         c -= 1;
     }
@@ -3971,8 +4594,18 @@ static bool pp_header_name(Preprocessor* pp, const PPTokens* tokens, uint32_t be
 // The answer of a feature query (__has_attribute and the like) about `name` (a scoped one as "scope::name").
 static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length, uint32_t standard);
 
+// A pragma's string (or __has_warning's), as clang's FinishLexStringLiteral reads one; defined with the pragmas.
+static uint32_t pp_pragma_strings(Preprocessor* pp, const PPTokens* tokens, uint32_t* i, uint32_t end, uint8_t* out, uint32_t capacity, const char* what, uint32_t location);
+
 // Builds the name a feature query's argument holds: an identifier, or `scope::identifier`; names with leading and
 // trailing "__" lose them for the attribute, feature and extension queries, as clang normalizes them.
+// Whether a token of `kind` has a name that a feature query takes: an identifier or a keyword (clang's tokens with an
+// IdentifierInfo).
+BUSTER_INLINE bool pp_names_kind(uint8_t kind)
+{
+    return kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END);
+}
+
 static bool pp_feature_name(Preprocessor* pp, PPBuiltin builtin, const PPTokens* tokens, uint32_t begin, uint32_t end, uint8_t* name, uint32_t* length)
 {
     bool result = false;
@@ -3980,9 +4613,11 @@ static bool pp_feature_name(Preprocessor* pp, PPBuiltin builtin, const PPTokens*
     // Attribute, feature and extension names may be written with "__" around them, which clang drops.
     const bool attribute = builtin == PP_BUILTIN_HAS_ATTRIBUTE || builtin == PP_BUILTIN_HAS_C_ATTRIBUTE || builtin == PP_BUILTIN_HAS_CPP_ATTRIBUTE ||
                            builtin == PP_BUILTIN_HAS_DECLSPEC_ATTRIBUTE || builtin == PP_BUILTIN_HAS_FEATURE || builtin == PP_BUILTIN_HAS_EXTENSION;
-    const bool scoped = end - begin == 3 && tokens->kinds[begin] == C_TOKEN_RAW_IDENTIFIER && tokens->kinds[begin + 1] == C_TOKEN_COLONCOLON &&
-                        tokens->kinds[begin + 2] == C_TOKEN_RAW_IDENTIFIER;
-    if ((end - begin == 1 && (tokens->kinds[begin] == C_TOKEN_RAW_IDENTIFIER || (tokens->kinds[begin] >= BUSTER_PP_KIND_KEYWORD && tokens->kinds[begin] < BUSTER_PP_KIND_PRAGMA_END))) || scoped)
+    // An identifier or a keyword; only __has_c_attribute and __has_cpp_attribute take a scope (`gnu::cold`).
+    const bool scoped = (builtin == PP_BUILTIN_HAS_C_ATTRIBUTE || builtin == PP_BUILTIN_HAS_CPP_ATTRIBUTE) && end - begin == 3 && pp_names_kind(tokens->kinds[begin]) &&
+                        tokens->kinds[begin + 1] == C_TOKEN_COLONCOLON && pp_names_kind(tokens->kinds[begin + 2]);
+    const bool named = (end - begin == 1 && pp_names_kind(tokens->kinds[begin])) || scoped;
+    if (named && builtin != PP_BUILTIN_HAS_WARNING)
     {
         result = true;
         for (uint32_t i = begin; i < end; i += 1)
@@ -4012,28 +4647,24 @@ static bool pp_feature_name(Preprocessor* pp, PPBuiltin builtin, const PPTokens*
             }
         }
     }
-    else if (builtin == PP_BUILTIN_HAS_WARNING && end - begin >= 1 && tokens->kinds[begin] == C_TOKEN_STRING_LITERAL)
+    else if (builtin == PP_BUILTIN_HAS_WARNING && end - begin >= 1)
     {
-        // __has_warning("-Wname"): the string's contents (adjacent strings joined).
-        result = true;
-        for (uint32_t i = begin; result && i < end; i += 1)
-        {
-            const uint8_t* bytes = pp_location_bytes(pp, tokens->locations[i]);
-            const uint32_t spelled = tokens->values[i] - tokens->locations[i];
-            result = tokens->kinds[i] == C_TOKEN_STRING_LITERAL && spelled >= 2 && *length + spelled < 256;
-            if (result)
-            {
-                memcpy(name + *length, bytes + 1, spelled - 2);
-                *length += spelled - 2;
-            }
-        }
+        // __has_warning("-Wname"): the strings' value, as clang reads it (FinishLexStringLiteral: ordinary literals,
+        // joined, without their line splices and with their escapes decoded), and nothing after them. Another first
+        // token (a macro's name too: clang doesn't expand the operand) is an error.
+        uint32_t i = begin;
+        const uint32_t n = pp_pragma_strings(pp, tokens, &i, end, name, 256, "'__has_warning'", tokens->locations[begin]);
+        result = n != BUSTER_PP_NONE && i == end;
+        *length = result ? n : 0;
     }
     return result;
 }
 
-// _Pragma("..."): the string destringized (C 6.10.9), lexed and handled as a #pragma line's tokens.
-static void pp_pragma_string(Preprocessor* pp, PPToken string, uint32_t name_location)
+// _Pragma("..."): the string destringized (C 6.10.9), lexed and handled as a #pragma line's tokens. Returns whether a
+// capture expands them (pp_pragma), which gives pp->arguments back to `restore` when it ends.
+static bool pp_pragma_string(Preprocessor* pp, PPToken string, uint32_t name_location, uint32_t restore)
 {
+    bool result = false;
     Scratch scratch = scratch_begin(0);
     const uint32_t spelled = string.value - string.location;
     uint8_t* buffer = arena_push(scratch.arena, (uint64_t)spelled + 1, 1);
@@ -4059,14 +4690,27 @@ static void pp_pragma_string(Preprocessor* pp, PPToken string, uint32_t name_loc
         }
         const uint32_t location = pp_scratch(pp, text, n);
         const uint32_t begin = pp->arguments.count;
-        if (pp_lex_scratch(pp, location, n, &pp->arguments, 0) != BUSTER_PP_NONE)
+        bool comment = false;
+        const bool lexed = pp_lex_scratch(pp, location, n, &pp->arguments, 0, &comment) != BUSTER_PP_NONE;
+        if (comment)
         {
-            pp_pragma(pp, &pp->arguments, begin, pp->arguments.count, name_location, true);
+            pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "unterminated /* comment");
         }
-        pp->arguments.count = begin;
+        const uint32_t emitted = pp->output.count;
+        result = lexed && pp_pragma(pp, begin, pp->arguments.count, name_location, true, false, restore);
+        if (lexed && !result && pp->options.expansion_starts && pp->capture_count == 0 && pp->output.count == emitted &&
+            pp->silent_pragma_count < BUSTER_PP_MAX_SILENT_PRAGMAS)
+        {
+            pp->silent_pragmas[pp->silent_pragma_count] = (PPExpansionStart){ .token = emitted, .location = pp->expansion_location };
+            pp->silent_pragma_count += 1;
+        }
+        pp->arguments.count = result ? pp->arguments.count : begin;
     }
     scratch_end(scratch);
+    return result;
 }
+
+static uint64_t pp_has_embed(Preprocessor* pp, const PPTokens* tokens, uint32_t first, uint32_t last, uint32_t location);
 
 // A feature query's or __has_include's answer, from its operand's tokens [first, last) of `tokens` (expanded, unless
 // __has_include's is a header name as written).
@@ -4077,9 +4721,13 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
     uint8_t text[512];
     uint32_t length;
     bool angled;
-    if (include && !pp_in_condition(pp))
+    if ((include || builtin == PP_BUILTIN_HAS_EMBED) && !pp_in_condition(pp))
     {
-        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "__has_include must be used within a preprocessing directive");
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "%s must be used within a preprocessing directive", include ? "__has_include" : "__has_embed");
+    }
+    else if (builtin == PP_BUILTIN_HAS_EMBED)
+    {
+        result = pp_has_embed(pp, tokens, first, last, location);
     }
     else if (include && pp_header_name(pp, tokens, first, last, text, sizeof(text), &length, &angled))
     {
@@ -4112,6 +4760,29 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "builtin feature check macro requires a parenthesized identifier");
     }
     return result;
+}
+
+// Whether an argument is being expanded (a capture of one is open), when clang doesn't run a _Pragma
+// (Preprocessor::Handle_Pragma, in InMacroArgPreExpansion) but checks it and gives its tokens back (pp_defer_pragma),
+// so that it runs when the argument's substitution is rescanned, and is stringized and pasted as tokens before that.
+static bool pp_expanding_argument(const Preprocessor* pp)
+{
+    bool result = false;
+    for (uint32_t c = 0; !result && c < pp->capture_count; c += 1)
+    {
+        result = pp->capture_frames[c].kind == BUSTER_PP_CAPTURE_ARGUMENT;
+    }
+    return result;
+}
+
+// A _Pragma's tokens given back in an argument's expansion: its name, its '(', its string literal (its operand
+// expanded) and its ')'.
+static void pp_defer_pragma(Preprocessor* pp, uint32_t name_location, uint8_t name_flags, PPToken open, PPToken string, PPToken close)
+{
+    pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = name_flags, .value = C_NAME_PRAGMA_OPERATOR, .location = name_location });
+    pp_emit(pp, open);
+    pp_emit(pp, string);
+    pp_emit(pp, close);
 }
 
 // Starts a builtin that takes a parenthesized operand (_Pragma, the feature queries, __has_include): the main loop
@@ -4149,6 +4820,7 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
 {
     const PPInvocation invocation = pp->invocations[pp->invocation_count - 1];
     pp->invocation_count -= 1;
+    pp->unterminated += !closed;
     pp->argument_record_count = invocation.arguments;
     const PPBuiltin builtin = (PPBuiltin)pp->macros[invocation.macro].builtin;
     const uint32_t begin = invocation.arguments_begin;
@@ -4159,9 +4831,14 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
     {
         const bool string = closed && end == begin + 1 && tokens->kinds[begin] >= C_TOKEN_STRING_LITERAL && tokens->kinds[begin] <= C_TOKEN_UTF32_STRING_LITERAL;
         bool started = false;
-        if (string)
+        if (string && pp_expanding_argument(pp))
         {
-            pp_pragma_string(pp, pp_stack_token(tokens, begin), invocation.name_location);
+            pp_defer_pragma(pp, invocation.name_location, invocation.name_flags, invocation.open, pp_stack_token(tokens, begin), invocation.close);
+        }
+        else if (string)
+        {
+            // The pragma's tokens, after the operand's, stay while a capture expands them; it then gives back both.
+            started = pp_pragma_string(pp, pp_stack_token(tokens, begin), invocation.name_location, begin);
         }
         else if (closed && begin < end)
         {
@@ -4173,6 +4850,8 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
                 .builtin = (uint8_t)builtin,
                 .flags = invocation.name_flags,
                 .location = invocation.name_location,
+                .open = invocation.open,
+                .close = invocation.close,
             };
             started = pp_start_capture(pp, capture, begin, end, invocation.expansion_end);
         }
@@ -4184,11 +4863,12 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
     }
     else
     {
-        const bool include = builtin == PP_BUILTIN_HAS_INCLUDE || builtin == PP_BUILTIN_HAS_INCLUDE_NEXT;
-        // A header name in <...> or a string literal is read as it is, and so is __is_identifier's operand (clang doesn't
-        // expand it); anything else is expanded first.
-        const bool direct = (include && begin < end && (tokens->kinds[begin] == C_TOKEN_LESS || tokens->kinds[begin] == C_TOKEN_STRING_LITERAL)) ||
-                            builtin == PP_BUILTIN_IS_IDENTIFIER;
+        const bool include = builtin == PP_BUILTIN_HAS_INCLUDE || builtin == PP_BUILTIN_HAS_INCLUDE_NEXT || builtin == PP_BUILTIN_HAS_EMBED;
+        // A header name in <...> or a string literal is read as it is, and so are the operands clang reads unexpanded
+        // (EvaluateFeatureLikeBuiltinMacro without ExpandArgs): the queries' that come here (an attribute query's
+        // operand is a stream, pp_start_stream, and one comes here only without its '('). A computed header name is
+        // expanded first.
+        const bool direct = (include && begin < end && (tokens->kinds[begin] == C_TOKEN_LESS || tokens->kinds[begin] == C_TOKEN_STRING_LITERAL)) || !include;
         const PPCapture capture = {
             .kind = BUSTER_PP_CAPTURE_BUILTIN,
             .arguments_begin = begin,
@@ -4213,7 +4893,7 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
         if (!started)
         {
             pp->arguments.count = begin;
-            pp_emit(pp, pp_number_token(pp, value, invocation.name_flags));
+            pp_emit(pp, include ? pp_number_token(pp, value, invocation.name_flags) : pp_feature_token(pp, value, invocation.name_flags));
         }
     }
 }
@@ -4232,9 +4912,13 @@ static void pp_finish_builtin(Preprocessor* pp)
         const PPToken token = string ? pp_stack_token(tokens, capture.begin) : (PPToken){ 0 };
         pp->captures.count = capture.begin;
         pp->arguments.count = capture.arguments_begin;
-        if (string)
+        if (string && pp_expanding_argument(pp))
         {
-            pp_pragma_string(pp, token, capture.location);
+            pp_defer_pragma(pp, capture.location, capture.flags, capture.open, token, capture.close);
+        }
+        else if (string)
+        {
+            pp_pragma_string(pp, token, capture.location, capture.arguments_begin);
         }
         else
         {
@@ -4246,7 +4930,242 @@ static void pp_finish_builtin(Preprocessor* pp)
         const uint64_t value = pp_builtin_value(pp, (PPBuiltin)capture.builtin, &pp->captures, capture.begin, pp->captures.count, capture.location);
         pp->captures.count = capture.begin;
         pp->arguments.count = capture.arguments_begin;
-        pp_emit(pp, pp_number_token(pp, value, capture.flags));
+        // __has_embed's 2 has no L (clang prints its answer as an int).
+        const bool numeric = capture.builtin == PP_BUILTIN_HAS_INCLUDE || capture.builtin == PP_BUILTIN_HAS_INCLUDE_NEXT || capture.builtin == PP_BUILTIN_HAS_EMBED;
+        pp_emit(pp, numeric ? pp_number_token(pp, value, capture.flags) : pp_feature_token(pp, value, capture.flags));
+    }
+}
+
+// An attribute query's '(' was read (pp_collect_token): its invocation becomes a stream, a capture without a barrier,
+// and the main loop goes on expanding into it, as clang reads the operand with Lex, until pp_stream_check finds the ')'
+// that closes it, wherever that comes from.
+static void pp_start_stream(Preprocessor* pp)
+{
+    const PPInvocation invocation = pp->invocations[pp->invocation_count - 1];
+    pp->invocation_count -= 1;
+    pp->argument_record_count = invocation.arguments;
+    pp->arguments.count = invocation.arguments_begin;
+    if (pp->capture_count < BUSTER_PP_MAX_CONTEXTS)
+    {
+        pp->capture_frames[pp->capture_count] = (PPCapture){
+            .kind = BUSTER_PP_CAPTURE_STREAM,
+            .begin = pp->captures.count,
+            .builtin = pp->macros[invocation.macro].builtin,
+            .flags = invocation.name_flags,
+            .location = invocation.name_location,
+            .open = invocation.open,
+            .pragma_mark = pp->pragma_lines,
+            .depth = 1,
+            .scanned = pp->captures.count,
+            .stage = BUSTER_PP_STREAM_FIRST,
+        };
+        pp->capture_count += 1;
+        pp->stream_count += 1;
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, invocation.name_location, "macro expansion nests too deeply");
+    }
+}
+
+// Moves the pragma lines that a _Pragma or a #pragma among the top capture's tokens emitted into it (clang prints them
+// as it reads them, and the line or the operand being read keeps the rest) to the target below, before the capture's
+// other tokens, in order: into the output, or onto the end of the capture below, whose tokens end where this one's
+// begin. Returns how many tokens left pp->captures (to the output).
+static uint32_t pp_lift_pragma_lines(Preprocessor* pp)
+{
+    PPCapture* capture = &pp->capture_frames[pp->capture_count - 1];
+    uint32_t result = 0;
+    if (capture->pragma_mark != pp->pragma_lines)
+    {
+        PPTokens* tokens = &pp->captures;
+        const uint32_t begin = capture->begin;
+        const uint32_t end = tokens->count;
+        Scratch scratch = scratch_begin(0);
+        PPToken* kept = arena_push(scratch.arena, (uint64_t)(end - begin + 1) * sizeof(PPToken), _Alignof(PPToken));
+        if (kept != 0)
+        {
+            // A stable partition: the pragma lines' tokens move to the front, and the others after them.
+            uint32_t lifted = begin;
+            uint32_t count = 0;
+            uint32_t state = BUSTER_PP_PRAGMA_OUTSIDE;
+            for (uint32_t i = begin; i < end; i += 1)
+            {
+                const PPToken token = pp_stack_token(tokens, i);
+                state = pp_pragma_state(pp, state, token.kind, token.location);
+                const bool line = state != BUSTER_PP_PRAGMA_OUTSIDE || token.kind == BUSTER_PP_KIND_PRAGMA_END;
+                if (line)
+                {
+                    pp_tokens_set(tokens, lifted, token.kind, token.flags, token.value, token.location);
+                    lifted += 1;
+                }
+                else
+                {
+                    kept[count] = token;
+                    count += 1;
+                }
+            }
+            for (uint32_t k = 0; k < count; k += 1)
+            {
+                pp_tokens_set(tokens, lifted + k, kept[k].kind, kept[k].flags, kept[k].value, kept[k].location);
+            }
+            if (pp->capture_count == 1 && pp_room(pp, &pp->output, lifted - begin))
+            {
+                PPTokens* output = &pp->output;
+                for (uint32_t i = begin; i < lifted; i += 1)
+                {
+                    pp_tokens_set(output, output->count, tokens->kinds[i], tokens->flags[i], tokens->values[i], tokens->locations[i]);
+                    output->count += 1;
+                }
+                for (uint32_t k = 0; k < count; k += 1)
+                {
+                    pp_tokens_set(tokens, begin + k, kept[k].kind, kept[k].flags, kept[k].value, kept[k].location);
+                }
+                tokens->count = begin + count;
+                result = lifted - begin;
+            }
+            else if (pp->capture_count != 1)
+            {
+                capture->begin = lifted;
+            }
+        }
+        scratch_end(scratch);
+        capture->pragma_mark = pp->pragma_lines;
+    }
+    return result;
+}
+
+// A stream ended: at its operand's ')', index `close` of pp->captures, or unterminated (BUSTER_PP_NONE) at the end of
+// a barrier or of the input, which clang reports and answers nothing for. Its pragma lines go first, then the answer
+// replaces the operand, and the tokens read after the ')' in the same step follow it: they are read as they would be
+// without the stream (a run's or an expansion's tokens that name no macro).
+static void pp_finish_stream(Preprocessor* pp, uint32_t close)
+{
+    const uint32_t lifted = pp_lift_pragma_lines(pp);
+    const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
+    pp->capture_count -= 1;
+    pp->stream_count -= 1;
+    const uint32_t end = pp->captures.count;
+    uint32_t rest = end;
+    uint64_t value = 0;
+    if (close == BUSTER_PP_NONE)
+    {
+        pp->unterminated += 1;
+        pp_diagnose(pp, PP_SEVERITY_ERROR, capture.location, "unterminated function-like macro invocation");
+    }
+    else
+    {
+        rest = close - lifted + 1;
+        value = pp_builtin_value(pp, (PPBuiltin)capture.builtin, &pp->captures, capture.begin, rest - 1, capture.location);
+    }
+    pp->captures.count = capture.begin;
+    if (close != BUSTER_PP_NONE)
+    {
+        pp_emit(pp, pp_feature_token(pp, value, capture.flags));
+    }
+    PPTokens* target = pp_target(pp);
+    const uint32_t trailing = end - rest;
+    if (trailing != 0 && pp_room(pp, target, trailing))
+    {
+        // Into the output, or down within pp->captures (the answer took at most the operand's place).
+        const PPTokens* tokens = &pp->captures;
+        for (uint32_t i = 0; i < trailing; i += 1)
+        {
+            pp_tokens_set(target, target->count + i, tokens->kinds[rest + i], tokens->flags[rest + i], tokens->values[rest + i], tokens->locations[rest + i]);
+        }
+        target->count += trailing;
+    }
+}
+
+// A stream's first identifier, __has_c_attribute's or __has_cpp_attribute's, is followed by a token clang reads
+// unexpanded (to see a `::`): a macro's name next in the top context is taken as it is, painted. Any other token is read
+// alike either way, and the main loop reads it; at a directive or the end of a context, the main loop goes first (it
+// runs the directive, or pops the context), and the stream waits.
+static void pp_stream_unexpanded(Preprocessor* pp)
+{
+    PPContext* context = &pp->contexts[pp->context_count - 1];
+    PPToken token = { 0 };
+    bool available = false;
+    if (context->kind == BUSTER_PP_CONTEXT_FILE)
+    {
+        const PPFileData* data = &pp->datas[pp->files[context->file].data];
+        available = context->position < pp_run_limit(data, context);
+        token = available ? pp_file_token(data, pp->ranges[context->range].base, context->position) : token;
+    }
+    else
+    {
+        available = context->position < context->end;
+        token = available ? pp_context_token(pp, context, context->position) : token;
+    }
+    const bool name = available && token.kind == C_TOKEN_RAW_IDENTIFIER && !(token.flags & BUSTER_PP_NO_EXPAND) && pp_is_macro(pp, token.value);
+    if (name)
+    {
+        if (context->kind == BUSTER_PP_CONTEXT_FILE)
+        {
+            pp_check_poison(pp, token.value, token.location);
+        }
+        context->position += 1;
+        token.flags |= (uint8_t)(context->pending_flags | BUSTER_PP_NO_EXPAND);
+        context->pending_flags = 0;
+        pp_emit(pp, token);
+    }
+    else if (available)
+    {
+        pp->capture_frames[pp->capture_count - 1].stage = BUSTER_PP_STREAM_REST;
+    }
+}
+
+// After a step of the main loop with a stream open: reads the top stream's new tokens, but its pragma lines, counting
+// parentheses as clang does (a ',' and any token after the first are errors that pp_builtin_value finds), and ends it at
+// the ')' that closes its operand (pp_finish_stream), which may close the stream below too.
+static void pp_stream_check(Preprocessor* pp)
+{
+    bool more = true;
+    while (more && pp->capture_count != 0 && pp->capture_frames[pp->capture_count - 1].kind == BUSTER_PP_CAPTURE_STREAM)
+    {
+        PPCapture* capture = &pp->capture_frames[pp->capture_count - 1];
+        const PPTokens* tokens = &pp->captures;
+        const bool scoped = capture->builtin == PP_BUILTIN_HAS_C_ATTRIBUTE || capture->builtin == PP_BUILTIN_HAS_CPP_ATTRIBUTE;
+        uint32_t close = BUSTER_PP_NONE;
+        uint32_t i = capture->scanned;
+        while (close == BUSTER_PP_NONE && i < tokens->count)
+        {
+            const uint8_t kind = tokens->kinds[i];
+            const bool pragma = capture->in_pragma || (kind == C_TOKEN_HASH && tokens->locations[i] == pp->hash_location);
+            capture->in_pragma = pragma && kind != BUSTER_PP_KIND_PRAGMA_END;
+            if (!pragma)
+            {
+                const bool paren = kind == C_TOKEN_L_PAREN || kind == C_TOKEN_R_PAREN || kind == C_TOKEN_COMMA;
+                const bool identifier = pp_names_kind(kind);
+                if (capture->stage == BUSTER_PP_STREAM_UNEXPANDED)
+                {
+                    capture->stage = BUSTER_PP_STREAM_REST;
+                }
+                else if (capture->stage == BUSTER_PP_STREAM_FIRST && !paren)
+                {
+                    capture->stage = scoped && identifier ? BUSTER_PP_STREAM_UNEXPANDED : BUSTER_PP_STREAM_REST;
+                }
+                capture->depth += kind == C_TOKEN_L_PAREN;
+                capture->depth -= kind == C_TOKEN_R_PAREN;
+                close = capture->depth == 0 ? i : BUSTER_PP_NONE;
+            }
+            i += 1;
+        }
+        capture->scanned = i;
+        if (close != BUSTER_PP_NONE)
+        {
+            pp_finish_stream(pp, close);
+        }
+        else if (capture->stage == BUSTER_PP_STREAM_UNEXPANDED)
+        {
+            const uint32_t count = tokens->count;
+            pp_stream_unexpanded(pp);
+            more = tokens->count != count;
+        }
+        else
+        {
+            more = false;
+        }
     }
 }
 
@@ -4343,13 +5262,17 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             pp_start_builtin(pp, id, name, flags, expansion_end);
             break;
         case PP_BUILTIN_POISONED:
-            pp_diagnose(pp, PP_SEVERITY_ERROR, name.location, "attempt to use a poisoned identifier");
+            // The name, which pp_expand_current reported if a file has it.
             pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = name.flags | BUSTER_PP_NO_EXPAND, .value = name.value, .location = name.location });
             break;
         case PP_BUILTIN_DEFINED:
             if (!pp_in_expression(pp))
             {
-                pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = name.flags | BUSTER_PP_NO_EXPAND, .value = name.value, .location = name.location });
+                // An identifier here. In a macro's argument that a #if line expands, which clang expands without
+                // evaluating it (its names after `defined` too), it stays one the substitution's rescan in the line
+                // reads as the operator.
+                const uint8_t painted = pp_in_condition(pp) ? 0 : BUSTER_PP_NO_EXPAND;
+                pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = (uint8_t)(name.flags | painted), .value = name.value, .location = name.location });
             }
             else
             {
@@ -4360,7 +5283,7 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
                 const bool parenthesized = valid && token.kind == C_TOKEN_L_PAREN;
                 valid = parenthesized ? pp_read_token(pp, &token, &end) : valid;
                 valid = valid && token.kind == C_TOKEN_RAW_IDENTIFIER;
-                const bool defined = valid && pp_is_macro(pp, token.value) && pp->macros[pp->macro_of[token.value]].builtin != PP_BUILTIN_POISONED;
+                const bool defined = valid && pp_is_defined(pp, token.value);
                 PPToken close;
                 if (valid && parenthesized)
                 {
@@ -4406,54 +5329,67 @@ BUSTER_INLINE void pp_note_expansion(Preprocessor* pp, uint32_t location)
     pp->expansion_start_count = replaces ? count : count + 1;
 }
 
-// Expands the macro whose name is the top context's current token.
+// Expands the macro whose name is the top context's current token. A stream open reads what came before the name first
+// (pp_stream_check): it may end there, or take the name as it is.
 static void pp_expand_current(Preprocessor* pp)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
-    PPToken name = pp_context_token(pp, context, context->position);
-    if (context->pending_flags != 0)
+    const uint32_t position = context->position;
+    if (pp->stream_count != 0)
     {
-        name.flags |= context->pending_flags;
-        context->pending_flags = 0;
+        pp_stream_check(pp);
     }
-    if (pp->options.expansion_starts && context->kind == BUSTER_PP_CONTEXT_FILE && pp->capture_count == 0)
+    if (context->position == position)
     {
-        pp->expansion_location = name.location;
-        if (name.flags & BUSTER_PP_START_OF_LINE)
+        PPToken name = pp_context_token(pp, context, context->position);
+        if (context->pending_flags != 0)
         {
-            pp_note_expansion(pp, name.location);
+            name.flags |= context->pending_flags;
+            context->pending_flags = 0;
         }
-    }
-    const PPMacroId id = pp->macro_of[name.value];
-    PPMacro* macro = &pp->macros[id];
-    const uint32_t expansion_end = pp_expansion_end(context, name);
-    if (macro->disabled != 0)
-    {
-        // A macro disabled while a file is read can only come from a directive in an invocation's arguments.
-        context->position += 1;
-        name.flags |= BUSTER_PP_NO_EXPAND;
-        pp_emit(pp, name);
-    }
-    else if (macro->flags & BUSTER_PP_MACRO_BUILTIN)
-    {
-        context->position += 1;
-        pp->statistics.builtins += pp->options.timing;
-        pp_expand_builtin(pp, id, name, expansion_end);
-    }
-    else if (!(macro->flags & BUSTER_PP_MACRO_FUNCTION))
-    {
-        context->position += 1;
-        pp_expand_object(pp, id, name, expansion_end);
-    }
-    else if (pp_next_is_lparen(pp))
-    {
-        context->position += 1;
-        pp_invoke(pp, id, name);
-    }
-    else
-    {
-        context->position += 1;
-        pp_emit(pp, name);
+        if (pp->options.expansion_starts && context->kind == BUSTER_PP_CONTEXT_FILE && pp->capture_count == 0)
+        {
+            pp->expansion_location = name.location;
+            if (name.flags & BUSTER_PP_START_OF_LINE)
+            {
+                pp_note_expansion(pp, name.location);
+            }
+        }
+        if (context->kind == BUSTER_PP_CONTEXT_FILE)
+        {
+            pp_check_poison(pp, name.value, name.location);
+        }
+        const PPMacroId id = pp->macro_of[name.value];
+        PPMacro* macro = &pp->macros[id];
+        const uint32_t expansion_end = pp_expansion_end(context, name);
+        if (macro->disabled != 0)
+        {
+            // A macro disabled while a file is read can only come from a directive in an invocation's arguments.
+            context->position += 1;
+            name.flags |= BUSTER_PP_NO_EXPAND;
+            pp_emit(pp, name);
+        }
+        else if (macro->flags & BUSTER_PP_MACRO_BUILTIN)
+        {
+            context->position += 1;
+            pp->statistics.builtins += pp->options.timing;
+            pp_expand_builtin(pp, id, name, expansion_end);
+        }
+        else if (!(macro->flags & BUSTER_PP_MACRO_FUNCTION))
+        {
+            context->position += 1;
+            pp_expand_object(pp, id, name, expansion_end);
+        }
+        else if (pp_next_is_lparen(pp))
+        {
+            context->position += 1;
+            pp_invoke(pp, id, name);
+        }
+        else
+        {
+            context->position += 1;
+            pp_emit(pp, name);
+        }
     }
 }
 
@@ -4509,10 +5445,22 @@ static void pp_step_buffer(Preprocessor* pp, PPContext* context)
 static void pp_finish_condition(Preprocessor* pp);
 static void pp_finish_include(Preprocessor* pp);
 static void pp_finish_line(Preprocessor* pp);
+static void pp_finish_pragma(Preprocessor* pp);
 
-// A barrier ended: its capture's continuation takes the capture (every barrier is pushed with a capture).
+// A barrier ended: its capture's continuation takes the capture (every barrier is pushed with a capture). The streams
+// above it, which have no barrier, end there unterminated, as clang's read of an operand stops at the end of a line or
+// of an argument. The pragma lines a _Pragma in its tokens emitted go below it first (but for a computed #include's
+// line, where clang reads the _Pragma's string as a header name and rejects it, and keeps an error).
 static void pp_finish_capture(Preprocessor* pp)
 {
+    while (pp->capture_frames[pp->capture_count - 1].kind == BUSTER_PP_CAPTURE_STREAM)
+    {
+        pp_finish_stream(pp, BUSTER_PP_NONE);
+    }
+    if (pp->capture_frames[pp->capture_count - 1].kind != BUSTER_PP_CAPTURE_INCLUDE)
+    {
+        pp_lift_pragma_lines(pp);
+    }
     switch (pp->capture_frames[pp->capture_count - 1].kind)
     {
         case BUSTER_PP_CAPTURE_ARGUMENT:
@@ -4529,6 +5477,9 @@ static void pp_finish_capture(Preprocessor* pp)
             break;
         case BUSTER_PP_CAPTURE_BUILTIN:
             pp_finish_builtin(pp);
+            break;
+        case BUSTER_PP_CAPTURE_PRAGMA:
+            pp_finish_pragma(pp);
             break;
     }
 }
@@ -4564,6 +5515,10 @@ static void pp_run_contexts(Preprocessor* pp, uint32_t stop_depth)
                 pp_finish_capture(pp);
             }
         }
+        if (pp->stream_count != 0)
+        {
+            pp_stream_check(pp);
+        }
     }
 }
 
@@ -4591,7 +5546,7 @@ static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t be
 static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index)
 {
     PPFileData* data = &pp->datas[pp->files[file].data];
-    const bool skipped = data->prepared && (data->once || (data->guard != 0 && pp_is_macro(pp, data->guard)));
+    const bool skipped = data->prepared && (data->once || (data->guard != 0 && pp_is_defined(pp, data->guard)));
     pp->statistics.skipped_includes += skipped && pp->options.timing;
     if (pp->include_depth >= BUSTER_PP_MAX_INCLUDE_DEPTH)
     {
@@ -4612,6 +5567,11 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
             context->end = data->token_count;
             context->conditional_base = pp->conditional_count;
             pp->include_depth += pp->context_count > 1;
+            if (data->unterminated_comment != 0)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp->ranges[range].base + data->unterminated_comment - 1, "unterminated /* comment");
+                pp->unterminated += 1;
+            }
         }
     }
 }
@@ -4745,7 +5705,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             {
                 pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #%s directive", kind == PP_DIRECTIVE_IFDEF ? "ifdef" : "ifndef");
             }
-            const bool defined = named && pp_is_macro(pp, data->values[hash + 2]);
+            const bool defined = named && pp_is_defined(pp, data->values[hash + 2]);
             pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_IFDEF ? defined : !defined), location);
             break;
         }
@@ -4755,6 +5715,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             if (!open)
             {
                 pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#elif without #if");
+                pp->unterminated += 1;
             }
             else if (group->seen_else)
             {
@@ -4772,7 +5733,15 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             else
             {
                 const bool named = hash + 2 < end && (data->kinds[hash + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
-                const bool defined = named && pp_is_macro(pp, data->values[hash + 2]);
+                if (!named)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "macro name missing");
+                }
+                else if (hash + 3 < end)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #%s directive", kind == PP_DIRECTIVE_ELIFDEF ? "elifdef" : "elifndef");
+                }
+                const bool defined = named && pp_is_defined(pp, data->values[hash + 2]);
                 pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_ELIFDEF ? defined : !defined), location);
             }
             break;
@@ -4780,9 +5749,14 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             if (!open)
             {
                 pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#else without #if");
+                pp->unterminated += 1;
             }
             else
             {
+                if (hash + 2 < end)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #else directive");
+                }
                 if (group->seen_else)
                 {
                     pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#else after #else");
@@ -4799,9 +5773,14 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             if (!open)
             {
                 pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#endif without #if");
+                pp->unterminated += 1;
             }
             else
             {
+                if (hash + 2 < end)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #endif directive");
+                }
                 pp->conditional_count -= 1;
             }
             break;
@@ -4824,6 +5803,15 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
     }
     else
     {
+        // An #include inside an assume_nonnull or arc_cf_code_audited region is an error, which ends it.
+        for (uint32_t region = 0; region < BUSTER_PP_REGION_UNSAFE_BUFFER; region += 1)
+        {
+            if (pp->region_locations[region] != 0)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "cannot #include files inside '#pragma clang %s'", pp_region_names[region]);
+                pp->region_locations[region] = 0;
+            }
+        }
         pp_enter_file(pp, file, context->range, location, found_in);
         if (kind == PP_DIRECTIVE_IMPORT)
         {
@@ -4832,14 +5820,37 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
     }
 }
 
-// The barrier over a computed #include's line ended: the capture is the line expanded, a string literal or <...>.
+// The name of an #include-like directive of `kind`, for its diagnostics.
+static const char* pp_include_name(uint8_t kind)
+{
+    return kind == PP_DIRECTIVE_INCLUDE_NEXT ? "include_next" : kind == PP_DIRECTIVE_IMPORT ? "import" : "include";
+}
+
+// The barrier over a computed #include's line ended: the capture is the line expanded, a string literal or <...> (to
+// the first '>', as clang reads it), and tokens after it are a warning.
 static void pp_finish_include(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
+    const PPTokens* tokens = &pp->captures;
     uint8_t name[PATH_MAX];
     uint32_t length = 0;
     bool angled = false;
-    const bool valid = pp_header_name(pp, &pp->captures, capture.begin, pp->captures.count, name, sizeof(name), &length, &angled);
+    uint32_t stop = capture.begin;
+    if (stop < tokens->count && tokens->kinds[stop] == C_TOKEN_STRING_LITERAL)
+    {
+        stop += 1;
+    }
+    else if (stop < tokens->count && tokens->kinds[stop] == C_TOKEN_LESS)
+    {
+        stop += 1;
+        while (stop < tokens->count && tokens->kinds[stop] != C_TOKEN_GREATER)
+        {
+            stop += 1;
+        }
+        stop += stop < tokens->count;
+    }
+    const bool valid = pp_header_name(pp, tokens, capture.begin, stop, name, sizeof(name), &length, &angled);
+    const bool extra = stop < tokens->count;
     pp->capture_count -= 1;
     pp->captures.count = capture.begin;
     pp->arguments.count = capture.arguments_begin;
@@ -4849,6 +5860,10 @@ static void pp_finish_include(Preprocessor* pp)
     }
     else
     {
+        if (extra)
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, capture.location, "extra tokens at end of #%s directive", pp_include_name(capture.directive_kind));
+        }
         pp_include_file(pp, &pp->contexts[capture.context], capture.directive_kind, name, length, angled, capture.location);
     }
 }
@@ -4867,6 +5882,7 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     bool angled = false;
     bool valid = false;
     bool started = false;
+    bool extra = false;
     const uint32_t first = hash + 2;
     if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_LESS)
     {
@@ -4898,9 +5914,12 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
         }
         valid = closed;
         angled = valid;
+        // A token after the '>'.
+        extra = valid && end > first + 1 && data->starts[end - 1] >= p;
     }
-    else if (first + 1 == end && (data->kinds[first] & 0x7F) == C_TOKEN_STRING_LITERAL)
+    else if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_STRING_LITERAL)
     {
+        extra = first + 1 < end;
         // The string literal without its line splices.
         const uint32_t start = data->starts[first];
         const uint32_t stop = data->values[first];
@@ -4937,6 +5956,10 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     }
     else if (valid)
     {
+        if (extra)
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #%s directive", pp_include_name(kind));
+        }
         pp_include_file(pp, context, kind, name, length, angled, location);
     }
 }
@@ -5066,30 +6089,44 @@ static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location
     }
 }
 
+// A #line's or a line marker's number, token `i` of `tokens`, as clang's GetLineValue reads it: digits (without the
+// line splices in its spelling, and skipping a digit separator, C23's, in a number C23 lexes) whose value fits 32 bits
+// (past C's 2^31 - 1, as clang allows without -pedantic). Returns whether it is one.
+static bool pp_line_value(Preprocessor* pp, const PPTokens* tokens, uint32_t i, uint64_t* number)
+{
+    bool result = tokens->kinds[i] == C_TOKEN_NUMERIC_CONSTANT;
+    *number = 0;
+    Scratch scratch = scratch_begin(0);
+    uint8_t* buffer = result ? arena_push(scratch.arena, (uint64_t)(tokens->values[i] - tokens->locations[i]) + 1, 1) : 0;
+    const uint8_t* digits = 0;
+    const uint32_t count = buffer != 0 ? pp_spelling(pp, tokens->kinds[i], tokens->values[i], tokens->locations[i], buffer, &digits) : 0;
+    result = count != 0;
+    for (uint32_t k = 0; result && k < count; k += 1)
+    {
+        const bool separator = digits[k] == '\'';
+        const uint64_t next = separator ? *number : *number * 10 + (uint64_t)(digits[k] - '0');
+        result = separator || (digits[k] >= '0' && digits[k] <= '9' && next <= UINT32_MAX);
+        *number = next;
+    }
+    scratch_end(scratch);
+    return result;
+}
+
 // The lines a #line or a line marker at directive d numbers, from its tokens [begin, stop) of `tokens` (expanded, for
 // #line): lines from the next on are numbered from the digits, and the file is named by the string literal if there is
-// one.
+// one. A line marker's flags come after the name, as clang reads them (ReadLineMarkerFlags): 1 (a file entered) or 2
+// (one left, which a marker with 1 in the same inclusion entered), then 3 (a system header), then 4 (one in extern
+// "C"); anything else is an error, which drops the marker. The marker's file is a system header for 3 and a user file
+// without it; a #line keeps what the file is, and tokens after its name are a warning.
 static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, const PPTokens* tokens, uint32_t begin, uint32_t stop, uint32_t location)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
     const uint32_t hash = data->directive_hash[d];
     const uint32_t base = pp->ranges[context->range].base;
     uint64_t number = 0;
-    bool valid = begin < stop && tokens->kinds[begin] == C_TOKEN_NUMERIC_CONSTANT;
+    bool valid = begin < stop && pp_line_value(pp, tokens, begin, &number);
     // The operands' spellings without their line splices (translation phase 2), as clang reads them.
     Scratch scratch = scratch_begin(0);
-    if (valid)
-    {
-        uint8_t* buffer = arena_push(scratch.arena, (uint64_t)(tokens->values[begin] - tokens->locations[begin]) + 1, 1);
-        const uint8_t* digits = 0;
-        const uint32_t count = buffer != 0 ? pp_spelling(pp, tokens->kinds[begin], tokens->values[begin], tokens->locations[begin], buffer, &digits) : 0;
-        valid = count != 0;
-        for (uint32_t i = 0; valid && i < count; i += 1)
-        {
-            valid = digits[i] >= '0' && digits[i] <= '9' && number < (1ull << 31);
-            number = number * 10 + (uint64_t)(digits[i] - '0');
-        }
-    }
     const char* name = 0;
     uint32_t name_length = 0;
     bool name_reported = false;
@@ -5108,12 +6145,45 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         name_length = valid ? name_length : 0;
     }
     scratch_end(scratch);
-    if (!valid && !name_reported)
+    const bool marker = data->directive_kind[d] == PP_DIRECTIVE_LINE_MARKER;
+    uint32_t system = marker ? BUSTER_PP_USER_FILE : BUSTER_PP_NONE;
+    bool entered = false;
+    bool left = false;
+    uint32_t stage = 0;
+    bool flags_reported = false;
+    for (uint32_t i = begin + 2; valid && marker && i < stop; i += 1)
+    {
+        uint64_t flag = 0;
+        const bool expected = pp_line_value(pp, tokens, i, &flag) && ((stage == 0 && flag >= 1 && flag <= 3) || (stage == 1 && flag == 3) || (stage == 2 && flag == 4));
+        valid = expected;
+        flags_reported = !expected;
+        entered |= flag == 1;
+        left |= flag == 2;
+        system = flag == 3 ? BUSTER_PP_SYSTEM_FILE : flag == 4 ? BUSTER_PP_EXTERN_C_FILE : system;
+        stage = flag <= 2 ? 1 : flag == 3 ? 2 : 3;
+    }
+    if (flags_reported)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid flag line marker directive");
+    }
+    else if (valid && left && pp->ranges[context->range].marker_entries == 0)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid line marker flag '2': cannot pop empty include stack");
+        valid = false;
+        flags_reported = true;
+    }
+    if (valid && !marker && begin + 2 < stop)
+    {
+        pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #line directive");
+    }
+    if (!valid && !name_reported && !flags_reported)
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#line directive requires a simple digit sequence (and optionally a file name)");
     }
     else if (valid)
     {
+        pp->ranges[context->range].marker_entries += entered;
+        pp->ranges[context->range].marker_entries -= left;
         // The line after the number token's is `number`, as clang counts: from where it lexes that token (the digits'
         // line, or for digits right after a line splice, the splice's, since its lexer reads a splice as part of the
         // token after it). The token is the directive's first operand (the macro name for a #line it expands).
@@ -5121,8 +6191,8 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         const uint32_t anchor = first < data->directive_end[d] ? pp_start_with_splices(data->bytes, data->starts[first]) : data->starts[hash];
         uint32_t column;
         const uint32_t physical = pp_line_of(pp, context->range, base + anchor, &column) + 1;
-        // A #line without a name keeps the presumed one, and any #line keeps the system level (clang's FileKind).
-        pp_add_line_note(pp, context->range, location + 1, (int64_t)number - (int64_t)physical, name, name_length, BUSTER_PP_NONE);
+        // A #line without a name keeps the presumed one.
+        pp_add_line_note(pp, context->range, location + 1, (int64_t)number - (int64_t)physical, name, name_length, system);
     }
 }
 
@@ -5163,104 +6233,796 @@ static void pp_line(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t ki
     }
 }
 
-// Emits a #pragma or #ident line to the output: '#' starting a line, the line's tokens, and BUSTER_PP_KIND_PRAGMA_END.
+// Emits the start of a #pragma or #ident line to the output: '#' starting a line, and the name (`pragma` or `ident`).
 // The name's location is the directive's, or for _Pragma (`from_operator`) the operator's, whose '#' is then one a
 // macro made (-E's line markers place it as the expansion the operator is in).
-static void pp_emit_pragma(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, IdentId name, uint32_t location, bool from_operator)
+static void pp_emit_pragma_start(Preprocessor* pp, IdentId name, uint32_t location, bool from_operator)
 {
     // The '#' isn't in any source here: its spelling is the scratch "#".
     const uint8_t flags = (uint8_t)(BUSTER_PP_START_OF_LINE | (from_operator ? BUSTER_PP_FROM_MACRO : 0));
+    pp->pragma_lines += 1;
     if (from_operator && pp->options.expansion_starts)
     {
-        pp_note_expansion(pp, pp->expansion_location);
+        // At the line its expansion came from, or for a _Pragma in a directive's line, at that line (where clang's
+        // printer moves to for it).
+        uint32_t where = pp->expansion_location;
+        for (uint32_t c = pp->capture_count; c > 0; c -= 1)
+        {
+            const uint8_t kind = pp->capture_frames[c - 1].kind;
+            const bool directive = kind == BUSTER_PP_CAPTURE_CONDITION || kind == BUSTER_PP_CAPTURE_INCLUDE || kind == BUSTER_PP_CAPTURE_LINE || kind == BUSTER_PP_CAPTURE_PRAGMA;
+            where = directive && where == pp->expansion_location ? pp->capture_frames[c - 1].location : where;
+        }
+        pp_note_expansion(pp, where);
     }
     pp_emit(pp, (PPToken){ .kind = C_TOKEN_HASH, .flags = flags, .value = pp->hash_location + 1, .location = pp->hash_location });
     pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = 0, .value = name, .location = location });
+}
+
+// One of a pragma line's tokens after its name, which is never expanded again: with `first`, a space before it.
+static void pp_emit_pragma_token(Preprocessor* pp, PPToken token, bool first)
+{
+    token.flags = (uint8_t)((token.flags & BUSTER_PP_SPACE) | (first ? BUSTER_PP_SPACE : 0) | BUSTER_PP_NO_EXPAND);
+    pp_emit(pp, token);
+}
+
+// Emits a #pragma or #ident line to the output: its start, tokens [begin, end) of a stack, and BUSTER_PP_KIND_PRAGMA_END.
+static void pp_emit_pragma(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, IdentId name, uint32_t location, bool from_operator)
+{
+    pp_emit_pragma_start(pp, name, location, from_operator);
     for (uint32_t i = begin; i < end; i += 1)
     {
-        PPToken token = pp_stack_token(tokens, i);
-        token.flags = (uint8_t)((token.flags & BUSTER_PP_SPACE) | (i == begin ? BUSTER_PP_SPACE : 0) | BUSTER_PP_NO_EXPAND);
-        pp_emit(pp, token);
+        pp_emit_pragma_token(pp, pp_stack_token(tokens, i), i == begin);
     }
     pp_emit(pp, (PPToken){ .kind = BUSTER_PP_KIND_PRAGMA_END });
 }
 
-// A pragma's tokens [begin, end) of a stack (after `pragma`): the ones the preprocessor acts on (once, GCC
-// system_header, push_macro, pop_macro, GCC poison, GCC dependency), and any other goes to the output as clang -E prints
-// it. `from_operator` for _Pragma.
-static void pp_pragma(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location, bool from_operator)
+// A token spelled in the scratch space: a pragma's '(' and ')', and its strings as clang prints them.
+static PPToken pp_scratch_token(Preprocessor* pp, uint8_t kind, const uint8_t* bytes, uint32_t length, uint8_t flags)
+{
+    const uint32_t location = pp_scratch_clean(pp, bytes, length);
+    const PPToken result = { .kind = kind, .flags = flags, .value = location + length, .location = location };
+    return result;
+}
+
+// What a pragma is to the preprocessor, by its names: clang's handlers (Pragma.cpp's RegisterBuiltinPragmas), and -E's
+// printer, which prints every other pragma as it is.
+typedef enum PPPragmaKind
+{
+    PP_PRAGMA_OTHER,
+    PP_PRAGMA_ONCE,
+    PP_PRAGMA_QUIET, // mark, region and endregion: read, and not printed.
+    PP_PRAGMA_PUSH_MACRO,
+    PP_PRAGMA_POP_MACRO,
+    PP_PRAGMA_MESSAGE, // message, GCC warning and GCC error: a diagnostic, and printed in clang's form.
+    PP_PRAGMA_WARNING,
+    PP_PRAGMA_ERROR,
+    PP_PRAGMA_POISON, // These four in the GCC and clang namespaces.
+    PP_PRAGMA_SYSTEM_HEADER,
+    PP_PRAGMA_DEPENDENCY,
+    PP_PRAGMA_DIAGNOSTIC,
+    PP_PRAGMA_OMP, // Printed expanded (-E's printer expands it, as OpenMP says).
+    PP_PRAGMA_IDENT, // #ident and #sccs: not pragmas, but read and printed alike.
+    PP_PRAGMA_REGION, // clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage: begin and end.
+    PP_PRAGMA_MACRO_NOTE, // clang deprecated, final and restrict_expansion, of a macro: not printed.
+} PPPragmaKind;
+
+
+// Whether token i of [.., end) is the identifier `name`.
+static bool pp_token_is_name(const Preprocessor* pp, const PPTokens* tokens, uint32_t i, uint32_t end, const char* name)
+{
+    const uint32_t length = (uint32_t)strlen(name);
+    const bool result = i < end && tokens->kinds[i] == C_TOKEN_RAW_IDENTIFIER && intern_length(pp->table, tokens->values[i]) == length &&
+                        memcmp(intern_bytes(pp->table, tokens->values[i]), name, length) == 0;
+    return result;
+}
+
+// The kind of the pragma whose tokens (after `pragma`) are [begin, end), and where its operands start (`*operands`, after
+// its one or two names).
+static PPPragmaKind pp_pragma_kind(const Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t* operands)
 {
     const IdentId first = begin < end && tokens->kinds[begin] == C_TOKEN_RAW_IDENTIFIER ? tokens->values[begin] : 0;
     const IdentId second = begin + 1 < end && tokens->kinds[begin + 1] == C_TOKEN_RAW_IDENTIFIER ? tokens->values[begin + 1] : 0;
-    const uint32_t file = pp_current_file(pp);
+    const bool space = first == C_NAME_GCC || first == C_NAME_CLANG;
+    PPPragmaKind result = PP_PRAGMA_OTHER;
+    *operands = begin + 1;
     if (first == C_NAME_ONCE)
     {
-        if (file != BUSTER_PP_NONE && file != pp->main_file)
+        result = PP_PRAGMA_ONCE;
+    }
+    else if (pp_token_is_name(pp, tokens, begin, end, "mark") || pp_token_is_name(pp, tokens, begin, end, "region") ||
+             pp_token_is_name(pp, tokens, begin, end, "endregion"))
+    {
+        result = PP_PRAGMA_QUIET;
+    }
+    else if (first == C_NAME_PUSH_MACRO || first == C_NAME_POP_MACRO)
+    {
+        result = first == C_NAME_PUSH_MACRO ? PP_PRAGMA_PUSH_MACRO : PP_PRAGMA_POP_MACRO;
+    }
+    else if (pp_token_is_name(pp, tokens, begin, end, "message"))
+    {
+        result = PP_PRAGMA_MESSAGE;
+    }
+    else if (pp_token_is_name(pp, tokens, begin, end, "omp"))
+    {
+        result = PP_PRAGMA_OMP;
+    }
+    else if (space && second != 0)
+    {
+        *operands = begin + 2;
+        const bool clang = first == C_NAME_CLANG;
+        result = second == C_NAME_POISON ? PP_PRAGMA_POISON
+                 : second == C_NAME_SYSTEM_HEADER ? PP_PRAGMA_SYSTEM_HEADER
+                 : second == C_NAME_DEPENDENCY ? PP_PRAGMA_DEPENDENCY
+                 : pp_token_is_name(pp, tokens, begin + 1, end, "diagnostic") ? PP_PRAGMA_DIAGNOSTIC
+                 : !clang && second == C_NAME_WARNING ? PP_PRAGMA_WARNING
+                 : !clang && second == C_NAME_ERROR ? PP_PRAGMA_ERROR
+                 : clang && (pp_token_is_name(pp, tokens, begin + 1, end, "assume_nonnull") || pp_token_is_name(pp, tokens, begin + 1, end, "arc_cf_code_audited") ||
+                             pp_token_is_name(pp, tokens, begin + 1, end, "unsafe_buffer_usage")) ? PP_PRAGMA_REGION
+                 : clang && (pp_token_is_name(pp, tokens, begin + 1, end, "deprecated") || pp_token_is_name(pp, tokens, begin + 1, end, "final") ||
+                             pp_token_is_name(pp, tokens, begin + 1, end, "restrict_expansion")) ? PP_PRAGMA_MACRO_NOTE
+                 : PP_PRAGMA_OTHER;
+    }
+    return result;
+}
+
+// The value of an ordinary string literal's spelling (with its quotes), as clang's StringLiteralParser decodes it: the
+// simple escapes and GNU's \e, octal and hex ones up to a byte, and UCNs as UTF-8 (in C17, not one for a basic or a
+// control character), into `out` (room for `length` bytes). An unknown escape is its character, with a warning. Returns
+// the value's length, or BUSTER_PP_NONE after an error.
+static uint32_t pp_string_value(Preprocessor* pp, const uint8_t* spelling, uint32_t length, uint8_t* out, uint32_t location)
+{
+    static const char simple[] = "'\"?\\abfnrtveE";
+    static const char meaning[] = "'\"?\\\a\b\f\n\r\t\v\x1B\x1B";
+    uint32_t result = 0;
+    bool valid = length >= 2 && spelling[0] == '"' && spelling[length - 1] == '"';
+    for (uint32_t i = 1; valid && i + 1 < length; i += 1)
+    {
+        const uint8_t c = spelling[i];
+        const uint8_t e = c == '\\' && i + 2 < length ? spelling[i + 1] : 0;
+        const char* found = e != 0 ? strchr(simple, e) : 0;
+        if (c != '\\')
         {
-            pp->datas[pp->files[file].data].once = true;
+            out[result] = c;
+            result += 1;
         }
-    }
-    else if (first == C_NAME_GCC && second == C_NAME_SYSTEM_HEADER)
-    {
-        // The rest of the file is a system header, as are its later inclusions (clang's MarkFileSystemHeader), and the
-        // files it includes; a line note marks where, after the directive, with the presumed line and name kept.
-        const PPContext* context = pp_current_file_context(pp);
-        if (file != BUSTER_PP_NONE && file != pp->main_file && context != 0)
+        else if (found != 0)
         {
-            pp->files[file].system = BUSTER_PP_SYSTEM_FILE;
-            const PPFileData* data = &pp->datas[pp->files[file].data];
-            const PPRange* range = &pp->ranges[context->range];
-            const uint32_t at = range->base + (context->position < data->token_count ? data->starts[context->position] : data->length);
-            const uint32_t latest = range->last_line_directive;
-            pp_add_line_note(pp, context->range, at, latest != BUSTER_PP_NONE ? pp->line_directives[latest].delta : 0, 0, 0, BUSTER_PP_SYSTEM_FILE);
+            out[result] = (uint8_t)meaning[found - simple];
+            result += 1;
+            i += 1;
         }
-    }
-    else if (first == C_NAME_GCC && second == C_NAME_DEPENDENCY)
-    {
-        // Its file's age against this one's: nothing to do here.
-    }
-    else if (first == C_NAME_GCC && second == C_NAME_POISON)
-    {
-        for (uint32_t i = begin + 2; i < end; i += 1)
+        else if (e >= '0' && e <= '7')
         {
-            if (tokens->kinds[i] == C_TOKEN_RAW_IDENTIFIER)
+            uint32_t value = 0;
+            uint32_t digits = 0;
+            while (digits < 3 && i + 1 + digits + 1 < length && spelling[i + 1 + digits] >= '0' && spelling[i + 1 + digits] <= '7')
             {
-                pp_define_builtin(pp, tokens->values[i], PP_BUILTIN_POISONED, false);
+                value = value * 8 + (uint32_t)(spelling[i + 1 + digits] - '0');
+                digits += 1;
             }
+            valid = value <= 0xFF;
+            if (!valid)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "octal escape sequence out of range");
+            }
+            out[result] = (uint8_t)value;
+            result += 1;
+            i += digits;
+        }
+        else if (e == 'x')
+        {
+            uint32_t value = 0;
+            uint32_t digits = 0;
+            bool overflow = false;
+            while (i + 2 + digits + 1 < length && hex_digit_value(spelling[i + 2 + digits]) >= 0)
+            {
+                value = value * 16 + (uint32_t)hex_digit_value(spelling[i + 2 + digits]);
+                overflow |= value > 0xFF;
+                digits += 1;
+            }
+            valid = digits != 0 && !overflow;
+            if (!valid)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, digits == 0 ? "\\x used with no following hex digits" : "hex escape sequence out of range");
+            }
+            out[result] = (uint8_t)value;
+            result += 1;
+            i += 1 + digits;
+        }
+        else if (e == 'u' || e == 'U')
+        {
+            const uint32_t digits = e == 'u' ? 4 : 8;
+            uint32_t code = 0;
+            uint32_t read = 0;
+            while (read < digits && i + 2 + read + 1 < length && hex_digit_value(spelling[i + 2 + read]) >= 0)
+            {
+                code = code * 16 + (uint32_t)hex_digit_value(spelling[i + 2 + read]);
+                read += 1;
+            }
+            // C23 lets a UCN name any character in a string; before it, not a basic one or a control one ($, @ and `
+            // excepted).
+            const bool basic = code < 0xA0 && code != 0x24 && code != 0x40 && code != 0x60;
+            valid = read == digits && code <= 0x10FFFF && (code < 0xD800 || code > 0xDFFF) && (!basic || pp->options.language.standard >= 2023);
+            if (!valid)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, read != digits ? "incomplete universal character name" : "invalid universal character");
+            }
+            const uint32_t n = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+            out[result] = (uint8_t)(n == 1 ? code : n == 2 ? 0xC0 | (code >> 6) : n == 3 ? 0xE0 | (code >> 12) : 0xF0 | (code >> 18));
+            for (uint32_t k = 1; k < n; k += 1)
+            {
+                out[result + k] = (uint8_t)(0x80 | ((code >> (6 * (n - 1 - k))) & 0x3F));
+            }
+            result += n;
+            i += 1 + digits;
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, location, "unknown escape sequence '\\%c'", e != 0 ? (char)e : '\\');
+            out[result] = e != 0 ? e : c;
+            result += 1;
+            i += e != 0;
         }
     }
-    else if ((first == C_NAME_PUSH_MACRO || first == C_NAME_POP_MACRO) && begin + 3 < end && tokens->kinds[begin + 1] == C_TOKEN_L_PAREN &&
-             tokens->kinds[begin + 2] == C_TOKEN_STRING_LITERAL)
+    return valid ? result : BUSTER_PP_NONE;
+}
+
+// A pragma's string, as clang's FinishLexStringLiteral reads one: ordinary string literals from token *i of [.., end),
+// their values joined into `out` (room for `capacity` bytes); a first token that isn't one is an error. *i goes past
+// them. Returns the value's length, or BUSTER_PP_NONE after an error.
+static uint32_t pp_pragma_strings(Preprocessor* pp, const PPTokens* tokens, uint32_t* i, uint32_t end, uint8_t* out, uint32_t capacity, const char* what, uint32_t location)
+{
+    uint32_t result = 0;
+    if (*i >= end || tokens->kinds[*i] != C_TOKEN_STRING_LITERAL)
     {
-        // push_macro("NAME") and pop_macro("NAME").
-        const uint8_t* bytes = pp_location_bytes(pp, tokens->locations[begin + 2]);
-        const uint32_t spelled = tokens->values[begin + 2] - tokens->locations[begin + 2];
-        const IdentId name = spelled >= 2 ? intern_find_or_add(pp->table, bytes + 1, spelled - 2) : 0;
-        if (name != 0 && first == C_NAME_PUSH_MACRO && pp->pushed_count < BUSTER_PP_MAX_PUSHED)
-        {
-            pp->pushed_names[pp->pushed_count] = name;
-            pp->pushed_macros[pp->pushed_count] = pp->macro_of[name];
-            pp->pushed_count += 1;
-        }
-        else if (name != 0 && first == C_NAME_POP_MACRO)
-        {
-            for (uint32_t i = pp->pushed_count; i > 0; i -= 1)
-            {
-                if (pp->pushed_names[i - 1] == name)
-                {
-                    pp_set_macro(pp, name, pp->pushed_macros[i - 1]);
-                    memmove(pp->pushed_names + i - 1, pp->pushed_names + i, (pp->pushed_count - i) * sizeof(IdentId));
-                    memmove(pp->pushed_macros + i - 1, pp->pushed_macros + i, (pp->pushed_count - i) * sizeof(PPMacroId));
-                    pp->pushed_count -= 1;
-                    break;
-                }
-            }
-        }
+        pp_diagnose(pp, PP_SEVERITY_ERROR, *i < end ? tokens->locations[*i] : location, "expected string literal in %s", what);
+        result = BUSTER_PP_NONE;
+    }
+    while (result != BUSTER_PP_NONE && *i < end && tokens->kinds[*i] == C_TOKEN_STRING_LITERAL)
+    {
+        Scratch scratch = scratch_begin(0);
+        const uint32_t spelled = tokens->values[*i] - tokens->locations[*i];
+        uint8_t* buffer = arena_push(scratch.arena, (uint64_t)spelled + 1, 1);
+        const uint8_t* spelling = 0;
+        const uint32_t n = buffer != 0 ? pp_spelling(pp, C_TOKEN_STRING_LITERAL, tokens->values[*i], tokens->locations[*i], buffer, &spelling) : 0;
+        const uint32_t decoded = n <= capacity - result ? pp_string_value(pp, spelling, n, out + result, tokens->locations[*i]) : BUSTER_PP_NONE;
+        result = decoded != BUSTER_PP_NONE ? result + decoded : BUSTER_PP_NONE;
+        scratch_end(scratch);
+        *i += 1;
+    }
+    return result;
+}
+
+// #pragma message, GCC warning and GCC error, on their operands [begin, end) (expanded): a string, or a parenthesized one
+// (message's MSVC form), and nothing after it; a diagnostic, and the line in clang's form, `#pragma message("...")`,
+// `#pragma GCC warning "..."` or `#pragma GCC error "..."`, with the strings' value written as clang's printer writes
+// it (outputPrintable): a printable byte as it is, and a backslash, a quote or any other byte as an octal escape.
+static void pp_pragma_message(Preprocessor* pp, PPPragmaKind kind, const PPTokens* names, uint32_t names_begin, const PPTokens* tokens, uint32_t begin, uint32_t end,
+                              uint32_t location, bool from_operator)
+{
+    const char* what = kind == PP_PRAGMA_MESSAGE ? "pragma message" : kind == PP_PRAGMA_WARNING ? "pragma warning" : "pragma error";
+    Scratch scratch = scratch_begin(0);
+    uint32_t capacity = 2;
+    for (uint32_t t = begin; t < end; t += 1)
+    {
+        capacity += tokens->kinds[t] == C_TOKEN_STRING_LITERAL ? 4 * (tokens->values[t] - tokens->locations[t]) : 0;
+    }
+    uint8_t* text = arena_push(scratch.arena, capacity, 1);
+    uint32_t i = begin;
+    const bool parenthesized = i < end && tokens->kinds[i] == C_TOKEN_L_PAREN;
+    i += parenthesized;
+    uint32_t length = BUSTER_PP_NONE;
+    if (text == 0 || (!parenthesized && (i >= end || tokens->kinds[i] != C_TOKEN_STRING_LITERAL)))
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "%s requires parenthesized string", what);
     }
     else
     {
-        pp_emit_pragma(pp, tokens, begin, end, C_NAME_PRAGMA, location, from_operator);
+        length = pp_pragma_strings(pp, tokens, &i, end, text + 1, capacity - 2, what, location);
+        const bool closed = !parenthesized || (i < end && tokens->kinds[i] == C_TOKEN_R_PAREN);
+        i += parenthesized && closed;
+        if (length != BUSTER_PP_NONE && (!closed || i != end))
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, i < end ? tokens->locations[i] : location, "%s requires parenthesized string", what);
+            length = BUSTER_PP_NONE;
+        }
     }
+    uint8_t* written = length != BUSTER_PP_NONE ? arena_push(scratch.arena, 4 * (uint64_t)length + 2, 1) : 0;
+    if (written != 0)
+    {
+        pp_diagnose(pp, kind == PP_PRAGMA_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, location, "%.*s", (int)length, (const char*)text + 1);
+        uint32_t n = 0;
+        written[n] = '"';
+        n += 1;
+        for (uint32_t k = 0; k < length; k += 1)
+        {
+            const uint8_t c = text[1 + k];
+            if (c >= 0x20 && c < 0x7F && c != '\\' && c != '"')
+            {
+                written[n] = c;
+                n += 1;
+            }
+            else
+            {
+                written[n] = '\\';
+                written[n + 1] = (uint8_t)('0' + ((c >> 6) & 7));
+                written[n + 2] = (uint8_t)('0' + ((c >> 3) & 7));
+                written[n + 3] = (uint8_t)('0' + (c & 7));
+                n += 4;
+            }
+        }
+        written[n] = '"';
+        n += 1;
+        pp_emit_pragma_start(pp, C_NAME_PRAGMA, location, from_operator);
+        pp_emit_pragma_token(pp, pp_stack_token(names, names_begin), true);
+        if (kind == PP_PRAGMA_MESSAGE)
+        {
+            pp_emit(pp, pp_scratch_token(pp, C_TOKEN_L_PAREN, (const uint8_t*)"(", 1, BUSTER_PP_NO_EXPAND));
+            pp_emit(pp, pp_scratch_token(pp, C_TOKEN_STRING_LITERAL, written, n, 0));
+            pp_emit(pp, pp_scratch_token(pp, C_TOKEN_R_PAREN, (const uint8_t*)")", 1, 0));
+        }
+        else
+        {
+            pp_emit_pragma_token(pp, pp_stack_token(names, names_begin + 1), true);
+            pp_emit(pp, pp_scratch_token(pp, C_TOKEN_STRING_LITERAL, written, n, BUSTER_PP_SPACE));
+        }
+        pp_emit(pp, (PPToken){ .kind = BUSTER_PP_KIND_PRAGMA_END });
+    }
+    scratch_end(scratch);
+}
+
+// The remark groups #pragma clang diagnostic takes as "-R<group>" (clang 23.1.3's, as docs/c-preprocessor.md has them).
+static const char* const pp_remark_groups[] = {
+    "ctu-remarks", "module-build", "module-import", "module-include-translation", "module-lock", "module-map", "module-validation", "modules-driver", "pass",
+    "pass-analysis", "pass-missed", "remark-backend-plugin", "round-trip-cc1-args", "sanitize-address", "search-path-usage", "sloc-usage",
+};
+
+// #pragma GCC diagnostic and #pragma clang diagnostic, on their operands [begin, end) (unexpanded). clang prints one only
+// when it takes it, in its own form: push; pop with a push to pop (the two namespaces share the pushes); and ignored,
+// warning, error or fatal with a string (ordinary literals joined; another first token is an error) that names a
+// warning group ("-W", the table of __has_warning's names, or "-Weverything") or a remark group ("-R"), and nothing after
+// it. Anything else is a warning, and isn't printed. The severities aren't applied to this preprocessor's diagnostics.
+static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint32_t names_begin, uint32_t begin, uint32_t end, uint32_t location, bool from_operator)
+{
+    const bool push = pp_token_is_name(pp, tokens, begin, end, "push");
+    const bool pop = pp_token_is_name(pp, tokens, begin, end, "pop");
+    const bool severity = pp_token_is_name(pp, tokens, begin, end, "ignored") || pp_token_is_name(pp, tokens, begin, end, "warning") ||
+                          pp_token_is_name(pp, tokens, begin, end, "error") || pp_token_is_name(pp, tokens, begin, end, "fatal");
+    bool printed = false;
+    uint8_t text[512];
+    uint32_t length = BUSTER_PP_NONE;
+    if (push || (pop && pp->diagnostic_depth != 0))
+    {
+        pp->diagnostic_depth = push ? pp->diagnostic_depth + 1 : pp->diagnostic_depth - 1;
+        printed = true;
+        if (begin + 1 < end)
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, tokens->locations[begin + 1], "unexpected token in pragma diagnostic");
+        }
+    }
+    else if (severity)
+    {
+        uint32_t i = begin + 1;
+        length = pp_pragma_strings(pp, tokens, &i, end, text + 1, sizeof(text) - 2, "pragma diagnostic", location);
+        const uint8_t* name = text + 1;
+        const bool other = length != BUSTER_PP_NONE && i != end;
+        const bool option = length != BUSTER_PP_NONE && !other && length >= 3 && name[0] == '-' && (name[1] == 'W' || name[1] == 'R');
+        bool known = option && length == 12 && memcmp(name + 2, "everything", 10) == 0;
+        known |= option && name[1] == 'W' && pp_feature(PP_BUILTIN_HAS_WARNING, name, length, 0) != 0;
+        for (uint32_t g = 0; option && name[1] == 'R' && g < BUSTER_ARRAY_LENGTH(pp_remark_groups); g += 1)
+        {
+            known |= strlen(pp_remark_groups[g]) == length - 2 && memcmp(pp_remark_groups[g], name + 2, length - 2) == 0;
+        }
+        if (other)
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, tokens->locations[i], "unexpected token in pragma diagnostic");
+        }
+        else if (length != BUSTER_PP_NONE && !known)
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, location, option ? "unknown warning group '%.*s', ignored" : "pragma diagnostic expected option name (e.g. \"-W%.*s\")",
+                        (int)length, (const char*)name);
+        }
+        printed = known;
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_WARNING, location, pop ? "pragma diagnostic pop could not pop, no matching push"
+                                                           : "pragma diagnostic expected 'error', 'warning', 'ignored', 'fatal', 'push', or 'pop'");
+    }
+    if (printed)
+    {
+        pp_emit_pragma_start(pp, C_NAME_PRAGMA, location, from_operator);
+        pp_emit_pragma_token(pp, pp_stack_token(tokens, names_begin), true);
+        pp_emit_pragma_token(pp, pp_stack_token(tokens, names_begin + 1), true);
+        pp_emit_pragma_token(pp, pp_stack_token(tokens, begin), true);
+        if (severity)
+        {
+            text[0] = '"';
+            text[length + 1] = '"';
+            pp_emit(pp, pp_scratch_token(pp, C_TOKEN_STRING_LITERAL, text, length + 2, BUSTER_PP_SPACE));
+        }
+        pp_emit(pp, (PPToken){ .kind = BUSTER_PP_KIND_PRAGMA_END });
+    }
+}
+
+// push_macro("NAME") and pop_macro("NAME"), on their operands [begin, end) (expanded); anything else is an error. As in
+// clang, the name is the string's spelling between its quotes, and tokens after the ')' are left alone.
+static void pp_pragma_push_pop(Preprocessor* pp, PPPragmaKind kind, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location)
+{
+    const bool valid = begin + 2 < end && tokens->kinds[begin] == C_TOKEN_L_PAREN && tokens->kinds[begin + 1] == C_TOKEN_STRING_LITERAL && tokens->kinds[begin + 2] == C_TOKEN_R_PAREN;
+    Scratch scratch = scratch_begin(0);
+    const uint32_t room = valid ? tokens->values[begin + 1] - tokens->locations[begin + 1] + 1 : 1;
+    uint8_t* buffer = arena_push(scratch.arena, room, 1);
+    const uint8_t* spelling = 0;
+    const uint32_t spelled = valid && buffer != 0 ? pp_spelling(pp, C_TOKEN_STRING_LITERAL, tokens->values[begin + 1], tokens->locations[begin + 1], buffer, &spelling) : 0;
+    const IdentId name = spelled >= 2 ? intern_find_or_add(pp->table, spelling + 1, spelled - 2) : 0;
+    scratch_end(scratch);
+    if (!valid)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "pragma %s requires a parenthesized string", kind == PP_PRAGMA_PUSH_MACRO ? "push_macro" : "pop_macro");
+    }
+    else if (name != 0 && kind == PP_PRAGMA_PUSH_MACRO && pp->pushed_count < BUSTER_PP_MAX_PUSHED)
+    {
+        pp->pushed_names[pp->pushed_count] = name;
+        pp->pushed_macros[pp->pushed_count] = pp->macro_of[name];
+        pp->pushed_count += 1;
+        if (pp->macro_of[name] != 0)
+        {
+            pp->macros[pp->macro_of[name]].flags |= BUSTER_PP_MACRO_REDEFINABLE;
+        }
+    }
+    else if (name != 0 && kind == PP_PRAGMA_POP_MACRO)
+    {
+        for (uint32_t i = pp->pushed_count; i > 0; i -= 1)
+        {
+            if (pp->pushed_names[i - 1] == name)
+            {
+                pp_set_macro(pp, name, pp->pushed_macros[i - 1]);
+                memmove(pp->pushed_names + i - 1, pp->pushed_names + i, (pp->pushed_count - i) * sizeof(IdentId));
+                memmove(pp->pushed_macros + i - 1, pp->pushed_macros + i, (pp->pushed_count - i) * sizeof(PPMacroId));
+                pp->pushed_count -= 1;
+                break;
+            }
+        }
+    }
+}
+
+// #ident and #sccs, on their operands [begin, end) (expanded when the first is a macro): a string literal, narrow or wide,
+// is printed as `#ident "..."` (for #sccs too, as clang prints it), and the tokens after it are dropped with a warning;
+// anything else is an error.
+static void pp_ident(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location)
+{
+    if (begin < end && (tokens->kinds[begin] == C_TOKEN_STRING_LITERAL || tokens->kinds[begin] == C_TOKEN_WIDE_STRING_LITERAL))
+    {
+        if (begin + 1 < end)
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, tokens->locations[begin + 1], "extra tokens at end of #ident directive");
+        }
+        pp_emit_pragma(pp, tokens, begin, begin + 1, C_NAME_IDENT, location, false);
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, begin < end ? tokens->locations[begin] : location, "invalid #ident directive");
+    }
+}
+
+// #pragma clang assume_nonnull, arc_cf_code_audited or unsafe_buffer_usage, on their operands [begin, end): begin or
+// end (anything else is an error), with clang's rules: beginning an open region or ending one that isn't is an error.
+// Only assume_nonnull is printed, as `#pragma clang assume_nonnull begin` (or end), but not an end that is an error.
+// A file that ends inside an assume_nonnull or arc_cf_code_audited region, an #include inside one, and the translation
+// unit's end inside unsafe_buffer_usage are errors too (pp_pop_context, pp_include_file).
+static void pp_pragma_region(Preprocessor* pp, const PPTokens* tokens, uint32_t names_begin, uint32_t begin, uint32_t end, uint32_t location, bool from_operator)
+{
+    const uint32_t region = pp_token_is_name(pp, tokens, names_begin + 1, begin, "assume_nonnull") ? BUSTER_PP_REGION_ASSUME_NONNULL
+                            : pp_token_is_name(pp, tokens, names_begin + 1, begin, "arc_cf_code_audited") ? BUSTER_PP_REGION_ARC_CF
+                                                                                                      : BUSTER_PP_REGION_UNSAFE_BUFFER;
+    const bool opening = pp_token_is_name(pp, tokens, begin, end, "begin");
+    const bool closing = pp_token_is_name(pp, tokens, begin, end, "end");
+    const char* quoted = region == BUSTER_PP_REGION_UNSAFE_BUFFER ? "#pragma unsafe_buffer_usage" : region == BUSTER_PP_REGION_ARC_CF ? "#pragma clang arc_cf_code_audited"
+                                                                                                                                    : "#pragma clang assume_nonnull";
+    bool printed = false;
+    if (!opening && !closing)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, begin < end ? tokens->locations[begin] : location, "expected 'begin' or 'end'");
+    }
+    else if (opening)
+    {
+        if (pp->region_locations[region] != 0)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, location, "already inside '%s'", quoted);
+        }
+        pp->region_locations[region] = location;
+        printed = true;
+    }
+    else if (pp->region_locations[region] == 0)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "not currently inside '%s'", quoted);
+    }
+    else
+    {
+        pp->region_locations[region] = 0;
+        printed = true;
+    }
+    if (printed && region != BUSTER_PP_REGION_UNSAFE_BUFFER && begin + 1 < end)
+    {
+        pp_diagnose(pp, PP_SEVERITY_WARNING, tokens->locations[begin + 1], "extra tokens at end of #pragma directive");
+    }
+    if (printed && region == BUSTER_PP_REGION_ASSUME_NONNULL)
+    {
+        // clang's -E places an end on the line before its directive's (with a blank line after it): at the line break
+        // that ends that line.
+        uint32_t placed = location;
+        const uint32_t range = closing && !from_operator ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+        if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
+        {
+            const uint8_t* bytes = pp->ranges[range].bytes;
+            uint32_t offset = location - pp->ranges[range].base;
+            while (offset > 0 && bytes[offset - 1] != '\n')
+            {
+                offset -= 1;
+            }
+            placed = pp->ranges[range].base + (offset > 0 ? offset - 1 : 0);
+        }
+        pp_emit_pragma(pp, tokens, names_begin, begin + 1, C_NAME_PRAGMA, placed, from_operator);
+    }
+}
+
+// #pragma clang deprecated, final or restrict_expansion, on their operands [begin, end): '(', the name of a macro
+// defined now, for deprecated and restrict_expansion an optional ',' and a string, and ')' (anything else is an error);
+// not printed. The warnings they ask for on later uses aren't given.
+static void pp_pragma_macro_note(Preprocessor* pp, const PPTokens* tokens, uint32_t names_begin, uint32_t begin, uint32_t end, uint32_t location)
+{
+    const bool message = !pp_token_is_name(pp, tokens, names_begin + 1, begin, "final");
+    uint32_t i = begin;
+    const char* expected = 0;
+    if (i >= end || tokens->kinds[i] != C_TOKEN_L_PAREN)
+    {
+        expected = "(";
+    }
+    else if (i + 1 >= end || tokens->kinds[i + 1] != C_TOKEN_RAW_IDENTIFIER)
+    {
+        expected = "identifier";
+        i += 1;
+    }
+    else if (!pp_is_defined(pp, tokens->values[i + 1]))
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, tokens->locations[i + 1], "no macro named '%.*s'", (int)intern_length(pp->table, tokens->values[i + 1]),
+                    intern_bytes(pp->table, tokens->values[i + 1]));
+    }
+    else
+    {
+        i += 2;
+        uint8_t text[512];
+        bool valid = true;
+        if (message && i < end && tokens->kinds[i] == C_TOKEN_COMMA)
+        {
+            i += 1;
+            valid = pp_pragma_strings(pp, tokens, &i, end, text, sizeof(text), "pragma", location) != BUSTER_PP_NONE;
+        }
+        expected = valid && (i >= end || tokens->kinds[i] != C_TOKEN_R_PAREN) ? ")" : 0;
+    }
+    if (expected != 0)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, i < end ? tokens->locations[i] : location, "expected %s", expected);
+    }
+}
+
+// Acts on a pragma of `kind`, with its names [names_begin, operands) of `names` and its operands [begin, end) of
+// `tokens` (expanded, for the kinds clang expands).
+static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* names, uint32_t names_begin, uint32_t operands, const PPTokens* tokens, uint32_t begin,
+                          uint32_t end, uint32_t location, bool from_operator)
+{
+    const uint32_t file = pp_current_file(pp);
+    switch (kind)
+    {
+        case PP_PRAGMA_ONCE:
+        {
+            if (begin < end)
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #pragma once directive");
+            }
+            if (file != BUSTER_PP_NONE && file != pp->main_file)
+            {
+                pp->datas[pp->files[file].data].once = true;
+            }
+            else
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "#pragma once in main file");
+            }
+        } break;
+        case PP_PRAGMA_QUIET:
+        {
+        } break;
+        case PP_PRAGMA_PUSH_MACRO:
+        case PP_PRAGMA_POP_MACRO:
+        {
+            pp_pragma_push_pop(pp, kind, tokens, begin, end, location);
+        } break;
+        case PP_PRAGMA_MESSAGE:
+        case PP_PRAGMA_WARNING:
+        case PP_PRAGMA_ERROR:
+        {
+            pp_pragma_message(pp, kind, names, names_begin, tokens, begin, end, location, from_operator);
+        } break;
+        case PP_PRAGMA_POISON:
+        {
+            // Each identifier until the line's end; another token is an error, which ends the pragma.
+            bool valid = true;
+            for (uint32_t i = begin; valid && i < end; i += 1)
+            {
+                valid = tokens->kinds[i] == C_TOKEN_RAW_IDENTIFIER;
+                if (valid)
+                {
+                    pp_poison(pp, tokens->values[i], tokens->locations[i]);
+                }
+                else
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, tokens->locations[i], "can only poison identifier tokens");
+                }
+            }
+        } break;
+        case PP_PRAGMA_SYSTEM_HEADER:
+        {
+            // The rest of the file is a system header, as are its later inclusions (clang's MarkFileSystemHeader), and the
+            // files it includes; a line note marks where, after the directive, with the presumed line and name kept.
+            const PPContext* context = pp_current_file_context(pp);
+            if (file != BUSTER_PP_NONE && file != pp->main_file && context != 0)
+            {
+                pp->files[file].system = BUSTER_PP_SYSTEM_FILE;
+                const PPFileData* data = &pp->datas[pp->files[file].data];
+                const PPRange* range = &pp->ranges[context->range];
+                const uint32_t at = range->base + (context->position < data->token_count ? data->starts[context->position] : data->length);
+                const uint32_t latest = range->last_line_directive;
+                pp_add_line_note(pp, context->range, at, latest != BUSTER_PP_NONE ? pp->line_directives[latest].delta : 0, 0, 0, BUSTER_PP_SYSTEM_FILE);
+            }
+            else
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "#pragma system_header ignored in main file");
+            }
+        } break;
+        case PP_PRAGMA_DEPENDENCY:
+        {
+            // A header name, which the include search must find (a fatal error otherwise); whether it is newer than this
+            // file is only a warning, left out.
+            uint8_t name[PATH_MAX];
+            uint32_t length = 0;
+            bool angled = false;
+            uint32_t stop = begin;
+            if (stop < end && tokens->kinds[stop] == C_TOKEN_LESS)
+            {
+                while (stop < end && tokens->kinds[stop] != C_TOKEN_GREATER)
+                {
+                    stop += 1;
+                }
+            }
+            stop += stop < end;
+            if (begin < end && pp_header_name(pp, tokens, begin, stop, name, sizeof(name), &length, &angled))
+            {
+                const PPContext* includer = pp_current_file_context(pp);
+                uint32_t found_in;
+                const uint32_t found = pp_find_include(pp, name, length, angled, false, includer != 0 ? includer->file : BUSTER_PP_NONE, BUSTER_PP_NONE, &found_in);
+                if (found == BUSTER_PP_NONE)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_FATAL, location, "'%.*s' file not found", (int)length, (const char*)name);
+                }
+            }
+            else
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "expected \"FILENAME\" or <FILENAME>");
+            }
+        } break;
+        case PP_PRAGMA_DIAGNOSTIC:
+        {
+            pp_pragma_diagnostic(pp, tokens, names_begin, begin, end, location, from_operator);
+        } break;
+        case PP_PRAGMA_OMP:
+        {
+            pp_emit_pragma_start(pp, C_NAME_PRAGMA, location, from_operator);
+            pp_emit_pragma_token(pp, pp_stack_token(names, names_begin), true);
+            for (uint32_t i = begin; i < end; i += 1)
+            {
+                pp_emit_pragma_token(pp, pp_stack_token(tokens, i), i == begin);
+            }
+            pp_emit(pp, (PPToken){ .kind = BUSTER_PP_KIND_PRAGMA_END });
+        } break;
+        case PP_PRAGMA_IDENT:
+        {
+            pp_ident(pp, tokens, begin, end, location);
+        } break;
+        case PP_PRAGMA_REGION:
+        {
+            pp_pragma_region(pp, tokens, names_begin, begin, end, location, from_operator);
+        } break;
+        case PP_PRAGMA_MACRO_NOTE:
+        {
+            pp_pragma_macro_note(pp, tokens, names_begin, begin, end, location);
+        } break;
+        case PP_PRAGMA_OTHER:
+        {
+            pp_emit_pragma(pp, names, names_begin, end, C_NAME_PRAGMA, location, from_operator);
+        } break;
+    }
+}
+
+// A pragma's tokens [begin, end) of pp->arguments (after `pragma`), or an #ident's (`ident`): the ones the preprocessor
+// acts on (pp_pragma_kind), and any other goes to the output as clang -E prints it. `from_operator` for _Pragma. The
+// kinds clang reads expanded (message, GCC warning and error, push_macro, pop_macro, omp and #ident) whose operands name
+// a macro are expanded first, through a capture that pp_finish_pragma takes: pp->arguments must then stay as they are
+// until it does, and it gives them back to `restore` (returning true). Otherwise the pragma runs now, and the caller
+// gives them back.
+static bool pp_pragma(Preprocessor* pp, uint32_t begin, uint32_t end, uint32_t location, bool from_operator, bool ident, uint32_t restore)
+{
+    const PPTokens* tokens = &pp->arguments;
+    uint32_t operands = begin;
+    const PPPragmaKind kind = ident ? PP_PRAGMA_IDENT : pp_pragma_kind(pp, tokens, begin, end, &operands);
+    if (pp->poison_count != 0)
+    {
+        // The line's poisoned names (pp_is_poisoned), but poison's own, which clang reads raw, and a dependency's
+        // header name.
+        pp_check_poison_range(pp, 0, 0, tokens, begin, kind == PP_PRAGMA_POISON ? operands : end, kind == PP_PRAGMA_DEPENDENCY ? operands : BUSTER_PP_NONE, false);
+    }
+    const bool expanded = kind == PP_PRAGMA_MESSAGE || kind == PP_PRAGMA_WARNING || kind == PP_PRAGMA_ERROR || kind == PP_PRAGMA_PUSH_MACRO || kind == PP_PRAGMA_POP_MACRO ||
+                          kind == PP_PRAGMA_OMP || kind == PP_PRAGMA_IDENT;
+    bool started = false;
+    if (expanded && pp_needs_expansion(pp, tokens, operands, end))
+    {
+        const PPCapture capture = {
+            .kind = BUSTER_PP_CAPTURE_PRAGMA,
+            .arguments_begin = restore,
+            .directive = begin,
+            .context = operands,
+            .directive_kind = (uint8_t)kind,
+            .flags = from_operator,
+            .location = location,
+        };
+        started = pp_start_capture(pp, capture, operands, end, location);
+    }
+    if (!started)
+    {
+        pp_pragma_run(pp, kind, tokens, begin, operands, tokens, operands, end, location, from_operator);
+    }
+    return started;
+}
+
+// The barrier over a pragma's operands ended (pp_pragma): the capture is the operands expanded. They are copied out first,
+// since what the pragma emits may go to a capture below this one.
+static void pp_finish_pragma(Preprocessor* pp)
+{
+    const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
+    pp->capture_count -= 1;
+    const uint32_t count = pp->captures.count - capture.begin;
+    const uint32_t names = capture.context - capture.directive;
+    Scratch scratch = scratch_begin(0);
+    PPTokens copy = { 0 };
+    copy.kinds = arena_push(scratch.arena, (uint64_t)count + names + 1, 1);
+    copy.flags = arena_push(scratch.arena, (uint64_t)count + names + 1, 1);
+    copy.values = arena_push_array(scratch.arena, (uint64_t)count + names + 1, sizeof(uint32_t), 4);
+    copy.locations = arena_push_array(scratch.arena, (uint64_t)count + names + 1, sizeof(uint32_t), 4);
+    if (copy.kinds != 0 && copy.flags != 0 && copy.values != 0 && copy.locations != 0)
+    {
+        // The names first, then the expanded operands.
+        for (uint32_t i = 0; i < names; i += 1)
+        {
+            const PPToken token = pp_stack_token(&pp->arguments, capture.directive + i);
+            pp_tokens_set(&copy, i, token.kind, token.flags, token.value, token.location);
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const PPToken token = pp_stack_token(&pp->captures, capture.begin + i);
+            pp_tokens_set(&copy, names + i, token.kind, token.flags, token.value, token.location);
+        }
+        copy.count = names + count;
+        pp->captures.count = capture.begin;
+        pp->arguments.count = capture.arguments_begin;
+        pp_pragma_run(pp, (PPPragmaKind)capture.directive_kind, &copy, 0, names, &copy, names, names + count, capture.location, capture.flags != 0);
+    }
+    else
+    {
+        pp->captures.count = capture.begin;
+        pp->arguments.count = capture.arguments_begin;
+        pp_diagnose(pp, PP_SEVERITY_FATAL, capture.location, "out of memory");
+    }
+    scratch_end(scratch);
 }
 
 // Runs directive `context->next_directive` of a file context; the context goes on after its line unless a conditional
@@ -5278,6 +7040,14 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
     context->position = end;
     context->next_directive = d + 1;
     pp->statistics.directives += pp->options.timing;
+    if (pp->poison_count != 0 && kind != PP_DIRECTIVE_PRAGMA && kind != PP_DIRECTIVE_IDENT)
+    {
+        // The line's poisoned names (pp_is_poisoned): #error's and #warning's text isn't lexed, a pragma's are
+        // pp_pragma's, and an #include's header name is one token.
+        const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
+        const bool include = kind == PP_DIRECTIVE_INCLUDE || kind == PP_DIRECTIVE_INCLUDE_NEXT || kind == PP_DIRECTIVE_IMPORT || kind == PP_DIRECTIVE_EMBED;
+        pp_check_poison_range(pp, data, base, 0, hash + 1, text ? hash + 2 : end, include ? hash + 2 : BUSTER_PP_NONE, true);
+    }
     switch (kind)
     {
         case PP_DIRECTIVE_NULL:
@@ -5295,6 +7065,10 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
                 }
                 else
                 {
+                    if (hash + 3 < end)
+                    {
+                        pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #undef directive");
+                    }
                     pp_set_macro(pp, name, 0);
                 }
             }
@@ -5334,19 +7108,10 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
         case PP_DIRECTIVE_PRAGMA:
         case PP_DIRECTIVE_IDENT:
         {
+            // The line stays on the stack while a capture expands it (pp_pragma).
             const uint32_t line = pp->arguments.count;
-            if (pp_copy_line(pp, context, hash + 2, end))
-            {
-                if (kind == PP_DIRECTIVE_PRAGMA)
-                {
-                    pp_pragma(pp, &pp->arguments, line, pp->arguments.count, location, false);
-                }
-                else
-                {
-                    pp_emit_pragma(pp, &pp->arguments, line, pp->arguments.count, data->values[hash + 1], location, false);
-                }
-            }
-            pp->arguments.count = line;
+            const bool started = pp_copy_line(pp, context, hash + 2, end) && pp_pragma(pp, line, pp->arguments.count, location, false, kind == PP_DIRECTIVE_IDENT, line);
+            pp->arguments.count = started ? pp->arguments.count : line;
             break;
         }
         case PP_DIRECTIVE_EMBED:
@@ -5751,9 +7516,14 @@ static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, 
                 r.bits = b.bits >= 64 ? 0 : a.bits << b.bits;
                 break;
             case PP_OPERATOR_SHIFT_RIGHT:
+            {
+                // clang shifts right by the amount's low 32 bits, and by 63 when they are 64 or more
+                // (EvaluateDirectiveSubExpr), where a left shift of 64 or more is 0.
+                const uint32_t low = (uint32_t)b.bits;
+                const uint32_t amount = low >= 64 ? 63 : low;
                 r.is_unsigned = a.is_unsigned;
-                r.bits = b.bits >= 64 ? (a.is_unsigned || sa >= 0 ? 0 : ~0ull) : a.is_unsigned ? a.bits >> b.bits : (uint64_t)(sa >> b.bits);
-                break;
+                r.bits = a.is_unsigned ? a.bits >> amount : (uint64_t)(sa >> amount);
+            } break;
             case PP_OPERATOR_LESS: r.bits = is_unsigned ? a.bits < b.bits : sa < sb; r.is_unsigned = false; break;
             case PP_OPERATOR_LESS_EQUAL: r.bits = is_unsigned ? a.bits <= b.bits : sa <= sb; r.is_unsigned = false; break;
             case PP_OPERATOR_GREATER: r.bits = is_unsigned ? a.bits > b.bits : sa > sb; r.is_unsigned = false; break;
@@ -5790,7 +7560,7 @@ static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, 
 
 // Evaluates a #if line's expanded tokens (C 6.10.1): a precedence parser with explicit operator and value stacks, where
 // an identifier left after expansion is 0 (true is 1 from C23 on). Returns false for zero or an error.
-static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location)
+static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location, PPValue* value)
 {
     PPValue values[BUSTER_PP_EXPRESSION_DEPTH];
     uint8_t operators[BUSTER_PP_EXPRESSION_DEPTH];
@@ -5903,6 +7673,15 @@ static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin
                     operator_count -= 1;
                     valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
                 }
+                // clang parses a #if line from ?:'s precedence on, so a comma is only an operator inside parentheses or
+                // between a '?' and its ':' (`#if 1, 2` is an error, `#if (1, 2)` isn't). Comma binds loosest, so the
+                // reductions above stop only at such a '(' or '?'.
+                if (valid && operator == PP_OPERATOR_COMMA &&
+                    (operator_count == 0 || (operators[operator_count - 1] != PP_OPERATOR_PAREN && operators[operator_count - 1] != PP_OPERATOR_QUESTION)))
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, token_location, "expected end of line in preprocessor expression");
+                    valid = false;
+                }
                 if (valid && operator == PP_OPERATOR_COLON)
                 {
                     // The ':' completes the innermost '?': it becomes the ternary operator.
@@ -5958,7 +7737,149 @@ static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "division by zero in preprocessor expression");
         valid = false;
     }
-    return valid && values[0].bits != 0;
+    *value = valid ? values[0] : (PPValue){ 0 };
+    return valid;
+}
+
+// A #if line's value: whether it is valid and nonzero.
+static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location)
+{
+    PPValue value;
+    return pp_evaluate_value(pp, tokens, begin, end, location, &value) && value.bits != 0;
+}
+
+// __has_embed's answer (C23 6.10.1), as clang gives it, from its operand's tokens [first, last): a header name, then
+// embed parameters, each a name (or `scope::name`) and its parenthesized tokens. 0 (not found) when a parameter is one
+// clang doesn't know or no file has the name; 2 (empty) when the file has no bytes left after clang::offset and limit,
+// whose values are #if expressions; else 1. The standard parameters (limit, prefix, suffix and if_empty, also spelled
+// with "__" around them) and clang::offset need their parentheses, and can't be given twice; a value below 0 is an
+// error. A quoted name is looked for in the current file's directory (clang's embed search has no other without
+// --embed-dir), an angled one nowhere.
+static uint64_t pp_has_embed(Preprocessor* pp, const PPTokens* tokens, uint32_t first, uint32_t last, uint32_t location)
+{
+    static const char* const standard[] = { "limit", "prefix", "suffix", "if_empty", "offset" };
+    uint8_t name[PATH_MAX];
+    uint32_t length = 0;
+    bool angled = false;
+    uint32_t i = first;
+    if (i < last && tokens->kinds[i] == C_TOKEN_STRING_LITERAL)
+    {
+        i += 1;
+    }
+    else if (i < last && tokens->kinds[i] == C_TOKEN_LESS)
+    {
+        while (i < last && tokens->kinds[i] != C_TOKEN_GREATER)
+        {
+            i += 1;
+        }
+        i += i < last;
+    }
+    bool valid = i > first && pp_header_name(pp, tokens, first, i, name, sizeof(name) - 1, &length, &angled);
+    if (!valid)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "expected \"FILENAME\" or <FILENAME>");
+    }
+    uint32_t seen = 0;
+    uint32_t unknown = 0;
+    uint64_t limit = UINT64_MAX;
+    uint64_t offset = 0;
+    while (valid && i < last)
+    {
+        const bool scoped = i + 2 < last && tokens->kinds[i + 1] == C_TOKEN_COLONCOLON && tokens->kinds[i + 2] == C_TOKEN_RAW_IDENTIFIER;
+        valid = tokens->kinds[i] == C_TOKEN_RAW_IDENTIFIER;
+        const uint32_t named = scoped ? i + 2 : i;
+        uint32_t parameter = BUSTER_ARRAY_LENGTH(standard);
+        for (uint32_t k = 0; valid && k < BUSTER_ARRAY_LENGTH(standard); k += 1)
+        {
+            // offset is clang's: clang::offset.
+            const bool scope_right = k == 4 ? scoped && pp_token_is_name(pp, tokens, i, last, "clang") : !scoped;
+            const uint32_t n = (uint32_t)strlen(standard[k]);
+            const uint8_t* bytes = intern_bytes(pp->table, tokens->values[named]);
+            const uint32_t spelled = intern_length(pp->table, tokens->values[named]);
+            const bool plain = spelled == n && memcmp(bytes, standard[k], n) == 0;
+            const bool underscored = spelled == n + 4 && memcmp(bytes, "__", 2) == 0 && memcmp(bytes + 2, standard[k], n) == 0 && memcmp(bytes + 2 + n, "__", 2) == 0;
+            parameter = scope_right && (plain || underscored) ? k : parameter;
+        }
+        i = named + 1;
+        const bool parenthesized = valid && i < last && tokens->kinds[i] == C_TOKEN_L_PAREN;
+        uint32_t close = i;
+        uint32_t depth = 0;
+        while (parenthesized && close < last && (close == i || depth != 0))
+        {
+            depth += tokens->kinds[close] == C_TOKEN_L_PAREN;
+            depth -= tokens->kinds[close] == C_TOKEN_R_PAREN;
+            close += 1;
+        }
+        if (!valid)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, tokens->locations[i < last ? i : last - 1], "expected identifier");
+        }
+        else if (parenthesized && depth != 0)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, location, "expected ')'");
+            valid = false;
+        }
+        else if (parameter == BUSTER_ARRAY_LENGTH(standard))
+        {
+            unknown += 1;
+            i = parenthesized ? close : i;
+        }
+        else if (!parenthesized)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, i < last ? tokens->locations[i] : location, "expected '('");
+            valid = false;
+        }
+        else if ((seen >> parameter) & 1)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, tokens->locations[named], "cannot specify parameter '%s' twice in the same '#embed' directive", standard[parameter]);
+            valid = false;
+        }
+        else
+        {
+            seen |= 1u << parameter;
+            if (parameter == 0 || parameter == 4)
+            {
+                PPValue value = { 0 };
+                valid = pp_evaluate_value(pp, tokens, i + 1, close - 1, tokens->locations[i], &value);
+                if (valid && !value.is_unsigned && (int64_t)value.bits < 0)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, tokens->locations[i + 1], "invalid value '%lld'; must be positive", (long long)(int64_t)value.bits);
+                    valid = false;
+                }
+                limit = parameter == 0 ? value.bits : limit;
+                offset = parameter == 4 ? value.bits : offset;
+            }
+            i = close;
+        }
+    }
+    uint64_t result = 0;
+    if (valid && unknown == 0 && !angled)
+    {
+        // Relative to the current file's directory ("." for a path without one), or absolute.
+        const PPContext* context = pp_current_file_context(pp);
+        const PPFile* from = context != 0 ? &pp->files[context->file] : 0;
+        char path[PATH_MAX];
+        const uint32_t directory = name[0] != '/' && from != 0 && from->directory_length != BUSTER_PP_NONE ? from->directory_length : 0;
+        int written = 0;
+        if (name[0] == '/')
+        {
+            written = snprintf(path, sizeof(path), "%.*s", (int)length, (const char*)name);
+        }
+        else
+        {
+            written = snprintf(path, sizeof(path), "%.*s/%.*s", (int)(directory != 0 ? directory : 1), directory != 0 ? from->path : ".", (int)length, (const char*)name);
+        }
+        struct stat stats;
+        // Any file but a directory, as clang finds one (/dev/null is an empty one).
+        if (written > 0 && (uint32_t)written < sizeof(path) && stat(path, &stats) == 0 && !S_ISDIR(stats.st_mode))
+        {
+            const uint64_t size = (uint64_t)stats.st_size;
+            uint64_t remaining = size > offset ? size - offset : 0;
+            remaining = remaining < limit ? remaining : limit;
+            result = remaining == 0 ? 2 : 1;
+        }
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -6076,11 +7997,309 @@ static const PPFeature pp_features_c_attribute[] = {
     { "gnu::weak", 1 }, { "gnu::weakref", 1 }, { "gnu::zero_call_used_regs", 1 }, { "maybe_unused", 202106 }, { "nodiscard", 202003 },
     { "noreturn", 202202 },
 };
+// __has_warning's: every -W option of clang 23.1.3's `clang --print-diagnostic-options` that its __has_warning answers
+// 1 for (the other 17 are remark groups), which #pragma clang diagnostic takes too.
 static const PPFeature pp_features_warning[] = {
-    { "-Warray-parameter", 1 }, { "-Wbitwise-instead-of-logical", 1 }, { "-Wc++98-compat-extra-semi", 1 }, { "-Wcharacter-conversion", 1 },
-    { "-Wdeprecated-pragma", 1 }, { "-Wenum-compare-switch", 1 }, { "-Wextra-semi-stmt", 1 }, { "-Wformat-insufficient-args", 1 },
-    { "-Wimplicit-const-int-float-conversion", 1 }, { "-Wmisleading-indentation", 1 }, { "-Woverriding-option", 1 }, { "-Wreserved-identifier", 1 },
-    { "-Wreturn-mismatch", 1 }, { "-Wunnecessary-virtual-specifier", 1 }, { "-Wunused-but-set-variable", 1 }, { "-Wuser-defined-warnings", 1 },
+    { "-W#pragma-messages", 1 }, { "-W#warnings", 1 }, { "-WCFString-literal", 1 }, { "-WCL4", 1 }, { "-WIndependentClass-attribute", 1 },
+    { "-WNSObject-attribute", 1 }, { "-WTU-local-entity-exposure", 1 }, { "-Waarch64-sme-attributes", 1 }, { "-Wabi", 1 }, { "-Wabsolute-value", 1 },
+    { "-Wabstract-final-class", 1 }, { "-Wabstract-vbase-init", 1 }, { "-Waddress", 1 }, { "-Waddress-of-packed-member", 1 }, { "-Waddress-of-temporary", 1 },
+    { "-Waggregate-return", 1 }, { "-Waix-compat", 1 }, { "-Walias-template-in-declaration-name", 1 }, { "-Walign-mismatch", 1 }, { "-Wall", 1 },
+    { "-Walloc-size", 1 }, { "-Walloca", 1 }, { "-Walloca-with-align-alignof", 1 }, { "-Walways-inline-coroutine", 1 }, { "-Wambiguous-delete", 1 },
+    { "-Wambiguous-ellipsis", 1 }, { "-Wambiguous-macro", 1 }, { "-Wambiguous-member-template", 1 }, { "-Wambiguous-reversed-operator", 1 },
+    { "-Wamdgpu-unguarded-builtin-usage", 1 }, { "-Wamdgpu-wait-event-mask", 1 }, { "-Wanalyzer-incompatible-plugin", 1 },
+    { "-Wandroid-unversioned-fallback", 1 }, { "-Wanon-enum-enum-conversion", 1 }, { "-Wanonymous-pack-parens", 1 }, { "-Wapinotes", 1 }, { "-Warc", 1 },
+    { "-Warc-bridge-casts-disallowed-in-nonarc", 1 }, { "-Warc-maybe-repeated-use-of-weak", 1 }, { "-Warc-non-pod-memaccess", 1 },
+    { "-Warc-performSelector-leaks", 1 }, { "-Warc-repeated-use-of-weak", 1 }, { "-Warc-retain-cycles", 1 }, { "-Warc-unsafe-retained-assign", 1 },
+    { "-Wargument-outside-range", 1 }, { "-Wargument-undefined-behaviour", 1 }, { "-Warm-interrupt-save-fp-no-vfp-unit", 1 },
+    { "-Warm-interrupt-vfp-clobber", 1 }, { "-Warray-bounds", 1 }, { "-Warray-bounds-pointer-arithmetic", 1 }, { "-Warray-compare", 1 },
+    { "-Warray-compare-cxx26", 1 }, { "-Warray-parameter", 1 }, { "-Wasm", 1 }, { "-Wasm-operand-widths", 1 }, { "-Wassign-enum", 1 }, { "-Wassume", 1 },
+    { "-Wat-protocol", 1 }, { "-Watimport-in-framework-header", 1 }, { "-Watomic-access", 1 }, { "-Watomic-alignment", 1 },
+    { "-Watomic-implicit-seq-cst", 1 }, { "-Watomic-memory-ordering", 1 }, { "-Watomic-properties", 1 },
+    { "-Watomic-property-with-user-defined-accessor", 1 }, { "-Wattribute-alias", 1 }, { "-Wattribute-packed-for-bitfield", 1 },
+    { "-Wattribute-preprocessor-tokens", 1 }, { "-Wattribute-statement", 1 }, { "-Wattribute-warning", 1 }, { "-Wattributes", 1 },
+    { "-Wauto-decl-extensions", 1 }, { "-Wauto-disable-vptr-sanitizer", 1 }, { "-Wauto-import", 1 }, { "-Wauto-storage-class", 1 }, { "-Wauto-var-id", 1 },
+    { "-Wavailability", 1 }, { "-Wavr-rtlib-linking-quirks", 1 }, { "-Wbackend-plugin", 1 }, { "-Wbackslash-newline-escape", 1 },
+    { "-Wbad-function-cast", 1 }, { "-Wbinary-literal", 1 }, { "-Wbind-to-temporary-copy", 1 }, { "-Wbit-int-extension", 1 },
+    { "-Wbitfield-constant-conversion", 1 }, { "-Wbitfield-enum-conversion", 1 }, { "-Wbitfield-width", 1 }, { "-Wbitwise-conditional-parentheses", 1 },
+    { "-Wbitwise-instead-of-logical", 1 }, { "-Wbitwise-op-parentheses", 1 }, { "-Wblock-capture-autoreleasing", 1 }, { "-Wbool-conversion", 1 },
+    { "-Wbool-conversions", 1 }, { "-Wbool-operation", 1 }, { "-Wbounds-safety-counted-by-elt-type-unknown-size", 1 }, { "-Wbraced-scalar-init", 1 },
+    { "-Wbranch-protection", 1 }, { "-Wbridge-cast", 1 }, { "-Wbuiltin-assume-aligned-alignment", 1 }, { "-Wbuiltin-macro-redefined", 1 },
+    { "-Wbuiltin-memcpy-chk-size", 1 }, { "-Wbuiltin-requires-header", 1 }, { "-Wc++-compat", 1 }, { "-Wc++-hidden-decl", 1 }, { "-Wc++-keyword", 1 },
+    { "-Wc++-unterminated-string-initialization", 1 }, { "-Wc++0x-compat", 1 }, { "-Wc++0x-extensions", 1 }, { "-Wc++0x-narrowing", 1 },
+    { "-Wc++11-compat", 1 }, { "-Wc++11-compat-deprecated-writable-strings", 1 }, { "-Wc++11-compat-pedantic", 1 },
+    { "-Wc++11-compat-reserved-user-defined-literal", 1 }, { "-Wc++11-extensions", 1 }, { "-Wc++11-extra-semi", 1 }, { "-Wc++11-inline-namespace", 1 },
+    { "-Wc++11-long-long", 1 }, { "-Wc++11-narrowing", 1 }, { "-Wc++11-narrowing-const-reference", 1 }, { "-Wc++14-attribute-extensions", 1 },
+    { "-Wc++14-binary-literal", 1 }, { "-Wc++14-compat", 1 }, { "-Wc++14-compat-pedantic", 1 }, { "-Wc++14-extensions", 1 },
+    { "-Wc++17-attribute-extensions", 1 }, { "-Wc++17-compat", 1 }, { "-Wc++17-compat-mangling", 1 }, { "-Wc++17-compat-pedantic", 1 },
+    { "-Wc++17-extensions", 1 }, { "-Wc++1y-extensions", 1 }, { "-Wc++1z-compat", 1 }, { "-Wc++1z-compat-mangling", 1 }, { "-Wc++1z-extensions", 1 },
+    { "-Wc++20-attribute-extensions", 1 }, { "-Wc++20-compat", 1 }, { "-Wc++20-compat-pedantic", 1 }, { "-Wc++20-designator", 1 },
+    { "-Wc++20-extensions", 1 }, { "-Wc++23-attribute-extensions", 1 }, { "-Wc++23-compat", 1 }, { "-Wc++23-extensions", 1 },
+    { "-Wc++23-lambda-attributes", 1 }, { "-Wc++26-extensions", 1 }, { "-Wc++2a-compat", 1 }, { "-Wc++2a-compat-pedantic", 1 }, { "-Wc++2a-extensions", 1 },
+    { "-Wc++2b-extensions", 1 }, { "-Wc++2c-compat", 1 }, { "-Wc++2c-extensions", 1 }, { "-Wc++2d-extensions", 1 }, { "-Wc++98-c++11-c++14-c++17-compat", 1 },
+    { "-Wc++98-c++11-c++14-c++17-compat-pedantic", 1 }, { "-Wc++98-c++11-c++14-compat", 1 }, { "-Wc++98-c++11-c++14-compat-pedantic", 1 },
+    { "-Wc++98-c++11-compat", 1 }, { "-Wc++98-c++11-compat-binary-literal", 1 }, { "-Wc++98-c++11-compat-pedantic", 1 }, { "-Wc++98-compat", 1 },
+    { "-Wc++98-compat-bind-to-temporary-copy", 1 }, { "-Wc++98-compat-extra-semi", 1 }, { "-Wc++98-compat-local-type-template-args", 1 },
+    { "-Wc++98-compat-pedantic", 1 }, { "-Wc++98-compat-unnamed-type-template-args", 1 }, { "-Wc-attribute-extension", 1 }, { "-Wc11-extensions", 1 },
+    { "-Wc23-compat", 1 }, { "-Wc23-extensions", 1 }, { "-Wc2x-compat", 1 }, { "-Wc2x-extensions", 1 }, { "-Wc2y-extensions", 1 }, { "-Wc99-compat", 1 },
+    { "-Wc99-designator", 1 }, { "-Wc99-extensions", 1 }, { "-Wcall-to-pure-virtual-from-ctor-dtor", 1 }, { "-Wcalled-once-parameter", 1 },
+    { "-Wcast-align", 1 }, { "-Wcast-calling-convention", 1 }, { "-Wcast-function-type", 1 }, { "-Wcast-function-type-mismatch", 1 },
+    { "-Wcast-function-type-strict", 1 }, { "-Wcast-of-sel-type", 1 }, { "-Wcast-qual", 1 }, { "-Wcast-qual-unrelated", 1 }, { "-Wcfi-unchecked-callee", 1 },
+    { "-Wchar-align", 1 }, { "-Wchar-subscripts", 1 }, { "-Wcharacter-conversion", 1 }, { "-Wclang-cl-pch", 1 }, { "-Wclass-conversion", 1 },
+    { "-Wclass-varargs", 1 }, { "-Wcmse-union-leak", 1 }, { "-Wcomma", 1 }, { "-Wcomment", 1 }, { "-Wcomments", 1 },
+    { "-Wcompare-distinct-pointer-types", 1 }, { "-Wcompletion-handler", 1 }, { "-Wcomplex-component-init", 1 }, { "-Wcompound-token-split", 1 },
+    { "-Wcompound-token-split-by-macro", 1 }, { "-Wcompound-token-split-by-space", 1 }, { "-Wconditional-type-mismatch", 1 },
+    { "-Wconditional-uninitialized", 1 }, { "-Wconfig-macros", 1 }, { "-Wconstant-conversion", 1 }, { "-Wconstant-evaluated", 1 },
+    { "-Wconstant-logical-operand", 1 }, { "-Wconstexpr-not-const", 1 }, { "-Wconsumed", 1 }, { "-Wconversion", 1 }, { "-Wconversion-null", 1 },
+    { "-Wcoro-non-aligned-allocation-function", 1 }, { "-Wcoro-type-aware-allocation-function", 1 }, { "-Wcoroutine", 1 },
+    { "-Wcoroutine-missing-unhandled-exception", 1 }, { "-Wcoroutines-unsupported-target", 1 }, { "-Wcovered-switch-default", 1 }, { "-Wcpp", 1 },
+    { "-Wcstring-format-directive", 1 }, { "-Wctad-maybe-unsupported", 1 }, { "-Wctor-dtor-privacy", 1 }, { "-Wctu", 1 }, { "-Wcuda-compat", 1 },
+    { "-Wcustom-atomic-properties", 1 }, { "-Wcxx-attribute-extension", 1 }, { "-Wdangling", 1 }, { "-Wdangling-assignment", 1 },
+    { "-Wdangling-assignment-gsl", 1 }, { "-Wdangling-capture", 1 }, { "-Wdangling-else", 1 }, { "-Wdangling-field", 1 }, { "-Wdangling-gsl", 1 },
+    { "-Wdangling-initializer-list", 1 }, { "-Wdarwin-sdk-settings", 1 }, { "-Wdate-time", 1 }, { "-Wdealloc-in-category", 1 },
+    { "-Wdebug-compression-unavailable", 1 }, { "-Wdeclaration-after-statement", 1 }, { "-Wdecls-in-multiple-modules", 1 }, { "-Wdefault-const-init", 1 },
+    { "-Wdefault-const-init-field", 1 }, { "-Wdefault-const-init-field-unsafe", 1 }, { "-Wdefault-const-init-unsafe", 1 }, { "-Wdefault-const-init-var", 1 },
+    { "-Wdefault-const-init-var-unsafe", 1 }, { "-Wdefaulted-function-deleted", 1 }, { "-Wdelayed-template-parsing-in-cxx20", 1 },
+    { "-Wdelegating-ctor-cycles", 1 }, { "-Wdelete-abstract-non-virtual-dtor", 1 }, { "-Wdelete-incomplete", 1 },
+    { "-Wdelete-non-abstract-non-virtual-dtor", 1 }, { "-Wdelete-non-virtual-dtor", 1 }, { "-Wdelimited-escape-sequence-extension", 1 },
+    { "-Wdeprecate-lax-vec-conv-all", 1 }, { "-Wdeprecated", 1 }, { "-Wdeprecated-altivec-src-compat", 1 }, { "-Wdeprecated-anon-enum-enum-conversion", 1 },
+    { "-Wdeprecated-array-compare", 1 }, { "-Wdeprecated-attributes", 1 }, { "-Wdeprecated-builtins", 1 }, { "-Wdeprecated-comma-subscript", 1 },
+    { "-Wdeprecated-copy", 1 }, { "-Wdeprecated-copy-dtor", 1 }, { "-Wdeprecated-copy-with-dtor", 1 }, { "-Wdeprecated-copy-with-user-provided-copy", 1 },
+    { "-Wdeprecated-copy-with-user-provided-dtor", 1 }, { "-Wdeprecated-coroutine", 1 }, { "-Wdeprecated-declarations", 1 },
+    { "-Wdeprecated-declarations-switch-case", 1 }, { "-Wdeprecated-dynamic-exception-spec", 1 }, { "-Wdeprecated-enum-compare", 1 },
+    { "-Wdeprecated-enum-compare-conditional", 1 }, { "-Wdeprecated-enum-enum-conversion", 1 }, { "-Wdeprecated-enum-float-conversion", 1 },
+    { "-Wdeprecated-implementations", 1 }, { "-Wdeprecated-increment-bool", 1 }, { "-Wdeprecated-literal-operator", 1 },
+    { "-Wdeprecated-missing-comma-variadic-parameter", 1 }, { "-Wdeprecated-module-dot-map", 1 }, { "-Wdeprecated-non-prototype", 1 },
+    { "-Wdeprecated-objc-isa-usage", 1 }, { "-Wdeprecated-objc-pointer-introspection", 1 }, { "-Wdeprecated-objc-pointer-introspection-performSelector", 1 },
+    { "-Wdeprecated-octal-literals", 1 }, { "-Wdeprecated-ofast", 1 }, { "-Wdeprecated-pragma", 1 }, { "-Wdeprecated-redundant-constexpr-static-def", 1 },
+    { "-Wdeprecated-register", 1 }, { "-Wdeprecated-this-capture", 1 }, { "-Wdeprecated-type", 1 }, { "-Wdeprecated-volatile", 1 },
+    { "-Wdeprecated-writable-strings", 1 }, { "-Wdirect-ivar-access", 1 }, { "-Wdisabled-macro-expansion", 1 }, { "-Wdisabled-optimization", 1 },
+    { "-Wdiscard-qual", 1 }, { "-Wdistributed-object-modifiers", 1 }, { "-Wdiv-by-zero", 1 }, { "-Wdivision-by-zero", 1 },
+    { "-Wdll-attribute-on-redeclaration", 1 }, { "-Wdllexport-explicit-instantiation", 1 }, { "-Wdllexport-explicit-instantiation-decl", 1 },
+    { "-Wdllimport-static-field-def", 1 }, { "-Wdocumentation", 1 }, { "-Wdocumentation-deprecated-sync", 1 }, { "-Wdocumentation-html", 1 },
+    { "-Wdocumentation-pedantic", 1 }, { "-Wdocumentation-unknown-command", 1 }, { "-Wdollar-in-identifier-extension", 1 }, { "-Wdouble-promotion", 1 },
+    { "-Wdtor-name", 1 }, { "-Wdtor-typedef", 1 }, { "-Wduplicate-decl-specifier", 1 }, { "-Wduplicate-enum", 1 }, { "-Wduplicate-header-ownership", 1 },
+    { "-Wduplicate-method-arg", 1 }, { "-Wduplicate-method-match", 1 }, { "-Wduplicate-protocol", 1 }, { "-Wdxil-validation", 1 },
+    { "-Wdynamic-class-memaccess", 1 }, { "-Wdynamic-exception-spec", 1 }, { "-Weager-load-cxx-named-modules", 1 }, { "-Weffc++", 1 },
+    { "-Welaborated-enum-base", 1 }, { "-Welaborated-enum-class", 1 }, { "-Wembedded-directive", 1 }, { "-Wempty-body", 1 }, { "-Wempty-decomposition", 1 },
+    { "-Wempty-init-stmt", 1 }, { "-Wempty-translation-unit", 1 }, { "-Wencode-type", 1 }, { "-Wendif-labels", 1 }, { "-Wenum-compare", 1 },
+    { "-Wenum-compare-conditional", 1 }, { "-Wenum-compare-switch", 1 }, { "-Wenum-compare-typo", 1 }, { "-Wenum-conversion", 1 },
+    { "-Wenum-enum-conversion", 1 }, { "-Wenum-float-conversion", 1 }, { "-Wenum-too-large", 1 }, { "-Wexceptions", 1 }, { "-Wexcess-initializers", 1 },
+    { "-Wexcessive-regsave", 1 }, { "-Wexit-time-destructors", 1 }, { "-Wexpansion-stmt-missing-braces", 1 }, { "-Wexpansion-to-defined", 1 },
+    { "-Wexperimental-header-units", 1 }, { "-Wexperimental-option", 1 }, { "-Wexplicit-initialize-call", 1 }, { "-Wexplicit-ownership-type", 1 },
+    { "-Wexplicit-specialization-storage-class", 1 }, { "-Wexport-unnamed", 1 }, { "-Wext-cxx-type-aware-allocators", 1 }, { "-Wextern-c-compat", 1 },
+    { "-Wextern-initializer", 1 }, { "-Wextra", 1 }, { "-Wextra-qualification", 1 }, { "-Wextra-semi", 1 }, { "-Wextra-semi-stmt", 1 },
+    { "-Wextra-tokens", 1 }, { "-Wextractapi-misuse", 1 }, { "-Wextraneous-template-head", 1 }, { "-Wfinal-dtor-non-final-class", 1 }, { "-Wfinal-macro", 1 },
+    { "-Wfixed-point-overflow", 1 }, { "-Wflag-enum", 1 }, { "-Wflexible-array-extensions", 1 }, { "-Wfloat-conversion", 1 }, { "-Wfloat-equal", 1 },
+    { "-Wfloat-overflow-conversion", 1 }, { "-Wfloat-zero-conversion", 1 }, { "-Wfor-loop-analysis", 1 }, { "-Wformat", 1 }, { "-Wformat-extra-args", 1 },
+    { "-Wformat-insufficient-args", 1 }, { "-Wformat-invalid-specifier", 1 }, { "-Wformat-non-iso", 1 }, { "-Wformat-nonliteral", 1 },
+    { "-Wformat-overflow", 1 }, { "-Wformat-overflow-non-kprintf", 1 }, { "-Wformat-pedantic", 1 }, { "-Wformat-security", 1 }, { "-Wformat-signedness", 1 },
+    { "-Wformat-truncation", 1 }, { "-Wformat-truncation-non-kprintf", 1 }, { "-Wformat-type-confusion", 1 }, { "-Wformat-y2k", 1 },
+    { "-Wformat-zero-length", 1 }, { "-Wformat=2", 1 }, { "-Wfortify-source", 1 }, { "-Wfour-char-constants", 1 }, { "-Wframe-address", 1 },
+    { "-Wframe-larger-than", 1 }, { "-Wframe-larger-than=", 1 }, { "-Wframework-include-private-from-public", 1 }, { "-Wfree-nonheap-object", 1 },
+    { "-Wfriend-enum", 1 }, { "-Wfunction-def-in-objc-container", 1 }, { "-Wfunction-effect-redeclarations", 1 }, { "-Wfunction-effects", 1 },
+    { "-Wfunction-multiversion", 1 }, { "-Wfuse-ld-path", 1 }, { "-Wfuture-attribute-extensions", 1 }, { "-Wfuture-compat", 1 }, { "-Wgcc-compat", 1 },
+    { "-Wgcc-install-dir-libstdcxx", 1 }, { "-Wglobal-constructors", 1 }, { "-Wglobal-isel", 1 }, { "-Wgnu", 1 }, { "-Wgnu-alignof-expression", 1 },
+    { "-Wgnu-anonymous-struct", 1 }, { "-Wgnu-array-member-paren-init", 1 }, { "-Wgnu-auto-type", 1 }, { "-Wgnu-binary-literal", 1 },
+    { "-Wgnu-case-range", 1 }, { "-Wgnu-complex-integer", 1 }, { "-Wgnu-compound-literal-initializer", 1 }, { "-Wgnu-conditional-omitted-operand", 1 },
+    { "-Wgnu-designator", 1 }, { "-Wgnu-empty-initializer", 1 }, { "-Wgnu-empty-struct", 1 }, { "-Wgnu-flexible-array-initializer", 1 },
+    { "-Wgnu-flexible-array-union-member", 1 }, { "-Wgnu-folding-constant", 1 }, { "-Wgnu-imaginary-constant", 1 }, { "-Wgnu-include-next", 1 },
+    { "-Wgnu-inline-cpp-without-extern", 1 }, { "-Wgnu-label-as-value", 1 }, { "-Wgnu-line-marker", 1 }, { "-Wgnu-null-pointer-arithmetic", 1 },
+    { "-Wgnu-offsetof-extensions", 1 }, { "-Wgnu-pointer-arith", 1 }, { "-Wgnu-redeclared-enum", 1 }, { "-Wgnu-statement-expression", 1 },
+    { "-Wgnu-statement-expression-from-macro-expansion", 1 }, { "-Wgnu-static-float-init", 1 }, { "-Wgnu-string-literal-operator-template", 1 },
+    { "-Wgnu-union-cast", 1 }, { "-Wgnu-variable-sized-type-not-at-end", 1 }, { "-Wgnu-zero-line-directive", 1 },
+    { "-Wgnu-zero-variadic-macro-arguments", 1 }, { "-Wgpu-maybe-wrong-side", 1 }, { "-Wgroupshared-initializer", 1 }, { "-Wheader-guard", 1 },
+    { "-Wheader-hygiene", 1 }, { "-Whexagon-reserved-caller-saved", 1 }, { "-Whigher-precision-for-complex-division", 1 }, { "-Whip-deprecated-builtins", 1 },
+    { "-Whip-omp-target-directives", 1 }, { "-Whip-only", 1 }, { "-Whlsl-202y-extensions", 1 }, { "-Whlsl-availability", 1 },
+    { "-Whlsl-dxc-compatability", 1 }, { "-Whlsl-explicit-binding", 1 }, { "-Whlsl-extensions", 1 }, { "-Whlsl-implicit-binding", 1 },
+    { "-Widiomatic-parentheses", 1 }, { "-Wignored-attributes", 1 }, { "-Wignored-availability-without-sdk-settings", 1 },
+    { "-Wignored-base-class-qualifiers", 1 }, { "-Wignored-gch", 1 }, { "-Wignored-optimization-argument", 1 }, { "-Wignored-pragma-intrinsic", 1 },
+    { "-Wignored-pragma-optimize", 1 }, { "-Wignored-pragmas", 1 }, { "-Wignored-qualifiers", 1 }, { "-Wignored-reference-qualifiers", 1 },
+    { "-Wimplicit", 1 }, { "-Wimplicit-atomic-properties", 1 }, { "-Wimplicit-const-int-float-conversion", 1 },
+    { "-Wimplicit-conversion-floating-point-to-bool", 1 }, { "-Wimplicit-enum-enum-cast", 1 }, { "-Wimplicit-exception-spec-mismatch", 1 },
+    { "-Wimplicit-fallthrough", 1 }, { "-Wimplicit-fallthrough-per-function", 1 }, { "-Wimplicit-fixed-point-conversion", 1 },
+    { "-Wimplicit-float-conversion", 1 }, { "-Wimplicit-function-declaration", 1 }, { "-Wimplicit-int", 1 }, { "-Wimplicit-int-conversion", 1 },
+    { "-Wimplicit-int-conversion-on-negation", 1 }, { "-Wimplicit-int-enum-cast", 1 }, { "-Wimplicit-int-float-conversion", 1 },
+    { "-Wimplicit-overflow-behavior-conversion", 1 }, { "-Wimplicit-overflow-behavior-conversion-assignment", 1 },
+    { "-Wimplicit-overflow-behavior-conversion-assignment-pedantic", 1 }, { "-Wimplicit-overflow-behavior-conversion-function-boundary", 1 },
+    { "-Wimplicit-overflow-behavior-conversion-function-boundary-pedantic", 1 }, { "-Wimplicit-overflow-behavior-conversion-pedantic", 1 },
+    { "-Wimplicit-retain-self", 1 }, { "-Wimplicit-void-ptr-cast", 1 }, { "-Wimplicitly-unsigned-literal", 1 }, { "-Wimport", 1 },
+    { "-Wimport-implementation-partition-unit-in-interface-unit", 1 }, { "-Wimport-preprocessor-directive-pedantic", 1 }, { "-Winaccessible-base", 1 },
+    { "-Winclude-angled-in-module-purview", 1 }, { "-Winclude-next-absolute-path", 1 }, { "-Winclude-next-outside-header", 1 },
+    { "-Wincompatible-exception-spec", 1 }, { "-Wincompatible-function-pointer-types", 1 }, { "-Wincompatible-function-pointer-types-strict", 1 },
+    { "-Wincompatible-library-redeclaration", 1 }, { "-Wincompatible-ms-pragma-section", 1 }, { "-Wincompatible-ms-struct", 1 },
+    { "-Wincompatible-pointer-types", 1 }, { "-Wincompatible-pointer-types-discards-overflow-behavior", 1 },
+    { "-Wincompatible-pointer-types-discards-qualifiers", 1 }, { "-Wincompatible-property-type", 1 }, { "-Wincompatible-sysroot", 1 },
+    { "-Wincomplete-framework-module-declaration", 1 }, { "-Wincomplete-implementation", 1 }, { "-Wincomplete-module", 1 },
+    { "-Wincomplete-setjmp-declaration", 1 }, { "-Wincomplete-umbrella", 1 }, { "-Winconsistent-dllimport", 1 },
+    { "-Winconsistent-missing-destructor-override", 1 }, { "-Winconsistent-missing-override", 1 }, { "-Wincrement-bool", 1 }, { "-Winfinite-recursion", 1 },
+    { "-Winit-priority-reserved", 1 }, { "-Winit-self", 1 }, { "-Winitializer-overrides", 1 }, { "-Winjected-class-name", 1 }, { "-Winline", 1 },
+    { "-Winline-asm", 1 }, { "-Winline-namespace-reopened-noninline", 1 }, { "-Winline-new-delete", 1 }, { "-Winstallapi-violation", 1 },
+    { "-Winstantiation-after-specialization", 1 }, { "-Wint-conversion", 1 }, { "-Wint-conversions", 1 }, { "-Wint-in-bool-context", 1 },
+    { "-Wint-to-pointer-cast", 1 }, { "-Wint-to-void-pointer-cast", 1 }, { "-Winteger-overflow", 1 }, { "-Winvalid-command-line-argument", 1 },
+    { "-Winvalid-constexpr", 1 }, { "-Winvalid-feature-combination", 1 }, { "-Winvalid-gnu-asm-cast", 1 }, { "-Winvalid-iboutlet", 1 },
+    { "-Winvalid-initializer-from-system-header", 1 }, { "-Winvalid-ios-deployment-target", 1 }, { "-Winvalid-no-builtin-names", 1 },
+    { "-Winvalid-noreturn", 1 }, { "-Winvalid-offsetof", 1 }, { "-Winvalid-or-nonexistent-directory", 1 }, { "-Winvalid-partial-specialization", 1 },
+    { "-Winvalid-pch", 1 }, { "-Winvalid-pp-token", 1 }, { "-Winvalid-source-encoding", 1 }, { "-Winvalid-specialization", 1 },
+    { "-Winvalid-static-assert-message", 1 }, { "-Winvalid-token-paste", 1 }, { "-Winvalid-unevaluated-string", 1 }, { "-Winvalid-utf8", 1 },
+    { "-Winvalid-version-availability", 1 }, { "-Wjump-misses-init", 1 }, { "-Wjump-seh-finally", 1 }, { "-Wkeyword-compat", 1 }, { "-Wkeyword-macro", 1 },
+    { "-Wknr-promoted-parameter", 1 }, { "-Wlanguage-extension-token", 1 }, { "-Wlarge-by-value-copy", 1 }, { "-Wlegacy-constant-register-binding", 1 },
+    { "-Wliblto", 1 }, { "-Wlifetime-safety", 1 }, { "-Wlifetime-safety-all", 1 }, { "-Wlifetime-safety-annotation-placement", 1 },
+    { "-Wlifetime-safety-annotation-verification", 1 }, { "-Wlifetime-safety-cross-tu-constructor-suggestions", 1 },
+    { "-Wlifetime-safety-cross-tu-misplaced-lifetimebound", 1 }, { "-Wlifetime-safety-cross-tu-suggestions", 1 }, { "-Wlifetime-safety-dangling-field", 1 },
+    { "-Wlifetime-safety-dangling-field-moved", 1 }, { "-Wlifetime-safety-dangling-global", 1 }, { "-Wlifetime-safety-dangling-global-moved", 1 },
+    { "-Wlifetime-safety-inapplicable-lifetimebound", 1 }, { "-Wlifetime-safety-intra-tu-constructor-suggestions", 1 },
+    { "-Wlifetime-safety-intra-tu-misplaced-lifetimebound", 1 }, { "-Wlifetime-safety-intra-tu-suggestions", 1 }, { "-Wlifetime-safety-invalidation", 1 },
+    { "-Wlifetime-safety-lifetimebound-violation", 1 }, { "-Wlifetime-safety-misplaced-lifetimebound", 1 }, { "-Wlifetime-safety-noescape", 1 },
+    { "-Wlifetime-safety-permissive", 1 }, { "-Wlifetime-safety-return-stack-addr", 1 }, { "-Wlifetime-safety-return-stack-addr-moved", 1 },
+    { "-Wlifetime-safety-strict", 1 }, { "-Wlifetime-safety-suggestions", 1 }, { "-Wlifetime-safety-use-after-free", 1 },
+    { "-Wlifetime-safety-use-after-scope", 1 }, { "-Wlifetime-safety-use-after-scope-moved", 1 }, { "-Wlifetime-safety-validations", 1 },
+    { "-Wlinker-warnings", 1 }, { "-Wliteral-conversion", 1 }, { "-Wliteral-range", 1 }, { "-Wlocal-type-template-args", 1 },
+    { "-Wlogical-not-parentheses", 1 }, { "-Wlogical-op-parentheses", 1 }, { "-Wlong-long", 1 }, { "-Wloop-analysis", 1 }, { "-Wmacro-redefined", 1 },
+    { "-Wmain", 1 }, { "-Wmain-attached-to-named-module", 1 }, { "-Wmain-return-type", 1 }, { "-Wmalformed-warning-check", 1 },
+    { "-Wmany-braces-around-scalar-init", 1 }, { "-Wmath-errno-enabled-with-veclib", 1 }, { "-Wmathematical-notation-identifier-extension", 1 },
+    { "-Wmatrix-conversion", 1 }, { "-Wmatrix-conversions", 1 }, { "-Wmax-tokens", 1 }, { "-Wmax-unsigned-zero", 1 }, { "-Wmemset-transposed-args", 1 },
+    { "-Wmemsize-comparison", 1 }, { "-Wmethod-signatures", 1 }, { "-Wmicrosoft", 1 }, { "-Wmicrosoft-abstract", 1 }, { "-Wmicrosoft-anon-tag", 1 },
+    { "-Wmicrosoft-cast", 1 }, { "-Wmicrosoft-charize", 1 }, { "-Wmicrosoft-comment-paste", 1 }, { "-Wmicrosoft-const-init", 1 },
+    { "-Wmicrosoft-cpp-macro", 1 }, { "-Wmicrosoft-default-arg-redefinition", 1 }, { "-Wmicrosoft-drectve-section", 1 }, { "-Wmicrosoft-empty-enum", 1 },
+    { "-Wmicrosoft-end-of-file", 1 }, { "-Wmicrosoft-enum-forward-reference", 1 }, { "-Wmicrosoft-enum-value", 1 }, { "-Wmicrosoft-exception-spec", 1 },
+    { "-Wmicrosoft-exists", 1 }, { "-Wmicrosoft-explicit-constructor-call", 1 }, { "-Wmicrosoft-extra-qualification", 1 }, { "-Wmicrosoft-fixed-enum", 1 },
+    { "-Wmicrosoft-flexible-array", 1 }, { "-Wmicrosoft-goto", 1 }, { "-Wmicrosoft-inaccessible-base", 1 }, { "-Wmicrosoft-include", 1 },
+    { "-Wmicrosoft-init-from-predefined", 1 }, { "-Wmicrosoft-inline-on-non-function", 1 }, { "-Wmicrosoft-mutable-reference", 1 },
+    { "-Wmicrosoft-pure-definition", 1 }, { "-Wmicrosoft-redeclare-static", 1 }, { "-Wmicrosoft-sealed", 1 },
+    { "-Wmicrosoft-string-literal-from-predefined", 1 }, { "-Wmicrosoft-template", 1 }, { "-Wmicrosoft-template-shadow", 1 },
+    { "-Wmicrosoft-union-member-reference", 1 }, { "-Wmicrosoft-unqualified-friend", 1 }, { "-Wmicrosoft-using-decl", 1 },
+    { "-Wmicrosoft-void-pseudo-dtor", 1 }, { "-Wmisexpect", 1 }, { "-Wmisleading-indentation", 1 }, { "-Wmismatched-new-delete", 1 },
+    { "-Wmismatched-parameter-types", 1 }, { "-Wmismatched-return-types", 1 }, { "-Wmismatched-tags", 1 }, { "-Wmissing-braces", 1 },
+    { "-Wmissing-constinit", 1 }, { "-Wmissing-declarations", 1 }, { "-Wmissing-designated-field-initializers", 1 }, { "-Wmissing-exception-spec", 1 },
+    { "-Wmissing-field-initializers", 1 }, { "-Wmissing-format-attribute", 1 }, { "-Wmissing-include-dirs", 1 }, { "-Wmissing-method-return-type", 1 },
+    { "-Wmissing-multilib", 1 }, { "-Wmissing-noescape", 1 }, { "-Wmissing-noreturn", 1 }, { "-Wmissing-prototype-for-cc", 1 }, { "-Wmissing-prototypes", 1 },
+    { "-Wmissing-selector-name", 1 }, { "-Wmissing-sysroot", 1 }, { "-Wmissing-template-arg-list-after-template-kw", 1 },
+    { "-Wmissing-variable-declarations", 1 }, { "-Wmisspelled-assumption", 1 }, { "-Wmix-packoffset", 1 },
+    { "-Wmmap-deprecated-symlink-to-modular-header", 1 }, { "-Wmodule-conflict", 1 }, { "-Wmodule-file-config-mismatch", 1 },
+    { "-Wmodule-file-extension", 1 }, { "-Wmodule-file-mapping-mismatch", 1 }, { "-Wmodule-import-in-extern-c", 1 },
+    { "-Wmodule-map-path-outside-directory", 1 }, { "-Wmodules-ambiguous-internal-linkage", 1 }, { "-Wmodules-import-nested-redundant", 1 }, { "-Wmost", 1 },
+    { "-Wmove", 1 }, { "-Wms-bitfield-padding", 1 }, { "-Wmsvc-include", 1 }, { "-Wmsvc-not-found", 1 }, { "-Wmulti-gpu", 1 }, { "-Wmultichar", 1 },
+    { "-Wmultilib-not-found", 1 }, { "-Wmultiple-move-vbase", 1 }, { "-Wnan-infinity-disabled", 1 }, { "-Wnarrowing", 1 }, { "-Wnested-anon-types", 1 },
+    { "-Wnested-externs", 1 }, { "-Wnew-returns-null", 1 }, { "-Wnewline-eof", 1 }, { "-Wnoderef", 1 }, { "-Wnoexcept-type", 1 },
+    { "-Wnon-c-typedef-for-linkage", 1 }, { "-Wnon-gcc", 1 }, { "-Wnon-literal-null-conversion", 1 }, { "-Wnon-modular-include-in-framework-module", 1 },
+    { "-Wnon-modular-include-in-module", 1 }, { "-Wnon-pod-varargs", 1 }, { "-Wnon-power-of-two-alignment", 1 }, { "-Wnon-virtual-dtor", 1 },
+    { "-Wnonnull", 1 }, { "-Wnonportable-cfstrings", 1 }, { "-Wnonportable-include-path", 1 }, { "-Wnonportable-include-path-separator", 1 },
+    { "-Wnonportable-private-apinotes-path", 1 }, { "-Wnonportable-private-system-apinotes-path", 1 }, { "-Wnonportable-sycl", 1 },
+    { "-Wnonportable-system-include-path", 1 }, { "-Wnonportable-vector-initialization", 1 }, { "-Wnontrivial-memaccess", 1 }, { "-Wnontrivial-memcall", 1 },
+    { "-Wnrvo", 1 }, { "-Wnsconsumed-mismatch", 1 }, { "-Wnsreturns-mismatch", 1 }, { "-Wnull-arithmetic", 1 }, { "-Wnull-character", 1 },
+    { "-Wnull-conversion", 1 }, { "-Wnull-dereference", 1 }, { "-Wnull-pointer-arithmetic", 1 }, { "-Wnull-pointer-subtraction", 1 }, { "-Wnullability", 1 },
+    { "-Wnullability-completeness", 1 }, { "-Wnullability-completeness-on-arrays", 1 }, { "-Wnullability-declspec", 1 }, { "-Wnullability-extension", 1 },
+    { "-Wnullability-inferred-on-nested-type", 1 }, { "-Wnullable-to-nonnull-conversion", 1 }, { "-Wnvcc-compat", 1 },
+    { "-Wobjc-autosynthesis-property-ivar-name-match", 1 }, { "-Wobjc-bool-constant-conversion", 1 }, { "-Wobjc-boxing", 1 },
+    { "-Wobjc-circular-container", 1 }, { "-Wobjc-cocoa-api", 1 }, { "-Wobjc-designated-initializers", 1 }, { "-Wobjc-dictionary-duplicate-keys", 1 },
+    { "-Wobjc-duplicate-category-definition", 1 }, { "-Wobjc-flexible-array", 1 }, { "-Wobjc-forward-class-redefinition", 1 },
+    { "-Wobjc-interface-ivars", 1 }, { "-Wobjc-literal-compare", 1 }, { "-Wobjc-literal-conversion", 1 }, { "-Wobjc-macro-redefinition", 1 },
+    { "-Wobjc-messaging-id", 1 }, { "-Wobjc-method-access", 1 }, { "-Wobjc-missing-property-synthesis", 1 }, { "-Wobjc-missing-super-calls", 1 },
+    { "-Wobjc-multiple-method-names", 1 }, { "-Wobjc-noncopy-retain-block-property", 1 }, { "-Wobjc-nonunified-exceptions", 1 },
+    { "-Wobjc-property-assign-on-object-type", 1 }, { "-Wobjc-property-implementation", 1 }, { "-Wobjc-property-implicit-mismatch", 1 },
+    { "-Wobjc-property-matches-cocoa-ownership-rule", 1 }, { "-Wobjc-property-no-attribute", 1 }, { "-Wobjc-property-synthesis", 1 },
+    { "-Wobjc-protocol-method-implementation", 1 }, { "-Wobjc-protocol-property-synthesis", 1 }, { "-Wobjc-protocol-qualifiers", 1 },
+    { "-Wobjc-readonly-with-setter-property", 1 }, { "-Wobjc-redundant-api-use", 1 }, { "-Wobjc-redundant-literal-use", 1 }, { "-Wobjc-root-class", 1 },
+    { "-Wobjc-signed-char-bool", 1 }, { "-Wobjc-signed-char-bool-implicit-float-conversion", 1 }, { "-Wobjc-signed-char-bool-implicit-int-conversion", 1 },
+    { "-Wobjc-string-compare", 1 }, { "-Wobjc-string-concatenation", 1 }, { "-Wobjc-unsafe-perform-selector", 1 }, { "-Woctal-prefix-extension", 1 },
+    { "-Wodr", 1 }, { "-Wold-style-cast", 1 }, { "-Wold-style-definition", 1 }, { "-Wopenacc", 1 }, { "-Wopenacc-cache-var-inside-loop", 1 },
+    { "-Wopenacc-confusing-routine-name", 1 }, { "-Wopenacc-deprecated-clause-alias", 1 }, { "-Wopenacc-extension", 1 },
+    { "-Wopenacc-self-if-potential-conflict", 1 }, { "-Wopenacc-var-lacks-operation", 1 }, { "-Wopenacc-var-non-const-array", 1 },
+    { "-Wopencl-unsupported-rgba", 1 }, { "-Wopenmp", 1 }, { "-Wopenmp-51-extensions", 1 }, { "-Wopenmp-clauses", 1 }, { "-Wopenmp-extensions", 1 },
+    { "-Wopenmp-future", 1 }, { "-Wopenmp-loop-form", 1 }, { "-Wopenmp-mapping", 1 }, { "-Wopenmp-target", 1 }, { "-Wopenmp-target-exception", 1 },
+    { "-Woption-ignored", 1 }, { "-Wordered-compare-function-pointers", 1 }, { "-Wout-of-line-declaration", 1 }, { "-Wout-of-scope-function", 1 },
+    { "-Wover-aligned", 1 }, { "-Woverflow", 1 }, { "-Woverflow-behavior-attribute-ignored", 1 }, { "-Woverflow-behavior-conversion", 1 },
+    { "-Woverlength-strings", 1 }, { "-Woverloaded-shift-op-parentheses", 1 }, { "-Woverloaded-virtual", 1 }, { "-Woverride-init", 1 },
+    { "-Woverride-module", 1 }, { "-Woverriding-complex-range", 1 }, { "-Woverriding-deployment-version", 1 }, { "-Woverriding-method-mismatch", 1 },
+    { "-Woverriding-option", 1 }, { "-Wpacked", 1 }, { "-Wpacked-non-pod", 1 }, { "-Wpadded", 1 }, { "-Wpadded-bitfield", 1 }, { "-Wparentheses", 1 },
+    { "-Wparentheses-equality", 1 }, { "-Wpartial-availability", 1 }, { "-Wpass-failed", 1 }, { "-Wpch-date-time", 1 }, { "-Wpch-vfs-diff", 1 },
+    { "-Wpedantic", 1 }, { "-Wpedantic-core-features", 1 }, { "-Wpedantic-macros", 1 }, { "-Wperf-constraint-implies-noexcept", 1 },
+    { "-Wpessimizing-move", 1 }, { "-Wpgo-coverage", 1 }, { "-Wpointer-arith", 1 }, { "-Wpointer-bool-conversion", 1 }, { "-Wpointer-compare", 1 },
+    { "-Wpointer-integer-compare", 1 }, { "-Wpointer-sign", 1 }, { "-Wpointer-to-enum-cast", 1 }, { "-Wpointer-to-int-cast", 1 },
+    { "-Wpointer-type-mismatch", 1 }, { "-Wpoison-system-directories", 1 }, { "-Wpotentially-direct-selector", 1 },
+    { "-Wpotentially-evaluated-expression", 1 }, { "-Wpragma-clang-attribute", 1 }, { "-Wpragma-once-outside-header", 1 }, { "-Wpragma-pack", 1 },
+    { "-Wpragma-pack-suspicious-include", 1 }, { "-Wpragma-system-header-outside-header", 1 }, { "-Wpragmas", 1 }, { "-Wpre-c++14-compat", 1 },
+    { "-Wpre-c++14-compat-pedantic", 1 }, { "-Wpre-c++17-compat", 1 }, { "-Wpre-c++17-compat-pedantic", 1 }, { "-Wpre-c++20-compat", 1 },
+    { "-Wpre-c++20-compat-pedantic", 1 }, { "-Wpre-c++23-compat", 1 }, { "-Wpre-c++23-compat-pedantic", 1 }, { "-Wpre-c++26-compat", 1 },
+    { "-Wpre-c++26-compat-pedantic", 1 }, { "-Wpre-c++2c-compat", 1 }, { "-Wpre-c++2c-compat-pedantic", 1 }, { "-Wpre-c++2d-compat", 1 },
+    { "-Wpre-c++2d-compat-pedantic", 1 }, { "-Wpre-c11-compat", 1 }, { "-Wpre-c11-compat-pedantic", 1 }, { "-Wpre-c23-compat", 1 },
+    { "-Wpre-c23-compat-pedantic", 1 }, { "-Wpre-c2x-compat", 1 }, { "-Wpre-c2x-compat-pedantic", 1 }, { "-Wpre-c2y-compat", 1 },
+    { "-Wpre-c2y-compat-pedantic", 1 }, { "-Wpre-openmp-51-compat", 1 }, { "-Wpredefined-identifier-outside-function", 1 },
+    { "-Wpreferred-type-bitfield-enum-conversion", 1 }, { "-Wpreferred-type-bitfield-width", 1 }, { "-Wprivate-extern", 1 }, { "-Wprivate-header", 1 },
+    { "-Wprivate-module", 1 }, { "-Wprofile-instr-missing", 1 }, { "-Wprofile-instr-out-of-date", 1 }, { "-Wprofile-instr-unprofiled", 1 },
+    { "-Wproperty-access-dot-syntax", 1 }, { "-Wproperty-attribute-mismatch", 1 }, { "-Wprotocol", 1 }, { "-Wprotocol-property-synthesis-ambiguity", 1 },
+    { "-Wpsabi", 1 }, { "-Wptrauth-null-pointers", 1 }, { "-Wqualified-void-return-type", 1 }, { "-Wquoted-include-in-framework-header", 1 },
+    { "-Wrange-loop-analysis", 1 }, { "-Wrange-loop-bind-reference", 1 }, { "-Wrange-loop-construct", 1 }, { "-Wread-only-types", 1 },
+    { "-Wreadonly-iboutlet-property", 1 }, { "-Wreceiver-expr", 1 }, { "-Wreceiver-forward-class", 1 }, { "-Wredeclared-class-member", 1 },
+    { "-Wreduced-bmi-output-overrided", 1 }, { "-Wredundant-attribute", 1 }, { "-Wredundant-consteval-if", 1 }, { "-Wredundant-decls", 1 },
+    { "-Wredundant-move", 1 }, { "-Wredundant-parens", 1 }, { "-Wreference-tu-local-entity-in-other-tu", 1 }, { "-Wregister", 1 },
+    { "-Wreinterpret-base-class", 1 }, { "-Wreorder", 1 }, { "-Wreorder-ctor", 1 }, { "-Wreorder-init-list", 1 }, { "-Wrequires-super-attribute", 1 },
+    { "-Wreserved-attribute-identifier", 1 }, { "-Wreserved-id-macro", 1 }, { "-Wreserved-identifier", 1 }, { "-Wreserved-macro-identifier", 1 },
+    { "-Wreserved-module-identifier", 1 }, { "-Wreserved-user-defined-literal", 1 }, { "-Wrestrict-expansion", 1 }, { "-Wretained-language-linkage", 1 },
+    { "-Wreturn-local-addr", 1 }, { "-Wreturn-mismatch", 1 }, { "-Wreturn-stack-address", 1 }, { "-Wreturn-std-move", 1 }, { "-Wreturn-type", 1 },
+    { "-Wreturn-type-c-linkage", 1 }, { "-Wrewrite-not-bool", 1 }, { "-Wriscv-be-experimental", 1 }, { "-Wrtti", 1 }, { "-Wsarif-format-unstable", 1 },
+    { "-Wscalable-static-analysis-framework", 1 }, { "-Wsection", 1 }, { "-Wselector", 1 }, { "-Wselector-type-mismatch", 1 }, { "-Wself-assign", 1 },
+    { "-Wself-assign-field", 1 }, { "-Wself-assign-overloaded", 1 }, { "-Wself-move", 1 }, { "-Wsemicolon-before-method-body", 1 }, { "-Wsentinel", 1 },
+    { "-Wsequence-point", 1 }, { "-Wserialized-diagnostics", 1 }, { "-Wshadow", 1 }, { "-Wshadow-all", 1 }, { "-Wshadow-field", 1 },
+    { "-Wshadow-field-in-constructor", 1 }, { "-Wshadow-field-in-constructor-modified", 1 }, { "-Wshadow-header", 1 }, { "-Wshadow-ivar", 1 },
+    { "-Wshadow-uncaptured-local", 1 }, { "-Wshift-bool", 1 }, { "-Wshift-count-negative", 1 }, { "-Wshift-count-overflow", 1 },
+    { "-Wshift-negative-value", 1 }, { "-Wshift-op-parentheses", 1 }, { "-Wshift-overflow", 1 }, { "-Wshift-sign-overflow", 1 }, { "-Wshorten-64-to-32", 1 },
+    { "-Wsign-compare", 1 }, { "-Wsign-conversion", 1 }, { "-Wsign-promo", 1 }, { "-Wsigned-enum-bitfield", 1 }, { "-Wsigned-unsigned-wchar", 1 },
+    { "-Wsimdlen", 1 }, { "-Wsingle-bit-bitfield-constant-conversion", 1 }, { "-Wsizeof-array-argument", 1 }, { "-Wsizeof-array-decay", 1 },
+    { "-Wsizeof-array-div", 1 }, { "-Wsizeof-pointer-div", 1 }, { "-Wsizeof-pointer-memaccess", 1 }, { "-Wslash-u-filename", 1 }, { "-Wslh-asm-goto", 1 },
+    { "-Wsometimes-uninitialized", 1 }, { "-Wsource-mgr", 1 }, { "-Wsource-uses-openacc", 1 }, { "-Wsource-uses-openmp", 1 }, { "-Wspir-compat", 1 },
+    { "-Wspirv-compat", 1 }, { "-Wspirv-validation", 1 }, { "-Wstack-exhausted", 1 }, { "-Wstack-protector", 1 }, { "-Wstatic-float-init", 1 },
+    { "-Wstatic-in-inline", 1 }, { "-Wstatic-inline-explicit-instantiation", 1 }, { "-Wstatic-local-in-inline", 1 }, { "-Wstatic-self-init", 1 },
+    { "-Wstdlibcxx-not-found", 1 }, { "-Wstrict-aliasing", 1 }, { "-Wstrict-aliasing=0", 1 }, { "-Wstrict-aliasing=1", 1 }, { "-Wstrict-aliasing=2", 1 },
+    { "-Wstrict-overflow", 1 }, { "-Wstrict-overflow=0", 1 }, { "-Wstrict-overflow=1", 1 }, { "-Wstrict-overflow=2", 1 }, { "-Wstrict-overflow=3", 1 },
+    { "-Wstrict-overflow=4", 1 }, { "-Wstrict-overflow=5", 1 }, { "-Wstrict-potentially-direct-selector", 1 }, { "-Wstrict-primary-template-shadow", 1 },
+    { "-Wstrict-prototypes", 1 }, { "-Wstrict-selector-match", 1 }, { "-Wstring-compare", 1 }, { "-Wstring-concatenation", 1 }, { "-Wstring-conversion", 1 },
+    { "-Wstring-plus-char", 1 }, { "-Wstring-plus-int", 1 }, { "-Wstrlcpy-strlcat-size", 1 }, { "-Wstrncat-size", 1 }, { "-Wsuggest-destructor-override", 1 },
+    { "-Wsuggest-override", 1 }, { "-Wsuper-class-method-mismatch", 1 }, { "-Wsuspicious-bzero", 1 }, { "-Wsuspicious-memaccess", 1 },
+    { "-Wswift-name-attribute", 1 }, { "-Wswitch", 1 }, { "-Wswitch-bool", 1 }, { "-Wswitch-default", 1 }, { "-Wswitch-enum", 1 }, { "-Wsync-alignment", 1 },
+    { "-Wsync-fetch-and-nand-semantics-changed", 1 }, { "-Wsynth", 1 }, { "-Wtarget-clones-mixed-specifiers", 1 }, { "-Wtautological-bitwise-compare", 1 },
+    { "-Wtautological-compare", 1 }, { "-Wtautological-constant-compare", 1 }, { "-Wtautological-constant-in-range-compare", 1 },
+    { "-Wtautological-constant-out-of-range-compare", 1 }, { "-Wtautological-negation-compare", 1 }, { "-Wtautological-objc-bool-compare", 1 },
+    { "-Wtautological-overlap-compare", 1 }, { "-Wtautological-pointer-compare", 1 }, { "-Wtautological-type-limit-compare", 1 },
+    { "-Wtautological-undefined-compare", 1 }, { "-Wtautological-unsigned-char-zero-compare", 1 }, { "-Wtautological-unsigned-enum-zero-compare", 1 },
+    { "-Wtautological-unsigned-zero-compare", 1 }, { "-Wtautological-value-range-compare", 1 }, { "-Wtcb-enforcement", 1 },
+    { "-Wtemplate-in-declaration-name", 1 }, { "-Wtentative-definition-array", 1 }, { "-Wtentative-definition-compat", 1 },
+    { "-Wtentative-definition-incomplete-type", 1 }, { "-Wthread-safety", 1 }, { "-Wthread-safety-analysis", 1 }, { "-Wthread-safety-attributes", 1 },
+    { "-Wthread-safety-beta", 1 }, { "-Wthread-safety-negative", 1 }, { "-Wthread-safety-pointer", 1 }, { "-Wthread-safety-precise", 1 },
+    { "-Wthread-safety-reference", 1 }, { "-Wthread-safety-reference-return", 1 }, { "-Wthread-safety-verbose", 1 }, { "-Wtrigraphs", 1 },
+    { "-Wtrivial-auto-var-init", 1 }, { "-Wtype-limits", 1 }, { "-Wtype-safety", 1 }, { "-Wtypedef-redefinition", 1 }, { "-Wtypename-missing", 1 },
+    { "-Wunable-to-open-stats-file", 1 }, { "-Wunaligned-access", 1 }, { "-Wunaligned-qualifier-implicit-cast", 1 }, { "-Wunavailable-declarations", 1 },
+    { "-Wundeclared-selector", 1 }, { "-Wundef", 1 }, { "-Wundef-prefix", 1 }, { "-Wundef-true", 1 }, { "-Wundefined-arm-za", 1 },
+    { "-Wundefined-arm-zt0", 1 }, { "-Wundefined-bool-conversion", 1 }, { "-Wundefined-func-template", 1 }, { "-Wundefined-inline", 1 },
+    { "-Wundefined-internal", 1 }, { "-Wundefined-internal-type", 1 }, { "-Wundefined-reinterpret-cast", 1 }, { "-Wundefined-var-template", 1 },
+    { "-Wunderaligned-exception-object", 1 }, { "-Wunderlying-atomic-qualifier-ignored", 1 }, { "-Wunderlying-cv-qualifier-ignored", 1 },
+    { "-Wunevaluated-expression", 1 }, { "-Wunguarded-availability", 1 }, { "-Wunguarded-availability-new", 1 }, { "-Wunicode", 1 },
+    { "-Wunicode-homoglyph", 1 }, { "-Wunicode-whitespace", 1 }, { "-Wunicode-zero-width", 1 }, { "-Wuninitialized", 1 },
+    { "-Wuninitialized-const-pointer", 1 }, { "-Wuninitialized-const-reference", 1 }, { "-Wuninitialized-explicit-init", 1 },
+    { "-Wunique-object-duplication", 1 }, { "-Wunknown-acc-extension-clause", 1 }, { "-Wunknown-argument", 1 }, { "-Wunknown-assumption", 1 },
+    { "-Wunknown-attributes", 1 }, { "-Wunknown-cuda-version", 1 }, { "-Wunknown-directives", 1 }, { "-Wunknown-escape-sequence", 1 },
+    { "-Wunknown-pragmas", 1 }, { "-Wunknown-sanitizers", 1 }, { "-Wunknown-warning-option", 1 }, { "-Wunnamed-type-template-args", 1 },
+    { "-Wunnecessary-virtual-specifier", 1 }, { "-Wunneeded-internal-declaration", 1 }, { "-Wunneeded-member-function", 1 },
+    { "-Wunqualified-std-cast-call", 1 }, { "-Wunreachable-code", 1 }, { "-Wunreachable-code-aggressive", 1 }, { "-Wunreachable-code-break", 1 },
+    { "-Wunreachable-code-fallthrough", 1 }, { "-Wunreachable-code-generic-assoc", 1 }, { "-Wunreachable-code-loop-increment", 1 },
+    { "-Wunreachable-code-return", 1 }, { "-Wunsafe-buffer-usage", 1 }, { "-Wunsafe-buffer-usage-in-container", 1 },
+    { "-Wunsafe-buffer-usage-in-format-attr-call", 1 }, { "-Wunsafe-buffer-usage-in-libc-call", 1 }, { "-Wunsafe-buffer-usage-in-static-sized-array", 1 },
+    { "-Wunsafe-buffer-usage-in-unique-ptr-array-access", 1 }, { "-Wunsequenced", 1 }, { "-Wunsupported-abi", 1 }, { "-Wunsupported-abs", 1 },
+    { "-Wunsupported-availability-guard", 1 }, { "-Wunsupported-cb", 1 }, { "-Wunsupported-dll-base-class-template", 1 },
+    { "-Wunsupported-floating-point-opt", 1 }, { "-Wunsupported-friend", 1 }, { "-Wunsupported-gpopt", 1 }, { "-Wunsupported-nan", 1 },
+    { "-Wunsupported-target-opt", 1 }, { "-Wunsupported-visibility", 1 }, { "-Wunterminated-string-initialization", 1 },
+    { "-Wunusable-partial-specialization", 1 }, { "-Wunused", 1 }, { "-Wunused-argument", 1 }, { "-Wunused-but-set-global", 1 },
+    { "-Wunused-but-set-parameter", 1 }, { "-Wunused-but-set-variable", 1 }, { "-Wunused-command-line-argument", 1 }, { "-Wunused-comparison", 1 },
+    { "-Wunused-const-variable", 1 }, { "-Wunused-exception-parameter", 1 }, { "-Wunused-function", 1 }, { "-Wunused-getter-return-value", 1 },
+    { "-Wunused-label", 1 }, { "-Wunused-lambda-capture", 1 }, { "-Wunused-local-typedef", 1 }, { "-Wunused-local-typedefs", 1 }, { "-Wunused-macros", 1 },
+    { "-Wunused-member-function", 1 }, { "-Wunused-parameter", 1 }, { "-Wunused-private-field", 1 }, { "-Wunused-property-ivar", 1 },
+    { "-Wunused-result", 1 }, { "-Wunused-template", 1 }, { "-Wunused-value", 1 }, { "-Wunused-variable", 1 }, { "-Wunused-volatile-lvalue", 1 },
+    { "-Wused-but-marked-unused", 1 }, { "-Wuser-defined-literals", 1 }, { "-Wuser-defined-warnings", 1 }, { "-Wvarargs", 1 },
+    { "-Wvariadic-macro-arguments-omitted", 1 }, { "-Wvariadic-macros", 1 }, { "-Wvec-elem-size", 1 }, { "-Wvector-conversion", 1 },
+    { "-Wvector-conversions", 1 }, { "-Wvexing-parse", 1 }, { "-Wvisibility", 1 }, { "-Wvla", 1 }, { "-Wvla-cxx-extension", 1 }, { "-Wvla-extension", 1 },
+    { "-Wvla-extension-static-assert", 1 }, { "-Wvoid-pointer-to-enum-cast", 1 }, { "-Wvoid-pointer-to-int-cast", 1 }, { "-Wvoid-ptr-dereference", 1 },
+    { "-Wvolatile-register-var", 1 }, { "-Wwasm-exception-spec", 1 }, { "-Wweak-template-vtables", 1 }, { "-Wweak-vtables", 1 }, { "-Wwritable-strings", 1 },
+    { "-Wwrite-strings", 1 }, { "-Wxor-used-as-pow", 1 }, { "-Wzero-as-null-pointer-constant", 1 }, { "-Wzero-length-array", 1 },
 };
 
 static int pp_compare_feature(const uint8_t* name, uint32_t length, const char* entry)
@@ -6116,6 +8335,43 @@ static uint32_t pp_feature_lookup(const PPFeature* table, uint32_t count, const 
     return result;
 }
 
+// The __is_target_* queries for x86_64-pc-linux-gnu, as clang answers them (an LLVM triple's parsing of the name, in
+// lower case): the architecture x86_64 (also written amd64 or x86_64h), the vendor pc, an OS whose name starts with
+// "linux", and an environment whose name starts with "gnu", but for the GNU environments of other targets.
+static bool pp_target_is(PPBuiltin builtin, const uint8_t* name, uint32_t length)
+{
+    char lower[64];
+    const uint32_t n = length < sizeof(lower) ? length : 0;
+    for (uint32_t i = 0; i < n; i += 1)
+    {
+        lower[i] = (char)(name[i] >= 'A' && name[i] <= 'Z' ? name[i] - 'A' + 'a' : name[i]);
+    }
+    static const char* const other_gnu[] = { "gnuabin32", "gnuabi64", "gnueabi", "gnuf32", "gnuf64", "gnusf", "gnux32", "gnu_ilp32", "gnut64" };
+    bool result = false;
+    if (builtin == PP_BUILTIN_IS_TARGET_ARCH)
+    {
+        result = (n == 6 && memcmp(lower, "x86_64", 6) == 0) || (n == 7 && memcmp(lower, "x86_64h", 7) == 0) || (n == 5 && memcmp(lower, "amd64", 5) == 0);
+    }
+    else if (builtin == PP_BUILTIN_IS_TARGET_VENDOR)
+    {
+        result = n == 2 && memcmp(lower, "pc", 2) == 0;
+    }
+    else if (builtin == PP_BUILTIN_IS_TARGET_OS)
+    {
+        result = n >= 5 && memcmp(lower, "linux", 5) == 0;
+    }
+    else
+    {
+        result = n >= 3 && memcmp(lower, "gnu", 3) == 0;
+        for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(other_gnu); i += 1)
+        {
+            const uint32_t prefix = (uint32_t)strlen(other_gnu[i]);
+            result = !(n >= prefix && memcmp(lower, other_gnu[i], prefix) == 0);
+        }
+    }
+    return result;
+}
+
 static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length, uint32_t standard)
 {
     uint32_t result = 0;
@@ -6133,10 +8389,10 @@ static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t leng
             result = pp_feature_lookup(pp_features_c_attribute, BUSTER_ARRAY_LENGTH(pp_features_c_attribute), name, length, standard);
             break;
         case PP_BUILTIN_HAS_WARNING: result = pp_feature_lookup(pp_features_warning, BUSTER_ARRAY_LENGTH(pp_features_warning), name, length, standard); break;
-        case PP_BUILTIN_IS_TARGET_ARCH: result = length == 6 && memcmp(name, "x86_64", 6) == 0; break;
-        case PP_BUILTIN_IS_TARGET_VENDOR: result = length == 7 && memcmp(name, "unknown", 7) == 0; break;
-        case PP_BUILTIN_IS_TARGET_OS: result = length == 5 && memcmp(name, "linux", 5) == 0; break;
-        case PP_BUILTIN_IS_TARGET_ENVIRONMENT: result = length == 3 && memcmp(name, "gnu", 3) == 0; break;
+        case PP_BUILTIN_IS_TARGET_ARCH:
+        case PP_BUILTIN_IS_TARGET_VENDOR:
+        case PP_BUILTIN_IS_TARGET_OS:
+        case PP_BUILTIN_IS_TARGET_ENVIRONMENT: result = pp_target_is(builtin, name, length); break;
         default: break;
     }
     return result;
@@ -6591,42 +8847,64 @@ static const char pp_predefines_c23[] =
     "#define __UINT_LEAST8_FMTb__ \"hhb\"\n"
     ;
 
+// The macros clang keeps with -undef, in every mode (the rest of `clang -undef -dM -E` is __STDC_VERSION__ and
+// __STDC_HOSTED__, which pp_predefines adds).
+static const char pp_predefines_undefined[] =
+    "#define __STDC_EMBED_EMPTY__ 2\n"
+    "#define __STDC_EMBED_FOUND__ 1\n"
+    "#define __STDC_EMBED_NOT_FOUND__ 0\n"
+    "#define __STDC_UTF_16__ 1\n"
+    "#define __STDC_UTF_32__ 1\n"
+    "#define __STDC__ 1\n"
+    ;
+
 // The predefines buffer for the options, into `buffer` (room for sizeof(pp_predefines_base) + 512 bytes). Returns its
 // length.
 static uint32_t pp_predefines(const PPOptions* options, char* buffer)
 {
     uint32_t length = 0;
-    memcpy(buffer, pp_predefines_base, sizeof(pp_predefines_base) - 1);
-    length += sizeof(pp_predefines_base) - 1;
     const CLanguage language = options->language;
     const char* version = language.standard >= 2023 ? "202311L" : language.standard >= 2017 ? "201710L" : language.standard >= 2011 ? "201112L" : language.standard >= 1999 ? "199901L" : 0;
+    if (options->undefine)
+    {
+        memcpy(buffer, pp_predefines_undefined, sizeof(pp_predefines_undefined) - 1);
+        length += sizeof(pp_predefines_undefined) - 1;
+    }
+    else
+    {
+        memcpy(buffer, pp_predefines_base, sizeof(pp_predefines_base) - 1);
+        length += sizeof(pp_predefines_base) - 1;
+    }
     if (version != 0)
     {
         length += (uint32_t)sprintf(buffer + length, "#define __STDC_VERSION__ %s\n", version);
     }
-    if (!language.gnu)
-    {
-        length += (uint32_t)sprintf(buffer + length, "#define __STRICT_ANSI__ 1\n");
-    }
-    else
-    {
-        length += (uint32_t)sprintf(buffer + length, "#define linux 1\n#define unix 1\n");
-    }
-    length += (uint32_t)sprintf(buffer + length, language.standard >= 1999 ? "#define __GNUC_STDC_INLINE__ 1\n" : "#define __GNUC_GNU_INLINE__ 1\n");
     length += (uint32_t)sprintf(buffer + length, "#define __STDC_HOSTED__ %d\n", options->freestanding ? 0 : 1);
-    if (!options->freestanding)
+    if (!options->undefine)
     {
-        length += (uint32_t)sprintf(buffer + length, "#define __GCC_HAVE_DWARF2_CFI_ASM 1\n");
+        if (!language.gnu)
+        {
+            length += (uint32_t)sprintf(buffer + length, "#define __STRICT_ANSI__ 1\n");
+        }
+        else
+        {
+            length += (uint32_t)sprintf(buffer + length, "#define linux 1\n#define unix 1\n");
+        }
+        length += (uint32_t)sprintf(buffer + length, language.standard >= 1999 ? "#define __GNUC_STDC_INLINE__ 1\n" : "#define __GNUC_GNU_INLINE__ 1\n");
+        if (!options->freestanding)
+        {
+            length += (uint32_t)sprintf(buffer + length, "#define __GCC_HAVE_DWARF2_CFI_ASM 1\n");
+        }
+        length += (uint32_t)sprintf(buffer + length, options->optimize ? "#define __OPTIMIZE__ 1\n" : "#define __NO_INLINE__ 1\n");
+        if (language.standard >= 2023)
+        {
+            memcpy(buffer + length, pp_predefines_c23, sizeof(pp_predefines_c23) - 1);
+            length += sizeof(pp_predefines_c23) - 1;
+        }
+        // The one macro that isn't clang's (#117: clang's configuration, plus this). --predefines replaces it too, so
+        // that test-preprocessor --clang starts from clang's own macros alone.
+        length += (uint32_t)sprintf(buffer + length, "#define __BUSTER__ 1\n");
     }
-    length += (uint32_t)sprintf(buffer + length, options->optimize ? "#define __OPTIMIZE__ 1\n" : "#define __NO_INLINE__ 1\n");
-    if (language.standard >= 2023)
-    {
-        memcpy(buffer + length, pp_predefines_c23, sizeof(pp_predefines_c23) - 1);
-        length += sizeof(pp_predefines_c23) - 1;
-    }
-    // The one macro that isn't clang's (#117: clang's configuration, plus this). --predefines replaces it too, so that
-    // test-preprocessor --clang starts from clang's own macros alone.
-    length += (uint32_t)sprintf(buffer + length, "#define __BUSTER__ 1\n");
     return length;
 }
 
@@ -6670,6 +8948,11 @@ static void pp_run_file(Preprocessor* pp, uint32_t file)
     const uint32_t depth = pp->context_count;
     pp_enter_file(pp, file, BUSTER_PP_NONE, 0, BUSTER_PP_NONE);
     pp_run_contexts(pp, depth);
+    // A stream (an attribute query's operand) reads on past an included file's end, but not past this one's.
+    while (!pp->fatal && pp->stream_count != 0)
+    {
+        pp_finish_stream(pp, BUSTER_PP_NONE);
+    }
 }
 
 // The highest version's directory of clang's own headers (clang searches its resource directory first), if any.
@@ -6815,8 +9098,10 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->directory_system = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(uint8_t));
     pp->line_directives = pp_array(pp, BUSTER_PP_MAX_LINE_DIRECTIVES, sizeof(PPLineDirective));
     pp->expansion_starts = pp_array(pp, (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPExpansionStart));
+    pp->silent_pragmas = pp_array(pp, BUSTER_PP_MAX_SILENT_PRAGMAS, sizeof(PPExpansionStart));
     pp->macro_of = pp_array(pp, BUSTER_INTERN_MAX_IDS, sizeof(PPMacroId));
     pp->is_macro = pp_array(pp, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
+    pp->poisoned = pp_array(pp, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
     pp->macros = pp_array(pp, BUSTER_PP_MAX_MACROS, sizeof(PPMacro));
     pp->items = pp_array(pp, BUSTER_PP_MAX_ITEMS, sizeof(PPItem));
     pp->parameters = pp_array(pp, BUSTER_PP_MAX_ITEMS, sizeof(IdentId));
@@ -6828,7 +9113,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->argument_records = pp_array(pp, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
     pp->capture_frames = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
     result = result && pp->ranges != 0 && pp->datas != 0 && pp->files != 0 && pp->file_slots != 0 && pp->directories != 0 && pp->directory_lengths != 0 &&
-             pp->directory_system != 0 && pp->line_directives != 0 && pp->expansion_starts != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->macros != 0 && pp->items != 0 &&
+             pp->directory_system != 0 && pp->line_directives != 0 && pp->expansion_starts != 0 && pp->silent_pragmas != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->poisoned != 0 && pp->macros != 0 && pp->items != 0 &&
              pp->parameters != 0 && pp->pushed_names != 0 && pp->pushed_macros != 0 && pp->contexts != 0 && pp->conditionals != 0 && pp->invocations != 0 &&
              pp->argument_records != 0 && pp->capture_frames != 0 && pp->scratch[0].base != 0 && pp->scratch[1].base != 0;
     if (result)
@@ -6900,6 +9185,8 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
             { C_NAME_IS_TARGET_VENDOR, PP_BUILTIN_IS_TARGET_VENDOR, true },
             { C_NAME_IS_TARGET_OS, PP_BUILTIN_IS_TARGET_OS, true },
             { C_NAME_IS_TARGET_ENVIRONMENT, PP_BUILTIN_IS_TARGET_ENVIRONMENT, true },
+            { C_NAME_IS_TARGET_VARIANT_OS, PP_BUILTIN_IS_TARGET_VARIANT_OS, true },
+            { C_NAME_IS_TARGET_VARIANT_ENVIRONMENT, PP_BUILTIN_IS_TARGET_VARIANT_ENVIRONMENT, true },
             { C_NAME_BUILDING_MODULE, PP_BUILTIN_BUILDING_MODULE, true },
         };
         for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(builtins); i += 1)
@@ -6966,9 +9253,9 @@ static void pp_release(Preprocessor* pp)
 
 static void pp_resolve_keywords(Preprocessor* pp);
 
-// Preprocesses the main file: the predefines (or PPOptions.predefines_path's), the command line's -D, -U and -include,
-// then the file. The output is pp->output, with keywords' kinds. Returns false if there were errors.
-static bool pp_run(Preprocessor* pp, const char* main_path)
+// Runs what comes before the main file: the predefines (or PPOptions.predefines_path's), then the command line's -D,
+// -U and -include. Returns false if the predefines can't be read.
+static bool pp_run_prelude(Preprocessor* pp)
 {
     bool result = true;
     // The predefines.
@@ -7044,20 +9331,61 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
             pp_run_file(pp, includes);
         }
     }
-    // The main file.
+    return result;
+}
+
+// Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
+static bool pp_run_main(Preprocessor* pp, uint32_t file)
+{
+    pp->main_file = file;
+    pp->include_depth = 0;
+    pp_run_file(pp, file);
+    pp_resolve_keywords(pp);
+    return pp->errors == 0 && !pp->fatal;
+}
+
+// Preprocesses the main file: the prelude (pp_run_prelude), then the file. The output is pp->output, with keywords'
+// kinds. Returns false if there were errors.
+static bool pp_run(Preprocessor* pp, const char* main_path)
+{
+    bool result = pp_run_prelude(pp);
     const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
     if (file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE)
     {
-        pp->main_file = file;
-        pp->include_depth = 0;
-        pp_run_file(pp, file);
+        result = pp_run_main(pp, file);
     }
-    else if (!pp->fatal)
+    else
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "no such file: '%s'", main_path);
+        if (!pp->fatal)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "no such file: '%s'", main_path);
+        }
+        pp_resolve_keywords(pp);
+        result = false;
     }
-    pp_resolve_keywords(pp);
-    return pp->errors == 0 && !pp->fatal;
+    return result;
+}
+
+// pp_run for a main file in memory, `length` bytes at `bytes`, named `name` (which must outlive the run), as clang names
+// its standard input <stdin>: test-preprocessor's fuzz runs give it the text clang reads.
+static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length)
+{
+    bool result = pp_run_prelude(pp);
+    const uint32_t file = result && !pp->fatal ? pp_virtual_file(pp, name, (const char*)bytes, length, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
+    if (file != BUSTER_PP_NONE)
+    {
+        result = pp_run_main(pp, file);
+    }
+    else
+    {
+        if (!pp->fatal)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory for %s", name);
+        }
+        pp_resolve_keywords(pp);
+        result = false;
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -7493,6 +9821,7 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
     uint8_t previous_kind = 0;
     bool line_start = true;
     bool force_line = false;
+    uint32_t pragma = BUSTER_PP_PRAGMA_OUTSIDE;
     PPMarkers marked;
     bool result = buffer != 0 && pp_markers_initialize(pp, &marked, scratch.arena) && (!markers || pp_print_start(pp, &marked));
     if (result && markers)
@@ -7503,6 +9832,8 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
     {
         const uint8_t kind = out->kinds[i];
         const uint8_t flags = out->flags[i];
+        const bool written = pp_spelled_as_written(pragma, kind);
+        pragma = pp_pragma_state(pp, pragma, kind, out->locations[i]);
         if (kind == BUSTER_PP_KIND_PRAGMA_END)
         {
             force_line = true;
@@ -7534,10 +9865,14 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
             buffer = arena_push(scratch.arena, buffer_size, 1);
             result = buffer != 0;
         }
+        const uint64_t mark = scratch.arena->length;
+        const uint8_t* spelling = 0;
+        const uint32_t length = !result ? 0
+                                : written ? pp_written_spelling(pp, out->values[i], out->locations[i], scratch.arena, &spelling)
+                                          : pp_spelling(pp, kind, out->values[i], out->locations[i], buffer, &spelling);
+        result = result && spelling != 0;
         if (result)
         {
-            const uint8_t* spelling;
-            const uint32_t length = pp_spelling(pp, kind, out->values[i], out->locations[i], buffer, &spelling);
             if (!line_start && length != 0 && ((flags & BUSTER_PP_SPACE) || pp_needs_separation(previous_last, previous_kind, spelling[0])))
             {
                 fputc(' ', stream);
@@ -7547,6 +9882,7 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
             previous_kind = kind;
             line_start = false;
         }
+        arena_pop_to(scratch.arena, mark);
     }
     if (!line_start)
     {
@@ -7670,6 +10006,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     const uint32_t* record_of = pp->table->record_of;
     const uint32_t* length_of = pp->table->length_of;
     const bool trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
+    const __m512i hash_location = _mm512_set1_epi32((int)pp->hash_location);
     Scratch scratch = scratch_begin(0);
     const uint32_t* directory = pp_build_directory(pp, scratch.arena);
     const uint64_t capacity = 1ull << 20;
@@ -7695,6 +10032,9 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     // The last character and kind of the token before the chunk, for its first token's space.
     uint8_t previous_last = 0;
     uint8_t previous_kind = 0;
+    // Whether the chunk starts inside a pragma line (after its '#'), and with its name (its '#' ended the last chunk).
+    uint64_t pragma_inside = 0;
+    uint64_t pragma_name = 0;
     const __m512i after_low = _mm512_load_si512(pp_after_classes);
     const __m512i after_high = _mm512_load_si512(pp_after_classes + 64);
     const __m512i before_low = _mm512_load_si512(pp_before_classes);
@@ -7705,6 +10045,26 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     {
         const uint32_t available = count - c < 64 ? count - c : 64;
         const __mmask64 valid = _bzhi_u64(~0ull, available);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(valid, out_kinds + c);
+        // 0. The identifiers of pragma lines after their names, which -E spells as written (pp_spelled_as_written): a
+        // line from its '#' (a hash at the scratch "#") to its end, which alternate, is the bits [start, end) of ends
+        // less starts, less one when the chunk starts inside a line, whose end comes first.
+        uint64_t pragma_starts = 0;
+        for (uint32_t q = 0; q < 4; q += 1)
+        {
+            const __mmask16 lanes = (__mmask16)(valid >> (16 * q));
+            const __m512i locations = _mm512_maskz_loadu_epi32(lanes, out_locations + c + 16 * q);
+            pragma_starts |= (uint64_t)_mm512_mask_cmpeq_epi32_mask(lanes, locations, hash_location) << (16 * q);
+        }
+        pragma_starts &= _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_HASH));
+        const uint64_t pragma_ends = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END));
+        const uint64_t pragma_lines = pragma_ends - pragma_starts - pragma_inside;
+        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER)) |
+                                     _mm512_mask_cmplt_epu8_mask(valid, _mm512_sub_epi8(kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_KEYWORD)),
+                                                                 _mm512_set1_epi8(C_NAME_KEYWORD_COUNT));
+        const uint64_t written = pragma_lines & ~pragma_starts & ~((pragma_starts << 1) | pragma_name) & identifiers & valid;
+        pragma_inside = (pragma_lines >> (available - 1)) & 1;
+        pragma_name = pragma_starts >> 63;
         // 1. Spellings: an identifier's from the intern table, any other token's bytes at its location. (A branch-free
         // version, which looked up both and picked one, was 1-2% slower on the 9700X: the location lookups it adds for
         // identifiers cost more than the branch's mispredictions.)
@@ -7717,7 +10077,14 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
             const uint32_t location = out_locations[i];
             const uint8_t* spelling = 0;
             uint32_t length = 0;
-            if (kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT))
+            if (BUSTER_UNLIKELY((written >> k) & 1))
+            {
+                length = pp_written_spelling(pp, value, location, scratch.arena, &spelling);
+                result = spelling != 0;
+                spelling = result ? spelling : (const uint8_t*)"";
+                length = result ? length : 0;
+            }
+            else if (kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT))
             {
                 spelling = records + record_of[value];
                 length = length_of[value];
@@ -7754,11 +10121,9 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
         // 2. Spaces, for the 64 tokens at once: line starts (a token that starts a line, or follows a pragma's end, or
         // is the output's first), whitespace, and the separation table on the class of the last character before and
         // of the first character after.
-        const __m512i kinds = _mm512_maskz_loadu_epi8(valid, out_kinds + c);
         const __m512i flags = _mm512_maskz_loadu_epi8(valid, out_flags + c);
         const __m512i first_bytes = _mm512_maskz_loadu_epi8(valid, firsts);
         const __m512i last_bytes = _mm512_maskz_loadu_epi8(valid, lasts);
-        const uint64_t pragma_ends = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END));
         const uint64_t starts = _mm512_mask_test_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_START_OF_LINE));
         const uint64_t spaces = _mm512_mask_test_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_SPACE));
         const __m512i after = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(after_low, first_bytes, after_high), _mm512_movepi8_mask(first_bytes),
@@ -7948,6 +10313,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             options->no_standard_includes = true;
         }
+        else if (strcmp(argument, "-undef") == 0)
+        {
+            options->undefine = true;
+        }
         else if (strcmp(argument, "--scalar") == 0)
         {
             options->scalar = true;
@@ -8064,7 +10433,7 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
-                        "[-include file] [-std=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
+                        "[-include file] [-std=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [-undef] [--predefines file] [--scalar] file\n");
     }
     else
     {
