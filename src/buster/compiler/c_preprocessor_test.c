@@ -756,6 +756,10 @@ struct PPTestFile
     const char* text;
     // The text's length, for one with zero bytes in it (an #embed's resource); 0 for strlen's.
     uint32_t length;
+    // A link instead of a text: a symbolic one to `link` as it is written, or (`hard`) a hard one to the case's file
+    // `link`, which comes earlier.
+    const char* link;
+    bool hard;
 };
 
 typedef struct PPTestCase PPTestCase;
@@ -831,6 +835,29 @@ static const PPTestFile pp_test_files_embed_directories[] = {
     { "sub/inc.h", "#embed \"y.bin\"\n" },
     { "sub/late.h", "\n// first\n#embed \"y.bin\"\n" },
     { "sub/y.bin", "Y" },
+    { 0, 0 },
+};
+
+// #119's header names and search: names with "//", "/*...*/" and a backslash written out, the file a comment that runs
+// on to the next line makes a name of ("a b.h"), a computed name's file, #include_next through three directories, a
+// header that includes itself, and one file reached through a symbolic link and a hard link, with #pragma once and
+// with a guard.
+static const PPTestFile pp_test_files_includes[] = {
+    { "a/b.h", "ab\n" },
+    { "a/*x*/b.h", "axb\n" },
+    { "a\\b.h", "backslash\n" },
+    { "a b.h", "joined\n" },
+    { "c.h", "computed\n" },
+    { "d1/n.h", "one\n#include_next <n.h>\n" },
+    { "d2/n.h", "two\n#include_next <n.h>\n" },
+    { "d3/n.h", "three\n" },
+    { "self.h", "#include \"self.h\"\nx\n" },
+    { "real.h", "#pragma once\nonce\n" },
+    { .path = "sym.h", .link = "real.h" },
+    { .path = "hard.h", .link = "real.h", .hard = true },
+    { "guarded.h", "#ifndef G\n#define G\nguarded\n#endif\n" },
+    { .path = "gsym.h", .link = "guarded.h" },
+    { "local.h", "local\n" },
     { 0, 0 },
 };
 
@@ -1349,6 +1376,87 @@ static const PPTestCase pp_test_cases[] = {
         .expected = "limits offsets others",
         .files = pp_test_files_embed,
     },
+    // #119's done-when checks, against clang 23: header names written out ("//" and "/*...*/" are part of the name,
+    // and a comment that runs on to the next line makes clang join the line's tokens), computed ones, #include_next
+    // through three directories, an inactive group's includes, a cycle stopped at clang's depth limit (an error, after
+    // which the file isn't entered again), one record through links, clang's recoveries (an angled name found as a
+    // quoted one, a name found without what it starts and ends with besides letters and digits), and the diagnostics'
+    // places.
+    {
+        .name = "#119: header names written out, a comment that runs on to the next line among them",
+        .source = "#include <a//b.h>\n#include <a/*x*/b.h>\n#include \"a\\b.h\"\n#include <a/*x\n*/b.h>\n",
+        .standard = "c17",
+        .expected = "ab axb backslash joined",
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: computed names, joined as clang joins them",
+        .source = "#define H <c.h>\n#include H\n#define Q \"c.h\"\n#include Q\n#define L <\n#define R >\n#include L "
+                  "c.h R\n",
+        .standard = "c17",
+        .expected = "computed computed computed",
+        .fails = true,
+        .warnings = 1,
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: #include_next through three directories",
+        .source = "#include <n.h>\n",
+        .standard = "c17",
+        .expected = "one two three",
+        .options = "-I%d/d1 -I%d/d2 -I%d/d3",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: an inactive group's includes aren't looked for",
+        .source = "#if 0\n#include \"missing.h\"\n#include <missing.h>\n#elif 0\n#include \"missing2.h\"\n#else\n"
+                  "#endif\nok\n",
+        .standard = "c17",
+        .expected = "ok",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: an include cycle stops at clang's depth limit",
+        .source = "#include \"self.h\"\nend\n",
+        .standard = "c17",
+        .expected = "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
+                    "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
+                    "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
+                    "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
+                    "x x x end",
+        .fails = true,
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: one file through a symbolic link and a hard link",
+        .source = "#include \"real.h\"\n#include \"sym.h\"\n#include \"hard.h\"\n#include \"guarded.h\"\n#include "
+                  "\"gsym.h\"\nend\n",
+        .standard = "c17",
+        .expected = "once guarded end",
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: clang's recoveries from a name not found",
+        .source = "#include <local.h>\na\n#include \"local.h \"\nb\n#include \" local.h\"\nc\n#include \"local.h.\"\n"
+                  "d\n",
+        .standard = "c17",
+        .expected = "local a local b local c local d",
+        .fails = true,
+        .warnings = 2,
+        .files = pp_test_files_includes,
+    },
+    {
+        .name = "#119: an include's diagnostics, at clang's places",
+        .source = "#include\n#include 1\n#include \"local.h\" x\n#include <local.h\n#include \"\"\n#include <>\nz\n",
+        .standard = "c17",
+        .expected = "local z",
+        .fails = true,
+        .warnings = 1,
+        .options = "-I%d",
+        .files = pp_test_files_includes,
+    },
 };
 
 // Writes `length` bytes of `text` to a file, or all of it up to its zero byte when `length` is 0; returns whether it could.
@@ -1370,8 +1478,8 @@ static bool pp_test_write_file(const char* path, const char* text)
     return pp_test_write_bytes(path, text, 0);
 }
 
-// Writes a case's files into its directory (other.h, and the others with their directories); returns the main file's
-// path (in `path`).
+// Writes a case's files into its directory (other.h, and the others with their directories, or links); returns the
+// main file's path (in `path`).
 static bool pp_test_write_case(const PPTestCase* test, const char* directory, char* path, uint32_t capacity)
 {
     snprintf(path, capacity, "%s/case.c", directory);
@@ -1384,19 +1492,29 @@ static bool pp_test_write_case(const PPTestCase* test, const char* directory, ch
     }
     for (uint32_t i = 0; result && test->files != 0 && test->files[i].path != 0; i += 1)
     {
-        const char* slash = strchr(test->files[i].path, '/');
-        if (slash != 0)
+        const PPTestFile* file = &test->files[i];
+        // Each directory on the way, outermost first.
+        for (const char* slash = strchr(file->path, '/'); slash != 0; slash = strchr(slash + 1, '/'))
         {
-            snprintf(other, sizeof(other), "%s/%.*s", directory, (int)(slash - test->files[i].path), test->files[i].path);
+            snprintf(other, sizeof(other), "%s/%.*s", directory, (int)(slash - file->path), file->path);
             mkdir(other, 0700);
         }
-        snprintf(other, sizeof(other), "%s/%s", directory, test->files[i].path);
-        result = pp_test_write_bytes(other, test->files[i].text, test->files[i].length);
+        snprintf(other, sizeof(other), "%s/%s", directory, file->path);
+        if (file->link != 0 && file->hard)
+        {
+            char target[4096];
+            snprintf(target, sizeof(target), "%s/%s", directory, file->link);
+            result = link(target, other) == 0;
+        }
+        else
+        {
+            result = file->link != 0 ? symlink(file->link, other) == 0 : pp_test_write_bytes(other, file->text, file->length);
+        }
     }
     return result;
 }
 
-// Removes the files pp_test_write_case wrote besides case.c, and their directories.
+// Removes the files pp_test_write_case wrote besides case.c, and their directories, innermost first.
 static void pp_test_remove_case(const PPTestCase* test, const char* directory)
 {
     char path[4096];
@@ -1406,11 +1524,17 @@ static void pp_test_remove_case(const PPTestCase* test, const char* directory)
     {
         snprintf(path, sizeof(path), "%s/%s", directory, test->files[i].path);
         unlink(path);
-        const char* slash = strchr(test->files[i].path, '/');
-        if (slash != 0)
+    }
+    for (uint32_t i = 0; test->files != 0 && test->files[i].path != 0; i += 1)
+    {
+        const char* file = test->files[i].path;
+        for (uint32_t end = (uint32_t)strlen(file); end > 0; end -= 1)
         {
-            snprintf(path, sizeof(path), "%s/%.*s", directory, (int)(slash - test->files[i].path), test->files[i].path);
-            rmdir(path);
+            if (file[end - 1] == '/')
+            {
+                snprintf(path, sizeof(path), "%s/%.*s", directory, (int)(end - 1), file);
+                rmdir(path);
+            }
         }
     }
 }

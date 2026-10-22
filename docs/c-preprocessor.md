@@ -443,6 +443,27 @@ arenas. Popping a context gives its tokens back when they are on top.
     repeated `-I` would make `#include_next` find the same file again.
   - A header name is read without its line splices, whether it is written out,
     comes from a macro, or is `__has_include`'s operand.
+  - `<...>` is read from the source up to the first `>` on the line, so `//`
+    and `/*...*/` there are part of the name, as in clang: `<a//b.h>` and
+    `<a/*x*/b.h>` (#119). Without a `>` on the line, the line's tokens up to a
+    `>` make the name, as clang's `LexHeaderName` joins them: a space for each
+    one that had whitespace before it, the `>` too. So with a comment that runs
+    on to the next line, `<a/*x` then `*/b.h>` names `a b.h`, and `< c.h >`
+    from macros names ` c.h `.
+  - The checks and their diagnostics go in clang's order
+    (`HandleHeaderIncludeOrImport`):
+    - an empty name is an error;
+    - a name that ends in a space or a dot gets a nonportable-path warning;
+    - a file not found is fatal, unless one of clang's two recoveries finds it.
+      Each is an error that still includes the file: an angled name found as a
+      quoted one, and a name found once the characters other than letters and
+      digits at its ends are dropped ("did you mean");
+    - an `#include` in the 199th file below the main one is an error, as in
+      clang, and the run goes on. Then a file entered before isn't entered
+      again, which stops a cycle.
+
+    Each diagnostic is at the name's token (for a name a macro made, at the
+    expansion, with its notes), or at the line's end for what the line lacks.
   - `__has_include` also works inside a macro's argument in a `#if` line.
 - **Pragmas** are acted on when they are `once`, `GCC system_header`,
   `push_macro`/`pop_macro` and `GCC poison`. Every other pragma, and `#ident`,

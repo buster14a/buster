@@ -897,6 +897,8 @@ struct Preprocessor
     uint32_t one_location;
     uint32_t hash_location;
     uint32_t include_depth;
+    // An #include reached the depth limit: a file entered before isn't entered again (pp_enter_file).
+    bool include_limit_reached;
     uint32_t main_file;
     char date[16];
     char time[16];
@@ -5222,7 +5224,8 @@ static uint32_t pp_current_file(const Preprocessor* pp)
 }
 
 // A header name from tokens [begin, end) of a stack: a string literal's contents, or the spellings between '<' and '>'
-// (with a space where whitespace was, as clang joins a header name that macros made). Returns false if they are neither.
+// with a space where whitespace was before each token after the '<', the '>' too, as clang joins a header name that
+// macros made (Preprocessor::LexHeaderName): `< c.h >` is " c.h ". Returns false if they are neither.
 static bool pp_header_name(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint8_t* name, uint32_t capacity, uint32_t* length, bool* angled)
 {
     bool result = false;
@@ -5246,22 +5249,24 @@ static bool pp_header_name(Preprocessor* pp, const PPTokens* tokens, uint32_t be
     else if (begin < end && tokens->kinds[begin] == C_TOKEN_LESS && tokens->kinds[end - 1] == C_TOKEN_GREATER)
     {
         result = true;
-        for (uint32_t i = begin + 1; result && i + 1 < end; i += 1)
+        for (uint32_t i = begin + 1; result && i < end; i += 1)
         {
             uint8_t buffer[64];
             const uint8_t* spelling;
-            const uint32_t spelled = tokens->kinds[i] == C_TOKEN_RAW_IDENTIFIER ? intern_length(pp->table, tokens->values[i]) : tokens->values[i] - tokens->locations[i];
-            const bool space = i > begin + 1 && (tokens->flags[i] & BUSTER_PP_SPACE);
+            // The '>' gives only its space.
+            const bool closing = i + 1 == end;
+            const uint32_t spelled = closing ? 0 : tokens->kinds[i] == C_TOKEN_RAW_IDENTIFIER ? intern_length(pp->table, tokens->values[i]) : tokens->values[i] - tokens->locations[i];
+            const bool space = (tokens->flags[i] & BUSTER_PP_SPACE) != 0;
             result = spelled < sizeof(buffer) && *length + spelled + 1 < capacity;
             if (result)
             {
-                const uint32_t n = pp_spelling(pp, tokens->kinds[i], tokens->values[i], tokens->locations[i], buffer, &spelling);
+                const uint32_t n = closing ? 0 : pp_spelling(pp, tokens->kinds[i], tokens->values[i], tokens->locations[i], buffer, &spelling);
                 if (space)
                 {
                     name[*length] = ' ';
                     *length += 1;
                 }
-                memcpy(name + *length, spelling, n);
+                memcpy(name + *length, closing ? (const uint8_t*)"" : spelling, n);
                 *length += n;
             }
         }
@@ -6478,17 +6483,24 @@ static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t be
 
 // Enters a file (prepared on first use) included at `include_location` from range `parent`, unless its guard is defined
 // or #pragma once read it. The inclusion is as much a system header as the file and as the includer there are, as
-// clang has it (HandleHeaderIncludeOrImport): a file included from a system header is one too.
-static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index)
+// clang has it (HandleHeaderIncludeOrImport): a file included from a system header is one too. As in clang, an
+// #include in the 199th file below the main one is an error (at the name, `name_location`), after which a file
+// entered before isn't entered again: the limit is usually a cycle's.
+static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index, uint32_t name_location)
 {
     PPFileData* data = &pp->datas[pp->files[file].data];
     const bool skipped = data->prepared && (data->once || (data->guard != 0 && pp_is_defined(pp, data->guard)));
     pp->statistics.skipped_includes += skipped && pp->options.timing;
-    if (pp->include_depth >= BUSTER_PP_MAX_INCLUDE_DEPTH)
+    if (skipped || (pp->include_limit_reached && data->prepared))
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, include_location, "#include nested too deeply");
+        // Not entered.
     }
-    else if (!skipped && (data->prepared || pp_prepare_data(pp, data, pp->files[file].path)))
+    else if (pp->include_depth + 1 >= BUSTER_PP_MAX_INCLUDE_DEPTH)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "#include nested too deeply");
+        pp->include_limit_reached = true;
+    }
+    else if (data->prepared || pp_prepare_data(pp, data, pp->files[file].path))
     {
         const uint32_t range = pp_add_range(pp, data->length, file, data->bytes, parent, include_location);
         PPContext* context = range != BUSTER_PP_NONE ? pp_push_context(pp, BUSTER_PP_CONTEXT_FILE) : 0;
@@ -6725,23 +6737,37 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
     }
 }
 
-// The file a #include, #include_next or #import (`kind`) in the context's file names: entered, unless #import read it.
-static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, const uint8_t* name, uint32_t length, bool angled, uint32_t location)
+// Whether a byte is a letter or a digit (ASCII), as clang's typo correction of a header name reads it.
+static bool pp_alphanumeric(uint8_t c)
 {
-    const bool next = kind == PP_DIRECTIVE_INCLUDE_NEXT && pp->include_depth != 0;
-    uint32_t found_in;
-    const uint32_t file = pp_find_include(pp, name, length, angled, next, context->file, context->search_index, &found_in);
-    if (file == BUSTER_PP_NONE)
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
+
+// The file a #include, #include_next or #import (`kind`) at `location` in the context's file names, written at
+// `name_location` (with `name_origin`, the history of a name a macro made): entered, unless #import read it. As
+// clang's HandleHeaderIncludeOrImport goes: an empty name is an error; a name that ends in a space or a dot is
+// nonportable; an #include in an assume_nonnull or arc_cf_code_audited region is an error, which ends the region. A
+// file not found is fatal, but for clang's recoveries, which are errors that include the file: an angled name found as
+// a quoted one, and a name found without the characters other than letters and digits it starts and ends with.
+static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, const uint8_t* name, uint32_t length, bool angled, uint32_t location,
+                            uint32_t name_location, uint32_t name_origin)
+{
+    const uint32_t saved_origin = pp->diagnostic_origin;
+    pp->diagnostic_origin = name_origin;
+    uint32_t file = BUSTER_PP_NONE;
+    uint32_t found_in = BUSTER_PP_NONE;
+    if (length == 0)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, location, "'%.*s' file not found", (int)length, (const char*)name);
-    }
-    else if (kind == PP_DIRECTIVE_IMPORT && pp->datas[pp->files[file].data].prepared && pp->datas[pp->files[file].data].once)
-    {
-        // Already imported.
+        pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "empty filename");
     }
     else
     {
-        // An #include inside an assume_nonnull or arc_cf_code_audited region is an error, which ends it.
+        if (name[length - 1] == ' ' || name[length - 1] == '.')
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, name_location, "non-portable path to file '%.*s'; specified path contains trailing %s", (int)length, (const char*)name,
+                        name[length - 1] == ' ' ? "whitespace" : "dot");
+        }
+        pp->diagnostic_origin = 0;
         for (uint32_t region = 0; region < BUSTER_PP_REGION_UNSAFE_BUFFER; region += 1)
         {
             if (pp->region_locations[region] != 0)
@@ -6750,7 +6776,49 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
                 pp->region_locations[region] = 0;
             }
         }
-        pp_enter_file(pp, file, context->range, location, found_in);
+        pp->diagnostic_origin = name_origin;
+        const bool next = kind == PP_DIRECTIVE_INCLUDE_NEXT && pp->include_depth != 0;
+        file = pp_find_include(pp, name, length, angled, next, context->file, context->search_index, &found_in);
+        if (file == BUSTER_PP_NONE && angled)
+        {
+            file = pp_find_include(pp, name, length, false, next, context->file, context->search_index, &found_in);
+            if (file != BUSTER_PP_NONE)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "'%.*s' file not found with <angled> include; use \"quotes\" instead", (int)length, (const char*)name);
+            }
+        }
+        uint32_t first = 0;
+        uint32_t last = length;
+        while (first < last && !pp_alphanumeric(name[first]))
+        {
+            first += 1;
+        }
+        while (last > first && !pp_alphanumeric(name[last - 1]))
+        {
+            last -= 1;
+        }
+        if (file == BUSTER_PP_NONE && last - first != length)
+        {
+            file = pp_find_include(pp, name + first, last - first, angled, next, context->file, context->search_index, &found_in);
+            if (file != BUSTER_PP_NONE)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "'%.*s' file not found, did you mean '%.*s'?", (int)length, (const char*)name, (int)(last - first),
+                            (const char*)name + first);
+            }
+        }
+        if (file == BUSTER_PP_NONE)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, name_location, "'%.*s' file not found", (int)length, (const char*)name);
+        }
+    }
+    pp->diagnostic_origin = saved_origin;
+    if (file == BUSTER_PP_NONE || (kind == PP_DIRECTIVE_IMPORT && pp->datas[pp->files[file].data].prepared && pp->datas[pp->files[file].data].once))
+    {
+        // Not found, or already imported.
+    }
+    else
+    {
+        pp_enter_file(pp, file, context->range, location, found_in, name_location);
         if (kind == PP_DIRECTIVE_IMPORT)
         {
             pp->datas[pp->files[file].data].once = true;
@@ -6764,52 +6832,79 @@ static const char* pp_include_name(uint8_t kind)
     return kind == PP_DIRECTIVE_INCLUDE_NEXT ? "include_next" : kind == PP_DIRECTIVE_IMPORT ? "import" : "include";
 }
 
+// The end of a computed header name in tokens [begin, end) of a stack: past a string literal, or past the first '>'
+// after a '<' (`*unclosed` when there is none, which clang reports as an expected '>'), else `begin`.
+static uint32_t pp_computed_name_end(const PPTokens* tokens, uint32_t begin, uint32_t end, bool* unclosed)
+{
+    uint32_t stop = begin;
+    *unclosed = false;
+    if (stop < end && tokens->kinds[stop] == C_TOKEN_STRING_LITERAL)
+    {
+        stop += 1;
+    }
+    else if (stop < end && tokens->kinds[stop] == C_TOKEN_LESS)
+    {
+        while (stop < end && tokens->kinds[stop] != C_TOKEN_GREATER)
+        {
+            stop += 1;
+        }
+        *unclosed = stop == end;
+        stop += stop < end;
+    }
+    return stop;
+}
+
 // The barrier over a computed #include's line ended: the capture is the line expanded, a string literal or <...> (to
-// the first '>', as clang reads it), and tokens after it are a warning.
+// the first '>', as clang reads it), and tokens after it are a warning. The diagnostics are at the tokens (with their
+// histories), or at the line's end for what it lacks, as clang's are.
 static void pp_finish_include(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
     const PPTokens* tokens = &pp->captures;
+    PPContext* context = &pp->contexts[capture.context];
+    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const uint32_t line_end = pp_line_end_location(pp, data, pp->ranges[context->range].base, data->directive_end[capture.directive] - 1);
     uint8_t name[PATH_MAX];
     uint32_t length = 0;
     bool angled = false;
-    uint32_t stop = capture.begin;
-    if (stop < tokens->count && tokens->kinds[stop] == C_TOKEN_STRING_LITERAL)
-    {
-        stop += 1;
-    }
-    else if (stop < tokens->count && tokens->kinds[stop] == C_TOKEN_LESS)
-    {
-        stop += 1;
-        while (stop < tokens->count && tokens->kinds[stop] != C_TOKEN_GREATER)
-        {
-            stop += 1;
-        }
-        stop += stop < tokens->count;
-    }
-    const bool valid = pp_header_name(pp, tokens, capture.begin, stop, name, sizeof(name), &length, &angled);
-    const bool extra = stop < tokens->count;
+    bool unclosed;
+    const uint32_t stop = pp_computed_name_end(tokens, capture.begin, tokens->count, &unclosed);
+    const bool valid = !unclosed && pp_header_name(pp, tokens, capture.begin, stop, name, sizeof(name), &length, &angled);
+    const bool extra = valid && stop < tokens->count;
+    const uint32_t name_location = capture.begin < tokens->count ? tokens->locations[capture.begin] : line_end;
+    const uint32_t name_origin = capture.begin < tokens->count && tokens->origins != 0 ? tokens->origins[capture.begin] : 0;
+    const uint32_t extra_location = extra ? tokens->locations[stop] : 0;
+    const uint32_t extra_origin = extra && tokens->origins != 0 ? tokens->origins[stop] : 0;
     pp->capture_count -= 1;
     pp->captures.count = capture.begin;
     pp->arguments.count = capture.arguments_begin;
-    if (!valid)
+    const uint32_t saved_origin = pp->diagnostic_origin;
+    if (unclosed)
     {
-        pp_diagnose(pp, PP_SEVERITY_ERROR, capture.location, "expected \"FILENAME\" or <FILENAME>");
+        pp_diagnose(pp, PP_SEVERITY_ERROR, line_end, "expected '>'");
+    }
+    else if (!valid)
+    {
+        pp->diagnostic_origin = name_origin;
+        pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "expected \"FILENAME\" or <FILENAME>");
     }
     else
     {
         if (extra)
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, capture.location, "extra tokens at end of #%s directive", pp_include_name(capture.directive_kind));
+            pp->diagnostic_origin = extra_origin;
+            pp_diagnose(pp, PP_SEVERITY_WARNING, extra_location, "extra tokens at end of #%s directive", pp_include_name(capture.directive_kind));
         }
-        pp_include_file(pp, &pp->contexts[capture.context], capture.directive_kind, name, length, angled, capture.location);
+        pp->diagnostic_origin = saved_origin;
+        pp_include_file(pp, context, capture.directive_kind, name, length, angled, capture.location, name_location, name_origin);
     }
+    pp->diagnostic_origin = saved_origin;
 }
 
 // A header name as it is written at token `first` of a directive's line [.., end): <...>, read from the source up to the
-// first '>' on the line, or a string literal, without line splices. `*literal` says whether the token is one of those (a
-// '<' or a string literal), and `*after` gets the first token past the name. Returns whether it is a name: false also for
-// a '<' without a '>' or a literal that isn't a plain string. A computed name is any other token.
+// first '>' on the line, or a string literal, without line splices. `*literal` says whether the token is one of those
+// (a '<' with its '>' on the line, or a string literal), and `*after` gets the first token past the name. Returns
+// whether it is a name: false also for a literal that isn't a plain string. A computed name is any other token.
 static bool pp_read_header_name(Preprocessor* pp, const PPFileData* data, uint32_t first, uint32_t end, uint8_t* name, uint32_t capacity, uint32_t* length,
                                 bool* angled, bool* literal, uint32_t* after)
 {
@@ -6846,9 +6941,11 @@ static bool pp_read_header_name(Preprocessor* pp, const PPFileData* data, uint32
             }
             p += size != 0 ? size : 1;
         }
+        // Without its '>' on the line, the name is the line's tokens up to a '>' (clang's LexHeaderName joins them):
+        // with a comment that runs on to the next line, `<a/*x` then `*/b.h>` is `a b.h`.
         valid = closed;
         *angled = valid;
-        *literal = true;
+        *literal = closed;
         // The first token at or after the '>''s end.
         uint32_t next = first + 1;
         while (next < end && data->starts[next] < p)
@@ -6897,6 +6994,8 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     const uint32_t first = hash + 2;
     const bool valid = pp_read_header_name(pp, data, first, end, name, sizeof(name), &length, &angled, &literal, &after);
     const bool extra = valid && after < end;
+    // Where clang reports the name: its token, or the line's end without one.
+    const uint32_t name_location = first < end ? base + data->starts[first] : pp_line_end_location(pp, data, base, end - 1);
     if (!literal && first < end)
     {
         // A computed include: the line expanded, then a string literal or <...> from its tokens, and one token more,
@@ -6916,15 +7015,15 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     }
     if (!valid && !started)
     {
-        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "expected \"FILENAME\" or <FILENAME>");
+        pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "expected \"FILENAME\" or <FILENAME>");
     }
     else if (valid)
     {
         if (extra)
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #%s directive", pp_include_name(kind));
+            pp_diagnose(pp, PP_SEVERITY_WARNING, base + data->starts[after], "extra tokens at end of #%s directive", pp_include_name(kind));
         }
-        pp_include_file(pp, context, kind, name, length, angled, location);
+        pp_include_file(pp, context, kind, name, length, angled, location, name_location, 0);
     }
 }
 
@@ -9455,20 +9554,14 @@ static void pp_embed_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
     bool valid = literal;
     if (!literal)
     {
-        if (i < end && tokens->kinds[i] == C_TOKEN_STRING_LITERAL)
+        bool unclosed;
+        i = pp_computed_name_end(tokens, begin, end, &unclosed);
+        valid = !unclosed && i > begin && pp_header_name(pp, tokens, begin, i, name, PATH_MAX, &length, &angled);
+        if (unclosed)
         {
-            i += 1;
+            pp_diagnose(pp, PP_SEVERITY_ERROR, line_end, "expected '>'");
         }
-        else if (i < end && tokens->kinds[i] == C_TOKEN_LESS)
-        {
-            while (i < end && tokens->kinds[i] != C_TOKEN_GREATER)
-            {
-                i += 1;
-            }
-            i += i < end;
-        }
-        valid = i > begin && pp_header_name(pp, tokens, begin, i, name, PATH_MAX, &length, &angled);
-        if (!valid)
+        else if (!valid)
         {
             pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "expected \"FILENAME\" or <FILENAME>");
         }
@@ -10685,7 +10778,7 @@ static uint32_t pp_virtual_file(Preprocessor* pp, const char* name, const char* 
 static void pp_run_file(Preprocessor* pp, uint32_t file)
 {
     const uint32_t depth = pp->context_count;
-    pp_enter_file(pp, file, BUSTER_PP_NONE, 0, BUSTER_PP_NONE);
+    pp_enter_file(pp, file, BUSTER_PP_NONE, 0, BUSTER_PP_NONE, 0);
     pp_run_contexts(pp, depth);
     // A stream (an attribute query's operand) reads on past an included file's end, but not past this one's.
     while (!pp->fatal && pp->stream_count != 0)
