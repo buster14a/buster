@@ -1208,8 +1208,10 @@ elements of no size (`abi_test_empty_arrays`), on which clang 23 crashes now
 and then: `getFPTypeAtOffset` and `GetINTEGERTypeAtOffset` divide an offset
 by such an element's LLVM size, 0, where they look into it, as
 `GetSSETypeAtOffset` does after the `_Float16` in `struct { long l; _Float16
-h; struct {} e[1]; }` passed by value. They make no vector of bools either
-(see "Next steps"). The unnamed arguments leave out the types the default
+h; struct {} e[1]; }` passed by value. Their signatures pass no type with an
+SSE low eightbyte and bit-fields in an INTEGER high one
+(`abi_test_bit_field_bytes`), whose access units the module doesn't work out
+yet, and they make no vector of bools (see "Next steps" for both). The unnamed arguments leave out the types the default
 argument promotions change, `nullptr_t` and `_Atomic` ones, types wider than
 16 bytes that are SSE, SSEUP as unnamed arguments, types of no size, whose
 calls and `va_arg`s clang passes differently (see "va_arg"), and
@@ -1309,6 +1311,20 @@ for `assign-simple`.
   the module passes it in one ymm or zmm register. LLVM passes it as its
   elements: `<2 x x86_fp80>` in two 16-byte stack slots, `<2 x fp128>` in
   xmm0 and xmm1. Each needs its rule from probes, or `UNSUPPORTED`.
+- **Bit-fields' access units.** `abi_layout` and the parts take a run of
+  bit-fields within an eightbyte as its first bit-field's type, at its type's
+  offset, where clang's `accumulateBitFields` makes access units of the run's
+  bytes (merged up to a register while the next one's integer fits before
+  the next member with storage, else an array of bytes), and the struct's
+  LLVM alignment from them. A unit decides one thing the module gives: in an
+  INTEGER high eightbyte, by its alignment, whether a narrow SSE low part
+  widens (`LOW_GENERAL`). `struct { _Complex _Float16 h; _Complex long z[0];
+  _BitInt(8) a : 3; unsigned char b : 8; }` is `(i64, i16)` to clang, a unit
+  of two bytes after the `<2 x half>`, and the module passes its low part in
+  xmm0, as it takes an `i8` with data after it. clang's cross-check found it
+  at seeds 50, 82 and 98 of 100, and leaves such types out until the module
+  works the units out (in `abi_bit_field_run`, which does it for a run wider
+  than an eightbyte), or refuses them.
 - **Arrays of none of a large record.** A record larger than 64 bytes may be
   finished before its members (see "Levels"), so its storage may not be
   LLVM's, and a record of 16 bytes or less that holds an array of none of

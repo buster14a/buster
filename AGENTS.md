@@ -2577,7 +2577,9 @@ and the program runs: each side checks every argument, result, hidden pointer,
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
 own bugs among them, and `docs/calling-convention.md` lists them), and clang's
 a type in registers that holds an array of elements of no size, on which
-clang 23 crashes now and then; an argument clang would pass as an `i0` becomes
+clang 23 crashes now and then, and one with an SSE low eightbyte and
+bit-fields in an INTEGER high one, whose access units the module doesn't work
+out yet; an argument clang would pass as an `i0` becomes
 a long (its passes crash on them now and then), as does an unnamed one clang's
 `va_arg` reads elsewhere than its call puts it; and bytes clang doesn't pass
 aren't compared. The files go in a new directory under `$TMPDIR` (or `/tmp`),
