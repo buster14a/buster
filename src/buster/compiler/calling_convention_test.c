@@ -13,15 +13,17 @@
 //     of classes and both kinds of size.
 //   - Fixtures: types whose classes, passing, slots and results clang's IR and LLVM's fixed stack objects show
 //     (abi_test_fixtures says which; abi_test_build_atomics the LARGER, GROWN and refused _Atomic types and what holds
-//     them), at each target vector width, by the vector path and by the twin; and calls whose locations clang and LLVM
-//     give (an UNCOUNTED argument's shift and the LARGER copies' slots among them).
+//     them), at each target vector width, by the vector path and by the twin; calls whose locations clang and LLVM give
+//     (an UNCOUNTED argument's shift, the LARGER copies' slots and a DEMOTED result among them); the levels across
+//     calls (abi_test_ordering); and the walk without scratch memory for its stack (abi_test_short_scratch).
 //   - Worlds: random worlds of types (abi_test_world_build: scalars, vectors, complex types, _BitInts, _Atomic and
-//     aligned types, _Atomics of structs of no size, and records and unions of them, small ones mostly, with bit-fields,
-//     arrays, nesting, packing and alignment, and zero-length arrays of large records), classified by the vector path in
-//     one table and by the twin in another, which must end up identical, and each type at each offset it can be at
-//     against the oracle: clang's classify transcribed as clang has it, its recursion over members as a stack of frames,
-//     from the type table alone (no rows). Then the twin classifies every type again at once, which must leave its table
-//     as it was: the paths share the levels, and this shows a type the levels took before what it reads.
+//     aligned types, _Atomics of structs of no size, and records and unions of them, small ones mostly, with
+//     bit-fields, arrays, nesting, packing and alignment, and zero-length arrays of large records), classified by the
+//     vector path in one table and by the twin in another, which must end up identical, and each type at each offset it
+//     can be at against the oracle: clang's classify transcribed as clang has it, its recursion over members as a stack
+//     of frames, from the type table alone (no rows). Then the twin classifies every type again at once, which must
+//     leave its table as it was: the paths share the levels, and in the rootless world (AbiTestWorld.rootless), whose
+//     levels only the waits order, this shows a type the levels took before what it reads.
 //   - Assignment: random calls over a world's types, named and variadic, with results in memory and in registers,
 //     assigned by the vector path and by the twin, which must agree on every location and total; calls around the
 //     vector path's most arguments (abi_test_long_calls); and the vector path with its argument and location columns
@@ -37,9 +39,8 @@
 //     clang's a type in registers that holds an array of elements of no size, which crashes it now and then
 //     (abi_test_empty_arrays), and one with an SSE low eightbyte and bit-fields in an INTEGER high one, whose access
 //     units the module doesn't work out yet (abi_test_bit_field_bytes); an argument clang would pass as an i0 becomes a
-//     long, as does an unnamed one clang's
-//     va_arg reads elsewhere than its call puts it (abi_test_va_disagreement); and bytes clang doesn't pass aren't
-//     checked (abi_test_mask_unpassed).
+//     long, as does an unnamed one clang's va_arg reads elsewhere than its call puts it (abi_test_va_disagreement); and
+//     bytes clang doesn't pass aren't checked (abi_test_mask_unpassed).
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally and helpers; merge; the oracle; fixtures; worlds; assignment; the cross-check;
@@ -1008,6 +1009,45 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     m[1] = abi_test_member(builder, tail80);
     abi_test_in_registers(builder, "union {__int128, {long, long, {__int128, char[64]}[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
                           BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    // Each of abi_wide_alignment's rules alone, a record larger than 16 bytes that LLVM aligns to 1, so that the __int128 is
+    // the union's storage (one i128, as clang 23 passes each): a member off its own alignment (packed {char, long double,
+    // char[15]}, 32 bytes), a record off its own (packed {char, {__int128, long}, char[15]}, 48 bytes), a size its
+    // alignment doesn't divide (packed {long double, char}, 17 bytes), and a union's members (union {__int128 x : 8,
+    // char[24]}, whose bit-field is an i8).
+    m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG_DOUBLE);
+    m[2] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 15));
+    const TypeId off_member = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, true, 0);
+    m[1] = abi_test_member(builder, big);
+    const TypeId off_record = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, true, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG_DOUBLE);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    const TypeId off_size = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, true, 0);
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_INT128, 8, true);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 24));
+    const TypeId bits_union = abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
+    const TypeId walked[4] = {
+        off_member,
+        off_record,
+        off_size,
+        bits_union,
+    };
+    const char* const walked_names[4] = {
+        "union {{long, long, packed {char, long double, char[15]}[0]}, __int128}",
+        "union {{long, long, packed {char, {__int128, long}, char[15]}[0]}, __int128}",
+        "union {{long, long, packed {long double, char}[0]}, __int128}",
+        "union {{long, long, union {__int128 x : 8, char[24]}[0]}, __int128}",
+    };
+    for (uint32_t w = 0; w < 4; w += 1)
+    {
+        m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+        m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+        m[2] = abi_test_member(builder, type_array(table, walked[w], 0));
+        m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0));
+        m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+        abi_test_in_registers(builder, walked_names[w], abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS,
+                              BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    }
     // The same with the large record inside another ({char, {__int128, long}}, aligned to 16 too), and with a packed one
     // in the array, aligned to 1 in LLVM's type (a long double off its own): the __int128 is then the most aligned.
     m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
@@ -1562,6 +1602,70 @@ static void abi_test_ordering(AbiTestTally* tally)
     }
 }
 
+// The walk without scratch memory for its stack (abi_wide_alignment): with the thread's first scratch arena replaced by
+// one of `room` bytes, from 64 up, 512 more at a time, until both paths' walks have room, every classifiable type must be
+// classified all the same (none waiting forever), and an _Atomic of a struct of no size that an array of none of a
+// record larger than 64 bytes aligns must have its 16 bytes or be refused (UNSUPPORTED), never a slot of another size;
+// and some room must give each.
+static void abi_test_short_scratch(AbiTestTally* tally)
+{
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        bool walked = false;
+        bool refused = false;
+        for (uint64_t room = 64; !walked && room <= (1u << 20); room += 512)
+        {
+            AbiTestTables tables;
+            if (abi_test_expect(tally, abi_test_tables_open(&tables, 4096), "fixtures", "the tables can't be made"))
+            {
+                TypeTable* table = &tables.types.table;
+                AbiTestBuilder builder = {
+                    .table = table,
+                    .expectations = 0,
+                    .count = 0,
+                    .next_name = 30000,
+                    .vector_bytes = 16,
+                };
+                const bool started = abi_test_tables_start(&tables, 16);
+                TypeMember m[2];
+                m[0] = abi_test_member(&builder, BUSTER_TYPE_INT128);
+                m[1] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 100));
+                m[0] = abi_test_member(&builder, type_array(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+                const TypeId atomic = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+                const Arena saved = thread_context.scratch[0];
+                thread_context.scratch[0] = arena_reserve(room);
+                if (path == 0)
+                {
+                    abi_classify_all(&tables.abi, table);
+                }
+                else
+                {
+                    abi_classify_all_scalar(&tables.abi, table);
+                }
+                arena_release(&thread_context.scratch[0]);
+                thread_context.scratch[0] = saved;
+                bool every = true;
+                for (uint32_t index = 1; index < table->types.count; index += 1)
+                {
+                    every = every && abi_classifiable(table, index) == ((tables.abi.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0);
+                }
+                const uint32_t pass = tables.abi.pass[atomic >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint32_t bytes = tables.abi.stack_bytes[atomic >> BUSTER_TYPE_INDEX_SHIFT];
+                const bool exact = (pass & (BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_UNSUPPORTED)) == BUSTER_ABI_PASS_LARGER && bytes == 16;
+                const bool unsupported = (pass & BUSTER_ABI_PASS_UNSUPPORTED) != 0;
+                walked = exact;
+                refused = refused || unsupported;
+                char detail[160];
+                snprintf(detail, sizeof(detail), "short scratch, %" PRIu64 " bytes (%s): every type classified %d, pass %08x, stack %u", room,
+                         path == 0 ? "vector" : "scalar", every, pass, bytes);
+                abi_test_expect(tally, started && every && (exact || unsupported), "fixtures", detail);
+                abi_test_tables_close(&tables);
+            }
+        }
+        abi_test_expect(tally, walked && refused, "fixtures", path == 0 ? "short scratch (vector): no room gave both" : "short scratch (scalar): no room gave both");
+    }
+}
+
 // The location expected of an argument, in a call fixture.
 typedef struct AbiTestLocation AbiTestLocation;
 struct AbiTestLocation
@@ -1588,8 +1692,10 @@ static bool abi_test_same_location(AbiLocation got, AbiTestLocation expected)
 // the stack, while {unsigned __int128 : 60, unsigned __int128 : 10} (one i128) goes on the stack, the long in r9. And
 // the LARGER copies (16 bytes for _Atomic(struct { __int128 x[0]; }), 17 and 26 for packed structs ending in one, a
 // GROWN one's 8 once clang has no general register), and _Atomic bool vectors (an i10 in r9, uncounted; an i65's
-// halves split; an i128 whole on the stack); and a union stored as an i128 with an SSE high eightbyte, which clang
-// counts as two general registers too: on the stack after five longs, and in rdi and rsi before a double in xmm0.
+// halves split; an i128 whole on the stack); a union stored as an i128 with an SSE high eightbyte, which clang counts
+// as two general registers too: on the stack after five longs, and in rdi and rsi before a double in xmm0; and a result
+// of two __int128s in a vector, which LLVM demotes to a hidden pointer clang doesn't count (DEMOTED), so that after it
+// and five longs a struct aligned to 16, which clang counts in a register, is an i64 at stack 0 and the long after it at 8.
 static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t vector_bytes, bool vector)
 {
     TypeTable* table = &tables->types.table;
@@ -1650,6 +1756,9 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     m[1] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0));
     m[0] = abi_test_member(&builder, unnamed_i128);
     const TypeId sse_pair = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
+    const TypeId demoted = abi_test_vector(&builder, BUSTER_TYPE_INT128, 32);
+    m[0] = abi_test_member(&builder, BUSTER_TYPE_LONG);
+    const TypeId aligned16 = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 5);
     if (vector)
     {
         abi_classify_all(&tables->abi, table);
@@ -1835,6 +1944,14 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         sse_pair,
         D,
         L,
+        // 151: a DEMOTED result; long x5, struct aligned(16) {long}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        aligned16,
+        L,
     };
     const AbiTestLocation expected[] = {
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
@@ -2000,6 +2117,15 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, BUSTER_ABI_RSI, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_TEST_XMM(0), none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        // 151: the hidden pointer in rdi, the longs after it, the struct an i64 at 0 (not a byval aligned to 16) and the
+        // long at 8.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
     };
     const uint32_t counts[] = {
         7,
@@ -2024,6 +2150,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         7,
         7,
         3,
+        7,
     };
     const uint32_t named[] = {
         7,
@@ -2048,6 +2175,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         7,
         7,
         3,
+        7,
     };
     const TypeId results[] = {
         BUSTER_TYPE_VOID,
@@ -2072,8 +2200,10 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         BUSTER_TYPE_VOID,
         BUSTER_TYPE_VOID,
         BUSTER_TYPE_VOID,
+        demoted,
     };
     const uint8_t variadic[] = {
+        0,
         0,
         0,
         0,
@@ -2145,6 +2275,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     abi_test_expect(tally, calls[19].stack_bytes == 16 && calls[19].stack_alignment_log2 == 4 && calls[19].integer_registers == 6, "fixtures", "call 19's totals");
     abi_test_expect(tally, calls[20].stack_bytes == 16 && calls[20].integer_registers == 6 && calls[20].vector_registers == 0, "fixtures", "call 20's totals");
     abi_test_expect(tally, calls[21].stack_bytes == 0 && calls[21].integer_registers == 3 && calls[21].vector_registers == 1, "fixtures", "call 21's totals");
+    abi_test_expect(tally, calls[22].result.kind == BUSTER_ABI_RESULT_MEMORY && calls[22].stack_bytes == 16 && calls[22].integer_registers == 6, "fixtures",
+                    "call 22's totals");
     // va_arg aligns the overflow area as the canonical type is aligned (EmitVAArg): long aligned(32) reads from 8.
     const AbiVaArg plan = abi_va_arg(&tables->abi, table, aligned_long);
     abi_test_expect(tally, plan.kind == BUSTER_ABI_LOCATION_REGISTERS && plan.overflow_alignment_log2 == 3 && plan.stack_bytes == 8, "fixtures",
@@ -2217,6 +2349,7 @@ static bool abi_test_fixtures(void)
         }
     }
     abi_test_ordering(&tally);
+    abi_test_short_scratch(&tally);
     abi_test_report("fixtures", tally);
     return tally.failures == 0;
 }
@@ -2249,6 +2382,9 @@ struct AbiTestWorld
     uint32_t other_count;
     uint32_t capacity;
     bool gcc;
+    // A clang world without _Atomics of types of no size, the roots of every LARGER type, so that the levels don't make
+    // every record wait for its members (abi_classify_levels' `all`) and only their own waits keep them right.
+    bool rootless;
 };
 
 static void abi_test_world_add(AbiTestWorld* world, TypeId type)
@@ -2597,7 +2733,7 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
             {
                 type_test_world_completed(&world->types, zero);
                 abi_test_world_add(world, zero);
-                abi_test_world_add(world, type_atomic(table, zero));
+                abi_test_world_add(world, world->rootless ? 0 : type_atomic(table, zero));
             }
             table->last_error = TYPE_ERROR_NONE;
         }
@@ -2626,7 +2762,8 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
             // to LLVM), and of an ext_vector_type, which LLVM may split into its elements (UNSUPPORTED: an _Atomic <5 x
             // i8> is five i8s, a general register each).
             const TypeId base = abi_test_world_pick(world, &random, true);
-            abi_test_world_add(world, type_atomic(table, type_unqualified(base)));
+            const bool root = table->types.size[abi_resolved_index(table, base)] == 0;
+            abi_test_world_add(world, world->rootless && root ? 0 : type_atomic(table, type_unqualified(base)));
             table->last_error = TYPE_ERROR_NONE;
         }
         else if (pick < 14)
@@ -2706,19 +2843,21 @@ static void abi_test_dump(const TypeTable* table, const AbiTable* abi, uint32_t 
 }
 
 // Every classifiable type, by the vector path and by the twin, at each vector width: identical tables, and every type at
-// every offset it can be at the oracle's classes.
+// every offset it can be at the oracle's classes. Three clang worlds, at 16, 32 and 64 bytes, a GCC one at 16, and a
+// rootless clang one at 32 (AbiTestWorld.rootless), whose levels only the waits keep right.
 static bool abi_test_worlds(uint64_t seed, uint32_t count)
 {
     AbiTestTally tally = { 0 };
     uint64_t compared = 0;
     AbiTestFrame* frames = malloc(sizeof(AbiTestFrame) * BUSTER_ABI_TEST_FRAMES);
     char detail[256];
-    for (uint32_t round = 0; frames != 0 && round < 4; round += 1)
+    for (uint32_t round = 0; frames != 0 && round < 5; round += 1)
     {
         AbiTestWorld world;
         if (abi_test_expect(&tally, abi_test_world_open(&world, count * 8 + 4096), "worlds", "the world can't be made"))
         {
             world.gcc = round == 3;
+            world.rootless = round == 4;
             abi_test_world_build(&world, seed + round, count);
             type_test_spell_world(&world.types);
             const TypeTable* table = &world.types.test.table;
@@ -2798,7 +2937,8 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                 }
                 // The twin's table classified again, every type at once with all it reads classified, must not change: the
                 // levels take a type only when what it reads is classified (a zero-length array of a large record waits
-                // for every type abi_wide_alignment reads), and the paths share them.
+                // for every type abi_wide_alignment reads), and the paths share them. Only the rootless world shows a
+                // missing wait: in the others every record waits for its members anyway.
                 TypeId* again = malloc(sizeof(TypeId) * table->types.count);
                 uint32_t again_count = 0;
                 for (uint32_t index = 1; again != 0 && index < table->types.count; index += 1)

@@ -1020,15 +1020,16 @@ struct AbiWideFrame
 // (abi_member_storage's), unless a struct's member is off its own or the size isn't a multiple of it (determinePacked:
 // 1); and INEXACT if a member's storage is. A member that holds such a record by value has its storage, walked in turn
 // on an explicit stack in scratch memory (no record holds itself, so it is no deeper than the table has types). With
-// BUSTER_ABI_WIDE_UNREADY if a type whose storage it reads isn't classified yet, or the scratch memory can't hold the
-// stack: a flag in the result rather than through a pointer, which would make its callers take a local's address, and
-// so check a stack protector's canary at every call (abi_dependencies_classified's, once a type, at every level).
+// BUSTER_ABI_WIDE_UNREADY if a type whose storage it reads isn't classified yet: a flag in the result rather than through
+// a pointer, which would make its callers take a local's address, and so check a stack protector's canary at every call
+// (abi_dependencies_classified's, once a type, at every level). Without scratch memory for the stack it gives INEXACT,
+// ready, so that what needs the alignment is refused rather than left waiting.
 __attribute__((cold, noinline)) static uint32_t abi_wide_alignment(const AbiTable* abi, const TypeTable* table, uint32_t record)
 {
     Scratch scratch = scratch_begin(0);
     AbiWideFrame* stack = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, AbiWideFrame, table->types.count);
     uint32_t depth = 0;
-    uint32_t result = 0;
+    uint32_t result = BUSTER_ABI_STORAGE_INEXACT;
     if (stack != 0)
     {
         stack[0] = (AbiWideFrame){
@@ -1043,7 +1044,7 @@ __attribute__((cold, noinline)) static uint32_t abi_wide_alignment(const AbiTabl
         };
         depth = 1;
     }
-    bool ready = stack != 0;
+    bool ready = true;
     while (depth != 0)
     {
         AbiWideFrame* frame = &stack[depth - 1];
