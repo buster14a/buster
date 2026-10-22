@@ -1706,16 +1706,20 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     uint64_t count = BUSTER_PP_DIRECTIVE_TEST_SOURCES;
     uint64_t id_order = 153;
     bool valid = true;
-    // The arguments without ours, for clang and pp_parse_options; the files are those that don't start with '-' and
-    // aren't an option's value.
+    // The arguments without the command's own, for pp_parse_options, and for clang the same without -E's options of ours
+    // (pp_own_option_with_value's, with their values); the files are those that don't start with '-' and aren't an
+    // option's value.
     char** passed = calloc((size_t)argument_count + 1, sizeof(char*));
+    char** clang_passed = calloc((size_t)argument_count + 1, sizeof(char*));
     char** files = calloc((size_t)argument_count + 1, sizeof(char*));
     int passed_count = 0;
+    int clang_passed_count = 0;
     int file_count = 0;
-    for (int i = 0; passed != 0 && files != 0 && i < argument_count; i += 1)
+    for (int i = 0; passed != 0 && clang_passed != 0 && files != 0 && i < argument_count; i += 1)
     {
         const char* argument = arguments[i];
-        const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
+        const bool ours = pp_own_option_with_value(argument);
+        const bool takes_value = ours || strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0;
         if (strcmp(argument, "--id-order") == 0 && i + 1 < argument_count)
         {
@@ -1749,10 +1753,18 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         else if (argument[0] == '-')
         {
             passed[passed_count++] = arguments[i];
+            if (!ours)
+            {
+                clang_passed[clang_passed_count++] = arguments[i];
+            }
             if (takes_value && i + 1 < argument_count)
             {
                 i += 1;
                 passed[passed_count++] = arguments[i];
+                if (!ours)
+                {
+                    clang_passed[clang_passed_count++] = arguments[i];
+                }
             }
         }
         else
@@ -1763,7 +1775,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     char directory[4096];
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
-    const bool created = valid && passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    const bool created = valid && passed != 0 && clang_passed != 0 && files != 0 && mkdtemp(directory) != 0;
     bool passed_all = created;
     if (passed_all && file_count == 0)
     {
@@ -1805,7 +1817,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         uint64_t tokens = 0;
         for (int i = 0; passed_all && i < file_count; i += 1)
         {
-            failures += !pp_test_file(passed_count, passed, &options, files[i], with_clang, directory, &tokens);
+            failures += !pp_test_file(clang_passed_count, clang_passed, &options, files[i], with_clang, directory, &tokens);
         }
         printf("files: %u of %d differ (%lu tokens)\n", failures, file_count, (unsigned long)tokens);
         passed_all = passed_all && failures == 0;
@@ -1825,6 +1837,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         rmdir(directory);
     }
     free(passed);
+    free(clang_passed);
     free(files);
     return passed_all ? 0 : 1;
 }

@@ -1165,11 +1165,82 @@ static bool pp_directive_test_location_space(const char* directory)
     return result && failures == 0;
 }
 
+// --location-limit N through the commands that split -E's options from their files, run on a small file as children of
+// this executable: test-preprocessor's files mode and benchmark-preprocessor must take the option and its value as one
+// option of ours, and with --clang give clang neither, nor may --compare-clang. In a space the file fits in (it needs
+// about 80 KB: a chunk of scratch spellings and the predefines), each must succeed and give its report, with no error
+// from clang; in a space of one byte, each must run out of it, reporting that space.
+static bool pp_directive_test_location_option(const char* directory, bool with_clang)
+{
+    // Each run: the command, its mode (with clang alone: --clang, which the run leaves out without it, or
+    // --compare-clang, which needs it), the space, the exit status, and what the run must write, to its output if it
+    // succeeds and else to its diagnostics.
+    static const struct
+    {
+        const char* command;
+        const char* mode;
+        const char* limit;
+        int status;
+        const char* says;
+    } runs[] = {
+        { "test-preprocessor", "--clang", "1000000", 0, "files: 0 of 1 differ" },
+        { "test-preprocessor", "--compare-clang", "1000000", 0, " identical=1 " },
+        { "benchmark-preprocessor", "--clang", "1000000", 0, "1 files, " },
+        { "test-preprocessor", 0, "1", 1, "it passes the location space (1 bytes)" },
+        { "benchmark-preprocessor", 0, "1", 1, "it passes the location space (1 bytes)" },
+    };
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/limit.c", directory);
+    const bool written = pp_test_write_file(path, "int x;\n");
+    uint32_t count = 0;
+    uint32_t failures = 0;
+    for (uint32_t r = 0; written && r < BUSTER_ARRAY_LENGTH(runs); r += 1)
+    {
+        const bool compare = runs[r].mode != 0 && strcmp(runs[r].mode, "--compare-clang") == 0;
+        if (with_clang || !compare)
+        {
+            char* argv[8];
+            int n = 0;
+            argv[n++] = "/proc/self/exe";
+            argv[n++] = (char*)runs[r].command;
+            if (with_clang && runs[r].mode != 0)
+            {
+                argv[n++] = (char*)runs[r].mode;
+            }
+            argv[n++] = "--location-limit";
+            argv[n++] = (char*)runs[r].limit;
+            argv[n++] = path;
+            argv[n] = 0;
+            char* output = 0;
+            char* errors = 0;
+            const int status = pp_directive_test_command(argv, &output, &errors);
+            const char* text = runs[r].status == 0 ? output : errors;
+            // clang's driver reports an option it doesn't know, or a value it takes for an input, as an error.
+            const bool same = status == runs[r].status && text != 0 && strstr(text, runs[r].says) != 0 &&
+                              (runs[r].status != 0 || (errors != 0 && strstr(errors, "error:") == 0));
+            if (!same)
+            {
+                printf("location option: %s %s--location-limit %s exits with %d, wanted %d with \"%s\"; its output:\n%s%s", runs[r].command,
+                       with_clang && runs[r].mode != 0 ? (compare ? "--compare-clang " : "--clang ") : "", runs[r].limit, status, runs[r].status, runs[r].says,
+                       output != 0 ? output : "", errors != 0 ? errors : "");
+            }
+            failures += !same;
+            count += 1;
+            free(output);
+            free(errors);
+        }
+    }
+    unlink(path);
+    printf("location option: %u of %u runs of the commands take --location-limit and its value as ours%s%s\n", count - failures, count,
+           with_clang ? ", clang without them" : "", failures == 0 ? "" : " (DIFFERS)");
+    return written && failures == 0;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // pp_test_directives
 
-// The checks without files: random streams (`count` from `seed`), the structure and definition fixtures, and the guard
-// fixtures.
+// The checks without files: random streams (`count` from `seed`), the structure and definition fixtures, the guard
+// fixtures, and the location space, shrunk and through the commands' --location-limit.
 static bool pp_test_directives(const char* directory, bool with_clang, uint64_t seed, uint64_t count)
 {
     bool result = pp_directive_test_streams(seed, count);
@@ -1177,5 +1248,6 @@ static bool pp_test_directives(const char* directory, bool with_clang, uint64_t 
     result &= pp_directive_test_diagnostics(pp_directive_test_definitions, BUSTER_ARRAY_LENGTH(pp_directive_test_definitions), "definitions", directory, with_clang);
     result &= pp_directive_test_guards(directory, with_clang);
     result &= pp_directive_test_location_space(directory);
+    result &= pp_directive_test_location_option(directory, with_clang);
     return result;
 }

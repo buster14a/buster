@@ -708,11 +708,11 @@ int run_preprocessor_benchmark(int argc, char** argv)
     for (int i = 1; passed != 0 && clang_passed != 0 && files != 0 && i < argc; i += 1)
     {
         const char* argument = argv[i];
-        const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
-                                 strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
-                                 strcmp(argument, "--predefines") == 0;
-        // --predefines (clang's predefines for the options, from `clang -dM -E`) is ours alone.
-        const bool ours = strcmp(argument, "--predefines") == 0;
+        // --predefines (clang's predefines for the options, from `clang -dM -E`) and --location-limit are ours alone, with
+        // their values (pp_own_option_with_value).
+        const bool ours = pp_own_option_with_value(argument);
+        const bool takes_value = ours || strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
+                                 strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0;
         if (strcmp(argument, "--clang") == 0)
         {
             with_clang = true;

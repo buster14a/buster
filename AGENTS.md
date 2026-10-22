@@ -2341,7 +2341,11 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   space shrunk to end where an inclusion, and then the first pasted spelling,
   would start (`--location-limit N`, #124): both kernels must stop there, with
   the output before it, and report the inclusion at its `#include` and the
-  spelling without a place;
+  spelling without a place. And `test-preprocessor` with a file and
+  `benchmark-preprocessor` (with `--clang`, and `--compare-clang`), run as
+  children on a small file, must take `--location-limit N` with its value as
+  ours, kept from clang, succeeding in a space the file fits in and running
+  out of one of a byte;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, ...), by both kernels, which must agree;
 - with `--tables`, the directive tables of every `.c` and `.h` file under each
@@ -2353,9 +2357,10 @@ byte, with line markers and without, and must lex back into the stream's
 spellings.
 
 `--clang` also compares every case and file with `clang -E` and the same
-options, token spelling by token spelling, and then where clang's line markers
-put each token (its presumed line and include stack) with where ours put it. It
-prints the first difference with the tokens around it. For files, our side
+options (but `--predefines` and `--location-limit`, ours alone), token spelling
+by token spelling, and then where clang's line markers put each token (its
+presumed line and include stack) with where ours put it. It prints the first
+difference with the tokens around it. For files, our side
 reads clang's own predefines for the options through `--predefines`. Without
 files, `--clang` also checks the built-in predefines, the keywords and the
 features:
@@ -2388,9 +2393,9 @@ lengths, and the inclusions skipped by guards and by `#pragma once`).
 `--clang` also times `clang -E -P` with the same options, a process per file.
 `-march` selects the shared target's predefines. `--predefines FILE` can replace
 them with `clang -dM -E` output (the benchmark leaves this option out of clang's
-command line), as the smoke commands above do for `main.c`. The default 9700X
-job runs that one, pinned to one allowed CPU; like the others, its measurements
-are informational.
+command line, as it does `--location-limit N`), as the smoke commands above do
+for `main.c`. The default 9700X job runs that one, pinned to one allowed CPU;
+like the others, its measurements are informational.
 
 `./build/compiler benchmark-preprocessor --defines [--only vectorized|scalar]
 path...` times definitions and lookups alone (#121): every `.c` and `.h` file

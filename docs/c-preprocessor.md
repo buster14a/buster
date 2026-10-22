@@ -1091,7 +1091,13 @@ full-corpus reproduction and frozen CI subset.
   an inclusion would start (`PPOptions.location_limit`, `--location-limit N`),
   and another where its first pasted spelling would: both kernels must stop
   there, with the output before it, reporting the inclusion at its `#include`
-  and the spelling without a place, as clang reports running out.
+  and the spelling without a place, as clang reports running out. Then the
+  commands that split `-E`'s options from their files, run on a small file,
+  must take `--location-limit N` with its value as an option of ours, which
+  clang doesn't get: `test-preprocessor` with the file and
+  `benchmark-preprocessor`, with `--clang` when the test has it, and
+  `--compare-clang`. Each must succeed in a space the file fits in, and run
+  out of a space of one byte.
 - **Include guards** (#120). 20 fixtures:
   - the issue's: a guarded file included twice, `#undef` between inclusions,
     `#if !defined X` and `#if !defined(X)`, `#else` in the group, a token

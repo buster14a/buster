@@ -9558,6 +9558,15 @@ static bool pp_parse_standard(const char* value, CLanguage* language)
     return result;
 }
 
+// Is `argument` one of our options that clang doesn't have and that take the next argument as their value
+// (--predefines FILE, --location-limit N)? The commands that split -E's options from their files take the value with
+// the option, and those that give the options to clang too (test-preprocessor's files and --compare-clang,
+// benchmark-preprocessor --clang) leave both out of clang's arguments.
+static bool pp_own_option_with_value(const char* argument)
+{
+    return strcmp(argument, "--predefines") == 0 || strcmp(argument, "--location-limit") == 0;
+}
+
 // The preprocessor's options from clang-style arguments (the ones -E needs). `input` gets the source file, `output`
 // the -o file (or null), `markers` false for -P. Returns false for an argument it doesn't know.
 static bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)

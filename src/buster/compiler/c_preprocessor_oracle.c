@@ -207,7 +207,10 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
     paths.items = arena_push_array(&paths.arena, BUSTER_PP_ORACLE_MAX_FILES, sizeof(char*), 8);
     const int capacity = argument_count + BUSTER_PP_ORACLE_EXTRA_ARGUMENTS;
     char** clang_arguments = calloc((size_t)capacity, sizeof(char*));
-    char** own_arguments = calloc((size_t)capacity, sizeof(char*));
+    // Our side's arguments: -E's options of ours (pp_own_option_with_value's, with their values), which clang doesn't
+    // get, then clang's but those only its driver takes, then the input.
+    char** own_arguments = calloc((size_t)capacity + (size_t)argument_count, sizeof(char*));
+    int own_count = 0;
     const char* executable = "clang";
     const char* list = 0;
     const char* root = ".";
@@ -265,6 +268,16 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
         {
             ready = pp_oracle_paths(&paths, argument);
         }
+        else if (pp_own_option_with_value(argument))
+        {
+            // Our side's alone (a --predefines file gives way to clang's own predefines, below).
+            ready = i + 1 < argument_count;
+            if (ready)
+            {
+                own_arguments[own_count++] = arguments[i];
+                own_arguments[own_count++] = arguments[++i];
+            }
+        }
         else
         {
             const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
@@ -298,7 +311,6 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
     const bool fixed_epoch = getenv("SOURCE_DATE_EPOCH") == 0;
     ready = ready && (!fixed_epoch || setenv("SOURCE_DATE_EPOCH", BUSTER_PP_ORACLE_EPOCH, 1) == 0);
     ready = ready && (no_standard_includes || pp_oracle_includes(executable, clang_arguments, &count, capacity, &paths));
-    int own_count = 0;
     for (int i = 0; ready && i < count; i += 1)
     {
         const char* argument = clang_arguments[i];
