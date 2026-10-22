@@ -1731,7 +1731,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     char directory[4096];
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
-    bool passed_all = valid && passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    const bool created = valid && passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    bool passed_all = created;
     if (passed_all && file_count == 0)
     {
         uint32_t failures = 0;
@@ -1774,7 +1775,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         free(with_input);
         arena_release(&arena);
     }
-    if (!keep)
+    if (!keep && created)
     {
         // The files the cases and the clang runs write, then the directory.
         static const char* const names[] = { "case.c", "other.h", "predefines.h" };
