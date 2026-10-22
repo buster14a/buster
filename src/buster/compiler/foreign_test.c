@@ -262,15 +262,21 @@ static void foreign_test_describe(const Foreign* foreign, ForeignTestText* text)
 //
 // A case is a command line (the arguments foreign_arguments reads). foreign_test_resolve resolves it by both paths and
 // with every lane count, checks that every description is the first's, and keeps the exact path's on one lane in
-// `kept` for the caller's checks.
+// `kept` for the caller's checks. Its partitions aim at BUSTER_FOREIGN_TEST_PARTITION_RECORDS records each, so that
+// the cases' few records spread over many partitions, and so over every lane.
+
+#define BUSTER_FOREIGN_TEST_PARTITION_RECORDS 16
 
 static bool foreign_test_command(ForeignCommand* command, char** arguments, uint32_t count, Arena* arena)
 {
     return foreign_arguments(command, (int)count, arguments, arena).error == FOREIGN_ERROR_NONE;
 }
 
-static void foreign_test_resolve(ForeignTestTally* tally, const char* what, const ForeignCommand* command, Foreign* kept, Arena* arena)
+static void foreign_test_resolve(ForeignTestTally* tally, const char* what, const ForeignCommand* given, Foreign* kept, Arena* arena)
 {
+    ForeignCommand spread = *given;
+    spread.partition_records = BUSTER_FOREIGN_TEST_PARTITION_RECORDS;
+    const ForeignCommand* command = &spread;
     const uint64_t length = arena->length;
     ForeignTestText reference = {
         .capacity = 64ull << 20,

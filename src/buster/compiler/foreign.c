@@ -44,10 +44,11 @@
 //
 // Each phase has a vector path and an exact scalar twin (ForeignPath), which give the same result (foreign_test.c
 // compares them on every input, with groups of 1, 2, 3 and 8 lanes): the readers' two paths; the headers eight section
-// headers at a time; the symbols eight at a time with their names hashed eight at a time; the records eight at a time;
-// and the resolution, which on the vector path sorts each partition's round of records by hash first, so that each name
-// is probed once. Opening is system calls, and the probes of the archives' and libraries' indices, the groups and the
-// winners are a few records per name, scalar on both paths ("SIMD: what pays" in the design has the measurements).
+// headers at a time; the symbols eight at a time with their names hashed eight at a time; and the records eight at a
+// time. Opening is system calls; the resolution probes a partition's table per record, which a vector path that grouped
+// the records by name first lost to; and the probes of the archives' and libraries' indices, the groups and the winners
+// are a few records per name: these are scalar on both paths ("Steps 1 to 5, as built" in the design has the
+// measurements).
 //
 // main.c includes this file after import.c and runtime.c, whose readers and linker names it uses. Layout, in this
 // order:
@@ -63,10 +64,11 @@
 //   - The first round: foreign_first_round.
 //   - The parse: foreign_member_bytes, foreign_check_tables, foreign_headers_exact, foreign_headers_vector,
 //     foreign_object_headers, foreign_class, foreign_symbol_exact, foreign_symbols_vector, foreign_fill_symbols,
-//     foreign_object_groups, foreign_round_columns and foreign_parse.
-//   - The exchange: foreign_partition, foreign_records_vector, foreign_exchange_items and foreign_exchange.
-//   - Resolution and archive members: the tables (foreign_entry, foreign_group_entry), foreign_touch,
-//     foreign_resolve_exact, foreign_sort_records, foreign_resolve_vector, foreign_probe, foreign_member_defines_data,
+//     foreign_object_groups, foreign_partitions, foreign_round_columns and foreign_parse.
+//   - The exchange: foreign_partition, foreign_records_vector, foreign_count_items, foreign_exchange_items and
+//     foreign_exchange.
+//   - Resolution and archive members: the tables (foreign_entry, foreign_group_entry), foreign_touch, foreign_fold,
+//     foreign_resolve_records, foreign_probe_archives, foreign_probe_libraries, foreign_member_defines_data,
 //     foreign_decide, foreign_resolve and foreign_load.
 //   - COMDAT groups and the winners: foreign_groups, foreign_win and foreign_winners.
 //   - Running: foreign_lane_main, foreign_run, foreign_release and the accessors.
@@ -188,6 +190,9 @@ struct ForeignCommand
     // -u's names: strong references from the command line, before every input.
     String8* undefined;
     uint32_t undefined_count;
+    // How many records each partition of the exchange aims at: 0 for BUSTER_FOREIGN_PARTITION_RECORDS. The tests take
+    // a few, so that small inputs spread over many partitions and lanes.
+    uint32_t partition_records;
 };
 
 // An input in link order, a script's inputs in place of the script: its path (NUL-terminated), its bytes (the file,
@@ -214,7 +219,8 @@ struct ForeignInput
 // archive order, and nothing probes the archive, since every name its members define is a loaded object's. Otherwise
 // import_archive_lazy reads its symbol index alone, the members it names numbered by rank (in archive order), and
 // members[m] is read when member m loads. Then each index entry's name's link_hash, an index of them by hash (lookup),
-// and the members the link loads, a bit each, with each one's object plus 1.
+// each entry's name, length and member in the index's order (so that a probe reads its bucket's entries one after
+// another), and the members the link loads, a bit each, with each one's object plus 1.
 typedef struct ForeignArchive ForeignArchive;
 struct ForeignArchive
 {
@@ -226,6 +232,9 @@ struct ForeignArchive
     uint32_t member_count;
     uint64_t* hashes;
     ImportNameIndex lookup;
+    const uint8_t** lookup_names;
+    uint32_t* lookup_lengths;
+    uint32_t* lookup_members;
     uint64_t* loaded;
     uint32_t* member_objects;
 };
@@ -271,10 +280,11 @@ struct ForeignObject
 };
 
 // A round's global symbols, as columns indexed by a symbol's place in the round (its global id less the round's
-// first): the round's objects' symbols one after another in object order. Each one's name (a slice of its object's
-// string table) with its length and link_hash, its value, size and section index (st_shndx through SHN_XINDEX:
-// SHN_UNDEF, SHN_ABS and SHN_COMMON as they are), st_info and st_other; the resolution's entry of its name in its
-// partition's table; and in the end its name's id.
+// first): the round's objects' symbols one after another in object order. Each one's name (a copy, NUL-terminated, in
+// the lane's arena that parsed it: the resolution compares names, and copies made while the parse reads them anyway
+// are a few megabytes, where the objects' string tables are spread over every input's pages) with its length and
+// link_hash, its value, size and section index (st_shndx through SHN_XINDEX: SHN_UNDEF, SHN_ABS and SHN_COMMON as they
+// are), st_info and st_other; and in the end its name's id.
 typedef struct ForeignSymbols ForeignSymbols;
 struct ForeignSymbols
 {
@@ -286,14 +296,12 @@ struct ForeignSymbols
     uint32_t* section;
     uint8_t* info;
     uint8_t* other;
-    uint32_t* entry;
     uint32_t* name_id;
 };
 
 // A round's COMDAT groups, as columns indexed by a group's place in the round, the objects' groups in object order:
 // each one's signature with its length and link_hash, its object (in whose group_list it is its global id less the
-// object's group_begin), its entry in its partition's group table, and whether it is kept: the first group of its
-// signature by position.
+// object's group_begin), and whether it is kept: the first group of its signature by position.
 typedef struct ForeignGroups ForeignGroups;
 struct ForeignGroups
 {
@@ -301,20 +309,31 @@ struct ForeignGroups
     uint32_t* length;
     uint64_t* hash;
     uint32_t* object;
-    uint32_t* entry;
     uint8_t* kept;
 };
 
-// A record of the exchange (docs/object-writer-and-linker.md, "Lanes", rule 4): a name's hash, the symbol (or group) it
-// is about, by its place in its round, and a tag: the class in bits 0 to 3, the symbol's visibility in bits 4 and 5,
-// and its object in bits 8 up. 16 bytes, each crossing between lanes once.
+// A record of the exchange (docs/object-writer-and-linker.md, "Lanes", rule 4): a name's hash and bytes, the symbol (or
+// group) it is about, by its place in its round, a tag (the class in bits 0 to 3, the symbol's visibility in bits 4 and
+// 5, and its object in bits 8 up), and the symbol's section index. 32 bytes, each crossing between lanes once with
+// what its partition's lane reads of it: the design's 16 (a hash, the symbol and its class) left the lane to read the
+// name, its length and the section from the round's columns, a cache miss each at a symbol's place, which cost more
+// than moving them. Once the partition's resolution has found the name's entry, it replaces the length, which nothing
+// reads after it.
 typedef struct ForeignRecord ForeignRecord;
 struct ForeignRecord
 {
     uint64_t hash;
+    const uint8_t* name;
+    union
+    {
+        uint32_t length;
+        uint32_t entry;
+    };
     uint32_t item;
     uint32_t tag;
+    uint32_t section;
 };
+_Static_assert(sizeof(ForeignRecord) == 32, "a record is half a cache line");
 
 // A name in a partition's table, 64 bytes: its hash and bytes (the first record's); what the rounds need to decide what
 // to load: its flags (BUSTER_FOREIGN_ENTRY_*), the most constraining visibility of every record of it (a rank: default,
@@ -466,7 +485,7 @@ struct ForeignLane
 typedef struct Foreign Foreign;
 struct Foreign
 {
-    // The options.
+    // The options, and the command, which the lanes read while they run (0 after foreign_run).
     ForeignPath path;
     uint32_t lanes;
     const ForeignCommand* command;
@@ -480,11 +499,12 @@ struct Foreign
     ForeignLibrary* libraries;
     uint32_t library_count;
     // The loaded objects, by id: object 0 holds the command line's references (-u), then each round's in position
-    // order; and each one's position, which the resolution reads per record.
+    // order; each one's position, which the resolution reads per record; and once the groups are picked, whether it has
+    // a section of a discarded group (ForeignObject.discarded), which the winners read per record.
     ForeignObject* objects;
     uint32_t object_count;
-    uint32_t object_capacity;
     uint64_t* positions;
+    uint8_t* discarding;
     // The rounds: round_count of them once the last is done.
     ForeignRound* rounds;
     uint32_t round_count;
@@ -496,8 +516,6 @@ struct Foreign
     ForeignTable* tables;
     // The output.
     ForeignNames names;
-    // The members the next round loads, which lane 0 lists, and how many.
-    uint32_t next_objects;
     // Each lane's own.
     ForeignLane* lane_states;
     // The first failure by position, once the lanes are done.
@@ -1177,6 +1195,17 @@ static void foreign_read_archive(Foreign* foreign, uint32_t a, ForeignLane* lane
             archive->hashes[i] = link_hash(names[i], lengths[i]);
         }
         fits = fits && import_index_build(&archive->lookup, archive->hashes, count, &lane->arena);
+        archive->lookup_names = fits ? BUSTER_ARENA_PUSH_ARRAY(&lane->arena, const uint8_t*, (uint64_t)count + 1) : 0;
+        archive->lookup_lengths = fits ? BUSTER_ARENA_PUSH_ARRAY(&lane->arena, uint32_t, (uint64_t)count + 1) : 0;
+        archive->lookup_members = fits ? BUSTER_ARENA_PUSH_ARRAY(&lane->arena, uint32_t, (uint64_t)count + 1) : 0;
+        fits = archive->lookup_names != 0 && archive->lookup_lengths != 0 && archive->lookup_members != 0;
+        for (uint32_t place = 0; fits && place < count; place += 1)
+        {
+            const uint32_t i = archive->lookup.order[place];
+            archive->lookup_names[place] = names[i];
+            archive->lookup_lengths[place] = lengths[i];
+            archive->lookup_members[place] = archive->index.symbols[i].member;
+        }
         if (!fits)
         {
             foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, position, archive->input, 0));
@@ -1230,38 +1259,22 @@ static void foreign_read_indices(Foreign* foreign, ForeignLane* lane)
 //
 // Round 0 loads object 0 (the command line's references, -u), every command-line object and every member of an archive
 // under --whole-archive, in position order. The objects get room for every object the link could load; each round's
-// symbols, groups and records get columns of their own once its headers have counted them (ForeignRound).
+// symbols, groups and records get columns of their own once its headers have counted them (ForeignRound), and round 0's
+// count decides the partitions (foreign_partitions).
 
-// The partitions, by how many records round 0's objects could have (a symbol per 24 bytes of each): about
-// BUSTER_FOREIGN_PARTITION_RECORDS each, from 1 to 2^BUSTER_FOREIGN_MAX_PARTITION_BITS. They depend on the input's size,
-// never on the lanes (rule 5).
-#define BUSTER_FOREIGN_PARTITION_RECORDS 2048
-#define BUSTER_FOREIGN_MAX_PARTITION_BITS 12
-
-// Lane 0: round 0's objects listed, and the objects, rounds, counts and tables pushed.
+// Lane 0: round 0's objects listed, and the objects and rounds pushed.
 static bool foreign_first_round(Foreign* foreign, ForeignLane* lane)
 {
     const ForeignCommand* command = foreign->command;
     uint64_t objects = 1;
-    uint64_t estimate = command->undefined_count;
     for (uint32_t i = 0; i < foreign->input_count; i += 1)
     {
-        const ForeignInput* input = &foreign->inputs[i];
-        objects += input->kind == FOREIGN_KIND_OBJECT ? 1 : 0;
-        estimate += input->kind == FOREIGN_KIND_OBJECT || (input->kind == FOREIGN_KIND_ARCHIVE && foreign->archives[input->item].whole) ? input->bytes.length / sizeof(Elf64_Sym) : 0;
+        objects += foreign->inputs[i].kind == FOREIGN_KIND_OBJECT ? 1 : 0;
     }
     for (uint32_t a = 0; a < foreign->archive_count; a += 1)
     {
         objects += foreign->archives[a].member_count;
     }
-    uint32_t bits = 0;
-    while (bits < BUSTER_FOREIGN_MAX_PARTITION_BITS && ((uint64_t)BUSTER_FOREIGN_PARTITION_RECORDS << bits) < estimate)
-    {
-        bits += 1;
-    }
-    foreign->partition_bits = bits;
-    foreign->partition_count = 1u << bits;
-    const uint32_t partitions = foreign->partition_count;
     bool result = objects < BUSTER_FOREIGN_MAX_OBJECTS;
     if (!result)
     {
@@ -1270,14 +1283,12 @@ static bool foreign_first_round(Foreign* foreign, ForeignLane* lane)
     Arena* arena = &foreign->arena;
     if (result)
     {
-        foreign->object_capacity = (uint32_t)objects;
         foreign->objects = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignObject, objects);
         foreign->positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, objects);
+        foreign->discarding = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, objects);
         // A round loads one member or more, but the last, which loads none.
         foreign->rounds = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignRound, objects + 1);
-        foreign->counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)foreign->lanes * partitions);
-        foreign->tables = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTable, partitions);
-        result = foreign->objects != 0 && foreign->positions != 0 && foreign->rounds != 0 && foreign->counts != 0 && foreign->tables != 0;
+        result = foreign->objects != 0 && foreign->positions != 0 && foreign->discarding != 0 && foreign->rounds != 0;
         if (!result)
         {
             foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0));
@@ -1285,7 +1296,6 @@ static bool foreign_first_round(Foreign* foreign, ForeignLane* lane)
     }
     if (result)
     {
-        memset(foreign->tables, 0, partitions * sizeof(ForeignTable));
         // Object 0: the command line's references, one strong undefined symbol each, which round 0's placement fills.
         foreign->objects[0] = (ForeignObject){
             .position = BUSTER_FOREIGN_COMMAND_POSITION,
@@ -1637,8 +1647,8 @@ static ForeignClass foreign_class(uint8_t info, uint32_t section)
     return result;
 }
 
-// Reads global symbol `index` of `object` into the round's columns at `at`, a symbol at a time: false, with *failure,
-// if it is malformed or not linked here. The checks, each with the place it reports:
+// Reads global symbol `index` of `object` into the round's columns at `at`, a symbol at a time, its name copied into
+// `names`: false, with *failure, if it is malformed or not linked here. The checks, each with the place it reports:
 //   - its name within the string table, NUL-terminated, and not empty (IMPORT_ERROR_BOUNDS);
 //   - a binding of a global symbol: STB_GLOBAL, STB_WEAK or STB_GNU_UNIQUE; a local one past sh_info is malformed
 //     (IMPORT_ERROR_BOUNDS), another is unsupported;
@@ -1648,7 +1658,7 @@ static ForeignClass foreign_class(uint8_t info, uint32_t section)
 //     extended indices (IMPORT_ERROR_BOUNDS; another reserved index is unsupported);
 //   - a common symbol global, with an alignment (its st_value) that is a power of two (IMPORT_ERROR_BOUNDS); an
 //     undefined one not GNU_UNIQUE (unsupported).
-static bool foreign_symbol_exact(const ForeignObject* object, uint32_t index, uint32_t at, ForeignSymbols* symbols, ImportResult* failure)
+static bool foreign_symbol_exact(const ForeignObject* object, uint32_t index, uint32_t at, ForeignSymbols* symbols, Arena* names, ImportResult* failure)
 {
     const ImportSymbols* table = &object->symbols;
     const Elf64_Sym symbol = import_symbol(table, index);
@@ -1678,7 +1688,14 @@ static bool foreign_symbol_exact(const ForeignObject* object, uint32_t index, ui
     }
     else
     {
-        symbols->name[at] = (const uint8_t*)name.pointer;
+        uint8_t* copy = arena_push(names, name.length + 1, 1);
+        if (copy != 0)
+        {
+            memcpy(copy, name.pointer, name.length);
+            copy[name.length] = 0;
+        }
+        *failure = copy == 0 ? import_fail(IMPORT_ERROR_MEMORY, offset) : *failure;
+        symbols->name[at] = copy;
         symbols->length[at] = (uint32_t)name.length;
         symbols->hash[at] = link_hash((const uint8_t*)name.pointer, name.length);
         symbols->value[at] = symbol.st_value;
@@ -1686,17 +1703,18 @@ static bool foreign_symbol_exact(const ForeignObject* object, uint32_t index, ui
         symbols->section[at] = section;
         symbols->info[at] = symbol.st_info;
         symbols->other[at] = symbol.st_other;
-        result = true;
+        result = copy != 0;
     }
     failure->symbol = result ? 0 : index;
     return result;
 }
 
 // The vector path over symbols [first, first + count) of `object` (indices in its symbol table), stored in the round's
-// columns from `at`: eight at a time, the checks as masks, each name's length from a masked 64-byte load and the names
-// hashed eight at a time. Returns how many it stored before the first batch it leaves to the exact path, which the
-// caller runs from there.
-static uint32_t foreign_symbols_vector(const ForeignObject* object, uint32_t first, uint32_t count, uint32_t at, ForeignSymbols* symbols)
+// columns from `at`: eight at a time, the checks as masks, each name's length from a masked 64-byte load, the names
+// hashed eight at a time and copied, one push from `names_arena` per batch, each row's bytes with its NUL in one masked
+// store. Returns how many it stored before the first batch it leaves to the exact path, which the caller runs from
+// there.
+static uint32_t foreign_symbols_vector(const ForeignObject* object, uint32_t first, uint32_t count, uint32_t at, ForeignSymbols* symbols, Arena* names_arena)
 {
     const ImportSymbols* table = &object->symbols;
     const String8 names = table->names;
@@ -1747,24 +1765,39 @@ static uint32_t foreign_symbols_vector(const ForeignObject* object, uint32_t fir
             lengths[lane] = (uint32_t)(length <= UINT32_MAX ? length : 0);
             empty |= (lengths[lane] == 0 ? 1u : 0u) << lane;
         }
-        result = ((bad | empty) & active) == 0;
+        uint64_t batch_bytes = 0;
+        for (uint32_t lane = 0; lane < n; lane += 1)
+        {
+            batch_bytes += ((bad | empty) & active) == 0 ? (uint64_t)lengths[lane] + 1 : 0;
+        }
+        uint8_t* copies = ((bad | empty) & active) == 0 ? arena_push(names_arena, batch_bytes, 1) : 0;
+        result = ((bad | empty) & active) == 0 && copies != 0;
         if (result)
         {
             __m512i rows[BUSTER_IMPORT_BATCH];
             uint64_t hashes[BUSTER_IMPORT_BATCH];
+            const uint8_t* copy_pointers[BUSTER_IMPORT_BATCH];
             const uint32_t long_names = import_name_rows(names.pointer, offsets, lengths, n, rows);
             const __m512i length = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32((__mmask8)active, lengths));
             _mm512_storeu_si512(hashes, link_hash_rows(rows, length));
-            for (uint32_t lane = 0; long_names != 0 && lane < n; lane += 1)
+            for (uint32_t lane = 0; lane < n; lane += 1)
             {
+                // The row's bytes past the length are zero, its NUL among them.
+                const char* source = names.pointer + offsets[lane];
                 if ((long_names >> lane & 1) != 0)
                 {
-                    hashes[lane] = link_hash((const uint8_t*)names.pointer + offsets[lane], lengths[lane]);
+                    hashes[lane] = link_hash((const uint8_t*)source, lengths[lane]);
+                    memcpy(copies, source, (uint64_t)lengths[lane] + 1);
                 }
+                else
+                {
+                    _mm512_mask_storeu_epi8(copies, _bzhi_u64(~0ull, lengths[lane] + 1), rows[lane]);
+                }
+                copy_pointers[lane] = copies;
+                copies += (uint64_t)lengths[lane] + 1;
             }
-            const __m512i pointers = _mm512_add_epi64(_mm512_set1_epi64((long long)(uintptr_t)names.pointer), name);
             const uint32_t place = at + stored;
-            import_store64((void*)(symbols->name + place), pointers, n);
+            memcpy((void*)(symbols->name + place), copy_pointers, n * sizeof(const uint8_t*));
             memcpy(symbols->length + place, lengths, n * sizeof(uint32_t));
             memcpy(symbols->hash + place, hashes, n * sizeof(uint64_t));
             import_store64(symbols->value + place, value, n);
@@ -1815,11 +1848,11 @@ static void foreign_fill_symbols(Foreign* foreign, ForeignRound* round, uint64_t
         {
             const uint32_t index = object->first_global + (uint32_t)(round->first_symbol + place - object->global_begin);
             const uint32_t count = (uint32_t)(stretch_end - place);
-            const uint32_t done = foreign->path == FOREIGN_PATH_VECTOR ? foreign_symbols_vector(object, index, count, (uint32_t)place, &round->symbols) : 0;
+            const uint32_t done = foreign->path == FOREIGN_PATH_VECTOR ? foreign_symbols_vector(object, index, count, (uint32_t)place, &round->symbols, &lane->arena) : 0;
             for (uint32_t k = done; !failed && k < count; k += 1)
             {
                 ImportResult read;
-                failed = !foreign_symbol_exact(object, index + k, (uint32_t)place + k, &round->symbols, &read);
+                failed = !foreign_symbol_exact(object, index + k, (uint32_t)place + k, &round->symbols, &lane->arena, &read);
                 if (failed)
                 {
                     foreign_fail(lane, foreign_import_failure(read, object->position, object->input, object->member));
@@ -1859,6 +1892,40 @@ static void foreign_object_groups(Foreign* foreign, ForeignRound* round, uint32_
     }
 }
 
+// The partitions, by how many records the link could have: round 0's, counted, and a symbol for each entry of the
+// archives' indices, each a global definition a member could bring (the references it brings too are left out, as
+// the members a link leaves are): about BUSTER_FOREIGN_PARTITION_RECORDS each (or the command's partition_records),
+// from 1 to 2^BUSTER_FOREIGN_MAX_PARTITION_BITS. They depend on the input, never on the lanes (rule 5).
+#define BUSTER_FOREIGN_PARTITION_RECORDS 2048
+#define BUSTER_FOREIGN_MAX_PARTITION_BITS 12
+
+// Lane 0, once round 0's headers have counted its records: the partitions, their tables and the lanes' counts of them.
+static bool foreign_partitions(Foreign* foreign, const ForeignRound* round)
+{
+    uint64_t estimate = (uint64_t)round->symbol_count + round->group_count;
+    for (uint32_t a = 0; a < foreign->archive_count; a += 1)
+    {
+        estimate += foreign->archives[a].whole ? 0 : foreign->archives[a].index.symbol_count;
+    }
+    uint32_t bits = 0;
+    const uint64_t target = foreign->command->partition_records != 0 ? foreign->command->partition_records : BUSTER_FOREIGN_PARTITION_RECORDS;
+    while (bits < BUSTER_FOREIGN_MAX_PARTITION_BITS && (target << bits) < estimate)
+    {
+        bits += 1;
+    }
+    foreign->partition_bits = bits;
+    foreign->partition_count = 1u << bits;
+    const uint32_t partitions = foreign->partition_count;
+    foreign->counts = BUSTER_ARENA_PUSH_ARRAY(&foreign->arena, uint32_t, (uint64_t)foreign->lanes * partitions);
+    foreign->tables = BUSTER_ARENA_PUSH_ARRAY(&foreign->arena, ForeignTable, partitions);
+    const bool result = foreign->counts != 0 && foreign->tables != 0;
+    if (result)
+    {
+        memset(foreign->tables, 0, partitions * sizeof(ForeignTable));
+    }
+    return result;
+}
+
 // Lane 0: a round's columns and records, for its counted symbols and groups, and object 0's symbols in round 0.
 static bool foreign_round_columns(Foreign* foreign, ForeignRound* round)
 {
@@ -1874,21 +1941,18 @@ static bool foreign_round_columns(Foreign* foreign, ForeignRound* round)
     columns->section = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbols + 1);
     columns->info = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, symbols + 1);
     columns->other = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, symbols + 1);
-    columns->entry = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbols + 1);
     columns->name_id = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbols + 1);
     ForeignGroups* group_columns = &round->groups;
     group_columns->signature = BUSTER_ARENA_PUSH_ARRAY(arena, const uint8_t*, groups + 1);
     group_columns->length = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, groups + 1);
     group_columns->hash = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, groups + 1);
     group_columns->object = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, groups + 1);
-    group_columns->entry = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, groups + 1);
     group_columns->kept = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, groups + 1);
     round->records = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignRecord, symbols + groups + 1);
     round->partition_begin = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)foreign->partition_count + 1);
     const bool result = columns->name != 0 && columns->length != 0 && columns->hash != 0 && columns->value != 0 && columns->size != 0 && columns->section != 0 &&
-                        columns->info != 0 && columns->other != 0 && columns->entry != 0 && columns->name_id != 0 && group_columns->signature != 0 &&
-                        group_columns->length != 0 && group_columns->hash != 0 && group_columns->object != 0 && group_columns->entry != 0 &&
-                        group_columns->kept != 0 && round->records != 0 && round->partition_begin != 0;
+                        columns->info != 0 && columns->other != 0 && columns->name_id != 0 && group_columns->signature != 0 && group_columns->length != 0 &&
+                        group_columns->hash != 0 && group_columns->object != 0 && group_columns->kept != 0 && round->records != 0 && round->partition_begin != 0;
     const ForeignCommand* command = foreign->command;
     for (uint32_t u = 0; result && round->first_object == 0 && u < command->undefined_count; u += 1)
     {
@@ -1953,7 +2017,7 @@ static void foreign_parse(Foreign* foreign, uint32_t index, ForeignLane* lane)
         round->symbol_count = (uint32_t)(global - first_symbol);
         round->first_group = (uint32_t)first_group;
         round->group_count = (uint32_t)(group - first_group);
-        if (!foreign_round_columns(foreign, round))
+        if ((index == 0 && !foreign_partitions(foreign, round)) || !foreign_round_columns(foreign, round))
         {
             foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0));
         }
@@ -2009,8 +2073,11 @@ static ForeignRecord foreign_symbol_record(const ForeignRound* round, uint32_t a
     const ForeignSymbols* symbols = &round->symbols;
     const ForeignRecord result = {
         .hash = symbols->hash[at],
+        .name = symbols->name[at],
+        .length = symbols->length[at],
         .item = at,
         .tag = foreign_tag(foreign_class(symbols->info[at], symbols->section[at]), symbols->other[at], object),
+        .section = symbols->section[at],
     };
     return result;
 }
@@ -2019,19 +2086,27 @@ static ForeignRecord foreign_group_record(const ForeignRound* round, uint32_t at
 {
     const ForeignRecord result = {
         .hash = round->groups.hash[at] ^ BUSTER_FOREIGN_GROUP_SALT,
+        .name = round->groups.signature[at],
+        .length = round->groups.length[at],
         .item = at,
         .tag = foreign_tag(FOREIGN_CLASS_GROUP, 0, round->groups.object[at]),
+        .section = 0,
     };
     return result;
 }
 
-// Up to eight records of `object`'s symbols from place `at`, `count` of them, in order into `records`, and their
-// partitions: foreign_class's classes as masks, the tags in vectors, each record's two words put together by permutes.
-static void foreign_records_vector(const Foreign* foreign, const ForeignRound* round, uint32_t at, uint32_t count, uint32_t object, ForeignRecord* records, uint32_t* partitions)
+// Up to eight records of `object`'s symbols from place `at`, `count` of them, in order two to a vector of `pairs` (record
+// 2k in pair k's low half, 2k + 1 in its high half), and their partitions: foreign_class's classes as masks, the tags in
+// vectors, and the records' four words each (the hash, the name, the length and the item, the tag and the section) put
+// together by a transpose: unpacks of the words' vectors in pairs, two-input permutes of their 128-bit chunks, then the
+// halves.
+static void foreign_records_vector(const Foreign* foreign, const ForeignRound* round, uint32_t at, uint32_t count, uint32_t object, __m512i* pairs, uint32_t* partitions)
 {
     const ForeignSymbols* symbols = &round->symbols;
     const __mmask8 loaded = (__mmask8)import_lane_mask(count);
     const __m512i hash = _mm512_maskz_loadu_epi64(loaded, symbols->hash + at);
+    const __m512i name = _mm512_maskz_loadu_epi64(loaded, symbols->name + at);
+    const __m512i length = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(loaded, symbols->length + at));
     const __m512i section = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(loaded, symbols->section + at));
     const __m512i info = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(loaded, symbols->info + at));
     const __m512i other = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(loaded, symbols->other + at));
@@ -2048,31 +2123,75 @@ static void foreign_records_vector(const Foreign* foreign, const ForeignRound* r
     const __m512i visibility = _mm512_slli_epi64(_mm512_and_si512(other, _mm512_set1_epi64(0x03)), BUSTER_FOREIGN_TAG_VISIBILITY_SHIFT);
     const __m512i tag = _mm512_or_si512(_mm512_or_si512(class, visibility), _mm512_set1_epi64((long long)object << BUSTER_FOREIGN_TAG_OBJECT_SHIFT));
     const __m512i item = _mm512_add_epi64(_mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0), _mm512_set1_epi64(at));
-    // Each record's second word: the item, then the tag above it.
-    const __m512i second = _mm512_or_si512(item, _mm512_slli_epi64(tag, 32));
-    _mm512_storeu_si512(records, _mm512_permutex2var_epi64(hash, _mm512_set_epi64(11, 3, 10, 2, 9, 1, 8, 0), second));
-    _mm512_storeu_si512(records + 4, _mm512_permutex2var_epi64(hash, _mm512_set_epi64(15, 7, 14, 6, 13, 5, 12, 4), second));
+    // The records' third and fourth words: the length below the item, and the tag below the section.
+    const __m512i third = _mm512_or_si512(length, _mm512_slli_epi64(item, 32));
+    const __m512i fourth = _mm512_or_si512(tag, _mm512_slli_epi64(section, 32));
+    // Each 128-bit chunk k of these holds lane 2k's two words (low) or lane 2k + 1's (high).
+    const __m512i first_low = _mm512_unpacklo_epi64(hash, name);
+    const __m512i first_high = _mm512_unpackhi_epi64(hash, name);
+    const __m512i second_low = _mm512_unpacklo_epi64(third, fourth);
+    const __m512i second_high = _mm512_unpackhi_epi64(third, fourth);
+    // Chunks 0 and 1 of each pair, then 2 and 3, the first's and the second's alternating.
+    const __m512i front = _mm512_set_epi64(11, 10, 3, 2, 9, 8, 1, 0);
+    const __m512i back = _mm512_set_epi64(15, 14, 7, 6, 13, 12, 5, 4);
+    const __m512i low_front = _mm512_permutex2var_epi64(first_low, front, second_low);
+    const __m512i high_front = _mm512_permutex2var_epi64(first_high, front, second_high);
+    const __m512i low_back = _mm512_permutex2var_epi64(first_low, back, second_low);
+    const __m512i high_back = _mm512_permutex2var_epi64(first_high, back, second_high);
+    pairs[0] = _mm512_shuffle_i64x2(low_front, high_front, 0x44);
+    pairs[1] = _mm512_shuffle_i64x2(low_front, high_front, 0xee);
+    pairs[2] = _mm512_shuffle_i64x2(low_back, high_back, 0x44);
+    pairs[3] = _mm512_shuffle_i64x2(low_back, high_back, 0xee);
     const __m512i partition = foreign->partition_bits == 0 ? _mm512_setzero_si512() : _mm512_srli_epi64(hash, 64 - foreign->partition_bits);
     import_store32(partitions, partition, count);
 }
 
-// One record into the exchange: with `next`, stored at its partition's next place, which moves on; without, counted.
-static void foreign_place_record(ForeignRecord* records, uint64_t* next, uint32_t* counts, ForeignRecord record, uint32_t partition)
+// The round's items [begin, end), its symbols then its groups, counted per partition: a histogram of their hashes' top
+// bits, a load and an increment each, on both paths, since the increments are the work and they are scalar either way.
+static void foreign_count_items(const Foreign* foreign, const ForeignRound* round, uint64_t begin, uint64_t end, uint32_t* counts)
 {
-    if (next != 0)
+    const uint64_t symbols = round->symbol_count;
+    const uint64_t symbol_end = end < symbols ? end : symbols;
+    const uint32_t bits = foreign->partition_bits;
+    if (bits == 0)
     {
-        records[next[partition]] = record;
-        next[partition] += 1;
+        counts[0] += (uint32_t)(end - begin);
     }
     else
     {
-        counts[partition] += 1;
+        const uint32_t shift = 64 - bits;
+        const uint64_t* hashes = round->symbols.hash;
+        for (uint64_t item = begin; item < symbol_end; item += 1)
+        {
+            counts[hashes[item] >> shift] += 1;
+        }
+        for (uint64_t item = begin > symbols ? begin : symbols; item < end; item += 1)
+        {
+            counts[(round->groups.hash[item - symbols] ^ BUSTER_FOREIGN_GROUP_SALT) >> shift] += 1;
+        }
     }
 }
 
-// The round's items [begin, end), its symbols then its groups, into the exchange: counted, or stored. The symbols go
-// object by object, eight at a time on the vector path.
-static void foreign_exchange_items(const Foreign* foreign, ForeignRound* round, uint64_t begin, uint64_t end, uint64_t* next, uint32_t* counts)
+// One record into the exchange, at its partition's next place, which moves on.
+static void foreign_place_record(ForeignRecord* records, uint64_t* next, ForeignRecord record, uint32_t partition)
+{
+    records[next[partition]] = record;
+    next[partition] += 1;
+}
+
+// A pair's two records into the exchange, each at its partition's next place, straight from the register: a batch
+// stored to memory and copied a record at a time read each record back from a store twice its size.
+static void foreign_place_pair(ForeignRecord* records, uint64_t* next, __m512i pair, uint32_t low, uint32_t high)
+{
+    _mm256_storeu_si256((__m256i*)(records + next[low]), _mm512_castsi512_si256(pair));
+    next[low] += 1;
+    _mm256_storeu_si256((__m256i*)(records + next[high]), _mm512_extracti64x4_epi64(pair, 1));
+    next[high] += 1;
+}
+
+// The round's items [begin, end), its symbols then its groups, stored into the exchange. The symbols go object by
+// object, eight at a time on the vector path.
+static void foreign_exchange_items(const Foreign* foreign, ForeignRound* round, uint64_t begin, uint64_t end, uint64_t* next)
 {
     const uint64_t symbols = round->symbol_count;
     const uint64_t symbol_end = end < symbols ? end : symbols;
@@ -2083,29 +2202,43 @@ static void foreign_exchange_items(const Foreign* foreign, ForeignRound* round, 
         const ForeignObject* holder = &foreign->objects[object];
         const uint64_t object_end = (uint64_t)holder->global_begin + holder->global_count - round->first_symbol;
         const uint64_t stretch = object_end < symbol_end ? object_end : symbol_end;
-        while (foreign->path == FOREIGN_PATH_VECTOR && item < stretch)
+        while (foreign->path == FOREIGN_PATH_VECTOR && item + BUSTER_IMPORT_BATCH <= stretch)
         {
-            const uint32_t n = stretch - item < BUSTER_IMPORT_BATCH ? (uint32_t)(stretch - item) : BUSTER_IMPORT_BATCH;
-            ForeignRecord batch[BUSTER_IMPORT_BATCH];
+            __m512i pairs[4];
             uint32_t partitions[BUSTER_IMPORT_BATCH];
-            foreign_records_vector(foreign, round, (uint32_t)item, n, object, batch, partitions);
+            foreign_records_vector(foreign, round, (uint32_t)item, BUSTER_IMPORT_BATCH, object, pairs, partitions);
+            foreign_place_pair(round->records, next, pairs[0], partitions[0], partitions[1]);
+            foreign_place_pair(round->records, next, pairs[1], partitions[2], partitions[3]);
+            foreign_place_pair(round->records, next, pairs[2], partitions[4], partitions[5]);
+            foreign_place_pair(round->records, next, pairs[3], partitions[6], partitions[7]);
+            item += BUSTER_IMPORT_BATCH;
+        }
+        // An object's last few symbols: a part batch, through memory.
+        if (foreign->path == FOREIGN_PATH_VECTOR && item < stretch)
+        {
+            const uint32_t n = (uint32_t)(stretch - item);
+            __m512i pairs[4];
+            uint32_t partitions[BUSTER_IMPORT_BATCH];
+            ForeignRecord batch[BUSTER_IMPORT_BATCH];
+            foreign_records_vector(foreign, round, (uint32_t)item, n, object, pairs, partitions);
+            memcpy(batch, pairs, sizeof(batch));
             for (uint32_t k = 0; k < n; k += 1)
             {
-                foreign_place_record(round->records, next, counts, batch[k], partitions[k]);
+                foreign_place_record(round->records, next, batch[k], partitions[k]);
             }
             item += n;
         }
         for (; item < stretch; item += 1)
         {
             const ForeignRecord record = foreign_symbol_record(round, (uint32_t)item, object);
-            foreign_place_record(round->records, next, counts, record, foreign_partition(foreign, record.hash));
+            foreign_place_record(round->records, next, record, foreign_partition(foreign, record.hash));
         }
         object += 1;
     }
     for (item = item > symbols ? item : symbols; item < end; item += 1)
     {
         const ForeignRecord record = foreign_group_record(round, (uint32_t)(item - symbols));
-        foreign_place_record(round->records, next, counts, record, foreign_partition(foreign, record.hash));
+        foreign_place_record(round->records, next, record, foreign_partition(foreign, record.hash));
     }
 }
 
@@ -2120,7 +2253,7 @@ static void foreign_exchange(Foreign* foreign, uint32_t index, ForeignLane* lane
     const Range64 mine = lane_range((uint64_t)round->symbol_count + round->group_count);
     uint32_t* counts = foreign->counts + (uint64_t)me * partitions;
     memset(counts, 0, partitions * sizeof(uint32_t));
-    foreign_exchange_items(foreign, round, mine.begin, mine.end, 0, counts);
+    foreign_count_items(foreign, round, mine.begin, mine.end, counts);
     lane_sync();
     Scratch scratch = scratch_begin(&lane->arena);
     uint64_t* next = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, partitions + 1);
@@ -2148,7 +2281,7 @@ static void foreign_exchange(Foreign* foreign, uint32_t index, ForeignLane* lane
         {
             round->partition_begin[partitions] = offset;
         }
-        foreign_exchange_items(foreign, round, mine.begin, mine.end, next, 0);
+        foreign_exchange_items(foreign, round, mine.begin, mine.end, next);
     }
     scratch_end(scratch);
     start = foreign_time(lane, FOREIGN_PHASE_EXCHANGE, start);
@@ -2162,11 +2295,14 @@ static void foreign_exchange(Foreign* foreign, uint32_t index, ForeignLane* lane
 // Each lane owns a range of the partitions (lane_range: the same in every round, so that a partition's tables stay with
 // its lane) and takes each round's records of them, which come from every lane in input order. A name's entry keeps
 // what loading needs (ForeignEntry): its earliest strong reference, definition and common symbol by position, the most
-// constraining visibility, and once a round touched it without a definition, the archive member that defines it first
-// (by position: the first archive in link order whose index has it, and its lowest member among the entries there) and
-// the first shared library that exports it. A group signature's entry keeps its earliest group by position. Both paths
-// fill the same tables, adding names in the order of their first records; each record's entry goes to its symbol's (or
-// group's) `entry` column.
+// constraining visibility, once a round touched it without a definition the archive member that defines it first (by
+// position: the first archive in link order whose index has it, and its lowest member among the entries there), and
+// once a decision or the winners need it, the first shared library that exports it. A decision needs only the libraries
+// before the member and the reference: a link whose first object refers to every name of an archive after it (the
+// benchmark's members kind) would otherwise look each name up in every library after it too, three lookups for the
+// archive's one. A group signature's entry keeps its earliest group by position. The tables add names in the order of
+// their first records, and each record's entry takes its length's place in the record (foreign_fold), where the groups
+// and the winners find it.
 //
 // Then each entry the round touched decides whether its first member must be loaded: as lld and mold decide where GNU
 // ld's result depends on the archives' order, and so as GNU ld does where it doesn't (an archive after the inputs that
@@ -2179,13 +2315,14 @@ static void foreign_exchange(Foreign* foreign, uint32_t index, ForeignLane* lane
 // archives' bitsets after a sync, and the next round loads those not loaded before, in position order. Loading only
 // ever adds: a member a round loaded stays loaded whatever a later round finds.
 
-#define BUSTER_FOREIGN_ENTRY_PROBED 0x01
+#define BUSTER_FOREIGN_ENTRY_ARCHIVES_PROBED 0x01
 #define BUSTER_FOREIGN_ENTRY_STRONG_DEFINED 0x02
 #define BUSTER_FOREIGN_ENTRY_WEAK_DEFINED 0x04
 #define BUSTER_FOREIGN_ENTRY_COMMON 0x08
 #define BUSTER_FOREIGN_ENTRY_REFERENCED 0x10
 #define BUSTER_FOREIGN_ENTRY_WEAK_REFERENCED 0x20
 #define BUSTER_FOREIGN_ENTRY_DATA_PROBED 0x40
+#define BUSTER_FOREIGN_ENTRY_LIBRARIES_PROBED 0x80
 // A table starts with room for this many entries, then doubles; its slots are twice its entries.
 #define BUSTER_FOREIGN_TABLE_ENTRIES 16
 
@@ -2393,42 +2530,68 @@ static bool foreign_touched_room(ForeignTable* table, uint64_t records, Arena* a
     return result;
 }
 
-// The bytes a record's name or signature is.
-static void foreign_record_name(const ForeignRound* round, const ForeignRecord* record, const uint8_t** name, uint32_t* length)
-{
-    const bool group = (record->tag & BUSTER_FOREIGN_TAG_CLASS) == FOREIGN_CLASS_GROUP;
-    *name = group ? round->groups.signature[record->item] : round->symbols.name[record->item];
-    *length = group ? round->groups.length[record->item] : round->symbols.length[record->item];
-}
-
-// A record folded into its entry, which its symbol's or group's column gets.
-static void foreign_fold(Foreign* foreign, ForeignRound* round, ForeignTable* table, uint32_t e, const ForeignRecord* record, uint32_t index)
+// A record folded into its entry, whose index then takes the record's length's place.
+static void foreign_fold(Foreign* foreign, ForeignRound* round, ForeignTable* table, uint32_t e, ForeignRecord* record, uint32_t index)
 {
     const uint64_t position = foreign->positions[record->tag >> BUSTER_FOREIGN_TAG_OBJECT_SHIFT];
     if ((record->tag & BUSTER_FOREIGN_TAG_CLASS) == FOREIGN_CLASS_GROUP)
     {
         foreign_touch_group(table, e, round->first_group + record->item, position);
-        round->groups.entry[record->item] = e;
     }
     else
     {
         foreign_touch(table, e, record->tag, position, index);
-        round->symbols.entry[record->item] = e;
     }
+    record->entry = e;
 }
 
-// The exact path: each record of the partition's round in turn, its entry found or added and updated.
-static bool foreign_resolve_exact(Foreign* foreign, ForeignRound* round, uint32_t index, ForeignTable* table, const ForeignRecord* records, uint64_t count, Arena* arena)
+// How many records ahead the resolution fetches what a record's probe and compare read: its name, which is read once,
+// from wherever its object's copies are (a partition's records come from every object); and the slot its hash names
+// first, the entry that slot holds and that entry's name, in three stages. A later round's records find the entries an
+// earlier round made, which are cold by then, and most probes end at their first slot.
+#define BUSTER_FOREIGN_PREFETCH_NAME 16
+#define BUSTER_FOREIGN_PREFETCH_SLOT 24
+#define BUSTER_FOREIGN_PREFETCH_ENTRY 16
+#define BUSTER_FOREIGN_PREFETCH_ENTRY_NAME 8
+
+// The partition's round of records in turn, each one's entry found or added and updated, on both paths. A probe is a few
+// loads in the partition's table, and a record's cost is the compare of its name with its entry's, which waits for both
+// names' bytes: each fetched ahead (BUSTER_FOREIGN_PREFETCH_*). A vector path that grouped a partition's records by
+// name first (a radix sort by hash, each name's records checked against its first's bytes, then a probe per name) did
+// the same compares and saved only probes that hit L1, and cost more than it saved ("Steps 1 to 5, as built").
+static bool foreign_resolve_records(Foreign* foreign, ForeignRound* round, uint32_t index, ForeignTable* table, ForeignRecord* records, uint64_t count, Arena* arena)
 {
     bool result = true;
     for (uint64_t i = 0; result && i < count; i += 1)
     {
-        const ForeignRecord* record = &records[i];
-        const uint8_t* name = 0;
-        uint32_t length = 0;
-        foreign_record_name(round, record, &name, &length);
+        if (i + BUSTER_FOREIGN_PREFETCH_NAME < count)
+        {
+            _mm_prefetch((const char*)records[i + BUSTER_FOREIGN_PREFETCH_NAME].name, _MM_HINT_T0);
+        }
+        // A table with no room yet has no slots.
+        if (i + BUSTER_FOREIGN_PREFETCH_SLOT < count && table->slots != 0)
+        {
+            _mm_prefetch((const char*)(table->slots + ((uint32_t)records[i + BUSTER_FOREIGN_PREFETCH_SLOT].hash & table->slot_mask)), _MM_HINT_T0);
+        }
+        if (i + BUSTER_FOREIGN_PREFETCH_ENTRY < count && table->slots != 0)
+        {
+            const uint32_t slot = table->slots[(uint32_t)records[i + BUSTER_FOREIGN_PREFETCH_ENTRY].hash & table->slot_mask];
+            if (slot != 0)
+            {
+                _mm_prefetch((const char*)(table->entries + slot - 1), _MM_HINT_T0);
+            }
+        }
+        if (i + BUSTER_FOREIGN_PREFETCH_ENTRY_NAME < count && table->slots != 0)
+        {
+            const uint32_t slot = table->slots[(uint32_t)records[i + BUSTER_FOREIGN_PREFETCH_ENTRY_NAME].hash & table->slot_mask];
+            if (slot != 0)
+            {
+                _mm_prefetch((const char*)table->entries[slot - 1].name, _MM_HINT_T0);
+            }
+        }
+        ForeignRecord* record = &records[i];
         const bool group = (record->tag & BUSTER_FOREIGN_TAG_CLASS) == FOREIGN_CLASS_GROUP;
-        const uint32_t e = group ? foreign_group_entry(table, record->hash, name, length, arena) : foreign_entry(table, record->hash, name, length, arena);
+        const uint32_t e = group ? foreign_group_entry(table, record->hash, record->name, record->length, arena) : foreign_entry(table, record->hash, record->name, record->length, arena);
         result = e != UINT32_MAX;
         if (result)
         {
@@ -2438,149 +2601,9 @@ static bool foreign_resolve_exact(Foreign* foreign, ForeignRound* round, uint32_
     return result;
 }
 
-// The vector path's sort: below this many records, a stable insertion sort by the whole hash; from it, a stable LSD
-// radix sort by the hash's low 16 bits in two passes of 8, then an insertion sort by the whole hash within each run of
-// equal low bits, which holds about one name.
-#define BUSTER_FOREIGN_SORT_RADIX 64
-#define BUSTER_FOREIGN_SORT_BUCKETS 256
-
-// Sorts `count` record places in `order` (0 to count - 1 on entry) stably by their records' hashes, using `spare`.
-static void foreign_sort_records(const ForeignRecord* records, uint32_t* order, uint32_t* spare, uint32_t count)
-{
-    if (count >= BUSTER_FOREIGN_SORT_RADIX)
-    {
-        uint32_t buckets[BUSTER_FOREIGN_SORT_BUCKETS];
-        uint32_t* from = order;
-        uint32_t* to = spare;
-        for (uint32_t shift = 0; shift < 16; shift += 8)
-        {
-            memset(buckets, 0, sizeof(buckets));
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                buckets[(records[from[i]].hash >> shift) & 0xff] += 1;
-            }
-            import_exclusive_scan(buckets, BUSTER_FOREIGN_SORT_BUCKETS);
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                const uint32_t bucket = (uint32_t)(records[from[i]].hash >> shift) & 0xff;
-                to[buckets[bucket]] = from[i];
-                buckets[bucket] += 1;
-            }
-            uint32_t* swap = from;
-            from = to;
-            to = swap;
-        }
-        // Two passes: the sorted places are back in `order`.
-    }
-    // Insertion sort by the whole hash: of everything below the radix sort's threshold, and within each run of equal
-    // low 16 bits after it. A place moves left only past a strictly larger hash, which keeps the sort stable.
-    uint32_t run = 0;
-    while (run < count)
-    {
-        uint32_t end = run + 1;
-        const uint64_t low = records[order[run]].hash & 0xffff;
-        while (end < count && (count < BUSTER_FOREIGN_SORT_RADIX || (records[order[end]].hash & 0xffff) == low))
-        {
-            end += 1;
-        }
-        for (uint32_t i = run + 1; i < end; i += 1)
-        {
-            const uint32_t place = order[i];
-            const uint64_t hash = records[place].hash;
-            uint32_t j = i;
-            while (j > run && records[order[j - 1]].hash > hash)
-            {
-                order[j] = order[j - 1];
-                j -= 1;
-            }
-            order[j] = place;
-        }
-        run = end;
-    }
-}
-
-// The vector path: the partition's round of records grouped by name before the tables see them, so that each name is
-// probed once, and in the order of its slots (the sort's low bits are the slots'). The records' places are sorted by
-// hash (foreign_sort_records), and each run of equal hashes, a name's records, is checked against its first's bytes
-// and kind (a group's signature or a symbol's name): a 64-bit collision between different names leaves the round to
-// the exact path, before any change to the tables. Then the names are taken in the order of their first records, the
-// order the exact path adds them in, each probed once, and its records folded in as the exact path folds them.
-static bool foreign_resolve_vector(Foreign* foreign, ForeignRound* round, uint32_t index, ForeignTable* table, const ForeignRecord* records, uint64_t count, Arena* arena)
-{
-    Scratch scratch = scratch_begin(arena);
-    const uint32_t n = count <= UINT32_MAX ? (uint32_t)count : 0;
-    uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, (uint64_t)n + 1);
-    uint32_t* spare = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, (uint64_t)n + 1);
-    // By a name's first record's place: where its run starts in `order`; and the places that start a name, a bit each.
-    uint32_t* run_of = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, (uint64_t)n + 1);
-    uint64_t* heads = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)n / 64 + 1);
-    bool result = count <= UINT32_MAX && order != 0 && spare != 0 && run_of != 0 && heads != 0;
-    bool same = result;
-    if (result)
-    {
-        for (uint32_t i = 0; i < n; i += 1)
-        {
-            order[i] = i;
-        }
-        memset(heads, 0, ((uint64_t)n / 64 + 1) * sizeof(uint64_t));
-        foreign_sort_records(records, order, spare, n);
-        uint32_t run = 0;
-        while (same && run < n)
-        {
-            const ForeignRecord* first = &records[order[run]];
-            const bool group = (first->tag & BUSTER_FOREIGN_TAG_CLASS) == FOREIGN_CLASS_GROUP;
-            const uint8_t* name = 0;
-            uint32_t length = 0;
-            foreign_record_name(round, first, &name, &length);
-            uint32_t end = run + 1;
-            while (same && end < n && records[order[end]].hash == first->hash)
-            {
-                const ForeignRecord* other = &records[order[end]];
-                const uint8_t* other_name = 0;
-                uint32_t other_length = 0;
-                foreign_record_name(round, other, &other_name, &other_length);
-                same = ((other->tag & BUSTER_FOREIGN_TAG_CLASS) == FOREIGN_CLASS_GROUP) == group && other_length == length && import_same_bytes(other_name, name, length);
-                end += 1;
-            }
-            // A stable sort leaves a run's first record its earliest.
-            const uint32_t head = order[run];
-            heads[head / 64] |= 1ull << (head % 64);
-            run_of[head] = run;
-            run = end;
-        }
-    }
-    if (result && same)
-    {
-        for (uint32_t w = 0; result && w < n / 64 + 1; w += 1)
-        {
-            for (uint64_t bits = heads[w]; result && bits != 0; bits &= bits - 1)
-            {
-                const uint32_t head = w * 64 + (uint32_t)__builtin_ctzll(bits);
-                const ForeignRecord* first = &records[head];
-                const bool group = (first->tag & BUSTER_FOREIGN_TAG_CLASS) == FOREIGN_CLASS_GROUP;
-                const uint8_t* name = 0;
-                uint32_t length = 0;
-                foreign_record_name(round, first, &name, &length);
-                const uint32_t e = group ? foreign_group_entry(table, first->hash, name, length, arena) : foreign_entry(table, first->hash, name, length, arena);
-                result = e != UINT32_MAX;
-                for (uint32_t k = run_of[head]; result && k < n && records[order[k]].hash == first->hash; k += 1)
-                {
-                    foreign_fold(foreign, round, table, e, &records[order[k]], index);
-                }
-            }
-        }
-    }
-    scratch_end(scratch);
-    if (result && !same)
-    {
-        result = foreign_resolve_exact(foreign, round, index, table, records, count, arena);
-    }
-    return result;
-}
-
-// Looks a name up in the archives' indices and the libraries' exports: its first member by position and its first
-// shared library in link order. An archive under --whole-archive has no index to look in: its members are all loaded.
-static void foreign_probe(const Foreign* foreign, ForeignEntry* entry)
+// Looks a name up in the archives' indices: its first member by position. An archive under --whole-archive has no index
+// to look in: its members are all loaded.
+static void foreign_probe_archives(const Foreign* foreign, ForeignEntry* entry)
 {
     for (uint32_t a = 0; entry->owner_archive == 0 && a < foreign->archive_count; a += 1)
     {
@@ -2591,22 +2614,39 @@ static void foreign_probe(const Foreign* foreign, ForeignEntry* entry)
         import_index_bucket(&archive->lookup, entry->hash, &begin, &end);
         for (uint32_t place = begin; place < end; place += 1)
         {
-            const uint32_t i = archive->lookup.order[place];
-            const String8 name = archive->index.symbols[i].name;
-            const bool same = archive->lookup.hash[place] == entry->hash && name.length == entry->length && import_same_bytes((const uint8_t*)name.pointer, entry->name, name.length);
-            const uint32_t candidate = archive->index.symbols[i].member;
+            const bool same = archive->lookup.hash[place] == entry->hash && archive->lookup_lengths[place] == entry->length &&
+                              import_same_bytes(archive->lookup_names[place], entry->name, entry->length);
+            const uint32_t candidate = archive->lookup_members[place];
             member = same && candidate < member ? candidate : member;
         }
         entry->owner_archive = member != UINT32_MAX ? a + 1 : 0;
         entry->owner_member = member != UINT32_MAX ? member : 0;
     }
-    for (uint32_t l = 0; entry->shared_library == 0 && l < foreign->library_count; l += 1)
+    entry->flags |= BUSTER_FOREIGN_ENTRY_ARCHIVES_PROBED;
+}
+
+// Looks a name up in the shared libraries' exports, in link order, those before `bound`: the first that exports it is
+// the first of all, which the entry keeps. Once one does, or every library has been looked in, what the entry knows is
+// final; a lookup stopped at the bound tells only that no library before it exports the name.
+static void foreign_probe_libraries(const Foreign* foreign, ForeignEntry* entry, uint64_t bound)
+{
+    uint32_t l = 0;
+    bool found = false;
+    bool within = true;
+    while ((entry->flags & BUSTER_FOREIGN_ENTRY_LIBRARIES_PROBED) == 0 && !found && within && l < foreign->library_count)
     {
-        const uint32_t export = import_library_find(&foreign->libraries[l].library, entry->name, entry->length, entry->hash);
-        entry->shared_library = export != 0 ? l + 1 : 0;
-        entry->shared_export = export != 0 ? export - 1 : 0;
+        const ForeignLibrary* library = &foreign->libraries[l];
+        within = foreign_position(library->input, 0) < bound;
+        const uint32_t export = within ? import_library_find(&library->library, entry->name, entry->length, entry->hash) : 0;
+        found = export != 0;
+        entry->shared_library = found ? l + 1 : 0;
+        entry->shared_export = found ? export - 1 : 0;
+        l += 1;
     }
-    entry->flags |= BUSTER_FOREIGN_ENTRY_PROBED;
+    if (found || (within && l == foreign->library_count))
+    {
+        entry->flags |= BUSTER_FOREIGN_ENTRY_LIBRARIES_PROBED;
+    }
 }
 
 // Whether archive member `member` defines the name as GNU ld's common rule asks (is_global_data_symbol_definition): the
@@ -2679,8 +2719,8 @@ static bool foreign_member_loaded(const ForeignArchive* archive, uint32_t member
     return (archive->loaded[member / 64] >> (member % 64) & 1) != 0;
 }
 
-// The position of the shared library an entry's name binds to: the first that exports it, if every symbol of the name
-// has default visibility; none otherwise.
+// The position of the shared library an entry's name binds to: the first that exports it (as far as the libraries have
+// been looked in), if every symbol of the name has default visibility; none otherwise.
 static uint64_t foreign_shared_position(const Foreign* foreign, const ForeignEntry* entry)
 {
     const bool bindable = entry->shared_library != 0 && entry->visibility == 0;
@@ -2691,16 +2731,22 @@ static uint64_t foreign_shared_position(const Foreign* foreign, const ForeignEnt
 // first member after its earliest common symbol that defines it as global data.
 static void foreign_decide(const Foreign* foreign, ForeignEntry* entry, ForeignLane* lane)
 {
-    if ((entry->flags & BUSTER_FOREIGN_ENTRY_PROBED) == 0 && (entry->defined == BUSTER_FOREIGN_NO_POSITION || (entry->flags & BUSTER_FOREIGN_ENTRY_COMMON) != 0))
+    if ((entry->flags & BUSTER_FOREIGN_ENTRY_ARCHIVES_PROBED) == 0 && (entry->defined == BUSTER_FOREIGN_NO_POSITION || (entry->flags & BUSTER_FOREIGN_ENTRY_COMMON) != 0))
     {
-        foreign_probe(foreign, entry);
+        foreign_probe_archives(foreign, entry);
     }
     if (entry->owner_archive != 0 && entry->reference != BUSTER_FOREIGN_NO_POSITION)
     {
         const ForeignArchive* archive = &foreign->archives[entry->owner_archive - 1];
         const uint64_t owner = foreign_position(archive->input, entry->owner_member + 1);
-        const uint64_t shadow = foreign_min(entry->defined, foreign_shared_position(foreign, entry));
-        if (!foreign_member_loaded(archive, entry->owner_member) && foreign_max(owner, entry->reference) < shadow)
+        // Both come before every definition; then a shared library before both shadows the member.
+        const uint64_t bound = foreign_max(owner, entry->reference);
+        const bool before = !foreign_member_loaded(archive, entry->owner_member) && bound < entry->defined;
+        if (before && entry->visibility == 0)
+        {
+            foreign_probe_libraries(foreign, entry, bound);
+        }
+        if (before && bound < foreign_shared_position(foreign, entry))
         {
             foreign_need(lane, entry->owner_archive - 1, entry->owner_member);
         }
@@ -2719,10 +2765,9 @@ static void foreign_decide(const Foreign* foreign, ForeignEntry* entry, ForeignL
             // The bucket's entries are in index order.
             for (uint32_t place = begin; !found && place < end; place += 1)
             {
-                const uint32_t i = archive->lookup.order[place];
-                const String8 name = archive->index.symbols[i].name;
-                const uint32_t member = archive->index.symbols[i].member;
-                const bool same = archive->lookup.hash[place] == entry->hash && name.length == entry->length && import_same_bytes((const uint8_t*)name.pointer, entry->name, name.length);
+                const uint32_t member = archive->lookup_members[place];
+                const bool same = archive->lookup.hash[place] == entry->hash && archive->lookup_lengths[place] == entry->length &&
+                                  import_same_bytes(archive->lookup_names[place], entry->name, entry->length);
                 const bool after = foreign_position(archive->input, member + 1) > entry->common;
                 found = same && after && !foreign_member_loaded(archive, member) && foreign_member_defines_data(foreign, archive, member, entry);
                 if (found)
@@ -2741,14 +2786,12 @@ static void foreign_resolve_partition(Foreign* foreign, uint32_t partition, uint
     ForeignTable* table = &foreign->tables[partition];
     const uint64_t first = round->partition_begin[partition];
     const uint64_t count = round->partition_begin[partition + 1] - first;
-    bool result = foreign_touched_room(table, count, &lane->arena);
-    if (result && foreign->path == FOREIGN_PATH_VECTOR)
+    // A later round's partitions are mostly empty: nothing to touch, and nothing to decide.
+    table->touched_count = 0;
+    bool result = count == 0 || foreign_touched_room(table, count, &lane->arena);
+    if (result && count != 0)
     {
-        result = foreign_resolve_vector(foreign, round, index, table, round->records + first, count, &lane->arena);
-    }
-    else if (result)
-    {
-        result = foreign_resolve_exact(foreign, round, index, table, round->records + first, count, &lane->arena);
+        result = foreign_resolve_records(foreign, round, index, table, round->records + first, count, &lane->arena);
     }
     for (uint32_t t = 0; result && t < table->touched_count; t += 1)
     {
@@ -2928,7 +2971,7 @@ static void foreign_groups(Foreign* foreign, ForeignLane* lane)
                 if ((record.tag & BUSTER_FOREIGN_TAG_CLASS) == FOREIGN_CLASS_GROUP)
                 {
                     const uint32_t group = round->first_group + record.item;
-                    round->groups.kept[record.item] = table->groups[round->groups.entry[record.item]].group == group ? 1 : 0;
+                    round->groups.kept[record.item] = table->groups[record.entry].group == group ? 1 : 0;
                 }
             }
         }
@@ -2962,6 +3005,7 @@ static void foreign_groups(Foreign* foreign, ForeignLane* lane)
                 }
             }
         }
+        foreign->discarding[id] = object->discarded != 0 ? 1 : 0;
     }
     start = foreign_time(lane, FOREIGN_PHASE_GROUPS, start);
     (void)start;
@@ -2991,10 +3035,14 @@ static void foreign_win(ForeignWinner* winner, const Foreign* foreign, const For
     const uint32_t at = record->item;
     const uint32_t symbol = round->first_symbol + at;
     const uint32_t object = record->tag >> BUSTER_FOREIGN_TAG_OBJECT_SHIFT;
-    const ForeignObject* holder = &foreign->objects[object];
     const uint64_t position = foreign->positions[object];
-    const uint32_t section = round->symbols.section[at];
-    const bool discarded = holder->discarded != 0 && section != SHN_UNDEF && section < holder->elf.section_count && holder->discarded[section] != 0;
+    const uint32_t section = record->section;
+    bool discarded = false;
+    if (foreign->discarding[object] != 0)
+    {
+        const ForeignObject* holder = &foreign->objects[object];
+        discarded = section != SHN_UNDEF && section < holder->elf.section_count && holder->discarded[section] != 0;
+    }
     ForeignClass class = (ForeignClass)(record->tag & BUSTER_FOREIGN_TAG_CLASS);
     if ((class == FOREIGN_CLASS_STRONG || class == FOREIGN_CLASS_WEAK) && discarded)
     {
@@ -3068,7 +3116,9 @@ static void foreign_winners(Foreign* foreign, ForeignLane* lane)
                     const ForeignRecord* record = &round->records[i];
                     if ((record->tag & BUSTER_FOREIGN_TAG_CLASS) != FOREIGN_CLASS_GROUP)
                     {
-                        foreign_win(&winners[round->symbols.entry[record->item]], foreign, round, record);
+                        foreign_win(&winners[record->entry], foreign, round, record);
+                        // The symbol's name id: one record per symbol, so every symbol gets one, from its partition's lane.
+                        round->symbols.name_id[record->item] = table->name_base + record->entry;
                     }
                 }
             }
@@ -3087,9 +3137,9 @@ static void foreign_winners(Foreign* foreign, ForeignLane* lane)
                 }
                 else
                 {
-                    if ((entry->flags & BUSTER_FOREIGN_ENTRY_PROBED) == 0)
+                    if (entry->visibility == 0)
                     {
-                        foreign_probe(foreign, entry);
+                        foreign_probe_libraries(foreign, entry, BUSTER_FOREIGN_NO_POSITION);
                     }
                     const bool shared = foreign_shared_position(foreign, entry) != BUSTER_FOREIGN_NO_POSITION;
                     resolution = shared ? FOREIGN_RESOLUTION_SHARED : (winner->flags & BUSTER_FOREIGN_NAME_REFERENCED) != 0 ? FOREIGN_RESOLUTION_UNDEFINED : FOREIGN_RESOLUTION_WEAK_UNDEFINED;
@@ -3111,17 +3161,6 @@ static void foreign_winners(Foreign* foreign, ForeignLane* lane)
             }
         }
         scratch_end(scratch);
-    }
-    lane_sync();
-    // Each symbol's name id: its partition's base and its entry, round by round.
-    for (uint32_t r = 0; r < foreign->round_count; r += 1)
-    {
-        ForeignRound* round = &foreign->rounds[r];
-        const Range64 symbols = lane_range(round->symbol_count);
-        for (uint64_t s = symbols.begin; s < symbols.end; s += 1)
-        {
-            round->symbols.name_id[s] = foreign->tables[foreign_partition(foreign, round->symbols.hash[s])].name_base + round->symbols.entry[s];
-        }
     }
     start = foreign_time(lane, FOREIGN_PHASE_WINNERS, start);
     (void)start;
@@ -3238,6 +3277,7 @@ static ForeignFailure foreign_run(Foreign* foreign, const ForeignCommand* comman
             result = failure->error != FOREIGN_ERROR_NONE && foreign_earlier(failure, &result) ? *failure : result;
         }
     }
+    foreign->command = 0;
     foreign->failure = result;
     return result;
 }

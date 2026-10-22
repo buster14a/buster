@@ -202,6 +202,18 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-snapshot
 
+      - name: Test the foreign inputs
+        # Generated programs' objects split into archives and compiled C and C++ cases, resolved by both paths on 1, 2, 3
+        # and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the
+        # winners, the COMDAT groups and -y's lines with the resolution's.
+        run: ./build/compiler test-foreign --cross-check
+
+      - name: Benchmark the foreign inputs
+        # --linkers also times mold's and wild's reading and resolving on one thread on the same command lines.
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-foreign --linkers
+
       - name: Benchmark the whole link against GNU ld, lld, mold and wild
         # Without taskset: it pins its own lane and the linkers' runs on one thread, and the linkers' other runs need
         # every CPU.
