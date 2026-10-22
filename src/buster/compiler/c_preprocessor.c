@@ -384,8 +384,9 @@ struct PPFileData
     bool once;
     bool prepared;
     // Where an unterminated block comment starts, plus 1, or 0: the lexer makes it the last token, which preparing the
-    // file drops, and entering the file reports, as clang's lexer does.
+    // file drops. Reading it in an active group reports it; a skipped group suppresses it, as clang's lexer does.
     uint32_t unterminated_comment;
+    bool unterminated_comment_starts_line;
     // A place whose line is known, from which pp_line_of counts lines forward: the preprocessor asks about later places
     // as it goes (__LINE__, diagnostics), so each file's lines are counted about once.
     uint32_t line_cursor;
@@ -698,6 +699,8 @@ struct PPContext
     // A file: this inclusion took the group of the file's include guard (its #ifndef was true). Only such an inclusion
     // tells clang the guard (its multiple-include optimization), and from its end on the guard skips the file.
     bool guard_taken;
+    // This inclusion has read the file's trailing unterminated comment, actively or while skipping a group.
+    bool comment_read;
     // The macro to enable again when the context is popped.
     PPMacroId macro;
     uint32_t position;
@@ -2249,10 +2252,11 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
     }
     else
     {
-        // An unterminated block comment (pp_is_unterminated_comment), which entering the file reports.
+        // An unterminated block comment (pp_is_unterminated_comment), reported when this inclusion reads it.
         if (count > 0 && pp_is_unterminated_comment(data->bytes, data->kinds[count - 1], data->starts[count - 1]))
         {
             data->unterminated_comment = data->starts[count - 1] + 1;
+            data->unterminated_comment_starts_line = (data->kinds[count - 1] & BUSTER_C_TOKEN_START_OF_LINE) != 0;
             count -= 1;
         }
         data->token_count = (uint32_t)count;
@@ -2826,6 +2830,7 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
     data->note_kinds = record->note_kinds;
     data->guard = record->guard;
     data->unterminated_comment = record->unterminated_comment;
+    data->unterminated_comment_starts_line = record->unterminated_comment_starts_line;
     data->guard_opener = record->guard_opener;
     data->prepared = true;
 }
@@ -4141,6 +4146,23 @@ static void pp_end_regions(Preprocessor* pp, bool main_file)
     }
 }
 
+// A file's trailing unterminated comment has been reached. Clang's raw lexer suppresses its diagnostic in a skipped
+// group's body, but reads a recognized directive's own line actively. Each inclusion reads it independently.
+static void pp_read_file_comment(Preprocessor* pp, PPContext* context, bool directive)
+{
+    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    if (data->unterminated_comment != 0 && !context->comment_read)
+    {
+        context->comment_read = true;
+        const bool skipping = !directive && pp->conditional_count > context->conditional_base && pp->conditionals[pp->conditional_count - 1].skipping;
+        if (!skipping)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp->ranges[context->range].base + data->unterminated_comment - 1, "unterminated /* comment");
+            pp->unterminated += 1;
+        }
+    }
+}
+
 BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
@@ -4154,6 +4176,7 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
     }
     else
     {
+        pp_read_file_comment(pp, context, false);
         while (pp->conditional_count > context->conditional_base)
         {
             pp_diagnose(pp, PP_SEVERITY_ERROR, pp->conditionals[pp->conditional_count - 1].location, "unterminated conditional directive");
@@ -5947,6 +5970,7 @@ static void pp_collect_step(Preprocessor* pp)
         }
         else
         {
+            pp_read_file_comment(pp, context, false);
             unterminated = true;
         }
     }
@@ -7521,11 +7545,6 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
             context->end = data->token_count;
             context->conditional_base = pp->conditional_count;
             pp->include_depth += pp->context_count > 1;
-            if (data->unterminated_comment != 0)
-            {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, pp->ranges[range].base + data->unterminated_comment - 1, "unterminated /* comment");
-                pp->unterminated += 1;
-            }
         }
     }
 }
@@ -9075,6 +9094,11 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
     const uint8_t kind = data->directive_kind[d];
     const uint32_t base = pp->ranges[context->range].base;
     const uint32_t location = base + data->starts[hash];
+    if (data->unterminated_comment != 0 && !data->unterminated_comment_starts_line && end == data->token_count)
+    {
+        // A comment on this directive's line is read before the directive changes which group is active.
+        pp_read_file_comment(pp, context, true);
+    }
     context->position = end;
     context->next_directive = d + 1;
     pp->statistics.directives += pp->options.timing;
