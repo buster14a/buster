@@ -962,6 +962,23 @@ static void dynamic_test_headers(DynamicTestTally* tally, const Link* link, cons
         dynamic_test_expect(tally, dynamic_test_tag(image, DT_FINI, &value) && value == dynamic_test_address(link, dynamic_global(runtime, bind, "_fini")), "DT_FINI _fini",
                             index);
         dynamic_test_expect(tally, dynamic_test_tag(image, DT_VERNEEDNUM, &value) && value == libraries, "DT_VERNEEDNUM", index);
+        // .gnu.version_r's entries, as its section header counts them (sh_info, which readelf -V reads) and as its
+        // chain of vn_next links has them: as many as DT_VERNEEDNUM says.
+        const Elf64_Shdr* verneed_section = dynamic_test_section(image, ".gnu.version_r");
+        const uint8_t* verneed = dynamic_test_bytes(image, verneed_section);
+        uint64_t chain = 0;
+        uint64_t record = 0;
+        bool more = verneed != 0 && verneed_section->sh_size >= sizeof(Elf64_Verneed);
+        while (more)
+        {
+            Elf64_Verneed entry;
+            memcpy(&entry, verneed + record, sizeof(entry));
+            chain += 1;
+            more = entry.vn_next != 0 && record + entry.vn_next + sizeof(Elf64_Verneed) <= verneed_section->sh_size;
+            record += entry.vn_next;
+        }
+        dynamic_test_expect(tally, verneed_section != 0 && verneed_section->sh_info == libraries && chain == libraries,
+                            ".gnu.version_r's entries: its sh_info and its chain, DT_VERNEEDNUM's", verneed_section != 0 ? verneed_section->sh_info * 100 + chain : 0);
     }
 }
 

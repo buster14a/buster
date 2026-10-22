@@ -1561,9 +1561,9 @@ static uint32_t bind_test_read_dynamic(String8 text, BindTestDynamic* entries)
     return valid ? count : UINT32_MAX;
 }
 
-// Whether readelf's entries are what binding found: each undefined one an import of the link at that version, with its
-// type, or a weak reference to nothing of it with default visibility, with the same binding; each defined one an
-// export; and every import, export and such weak reference among them.
+// Whether readelf's entries are what binding found: each undefined one an import of the link at that version, or a weak
+// reference to nothing of it with default visibility, unversioned, either with the same binding and type; each defined
+// one an export; and every import, export and such weak reference among them.
 static bool bind_test_same_dynamic(const Link* link, const Bind* bind, const Runtime* runtime, const BindTestDynamic* entries, uint32_t count)
 {
     const LinkSymbols* symbols = &link->symbols;
@@ -1591,7 +1591,7 @@ static bool bind_test_same_dynamic(const Link* link, const Bind* bind, const Run
             {
                 const BindTestDynamic* entry = &entries[e];
                 found = bind_test_named(link, name, entry->name) && entry->undefined == !exported && (exported || entry->weak == weak) &&
-                        (!import || (import_equal(version, entry->version) && entry->type == (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_TYPE))) &&
+                        (exported || entry->type == (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_TYPE)) && (!import || import_equal(version, entry->version)) &&
                         (!nowhere || entry->version[0] == 0);
             }
             if (!found)
@@ -1728,6 +1728,8 @@ typedef enum BindTestCase
     BIND_TEST_CASE_WEAK_HIDDEN_PUTS,
     BIND_TEST_CASE_ARRAY_BOUNDS,
     BIND_TEST_CASE_LOADER,
+    BIND_TEST_CASE_WEAK_LOADER,
+    BIND_TEST_CASE_MIXED_LOADER,
     BIND_TEST_CASES,
 } BindTestCase;
 
@@ -1775,6 +1777,18 @@ static const BindTestCaseInfo bind_test_cases[BIND_TEST_CASES] = {
     [BIND_TEST_CASE_LOADER] = {
         .name = "loader",
         .what = "main returns _r_debug's r_version (1), plus 10 if __libc_stack_end isn't 0: names only the loader exports, read through the GOT",
+        .links = true,
+        .status = 11,
+    },
+    [BIND_TEST_CASE_WEAK_LOADER] = {
+        .name = "weak-loader",
+        .what = "the loader's case with both references weak: the loader isn't needed, and both stay weak references to nothing, unversioned",
+        .links = true,
+        .status = 11,
+    },
+    [BIND_TEST_CASE_MIXED_LOADER] = {
+        .name = "mixed-loader",
+        .what = "the loader's case with __libc_stack_end's reference weak: _r_debug's needs the loader, and both are imports at their versions",
         .links = true,
         .status = 11,
     },
@@ -1938,7 +1952,7 @@ static bool bind_test_case_code(BindTestLink* test, BindTestCase which, SymbolId
         };
         result = bind_test_code(test, main_code, BUSTER_ARRAY_LENGTH(main_code), references, BUSTER_ARRAY_LENGTH(references), main);
     }
-    else if (which == BIND_TEST_CASE_LOADER)
+    else if (which == BIND_TEST_CASE_LOADER || which == BIND_TEST_CASE_WEAK_LOADER || which == BIND_TEST_CASE_MIXED_LOADER)
     {
         // main: mov rax, [rip + _r_debug@GOT]; mov eax, [rax]; mov rcx, [rip + __libc_stack_end@GOT]; mov rcx, [rcx];
         // mov edx, 10; mov esi, 0; test rcx, rcx; cmove rdx, rsi; add eax, edx; ret.
@@ -2076,11 +2090,12 @@ static void bind_test_case_program(BindTestCaseProgram* program, const Runtime* 
     {
         others[0] = bind_test_symbol(test, "puts", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_NOTYPE | BUSTER_LINK_SYMBOL_HIDDEN, BUSTER_LINK_SOURCE_NONE);
     }
-    else if (built && which == BIND_TEST_CASE_LOADER)
+    else if (built && (which == BIND_TEST_CASE_LOADER || which == BIND_TEST_CASE_WEAK_LOADER || which == BIND_TEST_CASE_MIXED_LOADER))
     {
+        const uint8_t weak = BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_NOTYPE;
         other_count = 2;
-        others[0] = bind_test_symbol(test, "_r_debug", reference, BUSTER_LINK_SOURCE_NONE);
-        others[1] = bind_test_symbol(test, "__libc_stack_end", reference, BUSTER_LINK_SOURCE_NONE);
+        others[0] = bind_test_symbol(test, "_r_debug", which == BIND_TEST_CASE_WEAK_LOADER ? weak : reference, BUSTER_LINK_SOURCE_NONE);
+        others[1] = bind_test_symbol(test, "__libc_stack_end", which == BIND_TEST_CASE_LOADER ? reference : weak, BUSTER_LINK_SOURCE_NONE);
     }
     else if (built)
     {
@@ -2170,6 +2185,37 @@ static void bind_test_case_linkers(BindTestTally* tally, BindTestCase which, con
     arena_pop_to(arena, length);
 }
 
+// How a loader case's two references bound: with a strong one, both imports at the loader's versions, the weak one
+// weak; with weak ones only, both left to nothing, unversioned, and no import the loader's (GNU ld and lld need a
+// library AS_NEEDED only for a strong reference). Either way, of the loader's exports' type, OBJECT, which GNU ld and lld
+// give them over the references' NOTYPE. True for the other cases.
+static bool bind_test_loader_holds(BindTestCase which, const Link* link, const Bind* bind, const Runtime* runtime)
+{
+    const bool loader = which == BIND_TEST_CASE_LOADER || which == BIND_TEST_CASE_WEAK_LOADER || which == BIND_TEST_CASE_MIXED_LOADER;
+    const LinkSymbols* symbols = &link->symbols;
+    bool result = true;
+    for (uint32_t r = 0; loader && r < 2; r += 1)
+    {
+        const SymbolId symbol = bind_test_global(link, r == 0 ? "_r_debug" : "__libc_stack_end");
+        const bool weak = symbol != 0 && (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+        bool imported = false;
+        for (uint32_t i = 0; i < bind->import_count; i += 1)
+        {
+            imported = imported || bind->imports[i] == symbol;
+        }
+        const bool expected_weak = which == BIND_TEST_CASE_WEAK_LOADER || (which == BIND_TEST_CASE_MIXED_LOADER && r == 1);
+        const bool needed = which != BIND_TEST_CASE_WEAK_LOADER;
+        result = result && symbol != 0 && weak == expected_weak && imported == needed && (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_OBJECT &&
+                 (needed ? symbols->source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED && runtime_loader_version(runtime, symbols->version[symbol])
+                         : symbols->source[symbol] == BUSTER_LINK_SOURCE_NONE && symbols->version[symbol] == 0);
+    }
+    for (uint32_t i = 0; loader && which == BIND_TEST_CASE_WEAK_LOADER && i < bind->import_count; i += 1)
+    {
+        result = result && !runtime_loader_version(runtime, symbols->version[bind->imports[i]]);
+    }
+    return result;
+}
+
 static bool bind_test_linker_cases(const Runtime* runtime, bool cross_check, const char* directory, bool keep, Arena* arena)
 {
     BindTestTally tally = {
@@ -2190,6 +2236,8 @@ static bool bind_test_linker_cases(const Runtime* runtime, bool cross_check, con
         bind_test_expect(&tally, exact.built == vector.built && exact.bound == vector.bound && bind_test_same_links(&vector.test.link, &exact.test.link) &&
                                      bind_test_same_binds(&vector.test.bind, &exact.test.bind),
                          "the paths agree", c);
+        bind_test_expect(&tally, !vector.bound || bind_test_loader_holds((BindTestCase)c, &vector.test.link, &vector.test.bind, runtime),
+                         "the loader's names bound as GNU ld and lld bind them, needed only for a strong reference", c);
         if (cross_check)
         {
             BindTestCaseProgram own;

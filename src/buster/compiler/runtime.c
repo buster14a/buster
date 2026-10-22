@@ -328,6 +328,9 @@ static __attribute__((unused)) bool runtime_probes_current(const Runtime* runtim
 // The library of an export of the runtime's (RuntimeNames.export less 1, or RuntimeBinding.export): libc.so.6 for one
 // below its exports' count, the loader for the others; and the export's index among that library's.
 static __attribute__((unused)) const ImportLibrary* runtime_export_library(const Runtime* runtime, uint32_t export, uint32_t* index);
+// Whether a version index that a link's symbol holds (LinkSymbols.version) is one of the loader's, which the import
+// numbers after libc.so.6's.
+static __attribute__((unused)) bool runtime_loader_version(const Runtime* runtime, uint16_t version);
 // The entry of the runtime's global names (RuntimeNames) with these bytes, plus 1, or 0.
 static __attribute__((unused)) uint32_t runtime_find_global_name(const RuntimeNames* names, const uint8_t* bytes, uint32_t length, uint64_t hash);
 // The bytes of an entry of the runtime's global names.
@@ -1221,6 +1224,16 @@ static const ImportLibrary* runtime_export_library(const Runtime* runtime, uint3
     const bool libc = export < runtime->libc.exports.count;
     *index = libc ? export : export - runtime->libc.exports.count;
     return libc ? &runtime->libc : &runtime->loader;
+}
+
+static bool runtime_loader_version(const Runtime* runtime, uint16_t version)
+{
+    bool result = false;
+    for (uint32_t v = 0; v < runtime->loader.version_count; v += 1)
+    {
+        result = result || runtime->loader.versions[v].index == version;
+    }
+    return result;
 }
 
 static uint32_t runtime_find_global_name(const RuntimeNames* names, const uint8_t* bytes, uint32_t length, uint64_t hash)

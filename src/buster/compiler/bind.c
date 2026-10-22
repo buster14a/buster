@@ -34,7 +34,9 @@
 //     __tls_get_addr, _r_debug, __libc_stack_end): an import, with source RUNTIME_SHARED, the export's type, and its
 //     version in the linker's column (the loader's indices follow libc.so.6's, runtime.c), listed in Bind.imports; but
 //     not for a hidden, internal or protected reference, which needs a definition within the executable, as GNU ld and
-//     lld bind one;
+//     lld bind one. The loader is needed only for a strong reference to one of its names, as GNU ld and lld take a
+//     library AS_NEEDED: without one, the weak references to its names are left to nothing, unversioned
+//     (bind_keep_loader);
 //   - for a strong reference, to a member of libc_nonshared.a (atexit), which joins the link;
 //   - for a weak reference, to nothing: source NONE. As with GNU ld, a weak reference loads no member.
 // Anything else is an error naming it. Members that join can refer to names nothing else does, so binding goes in
@@ -85,7 +87,7 @@
 //   - Joining an object: bind_visibility, bind_install, bind_merge, bind_piece_fits, bind_join_block, bind_join_records,
 //     bind_discards and bind_join.
 //   - Binding: bind_relaxed_name, bind_resolve_symbol, bind_resolve_vector, bind_resolve_exact, bind_resolve,
-//     bind_members, bind_keep_imports and bind_find_exports.
+//     bind_members, bind_keep_imports, bind_keep_loader and bind_find_exports.
 //   - The static closure: bind_symbol_defined, bind_entry_defined, bind_closure_need, bind_closure_vector,
 //     bind_closure_exact and bind_static_members.
 //   - Entry points: bind_capacity, bind_begin and bind_end.
@@ -945,6 +947,37 @@ static void bind_keep_imports(Bind* bind, const Link* link)
     bind->import_count = kept;
 }
 
+// The loader's imports. libc.so's script names the loader as needed (AS_NEEDED), and GNU ld and lld need such a library
+// only for a strong reference that binds to it. Without one, the weak references to its names are left to nothing,
+// unversioned (source NONE), and drop out of the imports, keeping its export's type: GNU ld and lld write them so,
+// OBJECT WEAK UND for _r_debug, lld demoting them in demoteSymbolsAndComputeIsPreemptible. With one, every reference
+// to its names is an import at its version, the weak ones among them. An import is the loader's by its version, whose
+// index follows libc.so.6's (runtime.c): the loader's exports all have versions, as glibc's do. A pass over the
+// imports, which are tens, shared by both paths.
+static void bind_keep_loader(Bind* bind, Link* link)
+{
+    const Runtime* runtime = bind->runtime;
+    LinkSymbols* symbols = &link->symbols;
+    bool needed = false;
+    for (uint32_t i = 0; i < bind->import_count; i += 1)
+    {
+        const SymbolId symbol = bind->imports[i];
+        const bool strong = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
+        needed = needed || (strong && runtime_loader_version(runtime, symbols->version[symbol]));
+    }
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < bind->import_count; i += 1)
+    {
+        const SymbolId symbol = bind->imports[i];
+        const bool dropped = !needed && runtime_loader_version(runtime, symbols->version[symbol]);
+        symbols->source[symbol] = dropped ? BUSTER_LINK_SOURCE_NONE : symbols->source[symbol];
+        symbols->version[symbol] = dropped ? 0 : symbols->version[symbol];
+        bind->imports[kept] = symbol;
+        kept += dropped ? 0 : 1;
+    }
+    bind->import_count = kept;
+}
+
 // The link's definitions of names that libc.so.6 or the loader defines too, or libc.so.6 refers to, with default or
 // protected visibility: among the runtime's names that took a link symbol, in the order they took it.
 static void bind_find_exports(Bind* bind, const Link* link)
@@ -1283,6 +1316,7 @@ static bool bind_end(Bind* bind, Link* link)
         bind_resolve(bind, link, before_tail, link->symbols.count, false);
     }
     bind_keep_imports(bind, link);
+    bind_keep_loader(bind, link);
     bind_find_exports(bind, link);
     return bind->error == BIND_ERROR_NONE;
 }
