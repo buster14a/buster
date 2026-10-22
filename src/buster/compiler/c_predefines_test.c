@@ -1226,6 +1226,22 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
             BUSTER_PREDEFINES_TEST_SET("-fsanitize=%s,%s -fno-sanitize=%s", sanitizers[a], sanitizers[b], sanitizers[b]);
         }
     }
+    // Each of them and each other group with -fno-sanitize=all after it, which turns off the group's own bit too (memtag's,
+    // which x86-64 doesn't support, is refused only while it is on), and before it; and "all" beside a group in -fsanitize=,
+    // which clang refuses and names with the group.
+    static const char* const groups[] = {
+        "memtag", "nullability", "shift", "cfi", "undefined-trap", "implicit-integer-truncation", "implicit-integer-arithmetic-value-change",
+        "implicit-integer-conversion", "implicit-conversion", "integer", "bounds",
+    };
+    for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(sanitizers) + BUSTER_ARRAY_LENGTH(groups); a += 1)
+    {
+        const char* name = a < BUSTER_ARRAY_LENGTH(sanitizers) ? sanitizers[a] : groups[a - BUSTER_ARRAY_LENGTH(sanitizers)];
+        BUSTER_PREDEFINES_TEST_SET("-fsanitize=%s -fno-sanitize=all", name);
+        BUSTER_PREDEFINES_TEST_SET("-fno-sanitize=all -fsanitize=%s", name);
+        BUSTER_PREDEFINES_TEST_SET("-fsanitize=%s,memtag -fno-sanitize=all,%s", name, name);
+    }
+    BUSTER_PREDEFINES_TEST_SET("%s", "-fsanitize=all,memtag");
+    BUSTER_PREDEFINES_TEST_SET("%s", "-fsanitize=memtag -fno-sanitize=all -fsanitize=address");
     // Random combinations: a -march (or none), then up to eight feature flags, special flags and other options.
     uint64_t state = seed;
     for (uint32_t r = 0; r < random; r += 1)

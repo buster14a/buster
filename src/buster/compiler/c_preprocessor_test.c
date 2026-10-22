@@ -1736,6 +1736,7 @@ static bool pp_test_option_features(const char* directory)
         "-fsanitize=realtime",
         "-fsanitize=alloc-token",
         "-fsanitize=vptr",
+        "-fsanitize=memtag,address,undefined -fno-sanitize=all",
     };
     static const char* const target_sets[] = {
         "-std=gnu17",

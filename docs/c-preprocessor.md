@@ -700,6 +700,9 @@ later `-fno-sanitize=` turns off what an earlier `-fsanitize=` turned on and
 resolves a pair the whole set wouldn't allow. Each of clang's 63 sanitizers keeps
 its own state (`address` and `kernel-address` share `__SANITIZE_ADDRESS__`, not
 their state), and a group (`undefined`, `integer`, `cfi`, ...) gives its members.
+`-fno-sanitize=all` turns off every sanitizer and every group, as clang's `all`
+holds every bit, a group's own too: an earlier `-fsanitize=memtag`, which x86-64
+doesn't support, is then no error.
 `-fsanitize=object-size` is off without `-O` or with `-O0` (`-O00` keeps it, as
 clang's does), `-fwrapv` (or `-fno-strict-overflow`) keeps `undefined` from
 checking signed overflow and `-fwrapv-pointer` pointer overflow,
@@ -716,8 +719,9 @@ explicit `function`, `-frtti` for `vptr`, and `kcfi` beside CFI.
 aren't followed: they only refuse `vptr` or a recovery mode, and change no macro
 or feature. `test-preprocessor --clang` compares every sanitizer that has a macro
 or appears in clang's incompatible pairs alone, in pairs and in pairs with
-either one turned off after them (376 sets), and the features under 45 option
-sets.
+either one turned off after them (376 sets), each of them and each other group
+with `-fno-sanitize=all` after it and before it, and beside `memtag` (81), and
+the features under 46 option sets.
 
 This is cold code: it runs once per translation unit, on a few dozen options
 and two-word feature sets, so it has no vector path. Generating the text costs

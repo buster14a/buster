@@ -1730,8 +1730,11 @@ static const struct
 #define BUSTER_PREDEFINES_SANITIZER_GROUP_MEMTAG 0x0001
 #define BUSTER_PREDEFINES_SANITIZER_GROUP_UNDEFINED 0x0010
 #define BUSTER_PREDEFINES_SANITIZER_GROUP_ALL 0x1000
+// Every group's own bit.
+#define BUSTER_PREDEFINES_SANITIZER_GROUPS 0x1fff
 // The groups with a member clang supports for x86_64-linux-gnu: all but memtag.
-#define BUSTER_PREDEFINES_SANITIZER_GROUPS_SUPPORTED (0x1fff & ~BUSTER_PREDEFINES_SANITIZER_GROUP_MEMTAG)
+#define BUSTER_PREDEFINES_SANITIZER_GROUPS_SUPPORTED (BUSTER_PREDEFINES_SANITIZER_GROUPS & ~BUSTER_PREDEFINES_SANITIZER_GROUP_MEMTAG)
+_Static_assert(BUSTER_PREDEFINES_SANITIZER_GROUPS == (1u << BUSTER_ARRAY_LENGTH(predefines_sanitizer_groups)) - 1, "a bit per group");
 
 // clang's IncompatibleGroups for Linux, in its order: with `group` on, `incompatible`'s are errors, and dropped.
 static const struct
@@ -1875,7 +1878,8 @@ static PredefinesSanitizers predefines_sanitizer_value(const char* name, size_t 
     return result;
 }
 
-// clang's expandSanitizerGroups: the groups' members added, the groups' own bits kept.
+// clang's expandSanitizerGroups: the groups' members added, the groups' own bits kept. "all" is every sanitizer and every
+// group's own bit, as clang's All (~SanitizerMask()) is, so -fno-sanitize=all turns off an earlier group too.
 static PredefinesSanitizers predefines_sanitizers_expand(PredefinesSanitizers set)
 {
     PredefinesSanitizers result = set;
@@ -1883,6 +1887,7 @@ static PredefinesSanitizers predefines_sanitizers_expand(PredefinesSanitizers se
     {
         result.kinds |= (set.groups >> g) & 1 ? predefines_sanitizer_groups[g].members : 0;
     }
+    result.groups |= (uint16_t)((set.groups & BUSTER_PREDEFINES_SANITIZER_GROUP_ALL) != 0 ? BUSTER_PREDEFINES_SANITIZER_GROUPS : 0);
     return result;
 }
 
