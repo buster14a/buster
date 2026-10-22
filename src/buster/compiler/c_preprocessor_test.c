@@ -2196,6 +2196,12 @@ static bool pp_test_assembly_printing(const char* directory)
             "$ foo\n$ 7\nfoo $\n1 $\n$ $\n",
             false,
         },
+        {
+            "assembly pragma identifiers stop at dollar punctuation",
+            "#pragma ppf a$b\n",
+            "#pragma ppf a$b\n",
+            true,
+        },
     };
     // Put '$' before, at and after each side of a 64-token boundary, including a partial final chunk.
     static const uint32_t padding[] = { 0, 62, 63, 64, 126, 127, 128 };
