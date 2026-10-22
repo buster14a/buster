@@ -1304,7 +1304,7 @@ static void pp_fuzz_against_clang(Arena* arena, const PPFuzzOptions* options, bo
                 result = pp_fuzz_check_ends(arena, options->clang_path, c23, &grouped[k], ours[i], &checked, &unverified);
             }
             // A comparison that can't be made leaves the case without a result.
-            tally->compared += answered[k] && result != BUSTER_PPF_INVALID;
+            tally->compared += answered[k] && result != BUSTER_PPF_INVALID && !unverified;
             tally->ends += checked && result != BUSTER_PPF_INVALID;
             tally->unverified += unverified;
             tally->invalid += answered[k] && result == BUSTER_PPF_INVALID;
@@ -1506,6 +1506,7 @@ static bool pp_fuzz_check_ends_cases(const PPFuzzOptions* options)
             bool checked = false;
             bool unverified = false;
             bool shortened = false;
+            bool counted = true;
             for (uint32_t pass = 0; ran && pass < 2; pass += 1)
             {
                 Preprocessor* pp = &pp_fuzz_state.runs[0];
@@ -1526,13 +1527,22 @@ static bool pp_fuzz_check_ends_cases(const PPFuzzOptions* options)
                                                                 : texts[pass];
                 checked |= pass == 0 && pass_checked;
                 unverified |= pass == 0 && pass_unverified;
+                if (pass == 0 && ends_case->unverified)
+                {
+                    // The real comparison path must report this case separately, without counting its unchecked end
+                    // as a verified comparison. The review's pragma source is accepted by both preprocessors.
+                    const bool usable = true;
+                    PPFuzzTally tally = { 0 };
+                    pp_fuzz_against_clang(&scratch, options, c23, false, &test_case, &ours, &lost, &usable, 1, &tally);
+                    counted = tally.unverified == 1 && tally.compared == 0 && tally.invalid == 0 && tally.differences == 0;
+                }
             }
             pp_fuzz_release(&pp_fuzz_state);
             arena_pop_to(&scratch, 0);
             const bool agrees = results[0] == BUSTER_PPF_EQUAL && checked == !ends_case->unverified && unverified == ends_case->unverified;
             const bool differs = shortened && results[1] != BUSTER_PPF_EQUAL && results[1] != BUSTER_PPF_INVALID;
             const bool only_tokens = i != 0 || (texts[1] == BUSTER_PPF_EQUAL && results[1] == BUSTER_PPF_TOKEN_SPELLING);
-            if (!agrees || !differs || !only_tokens)
+            if (!agrees || !differs || !only_tokens || !counted)
             {
                 printf("fuzz ends: %s, case %u gives %s as it is and %s one byte shorter (by its text, %s)\n", c23 ? "c23" : "c17", i, pp_fuzz_difference_name(results[0]),
                        pp_fuzz_difference_name(results[1]), pp_fuzz_difference_name(texts[1]));
@@ -1746,7 +1756,8 @@ static bool pp_fuzz(const PPFuzzOptions* options)
                 printf("; %" PRIu64 " saved", total->saved);
             }
             printf("\n");
-            result = result && total->cases == options->count && total->kernels == 0 && total->differences == 0 && total->oracle == 0 && total->invalid == 0;
+            const bool compared = !options->with_clang || (total->compared == total->cases && total->unverified == 0);
+            result = result && total->cases == options->count && compared && total->kernels == 0 && total->differences == 0 && total->oracle == 0 && total->invalid == 0;
         }
     }
     if (saved_epoch != 0)
