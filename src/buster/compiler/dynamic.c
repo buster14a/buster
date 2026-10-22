@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// A dynamic PIE's inputs: what executable_write takes as plain data (ExecutableDynamic), from the C runtime
-// (runtime.c) and from binding (bind.c) a program's link against it (docs/object-writer-and-linker.md, "The runtime
-// snapshot"):
+// An executable's inputs from the C runtime: what executable_write takes as plain data, from the runtime (runtime.c)
+// and from binding (bind.c) a program's link against it. A dynamic PIE's (ExecutableDynamic, dynamic_inputs;
+// docs/object-writer-and-linker.md, "The runtime snapshot") are:
 //   - the program interpreter that GCC's driver names for x86-64 glibc (GLIBC_DYNAMIC_LINKER64 in
 //     gcc/config/i386/linux64.h), which it passes to the linker with -dynamic-linker;
 //   - libc.so.6's soname and its version definitions, but the one of its own name (VER_FLG_BASE), and among them
@@ -12,6 +12,10 @@
 //   - crti.o's _init and _fini, as the link's symbols of those names, for DT_INIT and DT_FINI, as GNU ld and lld find
 //     them by name;
 //   - binding's exports.
+// A static executable's with the C runtime (ExecutableRuntime, dynamic_static_inputs) are crt1.o's ABI note and the
+// link's __tls_get_addr. A static PIE's (dynamic_static_pie_inputs) are both: an ExecutableDynamic without an
+// interpreter, a library, versions or exports, with rcrt1.o's ABI note, crti.o's _init and _fini and RELR when libc.a's
+// startup takes it (dynamic_static_relr), and the static executable's ExecutableRuntime.
 //
 // main.c includes this file after bind.c and executable.c.
 
@@ -32,6 +36,44 @@ static SymbolId dynamic_global(const Runtime* runtime, const Bind* bind, const c
     const uint64_t length = strlen(name);
     const uint32_t entry = runtime_find_global_name(&runtime->global_names, (const uint8_t*)name, (uint32_t)length, link_hash((const uint8_t*)name, length));
     return entry != 0 ? bind->name_symbols[entry - 1] : 0;
+}
+
+// Fills `inputs` for a link that `bind` bound against the static runtime `runtime` (runtime_import_static): crt1.o's
+// ABI note, which the executable repeats, and the link's __tls_get_addr, which nothing defines (bind.c leaves it to the
+// writer, which relaxes its calls away), or 0 if the link has none.
+static __attribute__((unused)) void dynamic_static_inputs(ExecutableRuntime* inputs, const Runtime* runtime, const Bind* bind)
+{
+    *inputs = (ExecutableRuntime){
+        .note = runtime->abi_note,
+        .tls_get_addr = dynamic_global(runtime, bind, "__tls_get_addr"),
+    };
+}
+
+// Whether a static runtime's libc.a relocates a static PIE with DT_RELR too: glibc's startup does from 2.36 on
+// (_dl_relocate_static_pie applies DT_RELR before DT_RELA), and an older one would leave RELR's relocations undone.
+// libc.a has no version definitions to say so, as libc.so.6's GLIBC_ABI_DT_RELR does: the release that took DT_RELR
+// added arc4random, which a member of a libc.a from it on defines.
+static bool dynamic_static_relr(const Runtime* runtime)
+{
+    static const char name[] = "arc4random";
+    const uint64_t length = sizeof(name) - 1;
+    const uint32_t entry = runtime_find_global_name(&runtime->global_names, (const uint8_t*)name, (uint32_t)length, link_hash((const uint8_t*)name, length));
+    return entry != 0 && runtime->global_names.member[entry - 1] != 0;
+}
+
+// Fills `dynamic` and `inputs` for a link that `bind` bound against a static PIE's runtime (runtime_import_static_pie),
+// which executable_write takes together for a static PIE: no interpreter, library, versions or exports, rcrt1.o's ABI
+// note, and crti.o's _init and _fini for DT_INIT and DT_FINI, as GNU ld and lld give a static PIE them, and RELR when
+// libc.a takes it (dynamic_static_relr); and the link's __tls_get_addr, as for a static executable.
+static __attribute__((unused)) void dynamic_static_pie_inputs(ExecutableDynamic* dynamic, ExecutableRuntime* inputs, const Runtime* runtime, const Bind* bind)
+{
+    dynamic_static_inputs(inputs, runtime, bind);
+    *dynamic = (ExecutableDynamic){
+        .note = runtime->abi_note,
+        .init = dynamic_global(runtime, bind, "_init"),
+        .fini = dynamic_global(runtime, bind, "_fini"),
+        .relr = dynamic_static_relr(runtime),
+    };
 }
 
 // Fills `dynamic` for a link that `bind` bound against `runtime`, its versions pushed from `arena`. False if the arena
@@ -67,6 +109,7 @@ static __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, c
         .exports = bind->exports,
         .export_count = bind->export_count,
         .relr_version = relr_version,
+        .relr = relr_version != 0,
     };
     return versions != 0;
 }

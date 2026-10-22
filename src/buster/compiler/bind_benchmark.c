@@ -9,15 +9,15 @@
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...). For each count of workers in --functions (1, 64,
 // 2000 and 102400 by default), a generated program that calls libc, of 200 workers per unit as synth's translation
 // units have (one unit below 200), with 8 globals and 2 thread-locals per unit, is bound by each path, against the
-// dynamic PIE's runtime and against a static executable's. Each figure is the median of BUSTER_BIND_BENCHMARK_RUNS runs
-// after a warm-up, each path's on a program of its own, each run on the same link put back as it was before (its
-// counts, arenas and the symbol columns binding writes, and binding's own state):
+// dynamic PIE's runtime, a static executable's and a static PIE's. Each figure is the median of
+// BUSTER_BIND_BENCHMARK_RUNS runs after a warm-up, each path's on a program of its own, each run on the same link put
+// back as it was before (its counts, arenas and the symbol columns binding writes, and binding's own state):
 //   - match: the program's global symbols looked up in the runtime's names (bind_match), per global symbol;
 //   - begin: bind_begin, the match and the crt objects before the program joined;
-//   - closure (the static runtime's): the members the link needs found (bind_closure_vector or bind_closure_exact), per
-//     member found;
-//   - end: bind_end, after the program's atoms: the members joined (for the static runtime, the closure among it),
-//     every name bound, the crt objects after the program joined, and the exports found.
+//   - closure (the static runtimes', a static executable's and a static PIE's): the members the link needs found
+//     (bind_closure_vector or bind_closure_exact), per member found;
+//   - end: bind_end, after the program's atoms: the members joined (for a static runtime, the closure among it), every
+//     name bound, the crt objects after the program joined, and the exports found.
 // Cycles and instructions come from the hardware counters (zero when unavailable). The paths must make the same links.
 // The exit status is 1 if the arguments are invalid, a program can't be made or bound, or the paths disagree.
 
@@ -74,6 +74,13 @@ static const uint32_t bind_benchmark_default_functions[] = {
 static const char* const bind_benchmark_path_names[] = {
     [BIND_PATH_VECTOR] = "vector",
     [BIND_PATH_EXACT] = "exact",
+};
+
+// Each kind's runtime, as the rows name it.
+static const char* const bind_benchmark_kind_names[RUNTIME_KINDS] = {
+    [RUNTIME_KIND_DYNAMIC] = "the dynamic PIE's",
+    [RUNTIME_KIND_STATIC] = "the static",
+    [RUNTIME_KIND_STATIC_PIE] = "the static PIE's",
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -413,7 +420,7 @@ static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime,
     // The closure alone, from binding's state after bind_begin: the program defines its names before it, so the names it
     // has are all matched.
     const uint32_t words = (runtime->member_count + 63) / 64;
-    for (uint32_t run = 0; result && runtime->kind == RUNTIME_KIND_STATIC && run < BUSTER_BIND_BENCHMARK_RUNS + 1; run += 1)
+    for (uint32_t run = 0; result && runtime_kind_is_static(runtime->kind) && run < BUSTER_BIND_BENCHMARK_RUNS + 1; run += 1)
     {
         bind_benchmark_restore(&atoms_added, link, &program->bytes);
         bind_benchmark_load(&state, &bind);
@@ -504,17 +511,23 @@ int run_bind_benchmark(int argc, char** argv)
             valid = false;
         }
     }
+    // Each kind's runtime, imported: runtime_import, runtime_import_static and runtime_import_static_pie.
     Runtime runtimes[RUNTIME_KINDS];
-    const bool imported = valid && runtime_import(&runtimes[RUNTIME_KIND_DYNAMIC]) == RUNTIME_ERROR_NONE;
-    const bool static_imported = imported && runtime_import_static(&runtimes[RUNTIME_KIND_STATIC]) == RUNTIME_ERROR_NONE;
-    bool result = static_imported && x86_encoder_initialize();
+    uint32_t started = 0;
+    bool result = valid;
+    for (uint32_t kind = 0; result && kind < RUNTIME_KINDS; kind += 1)
+    {
+        result = runtime_import_kind(&runtimes[kind], (RuntimeKind)kind) == RUNTIME_ERROR_NONE;
+        started += 1;
+    }
+    result = result && x86_encoder_initialize();
     if (!valid)
     {
         printf("usage: benchmark-bind [--functions LIST] [--seed N]\n");
     }
     else if (!result)
     {
-        printf("the runtime didn't import, or the encoder's templates can't be built\n");
+        printf("a runtime didn't import, or the encoder's templates can't be built\n");
     }
     BindBenchmarkClock clock = {
         .cycles_counter = bind_benchmark_counter(PERF_COUNT_HW_CPU_CYCLES),
@@ -539,9 +552,9 @@ int run_bind_benchmark(int argc, char** argv)
             if (result)
             {
                 const Link* link = &programs[BIND_PATH_VECTOR].link;
-                printf("%u workers, %s runtime (%u members joined): %u units, %u symbols (%u global), %u atoms, %u fixups%s\n", functions[p],
-                       kind == RUNTIME_KIND_STATIC ? "the static" : "the dynamic PIE's", members, programs[BIND_PATH_VECTOR].options.units, link->symbols.count - 1, globals,
-                       link->atoms.count - 1, link->fixups.count - 1, same ? "" : "; the paths' links differ");
+                printf("%u workers, %s runtime (%u members joined): %u units, %u symbols (%u global), %u atoms, %u fixups%s\n", functions[p], bind_benchmark_kind_names[kind],
+                       members, programs[BIND_PATH_VECTOR].options.units, link->symbols.count - 1, globals, link->atoms.count - 1, link->fixups.count - 1,
+                       same ? "" : "; the paths' links differ");
                 for (uint32_t path = 0; path < 2; path += 1)
                 {
                     for (uint32_t phase = 0; phase < BIND_BENCHMARK_PHASES; phase += 1)
@@ -549,7 +562,7 @@ int run_bind_benchmark(int argc, char** argv)
                         char what[64];
                         snprintf(what, sizeof(what), "%s %s", bind_benchmark_path_names[path], bind_benchmark_phase_names[phase]);
                         const uint64_t items = phase == BIND_BENCHMARK_MATCH ? globals : phase == BIND_BENCHMARK_CLOSURE ? members : 0;
-                        if (phase != BIND_BENCHMARK_CLOSURE || kind == RUNTIME_KIND_STATIC)
+                        if (phase != BIND_BENCHMARK_CLOSURE || runtime_kind_is_static((RuntimeKind)kind))
                         {
                             bind_benchmark_print(what, &figures[BIND_BENCHMARK_PHASES * path + phase], items, phase == BIND_BENCHMARK_MATCH ? "global" : "member");
                         }
@@ -563,13 +576,10 @@ int run_bind_benchmark(int argc, char** argv)
         }
     }
     arena_release(&arena);
-    if (imported)
+    // A failed import's arenas too.
+    for (uint32_t kind = 0; kind < started; kind += 1)
     {
-        runtime_release(&runtimes[RUNTIME_KIND_DYNAMIC]);
-    }
-    if (static_imported)
-    {
-        runtime_release(&runtimes[RUNTIME_KIND_STATIC]);
+        runtime_release(&runtimes[kind]);
     }
     return result ? 0 : 1;
 }

@@ -2,23 +2,29 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The runtime snapshot's benchmark: what a link pays for the C runtime with the snapshot (snapshot.c) and without it
-// (runtime_import), phase by phase, and what the alternatives the design weighed cost.
+// (runtime_import, runtime_import_static, runtime_import_static_pie), phase by phase, for each kind's runtime, and what
+// the alternatives the design weighed cost.
 //
-// Usage: build/compiler benchmark-snapshot [--directory PATH] [--runs N]
+// Usage: build/compiler benchmark-snapshot [--directory PATH] [--runs N] [--only dynamic|static|static-pie]
 //
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...), with --directory on each file system to measure
 // (TMPDIR or /tmp by default; the cache directory is usually under $HOME). Each figure is the median of --runs runs (41
-// by default) after a warm-up:
-//   - the import: runtime_import and runtime_release, as a link without a snapshot pays them;
+// by default) after a warm-up, for a dynamic PIE's runtime, a static executable's and a static PIE's (--only one of
+// them):
+//   - the import: runtime_import, runtime_import_static or runtime_import_static_pie, and runtime_release, as a link
+//     without a snapshot pays them;
 //   - the write: snapshot_write of the imported runtime into the directory, over the snapshot of the run before;
 //   - the load: runtime_open's, as a link pays it: this executable's identity (a stat of /proc/self/exe), then
-//     snapshot_load's phases (the mapping, the header and the hash, the view, the probes' stats), and runtime_release's
-//     munmap after it;
+//     snapshot_load's phases (the mapping, the header and the directory's hash, the view, the probes' stats), and
+//     runtime_release's munmap after it;
 //   - the alternatives: the snapshot read with pread into new memory, as the design first had it, instead of mapped;
-//     and mapped without the hash, touching only the pages a hello world's binding reads;
-//   - binding: a program of one worker that calls libc, bound against the imported runtime and against a loaded one
-//     (bind_begin and bind_end), which must make the same link.
-// The exit status is 1 if the arguments are invalid, the runtime doesn't import, or a snapshot can't be written or
+//     mapped without the hash, touching only the pages a hello world's lookups read; and mapped and hashed whole, as
+//     format 3's loader checked every byte;
+//   - binding: a program of one worker that calls libc (bind_begin and bind_end), which must make the same link each
+//     time: against the imported runtime; against one loaded afresh each time, as a link binds after runtime_open,
+//     whose pieces it joins are faulted in and checked then (runtime_piece_current); against one loaded once and warm;
+//     and the checks alone of the pieces it joined, warm.
+// The exit status is 1 if the arguments are invalid, a runtime doesn't import, or a snapshot can't be written or
 // loaded.
 
 #include <stdint.h>
@@ -61,6 +67,25 @@ struct String8
 #define BUSTER_SNAPSHOT_BENCHMARK_DEFAULT_RUNS 41
 #define BUSTER_SNAPSHOT_BENCHMARK_MAX_RUNS 10001
 #define BUSTER_SNAPSHOT_BENCHMARK_BIND_BYTES (1ull << 30)
+
+// Each kind's name for --only, its runtime's in the rows, and its import's.
+static const char* const snapshot_benchmark_kind_options[RUNTIME_KINDS] = {
+    [RUNTIME_KIND_DYNAMIC] = "dynamic",
+    [RUNTIME_KIND_STATIC] = "static",
+    [RUNTIME_KIND_STATIC_PIE] = "static-pie",
+};
+
+static const char* const snapshot_benchmark_kind_names[RUNTIME_KINDS] = {
+    [RUNTIME_KIND_DYNAMIC] = "dynamic",
+    [RUNTIME_KIND_STATIC] = "static",
+    [RUNTIME_KIND_STATIC_PIE] = "static PIE",
+};
+
+static const char* const snapshot_benchmark_imports[RUNTIME_KINDS] = {
+    [RUNTIME_KIND_DYNAMIC] = "runtime_import",
+    [RUNTIME_KIND_STATIC] = "runtime_import_static",
+    [RUNTIME_KIND_STATIC_PIE] = "runtime_import_static_pie",
+};
 
 static int snapshot_benchmark_compare(const void* a, const void* b)
 {
@@ -128,6 +153,7 @@ static uint64_t snapshot_benchmark_unhashed(const char* path, const RuntimeProbe
     if (loaded)
     {
         snapshot_view(&runtime, file, bytes);
+        snapshot_rebase(&runtime);
         loaded = runtime_probes_current(&runtime);
     }
     // A dozen lookups, of names spread over the global names.
@@ -188,6 +214,56 @@ static uint64_t snapshot_benchmark_bind(const Runtime* runtime, LinkProgram* ref
     return result ? (begin_end - begin_start) + (end_end - end_start) : 0;
 }
 
+// What the whole-file hash computes, which a store keeps the compiler from leaving out.
+static volatile uint8_t snapshot_benchmark_sink;
+
+// The whole snapshot hashed, as format 3's loader checked it (format 4's checks the directory, and each piece as binding
+// reads it): the nanoseconds the mapping and the hash of every byte take, or 0 if it can't be mapped.
+static uint64_t snapshot_benchmark_whole_hash(const char* path)
+{
+    const uint64_t start = executable_now();
+    const int descriptor = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat status;
+    const bool known = descriptor >= 0 && fstat(descriptor, &status) == 0;
+    const uint64_t bytes = known ? (uint64_t)status.st_size : 0;
+    uint8_t* file = bytes >= sizeof(SnapshotHeader) ? mmap(0, bytes, PROT_READ, MAP_PRIVATE, descriptor, 0) : MAP_FAILED;
+    if (descriptor >= 0)
+    {
+        close(descriptor);
+    }
+    uint8_t hash[16] = { 0 };
+    if (file != MAP_FAILED)
+    {
+        snapshot_hash(file, bytes, hash);
+        snapshot_benchmark_sink ^= hash[0];
+    }
+    const uint64_t end = executable_now();
+    if (file != MAP_FAILED)
+    {
+        munmap(file, bytes);
+    }
+    return file != MAP_FAILED ? end - start : 0;
+}
+
+// The pieces that a program bound against `runtime` read, the crt objects and the members that joined, checked again
+// (runtime_piece_current) after the binding read them: the nanoseconds it takes, or 0 if one isn't current.
+static uint64_t snapshot_benchmark_checks(const Runtime* runtime, const Bind* bind, uint32_t* checked)
+{
+    bool current = true;
+    uint32_t count = 0;
+    const uint64_t start = executable_now();
+    for (uint32_t piece = 0; piece < RUNTIME_OBJECTS + runtime->member_count; piece += 1)
+    {
+        const uint32_t member = piece - RUNTIME_OBJECTS;
+        const bool joined = piece < RUNTIME_OBJECTS || (bind->members_joined[member / 64] >> (member % 64) & 1) != 0;
+        current = current && (!joined || runtime_piece_current(runtime, piece));
+        count += joined ? 1 : 0;
+    }
+    const uint64_t end = executable_now();
+    *checked = count;
+    return current ? end - start : 0;
+}
+
 static const char* const snapshot_benchmark_phase_names[SNAPSHOT_PHASES] = {
     [SNAPSHOT_PHASE_MAP] = "map",
     [SNAPSHOT_PHASE_HASH] = "hash",
@@ -195,45 +271,21 @@ static const char* const snapshot_benchmark_phase_names[SNAPSHOT_PHASES] = {
     [SNAPSHOT_PHASE_PROBES] = "probes",
 };
 
-int run_snapshot_benchmark(int argc, char** argv);
-
-int run_snapshot_benchmark(int argc, char** argv)
+// The rows of one kind's runtime, in a directory of its own under `parent` (see the orientation comment): false if the
+// runtime doesn't import, or a snapshot can't be written or loaded, or the loaded runtime binds other than the imported.
+static bool snapshot_benchmark_kind(RuntimeKind kind, const char* parent, uint64_t runs)
 {
-    const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
-    uint64_t runs = BUSTER_SNAPSHOT_BENCHMARK_DEFAULT_RUNS;
-    bool valid = true;
-    for (int i = 1; i < argc; i += 1)
-    {
-        if (strcmp(argv[i], "--directory") == 0 && i + 1 < argc)
-        {
-            parent = argv[i + 1];
-            i += 1;
-        }
-        else if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc)
-        {
-            valid = valid && snapshot_benchmark_parse_u64(argv[i + 1], &runs) && runs >= 1 && runs <= BUSTER_SNAPSHOT_BENCHMARK_MAX_RUNS;
-            i += 1;
-        }
-        else
-        {
-            valid = false;
-        }
-    }
     char directory[BUSTER_SNAPSHOT_BENCHMARK_PATH_BYTES];
     char path[BUSTER_SNAPSHOT_BENCHMARK_PATH_BYTES];
     const int length = snprintf(directory, sizeof(directory), "%s/buster-snapshot-benchmark-XXXXXX", parent);
-    const bool made = valid && length > 0 && (uint64_t)length + 64 < sizeof(directory) && mkdtemp(directory) != 0;
-    snprintf(path, sizeof(path), "%s/" BUSTER_SNAPSHOT_NAME, directory);
+    const bool made = length > 0 && (uint64_t)length + 64 < sizeof(directory) && mkdtemp(directory) != 0;
+    snprintf(path, sizeof(path), "%s/%s", directory, snapshot_name(kind));
     Runtime imported;
     RuntimeProbe compiler;
     const bool identified = snapshot_compiler(&compiler);
-    const RuntimeError error = made ? runtime_import(&imported) : RUNTIME_ERROR_NONE;
-    bool result = made && identified && error == RUNTIME_ERROR_NONE && (x86_encoder_initialized || x86_encoder_initialize());
-    if (!valid)
-    {
-        fprintf(stderr, "usage: benchmark-snapshot [--directory PATH] [--runs N]\n");
-    }
-    else if (!made)
+    const RuntimeError error = made ? runtime_import_kind(&imported, kind) : RUNTIME_ERROR_NONE;
+    bool result = made && identified && error == RUNTIME_ERROR_NONE;
+    if (!made)
     {
         fprintf(stderr, "benchmark-snapshot: can't make a directory in %s\n", parent);
     }
@@ -241,7 +293,7 @@ int run_snapshot_benchmark(int argc, char** argv)
     {
         fprintf(stderr, "the runtime didn't import: error %d, %s\n", (int)error, imported.failed_file);
     }
-    uint64_t* times = result ? calloc(runs * (SNAPSHOT_PHASES + 8), sizeof(uint64_t)) : 0;
+    uint64_t* times = result ? calloc(runs * (SNAPSHOT_PHASES + 12), sizeof(uint64_t)) : 0;
     result = result && times != 0;
     uint64_t* import_times = times;
     uint64_t* write_times = times + runs;
@@ -250,13 +302,18 @@ int run_snapshot_benchmark(int argc, char** argv)
     uint64_t* release_times = times + 4 * runs;
     uint64_t* pread_times = times + 5 * runs;
     uint64_t* unhashed_times = times + 6 * runs;
-    uint64_t* phase_times = times + 7 * runs;
+    uint64_t* whole_times = times + 7 * runs;
+    uint64_t* first_bind_times = times + 8 * runs;
+    uint64_t* bind_times = times + 9 * runs;
+    uint64_t* check_times = times + 10 * runs;
+    uint64_t* imported_bind_times = times + 11 * runs;
+    uint64_t* phase_times = times + 12 * runs;
     // The import, as a link without a snapshot pays it.
     for (int64_t r = -1; result && r < (int64_t)runs; r += 1)
     {
         Runtime runtime;
         const uint64_t start = executable_now();
-        result = runtime_import(&runtime) == RUNTIME_ERROR_NONE;
+        result = runtime_import_kind(&runtime, kind) == RUNTIME_ERROR_NONE;
         runtime_release(&runtime);
         const uint64_t end = executable_now();
         if (r >= 0)
@@ -287,7 +344,7 @@ int run_snapshot_benchmark(int argc, char** argv)
         const uint64_t start = executable_now();
         const bool known = snapshot_compiler(&identity);
         const uint64_t identified_at = executable_now();
-        result = known && snapshot_load(&runtime, path, &identity, phases) == SNAPSHOT_STATUS_LOADED;
+        result = known && snapshot_load(&runtime, path, kind, &identity, phases) == SNAPSHOT_STATUS_LOADED;
         const uint64_t loaded_at = executable_now();
         if (result)
         {
@@ -310,69 +367,103 @@ int run_snapshot_benchmark(int argc, char** argv)
     {
         const uint64_t read = snapshot_benchmark_pread(path);
         const uint64_t unhashed = snapshot_benchmark_unhashed(path, &compiler, &imported);
-        result = read != 0 && unhashed != 0;
+        const uint64_t whole = snapshot_benchmark_whole_hash(path);
+        result = read != 0 && unhashed != 0 && whole != 0;
         if (r >= 0)
         {
             pread_times[r] = read;
             unhashed_times[r] = unhashed;
+            whole_times[r] = whole;
         }
     }
-    if (result)
+    // Binding one worker's program: against the imported runtime; against a runtime loaded afresh each time, as a link
+    // binds after runtime_open (the pieces it joins faulted in and checked); against one loaded once, warm; and the
+    // checks alone of the pieces it read.
+    LinkProgram reference;
+    bool kept = false;
+    const bool referenced = result && snapshot_benchmark_bind(&imported, &reference, true, &kept) != 0 && kept;
+    Runtime warm;
+    const bool warmed = referenced && snapshot_load(&warm, path, kind, &compiler, 0) == SNAPSHOT_STATUS_LOADED;
+    uint32_t checked = 0;
+    bool same = warmed;
+    for (int64_t r = -1; same && r < (int64_t)runs; r += 1)
     {
-        printf("The runtime: %u probes, %u global names, %u exports of libc.so.6, %u symbols; a %llu-byte snapshot in %s\n", imported.probe_count, imported.global_names.count,
-               imported.libc.exports.count, imported.link.symbols.count - 1, (unsigned long long)snapshot_bytes, directory);
-        printf("  runtime_import and runtime_release   %9.2f us\n", snapshot_benchmark_median(import_times, runs));
-        printf("  snapshot_write                        %9.2f us\n", snapshot_benchmark_median(write_times, runs));
-        printf("  runtime_open from the snapshot        %9.2f us:", snapshot_benchmark_median(open_times, runs));
+        bool same_imported = false;
+        bool same_first = false;
+        bool same_warm = false;
+        const uint64_t a = snapshot_benchmark_bind(&imported, &reference, false, &same_imported);
+        Runtime fresh;
+        const bool loaded = snapshot_load(&fresh, path, kind, &compiler, 0) == SNAPSHOT_STATUS_LOADED;
+        const uint64_t b = loaded ? snapshot_benchmark_bind(&fresh, &reference, false, &same_first) : 0;
+        if (loaded)
+        {
+            runtime_release(&fresh);
+        }
+        const uint64_t c = snapshot_benchmark_bind(&warm, &reference, false, &same_warm);
+        // The checks: a binding of its own, kept, whose members say which pieces it read.
+        uint64_t name_bytes = 0;
+        uint64_t atom_bytes = 0;
+        LinkProgramOptions options = link_program_default_options();
+        options.functions = 1;
+        options.units = 1;
+        options.absolute = false;
+        options.libc = true;
+        const LinkCapacity extra = bind_capacity(&warm, &name_bytes, &atom_bytes);
+        Arena arena = arena_reserve(BUSTER_SNAPSHOT_BENCHMARK_BIND_BYTES);
+        Bind bind = { 0 };
+        LinkProgram program;
+        const bool bound = link_program_generate_begin(&program, options, extra, name_bytes, atom_bytes) && arena.base != 0 &&
+                           bind_begin(&bind, &program.link, &warm, BIND_PATH_VECTOR, &program.bytes, options.units, &arena) && link_program_generate_atoms(&program) &&
+                           bind_end(&bind, &program.link);
+        const uint64_t d = bound ? snapshot_benchmark_checks(&warm, &bind, &checked) : 0;
+        link_program_release(&program);
+        arena_release(&arena);
+        same = a != 0 && b != 0 && c != 0 && d != 0 && same_imported && same_first && same_warm;
+        if (r >= 0)
+        {
+            imported_bind_times[r] = a;
+            first_bind_times[r] = b;
+            bind_times[r] = c;
+            check_times[r] = d;
+        }
+    }
+    if (warmed)
+    {
+        runtime_release(&warm);
+    }
+    if (result && same)
+    {
+        printf("The %s runtime: %u probes, %u global names, %u exports of libc.so.6, %u members, %u symbols; a %llu-byte snapshot in %s\n",
+               snapshot_benchmark_kind_names[kind], imported.probe_count, imported.global_names.count, imported.libc.exports.count, imported.member_count,
+               imported.link.symbols.count - 1, (unsigned long long)snapshot_bytes, directory);
+        char import[64];
+        snprintf(import, sizeof(import), "%s and runtime_release", snapshot_benchmark_imports[kind]);
+        printf("  %-46s%9.2f us\n", import, snapshot_benchmark_median(import_times, runs));
+        printf("  snapshot_write                                %9.2f us\n", snapshot_benchmark_median(write_times, runs));
+        printf("  runtime_open from the snapshot                %9.2f us:", snapshot_benchmark_median(open_times, runs));
         printf(" identity %.2f", snapshot_benchmark_median(identity_times, runs));
         for (uint32_t p = 0; p < SNAPSHOT_PHASES; p += 1)
         {
             printf(" %s %.2f", snapshot_benchmark_phase_names[p], snapshot_benchmark_median(phase_times + p * runs, runs));
         }
         printf("\n");
-        printf("  runtime_release of a loaded runtime   %9.2f us\n", snapshot_benchmark_median(release_times, runs));
-        printf("  read with pread into new memory       %9.2f us\n", snapshot_benchmark_median(pread_times, runs));
-        printf("  loaded without the hash, 12 lookups   %9.2f us\n", snapshot_benchmark_median(unhashed_times, runs));
-    }
-    // Binding one worker's program against each runtime: the same link, and its time.
-    Runtime loaded;
-    const bool loaded_runtime = result && snapshot_load(&loaded, path, &compiler, 0) == SNAPSHOT_STATUS_LOADED;
-    LinkProgram reference;
-    bool kept = false;
-    const bool referenced = loaded_runtime && snapshot_benchmark_bind(&imported, &reference, true, &kept) != 0 && kept;
-    uint64_t* bind_times = referenced ? calloc(2 * runs, sizeof(uint64_t)) : 0;
-    bool same = bind_times != 0;
-    for (int64_t r = -1; same && r < (int64_t)runs; r += 1)
-    {
-        bool same_imported = false;
-        bool same_loaded = false;
-        const uint64_t a = snapshot_benchmark_bind(&imported, &reference, false, &same_imported);
-        const uint64_t b = snapshot_benchmark_bind(&loaded, &reference, false, &same_loaded);
-        same = a != 0 && b != 0 && same_imported && same_loaded;
-        if (r >= 0)
-        {
-            bind_times[r] = a;
-            bind_times[runs + (uint64_t)r] = b;
-        }
-    }
-    if (same)
-    {
-        printf("  binding one worker, imported runtime  %9.2f us\n", snapshot_benchmark_median(bind_times, runs));
-        printf("  binding one worker, loaded runtime    %9.2f us\n", snapshot_benchmark_median(bind_times + runs, runs));
+        printf("  runtime_release of a loaded runtime           %9.2f us\n", snapshot_benchmark_median(release_times, runs));
+        printf("  read with pread into new memory               %9.2f us\n", snapshot_benchmark_median(pread_times, runs));
+        printf("  loaded without the hash, 12 lookups           %9.2f us\n", snapshot_benchmark_median(unhashed_times, runs));
+        printf("  mapped and hashed whole (format 3)            %9.2f us\n", snapshot_benchmark_median(whole_times, runs));
+        printf("  binding one worker, imported runtime          %9.2f us\n", snapshot_benchmark_median(imported_bind_times, runs));
+        printf("  binding one worker, freshly loaded            %9.2f us\n", snapshot_benchmark_median(first_bind_times, runs));
+        printf("  binding one worker, loaded and warm           %9.2f us\n", snapshot_benchmark_median(bind_times, runs));
+        printf("  its %u pieces' checks alone, warm             %9.2f us\n", checked, snapshot_benchmark_median(check_times, runs));
     }
     else if (result)
     {
         fprintf(stderr, "benchmark-snapshot: the loaded runtime didn't bind as the imported one\n");
     }
     result = result && same;
-    free(bind_times);
     if (referenced)
     {
         link_program_release(&reference);
-    }
-    if (loaded_runtime)
-    {
-        runtime_release(&loaded);
     }
     free(times);
     if (made)
@@ -383,6 +474,58 @@ int run_snapshot_benchmark(int argc, char** argv)
     if (made && error == RUNTIME_ERROR_NONE)
     {
         runtime_release(&imported);
+    }
+    return result;
+}
+
+int run_snapshot_benchmark(int argc, char** argv);
+
+int run_snapshot_benchmark(int argc, char** argv)
+{
+    const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    uint64_t runs = BUSTER_SNAPSHOT_BENCHMARK_DEFAULT_RUNS;
+    bool kinds[RUNTIME_KINDS] = {
+        [RUNTIME_KIND_DYNAMIC] = true,
+        [RUNTIME_KIND_STATIC] = true,
+        [RUNTIME_KIND_STATIC_PIE] = true,
+    };
+    bool valid = true;
+    for (int i = 1; i < argc; i += 1)
+    {
+        if (strcmp(argv[i], "--directory") == 0 && i + 1 < argc)
+        {
+            parent = argv[i + 1];
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc)
+        {
+            valid = valid && snapshot_benchmark_parse_u64(argv[i + 1], &runs) && runs >= 1 && runs <= BUSTER_SNAPSHOT_BENCHMARK_MAX_RUNS;
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
+        {
+            bool named = false;
+            for (uint32_t kind = 0; kind < RUNTIME_KINDS; kind += 1)
+            {
+                kinds[kind] = strcmp(argv[i + 1], snapshot_benchmark_kind_options[kind]) == 0;
+                named = named || kinds[kind];
+            }
+            valid = valid && named;
+            i += 1;
+        }
+        else
+        {
+            valid = false;
+        }
+    }
+    bool result = valid && (x86_encoder_initialized || x86_encoder_initialize());
+    if (!valid)
+    {
+        fprintf(stderr, "usage: benchmark-snapshot [--directory PATH] [--runs N] [--only dynamic|static|static-pie]\n");
+    }
+    for (uint32_t kind = 0; result && kind < RUNTIME_KINDS; kind += 1)
+    {
+        result = !kinds[kind] || snapshot_benchmark_kind((RuntimeKind)kind, parent, runs);
     }
     return result ? 0 : 1;
 }

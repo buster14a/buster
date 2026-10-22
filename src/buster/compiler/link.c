@@ -180,7 +180,8 @@ typedef uint32_t FixupId;
 //   - SIZE32, SIZE64: 4 or 8 bytes: R_X86_64_SIZE32, R_X86_64_SIZE64; S's size + A.
 //   - TLSGD: the displacement of a general-dynamic access's lea rdi, [rip + x@tlsgd], in the 16 bytes of data16 lea
 //     rdi, [rip + x@tlsgd]; data16 data16 rex.W call __tls_get_addr (or data16 rex.W call [rip + __tls_get_addr's
-//     slot]), whose call is the next fixup: R_X86_64_TLSGD; G + A - P for the pair of slots of x's module and offset.
+//     slot], a CALL_GOT or, as GNU as 2.42 writes it, a GOTPCREL), whose call is the next fixup: R_X86_64_TLSGD;
+//     G + A - P for the pair of slots of x's module and offset.
 //     An executable relaxes the 16 bytes to mov rax, fs:0; lea rax, [rax + x's offset from the end of the TLS block],
 //     the call's fixup with them.
 //   - TLSLD: the displacement of a local-dynamic access's lea rdi, [rip + x@tlsld], in the 12 bytes of lea rdi,

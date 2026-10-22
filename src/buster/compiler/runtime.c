@@ -17,6 +17,9 @@
 //   - the archives of the driver's group, --start-group -lgcc -lgcc_eh -latomic_asneeded -lc --end-group, in its order:
 //     libgcc.a and libgcc_eh.a, GCC's; libatomic_asneeded.a, which GCC 16 installs as a link to libatomic.a, where -L
 //     finds it if GCC has it; and libc.a, where -L finds it: GCC's installation, then the library directories.
+// And for `cc -static-pie main.c -o main` (RUNTIME_KIND_STATIC_PIE), the same archives with the crt objects rcrt1.o,
+// crti.o, crtbeginS.o, crtendS.o and crtn.o. rcrt1.o doesn't define _dl_relocate_static_pie, as crt1.o does (an empty
+// one), so libc.a's member that relocates the executable joins, which refers to _DYNAMIC.
 // Each path probed, found or absent, is recorded with what identifies a found file (st_dev, st_ino, st_size, st_mtim
 // and st_ctim), so that the snapshot can tell with one stat per path whether it still describes the system
 // (runtime_probes_current). Among them are the directory GCC's versions were chosen from, whose times change when a
@@ -43,6 +46,7 @@
 //   - Files: probing and reading.
 //   - The search: GCC's installation, the crt objects and libc's script.
 //   - Importing and binding.
+//   - Bytes and pieces: the accessors of a loaded runtime's bytes, and its pieces' hashes (runtime_piece_hash).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -56,6 +60,9 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+
+// CPU architecture dependent includes
+#include <immintrin.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
 // API
@@ -81,6 +88,8 @@ typedef enum RuntimeKind
     // A static executable: crt1.o, crti.o, crtbeginT.o, crtend.o and crtn.o; libgcc.a, libgcc_eh.a, libatomic.a and
     // libc.a.
     RUNTIME_KIND_STATIC,
+    // A static PIE: rcrt1.o, crti.o, crtbeginS.o, crtendS.o and crtn.o; the static executable's archives.
+    RUNTIME_KIND_STATIC_PIE,
     RUNTIME_KINDS,
 } RuntimeKind;
 
@@ -262,6 +271,10 @@ struct Runtime
     // (0 for a local or unnamed symbol).
     RuntimeNames global_names;
     uint32_t* symbol_names;
+    // The room a link that binds against the runtime needs for the runtime's names' bytes, each with its NUL, and for
+    // its atoms' bytes with their alignments (bind_capacity), which the import sums once.
+    uint64_t name_room;
+    uint64_t atom_room;
     // For a runtime loaded from a snapshot (snapshot.c), the file, mapped, whose columns it uses where they are; 0 for one
     // runtime_import made. A loaded runtime has what binding and an executable read: none of the files' bytes, the
     // objects' and members' ImportObjects, the archives' indices, or libc.so.6's export names, sizes, references and
@@ -269,6 +282,18 @@ struct Runtime
     // bind.c copies from.
     uint8_t* snapshot;
     uint64_t snapshot_bytes;
+    // A loaded runtime's link holds its names' and atoms' bytes as offsets into the snapshot's data plus 1 (0 for none),
+    // and its members their names as offsets into the snapshot's strings plus 1, which these deltas make pointers
+    // (runtime_name_bytes, runtime_atom_bytes and runtime_member_name), so that loading writes none of those columns.
+    // Both are 0 for an imported runtime, whose columns hold the pointers.
+    uintptr_t byte_delta;
+    uintptr_t string_delta;
+    // A loaded runtime's pieces' records are trusted a piece at a time, when binding first reads them
+    // (runtime_piece_current): each piece's hash, 16 bytes, and where each piece's atoms' bytes start in the snapshot's
+    // data, the pieces' count plus 1 of them, the last the end.
+    const uint8_t* snapshot_data;
+    const uint8_t* piece_hashes;
+    const uint64_t* piece_data;
     // When it failed: the file that didn't import or couldn't be read, or the name that wasn't found, the importer's
     // result and errno.
     char failed_file[BUSTER_RUNTIME_PATH_BYTES];
@@ -278,10 +303,17 @@ struct Runtime
 
 // Finds a dynamic PIE's runtime's files and imports them, with arenas of its own; runtime_release frees them (or a
 // snapshot's mapping, for a runtime loaded from one). On failure, the error says what went wrong and the runtime's
-// fields where. runtime_import_static does the same for a static executable's runtime.
+// fields where. runtime_import_static does the same for a static executable's runtime, and runtime_import_static_pie for a
+// static PIE's.
 static __attribute__((unused)) RuntimeError runtime_import(Runtime* runtime);
 static __attribute__((unused)) RuntimeError runtime_import_static(Runtime* runtime);
+static __attribute__((unused)) RuntimeError runtime_import_static_pie(Runtime* runtime);
+// runtime_import, runtime_import_static or runtime_import_static_pie, by `kind`.
+static __attribute__((unused)) RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind);
 static __attribute__((unused)) void runtime_release(Runtime* runtime);
+// Whether a runtime of `kind` is libc.a's, with archives and without a shared library: a static executable's or a static
+// PIE's.
+static __attribute__((unused)) bool runtime_kind_is_static(RuntimeKind kind);
 // Whether every path the search probed is as it found it: absent still, or the same file or directory, by st_dev, st_ino,
 // st_size, st_mtim and st_ctim.
 static __attribute__((unused)) bool runtime_probes_current(const Runtime* runtime);
@@ -291,6 +323,15 @@ static __attribute__((unused)) uint32_t runtime_find_global_name(const RuntimeNa
 static __attribute__((unused)) const uint8_t* runtime_global_name(const RuntimeNames* names, uint32_t entry);
 // The two bits a name's hash sets in its word of the global names' filter: the hash's low six bits and the six above.
 static __attribute__((unused)) uint64_t runtime_name_filter_bits(uint64_t hash);
+// The bytes of a name and of an atom of the runtime's link (0 for an atom without bytes), and a member's name: what the
+// link's columns and the members point to, for a loaded runtime through its deltas.
+static __attribute__((unused)) const uint8_t* runtime_name_bytes(const Runtime* runtime, NameId name);
+static __attribute__((unused)) const uint8_t* runtime_atom_bytes(const Runtime* runtime, AtomId atom);
+static __attribute__((unused)) String8 runtime_member_name(const Runtime* runtime, uint32_t member);
+// Whether binding may read a piece of the runtime (a crt object, or RUNTIME_OBJECTS + m for member m): always for one
+// runtime_import made; for one loaded from a snapshot, whether the piece's records and bytes hash as when the snapshot
+// was written (runtime_piece_hash).
+static __attribute__((unused)) bool runtime_piece_current(const Runtime* runtime, uint32_t piece);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Files
@@ -648,6 +689,13 @@ static RuntimeError runtime_search(Runtime* runtime)
             [RUNTIME_OBJECT_END] = "crtend.o",
             [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
         },
+        [RUNTIME_KIND_STATIC_PIE] = {
+            [RUNTIME_OBJECT_START] = "rcrt1.o",
+            [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
+            [RUNTIME_OBJECT_BEGIN] = "crtbeginS.o",
+            [RUNTIME_OBJECT_END] = "crtendS.o",
+            [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
+        },
     };
     RuntimeError result = runtime_find_gcc(runtime, runtime_gcc_bases, BUSTER_ARRAY_LENGTH(runtime_gcc_bases)) ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MISSING;
     if (result != RUNTIME_ERROR_NONE)
@@ -771,49 +819,70 @@ static String8 runtime_section(String8 bytes, const char* name)
 }
 
 // The names the direct path's linker defines (BUSTER_LINK_SOURCE_LINKER) when something refers to one, as lld does when
-// no object defines it. For both kinds: the bounds of the init and fini arrays, which step 4's executables define, and
-// the GOT's _GLOBAL_OFFSET_TABLE_, which GNU as names in an object with a GOT reference and the dynamic PIE (step 5)
-// defines. For a static executable, besides, as GNU ld's and lld's define them there: the ELF header's address
-// (__ehdr_start, through which libc.a's startup finds the program headers) and the image's start; the preinit array's
-// bounds; the IRELATIVE relocations' (__rela_iplt_start and __rela_iplt_end, which libc.a's startup applies for its
-// IFUNCs); and the ends of the text, the data and the image.
-static const char* const runtime_linker_names[] = {
-    "_GLOBAL_OFFSET_TABLE_",
-    "__init_array_start",
-    "__init_array_end",
-    "__fini_array_start",
-    "__fini_array_end",
-    "__ehdr_start",
-    "__executable_start",
-    "__preinit_array_start",
-    "__preinit_array_end",
-    "__rela_iplt_start",
-    "__rela_iplt_end",
-    "_etext",
-    "etext",
-    "__etext",
-    "_edata",
-    "edata",
-    "__bss_start",
-    "_end",
-    "end",
+// no object defines it, each with the kinds whose linker defines it (a bit per RuntimeKind), as GNU ld's and lld's
+// define them there:
+//   - every kind: the bounds of the init and fini arrays, which step 4's executables define, and the GOT's
+//     _GLOBAL_OFFSET_TABLE_, which GNU as names in an object with a GOT reference;
+//   - the PIEs: .dynamic's address (_DYNAMIC, through which libc.a's member that relocates a static PIE finds it);
+//   - a static executable and a static PIE: the ELF header's address (__ehdr_start, through which libc.a's startup finds
+//     the program headers) and the image's start; the preinit array's bounds; and the ends of the text, the data and
+//     the image;
+//   - a static executable alone: its IRELATIVE relocations' bounds (__rela_iplt_start and __rela_iplt_end, which
+//     libc.a's startup applies for its IFUNCs). A static PIE's are in .rela.dyn, which its startup applies with the
+//     others, and libc.a's weak references to the bounds bind to nothing, as GNU ld and lld leave them.
+#define BUSTER_RUNTIME_KIND_BIT(kind) (1u << (kind))
+#define BUSTER_RUNTIME_EVERY_KIND (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_DYNAMIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE))
+#define BUSTER_RUNTIME_PIE_KINDS (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_DYNAMIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE))
+#define BUSTER_RUNTIME_STATIC_KINDS (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE))
+
+typedef struct RuntimeLinkerName RuntimeLinkerName;
+struct RuntimeLinkerName
+{
+    const char* name;
+    uint8_t kinds;
 };
 
-// How many of runtime_linker_names, from the first, a kind's linker defines.
-static const uint32_t runtime_linker_name_counts[RUNTIME_KINDS] = {
-    [RUNTIME_KIND_DYNAMIC] = 5,
-    [RUNTIME_KIND_STATIC] = BUSTER_ARRAY_LENGTH(runtime_linker_names),
+static const RuntimeLinkerName runtime_linker_names[] = {
+    { "_GLOBAL_OFFSET_TABLE_", BUSTER_RUNTIME_EVERY_KIND },
+    { "__init_array_start", BUSTER_RUNTIME_EVERY_KIND },
+    { "__init_array_end", BUSTER_RUNTIME_EVERY_KIND },
+    { "__fini_array_start", BUSTER_RUNTIME_EVERY_KIND },
+    { "__fini_array_end", BUSTER_RUNTIME_EVERY_KIND },
+    { "_DYNAMIC", BUSTER_RUNTIME_PIE_KINDS },
+    { "__ehdr_start", BUSTER_RUNTIME_STATIC_KINDS },
+    { "__executable_start", BUSTER_RUNTIME_STATIC_KINDS },
+    { "__preinit_array_start", BUSTER_RUNTIME_STATIC_KINDS },
+    { "__preinit_array_end", BUSTER_RUNTIME_STATIC_KINDS },
+    { "__rela_iplt_start", BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC) },
+    { "__rela_iplt_end", BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC) },
+    { "_etext", BUSTER_RUNTIME_STATIC_KINDS },
+    { "etext", BUSTER_RUNTIME_STATIC_KINDS },
+    { "__etext", BUSTER_RUNTIME_STATIC_KINDS },
+    { "_edata", BUSTER_RUNTIME_STATIC_KINDS },
+    { "edata", BUSTER_RUNTIME_STATIC_KINDS },
+    { "__bss_start", BUSTER_RUNTIME_STATIC_KINDS },
+    { "_end", BUSTER_RUNTIME_STATIC_KINDS },
+    { "end", BUSTER_RUNTIME_STATIC_KINDS },
 };
 
 // Whether the name is one of the names the linker of a runtime of `kind` defines.
 static bool runtime_linker_name(RuntimeKind kind, const uint8_t* bytes, uint32_t length)
 {
     bool result = false;
-    for (uint32_t i = 0; i < runtime_linker_name_counts[kind]; i += 1)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
     {
-        result = result || (strlen(runtime_linker_names[i]) == length && memcmp(runtime_linker_names[i], bytes, length) == 0);
+        const char* name = runtime_linker_names[i].name;
+        const bool defined = (runtime_linker_names[i].kinds & BUSTER_RUNTIME_KIND_BIT(kind)) != 0;
+        result = result || (defined && strlen(name) == length && memcmp(name, bytes, length) == 0);
     }
     return result;
+}
+
+// Whether a runtime of `kind` is libc.a's, with archives and without a shared library: a static executable's or a static
+// PIE's.
+static bool runtime_kind_is_static(RuntimeKind kind)
+{
+    return (BUSTER_RUNTIME_STATIC_KINDS & BUSTER_RUNTIME_KIND_BIT(kind)) != 0;
 }
 
 // The runtime's first symbol that defines the name (a global or weak definition in an atom), by the definitions' index:
@@ -886,8 +955,8 @@ static RuntimeError runtime_bind(Runtime* runtime)
         {
             const SymbolId definition = runtime_definition(link, &index, definitions, name);
             const bool linker = definition == 0 && runtime_linker_name(runtime->kind, link->names.bytes[name], link->names.length[name]);
-            // A static executable's runtime has no shared library.
-            const bool shared = definition == 0 && !linker && runtime->kind == RUNTIME_KIND_DYNAMIC;
+            // A static executable's or a static PIE's runtime has no shared library.
+            const bool shared = definition == 0 && !linker && !runtime_kind_is_static(runtime->kind);
             const uint32_t export = shared ? import_library_find(&runtime->libc, link->names.bytes[name], link->names.length[name], link->names.hash[name]) : 0;
             const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
             const RuntimeBindingKind otherwise = export != 0 ? RUNTIME_BINDING_SHARED : weak ? RUNTIME_BINDING_NOWHERE : RUNTIME_BINDING_PROGRAM;
@@ -915,7 +984,11 @@ static RuntimeError runtime_global_names(Runtime* runtime)
     RuntimeNames* names = &runtime->global_names;
     Arena* arena = &runtime->tables;
     const uint32_t symbol_count = symbols->count;
-    const uint32_t linker_count = runtime_linker_name_counts[runtime->kind];
+    uint32_t linker_count = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
+    {
+        linker_count += (runtime_linker_names[i].kinds & BUSTER_RUNTIME_KIND_BIT(runtime->kind)) != 0 ? 1 : 0;
+    }
     const uint64_t bound = (uint64_t)symbol_count + exports->count + references->count + linker_count;
     runtime->symbol_names = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbol_count);
     Scratch scratch = scratch_begin(arena);
@@ -964,11 +1037,15 @@ static RuntimeError runtime_global_names(Runtime* runtime)
     }
     if (result == RUNTIME_ERROR_NONE)
     {
-        for (uint32_t i = 0; i < linker_count; i += 1)
+        uint32_t taken = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
         {
-            bytes[references_end + i] = (const uint8_t*)runtime_linker_names[i];
-            lengths[references_end + i] = (uint32_t)strlen(runtime_linker_names[i]);
-            hashes[references_end + i] = link_hash(bytes[references_end + i], lengths[references_end + i]);
+            const uint32_t at = references_end + taken;
+            const bool defined = (runtime_linker_names[i].kinds & BUSTER_RUNTIME_KIND_BIT(runtime->kind)) != 0;
+            bytes[at] = defined ? (const uint8_t*)runtime_linker_names[i].name : bytes[at];
+            lengths[at] = defined ? (uint32_t)strlen(runtime_linker_names[i].name) : lengths[at];
+            hashes[at] = defined ? link_hash(bytes[at], lengths[at]) : hashes[at];
+            taken += defined ? 1 : 0;
         }
     }
     ImportNameIndex candidates = { 0 };
@@ -1389,6 +1466,17 @@ static RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind)
     {
         result = runtime_groups(runtime);
     }
+    // The room a link that binds against the runtime needs for its names' and atoms' bytes, summed once here rather than
+    // by each link (bind_capacity).
+    for (NameId name = 1; result == RUNTIME_ERROR_NONE && name < runtime->link.names.count; name += 1)
+    {
+        runtime->name_room += (uint64_t)runtime->link.names.length[name] + 1;
+    }
+    for (AtomId atom = 1; result == RUNTIME_ERROR_NONE && atom < runtime->link.atoms.count; atom += 1)
+    {
+        const LinkAtoms* atoms = &runtime->link.atoms;
+        runtime->atom_room += atoms->bytes[atom] != 0 ? atoms->size[atom] + ((uint64_t)1 << atoms->alignment_log2[atom]) - 1 : 0;
+    }
     result = result == RUNTIME_ERROR_NONE && runtime->probes_full ? RUNTIME_ERROR_MEMORY : result;
     return result;
 }
@@ -1401,6 +1489,11 @@ static RuntimeError runtime_import(Runtime* runtime)
 static RuntimeError runtime_import_static(Runtime* runtime)
 {
     return runtime_import_kind(runtime, RUNTIME_KIND_STATIC);
+}
+
+static RuntimeError runtime_import_static_pie(Runtime* runtime)
+{
+    return runtime_import_kind(runtime, RUNTIME_KIND_STATIC_PIE);
 }
 
 static void runtime_release(Runtime* runtime)
@@ -1416,4 +1509,185 @@ static void runtime_release(Runtime* runtime)
         arena_release(&runtime->names);
         arena_release(&runtime->files);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Bytes and pieces
+
+static const uint8_t* runtime_name_bytes(const Runtime* runtime, NameId name)
+{
+    const uintptr_t value = (uintptr_t)runtime->link.names.bytes[name];
+    return value != 0 ? (const uint8_t*)(value + runtime->byte_delta) : 0;
+}
+
+static const uint8_t* runtime_atom_bytes(const Runtime* runtime, AtomId atom)
+{
+    const uintptr_t value = (uintptr_t)runtime->link.atoms.bytes[atom];
+    return value != 0 ? (const uint8_t*)(value + runtime->byte_delta) : 0;
+}
+
+static String8 runtime_member_name(const Runtime* runtime, uint32_t member)
+{
+    const uintptr_t value = (uintptr_t)runtime->members[member].name.pointer;
+    const String8 result = {
+        .pointer = value != 0 ? (char*)(value + runtime->string_delta) : 0,
+        .length = runtime->members[member].name.length,
+    };
+    return result;
+}
+
+// A run of a piece's bytes that its hash takes: one table's column over the piece's records, or the piece's names' or
+// atoms' bytes.
+typedef struct RuntimeSlice RuntimeSlice;
+struct RuntimeSlice
+{
+    const uint8_t* bytes;
+    uint64_t size;
+};
+
+#define BUSTER_RUNTIME_PIECE_SLICES 26
+
+static RuntimeSlice runtime_slice(const void* column, uint64_t element, uint64_t from, uint64_t to)
+{
+    const RuntimeSlice result = {
+        .bytes = (const uint8_t*)column + element * from,
+        .size = element * (to - from),
+    };
+    return result;
+}
+
+// A loaded runtime's piece as its hash takes it: what binding reads of it (bind.c's joins), each column of its link over
+// the piece's records (piece 0's from each table's record 0, which no piece has), its symbols' global names, then its
+// names' bytes in the names run and its atoms' bytes in the snapshot's data. Not the columns nothing reads of a loaded
+// runtime: the atoms' addresses and the symbols' GOT slots, dynamic indices, versions and references, the linker's,
+// which the runtime leaves 0, and the bindings, which only the import uses (hashing them too took a fifth more on the
+// 9700X, and faulted their pages in). Returns how many slices.
+static uint32_t runtime_piece_slices(const Runtime* runtime, uint32_t piece, RuntimeSlice* slices)
+{
+    const Link* link = &runtime->link;
+    const ImportMark begin = runtime->pieces[piece].begin;
+    const ImportMark end = runtime->pieces[piece].end;
+    const bool first = piece == 0;
+    const uint64_t names = first ? 0 : begin.names;
+    const uint64_t atoms = first ? 0 : begin.atoms;
+    const uint64_t symbols = first ? 0 : begin.symbols;
+    const uint64_t fixups = first ? 0 : begin.fixups;
+    const uint64_t wide = first ? 0 : begin.wide_addends;
+    const uint64_t priorities = first ? 0 : begin.priorities;
+    const uint64_t name_bytes = first ? 0 : begin.name_bytes;
+    const RuntimeSlice all[BUSTER_RUNTIME_PIECE_SLICES] = {
+        runtime_slice(link->names.bytes, sizeof(*link->names.bytes), names, end.names),
+        runtime_slice(link->names.length, sizeof(*link->names.length), names, end.names),
+        runtime_slice(link->names.hash, sizeof(*link->names.hash), names, end.names),
+        runtime_slice(link->atoms.class, sizeof(*link->atoms.class), atoms, end.atoms),
+        runtime_slice(link->atoms.alignment_log2, sizeof(*link->atoms.alignment_log2), atoms, end.atoms),
+        runtime_slice(link->atoms.unit, sizeof(*link->atoms.unit), atoms, end.atoms),
+        runtime_slice(link->atoms.size, sizeof(*link->atoms.size), atoms, end.atoms),
+        runtime_slice(link->atoms.bytes, sizeof(*link->atoms.bytes), atoms, end.atoms),
+        runtime_slice(link->atoms.fixup_begin, sizeof(*link->atoms.fixup_begin), atoms, end.atoms),
+        runtime_slice(link->atoms.fixup_count, sizeof(*link->atoms.fixup_count), atoms, end.atoms),
+        runtime_slice(link->symbols.name, sizeof(*link->symbols.name), symbols, end.symbols),
+        runtime_slice(link->symbols.atom, sizeof(*link->symbols.atom), symbols, end.symbols),
+        runtime_slice(link->symbols.value, sizeof(*link->symbols.value), symbols, end.symbols),
+        runtime_slice(link->symbols.size, sizeof(*link->symbols.size), symbols, end.symbols),
+        runtime_slice(link->symbols.flags, sizeof(*link->symbols.flags), symbols, end.symbols),
+        runtime_slice(link->symbols.source, sizeof(*link->symbols.source), symbols, end.symbols),
+        runtime_slice(link->fixups.offset, sizeof(*link->fixups.offset), fixups, end.fixups),
+        runtime_slice(link->fixups.target, sizeof(*link->fixups.target), fixups, end.fixups),
+        runtime_slice(link->fixups.addend, sizeof(*link->fixups.addend), fixups, end.fixups),
+        runtime_slice(link->fixups.kind, sizeof(*link->fixups.kind), fixups, end.fixups),
+        runtime_slice(link->fixups.wide_addends, sizeof(*link->fixups.wide_addends), wide, end.wide_addends),
+        runtime_slice(link->priorities.atom, sizeof(*link->priorities.atom), priorities, end.priorities),
+        runtime_slice(link->priorities.priority, sizeof(*link->priorities.priority), priorities, end.priorities),
+        runtime_slice(runtime->symbol_names, sizeof(*runtime->symbol_names), symbols, end.symbols),
+        runtime_slice(runtime->names.base, 1, name_bytes, end.name_bytes),
+        runtime_slice(runtime->snapshot_data, 1, runtime->piece_data[piece], runtime->piece_data[piece + 1]),
+    };
+    memcpy(slices, all, sizeof(all));
+    return BUSTER_RUNTIME_PIECE_SLICES;
+}
+
+// The piece hash's accumulators' starting values, its round key and its length's key: splitmix64's first 24 outputs
+// from state 0x7069656365 ("piece").
+static const uint64_t runtime_piece_constants[24] __attribute__((aligned(64))) = {
+    0x3b6c2a1e0f287982ull, 0x9883bd502459f28bull, 0x0e440393a1363654ull, 0xec7f8f82ad4b274aull,
+    0xdb044812eec1d14full, 0xf2678ff4d3cf820full, 0x71c427ba2cca1a52ull, 0xdd507d22f8cf497full,
+    0xff1551593eea8aeaull, 0xd5b0fd0b8bbdc348ull, 0xcb9fbba7df47918dull, 0x44f5b75efd54f847ull,
+    0x72e4a321d8d873daull, 0x6acce6e0f7f2d408ull, 0xf128baa029a7e49dull, 0xe97bfbb96d982cf1ull,
+    0x4c93ee5447e895e2ull, 0x70e7cb8ac6de2be8ull, 0xb134236ffb5f0309ull, 0x9b62ff6d62ebf85eull,
+    0x301611dd774bb168ull, 0x0d11f78933ee35f6ull, 0xf445a4a9f0eeb728ull, 0x0e75a7bade90190cull,
+};
+
+// A loaded runtime's piece hash: 128 bits of its slices (runtime_piece_slices), each slice's 64-byte blocks in turn,
+// the last padded with zeros (masked loads, which read nothing past the slice), as executable.c's chunk hash takes a
+// stream's: each block the round key of one AES round of an accumulator and then one more round with a constant key.
+// The eight accumulators take the piece's blocks in turn, rotating after each, so that a slice of a few bytes takes
+// one block rather than a stride; then they are folded with the length into 128 bits. A piece's slices are many and
+// small (a hello world's link reads 442 of the static runtime's 2,622 pieces), so this takes no stream with a carry, as
+// the chunk hash does, which would copy every slice's tail. The snapshot's writer hashes each piece so over its image,
+// and runtime_piece_current again over the mapping, before binding reads the piece.
+static void runtime_piece_hash(const Runtime* runtime, uint32_t piece, uint8_t* hash)
+{
+    RuntimeSlice slices[BUSTER_RUNTIME_PIECE_SLICES];
+    const uint32_t count = runtime_piece_slices(runtime, piece, slices);
+    const __m512i start = _mm512_load_si512(runtime_piece_constants);
+    const __m512i key = _mm512_load_si512(runtime_piece_constants + 8);
+    __m512i a0 = _mm512_xor_si512(start, _mm512_set1_epi64(1));
+    __m512i a1 = _mm512_xor_si512(start, _mm512_set1_epi64(2));
+    __m512i a2 = _mm512_xor_si512(start, _mm512_set1_epi64(3));
+    __m512i a3 = _mm512_xor_si512(start, _mm512_set1_epi64(4));
+    __m512i a4 = _mm512_xor_si512(start, _mm512_set1_epi64(5));
+    __m512i a5 = _mm512_xor_si512(start, _mm512_set1_epi64(6));
+    __m512i a6 = _mm512_xor_si512(start, _mm512_set1_epi64(7));
+    __m512i a7 = _mm512_xor_si512(start, _mm512_set1_epi64(8));
+    uint64_t length = 0;
+    for (uint32_t s = 0; s < count; s += 1)
+    {
+        const uint8_t* bytes = slices[s].bytes;
+        const uint64_t size = slices[s].size;
+        for (uint64_t at = 0; at < size; at += 64)
+        {
+            const uint64_t taken = size - at < 64 ? size - at : 64;
+            const __m512i block = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, (uint32_t)taken), bytes + at);
+            const __m512i next = _mm512_aesenc_epi128(_mm512_aesenc_epi128(a0, block), key);
+            a0 = a1;
+            a1 = a2;
+            a2 = a3;
+            a3 = a4;
+            a4 = a5;
+            a5 = a6;
+            a6 = a7;
+            a7 = next;
+        }
+        length += size;
+    }
+    __m512i x = a0;
+    x = _mm512_aesenc_epi128(x, a1);
+    x = _mm512_aesenc_epi128(x, a2);
+    x = _mm512_aesenc_epi128(x, a3);
+    x = _mm512_aesenc_epi128(x, a4);
+    x = _mm512_aesenc_epi128(x, a5);
+    x = _mm512_aesenc_epi128(x, a6);
+    x = _mm512_aesenc_epi128(x, a7);
+    const __m512i length_key = _mm512_xor_si512(_mm512_load_si512(runtime_piece_constants + 16), _mm512_set1_epi64((long long)length));
+    x = _mm512_aesenc_epi128(_mm512_aesenc_epi128(x, length_key), key);
+    const __m128i lane_key = _mm512_castsi512_si128(key);
+    __m128i folded = _mm512_castsi512_si128(x);
+    folded = _mm_aesenc_si128(folded, _mm512_extracti32x4_epi32(x, 1));
+    folded = _mm_aesenc_si128(folded, _mm512_extracti32x4_epi32(x, 2));
+    folded = _mm_aesenc_si128(folded, _mm512_extracti32x4_epi32(x, 3));
+    folded = _mm_aesenclast_si128(_mm_aesenc_si128(folded, lane_key), lane_key);
+    _mm_storeu_si128((__m128i*)hash, folded);
+}
+
+static bool runtime_piece_current(const Runtime* runtime, uint32_t piece)
+{
+    uint8_t hash[16];
+    bool result = runtime->snapshot == 0;
+    if (!result)
+    {
+        runtime_piece_hash(runtime, piece, hash);
+        result = memcmp(hash, runtime->piece_hashes + 16 * (uint64_t)piece, sizeof(hash)) == 0;
+    }
+    return result;
 }

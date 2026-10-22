@@ -252,6 +252,10 @@ int run_c_lexer_benchmark(int argc, char** argv);
 // The x86-64 encoder and its tests, for the test-x86-encoder command. Its benchmark is another translation unit.
 #include "buster/compiler/x86_64_encoder.c"
 #include "buster/compiler/x86_64_encoder_test.c"
+#include "buster/compiler/x86_64_disassembler.c"
+#include "buster/compiler/x86_64_disassembler_test.c"
+#include "buster/compiler/x86_64_disassembler_cli.c"
+int run_x86_disassembler_benchmark(int argc, char** argv);
 int run_x86_encoder_benchmark(int argc, char** argv);
 
 // The lane base layer (groups of threads, and the arenas they allocate from) and its tests, for the test-lanes command.
@@ -283,6 +287,9 @@ int run_refinement_benchmark(int argc, char** argv);
 // The preprocessor (c_preprocessor.c) and its tests, for the -E and test-preprocessor commands.
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_preprocessor_test.c"
+#include "buster/compiler/c_preprocessor_oracle.c"
+#include "buster/compiler/x86_target_forms.c"
+#include "buster/compiler/x86_target_test.c"
 int run_preprocessor_benchmark(int argc, char** argv);
 
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test
@@ -320,6 +327,9 @@ int run_executable_benchmark(int argc, char** argv);
 #include "buster/compiler/dynamic.c"
 #include "buster/compiler/dynamic_test.c"
 
+// The static executables' tests with the C runtime, for the test-static command.
+#include "buster/compiler/static_test.c"
+
 // The runtime snapshot (the imported runtime kept in the cache directory) and its tests, for the test-snapshot command.
 // Its benchmark is another translation unit.
 #include "buster/compiler/snapshot.c"
@@ -336,6 +346,12 @@ int run_floors_benchmark(int argc, char** argv);
 #include "buster/compiler/branch_sizing_generate.c"
 #include "buster/compiler/branch_sizing_test.c"
 int run_branch_sizing_benchmark(int argc, char** argv);
+
+#include "buster/compiler/x86_match.c"
+#include "buster/compiler/assembler.c"
+#include "buster/compiler/assembler_driver.c"
+#include "buster/compiler/assembler_test.c"
+#include "buster/compiler/assembler_benchmark.c"
 
 // The C type table (TypeIds, hash-consing, layout, conversions, compatibility and printing) and its tests, for the
 // test-types command. Its benchmark is another translation unit.
@@ -357,7 +373,19 @@ int run_calling_convention_benchmark(int argc, char** argv);
 int main(int argc, char** argv)
 {
     int result = 0;
-    if (argc >= 2 && strcmp(argv[1], "-E") == 0)
+    if (argc >= 2 && (strcmp(argv[1], "assemble") == 0 || strcmp(argv[1], "-c") == 0))
+    {
+        result = run_assembler_command(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-assembler") == 0)
+    {
+        result = run_assembler_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-assembler") == 0)
+    {
+        result = run_assembler_benchmark(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "-E") == 0)
     {
         result = run_preprocessor_command(argc - 1, argv + 1);
     }
@@ -385,9 +413,29 @@ int main(int argc, char** argv)
     {
         result = run_x86_encoder_tests(argc - 2, argv + 2);
     }
+    else if (argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
+    {
+        result = run_x86_target_tests();
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
+    {
+        result = run_x86_target_benchmark(argc - 2, argv + 2);
+    }
     else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-encoder") == 0)
     {
         result = run_x86_encoder_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-x86-disassembler") == 0)
+    {
+        result = run_x86_disassembler_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "disassemble") == 0)
+    {
+        result = run_x86_disassembler(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-disassembler") == 0)
+    {
+        result = run_x86_disassembler_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-lanes") == 0)
     {
@@ -460,6 +508,10 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "test-dynamic") == 0)
     {
         result = run_dynamic_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-static") == 0)
+    {
+        result = run_static_tests(argc - 2, argv + 2);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-snapshot") == 0)
     {
