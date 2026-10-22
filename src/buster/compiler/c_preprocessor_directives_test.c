@@ -351,21 +351,52 @@ static bool pp_directive_test_oracle(const PPFileData* data, const InternTable* 
             table_out.note_count += 1;
         }
     }
-    // The include guard: the file starts with `#ifndef X`, `#if !defined X` or `#if !defined(X)`, whose group's next
-    // directive is an #endif that ends the file.
-    const bool closed = result && count >= 2 && table_out.hash[0] == 0 && table_out.next[0] != BUSTER_PP_NONE &&
-                        table_out.kind[table_out.next[0]] == PP_DIRECTIVE_ENDIF && table_out.end[table_out.next[0]] == tokens;
-    const uint32_t line = closed ? table_out.end[0] : 0;
-    if (closed && table_out.kind[0] == PP_DIRECTIVE_IFNDEF && line == 3 && (data->kinds[2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER)
+    // The include guard, as clang's multiple-include optimization finds one: after null directives, `#ifndef X` or a
+    // `#if` of `defined X` or `defined(X)` under an odd number of '!' and any parentheses, whose group's next directive
+    // is an #endif that only null directives follow.
+    uint32_t first = 0;
+    while (result && first < count && table_out.kind[first] == PP_DIRECTIVE_NULL && table_out.end[first] == table_out.hash[first] + 1 && table_out.hash[first] == first)
     {
-        table_out.guard = data->values[2];
+        first += 1;
     }
-    else if (closed && table_out.kind[0] == PP_DIRECTIVE_IF && line >= 5 && (data->kinds[2] & 0x7F) == C_TOKEN_EXCLAIM && pp_directive_test_spelled(data, table, 3, "defined"))
+    const uint32_t endif = result && first < count && table_out.hash[first] == first ? table_out.next[first] : BUSTER_PP_NONE;
+    uint32_t after = endif != BUSTER_PP_NONE ? table_out.end[endif] : 0;
+    for (uint32_t i = endif != BUSTER_PP_NONE ? endif + 1 : count; i < count; i += 1)
     {
-        const bool plain = line == 5 && (data->kinds[4] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
-        const bool parenthesized = line == 7 && (data->kinds[4] & 0x7F) == C_TOKEN_L_PAREN && (data->kinds[5] & 0x7F) == C_TOKEN_RAW_IDENTIFIER &&
-                                   (data->kinds[6] & 0x7F) == C_TOKEN_R_PAREN;
-        table_out.guard = plain ? data->values[4] : parenthesized ? data->values[5] : 0;
+        after = after == table_out.hash[i] && table_out.kind[i] == PP_DIRECTIVE_NULL ? table_out.end[i] : UINT32_MAX;
+    }
+    const bool closed = endif != BUSTER_PP_NONE && table_out.kind[endif] == PP_DIRECTIVE_ENDIF && after == tokens;
+    const uint32_t opener = closed ? table_out.hash[first] : 0;
+    const uint32_t line = closed ? table_out.end[first] : 0;
+    if (closed && table_out.kind[first] == PP_DIRECTIVE_IFNDEF && opener + 2 < line && (data->kinds[opener + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER)
+    {
+        table_out.guard = data->values[opener + 2];
+    }
+    else if (closed && table_out.kind[first] == PP_DIRECTIVE_IF)
+    {
+        // The line from both ends: '!'s and '('s, `defined`, the name, maybe in parentheses, and ')'s.
+        uint32_t begin = opener + 2;
+        uint32_t stop = line;
+        uint32_t negations = 0;
+        int32_t balance = 0;
+        bool shaped = true;
+        for (; begin < stop && !pp_directive_test_spelled(data, table, begin, "defined"); begin += 1)
+        {
+            const uint8_t kind = data->kinds[begin] & 0x7F;
+            negations += kind == C_TOKEN_EXCLAIM;
+            balance += kind == C_TOKEN_L_PAREN;
+            shaped = shaped && (kind == C_TOKEN_EXCLAIM || kind == C_TOKEN_L_PAREN);
+        }
+        for (; stop > begin && (data->kinds[stop - 1] & 0x7F) == C_TOKEN_R_PAREN; stop -= 1)
+        {
+            balance -= 1;
+        }
+        // What's left is `defined X`, or `defined(X` whose ')' the loop took.
+        const bool plain = stop - begin == 2 && (data->kinds[begin + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
+        const bool enclosed = stop - begin == 3 && (data->kinds[begin + 1] & 0x7F) == C_TOKEN_L_PAREN && (data->kinds[begin + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
+        balance += enclosed ? 1 : 0;
+        const bool guard = shaped && begin < stop && (plain || enclosed) && balance == 0 && negations % 2 == 1;
+        table_out.guard = guard ? data->values[begin + (plain ? 1 : 2)] : 0;
     }
     *result_table = table_out;
     return result;
@@ -665,43 +696,61 @@ static const PPDirectiveTestStructure pp_directive_test_structures[] = {
     { "digraphs and splices", "%:if 0\n%:  if 1\n#el\\\nse\n%:else\n%:endif\n#endif\n#\\\nendif\n", 0, 0 },
 };
 
+// Runs a command (`argv`, ended by a null) with CPATH and C_INCLUDE_PATH unset: what it writes to standard output and
+// to standard error go to `*output` and `*errors` (each may be null to drop it), in memory (null if it doesn't run).
+// Returns its exit status, or -1.
+static int pp_directive_test_command(char* const* argv, char** output, char** errors)
+{
+    FILE* files[2] = { tmpfile(), tmpfile() };
+    const pid_t child = files[0] != 0 && files[1] != 0 ? fork() : -1;
+    if (child == 0)
+    {
+        if (dup2(fileno(files[0]), STDOUT_FILENO) < 0 || dup2(fileno(files[1]), STDERR_FILENO) < 0)
+        {
+            _exit(127);
+        }
+        unsetenv("CPATH");
+        unsetenv("C_INCLUDE_PATH");
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    int status = 0;
+    const bool ran = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) != 127;
+    char** texts[2] = { output, errors };
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        const long length = ran && texts[k] != 0 && fseek(files[k], 0, SEEK_END) == 0 ? ftell(files[k]) : -1;
+        char* text = length >= 0 && length < (1l << 30) && fseek(files[k], 0, SEEK_SET) == 0 ? calloc((size_t)length + 1, 1) : 0;
+        if (text != 0 && fread(text, 1, (size_t)length, files[k]) != (size_t)length)
+        {
+            free(text);
+            text = 0;
+        }
+        if (texts[k] != 0)
+        {
+            *texts[k] = text;
+        }
+        if (files[k] != 0)
+        {
+            fclose(files[k]);
+        }
+    }
+    return ran ? WEXITSTATUS(status) : -1;
+}
+
 // Runs clang -E on `path` in the mode (`standard`, or gnu17), and returns what it writes to stderr (without its "N
 // errors generated." lines), or null.
 static char* pp_directive_test_clang(const char* path, const char* standard)
 {
+    char mode[32];
+    snprintf(mode, sizeof(mode), "-std=%s", standard != 0 ? standard : "gnu17");
+    char* const argv[] = { "clang", "-E", mode, "-fno-caret-diagnostics", "-fno-diagnostics-show-option", "-fno-color-diagnostics", "-o", "/dev/null", (char*)path, 0 };
     char* result = 0;
-    FILE* errors = tmpfile();
-    const pid_t child = errors != 0 ? fork() : -1;
-    if (child == 0)
+    const int status = pp_directive_test_command(argv, 0, &result);
+    if (status != 0 && status != 1)
     {
-        char mode[32];
-        snprintf(mode, sizeof(mode), "-std=%s", standard != 0 ? standard : "gnu17");
-        const int null = open("/dev/null", O_WRONLY);
-        if (null < 0 || dup2(null, STDOUT_FILENO) < 0 || dup2(fileno(errors), STDERR_FILENO) < 0)
-        {
-            _exit(127);
-        }
-        close(null);
-        unsetenv("CPATH");
-        unsetenv("C_INCLUDE_PATH");
-        execlp("clang", "clang", "-E", mode, "-fno-caret-diagnostics", "-fno-diagnostics-show-option", "-fno-color-diagnostics", "-o", "/dev/null", path, (char*)0);
-        _exit(127);
-    }
-    int status = 0;
-    const bool ran = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) <= 1;
-    const long length = ran && fseek(errors, 0, SEEK_END) == 0 ? ftell(errors) : -1;
-    if (length >= 0 && length < (1 << 20) && fseek(errors, 0, SEEK_SET) == 0)
-    {
-        result = calloc((size_t)length + 1, 1);
-        if (result != 0 && fread(result, 1, (size_t)length, errors) != (size_t)length)
-        {
-            free(result);
-            result = 0;
-        }
-    }
-    if (errors != 0)
-    {
-        fclose(errors);
+        free(result);
+        result = 0;
     }
     // Without the summary lines ("1 error generated.", "2 warnings and 1 error generated.").
     for (char* line = result; line != 0 && *line != 0;)
@@ -718,6 +767,41 @@ static char* pp_directive_test_clang(const char* path, const char* standard)
             line += line_length;
         }
     }
+    return result;
+}
+
+// How many inclusions clang skips by their guards (its multiple-include optimization: -print-stats' "#includes
+// skipped due to the multi-include optimization"), preprocessing `path` with the arguments; -1 if it can't say.
+static int64_t pp_directive_test_clang_guards(char** arguments, int argument_count, const char* path)
+{
+    char* argv[256];
+    int n = 0;
+    argv[n++] = "clang";
+    for (int i = 0; i < argument_count && n < 248; i += 1)
+    {
+        argv[n++] = arguments[i];
+    }
+    argv[n++] = "-E";
+    argv[n++] = "-o";
+    argv[n++] = "/dev/null";
+    argv[n++] = "-Xclang";
+    argv[n++] = "-print-stats";
+    argv[n++] = (char*)path;
+    argv[n] = 0;
+    char* errors = 0;
+    const int status = pp_directive_test_command(argv, 0, &errors);
+    const char* found = status == 0 && errors != 0 ? strstr(errors, " #includes skipped due to the multi-include optimization") : 0;
+    int64_t result = -1;
+    if (found != 0)
+    {
+        const char* digits = found;
+        while (digits > errors && digits[-1] >= '0' && digits[-1] <= '9')
+        {
+            digits -= 1;
+        }
+        result = digits < found ? strtoll(digits, 0, 10) : -1;
+    }
+    free(errors);
     return result;
 }
 
@@ -783,12 +867,156 @@ static bool pp_directive_test_structure(const char* directory, bool with_clang)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Include guards and #pragma once (#120)
+
+// A guard fixture: the main source, its files (a name and its text, or for a link "->target" (symbolic) or "=>target"
+// (hard) to another of them; ended by a null name), and how many inclusions it skips by guards and by #pragma once.
+typedef struct PPDirectiveTestGuard PPDirectiveTestGuard;
+struct PPDirectiveTestGuard
+{
+    const char* name;
+    const char* source;
+    const char* files[4][2];
+    uint32_t guards;
+    uint32_t once;
+};
+
+#define BUSTER_PP_DIRECTIVE_TEST_GUARDED "#ifndef G\n#define G\nint g;\n#endif\n"
+#define BUSTER_PP_DIRECTIVE_TEST_TWICE "#include \"g.h\"\n#include \"g.h\"\nx\n"
+
+static const PPDirectiveTestGuard pp_directive_test_guard_fixtures[] = {
+    { "a guarded file included twice", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", BUSTER_PP_DIRECTIVE_TEST_GUARDED } }, 1, 0 },
+    { "#undef between the inclusions", "#include \"g.h\"\n#undef G\n#include \"g.h\"\n#include \"g.h\"\n", { { "g.h", BUSTER_PP_DIRECTIVE_TEST_GUARDED } }, 1, 0 },
+    { "#if !defined G", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#if !defined G\n#define G\nint g;\n#endif\n" } }, 1, 0 },
+    { "#if !defined(G)", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#if !defined(G)\n#define G\nint g;\n#endif\n" } }, 1, 0 },
+    { "parentheses and three '!'", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#if ( !!!( defined ( G ) ) )\n#define G\nint g;\n#endif\n" } }, 1, 0 },
+    { "two '!'", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#if !!defined G\n#else\n#define G\nint g;\n#endif\n" } }, 0, 0 },
+    { "!defined G || 0", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#if !defined G || 0\n#define G\nint g;\n#endif\n" } }, 0, 0 },
+    { "a guard with #else", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#ifndef G\n#define G\nfirst\n#else\nsecond\n#endif\n" } }, 0, 0 },
+    { "a guard with #elif", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#ifndef G\n#define G\nfirst\n#elif 1\nsecond\n#endif\n" } }, 0, 0 },
+    { "a token before the #ifndef", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "int before;\n#ifndef G\n#define G\n#endif\n" } }, 0, 0 },
+    { "a token after the #endif", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#ifndef G\n#define G\n#endif\nint after;\n" } }, 0, 0 },
+    { "a directive before the #ifndef", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#define X\n#ifndef G\n#define G\nint g;\n#endif\n" } }, 0, 0 },
+    { "a directive after the #endif", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#ifndef G\n#define G\nint g;\n#endif\n#define Y\n" } }, 0, 0 },
+    { "comments and null directives around the group", BUSTER_PP_DIRECTIVE_TEST_TWICE,
+      { { "g.h", "/* a */\n#\n%:\n#ifndef G // b\n#define G\nint g;\n#endif /* c */\n#\n// d\n" } }, 1, 0 },
+    { "extra tokens", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#ifndef G junk\n#define G\nint g;\n#endif junk\n" } }, 1, 0 },
+    { "the macro defined before the first inclusion", "#define G\n" BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", BUSTER_PP_DIRECTIVE_TEST_GUARDED } }, 0, 0 },
+    { "an inclusion from inside the file", "#include \"n.h\"\n#include \"n.h\"\n", { { "n.h", "#ifndef N\n#define N\n#include \"n.h\"\nint n;\n#endif\n" } }, 1, 0 },
+    { "an inclusion in a skipped group", "#if 0\n#include \"g.h\"\n#endif\n" BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", BUSTER_PP_DIRECTIVE_TEST_GUARDED } }, 1, 0 },
+    { "#pragma once through a symbolic link and a hard link", "#include \"o.h\"\n#include \"link.h\"\n#include \"hard.h\"\n#include \"o.h\"\n",
+      { { "o.h", "#pragma once\nint o;\n" }, { "link.h", "->o.h" }, { "hard.h", "=>o.h" } }, 0, 3 },
+    { "#import", "#import \"i.h\"\n#include \"i.h\"\n#import \"i.h\"\n", { { "i.h", "int i;\n" } }, 0, 2 },
+};
+
+// Writes a fixture's files into `directory` (links as links), or removes them (`write` false).
+static bool pp_directive_test_guard_files(const PPDirectiveTestGuard* fixture, const char* directory, bool write)
+{
+    bool result = true;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixture->files) && fixture->files[i][0] != 0; i += 1)
+    {
+        char path[4200];
+        char target[4200];
+        const char* text = fixture->files[i][1];
+        snprintf(path, sizeof(path), "%s/%s", directory, fixture->files[i][0]);
+        snprintf(target, sizeof(target), "%s/%s", directory, text + 2);
+        if (!write)
+        {
+            unlink(path);
+        }
+        else if (text[0] == '-' && text[1] == '>')
+        {
+            result &= symlink(text + 2, path) == 0;
+        }
+        else if (text[0] == '=' && text[1] == '>')
+        {
+            result &= link(target, path) == 0;
+        }
+        else
+        {
+            result &= pp_test_write_file(path, text);
+        }
+    }
+    return result;
+}
+
+// A fixture by both kernels: the same stream, and the skips it must make; with clang, clang's output and its count of
+// the inclusions it skips by guards.
+static bool pp_directive_test_guard(const PPDirectiveTestGuard* fixture, const char* directory, bool with_clang)
+{
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/guard.c", directory);
+    bool result = pp_test_write_file(path, fixture->source) && pp_directive_test_guard_files(fixture, directory, true);
+    static InternTable tables[2];
+    static Preprocessor runs[2];
+    bool ran[2] = { false, false };
+    for (uint32_t k = 0; result && k < 2; k += 1)
+    {
+        const PPOptions options = {
+            .language = { .standard = 2017, .gnu = true },
+            .scalar = k == 1,
+            .timing = true,
+        };
+        ran[k] = intern_initialize(&tables[k]) && pp_initialize(&runs[k], &options, &tables[k]) && pp_run(&runs[k], path);
+        const uint64_t guards = runs[k].statistics.skipped_guards;
+        const uint64_t once = runs[k].statistics.skipped_once;
+        if (ran[k] && (guards != fixture->guards || once != fixture->once))
+        {
+            printf("include guards %s: the %s kernels skip %lu inclusions by guards and %lu by #pragma once, not %u and %u\n", fixture->name,
+                   k == 0 ? "vectorized" : "scalar", (unsigned long)guards, (unsigned long)once, fixture->guards, fixture->once);
+            result = false;
+        }
+    }
+    result = result && ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], fixture->name);
+    if (result && with_clang)
+    {
+        char* const argv[] = { "clang", "-E", "-P", "-std=gnu17", path, 0 };
+        char* text = 0;
+        PPSpellings ours = { 0 };
+        PPSpellings theirs = { 0 };
+        result = pp_directive_test_command(argv, &text, 0) == 0 && text != 0 && pp_stream_spellings(&runs[0], &ours) &&
+                 pp_text_spellings((const uint8_t*)text, strlen(text), runs[0].split_kinds, &theirs) &&
+                 pp_compare_spellings(&runs[0], &ours, &theirs, fixture->name, "clang");
+        const int64_t clang_guards = result ? pp_directive_test_clang_guards(0, 0, path) : -1;
+        if (result && clang_guards != fixture->guards)
+        {
+            printf("include guards %s: clang skips %ld inclusions by guards, not %u\n", fixture->name, (long)clang_guards, fixture->guards);
+            result = false;
+        }
+        arena_release(&ours.arena);
+        arena_release(&theirs.arena);
+        free(text);
+    }
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        pp_release(&runs[k]);
+        intern_release(&tables[k]);
+    }
+    pp_directive_test_guard_files(fixture, directory, false);
+    unlink(path);
+    return result;
+}
+
+static bool pp_directive_test_guards(const char* directory, bool with_clang)
+{
+    uint32_t failures = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_directive_test_guard_fixtures); i += 1)
+    {
+        failures += !pp_directive_test_guard(&pp_directive_test_guard_fixtures[i], directory, with_clang);
+    }
+    printf("include guards: %u of %lu fixtures differ%s\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_directive_test_guard_fixtures),
+           with_clang ? " (outputs and skips by guards against clang's)" : "");
+    return failures == 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // pp_test_directives
 
-// The checks without files: random streams (`count` from `seed`) and the structure fixtures.
+// The checks without files: random streams (`count` from `seed`), the structure fixtures and the guard fixtures.
 static bool pp_test_directives(const char* directory, bool with_clang, uint64_t seed, uint64_t count)
 {
     bool result = pp_directive_test_streams(seed, count);
     result &= pp_directive_test_structure(directory, with_clang);
+    result &= pp_directive_test_guards(directory, with_clang);
     return result;
 }

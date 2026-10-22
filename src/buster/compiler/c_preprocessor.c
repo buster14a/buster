@@ -141,7 +141,8 @@ struct PPStatistics
     uint64_t long_conditions; // the lines of more than 32 of them,
     uint64_t longest_condition; // and the most tokens a line had.
     uint64_t directives;
-    uint64_t skipped_includes; // #include of a file whose guard is defined, or after #pragma once.
+    uint64_t skipped_guards; // #include of a file whose guard is defined (clang's "multi-include optimization"),
+    uint64_t skipped_once; // and of one #pragma once or #import read.
 };
 
 typedef enum PPPhase
@@ -194,6 +195,8 @@ struct PPOptions
     bool trigraphs;
     // Recording is on by default; the benchmark's control disables it without changing preprocessing.
     bool no_history;
+    // Enter a file whose include guard is defined rather than skip it (#120's control: the output is the same).
+    bool no_guard_skip;
     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
     FILE* diagnostics;
 };
@@ -298,8 +301,13 @@ struct PPFileData
     uint32_t note_count;
     uint32_t* note_directives;
     uint8_t* note_kinds;
-    // The include guard's macro (0 if the file has none), and whether #pragma once (or #import) read it.
+    // The include guard's macro (0 if the file has none), whether an inclusion that took the guard's group has ended,
+    // from when on the guard skips the file (clang knows a file's guard from the end of such an inclusion, so it enters
+    // the file again from inside it, and every time while the macro was defined before the first), and whether #pragma
+    // once (or #import) read it.
     IdentId guard;
+    uint32_t guard_opener; // The guard's #ifndef or #if: the directive after the null ones that start the file.
+    bool guarded;
     bool once;
     bool prepared;
     // A place whose line is known, from which pp_line_of counts lines forward: the preprocessor asks about later places
@@ -481,6 +489,9 @@ struct PPContext
     // A buffer: the leading space its expansion left after its last token (an empty argument there), which the next
     // token read after it takes.
     uint8_t trailing_flags;
+    // A file: this inclusion took the group of the file's include guard (its #ifndef was true). Only such an inclusion
+    // tells clang the guard (its multiple-include optimization), and from its end on the guard skips the file.
+    bool guard_taken;
     // The macro to enable again when the context is popped.
     PPMacroId macro;
     uint32_t position;
@@ -1433,34 +1444,59 @@ static bool pp_finish_directives(Preprocessor* pp, PPFileData* data, const uint6
     return result;
 }
 
-// The include guard of a prepared file, or 0: its first token starts `#ifndef X` (or `#if !defined X`, or
-// `#if !defined(X)`), whose group has no other branch and whose #endif ends the file.
-static IdentId pp_find_guard(const PPFileData* data)
+// The include guard of a prepared file, or 0, as clang's multiple-include optimization finds one: the file is null
+// directives ('#' alone), then `#ifndef X` (with extra tokens or not) or a `#if` whose line is `defined X` or
+// `defined(X)` under an odd number of '!' and any parentheses, whose group has no other branch, and whose #endif's line
+// only null directives follow. *opener gets the #ifndef's or #if's index.
+static IdentId pp_find_guard(const PPFileData* data, uint32_t* opener)
 {
     IdentId result = 0;
-    if (data->directive_count >= 2 && data->directive_hash[0] == 0 && data->directive_next[0] != BUSTER_PP_NONE)
+    const uint8_t* kinds = data->kinds;
+    uint32_t first = 0;
+    while (first < data->directive_count && data->directive_kind[first] == PP_DIRECTIVE_NULL && data->directive_hash[first] == first)
     {
-        const uint32_t endif = data->directive_next[0];
-        const bool closes = data->directive_kind[endif] == PP_DIRECTIVE_ENDIF && data->directive_end[endif] == data->token_count;
-        const uint32_t end = data->directive_end[0];
-        const uint8_t* kinds = data->kinds;
-        if (closes && data->directive_kind[0] == PP_DIRECTIVE_IFNDEF && end == 3 && (kinds[2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER)
-        {
-            result = data->values[2];
-        }
-        else if (closes && data->directive_kind[0] == PP_DIRECTIVE_IF && end >= 5 && (kinds[2] & 0x7F) == C_TOKEN_EXCLAIM &&
-                 (kinds[3] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[3] == C_NAME_DEFINED)
-        {
-            if (end == 5 && (kinds[4] & 0x7F) == C_TOKEN_RAW_IDENTIFIER)
-            {
-                result = data->values[4];
-            }
-            else if (end == 7 && (kinds[4] & 0x7F) == C_TOKEN_L_PAREN && (kinds[5] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && (kinds[6] & 0x7F) == C_TOKEN_R_PAREN)
-            {
-                result = data->values[5];
-            }
-        }
+        first += 1;
     }
+    const uint32_t endif = first < data->directive_count && data->directive_hash[first] == first ? data->directive_next[first] : BUSTER_PP_NONE;
+    bool closes = endif != BUSTER_PP_NONE && data->directive_kind[endif] == PP_DIRECTIVE_ENDIF;
+    // Each null directive is one token, so only they follow the #endif's line when as many tokens as directives do.
+    for (uint32_t d = endif + 1; closes && d < data->directive_count; d += 1)
+    {
+        closes = data->directive_kind[d] == PP_DIRECTIVE_NULL;
+    }
+    closes = closes && data->directive_end[endif] + (data->directive_count - 1 - endif) == data->token_count;
+    const uint32_t hash = closes ? data->directive_hash[first] : 0;
+    const uint32_t end = closes ? data->directive_end[first] : 0;
+    if (closes && data->directive_kind[first] == PP_DIRECTIVE_IFNDEF && hash + 2 < end && (kinds[hash + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER)
+    {
+        result = data->values[hash + 2];
+    }
+    else if (closes && data->directive_kind[first] == PP_DIRECTIVE_IF)
+    {
+        // Parentheses and '!' before `defined`, then as many ')' after its operand as there were '(' before.
+        uint32_t t = hash + 2;
+        uint32_t negations = 0;
+        uint32_t parentheses = 0;
+        while (t < end && ((kinds[t] & 0x7F) == C_TOKEN_EXCLAIM || (kinds[t] & 0x7F) == C_TOKEN_L_PAREN))
+        {
+            negations += (kinds[t] & 0x7F) == C_TOKEN_EXCLAIM;
+            parentheses += (kinds[t] & 0x7F) == C_TOKEN_L_PAREN;
+            t += 1;
+        }
+        const bool defined = t + 1 < end && (kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_DEFINED;
+        const bool plain = defined && (kinds[t + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
+        const bool enclosed = defined && !plain && t + 3 < end && (kinds[t + 1] & 0x7F) == C_TOKEN_L_PAREN && (kinds[t + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER &&
+                              (kinds[t + 3] & 0x7F) == C_TOKEN_R_PAREN;
+        const IdentId name = plain ? data->values[t + 1] : enclosed ? data->values[t + 2] : 0;
+        t += plain ? 2 : enclosed ? 4 : 0;
+        uint32_t closing = 0;
+        while (name != 0 && t + closing < end && (kinds[t + closing] & 0x7F) == C_TOKEN_R_PAREN)
+        {
+            closing += 1;
+        }
+        result = name != 0 && t + closing == end && closing == parentheses && negations % 2 == 1 ? name : 0;
+    }
+    *opener = first;
     return result;
 }
 
@@ -1684,7 +1720,7 @@ static bool pp_directive_table(Preprocessor* pp, PPFileData* data)
         result = pp_finish_directives(pp, data, lines);
     }
     scratch_end(scratch);
-    data->guard = result ? pp_find_guard(data) : 0;
+    data->guard = result ? pp_find_guard(data, &data->guard_opener) : 0;
     return result;
 }
 
@@ -2667,6 +2703,7 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
             pp->conditional_count -= 1;
         }
         pp->include_depth -= pp->include_depth != 0;
+        pp->datas[pp->files[context->file].data].guarded |= context->guard_taken;
     }
     pp->context_count -= 1;
     // An expansion that ends passes its pending flags on to the context it was read from; an argument's or a line's
@@ -5095,14 +5132,17 @@ static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t be
     return result;
 }
 
-// Enters a file (prepared on first use) included at `include_location` from range `parent`, unless its guard is defined
-// or #pragma once read it. The inclusion is as much a system header as the file and as the includer there are, as
-// clang has it (HandleHeaderIncludeOrImport): a file included from a system header is one too.
+// Enters a file (prepared on first use) included at `include_location` from range `parent`, unless #pragma once read it
+// or its guard is defined after its first inclusion ended. The inclusion is as much a system header as the file and as
+// the includer there are, as clang has it (HandleHeaderIncludeOrImport): a file included from a system header is one
+// too.
 static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index)
 {
     PPFileData* data = &pp->datas[pp->files[file].data];
-    const bool skipped = data->prepared && (data->once || (data->guard != 0 && pp_is_macro(pp, data->guard)));
-    pp->statistics.skipped_includes += skipped && pp->options.timing;
+    const bool guarded = data->guarded && data->guard != 0 && !pp->options.no_guard_skip && pp_is_macro(pp, data->guard);
+    const bool skipped = data->prepared && (data->once || guarded);
+    pp->statistics.skipped_once += data->prepared && data->once && pp->options.timing;
+    pp->statistics.skipped_guards += data->prepared && !data->once && guarded && pp->options.timing;
     if (pp->include_depth >= BUSTER_PP_MAX_INCLUDE_DEPTH)
     {
         pp_diagnose(pp, PP_SEVERITY_FATAL, include_location, "#include nested too deeply");
@@ -5227,6 +5267,7 @@ static void pp_apply_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     if (kind == PP_DIRECTIVE_IF || kind == PP_DIRECTIVE_IFDEF || kind == PP_DIRECTIVE_IFNDEF)
     {
         const PPFileData* data = &pp->datas[pp->files[context->file].data];
+        context->guard_taken |= d == data->guard_opener && data->guard != 0 && taken;
         const uint32_t name = pp_token_location(pp, context, data, data->directive_hash[d] + 1);
         if (pp->conditional_count < BUSTER_PP_MAX_CONTEXTS)
         {
@@ -5427,12 +5468,9 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
     {
         pp_diagnose(pp, PP_SEVERITY_FATAL, location, "'%.*s' file not found", (int)length, (const char*)name);
     }
-    else if (kind == PP_DIRECTIVE_IMPORT && pp->datas[pp->files[file].data].prepared && pp->datas[pp->files[file].data].once)
-    {
-        // Already imported.
-    }
     else
     {
+        // An imported file is read once, as after #pragma once: pp_enter_file skips it after that.
         pp_enter_file(pp, file, context->range, location, found_in);
         if (kind == PP_DIRECTIVE_IMPORT)
         {

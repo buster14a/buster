@@ -15,7 +15,9 @@
 // token (the tokens of every file the runs prepared) and per output token, the share of the time each phase took
 // (PPPhase: reading, lexing, refining and directive tables; the rest is the main loop with its directives), and what
 // a run did (PPStatistics). With --clang it also times `clang -E -P` with the same options (but --predefines, which is
-// ours) writing to /dev/null, a process per file, the median of as many runs, for scale. --only runs one
+// ours) writing to /dev/null, a process per file, the median of as many runs, for scale. --history-cost and
+// --guard-cost replace the scalar twins with the vectorized kernels without recording macro expansion history, or
+// without skipping the inclusions of guarded files (#120), whose output must be the same. --only runs one
 // implementation (for profiles). Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments
 // are invalid or a run fails.
 //
@@ -68,6 +70,10 @@ struct PPBenchmarkSample
     uint64_t substitutions;
     uint64_t generated;
     uint64_t runs;
+    // The output's kinds, flags and spellings (values, and lengths for the tokens whose values are locations), and with
+    // its locations and values: --guard-cost must keep the first (a file entered rather than skipped takes locations)
+    // and --history-cost the second.
+    uint64_t token_digest;
     uint64_t digest;
 };
 
@@ -115,16 +121,14 @@ static void pp_benchmark_sort(uint64_t* values, uint64_t count)
     }
 }
 
-// One pass of one implementation over the files: each preprocessed from nothing. Adds the files' input and output
-// tokens to `tokens` (the first time).
-static bool pp_benchmark_pass(const PPOptions* base, bool scalar, bool no_history, char** files, int file_count, int cycles_fd, int instructions_fd, PPBenchmarkSample* sample,
-                              uint64_t* input_tokens, uint64_t* output_tokens)
+// One pass of one implementation (its options) over the files: each preprocessed from nothing. Adds the files' input
+// and output tokens to `tokens` (the first time).
+static bool pp_benchmark_pass(const PPOptions* run, char** files, int file_count, int cycles_fd, int instructions_fd, PPBenchmarkSample* sample, uint64_t* input_tokens,
+                              uint64_t* output_tokens)
 {
     static InternTable table;
     static Preprocessor pp;
-    PPOptions options = *base;
-    options.scalar = scalar;
-    options.no_history = no_history;
+    PPOptions options = *run;
     options.timing = true;
     bool result = true;
     *sample = (PPBenchmarkSample){ 0 };
@@ -164,6 +168,13 @@ static bool pp_benchmark_pass(const PPOptions* base, bool scalar, bool no_histor
             sample->digest = (sample->digest ^ pp.output.locations[i]) * 1099511628211ull;
             sample->digest = (sample->digest ^ pp.output.values[i]) * 1099511628211ull;
             sample->digest = (sample->digest ^ pp.output.kinds[i] ^ ((uint64_t)pp.output.flags[i] << 8)) * 1099511628211ull;
+            // An identifier's or keyword's value is its IdentId, a pragma end's nothing, and another token's its end's
+            // location, of which the token's length doesn't depend on the locations.
+            const uint8_t kind = pp.output.kinds[i];
+            const bool named = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END);
+            const uint32_t value = named ? pp.output.values[i] : kind == BUSTER_PP_KIND_PRAGMA_END ? 0 : pp.output.values[i] - pp.output.locations[i];
+            sample->token_digest = (sample->token_digest ^ value) * 1099511628211ull;
+            sample->token_digest = (sample->token_digest ^ kind ^ ((uint64_t)pp.output.flags[i] << 8)) * 1099511628211ull;
         }
         const uint64_t* from = (const uint64_t*)&pp.statistics;
         uint64_t* to = (uint64_t*)&sample->statistics;
@@ -485,6 +496,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
     int result = 1;
     bool with_clang = false;
     bool history_cost = false;
+    bool guard_cost = false;
     bool tables = false;
     uint32_t only = 3;
     char** passed = calloc((size_t)argc + 1, sizeof(char*));
@@ -512,6 +524,10 @@ int run_preprocessor_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--tables") == 0)
         {
             tables = true;
+        }
+        else if (strcmp(argument, "--guard-cost") == 0)
+        {
+            guard_cost = true;
         }
         else if (strcmp(argument, "--only") == 0 && i + 1 < argc)
         {
@@ -562,7 +578,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
     }
     else if (file_count == 0 || with_input == 0 || only == 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
     {
-        fprintf(stderr, "usage: %s [--clang] [--history-cost] [--only vectorized|scalar] [-E's options] file...\n"
+        fprintf(stderr, "usage: %s [--clang] [--history-cost | --guard-cost] [--only vectorized|scalar] [-E's options] file...\n"
                         "       %s --tables [--only vectorized|scalar] path...\n", argv[0], argv[0]);
     }
     else
@@ -579,6 +595,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
         uint64_t output_tokens = 0;
         bool ran = true;
         uint64_t expected_digest = 0;
+        uint64_t expected_token_digest = 0;
         bool have_digest = false;
         for (uint32_t pass = 0; ran && pass <= BUSTER_PP_BENCHMARK_PASSES; pass += 1)
         {
@@ -589,17 +606,24 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 {
                     continue;
                 }
+                // The second implementation: the scalar twins, or with --history-cost and --guard-cost the vectorized
+                // kernels without recording history or without skipping guarded files.
                 PPBenchmarkSample sample;
-                ran = pp_benchmark_pass(&options, !history_cost && implementation == 1, history_cost && implementation == 1, files, file_count, cycles_fd,
-                                        instructions_fd, &sample, &input_tokens, &output_tokens);
+                PPOptions run = options;
+                const bool control = history_cost || guard_cost;
+                run.scalar = !control && implementation == 1;
+                run.no_history = history_cost && implementation == 1;
+                run.no_guard_skip = guard_cost && implementation == 1;
+                ran = pp_benchmark_pass(&run, files, file_count, cycles_fd, instructions_fd, &sample, &input_tokens, &output_tokens);
                 if (!have_digest)
                 {
                     expected_digest = sample.digest;
+                    expected_token_digest = sample.token_digest;
                     have_digest = true;
                 }
-                else if (history_cost && sample.digest != expected_digest)
+                else if ((history_cost && sample.digest != expected_digest) || (guard_cost && sample.token_digest != expected_token_digest))
                 {
-                    fprintf(stderr, "recording changed the output token digest\n");
+                    fprintf(stderr, "the control changed the output token digest\n");
                     ran = false;
                 }
                 if (pass > 0)
@@ -651,7 +675,9 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 pp_benchmark_sort(instructions, BUSTER_PP_BENCHMARK_PASSES);
                 const double median_cycles = (double)cycles[BUSTER_PP_BENCHMARK_PASSES / 2];
                 const double median_instructions = (double)instructions[BUSTER_PP_BENCHMARK_PASSES / 2];
-                const char* name = history_cost ? (implementation == 0 ? "history" : "no-history") : names[implementation];
+                const char* name = history_cost ? (implementation == 0 ? "history" : "no-history")
+                                   : guard_cost ? (implementation == 0 ? "guards" : "no-guards")
+                                                : names[implementation];
                 printf("  %-10s %8.3f ms  %6.2f cycles/input token  %6.2f cycles/output token  %6.2f instructions/input token  IPC %.2f\n", name,
                        (double)nanoseconds[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6, median_cycles / (double)input_tokens, median_cycles / (double)output_tokens,
                        median_instructions / (double)input_tokens, median_cycles != 0 ? median_instructions / median_cycles : 0.0);
@@ -678,11 +704,13 @@ int run_preprocessor_benchmark(int argc, char** argv)
             }
             const PPStatistics* statistics = &samples[only == 2 ? 1 : 0][0].statistics;
             printf("  per pass: %lu directives, %lu file runs (%lu tokens), %lu buffer runs (%lu tokens), %lu object-like expansions copied out and %lu "
-                   "buffered, %lu invocations (%lu arguments, %lu expanded first), %lu pastes, %lu builtins, %lu includes skipped\n",
+                   "buffered, %lu invocations (%lu arguments, %lu expanded first), %lu pastes, %lu builtins, %lu includes skipped by their guards and "
+                   "%lu by #pragma once\n",
                    (unsigned long)statistics->directives, (unsigned long)statistics->file_runs, (unsigned long)statistics->file_run_tokens,
                    (unsigned long)statistics->buffer_runs, (unsigned long)statistics->buffer_run_tokens, (unsigned long)statistics->direct_expansions,
                    (unsigned long)statistics->buffered_expansions, (unsigned long)statistics->invocations, (unsigned long)statistics->arguments,
-                   (unsigned long)statistics->expanded_arguments, (unsigned long)statistics->pastes, (unsigned long)statistics->builtins, (unsigned long)statistics->skipped_includes);
+                   (unsigned long)statistics->expanded_arguments, (unsigned long)statistics->pastes, (unsigned long)statistics->builtins, (unsigned long)statistics->skipped_guards,
+                   (unsigned long)statistics->skipped_once);
             printf("  #if and #elif: %lu lines of %.1f tokens on average after expansion, %lu of more than 32, the longest %lu\n",
                    (unsigned long)statistics->conditions, statistics->conditions != 0 ? (double)statistics->condition_tokens / (double)statistics->conditions : 0.0,
                    (unsigned long)statistics->long_conditions, (unsigned long)statistics->longest_condition);

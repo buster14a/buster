@@ -249,6 +249,8 @@ static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* o
 {
     PPOptions with_starts = *options;
     with_starts.expansion_starts = true;
+    // The statistics too: the files' checks compare the inclusions skipped by guards with clang's.
+    with_starts.timing = true;
     bool result = intern_initialize(table) && pp_initialize(pp, &with_starts, table);
     if (result)
     {
@@ -1098,7 +1100,10 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     return result;
 }
 
-// One file, by both kernels, and with --clang against clang with the same options.
+static int64_t pp_directive_test_clang_guards(char** arguments, int argument_count, const char* path);
+
+// One file, by both kernels, and with --clang against clang with the same options: the tokens, their places, and the
+// inclusions skipped by their guards (#120), as many as clang's multiple-include optimization skips.
 static bool pp_test_file(int argument_count, char** arguments, const PPOptions* base, const char* path, bool with_clang, const char* directory, uint64_t* tokens)
 {
     PPOptions options = *base;
@@ -1129,6 +1134,12 @@ static bool pp_test_file(int argument_count, char** arguments, const PPOptions* 
         result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, runs[0].split_kinds, &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
                  pp_test_placed(&runs[0], &theirs, path);
         pp_placed_release(&theirs);
+        const int64_t guards = result ? pp_directive_test_clang_guards(arguments, argument_count, path) : -1;
+        if (result && guards != (int64_t)runs[0].statistics.skipped_guards)
+        {
+            printf("%s: %lu inclusions skipped by their guards, clang %ld\n", path, (unsigned long)runs[0].statistics.skipped_guards, (long)guards);
+            result = false;
+        }
     }
     arena_release(&ours.arena);
     free(text);
