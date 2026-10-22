@@ -196,9 +196,14 @@ designs and the compilers already built this way.
   syntax, limitations, example and measurement method are in
   [docs/assembler.md](docs/assembler.md). `.S` uses the shared preprocessor's
   explicit assembly mode, including `-I`, `-D`, `-U` and source line markers.
-- `src/buster/compiler/main.c` is the executable entry point. It includes most
-  of the compiler and all of its tests, and `build.sh` compiles it as eight
-  translation units: `main.c` itself, the driver's unit, and each
+- `src/buster/compiler/main.c` is the executable entry point: its commands, and
+  for anything else the driver (`run_parse_command`, in `c_parser.c`):
+  `./build/compiler [-fsyntax-only] [-E's options] [--scalar] file.c`
+  preprocesses and parses the file and prints the diagnostics as clang does,
+  with exit status 0 for a unit without errors and 1 otherwise. Nothing is
+  written yet. With no file it prints its usage and exits with status 1. It
+  includes most of the compiler and all of its tests, and `build.sh` compiles
+  it as eight translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
@@ -212,8 +217,6 @@ designs and the compilers already built this way.
   them in order: the same executable as one clang command for all of them.
 - `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
   it, and `./build/compiler test-lexer` runs them.
-  The same command also runs `main_test.c`'s input-loader error and cleanup
-  regressions; these require no corpus or performance measurement.
 - `src/buster/compiler/c_lexer_benchmark.c` provides the `benchmark-lexer`
   command. The 9700X CI workflow runs it on the repository's C sources by
   default. `docs/c-lexer.md` records the GFNI classifier, the leading-comment
@@ -492,6 +495,17 @@ designs and the compilers already built this way.
   measurements. `c_files_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-files` runs them) and `c_files_benchmark.c` provides
   `benchmark-files`.
+- `src/buster/compiler/c_parser.c` is the parser (#127): the preprocessor's
+  token stream to a tree, a parent, a role and a node depth for every token,
+  and for a unit without errors its postorder with each subtree's size. The
+  vector path builds it with kernels in AVX-512, each with an exact scalar
+  twin, and a pass of checks that flags what C's grammar doesn't allow, whose
+  top-level declarations go to the scalar parser; the scalar parser alone
+  (`--scalar`) builds the same tree and gives the diagnostics, at clang's
+  places with clang's messages. It also holds the driver. `docs/c-parser.md`
+  explains the design and its 9700X measurements. `c_parser_test.c` holds its
+  tests (`main.c` includes it; `./build/compiler test-parser` runs them) and
+  `c_parser_benchmark.c` provides `benchmark-parser`.
 - `src/buster/compiler/profile.c` is the profiling tools: `ab` (builds of
   several trees run in turn, under the 9700X's lock) and the reports of perf's
   and objdump's text, `hot-loops`, `label-spills`, `spill-report` and
@@ -510,7 +524,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 
 ```sh
 ./build.sh
-./build/compiler
+clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
+./build/compiler -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler test-call-graph
 ./build.sh check-call-graph
 ./build/compiler test-profile
@@ -553,12 +568,15 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-preprocessor --clang
 ./build/compiler test-preprocessor --tables src
 ./build/compiler benchmark-preprocessor --tables src
-./build/compiler -E -march=native -Isrc -fwrapv -funsigned-char -o build/main.i src/buster/compiler/main.c
-./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
+./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler test-files
 ./build/compiler test-files --flat src
-./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
-./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler test-parser --clang
+./build/compiler test-parser --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler test-types
 ./build/compiler benchmark-types
 ./build/compiler test-calling-convention --cross-check
@@ -705,14 +723,6 @@ machine, with `build.sh`'s unoptimized build, the C and C++ runs take about
 ```sh
 ./build/compiler test-lexer --cplusplus --seed 7 --fuzz 2000000
 ```
-
-Both modes also check the entry point's loader: empty and missing files,
-a borrowed source and a sparse file past the lexer's length limit, and repeated
-successful loads whose descriptor and four mappings must be released. A child
-limits its address space to fail each token-array mapping in turn, including
-`ends`, and the source mapping; each failure must retain its cause, return zero tokens and
-leave no mappings or descriptor behind. This checks the existing stub only,
-without replacing the driver being developed under #116, #117 and #145.
 
 ## Lexer benchmarks
 
@@ -2955,6 +2965,100 @@ with the largest. Run it under the 9700X's lock without `taskset`: it pins its
 lanes. `docs/c-files.md` has the numbers for the C library corpus, `sqlite3.c`,
 musl and this repository. The default 9700X job runs it on the repository's
 translation units; like the others, its measurements are informational.
+
+## Parser tests
+
+`./build/compiler test-parser [--clang [PATH]] [--mutations N] [--seed N]
+[--streams N] [--reports N] [--keep] [options] [file or directory...]`
+(about 7 s on the 9700X without files, with `--clang`) checks `c_parser.c`; `--clang` needs
+clang 23 on `PATH`, or the one PATH names. Each unit goes through both paths,
+the vector path with its fallback and the scalar parser alone, which must read
+the same tokens and give the same outcome, and on a unit without errors the same
+tree: the same parent, node depth and role on every token. The tree must keep
+its invariants (every parent another token or the root, at no greater depth;
+every opener's parent its closer, after it; no cycle), and its postorder and
+subtree sizes must be a depth-first walk's, whose in-order walk gives the tokens
+back in order. Then each kernel against its scalar twin, from the twins'
+outputs before it: K1 (depths, enclosing openers and each block's view), K3's
+classification, K2 (roles, flags, typed states and statement contexts, also
+from random roles and with every block in the twin's loop), K1's second part,
+K4 (with the stack's top in registers and with windows of 1, 3 and 8 lanes),
+K5, and K6 (flags and classes, also with every second and every third block
+left to the twin); and the twins together with the fallback, whose tree must be
+the scalar parser's. Those checks put every array in an arena followed by 4 GB
+and its own size of address space that may not be touched, so that a load past
+an array, or through a 32-bit index that wrapped below 0, faults. On:
+
+- snippets: 202 of valid and invalid code, each with the first error clang gives
+  (or none), which the parser must give at the same line and column with the
+  same message; `--clang` checks each expectation against clang too, which
+  must be a parse issue but for the snippets marked as the errors clang's
+  semantic analysis gives where its parser took a declaration as ours does (an
+  unknown type name, a missing type specifier, a type name where an operand
+  would be), or as code only its semantic analysis rejects, which the parser
+  takes; and the oracle itself: clang given an option it doesn't know must
+  count as no answer, and an error in a header a file includes must reject the
+  file;
+- fixtures: four trees checked by hand, parent by parent, among them #127's
+  comma case (`f(a ? b, c : d, e)` has two arguments), its cast case (`(T) * p`
+  is a cast where `T` names a type and a product where it doesn't) and a
+  declarator's spine (`(*a[3])(double)`: array, pointer, function);
+- generated inputs, without files: `--streams N` random streams of C's tokens
+  (2,000; half with balanced brackets), the snippets after 0 to 63 file-scope
+  `;`, at every block alignment, and nine kinds of nesting 100,000 levels deep
+  (commas in nested ternaries among them) and a run of 100,000 attributes, which
+  mustn't grow the native stack, nor make a token cost more for what is open
+  around it;
+- the driver, without files: eleven cases' exit statuses and exact messages (a
+  valid, an empty and an invalid file, the last with `--scalar` too, an
+  `#error`, a missing header, a missing file, a directory, a sparse file past
+  the preprocessor's size limit, no file and an unknown option), 16 runs of
+  each, after which the address space and the descriptors must be as they were;
+  then every reservation and mapping of a run on a valid and on an invalid file
+  failed in turn (74 and 75), in children whose address space may grow a page
+  less than a run reached: the last fails, then, a page below the peak that run
+  reached, the one before it, down to the first. Each run must exit with status
+  1 having said why in a fatal error, and leave nothing behind;
+- files: every `.c` file under each path, preprocessed with -E's options, must
+  parse; with `--clang`, the parser must accept exactly what `clang
+  -fsyntax-only` with the same options accepts (our side reads clang's
+  predefines for target options from `--predefines`);
+- mutations (`--mutations N`, with files): N copies of the files' -E text with
+  a token deleted, duplicated or swapped with the next. With `--clang`, a copy
+  clang accepts must parse, and one whose first error is a parse issue must fail
+  with its first error on the same line; without, both paths must agree as on
+  any file.
+
+`--explain` tallies instead why the checks sent valid code to the scalar parser,
+by signature, with an example of each, and `--print-tree FILE [FIRST LAST]`
+prints each token's role, node depth and parent by both paths, with the
+differences marked. `--seed N` changes the random inputs and the mutations,
+`--reports N` how many differences are printed (200), and `--keep` keeps the
+files in the directory the command makes under `$TMPDIR` (or `/tmp`). On the
+9700X, `sqlite3.c`, the 733 files of the libc corpus that clang accepts and the
+repository's translation units pass with `--clang`, and so does Lua 5.4.8
+locally; `docs/c-parser.md` has the corpora and the mutations' counts. The 9700X job runs
+it without files and on the repository's translation units, both with `--clang`.
+
+## Parser benchmark
+
+`./build/compiler benchmark-parser [--passes N] [--only NAME|stages] [--repeat N]
+[--counters pipeline|branches|memory|stalls] [options] file...` preprocesses
+each file with -E's options and turns its tokens into the parser's outside the
+timing, checks that the vector path gives the scalar parser's outcome and tree,
+and times `--passes` interleaved passes (21) after a warm-up: the whole paths
+over every file (the input's conversion and its twin, the scalar parser, the
+twins together and the vector path), then each stage per file on shared arrays,
+after the stages before it (each kernel and its twin, K4's three loops, the
+fallback, and the postorder by its branch-free passes and by a walk). It reports
+medians per token of time, cycles (with the fastest and slowest pass) and
+instructions, the events of the `--counters` set, and the share of top-level
+declarations and tokens the fallback took. `--only` times one path or stage
+(`stages` for every stage), and a stage named alone runs `--repeat` times per
+file, for perf. Run it under the 9700X's lock with `taskset -c 2`;
+`docs/c-parser.md` has the numbers for `sqlite3.c`, the libc corpus and `main.c`.
+The default 9700X job runs it on `main.c`, pinned to one allowed CPU; like the
+others, its measurements are informational.
 
 ## Type tests
 
