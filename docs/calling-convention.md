@@ -212,9 +212,11 @@ members' own:
   `STORAGE_INEXACT` also marks a record with a flexible array member and a
   size, which gets no storage either (its members may be classified after it:
   see "Levels"), and what holds one, a record the walk takes among them: its
-  alignment may not be LLVM's. An `_Atomic` of a type of no size takes its
+  alignment may not be LLVM's. It marks a type aligned past the 2^15 the
+  storage holds too, and what holds one: LLVM aligns a vector as large as
+  itself, so one of 64 KB or more. An `_Atomic` of a type of no size takes its
   value's alignment as its size, and is refused for an inexact one. A type of
-  16 bytes or less holds such a record only through an array of none of them,
+  16 bytes or less holds such a type only through an array of none of them,
   and passes by that alignment unchecked. A vector is aligned as in C, but a
   vector of bools is the integer of its bits clang stores it as (aligned as
   LLVM aligns integers, an `i128` at 128 bits), and one of long doubles or of
@@ -980,10 +982,12 @@ and has a fixture:
   refuses such a struct (`UNSUPPORTED`). It also refuses one holding a type it
   keeps no LLVM size of: an array of them, an `_Atomic` of a `LARGER` struct,
   or a `LARGER` struct, unless the next member leaves that struct's slot
-  room; and an `_Atomic` of a type of no size whose alignment comes from a
-  record larger than 64 bytes or a flexible one with a size, through an array
-  of none of them (`STORAGE_INEXACT`). A union is never larger: `lowerUnion`
-  cuts its storage to its size.
+  room; and an `_Atomic` of a type of no size whose alignment comes, through
+  an array of none of them, from a record with a flexible array member and a
+  size or from one that holds one (a larger record's comes from its members',
+  `abi_wide_alignment`'s walk), or from a vector of 64 KB or more, aligned
+  past the 2^15 the storage holds (`STORAGE_INEXACT`). A union is never
+  larger: `lowerUnion` cuts its storage to its size.
 - **Vectors LLVM breaks up.** clang passes a vector as its LLVM type, `<N x
   T>`: an `_Atomic` one always, as its value, and another where its classes
   are SSE, SSEUP (`GetByteVectorType`, `<2N x i64>` for `i128`s) and as a
@@ -1159,7 +1163,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (2,522 checks): about 215 types whose classes, pass bits and
+- **Fixtures** (2,740 checks): about 220 types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -1181,63 +1185,72 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   char}` and its kin). Then the `_Atomic` types clang's LLVM types decide,
   with the slots that `-mllvm -stop-after=finalize-isel`'s fixed stack objects
   show: `_Atomic`s of structs of no size, `LARGER` and `GROWN` ones among them
-  (of a packed one, of a flexible array member's `unsigned _BitInt(127)`, and
-  of one aligned by an array of none of a record larger than 64 bytes), and of
-  aligned typedefs of an empty struct and of a 32-byte one, aligned to 8;
-  packed structs ending in one (17 to 117 bytes to LLVM), structs and a union
-  with room for one, the C layout, and the structs refused (a member after the
-  overrun, a member of no size or a flexible one, a struct ending in one, an
-  `_Atomic` of one, and `_Atomic`s of a struct and a union of an array of none
-  of a struct with a flexible array member and a size, and of a struct of an
-  array of none of a struct of 32 bytes holding one: `STORAGE_INEXACT`); a
-  union at offset 1 of an empty struct and an array of none of an `_Atomic` of
-  an `aligned(16)` typedef of one (through an `aligned(1)` typedef), which
-  passes as an `i8`, since clang checks a member's offset against its
-  canonical type's alignment, and the canonical `_Atomic` drops its value's
-  typedefs; and `_Atomic` vectors in one register (`<8 x i8>`, `<9 x i8>`, `<3
-  x half>`, `<17 x i8>` with AVX), refused (`<3 x i8>`, `<5 x i8>`, `<3 x
-  i16>`, two `__int128`s, `long double`s or `__float128`s, a `_BitInt(256)`,
-  `<17 x i8>` without AVX, eight `_BitInt(4)`s), in two halves (`<1 x
-  _BitInt(128)>`), of one `_BitInt(4)` as its integer, and of bools (10 and 64
-  in a general register, 65 in halves, 128 a `PAIR`, 129 refused). Then the
-  vectors that aren't `_Atomic` which LLVM breaks up or packs
-  (`abi_test_build_split_vectors`): of bools (8 in rax, 64 in xmm0, 65
-  refused, 129, 257 and 513 in memory where the target's registers don't hold
-  them, copies of 32, 48 and 80 bytes, `SMALLER` but the first, and a hidden
-  pointer as a result); records of 128 bools refused with them (a struct, a
-  union, beside an `int[0]`, a struct of a struct, a struct of an array of one
-  of 65), but not a union of them and a `float` vector or of 256 bools and a
-  `char[20]`; a union of 128 bools and a `long` one `PAIR`, of 100 not; a
-  struct of two `__bf16`s and 8 bools aligned to 8 `LOW_GENERAL`, of 9 not;
-  long doubles (one refused, st0; two in memory or refused, st0 and st1 10
-  bytes apart; three and four in memory, copies of 32 and 64 bytes, or
-  refused, through a hidden pointer; a struct of one refused, a union of one
-  and a `double` not); `__float128`s (one in xmm0, two in memory or refused,
-  xmm0 and xmm1, four through a hidden pointer); `_BitInt`s (one of 256 bits
-  refused or in memory; one, two and four of 128 refused in a vector register,
-  a struct of one not, and in memory through a hidden pointer; `unsigned
-  _BitInt(4)`s: eight in xmm0, `SMALLER`, sixteen refused, 32 a copy of 16
-  bytes); and lengths that aren't a power of two in memory (five floats and
-  five doubles through a hidden pointer, three `long`s in rax, rdx and rcx,
-  three doubles in xmm0, xmm1 and st0). Then twenty-five calls whose locations
-  clang and LLVM give, with their totals: an `UNCOUNTED` `nullptr_t` that
-  splits a struct; a `PAIR` on the stack with r9 taken by the `long` after it;
-  a high eightbyte alone on the stack; an `UNCOUNTED` `_Atomic double` in
-  xmm7; a hidden pointer; a struct of a flexible array member alone, in an
-  8-byte slot while a general register is free and in none after (an `i0`); a
-  `LOW_GENERAL` struct in two general registers; a union stored as an `i128`,
-  counted as two registers, on the stack after five `long`s; after an
-  `UNCOUNTED` `_Atomic int` and four `long`s, a packed run of bit-fields split
-  between r9 and the stack, and a run that is an `i128` on the stack with r9
-  taken by the `long` after it; the `LARGER` copies' slots after five and six
-  `long`s (16 bytes for `_Atomic(struct { __int128 x[0]; })`, 24 and 32 for
-  packed structs ending in one, and a `GROWN` one's 16 or its integer's 8 by
-  clang's count); and `_Atomic` bool vectors after five `long`s (an `i10` in
-  r9, which leaves the `long` after it on the stack; an `i65` `SPLIT`; an
-  `i128` whole on the stack, the `long` after it in r9); and a union stored as
-  an `i128` with an SSE high eightbyte, counted as two general registers too,
-  on the stack after five `long`s and in rdi and rsi before a `double` in
-  xmm0; and after a result of two `__int128`s in a vector, which LLVM demotes
+  (of a packed one, of a flexible array member's `unsigned _BitInt(127)`, of
+  one aligned by an array of none of a record larger than 64 bytes, and of an
+  array of none of a 32 KB vector or of a record holding one, 32 KB to LLVM),
+  and of aligned typedefs of an empty struct and of a 32-byte one, aligned to
+  8; packed structs ending in one (17 to 117 bytes to LLVM, and 32 KB and a
+  byte), structs and a union with room for one, the C layout, and the structs
+  refused (a member after the overrun, a member of no size or a flexible one,
+  a struct ending in one, an `_Atomic` of one; `_Atomic`s of a struct and a
+  union of an array of none of a struct with a flexible array member and a
+  size, and of a struct of an array of none of a struct of 32 bytes holding
+  one: `STORAGE_INEXACT`; and `_Atomic`s of structs of no size aligned by a
+  vector of 64 KB, past what the storage holds, or by a record holding one,
+  and a packed struct ending in the first); a union at offset 1 of an empty
+  struct and an array of none of an `_Atomic` of an `aligned(16)` typedef of
+  one (through an `aligned(1)` typedef), which passes as an `i8`, since clang
+  checks a member's offset against its canonical type's alignment, and the
+  canonical `_Atomic` drops its value's typedefs; and `_Atomic` vectors in one
+  register (`<8 x i8>`, `<9 x i8>`, `<3 x half>`, `<17 x i8>` with AVX),
+  refused (`<3 x i8>`, `<5 x i8>`, `<3 x i16>`, two `__int128`s, `long
+  double`s or `__float128`s, a `_BitInt(256)`, `<17 x i8>` without AVX, eight
+  `_BitInt(4)`s), in two halves (`<1 x _BitInt(128)>`), of one `_BitInt(4)` as
+  its integer, and of bools (10 and 64 in a general register, 65 in halves,
+  128 a `PAIR`, 129 refused). Then the vectors that aren't `_Atomic` which
+  LLVM breaks up or packs (`abi_test_build_split_vectors`): of bools (8 in
+  rax, 64 in xmm0, 65 refused, 129, 257 and 513 in memory where the target's
+  registers don't hold them, copies of 32, 48 and 80 bytes, `SMALLER` but the
+  first, and a hidden pointer as a result); records of 128 bools refused with
+  them (a struct, a union, beside an `int[0]`, a struct of a struct, a struct
+  of an array of one of 65), but not a union of them and a `float` vector or
+  of 256 bools and a `char[20]`; a union of 128 bools and a `long` one `PAIR`,
+  of 100 not; a struct of two `__bf16`s and 8 bools aligned to 8
+  `LOW_GENERAL`, of 9 not; long doubles (one refused, st0; two in memory or
+  refused, st0 and st1 10 bytes apart; three and four in memory, copies of 32
+  and 64 bytes, or refused, through a hidden pointer; a struct of one refused,
+  a union of one and a `double` not); `__float128`s (one in xmm0, two in
+  memory or refused, xmm0 and xmm1, four through a hidden pointer); `_BitInt`s
+  (one of 256 bits refused or in memory; one, two and four of 128 refused in a
+  vector register, a struct of one not, and in memory through a hidden
+  pointer; `unsigned _BitInt(4)`s: eight in xmm0, `SMALLER`, sixteen refused,
+  32 a copy of 16 bytes); and lengths that aren't a power of two in memory
+  (five floats and five doubles through a hidden pointer, three `long`s in
+  rax, rdx and rcx, three doubles in xmm0, xmm1 and st0). Then thirty calls
+  whose locations clang and LLVM give, with their totals: an `UNCOUNTED`
+  `nullptr_t` that splits a struct; a `PAIR` on the stack with r9 taken by the
+  `long` after it; a high eightbyte alone on the stack; an `UNCOUNTED`
+  `_Atomic double` in xmm7; a hidden pointer; a struct of a flexible array
+  member alone, in an 8-byte slot while a general register is free and in none
+  after (an `i0`); a `LOW_GENERAL` struct in two general registers; a union
+  stored as an `i128`, counted as two registers, on the stack after five
+  `long`s; after an `UNCOUNTED` `_Atomic int` and four `long`s, a packed run
+  of bit-fields split between r9 and the stack, and a run that is an `i128` on
+  the stack with r9 taken by the `long` after it; the `LARGER` copies' slots
+  after five and six `long`s (16 bytes for `_Atomic(struct { __int128 x[0];
+  })`, 24 and 32 for packed structs ending in one, and a `GROWN` one's 16 or
+  its integer's 8 by clang's count); and `_Atomic` bool vectors after five
+  `long`s (an `i10` in r9, which leaves the `long` after it on the stack; an
+  `i65` `SPLIT`; an `i128` whole on the stack, the `long` after it in r9); and
+  a union stored as an `i128` with an SSE high eightbyte, counted as two
+  general registers too, on the stack after five `long`s and in rdi and rsi
+  before a `double` in xmm0; a vector of 4,096 bools, which isn't `_Atomic`,
+  returned through the hidden pointer LLVM demotes it to, in rdi, with the
+  `long` after it in rsi (and one of 1,024, at every width); the 32 KB copy of
+  an `_Atomic` aligned to 32 KB after six `long`s, the `long` after it at 32
+  KB, and a packed struct ending in it, 32 KB and a byte in a slot of 32,776
+  after five `long`s, with r9 left for the `long` after it, and an `i8` after
+  six; and after a result of two `__int128`s in a vector, which LLVM demotes
   to a hidden pointer clang doesn't count (`DEMOTED`), and five `long`s, a
   struct aligned to 16 that clang counts in a register, an `i64` at stack 0,
   and the `long` after it at 8; and 513 bools after six `long`s, a copy of 80

@@ -2659,33 +2659,35 @@ others, its measurements are informational.
   zero-length array of a larger record decides (each of the walk's rules alone
   among them), and the narrow low parts clang widens into a general register;
   and the `_Atomic` types whose LLVM types decide: of types of no size, which
-  LLVM makes larger, as the records ending in one, with their slots, the
-  records it lays out otherwise than C, and vectors LLVM keeps whole, splits
-  or, of bools, passes as integers; and the vectors that aren't `_Atomic`
-  which LLVM breaks up or packs: of bools, with their integer storage and
-  layout, refused from 16 bytes up where clang passes them as `<N x i1>`, with
-  the records of one, and smaller copies past 128 (`SMALLER`), of `_BitInt`s
-  narrower than a byte, of long doubles (refused in registers, st0 and st1 as
-  results), of `__float128`s, of `_BitInt`s of 128 bits and more, and of
-  lengths that aren't a power of two in memory, returned in rax, rdx and rcx,
-  in xmm0, xmm1 and st0, or through a hidden pointer), and calls whose
-  locations clang and LLVM give (an `UNCOUNTED` argument that splits the next
-  record, an `__int128` without two registers left, a hidden pointer, a record
-  of a flexible array member alone as an `i0`, a struct whose narrow low part
-  takes a general register, unions stored as an `i128`, which clang counts as
-  two registers with a NO_CLASS or SSE high eightbyte, runs of bit-fields
-  where an uncounted `_Atomic int` leaves one register, split or whole on the
-  stack, the larger copies' slots, byval or an integer by clang's count,
-  `_Atomic` bool vectors, a result LLVM demotes to a hidden pointer clang
-  doesn't count, and 513 bools, an 80-byte copy, and as a result a hidden
-  pointer clang doesn't count), `va_arg`'s plans for an aligned `long` and an
-  `i128` with an SSE high eightbyte, and the levels across calls (a record
-  larger than 64 bytes that waits for a `LARGER` member, and records of no
-  size that an `_Atomic` of them in a later call reads: a flexible one, and
-  two that hold a struct of 128 bytes by an array of none, which wait for what
-  its alignment reads), and the walk without scratch memory for its stack,
-  after which every type must be classified and an `_Atomic` it aligns be
-  right or refused;
+  LLVM makes larger (to 32 KB, and refused past the alignment the module
+  keeps), as the records ending in one, with their slots, the records it lays
+  out otherwise than C, and vectors LLVM keeps whole, splits or, of bools,
+  passes as integers; and the vectors that aren't `_Atomic` which LLVM breaks
+  up or packs: of bools, with their integer storage and layout, refused from
+  16 bytes up where clang passes them as `<N x i1>`, with the records of one,
+  and smaller copies past 128 (`SMALLER`), of `_BitInt`s narrower than a byte,
+  of long doubles (refused in registers, st0 and st1 as results), of
+  `__float128`s, of `_BitInt`s of 128 bits and more, and of lengths that
+  aren't a power of two in memory, returned in rax, rdx and rcx, in xmm0, xmm1
+  and st0, or through a hidden pointer), and calls whose locations clang and
+  LLVM give (an `UNCOUNTED` argument that splits the next record, an
+  `__int128` without two registers left, a hidden pointer, a record of a
+  flexible array member alone as an `i0`, a struct whose narrow low part takes
+  a general register, unions stored as an `i128`, which clang counts as two
+  registers with a NO_CLASS or SSE high eightbyte, runs of bit-fields where an
+  uncounted `_Atomic int` leaves one register, split or whole on the stack,
+  the larger copies' slots, byval or an integer by clang's count, `_Atomic`
+  bool vectors, a vector of bools that isn't `_Atomic` returned through a
+  hidden pointer, a result LLVM demotes to a hidden pointer clang doesn't
+  count, and 513 bools, an 80-byte copy, and as a result a hidden pointer
+  clang doesn't count), `va_arg`'s plans for an aligned `long` and an `i128`
+  with an SSE high eightbyte, and the levels across calls (a record larger
+  than 64 bytes that waits for a `LARGER` member, and records of no size that
+  an `_Atomic` of them in a later call reads: a flexible one, and two that
+  hold a struct of 128 bytes by an array of none, which wait for what its
+  alignment reads), and the walk without scratch memory for its stack, after
+  which every type must be classified and an `_Atomic` it aligns be right or
+  refused;
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's
