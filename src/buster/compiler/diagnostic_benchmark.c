@@ -2,7 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Original measurement harness for diagnostic ordering. Included after diagnostic_test.c, whose frozen key generator
 // supplies the input. Both paths sort the same copies; copying is included. --after-scalar MS conditions each sample
-// with small insertion sorts. Report elapsed nanoseconds as well as invariant-TSC ticks, not core-cycle counters.
+// with small insertion sorts; --only selected runs the chosen path back to back. Report elapsed nanoseconds as well
+// as invariant-TSC ticks, not core-cycle counters.
 
 static uint64_t diagnostic_benchmark_nanoseconds(void)
 {
@@ -30,13 +31,28 @@ static uint64_t diagnostic_benchmark_median(uint64_t* values, uint32_t count)
 static int run_diagnostic_benchmark(int argc, char** argv)
 {
     uint64_t after_scalar = 0;
-    bool valid = argc == 0;
-    if (argc == 2 && strcmp(argv[0], "--after-scalar") == 0)
+    uint32_t only = 2;
+    bool valid = true;
+    for (int i = 0; valid && i < argc; i += 1)
     {
-        char* end;
-        errno = 0;
-        after_scalar = strtoull(argv[1], &end, 10);
-        valid = errno == 0 && end != argv[1] && *end == 0 && after_scalar <= 1000;
+        if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
+        {
+            i += 1;
+            char* end;
+            errno = 0;
+            after_scalar = strtoull(argv[i], &end, 10);
+            valid = errno == 0 && end != argv[i] && *end == 0 && argv[i][0] != '-' && after_scalar <= 1000;
+        }
+        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
+        {
+            i += 1;
+            only = strcmp(argv[i], "scalar") == 0 ? 0 : strcmp(argv[i], "selected") == 0 ? 1 : 2;
+            valid = only != 2;
+        }
+        else
+        {
+            valid = false;
+        }
     }
     static const uint32_t counts[] =
     {
@@ -55,12 +71,14 @@ static int run_diagnostic_benchmark(int argc, char** argv)
     volatile uint64_t observed = 0;
     if (!valid)
     {
-        fprintf(stderr, "usage: benchmark-diagnostics [--after-scalar MS (0..1000)]\n");
+        fprintf(stderr, "usage: benchmark-diagnostics [--only scalar|selected] [--after-scalar MS (0..1000)]\n");
     }
     for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(counts); c += 1)
     {
         const uint32_t count = counts[c];
-        const uint32_t repeats = count < 256 ? 256 : count < 4096 ? 16 : 1;
+        // Isolated unconditioned samples run long enough to measure sustained sorting. Conditioned samples retain
+        // the short batch so its initial transition is not averaged over a long vector phase.
+        const uint32_t repeats = count < 256 ? 256 : count < 4096 ? 16 : only == 1 && after_scalar == 0 ? 32 : 1;
         const uint64_t bytes = (uint64_t)count * sizeof(DiagnosticOrder);
         for (uint32_t i = 0; i < count; i += 1)
         {
@@ -79,9 +97,9 @@ static int run_diagnostic_benchmark(int argc, char** argv)
         uint64_t ticks[2][21];
         for (uint32_t pass = 0; result && pass < 22; pass += 1)
         {
-            for (uint32_t slot = 0; result && slot < 2; slot += 1)
+            for (uint32_t slot = 0; result && slot < (only == 2 ? 2u : 1u); slot += 1)
             {
-                const uint32_t mode = (slot + pass) % 2;
+                const uint32_t mode = only == 2 ? (slot + pass) % 2 : only;
                 const uint64_t until = diagnostic_benchmark_nanoseconds() + after_scalar * 1000000;
                 while (diagnostic_benchmark_nanoseconds() < until)
                 {
@@ -119,8 +137,9 @@ static int run_diagnostic_benchmark(int argc, char** argv)
                 }
             }
         }
-        for (uint32_t mode = 0; result && mode < 2; mode += 1)
+        for (uint32_t slot = 0; result && slot < (only == 2 ? 2u : 1u); slot += 1)
         {
+            const uint32_t mode = only == 2 ? slot : only;
             const double work = (double)count * repeats;
             const uint64_t ns = diagnostic_benchmark_median(times[mode], 21);
             const uint64_t tsc = diagnostic_benchmark_median(ticks[mode], 21);

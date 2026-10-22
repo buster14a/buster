@@ -876,9 +876,11 @@ test covers both section modes at every lane count; the preprocessor compares
 both `-E` text modes and diagnostics through both kernels and both job orders.
 The 9700X workflow runs these checks as part of the stage commands.
 
-`./build/compiler benchmark-diagnostics [--after-scalar MS]` compares the
+`./build/compiler benchmark-diagnostics [--only scalar|selected]
+[--after-scalar MS]` compares the
 ordering paths with 21 interleaved samples, in ns/key and invariant-TSC
-ticks/key. Run both the default and `--after-scalar 100`, pinned to CPU 2
+ticks/key. Run both isolated `--only selected` and
+`--only selected --after-scalar 100`, across several processes pinned to CPU 2
 under the host's lock. [The determinism guide](docs/determinism.md) specifies
 the caller's source-order and lifetime contracts and the integration still
 required by #150, #151 and #152.

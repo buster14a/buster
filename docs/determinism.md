@@ -63,8 +63,8 @@ The link representation's atom, symbol and fixup arrays are already placed
 input ranges. Their indices express that canonical placement, rather than
 an arbitrary intern insertion order. Tests permute `NameId`, update all
 symbol-name references, rebuild preparation that caches those IDs, and preserve
-those ranges. The object tests freeze
-the reference bytes before any permutation, for both section modes.
+those ranges. The object tests freeze the reference bytes before any
+permutation, for both section modes.
 
 Future literal pooling must first find each value's earliest source use and
 place distinct values by that position, with an explicit source-order tie
@@ -101,12 +101,15 @@ The four output test commands and `test-preprocessor` accept `--id-order N`
 The default 9700X workflow runs these property checks in their stage commands
 and runs `test-diagnostics` explicitly.
 
-`benchmark-diagnostics [--after-scalar MS]` compares insertion sort with the
+`benchmark-diagnostics [--only scalar|selected] [--after-scalar MS]` compares insertion sort with the
 selected path on the same frozen random keys, including the input copy. It
 prints medians of 21 interleaved samples after one warm-up, in nanoseconds and
 invariant-TSC ticks per key. TSC ticks are not hardware core-cycle counts.
-Run it on CPU 2 under the shared lock, both with the default conditioning and
-with `--after-scalar 100`.
+Run it on CPU 2 under the shared lock. The default interleaves the two paths;
+`--only selected` runs the selected path back to back, with longer batches for
+the large radix sort. `--only selected --after-scalar 100` conditions each
+short timed batch with 100 ms of lighter insertion sorts. Repeat each in
+several processes: an interleaved run alone does not establish either state.
 
 ## Integration boundary
 

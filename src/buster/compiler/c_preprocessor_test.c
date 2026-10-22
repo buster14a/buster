@@ -1702,6 +1702,10 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             id_order = strtoull(arguments[i], &end, 10);
             valid = valid && errno == 0 && end != arguments[i] && *end == 0 && arguments[i][0] != '-';
         }
+        else if (strcmp(argument, "--id-order") == 0)
+        {
+            valid = false;
+        }
         else if (strcmp(argument, "--clang") == 0)
         {
             with_clang = true;
