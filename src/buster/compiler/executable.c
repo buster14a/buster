@@ -1967,8 +1967,9 @@ static Elf64_Phdr executable_program_header(const ExecutableLayout* layout, uint
 
 // The headers, in lld's order of program headers: PT_PHDR, a dynamic PIE's PT_INTERP, the PT_LOADs, PT_TLS, a PIE's
 // PT_DYNAMIC, PT_GNU_RELRO, PT_GNU_EH_FRAME, PT_GNU_STACK (not executable) and PT_NOTE (the ABI note and the build ID's,
-// which follow each other). The note's hash stays zero until the build ID is known.
-static void executable_write_headers(ExecutableHeaders* headers, const ExecutableLayout* layout, uint64_t entry)
+// which follow each other). The note's hash stays zero until the build ID is known. `verneed_records` is
+// .gnu.version_r's count of entries, its sh_info.
+static void executable_write_headers(ExecutableHeaders* headers, const ExecutableLayout* layout, uint64_t entry, uint32_t verneed_records)
 {
     memset(headers, 0, sizeof(*headers));
     const Elf64_Ehdr header = {
@@ -2092,9 +2093,12 @@ static void executable_write_headers(ExecutableHeaders* headers, const Executabl
                 .sh_offset = placed->offset,
                 .sh_size = placed->size,
                 .sh_link = linked != 0 ? layout->section_index[linked] : 0,
-                .sh_info = section == EXECUTABLE_SECTION_DYNSYM || section == EXECUTABLE_SECTION_VERNEED ? 1
-                           : section == EXECUTABLE_SECTION_RELA_IPLT                                    ? layout->section_index[EXECUTABLE_SECTION_GOT]
-                                                                                                        : 0,
+                // .dynsym's first global symbol (only the null symbol is local), .gnu.version_r's entries (one per
+                // library with a needed version, which readelf -V reads it for) and .rela.iplt's section.
+                .sh_info = section == EXECUTABLE_SECTION_DYNSYM        ? 1
+                           : section == EXECUTABLE_SECTION_VERNEED     ? verneed_records
+                           : section == EXECUTABLE_SECTION_RELA_IPLT ? layout->section_index[EXECUTABLE_SECTION_GOT]
+                                                                       : 0,
                 .sh_addralign = placed->alignment,
                 .sh_entsize = executable_section_entry_bytes[section],
             };
@@ -5597,7 +5601,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     }
     if (ok && lane == 0)
     {
-        executable_write_headers(&shared->headers, layout, link->atoms.address[entry_atom] + link->symbols.value[entry]);
+        executable_write_headers(&shared->headers, layout, link->atoms.address[entry_atom] + link->symbols.value[entry], (uint32_t)totals.verneed_files);
     }
     lane_sync();
     ok = ok && !executable_any_failed(shared, EXECUTABLE_PHASE_SYMBOLS, lanes);

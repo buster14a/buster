@@ -1222,14 +1222,18 @@ exports and members:
   through the GOT to a hidden `puts` (refused); `main` returning whether a
   weak hidden `puts` isn't 0; references to the arrays' bounds; and `main`
   returning `_r_debug`'s `r_version` plus 10 when `__libc_stack_end` isn't 0,
-  which only the loader exports (status 11). Each must bind, or fail to, as
-  the linkers link it;
+  which only the loader exports (status 11), with both references strong,
+  both weak and one of each. GNU ld and lld need a library `AS_NEEDED` only
+  for a strong reference, so with weak ones alone the loader isn't needed and
+  both are left to nothing, unversioned, and with a strong one both are
+  imports at the loader's versions. Each must bind, or fail to, as the
+  linkers link it;
 - with `--cross-check`, which needs `ld.lld`, `ld.bfd`, `cc` and `readelf`:
   each bound program written as objects, one per unit, linked by ld.lld and
   ld.bfd as a PIE with only `libc.so.6` and, as needed, the loader besides,
   in GCC's order and with `--eh-frame-hdr` as GCC's driver asks, without
   errors or warnings, must run and print what its model predicts (the atexit
-  program must exit with 0, the loader's case with 11); and the program's own
+  program must exit with 0, the loader's cases with 11); and the program's own
   objects, linked by `cc` with lld, must have in readelf's `.dynsym` the
   imports at their versions and with their types, the weak references with
   default visibility and the exports binding found, and lld's `--why-extract`
@@ -1447,7 +1451,9 @@ program is bound by `bind.c` and written by groups of 1, 2, 3 and 8 lanes,
 each time from zeroed fields over the last file scribbled over and every
 other time over poisoned scratch memory: the files must be byte-identical.
 Each file is read back and checked by the test's own rules: the headers and
-`.dynamic` (lld's tags, `DT_INIT` and `DT_FINI` crti.o's functions);
+`.dynamic` (lld's tags, `DT_INIT` and `DT_FINI` crti.o's functions, and
+`.gnu.version_r`'s entries, as many as its `sh_info`, its chain and
+`DT_VERNEEDNUM` say);
 `.dynsym` (every dynamic symbol once, undefined, an import at its version,
 before the exports, and each export at its address, found through
 `.gnu.hash` as glibc's loader looks it up); `.gnu.hash`'s shape (lld's); and
@@ -1464,8 +1470,9 @@ must have the same relocations in `.rela.dyn` alone and run alike. The checks:
   the system's loader, without stand-ins, and print what its model predicts;
 - cases: test-bind's atexit program and linkers' cases, each bound or refused
   as GNU ld and lld link it, and run with their links' status; the loader's
-  case with `DT_NEEDED` the loader after `libc.so.6`, and `.gnu.version_r` an
-  entry for each, each import's version in its library's;
+  cases with `DT_NEEDED` the loader after `libc.so.6` exactly when a strong
+  reference needs it, and `.gnu.version_r` an entry for each library, each
+  import's version in its library's;
 - exports: sixteen functions whose names `libc.so.6` defines too, which
   binding exports and `main` finds with `dlsym` through the executable's
   `.gnu.hash`;
