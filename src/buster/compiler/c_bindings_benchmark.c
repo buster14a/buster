@@ -146,6 +146,11 @@ static int run_c_bindings_benchmark(int argc, char** argv)
         output = expected != 0 ? arena_push_array(&arena, (uint64_t)bindings.count + 1, 4, 64) : 0;
         valid = output != 0 && c_bindings_replay(&bindings, &replay, expected);
     }
+    uint32_t identifiers = 0;
+    for (uint32_t i = 0; valid && i < bindings.count; i += 1)
+    {
+        identifiers += bindings.operation[i] != C_BINDING_RESTORE;
+    }
     struct perf_event_attr attribute = {
         .type = PERF_TYPE_HARDWARE,
         .size = sizeof(struct perf_event_attr),
@@ -170,8 +175,12 @@ static int run_c_bindings_benchmark(int argc, char** argv)
                 while (after_scalar != 0 && c_binding_benchmark_time() < until)
                 {
                     valid = c_bindings_replay(&bindings, &replay, output);
+                    // Keep every conditioning pass observable even if a future optimizer inlines the replay.
+                    __asm__ volatile("" : : "r"(output) : "memory");
                 }
                 const uint64_t mark = scratch.length;
+                uint64_t* keys = 0;
+                uint32_t key_count = 0;
                 if (counter >= 0)
                 {
                     cycles_available &= ioctl(counter, PERF_EVENT_IOC_RESET, 0) == 0 && ioctl(counter, PERF_EVENT_IOC_ENABLE, 0) == 0;
@@ -187,8 +196,6 @@ static int run_c_bindings_benchmark(int argc, char** argv)
                 }
                 else
                 {
-                    uint64_t* keys = 0;
-                    uint32_t key_count = 0;
                     valid = c_bindings_sorted(&bindings, &scratch, &keys, &key_count, true);
                 }
                 const uint64_t elapsed = c_binding_benchmark_time() - begin;
@@ -205,6 +212,18 @@ static int run_c_bindings_benchmark(int argc, char** argv)
                 if (path != 2)
                 {
                     valid = valid && memcmp(output, expected, (uint64_t)bindings.count * 4) == 0;
+                }
+                else
+                {
+                    // Consume the timed sort's output outside the timing. Strict ordering and one valid record per
+                    // key, with the exact count, also establish that no identifier event was lost or duplicated.
+                    valid = valid && key_count == identifiers;
+                    for (uint32_t i = 0; valid && i < key_count; i += 1)
+                    {
+                        const uint32_t event = (uint32_t)keys[i];
+                        valid = event < bindings.count && bindings.operation[event] != C_BINDING_RESTORE &&
+                                (uint32_t)(keys[i] >> 32) == bindings.key[event] && (i == 0 || keys[i - 1] < keys[i]);
+                    }
                 }
                 arena_pop_to(&scratch, mark);
             }
