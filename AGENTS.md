@@ -258,16 +258,20 @@ designs and the compilers already built this way.
   takes what the vector path leaves to it (the design's "Step 5's phases,
   data-parallel"). `runtime.c` finds the C runtime's files as GCC's driver
   does (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o` and `crtn.o`, and the
-  `libc.so.6` and `libc_nonshared.a` that `libc.so` names) and imports them
-  into a link of their own, with what each name they refer to binds to (the
-  first part of step 5 of the design's plan), each object's records as a
-  piece, and an index and a filter of their global names and libc's;
+  `libc.so.6`, `libc_nonshared.a` and loader that `libc.so` names, the loader
+  as needed) and imports them into a link of their own, with what each name
+  they refer to binds to (the first part of step 5 of the design's plan), each
+  object's records as a piece, and an index and a filter of their global
+  names and the libraries' (the loader's version indices numbered after
+  `libc.so.6`'s);
   `runtime_import_static` does the same for a static executable's runtime
   (`crt1.o`, `crtbeginT.o` and `crtend.o`, and the archives of GCC's group:
   `libgcc.a`, `libgcc_eh.a`, `libatomic.a` where GCC has it, and `libc.a`),
   with each member's strong references and COMDAT groups (step 6's first
-  part), and `runtime_import_static_pie` for a static PIE's (`rcrt1.o`,
-  `crtbeginS.o` and `crtendS.o` with the same archives; step 6's fifth part).
+  part), `runtime_import_static_pie` for a static PIE's (`rcrt1.o`,
+  `crtbeginS.o` and `crtendS.o` with the same archives; step 6's fifth part),
+  and `runtime_import_shared` for a shared library's (the dynamic runtime
+  without `Scrt1.o`, its unit and piece empty).
   The object reader gives `GOTPCRELX` and `REX_GOTPCRELX` relocations the
   kinds a linker may rewrite (`CALL_GOT` and `LOAD_GOT`) only on the
   instructions those kinds are (`call` or `jmp` through the slot, a `mov`
@@ -287,7 +291,11 @@ designs and the compilers already built this way.
   It binds against the static runtime too (step 6's second part): the
   archives' members the link needs, found as GNU ld's group finds them, joined
   in archive order with the COMDAT groups after the first of each signature
-  discarded, and no name bound to a shared library.
+  discarded, and no name bound to a shared library. And against a shared
+  library's runtime (step 6's fifth part), as GNU ld and lld bind `-shared`:
+  no start object, a strong reference to a name no library exports left
+  undefined for the loader, and every definition with default or protected
+  visibility exported (`bind_shared_exports`).
   `bind_test.c` holds its tests (`main.c` includes it; `./build/compiler
   test-bind` runs them) and `bind_benchmark.c` provides `benchmark-bind`.
 - `src/buster/compiler/executable.c` writes the direct path's executables: a
@@ -312,15 +320,14 @@ designs and the compilers already built this way.
   test-static`); `main.c` includes all three, and `executable_benchmark.c`
   provides `benchmark-executable`.
 - `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
-  part, and step 6's for the static runtimes): what `runtime_import` (or
-  `runtime_import_static`, or `runtime_import_static_pie`) makes of the C
-  runtime, kept in a file per kind in the cache directory
-  (`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster`), which `runtime_open`
-  (or `runtime_open_static`, or `runtime_open_static_pie`) maps and uses in
-  place when
-  this executable wrote it, it is of the kind, its directory hashes right and
-  every file the import probed is as it was, and otherwise rebuilds and renames
-  into place. Binding checks each piece of it (a crt object or a member) when
+  part, and step 6's for the other kinds): what `runtime_import` (or
+  `runtime_import_static`, `runtime_import_static_pie` or
+  `runtime_import_shared`) makes of the C runtime, kept in a file per kind in
+  the cache directory (`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster`),
+  which `runtime_open` (or `runtime_open_static`, `runtime_open_static_pie` or
+  `runtime_open_shared`) maps and uses in place when this executable wrote
+  it, it is of the kind, its directory hashes right and every file the import
+  probed is as it was, and otherwise rebuilds and renames into place. Binding checks each piece of it (a crt object or a member) when
   it first reads it (`runtime_piece_current`). `snapshot_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-snapshot` runs them) and `snapshot_benchmark.c`
   provides `benchmark-snapshot`.
@@ -930,7 +937,17 @@ informational.
   and a fini function must have every class but the C runtime's (`INIT` and
   `FINI`) and every kind its options allow, and a copy of the defaults'
   program with the hexadecimal digits' fixup one byte off must print
-  something else.
+  something else;
+- and two shared libraries, the two sets that call libc as libraries
+  (`LinkProgramOptions.shared`, from seeds of their own; the other checks that
+  take test-link's sets don't): position-independent code whose exports are
+  its functions (the workers, `buster_mix` and the entry,
+  `buster_library_main`, which takes `main`'s arguments), every other global
+  symbol hidden, the thread-locals reached with initial-exec, and each
+  function's FDE at a local symbol at its start. Each is generated and run as
+  the others are, through its entry, and must have no local-exec access, no
+  `PC32`, `PC64` or size of a symbol another object may preempt, its exports
+  exactly its functions, and each FDE at a local symbol.
 
 `--seed N` changes the random records and programs. The programs check is
 what scales: `--functions 1000000` builds three programs of a million workers
@@ -943,7 +960,10 @@ class's section, with a label at each symbol and a `.reloc` for each fixup, so
 GNU as's object of a unit is a reference for the object writer's. To check
 the programs with real toolchains, assemble every unit, then link each
 program, run it and compare what it prints (the `static-*` directories with
-`-static -e _start`, the `libc-*` ones through `cc`):
+`-static -e _start`, the `libc-*` ones through `cc`, and the `shared-*` ones
+with `cc -shared`, each loaded by a program that calls its
+`buster_library_main` with `main`'s arguments, as test-object-writer's
+harness does):
 
 ```sh
 ./build/compiler test-link --print-assembly build/programs
@@ -953,6 +973,9 @@ for d in build/programs/static-*; do
 done
 for d in build/programs/libc-*; do
     cc -o $d/program $d/unit_*.o && $d/program | cmp - $d/expected
+done
+for d in build/programs/shared-*; do
+    cc -shared -o $d/library.so $d/unit_*.o && ./harness $d/library.so | cmp - $d/expected
 done
 ```
 
@@ -970,12 +993,12 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 `./build/compiler test-object-writer [--seed N] [--cross-check] [--keep]` checks
 `object_writer.c`:
 
-- objects: each unit's object of `test-link`'s seven programs (with 500 workers
-  in the one that takes `--functions`), of a link made by hand (gaps between
-  atoms, an atom of no size, weak, hidden and protected symbols, pointers into
-  a string pool, a call to and a pointer to a local IFUNC, units without atoms
-  between and after the others) and of a link without atoms, with and without
-  function sections.
+- objects: each unit's object of `test-link`'s seven programs and two shared
+  libraries (with 500 workers in the one that takes `--functions`), of a link
+  made by hand (gaps between atoms, an atom of no size, weak, hidden and
+  protected symbols, pointers into a string pool, a call to and a pointer to a
+  local IFUNC, units without atoms between and after the others) and of a link
+  without atoms, with and without function sections.
   Each is built twice, the second time over poisoned memory, and must come out
   the same; the test's own ELF reader reads it back and checks the rules every
   object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC`);
@@ -1006,10 +1029,12 @@ segment off its alignment when told where: seed 1's `static-defaults` with
     symbols and relocations, which must be what the test's reader read, field
     by field;
   - GNU ld, lld, mold and wild link each program's objects, without errors or
-    warnings: the static programs with `-static -e _start`, and the ones that
-    call libc through `cc` as a PIE, with `-no-pie` and with `-static`. The
-    executable must exit with status 0 having printed what the program's model
-    predicts. wild links only the programs without `SIZE32` and `SIZE64`, which
+    warnings: the static programs with `-static -e _start`, the ones that
+    call libc through `cc` as a PIE, with `-no-pie` and with `-static`, and
+    the shared libraries through `cc -shared`, each loaded by a harness that
+    `cc` builds, which calls its `buster_library_main` with `main`'s
+    arguments (`dlopen` and `dlsym`). The executable (or the harness) must
+    exit with status 0 having printed what the program's model predicts. wild links only the programs without `SIZE32` and `SIZE64`, which
     wild 0.10 refuses, and among them one of 33,000 functions past
     `SHN_LORESERVE` sections. The same linkers link, the same three ways, a
     program whose `main` calls a local IFUNC directly and through a pointer,
@@ -1054,8 +1079,8 @@ one allowed CPU; like the others, its measurements are informational.
 
 ## Import tests
 
-`./build/compiler test-import [--seed N] [--cross-check]` (about 0.19 s on
-the 9700X, and 0.26 s with `--cross-check`) checks `import.c` and
+`./build/compiler test-import [--seed N] [--cross-check]` (about 0.21 s on
+the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
 `runtime.c`:
 
 - round trips: each unit's object of `test-link`'s seven programs (with 500
@@ -1118,8 +1143,10 @@ the 9700X, and 0.26 s with `--cross-check`) checks `import.c` and
   `.fini` atoms, crti.o's fragment first, `__dso_handle`, `__TMC_END__`),
   `libc.so.6` with its soname, `write`, `strlen`, `environ` and
   `__errno_location` at `GLIBC_2.2.5`, `__libc_start_main` at `GLIBC_2.34`
-  and `GLIBC_ABI_DT_RELR`, `libc_nonshared.a` with `atexit` in its index, and
-  every reference to each name bound: `main` to the program,
+  and `GLIBC_ABI_DT_RELR`, the loader with its soname, `__tls_get_addr` at
+  `GLIBC_2.3` and `_r_debug` and `__libc_stack_end` at `GLIBC_2.2.5`, its
+  version indices past `libc.so.6`'s, `libc_nonshared.a` with `atexit` in its
+  index, and every reference to each name bound: `main` to the program,
   `__libc_start_main` and `__cxa_finalize` to libc, `__gmon_start__` and the
   `_ITM_` functions to nothing, `__TMC_END__` to `crtendS.o`, and
   `_GLOBAL_OFFSET_TABLE_`, which the crt objects that use the GOT name, to the
@@ -1127,33 +1154,52 @@ the 9700X, and 0.26 s with `--cross-check`) checks `import.c` and
   its own unit and its names' bytes one run, and the global names (binding's
   index of the runtime's names and libc's) must hold each name once, found by
   its bytes and in its filter, each global symbol's its own: `main` defined by
-  none of them, `__libc_start_main` libc.so.6's, `__dso_handle` crtbeginS.o's,
-  `atexit` a member's, and `_GLOBAL_OFFSET_TABLE_` and the init and fini
-  arrays' bounds the linker's, whether or not the runtime refers to them;
+  none of them, `__libc_start_main` libc.so.6's, `_r_debug` the loader's,
+  numbered after `libc.so.6`'s exports, `__dso_handle` crtbeginS.o's, `atexit`
+  a member's, and `_GLOBAL_OFFSET_TABLE_` and the init and fini arrays' bounds
+  the linker's, whether or not the runtime refers to them;
 - the static runtime: `runtime_import_static` on this system's files.
   `crt1.o`, `crtbeginT.o` and `crtend.o` with `_start`, `_init`,
   `__dso_handle` and `__TMC_END__`, and `crt1.o`'s ABI note; the archives in
   GCC's group order, each one's members one after another; `main` bound to
   the program, `__libc_start_main` to `libc.a`'s member,
-  `__gmon_start__` to nothing, `__TMC_END__` to `crtend.o`, and
+  `__gmon_start__` to nothing, `__TMC_END__` to `crtend.o`,
+  `_dl_relocate_static_pie` to `crt1.o`'s empty one, and
   `_GLOBAL_OFFSET_TABLE_` and the IRELATIVE relocations' bounds to the
-  linker, and nothing to a shared library; `memcpy` an IFUNC of `libc.a`'s,
-  `_nl_current_LC_CTYPE_used` absolute, and `libgcc.a`'s priorities; each
-  object's COMDAT groups as its `ImportObject` has them, with the same
-  signature numbers for groups of the same signature and different ones
-  otherwise; each piece's strong references as a scan of its symbols finds
-  them, with the member each loads, and each global name's defining member;
-  `link_check` on the whole runtime; and every crt object and member taking
-  the vector path.
+  linker, and nothing to a shared library; the names its linker defines
+  among the global names, the linker's, and no other; `memcpy` an IFUNC of
+  `libc.a`'s, `_nl_current_LC_CTYPE_used` absolute, and `libgcc.a`'s
+  priorities; each object's COMDAT groups as its `ImportObject` has them,
+  with the same signature numbers for groups of the same signature and
+  different ones otherwise; each piece's strong references as a scan of its
+  symbols finds them, with the member each loads, and each global name's
+  defining member; `link_check` on the whole runtime; and every crt object
+  and member taking the vector path;
+- the static PIE's runtime: `runtime_import_static_pie`, checked as the
+  static runtime is: `rcrt1.o`, `crtbeginS.o` and `crtendS.o`, with the
+  same archives; `_dl_relocate_static_pie` bound to `libc.a`'s
+  `dl-reloc-static-pie.o`, which relocates the executable, and its
+  `_DYNAMIC` to the linker; the IRELATIVE relocations' bounds, which
+  `libc.a` refers to weakly and a static PIE's linker doesn't define, to
+  nothing; and with `--cross-check`, every relocation compared with
+  readelf's, as the static runtime's are;
+- the shared library's runtime: `runtime_import_shared`, without a start
+  object (its piece empty, no ABI note); `crti.o`, `crtbeginS.o`, `crtendS.o`
+  and `crtn.o`; `libc.so.6`, the loader and `libc_nonshared.a`; nothing
+  referring to `main`, which is no global name; `_init` crti.o's and
+  `__dso_handle` crtbeginS.o's; the names its linker defines (`_DYNAMIC`
+  among them), and no other; and every crt object and member taking the
+  vector path.
 
-`--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
-version, type, binding and size) and references with `readelf -W --dyn-syms`,
-and every relocation of the crt objects and the archives' members, the static
-runtime's among them, with `readelf -W -r`: each one must be a fixup of its
-kind at its offset (a `GOTPCRELX` or `REX_GOTPCRELX` one's by the instruction
-before it, as the test reads it: 379 of `libgcc.a`'s are `GOTPCREL` on the
-9700X, adds of slots), against the symbol (or the section) readelf names, with
-its addend, and there must be no other fixups. `--seed N` changes the programs
+`--cross-check`, which needs `readelf`, compares `libc.so.6`'s and the
+loader's exports (name, version, type, binding and size) and references with
+`readelf -W --dyn-syms`, and every relocation of the crt objects and the
+archives' members, the static runtime's among them, with `readelf -W -r`:
+each one must be a fixup of its kind at its offset (a `GOTPCRELX` or
+`REX_GOTPCRELX` one's by the instruction before it, as the test reads it: 379
+of `libgcc.a`'s are `GOTPCREL` on the 9700X, adds of slots), against the
+symbol (or the section) readelf names, with its addend, and there must be no
+other fixups. `--seed N` changes the programs
 and the random bytes. The default 9700X job runs it with `--cross-check` after
 the object writer's benchmark.
 
@@ -1175,7 +1221,9 @@ both, the paths taking turns (time, cycles, instructions, IPC):
   looked up for every name; `libc_nonshared.a` and each `--archive` (per
   index entry); `libc.so`'s script, which has no vector path;
   `runtime_import` end to end; the static runtime's archives; and
-  `runtime_import_static` end to end.
+  `runtime_import_static` and `runtime_import_static_pie` end to end (a
+  static PIE's runtime is the static executable's archives with other crt
+  objects, so the archives' rows are its too).
 
 Run it under the 9700X's lock with `taskset -c 2`. With `--library
 /usr/lib/libstdc++.so.6 --library /usr/lib/libLLVM.so.23.1 --archive
@@ -1187,7 +1235,7 @@ informational.
 ## Bind tests
 
 `./build/compiler test-bind [--seed N] [--cross-check] [--keep]` (about
-34 ms on the 9700X, and 0.57 s with `--cross-check`) checks `bind.c` against
+72 ms on the 9700X, and 1.05 s with `--cross-check`) checks `bind.c` against
 this system's runtime (`runtime_import`). Every check binds by both paths,
 which must make the same link, column by column, and the same imports,
 exports and members:
@@ -1243,14 +1291,20 @@ exports and members:
   themselves: a weak `_init` that exits with 7 if it runs, against crti.o's;
   `main` returning a weak `data_start` of 7, after Scrt1.o's of 0; a call
   through the GOT to a hidden `puts` (refused); `main` returning whether a
-  weak hidden `puts` isn't 0; and references to the arrays' bounds. Each must
-  bind, or fail to, as the linkers link it;
+  weak hidden `puts` isn't 0; references to the arrays' bounds; and `main`
+  returning `_r_debug`'s `r_version` plus 10 when `__libc_stack_end` isn't 0,
+  which only the loader exports (status 11), with both references strong,
+  both weak and one of each. GNU ld and lld need a library `AS_NEEDED` only
+  for a strong reference, so with weak ones alone the loader isn't needed and
+  both are left to nothing, unversioned, and with a strong one both are
+  imports at the loader's versions. Each must bind, or fail to, as the
+  linkers link it;
 - with `--cross-check`, which needs `ld.lld`, `ld.bfd`, `cc` and `readelf`:
   each bound program written as objects, one per unit, linked by ld.lld and
-  ld.bfd as a PIE with only `libc.so.6` and the loader besides, in GCC's
-  order and with `--eh-frame-hdr` as GCC's driver asks, without errors or
-  warnings, must run and print what its model
-  predicts (the atexit program must exit with 0); and the program's own
+  ld.bfd as a PIE with only `libc.so.6` and, as needed, the loader besides,
+  in GCC's order and with `--eh-frame-hdr` as GCC's driver asks, without
+  errors or warnings, must run and print what its model predicts (the atexit
+  program must exit with 0, the loader's cases with 11); and the program's own
   objects, linked by `cc` with lld, must have in readelf's `.dynsym` the
   imports at their versions and with their types, the weak references with
   default visibility and the exports binding found, and lld's `--why-extract`
@@ -1268,14 +1322,15 @@ paths, which must make the same link and join the same members:
   `link_check`; one symbol per global name and none of a shared library;
   every fixup's target defined, absolute, the static linker's, a weak
   reference to nothing, or `__tls_get_addr`, left to the relaxation; `main`
-  the program's, `__libc_start_main` a member's, `_init` crti.o's and
-  `__dso_handle` crtbeginT.o's; and each joined object's atoms, in link
-  order, but those of a COMDAT group whose signature an object before it
-  has, with their priorities;
+  the program's, `__libc_start_main` a member's, `_init` crti.o's,
+  `__dso_handle` crtbeginT.o's and `_dl_relocate_static_pie` crt1.o's; and
+  each joined object's atoms, in link order, but those of a COMDAT group
+  whose signature an object before it has, with their priorities;
 - static rules, on links made by hand: a strong reference to a name nothing
   defines (an error naming it); strong and weak references to
   `__tls_get_addr` (left undefined); the static linker's names (the
-  linker's); weak and strong references to `puts` (the weak one binds to its
+  linker's), and `_DYNAMIC`, which only a PIE's linker defines (an error
+  naming it); weak and strong references to `puts` (the weak one binds to its
   member only if the closure loads it for another reason); a weak definition
   of `__libc_start_main` (crt1.o's reference takes it, and its member doesn't
   join); a weak absolute definition of `data_start` (crt1.o's weak one, first
@@ -1292,6 +1347,45 @@ paths, which must make the same link and join the same members:
   program, bound and checked as the static programs are, and linked by both
   linkers, with the same members, to run with the program's status.
 
+Then the static programs, the static rules, and with `--cross-check` the C
+programs (compiled with `-fPIE`), against the static PIE's runtime
+(`runtime_import_static_pie`), by both paths, which must make the same link
+and join the same members, checked as against the static runtime: the
+members the oracle's scan loads, among them `libc.a`'s
+`dl-reloc-static-pie.o`, which `rcrt1.o` makes join by not defining
+`_dl_relocate_static_pie`; that name the member's, its `_DYNAMIC` the
+linker's and `__dso_handle` crtbeginS.o's; the rules' linker's names a static
+PIE's (`_DYNAMIC` among them), and a strong reference to
+`__rela_iplt_start`, which a static PIE's linker leaves to libc.a's weak
+references, an error naming it; and with `--cross-check`, each
+linked by `cc -static-pie` with GNU ld (`--trace` twice) and with lld
+(`--why-extract`), which must load the same members and run as the model
+predicts, or with the program's status.
+
+Then against a shared library's runtime (`runtime_import_shared`), by both
+paths, which must make the same link and binding:
+
+- shared programs: test-link's two sets that call libc, bound as libraries:
+  `link_check`; no `_start`, as there is no start object; `_init`, `_fini` and
+  `__dso_handle` hidden and not exported; and the exports exactly the link's
+  definitions with default or protected visibility, global or weak, in
+  symbol order, `main` among them;
+- shared rules, on links made by hand without `main`: a strong reference
+  with default visibility to a name nothing defines stays undefined, neither
+  an import nor an export, and a hidden one is an error naming it;
+  definitions with default, protected and hidden visibility and a weak one,
+  all but the hidden one exports; and references to `__tls_get_addr` and
+  `puts`, imports of the loader's at `GLIBC_2.3` and of `libc.so.6`'s at
+  `GLIBC_2.2.5`;
+- with `--cross-check`, three C libraries that `cc` compiles with `-fPIC`
+  (exports of every visibility; imports from `libc.so.6` and the loader,
+  general-dynamic TLS with `-mtls-dialect=gnu`, and undefined and weak
+  references; and `atexit`, whose member joins), each imported, bound and
+  checked as the programs are, then linked by `cc -shared` with GNU ld, which
+  must link it, and with lld, whose `.dynsym` must have the imports at their
+  versions, the undefined and weak references and the exports binding found,
+  and whose `--why-extract` the members that joined.
+
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
 removed at the end unless `--keep`. The default 9700X job runs it with
 `--cross-check` after the import benchmark.
@@ -1301,17 +1395,17 @@ removed at the end unless `--keep`. The default 9700X job runs it with
 `./build/compiler benchmark-bind [--functions LIST] [--seed N]` binds
 generated programs that call libc, of 1, 64, 2,000 and 102,400 workers by
 default (`--functions` takes a list), 200 workers per unit as synth's
-translation units have, by each path, against the dynamic PIE's runtime,
-the static one and the static PIE's, and reports 21-run medians (time,
+translation units have, by each path, against the dynamic PIE's runtime, a
+static executable's, a static PIE's and a shared library's, and reports
+21-run medians (time,
 cycles, instructions, IPC) of the match (the program's global symbols looked
 up in the runtime's names, per global symbol), `bind_begin`, the static
 runtimes' closure (the members the link needs, per member) and `bind_end`,
-each run on
-the same link put back as it was. The paths must make the same links. Run it
-under the 9700X's lock with `taskset -c 2`; the design's "Step 5's phases,
-data-parallel" and "Static links, as built" have the numbers. The default
-9700X job runs it after the bind tests, pinned to one allowed CPU; like the
-others, its measurements are informational.
+each run on the same link put back as it was. The paths must make the same
+links. Run it under the 9700X's lock with `taskset -c 2`; the design's "Step
+5's phases, data-parallel" and "Static links, as built" have the numbers. The
+default 9700X job runs it after the bind tests, pinned to one allowed CPU;
+like the others, its measurements are informational.
 
 ## Direct executable tests
 
@@ -1420,7 +1514,7 @@ the workers of the set named after it (2,000 by default).
 ## Dynamic PIE tests
 
 `./build/compiler test-dynamic [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 0.6 s on the 9700X, and 0.8 s with
+[--cross-check] [--keep]` (about 0.75 s on the 9700X, and 0.93 s with
 `--cross-check`) checks `executable.c`'s dynamic PIEs against this system's
 runtime (`runtime_import`), in a directory of its own under `--directory`
 (`TMPDIR` or `/tmp` by default), which it removes unless `--keep`. Each
@@ -1428,7 +1522,9 @@ program is bound by `bind.c` and written by groups of 1, 2, 3 and 8 lanes,
 each time from zeroed fields over the last file scribbled over and every
 other time over poisoned scratch memory: the files must be byte-identical.
 Each file is read back and checked by the test's own rules: the headers and
-`.dynamic` (lld's tags, `DT_INIT` and `DT_FINI` crti.o's functions);
+`.dynamic` (lld's tags, `DT_INIT` and `DT_FINI` crti.o's functions, and
+`.gnu.version_r`'s entries, as many as its `sh_info`, its chain and
+`DT_VERNEEDNUM` say);
 `.dynsym` (every dynamic symbol once, undefined, an import at its version,
 before the exports, and each export at its address, found through
 `.gnu.hash` as glibc's loader looks it up); `.gnu.hash`'s shape (lld's); and
@@ -1444,7 +1540,10 @@ must have the same relocations in `.rela.dyn` alone and run alike. The checks:
   writer's filter takes for symbols outside the image. Each must run under
   the system's loader, without stand-ins, and print what its model predicts;
 - cases: test-bind's atexit program and linkers' cases, each bound or refused
-  as GNU ld and lld link it, and run with their links' status;
+  as GNU ld and lld link it, and run with their links' status; the loader's
+  cases with `DT_NEEDED` the loader after `libc.so.6` exactly when a strong
+  reference needs it, and `.gnu.version_r` an entry for each library, each
+  import's version in its library's;
 - exports: sixteen functions whose names `libc.so.6` defines too, which
   binding exports and `main` finds with `dlsym` through the executable's
   `.gnu.hash`;
@@ -1475,8 +1574,9 @@ must have the same segments (the program headers' types in order, their flags
 and the `PT_LOAD`s' alignments), the same dynamic symbols (name, binding, type,
 whether defined, version), the same symbols with a GOT slot the loader fills,
 the same `R_X86_64_64`s with their addends, as many RELATIVE pointers outside
-the GOT, the same init and fini arrays' sizes, the same `DT_NEEDED`, `DT_INIT`,
-`DT_FINI`, `DT_GNU_HASH` and `DT_VERNEED`, and `.eh_frame_hdr` tables (lld's
+the GOT, the same init and fini arrays' sizes, the same `DT_NEEDED` libraries
+in order, each with the same needed versions, the same `DT_INIT`, `DT_FINI`,
+`DT_GNU_HASH` and `DT_VERNEED`, and `.eh_frame_hdr` tables (lld's
 with `--eh-frame-hdr`, as GCC's driver asks) that index the same functions with
 the same ranges. And each program runs
 again with a library preloaded, which `cc` builds: its `write` walks the stack
@@ -1494,7 +1594,7 @@ push saves at the CFA less the new offset, and one a pop restores as it was.
 ## Static executable tests
 
 `./build/compiler test-static [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 2.5 s on the 9700X, and 2.7 s with
+[--cross-check] [--keep]` (about 2.7 s on the 9700X, and 2.9 s with
 `--cross-check`) checks `executable.c`'s static executables with the C
 runtime against this system's static runtime (`runtime_import_static`), then
 its static PIEs against the static PIE's (`runtime_import_static_pie`), in a
@@ -1646,10 +1746,10 @@ like the others, its measurements are informational.
 ## Snapshot tests
 
 `./build/compiler test-snapshot [--seed N] [--functions N] [--directory PATH]
-[--keep]` (about 0.27 s on the 9700X) checks `snapshot.c` with this system's
-runtimes, a dynamic PIE's and a static executable's, in a directory of its own
-under `--directory` (`TMPDIR` or `/tmp` by default), which it removes unless
-`--keep`:
+[--keep]` (about 0.31 s on the 9700X) checks `snapshot.c` with this system's
+runtimes, a dynamic PIE's, a static executable's, a static PIE's and a
+shared library's, in a directory of its own under `--directory` (`TMPDIR` or
+`/tmp` by default), which it removes unless `--keep`:
 
 - round trip: the imported runtime written as a snapshot and loaded back must
   have the import's records, every one that binding and a dynamic PIE read
@@ -1659,45 +1759,57 @@ under `--directory` (`TMPDIR` or `/tmp` by default), which it removes unless
   over the file it maps. Then the same for the static runtime
   (`runtime_import_static`), with its kind, its archives, its members'
   references (with the members they load) and COMDAT groups and its global
-  names' members;
-- links and static links: test-link's two sets that call libc and a program
-  of `--functions` workers (2,000 by default), bound by both of binding's
-  paths against the imported runtime and against a loaded one: the same links
-  and bindings, written as dynamic PIEs, or against the static runtime as
-  static executables, by 1 and 8 lanes into the same bytes, which run;
+  names' members, for the static PIE's (`runtime_import_static_pie`), and
+  for the shared library's (`runtime_import_shared`), its start object's
+  piece empty;
+- links, static links and static PIE links: test-link's two sets that call
+  libc and a program of `--functions` workers (2,000 by default), bound by
+  both of binding's paths against the imported runtime and against a loaded
+  one: the same links and bindings, written as dynamic PIEs, or against the
+  static runtime as static executables and against the static PIE's as static
+  PIEs, by 1 and 8 lanes into the same bytes, which run; and test-bind's
+  loader case bound both ways too, the loaded runtime's PIE running with its
+  status (11);
 - opening: `runtime_open` in a directory two levels below one that exists,
   which it makes private: imported and written, then loaded; with no
   directory, or without an identity, imported and nothing written; and where
   the directory can't be made, the runtime still imported, the failure named;
-- kinds: `runtime_open_static` imported and written, then loaded, with the
-  static runtime's records; the dynamic runtime's snapshot beside it, the two
-  the directory's only files; and each kind's snapshot renamed to the other
-  kind's name, stale there, imported again and written over;
+- kinds: `runtime_open_static`, `runtime_open_static_pie` and
+  `runtime_open_shared`, each imported and written, then loaded, with its
+  kind's records; the dynamic runtime's snapshot beside them, the four
+  (`runtime.snapshot`, `runtime-static.snapshot`,
+  `runtime-static-pie.snapshot` and `runtime-shared.snapshot`) the
+  directory's only files; each kind's snapshot loaded as each other kind,
+  stale; and each kind's snapshot renamed to the next kind's name in turn,
+  stale there, imported again and written over;
 - staleness: snapshots with probes of the test's own files, each changed one
   way (rewritten in place to the same size, its mode changed, replaced by a
   rename, removed, created where a probe found nothing, a file added to a
   probed directory, written with its times put back), and one written by
   another executable, must be stale, and `runtime_open` must rebuild them;
-- invalid files: 1,600 damaged copies (cut short, one byte longer, a byte of
-  the directory changed at sampled offsets and in every byte of the header)
-  must be invalid, and so must 10 whose header was changed and then rehashed
+- invalid files, of the dynamic PIE's runtime's snapshot and of the static
+  PIE's: 1,600 damaged copies (cut short, one byte longer, a byte of the
+  directory changed at sampled offsets and in every byte of the header), each
+  made in place over the snapshot and repaired after its load, must be
+  invalid, and so must 10 whose header was changed and then rehashed
   (another version or magic, a region misaligned, running or starting past
   the end or of the wrong size, counts out of range, the directory ending
   before its last region), which only the header's own checks catch;
-  `runtime_open` must replace them; a directory and a FIFO at the snapshot's
-  path must neither block a link (run in a child under an alarm) nor fail it,
-  the FIFO replaced and the directory left with nothing beside it;
+  `runtime_open` must replace them with the kind's runtime; a directory and
+  a FIFO at the snapshot's path must neither block a link (run in a child
+  under an alarm) nor fail it, the FIFO replaced and the directory left with
+  nothing beside it;
 - damaged pieces, of each kind's snapshot: a byte of the pieces' records
   changed at 123 offsets (at each 1/61 of them, and the first and last of
   each of their regions), each copy of which must load with every piece
   current but the one whose records hold the byte, by the test's own reading
   of the layout (none for a byte of padding or of a column no piece's hash
   covers). Then a program bound against a snapshot with a damaged piece, by
-  each path: `crt1.o`'s (or `Scrt1.o`'s), `crtend.o`'s, or a member the
-  program joins must fail the binding with `BIND_ERROR_SNAPSHOT`, and a member
-  it doesn't join must bind as against the whole snapshot. After a failure,
-  `snapshot_discard` and `runtime_open` import the runtime and write a
-  snapshot that loads;
+  each path: `crt1.o`'s (or `Scrt1.o`'s, or `rcrt1.o`'s), `crtend.o`'s (or
+  `crtendS.o`'s), or a member the program joins must fail the binding with
+  `BIND_ERROR_SNAPSHOT`, and a member it doesn't join must bind as against
+  the whole snapshot. After a failure, `snapshot_discard` and `runtime_open`
+  import the runtime and write a snapshot that loads;
 - concurrency: eight processes opening the runtime at once in an empty
   directory must each get it and leave one snapshot, which loads, and no other
   file;
@@ -1709,43 +1821,47 @@ it after benchmark-executable.
 ## Snapshot benchmark
 
 `./build/compiler benchmark-snapshot [--directory PATH] [--runs N] [--only
-dynamic|static]` reports, for a dynamic PIE's runtime and a static
-executable's (`--only` one of them), medians of `--runs` runs (41 by default)
-of the import without a snapshot, `snapshot_write` into a directory under
-`--directory` (`TMPDIR` or `/tmp`), `runtime_open` (or
-`runtime_open_static`) from the snapshot phase by phase (the compiler's
-identity, the mapping, the header and the directory's hash, the view, the
-probes' `stat`s), `runtime_release` of a loaded runtime, the alternatives the
-design weighed (the snapshot read with `pread` into new memory, mapped without
-the hash, and mapped and hashed whole as format 3 checked it), and binding a
-program of one worker against the imported runtime, against one loaded afresh
-each time (as a link binds, its pieces faulted in and checked), against one
-loaded once, and the checks alone of the pieces it read. Every binding must
-make the same link. Run it under the 9700X's lock with
-`taskset -c 2`, with `--directory` on each file system to measure (the cache
-directory is under `$HOME`, btrfs there). `docs/object-writer-and-linker.md`
-("The runtime snapshot") has the numbers. The default 9700X job runs it after
-the tests, pinned to one allowed CPU; like the others, its measurements are
-informational.
+dynamic|static|static-pie|shared]` reports, for a dynamic PIE's runtime, a
+static executable's, a static PIE's and a shared library's (`--only` one of
+them), medians of `--runs` runs (41 by default) of the import without a
+snapshot, `snapshot_write` into a directory under `--directory` (`TMPDIR` or
+`/tmp`), `runtime_open` (or `runtime_open_static`, `runtime_open_static_pie`,
+`runtime_open_shared`) from the snapshot phase by
+phase (the compiler's identity, the mapping, the header and the directory's
+hash, the view, the probes' `stat`s), `runtime_release` of a loaded runtime,
+the alternatives the design weighed (the snapshot read with `pread` into new
+memory, mapped without the hash, and mapped and hashed whole as format 3
+checked it), and binding a program of one worker against the imported
+runtime, against one loaded afresh each time (as a link binds, its pieces
+faulted in and checked), against one loaded once, and the checks alone of the
+pieces it read. Every binding must make the same link. Run it under the
+9700X's lock with `taskset -c 2`, with `--directory` on each file system to
+measure (the cache directory is under `$HOME`, btrfs there).
+`docs/object-writer-and-linker.md` ("The runtime snapshot") has the numbers.
+The default 9700X job runs it after the tests, pinned to one allowed CPU; like
+the others, its measurements are informational.
 
 ## Link benchmark
 
 `./build/compiler benchmark-link [--functions LIST [--filler N]] [--seed N]
 [--directory PATH] [--cache PATH] [--cpus LIST] [--linkers LIST] [--runs N]
-[--only direct|linkers] [--kinds dynamic|static|dynamic,static] [--keep]`
-(about 81 s on the 9700X) links generated programs that call libc, without
-`SIZE32` and `SIZE64`, as dynamic PIEs and as static executables (`--kinds`,
-both by default), by the direct path and by each linker, and reports medians:
+[--only direct|linkers] [--kinds LIST] [--keep]` (about 122 s on the 9700X)
+links generated programs that call libc, without `SIZE32` and `SIZE64`, as
+dynamic PIEs, static executables and static PIEs (`--kinds`, a list of
+`dynamic`, `static` and `static-pie`, every kind by default), by the direct
+path and by each linker, and reports medians:
 
 - the programs: one worker and 2,000 workers (about hello world's and tcc's
   outputs), and one of synth's shape, 102,400 workers in 512 units with up to
   64 filler instructions each (44 MB); or with `--functions`, a program of
   each count of workers, of up to `--filler` (8) filler instructions each;
 - the direct path, on a lane per CPU of `--cpus` (CPU 2): `runtime_open` (or
-  `runtime_open_static`), which must load the kind's snapshot in `--cache` (the
-  cache directory), and `bind_begin`; then, after the program's atoms,
-  `bind_end` and `dynamic_inputs` (or `dynamic_static_inputs`), and
-  `executable_write` over the file of the run before into a directory under
+  `runtime_open_static`, `runtime_open_static_pie`), which must load the
+  kind's snapshot in `--cache` (the cache directory), and `bind_begin`; then,
+  after the program's atoms, `bind_end` and `dynamic_inputs` (or
+  `dynamic_static_inputs`, `dynamic_static_pie_inputs`), and
+  `executable_write` (a static PIE's with `ExecutableOptions.dynamic` and
+  `.runtime` both set) over the file of the run before into a directory under
   `--directory` (`TMPDIR` or `/tmp`). Each part is the
   median of its runs after a warm-up, each run from the link and binding as
   they were before the part, put back outside the time (a static link's
@@ -1762,8 +1878,10 @@ both by default), by the direct path and by each linker, and reports medians:
 - each linker of `--linkers` (`ld.bfd`, `ld.lld`, `mold` and `wild`) linking
   them with the appendix's command, the clang driver's with the matched
   options (its `-static` one for a static executable, with
-  `--start-group -lgcc -lgcc_eh -lc --end-group`), with its own threads and
-  on one (pinned to the first of `--cpus`):
+  `--start-group -lgcc -lgcc_eh -lc --end-group`, and its `-static-pie` one
+  for a static PIE: `-static -pie --no-dynamic-linker -z text`, `rcrt1.o`,
+  `crtbeginS.o` and `crtendS.o`, with the same group), with its own threads
+  and on one (pinned to the first of `--cpus`):
   the wall time from `posix_spawn` to the wait's return, over the output of
   the run before, the median of 41 runs after a warm-up with a 20 ms pause
   before each, or past 4 MB of output 11 runs after 200 ms, and GNU ld's 5
@@ -1775,10 +1893,11 @@ both by default), by the direct path and by each linker, and reports medians:
   program that does nothing, is printed first.
 
 Every program written must run and print what its model predicts, but wild's
-static executable of a program whose `.tbss` is more aligned than its
-`.tdata`, which wild 0.10 links with the TLS segment off its alignment, so
-that it faults in glibc's startup: the benchmark doesn't run wild on such a
-program, and says so. `--only direct` and `--only linkers` run one side, and
+static executables and static PIEs of a program whose `.tbss` is more aligned
+than its `.tdata`, whose TLS segment wild 0.10 starts at `.tdata`'s
+alignment, off its own wherever the layout puts it there, so that glibc's
+static startup faults: the benchmark doesn't run wild on such a program, and
+says so. `--only direct` and `--only linkers` run one side, and
 `--keep` leaves the directory.
 Run it under the 9700X's lock without `taskset`: it pins its lanes and the
 linkers' runs on one thread itself, and the linkers' other runs need every CPU.
@@ -1974,7 +2093,8 @@ interning (`RefineVariant`), with `refine_tokens_scalar` and with an oracle of
 its own (splices and UCNs removed in plain passes, and a different table): every
 identifier must get the same id and every token the same leading-space bit, on:
 
-- the hash's three forms on spellings of 0 to 200 bytes;
+- the hash's four forms on spellings of 0 to 200 bytes (the one that hashes
+  four spellings at once, up to 32 bytes, with their first lanes);
 - 88,064 structured spellings that must all hash differently: repeated and
   swapped 64-byte chunks and 16-byte lanes, and #192's review's 32-byte
   identifiers with paired changes in two lanes;
@@ -1983,7 +2103,7 @@ identifier must get the same id and every token the same leading-space bit, on:
 - the predefined names, every name's keyword answer in each of the ten modes
   from `c89` to `gnu23`, and 24 spellings chosen apart from the predefined names
   with clang's answer (17 keywords, 7 not);
-- 300,000 random spellings that grow the table seven times;
+- 300,000 random spellings that grow the table three times;
 - 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
   and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64
   misalignments from a cache line;
@@ -2003,17 +2123,24 @@ identifier must get the same id and every token the same leading-space bit, on:
 
 ## Refinement benchmark
 
-`./build/compiler benchmark-refinement [--cplusplus] [--trigraphs] [--only NAME]
-path...` lexes every `.c` and `.h` file once, checks every implementation
-against `refine_tokens_scalar`, and reports the share of identifiers the table
-finds and how often the vectorized path takes a scalar one. Then come 21
-interleaved passes, each from a table reset to the predefined names, with the
-medians per token and per identifier (time, cycles, instructions, IPC) of the
-variants (`refine_tokens_16`, `_32`, `_64` and `_fused`; `refine_tokens` is the
-64 one), the scalar path, `c_tokenize` and `c_tokenize` then refinement per file.
-`docs/c-refinement.md` has the numbers for `sqlite3.c`, the C library corpus and
-`src`. Run it pinned to one CPU; the default 9700X job runs it on `src`, and like
-the others its measurements are informational.
+`./build/compiler benchmark-refinement [--cplusplus] [--trigraphs]
+[--after-scalar MS] [--only NAME] path...` lexes every `.c` and `.h` file once,
+checks every implementation against `refine_tokens_scalar`, and reports the
+share of identifiers the table finds and how often the vectorized path takes a
+scalar one. Then come 21 interleaved passes, each from a table reset to the
+predefined names, with the medians per token and per identifier (time, cycles,
+instructions, IPC) of the variants (`refine_tokens_16`, `_32`, `_64` and
+`_fused`; `refine_tokens` is the 64 one), the scalar path, `c_tokenize` and
+`c_tokenize` then refinement per file. `--only NAME` runs one of them, its
+passes back to back, and `--after-scalar MS` runs the scalar path over the
+corpus for MS ms (100 to 300) before each timed pass of a vectorized one: the
+state after lighter code, in which Zen 5's power cap slows a heavy AVX-512 loop
+(#199, as the encoder's benchmark does). The columns, table and source stay in
+the caches from pass to pass, unlike the preprocessor's, whose refine phase is
+what #115's budget measures. `docs/c-refinement.md` has the numbers for
+`sqlite3.c`, the C library corpus and `src`. Run it pinned to one CPU; the
+default 9700X job runs it on `src`, and like the others its measurements are
+informational.
 
 ## Preprocessor tests
 
@@ -2028,7 +2155,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 222 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 223 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2119,8 +2246,8 @@ current directory. One block of 64 cases in 128 has every case read alone
 too, which must give its batch's result, and a batch clang gives no result
 for has its cases read alone. It exits with status 1 on any difference, a
 batch that differs from its cases alone, or a case without a result. For a
-qualification run (about 10 minutes per million cases in each mode on 16
-threads):
+qualification run (a million cases in each mode take about 7 minutes on the
+9700X's 15 threads, and 15 to 24 on a 7940HS's 16, mostly clang's processes):
 
 ```sh
 ./build/compiler test-preprocessor --clang --fuzz 1000000 --seed 11 --jobs 16
@@ -2135,8 +2262,8 @@ constructs and the qualification runs.
 [options] file...` preprocesses each file from nothing per run (a new intern
 table and preprocessor), with the vectorized kernels and their scalar twins, 21
 passes after a warm-up, and reports the medians of time, cycles and instructions
-per input token and per output token, IPC, each phase's share (read, lex,
-refine, directive tables, main loop) and what a run did (directives, runs,
+per input token and per output token, IPC, each phase's share and time (read,
+lex, refine, directive tables, main loop) and what a run did (directives, runs,
 expansions, invocations, pastes, and the `#if` lines and their lengths).
 `--clang` also times `clang -E -P` with the same options, a process per file.
 `-march` selects the shared target's predefines. `--predefines FILE` can replace

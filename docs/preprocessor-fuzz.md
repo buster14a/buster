@@ -491,6 +491,16 @@ The third freeze (`7696788`, below) found, while it ran:
 - seed 62's case 629259 and seed 70's case 894231 (both modes), more of
   #247's skipped-group structure (an `#elifdef` after `#else` among them).
 
+A fresh seed on the build merged with main found one more:
+
+- **A paste's line start among a macro's arguments** (seed 14's case 452,
+  C23): clang's `pasteTokens` gives the result its left operand's flags,
+  start of line among them. With `#define E(a) X a ## a .` and `E(f` with
+  `z)` on the next line, after two line splices before `E`, clang's printer
+  moves to the expansion's line at the result `zf`, and the `z` after it
+  stays there. We moved at that `z`. The result now keeps the left
+  operand's `BUSTER_PP_LINE_SPACE` (`pp_paste`).
+
 Each harness change came from a case the comparison couldn't place. They
 cover the printer's emulation, the by-spellings cases, the isolation rules,
 the attribution of a rejected batch's errors, the line-based marker split
@@ -538,28 +548,49 @@ the following, which are listed in
 
 ## Qualification
 
-After the last fix (`c4a7706`), the code was frozen and run on both hosts.
-The local host is a Ryzen 9 7940HS (Zen 4, clang 23.1.3, 16 threads). The
-9700X is benchpress (Zen 5, clang 23.1.1, 15 threads, under its lock in
-slices of 500,000 cases per mode). Every run compared every case with clang:
+Each campaign froze the code, ran it on both hosts and compared every case
+with clang. The local host is a Ryzen 9 7940HS (Zen 4, clang 23.1.3, 16
+threads). The 9700X is benchpress (Zen 5, clang 23.1.1, 15 threads), where
+it ran under the machine's lock in slices of 500,000 cases per mode, about
+208 s each. What a campaign found was fixed (above), and the next one ran
+seeds of its own. A fault is a worker process that crashed or a batch whose
+result clang gives differently for its cases alone:
 
-| Host | Seeds | Cases per mode | Differences | Cases without a result |
-| --- | --- | ---: | ---: | ---: |
-| 7940HS | 11 to 20 | 10,000,000 | 0 | 0 |
-| 9700X | 21 to 30 | 10,000,000 | 0 | 0 |
+| Build | Host | Seeds | Cases per mode | Differ (C17, C23) | No result | Faults |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| First freeze, `c4a7706` | 9700X | 21 to 30 | 9,799,997 | 70, 60 | 2 | 6 workers crashed |
+| | 7940HS | 11 | stopped | 6, 0 | 0 | none |
+| Second freeze, `8ee1e16` | 9700X | 41 to 50 | 9,966,667 | 0, 0 | 0 | 1 worker crashed; 2 cases' batches, both modes |
+| | 7940HS | 31 to 35 | 5,000,000 | 0, 2 | 0 | none |
+| Third freeze, `7696788` | 9700X | 51 to 60 | 10,000,000 | 0, 2 | 0 | none |
+| | 7940HS | 61 to 70 | 10,000,000 | 6, 3 | 0 | none |
+| The third freeze's fixes, `076948c` | 7940HS | 12 | 300,000 | 0, 0 | 0 | none |
+| The cost fixes, `fde8698` | 7940HS | 13 | 200,000 | 0, 0 | 0 | none |
+| Merged with main, `4c6160f` | 7940HS | 14 | 300,000 | 0, 1 | 0 | none |
+| The paste's line start, `fbddd2e` | 7940HS | 14 and 15 | 600,000 | 0, 0 | 0 | none |
 
-Before the freeze, runs of 100,000 to 200,000 cases per mode on seeds 1 to 3
-found the differences listed above. They were fixed and run again until each
+A crashed worker's cases have no count: 33,333 cases each. The first freeze's
+local run on seed 11 was stopped after its first six differences, which the
+9700X's seeds had too. The third freeze's 11 differences and seed 14's case
+452 were each run again on `fbddd2e`: eight agree with clang now, and the
+other four, seed 62's case 629259 and seed 70's case 894231 in both modes, are
+#247's (its build agrees with clang on them).
+
+Before the first freeze, runs of 100,000 to 200,000 cases per mode on seeds 1
+to 3 found the differences listed first above, and were run again until each
 seed gave none. A focused check of substitution spacing ran beside them: 4,000
 stringized `__VA_OPT__`, `##` and `#` bodies per run, over 12 seeds and three
 modes. It found the spacing rules above and now finds no difference.
 
-The corpora stay token-identical after the fixes, with the frozen build
+The corpora are token-identical with clang on `fbddd2e`
 (`docs/c-preprocessor.md` has the configurations):
 
 - `sqlite3.c` (707,153 tokens);
 - musl 1.2.5's 1,357 sources (5,124,927 tokens, on the 9700X);
 - Lua 5.4.8 (34 files, 588,066 tokens);
-- this repository's 19 translation units (12,021,842 tokens);
-- the corpus oracle's CI checks (`docs/preprocessor-oracle.md`), and its
-  frozen subset of `sqlite3.c`, the C library and musl on the 9700X.
+- this repository's 19 translation units (12,070,090 tokens);
+- the corpus oracle's CI checks (`docs/preprocessor-oracle.md`): its frozen
+  subset of `sqlite3.c`, the C library and musl on the 9700X.
+
+The fixes cost the vectorized kernels instructions, which "#109's cost" in
+`docs/c-preprocessor.md`'s results measures.
