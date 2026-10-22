@@ -71,8 +71,6 @@ struct PPFuzzTally
     uint64_t invalid;
     // Cases whose -P text can't lex back into their stream, as clang's can't (pp_fuzz_unprintable).
     uint64_t unprintable;
-    // Accepted cases compared with clang by their spellings without whitespace (pp_fuzz_by_spellings).
-    uint64_t spellings;
     // Differences minimized and saved, and the ones reported.
     uint64_t saved;
     uint64_t reported;
@@ -474,6 +472,10 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length)
             uint32_t column = 0;
             uint32_t place = 0;
             bool starts = (out->flags[i] & BUSTER_PP_START_OF_LINE) || (line_start && i != 0);
+            // A token that keeps clang's start of line on the line the printer is on, when that is presumed line 1: the
+            // printer takes it for the file's first token (MoveToLine's IsFirstInFile) and indents it by its column in
+            // place of a space, without AvoidConcat, so that it can join the token before.
+            bool first_in_file = false;
             if (starts || i == 0)
             {
                 const uint32_t line = pp_fuzz_place_line(pp, i, &at, &place, &column);
@@ -485,6 +487,7 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length)
                 // argument's first): its printer moves to its expansion's line when that is another one.
                 const uint32_t line = pp_fuzz_place_line(pp, i, &at, &place, &column);
                 starts = line != BUSTER_PP_NONE && line != current_line;
+                first_in_file = line == 1 && line == current_line;
                 current_line = line != BUSTER_PP_NONE ? line : current_line;
             }
             else if (silent_place != BUSTER_PP_NONE)
@@ -494,6 +497,7 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length)
                 place = pp_lexed_start(pp, (out->flags[i] & BUSTER_PP_FROM_MACRO) ? silent_place : out->locations[i]);
                 const uint32_t line = pp_fuzz_line_at(pp, place, &column);
                 starts = line != BUSTER_PP_NONE && line != current_line;
+                first_in_file = line == 1 && line == current_line;
                 current_line = line != BUSTER_PP_NONE ? line : current_line;
             }
             // A first column with a leading space before the token (an empty argument or expansion before it) is 2; a
@@ -503,6 +507,9 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length)
             if (starts)
             {
                 fputc('\n', stream);
+            }
+            if (starts || first_in_file)
+            {
                 for (uint32_t c = 1; c < column; c += 1)
                 {
                     fputc(' ', stream);
@@ -588,95 +595,13 @@ static PreprocessorFuzzOutput pp_fuzz_output(Preprocessor* pp, bool accepted, Ar
     return result;
 }
 
-// Whether two accepted texts have the same bytes but their whitespace: the comparison of a case whose clang text depends
-// on how clang's printer spaces it (pp_fuzz_by_spellings).
-static bool pp_fuzz_same_spellings(String8 left, String8 right)
+// Our result against clang's, by tokens: our text has clang's spacing (pp_fuzz_clang_text), so the two lex alike, its
+// joins included. An accepted run whose marker is missing or misplaced differs from clang's, whose text always has it in
+// place.
+static PreprocessorFuzzDifference pp_fuzz_compare(Arena* scratch, PreprocessorFuzzOutput ours, bool lost, PreprocessorFuzzOutput theirs, bool c23)
 {
-    uint64_t i = 0;
-    uint64_t j = 0;
-    bool same = true;
-    while (same && (i < left.length || j < right.length))
-    {
-        while (i < left.length && (left.pointer[i] == ' ' || left.pointer[i] == '\t' || left.pointer[i] == '\n' || left.pointer[i] == '\r'))
-        {
-            i += 1;
-        }
-        while (j < right.length && (right.pointer[j] == ' ' || right.pointer[j] == '\t' || right.pointer[j] == '\n' || right.pointer[j] == '\r'))
-        {
-            j += 1;
-        }
-        same = (i == left.length) == (j == right.length) && (i == left.length || left.pointer[i] == right.pointer[j]);
-        i += i < left.length;
-        j += j < right.length;
-    }
-    return same;
-}
-
-// Our result against clang's (our text has clang's spacing, so the two lex alike), by tokens, or by spellings without
-// whitespace when `spellings` (pp_fuzz_same_spellings). An accepted run whose marker is missing or misplaced differs from
-// clang's, whose text always has it in place.
-static PreprocessorFuzzDifference pp_fuzz_compare(Arena* scratch, PreprocessorFuzzOutput ours, bool lost, PreprocessorFuzzOutput theirs, bool spellings, bool c23)
-{
-    PreprocessorFuzzDifference difference = preprocessor_fuzz_compare_mode(scratch, ours, theirs, c23);
-    if (spellings && ours.valid && theirs.valid && ours.accepted && theirs.accepted && difference != BUSTER_PPF_INVALID)
-    {
-        difference = pp_fuzz_same_spellings(ours.text, theirs.text) ? BUSTER_PPF_EQUAL : BUSTER_PPF_TOKEN_SPELLING;
-    }
+    const PreprocessorFuzzDifference difference = preprocessor_fuzz_compare_mode(scratch, ours, theirs, c23);
     return lost && difference == BUSTER_PPF_EQUAL ? BUSTER_PPF_TOKEN_COUNT : difference;
-}
-
-// Whether a stream has an unterminated literal: an unknown token from a quote (after a prefix).
-static bool pp_fuzz_has_unterminated(const Preprocessor* pp)
-{
-    const PPTokens* out = &pp->output;
-    bool result = false;
-    for (uint32_t i = 0; !result && i < out->count; i += 1)
-    {
-        const uint8_t* bytes = out->kinds[i] == C_TOKEN_UNKNOWN ? pp_location_bytes(pp, out->locations[i]) : 0;
-        const uint32_t length = bytes != 0 ? out->values[i] - out->locations[i] : 0;
-        uint32_t quote = 0;
-        while (quote < length && quote < 2 && (bytes[quote] == 'L' || bytes[quote] == 'u' || bytes[quote] == 'U' || bytes[quote] == '8'))
-        {
-            quote += 1;
-        }
-        result = quote < length && (bytes[quote] == '"' || bytes[quote] == '\'');
-    }
-    return result;
-}
-
-// Whether two or more of a stream's tokens are placed on presumed line 1 (by their expansions' places, as -E places
-// them, where clang's lexer starts them). Then a token that started a line in its source but is printed on that line after another (from a macro's
-// arguments) is the file's first one to clang's printer (PrintPPOutputPPCallbacks::MoveToLine's IsFirstInFile), which
-// indents it by its column in place of a space, and that can join it to the token before.
-static bool pp_fuzz_line_one(Preprocessor* pp)
-{
-    const PPTokens* out = &pp->output;
-    uint32_t at = 0;
-    uint32_t count = 0;
-    for (uint32_t i = 0; count < 2 && i < out->count; i += 1)
-    {
-        while (at < pp->expansion_start_count && pp->expansion_starts[at].token <= i)
-        {
-            at += 1;
-        }
-        // Where clang's lexer starts it, at a line splice right before it (pp_lexed_start).
-        const uint32_t location = pp_lexed_start(pp, (out->flags[i] & BUSTER_PP_FROM_MACRO) && at != 0 ? pp->expansion_starts[at - 1].location : out->locations[i]);
-        const uint32_t range = out->kinds[i] != BUSTER_PP_KIND_PRAGMA_END ? pp_find_range(pp, location) : BUSTER_PP_NONE;
-        const char* name = 0;
-        uint32_t length = 0;
-        count += range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE && pp_presumed(pp, location, &name, &length) == 1;
-    }
-    return count >= 2;
-}
-
-// Whether a case is compared with clang by its spellings without whitespace (pp_fuzz_same_spellings), since clang's text
-// for it depends on where clang's printer breaks lines and puts spaces: when its stream has an unterminated literal,
-// which runs to its line's end in a text (clang breaks a line after a _Pragma that printed nothing, and puts no space
-// before a token that starts a line inside a macro's arguments), and when tokens are placed on line 1
-// (pp_fuzz_line_one).
-static bool pp_fuzz_by_spellings(Preprocessor* pp)
-{
-    return pp_fuzz_has_unterminated(pp) || pp_fuzz_line_one(pp);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -804,11 +729,10 @@ static PreprocessorFuzzDifference pp_fuzz_clang_difference(Arena* scratch, const
     {
         bool lost = false;
         const PreprocessorFuzzOutput ours = pp_fuzz_output(&pp_fuzz_state.runs[0], pp_fuzz_state.ran[0], scratch, &lost);
-        const bool spellings = pp_fuzz_by_spellings(&pp_fuzz_state.runs[0]);
         PreprocessorFuzzOutput theirs = { 0 };
         if (ours.valid && preprocessor_fuzz_clang(scratch, oracle->clang_path, oracle->c23, &test_case, 1, true, &theirs))
         {
-            result = pp_fuzz_compare(scratch, ours, lost, theirs, spellings, oracle->c23);
+            result = pp_fuzz_compare(scratch, ours, lost, theirs, oracle->c23);
         }
     }
     pp_fuzz_release(&pp_fuzz_state);
@@ -1025,11 +949,72 @@ static bool pp_fuzz_check_isolation(void)
     return failures == 0;
 }
 
+// Our text and clang's for a case, which pp_fuzz_compare must find to differ as `difference` says: whitespace between
+// tokens doesn't count, but a literal's contents and two tokens joined into one do (#263's review found a comparison of
+// spellings without whitespace, which took `"a b" 0` for `"ab" 0`).
+typedef struct PPFuzzComparison PPFuzzComparison;
+struct PPFuzzComparison
+{
+    const char* ours;
+    const char* theirs;
+    PreprocessorFuzzDifference difference;
+};
+
+static const PPFuzzComparison pp_fuzz_comparisons[] = {
+    { "\"a b\" 0\n", "\"a b\"\n 0\n", BUSTER_PPF_EQUAL },
+    { "\"a b\" 0\n", "\"ab\" 0\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "'a b' 0\n", "'ab' 0\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "a b\n", "ab\n", BUSTER_PPF_TOKEN_COUNT },
+    { "ab\n", "a\nb\n", BUSTER_PPF_TOKEN_COUNT },
+    { "x\n  y\n", "x y\n", BUSTER_PPF_EQUAL },
+};
+
+// Runs each pair above through pp_fuzz_compare, in both modes, as accepted outputs. Returns whether every pair gives its
+// difference.
+static bool pp_fuzz_check_comparison(void)
+{
+    Arena scratch = arena_reserve(BUSTER_PP_FUZZ_ARENA_BYTES);
+    uint32_t failures = scratch.base == 0;
+    for (uint32_t mode = 0; scratch.base != 0 && mode < 2; mode += 1)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_fuzz_comparisons); i += 1)
+        {
+            const PPFuzzComparison* comparison = &pp_fuzz_comparisons[i];
+            const PreprocessorFuzzOutput ours = {
+                .text = {
+                    .pointer = (char*)comparison->ours,
+                    .length = strlen(comparison->ours),
+                },
+                .accepted = true,
+                .valid = true,
+            };
+            const PreprocessorFuzzOutput theirs = {
+                .text = {
+                    .pointer = (char*)comparison->theirs,
+                    .length = strlen(comparison->theirs),
+                },
+                .accepted = true,
+                .valid = true,
+            };
+            const PreprocessorFuzzDifference difference = pp_fuzz_compare(&scratch, ours, false, theirs, mode == 1);
+            arena_pop_to(&scratch, 0);
+            if (difference != comparison->difference)
+            {
+                printf("fuzz comparison: %s, pair %u gives %s, not %s\n", mode == 1 ? "c23" : "c17", i, pp_fuzz_difference_name(difference),
+                       pp_fuzz_difference_name(comparison->difference));
+                failures += 1;
+            }
+        }
+    }
+    arena_release(&scratch);
+    printf("fuzz comparison: %u of %lu pairs fail\n", failures, 2 * (unsigned long)BUSTER_ARRAY_LENGTH(pp_fuzz_comparisons));
+    return failures == 0;
+}
+
 // Our side of case `id`: generated into `arena`, preprocessed by both sets of kernels, which must agree, and our result
-// (the vectorized run's) into *ours, with whether it is compared by spellings (pp_fuzz_by_spellings) into *spellings. Returns
-// false if the case can't be generated or preprocessed.
+// (the vectorized run's) into *ours. Returns false if the case can't be generated or preprocessed.
 static bool pp_fuzz_case(Arena* arena, Arena* scratch, const PPFuzzOptions* options, bool c23, uint64_t id, PreprocessorFuzzCase* test_case, PreprocessorFuzzOutput* ours,
-                         bool* lost, bool* spellings, PPFuzzTally* tally)
+                         bool* lost, PPFuzzTally* tally)
 {
     String8 text = { 0 };
     bool result = preprocessor_fuzz_generate(arena, options->seed, id, c23, test_case) && pp_fuzz_text(arena, test_case, &text);
@@ -1045,7 +1030,6 @@ static bool pp_fuzz_case(Arena* arena, Arena* scratch, const PPFuzzOptions* opti
         pp_test_quiet = quiet;
         tally->unprintable += pp_fuzz_state.unprintable;
         *ours = pp_fuzz_output(&pp_fuzz_state.runs[0], pp_fuzz_state.ran[0], arena, lost);
-        *spellings = pp_fuzz_by_spellings(&pp_fuzz_state.runs[0]);
         tally->accepted += ours->valid && ours->accepted;
         test_case->isolated |= pp_fuzz_leaks(&pp_fuzz_state.runs[0]);
         result = ours->valid;
@@ -1080,7 +1064,7 @@ static bool pp_fuzz_case(Arena* arena, Arena* scratch, const PPFuzzOptions* opti
 // the case alone gives. A batch without a result (clang's output without its markers in place) has each of its cases
 // read alone instead, and one that gives no result alone either is reported.
 static void pp_fuzz_against_clang(Arena* arena, const PPFuzzOptions* options, bool c23, bool sampled, const PreprocessorFuzzCase* cases, const PreprocessorFuzzOutput* ours,
-                                  const bool* lost, const bool* spellings, const bool* usable, uint64_t count, PPFuzzTally* tally)
+                                  const bool* lost, const bool* usable, uint64_t count, PPFuzzTally* tally)
 {
     for (uint32_t group = 0; group < 2; group += 1)
     {
@@ -1114,15 +1098,14 @@ static void pp_fuzz_against_clang(Arena* arena, const PPFuzzOptions* options, bo
         {
             const uint64_t i = indices[k];
             tally->compared += answered[k];
-            tally->spellings += answered[k] && group == 0 && spellings[i];
-            const PreprocessorFuzzDifference difference = answered[k] ? pp_fuzz_compare(arena, ours[i], lost[i], theirs[k], spellings[i], c23) : BUSTER_PPF_EQUAL;
+            const PreprocessorFuzzDifference difference = answered[k] ? pp_fuzz_compare(arena, ours[i], lost[i], theirs[k], c23) : BUSTER_PPF_EQUAL;
             if (answered[k] && (difference != BUSTER_PPF_EQUAL || sampled))
             {
                 PreprocessorFuzzOutput alone = theirs[k];
                 const bool alone_valid = !batched || preprocessor_fuzz_clang(arena, options->clang_path, c23, &grouped[k], 1, true, &alone);
                 tally->alone += batched;
                 tally->invalid += !alone_valid;
-                const PreprocessorFuzzDifference confirmed = alone_valid ? pp_fuzz_compare(arena, ours[i], lost[i], alone, spellings[i], c23) : BUSTER_PPF_INVALID;
+                const PreprocessorFuzzDifference confirmed = alone_valid ? pp_fuzz_compare(arena, ours[i], lost[i], alone, c23) : BUSTER_PPF_INVALID;
                 if (alone_valid && preprocessor_fuzz_compare_mode(arena, theirs[k], alone, c23) != BUSTER_PPF_EQUAL)
                 {
                     tally->oracle += 1;
@@ -1162,16 +1145,15 @@ static void pp_fuzz_worker(const PPFuzzOptions* options, bool c23, uint64_t begi
         PreprocessorFuzzCase cases[BUSTER_PP_FUZZ_BLOCK];
         PreprocessorFuzzOutput ours[BUSTER_PP_FUZZ_BLOCK];
         bool lost[BUSTER_PP_FUZZ_BLOCK];
-        bool spellings[BUSTER_PP_FUZZ_BLOCK];
         bool usable[BUSTER_PP_FUZZ_BLOCK];
         for (uint64_t i = 0; i < count; i += 1)
         {
-            usable[i] = pp_fuzz_case(&arena, &scratch, options, c23, first + i, &cases[i], &ours[i], &lost[i], &spellings[i], tally);
+            usable[i] = pp_fuzz_case(&arena, &scratch, options, c23, first + i, &cases[i], &ours[i], &lost[i], tally);
         }
         if (options->with_clang)
         {
             const bool sampled = (first - begin) / BUSTER_PP_FUZZ_BLOCK % BUSTER_PP_FUZZ_SAMPLED == 0;
-            pp_fuzz_against_clang(&arena, options, c23, sampled, cases, ours, lost, spellings, usable, count, tally);
+            pp_fuzz_against_clang(&arena, options, c23, sampled, cases, ours, lost, usable, count, tally);
         }
         arena_pop_to(&arena, 0);
     }
@@ -1210,6 +1192,14 @@ static const char* const pp_fuzz_emulation_cases[] = {
     // A name at presumed line 1 from a line splice right before it, which clang's token starts at: its argument's line
     // there is the file's first to clang's printer, which joins `.5_z` and `4ll` (seed 65's case 702022, C17).
     "#define h(c, d) d\n# 1\n\\\nh((\n),.5_z\n4ll)\n",
+    // Any token that keeps clang's start of line on the printer's line, when that is presumed line 1, is the file's first
+    // to clang's printer (MoveToLine's IsFirstInFile), which indents it by its column in place of a space (#263's
+    // review): a line among a macro's arguments joins the token before in column 1, and is a column further with a
+    // leading space; the token after a _Pragma that printed nothing goes to its own column, or to its expansion's.
+    "#define h(...) __VA_ARGS__\n# 1\nh(x\ny)\n",
+    "#define h(...) __VA_ARGS__\n# 1\nh(x\n  y)\n",
+    "# 1\na _Pragma(\"once\")b\n",
+    "#define h(...) __VA_ARGS__\n# 1\nh(a _Pragma(\"once\")b)\n",
 };
 
 // Each source of pp_fuzz_emulation_cases against clang, alone, in both modes (pp_fuzz_clang_difference). Returns
@@ -1276,7 +1266,6 @@ static void pp_fuzz_add(PPFuzzTally* total, const PPFuzzTally* part)
     total->unbatched += part->unbatched;
     total->invalid += part->invalid;
     total->unprintable += part->unprintable;
-    total->spellings += part->spellings;
     total->saved += part->saved;
     total->reported += part->reported;
 }
@@ -1319,6 +1308,7 @@ static bool pp_fuzz(const PPFuzzOptions* options)
         result = false;
     }
     result = result && pp_fuzz_check_isolation();
+    result = result && pp_fuzz_check_comparison();
     result = result && (!options->with_clang || pp_fuzz_check_emulation(options));
     if (result && options->jobs == 1)
     {
@@ -1396,9 +1386,9 @@ static bool pp_fuzz(const PPFuzzOptions* options)
                    total->cases, total->accepted, total->kernels);
             if (options->with_clang)
             {
-                printf("; %" PRIu64 " compared with clang (%" PRIu64 " by spellings), %" PRIu64 " differ (%" PRIu64
-                       " read alone), %" PRIu64 " batches differ from the case alone, %" PRIu64 " batches read case by case",
-                       total->compared, total->spellings, total->differences, total->alone, total->oracle, total->unbatched);
+                printf("; %" PRIu64 " compared with clang, %" PRIu64 " differ (%" PRIu64 " read alone), %" PRIu64
+                       " batches differ from the case alone, %" PRIu64 " batches read case by case",
+                       total->compared, total->differences, total->alone, total->oracle, total->unbatched);
             }
             printf("; %" PRIu64 " without a result; %" PRIu64 " whose text can't lex back, as clang's can't", total->invalid, total->unprintable);
             if (total->saved != 0)

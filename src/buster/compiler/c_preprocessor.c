@@ -3337,11 +3337,37 @@ static uint64_t pp_line_end(const ScalarLexer* lexer, uint64_t p)
     return result;
 }
 
+// The end of a directive's line as clang lexes it on from byte `stop` of a file, past a header name the file's tokens
+// didn't know (pp_header_name_tail): its first newline outside a block comment, which carries the line on past its
+// newlines, or the end of the file. The line is lexed from `stop` to its next newline (pp_line_end) until it doesn't end
+// inside a block comment, each time past that comment's end.
+static uint32_t pp_relex_end(uint32_t refine_flags, const PPFileData* data, uint32_t stop)
+{
+    const ScalarLexer lexer = pp_file_lexer(refine_flags, data);
+    uint64_t result = pp_line_end(&lexer, stop);
+    bool inside = true;
+    while (inside && result < data->length)
+    {
+        const uint32_t length = (uint32_t)result - stop;
+        Scratch scratch = scratch_begin(0);
+        const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY((uint64_t)length);
+        uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
+        uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
+        uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
+        const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(data->bytes + stop, length, kinds, starts, ends, refine_flags) : 0;
+        inside = count > 0 && pp_is_unterminated_comment(data->bytes + stop, kinds[count - 1], starts[count - 1]);
+        result = inside ? pp_line_end(&lexer, pp_skip_comment(&lexer, stop + starts[count - 1])) : result;
+        scratch_end(scratch);
+    }
+    return (uint32_t)result;
+}
+
 // The rest of a directive's line [first, end) past a header name read from the file up to its '>' (pp_read_header_name),
 // which ends at byte `stop`: the first of the line's tokens there or past it. The lexer read the line before the name was
 // known, so one of its tokens or comments may run past `stop` (`<a.h>>`, or `<a//b.h>`, whose "//" began a comment to
 // the line's end), and then its tokens from `stop` on aren't those clang lexes there, on from the name. `*relex` gets
-// the end of what must then be lexed again, the end of the line from `stop` (pp_line_end); else `stop`.
+// the end of what must then be lexed again, the end of the line as clang lexes it from `stop` (pp_relex_end), which may
+// be past the directive's end in the file's tokens (pp_resume_after); else `stop`.
 static uint32_t pp_header_name_tail(uint32_t refine_flags, const PPFileData* data, uint32_t first, uint32_t end, uint32_t stop, uint32_t* relex)
 {
     uint32_t result = first + 1;
@@ -3354,8 +3380,23 @@ static uint32_t pp_header_name_tail(uint32_t refine_flags, const PPFileData* dat
     const uint64_t next = pp_skip_blanks(&lexer, stop);
     const bool line_ended = next >= data->length || data->bytes[next] == '\n' || data->bytes[next] == '\r';
     const bool same = result < end ? next == data->starts[result] : line_ended;
-    *relex = same ? stop : (uint32_t)pp_line_end(&lexer, stop);
+    *relex = same ? stop : pp_relex_end(refine_flags, data, stop);
     return result;
+}
+
+// A file context goes on after a directive whose line clang lexes to byte `end` of the file (pp_relex_end), past where
+// the file's tokens end it: a block comment begun after a header name in which "//" began a comment for them. It goes on
+// at its first token past `end`, and the directives before that are left out: they are in that comment for clang.
+static void pp_resume_after(PPContext* context, const PPFileData* data, uint32_t end)
+{
+    while (context->position < data->token_count && data->starts[context->position] < end)
+    {
+        context->position += 1;
+    }
+    while (context->next_directive < data->directive_count && data->directive_hash[context->next_directive] < context->position)
+    {
+        context->next_directive += 1;
+    }
 }
 
 // Where clang reports what a directive's line lacks: its end, the newline after its last token (`last`), past blanks,
@@ -7480,7 +7521,9 @@ static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t
         const uint8_t kind = kinds[i] & 0x7F;
         const uint32_t value = kind == C_TOKEN_RAW_IDENTIFIER ? refine_intern_identifier(pp->table, bytes, length, starts[i], ends[i] - starts[i], pp->refine_flags)
                                                               : base + begin + ends[i];
-        const bool space = starts[i] != (i == 0 ? 0 : ends[i - 1]);
+        // A gap of line splices alone isn't a space, as refinement has it.
+        const uint32_t gap = i == 0 ? 0 : ends[i - 1];
+        const bool space = starts[i] != gap && !refine_gap_is_splices(bytes, length, gap, starts[i], pp->refine_flags);
         pp_tokens_set(into, into->count, kind, space ? BUSTER_PP_SPACE : 0, value, base + begin + starts[i]);
         pp_history_fill(pp, into, into->count, into->count + 1, 0);
         into->count += 1;
@@ -8976,13 +9019,16 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
                 pp->files[file].system = BUSTER_PP_SYSTEM_FILE;
                 const PPFileData* data = &pp->datas[pp->files[file].data];
                 const PPRange* range = &pp->ranges[context->range];
-                const uint32_t at = range->base + (context->position < data->token_count ? data->starts[context->position] : data->length);
+                // A change of file for clang's printer too (FileChanged with SystemHeaderPragma), which starts a line
+                // where the directive's line ends: the note starts there, before blanks and lines without tokens, so that
+                // an #embed's tokens, which start the line there (pp_embed_line), are in the system header. A _Pragma's
+                // note starts at the token after it.
+                const uint32_t next = range->base + (context->position < data->token_count ? data->starts[context->position] : data->length);
+                const uint32_t at = from_operator ? next : pp_directive_resume(pp, context, context->next_directive - 1);
                 const uint32_t latest = range->last_line_directive;
                 pp_add_line_note(pp, context->range, at, latest != BUSTER_PP_NONE ? pp->line_directives[latest].delta : 0, 0, 0, BUSTER_PP_SYSTEM_FILE);
-                // A change of file for clang's printer too (FileChanged with SystemHeaderPragma), which starts a line
-                // where the directive's line ends: an #embed's tokens next start there (pp_embed_line).
                 pp->file_change_token = pp->output.count;
-                pp->file_change_location = from_operator ? at : pp_directive_resume(pp, context, context->next_directive - 1);
+                pp->file_change_location = at;
             }
             else
             {
@@ -10491,14 +10537,16 @@ static uint64_t pp_has_embed(Preprocessor* pp, const PPTokens* tokens, uint32_t 
     return result;
 }
 
-// Whether the token after directive d's line in a file is on the next line, with no newline outside comments between it
-// and the line's end, and isn't a directive's '#': after an #embed's tokens clang's lexer starts no line there, since the
-// end of the tokens it entered passes no line start on (Preprocessor::HandleEndOfFile's
+// Whether the token after an #embed's line in a file (the context's next) is on the next line, with no newline outside
+// comments between it and the line's end, and isn't a directive's '#': after an #embed's tokens clang's lexer starts no
+// line there, since the end of the tokens it entered passes no line start on (Preprocessor::HandleEndOfFile's
 // PropagateLineStartLeadingSpaceInfo), so its printer prints the token on the line of the embed's output.
-static bool pp_embed_joins(const Preprocessor* pp, const PPFileData* data, uint32_t d)
+static bool pp_embed_joins(const Preprocessor* pp, const PPFileData* data, const PPContext* context)
 {
-    const uint32_t end = data->directive_end[d];
-    const bool directive = d + 1 < data->directive_count && data->directive_hash[d + 1] == end;
+    // The token after the line: the context's next one, past the line as clang lexes it when it was lexed again
+    // (pp_resume_after), from the end of the token before it.
+    const uint32_t end = context->position;
+    const bool directive = context->next_directive < data->directive_count && data->directive_hash[context->next_directive] == end;
     const uint32_t stop = end < data->token_count && !directive ? data->starts[end] : 0;
     const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
     uint64_t p = pp_file_token_end(pp, data, end - 1);
@@ -10627,7 +10675,7 @@ static void pp_embed_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
                         pp_note_expansion(pp, pp->file_change_location);
                     }
                 }
-                const bool joins = !pp_collecting(pp) && pp_embed_joins(pp, data, d);
+                const bool joins = !pp_collecting(pp) && pp_embed_joins(pp, data, context);
                 if (pp_push_buffer(pp, &pp->expansions, start, pp->expansions.count, 0, 0, false, true) != 0 && joins)
                 {
                     context->pending_flags |= BUSTER_PP_JOIN_LINE;
@@ -10691,6 +10739,7 @@ static void pp_embed(Preprocessor* pp, PPContext* context, uint32_t d)
     }
     else if (relex_begin != relex_end ? pp_copy_relexed(pp, context, relex_begin, relex_end, &pp->arguments) : pp_copy_line(pp, context, literal ? after : hash + 2, end))
     {
+        pp_resume_after(context, data, relex_end);
         bool expands = !literal;
         for (uint32_t i = line; i < pp->arguments.count; i += 1)
         {
@@ -11715,6 +11764,11 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer)
         length += (uint32_t)sprintf(buffer + length, "#define __STDC_VERSION__ %s\n", version);
     }
     length += (uint32_t)sprintf(buffer + length, "#define __STDC_HOSTED__ %d\n", options->freestanding ? 0 : 1);
+    // The language's, which -undef keeps too (clang's InitializeStandardPredefinedMacros).
+    if (options->assembly)
+    {
+        length += (uint32_t)sprintf(buffer + length, "#define __ASSEMBLER__ 1\n");
+    }
     if (!options->undefine)
     {
         if (!language.gnu)
@@ -11739,10 +11793,6 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer)
         // The one macro that isn't clang's (#117: clang's configuration, plus this). --predefines replaces it too, so
         // that test-preprocessor --clang starts from clang's own macros alone.
         length += (uint32_t)sprintf(buffer + length, "#define __BUSTER__ 1\n");
-        if (options->assembly)
-        {
-            length += (uint32_t)sprintf(buffer + length, "#define __ASSEMBLER__ 1\n");
-        }
     }
     return length;
 }

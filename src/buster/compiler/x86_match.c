@@ -9,7 +9,7 @@
 // Candidate operand templates and immediate ranges are compared sixteen at a time, with an exact scalar twin.
 // Both paths run x86_validate at the frontend boundary. No compiler expression optimization is done here.
 
-#define BUSTER_X86_MATCH_BUCKETS 256
+#define BUSTER_X86_MATCH_BUCKETS 512
 #define BUSTER_X86_MATCH_OPERANDS 4
 
 typedef enum X86OperandKind
@@ -50,6 +50,9 @@ struct X86MatchRequest
 typedef struct X86MatchIndex X86MatchIndex;
 struct X86MatchIndex
 {
+    // Open-addressed mnemonic dictionary. Each occupied slot owns exactly one canonical name's contiguous forms.
+    // More slots than the admitted spelling lists can name; aliases movabs/pushw share mov/push's slot.
+    String8 names[BUSTER_X86_MATCH_BUCKETS];
     uint32_t begin[BUSTER_X86_MATCH_BUCKETS + 1];
     uint32_t forms[X86_FORM_COUNT];
     uint32_t counts[X86_FORM_COUNT];
@@ -58,9 +61,18 @@ struct X86MatchIndex
     uint32_t operands[4][X86_FORM_COUNT];
     uint8_t allowed[X86_FORM_COUNT];
     uint32_t broadcast[X86_FORM_COUNT];
+    // Width (including implicit qword) in bits 0..7; spelling, family and EVEX predicates above it.
+    uint32_t attributes[X86_FORM_COUNT];
     int64_t immediate_min[X86_FORM_COUNT];
     uint64_t immediate_max[X86_FORM_COUNT];
 };
+
+#define BUSTER_X86_MATCH_MOVABS (1u << 8)
+#define BUSTER_X86_MATCH_PUSH_WORD (1u << 9)
+#define BUSTER_X86_MATCH_EVEX (1u << 10)
+#define BUSTER_X86_MATCH_ROUNDING (1u << 11)
+#define BUSTER_X86_MATCH_FORBIDDEN (1u << 12)
+#define BUSTER_X86_MATCH_PUSHW_NAME (1u << 13)
 
 typedef struct X86Match X86Match;
 struct X86Match
@@ -181,7 +193,17 @@ static bool x86_match_name(String8 name, const char* text)
 
 static uint32_t x86_match_hash(String8 name)
 {
-    // movabs is mov's 64-bit immediate, and pushw push's 16-bit operand size: each shares its family's bucket.
+    // The caller supplies the canonical spelling, including movabs -> mov and pushw -> push.
+    uint32_t hash = 0;
+    for (uint64_t i = 0; i < name.length; i += 1)
+    {
+        hash = hash * 33 + (uint8_t)name.pointer[i];
+    }
+    return hash & (BUSTER_X86_MATCH_BUCKETS - 1);
+}
+
+static String8 x86_match_canonical(String8 name)
+{
     if (x86_match_name(name, "movabs"))
     {
         name = BUSTER_S8("mov");
@@ -190,12 +212,23 @@ static uint32_t x86_match_hash(String8 name)
     {
         name = BUSTER_S8("push");
     }
-    uint32_t hash = 0;
-    for (uint64_t i = 0; i < name.length; i += 1)
+    return name;
+}
+
+static uint32_t x86_match_bucket(const X86MatchIndex* index, String8 name)
+{
+    name = x86_match_canonical(name);
+    uint32_t at = x86_match_hash(name);
+    for (uint32_t probes = 0; probes < BUSTER_X86_MATCH_BUCKETS; probes += 1)
     {
-        hash = hash * 33 + (uint8_t)name.pointer[i];
+        const String8 candidate = index->names[at];
+        if (candidate.pointer == 0 || (candidate.length == name.length && memcmp(candidate.pointer, name.pointer, name.length) == 0))
+        {
+            break;
+        }
+        at = (at + 1) & (BUSTER_X86_MATCH_BUCKETS - 1);
     }
-    return hash & (BUSTER_X86_MATCH_BUCKETS - 1);
+    return at;
 }
 
 // Syntax and immediate semantics understood by this frontend. ISA eligibility is a separate intersection with
@@ -360,6 +393,7 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
     memset(index, 0, sizeof(*index));
     x86_target_forms(target, index->allowed);
     bool admitted[BUSTER_X86_FORM_LEGACY_MODES];
+    uint16_t buckets[BUSTER_X86_FORM_LEGACY_MODES];
     for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
     {
         const X86FormDescription* form = &x86_form_descriptions[f];
@@ -367,8 +401,11 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
         admitted[f] = index->allowed[f] && x86_match_supported(form) && x86_match_roles(form->syntax, roles) <= 4;
         if (admitted[f])
         {
-            const String8 name = {.pointer = (char*)form->mnemonic, .length = strlen(form->mnemonic)};
-            index->begin[x86_match_hash(name) + 1] += 1;
+            const String8 name = x86_match_canonical((String8){.pointer = (char*)form->mnemonic, .length = strlen(form->mnemonic)});
+            const uint32_t bucket = x86_match_bucket(index, name);
+            index->names[bucket] = name;
+            buckets[f] = bucket;
+            index->begin[bucket + 1] += 1;
         }
     }
     for (uint32_t b = 0; b < BUSTER_X86_MATCH_BUCKETS; b += 1)
@@ -384,11 +421,18 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
         const uint32_t count = x86_match_roles(form->syntax, roles);
         if (admitted[f])
         {
-            const String8 name = {.pointer = (char*)form->mnemonic, .length = strlen(form->mnemonic)};
-            const uint32_t at = cursors[x86_match_hash(name)]++;
+            const uint32_t at = cursors[buckets[f]]++;
             index->forms[at] = f;
             index->counts[at] = count;
             index->broadcast[at] = (form->evex & BUSTER_X86_EVEX_BROADCAST) ? 64 / form->disp8_scale : 0;
+            const bool implicit_qword = form->operand_bytes == 0 && (strcmp(form->mnemonic, "call") == 0 || strcmp(form->mnemonic, "jmp") == 0 || strcmp(form->mnemonic, "ret") == 0 || strcmp(form->mnemonic, "leave") == 0);
+            index->attributes[at] = (implicit_qword ? 8 : form->operand_bytes) |
+                (strcmp(form->mnemonic, "movabs") == 0 ? BUSTER_X86_MATCH_MOVABS : 0) |
+                (strcmp(form->mnemonic, "pushw") == 0 ? BUSTER_X86_MATCH_PUSHW_NAME : 0) |
+                (form->operand_bytes == 2 && (strcmp(form->mnemonic, "pushw") == 0 || strcmp(form->mnemonic, "push") == 0) ? BUSTER_X86_MATCH_PUSH_WORD : 0) |
+                (form->family == BUSTER_X86_FAMILY_EVEX ? BUSTER_X86_MATCH_EVEX : 0) |
+                ((form->evex & BUSTER_X86_EVEX_ROUNDING) != 0 ? BUSTER_X86_MATCH_ROUNDING : 0) |
+                ((form->evex & (BUSTER_X86_EVEX_SAE | BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF | BUSTER_X86_EVEX_SOURCE_CONDITION)) != 0 ? BUSTER_X86_MATCH_FORBIDDEN : 0);
             const uint32_t bytes = form->immediate_bytes;
             const bool extended = x86_match_sign_extends(form);
             index->immediate_min[at] = bytes != 0 ? (int64_t)(-((__int128)1 << (8 * bytes - 1))) : 0;
@@ -544,7 +588,16 @@ static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X8
     const __mmask16 valid = (1u << count) - 1;
     __mmask16 mask = _mm512_mask_cmpeq_epi32_mask(valid, _mm512_maskz_loadu_epi32(valid, index->counts + first), _mm512_set1_epi32(request->count));
     mask &= _mm512_mask_cmpeq_epi32_mask(valid, _mm512_maskz_loadu_epi32(valid, index->broadcast + first), _mm512_set1_epi32(request->broadcast));
-    for (uint32_t operand = 0; operand < request->count; operand += 1)
+    const __m512i attributes = _mm512_maskz_loadu_epi32(valid, index->attributes + first);
+    if (request->width != 0)
+    {
+        mask &= _mm512_cmpeq_epi32_mask(_mm512_and_epi32(attributes, _mm512_set1_epi32(255)), _mm512_set1_epi32(request->width));
+    }
+    const uint32_t spelling = x86_match_name(request->mnemonic, "movabs") ? BUSTER_X86_MATCH_MOVABS : x86_match_name(request->mnemonic, "pushw") ? BUSTER_X86_MATCH_PUSH_WORD : 0;
+    const uint32_t required = spelling | (request->decorations != 0 ? BUSTER_X86_MATCH_EVEX : 0) | (request->rounding ? BUSTER_X86_MATCH_ROUNDING : 0);
+    const uint32_t checked = required | BUSTER_X86_MATCH_ROUNDING | BUSTER_X86_MATCH_FORBIDDEN | (spelling == BUSTER_X86_MATCH_PUSH_WORD ? 0 : BUSTER_X86_MATCH_PUSHW_NAME);
+    mask &= _mm512_cmpeq_epi32_mask(_mm512_and_epi32(attributes, _mm512_set1_epi32(checked)), _mm512_set1_epi32(required));
+    for (uint32_t operand = 0; mask != 0 && operand < request->count; operand += 1)
     {
         const X86Operand* value = &request->operands[operand];
         const __m512i templates = _mm512_maskz_loadu_epi32(valid, index->operands[operand] + first);
@@ -554,8 +607,14 @@ static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X8
         {
             const __m512i classes = _mm512_and_epi32(_mm512_srli_epi32(templates, 4), _mm512_set1_epi32(15));
             const __m512i fixed = _mm512_srli_epi32(templates, 24);
-            mask &= _mm512_cmpeq_epi32_mask(classes, _mm512_set1_epi32(value->class));
+            const __mmask16 accumulator = _mm512_cmpeq_epi32_mask(roles, _mm512_set1_epi32(X86_MATCH_ACC));
+            const __mmask16 class_match = _mm512_cmpeq_epi32_mask(classes, _mm512_set1_epi32(value->class));
+            // The scalar accumulator rule sizes its implicit register from width, even for a malformed direct
+            // request whose class disagrees. Keep that predicate exact; the parser itself emits consistent pairs.
+            mask &= (accumulator & (value->class <= BUSTER_X86_CLASS_GPR64 ? 65535u : 0)) | (~accumulator & class_match);
             mask &= _mm512_cmpeq_epi32_mask(fixed, _mm512_setzero_si512()) | _mm512_cmpeq_epi32_mask(fixed, _mm512_set1_epi32(value->reg + 1));
+            const __m512i widths = _mm512_and_epi32(_mm512_srli_epi32(templates, 8), _mm512_set1_epi32(255));
+            mask &= ~accumulator | _mm512_cmpeq_epi32_mask(widths, _mm512_set1_epi32(value->width));
         }
         else if (value->kind == X86_OPERAND_MEMORY)
         {
@@ -571,6 +630,10 @@ static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X8
         }
         else if (value->kind == X86_OPERAND_IMMEDIATE)
         {
+            if (!value->symbolic && (value->value < INT64_MIN || value->value > (__int128)UINT64_MAX))
+            {
+                mask = 0;
+            }
             const __mmask16 relative = _mm512_cmpeq_epi32_mask(roles, _mm512_set1_epi32(X86_MATCH_REL));
             const __mmask16 one = _mm512_cmpeq_epi32_mask(roles, _mm512_set1_epi32(X86_MATCH_ONE));
             uint32_t fits = 0;
@@ -593,10 +656,56 @@ static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X8
     return mask;
 }
 
+// Only the vector predicate's survivors reach here. The role columns replace decoding the syntax and repeating
+// every operand/name comparison. Full encoder legality still runs before any untrusted record can be encoded.
+// x86_match_candidate remains the independent scalar semantic matcher.
+static bool x86_match_candidate_indexed(const X86MatchIndex* index, const X86MatchRequest* request, uint32_t at, X86Instruction* instruction)
+{
+    const uint32_t f = index->forms[at];
+    *instruction = (X86Instruction){.form = f, .decorations = request->decorations};
+    for (uint32_t i = 0; i < request->count; i += 1)
+    {
+        const X86Operand* operand = &request->operands[i];
+        const uint32_t role = (index->operands[i][at] >> 16) & 255;
+        if (role == X86_MATCH_RM)
+        {
+            if (operand->kind == X86_OPERAND_MEMORY)
+            {
+                instruction->rm = operand->base;
+                instruction->index = operand->index;
+                instruction->mode = operand->mode;
+                instruction->displacement = operand->symbolic ? INT32_MIN : (int32_t)operand->value;
+                instruction->form += operand->segment == 1 ? BUSTER_X86_FORM_FS : operand->segment == 2 ? BUSTER_X86_FORM_GS : 0;
+            }
+            else
+            {
+                instruction->rm = operand->reg;
+            }
+        }
+        else if (role == X86_MATCH_REG)
+        {
+            instruction->reg = operand->reg;
+        }
+        else if (role == X86_MATCH_VVVV)
+        {
+            instruction->vvvv = operand->reg;
+        }
+        else if (role == X86_MATCH_IMM)
+        {
+            instruction->immediate = operand->symbolic ? 0 : (int32_t)(uint64_t)operand->value;
+            if (x86_form_descriptions[f].immediate_bytes == 8)
+            {
+                instruction->displacement = operand->symbolic ? 0 : (int32_t)((uint64_t)operand->value >> 32);
+            }
+        }
+    }
+    return x86_validate(instruction, 1) == 1;
+}
+
 static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* request, bool vectorized)
 {
     X86Match result = {0};
-    const uint32_t bucket = x86_match_hash(request->mnemonic);
+    const uint32_t bucket = x86_match_bucket(index, request->mnemonic);
     uint32_t memory_width = 0;
     bool unsized_memory = false;
     for (uint32_t i = 0; i < request->count; i += 1)
@@ -624,7 +733,8 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
             const uint32_t at = first + __builtin_ctz(mask);
             mask &= mask - 1;
             X86Instruction instruction;
-            if (x86_match_candidate(request, index->forms[at], &instruction))
+            const bool accepted = vectorized ? x86_match_candidate_indexed(index, request, at, &instruction) : x86_match_candidate(request, index->forms[at], &instruction);
+            if (accepted)
             {
                 const X86FormDescription* form = x86_form_description(instruction.form);
                 if (unsized_memory)
@@ -633,7 +743,9 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                     memory_width = form->operand_bytes;
                 }
                 uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-                const int64_t length = x86_encode_scalar(&instruction, 1, bytes, sizeof(bytes), 0, 0);
+                // The indexed builder has already crossed the complete x86_validate boundary. The scalar API
+                // would run that same validation a second time merely to get this length.
+                const int64_t length = vectorized ? encode_one(&instruction, bytes, X86_ENCODER_MODE_64) : x86_encode_scalar(&instruction, 1, bytes, sizeof(bytes), 0, 0);
                 if (length > 0 && (!result.found || length < result.length))
                 {
                     result.instruction = instruction;

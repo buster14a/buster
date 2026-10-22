@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units (at fbddd2e, with `main` at e71d7fd), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,070,090 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 223 | |
+| The built-in cases (`pp_test_cases`) | 233 | |
 | #109's generated cases in C17 and C23, against `clang -E -P`: the last campaign's and those after it, but for 4 that #247 fixes ([the fuzzing](preprocessor-fuzz.md), "Qualification") | 42,800,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
@@ -574,7 +574,11 @@ arenas. Popping a context gives its tokens back when they are on top.
   known, so after a written `<...>` one of its tokens or comments may run past
   the `>`: in `<a//b.bin> limit(1)`, the `//` began a comment to the line's
   end. Then the rest of the line is lexed again from the `>`, as clang lexes on
-  after the name (`pp_header_name_tail`, `pp_copy_relexed`).
+  after the name (`pp_header_name_tail`, `pp_copy_relexed`): to its first
+  newline outside a block comment, which carries the line on past its
+  newlines (`pp_relex_end`), with no space where only a line splice was. The
+  file goes on after that line, past what its own tokens held there, a
+  directive in the comment among them (`pp_resume_after`).
 - **The parameters** are read expanded, as clang reads them. When a macro's
   name is among them, or the name is computed, the line goes through a capture
   (`BUSTER_PP_CAPTURE_EMBED`, `pp_finish_embed`); otherwise it is read as it is.
@@ -663,7 +667,8 @@ arenas. Popping a context gives its tokens back when they are on top.
   output since, go at the place the change left the printer: the file's first
   line, the line after the `#include` or the pragma, or `#line`'s number. That
   is where clang prints them, though the `#embed` may be further down
-  (`Preprocessor.file_change_token`).
+  (`Preprocessor.file_change_token`). So the pragma's note of a system header
+  starts there, at the line after it, before blanks and lines without tokens.
 
 ### Built-in macros and the predefines
 
@@ -1080,7 +1085,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 223 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 233 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
