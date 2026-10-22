@@ -455,6 +455,22 @@ designs and the compilers already built this way.
   `calling_convention_benchmark.c` provides `benchmark-calling-convention`.
   `docs/calling-convention.md` records the design, where clang's LLVM types
   and GCC decide otherwise than the classes, and its 9700X measurements.
+- `src/buster/compiler/tier0.c` is Tier 0 (#136): a function's typed stream (the
+  checker's output, #133, which `Tier0Function` defines until #133 produces it:
+  entries in evaluation order, control flow as branches to entry indices, and
+  the locals and calls tables with #137's locations) to `X86Instruction`
+  records by expanding a template per entry, with each value's register its
+  depth on an integer and a floating value stack, after fusing leaves,
+  addresses, compares and x = x op v into their consumers' instructions; locals
+  get registers or frame slots; calls, and division and shifts at depths where
+  their fixed registers are taken, are emitted entry by entry. The output is
+  the records with #144's branch columns and `LinkReference`s. `tier0_compile`
+  finds the fusions, effects and depths 64 entries at a time in AVX-512 and
+  expands each template with one `vpermb`; `tier0_compile_scalar` is its twin.
+  `tier0_generate.c` makes random programs as typed streams and as C,
+  `tier0_test.c` holds `test-tier0` and `tier0_benchmark.c` provides
+  `benchmark-backend`. `docs/tier0.md` has the contract, the design and the
+  9700X measurements.
 - `src/buster/compiler/call_graph.c` is the call graph check, the coding
   style's rule against recursion checked mechanically: `check-call-graph`
   reads the LLVM IR of the translation units `build.sh` compiles, builds their
@@ -590,6 +606,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-types
 ./build/compiler test-calling-convention --cross-check
 ./build/compiler benchmark-calling-convention
+./build/compiler test-tier0 --cross-check
+./build/compiler benchmark-backend
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
@@ -3365,3 +3383,43 @@ the 9700X's lock with `taskset -c 2`; `docs/calling-convention.md` has the
 numbers. The default 9700X job runs it after the tests, pinned to one allowed
 CPU; like the others, its measurements are
 informational.
+
+## Tier 0 tests
+
+`./build/compiler test-tier0 [--seed N] [--count N] [--cross-check
+[--cross-count N] [--clang PATH] [--keep]]` (about 0.8 s on the 9700X, and
+2.9 s with `--cross-check`) checks `tier0.c` on programs from
+`tier0_generate.c`, `--count` (300) of each of four shapes: one function of
+integers; integers and calls; everything (floating values, pointers,
+address-taken locals); and larger. Every function must pass `tier0_validate`,
+both paths must compile it to the same records, branch columns and references,
+and the records must pass `x86_validate` and the branch columns
+`branch_sizing_validate`. Each program is then sized, encoded, loaded into
+fresh pages and run in a child process on eight inputs, and its result and
+every global's bytes must equal what the test's interpreter of the typed stream
+gives (the interpreter converts floating values to integers as cvttsd2si does).
+
+With `--cross-check`, which needs clang (`--clang PATH`) and `size`, each of
+`--cross-count` (60) programs of the larger shape, keeping to what C defines,
+is written as Tier 0's object (the link representation and the object writer)
+and as C, which clang -O0 compiles; a generated harness links both, runs them
+on the same inputs and compares the results and every global, then times both.
+It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
+run times. The files go in a directory under `$TMPDIR` (or `/tmp`), kept with
+`--keep` or on a failure. The 9700X job's test step runs it with
+`--cross-check`.
+
+## Backend benchmark
+
+`./build/compiler benchmark-backend [--entries N] [--seed N] [--only
+vector|scalar|sizing|encode] [--after-scalar MS]` (about 4 s) generates programs
+until their functions hold `--entries` typed entries (262,144), checks that both
+of Tier 0's paths give every function the same code, then reports 21-pass
+medians, per typed entry and per record, of `tier0_compile`,
+`tier0_compile_scalar`, `size_branches` on their records and `x86_encode` of the
+sized records: nanoseconds, cycles, instructions, IPC and the throttle
+(PMCx1A0's umask 0x08, #199), with the share of entries deferred. `--only` runs
+one variant alone, and `--after-scalar MS` runs the scalar path for MS ms before
+each pass of the vector one. Run it under the 9700X's lock with `taskset -c 2`.
+`docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
+pinned to one allowed CPU; like the others, its measurements are informational.
