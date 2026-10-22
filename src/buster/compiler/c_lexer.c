@@ -1932,8 +1932,21 @@ static uint64_t c_tokenize_scalar_context(const uint8_t* source, uint64_t length
                 directive = 0;
                 if (kind == C_TOKEN_LESS)
                 {
-                    lexer_value.raw_strings = false;
-                    lexer_value.utf_raw_strings = false;
+                    // The header's contents are opaque, but an extra raw literal after its '>' still owns its whole
+                    // body, including newlines. Carry the source header as one LESS token and resume normal lexing.
+                    uint64_t position = p;
+                    bool closed = false;
+                    bool line_ended = false;
+                    while (!closed && !line_ended && position < length)
+                    {
+                        uint64_t size;
+                        uint64_t char_start;
+                        const int32_t character = get_char(lexer, position, &size, &char_start);
+                        closed = character == '>';
+                        line_ended = character == '\n' || character == '\r' || character == BUSTER_LEX_END_OF_FILE;
+                        position += size != 0 ? size : 1;
+                    }
+                    p = closed ? position : p;
                 }
             }
         }

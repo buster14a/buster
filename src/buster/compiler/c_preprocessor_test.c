@@ -965,6 +965,7 @@ static const PPTestCase pp_test_cases[] = {
     { "invalid raw delimiter keeps its line splice", "R\"a\\\nb\" c\n", 0, "gnu17", "R\"a\\\nb\" c\n", false, 0, 0, 0,
       "# 1 \"%d/case.c\"\nR\"a\\\nb\" c\n" },
     { "raw-looking direct angle header preserves following source", "#include <R\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
+    { "raw strings resume after an opaque direct header", "#include <R\"(x> R\"(a\nb)\"\nafter\n", 0, "gnu17", "header\nafter\n", false, 1, "-I%d", pp_test_files_opaque_raw },
     { "spliced raw-looking direct angle header", "#include <R\\\n\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
     { "raw-looking warning text preserves following source", "#warning R\"(\nafter\n", 0, "gnu17", "after\n", false, 1, 0, 0 },
     { "raw-looking error text preserves following source", "#error R\"(\nafter\n", 0, "gnu17", "after\n", true, 0, 0, 0 },
