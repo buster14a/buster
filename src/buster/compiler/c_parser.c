@@ -432,6 +432,8 @@ static const char* const parse_predeclared_typedefs[] =
 // Every per-token array of the parser has BUSTER_PARSE_TOKEN_PADDING entries before token 0 and after the last token,
 // holding PARSE_KIND_END and zeros, so that a kernel can load a whole block around any token.
 #define BUSTER_PARSE_TOKEN_PADDING 128
+// The second colon split from one preprocessing `::` token, distinct from adjacent expanded `:` tokens.
+#define BUSTER_PARSE_COLONCOLON_SECOND 0x10u
 
 // The most tokens a translation unit may have: positions, parents and keys are 32-bit, and the kernels add their
 // padding and blocks past the last token.
@@ -498,7 +500,7 @@ static uint32_t parse_convert_token(const PPTokens* output, uint32_t i, ParseTok
         tokens->kinds[w + 1] = halves == 2 ? PARSE_KIND_COLON : tokens->kinds[w + 1];
         tokens->names[w + 1] = halves == 2 ? 0 : tokens->names[w + 1];
         tokens->sources[w + 1] = halves == 2 ? i : tokens->sources[w + 1];
-        tokens->flags[w + 1] = halves == 2 ? 0 : tokens->flags[w + 1];
+        tokens->flags[w + 1] = halves == 2 ? BUSTER_PARSE_COLONCOLON_SECOND : tokens->flags[w + 1];
         *written = w + halves;
     }
     return result;
@@ -995,6 +997,14 @@ static const uint8_t parse_closer_roles[PARSE_ROLE_COUNT] =
     X(EXPECTED_TYPE, "expected a type") \
     X(EXPECTED_PARAMETER, "expected parameter declarator") \
     X(EXPECTED_ASM_STRING, "expected string literal in 'asm'") \
+    X(EXPECTED_ASM_QUALIFIER, "expected 'volatile', 'inline', 'goto', or '('") \
+    X(DUPLICATE_ASM_VOLATILE, "duplicate asm qualifier 'volatile'") \
+    X(DUPLICATE_ASM_INLINE, "duplicate asm qualifier 'inline'") \
+    X(DUPLICATE_ASM_GOTO, "duplicate asm qualifier 'goto'") \
+    X(MEANINGLESS_ASM_VOLATILE, "meaningless 'volatile' on asm outside function") \
+    X(MEANINGLESS_ASM_INLINE, "meaningless 'inline' on asm outside function") \
+    X(MEANINGLESS_ASM_GOTO, "meaningless 'goto' on asm outside function") \
+    X(EXPECTED_L_PAREN_AFTER_ASM, "expected '(' after 'asm'") \
     X(EXPECTED_L_PAREN_AFTER_ASM_OPERAND, "expected '(' after 'asm operand'") \
     X(STATEMENT_EXPRESSION_AT_FILE_SCOPE, "statement expression not allowed at file scope") \
     X(EXPECTED_DESIGNATOR, "expected '=' or another designator") \
@@ -1148,6 +1158,9 @@ typedef enum ParseMode
     // An asm label's string (`int x asm("y")`), and an asm operand's symbolic name in `[...]`.
     PARSE_MODE_ASM_LABEL,
     PARSE_MODE_ASM_NAME,
+    // GNU local labels have their own namespace and take an identifier list, never declarators.
+    PARSE_MODE_LOCAL_LABEL_NAME,
+    PARSE_MODE_LOCAL_LABEL_END,
 } ParseMode;
 
 // Frame flags: the frame's contents are a declaration (cleared when it ends), after `typedef`, after a type specifier.
@@ -1270,6 +1283,8 @@ struct ParseFrame
     // What a comma at this frame's top level is (PARSE_ROLE_COMMA or PARSE_ROLE_SEPARATOR), by its innermost group of
     // ( [ {: the ?: and case groups take their parent's.
     uint8_t comma_role;
+    // The asm statement's volatile, inline and goto qualifiers, checked before its `(`.
+    uint8_t asm_qualifiers;
 };
 
 // What a name is bound as: an ordinary identifier or a typedef name, and for a K&R identifier list's names, which are
@@ -1478,7 +1493,7 @@ BUSTER_INLINE bool parse_scalar_starts_declaration(const ParseScalar* parser, ui
     const uint8_t kind = parser->kinds[i];
     const bool label = block && parser->kinds[i] == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON;
     return !label && (parse_scalar_starts_type(parser, i) || kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEDEF || kind == PARSE_KIND_ALIGNAS ||
-                      kind == PARSE_KIND_STATIC_ASSERT || kind == PARSE_KIND_LABEL || kind == PARSE_KIND_CALLING_CONVENTION);
+                      kind == PARSE_KIND_STATIC_ASSERT || kind == PARSE_KIND_CALLING_CONVENTION);
 }
 
 // Whether `[` at `token` starts a C23 attribute: `[[`, which C has nowhere else (a subscript or a designator can't
@@ -2539,6 +2554,7 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
             step->role = PARSE_ROLE_LEAF_RIGHT;
             frame->mode = PARSE_MODE_ASM_PAREN;
             frame->statement = PARSE_ITEM_TOP_LEVEL_ASM;
+            frame->asm_qualifiers = 0;
         }
         else if (kind == PARSE_KIND_STATIC_ASSERT)
         {
@@ -2660,6 +2676,7 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
             step->role = PARSE_ROLE_LEAF_RIGHT;
             frame->mode = PARSE_MODE_ASM_PAREN;
             frame->statement = PARSE_ITEM_ASM;
+            frame->asm_qualifiers = 0;
         }
         else if (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON)
         {
@@ -2670,6 +2687,11 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
         {
             // GNU's local labels are declared at the start of a block only.
             parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_EXPRESSION, BUSTER_PARSE_AT_TOKEN);
+        }
+        else if (kind == PARSE_KIND_LABEL)
+        {
+            step->role = PARSE_ROLE_SPECIFIER;
+            frame->mode = PARSE_MODE_LOCAL_LABEL_NAME;
         }
         else if ((parse_scalar_starts_declaration(parser, i, true) || kind == PARSE_KIND_STATIC_ASSERT) && waiting && !labeled)
         {
@@ -2821,12 +2843,6 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
     {
         step->role = PARSE_ROLE_SPECIFIER;
         frame->flags |= BUSTER_PARSE_FRAME_SPECIFIED | (parser->names[i] == C_NAME_AUTO ? BUSTER_PARSE_FRAME_AUTO : 0);
-    }
-    else if (kind == PARSE_KIND_LABEL)
-    {
-        // GNU's `__label__ a, b;` declares labels, which have no type.
-        step->role = PARSE_ROLE_SPECIFIER;
-        frame->flags |= BUSTER_PARSE_FRAME_TYPE_SEEN | BUSTER_PARSE_FRAME_SPECIFIED;
     }
     else if (kind == PARSE_KIND_TYPEDEF)
     {
@@ -3672,10 +3688,29 @@ static void parse_scalar_paren(ParseScalar* parser, uint32_t i, ParseFrame* fram
 {
     const uint8_t mode = frame->mode;
     const uint8_t kind = parser->kinds[i];
-    if (mode == PARSE_MODE_ASM_PAREN && (kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_GOTO))
+    const IdentId name = parser->names[i];
+    const uint8_t qualifier = name == C_NAME_VOLATILE || name == C_NAME_GNU_VOLATILE || name == C_NAME_GNU_VOLATILE2 ? 1 :
+                              name == C_NAME_INLINE || name == C_NAME_GNU_INLINE || name == C_NAME_GNU_INLINE2 ? 2 : kind == PARSE_KIND_GOTO ? 4 : 0;
+    const bool asm_label = mode == PARSE_MODE_ATTRIBUTE_PAREN && parser->kinds[(int64_t)i - 1] == PARSE_KIND_ASM;
+    if (kind != PARSE_KIND_L_PAREN && (mode == PARSE_MODE_ASM_PAREN || asm_label))
     {
-        // asm volatile, asm inline, asm goto.
-        step->role = PARSE_ROLE_LEAF_RIGHT;
+        const bool outside = asm_label || frame->statement == PARSE_ITEM_TOP_LEVEL_ASM;
+        const bool duplicate = (frame->asm_qualifiers & qualifier) != 0;
+        if (qualifier != 0 && (outside || duplicate))
+        {
+            const uint8_t offset = qualifier == 1 ? 0 : qualifier == 2 ? 1 : 2;
+            const ParseMessage message = (outside ? PARSE_MESSAGE_MEANINGLESS_ASM_VOLATILE : PARSE_MESSAGE_DUPLICATE_ASM_VOLATILE) + offset;
+            parse_scalar_error(parser, i, message, BUSTER_PARSE_AT_TOKEN);
+        }
+        else if (qualifier != 0)
+        {
+            step->role = PARSE_ROLE_LEAF_RIGHT;
+            frame->asm_qualifiers |= qualifier;
+        }
+        else
+        {
+            parse_scalar_error(parser, i, outside ? PARSE_MESSAGE_EXPECTED_L_PAREN_AFTER_ASM : PARSE_MESSAGE_EXPECTED_ASM_QUALIFIER, BUSTER_PARSE_AT_TOKEN);
+        }
     }
     else if (kind != PARSE_KIND_L_PAREN && mode == PARSE_MODE_ATTRIBUTE_PAREN && parser->kinds[(int64_t)i - 1] == PARSE_KIND_ATTRIBUTE)
     {
@@ -3772,8 +3807,9 @@ static void parse_scalar_standard_attribute_item(ParseScalar* parser, uint32_t i
     const uint8_t kind = parser->kinds[i];
     const uint8_t mode = frame->mode;
     const bool name = kind == PARSE_KIND_IDENTIFIER || (kind >= PARSE_KIND_TYPE && kind < PARSE_KIND_COUNT);
-    // `::`, which the input splits into two colons, the second without a space before it.
-    const bool scope = kind == PARSE_KIND_COLON && parser->kinds[i + 1] == PARSE_KIND_COLON && (parser->flags[i + 1] & BUSTER_PP_SPACE) == 0;
+    // Only two halves of the same preprocessing token form `::`; macro expansion may juxtapose separate colons.
+    const bool scope = kind == PARSE_KIND_COLON && parser->kinds[i + 1] == PARSE_KIND_COLON &&
+                       (parser->flags[i + 1] & BUSTER_PARSE_COLONCOLON_SECOND) != 0;
     const bool named = mode == PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_NAME || mode == PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_SCOPED_NAME;
     const bool ended = mode == PARSE_MODE_STANDARD_ATTRIBUTE_NAME || named || mode == PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_ARGUMENTS;
     if (mode == PARSE_MODE_STANDARD_ATTRIBUTE_SCOPE)
@@ -3985,6 +4021,32 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
                     else
                     {
                         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_IDENTIFIER, BUSTER_PARSE_AT_TOKEN);
+                    }
+                    break;
+                case PARSE_MODE_LOCAL_LABEL_NAME:
+                    if (kind == PARSE_KIND_IDENTIFIER)
+                    {
+                        step.role = PARSE_ROLE_OPERAND;
+                        frame->mode = PARSE_MODE_LOCAL_LABEL_END;
+                    }
+                    else
+                    {
+                        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_IDENTIFIER, BUSTER_PARSE_AT_TOKEN);
+                    }
+                    break;
+                case PARSE_MODE_LOCAL_LABEL_END:
+                    if (kind == PARSE_KIND_COMMA)
+                    {
+                        step.role = frame->comma_role;
+                        frame->mode = PARSE_MODE_LOCAL_LABEL_NAME;
+                    }
+                    else if (kind == PARSE_KIND_SEMI)
+                    {
+                        parse_scalar_terminator(parser, i, frame, &step);
+                    }
+                    else
+                    {
+                        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION, BUSTER_PARSE_AFTER_PREVIOUS);
                     }
                     break;
                 case PARSE_MODE_JUMP:
@@ -5747,7 +5809,8 @@ static __attribute__((unused)) void parse_statement_contexts(const ParseKernels*
     X(JUMP) \
     X(GOTO) \
     X(DEFAULT) \
-    X(ARROW)
+    X(ARROW) \
+    X(LOCAL_LABEL)
 
 typedef enum ParseClass
 {
@@ -6409,8 +6472,9 @@ static uint8_t parse_check_class(uint8_t role, uint8_t vkind, uint32_t name, boo
     }
     else if (role == PARSE_ROLE_SPECIFIER)
     {
-        const bool storage = vkind == PARSE_KIND_STORAGE || vkind == PARSE_KIND_TYPEDEF || vkind == PARSE_KIND_LABEL;
-        result = vkind == PARSE_KIND_TYPE || vkind == PARSE_VKIND_TYPE_NAME ? PARSE_CLASS_TYPE : vkind == PARSE_KIND_EXTENSION ? PARSE_CLASS_EXTENSION :
+        const bool storage = vkind == PARSE_KIND_STORAGE || vkind == PARSE_KIND_TYPEDEF;
+        result = vkind == PARSE_KIND_LABEL ? PARSE_CLASS_LOCAL_LABEL :
+                 vkind == PARSE_KIND_TYPE || vkind == PARSE_VKIND_TYPE_NAME ? PARSE_CLASS_TYPE : vkind == PARSE_KIND_EXTENSION ? PARSE_CLASS_EXTENSION :
                  storage ? (typed ? PARSE_CLASS_TYPED_STORAGE : PARSE_CLASS_STORAGE) : typed ? PARSE_CLASS_TYPED : PARSE_ROLE_SPECIFIER;
     }
     else if (role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER)
