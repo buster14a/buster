@@ -187,7 +187,15 @@ designs and the compilers already built this way.
   syntax, limitations, example and measurement method are in
   [docs/assembler.md](docs/assembler.md). `.S` uses the shared preprocessor's
   explicit assembly mode, including `-I`, `-D`, `-U` and source line markers.
-- `src/buster/compiler/main.c` is the executable entry point
+- `src/buster/compiler/main.c` is the executable entry point. It includes most
+  of the compiler and all of its tests, and `build.sh` compiles it as eight
+  translation units: `main.c` itself, the driver's unit, and each
+  `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
+  all of `main.c`, so each has the whole file's diagnostics, but emits only its
+  own commands' code: each branch of `main_command` first tests its unit, and
+  clang emits no static function that only other units' branches reach. A new
+  command's branch names its unit. On the 9700X the units take 3.5 to 7.1 s
+  each (46.7 s in all), where `main.c` as one unit took 28.5 s (#270).
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
   `-march=native`, so the machine executing the build determines the host ISA.
   The benchmark is linked into this executable rather than built separately.
@@ -208,10 +216,10 @@ designs and the compilers already built this way.
 - `src/buster/compiler/preprocessor_fuzz.c` provides bounded output comparison
   and the minimizer for the independent preprocessor test harness.
   `preprocessor_fuzz_generate.c` generates cases, `preprocessor_fuzz_clang.c`
-  runs the Clang oracle, and `preprocessor_fuzz_test.c` provides
-  `test-preprocessor-fuzz`; `main.c` includes all four.
-  `preprocessor_fuzz_benchmark.c` provides `benchmark-preprocessor-fuzz`,
-  measuring the external test harness. `docs/preprocessor-fuzz.md` records
+  runs the Clang oracle, `preprocessor_fuzz_test.c` provides
+  `test-preprocessor-fuzz`, and `preprocessor_fuzz_benchmark.c` provides
+  `benchmark-preprocessor-fuzz`, measuring the external test harness; `main.c`
+  includes all five. `docs/preprocessor-fuzz.md` records
   its contract. These names and locations are provisional pending agreement
   with the #117 session; no Buster preprocessor is attached yet.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
