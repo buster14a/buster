@@ -31,7 +31,9 @@ jobs:
   # GitHub-hosted runner so that it doesn't wait for the 9700X. When this job fails, `test` runs. And whether it changes
   # the harnesses of the baselines, the linkers' times and the floors (link_benchmark.c and floors_benchmark.c): they
   # measure other programs and the machine, the same for every pull request, so `test` measures them on pushes to main,
-  # dispatched runs and pull requests that change these harnesses, as when this job is skipped or fails.
+  # dispatched runs and pull requests that change these harnesses, as when this job is skipped or fails. The same for
+  # benchmark-foreign's mold and wild (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the
+  # foreign path's phases.
   changes:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -41,6 +43,7 @@ jobs:
     outputs:
       code: ${{ steps.files.outputs.code }}
       baselines: ${{ steps.files.outputs.baselines }}
+      foreign: ${{ steps.files.outputs.foreign }}
     steps:
       - id: files
         env:
@@ -55,6 +58,7 @@ jobs:
           if [ "$COUNT" -ge 3000 ]; then
               code=true
               baselines=true
+              foreign=true
           else
               gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" \
                   --jq '.[] | .filename, (.previous_filename // empty)' > files
@@ -69,11 +73,18 @@ jobs:
               else
                   baselines=false
               fi
+              if grep -Ex 'src/buster/compiler/foreign_benchmark\.c' files > /dev/null; then
+                  foreign=true
+              else
+                  foreign=false
+              fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "baselines=$baselines" >> "$GITHUB_OUTPUT"
+          echo "foreign=$foreign" >> "$GITHUB_OUTPUT"
           echo "Changes code: $code"
           echo "Changes the baselines' harnesses: $baselines"
+          echo "Changes the foreign inputs' benchmark: $foreign"
 
   test:
     name: Build and execute on Ryzen 7 9700X
@@ -109,8 +120,14 @@ jobs:
           test -x build/compiler
           test "$(find build -type f -executable | wc -l)" -eq 1
 
+      - name: Write clang's predefines for the compiler's flags
+        # For the steps that preprocess the compiler's own translation units: --predefines supplies the macro effects of
+        # flags such as -funsigned-char.
+        run: clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
+
       - name: Execute compiler
-        run: ./build/compiler
+        # The driver, on the compiler's own main.c: preprocessed with clang's predefines for its options, and parsed.
+        run: ./build/compiler -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 
       - name: Run the tests at once
         # Tests don't need the machine to themselves, unlike the benchmarks after them, which run one at a time and
@@ -135,12 +152,26 @@ jobs:
           # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
           # tokens. -target and its triple (clang's default) go to both.
           ./build/compiler test-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          == Test the parser on the repository's translation units against clang
+          # Both paths, which must agree kernel by kernel, and accept each unit build.sh compiles as clang -fsyntax-only
+          # does, but main_unit_*.c, which are main.c again with another BUSTER_UNIT.
+          ./build/compiler test-parser --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h $(sed -n 's/^sources=(\(.*\))$/\1/p' build.sh | tr ' ' '\n' | grep -v main_unit_)
+          == Test the parser's snippets against clang
+          # The snippets, each also checked against clang, the generated inputs and the driver's checks.
+          ./build/compiler test-parser --clang
+          == Test scoped name-resolution kernels
+          ./build/compiler test-bindings
           == Test the static executables with libc
           # Each program bound against the system's static runtime and written as a static executable by 1, 2, 3 and 8
           # lanes and by the writer's exact twins must be the same file, run as cc -static's link of the same object
           # does, and with --cross-check as lld's does, with as many IRELATIVE relocations and the same TLS segment's
           # alignment and init and fini arrays' sizes.
           ./build/compiler test-static --cross-check
+          == Test the foreign inputs
+          # Generated programs' objects split into archives and compiled C and C++ cases, resolved by both paths on 1,
+          # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the
+          # winners, the COMDAT groups and -y's lines with the resolution's.
+          ./build/compiler test-foreign --cross-check
           == Test branch sizing
           # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
           # relaxation of them must give the bytes of the sized records.
@@ -236,8 +267,14 @@ jobs:
           ./build/compiler test-types
           == Test the per-file jobs
           # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams,
-          # and each unit the spellings it gives alone.
+          # -E text and diagnostics, and each unit the spellings it gives alone; and again with the shared table's ids
+          # in another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and
+          # locations, each id spelled the same. Its forms with paths (the translation units, src flat) do the same.
           ./build/compiler test-files
+          == Test the x86 semantics
+          # The effects table is checked by executing every covered form; --cross-check also assembles the chosen forms
+          # with GNU as and compares the bytes.
+          ./build/compiler test-x86-semantics --cross-check
           == Test the lanes
           ./build/compiler test-lanes
           == Test the direct path's executables
@@ -314,6 +351,11 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-branch-sizing
 
+      - name: Benchmark the x86 semantics
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-x86-semantics
+
       - name: Benchmark the lanes
         # It pins each lane to an allowed CPU of its own.
         run: ./build/compiler benchmark-lanes
@@ -352,6 +394,21 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-snapshot
+
+      - name: Benchmark the foreign inputs against mold and wild
+        # --linkers also times mold's and wild's reading and resolving on one thread on the same command lines, which no
+        # pull request changes: it runs where `changes` doesn't rule it out (foreign_benchmark.c's harness).
+        if: needs.changes.outputs.foreign != 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-foreign --linkers
+
+      - name: Benchmark the foreign inputs
+        # Every other pull request's: the resolution's times by the vector path and the exact one.
+        if: needs.changes.outputs.foreign == 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-foreign
 
       - name: Benchmark the whole link against GNU ld, lld, mold and wild
         # Without taskset: it pins its own lane and the linkers' runs on one thread, and the linkers' other runs need
@@ -397,6 +454,11 @@ jobs:
       - name: Benchmark the per-file jobs on the repository's translation units
         # Without taskset: it pins each lane to an allowed CPU of its own.
         run: ./build/compiler benchmark-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+
+      - name: Benchmark the parser on main.c
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 
       - name: Benchmark the C type table
         run: |
