@@ -372,8 +372,9 @@ designs and the compilers already built this way.
   it; `./build/compiler test-refinement` runs them) and `c_refine_benchmark.c`
   provides `benchmark-refinement`.
 - `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
-  unit's token stream from its files' refined tokens, and `./build/compiler -E`
-  (as `clang -E`). `docs/c-preprocessor.md` explains the design, the `clang -E`
+  unit's token stream from its files' refined tokens (C23's `#embed` among its
+  directives), and `./build/compiler -E` (as `clang -E`, with `--embed-dir=`).
+  `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
   `c_preprocessor_fuzz.c` its differential fuzzing (#109; `main.c` includes
@@ -429,6 +430,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
 ./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+./build/compiler benchmark-preprocessor --embed 16777216
 ./build/compiler test-types
 ./build/compiler benchmark-types
 ```
@@ -2021,7 +2023,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 195 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 207 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2032,13 +2034,16 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   - directives and builtins that nest through the main loop's frames;
   - #193's review fixes, line markers among them;
   - each difference from clang that #109's fuzzing found, minimized, and the
-    ones probing around it found.
+    ones probing around it found;
+  - `#embed`: its data, parameters, errors and files, and where `-E` prints it.
 
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
   modification times of their own must give each file's time (in UTC), and
-  `SOURCE_DATE_EPOCH`'s when it is set; the expansion history's checks; and
-  the fuzz batch: its isolation rules checked on small sources (what a case
+  `SOURCE_DATE_EPOCH`'s when it is set; the expansion history's checks; the
+  text of an `#embed`'s data, by `pp_embed_text_vector` and its scalar twin
+  against `snprintf`, for every count to 300 of random bytes and of every value,
+  ending at a `PROT_NONE` page; and the fuzz batch: its isolation rules checked on small sources (what a case
   leaves open makes clang read it alone), with `--clang` its emulation of
   clang's -P printer checked on fixtures of its own, then 1,500 cases of the
   independent harness's generator in each of C17 and C23
@@ -2110,6 +2115,13 @@ them with `clang -dM -E` output (the benchmark leaves this option out of clang's
 command line), as the smoke commands above do for `main.c`. The default 9700X
 job runs that one, pinned to one allowed CPU; like the others, its measurements
 are informational.
+
+`./build/compiler benchmark-preprocessor --embed N` measures instead the text
+`-E` prints for an `#embed`'s N bytes (random, from a fixed seed), by
+`pp_embed_text_vector` and its scalar twin in the printers' pieces, 21 passes
+after a warm-up: medians per input byte, and the text's throughput. The two
+texts must be the same. Run it pinned to one CPU; `docs/c-preprocessor.md` has
+the 9700X's numbers.
 
 ## Type tests
 

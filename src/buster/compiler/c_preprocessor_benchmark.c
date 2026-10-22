@@ -7,6 +7,7 @@
 // vectorized kernels and with their scalar twins, and reports per token what each costs.
 //
 // Usage: build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar] [-E's options] file...
+//        build/compiler benchmark-preprocessor --embed bytes
 //
 // Each pass preprocesses every file once with each implementation in turn, each run from nothing: a new intern table
 // and preprocessor, so that every file it includes is read, lexed, refined and given its directive table, as a
@@ -16,10 +17,11 @@
 // (PPPhase: reading, lexing, refining and directive tables; the rest is the main loop with its directives), and what
 // a run did (PPStatistics). With --clang it also times `clang -E -P` with the same options (but --predefines, which is
 // ours) writing to /dev/null, a process per file, the median of as many runs, for scale. --only runs one
-// implementation (for profiles). Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments
-// are invalid or a run fails.
+// implementation (for profiles). --embed measures the text -E prints for an #embed's bytes instead
+// (pp_benchmark_embed). Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments are invalid
+// or a run fails.
 //
-// Layout: the clock and the counters, the passes, and run_preprocessor_benchmark.
+// Layout: the clock and the counters, the passes, the #embed text (pp_benchmark_embed), and run_preprocessor_benchmark.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -209,12 +211,89 @@ static uint64_t pp_benchmark_clang(char** arguments, int argument_count, char** 
     return result;
 }
 
+// --embed N: the text -E prints for an #embed's N bytes (random, from a fixed seed), by pp_embed_text_vector and by its
+// scalar twin, a printer's piece (BUSTER_PP_EMBED_PRINT_BYTES) at a time into one buffer, as pp_print_embed writes them:
+// after a warm-up, BUSTER_PP_BENCHMARK_PASSES passes that alternate which goes first, and the medians per input byte.
+// The two texts must be the same. Returns the exit status.
+static int pp_benchmark_embed(uint64_t count)
+{
+    uint8_t* bytes = malloc(count + 64);
+    uint8_t* text = malloc(5 * BUSTER_PP_EMBED_PRINT_BYTES + 64);
+    int result = bytes != 0 && text != 0 && count != 0 ? 0 : 1;
+    uint64_t state = 1;
+    for (uint64_t i = 0; result == 0 && i < count; i += 1)
+    {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        bytes[i] = (uint8_t)(state >> 56);
+    }
+    const int cycles_fd = pp_benchmark_open_counter(PERF_COUNT_HW_CPU_CYCLES);
+    const int instructions_fd = pp_benchmark_open_counter(PERF_COUNT_HW_INSTRUCTIONS);
+    static uint64_t samples[2][3][BUSTER_PP_BENCHMARK_PASSES];
+    uint64_t lengths[2] = { 0, 0 };
+    uint64_t digests[2] = { 0, 0 };
+    for (uint32_t pass = 0; result == 0 && pass <= BUSTER_PP_BENCHMARK_PASSES; pass += 1)
+    {
+        for (uint32_t order = 0; order < 2; order += 1)
+        {
+            const uint32_t scalar = (pass + order) & 1;
+            uint64_t length = 0;
+            uint64_t digest = 0;
+            const uint64_t nanoseconds = pp_benchmark_nanoseconds();
+            const uint64_t cycles = pp_benchmark_read_counter(cycles_fd);
+            const uint64_t instructions = pp_benchmark_read_counter(instructions_fd);
+            for (uint64_t done = 0; done < count; done += BUSTER_PP_EMBED_PRINT_BYTES)
+            {
+                const uint64_t step = count - done < BUSTER_PP_EMBED_PRINT_BYTES ? count - done : BUSTER_PP_EMBED_PRINT_BYTES;
+                const uint64_t written = scalar ? pp_embed_text_scalar(bytes + done, step, done != 0, text) : pp_embed_text_vector(bytes + done, step, done != 0, text);
+                // A use of the text the compiler can't drop: its length, and a word of it.
+                length += written;
+                uint64_t word;
+                memcpy(&word, text + written / 2, sizeof(word));
+                digest = digest * 31 + word;
+            }
+            const uint64_t elapsed[3] = {
+                pp_benchmark_nanoseconds() - nanoseconds,
+                pp_benchmark_read_counter(cycles_fd) - cycles,
+                pp_benchmark_read_counter(instructions_fd) - instructions,
+            };
+            for (uint32_t k = 0; pass != 0 && k < 3; k += 1)
+            {
+                samples[scalar][k][pass - 1] = elapsed[k];
+            }
+            lengths[scalar] = length;
+            digests[scalar] = digest;
+        }
+        if (lengths[0] != lengths[1] || digests[0] != digests[1])
+        {
+            fprintf(stderr, "embed text: the vector kernel's text differs from the scalar one's\n");
+            result = 1;
+        }
+    }
+    for (uint32_t scalar = 0; result == 0 && scalar < 2; scalar += 1)
+    {
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            pp_benchmark_sort(samples[scalar][k], BUSTER_PP_BENCHMARK_PASSES);
+        }
+        const double nanoseconds = (double)samples[scalar][0][BUSTER_PP_BENCHMARK_PASSES / 2];
+        const double cycles = (double)samples[scalar][1][BUSTER_PP_BENCHMARK_PASSES / 2];
+        const double instructions = (double)samples[scalar][2][BUSTER_PP_BENCHMARK_PASSES / 2];
+        printf("embed text, %lu bytes, %s: %.3f ns, %.3f cycles, %.2f instructions per byte (IPC %.2f), %.2f GB/s of text\n", (unsigned long)count,
+               scalar ? "scalar" : "vector", nanoseconds / (double)count, cycles / (double)count, instructions / (double)count, cycles != 0 ? instructions / cycles : 0.0,
+               nanoseconds != 0 ? (double)lengths[scalar] / nanoseconds : 0.0);
+    }
+    free(bytes);
+    free(text);
+    return result;
+}
+
 int run_preprocessor_benchmark(int argc, char** argv)
 {
     int result = 1;
     bool with_clang = false;
     bool history_cost = false;
     uint32_t only = 3;
+    uint64_t embed = 0;
     char** passed = calloc((size_t)argc + 1, sizeof(char*));
     char** clang_passed = calloc((size_t)argc + 1, sizeof(char*));
     char** files = calloc((size_t)argc + 1, sizeof(char*));
@@ -236,6 +315,11 @@ int run_preprocessor_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--history-cost") == 0)
         {
             history_cost = true;
+        }
+        else if (strcmp(argument, "--embed") == 0 && i + 1 < argc)
+        {
+            i += 1;
+            embed = strtoull(argv[i], 0, 10);
         }
         else if (strcmp(argument, "--only") == 0 && i + 1 < argc)
         {
@@ -275,9 +359,13 @@ int run_preprocessor_benchmark(int argc, char** argv)
         memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
         with_input[passed_count] = files[0];
     }
-    if (file_count == 0 || with_input == 0 || only == 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
+    if (embed != 0)
     {
-        fprintf(stderr, "usage: %s [--clang] [--history-cost] [--only vectorized|scalar] [-E's options] file...\n", argv[0]);
+        result = pp_benchmark_embed(embed);
+    }
+    else if (file_count == 0 || with_input == 0 || only == 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
+    {
+        fprintf(stderr, "usage: %s [--clang] [--history-cost] [--only vectorized|scalar] [-E's options] file... | --embed bytes\n", argv[0]);
     }
     else
     {
