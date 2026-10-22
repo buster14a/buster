@@ -20,7 +20,8 @@
 // This runs once per translation unit, on a few dozen options and two-word feature sets: it has no vector path.
 // docs/c-preprocessor.md ("The predefined macros") has its cost.
 //
-// main.c and c_preprocessor_benchmark.c include this file after c_intern.c (for CLanguage) and before c_preprocessor.c.
+// main.c, c_preprocessor_benchmark.c and c_files_benchmark.c include this file after c_intern.c (for CLanguage) and
+// before c_preprocessor.c.
 // Layout:
 //   - PredefinesFeatures and the generated tables: predefines_features (each feature's flag, closures and macros),
 //     predefines_cpus (each -march CPU's macro name and features) and predefines_tunes (the -mtune names).

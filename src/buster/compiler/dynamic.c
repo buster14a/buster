@@ -7,7 +7,8 @@
 //   - the program interpreter that GCC's driver names for x86-64 glibc (GLIBC_DYNAMIC_LINKER64 in
 //     gcc/config/i386/linux64.h), which it passes to the linker with -dynamic-linker;
 //   - libc.so.6's soname and its version definitions, but the one of its own name (VER_FLG_BASE), and among them
-//     GLIBC_ABI_DT_RELR, with which the executable's RELATIVE relocations are RELR's;
+//     GLIBC_ABI_DT_RELR, with which the executable's RELATIVE relocations are RELR's; then the loader's, which libc.so's
+//     script names as needed (ld-linux-x86-64.so.2), whose version indices follow libc.so.6's (runtime.c);
 //   - Scrt1.o's .note.ABI-tag;
 //   - crti.o's _init and _fini, as the link's symbols of those names, for DT_INIT and DT_FINI, as GNU ld and lld find
 //     them by name;
@@ -76,31 +77,42 @@ static __attribute__((unused)) void dynamic_static_pie_inputs(ExecutableDynamic*
     };
 }
 
-// Fills `dynamic` for a link that `bind` bound against `runtime`, its versions pushed from `arena`. False if the arena
-// has no room for them.
+// Fills `dynamic` for a link that `bind` bound against `runtime`, its versions pushed from `arena`: libc.so.6's, then
+// the loader's. False if the arena has no room for them.
 static __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, const Runtime* runtime, const Bind* bind, Arena* arena)
 {
-    const ImportLibrary* libc = &runtime->libc;
-    ExecutableVersion* versions = BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableVersion, (uint64_t)libc->version_count + 1);
+    const ImportLibrary* libraries[BUSTER_EXECUTABLE_LIBRARIES] = {
+        &runtime->libc,
+        &runtime->loader,
+    };
+    ExecutableVersion* versions = BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableVersion, (uint64_t)runtime->libc.version_count + runtime->loader.version_count + 1);
     uint32_t count = 0;
     uint16_t relr_version = 0;
-    for (uint32_t v = 0; versions != 0 && v < libc->version_count; v += 1)
+    for (uint32_t l = 0; versions != 0 && l < BUSTER_EXECUTABLE_LIBRARIES; l += 1)
     {
-        const ImportVersion* version = &libc->versions[v];
-        versions[count] = (ExecutableVersion){
-            .name = version->name,
-            .hash = version->hash,
-            .index = version->index,
-        };
-        count += version->base ? 0 : 1;
-        relr_version = !version->base && import_equal(version->name, BUSTER_DYNAMIC_RELR_VERSION) ? version->index : relr_version;
+        for (uint32_t v = 0; v < libraries[l]->version_count; v += 1)
+        {
+            const ImportVersion* version = &libraries[l]->versions[v];
+            versions[count] = (ExecutableVersion){
+                .name = version->name,
+                .hash = version->hash,
+                .index = version->index,
+                .library = (uint8_t)l,
+            };
+            count += version->base ? 0 : 1;
+            // libc.so.6's GLIBC_ABI_DT_RELR.
+            relr_version = l == 0 && !version->base && import_equal(version->name, BUSTER_DYNAMIC_RELR_VERSION) ? version->index : relr_version;
+        }
     }
     *dynamic = (ExecutableDynamic){
         .interpreter = {
             .pointer = (char*)dynamic_interpreter,
             .length = sizeof(dynamic_interpreter) - 1,
         },
-        .needed = libc->soname,
+        .needed = {
+            runtime->libc.soname,
+            runtime->loader.soname,
+        },
         .versions = versions,
         .version_count = count,
         .note = runtime->abi_note,

@@ -295,6 +295,12 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/x86_target_test.c"
 int run_preprocessor_benchmark(int argc, char** argv);
 
+// The per-file jobs on lanes and the run-ahead that fill the preprocessor's file cache (c_files.c), and their tests, for
+// the test-files command. Its benchmark is another translation unit.
+#include "buster/compiler/c_files.c"
+#include "buster/compiler/c_files_test.c"
+int run_files_benchmark(int argc, char** argv);
+
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test
 // programs generated in it, and their tests, for the test-link command.
 #include "buster/compiler/link.c"
@@ -533,6 +539,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-branch-sizing") == 0)
     {
         result = run_branch_sizing_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-files") == 0)
+    {
+        result = run_files_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-files") == 0)
+    {
+        result = run_files_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-types") == 0)
     {
