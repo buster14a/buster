@@ -305,7 +305,14 @@ input, every bit of the context too.
 - each lane's effects record comes from a scalar lookup of its index and a
   16-byte load into its part of a ZMM register;
 - each lane computes what `x86_instruction_effects_scalar` does, with masks for
-  its branches.
+  its branches;
+- a legacy SSE form's read of the vector registers it writes is `write &
+  vectors` in the lanes of `BUSTER_X86_EFFECT_KEEP_UPPER`, the record's top bit,
+  which one arithmetic shift (`vpsraq`) spreads over the lane, and it joins the
+  reads at the end, with an uncovered form's everything. The loop has many
+  mask registers in flight already: a `vptestmq` for the property, or a join
+  inside the chain of masked ORs that builds the read set, measured slower
+  (below).
 
 Gathers would cost more here: a `vpgatherdd` of 16 is 64 µops on Zen 5
 (`docs/coding-style.md`). The records and outputs are read and written with
@@ -489,6 +496,25 @@ Choice is 15 times the scalar twin's speed and effects 8.5 times; -O2's shape
 measures the same. Both loops are light enough that the power cap hardly takes
 them: choice is 3% slower after the scalar twin, effects unchanged (#199's
 method).
+
+**The upper-lane read** (the read of the vector registers a legacy SSE form
+writes, from #239's review) costs about 2% of the effects loop. Cycles per
+record back to back (`--only effects-avx512`), medians of runs alternating with
+the loop without it, but for the two marked, which ran on their own:
+
+| How the loop takes it | -O0's shape | -O2's shape | Instructions | IPC |
+| --- | --- | --- | --- | --- |
+| not at all (before the fix) | 5.75 | 5.76 | 31.00 | 5.39 |
+| a mask per role in the operands' masked ORs (on its own) | 6.28 | 6.34 | 34.00 | 5.42 |
+| a masked `vpternlogq` from a `vptestmq` after the operands (on its own) | 6.13 | 6.18 | 31.50 | 5.14 |
+| a zero-masked `vpandq`, joined with the memory operand's registers | 5.97 | 6.03 | 31.25 | 5.23 |
+| the same, joined at the end | 5.91 | 5.93 | 31.38 | 5.31 |
+| a shift of the property's bit 2 to a lane mask, at the end | 5.86 | 5.93 | 31.50 | 5.37 |
+| `KEEP_UPPER` as the record's top bit, one shift, at the end | 5.86 | 5.86 | 31.38 | 5.36 |
+
+The instructions hardly change. What costs is a `vptestmq`, one more mask
+register in a loop that has many in flight, and a join inside the read set's
+chain of masked ORs, which run at 5.4 instructions per cycle.
 
 The chosen forms take 4.74 bytes per instruction on the request stream,
 against 6.39 for a selector that always used the imm32. 1.8% of the requests

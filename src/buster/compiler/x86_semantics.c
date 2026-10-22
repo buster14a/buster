@@ -123,7 +123,8 @@
 //   - ZERO_IDIOM: with the same register in reg and rm, the result is zero whatever the register held, so it reads
 //     nothing of what it writes (xor, sub and their vector kin; for a general register only where the write leaves no
 //     old bits). A legacy SSE one keeps its register's bits above 127 (KEEP_UPPER), which its resolved effects read.
-//   - KEEP_UPPER: a legacy SSE form: a vector register it writes keeps its bits above 127.
+//   - KEEP_UPPER: a legacy SSE form: a vector register it writes keeps its bits above 127. It is the top bit, bit 63 of
+//     the record's first 8 bytes, which x86_instructions_effects spreads over a lane with one arithmetic shift.
 //   - MXCSR: reads MXCSR's controls (rounding, DAZ and FTZ).
 //   - FP_EXCEPTION: may raise floating-point exceptions (setting MXCSR's status flags, or trapping if unmasked).
 //   - COUNT: a shift or rotate by a count (CL, or an immediate that x86_instruction_flags reads): a count of zero (after
@@ -134,12 +135,12 @@
 //     zeroes the upper half either way, and cmpxchg's RAX keeps all of its bits when it isn't written.
 #define BUSTER_X86_EFFECT_FAULT 0x0001
 #define BUSTER_X86_EFFECT_ZERO_IDIOM 0x0002
-#define BUSTER_X86_EFFECT_KEEP_UPPER 0x0004
 #define BUSTER_X86_EFFECT_MXCSR 0x0008
 #define BUSTER_X86_EFFECT_FP_EXCEPTION 0x0010
 #define BUSTER_X86_EFFECT_COUNT 0x0020
 #define BUSTER_X86_EFFECT_ZERO_SOURCE 0x0040
 #define BUSTER_X86_EFFECT_CONDITIONAL 0x0080
+#define BUSTER_X86_EFFECT_KEEP_UPPER 0x8000
 
 // How the form's immediate becomes a value (X86Effects.kinds's low nibble; NONE without an immediate):
 //   - VALUE: an integer operand: the field's bytes sign-extended to the form's width (an imm8 in add rax, imm8 is -128
@@ -940,10 +941,10 @@ static __attribute__((unused)) void x86_instructions_effects(const X86Instructio
         write = _mm512_mask_or_epi64(write, reg_writes, write, reg_resource);
         read = _mm512_mask_or_epi64(read, rm_reads & ~memory & ~idiom, read, rm_resource);
         write = _mm512_mask_or_epi64(write, rm_writes & ~memory, write, rm_resource);
-        // A legacy SSE form reads every vector register it writes (which keeps its bits above 127), a zero idiom's too.
-        // That's write & vectors, joined to the reads with the memory operand's registers below, off read's chain.
-        const __mmask8 keeps_upper = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_KEEP_UPPER));
-        const __m512i kept = _mm512_maskz_and_epi64(keeps_upper, write, _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_VECTORS));
+        // A legacy SSE form reads every vector register it writes (which keeps its bits above 127), a zero idiom's too:
+        // write & vectors in the lanes of KEEP_UPPER, the record's top bit, spread over the lane by an arithmetic shift
+        // (0x80, all three). A mask register from vptestmq measured slower on the 9700X. It joins the reads at the end.
+        const __m512i kept = _mm512_ternarylogic_epi64(write, _mm512_srai_epi64(facts, 63), _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_VECTORS), 0x80);
 
         // A memory operand: its base and index when it's accessed or its address taken, and the memory read or written.
         const __mmask8 address = _mm512_test_epi64_mask(memory_effects, _mm512_set1_epi64(BUSTER_X86_MEMORY_EFFECT_ADDRESS));
@@ -952,8 +953,7 @@ static __attribute__((unused)) void x86_instructions_effects(const X86Instructio
                                                               _mm512_and_si512(rm, _mm512_set1_epi64(15)));
         const __m512i index_resource = _mm512_maskz_sllv_epi64(_mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_INDEX)), one,
                                                                _mm512_and_si512(index, _mm512_set1_epi64(15)));
-        // read | address registers | kept: 0xfe.
-        read = _mm512_ternarylogic_epi64(read, _mm512_maskz_or_epi64(accessed, base_resource, index_resource), kept, 0xfe);
+        read = _mm512_mask_or_epi64(read, accessed, read, _mm512_or_si512(base_resource, index_resource));
         const __m512i memory_resource = _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_MEMORY);
         read = _mm512_mask_or_epi64(read, memory & _mm512_test_epi64_mask(role_rm, read_bit) & ~address, read, memory_resource);
         write = _mm512_mask_or_epi64(write, memory & rm_writes, write, memory_resource);
@@ -967,7 +967,7 @@ static __attribute__((unused)) void x86_instructions_effects(const X86Instructio
         write = _mm512_mask_or_epi64(write, _mm512_test_epi64_mask(control, control), write, _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_CONTROL));
         write = _mm512_mask_or_epi64(write, _mm512_cmpeq_epi64_mask(control, _mm512_set1_epi64(BUSTER_X86_CONTROL_CALL)), write,
                                      _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_CALL));
-        read = _mm512_mask_mov_epi64(_mm512_set1_epi64(-1), known, read);
+        read = _mm512_mask_or_epi64(_mm512_set1_epi64(-1), known, read, kept);
         write = _mm512_mask_mov_epi64(_mm512_set1_epi64(-1), known, write);
         _mm512_mask_storeu_epi64(reads + first, live, read);
         _mm512_mask_storeu_epi64(writes + first, live, write);
