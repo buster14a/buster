@@ -1375,10 +1375,10 @@ static bool abi_test_fixtures(void)
 // members of no size (GCC ignores them where clang makes a wide record or offset 16 MEMORY), misaligned members (GCC
 // checks a member's scalars against their sizes, and no _BitInt, where clang checks each member's alignment), so no
 // packing and no alignment a typedef lowers; and what GCC lays out otherwise: arrays whose element's size isn't a
-// multiple of its alignment (GCC refuses them), bit-fields of aligned typedefs, abi_test_gcc_enum_differs's enums, and
-// aligned typedefs whose declaration spells a vector: GCC applies a declarator's attributes before the vector_size of
-// its specifiers, so it drops the aligned of `typedef long __attribute__((vector_size(8))) *T
-// __attribute__((aligned(32)))`.
+// multiple of its alignment (GCC refuses them), bit-fields of aligned typedefs, _BitInt(128) bit-fields of all 128 bits
+// (GCC aligns them to 16 at an offset 16 divides), abi_test_gcc_enum_differs's enums, and aligned typedefs whose
+// declaration spells a vector: GCC applies a declarator's attributes before the vector_size of its specifiers, so it
+// drops the aligned of `typedef long __attribute__((vector_size(8))) *T __attribute__((aligned(32)))`.
 
 #define BUSTER_ABI_TEST_MEMBERS 8
 
@@ -1535,7 +1535,11 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
         // GCC classifies a union's bit-field by its type, not its width (a zero-width one too): none in its worlds.
         if (pick < 3 && type_test_bit_field_type(table, type) && (type_qualifiers(type) & BUSTER_TYPE_CONST) == 0 && !(world->gcc && (aligned || is_union)))
         {
-            width = (uint32_t)type_test_below(random, type_integer_width(table, type) + 1);
+            // GCC gives a _BitInt(128) bit-field of all 128 bits at an offset 16 divides TImode's alignment, 16, which
+            // raises its record's (clang keeps the type's, 8): none in its worlds.
+            const uint64_t bits = type_integer_width(table, type);
+            const bool full_bit_int = world->gcc && type_kind(table, type) == BUSTER_TYPE_KIND_BIT_INT && bits == 128;
+            width = (uint32_t)type_test_below(random, full_bit_int ? bits : bits + 1);
         }
         else if (pick < 5)
         {
@@ -2073,8 +2077,8 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
 // Each value's bytes are a valid representation of its type (bool 0 or 1, _BitInts extended, long doubles normal),
 // and a mask says which of its bits mean something (not padding, nor a _BitInt's bits past its width). The records
 // pass through x86_encode, link_add_code_fixups and the object writer, and the C compiler's driver links the two
-// objects. It runs at each target vector width (no AVX, -mavx2, -mavx512f), with clang (every type) and with GCC (the
-// types GCC passes as clang does).
+// objects. It runs at each target vector width (-march=x86-64, x86-64-v3 and x86-64-v4), with clang (every type) and with
+// GCC (the types GCC passes as clang does).
 
 #define BUSTER_ABI_TEST_SLOT 64
 #define BUSTER_ABI_TEST_FILL_ITEMS 4096
@@ -2370,11 +2374,15 @@ static bool abi_test_single_vector(const TypeTable* table, TypeId type)
 
 // Whether GCC passes an unnamed argument otherwise than clang: a WIDE aggregate, as a union of vectors as wide as a
 // vector register, to which GCC gives an integer mode: its caller passes it in a register and its va_arg reads 32 or 64
-// bytes from the register save area, past the 16 a register has there (GCC 16 crashes calling itself so).
-static bool abi_test_gcc_unnamed_differs(const AbiTable* abi, TypeId type)
+// bytes from the register save area, past the 16 a register has there (GCC 16 crashes calling itself so). And an
+// aligned typedef that raises its type's alignment to 16 or more: both place it by its type's, but GCC 16's va_arg
+// copies it from the overflow area with an aligned load (movdqa), which faults at an offset 16 doesn't divide.
+static bool abi_test_gcc_unnamed_differs(const AbiTable* abi, const TypeTable* table, TypeId type)
 {
     const uint32_t pass = abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT];
-    return (pass & BUSTER_ABI_PASS_WIDE) != 0 && (pass & BUSTER_ABI_PASS_AGGREGATE) != 0;
+    const uint32_t alignment_log2 = type_alignment_log2(table, type);
+    const bool raised = alignment_log2 >= 4 && alignment_log2 > type_alignment_log2(table, type_strip_aligned(table, type));
+    return ((pass & BUSTER_ABI_PASS_WIDE) != 0 && (pass & BUSTER_ABI_PASS_AGGREGATE) != 0) || raised;
 }
 
 static uint64_t abi_test_round(uint64_t value, uint64_t alignment)
@@ -3419,7 +3427,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 {
                     types[type_count] = type;
                     type_count += 1;
-                    if (abi_test_unnamed_ok(&abi, table, type, frames) && !(gcc && abi_test_gcc_unnamed_differs(&abi, type)))
+                    if (abi_test_unnamed_ok(&abi, table, type, frames) && !(gcc && abi_test_gcc_unnamed_differs(&abi, table, type)))
                     {
                         unnamed_types[unnamed_count] = type;
                         unnamed_count += 1;
