@@ -100,7 +100,8 @@ old `buster14a/buster` links now address this compiler.
 Local checkout directories, `~/buster-fast-bench/`, the shared host lock,
 `~/llm-memory/projects/buster-fast/` and its memory symlinks retain their existing
 names. The repository-local `buster-fast-9700x` concurrency key is also retained.
-These are operational resources, not canonical repository URLs; do not rename
+Queues use that prefix per PR/ref; the runner hooks serialize every CI job with
+the shared host lock. These are operational resources, not canonical repository URLs; do not rename
 them by replacing text. Source paths, executable names and object-file metadata
 are unchanged by the repository rename.
 
@@ -582,6 +583,32 @@ selects C++ source/header extensions. The default 9700X job runs
 `benchmark-lexer src` after the tests, pinned to one allowed CPU. Measurements
 are informational: correctness failures fail CI, but throughput values are not
 yet compared against a performance baseline. Keep just one compiler executable.
+
+## x86-64 disassembler
+
+`src/buster/compiler/x86_64_disassembler.c` decodes bounded raw-byte slices into
+semantic records with actual encoded lengths. Its tests and raw-binary command
+adapter are included by `main.c`; the benchmark is a separate translation unit
+in the same executable. [The disassembler notes](docs/x86-64-disassembler.md)
+define the supported 64-bit catalogue subset and prefix restrictions.
+
+On the approved host, with the usual per-run lock:
+
+```sh
+./build/compiler test-x86-disassembler --objdump
+./build/compiler disassemble input.text
+./build/compiler benchmark-x86-disassembler
+./build/compiler benchmark-x86-disassembler --vector --after-scalar 200
+```
+
+The independent GNU tools check instruction boundaries and reassembled operands.
+Keep hand-written semantic fixtures and guarded tails: scalar/vector equality
+and re-encoding through the shared catalogue do not constitute an independent
+oracle. Benchmarks separate decode from decode plus formatting and include
+`--file raw.text` and `--only scalar|compact|avx512|batched`. `batched` is the
+default API path; `compact` isolates validation specialization with scalar
+matching. `--iterations N` and `--after-scalar MS` distinguish short bursts
+after scalar work from sustained runs.
 
 ## x86-64 encoder tests
 
@@ -1978,10 +2005,19 @@ the others its measurements are informational.
 
 ## Preprocessor tests
 
+`./build/compiler test-preprocessor --compare-clang [--clang PATH] [options]
+corpus...` is #125's real-source oracle. It accepts directories or
+`--files-from LIST --root DIR`, compares lexical kinds, spellings and locations,
+and reports every Clang rejection as an explicit skip. Process/configuration
+failures fail the run. `--report NEW.tsv` records every file's result and skip
+reason. `c_preprocessor_oracle.c` implements this interface;
+[the frozen oracle guide](docs/preprocessor-oracle.md) records the pinned
+headers/corpora, manifest identities, CI subset and on-demand commands.
+
 `./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
 [options] [file...]`, or `test-preprocessor --tables path...`:
 
-- without files, the 88 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 92 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The

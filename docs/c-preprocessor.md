@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 88 | |
+| The built-in cases (`pp_test_cases`) | 92 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -911,9 +911,14 @@ the mispredictions it saves.
 
 ## The oracle
 
+The real-source command is `test-preprocessor --compare-clang [--clang PATH]`.
+[Frozen preprocessor oracle](preprocessor-oracle.md) records its token-kind
+and location checks, explicit skip/error accounting, pinned input manifests,
+full-corpus reproduction and frozen CI subset.
+
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 88 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 92 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -1041,7 +1046,7 @@ the mispredictions it saves.
 In both, the two printers must give the same bytes, with line markers and
 without, and the text must lex back into the stream's spellings.
 
-So "token-identical" means the same sequence of token spellings. Whitespace
+So "token-identical" means the same sequence of lexical kinds and spellings. Whitespace
 and line breaks may differ: clang's `-E` spacing heuristics aren't part of the
 contract.
 
@@ -1062,10 +1067,10 @@ The configurations behind the results table:
 ../../build/compiler test-preprocessor --clang -std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX *.c
 ```
 
-The C library corpus (Zig 0.14.1's `lib/libc`) is a collection of headers and
-sources for many targets without their build configurations, so it isn't a set
-of translation units to preprocess. Refinement checks it file by file
-(`docs/c-refinement.md`), and musl stands for it here.
+The C library corpus (Zig 0.14.1's `lib/libc`) contains headers and sources for
+many targets without their build configurations. The corpus oracle tries each
+C/header input alone, compares every one Clang accepts and records every
+rejection's reason. Musl is also checked under its upstream build configuration.
 
 ## Where the time goes
 
@@ -1138,8 +1143,6 @@ cleared once and reused.
   `-mtune=`) are rejected. Other options such as `-funsigned-char` still need
   `--predefines` for their macro effects. The target-builtin query table remains
   a bounded subset; see [the target contract](x86-target.md).
-- The oracle uses the installed `/usr/include`, not the pinned copy of the
-  headers that #125's decision asks for (with its hashed manifest).
 - The feature tests (`__has_attribute` and the others) always answer from
   clang's table, which #117 and #125 keep for the oracle's mode. Outside it, they
   are to answer what the compiler implements (#123, #148).
