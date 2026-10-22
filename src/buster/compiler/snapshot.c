@@ -9,11 +9,11 @@
 // own. Each kind's file holds that kind, which the loader checks.
 //
 // The file holds the runtime's records as this executable lays them out in memory, each region at a multiple of 64
-// bytes: a header, then the directory, which every link reads (from the second page: the probes, libc.so.6's versions,
-// the members, the strings, the pieces, the global names with their index and filter, libc.so.6's exports, the pieces'
-// references and COMDAT groups), then the pieces' records, of which a link reads only those of the pieces it joins (the
-// link's columns, the bindings and the symbols' global names, and the data: the names run, then each piece's atoms'
-// bytes). A piece is a crt object or a member, as Runtime.pieces has them.
+// bytes: a header, then the directory, which every link reads (from the second page: the probes, libc.so.6's and the
+// loader's versions, the members, the strings, the pieces, the global names with their index and filter, the two
+// libraries' exports, the pieces' references and COMDAT groups), then the pieces' records, of which a link reads only
+// those of the pieces it joins (the link's columns, the bindings and the symbols' global names, and the data: the names
+// run, then each piece's atoms' bytes). A piece is a crt object or a member, as Runtime.pieces has them.
 //   - Validation: the file must have this format's magic, version and header, and the size its header gives; the
 //     directory's hash must be its bytes' (executable.c's chunk hash, over the file up to the pieces' records, with the
 //     hash's field as zeros); this very executable must have written it (the identity of /proc/self/exe: st_dev,
@@ -26,11 +26,11 @@
 //     rebuilt rather than trusted, and none needs an fsync before its rename: a damaged directory makes the file
 //     invalid, and a damaged piece fails the link that joins it (BIND_ERROR_SNAPSHOT), whose caller discards the file
 //     (snapshot_discard) and opens the runtime again.
-//   - Loading: the file is mapped privately, and the runtime's columns point into the mapping. The probes and libc.so.6's
-//     versions hold offsets into the strings plus 1, 0 for none, and are rebased where they are, which copies their
-//     page; the members' names and the link's names' and atoms' bytes hold such offsets too, into the strings and the
-//     data, which the runtime's deltas make pointers where they are read (runtime_name_bytes, runtime_atom_bytes and
-//     runtime_member_name), so that loading writes none of their pages. The rest is only read.
+//   - Loading: the file is mapped privately, and the runtime's columns point into the mapping. The probes and the
+//     libraries' versions hold offsets into the strings plus 1, 0 for none, and are rebased where they are, which
+//     copies their page; the members' names and the link's names' and atoms' bytes hold such offsets too, into the
+//     strings and the data, which the runtime's deltas make pointers where they are read (runtime_name_bytes,
+//     runtime_atom_bytes and runtime_member_name), so that loading writes none of their pages. The rest is only read.
 //   - Writing: into a new file beside the snapshot, under a random name, then renamed over it: a process that has the
 //     old one mapped keeps it whole, and two compilers that rebuild it at once write the same bytes, the last rename
 //     winning.
@@ -117,7 +117,7 @@ static __attribute__((unused)) bool snapshot_discard(const char* directory, Runt
 // The file
 
 #define BUSTER_SNAPSHOT_MAGIC 0x504e535254535542ull
-#define BUSTER_SNAPSHOT_VERSION 4
+#define BUSTER_SNAPSHOT_VERSION 5
 // Each kind's file: a dynamic PIE's runtime's, a static executable's and a static PIE's.
 #define BUSTER_SNAPSHOT_NAME "runtime.snapshot"
 #define BUSTER_SNAPSHOT_STATIC_NAME "runtime-static.snapshot"
@@ -146,6 +146,7 @@ typedef enum SnapshotPath
     SNAPSHOT_PATH_ARCHIVES,
     SNAPSHOT_PATH_LOADER = SNAPSHOT_PATH_ARCHIVES + BUSTER_RUNTIME_ARCHIVES,
     SNAPSHOT_PATH_SONAME,
+    SNAPSHOT_PATH_LOADER_SONAME,
     SNAPSHOT_PATH_ABI_NOTE,
     SNAPSHOT_PATHS,
 } SnapshotPath;
@@ -159,6 +160,7 @@ typedef enum SnapshotRegion
 {
     SNAPSHOT_REGION_PROBES,
     SNAPSHOT_REGION_VERSIONS,
+    SNAPSHOT_REGION_LOADER_VERSIONS,
     SNAPSHOT_REGION_MEMBERS,
     SNAPSHOT_REGION_STRINGS,
     SNAPSHOT_REGION_PIECES,
@@ -178,6 +180,8 @@ typedef enum SnapshotRegion
     SNAPSHOT_REGION_FILTER,
     SNAPSHOT_REGION_EXPORT_VERSION,
     SNAPSHOT_REGION_EXPORT_FLAGS,
+    SNAPSHOT_REGION_LOADER_EXPORT_VERSION,
+    SNAPSHOT_REGION_LOADER_EXPORT_FLAGS,
     SNAPSHOT_REGION_REFERENCE_BEGIN,
     SNAPSHOT_REGION_REFERENCES,
     SNAPSHOT_REGION_REFERENCE_MEMBERS,
@@ -246,7 +250,9 @@ struct SnapshotCounts
     uint32_t archives;
     uint32_t first_members[BUSTER_RUNTIME_ARCHIVES];
     uint32_t probes;
+    // libc.so.6's versions, and the loader's.
     uint32_t versions;
+    uint32_t loader_versions;
     uint32_t members;
     // Each of the link's tables, record 0 among them.
     uint32_t names;
@@ -264,7 +270,9 @@ struct SnapshotCounts
     uint32_t globals;
     uint32_t bucket_bits;
     uint32_t filter_bits;
+    // libc.so.6's exports, and the loader's.
     uint32_t exports;
+    uint32_t loader_exports;
     uint32_t member_unit;
     uint64_t names_run;
     uint64_t names_run_bytes;
@@ -313,6 +321,7 @@ static void snapshot_columns(Runtime* runtime, const SnapshotCounts* counts, Sna
     const uint64_t filter = counts->filter_bits < 32 ? (uint64_t)1 << counts->filter_bits : 0;
     columns[SNAPSHOT_REGION_PROBES] = (SnapshotColumn){ (void**)&runtime->probes, sizeof(RuntimeProbe), counts->probes };
     columns[SNAPSHOT_REGION_VERSIONS] = (SnapshotColumn){ (void**)&runtime->libc.versions, sizeof(ImportVersion), counts->versions };
+    columns[SNAPSHOT_REGION_LOADER_VERSIONS] = (SnapshotColumn){ (void**)&runtime->loader.versions, sizeof(ImportVersion), counts->loader_versions };
     columns[SNAPSHOT_REGION_MEMBERS] = (SnapshotColumn){ (void**)&runtime->members, sizeof(ImportMember), counts->members };
     columns[SNAPSHOT_REGION_STRINGS] = (SnapshotColumn){ 0, 1, 0 };
     columns[SNAPSHOT_REGION_PIECES] = (SnapshotColumn){ (void**)&runtime->pieces, sizeof(RuntimePiece), counts->pieces };
@@ -332,6 +341,9 @@ static void snapshot_columns(Runtime* runtime, const SnapshotCounts* counts, Sna
     columns[SNAPSHOT_REGION_FILTER] = (SnapshotColumn){ (void**)&names->filter, sizeof(*names->filter), filter };
     columns[SNAPSHOT_REGION_EXPORT_VERSION] = (SnapshotColumn){ (void**)&runtime->libc.exports.version, sizeof(*runtime->libc.exports.version), counts->exports };
     columns[SNAPSHOT_REGION_EXPORT_FLAGS] = (SnapshotColumn){ (void**)&runtime->libc.exports.flags, sizeof(*runtime->libc.exports.flags), counts->exports };
+    columns[SNAPSHOT_REGION_LOADER_EXPORT_VERSION] =
+        (SnapshotColumn){ (void**)&runtime->loader.exports.version, sizeof(*runtime->loader.exports.version), counts->loader_exports };
+    columns[SNAPSHOT_REGION_LOADER_EXPORT_FLAGS] = (SnapshotColumn){ (void**)&runtime->loader.exports.flags, sizeof(*runtime->loader.exports.flags), counts->loader_exports };
     columns[SNAPSHOT_REGION_REFERENCE_BEGIN] = (SnapshotColumn){ (void**)&runtime->reference_begin, sizeof(*runtime->reference_begin), (uint64_t)counts->pieces + 1 };
     columns[SNAPSHOT_REGION_REFERENCES] = (SnapshotColumn){ (void**)&runtime->references, sizeof(*runtime->references), counts->references };
     columns[SNAPSHOT_REGION_REFERENCE_MEMBERS] = (SnapshotColumn){ (void**)&runtime->reference_members, sizeof(*runtime->reference_members), counts->references };
@@ -388,6 +400,7 @@ static void snapshot_paths(Runtime* runtime, String8** paths)
     }
     paths[SNAPSHOT_PATH_LOADER] = &runtime->loader_path;
     paths[SNAPSHOT_PATH_SONAME] = &runtime->libc.soname;
+    paths[SNAPSHOT_PATH_LOADER_SONAME] = &runtime->loader.soname;
     paths[SNAPSHOT_PATH_ABI_NOTE] = &runtime->abi_note;
 }
 
@@ -494,6 +507,8 @@ static void snapshot_view(Runtime* runtime, uint8_t* file, uint64_t bytes)
     runtime->probe_capacity = counts.probes;
     runtime->libc.version_count = counts.versions;
     runtime->libc.exports.count = counts.exports;
+    runtime->loader.version_count = counts.loader_versions;
+    runtime->loader.exports.count = counts.loader_exports;
     runtime->member_count = counts.members;
     runtime->member_unit = counts.member_unit;
     runtime->kind = (RuntimeKind)counts.kind;
@@ -541,6 +556,7 @@ static SnapshotCounts snapshot_counts(const Runtime* runtime)
         .archives = runtime->archive_count,
         .probes = runtime->probe_count,
         .versions = runtime->libc.version_count,
+        .loader_versions = runtime->loader.version_count,
         .members = runtime->member_count,
         .names = link->names.count,
         .atoms = link->atoms.count,
@@ -557,6 +573,7 @@ static SnapshotCounts snapshot_counts(const Runtime* runtime)
         .bucket_bits = runtime->global_names.index.bucket_bits,
         .filter_bits = runtime->global_names.filter_bits,
         .exports = runtime->libc.exports.count,
+        .loader_exports = runtime->loader.exports.count,
         .member_unit = runtime->member_unit,
         .names_run_bytes = runtime->names.length,
         .global_strings_bytes = runtime->global_names.strings_length,
@@ -642,6 +659,10 @@ static uint64_t snapshot_strings_bytes(const Runtime* runtime)
     for (uint32_t v = 0; v < runtime->libc.version_count; v += 1)
     {
         result += runtime->libc.versions[v].name.length + 1;
+    }
+    for (uint32_t v = 0; v < runtime->loader.version_count; v += 1)
+    {
+        result += runtime->loader.versions[v].name.length + 1;
     }
     for (uint32_t m = 0; m < runtime->member_count; m += 1)
     {
@@ -732,15 +753,21 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
             probes[p].changed_seconds = probe->changed_seconds;
             probes[p].changed_nanoseconds = probe->changed_nanoseconds;
         }
-        ImportVersion* versions = (ImportVersion*)(image + header.regions[SNAPSHOT_REGION_VERSIONS].offset);
-        for (uint32_t v = 0; v < header.counts.versions; v += 1)
+        // libc.so.6's versions, then the loader's, each with its name in the strings.
+        for (uint32_t library = 0; library < 2; library += 1)
         {
-            const ImportVersion* version = &runtime->libc.versions[v];
-            versions[v].name.pointer = (char*)(uintptr_t)snapshot_add_string(&strings, version->name.pointer, version->name.length, &fits);
-            versions[v].name.length = version->name.length;
-            versions[v].hash = version->hash;
-            versions[v].index = version->index;
-            versions[v].base = version->base;
+            const ImportLibrary* source = library == 0 ? &runtime->libc : &runtime->loader;
+            const SnapshotRegion region = library == 0 ? SNAPSHOT_REGION_VERSIONS : SNAPSHOT_REGION_LOADER_VERSIONS;
+            ImportVersion* versions = (ImportVersion*)(image + header.regions[region].offset);
+            for (uint32_t v = 0; v < source->version_count; v += 1)
+            {
+                const ImportVersion* version = &source->versions[v];
+                versions[v].name.pointer = (char*)(uintptr_t)snapshot_add_string(&strings, version->name.pointer, version->name.length, &fits);
+                versions[v].name.length = version->name.length;
+                versions[v].hash = version->hash;
+                versions[v].index = version->index;
+                versions[v].base = version->base;
+            }
         }
         ImportMember* members = (ImportMember*)(image + header.regions[SNAPSHOT_REGION_MEMBERS].offset);
         for (uint32_t m = 0; m < header.counts.members; m += 1)
@@ -916,8 +943,8 @@ static bool snapshot_write(const Runtime* runtime, const char* directory, const 
 // ---------------------------------------------------------------------------------------------------------------------
 // Loading
 
-// The records with pointers the loader writes, a few dozen: the probes' paths and libc.so.6's versions' names, offsets
-// into the strings plus 1 until now.
+// The records with pointers the loader writes, a few dozen: the probes' paths and the libraries' versions' names,
+// offsets into the strings plus 1 until now.
 static void snapshot_rebase(Runtime* runtime)
 {
     const SnapshotHeader* header = (const SnapshotHeader*)runtime->snapshot;
@@ -929,6 +956,11 @@ static void snapshot_rebase(Runtime* runtime)
     for (uint32_t v = 0; v < runtime->libc.version_count; v += 1)
     {
         ImportVersion* version = &runtime->libc.versions[v];
+        version->name = snapshot_string(strings, (SnapshotString){ (uint64_t)(uintptr_t)version->name.pointer, version->name.length });
+    }
+    for (uint32_t v = 0; v < runtime->loader.version_count; v += 1)
+    {
+        ImportVersion* version = &runtime->loader.versions[v];
         version->name = snapshot_string(strings, (SnapshotString){ (uint64_t)(uintptr_t)version->name.pointer, version->name.length });
     }
 }
