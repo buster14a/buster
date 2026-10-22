@@ -60,7 +60,7 @@
 //     the cache's functions (file_cache_lookup_path, file_cache_prepare and the ones they're made of), and a translation
 //     unit's paths (pp_lookup_path) and preparation (pp_prepare_data).
 //   - Include search: pp_include_candidate and pp_find_include (pp_dedupe_directories drops missing and repeated
-//     directories), and the literal header names (pp_literal_header_name).
+//     directories), and the literal header names (pp_scan_header_name, pp_literal_header_name).
 //   - Macros: PPMacro, pp_define, pp_same_definition, pp_compile_macro.
 //   - The main loop: contexts, the token copies, pp_read_token, substitution (pp_paste, pp_stringize, pp_paste_in_place,
 //     pp_substitute),
@@ -69,7 +69,10 @@
 //   - Directives: pp_directive and the handlers (pp_condition, pp_include, pp_line, pp_pragma).
 //   - #if expressions (pp_evaluate), and the feature tables the __has_* builtins read (pp_feature).
 //   - The predefines, pp_initialize, pp_release and pp_run.
-//   - Output: pp_resolve_keywords and pp_print, and the -E command (pp_parse_options).
+//   - Output: pp_resolve_keywords and pp_print, and the -E command (pp_parse_options, with pp_take_family and
+//     pp_settle_families for the -f options that change clang's keywords, lexing or -E output).
+//   - clang's arguments for ours (pp_clang_arguments), and a clang run (pp_clang_preprocess), for the commands that run
+//     clang with them.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -77,12 +80,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdarg.h>
 #include <dirent.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <immintrin.h>
 #include "buster/compiler/x86_target.c"
 
@@ -192,6 +197,24 @@ typedef enum PPPhase
 // Every file a preprocessor reads, and what is prepared from it, shared by the translation units that use it ("Files").
 typedef struct FileCache FileCache;
 
+// Whether '$' is an identifier character, clang's DollarIdents: as the mode has it (C's identifiers and pp-numbers take
+// it, and in assembly it is punctuation), unless -fdollars-in-identifiers or -fno-dollars-in-identifiers set it.
+typedef enum PPDollars
+{
+    PP_DOLLARS_MODE,
+    PP_DOLLARS_IDENTIFIER,
+    PP_DOLLARS_PUNCTUATION,
+} PPDollars;
+
+// Whether the lexer takes raw string literals, clang's RawStringLiterals: as the mode has them (GNU modes from C99 on,
+// assembler-with-cpp among them), unless -fraw-string-literals or -fno-raw-string-literals set it in any mode.
+typedef enum PPRawStrings
+{
+    PP_RAW_STRINGS_MODE,
+    PP_RAW_STRINGS_ON,
+    PP_RAW_STRINGS_OFF,
+} PPRawStrings;
+
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
@@ -211,8 +234,18 @@ struct PPOptions
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
     bool scalar;
     bool no_standard_includes;
-    // Opt-in assembler-with-cpp input: '$' is punctuation, and unknown # lines are assembly comments.
+    // -nobuiltininc: no compiler headers (clang's resource directory, or buster's) among the standard directories.
+    bool no_builtin_includes;
+    // --buster-headers: buster's own headers (src/buster/include, found from the executable) in place of clang's
+    // resource directory.
+    bool buster_headers;
+    // Opt-in assembler-with-cpp input: '$' is punctuation (unless `dollars` says otherwise), and unknown # lines are
+    // assembly comments.
     bool assembly;
+    // A PPDollars, zero for the mode's (pp_dollar_punctuation).
+    uint8_t dollars;
+    // A PPRawStrings, zero for the mode's (pp_raw_strings).
+    uint8_t raw_strings;
     // -iquote, -I and -isystem directories, and -idirafter ones after the standard directories.
     const char* const* quote_directories;
     uint32_t quote_directory_count;
@@ -263,6 +296,22 @@ struct PPOptions
     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
     FILE* diagnostics;
 };
+
+// Is '$' punctuation with these options (PPDollars)? The lexer takes it into identifiers and pp-numbers, and
+// pp_split_dollars splits it out of them where it isn't.
+static bool pp_dollar_punctuation(const PPOptions* options)
+{
+    return options->dollars == PP_DOLLARS_PUNCTUATION || (options->dollars == PP_DOLLARS_MODE && options->assembly);
+}
+
+// The lexer's flags for raw string literals with these options (PPRawStrings): C_TOKENIZER_RAW_STRINGS for their R and
+// LR forms, and from C11, whose u8, u and U prefixes they need, C_TOKENIZER_UTF_RAW_STRINGS for those forms too.
+static uint32_t pp_raw_strings(const PPOptions* options)
+{
+    const CLanguage language = options->language;
+    const bool on = options->raw_strings == PP_RAW_STRINGS_ON || (options->raw_strings == PP_RAW_STRINGS_MODE && language.gnu && language.standard >= 1999);
+    return on ? C_TOKENIZER_RAW_STRINGS | (language.standard >= 2011 ? C_TOKENIZER_UTF_RAW_STRINGS : 0) : 0;
+}
 
 // A column array of tokens: an output stream, or a stack of buffers.
 typedef struct PPTokens PPTokens;
@@ -382,6 +431,9 @@ struct PPFileData
     bool guarded;
     bool once;
     bool prepared;
+    // Whether an inclusion has taken it, as clang's markIncluded records it: entered, or refused at the depth limit
+    // (pp_enter_file), which doesn't prepare it.
+    bool included;
     // Where an unterminated block comment starts, plus 1, or 0: the lexer makes it the last token, which preparing the
     // file drops. Reading it in an active group reports it; a skipped group suppresses it, as clang's lexer does.
     uint32_t unterminated_comment;
@@ -488,15 +540,15 @@ struct FileCacheArenas
     Arena bytes;
 };
 
-// How files are prepared: the lexer's and refinement's flags (trigraphs, and no digit separators before C23), the
-// literal prefixes the language mode splits (pp_split_kinds), whether '$' is punctuation (assembly), and whether by the
-// vectorized kernels or by their scalar twins, which prepare the same records.
+// How files are prepared: the lexer's and refinement's flags (trigraphs, and raw strings: pp_raw_strings), the literal
+// prefixes the language mode splits (pp_split_kinds), whether '$' is punctuation (pp_dollar_punctuation), and whether
+// by the vectorized kernels or by their scalar twins, which prepare the same records.
 typedef struct PPPrepare PPPrepare;
 struct PPPrepare
 {
     uint32_t refine_flags;
     uint64_t split_kinds;
-    bool assembly;
+    bool dollar_punctuation;
     bool vectorized;
 };
 
@@ -713,10 +765,18 @@ struct PPContext
     // A file: this inclusion took the group of the file's include guard (its #ifndef was true). Only such an inclusion
     // tells clang the guard (its multiple-include optimization), and from its end on the guard skips the file.
     bool guard_taken;
+    // A source piece of a condition lexed again after a raw header: continue at this byte when it ends. A piece ends
+    // after each '(' so a header query can read its operand raw before the ordinary lexer sees comments in its name.
+    bool relexed;
+    uint32_t relex_position;
+    uint32_t relex_file;
     // This inclusion has read the file's trailing unterminated comment, actively or while skipping a group.
     bool comment_read;
     uint8_t opaque_query_repairs;
     uint8_t opaque_direct_repairs;
+    // A file's comment-gap search advances with source header names; a new private view restarts that token cursor.
+    uint32_t header_gap_data;
+    uint32_t header_gap_token;
     // The macro to enable again when the context is popped.
     PPMacroId macro;
     uint32_t position;
@@ -992,6 +1052,12 @@ struct Preprocessor
     uint8_t* directory_system;
     uint32_t directory_count;
     uint32_t angled_first; // The first directory <...> searches.
+    // With --buster-headers: clang's resource directory, right after buster's (`buster_directory`, its path, as
+    // pp_add_directory copied it), which supplies only the names buster's doesn't have (pp_find_include); otherwise
+    // BUSTER_PP_NONE.
+    uint32_t fallback_directory;
+    const char* buster_directory;
+    uint32_t buster_directory_length;
     // The location space.
     PPRange* ranges;
     uint32_t range_count;
@@ -1094,6 +1160,9 @@ struct Preprocessor
     uint32_t one_location;
     uint32_t hash_location;
     uint32_t include_depth;
+    // An #include reached the depth limit: a file included before (PPFileData.included) isn't entered again
+    // (pp_enter_file).
+    bool include_limit_reached;
     uint32_t main_file;
     // The predefines' file data (clang's <built-in> buffer), whose __STDC macros clang reports as builtin when they are
     // redefined or undefined (pp_language_defined); BUSTER_PP_NONE before it is read.
@@ -1326,17 +1395,39 @@ static const uint8_t* pp_location_bytes(const Preprocessor* pp, uint32_t locatio
     return range != BUSTER_PP_NONE ? pp->ranges[range].bytes + (location - pp->ranges[range].base) : 0;
 }
 
-// `length` bytes of source without the line splices in them (and trigraphs, with C_TOKENIZER_TRIGRAPHS in
-// `refine_flags`): the bytes themselves if they have none, else a copy in `buffer`, which needs room for `length` bytes.
-// Returns the length.
-static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t* buffer, const uint8_t** spelling)
+// Is a token of this kind a string literal?
+BUSTER_INLINE bool pp_is_string_literal(uint8_t kind)
+{
+    return kind >= C_TOKEN_STRING_LITERAL && kind <= C_TOKEN_UTF32_STRING_LITERAL;
+}
+
+// Do `length` bytes start with a raw string literal's prefix and opening quote, as written (R", LR", uR", UR" or u8R",
+// with no line splice or trigraph in them)? A token that does is one the lexer read as a raw string literal: one, or an
+// unknown token if its delimiter is invalid or it is unterminated.
+static bool pp_raw_string_start(const uint8_t* bytes, uint32_t length)
+{
+    const bool u8 = length >= 2 && bytes[0] == 'u' && bytes[1] == '8';
+    const uint32_t prefix = u8 ? 2 : length >= 1 && (bytes[0] == 'L' || bytes[0] == 'u' || bytes[0] == 'U') ? 1 : 0;
+    return length >= prefix + 2 && bytes[prefix] == 'R' && bytes[prefix + 1] == '"';
+}
+
+// `length` bytes of source of a token of kind `kind`, without the line splices in them (and trigraphs, with
+// C_TOKENIZER_TRIGRAPHS in `refine_flags`): the bytes themselves if they have none, else a copy in `buffer`, which
+// needs room for `length` bytes. A raw string literal's characters undo translation phases 1 and 2, as clang's
+// getSpelling keeps them: a raw string literal keeps what follows its opening quote as written, and so does an unknown
+// token the lexer read as one (its delimiter invalid, or unterminated) whose prefix and quote are as written, which
+// clang reads byte by byte (a token that needs cleaning anywhere, as one with a line splice in its prefix, clang cleans
+// whole). Returns the length.
+static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t kind, uint8_t* buffer, const uint8_t** spelling)
 {
     const bool trigraphs = (refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
+    const bool string = pp_is_string_literal(kind);
     bool cleaned = false;
     for (uint32_t i = 0; !cleaned && i < length; i += 1)
     {
         cleaned = bytes[i] == '\\' || (bytes[i] == '?' && trigraphs);
     }
+    cleaned = cleaned && !(kind == C_TOKEN_UNKNOWN && pp_raw_string_start(bytes, length));
     uint32_t result = length;
     *spelling = bytes;
     if (cleaned)
@@ -1350,6 +1441,7 @@ static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_
         };
         uint64_t p = 0;
         result = 0;
+        bool opened = false;
         while (p < length)
         {
             uint64_t size;
@@ -1361,15 +1453,25 @@ static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_
                 result += 1;
             }
             p += size != 0 ? size : 1;
+            // A string literal's first quote is its opening one, right after its R if it is a raw string literal.
+            if (string && !opened && c == '"')
+            {
+                opened = true;
+                const bool raw = result >= 2 && buffer[result - 2] == 'R';
+                const uint64_t rest = raw ? length - p : 0;
+                memcpy(buffer + result, bytes + p, rest);
+                result += (uint32_t)rest;
+                p += rest;
+            }
         }
         *spelling = buffer;
     }
     return result;
 }
 
-// `length` bytes without the line splices in them (pp_remove_splices), unless they are a clean scratch spelling (in its
-// arena: pp_scratch_clean), which is final and is the bytes themselves.
-static uint32_t pp_without_splices(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint8_t* buffer, const uint8_t** spelling)
+// `length` bytes of a token of kind `kind` without the line splices in them (pp_remove_splices), unless they are a
+// clean scratch spelling (in its arena: pp_scratch_clean), which is final and is the bytes themselves.
+static uint32_t pp_without_splices(const Preprocessor* pp, uint8_t kind, const uint8_t* bytes, uint32_t length, uint8_t* buffer, const uint8_t** spelling)
 {
     const Arena* clean = &pp->scratch[1];
     const bool final = bytes >= clean->base && bytes < clean->base + clean->capacity;
@@ -1377,7 +1479,24 @@ static uint32_t pp_without_splices(const Preprocessor* pp, const uint8_t* bytes,
     *spelling = bytes;
     if (!final)
     {
-        result = pp_remove_splices(bytes, length, pp->refine_flags, buffer, spelling);
+        result = pp_remove_splices(bytes, length, pp->refine_flags, kind, buffer, spelling);
+    }
+    return result;
+}
+
+// The body of a string literal's spelling (pp_spelling's) if it is a raw string literal: its prefix, R and the opening
+// quote, the delimiter and '(', then the body, then ')', the delimiter and the closing quote (C has no user-defined
+// suffix), as the lexer makes one. The body's characters are as written, without escape sequences.
+static bool pp_raw_string_body(const uint8_t* spelling, uint32_t length, const uint8_t** body, uint32_t* body_length)
+{
+    const uint8_t* quote = memchr(spelling, '"', length);
+    const uint8_t* open = quote != 0 && quote > spelling && quote[-1] == 'R' ? memchr(quote, '(', length - (uint32_t)(quote - spelling)) : 0;
+    const bool result = open != 0;
+    if (result)
+    {
+        const uint32_t delimiter = (uint32_t)(open - quote) - 1;
+        *body = open + 1;
+        *body_length = length - (uint32_t)(open + 1 - spelling) - delimiter - 2;
     }
     return result;
 }
@@ -1439,17 +1558,17 @@ static uint32_t pp_spelling(Preprocessor* pp, uint8_t kind, uint32_t value, uint
     }
     else
     {
-        result = pp_without_splices(pp, pp_location_bytes(pp, location), value - location, buffer, spelling);
+        result = pp_without_splices(pp, kind, pp_location_bytes(pp, location), value - location, buffer, spelling);
         result = kind == C_TOKEN_UNKNOWN && *spelling == buffer ? pp_trailing_splice(pp, location, value - location, buffer, result) : result;
     }
     return result;
 }
 
-// Recover a refined identifier's end, respecting the assembly adapter's '$' boundary.
+// Recover a refined identifier's end, respecting the '$' boundary of pp_split_dollars where '$' is punctuation.
 static uint32_t pp_identifier_end(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint32_t start)
 {
     uint32_t result = refine_identifier_end(bytes, length, start, pp->refine_flags);
-    if (pp->options.assembly)
+    if (pp_dollar_punctuation(&pp->options))
     {
         const uint8_t* dollar = memchr(bytes + start, '$', result - start);
         result = dollar != 0 ? (uint32_t)(dollar - bytes) : result;
@@ -1469,7 +1588,7 @@ static uint32_t pp_identifier_as_written(Preprocessor* pp, uint32_t location, ui
         const PPRange* bytes_range = &pp->ranges[range];
         const uint32_t start = location - bytes_range->base;
         const uint32_t end = pp_identifier_end(pp, bytes_range->bytes, bytes_range->length, start);
-        result = pp_without_splices(pp, bytes_range->bytes + start, end - start, buffer, spelling);
+        result = pp_without_splices(pp, C_TOKEN_RAW_IDENTIFIER, bytes_range->bytes + start, end - start, buffer, spelling);
     }
     return result;
 }
@@ -1512,7 +1631,7 @@ static uint32_t pp_written_spelling(Preprocessor* pp, uint32_t value, uint32_t l
         const uint32_t start = location - bytes_range->base;
         const uint32_t end = pp_identifier_end(pp, bytes_range->bytes, bytes_range->length, start);
         uint8_t* buffer = arena_push(arena, (uint64_t)(end - start) + 1, 1);
-        result = buffer != 0 ? pp_without_splices(pp, bytes_range->bytes + start, end - start, buffer, spelling) : 0;
+        result = buffer != 0 ? pp_without_splices(pp, C_TOKEN_RAW_IDENTIFIER, bytes_range->bytes + start, end - start, buffer, spelling) : 0;
         *spelling = buffer != 0 ? *spelling : 0;
     }
     return result;
@@ -2079,71 +2198,80 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
     return count + splits;
 }
 
-// C's GNU identifier grammar includes '$'. Assembly instead needs $MACRO to expand MACRO. Only tokens containing
-// '$' take this adapter; literals stay opaque. Re-lex the intervening slices with the shared lexer, including line
-// splices and numeric local references. Scratch columns leave the original columns intact on allocation failure.
-// A slice can lex into several tokens (the pp-number 1$e+5 into 1, $, e, + and 5), at most one per byte: the bytes of
-// the tokens that contain '$' bound the columns, not their dollars.
-static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count)
+// Does token `i` hold a '$' that the vectorized lexer took into it (an identifier or a pp-number)?
+static bool pp_holds_dollar(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t i)
+{
+    const uint8_t kind = kinds[i] & 0x7F;
+    return (kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT) && memchr(bytes + starts[i], '$', ends[i] - starts[i]) != 0;
+}
+
+// The last token of the run token `i` starts: the tokens after it with nothing between them but line splices.
+static uint32_t pp_run_end(uint32_t refine_flags, const uint8_t* bytes, uint32_t length, const uint32_t* starts, const uint32_t* ends, uint32_t count, uint32_t i)
+{
+    uint32_t result = i;
+    while (result + 1 < count && (ends[result] == starts[result + 1] || refine_gap_is_splices(bytes, length, ends[result], starts[result + 1], refine_flags)))
+    {
+        result += 1;
+    }
+    return result;
+}
+
+// C's GNU identifier grammar includes '$'. Assembly instead needs $MACRO to expand MACRO, and so does C with
+// -fno-dollars-in-identifiers (pp_dollar_punctuation): there '$' is punctuation, as C_TOKENIZER_NO_DOLLARS lexes it.
+// The vectorized lexer takes '$' into identifiers and pp-numbers, so each run of tokens with nothing but line splices
+// between them that holds such a token is lexed again that way: what follows a '$' can then join the tokens after it,
+// as in clang ($L"x" is $ and a wide string literal, x$1.5 is x, $ and 1.5). Whitespace bounds the runs, and both
+// lexings start and end tokens there alike, but for a literal a run's end cuts: a quote that C23's digit separators
+// free ($1'2' is $, 1'2 and an unterminated character constant that takes the rest of the line). A run that ends in
+// an unknown token of more than a '$' sends the whole file to C_TOKENIZER_NO_DOLLARS instead. Literals stay opaque.
+// Scratch columns leave the original columns intact on allocation failure. A run can lex into more tokens, at most one
+// per byte: the runs' bytes bound the columns. `bytes` are the whole file's, of `length` bytes.
+static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count)
 {
     // Most sources have no '$' at all, which one scan of their extent finds.
     const bool dollars = count != 0 && memchr(bytes + starts[0], '$', ends[count - 1] - starts[0]) != 0;
-    uint64_t split_bytes = 0;
+    uint64_t run_bytes = 0;
     for (uint32_t i = 0; dollars && i < count; i += 1)
     {
-        const uint8_t kind = kinds[i] & 0x7F;
-        if ((kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT) && memchr(bytes + starts[i], '$', ends[i] - starts[i]) != 0)
+        if (pp_holds_dollar(bytes, kinds, starts, ends, i))
         {
-            split_bytes += ends[i] - starts[i];
+            const uint32_t last = pp_run_end(refine_flags, bytes, length, starts, ends, count, i);
+            run_bytes += ends[last] - starts[i];
+            i = last;
         }
     }
     int64_t result = count;
-    if (split_bytes != 0)
+    if (run_bytes != 0)
     {
         Scratch scratch = scratch_begin(0);
-        const uint64_t capacity = (uint64_t)count + split_bytes + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
+        const uint64_t capacity = (uint64_t)count + run_bytes + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
         uint8_t* split_kinds = arena_push(scratch.arena, capacity, 64);
         uint32_t* split_starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
         uint32_t* split_ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
         result = split_kinds != 0 && split_starts != 0 && split_ends != 0 ? 0 : -1;
-        for (uint32_t i = 0; result >= 0 && i < count; i += 1)
+        bool whole = false;
+        for (uint32_t i = 0; result >= 0 && !whole && i < count; i += 1)
         {
-            const uint8_t kind = kinds[i] & 0x7F;
-            const bool word = kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT;
-            if (word && memchr(bytes + starts[i], '$', ends[i] - starts[i]) != 0)
+            if (pp_holds_dollar(bytes, kinds, starts, ends, i))
             {
-                const uint32_t first = (uint32_t)result;
-                for (uint32_t at = starts[i]; result >= 0 && at < ends[i];)
+                const uint32_t last = pp_run_end(refine_flags, bytes, length, starts, ends, count, i);
+                const uint32_t begin = starts[i];
+                const int64_t added = c_tokenize_scalar(bytes + begin, ends[last] - begin, split_kinds + result, split_starts + result, split_ends + result,
+                                                        refine_flags | C_TOKENIZER_NO_DOLLARS);
+                for (int64_t n = 0; n < added; n += 1)
                 {
-                    if (bytes[at] == '$')
-                    {
-                        split_kinds[result] = C_TOKEN_UNKNOWN;
-                        split_starts[result] = at;
-                        split_ends[result] = at + 1;
-                        result += 1;
-                        at += 1;
-                    }
-                    else
-                    {
-                        const uint32_t begin = at;
-                        while (at < ends[i] && bytes[at] != '$')
-                        {
-                            at += 1;
-                        }
-                        const int64_t added = c_tokenize_scalar(bytes + begin, at - begin, split_kinds + result, split_starts + result, split_ends + result, refine_flags);
-                        for (int64_t n = 0; n < added; n += 1)
-                        {
-                            split_kinds[result + n] &= 0x7F;
-                            split_starts[result + n] += begin;
-                            split_ends[result + n] += begin;
-                        }
-                        result = added >= 0 ? result + added : -1;
-                    }
+                    split_kinds[result + n] &= 0x7F;
+                    split_starts[result + n] += begin;
+                    split_ends[result + n] += begin;
                 }
-                if (result > first)
+                if (added > 0)
                 {
-                    split_kinds[first] |= kinds[i] & BUSTER_C_TOKEN_START_OF_LINE;
+                    const int64_t final = result + added - 1;
+                    split_kinds[result] |= kinds[i] & BUSTER_C_TOKEN_START_OF_LINE;
+                    whole = split_kinds[final] == C_TOKEN_UNKNOWN && (split_ends[final] - split_starts[final] > 1 || bytes[split_starts[final]] != '$');
                 }
+                result = added >= 0 ? result + added : -1;
+                i = last;
             }
             else
             {
@@ -2153,7 +2281,11 @@ static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uin
                 result += 1;
             }
         }
-        if (result >= 0)
+        if (result >= 0 && whole)
+        {
+            result = c_tokenize_scalar(bytes, length, kinds, starts, ends, refine_flags | C_TOKENIZER_NO_DOLLARS);
+        }
+        else if (result >= 0)
         {
             memcpy(kinds, split_kinds, result);
             memcpy(starts, split_starts, (uint64_t)result * sizeof(uint32_t));
@@ -2164,33 +2296,26 @@ static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uin
     return result;
 }
 
-// Splits the literal prefixes that a mode before C23 doesn't have off `count` freshly lexed tokens (`split`,
-// pp_split_kinds; nonzero just before C23): clang lexes such a literal as its prefix, an identifier, and the literal
-// without it (pp_split_prefixes). The lexer has lexed the numbers as the mode does already: before C23 it has no digit
-// separators (C_TOKENIZER_NO_DIGIT_SEPARATORS in the mode's flags), so a number ends before a `'`, which starts a
-// character constant (`1'000` is 1 and the unterminated '000). The arrays have room for a token per byte. Returns the new
-// count.
-static int64_t pp_lex_mode(const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, uint64_t split, bool vectorized)
+// The lexer's flags for a mode: refinement's (trigraphs, digraphs and "//" comments), and C_TOKENIZER_NO_DOLLARS where '$'
+// is punctuation.
+static uint32_t pp_lex_flags(const PPPrepare* mode)
 {
-    int64_t result = count;
-    if (split != 0 && result > 0)
-    {
-        const uint32_t n = (uint32_t)result;
-        const uint32_t splits = vectorized ? pp_count_splits_vector(bytes, kinds, starts, ends, n, split) : pp_count_splits_scalar(bytes, kinds, starts, ends, n, split);
-        result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, n, splits, split) : result;
-    }
-    return result;
+    return mode->refine_flags | (mode->dollar_punctuation ? C_TOKENIZER_NO_DOLLARS : 0);
 }
 
-// A file's (or a scratch text's) tokens, freshly lexed with the mode's flags, as the language mode has them: without the
-// literal prefixes it lacks (pp_lex_mode), then with assembly's '$' punctuation (pp_split_dollars). Returns the new
-// count, or -1 if an allocation fails.
-static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, bool vectorized)
+// Splits, among `count` freshly lexed tokens of `length` bytes, '$' out of the identifiers and pp-numbers that the
+// vectorized lexer gave it to, where it is punctuation (pp_split_dollars: the scalar lexer, pp_lex_flags, lexes it so
+// itself, so `vectorized` says which made them), then the prefixed literals that `mode`'s language doesn't have (a
+// scan of the kinds, and the rare split: pp_split_prefixes), the literals pp_split_dollars makes among them. Returns
+// the new count, or -1 on allocation failure.
+static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, bool vectorized)
 {
-    int64_t result = pp_lex_mode(bytes, kinds, starts, ends, count, mode->split_kinds, vectorized);
-    if (mode->assembly && result > 0)
+    int64_t result = mode->dollar_punctuation && vectorized ? pp_split_dollars(mode->refine_flags, bytes, length, kinds, starts, ends, count) : count;
+    if (result > 0 && mode->split_kinds != 0)
     {
-        result = pp_split_dollars(mode->refine_flags, bytes, kinds, starts, ends, (uint32_t)result);
+        const uint32_t splits = vectorized ? pp_count_splits_vector(bytes, kinds, starts, ends, (uint32_t)result, mode->split_kinds)
+                                          : pp_count_splits_scalar(bytes, kinds, starts, ends, (uint32_t)result, mode->split_kinds);
+        result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, (uint32_t)result, splits, mode->split_kinds) : result;
     }
     return result;
 }
@@ -2265,11 +2390,12 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
     int64_t count = -1;
     if (pushed)
     {
-        count = prepare->assembly && !prepare->vectorized ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags)
-                                                           : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags);
+        // The scalar kernels lex '$' as punctuation themselves, the twin of the vectorized lexer and pp_split_dollars.
+        count = prepare->dollar_punctuation && !prepare->vectorized ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, pp_lex_flags(prepare))
+                                                                    : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags);
     }
     const bool lexed = count >= 0;
-    count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->kinds, data->starts, data->values, count, prepare->vectorized) : count;
+    count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds, data->starts, data->values, (uint32_t)count, prepare->vectorized) : count;
     if (ticks != 0)
     {
         const uint64_t now = __rdtsc();
@@ -2643,8 +2769,10 @@ static FileCachePath* file_cache_find_path(FileCache* cache, const char* path, u
 // costs neither a copy nor clearing new pages, but each mapping holds the process's memory map lock, on which lanes that
 // map at once queue. A file of up to `read_limit` bytes, or any with FILE_CACHE_READ, is read into `bytes_arena`
 // instead (unless it is null), followed by 64 zero bytes. A file too big for 32-bit positions, or that can't be mapped
-// or read whole, is none. The probe reads the identity table only, so lanes probe at once while no lane adds records;
-// the system calls go to `counts`.
+// or read whole, is none. An open that fails for another reason than there being no file there (no such file, a part
+// of the path that isn't a directory, or a directory, which clang's header search takes as none there) gives the probe
+// its error, which the include search reports (pp_find_include). The probe reads the identity table only, so lanes
+// probe at once while no lane adds records; the system calls go to `counts`.
 static void file_cache_probe(const FileCache* cache, const char* path, FileCacheBytes how, uint32_t read_limit, Arena* bytes_arena, FileProbe* probe,
                              FileCacheCounts* counts)
 {
@@ -2786,6 +2914,7 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
         Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
         FileProbe probe;
         file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, cache->read_limit, bytes->base != 0 ? bytes : 0, &probe, counts);
+        *error = probe.error;
         entry = file_cache_add_path(cache, path, length, hash, &probe);
         if (entry != 0)
         {
@@ -2818,15 +2947,15 @@ static PPPrepareStatus file_cache_prepare(FileCache* cache, uint32_t record, uin
     return result;
 }
 
-// How a unit with these options prepares files: trigraphs or not, digit separators or not (C23's: before it, the lexer
-// ends a number before a `'`), the literal prefixes its language mode splits, and its kernels. A file cache that units
-// share is made with it (file_cache_initialize).
+// How a unit with these options prepares files: trigraphs or not, raw string literals or not, the literal prefixes its
+// language mode splits, and its kernels. A file cache that units share is made with it (file_cache_initialize).
 static PPPrepare pp_prepare_options(const PPOptions* options)
 {
     return (PPPrepare){
-        .refine_flags = (options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0) | (options->language.standard < 2023 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0),
+        .refine_flags = (options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0) | pp_raw_strings(options) | c_language_lexer_flags(options->language) |
+                        (options->language.standard < 2023 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0),
         .split_kinds = pp_split_kinds(options->language),
-        .assembly = options->assembly,
+        .dollar_punctuation = pp_dollar_punctuation(options),
         .vectorized = !options->scalar,
     };
 }
@@ -2837,7 +2966,7 @@ static PPPrepare pp_prepare_config(const Preprocessor* pp)
     return (PPPrepare){
         .refine_flags = pp->refine_flags,
         .split_kinds = pp->split_kinds,
-        .assembly = pp->options.assembly,
+        .dollar_punctuation = pp_dollar_punctuation(&pp->options),
         .vectorized = pp->vectorized,
     };
 }
@@ -2946,7 +3075,9 @@ static void pp_grow_file_slots(Preprocessor* pp)
 
 // This unit's record of `path` (`length` bytes, not NUL-terminated): looked up by name, and the first time through the
 // file cache (file_cache_lookup_path), which probes the file system only for a path it never looked up. Its data is
-// BUSTER_PP_NONE if no file can be read there. Returns BUSTER_PP_NONE if memory runs out.
+// BUSTER_PP_NONE if no file can be read there, and its error why, when that isn't that there is no file there (no such
+// file, a part of the path that isn't a directory, or a directory, which clang's header search takes as none there:
+// HeaderSearch::getFileAndSuggestModule). Returns BUSTER_PP_NONE if memory runs out.
 static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t length, uint8_t system)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
@@ -2983,10 +3114,8 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
             {
                 directory_length = path[i] == '/' ? i : directory_length;
             }
-            const uint64_t start = pp->options.timing ? __rdtsc() : 0;
-            // Why the file has no data, for the message that may report it: why no file can be read at the path, or
-            // that the unit has as many files as it can hold.
             int error = 0;
+            const uint64_t start = pp->options.timing ? __rdtsc() : 0;
             const uint32_t record = file_cache_lookup_path(pp->cache, copy, length, &pp->probes, &error);
             const uint32_t data = record != BUSTER_PP_NONE ? pp_data_of_record(pp, record) : BUSTER_PP_NONE;
             error = record != BUSTER_PP_NONE && data == BUSTER_PP_NONE ? EMFILE : error;
@@ -3011,6 +3140,27 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
     return result;
 }
 
+// Whether buster's own headers' directory has a file `name` (`length` bytes), which clang's resource directory after
+// it (pp->fallback_directory) then doesn't supply, to the search or beside one of its own headers: so a #include_next
+// in buster's header goes on past clang's header of the same name, to the C library's. The path is the one the search
+// of buster's directory looks up, so its record is usually in the table already (a #include_next in buster's header
+// names that header).
+static bool pp_buster_supplies(Preprocessor* pp, const uint8_t* name, uint32_t length)
+{
+    char path[PATH_MAX];
+    const uint32_t directory_length = pp->buster_directory_length;
+    bool result = false;
+    if ((uint64_t)directory_length + 1 + length < PATH_MAX)
+    {
+        memcpy(path, pp->buster_directory, directory_length);
+        path[directory_length] = '/';
+        memcpy(path + directory_length + 1, name, length);
+        const uint32_t record = pp_lookup_path(pp, path, directory_length + 1 + length, BUSTER_PP_SYSTEM_FILE);
+        result = record != BUSTER_PP_NONE && pp->files[record].data != BUSTER_PP_NONE;
+    }
+    return result;
+}
+
 // What includes a file, for the search of a header it includes: the path the includer was found by (whose directory a
 // quoted name is looked for in first) and how it was found (its system level), or `present` false for no file.
 typedef struct PPIncluder PPIncluder;
@@ -3028,7 +3178,8 @@ typedef enum PPCandidate
 {
     // A path to look for the header at, in `path`.
     PP_CANDIDATE_PATH,
-    // No path: the directory and the name together are too long for one.
+    // No path: the directory and the name together, or an absolute name, are too long for one (ENAMETOOLONG, which the
+    // include search reports: pp_find_include).
     PP_CANDIDATE_SKIP,
     // There are no more candidates.
     PP_CANDIDATE_END,
@@ -3039,25 +3190,29 @@ typedef enum PPCandidate
 // (the quoted ones only for a quoted name), or for #include_next (`next`) the directories after the one the includer's
 // inclusion was found in (`includer_search`). For a path, writes it to `path` (PATH_MAX bytes, not NUL-terminated),
 // its length, the system level a file found there has, and the search directory it is in (BUSTER_PP_NONE for the
-// includer's directory or an absolute path). pp_find_include and the run-ahead (c_files.c) both go through the
-// candidates in order, so that they look at the same paths.
+// includer's directory or an absolute path), which a candidate too long for a path gets too. pp_find_include and the
+// run-ahead (c_files.c) both go through the candidates in order, so that they look at the same paths.
 static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* name, uint32_t length, bool angled, bool next, const PPIncluder* includer,
                                         uint32_t includer_search, uint32_t index, char* path, uint32_t* path_length, uint8_t* system, uint32_t* directory)
 {
     PPCandidate result = PP_CANDIDATE_END;
     *directory = BUSTER_PP_NONE;
-    if (length != 0 && length < PATH_MAX && name[0] == '/')
+    if (length != 0 && name[0] == '/')
     {
         // An absolute path: its record, if a file is there (a record is kept for a missing one too).
         if (index == 0)
         {
-            memcpy(path, name, length);
-            *path_length = length;
-            *system = BUSTER_PP_USER_FILE;
-            result = PP_CANDIDATE_PATH;
+            result = PP_CANDIDATE_SKIP;
+            if (length < PATH_MAX)
+            {
+                memcpy(path, name, length);
+                *path_length = length;
+                *system = BUSTER_PP_USER_FILE;
+                result = PP_CANDIDATE_PATH;
+            }
         }
     }
-    else if (length != 0 && length < PATH_MAX)
+    else if (length != 0)
     {
         const bool resumes = next && includer->present && includer_search != BUSTER_PP_NONE;
         const bool local = !resumes && !angled && includer->present;
@@ -3084,6 +3239,7 @@ static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* n
             if (i < pp->directory_count)
             {
                 const uint32_t directory_length = pp->directory_lengths[i];
+                *directory = (uint32_t)i;
                 result = PP_CANDIDATE_SKIP;
                 if ((uint64_t)directory_length + 1 + length < PATH_MAX)
                 {
@@ -3092,7 +3248,6 @@ static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* n
                     memcpy(path + directory_length + 1, name, length);
                     *path_length = directory_length + 1 + length;
                     *system = pp->directory_system[i];
-                    *directory = (uint32_t)i;
                     result = PP_CANDIDATE_PATH;
                 }
             }
@@ -3101,11 +3256,24 @@ static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* n
     return result;
 }
 
+// An include candidate without a regular file is absent; other errors stop the search. The file walk uses the same
+// boundary as the preprocessor, since cached probes retain their original error.
+static bool pp_include_error_absent(int error)
+{
+    return error == ENOENT || error == ENOTDIR || error == EISDIR || error == EINVAL || error == -1;
+}
+
 // Finds the file an include names, looking at each of its search's candidates in turn (pp_include_candidate) until a
 // file is at one. Returns the PPFile, or BUSTER_PP_NONE if no file has the name; `*found_in` gets the search directory
-// it was found in, or BUSTER_PP_NONE (the includer's directory, or an absolute path).
+// it was found in, or BUSTER_PP_NONE (the includer's directory, or an absolute path). A place the search can't look in,
+// a path that can't be opened for another reason than there being no file there (PPFile.error) or one PATH_MAX bytes
+// long or longer, which no system call takes (ENAMETOOLONG), is a fatal error at `report`, as clang's
+// getFileAndSuggestModule reports it, and ends the search; with `report` BUSTER_PP_NONE, it is a place without the file.
+// With --buster-headers, clang's resource directory after buster's (pp->fallback_directory) doesn't supply a name
+// buster's directory has (pp_buster_supplies), neither as a search directory nor as the directory of an includer of
+// clang's: a #include_next in buster's header goes on past clang's header of the same name, to the C library's.
 static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t length, bool angled, bool next, uint32_t includer, uint32_t includer_search,
-                                uint32_t* found_in)
+                                uint32_t* found_in, uint32_t report)
 {
     char path[PATH_MAX];
     const PPFile* from = includer != BUSTER_PP_NONE ? &pp->files[includer] : 0;
@@ -3115,19 +3283,40 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
         source = (PPIncluder){ .path = from->path, .directory_length = from->directory_length, .system = from->system, .present = true };
     }
     uint32_t result = BUSTER_PP_NONE;
+    bool failed = false;
     *found_in = BUSTER_PP_NONE;
     PPCandidate candidate = PP_CANDIDATE_SKIP;
-    for (uint32_t index = 0; result == BUSTER_PP_NONE && candidate != PP_CANDIDATE_END; index += 1)
+    for (uint32_t index = 0; result == BUSTER_PP_NONE && !failed && candidate != PP_CANDIDATE_END; index += 1)
     {
         uint32_t path_length = 0;
         uint8_t system = 0;
         uint32_t directory = BUSTER_PP_NONE;
         candidate = pp_include_candidate(pp, name, length, angled, next, &source, includer_search, index, path, &path_length, &system, &directory);
-        if (candidate == PP_CANDIDATE_PATH)
+        // The place's directory as clang names it: the includer's, a search directory, or none for an absolute name.
+        const bool absolute = length != 0 && name[0] == '/';
+        const bool own = candidate != PP_CANDIDATE_END && !absolute && directory == BUSTER_PP_NONE;
+        const char* prefix = own ? (source.directory_length != BUSTER_PP_NONE ? source.path : ".") : directory != BUSTER_PP_NONE ? pp->directories[directory] : "";
+        const uint32_t prefix_length = own ? (source.directory_length != BUSTER_PP_NONE ? source.directory_length : 1)
+                                           : directory != BUSTER_PP_NONE ? pp->directory_lengths[directory] : 0;
+        // Clang's resource directory behind buster's, which doesn't supply a name buster's directory has.
+        const uint32_t fallback = pp->fallback_directory;
+        const bool behind = fallback != BUSTER_PP_NONE &&
+                            (own ? prefix_length == pp->directory_lengths[fallback] && memcmp(prefix, pp->directories[fallback], prefix_length) == 0 : directory == fallback);
+        const bool shadowed = candidate != PP_CANDIDATE_END && behind && pp_buster_supplies(pp, name, length);
+        int error = candidate == PP_CANDIDATE_SKIP && !shadowed ? ENAMETOOLONG : 0;
+        if (candidate == PP_CANDIDATE_PATH && !shadowed)
         {
             const uint32_t file = pp_lookup_path(pp, path, path_length, system);
             result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE ? file : BUSTER_PP_NONE;
             *found_in = result != BUSTER_PP_NONE ? directory : BUSTER_PP_NONE;
+            error = file != BUSTER_PP_NONE ? pp->files[file].error : 0;
+        }
+        failed = error != 0 && !pp_include_error_absent(error) && report != BUSTER_PP_NONE;
+        if (failed)
+        {
+            // The place as clang names it: the directory, a '/' and the name, or an absolute name alone.
+            pp_diagnose(pp, PP_SEVERITY_FATAL, report, "cannot open file '%.*s%s%.*s': %s", (int)prefix_length, prefix, absolute ? "" : "/", (int)length,
+                        (const char*)name, strerror(error));
         }
     }
     return result;
@@ -3136,21 +3325,76 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
 // The forms of an include's header name (pp_literal_header_name).
 typedef enum PPHeaderForm
 {
-    // `<...>`, or a string literal, first on the line: the name is known without expanding the line.
+    // `<...>` with its '>' on the line, or a string literal, first on the line: the name is known without expanding the
+    // line.
     PP_HEADER_LITERAL,
-    // Anything else: the line must be expanded first, and then be one of the literal forms.
+    // Anything else, a `<` without its `>` on the line too: the line must be expanded first, and then be one of the
+    // literal forms.
     PP_HEADER_COMPUTED,
-    // An empty line, `<` without its `>`, or a name longer than the room for it.
+    // An empty line, a string literal that isn't a plain one, or a name longer than the room for it.
     PP_HEADER_INVALID,
 } PPHeaderForm;
 
+// Token `first` of a directive's line [.., end), a '<', read as clang reads a header name from its file
+// (Lexer::LexAngledStringLiteral): up to the first '>' on the line that no backslash escapes, through the scalar lexer's
+// characters, which skip line splices (translation phase 2 removed them). A backslash takes the character after it into
+// the name, a '>' too: `<a\>b.h>` names `a\>b.h`. Writes the name's bytes to `name` as far as `capacity` holds them
+// (`*length` of them; `*whole` says whether that is all of them). Returns the offset past the '>', or 0 if the line has
+// none.
+static uint32_t pp_scan_header_bytes(uint32_t refine_flags, const PPFileData* data, uint32_t first, uint32_t line_end, uint8_t* name, uint32_t capacity,
+                                     uint32_t* length, bool* whole)
+{
+    const ScalarLexer lexer = {
+        .source = data->bytes,
+        .length = line_end,
+        .trigraphs = (refine_flags & C_TOKENIZER_TRIGRAPHS) != 0,
+        .cplusplus = false,
+    };
+    uint64_t p = (uint64_t)first + 1;
+    bool closed = false;
+    bool line_ended = false;
+    bool escaped = false;
+    *length = 0;
+    *whole = true;
+    while (!closed && !line_ended && p < line_end)
+    {
+        uint64_t size;
+        uint64_t char_start;
+        const int32_t c = get_char(&lexer, p, &size, &char_start);
+        closed = c == '>' && !escaped;
+        line_ended = c == '\n' || c == '\r' || c == BUSTER_LEX_END_OF_FILE;
+        const bool kept = !closed && !line_ended;
+        const bool fits = *length < capacity;
+        if (kept && fits)
+        {
+            name[*length] = (uint8_t)c;
+            *length += 1;
+        }
+        *whole = *whole && (fits || !kept);
+        escaped = c == '\\' && !escaped;
+        p += size != 0 ? size : 1;
+    }
+    return closed ? (uint32_t)p : 0;
+}
+
+static uint32_t pp_scan_header_name(uint32_t refine_flags, const PPFileData* data, uint32_t first, uint32_t end, uint8_t* name, uint32_t capacity,
+                                    uint32_t* length, bool* whole)
+{
+    const uint32_t line_end = end < data->token_count ? data->starts[end] : data->length;
+    return pp_scan_header_bytes(refine_flags, data, data->starts[first], line_end, name, capacity, length, whole);
+}
+
 // The header name of directive d, an #include, #include_next or #import of a prepared file: `<...>` read from the
-// source, up to the '>' on the line, or a string literal, both without line splices (translation phase 2 removed them).
-// For a literal form, writes the name to `name` (`capacity` bytes) and its length, whether it is angled, and whether
-// tokens follow it on the line (`*extra`), which clang warns about and reads as they are (CheckEndOfDirective).
-// `scratch` holds the string literal's spelling while its splices are removed (room for the token's bytes).
+// source, up to the '>' on the line (pp_scan_header_name), or a string literal, both without line splices (translation
+// phase 2 removed them). For a literal form, writes the name to `name` (`capacity` bytes) and its length, whether it is
+// angled, and where it ends in the file (`*stop`: past its '>' or the string literal; else 0), from which clang lexes
+// the line's next token, a warning (CheckEndOfDirective). Without its '>' on the line, a '<' is a computed name: clang's
+// LexHeaderName joins the
+// tokens up to a '>', so that with a comment that runs on to the next line, `<a/*x` then `*/b.h>` is `a b.h`. With it,
+// the name is written out, never a computed one, whose identifiers would expand. `scratch` holds the string literal's
+// spelling while its splices are removed (room for the token's bytes).
 static PPHeaderForm pp_literal_header_name(const PPFileData* data, uint32_t d, uint32_t refine_flags, uint8_t* name, uint32_t capacity, uint32_t* length, bool* angled,
-                                           bool* extra, Arena* scratch)
+                                           uint32_t* stop, Arena* scratch)
 {
     const uint32_t hash = data->directive_hash[d];
     const uint32_t end = data->directive_end[d];
@@ -3158,50 +3402,25 @@ static PPHeaderForm pp_literal_header_name(const PPFileData* data, uint32_t d, u
     PPHeaderForm result = PP_HEADER_INVALID;
     *length = 0;
     *angled = false;
-    *extra = false;
+    *stop = 0;
     if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_LESS)
     {
-        // The lexer doesn't make header names: read <...> from the source, up to the '>' on the line, through the scalar
-        // lexer's characters, which skip line splices.
-        const uint32_t line_end = end < data->token_count ? data->starts[end] : data->length;
-        const ScalarLexer lexer = {
-            .source = data->bytes,
-            .length = line_end,
-            .trigraphs = (refine_flags & C_TOKENIZER_TRIGRAPHS) != 0,
-            .cplusplus = false,
-        };
-        uint64_t p = data->starts[first] + 1;
-        bool closed = false;
-        bool line_ended = false;
-        while (!closed && !line_ended && p < line_end && *length < capacity)
-        {
-            uint64_t size;
-            uint64_t char_start;
-            const int32_t c = get_char(&lexer, p, &size, &char_start);
-            closed = c == '>';
-            line_ended = c == '\n' || c == '\r' || c == BUSTER_LEX_END_OF_FILE;
-            if (!closed && !line_ended)
-            {
-                name[*length] = (uint8_t)c;
-                *length += 1;
-            }
-            p += size != 0 ? size : 1;
-        }
-        result = closed ? PP_HEADER_LITERAL : PP_HEADER_INVALID;
-        *angled = closed;
-        // A token after the '>'.
-        *extra = closed && end > first + 1 && data->starts[end - 1] >= p;
+        // The lexer doesn't make header names: read <...> from the source.
+        bool whole;
+        *stop = pp_scan_header_name(refine_flags, data, first, end, name, capacity, length, &whole);
+        result = *stop == 0 ? PP_HEADER_COMPUTED : whole ? PP_HEADER_LITERAL : PP_HEADER_INVALID;
+        *angled = result == PP_HEADER_LITERAL;
     }
     else if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_STRING_LITERAL)
     {
-        *extra = first + 1 < end;
         // The string literal without its line splices.
         const uint32_t start = data->starts[first];
-        const uint32_t stop = data->values[first];
+        const uint32_t stop_byte = data->values[first];
+        *stop = stop_byte;
         const uint64_t mark = scratch->length;
-        uint8_t* buffer = arena_push(scratch, (uint64_t)(stop - start) + 1, 1);
+        uint8_t* buffer = arena_push(scratch, (uint64_t)(stop_byte - start) + 1, 1);
         const uint8_t* spelling = 0;
-        const uint32_t spelled = buffer != 0 ? pp_remove_splices(data->bytes + start, stop - start, refine_flags, buffer, &spelling) : 0;
+        const uint32_t spelled = buffer != 0 ? pp_remove_splices(data->bytes + start, stop_byte - start, refine_flags, C_TOKEN_STRING_LITERAL, buffer, &spelling) : 0;
         if (spelled >= 2 && spelled - 2 < capacity && spelling[0] == '"')
         {
             *length = spelled - 2;
@@ -3473,6 +3692,59 @@ static uint32_t pp_relex_end(uint32_t refine_flags, const PPFileData* data, uint
     return (uint32_t)result;
 }
 
+// A block comment in a confirmed source header name can hide later file lines, unlike a line comment or a closed
+// same-line comment, whose suffix is already restored by pp_header_name_tail. Inspect only the prepared token gap
+// before the header's end, using the current masked lexical bytes so a repaired name never consumes capacity twice.
+static bool pp_header_comment_overlap(const Preprocessor* pp, PPContext* file, uint32_t first, uint32_t stop)
+{
+    const PPFileData* data = &pp->datas[file->data];
+    const uint8_t* bytes = data->lexical_bytes != 0 ? data->lexical_bytes : data->bytes;
+    bool result = false;
+    if (memchr(bytes + first, '*', stop - first) != 0)
+    {
+        if (file->header_gap_data != file->data)
+        {
+            file->header_gap_data = file->data;
+            file->header_gap_token = 0;
+        }
+        // Confirmed source names advance monotonically within a view. Each prepared token is passed at most once.
+        while (file->header_gap_token < data->token_count && data->starts[file->header_gap_token] < stop)
+        {
+            file->header_gap_token += 1;
+        }
+        ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+        lexer.source = bytes;
+        uint64_t p = file->header_gap_token != 0 ? pp_file_token_end(pp, data, file->header_gap_token - 1) : stop;
+        bool done = p < first;
+        while (!done && p < stop)
+        {
+            uint64_t size;
+            uint64_t at;
+            const int32_t c = get_char(&lexer, p, &size, &at);
+            uint64_t second;
+            const int32_t next = c == '/' ? get_char(&lexer, p + size, &second, &at) : 0;
+            const bool block = c == '/' && next == '*';
+            const bool blank = c == ' ' || c == '\t' || c == '\v' || c == '\f';
+            if (block)
+            {
+                const uint64_t past = pp_skip_comment(&lexer, p);
+                ScalarLexer comment = lexer;
+                comment.length = past;
+                const bool unclosed = data->unterminated_comment != 0 && data->unterminated_comment - 1 >= first && data->unterminated_comment - 1 < stop;
+                // Bound the newline scan to this comment. Scanning the remaining line for each query is quadratic.
+                result = pp_line_end(&comment, stop) < past || unclosed;
+                p = past;
+            }
+            else
+            {
+                p += size != 0 ? size : 1;
+            }
+            done = result || (!block && !blank);
+        }
+    }
+    return result;
+}
+
 // The rest of a directive's line [first, end) past a header name read from the file up to its '>' (pp_read_header_name),
 // which ends at byte `stop`: the first of the line's tokens there or past it. The lexer read the line before the name was
 // known, so one of its tokens or comments may run past `stop` (`<a.h>>`, or `<a//b.h>`, whose "//" began a comment to
@@ -3555,8 +3827,8 @@ static bool pp_same_file_token(const Preprocessor* pp, const PPFileData* a, uint
         uint32_t b_spelled = b_length;
         if (a_buffer != 0 && b_buffer != 0)
         {
-            a_spelled = pp_without_splices(pp, a->bytes + a->starts[i], a_length, a_buffer, &a_spelling);
-            b_spelled = pp_without_splices(pp, b->bytes + b->starts[j], b_length, b_buffer, &b_spelling);
+            a_spelled = pp_without_splices(pp, a->kinds[i] & 0x7F, a->bytes + a->starts[i], a_length, a_buffer, &a_spelling);
+            b_spelled = pp_without_splices(pp, b->kinds[j] & 0x7F, b->bytes + b->starts[j], b_length, b_buffer, &b_spelling);
         }
         result = a_spelled == b_spelled && memcmp(a_spelling, b_spelling, a_spelled) == 0;
         scratch_end(scratch);
@@ -4337,6 +4609,7 @@ static void pp_end_regions(Preprocessor* pp, bool main_file)
     }
 }
 
+static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end);
 // A file's trailing unterminated comment has been reached. Clang's raw lexer suppresses its diagnostic in a skipped
 // group's body, but reads a recognized directive's own line actively. Each inclusion reads it independently.
 static void pp_read_file_comment(Preprocessor* pp, PPContext* context, bool directive)
@@ -4354,9 +4627,24 @@ static void pp_read_file_comment(Preprocessor* pp, PPContext* context, bool dire
     }
 }
 
+// A recognized directive reads a trailing comment on its own line actively. Conditions do this after source header
+// queries have restored any opaque names, before their expression is evaluated; a body comment is left to the file.
+static void pp_read_directive_comment(Preprocessor* pp, PPContext* context, uint32_t directive)
+{
+    const PPFileData* data = &pp->datas[context->data];
+    if (data->unterminated_comment != 0 && !data->unterminated_comment_starts_line && data->directive_end[directive] == data->token_count)
+    {
+        pp_read_file_comment(pp, context, true);
+    }
+}
+
 BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
+    const bool relexed = context->relexed;
+    const uint32_t relex_position = context->relex_position;
+    const uint32_t relex_file = context->relex_file;
+    const uint32_t expansion_end = context->expansion_end;
     pp->macros[context->macro].disabled -= context->macro != 0;
     if (context->kind == BUSTER_PP_CONTEXT_BUFFER)
     {
@@ -4387,9 +4675,14 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
         pp->file_change_location = pp_directive_resume(pp, includer, includer->next_directive - 1);
     }
     // An expansion that ends passes its pending flags on to the context it was read from; an argument's or a line's
-    // barrier doesn't.
+    // barrier doesn't. An artificial source split passes them to its successor, which can reuse this context's slot.
     const uint8_t passed = (uint8_t)((context->pending_flags | context->trailing_flags) & ~((context->trailing_flags & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE : 0));
-    if (context->kind == BUSTER_PP_CONTEXT_BUFFER && !context->barrier && passed != 0 && pp->context_count != 0)
+    const bool passes_flags = context->kind == BUSTER_PP_CONTEXT_BUFFER && !context->barrier;
+    if (relexed && relex_position != 0)
+    {
+        pp_continue_relex(pp, relex_file, relex_position, expansion_end);
+    }
+    if (passes_flags && passed != 0 && pp->context_count != 0)
     {
         pp->contexts[pp->context_count - 1].pending_flags |= passed;
     }
@@ -4734,9 +5027,9 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
     uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
     const PPPrepare mode = pp_prepare_config(pp);
-    count = count > 0 ? pp_lex_for_mode(&mode, bytes, kinds, starts, ends, count, false) : count;
+    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp_lex_flags(&mode)) : -1;
+    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, (uint32_t)count, false) : count;
     *comment = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
     count -= *comment;
     uint32_t result = count >= 0 && pp_room(pp, into, (uint32_t)count) ? (uint32_t)count : BUSTER_PP_NONE;
@@ -4847,13 +5140,12 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
             uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-            int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, pp->refine_flags) : -1;
-            // As the mode lexes it (its flags, then pp_lex_for_mode): a digit separator or a prefix it doesn't have makes
-            // two tokens, and in assembly '$' is punctuation (pp_split_dollars), so `$ ## x` gives two tokens. A '/' and a
-            // '*' make no token, but an unterminated comment.
-            const PPPrepare mode = pp_prepare_config(pp);
-            count = count > 0 ? pp_lex_for_mode(&mode, joined, kinds, starts, ends, count, false) : count;
-            valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_is_unterminated_comment(joined, kinds[0], 0);
+            // Where '$' is punctuation (pp_dollar_punctuation), `$ ## x` gives two tokens.
+            const uint32_t flags = pp->refine_flags | (pp_dollar_punctuation(&pp->options) ? C_TOKENIZER_NO_DOLLARS : 0);
+            const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, flags) : -1;
+            // A prefixed literal the mode doesn't have lexes as two tokens (pp_split_kinds).
+            valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_splits_kind(pp->split_kinds, kinds[0]) &&
+                    !pp_splits_unknown(joined, starts[0], ends[0], pp->split_kinds) && !pp_is_unterminated_comment(joined, kinds[0], 0);
             kind = valid ? kinds[0] & 0x7F : kind;
         }
         if (valid)
@@ -4942,13 +5234,17 @@ static PPToken pp_stringize(Preprocessor* pp, const PPTokens* tokens, uint32_t b
                 const bool escape = pp_is_literal(kind);
                 for (uint32_t k = 0; k < spelling_length; k += 1)
                 {
-                    if (escape && (spelling[k] == '"' || spelling[k] == '\\'))
+                    const uint8_t c = spelling[k];
+                    // A raw string literal's line break is \n, as clang's Stringify writes one (\r\n and \n\r too).
+                    const bool line_break = escape && (c == '\n' || c == '\r');
+                    if (escape && (c == '"' || c == '\\' || line_break))
                     {
                         text[length] = '\\';
                         length += 1;
                     }
-                    text[length] = spelling[k];
+                    text[length] = line_break ? 'n' : c;
                     length += 1;
+                    k += line_break && k + 1 < spelling_length && (spelling[k + 1] == '\n' || spelling[k + 1] == '\r') && spelling[k + 1] != c;
                 }
                 first = false;
             }
@@ -6120,11 +6416,252 @@ static const char* pp_embedded_directive_name(uint8_t kind)
     return result;
 }
 
+static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end, PPTokens* into);
+
+// Did the ordinary lexer read the token before byte `stop` as a raw string that runs past it? Only that rare case
+// can hide source after a confirmed header name. Read just its prefix through phases 1 and 2, including a spliced R.
+static bool pp_query_raw_overlap(const Preprocessor* pp, const PPFileData* data, uint32_t first, uint32_t stop)
+{
+    uint32_t low = 0;
+    uint32_t high = data->token_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = data->starts[middle] < stop;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    const uint32_t token = low != 0 ? low - 1 : 0;
+    const uint8_t kind = low != 0 ? data->kinds[token] & 0x7F : 0;
+    const bool candidate = low != 0 && data->starts[token] > first &&
+                           (kind == C_TOKEN_UNKNOWN || pp_is_string_literal(kind)) && pp_file_token_end(pp, data, token) > stop;
+    bool result = false;
+    if (candidate)
+    {
+        const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+        uint64_t at = data->starts[token];
+        int32_t previous = 0;
+        bool quoted = false;
+        for (uint32_t i = 0; !quoted && i < 4; i += 1)
+        {
+            uint64_t size;
+            uint64_t start;
+            const int32_t c = get_char(&lexer, at, &size, &start);
+            result = c == '"' && previous == 'R';
+            quoted = c == '"';
+            at += size;
+            previous = c;
+        }
+    }
+    return result;
+}
+
+// The executing directive or expanded query has proved [begin, stop) opaque to ordinary C lexing. Prepare a
+// private view for this inclusion with only that span masked. Original source bytes/offsets, old macro data indexes,
+// other inclusions and shared cache records stay unchanged. Previous masks are retained. Callers invoke this only
+// for an exceptional lexical overlap, and reload their data afterward: position moves to the rebuilt directive end.
+// Separate per-inclusion budgets of 64 direct repairs and 8 queries bound full-file copy/preparation work and retained
+// storage by O((64 + 8) * N). Capacity/allocation exhaustion is fatal, never a successful truncated stream.
+static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t begin, uint32_t stop, bool query)
+{
+    PPContext* file = &pp->contexts[file_context];
+    const PPFileData* data = &pp->datas[file->data];
+    uint8_t* repairs = query ? &file->opaque_query_repairs : &file->opaque_direct_repairs;
+    const uint32_t capacity = query ? BUSTER_PP_MAX_QUERY_REPAIRS : BUSTER_PP_MAX_DIRECT_REPAIRS;
+    bool result = true;
+    if (*repairs >= capacity)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "%s recovery capacity exceeded (%u repairs per inclusion)",
+                    query ? "header query" : "opaque directive", capacity);
+        result = false;
+    }
+    else
+    {
+        uint8_t* lexical = pp->data_count < BUSTER_PP_MAX_FILES ? arena_push(&pp->arena, data->length, 1) : 0;
+        result = lexical != 0;
+        if (result)
+        {
+            memcpy(lexical, data->lexical_bytes != 0 ? data->lexical_bytes : data->bytes, data->length);
+            const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = pp->options.trigraphs };
+            uint64_t p = begin;
+            while (p < stop)
+            {
+                uint64_t size;
+                uint64_t at;
+                get_char(&lexer, p, &size, &at);
+                // Leave physical splices before `at` intact, preserving logical lines and original source offsets.
+                const uint64_t end = p + size < stop ? p + size : stop;
+                memset(lexical + at, ' ', at < end ? end - at : 0);
+                p += size != 0 ? size : 1;
+            }
+            PPFileData recovered = *data;
+            recovered.bytes = lexical;
+            recovered.lexical_bytes = lexical;
+            recovered.mapped = false;
+            recovered.prepared = false;
+            recovered.unterminated_comment = 0;
+            recovered.unterminated_comment_starts_line = false;
+            const PPPrepare prepare = pp_prepare_config(pp);
+            result = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, &recovered, 0) == PP_PREPARE_DONE;
+            if (result)
+            {
+                recovered.bytes = data->bytes;
+                pp->datas[pp->data_count] = recovered;
+                file->data = pp->data_count;
+                pp->data_count += 1;
+                *repairs += 1;
+                file->end = recovered.token_count;
+                file->position = recovered.directive_end[directive];
+                file->next_directive = directive + 1;
+                file->comment_read = false;
+            }
+        }
+        if (!result)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "out of memory recovering an opaque directive span");
+        }
+    }
+    return result;
+}
+
+// Raw-looking header bytes need this correction only after expansion confirms the query's source header context.
+// Genuine multiline raw macro arguments never call the primitive merely because they appear on a directive line.
+static bool pp_recover_query_raw(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t first, uint32_t stop)
+{
+    const PPContext* file = &pp->contexts[file_context];
+    const PPFileData* data = &pp->datas[file->data];
+    const bool overlap = (pp->refine_flags & C_TOKENIZER_RAW_STRINGS) && pp_query_raw_overlap(pp, data, first, stop);
+    return !overlap || pp_recover_opaque_span(pp, file_context, directive, first + 1, stop - 1, true);
+}
+
+// Only an executing direct header directive owns this source span. An excluded directive never reaches this hook,
+// so raw-looking text in skipped groups retains the ordinary lexer's behavior and cannot reveal hidden directives.
+static bool pp_recover_direct_raw(Preprocessor* pp, PPContext* context, uint32_t directive)
+{
+    const PPFileData* data = &pp->datas[context->data];
+    const uint8_t kind = data->directive_kind[directive];
+    const bool header = kind == PP_DIRECTIVE_INCLUDE || kind == PP_DIRECTIVE_INCLUDE_NEXT || kind == PP_DIRECTIVE_IMPORT || kind == PP_DIRECTIVE_EMBED;
+    const uint32_t first = data->directive_hash[directive] + 2;
+    const uint32_t end = data->directive_end[directive];
+    bool result = true;
+    if (header && (pp->refine_flags & C_TOKENIZER_RAW_STRINGS) && first < end && (data->kinds[first] & 0x7F) == C_TOKEN_LESS)
+    {
+        uint32_t length;
+        bool whole;
+        const uint32_t stop = pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole);
+        if (stop != 0 && pp_query_raw_overlap(pp, data, data->starts[first], stop))
+        {
+            result = pp_recover_opaque_span(pp, (uint32_t)(context - pp->contexts), directive, data->starts[first] + 1, stop - 1, false);
+        }
+    }
+    return result;
+}
+
+// A source header's literal spelling is confirmed before the ordinary lexer's comment is corrected. The private view
+// restores file tokens and directive links after it, while old macro definitions and other inclusions keep their data.
+static bool pp_recover_header_comment(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t first, uint32_t stop, bool query)
+{
+    PPContext* file = &pp->contexts[file_context];
+    return !pp_header_comment_overlap(pp, file, first, stop) || pp_recover_opaque_span(pp, file_context, directive, first + 1, stop - 1, query);
+}
+
+// Only an executing direct header directive confirms this opaque source span. Excluded directives keep ordinary
+// lexing, including their comments; computed headers are identified during macro expansion instead.
+static bool pp_recover_direct_header_comment(Preprocessor* pp, PPContext* context, uint32_t directive)
+{
+    const PPFileData* data = &pp->datas[context->data];
+    const uint8_t kind = data->directive_kind[directive];
+    const bool header = kind == PP_DIRECTIVE_INCLUDE || kind == PP_DIRECTIVE_INCLUDE_NEXT || kind == PP_DIRECTIVE_IMPORT || kind == PP_DIRECTIVE_EMBED;
+    const uint32_t first = data->directive_hash[directive] + 2;
+    const uint32_t end = data->directive_end[directive];
+    bool result = true;
+    if (header && first < end && (data->kinds[first] & 0x7F) == C_TOKEN_LESS)
+    {
+        uint32_t length;
+        bool whole;
+        const uint32_t stop = pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole);
+        if (stop != 0)
+        {
+            result = pp_recover_header_comment(pp, (uint32_t)(context - pp->contexts), directive, data->starts[first], stop, false);
+        }
+    }
+    return result;
+}
+
+// An include-like builtin's '(' (__has_include's, __has_include_next's or __has_embed's) was just read from its #if or
+// #elif line itself, the barrier of the line's capture: a '<' next is a header name as the line writes it, read as
+// #include reads one (pp_scan_header_name), where clang's LexHeaderName lexes one from its file, and not joined from
+// tokens as one a macro or an argument gives (pp_header_name): `__has_include(<  x.h>)` names "  x.h". The operand takes
+// the '<' alone, spanning the name to its '>' (pp_written_angled), and the line's tokens inside the name are skipped.
+// When the line's tokens past the '>' aren't those clang lexes on from it (pp_header_name_tail: a token or a comment
+// of the file's ran past it, as in `<x.h>>` or `<a//b.h>`), the rest of the line is lexed again from the '>', into a
+// buffer the main loop reads next, and the barrier's own tokens are left: `<x.h>>` leaves a '>' in the operand, an
+// error, and `<a//b.h>) && X` keeps its `&& X`. Without a '>' on the line, nothing changes. Returns what collecting the
+// '<' did, or PP_COLLECTED_MORE.
+static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* invocation, PPContext* context)
+{
+    PPCollected result = PP_COLLECTED_MORE;
+    const uint8_t builtin = pp->macros[invocation->macro].builtin;
+    const bool header = builtin == PP_BUILTIN_HAS_INCLUDE || builtin == PP_BUILTIN_HAS_INCLUDE_NEXT || builtin == PP_BUILTIN_HAS_EMBED;
+    const PPCapture* line = pp->capture_count != 0 ? &pp->capture_frames[pp->capture_count - 1] : 0;
+    if (header && context->relexed && context->position == context->end && context->relex_position != 0)
+    {
+        const PPContext* file = &pp->contexts[context->relex_file];
+        const PPFileData* data = &pp->datas[file->data];
+        const uint32_t base = pp->ranges[file->range].base;
+        const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+        const uint32_t first = (uint32_t)pp_skip_blanks(&lexer, context->relex_position);
+        uint64_t size;
+        uint64_t at;
+        const int32_t c = get_char(&lexer, first, &size, &at);
+        uint32_t length;
+        bool whole;
+        const uint32_t stop = c == '<' ? pp_scan_header_bytes(pp->refine_flags, data, first, data->length, 0, 0, &length, &whole) : 0;
+        if (stop != 0 && line != 0 && pp_recover_query_raw(pp, context->relex_file, line->directive, first, stop) &&
+            pp_recover_header_comment(pp, context->relex_file, line->directive, first, stop, true))
+        {
+            const PPToken token = { .kind = C_TOKEN_LESS, .value = base + stop, .location = base + first };
+            context->relex_position = stop;
+            result = pp_collect_token(pp, invocation, token, pp_expansion_end(context, token));
+        }
+    }
+    else if (header && context->barrier && line != 0 && line->kind == BUSTER_PP_CAPTURE_CONDITION && context->position < context->end &&
+             context->tokens->kinds[context->position] == C_TOKEN_LESS)
+    {
+        // The barrier holds the line's tokens from the one after the directive's name (pp_start_condition).
+        PPContext* file = &pp->contexts[line->context];
+        const PPFileData* data = &pp->datas[file->data];
+        const uint32_t base = pp->ranges[file->range].base;
+        const uint32_t first = data->directive_hash[line->directive] + 2 + (context->position - line->arguments_begin);
+        const uint32_t end = data->directive_end[line->directive];
+        PPToken token = pp_context_token(pp, context, context->position);
+        uint32_t length;
+        bool whole;
+        const uint32_t stop = first < end && base + data->starts[first] == token.location ? pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole) : 0;
+        if (stop != 0 && pp_recover_query_raw(pp, line->context, line->directive, data->starts[first], stop) &&
+            pp_recover_header_comment(pp, line->context, line->directive, data->starts[first], stop, true))
+        {
+            uint32_t relex;
+            const uint32_t after = pp_header_name_tail(pp, data, first, end, stop, &relex);
+            token.value = base + stop;
+            const uint32_t expansion_end = pp_expansion_end(context, token);
+            context->position = relex != stop ? context->end : context->position + (after - first);
+            result = pp_collect_token(pp, invocation, token, expansion_end);
+            if (relex != stop)
+            {
+                pp_continue_relex(pp, line->context, stop, context->expansion_end);
+            }
+        }
+    }
+    return result;
+}
+
 // One step of the main loop while it collects the top invocation's arguments (or a builtin's operand) a token at a time:
 // the top context's tokens up to its end or its next directive. An exhausted buffer is popped (which enables its macro
 // again); a directive runs, as clang runs one among a macro's arguments (its line may start a capture, during which the
 // collection waits), but for those clang rejects there (pp_embedded_directive_name), which are an error and skipped;
-// the end of a file or of a barrier leaves the invocation unterminated.
+// the end of a file or of a barrier leaves the invocation unterminated. A builtin's header name a #if line writes is
+// read as the line writes it (pp_collect_written_header).
 static void pp_collect_step(Preprocessor* pp)
 {
     PPInvocation* invocation = &pp->invocations[pp->invocation_count - 1];
@@ -6179,12 +6716,17 @@ static void pp_collect_step(Preprocessor* pp)
         {
             PPToken token = pp_context_token(pp, context, context->position);
             const uint32_t expansion_end = pp_expansion_end(context, token);
+            const bool opening = !invocation->opened;
             context->position += 1;
             // A name of a macro disabled now is painted: the expansion it is in can end before the argument expands,
             // which enables the macro again (Preprocessor::ReadMacroCallArgumentList, C 6.10.4.4p2).
             const bool disabled = token.kind == C_TOKEN_RAW_IDENTIFIER && pp_is_macro(pp, token.value) && pp->macros[pp->macro_of[token.value]].disabled != 0;
             token.flags |= disabled ? BUSTER_PP_NO_EXPAND : 0;
             collected = pp_collect_token(pp, invocation, token, expansion_end);
+            if (opening && invocation->builtin && collected == PP_COLLECTED_MORE)
+            {
+                collected = pp_collect_written_header(pp, invocation, context);
+            }
         }
     }
     else if (context->barrier)
@@ -6458,47 +7000,61 @@ static uint32_t pp_current_file(const Preprocessor* pp)
     return context != 0 ? context->file : BUSTER_PP_NONE;
 }
 
-// A header name from tokens [begin, end) of a stack: a string literal's contents, or the spellings between '<' and '>'
-// (with a space where whitespace was, as clang joins a header name that macros made). Returns false if they are neither.
+// Whether token `i` of a stack is a '<' that spans a header name a #if line writes, up to its '>'
+// (pp_collect_written_header).
+static bool pp_written_angled(const Preprocessor* pp, const PPTokens* tokens, uint32_t i)
+{
+    const uint8_t* last = tokens->kinds[i] == C_TOKEN_LESS && tokens->values[i] - tokens->locations[i] > 1 ? pp_location_bytes(pp, tokens->values[i] - 1) : 0;
+    return last != 0 && *last == '>';
+}
+
+// A header name from tokens [begin, end) of a stack: a string literal's contents, the name a '<' spans as a #if line
+// writes it (pp_written_angled), or the spellings between '<' and '>' with a space where whitespace was before each token
+// after the '<', the '>' too, as clang joins a header name that macros made (Preprocessor::LexHeaderName): `< c.h >` is
+// " c.h ". Returns false if they are none of those (a name a '<' spans with tokens after it too).
 static bool pp_header_name(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint8_t* name, uint32_t capacity, uint32_t* length, bool* angled)
 {
     bool result = false;
     *length = 0;
-    if (begin < end && tokens->kinds[begin] == C_TOKEN_STRING_LITERAL && end - begin == 1)
+    if (begin < end && end - begin == 1 && (tokens->kinds[begin] == C_TOKEN_STRING_LITERAL || pp_written_angled(pp, tokens, begin)))
     {
-        // The literal's spelling without its line splices (translation phase 2), as for a direct #include.
+        // The token's spelling without its line splices (translation phase 2), as for a direct #include, inside its
+        // quotes or its '<' and '>'.
         Scratch scratch = scratch_begin(0);
         uint8_t* buffer = arena_push(scratch.arena, (uint64_t)(tokens->values[begin] - tokens->locations[begin]) + 1, 1);
         const uint8_t* spelling = 0;
         const uint32_t spelled = buffer != 0 ? pp_spelling(pp, tokens->kinds[begin], tokens->values[begin], tokens->locations[begin], buffer, &spelling) : 0;
-        result = spelled >= 2 && spelled - 2 < capacity;
+        // (A raw string literal is no header name, as in clang.)
+        result = spelled >= 2 && spelled - 2 < capacity && (tokens->kinds[begin] == C_TOKEN_LESS || spelling[0] == '"');
         if (result)
         {
             memcpy(name, spelling + 1, spelled - 2);
             *length = spelled - 2;
-            *angled = false;
+            *angled = tokens->kinds[begin] == C_TOKEN_LESS;
         }
         scratch_end(scratch);
     }
-    else if (begin < end && tokens->kinds[begin] == C_TOKEN_LESS && tokens->kinds[end - 1] == C_TOKEN_GREATER)
+    else if (begin < end && tokens->kinds[begin] == C_TOKEN_LESS && tokens->kinds[end - 1] == C_TOKEN_GREATER && !pp_written_angled(pp, tokens, begin))
     {
         result = true;
-        for (uint32_t i = begin + 1; result && i + 1 < end; i += 1)
+        for (uint32_t i = begin + 1; result && i < end; i += 1)
         {
             uint8_t buffer[64];
             const uint8_t* spelling;
-            const uint32_t spelled = tokens->kinds[i] == C_TOKEN_RAW_IDENTIFIER ? intern_length(pp->table, tokens->values[i]) : tokens->values[i] - tokens->locations[i];
-            const bool space = i > begin + 1 && (tokens->flags[i] & BUSTER_PP_SPACE);
+            // The '>' gives only its space.
+            const bool closing = i + 1 == end;
+            const uint32_t spelled = closing ? 0 : tokens->kinds[i] == C_TOKEN_RAW_IDENTIFIER ? intern_length(pp->table, tokens->values[i]) : tokens->values[i] - tokens->locations[i];
+            const bool space = (tokens->flags[i] & BUSTER_PP_SPACE) != 0;
             result = spelled < sizeof(buffer) && *length + spelled + 1 < capacity;
             if (result)
             {
-                const uint32_t n = pp_spelling(pp, tokens->kinds[i], tokens->values[i], tokens->locations[i], buffer, &spelling);
+                const uint32_t n = closing ? 0 : pp_spelling(pp, tokens->kinds[i], tokens->values[i], tokens->locations[i], buffer, &spelling);
                 if (space)
                 {
                     name[*length] = ' ';
                     *length += 1;
                 }
-                memcpy(name + *length, spelling, n);
+                memcpy(name + *length, closing ? (const uint8_t*)"" : spelling, n);
                 *length += n;
             }
         }
@@ -6565,13 +7121,28 @@ static bool pp_feature_name(Preprocessor* pp, PPBuiltin builtin, const PPTokens*
     }
     else if (builtin == PP_BUILTIN_HAS_WARNING && end - begin >= 1)
     {
-        // __has_warning("-Wname"): the strings' value, as clang reads it (FinishLexStringLiteral: ordinary literals,
-        // joined, without their line splices and with their escapes decoded), and nothing after them. Another first
-        // token (a macro's name too: clang doesn't expand the operand) is an error.
-        uint32_t i = begin;
-        const uint32_t n = pp_pragma_strings(pp, tokens, &i, end, name, 256, "'__has_warning'", tokens->locations[begin]);
-        result = n != BUSTER_PP_NONE && i == end;
-        *length = result ? n : 0;
+        // __has_warning("-Wname"): the strings' contents (adjacent strings joined), from their spellings; a raw string
+        // literal's is its body.
+        result = true;
+        for (uint32_t i = begin; result && i < end; i += 1)
+        {
+            const uint32_t spelled = tokens->values[i] - tokens->locations[i];
+            result = tokens->kinds[i] == C_TOKEN_STRING_LITERAL && spelled >= 2 && *length + spelled < 256;
+            Scratch scratch = scratch_begin(0);
+            uint8_t* buffer = result ? arena_push(scratch.arena, (uint64_t)spelled + 1, 1) : 0;
+            result = buffer != 0;
+            if (result)
+            {
+                const uint8_t* spelling;
+                const uint32_t length_spelled = pp_spelling(pp, tokens->kinds[i], tokens->values[i], tokens->locations[i], buffer, &spelling);
+                const uint8_t* body = spelling + 1;
+                uint32_t body_length = length_spelled - 2;
+                pp_raw_string_body(spelling, length_spelled, &body, &body_length);
+                memcpy(name + *length, body, body_length);
+                *length += body_length;
+            }
+            scratch_end(scratch);
+        }
     }
     return result;
 }
@@ -6594,8 +7165,18 @@ static bool pp_pragma_string(Preprocessor* pp, PPToken string, uint32_t name_loc
         {
             open_quote += 1;
         }
+        // A raw string literal's body is as written (clang takes off its prefix, delimiters and parentheses); another
+        // string loses its escaped quotes' and backslashes' escapes.
+        const uint8_t* body;
+        uint32_t body_length;
+        const bool raw = pp_raw_string_body(spelling, length, &body, &body_length);
         uint32_t n = 0;
-        for (uint32_t i = open_quote + 1; i + 1 < length; i += 1)
+        if (raw)
+        {
+            memcpy(text, body, body_length);
+            n = body_length;
+        }
+        for (uint32_t i = open_quote + 1; !raw && i + 1 < length; i += 1)
         {
             if (spelling[i] == '\\' && i + 2 < length && (spelling[i + 1] == '"' || spelling[i + 1] == '\\'))
             {
@@ -6632,7 +7213,8 @@ static bool pp_pragma_string(Preprocessor* pp, PPToken string, uint32_t name_loc
 static uint64_t pp_has_embed(Preprocessor* pp, const PPTokens* tokens, uint32_t first, uint32_t last, uint32_t location);
 
 // A feature query's or __has_include's answer, from its operand's tokens [first, last) of `tokens` (expanded, unless
-// __has_include's is a header name as written).
+// __has_include's is a header name as written). A place __has_include's search can't look in is clang's fatal error at
+// the name, as #include's is (pp_find_include).
 static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTokens* tokens, uint32_t first, uint32_t last, uint32_t location)
 {
     uint64_t result = 0;
@@ -6651,9 +7233,12 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
     else if (include && pp_header_name(pp, tokens, first, last, text, sizeof(text), &length, &angled))
     {
         const PPContext* includer = pp_current_file_context(pp);
+        const uint32_t saved_origin = pp->diagnostic_origin;
+        pp->diagnostic_origin = tokens->origins != 0 ? tokens->origins[first] : 0;
         uint32_t found_in;
         const uint32_t file = pp_find_include(pp, text, length, angled, builtin == PP_BUILTIN_HAS_INCLUDE_NEXT, includer != 0 ? includer->file : BUSTER_PP_NONE,
-                                              includer != 0 ? includer->search_index : BUSTER_PP_NONE, &found_in);
+                                              includer != 0 ? includer->search_index : BUSTER_PP_NONE, &found_in, tokens->locations[first]);
+        pp->diagnostic_origin = saved_origin;
         result = file != BUSTER_PP_NONE;
     }
     else if (include)
@@ -7651,6 +8236,7 @@ static __attribute__((noinline, cold)) void pp_check_limit(Preprocessor* pp)
         while (!popped)
         {
             popped = pp->contexts[pp->context_count - 1].barrier;
+            pp->contexts[pp->context_count - 1].relexed = false;
             pp_pop_context(pp);
         }
         pp_finish_capture(pp);
@@ -7718,11 +8304,11 @@ static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t be
     return result;
 }
 
-// Lexes bytes [begin, end) of the context's file again and appends their tokens to pp->arguments as pp_copy_line copies
-// a line's: the rest of a line past a header name read from it, where the file's tokens aren't those clang lexes
-// (pp_header_name_tail). An unterminated block comment at their end is an error, and left out. Returns false if they
-// don't fit.
-static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end)
+// Lexes bytes [begin, end) of the context's file again and appends their tokens to `into` as pp_copy_line copies a
+// line's: the rest of a line past a header name read from it, where the file's tokens aren't those clang lexes
+// (pp_header_name_tail). An unterminated block comment at their end is an error, and left out. Returns false
+// if they don't fit.
+static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end, PPTokens* into)
 {
     const PPFileData* data = &pp->datas[context->data];
     const uint32_t base = pp->ranges[context->range].base;
@@ -7733,9 +8319,9 @@ static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t
     uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
     uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
     const PPPrepare mode = pp_prepare_config(pp);
-    count = count > 0 ? pp_lex_for_mode(&mode, bytes, kinds, starts, ends, count, false) : count;
+    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp_lex_flags(&mode)) : -1;
+    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, (uint32_t)count, false) : count;
     // An unterminated block comment at their end runs to the file's end (pp_relex_end), which clang's lexer reports where
     // it starts: the file's tokens, which read it as part of a line comment, didn't.
     const bool unterminated = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
@@ -7744,7 +8330,7 @@ static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t
         pp_diagnose(pp, PP_SEVERITY_ERROR, base + begin + starts[count - 1], "unterminated /* comment");
     }
     count -= unterminated;
-    bool result = count >= 0 && pp_room(pp, &pp->arguments, (uint32_t)count);
+    bool result = count >= 0 && pp_room(pp, into, (uint32_t)count);
     for (uint32_t i = 0; result && i < (uint32_t)count; i += 1)
     {
         const uint8_t kind = kinds[i] & 0x7F;
@@ -7753,30 +8339,124 @@ static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t
         // A gap of line splices alone isn't a space, as refinement has it.
         const uint32_t gap = i == 0 ? 0 : ends[i - 1];
         const bool space = starts[i] != gap && !refine_gap_is_splices(bytes, length, gap, starts[i], pp->refine_flags);
-        pp_tokens_set(&pp->arguments, pp->arguments.count, kind, space ? BUSTER_PP_SPACE : 0, value, base + begin + starts[i]);
-        pp_history_fill(pp, &pp->arguments, pp->arguments.count, pp->arguments.count + 1, 0);
-        pp->arguments.count += 1;
+        pp_tokens_set(into, into->count, kind, space ? BUSTER_PP_SPACE : 0, value, base + begin + starts[i]);
+        pp_history_fill(pp, into, into->count, into->count + 1, 0);
+        into->count += 1;
     }
     scratch_end(scratch);
     return result;
 }
 
-// Enters a file (prepared on first use) included at `include_location` from range `parent`, unless #pragma once read it
-// or its guard is defined after its first inclusion ended. The inclusion is as much a system header as the file and as
-// the includer there are, as clang has it (HandleHeaderIncludeOrImport): a file included from a system header is one
-// too.
-static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index)
+// Continue a condition's file-sourced suffix in pieces. Stop each piece after '(' so an include-like builtin can read
+// the next header name raw (pp_collect_written_header). Other parentheses just continue ordinary lexing when their
+// piece ends. Windows grow geometrically until they contain a parenthesis, the line's end, or a complete token prefix;
+// the last three tokens of an incomplete window are withheld because a punctuator or literal may span its edge.
+// Thus each byte is lexed a bounded number of times, including a line with many names containing '//'. This is a rare
+// correction of file tokens that were lexed before a header name was known; ordinary conditions keep their file runs.
+static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end)
+{
+    PPContext* file = &pp->contexts[file_context];
+    const PPFileData* data = &pp->datas[file->data];
+    const PPPrepare mode = pp_prepare_config(pp);
+    const uint32_t remaining = data->length - begin;
+    uint32_t window = remaining < 128 ? remaining : 128;
+    uint32_t end = begin;
+    uint32_t next = 0;
+    bool done = false;
+    bool valid = true;
+    while (!done && valid)
+    {
+        Scratch scratch = scratch_begin(0);
+        const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY((uint64_t)window);
+        uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
+        uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
+        uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
+        valid = kinds != 0 && starts != 0 && ends != 0;
+        uint64_t resume = window;
+        const uint64_t count = valid ? c_tokenize_scalar_range(data->bytes + begin, window, 0, false, 0, kinds, starts, ends, 0, pp_lex_flags(&mode), &resume) : 0;
+        uint32_t paren = 0;
+        while (paren < count && (kinds[paren] & 0x7F) != C_TOKEN_L_PAREN)
+        {
+            paren += 1;
+        }
+        const bool line_ended = resume < window || window == remaining;
+        if (paren < count)
+        {
+            end = begin + ends[paren];
+            next = end;
+            done = true;
+        }
+        else if (line_ended)
+        {
+            end = begin + (uint32_t)resume;
+            done = true;
+        }
+        else if (count > 3)
+        {
+            end = begin + ends[count - 4];
+            next = end;
+            done = true;
+        }
+        else
+        {
+            const uint64_t grown = (uint64_t)window * 2;
+            window = grown < remaining ? (uint32_t)grown : remaining;
+        }
+        scratch_end(scratch);
+    }
+    if (!valid)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "out of memory re-lexing a header query");
+    }
+    const uint32_t start = pp->expansions.count;
+    if (valid && pp_copy_relexed(pp, file, begin, end, &pp->expansions))
+    {
+        pp_check_poison_range(pp, data, pp->ranges[file->range].base, &pp->expansions, start, pp->expansions.count, BUSTER_PP_NONE, true);
+        pp_resume_after(file, data, end);
+        if (pp->expansions.count != start)
+        {
+            PPContext* piece = pp_push_buffer(pp, &pp->expansions, start, pp->expansions.count, 0, expansion_end, false, true);
+            if (piece != 0)
+            {
+                piece->relexed = true;
+                piece->relex_position = next;
+                piece->relex_file = file_context;
+            }
+        }
+    }
+}
+
+// Enters a file (prepared on first use) included at `include_location` from range `parent`, unless its guard is defined
+// or #pragma once read it. The inclusion is as much a system header as the file and as the includer there are, as
+// clang has it (HandleHeaderIncludeOrImport): a file included from a system header is one too. As in clang, an
+// #include in the 199th file below the main one is an error (at the name, `name_location`, with `name_origin`, the
+// history of a name a macro made), after which a file included before isn't entered again: the limit is usually a
+// cycle's.
+static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index, uint32_t name_location,
+                          uint32_t name_origin)
 {
     PPFileData* data = &pp->datas[pp->files[file].data];
     const bool guarded = data->guarded && data->guard != 0 && !pp->options.no_guard_skip && pp_is_defined(pp, data->guard);
     const bool skipped = data->prepared && (data->once || guarded);
     pp->statistics.skipped_once += data->prepared && data->once && pp->options.timing;
     pp->statistics.skipped_guards += data->prepared && !data->once && guarded && pp->options.timing;
-    if (pp->include_depth >= BUSTER_PP_MAX_INCLUDE_DEPTH)
+    // Whether the inclusion takes the file (clang's ShouldEnterIncludeFile, which marks it included before the depth
+    // check, so that the file the check refuses isn't entered after it either).
+    const bool taken = !skipped && !(pp->include_limit_reached && data->included);
+    data->included |= taken;
+    if (!taken)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, include_location, "#include nested too deeply");
+        // Not entered.
     }
-    else if (!skipped && (data->prepared || pp_prepare_data(pp, data, pp->files[file].path)))
+    else if (pp->include_depth + 1 >= BUSTER_PP_MAX_INCLUDE_DEPTH)
+    {
+        const uint32_t saved_origin = pp->diagnostic_origin;
+        pp->diagnostic_origin = name_origin;
+        pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "#include nested too deeply");
+        pp->diagnostic_origin = saved_origin;
+        pp->include_limit_reached = true;
+    }
+    else if (data->prepared || pp_prepare_data(pp, data, pp->files[file].path))
     {
         const uint32_t range = pp_add_range(pp, data->length, file, data->bytes, parent, include_location);
         PPContext* context = range != BUSTER_PP_NONE ? pp_push_context(pp, BUSTER_PP_CONTEXT_FILE) : 0;
@@ -7804,67 +8484,6 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
 // for an exceptional lexical overlap, and reload their data afterward: position moves to the rebuilt directive end.
 // Separate per-inclusion budgets of 64 direct repairs and 8 queries bound full-file copy/preparation work and retained
 // storage by O((64 + 8) * N). Capacity/allocation exhaustion is fatal, never a successful truncated stream.
-static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t begin, uint32_t stop, bool query)
-{
-    PPContext* file = &pp->contexts[file_context];
-    const PPFileData* data = &pp->datas[file->data];
-    uint8_t* repairs = query ? &file->opaque_query_repairs : &file->opaque_direct_repairs;
-    const uint32_t capacity = query ? BUSTER_PP_MAX_QUERY_REPAIRS : BUSTER_PP_MAX_DIRECT_REPAIRS;
-    bool result = true;
-    if (*repairs >= capacity)
-    {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "%s recovery capacity exceeded (%u repairs per inclusion)",
-                    query ? "header query" : "opaque directive", capacity);
-        result = false;
-    }
-    else
-    {
-        uint8_t* lexical = pp->data_count < BUSTER_PP_MAX_FILES ? arena_push(&pp->arena, data->length, 1) : 0;
-        result = lexical != 0;
-        if (result)
-        {
-            memcpy(lexical, data->lexical_bytes != 0 ? data->lexical_bytes : data->bytes, data->length);
-            const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = pp->options.trigraphs };
-            uint64_t p = begin;
-            while (p < stop)
-            {
-                uint64_t size;
-                uint64_t at;
-                get_char(&lexer, p, &size, &at);
-                // Leave physical splices before `at` intact, preserving logical lines and original source offsets.
-                const uint64_t end = p + size < stop ? p + size : stop;
-                memset(lexical + at, ' ', at < end ? end - at : 0);
-                p += size != 0 ? size : 1;
-            }
-            PPFileData recovered = *data;
-            recovered.bytes = lexical;
-            recovered.lexical_bytes = lexical;
-            recovered.mapped = false;
-            recovered.prepared = false;
-            recovered.unterminated_comment = 0;
-            recovered.unterminated_comment_starts_line = false;
-            const PPPrepare prepare = pp_prepare_config(pp);
-            result = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, &recovered, 0) == PP_PREPARE_DONE;
-            if (result)
-            {
-                recovered.bytes = data->bytes;
-                pp->datas[pp->data_count] = recovered;
-                file->data = pp->data_count;
-                pp->data_count += 1;
-                *repairs += 1;
-                file->end = recovered.token_count;
-                file->position = recovered.directive_end[directive];
-                file->next_directive = directive + 1;
-                file->comment_read = false;
-            }
-        }
-        if (!result)
-        {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "out of memory recovering an opaque directive span");
-        }
-    }
-    return result;
-}
 
 // Only active diagnostic directives read their message opaquely. Detect a token or comment that ordinary lexing
 // carried past its logical newline, or an unterminated comment on it, then restore the following source. A token's
@@ -7921,7 +8540,7 @@ static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_
     if (buffer != 0)
     {
         const uint8_t* text;
-        const uint32_t length = pp_remove_splices(data->bytes + begin, end - begin, pp->refine_flags, buffer, &text);
+        const uint32_t length = pp_remove_splices(data->bytes + begin, end - begin, pp->refine_flags, C_TOKEN_RAW_IDENTIFIER, buffer, &text);
         uint32_t first = 0;
         while (first < length && (text[first] == ' ' || text[first] == '\t' || text[first] == '\v' || text[first] == '\f'))
         {
@@ -7990,29 +8609,68 @@ static void pp_report_skipped(Preprocessor* pp, const PPContext* context, const 
     }
 }
 
-// Skips to the next directive of directive d's conditional group (or to the end of the file if it is unterminated): the
-// file's pairing gives it (directive_next), but where a line lexed again hid directives (pp_resume_after), which that
-// pairing counted, the nesting is counted again from d on. The hidden directives are before d, as a line hides them when
-// it runs, and those the count passes are the skipped group's, which the context then passes over: each is counted once.
+// A condition's corrected source hid directives from the file's table. Find its next branch from the first directive
+// not consumed by that source, and check the nested skipped groups' structure too: their precomputed notes may have
+// paired an opener or an else with a directive that turned out to be inside a comment. Each skipped directive is read
+// once. Ordinary contexts use their precomputed links and notes.
+static uint32_t pp_skip_relexed_group(Preprocessor* pp, const PPContext* context, const PPFileData* data)
+{
+    Scratch scratch = scratch_begin(0);
+    const uint32_t capacity = data->directive_count - context->next_directive;
+    uint32_t* openers = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 4);
+    uint8_t* seen_else = arena_push(scratch.arena, capacity, 1);
+    const bool valid = capacity == 0 || (openers != 0 && seen_else != 0);
+    uint32_t next = BUSTER_PP_NONE;
+    uint32_t depth = 0;
+    if (!valid)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory checking a re-lexed condition");
+    }
+    for (uint32_t e = context->next_directive; valid && next == BUSTER_PP_NONE && e < data->directive_count; e += 1)
+    {
+        const uint8_t kind = data->directive_kind[e];
+        const bool opens = kind == PP_DIRECTIVE_IF || kind == PP_DIRECTIVE_IFDEF || kind == PP_DIRECTIVE_IFNDEF;
+        const bool branch = kind == PP_DIRECTIVE_ELIF || kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF || kind == PP_DIRECTIVE_ELSE;
+        const bool closes = kind == PP_DIRECTIVE_ENDIF;
+        next = depth == 0 && (branch || closes) ? e : BUSTER_PP_NONE;
+        if (opens)
+        {
+            openers[depth] = e;
+            seen_else[depth] = false;
+            depth += 1;
+        }
+        else if (branch && depth != 0)
+        {
+            const uint32_t location = pp_token_location(pp, context, data, data->directive_hash[e] + 1);
+            const char* name = pp_conditional_name(kind);
+            if ((kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF) && pp->options.language.standard < 2023)
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "use of a '#%s' directive is a C23 extension", name);
+            }
+            if (seen_else[depth - 1])
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#%s after #else", name);
+            }
+            seen_else[depth - 1] |= kind == PP_DIRECTIVE_ELSE;
+        }
+        else if (closes && depth != 0)
+        {
+            depth -= 1;
+        }
+    }
+    for (uint32_t i = depth; next == BUSTER_PP_NONE && i > 0; i -= 1)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, pp_token_location(pp, context, data, data->directive_hash[openers[i - 1]] + 1), "unterminated conditional directive");
+    }
+    scratch_end(scratch);
+    return next;
+}
+
+// Skip to the next branch of d's group, reporting the skipped directives' structural diagnostics.
 static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
 {
     const PPFileData* data = &pp->datas[context->data];
-    uint32_t next = data->directive_next[d];
-    if (context->hidden_directives)
-    {
-        next = BUSTER_PP_NONE;
-        uint32_t depth = 0;
-        for (uint32_t e = d + 1; next == BUSTER_PP_NONE && e < data->directive_count; e += 1)
-        {
-            const uint8_t kind = data->directive_kind[e];
-            const bool opens = kind == PP_DIRECTIVE_IF || kind == PP_DIRECTIVE_IFDEF || kind == PP_DIRECTIVE_IFNDEF;
-            const bool branch = kind == PP_DIRECTIVE_ELIF || kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF || kind == PP_DIRECTIVE_ELSE;
-            const bool closes = kind == PP_DIRECTIVE_ENDIF;
-            next = depth == 0 && (branch || closes) ? e : BUSTER_PP_NONE;
-            depth += opens;
-            depth -= closes && depth != 0;
-        }
-    }
+    const uint32_t next = context->hidden_directives ? pp_skip_relexed_group(pp, context, data) : data->directive_next[d];
     if (next == BUSTER_PP_NONE)
     {
         context->position = data->token_count;
@@ -8027,7 +8685,7 @@ static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
     {
         pp->conditionals[pp->conditional_count - 1].skipping = true;
     }
-    if (data->note_count != 0)
+    if (!context->hidden_directives && data->note_count != 0)
     {
         pp_report_skipped(pp, context, data, d, context->next_directive);
     }
@@ -8068,6 +8726,7 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     bool started = false;
     if (begin == end)
     {
+        pp_read_directive_comment(pp, context, d);
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#if with no expression");
     }
     else if (pp_copy_line(pp, context, begin, end))
@@ -8084,6 +8743,7 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     }
     if (!started)
     {
+        pp_read_directive_comment(pp, context, d);
         pp->arguments.count = line;
         pp_apply_condition(pp, context, d, kind, false);
     }
@@ -8093,6 +8753,7 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
 static void pp_finish_condition(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
+    pp_read_directive_comment(pp, &pp->contexts[capture.context], capture.directive);
     const bool taken = pp_evaluate(pp, &pp->captures, capture.begin, pp->captures.count, capture.location);
     if (pp->options.timing)
     {
@@ -8248,21 +8909,39 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
     }
 }
 
-// The file a #include, #include_next or #import (`kind`) at `location` in the context's file names: entered, unless
-// #import read it. A name no file has is reported at `name_location`, where clang reports it: the name's.
-static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, const uint8_t* name, uint32_t length, bool angled, uint32_t location,
-                            uint32_t name_location)
+// Whether a byte is a letter or a digit (ASCII), as clang's typo correction of a header name reads it.
+static bool pp_alphanumeric(uint8_t c)
 {
-    const bool next = kind == PP_DIRECTIVE_INCLUDE_NEXT && pp->include_depth != 0;
-    uint32_t found_in;
-    const uint32_t file = pp_find_include(pp, name, length, angled, next, context->file, context->search_index, &found_in);
-    if (file == BUSTER_PP_NONE)
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
+
+// The file a #include, #include_next or #import (`kind`) at `location` in the context's file names, written at
+// `name_location` (with `name_origin`, the history of a name a macro made): entered, unless #import read it. As
+// clang's HandleHeaderIncludeOrImport goes: an empty name is an error; a name that ends in a space or a dot is
+// nonportable; an #include in an assume_nonnull or arc_cf_code_audited region is an error, which ends the region. A
+// file not found is fatal, but for clang's recoveries, which are errors that include the file: an angled name found as
+// a quoted one, and a name found without the characters other than letters and digits it starts and ends with. A place
+// the search can't look in (a path too long for one, a file that can't be read: pp_find_include) is fatal, and
+// nothing after it is reported, as clang reports nothing after a fatal error.
+static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, const uint8_t* name, uint32_t length, bool angled, uint32_t location,
+                            uint32_t name_location, uint32_t name_origin)
+{
+    const uint32_t saved_origin = pp->diagnostic_origin;
+    pp->diagnostic_origin = name_origin;
+    uint32_t file = BUSTER_PP_NONE;
+    uint32_t found_in = BUSTER_PP_NONE;
+    if (length == 0)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, name_location, "'%.*s' file not found", (int)length, (const char*)name);
+        pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "empty filename");
     }
     else
     {
-        // An #include inside an assume_nonnull or arc_cf_code_audited region is an error, which ends it.
+        if (name[length - 1] == ' ' || name[length - 1] == '.')
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, name_location, "non-portable path to file '%.*s'; specified path contains trailing %s", (int)length, (const char*)name,
+                        name[length - 1] == ' ' ? "whitespace" : "dot");
+        }
+        pp->diagnostic_origin = 0;
         for (uint32_t region = 0; region < BUSTER_PP_REGION_UNSAFE_BUFFER; region += 1)
         {
             if (pp->region_locations[region] != 0)
@@ -8271,8 +8950,49 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
                 pp->region_locations[region] = 0;
             }
         }
-        // An imported file is read once, as after #pragma once: pp_enter_file skips it after that.
-        pp_enter_file(pp, file, context->range, location, found_in);
+        pp->diagnostic_origin = name_origin;
+        const bool next = kind == PP_DIRECTIVE_INCLUDE_NEXT && pp->include_depth != 0;
+        file = pp_find_include(pp, name, length, angled, next, context->file, context->search_index, &found_in, name_location);
+        if (file == BUSTER_PP_NONE && angled && !pp->fatal)
+        {
+            file = pp_find_include(pp, name, length, false, next, context->file, context->search_index, &found_in, name_location);
+            if (file != BUSTER_PP_NONE)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "'%.*s' file not found with <angled> include; use \"quotes\" instead", (int)length, (const char*)name);
+            }
+        }
+        uint32_t first = 0;
+        uint32_t last = length;
+        while (first < last && !pp_alphanumeric(name[first]))
+        {
+            first += 1;
+        }
+        while (last > first && !pp_alphanumeric(name[last - 1]))
+        {
+            last -= 1;
+        }
+        if (file == BUSTER_PP_NONE && last - first != length && !pp->fatal)
+        {
+            file = pp_find_include(pp, name + first, last - first, angled, next, context->file, context->search_index, &found_in, name_location);
+            if (file != BUSTER_PP_NONE)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "'%.*s' file not found, did you mean '%.*s'?", (int)length, (const char*)name, (int)(last - first),
+                            (const char*)name + first);
+            }
+        }
+        if (file == BUSTER_PP_NONE && !pp->fatal)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, name_location, "'%.*s' file not found", (int)length, (const char*)name);
+        }
+    }
+    pp->diagnostic_origin = saved_origin;
+    if (file == BUSTER_PP_NONE)
+    {
+        // Not found. pp_enter_file handles an already imported file like #pragma once, counting its skipped inclusion.
+    }
+    else
+    {
+        pp_enter_file(pp, file, context->range, location, found_in, name_location, name_origin);
         if (kind == PP_DIRECTIVE_IMPORT)
         {
             pp->datas[pp->files[file].data].once = true;
@@ -8286,54 +9006,82 @@ static const char* pp_include_name(uint8_t kind)
     return kind == PP_DIRECTIVE_INCLUDE_NEXT ? "include_next" : kind == PP_DIRECTIVE_IMPORT ? "import" : "include";
 }
 
+// The end of a computed header name in tokens [begin, end) of a stack: past a string literal, or past the first '>'
+// after a '<' (`*unclosed` when there is none, which clang reports as an expected '>'), else `begin`.
+static uint32_t pp_computed_name_end(const PPTokens* tokens, uint32_t begin, uint32_t end, bool* unclosed)
+{
+    uint32_t stop = begin;
+    *unclosed = false;
+    if (stop < end && tokens->kinds[stop] == C_TOKEN_STRING_LITERAL)
+    {
+        stop += 1;
+    }
+    else if (stop < end && tokens->kinds[stop] == C_TOKEN_LESS)
+    {
+        while (stop < end && tokens->kinds[stop] != C_TOKEN_GREATER)
+        {
+            stop += 1;
+        }
+        *unclosed = stop == end;
+        stop += stop < end;
+    }
+    return stop;
+}
+
 // The barrier over a computed #include's line ended: the capture is the line expanded, a string literal or <...> (to
-// the first '>', as clang reads it), and tokens after it are a warning.
+// the first '>', as clang reads it), and tokens after it are a warning. The diagnostics are at the tokens (with their
+// histories), or at the line's end for what it lacks, as clang's are.
 static void pp_finish_include(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
     const PPTokens* tokens = &pp->captures;
+    PPContext* context = &pp->contexts[capture.context];
+    const PPFileData* data = &pp->datas[context->data];
+    const uint32_t line_end = pp_line_end_location(pp, data, pp->ranges[context->range].base, data->directive_end[capture.directive] - 1);
     uint8_t name[PATH_MAX];
     uint32_t length = 0;
     bool angled = false;
-    uint32_t stop = capture.begin;
-    if (stop < tokens->count && tokens->kinds[stop] == C_TOKEN_STRING_LITERAL)
-    {
-        stop += 1;
-    }
-    else if (stop < tokens->count && tokens->kinds[stop] == C_TOKEN_LESS)
-    {
-        stop += 1;
-        while (stop < tokens->count && tokens->kinds[stop] != C_TOKEN_GREATER)
-        {
-            stop += 1;
-        }
-        stop += stop < tokens->count;
-    }
-    const bool valid = pp_header_name(pp, tokens, capture.begin, stop, name, sizeof(name), &length, &angled);
-    const bool extra = stop < tokens->count;
+    bool unclosed;
+    const uint32_t stop = pp_computed_name_end(tokens, capture.begin, tokens->count, &unclosed);
+    const bool valid = !unclosed && pp_header_name(pp, tokens, capture.begin, stop, name, sizeof(name), &length, &angled);
+    const bool extra = valid && stop < tokens->count;
+    const uint32_t name_location = capture.begin < tokens->count ? tokens->locations[capture.begin] : line_end;
+    const uint32_t name_origin = capture.begin < tokens->count && tokens->origins != 0 ? tokens->origins[capture.begin] : 0;
+    const uint32_t extra_location = extra ? tokens->locations[stop] : 0;
+    const uint32_t extra_origin = extra && tokens->origins != 0 ? tokens->origins[stop] : 0;
     pp->capture_count -= 1;
     pp->captures.count = capture.begin;
     pp->arguments.count = capture.arguments_begin;
-    if (!valid)
+    const uint32_t saved_origin = pp->diagnostic_origin;
+    if (unclosed)
     {
-        pp_diagnose(pp, PP_SEVERITY_ERROR, capture.location, "expected \"FILENAME\" or <FILENAME>");
+        pp_diagnose(pp, PP_SEVERITY_ERROR, line_end, "expected '>'");
+    }
+    else if (!valid)
+    {
+        pp->diagnostic_origin = name_origin;
+        pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "expected \"FILENAME\" or <FILENAME>");
     }
     else
     {
         if (extra)
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, capture.location, "extra tokens at end of #%s directive", pp_include_name(capture.directive_kind));
+            pp->diagnostic_origin = extra_origin;
+            pp_diagnose(pp, PP_SEVERITY_WARNING, extra_location, "extra tokens at end of #%s directive", pp_include_name(capture.directive_kind));
         }
-        pp_include_file(pp, &pp->contexts[capture.context], capture.directive_kind, name, length, angled, capture.location, capture.location);
+        pp->diagnostic_origin = saved_origin;
+        pp_include_file(pp, context, capture.directive_kind, name, length, angled, capture.location, name_location, name_origin);
     }
+    pp->diagnostic_origin = saved_origin;
 }
 
 // A header name as it is written at token `first` of a directive's line [.., end): <...>, read from the source up to the
-// first '>' on the line, or a string literal, without line splices. `*literal` says whether the token is one of those (a
-// '<' or a string literal), and `*after` gets the first token past the name. When the line's tokens from there aren't
-// those clang lexes on from a '>' (pp_header_name_tail), the line's bytes [*relex_begin, *relex_end) must be lexed again
-// for them; otherwise the two are equal. Returns whether it is a name: false also for a '<' without a '>' or a literal
-// that isn't a plain string. A computed name is any other token.
+// first '>' on the line, or a string literal, without line splices. `*literal` says whether the token is one of those
+// (a '<' with its '>' on the line, or a string literal), and `*after` gets the first token past the name. When the
+// line's tokens from there aren't those clang lexes on from the '>' (pp_header_name_tail), the line's bytes
+// [*relex_begin, *relex_end) must be lexed again for them; otherwise the two are equal. Returns whether it is a name:
+// false also for a literal that isn't a plain string, and for one longer than `capacity`, which is still a literal. A
+// computed name is any other token.
 static bool pp_read_header_name(Preprocessor* pp, const PPFileData* data, uint32_t first, uint32_t end, uint8_t* name, uint32_t capacity, uint32_t* length,
                                 bool* angled, bool* literal, uint32_t* after, uint32_t* relex_begin, uint32_t* relex_end)
 {
@@ -8346,39 +9094,18 @@ static bool pp_read_header_name(Preprocessor* pp, const PPFileData* data, uint32
     *relex_end = 0;
     if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_LESS)
     {
-        // The lexer doesn't make header names: read <...> from the source, up to the '>' on the line, through the scalar
-        // lexer's characters, which skip line splices (translation phase 2 removed them).
-        const uint32_t line_end = end < data->token_count ? data->starts[end] : data->length;
-        const ScalarLexer lexer = {
-            .source = data->bytes,
-            .length = line_end,
-            .trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0,
-            .cplusplus = false,
-        };
-        uint64_t p = data->starts[first] + 1;
-        bool closed = false;
-        bool line_ended = false;
-        while (!closed && !line_ended && p < line_end && *length < capacity)
-        {
-            uint64_t size;
-            uint64_t char_start;
-            const int32_t c = get_char(&lexer, p, &size, &char_start);
-            closed = c == '>';
-            line_ended = c == '\n' || c == '\r' || c == BUSTER_LEX_END_OF_FILE;
-            if (!closed && !line_ended)
-            {
-                name[*length] = (uint8_t)c;
-                *length += 1;
-            }
-            p += size != 0 ? size : 1;
-        }
-        valid = closed;
+        // The lexer doesn't make header names: read <...> from the source (pp_scan_header_name). Without its '>' on the
+        // line, the name is the line's tokens up to a '>' (clang's LexHeaderName joins them): with a comment that runs on
+        // to the next line, `<a/*x` then `*/b.h>` is `a b.h`. With it, the name is written out, also when `name` can't
+        // hold it all, and never a computed one, whose identifiers would expand.
+        bool whole;
+        const uint32_t stop = pp_scan_header_name(pp->refine_flags, data, first, end, name, capacity, length, &whole);
+        *literal = stop != 0;
+        valid = *literal && whole;
         *angled = valid;
-        *literal = true;
-        // The first token at or after the '>''s end.
-        *after = pp_header_name_tail(pp, data, first, end, (uint32_t)p, relex_end);
-        *relex_begin = (uint32_t)p;
-        *relex_end = closed ? *relex_end : *relex_begin;
+        // The first token at or after the '>''s end, and what must be lexed again from there (pp_header_name_tail).
+        *after = *literal ? pp_header_name_tail(pp, data, first, end, stop, relex_end) : end;
+        *relex_begin = *literal ? stop : 0;
     }
     else if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_STRING_LITERAL)
     {
@@ -8390,7 +9117,7 @@ static bool pp_read_header_name(Preprocessor* pp, const PPFileData* data, uint32
         Scratch scratch = scratch_begin(0);
         uint8_t* buffer = arena_push(scratch.arena, (uint64_t)(stop - start) + 1, 1);
         const uint8_t* spelling = 0;
-        const uint32_t spelled = buffer != 0 ? pp_without_splices(pp, data->bytes + start, stop - start, buffer, &spelling) : 0;
+        const uint32_t spelled = buffer != 0 ? pp_without_splices(pp, C_TOKEN_STRING_LITERAL, data->bytes + start, stop - start, buffer, &spelling) : 0;
         valid = spelled >= 2 && spelled - 2 < capacity && spelling[0] == '"';
         if (valid)
         {
@@ -8403,7 +9130,8 @@ static bool pp_read_header_name(Preprocessor* pp, const PPFileData* data, uint32
 }
 
 // #include, #include_next and #import, at directive d. A computed name (the line's macros expanded) goes through a
-// capture, which pp_finish_include takes.
+// capture, which pp_finish_include takes. A written one is read whole, however long (it is no longer than its line), so
+// that one too long for a path is clang's error about the path (pp_find_include).
 static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind)
 {
     const PPFileData* data = &pp->datas[context->data];
@@ -8411,14 +9139,18 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     const uint32_t end = data->directive_end[d];
     const uint32_t base = pp->ranges[context->range].base;
     const uint32_t location = base + data->starts[hash];
-    uint8_t name[PATH_MAX];
+    const uint32_t first = hash + 2;
+    const uint32_t line_end = end < data->token_count ? data->starts[end] : data->length;
+    const uint32_t room = first < end ? line_end - data->starts[first] : 0;
+    Scratch scratch = scratch_begin(0);
+    uint8_t* name = arena_push(scratch.arena, (uint64_t)room + 1, 1);
     uint32_t length = 0;
     bool angled = false;
     bool started = false;
-    bool extra = false;
-    Scratch scratch = scratch_begin(0);
-    const PPHeaderForm form = pp_literal_header_name(data, d, pp->refine_flags, name, sizeof(name), &length, &angled, &extra, scratch.arena);
-    scratch_end(scratch);
+    uint32_t stop = 0;
+    const PPHeaderForm form = pp_literal_header_name(data, d, pp->refine_flags, name, name != 0 ? room : 0, &length, &angled, &stop, scratch.arena);
+    // Where clang reports the name: its token, or the line's end without one.
+    const uint32_t name_location = first < end ? base + data->starts[first] : pp_line_end_location(pp, data, base, end - 1);
     if (form == PP_HEADER_COMPUTED)
     {
         // A computed include: the line expanded, then a string literal or <...> from its tokens, and one token more,
@@ -8438,17 +9170,25 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     }
     if (form != PP_HEADER_LITERAL && !started)
     {
-        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "expected \"FILENAME\" or <FILENAME>");
+        pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "expected \"FILENAME\" or <FILENAME>");
     }
     else if (form == PP_HEADER_LITERAL)
     {
-        if (extra)
+        // A token after the name, where clang lexes on from it (pp_skip_blanks, past what the file's tokens may hold as
+        // a comment begun in the name: `<a//b.h> x`), is a warning at it.
+        const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+        const uint64_t next = pp_skip_blanks(&lexer, stop);
+        if (next < data->length && data->bytes[next] != '\n' && data->bytes[next] != '\r')
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #%s directive", pp_include_name(kind));
+            pp_diagnose(pp, PP_SEVERITY_WARNING, base + (uint32_t)next, "extra tokens at end of #%s directive", pp_include_name(kind));
         }
-        // A name no file has is reported at the name, its first token (pp_literal_header_name's).
-        pp_include_file(pp, context, kind, name, length, angled, location, base + data->starts[hash + 2]);
+        // The file goes on past the line as clang lexes it (pp_resume_after), before the header is entered.
+        uint32_t relex;
+        pp_header_name_tail(pp, data, first, end, stop, &relex);
+        pp_resume_after(context, data, relex);
+        pp_include_file(pp, context, kind, name, length, angled, location, name_location, 0);
     }
+    scratch_end(scratch);
 }
 
 // A #line's or line marker's file name from its string literal's spelling (quotes included, line splices removed), read as
@@ -8642,7 +9382,15 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         char* copy = valid ? arena_push(&pp->arena, (uint64_t)spelled + 1, 1) : 0;
         const uint8_t* spelling = 0;
         const uint32_t length = buffer != 0 && copy != 0 ? pp_spelling(pp, tokens->kinds[begin + 1], tokens->values[begin + 1], tokens->locations[begin + 1], buffer, &spelling) : 0;
-        name_length = length >= 2 ? pp_decode_file_name(pp, spelling, length, copy, location) : BUSTER_PP_NONE;
+        // A raw string literal names the file with its body as written.
+        const uint8_t* body;
+        uint32_t body_length;
+        const bool raw = length >= 2 && pp_raw_string_body(spelling, length, &body, &body_length);
+        if (raw)
+        {
+            memcpy(copy, body, body_length);
+        }
+        name_length = raw ? body_length : length >= 2 ? pp_decode_file_name(pp, spelling, length, copy, location) : BUSTER_PP_NONE;
         name_reported = length >= 2 && name_length == BUSTER_PP_NONE;
         valid = valid && name_length != BUSTER_PP_NONE;
         name = valid ? copy : 0;
@@ -9431,7 +10179,8 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
             {
                 const PPContext* includer = pp_current_file_context(pp);
                 uint32_t found_in;
-                const uint32_t found = pp_find_include(pp, name, length, angled, false, includer != 0 ? includer->file : BUSTER_PP_NONE, BUSTER_PP_NONE, &found_in);
+                const uint32_t found = pp_find_include(pp, name, length, angled, false, includer != 0 ? includer->file : BUSTER_PP_NONE, BUSTER_PP_NONE, &found_in,
+                                                       BUSTER_PP_NONE);
                 if (found == BUSTER_PP_NONE)
                 {
                     pp_diagnose(pp, PP_SEVERITY_FATAL, location, "'%.*s' file not found", (int)length, (const char*)name);
@@ -9574,10 +10323,11 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
     const uint8_t kind = data->directive_kind[d];
     const uint32_t base = pp->ranges[context->range].base;
     const uint32_t location = base + data->starts[hash];
-    if (data->unterminated_comment != 0 && !data->unterminated_comment_starts_line && end == data->token_count)
+    const PPConditional* group = pp->conditional_count > context->conditional_base ? &pp->conditionals[pp->conditional_count - 1] : 0;
+    const bool condition = kind == PP_DIRECTIVE_IF || (kind == PP_DIRECTIVE_ELIF && group != 0 && !group->seen_else && !group->taken);
+    if (!condition)
     {
-        // A comment on this directive's line is read before the directive changes which group is active.
-        pp_read_file_comment(pp, context, true);
+        pp_read_directive_comment(pp, context, d);
     }
     context->position = end;
     context->next_directive = d + 1;
@@ -9688,7 +10438,8 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
     const PPFileData* data = &pp->datas[context->data];
     const uint8_t kind = data->directive_kind[directive];
     const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
-    if (!text || pp_recover_diagnostic_line(pp, context, directive))
+    if ((!text || pp_recover_diagnostic_line(pp, context, directive)) && pp_recover_direct_raw(pp, context, directive) &&
+        pp_recover_direct_header_comment(pp, context, directive))
     {
         // Recovery resumes a capture after its directive; this caller still has to dispatch that directive itself.
         context->next_directive = directive;
@@ -10191,8 +10942,10 @@ static uint32_t pp_parse_escape(Preprocessor* pp, const uint8_t* spelling, uint3
 static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* spelling, uint32_t length, uint32_t location, PPValue* value)
 {
     const bool ordinary = kind == C_TOKEN_CHAR_CONSTANT;
-    const uint32_t largest = kind == C_TOKEN_WIDE_CHAR_CONSTANT ? 0xFFFFFFFFu : kind == C_TOKEN_UTF16_CHAR_CONSTANT ? 0xFFFFu : kind == C_TOKEN_UTF32_CHAR_CONSTANT ? 0x10FFFFu : 0x7Fu;
-    const uint32_t width = kind == C_TOKEN_WIDE_CHAR_CONSTANT || kind == C_TOKEN_UTF32_CHAR_CONSTANT ? 32 : kind == C_TOKEN_UTF16_CHAR_CONSTANT ? 16 : 8;
+    const uint32_t largest = kind == C_TOKEN_WIDE_CHAR_CONSTANT ? (pp->options.predefines.short_wchar ? 0xFFFFu : 0xFFFFFFFFu)
+                            : kind == C_TOKEN_UTF16_CHAR_CONSTANT ? 0xFFFFu : kind == C_TOKEN_UTF32_CHAR_CONSTANT ? 0x10FFFFu : 0x7Fu;
+    const uint32_t width = kind == C_TOKEN_WIDE_CHAR_CONSTANT ? (pp->options.predefines.short_wchar ? 16 : 32)
+                          : kind == C_TOKEN_UTF32_CHAR_CONSTANT ? 32 : kind == C_TOKEN_UTF16_CHAR_CONSTANT ? 16 : 8;
     uint32_t i = 0;
     while (i < length && spelling[i] != '\'')
     {
@@ -10284,7 +11037,8 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
     switch (kind)
     {
         case C_TOKEN_CHAR_CONSTANT:
-            bits = characters.count > 1 ? (int64_t)(int32_t)characters.packed : (int64_t)(int8_t)(uint8_t)characters.last;
+            bits = characters.count > 1 ? (pp->options.predefines.char_unsigned ? (int64_t)characters.packed : (int64_t)(int32_t)characters.packed)
+                                       : pp->options.predefines.char_unsigned ? (int64_t)(uint8_t)characters.last : (int64_t)(int8_t)(uint8_t)characters.last;
             break;
         case C_TOKEN_UTF8_CHAR_CONSTANT:
             bits = (uint8_t)characters.last;
@@ -10296,11 +11050,13 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
             bits = characters.last;
             break;
         default:
-            bits = (int64_t)(int32_t)characters.last;
+            bits = pp->options.predefines.short_wchar ? (int64_t)(uint16_t)characters.last : (int64_t)(int32_t)characters.last;
             break;
     }
     // UTF-8, UTF-16 and UTF-32 character constants are unsigned in C (unsigned char, char16_t, char32_t), as in clang.
-    const bool is_unsigned = kind == C_TOKEN_UTF8_CHAR_CONSTANT || kind == C_TOKEN_UTF16_CHAR_CONSTANT || kind == C_TOKEN_UTF32_CHAR_CONSTANT;
+    const bool is_unsigned = kind == C_TOKEN_UTF8_CHAR_CONSTANT || kind == C_TOKEN_UTF16_CHAR_CONSTANT || kind == C_TOKEN_UTF32_CHAR_CONSTANT ||
+                             (kind == C_TOKEN_CHAR_CONSTANT && pp->options.predefines.char_unsigned) ||
+                             (kind == C_TOKEN_WIDE_CHAR_CONSTANT && pp->options.predefines.short_wchar);
     *value = (PPValue){ .bits = (uint64_t)bits, .is_unsigned = is_unsigned };
     return !error;
 }
@@ -10897,17 +11653,18 @@ static bool pp_find_embed(const Preprocessor* pp, const PPContext* context, cons
 }
 
 // __has_embed's answer (C23 6.10.1), as clang gives it (Preprocessor::EvaluateHasEmbed), from its operand's tokens
-// [first, last): a header name, then embed parameters (pp_embed_parameters). 0 (not found) when a parameter is one clang
-// doesn't know or no file has the name (pp_find_embed, which only looks at the file: its size is the answer's); 2
-// (empty) when the file has no bytes left after clang::offset and limit; else 1. Clang takes a limit past the bytes left
-// as none left, not as all of them, and a device's size as 0.
+// [first, last): a header name (a string literal, a '<' that spans one a #if line writes, or '<' to the first '>'), then
+// embed parameters (pp_embed_parameters). 0 (not found) when a parameter is one clang doesn't know or no file has the
+// name (pp_find_embed, which only looks at the file: its size is the answer's); 2 (empty) when the file has no bytes
+// left after clang::offset and limit; else 1. Clang takes a limit past the bytes left as none left, not as all of them,
+// and a device's size as 0.
 static uint64_t pp_has_embed(Preprocessor* pp, const PPTokens* tokens, uint32_t first, uint32_t last, uint32_t location)
 {
     uint8_t name[PATH_MAX];
     uint32_t length = 0;
     bool angled = false;
     uint32_t i = first;
-    if (i < last && tokens->kinds[i] == C_TOKEN_STRING_LITERAL)
+    if (i < last && (tokens->kinds[i] == C_TOKEN_STRING_LITERAL || pp_written_angled(pp, tokens, i)))
     {
         i += 1;
     }
@@ -11007,20 +11764,14 @@ static void pp_embed_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
     bool valid = literal;
     if (!literal)
     {
-        if (i < end && tokens->kinds[i] == C_TOKEN_STRING_LITERAL)
+        bool unclosed;
+        i = pp_computed_name_end(tokens, begin, end, &unclosed);
+        valid = !unclosed && i > begin && pp_header_name(pp, tokens, begin, i, name, PATH_MAX, &length, &angled);
+        if (unclosed)
         {
-            i += 1;
+            pp_diagnose(pp, PP_SEVERITY_ERROR, line_end, "expected '>'");
         }
-        else if (i < end && tokens->kinds[i] == C_TOKEN_LESS)
-        {
-            while (i < end && tokens->kinds[i] != C_TOKEN_GREATER)
-            {
-                i += 1;
-            }
-            i += i < end;
-        }
-        valid = i > begin && pp_header_name(pp, tokens, begin, i, name, PATH_MAX, &length, &angled);
-        if (!valid)
+        else if (!valid)
         {
             pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "expected \"FILENAME\" or <FILENAME>");
         }
@@ -11153,7 +11904,7 @@ static void pp_embed(Preprocessor* pp, PPContext* context, uint32_t d)
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, base + data->starts[hash + 2], "expected \"FILENAME\" or <FILENAME>");
     }
-    else if (relex_begin != relex_end ? pp_copy_relexed(pp, context, relex_begin, relex_end) : pp_copy_line(pp, context, literal ? after : hash + 2, end))
+    else if (relex_begin != relex_end ? pp_copy_relexed(pp, context, relex_begin, relex_end, &pp->arguments) : pp_copy_line(pp, context, literal ? after : hash + 2, end))
     {
         pp_resume_after(context, data, relex_end);
         // The poisoned names of the line past an angled name, which pp_directive leaves to this: the line lexed again
@@ -12164,12 +12915,14 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer, uint32_t* 
         length += (uint32_t)sprintf(buffer + length, "#pragma push_macro(\"__GCC_DESTRUCTIVE_SIZE\")\n#pragma push_macro(\"__GCC_CONSTRUCTIVE_SIZE\")\n");
     }
     const CLanguage language = options->language;
-    const char* version = language.standard >= 2023   ? "202311L"
-                          : language.standard >= 2017 ? "201710L"
-                          : language.standard >= 2011 ? "201112L"
-                          : language.standard >= 1999 ? "199901L"
-                          : language.standard >= 1994 ? "199409L"
-                                                      : 0;
+    // C94's 199409L is that of any C89 mode that isn't GNU's and has digraphs (CDigraphs), as clang's
+    // LangOptions::getCLangStd has it.
+    const char* version = language.standard >= 2023                   ? "202311L"
+                          : language.standard >= 2017                 ? "201710L"
+                          : language.standard >= 2011                 ? "201112L"
+                          : language.standard >= 1999                 ? "199901L"
+                          : !language.gnu && c_language_digraphs(language) ? "199409L"
+                                                                      : 0;
     if (version != 0)
     {
         length += (uint32_t)sprintf(buffer + length, "#define __STDC_VERSION__ %s\n", version);
@@ -12241,13 +12994,40 @@ static uint32_t pp_virtual_file(Preprocessor* pp, const char* name, const char* 
 static void pp_run_file(Preprocessor* pp, uint32_t file)
 {
     const uint32_t depth = pp->context_count;
-    pp_enter_file(pp, file, BUSTER_PP_NONE, 0, BUSTER_PP_NONE);
+    pp_enter_file(pp, file, BUSTER_PP_NONE, 0, BUSTER_PP_NONE, 0, 0);
     pp_run_contexts(pp, depth);
     // A stream (an attribute query's operand) reads on past an included file's end, but not past this one's.
     while (!pp->fatal && pp->stream_count != 0)
     {
         pp_cut_stream(pp);
     }
+}
+
+// buster's own headers' directory: src/buster/include in the tree whose build/ holds the executable (as clang finds its
+// resource directory from its executable). Returns whether it exists.
+static bool pp_buster_headers_directory(char* path, uint32_t capacity)
+{
+    char executable[PATH_MAX];
+    const ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+    bool result = length > 0;
+    if (result)
+    {
+        executable[length] = 0;
+        // Up from build/compiler to the tree.
+        for (uint32_t up = 0; result && up < 2; up += 1)
+        {
+            char* slash = strrchr(executable, '/');
+            result = slash != 0 && slash != executable;
+            if (result)
+            {
+                *slash = 0;
+            }
+        }
+        result = result && (uint32_t)snprintf(path, capacity, "%s/src/buster/include", executable) < capacity;
+        struct stat stats;
+        result = result && stat(path, &stats) == 0 && S_ISDIR(stats.st_mode);
+    }
+    return result;
 }
 
 // The highest version's directory of clang's own headers (clang searches its resource directory first), if any.
@@ -12333,11 +13113,15 @@ static void pp_dedupe_directories(Preprocessor* pp)
         }
         uint32_t written = 0;
         uint32_t angled_first = 0;
+        // --buster-headers' fallback keeps its rule where it moves to; dropped (an earlier directory is the same), it
+        // has none.
+        uint32_t fallback = BUSTER_PP_NONE;
         for (uint32_t i = 0; i < count; i += 1)
         {
             angled_first += i < pp->angled_first && kept[i];
             if (kept[i])
             {
+                fallback = i == pp->fallback_directory ? written : fallback;
                 pp->directories[written] = pp->directories[i];
                 pp->directory_lengths[written] = pp->directory_lengths[i];
                 pp->directory_system[written] = pp->directory_system[i];
@@ -12346,6 +13130,7 @@ static void pp_dedupe_directories(Preprocessor* pp)
         }
         pp->directory_count = written;
         pp->angled_first = angled_first;
+        pp->fallback_directory = fallback;
     }
     scratch_end(scratch);
 }
@@ -12371,6 +13156,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
 {
     *pp = (Preprocessor){ 0 };
     pp->diagnostic_include_range = BUSTER_PP_NONE;
+    pp->fallback_directory = BUSTER_PP_NONE;
     pp->predefines_data = BUSTER_PP_NONE;
     pp->options = *options;
     pp->table = table;
@@ -12449,7 +13235,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         result = result && pp->cache != 0 && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
     }
     else if (pp->cache->table != table || pp->cache->prepare.refine_flags != pp->refine_flags || pp->cache->prepare.split_kinds != pp->split_kinds ||
-             pp->cache->prepare.assembly != (bool)options->assembly)
+             pp->cache->prepare.dollar_punctuation != pp_dollar_punctuation(options))
     {
         fprintf(stderr, "error: the file cache was made for another language mode or intern table\n");
         result = false;
@@ -12473,11 +13259,30 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         {
             result = pp_add_directory(pp, options->system_directories[i], BUSTER_PP_SYSTEM_FILE);
         }
-        char resource[256];
         if (result && !options->no_standard_includes)
         {
-            if (pp_clang_resource_directory(resource, sizeof(resource)))
+            // The compiler's headers, which -nobuiltininc leaves out: clang's resource directory (the default), or with
+            // --buster-headers buster's own, then clang's for the headers buster's doesn't supply. That one has no name
+            // buster's directory has (pp_find_include), so buster's headers' #include_next goes on to the C library's,
+            // and every other name is found as without the flag.
+            const bool builtin = !options->no_builtin_includes;
+            char buster[PATH_MAX];
+            char resource[PATH_MAX];
+            bool buster_added = false;
+            if (builtin && options->buster_headers && !pp_buster_headers_directory(buster, sizeof(buster)))
             {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "--buster-headers: no src/buster/include beside the executable's build directory");
+            }
+            else if (builtin && options->buster_headers)
+            {
+                result = pp_add_directory(pp, buster, BUSTER_PP_SYSTEM_FILE);
+                buster_added = result;
+                pp->buster_directory = result ? pp->directories[pp->directory_count - 1] : 0;
+                pp->buster_directory_length = result ? pp->directory_lengths[pp->directory_count - 1] : 0;
+            }
+            if (result && builtin && pp_clang_resource_directory(resource, sizeof(resource)))
+            {
+                pp->fallback_directory = buster_added ? pp->directory_count : BUSTER_PP_NONE;
                 result = pp_add_directory(pp, resource, BUSTER_PP_SYSTEM_FILE);
             }
             result = result && pp_add_directory(pp, "/usr/local/include", BUSTER_PP_EXTERN_C_FILE) && pp_add_directory(pp, "/usr/include", BUSTER_PP_EXTERN_C_FILE);
@@ -12506,6 +13311,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
             { C_NAME_BASE_FILE, PP_BUILTIN_BASE_FILE, false },
             { C_NAME_FILE_NAME, PP_BUILTIN_FILE_NAME, false },
             { C_NAME_INCLUDE_LEVEL, PP_BUILTIN_INCLUDE_LEVEL, false },
+            { C_NAME_FLT_EVAL_METHOD, PP_BUILTIN_FLT_EVAL_METHOD, false },
             { C_NAME_PRAGMA_OPERATOR, PP_BUILTIN_PRAGMA, true },
             { C_NAME_DEFINED, PP_BUILTIN_DEFINED, false },
             { C_NAME_HAS_INCLUDE, PP_BUILTIN_HAS_INCLUDE, true },
@@ -12531,15 +13337,13 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         {
             pp_define_builtin(pp, builtins[i].name, builtins[i].builtin, builtins[i].function_like);
         }
-        // Two of clang's builtins that aren't among c_intern.c's predefined names: __FLT_EVAL_METHOD__ (its value
-        // follows -ffp-eval-method and SSE) and the __has_constexpr_builtin query.
+        // Clang's query that isn't among c_intern.c's predefined names.
         static const struct
         {
             const char* name;
             PPBuiltin builtin;
             bool function_like;
         } named_builtins[] = {
-            { "__FLT_EVAL_METHOD__", PP_BUILTIN_FLT_EVAL_METHOD, false },
             { "__has_constexpr_builtin", PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, true },
         };
         for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(named_builtins); i += 1)
@@ -12834,25 +13638,26 @@ static bool pp_punctuation_joins(uint8_t before, uint8_t after)
     return before != 0 && after != 0 && strchr(joining, before) != 0 && strchr(joining, after) != 0;
 }
 
-static bool pp_word_character(uint8_t c, bool assembly)
+// Can `c` go on an identifier or a pp-number? '$' can unless it is punctuation (pp_dollar_punctuation).
+static bool pp_word_character(uint8_t c, bool dollar_punctuation)
 {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || (c == '$' && !assembly) || c >= 0x80 || c == '\\';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || (c == '$' && !dollar_punctuation) || c >= 0x80 || c == '\\';
 }
 
 // Would printing `after` right after `before` (their last and first characters) lex differently? Then a space goes
 // between them. It errs towards a space: -E's output only has to lex into the same tokens.
-static bool pp_needs_separation(uint8_t before_last, uint8_t before_kind, uint8_t after_first, bool assembly)
+static bool pp_needs_separation(uint8_t before_last, uint8_t before_kind, uint8_t after_first, bool dollar_punctuation)
 {
     bool result = false;
     if (before_kind == C_TOKEN_NUMERIC_CONSTANT)
     {
         // A pp-number goes on with word characters, '.', a digit separator and an exponent's sign.
-        result = pp_word_character(after_first, assembly) || after_first == '.' || after_first == '\'' || after_first == '+' || after_first == '-';
+        result = pp_word_character(after_first, dollar_punctuation) || after_first == '.' || after_first == '\'' || after_first == '+' || after_first == '-';
     }
-    else if (pp_word_character(before_last, assembly))
+    else if (pp_word_character(before_last, dollar_punctuation))
     {
         // An identifier goes on with word characters, and a prefix makes a literal with a quote.
-        result = pp_word_character(after_first, assembly) || after_first == '"' || after_first == '\'';
+        result = pp_word_character(after_first, dollar_punctuation) || after_first == '"' || after_first == '\'';
     }
     else if (before_last == '.')
     {
@@ -13212,11 +14017,21 @@ BUSTER_INLINE uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint
     return result;
 }
 
-// Where -E puts output token `token`, a line's first, when clang's token starts a line though ours doesn't, or
-// BUSTER_PP_NONE when it stays on the line: one that started a line among a macro's arguments (BUSTER_PP_LINE_SPACE),
-// and one after a _Pragma that printed nothing (Preprocessor.silent_pragmas, from *silent on, which moves past the ones
-// before it), where clang's lexer starts a line. Clang's printer moves to the token's place (its own, or its
-// expansion's for one a macro or a builtin made) only when that is another line than the current one (MoveToLine).
+// The line breaks in an unknown token's spelling (\r\n and \n\r count as one), which clang's printer adds to its line
+// (HandleNewlinesInToken): an unknown token the lexer read as a raw string literal (its delimiter invalid) can have
+// some. It counts no other token's, a raw string literal's among them.
+static __attribute__((noinline)) uint32_t pp_print_token_lines(const uint8_t* spelling, uint32_t length)
+{
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < length; i += 1)
+    {
+        const bool line_break = spelling[i] == '\n' || spelling[i] == '\r';
+        result += line_break;
+        i += line_break && i + 1 < length && (spelling[i + 1] == '\n' || spelling[i + 1] == '\r') && spelling[i + 1] != spelling[i];
+    }
+    return result;
+}
+
 static __attribute__((noinline, cold)) uint32_t pp_print_moves(Preprocessor* pp, PPMarkers* markers, uint32_t token, uint32_t* silent)
 {
     uint32_t result = BUSTER_PP_NONE;
@@ -13463,11 +14278,12 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
         result = result && spelling != 0;
         if (result)
         {
-            if (!line_start && length != 0 && ((flags & BUSTER_PP_SPACE) || pp_needs_separation(previous_last, previous_kind, spelling[0], pp->options.assembly)))
+            if (!line_start && length != 0 && ((flags & BUSTER_PP_SPACE) || pp_needs_separation(previous_last, previous_kind, spelling[0], pp_dollar_punctuation(&pp->options))))
             {
                 fputc(' ', stream);
             }
             fwrite(spelling, 1, length, stream);
+            marked.line += markers && kind == C_TOKEN_UNKNOWN ? pp_print_token_lines(spelling, length) : 0;
             previous_last = length != 0 ? spelling[length - 1] : previous_last;
             previous_kind = kind;
             line_start = false;
@@ -13622,11 +14438,12 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     // The last character and kind of the token before the chunk, for its first token's space.
     uint8_t previous_last = 0;
     uint8_t previous_kind = 0;
-    // Whether the chunk starts inside a pragma line (after its '#'), and with its name (its '#' ended the last chunk).
+    // Where '$' is punctuation (assembly, -fno-dollars-in-identifiers: pp_dollar_punctuation), it is split from names
+    // and numbers. Classify it as punctuation once for all chunks; source spaces stay.
+    const bool dollar_punctuation = pp_dollar_punctuation(&pp->options);
+    const __mmask64 word_classes = ~((uint64_t)dollar_punctuation << '$');
     uint64_t pragma_inside = 0;
     uint64_t pragma_name = 0;
-    // Assembly splits '$' from names and numbers. Classify it as punctuation once for all chunks; source spaces stay.
-    const __mmask64 word_classes = ~((uint64_t)pp->options.assembly << '$');
     const __m512i after_low = _mm512_maskz_loadu_epi8(word_classes, pp_after_classes);
     const __m512i after_high = _mm512_load_si512(pp_after_classes + 64);
     const __m512i before_low = _mm512_maskz_loadu_epi8(word_classes, pp_before_classes);
@@ -13697,7 +14514,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                     uint8_t* spare = arena_push(scratch.arena, (uint64_t)length + 1, 1);
                     result = spare != 0;
                     const uint32_t raw = length;
-                    length = result ? pp_without_splices(pp, spelling, length, spare, &spelling) : 0;
+                    length = result ? pp_without_splices(pp, kind, spelling, length, spare, &spelling) : 0;
                     length = result && kind == C_TOKEN_UNKNOWN && spelling == spare ? pp_trailing_splice(pp, location, raw, spare, length) : length;
                 }
             }
@@ -13739,12 +14556,14 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
         // class of the token before the chunk.
         const uint8_t carried = previous_kind == C_TOKEN_NUMERIC_CONSTANT || previous_kind == BUSTER_PP_KIND_EMBED ? BUSTER_PP_BEFORE_NUMBER
                                 : previous_last >= 0x80 ? BUSTER_PP_BEFORE_WORD
-                                : pp->options.assembly && previous_last == '$' ? 0 : pp_before_classes[previous_last];
+                                : dollar_punctuation && previous_last == '$' ? 0 : pp_before_classes[previous_last];
         before = _mm512_mask_permutexvar_epi8(_mm512_set1_epi8((char)carried), ~1ull, previous_lanes, before);
         const __m512i pair = _mm512_add_epi8(_mm512_slli_epi16(before, 3), after);
         const uint64_t joins = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(pair, separation), _mm512_set1_epi8(1));
         const uint64_t line_starts = starts | (pragma_ends << 1) | (uint64_t)force_line | (uint64_t)(c == 0 && line_start);
         const uint64_t spaced = (spaces | joins) & ~line_starts & valid;
+        // With markers, the unknown tokens, whose line breaks the printer's line counts (pp_print_token_lines).
+        const uint64_t unknowns = markers ? _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)) : 0;
         // 3. Copies, with the line breaks and markers between: without a branch per token but for line markers (which
         // -P doesn't print), the rare line of more than one break, and spellings past 64 bytes.
         for (uint32_t k = 0; result && k < available; k += 1)
@@ -13842,6 +14661,10 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                 }
             }
             used += direct ? 0 : length;
+            if (BUSTER_UNLIKELY((unknowns >> k) & 1))
+            {
+                marked.line += pp_print_token_lines(spelling, length);
+            }
             line_start = false;
             previous_last = length != 0 ? lasts[k] : previous_last;
             previous_kind = out_kinds[i];
@@ -13990,27 +14813,194 @@ static __attribute__((unused)) bool pp_print_macros(Preprocessor* pp, FILE* stre
 // The language mode of a -std= value, or false if it isn't one.
 static bool pp_parse_standard(const char* value, CLanguage* language)
 {
+    // C94 (iso9899:199409) is c89 with digraphs, as clang has it (CDigraphs).
     static const struct
     {
         const char* name;
         uint32_t standard;
         bool gnu;
+        uint8_t digraphs;
     } standards[] = {
-        { "c89", 1989, false }, { "c90", 1989, false }, { "iso9899:1990", 1989, false }, { "gnu89", 1989, true }, { "gnu90", 1989, true },
+        { "c89", 1989, false }, { "c90", 1989, false }, { "iso9899:1990", 1989, false }, { "iso9899:199409", 1989, false, C_DIGRAPHS_ON },
+        { "gnu89", 1989, true }, { "gnu90", 1989, true },
         { "c99", 1999, false }, { "iso9899:1999", 1999, false }, { "gnu99", 1999, true }, { "c11", 2011, false }, { "iso9899:2011", 2011, false },
         { "gnu11", 2011, true }, { "c17", 2017, false }, { "c18", 2017, false }, { "iso9899:2017", 2017, false }, { "iso9899:2018", 2017, false },
         { "gnu17", 2017, true }, { "gnu18", 2017, true }, { "c23", 2023, false }, { "c2x", 2023, false }, { "iso9899:2024", 2023, false },
         { "gnu23", 2023, true }, { "gnu2x", 2023, true }, { "c9x", 1999, false }, { "iso9899:199x", 1999, false }, { "gnu9x", 1999, true },
-        { "c1x", 2011, false }, { "iso9899:201x", 2011, false }, { "gnu1x", 2011, true }, { "iso9899:199409", 1994, false },
+        { "c1x", 2011, false }, { "iso9899:201x", 2011, false }, { "gnu1x", 2011, true },
     };
     bool result = false;
     for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(standards); i += 1)
     {
         if (strcmp(value, standards[i].name) == 0)
         {
-            *language = (CLanguage){ .standard = standards[i].standard, .gnu = standards[i].gnu };
+            *language = (CLanguage){ .standard = standards[i].standard, .gnu = standards[i].gnu, .digraphs = standards[i].digraphs };
             result = true;
         }
+    }
+    return result;
+}
+
+// The -f options that change what clang's -E gives other than its macros, in families of an option and its -fno- form,
+// of which clang's driver reads only the last: the keyword sets (TokenKinds.def's KEYGNU, KEYMS, KEYBORLAND,
+// KEYZVECTOR, KEYZOS, KEYFIXEDPOINT and KEYDEFERTS, and __declspec), the lexing of '$', digraphs and raw strings, -E's
+// own modes, and modules. pp_take_family records each family's last option, and pp_settle_families models GNU's
+// keywords, '$' and digraphs, and refuses the other families where their last option turns them on. Issue #281 has the
+// audit of clang 23.1.3's -f options that found them: every other one changes only macros (predefines_option), or
+// nothing that -E gives, but char's signedness and wchar_t's width, which predefines_option reads and #if follows
+// (pp_parse_character).
+typedef enum PPFamily
+{
+    PP_FAMILY_GNU_KEYWORDS,
+    PP_FAMILY_ASM,
+    PP_FAMILY_DOLLARS,
+    PP_FAMILY_DIGRAPHS,
+    PP_FAMILY_RAW_STRINGS,
+    PP_FAMILY_MS_EXTENSIONS,
+    PP_FAMILY_MS_COMPATIBILITY,
+    PP_FAMILY_BORLAND,
+    PP_FAMILY_DECLSPEC,
+    PP_FAMILY_ZVECTOR,
+    PP_FAMILY_ZOS,
+    PP_FAMILY_FIXED_POINT,
+    PP_FAMILY_DEFER_TS,
+    PP_FAMILY_DIRECTIVES_ONLY,
+    PP_FAMILY_KEEP_SYSTEM_INCLUDES,
+    PP_FAMILY_MINIMIZE_WHITESPACE,
+    PP_FAMILY_LINE_DIRECTIVES,
+    PP_FAMILY_REWRITE_INCLUDES,
+    PP_FAMILY_REWRITE_IMPORTS,
+    PP_FAMILY_MODULES,
+    PP_FAMILY_IMPLICIT_MODULE_MAPS,
+    PP_FAMILY_COUNT,
+} PPFamily;
+
+#define BUSTER_PP_KEYWORDS_REFUSED(whose) whose ", which buster doesn't follow"
+#define BUSTER_PP_OUTPUT_REFUSED "it changes what clang -E prints, which buster doesn't follow"
+#define BUSTER_PP_MODULES_REFUSED "clang's modules, which buster doesn't have"
+
+// Each family's option, its -fno- form (none for -fzvector's: clang's driver never passes -fno-zvector on, and warns
+// that it is unused), and why buster refuses the option, null where pp_settle_families models the family or decides.
+static const struct
+{
+    const char* on;
+    const char* off;
+    const char* refused;
+} pp_families[PP_FAMILY_COUNT] = {
+    [PP_FAMILY_GNU_KEYWORDS] = { "-fgnu-keywords", "-fno-gnu-keywords", 0 },
+    [PP_FAMILY_ASM] = { "-fasm", "-fno-asm", 0 },
+    [PP_FAMILY_DOLLARS] = { "-fdollars-in-identifiers", "-fno-dollars-in-identifiers", 0 },
+    [PP_FAMILY_DIGRAPHS] = { "-fdigraphs", "-fno-digraphs", 0 },
+    [PP_FAMILY_RAW_STRINGS] = { "-fraw-string-literals", "-fno-raw-string-literals", 0 },
+    [PP_FAMILY_MS_EXTENSIONS] = { "-fms-extensions", "-fno-ms-extensions", BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
+    [PP_FAMILY_MS_COMPATIBILITY] = { "-fms-compatibility", "-fno-ms-compatibility", BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
+    [PP_FAMILY_BORLAND] = { "-fborland-extensions", "-fno-borland-extensions", BUSTER_PP_KEYWORDS_REFUSED("Borland's keywords and __declspec") },
+    [PP_FAMILY_DECLSPEC] = { "-fdeclspec", "-fno-declspec", BUSTER_PP_KEYWORDS_REFUSED("the __declspec keyword and __has_declspec_attribute") },
+    [PP_FAMILY_ZVECTOR] = { "-fzvector", 0, BUSTER_PP_KEYWORDS_REFUSED("System z's vector keywords") },
+    [PP_FAMILY_ZOS] = { "-fzos-extensions", "-fno-zos-extensions", BUSTER_PP_KEYWORDS_REFUSED("z/OS's __ptr32 keyword") },
+    [PP_FAMILY_FIXED_POINT] = { "-ffixed-point", "-fno-fixed-point", BUSTER_PP_KEYWORDS_REFUSED("the fixed-point keywords and macros") },
+    [PP_FAMILY_DEFER_TS] = { "-fdefer-ts", "-fno-defer-ts", BUSTER_PP_KEYWORDS_REFUSED("the _Defer keyword") },
+    [PP_FAMILY_DIRECTIVES_ONLY] = { "-fdirectives-only", "-fno-directives-only", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_KEEP_SYSTEM_INCLUDES] = { "-fkeep-system-includes", "-fno-keep-system-includes", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_MINIMIZE_WHITESPACE] = { "-fminimize-whitespace", "-fno-minimize-whitespace", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_LINE_DIRECTIVES] = { "-fuse-line-directives", "-fno-use-line-directives", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_REWRITE_INCLUDES] = { "-frewrite-includes", "-fno-rewrite-includes", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_REWRITE_IMPORTS] = { "-frewrite-imports", "-fno-rewrite-imports", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_MODULES] = { "-fmodules", "-fno-modules", BUSTER_PP_MODULES_REFUSED },
+    [PP_FAMILY_IMPLICIT_MODULE_MAPS] = { "-fimplicit-module-maps", "-fno-implicit-module-maps", BUSTER_PP_MODULES_REFUSED },
+};
+
+// What pp_take_family records for pp_settle_families: each family's last option (1 for its option, 0 for its -fno- form,
+// -1 for neither), and the last -fexec-charset= and -finput-charset=.
+typedef struct PPFamilies PPFamilies;
+struct PPFamilies
+{
+    int8_t last[PP_FAMILY_COUNT];
+    const char* charsets[2];
+};
+
+// Takes an argument that is a family's option (PPFamily), or -fexec-charset= or -finput-charset=, or one that buster
+// refuses wherever it comes, as it changes clang's -E with no -fno- form: modules', and __FILE__'s remapping (by prefix,
+// which takes the value too). `refused` is set for those. Returns false for any other argument.
+static bool pp_take_family(PPFamilies* families, const char* argument, bool* refused)
+{
+    static const struct
+    {
+        const char* prefix;
+        const char* refused;
+    } refusals[] = {
+        { "-fbuiltin-module-map", BUSTER_PP_MODULES_REFUSED },
+        { "-fmodule-name=", BUSTER_PP_MODULES_REFUSED },
+        { "-fmodule-map-file=", BUSTER_PP_MODULES_REFUSED },
+        { "-fdriver-only", "it stops clang before it preprocesses" },
+        { "-fproc-stat-report", "clang's process statistics, which buster doesn't report" },
+        { "-fmacro-prefix-map=", "a remapping of __FILE__ and __BASE_FILE__, which buster doesn't follow" },
+        { "-ffile-prefix-map=", "a remapping of __FILE__ and __BASE_FILE__, which buster doesn't follow" },
+    };
+    bool result = false;
+    for (uint32_t f = 0; !result && f < PP_FAMILY_COUNT; f += 1)
+    {
+        const bool on = strcmp(argument, pp_families[f].on) == 0;
+        const bool off = pp_families[f].off != 0 && strcmp(argument, pp_families[f].off) == 0;
+        families->last[f] = on ? 1 : off ? 0 : families->last[f];
+        result = on || off;
+    }
+    for (uint32_t c = 0; !result && c < BUSTER_ARRAY_LENGTH(families->charsets); c += 1)
+    {
+        const char* const prefix = c == 0 ? "-fexec-charset=" : "-finput-charset=";
+        result = strncmp(argument, prefix, strlen(prefix)) == 0;
+        families->charsets[c] = result ? argument : families->charsets[c];
+    }
+    for (uint32_t r = 0; !result && r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
+    {
+        result = strncmp(argument, refusals[r].prefix, strlen(refusals[r].prefix)) == 0;
+        if (result)
+        {
+            fprintf(stderr, "error: unsupported option '%s' (%s)\n", argument, refusals[r].refused);
+            *refused = true;
+        }
+    }
+    return result;
+}
+
+// Settles the families pp_take_family recorded, after every argument, as clang's driver does. GNU's keywords follow the
+// last -f[no-]gnu-keywords, or else the last of GCC's -f[no-]asm (which the driver passes on before them), or else the
+// mode; '$' and digraphs follow their last options (-fdigraphs makes c89 C94, and -fno-digraphs makes C94 c89:
+// CDigraphs). The refusals: a family buster doesn't follow whose last option turns it on, but -fzvector in assembly,
+// where clang ignores it; and a last -fexec-charset= or -finput-charset= other than UTF-8 in any case, which clang's
+// driver refuses too. Returns false after a refusal.
+static bool pp_settle_families(const PPFamilies* families, PPOptions* options)
+{
+    bool result = true;
+    const int8_t* last = families->last;
+    const int8_t gnu = last[PP_FAMILY_GNU_KEYWORDS] >= 0 ? last[PP_FAMILY_GNU_KEYWORDS] : last[PP_FAMILY_ASM];
+    options->language.gnu_keywords = (uint8_t)(gnu < 0 ? C_GNU_KEYWORDS_MODE : gnu != 0 ? C_GNU_KEYWORDS_ON : C_GNU_KEYWORDS_OFF);
+    options->language.digraphs = (uint8_t)(last[PP_FAMILY_DIGRAPHS] < 0 ? options->language.digraphs : last[PP_FAMILY_DIGRAPHS] != 0 ? C_DIGRAPHS_ON : C_DIGRAPHS_OFF);
+    options->dollars = (uint8_t)(last[PP_FAMILY_DOLLARS] < 0 ? PP_DOLLARS_MODE : last[PP_FAMILY_DOLLARS] != 0 ? PP_DOLLARS_IDENTIFIER : PP_DOLLARS_PUNCTUATION);
+    options->raw_strings = (uint8_t)(last[PP_FAMILY_RAW_STRINGS] < 0 ? PP_RAW_STRINGS_MODE : last[PP_FAMILY_RAW_STRINGS] != 0 ? PP_RAW_STRINGS_ON : PP_RAW_STRINGS_OFF);
+    for (uint32_t f = 0; f < PP_FAMILY_COUNT; f += 1)
+    {
+        const bool refuse = pp_families[f].refused != 0 && last[f] == 1 && !(f == PP_FAMILY_ZVECTOR && options->assembly);
+        if (refuse)
+        {
+            fprintf(stderr, "error: unsupported option '%s' (%s)\n", pp_families[f].on, pp_families[f].refused);
+        }
+        result &= !refuse;
+    }
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(families->charsets); c += 1)
+    {
+        const char* charset = families->charsets[c];
+        const char* value = charset != 0 ? strchr(charset, '=') + 1 : "utf-8";
+        bool utf8 = strlen(value) == 5;
+        for (uint32_t i = 0; utf8 && i < 5; i += 1)
+        {
+            utf8 = (value[i] >= 'A' && value[i] <= 'Z' ? value[i] | 0x20 : value[i]) == "utf-8"[i];
+        }
+        if (!utf8)
+        {
+            fprintf(stderr, "error: invalid value '%s' in '%s'\n", value, charset);
+        }
+        result &= utf8;
     }
     return result;
 }
@@ -14044,6 +15034,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     int trigraphs = -1;
     // The last -std= or -ansi, the only one clang's driver reads.
     const char* standard = 0;
+    // The -f options that change clang's keywords, lexing or -E output (pp_settle_families reads them after the loop).
+    PPFamilies families = { .charsets = { 0, 0 } };
+    memset(families.last, -1, sizeof(families.last));
+    bool refused = false;
     result = quote != 0 && include != 0 && system != 0 && after != 0 && macros != 0 && includes != 0 && embeds != 0;
     result = result && predefines_options_initialize(&options->predefines, arena, (uint32_t)count);
     for (int i = 0; result && i < count; i += 1)
@@ -14082,6 +15076,14 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             options->no_standard_includes = true;
         }
+        else if (strcmp(argument, "-nobuiltininc") == 0)
+        {
+            options->no_builtin_includes = true;
+        }
+        else if (strcmp(argument, "--buster-headers") == 0)
+        {
+            options->buster_headers = true;
+        }
         else if (strcmp(argument, "-undef") == 0)
         {
             options->undefine = true;
@@ -14110,6 +15112,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
             fprintf(stderr, "error: unknown or unsupported option '%s' for x86-64 Linux\n", argument);
             result = false;
         }
+        else if (pp_take_family(&families, argument, &refused))
+        {
+            result = !refused;
+        }
         else if (strncmp(argument, "--embed-dir=", 12) == 0)
         {
             embeds[options->embed_directory_count] = argument + 12;
@@ -14118,7 +15124,8 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0)
         {
             // The other code generation and warning options: none changes what -E gives (predefines_option takes the
-            // ones that do, and refuses those buster doesn't follow).
+            // ones that change macros, and refuses those buster doesn't follow, and pp_take_family those that change
+            // clang's keywords, lexing or -E output).
         }
         else if (strncmp(argument, "-std=", 5) == 0 || strcmp(argument, "-ansi") == 0)
         {
@@ -14210,6 +15217,8 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     options->trigraphs = trigraphs >= 0 ? trigraphs != 0 : !options->language.gnu && options->language.standard < 2023;
     options->macros = macros;
     options->includes = includes;
+    // The -f families, after the language mode (pp_settle_families).
+    result = result && pp_settle_families(&families, options);
     options->embed_directories = embeds;
     // What clang's driver decides from the whole command line (the sanitizers, -flto and -fvisibility='s values), and the
     // generated code's instruction set, from the target options as clang resolves them; each reports what doesn't
@@ -14238,7 +15247,7 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
                         "[-include file] [--embed-dir=dir] [-dM] [-std=...] [-ansi] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-march=cpu] [-m[no-]feature] [-O...] [-f...] "
-                        "[-g...] [-pthread] [-nostdinc] [-undef] [--predefines file] [--clang-features] [--scalar] file\n");
+                        "[-g...] [-pthread] [-nostdinc] [-nobuiltininc] [--buster-headers] [-undef] [--predefines file] [--clang-features] [--scalar] file\n");
     }
     else
     {
@@ -14272,5 +15281,232 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
         intern_release(&table);
     }
     arena_release(&arena);
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// clang's arguments for ours
+//
+// test-preprocessor and benchmark-preprocessor run clang with the options ours reads, to compare with it and to time it.
+// clang has no --buster-headers, and no rule like pp_find_include's that keeps its resource directory from supplying a
+// name buster's directory has, so it gets ours' whole search instead (pp_clang_arguments), with a directory of links to
+// the rest of clang's resource directory in that directory's place.
+
+// Removes the directory pp_clang_fallback_links made, with its links.
+static void pp_clang_remove_links(const char* links)
+{
+    DIR* directory = opendir(links);
+    for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
+    {
+        char link[PATH_MAX];
+        const bool dots = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0;
+        if (!dots && (size_t)snprintf(link, sizeof(link), "%s/%s", links, entry->d_name) < sizeof(link))
+        {
+            unlink(link);
+        }
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+    rmdir(links);
+}
+
+// What --buster-headers searches after buster's directory `ours`, for clang: a new directory, made from the template
+// `links` (mkdtemp's, which gives it its name), with a link to each entry of clang's resource directory that `ours`
+// hasn't. Returns whether it made it; if not, it leaves nothing.
+static bool pp_clang_fallback_links(const char* ours, char* links)
+{
+    char resource[PATH_MAX];
+    const bool made = pp_clang_resource_directory(resource, sizeof(resource)) && mkdtemp(links) != 0;
+    DIR* directory = made ? opendir(resource) : 0;
+    bool result = directory != 0;
+    for (struct dirent* entry = result ? readdir(directory) : 0; result && entry != 0; entry = readdir(directory))
+    {
+        char target[PATH_MAX];
+        char shadow[PATH_MAX];
+        char link[PATH_MAX];
+        struct stat stats;
+        const bool dots = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0;
+        result = (size_t)snprintf(target, sizeof(target), "%s/%s", resource, entry->d_name) < sizeof(target) &&
+                 (size_t)snprintf(shadow, sizeof(shadow), "%s/%s", ours, entry->d_name) < sizeof(shadow) &&
+                 (size_t)snprintf(link, sizeof(link), "%s/%s", links, entry->d_name) < sizeof(link);
+        if (result && !dots && stat(shadow, &stats) != 0)
+        {
+            result = symlink(target, link) == 0;
+        }
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+    if (made && !result)
+    {
+        pp_clang_remove_links(links);
+    }
+    return result;
+}
+
+// Is `argument` an option whose value is the next argument (pp_parse_options)?
+static bool pp_option_takes_value(const char* argument)
+{
+    static const char* const options[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter", "-target" };
+    bool result = pp_own_option_with_value(argument);
+    for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(options); i += 1)
+    {
+        result = strcmp(argument, options[i]) == 0;
+    }
+    return result;
+}
+
+// clang's arguments for ours: `arguments` (`count` of them), from which `options` were read, in a new array with a null
+// at its end (one block, with the names it holds, for free), and their count in `*clang_count`; null if it can't be
+// made. Our own options are left out; any other option's value is copied as it is, whatever it spells. With
+// --buster-headers, and without -nostdinc or
+// -nobuiltininc (which leave out buster's headers and clang's alike), clang gets ours' search instead of the
+// directories' options, from a preprocessor initialized with `options`: each directory pp_dedupe_directories keeps
+// (whose decisions, by identity and a system directory over a user's, clang's links would hide from it) with its
+// option, -iquote, -I, -isystem or -idirafter, and in clang's resource directory's place, when it is kept, a new
+// directory of links made from the template `links` (pp_clang_fallback_links, with buster's directory in `ours`,
+// PATH_MAX bytes). -nobuiltininc comes first, and clang adds the standard directories, /usr/local/include and
+// /usr/include, after the -isystem ones, as ours has them. `*linked` says whether the links were made, for
+// pp_clang_remove_links.
+static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* options, int count, char** arguments, char* ours, char* links, bool* linked, int* clang_count)
+{
+    const bool search = options->buster_headers && !options->no_standard_includes && !options->no_builtin_includes;
+    // Ours' search, as pp_initialize makes it, without its diagnostics.
+    static InternTable table;
+    static Preprocessor pp;
+    PPOptions quiet = *options;
+    quiet.quiet = true;
+    const bool found = search && pp_buster_headers_directory(ours, PATH_MAX);
+    const bool interned = found && intern_initialize(&table);
+    const bool initialized = interned && pp_initialize(&pp, &quiet, &table) && !pp.fatal;
+    const uint32_t directories = initialized ? pp.directory_count : 0;
+    uint64_t bytes = 0;
+    for (uint32_t d = 0; d < directories; d += 1)
+    {
+        bytes += (uint64_t)pp.directory_lengths[d] + 1;
+    }
+    const uint64_t slots = (uint64_t)count + 2 * (uint64_t)directories + 2;
+    char** result = !search || initialized ? malloc(slots * sizeof(char*) + bytes) : 0;
+    char* names = result != 0 ? (char*)(result + slots) : 0;
+    bool ready = result != 0;
+    int n = 0;
+    *linked = false;
+    for (int i = 0; ready && i < count; i += 1)
+    {
+        const char* argument = arguments[i];
+        const bool value = pp_option_takes_value(argument) && i + 1 < count;
+        // With ours' search, the directories' options are in it.
+        const bool directory = search && (strncmp(argument, "-I", 2) == 0 || strcmp(argument, "-isystem") == 0 || strcmp(argument, "-iquote") == 0 ||
+                                          strcmp(argument, "-idirafter") == 0);
+        if (!directory && !pp_own_option_with_value(argument) && strcmp(argument, "--buster-headers") != 0 && strcmp(argument, "--scalar") != 0 &&
+            strcmp(argument, "--clang-features") != 0)
+        {
+            result[n] = arguments[i];
+            n += 1;
+            if (value)
+            {
+                result[n] = arguments[i + 1];
+                n += 1;
+            }
+        }
+        i += value;
+    }
+    if (ready && search)
+    {
+        result[n] = "-nobuiltininc";
+        n += 1;
+        // Past a standard directory, the system ones are -idirafter's. When -isystem took the standard ones' places
+        // instead, every later one is an -isystem in clang's order too.
+        bool after = false;
+        for (uint32_t d = 0; ready && d < directories; d += 1)
+        {
+            const uint8_t system = pp.directory_system[d];
+            const bool fallback = d == pp.fallback_directory;
+            after = after || system == BUSTER_PP_EXTERN_C_FILE;
+            *linked = *linked || (fallback && pp_clang_fallback_links(ours, links));
+            ready = !fallback || *linked;
+            if (ready && system != BUSTER_PP_EXTERN_C_FILE)
+            {
+                memcpy(names, pp.directories[d], (size_t)pp.directory_lengths[d] + 1);
+                result[n] = d < pp.angled_first ? "-iquote" : system == BUSTER_PP_USER_FILE ? "-I" : after ? "-idirafter" : "-isystem";
+                result[n + 1] = fallback ? links : names;
+                n += 2;
+                names += pp.directory_lengths[d] + 1;
+            }
+        }
+    }
+    if (search && !found)
+    {
+        fprintf(stderr, "--buster-headers: no src/buster/include beside the executable's build directory\n");
+    }
+    else if (search && (!ready || !initialized))
+    {
+        fprintf(stderr, "--buster-headers: can't make clang's search, with links to clang's resource headers in %s\n", links);
+    }
+    if (interned)
+    {
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    if (ready)
+    {
+        result[n] = 0;
+        *clang_count = n;
+    }
+    else
+    {
+        free(result);
+        result = 0;
+    }
+    return result;
+}
+
+// Runs clang with `arguments` (`count` of them, as pp_clang_arguments gives them) and -E -P -o `output` `file`, as a
+// process of its own without CPATH and C_INCLUDE_PATH, and waits for it: benchmark-preprocessor's clang runs. Its command
+// is an array of its own count (#255's review: a fixed one of 256 dropped the arguments past it). Returns whether clang
+// exited with status 0, naming the file if it didn't.
+static __attribute__((unused)) bool pp_clang_preprocess(int count, char** arguments, const char* output, const char* file)
+{
+    char** command = calloc((size_t)count + 7, sizeof(char*));
+    bool result = command != 0;
+    int status = 0;
+    if (result)
+    {
+        int n = 0;
+        command[n++] = "clang";
+        for (int i = 0; i < count; i += 1)
+        {
+            command[n++] = arguments[i];
+        }
+        command[n++] = "-E";
+        command[n++] = "-P";
+        command[n++] = "-o";
+        command[n++] = (char*)output;
+        command[n++] = (char*)file;
+        command[n] = 0;
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            unsetenv("CPATH");
+            unsetenv("C_INCLUDE_PATH");
+            execvp("clang", command);
+            _exit(127);
+        }
+        pid_t waited = -1;
+        do
+        {
+            waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        }
+        while (waited < 0 && child > 0 && errno == EINTR);
+        result = waited == child && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    if (!result)
+    {
+        fprintf(stderr, "clang -E failed on %s (wait status %d)\n", file, status);
+    }
+    free(command);
     return result;
 }

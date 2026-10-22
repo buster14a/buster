@@ -345,17 +345,25 @@ designs and the compilers already built this way.
   static executable with the C runtime (step 6's third part), with its
   IFUNCs' stubs and IRELATIVE relocations, its general- and local-dynamic
   TLS accesses relaxed to local-exec and its init and fini arrays' priorities,
-  or as a static PIE (step 6's fifth part): the PIE's layout and RELATIVE
+  as a static PIE (step 6's fifth part): the PIE's layout and RELATIVE
   relocations without dynamic symbols, and the static runtime's IFUNCs with
   their IRELATIVE relocations last in `.rela.dyn`. Every kind's loads and
   calls through the GOT of the image's symbols are relaxed, as GNU ld and lld
   relax them, and an IFUNC whose stub only calls reach reads the stub's slot
   through the GOT, as lld's does; all from vector passes with exact twins.
+  It also writes shared libraries (`ExecutableDynamic.shared`, with optional
+  `soname`): default-visibility global and weak definitions are preemptible,
+  calls use non-lazy GOT stubs, and initial-exec TLS uses TPOFF64 slots.
+  Regular shared-library outputs use a new file and rename, preserving any
+  old inode that a process still maps.
+  Local-exec and general/local-dynamic TLS accesses in shared libraries are
+  refused; their implementations remain a later part of #85.
   `dynamic.c` gives it what a PIE needs from the C runtime and from
   binding (`dynamic_inputs`), what a static executable with the C runtime
   needs (`dynamic_static_inputs`) and what a static PIE needs
-  (`dynamic_static_pie_inputs`). `executable_test.c` holds the static
-  executables' tests without libc (`./build/compiler test-executable` runs
+  (`dynamic_static_pie_inputs`), and what a shared library needs without a
+  start object or interpreter (`dynamic_shared_inputs`). `executable_test.c`
+  holds the static executables' tests without libc (`./build/compiler test-executable` runs
   them), `dynamic_test.c` the PIEs' (`./build/compiler test-dynamic`) and
   `static_test.c` those with libc and the static PIEs' (`./build/compiler
   test-static`); `main.c` includes all three, and `executable_benchmark.c`
@@ -491,6 +499,11 @@ designs and the compilers already built this way.
 - `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
   unit's token stream from its files' refined tokens (C23's `#embed` among its
   directives), and `./build/compiler -E` (as `clang -E`, with `-dM` and `--embed-dir=`).
+  `src/buster/include` holds the compiler's own freestanding headers, which
+  `--buster-headers` puts where clang's resource directory goes (the default),
+  with clang's after them for the headers they don't supply (never for a name
+  they have, so their `#include_next` reaches the C library's), and
+  `-nobuiltininc` leaves out the compiler's headers, whichever they are.
   `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
@@ -503,7 +516,12 @@ designs and the compilers already built this way.
   as clang does (`-march`, the `-m` feature flags, `-march=native` from CPUID,
   `-O`, `-f...`, `-g`), from tables generated from clang 23; `c_predefines_test.c`
   checks them against clang under `test-preprocessor --clang` and regenerates the
-  tables (`test-preprocessor --generate-targets`).
+  tables (`test-preprocessor --generate-targets`). Of the `-f` options that
+  change clang's keywords, lexing or `-E` output (#281), `-E` models GNU's
+  keywords (`-f[no-]gnu-keywords`, `-f[no-]asm`), `$` in identifiers, and char's
+  signedness and `wchar_t`'s width in `#if` (from `c_predefines.c`'s options),
+  and refuses the others where their last option turns them on
+  (`pp_take_family`, `pp_settle_families`).
 - `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
   records macro expansion history in cold records and compressed output runs;
   `pp_diagnose_output` renders a diagnostic for an output-token index.
@@ -556,6 +574,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-parallel
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
+./build/compiler test-lexer --no-digraphs --no-line-comments
 ./build/compiler benchmark-lexer src
 ./build/compiler test-preprocessor-fuzz --std c17
 ./build/compiler test-preprocessor-fuzz --std c23
@@ -758,11 +777,18 @@ second's counts after the first's. The inputs:
   clang 23.1.3's raw lexer gives them (`-std=c17`, `c23`, `c++11` and
   `c++26`), from both lexers.
 
-`--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces. The
-command prints each check's counts and first differences, and exits with status
-1 if anything fails. The 9700X job's test step runs both modes. On that
-machine the C and C++ runs take about 2.8 s and 3.0 s (1.8 s and 1.9 s before
-every input was lexed both ways). For a longer run:
+`--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces.
+`--raw-strings` enables C11's raw prefixes in C; `--raw-strings-c99`
+enables `R` and `LR`. Raw literals and near misses are checked around
+chunk and page boundaries. Both modes run in the 9700X workflow.
+`--no-digraphs` and `--no-line-comments` tokenize C without digraphs and without
+`//` comments (`C_TOKENIZER_NO_DIGRAPHS` and `C_TOKENIZER_NO_LINE_COMMENTS`), as
+the preprocessor lexes `-std=c89` (both), C94 (the second) and `-fno-digraphs`
+(the first): the same inputs, lexed otherwise, through every check; C++ takes
+neither (#288). The command prints each check's counts and first differences,
+and exits with status 1 if anything fails. The 9700X job's test step runs C++,
+C and C's three other modes. Before adding the C89 modes, the C and C++
+runs took about 2.8 s and 3.0 s on the 9700X. For a longer run:
 
 ```sh
 ./build/compiler test-lexer --cplusplus --seed 7 --fuzz 2000000
@@ -770,11 +796,13 @@ every input was lexed both ways). For a longer run:
 
 ## Lexer benchmarks
 
-`./build/compiler benchmark-lexer [--cplusplus] [--no-digit-separators] path...`
-checks each matching source against the scalar lexer and reports 21
-interleaved-pass median throughput, cycles per byte, instructions per byte and
-IPC (hardware counters are zero when unavailable). Paths can be files or
-directories; `--cplusplus` selects C++ source/header extensions, and
+`./build/compiler benchmark-lexer [--cplusplus] [--no-digraphs]
+[--no-line-comments] [--no-digit-separators] path...` checks each matching source against the scalar
+lexer and reports 21 interleaved-pass median throughput, cycles per byte,
+instructions per byte and IPC (hardware counters are zero when unavailable).
+Paths can be files or directories; `--cplusplus` selects C++ source/header
+extensions, and `--no-digraphs` and `--no-line-comments` C's modes, as
+`test-lexer` takes them, and
 `--no-digit-separators` lexes numbers as C17 does, as the preprocessor does
 before C23 (`docs/c-lexer.md`, "Numbers without digit separators"). The default
 9700X job runs
@@ -1973,11 +2001,11 @@ like the others, its measurements are informational.
 `--seed N` changes the programs and the random inputs, and `--functions N`
 the workers of the set named after it (2,000 by default).
 
-## Dynamic PIE tests
+## Dynamic PIE and shared library tests
 
 `./build/compiler test-dynamic [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 0.75 s on the 9700X, and 0.93 s with
-`--cross-check`) checks `executable.c`'s dynamic PIEs against this system's
+[--cross-check] [--keep]` (about 1.54 s with `--cross-check` on the 9700X)
+checks `executable.c`'s dynamic PIEs against this system's
 runtime (`runtime_import`), in a directory of its own under `--directory`
 (`TMPDIR` or `/tmp` by default), which it removes unless `--keep`. Each
 program is bound by `bind.c` and written by groups of 1, 2, 3 and 8 lanes,
@@ -2060,6 +2088,22 @@ function's pushes and pops gives as GCC's CFI: the CFA 8 bytes further from
 push saves at the CFA less the new offset, and one a pop restores as it was.
 `--seed N` changes the programs. The 9700X job's test step runs it with
 `--cross-check`.
+
+The same command also writes generated and compiled shared libraries against
+`runtime_import_shared`. Every library is byte-identical on 1, 2, 3 and 8 lanes
+and through the exact twins, then loads with `dlopen` and runs through the
+generated harness. The file checks require ET_DYN without PT_INTERP, SONAME,
+the library's exported symbols and initial-exec TLS, and the corresponding
+dynamic relocations. Compiled fixtures verify that the executable's definitions
+preempt the library's calls, data and pointer tables. With `--cross-check`, lld
+links the same objects with `-shared`; the comparison accounts for its lazy PLT
+slots and our non-lazy GLOB_DAT slots. Local-exec TLS, text relocations, a direct
+address of a preemptible function, and currently general/local-dynamic TLS are
+refused. See "The shared library" in the linker design for the supported scope.
+Mapped-file checks hold the old library's descriptor and shared mapping across
+replacement on every lane count; its inode and bytes must survive while new
+opens find the new library. File-cleanup checks also preserve a concurrently
+created destination when a first publication fails.
 
 ## Static executable tests
 
@@ -2188,7 +2232,7 @@ it with `--cross-check`.
 ## Direct executable benchmark
 
 `./build/compiler benchmark-executable [--directory PATH] [--functions LIST]
-[--lanes N] [--seed N] [--only kernels|hash|links|dynamic|static|static-pie]`
+[--lanes N] [--seed N] [--only kernels|hash|links|dynamic|static|static-pie|shared]`
 (about 4 s) reports medians of:
 
 - the patch kernel and the variants it was chosen over (a branch on the kind,
@@ -2215,15 +2259,19 @@ it with `--cross-check`.
   with their stubs, IRELATIVE relocations and GOT slots (`--only static`);
 - and bound against the static PIE's runtime and written as static PIEs,
   with their stubs, relocations (RELATIVE among them) and GOT slots
-  (`--only static-pie`).
+  (`--only static-pie`);
+- bound against the shared-library runtime and written as libraries, including
+  exports, preemptible calls and initial-exec TLS (`--only shared`).
 
-Every write after a case's first goes over the last one's bytes, whose loads
-and calls through the GOT it relaxed already. Run it under the 9700X's lock
+Executable writes after a case's first reuse the last one's file, whose loads
+and calls through the GOT the writer relaxed already. Shared-library writes
+replace their file each time. Run it under the 9700X's lock
 with `taskset -c 2` for one lane, or with `taskset -c 0-7` for 8 (one CPU per
 core), since the lanes' threads keep the affinity they start with.
 `docs/object-writer-and-linker.md` ("Patching and writing", "The first
 executables", "The dynamic PIE", "The static executable with libc", "The
-static PIE" and "GOT relaxation in every executable") has the numbers.
+static PIE", "GOT relaxation in every executable" and "The shared library") has
+the numbers.
 The default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
 
@@ -2331,9 +2379,9 @@ the others, its measurements are informational.
 [--directory PATH] [--cache PATH] [--cpus LIST] [--linkers LIST] [--runs N]
 [--only direct|linkers] [--kinds LIST] [--keep]` (about 122 s on the 9700X)
 links generated programs that call libc, without `SIZE32` and `SIZE64`, as
-dynamic PIEs, static executables and static PIEs (`--kinds`, a list of
-`dynamic`, `static` and `static-pie`, every kind by default), by the direct
-path and by each linker, and reports medians:
+dynamic PIEs, static executables, static PIEs and shared libraries (`--kinds`, a
+list of `dynamic`, `static`, `static-pie` and `shared`, every kind by default),
+by the direct path and by each linker, and reports medians:
 
 - the programs: one worker and 2,000 workers (about hello world's and tcc's
   outputs), and one of synth's shape, 102,400 workers in 512 units with up to
@@ -2710,8 +2758,9 @@ identifier must get the same id and every token the same leading-space bit, on:
 - about 14,800 spellings where the same bit flipped in two lanes must change
   the hash;
 - the predefined names, every name's keyword answer in each of the ten modes
-  from `c89` to `gnu23`, and 24 spellings chosen apart from the predefined names
-  with clang's answer (17 keywords, 7 not);
+  from `c89` to `gnu23` and in five of them with `-fgnu-keywords` or
+  `-fno-gnu-keywords` (#281), and 24 spellings chosen apart from the predefined
+  names with clang's answer (17 keywords, 7 not);
 - 300,000 random spellings that grow the table three times;
 - 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
   and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64
@@ -2759,14 +2808,16 @@ corpus...` is #125's real-source oracle. It accepts directories or
 `--files-from LIST --root DIR`, compares lexical kinds, spellings and locations,
 and reports every Clang rejection as an explicit skip. Process/configuration
 failures fail the run. `--report NEW.tsv` records every file's result and skip
-reason. `c_preprocessor_oracle.c` implements this interface;
+reason. It refuses `--buster-headers`: both sides search as clang does, which
+leaves ours no headers of its own to select. `c_preprocessor_oracle.c`
+implements this interface;
 [the frozen oracle guide](docs/preprocessor-oracle.md) records the pinned
 headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
 [options] [file...]`, or `test-preprocessor --tables path...`:
 
-- without files, the 236 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 320 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2776,17 +2827,34 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   - inputs past the vectorized kernels' limits;
   - directives and builtins that nest through the main loop's frames;
   - #193's review fixes, line markers among them;
+  - the `-f` options it models (#281): GNU's keywords, `$` (what follows it
+    joining the tokens after it, as clang lexes them), char's signedness and
+    `-f[no-]short-wchar`'s width and signedness in `#if`;
+  - c89's and C94's lexing without `//` comments, and c89's without digraphs,
+    pasted and stringized too, and `-f[no-]digraphs` in four modes (#288);
   - each difference from clang that #109's fuzzing found, minimized, and the
     ones probing around it found;
-  - `#embed`: its data, parameters, errors and files, and where `-E` prints it.
+  - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
+  - #119's includes, in files and links the case makes: header names written out
+    and computed, `#include_next` through three directories, an inactive group's
+    includes, a cycle at the depth limit, one file through a symbolic link and a
+    hard link, and clang's recoveries and diagnostics' places; and #254's
+    review's: a header name written out that is too long for a path (and an
+    `#embed` one longer than its buffer), `__has_include`'s and `__has_embed`'s
+    operands as their `#if` line writes them, and the header the depth limit
+    refuses.
 
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
   modification times of their own must give each file's time (in UTC), and
-  `SOURCE_DATE_EPOCH`'s when it is set; and the `-m` options buster refuses
+  `SOURCE_DATE_EPOCH`'s when it is set; the `-m` options buster refuses
   though clang takes them (another target's, which clang ignores with a
   warning, and those that change the target) must be refused, and each `-m`
-  flag that changes no macro taken; the expansion history's checks; #embed's vector/scalar text and lookup checks; and
+  flag that changes no macro taken; and each of `pp_test_option_sets` must be
+  refused, its message naming the option, or taken without one: the `-f`
+  options that change clang's keywords, lexing or `-E` output, which
+  `pp_parse_options` models or refuses where their family's last option turns
+  them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks; and
   the fuzz batch: its isolation rules checked on small sources (what a case
   leaves open makes clang read it alone), its comparison on pairs of texts
   (whitespace between tokens doesn't count, a literal's contents and joined
@@ -2840,16 +2908,21 @@ ways: by default they answer what buster implements.
 options (but `--predefines` and `--location-limit`, ours alone), token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
 prints the first difference with the tokens around it. For files, our side
-reads clang's own predefines for the options through `--predefines`, so that
-only preprocessing is compared (the 9700X's clang names another patch release);
-then, with our own predefines, the macros defined at the file's end must be
-`clang -dM -E`'s byte for byte, but for those three macros and `__BUSTER__`.
-Without files, `--clang` also checks the built-in predefines, the keywords and
-the features:
-- in 22 option sets (the ten modes from `c89` to `gnu23`, `-ffreestanding`,
-  `-O2`, two combinations, the six ISA profiles of `docs/x86-target.md` and two
-  with `-mtune`), `pp_predefines` must give `clang -dM -E` line for line, but for
-  the patch release's three macros;
+reads clang's own predefines for the options through `--predefines`, and clang
+gets `--buster-headers`, which it hasn't, as ours' whole search
+(`pp_clang_arguments`): after `-nobuiltininc`, each directory ours keeps, by
+identity and a system directory over a user's (`pp_dedupe_directories`), with
+its option, and in clang's resource directory's place a directory of links to
+its headers but buster's; or nothing with `-nostdinc` or `-nobuiltininc`. The
+files it finds through the links are compared under their names in clang's
+resource directory, escaped as clang writes them, as ours names them. The macros at the file's end also compare against `clang -dM -E` with our own predefines. Without
+files, `--clang` also checks the built-in predefines, the keywords and the
+features:
+- in 26 option sets (the ten modes from `c89` to `gnu23`, C94 as
+  `-std=iso9899:199409` and as `-std=c89 -fdigraphs`, C94 and `gnu89` without
+  digraphs, `-ffreestanding`, `-O2`, two combinations, the six ISA profiles of
+  `docs/x86-target.md` and two with `-mtune`), `pp_predefines` must give
+  `clang -dM -E` line for line, but for the patch release's three macros;
 - `c_predefines.c`'s generated tables (each x86-64 feature's flag, closures and
   macros, each `-march` CPU's macro name and features, the `-mtune` names) must
   be what `c_predefines_test.c`'s generator learns from clang now;
@@ -2869,13 +2942,41 @@ the features:
 - `-E -dM` of a file with every kind of definition must be clang's byte for byte
   (but `__BUSTER__`), and `__FLT_EVAL_METHOD__` clang's under
   `-ffp-eval-method=` and without SSE;
-- in each mode, `__is_identifier` of every predefined name, and of clang's
+- in each mode (the ten and C94), `__is_identifier` of every predefined name, and of clang's
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
-  must give clang's answer;
+  must give clang's answer, and so must it in 25 sets of `-f` options
+  (`pp_test_keyword_sets`: GNU's keywords on and off, in each order of
+  `-f[no-]gnu-keywords` and `-f[no-]asm`, and the refused families turned off
+  again);
+- each refused option set must change clang's `-E` of a probe (from the set's
+  `-std=` alone, or no options), and each taken one must give clang's tokens;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
-  23's `Features.def` must give clang's answers, and so must they under 45
-  sanitizer option sets, and the four `__is_target_*` of 41 names under eight
-  kinds of target triple;
+  23's `Features.def` must give clang's answers, including 45 sanitizer option sets and target queries;
+- buster's own headers (`src/buster/include`) against clang's, for each header,
+  8 modes, hosted and freestanding (176 sets): with each set, clang's run must
+  define the same macros (but the guards and helpers each names its own way),
+  expand each to the same tokens, make the same declarations and give the same
+  diagnostics; and our preprocessor with `--buster-headers` must give clang's
+  tokens on all of them, with no warnings from the headers. Then, in each mode,
+  hosted and freestanding, two units (32) include them with the C library's
+  headers that define some of their macros or ask them for parts and clang's
+  headers they don't supply (`<immintrin.h>` and others), buster's last and
+  first: clang with them, searched as `--buster-headers` searches
+  (`-Wsystem-headers`), must warn about nothing in the headers and expand every
+  macro as clang's own headers do, and our preprocessor must give its tokens,
+  with no warnings from the headers; `-nobuiltininc` and `-nostdinc` must
+  leave out buster's headers and clang's after them alike; a quoted name
+  beside one of clang's headers must come from buster's when buster's has it;
+  the files' comparison with `--buster-headers` must agree with clang on a
+  unit of buster's and clang's headers (`<inttypes.h>`, which reaches buster's
+  `<stdint.h>` through glibc's) and an `-isystem` directory's `<limits.h>`
+  given after the flag, also with clang's links in directories whose names it
+  escapes (a quote, a backslash, a byte past ASCII), on `__has_include` with
+  the flag alone, with `-nobuiltininc` and with `-nostdinc`, and with clang's
+  resource directory and buster's given again as `-I`, `-isystem` and
+  `-idirafter` (13 ways, through a symbolic link, a trailing slash and `/./`
+  too); and the benchmark's clang command, with 300 `-D` options and the
+  search, must reach clang whole;
 - the fuzz batch's cases must give clang's acceptance, and an accepted case's
   stream, printed with clang's -P spacing, must lex into clang's tokens (with
   a comment's `/` and a line splice's `\` as tokens, which only tokens printed
@@ -2939,7 +3040,7 @@ lengths, and the inclusions skipped by guards and by `#pragma once`).
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.
-`--clang` also times `clang -E -P` with the same options, a process per file.
+`--clang` also times `clang -E -P` with the same options, a process per file, with `--buster-headers` translated to ours' search and every argument passed (`pp_clang_preprocess`). A failed clang run fails the benchmark and reports no timing.
 Our predefines follow the target options as clang's do; `--predefines FILE`
 still replaces them (the benchmark leaves it out of clang's command line). The
 runs answer the feature queries as clang does (`--clang-features`), so that they
@@ -3033,6 +3134,8 @@ the guard spelled the same, and the walk must do what it did:
   which the walk must take once (an alias of a file in the same context, by
   its directory's device and inode, isn't walked again), and one header in two
   directories (a hard link) whose own `local.h` differ, walked in both;
+- dollars: a cache filled with `$` as punctuation (`-fno-dollars-in-identifiers`,
+  #281), whose unit must split `aa$bb` into three tokens on every lane count;
 - special paths: a FIFO that an `#include` under `#if 0` names (the walk's
   probe mustn't block) and an active one names (an error, as alone), and a
   quoted name of 2,400 bytes in a directory of 2,539, three requests of which

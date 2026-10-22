@@ -668,7 +668,8 @@ static bool refine_check_aligned_flips(uint64_t* random)
 }
 
 
-// The language modes, by their -std= names.
+// The language modes, by their -std= names, and some with -fgnu-keywords (+gnu-keywords) or -fno-gnu-keywords
+// (-gnu-keywords), which turn GNU's keywords on and off whatever the mode (#281).
 typedef struct RefineTestMode RefineTestMode;
 struct RefineTestMode
 {
@@ -687,6 +688,11 @@ static const RefineTestMode refine_test_modes[] = {
     { "gnu17", { .standard = 2017, .gnu = true } },
     { "c23", { .standard = 2023, .gnu = false } },
     { "gnu23", { .standard = 2023, .gnu = true } },
+    { "c89+gnu-keywords", { .standard = 1989, .gnu = false, .gnu_keywords = C_GNU_KEYWORDS_ON } },
+    { "gnu89-gnu-keywords", { .standard = 1989, .gnu = true, .gnu_keywords = C_GNU_KEYWORDS_OFF } },
+    { "c17+gnu-keywords", { .standard = 2017, .gnu = false, .gnu_keywords = C_GNU_KEYWORDS_ON } },
+    { "gnu17-gnu-keywords", { .standard = 2017, .gnu = true, .gnu_keywords = C_GNU_KEYWORDS_OFF } },
+    { "gnu23-gnu-keywords", { .standard = 2023, .gnu = true, .gnu_keywords = C_GNU_KEYWORDS_OFF } },
 };
 
 // The names that are keywords in some modes only, with the modes clang 23 makes them keywords in (where its
@@ -700,20 +706,20 @@ struct RefineTestKeyword
 };
 
 static const RefineTestKeyword refine_test_keywords[] = {
-    { C_NAME_INLINE, " gnu89 c99 gnu99 c11 gnu11 c17 gnu17 c23 gnu23 " },
-    { C_NAME_RESTRICT, " c99 gnu99 c11 gnu11 c17 gnu17 c23 gnu23 " },
-    { C_NAME_ALIGNAS, " c23 gnu23 " },
-    { C_NAME_ALIGNOF, " c23 gnu23 " },
-    { C_NAME_BOOL, " c23 gnu23 " },
-    { C_NAME_CONSTEXPR, " c23 gnu23 " },
-    { C_NAME_FALSE, " c23 gnu23 " },
-    { C_NAME_NULLPTR, " c23 gnu23 " },
-    { C_NAME_STATIC_ASSERT, " c23 gnu23 " },
-    { C_NAME_THREAD_LOCAL, " c23 gnu23 " },
-    { C_NAME_TRUE, " c23 gnu23 " },
-    { C_NAME_TYPEOF_UNQUAL, " c23 gnu23 " },
-    { C_NAME_TYPEOF, " gnu89 gnu99 gnu11 gnu17 c23 gnu23 " },
-    { C_NAME_ASM, " gnu89 gnu99 gnu11 gnu17 gnu23 " },
+    { C_NAME_INLINE, " gnu89 c99 gnu99 c11 gnu11 c17 gnu17 c23 gnu23 c89+gnu-keywords c17+gnu-keywords gnu17-gnu-keywords gnu23-gnu-keywords " },
+    { C_NAME_RESTRICT, " c99 gnu99 c11 gnu11 c17 gnu17 c23 gnu23 c17+gnu-keywords gnu17-gnu-keywords gnu23-gnu-keywords " },
+    { C_NAME_ALIGNAS, " c23 gnu23 gnu23-gnu-keywords " },
+    { C_NAME_ALIGNOF, " c23 gnu23 gnu23-gnu-keywords " },
+    { C_NAME_BOOL, " c23 gnu23 gnu23-gnu-keywords " },
+    { C_NAME_CONSTEXPR, " c23 gnu23 gnu23-gnu-keywords " },
+    { C_NAME_FALSE, " c23 gnu23 gnu23-gnu-keywords " },
+    { C_NAME_NULLPTR, " c23 gnu23 gnu23-gnu-keywords " },
+    { C_NAME_STATIC_ASSERT, " c23 gnu23 gnu23-gnu-keywords " },
+    { C_NAME_THREAD_LOCAL, " c23 gnu23 gnu23-gnu-keywords " },
+    { C_NAME_TRUE, " c23 gnu23 gnu23-gnu-keywords " },
+    { C_NAME_TYPEOF_UNQUAL, " c23 gnu23 gnu23-gnu-keywords " },
+    { C_NAME_TYPEOF, " gnu89 gnu99 gnu11 gnu17 c23 gnu23 c89+gnu-keywords c17+gnu-keywords gnu23-gnu-keywords " },
+    { C_NAME_ASM, " gnu89 gnu99 gnu11 gnu17 gnu23 c89+gnu-keywords c17+gnu-keywords " },
 };
 
 // Spellings chosen apart from BUSTER_C_NAMES, with clang 23's answer in every C mode (its __is_identifier), so that a
@@ -761,7 +767,7 @@ static bool refine_test_expected_keyword(IdentId name, const char* mode)
     {
         if (refine_test_keywords[i].name == name)
         {
-            char key[16];
+            char key[32];
             snprintf(key, sizeof(key), " %s ", mode);
             result = strstr(refine_test_keywords[i].modes, key) != 0;
         }

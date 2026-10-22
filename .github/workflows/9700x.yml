@@ -189,8 +189,16 @@ jobs:
           ./build/compiler test-preprocessor --tables src
           == Test the C lexer as C++
           ./build/compiler test-lexer --cplusplus
+          ./build/compiler test-lexer --raw-strings
+          ./build/compiler test-lexer --raw-strings-c99
           == Test the C lexer
           ./build/compiler test-lexer
+          == Test the C lexer without digraphs and // comments, as c89
+          ./build/compiler test-lexer --no-digraphs --no-line-comments
+          == Test the C lexer without // comments, as C94
+          ./build/compiler test-lexer --no-line-comments
+          == Test the C lexer without digraphs, as -fno-digraphs
+          ./build/compiler test-lexer --no-digraphs
           == Test the x86-64 encoder
           ./build/compiler test-x86-encoder
           == Test the per-file jobs on the repository's translation units

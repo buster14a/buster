@@ -195,12 +195,14 @@ static const char* const link_benchmark_kind_names[RUNTIME_KINDS] = {
     [RUNTIME_KIND_DYNAMIC] = "dynamic",
     [RUNTIME_KIND_STATIC] = "static",
     [RUNTIME_KIND_STATIC_PIE] = "static-pie",
+    [RUNTIME_KIND_SHARED] = "shared",
 };
 
 static const char* const link_benchmark_kind_links[RUNTIME_KINDS] = {
     [RUNTIME_KIND_DYNAMIC] = "a dynamic PIE",
     [RUNTIME_KIND_STATIC] = "a static executable",
     [RUNTIME_KIND_STATIC_PIE] = "a static PIE",
+    [RUNTIME_KIND_SHARED] = "a shared library",
 };
 
 typedef struct LinkBenchmarkSettings LinkBenchmarkSettings;
@@ -222,10 +224,14 @@ struct LinkBenchmarkSettings
     uint64_t runs;
     bool direct;
     bool linking;
-    // The kinds of link to measure, a dynamic PIE's, a static executable's and a static PIE's (--kinds), and each one's
-    // runtime, opened once: the linkers' inputs come from its paths, and its records size the programs' room.
+    // The kinds of link to measure, a dynamic PIE's, a static executable's, a static PIE's and a shared library's
+    // (--kinds), and each one's runtime, opened once: the linkers' inputs come from its paths, and its records size the
+    // programs' room.
     bool kinds[RUNTIME_KINDS];
     const Runtime* runtimes[RUNTIME_KINDS];
+    // With a shared library's kind, the program that loads one and runs its buster_library_main (dlopen), which cc
+    // builds in `work`.
+    char harness[BUSTER_LINK_BENCHMARK_PATH_BYTES];
     // The directory made under `directory`, and its files: the direct path's output, and what a program run prints, its
     // errors and the helper's counts (link_benchmark_rusage). With `keep`, they stay.
     char work[BUSTER_LINK_BENCHMARK_PATH_BYTES];
@@ -382,11 +388,14 @@ static int64_t link_benchmark_read(const char* path, char* text, uint64_t capaci
     return length;
 }
 
-// Whether the program at `path` exits with status 0 having printed `expected` (BUSTER_LINK_PROGRAM_OUTPUT_BYTES).
-static bool link_benchmark_runs_as_predicted(const LinkBenchmarkSettings* settings, const char* path, const uint8_t* expected)
+// Whether the program at `path` exits with status 0 having printed `expected` (BUSTER_LINK_PROGRAM_OUTPUT_BYTES): a
+// shared library (`kind`) through the harness, which loads it and runs its buster_library_main.
+static bool link_benchmark_runs_as_predicted(const LinkBenchmarkSettings* settings, RuntimeKind kind, const char* path, const uint8_t* expected)
 {
+    const bool library = kind == RUNTIME_KIND_SHARED;
     char* arguments[] = {
-        (char*)path,
+        library ? (char*)settings->harness : (char*)path,
+        library ? (char*)path : 0,
         0,
     };
     int status = -1;
@@ -410,7 +419,8 @@ static bool link_benchmark_set_cpus(const uint64_t* mask)
 // ---------------------------------------------------------------------------------------------------------------------
 // The programs
 
-static LinkProgramOptions link_benchmark_options(LinkBenchmarkProgram program, uint64_t seed)
+// A program's options, generated as a shared library for that kind (LinkProgramOptions.shared).
+static LinkProgramOptions link_benchmark_options(LinkBenchmarkProgram program, uint64_t seed, RuntimeKind kind)
 {
     LinkProgramOptions result = link_program_default_options();
     const uint32_t functions = program.functions;
@@ -423,6 +433,7 @@ static LinkProgramOptions link_benchmark_options(LinkBenchmarkProgram program, u
     result.absolute = false;
     result.sizes = false;
     result.libc = true;
+    result.shared = kind == RUNTIME_KIND_SHARED;
     return result;
 }
 
@@ -635,7 +646,8 @@ struct LinkBenchmarkDirect
     bool succeeded;
 };
 
-// The kind's runtime from its snapshot in `cache`: runtime_open, runtime_open_static or runtime_open_static_pie.
+// The kind's runtime from its snapshot in `cache`: runtime_open, runtime_open_static, runtime_open_static_pie or
+// runtime_open_shared.
 static SnapshotResult link_benchmark_open(Runtime* runtime, const char* cache, RuntimeKind kind)
 {
     SnapshotResult result;
@@ -646,6 +658,10 @@ static SnapshotResult link_benchmark_open(Runtime* runtime, const char* cache, R
     else if (kind == RUNTIME_KIND_STATIC_PIE)
     {
         result = runtime_open_static_pie(runtime, cache);
+    }
+    else if (kind == RUNTIME_KIND_SHARED)
+    {
+        result = runtime_open_shared(runtime, cache);
     }
     else
     {
@@ -717,10 +733,10 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
 }
 
 // The lanes' entry point: lane 0's part before the program's atoms, then the runs of bind_end and dynamic_inputs (or
-// dynamic_static_inputs, or dynamic_static_pie_inputs) on lane 0 and executable_write on every lane, each from the link
-// and binding as they were after the atoms, whose members' bytes bind_end copies again (the static runtime's TLS
-// relaxation rewrites them, and a static PIE's GOT relaxation the program's too, which the writer relaxes alike when
-// it finds them relaxed). The warm-up's output decides how many runs follow it.
+// dynamic_static_inputs, dynamic_static_pie_inputs or dynamic_shared_inputs) on lane 0 and executable_write on every
+// lane, each from the link and binding as they were after the atoms, whose members' bytes bind_end copies again (the
+// static runtime's TLS relaxation rewrites them, and a static PIE's GOT relaxation the program's too, which the writer
+// relaxes alike when it finds them relaxed). The warm-up's output decides how many runs follow it.
 static void link_benchmark_direct_main(void* argument)
 {
     LinkBenchmarkDirect* direct = argument;
@@ -752,11 +768,17 @@ static void link_benchmark_direct_main(void* argument)
             {
                 dynamic_static_pie_inputs(&direct->dynamic, &direct->static_inputs, &direct->runtime, &direct->bind);
             }
+            else if (direct->kind == RUNTIME_KIND_SHARED)
+            {
+                // Without a soname, as the linkers' -shared links are.
+                bound = bound && dynamic_shared_inputs(&direct->dynamic, &direct->runtime, &direct->bind, (String8){ 0 }, direct->arena);
+            }
             else
             {
                 bound = bound && dynamic_inputs(&direct->dynamic, &direct->runtime, &direct->bind, direct->arena);
             }
-            direct->options.entry = bound ? dynamic_global(&direct->runtime, &direct->bind, "_start") : 0;
+            // A shared library has no entry point.
+            direct->options.entry = bound && direct->kind != RUNTIME_KIND_SHARED ? dynamic_global(&direct->runtime, &direct->bind, "_start") : 0;
             bound_at = executable_now();
             // The link the first binding made, fresh: a run that restored less than binding writes would make another.
             const bool same = link->atoms.count == direct->bound_atoms && link->symbols.count == direct->bound_symbols && link->fixups.count - 1 == direct->fixups;
@@ -849,7 +871,7 @@ static bool link_benchmark_direct_attempt(const LinkBenchmarkSettings* settings,
                                           bool* damaged)
 {
     const char* path = settings->direct_path;
-    const LinkProgramOptions options = link_benchmark_options(linked, settings->seed);
+    const LinkProgramOptions options = link_benchmark_options(linked, settings->seed, kind);
     uint64_t name_bytes = 0;
     uint64_t atom_bytes = 0;
     const LinkCapacity extra = bind_capacity(settings->runtimes[kind], &name_bytes, &atom_bytes);
@@ -932,7 +954,7 @@ static bool link_benchmark_direct_attempt(const LinkBenchmarkSettings* settings,
         {
             printf("the resident set's growth unknown\n");
         }
-        result = link_benchmark_runs_as_predicted(settings, path, expected);
+        result = link_benchmark_runs_as_predicted(settings, kind, path, expected);
     }
     if (direct != 0 && direct->opened)
     {
@@ -1144,6 +1166,10 @@ static uint32_t link_benchmark_arguments(char** arguments, const char* linker, c
             arguments[count++] = (char*)static_pie[i];
         }
     }
+    else if (runtime->kind == RUNTIME_KIND_SHARED)
+    {
+        arguments[count++] = "-shared";
+    }
     else
     {
         arguments[count++] = "-pie";
@@ -1152,7 +1178,11 @@ static uint32_t link_benchmark_arguments(char** arguments, const char* linker, c
     }
     arguments[count++] = "-o";
     arguments[count++] = (char*)output;
-    arguments[count++] = runtime->object_paths[RUNTIME_OBJECT_START].pointer;
+    // A shared library's runtime has no start object.
+    if (runtime->kind != RUNTIME_KIND_SHARED)
+    {
+        arguments[count++] = runtime->object_paths[RUNTIME_OBJECT_START].pointer;
+    }
     arguments[count++] = runtime->object_paths[RUNTIME_OBJECT_INIT_PROLOGUE].pointer;
     arguments[count++] = runtime->object_paths[RUNTIME_OBJECT_BEGIN].pointer;
     arguments[count++] = search[0];
@@ -1288,7 +1318,7 @@ static bool link_benchmark_linker(const LinkBenchmarkSettings* settings, const R
         printf("  %s: the helper didn't count its run\n", linker->name);
     }
     result = counted && status == 0;
-    result = result && link_benchmark_runs_as_predicted(settings, output, expected);
+    result = result && link_benchmark_runs_as_predicted(settings, runtime->kind, output, expected);
     result = link_benchmark_set_cpus(settings->allowed) && result;
     return result;
 }
@@ -1322,7 +1352,7 @@ static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, Run
 {
     const char* directory = settings->work;
     const bool keep = settings->keep;
-    const LinkProgramOptions options = link_benchmark_options(linked_program, settings->seed);
+    const LinkProgramOptions options = link_benchmark_options(linked_program, settings->seed, kind);
     const uint32_t units = options.units;
     LinkProgram program = { 0 };
     Arena arena = arena_reserve(BUSTER_LINK_BENCHMARK_ARENA_BYTES);
@@ -1596,6 +1626,39 @@ static bool link_benchmark_version(const LinkBenchmarkSettings* settings, const 
     return status == 0;
 }
 
+// Builds the harness that loads a shared library (LinkBenchmarkSettings.harness) with cc: whether it did.
+static bool link_benchmark_build_harness(const LinkBenchmarkSettings* settings)
+{
+    static const char source[] = "#include <dlfcn.h>\n"
+                                 "#include <stdio.h>\n"
+                                 "int main(int argc, char** argv, char** envp)\n"
+                                 "{\n"
+                                 "    void* library = argc >= 2 ? dlopen(argv[1], RTLD_NOW) : 0;\n"
+                                 "    int (*entry)(int, char**, char**) = library != 0 ? (int (*)(int, char**, char**))dlsym(library, \"buster_library_main\") : 0;\n"
+                                 "    if (entry == 0)\n"
+                                 "    {\n"
+                                 "        fprintf(stderr, \"%s\\n\", dlerror());\n"
+                                 "    }\n"
+                                 "    return entry != 0 ? entry(argc, argv, envp) : 99;\n"
+                                 "}\n";
+    char source_path[BUSTER_LINK_BENCHMARK_PATH_BYTES];
+    snprintf(source_path, sizeof(source_path), "%s.c", settings->harness);
+    FILE* file = fopen(source_path, "w");
+    const bool written = file != 0 && fputs(source, file) >= 0;
+    if (file != 0)
+    {
+        fclose(file);
+    }
+    char* arguments[] = { "cc", "-O1", "-o", (char*)settings->harness, source_path, 0 };
+    int status = -1;
+    if (written)
+    {
+        link_benchmark_spawn(arguments, settings->output_path, settings->error_path, &status, 0);
+    }
+    unlink(source_path);
+    return status == 0;
+}
+
 int run_link_benchmark(int argc, char** argv);
 
 int run_link_benchmark(int argc, char** argv)
@@ -1611,6 +1674,7 @@ int run_link_benchmark(int argc, char** argv)
             [RUNTIME_KIND_DYNAMIC] = true,
             [RUNTIME_KIND_STATIC] = true,
             [RUNTIME_KIND_STATIC_PIE] = true,
+            [RUNTIME_KIND_SHARED] = true,
         },
     };
     settings.cpus[0] = 2;
@@ -1717,6 +1781,8 @@ int run_link_benchmark(int argc, char** argv)
     snprintf(settings.output_path, sizeof(settings.output_path), "%s/output", settings.work);
     snprintf(settings.error_path, sizeof(settings.error_path), "%s/errors", settings.work);
     snprintf(settings.usage_path, sizeof(settings.usage_path), "%s/usage", settings.work);
+    snprintf(settings.harness, sizeof(settings.harness), "%s/harness", settings.work);
+    const bool harnessed = !made || !settings.kinds[RUNTIME_KIND_SHARED] || link_benchmark_build_harness(&settings);
     // A first open of each kind's runtime makes its snapshot this executable's, so that the direct path's runs load it.
     Runtime runtimes[RUNTIME_KINDS];
     SnapshotResult opened[RUNTIME_KINDS];
@@ -1735,10 +1801,15 @@ int run_link_benchmark(int argc, char** argv)
     {
         result = link_benchmark_rusage(argc, argv) == 0;
     }
+    else if (!harnessed)
+    {
+        fprintf(stderr, "benchmark-link: cc didn't build the harness that loads a shared library\n");
+        result = false;
+    }
     else if (!valid)
     {
         fprintf(stderr, "usage: benchmark-link [--functions LIST] [--filler N] [--seed N] [--directory PATH] [--cache PATH] [--cpus LIST] [--linkers LIST] [--runs N] "
-                        "[--only direct|linkers] [--kinds LIST of dynamic, static and static-pie] [--keep]\n");
+                        "[--only direct|linkers] [--kinds LIST of dynamic, static, static-pie and shared] [--keep]\n");
     }
     else if (!known_cpus || settings.cache == 0)
     {
@@ -1794,7 +1865,7 @@ int run_link_benchmark(int argc, char** argv)
     {
         for (uint32_t kind = 0; result && kind < RUNTIME_KINDS; kind += 1)
         {
-            const LinkProgramOptions options = link_benchmark_options(programs[i], settings.seed);
+            const LinkProgramOptions options = link_benchmark_options(programs[i], settings.seed, (RuntimeKind)kind);
             if (settings.kinds[kind])
             {
                 printf("%u worker%s in %u units, up to %u filler instructions each, linked as %s:\n", options.functions, options.functions == 1 ? "" : "s", options.units,
@@ -1815,6 +1886,7 @@ int run_link_benchmark(int argc, char** argv)
     }
     if (made && !settings.keep)
     {
+        unlink(settings.harness);
         unlink(settings.direct_path);
         unlink(settings.output_path);
         unlink(settings.error_path);

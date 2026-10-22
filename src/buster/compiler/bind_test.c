@@ -1394,14 +1394,22 @@ static bool bind_test_write_objects(const Link* link, uint32_t unit_count, const
 // its members after it, crtendS.o and crtn.o last, with libc.so.6 and the loader. `units` has the program's unit count.
 static uint32_t bind_test_link_arguments(char** arguments, const char* linker, const Runtime* runtime, const Bind* bind, char** paths, uint32_t units, const char* output)
 {
+    // A shared library's runtime has no start object, and its link no interpreter, as GCC's driver links -shared.
+    const bool library = runtime->kind == RUNTIME_KIND_SHARED;
     uint32_t count = 0;
     arguments[count++] = (char*)linker;
-    arguments[count++] = "-pie";
-    arguments[count++] = "--dynamic-linker";
-    arguments[count++] = (char*)runtime->loader_path.pointer;
+    arguments[count++] = library ? "-shared" : "-pie";
+    if (!library)
+    {
+        arguments[count++] = "--dynamic-linker";
+        arguments[count++] = (char*)runtime->loader_path.pointer;
+    }
     arguments[count++] = "-o";
     arguments[count++] = (char*)output;
-    arguments[count++] = paths[units + RUNTIME_OBJECT_START];
+    if (!library)
+    {
+        arguments[count++] = paths[units + RUNTIME_OBJECT_START];
+    }
     arguments[count++] = paths[units + RUNTIME_OBJECT_INIT_PROLOGUE];
     arguments[count++] = paths[units + RUNTIME_OBJECT_BEGIN];
     for (uint32_t unit = 0; unit < units; unit += 1)

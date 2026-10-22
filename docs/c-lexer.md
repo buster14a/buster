@@ -455,3 +455,136 @@ preprocessor's lex phase stayed 0.1 ms above main's on `sqlite3.c`.
 `ab` over them (`ab-preprocessor.log`, `ab-lexer.log`); the `bins/mine-nosep` script runs this branch's
 `benchmark-lexer` with `--no-digit-separators`, so that `ab` takes it as a tree. `separators-264` has the discarded
 loop's runs.
+
+## C89 and C94 mode costs (#288)
+
+C89 disables digraphs and `//` comments; C94 retains digraphs. The three
+additional chunk specializations share the separator-table choice. The ordinary
+C/C++ specializations retain constant mode choices.
+
+The frozen control was 9989bb61fb8fde70223009107d8a64dc7e53a4b6 (#283), and the
+candidate eabf46ab07fa711086c62a73d36c2e7215703907. On the approved 9700X, each
+build and benchmark took the shared lock separately, with timing pinned to CPU
+2. The C library corpus has 8,983 files and 93,836,361 bytes. Each lexer process
+reports 21 interleaved passes. Three complete alternating rounds gave:
+
+| Default mode | Round 1 | Round 2 | Round 3 | Instructions/B |
+| --- | ---: | ---: | ---: | ---: |
+| Control lexer, cycles/B | 0.794 | 0.795 | 0.785 | 3.046 |
+| Candidate lexer, cycles/B | 0.788 | 0.789 | 0.799 | 3.047 |
+| Control SQLite preprocessing, cycles/input token | 41.69 | 41.78 | 41.80 | 132.00 |
+| Candidate SQLite preprocessing, cycles/input token | 41.68 | 42.04 | 41.44 | 132.00 |
+
+The paired differences change direction within the observed spread. These
+measurements establish comparable default cost, without a speedup claim. The
+original 15-round script was stopped after three complete pairs; an extra
+partial fourth-round lexer receipt is excluded.
+
+Disassembly of those target-built binaries, normalizing addresses, gives
+identical default-loop instructions: 18,913 bytes / 3,289 instructions for both
+C separator choices, and 22,808 bytes / 3,979 instructions for both C++ choices.
+Subsequent parent/main merges preserve the candidate lexer and benchmark blobs
+9cddb88e235e19c6790cdad2229d739a0ec5b916 and
+fa883e1495d6b87f5da07414482aa5fdb955794c. The preprocessing numbers above remain
+bound to their frozen revisions.
+
+Two additional processes per new lexer mode gave:
+
+| Flags after `--no-digit-separators` | Cycles/B, runs 1 / 2 | Instructions/B |
+| --- | ---: | ---: |
+| `--no-digraphs --no-line-comments` (C89) | 0.788 / 0.809 | 3.042 |
+| `--no-line-comments` (C94) | 0.787 / 0.807 | 3.042 |
+| `--no-digraphs` | 0.799 / 0.793 | 3.051 |
+
+Every corpus comparison agrees with the scalar twin in its selected mode.
+These processes take about 3.0 seconds each, excluding lock waits. A separate
+SQLite `-std=c89 -march=native` process took 42.43 cycles/input token and 133.52
+instructions/input token (12.046 ms vector, 24.275 ms scalar). Its modern system
+headers produce C89 extra-token warnings; this is a mode-cost measurement,
+not a Clang-oracle qualification.
+
+Receipts and frozen binaries are under
+`~/buster-fast-bench/codex-takeover/{control,292}` on `benchpress`:
+`measurement-provenance`, `ab-default.log`, `c89-*.log`, `c94-*.log`,
+`no-digraphs-*.log` and `c89-preprocessor.log`. `bench292.sh` records the original
+alternating comparison; `bench292-modes.sh` records the bounded mode runs.
+
+## GNU C raw strings (#285)
+
+`C_TOKENIZER_RAW_STRINGS` (8) enables `R` and `LR` raw literals in C;
+`C_TOKENIZER_UTF_RAW_STRINGS` (16) adds `uR`, `UR` and `u8R`, whose
+prefixes need C11. C++ keeps its raw literals and user-defined suffixes;
+C never takes a user-defined suffix. The ordinary C chunk specialization
+still has no raw-string check.
+
+The raw specialization checks identifier-start and quote bitstrings in the
+existing rare prefixed-literal branch. It looks three bytes into the next
+chunk for `u8R"`, and hands a chunk containing a raw literal to the scalar
+lexer, which reads its delimiter and body. C99 conservatively detects UTF
+raw prefixes too, then the scalar lexer recognizes their identifier tokens.
+This bounds the extra work to chunks with possible literal prefixes and
+preserves exact scalar/vector token equality.
+
+`test-lexer --raw-strings` and `--raw-strings-c99` cover raw literals,
+near misses, randomized pieces and every placement around 64-byte and
+512-byte boundaries, with guarded pages. `benchmark-lexer` accepts the
+same flags so the specialization can be timed directly. The preprocessor
+covers modes, option order, pasting, stringizing, skipped directives,
+splices/trigraphs, dollar punctuation, `_Pragma`, line names and printers.
+An invalid delimiter containing a line splice pins its verbatim spelling.
+
+### Frozen target-host measurements
+
+The candidate is 281e245d9a1e19412689d85666dede7d79875fe8, built on the approved
+9700X with the shared lock. Three processes per configuration, pinned to CPU 2,
+compare its lexer with a same-process `control` variant from the C89 lexer at
+1051292. Both see the same 8,983 files / 93,836,361 bytes and 13,152,141 tokens.
+Each process takes 21 rotating passes. All scalar/vector/variant corpus
+comparisons agree.
+
+| Configuration | Candidate cycles/B, runs 1 / 2 / 3 | Control cycles/B, runs 1 / 2 / 3 | Candidate / control instructions/B |
+| --- | ---: | ---: | ---: |
+| Ordinary C, no RAW flag | 0.789 / 0.797 / 0.793 | 0.789 / 0.790 / 0.788 | 3.048 / 3.045 |
+| `--raw-strings` | 0.797 / 0.801 / 0.795 | 0.789 / 0.787 / 0.785 | 3.076 / 3.045 |
+| `--raw-strings-c99` | 0.793 / 0.798 / 0.797 | 0.787 / 0.787 / 0.792 | 3.076 / 3.045 |
+
+The ordinary copy differs from its control by up to 1% between processes,
+showing the remaining code-placement spread. RAW-enabled modes retire about
+0.9% more instructions than the candidate's ordinary mode. The raw feature
+therefore has a small explicit cost; these results establish neither a speedup
+nor a no-cost GNU raw path. Each process takes about 3.45–3.52 seconds,
+excluding lock waits.
+
+A separate alternating A/B uses the **same candidate binary** for SQLite
+preprocessing, with default GNU raw strings enabled or
+`-fno-raw-string-literals`. All parent/include/recovery implementation is shared
+between the two controls. `-E -P` output hashes match byte for byte before the
+timings (SHA256 8cc652b634970b9bd71497309e5d33ffe54459edbc3356c260a6e61dbd550bee).
+
+| SQLite vector preprocessing | Round 1 | Round 2 | Round 3 | Instructions/input token |
+| --- | ---: | ---: | ---: | ---: |
+| Raw disabled, cycles/input token | 41.73 | 41.73 | 41.93 | 133.49 |
+| Raw enabled, cycles/input token | 42.02 | 41.86 | 42.24 | 133.94 |
+
+The paired time cost is about 0.3–0.7%, and the instruction cost 0.34%. These
+frozen receipts measure the raw feature without attributing unrelated parent
+changes to it. The candidate binary SHA256 is
+0f106e7f750b0e6425f1d0e9ac1cc4f6fe7b4d95be4f3711a10dd629d467f38f;
+the SQLite input SHA256 is
+b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189.
+
+The frozen candidate passes 319 built-in cases against Clang, the fresh/cold
+shared/warm shared private-view checks, both kernels' 8/9 query and 64/65 direct
+repair boundaries, all 70 option sets and the three saved minimized angle-header
+fuzz failures. A one-case fuzz batch per language also checks the harness; the
+standard random campaign belongs to the final exact-head hosted workflow.
+Later header-CLI/oracle integration gets that separate correctness validation.
+The measured lexer and benchmark source blobs remain
+982029ded5c4b2a0f8a0677c6313778b6f21268f and
+38a5a9572938a14565a40475647e3b28e713803f.
+
+Receipts are under `~/buster-fast-bench/codex-takeover/293` on `benchpress`:
+`raw-measurement-provenance`, `raw-fixed-{default,gnu11,gnu99}-*.log`,
+`raw-preprocessor-provenance`, `raw-preprocessor-ab.log`,
+`raw-fixed-preprocessor.log` and `saved-repro-*.log`.
+`bench293-lexer.sh` and `bench293-preprocessor.sh` reproduce the bounded runs.
