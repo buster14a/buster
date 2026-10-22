@@ -97,11 +97,22 @@ they do not stand in for an unimplemented C literal-pooling frontend.
   writes at different lane counts, compared with the original-ID executable
   and build ID. Existing execution, ELF structure and independent linker
   checks still apply, including static PIEs.
+- `test-files`: #150's shared file cache, filled on lanes from a walk. Every
+  check runs again on 1/2/3/8 lanes with the shared table primed before the
+  walk, with unused names and every other name of a first run's table in
+  another order, so that the merge finds those and numbers the rest after them.
+  Every translation unit's `-E` bytes, with and without markers, diagnostic
+  bytes, errors, warnings and stream locations must equal the first run's, each
+  ID in its stream and in every cached file's tokens spelled the same. The
+  first run's names must all be there, and both those primed and those the walk
+  adds must have changed IDs. This covers the tree, the generated spellings,
+  the contexts and special paths, and in the workflow the repository's units
+  and `--flat src`.
 
-The four output test commands and `test-preprocessor` accept `--id-order N`
-(default 153) to choose another permutation, independently of fixture seeds.
-The default 9700X workflow runs these property checks in their stage commands
-and runs `test-diagnostics` explicitly.
+The four output test commands, `test-preprocessor` and `test-files` accept
+`--id-order N` (default 153) to choose another permutation, independently of
+fixture seeds. The default 9700X workflow runs these property checks in their
+stage commands and runs `test-diagnostics` explicitly.
 
 `benchmark-diagnostics [--only scalar|selected] [--after-scalar MS]` compares insertion sort with the
 selected path on the same frozen random keys, including the input copy. It
@@ -138,12 +149,14 @@ or a claim that radix wins on every already ordered input.
 
 ## Integration boundary
 
-This change covers the currently callable preprocessor and output writers,
-and supplies the diagnostic buffer API. It does not implement the independent
-dependencies of #153:
+The property tests above cover the currently callable preprocessor and
+output writers, and `diagnostic.c` supplies the diagnostic buffer API. #153's
+independent dependencies each add their own integration check:
 
 - #150's shared file cache must exercise its own `test-files` output with
   changed intern assignments, preserving the same spellings and locations.
+  Done: `test-files` runs every check again with the shared table primed
+  before its walk ("Property tests").
 - #151's per-function frontend/backend must assign canonical job positions,
   literal first uses and output ranges, then compare actual compilation
   results at every lane count.
@@ -151,6 +164,6 @@ dependencies of #153:
   merge, finish the earlier jobs before applying fatal cutoff, and compare
   its final objects, executable, `-E` text and diagnostic stream.
 
-Those integration checks belong in each stage's test command as it lands.
+The others' integration checks belong in each stage's test command as it lands.
 Passing the current tests is not proof of those future pipelines, and #153
 must retain that distinction when its overall completion is assessed.
