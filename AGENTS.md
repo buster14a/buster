@@ -2453,7 +2453,7 @@ translation units; like the others, its measurements are informational.
 
 `./build/compiler test-parser [--clang [PATH]] [--mutations N] [--seed N]
 [--streams N] [--reports N] [--keep] [options] [file or directory...]`
-(about 4 s on the 9700X without files, with `--clang`) checks `c_parser.c`; `--clang` needs
+(about 7 s on the 9700X without files, with `--clang`) checks `c_parser.c`; `--clang` needs
 clang 23 on `PATH`, or the one PATH names. Each unit goes through both paths,
 the vector path with its fallback and the scalar parser alone, which must read
 the same tokens and give the same outcome, and on a unit without errors the same
