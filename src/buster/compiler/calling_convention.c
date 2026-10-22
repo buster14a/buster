@@ -2018,8 +2018,9 @@ __attribute__((cold, noinline)) static AbiRare abi_vector_llvm(AbiTable* abi, co
     const uint64_t size = table->types.size[index];
     const bool integer = element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_BIT_INT;
     const bool floating = element_kind == BUSTER_TYPE_KIND_FLOATING;
-    const bool bits = element_kind == BUSTER_TYPE_KIND_INTEGER && element_code == BUSTER_TYPE_CODE_BOOL;
-    const bool narrow = element_kind == BUSTER_TYPE_KIND_BIT_INT && table->types.extent[element] < 8;
+    const bool boolean = element_kind == BUSTER_TYPE_KIND_INTEGER && element_code == BUSTER_TYPE_CODE_BOOL;
+    const bool bits = boolean && abi_is_bool_vector(table, index);
+    const bool narrow = (element_kind == BUSTER_TYPE_KIND_BIT_INT && table->types.extent[element] < 8) || (boolean && !bits);
     const bool x87 = floating && element_code == BUSTER_TYPE_CODE_LONG_DOUBLE;
     const bool quad = floating && element_code == BUSTER_TYPE_CODE_FLOAT128;
     const bool wide = integer && element_size > BUSTER_ABI_REGISTER_BYTES;
@@ -2032,7 +2033,8 @@ __attribute__((cold, noinline)) static AbiRare abi_vector_llvm(AbiTable* abi, co
     // doubles and narrow _BitInts their elements packed, aligned to their bytes rounded up to a power of two.
     const uint64_t integer_bits = count < 8 ? 8 : count;
     const uint64_t integer_log2 = integer_bits <= 8 ? 0 : integer_bits <= 16 ? 1 : integer_bits <= 32 ? 2 : integer_bits <= 64 ? 3 : 4;
-    const uint64_t packed_bytes = x87 ? count * 10 : (count * table->types.extent[element] + 7) / 8;
+    const uint64_t element_bits = boolean ? 1 : table->types.extent[element];
+    const uint64_t packed_bytes = x87 ? count * 10 : (count * element_bits + 7) / 8;
     const uint64_t packed_log2 = packed_bytes <= 1 ? 0 : 64 - (uint64_t)__builtin_clzll(packed_bytes - 1);
     if (bits)
     {

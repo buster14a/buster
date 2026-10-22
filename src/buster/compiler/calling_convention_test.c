@@ -981,6 +981,23 @@ static void abi_test_build_split_vectors(AbiTestBuilder* builder)
         abi_test_in_memory(builder, "struct {bool ext256}", bits256_struct);
         abi_test_in_memory(builder, "union {bool ext256, char[20]}", bits256_union);
     }
+    // An enum backed by bool retains vector storage, unlike an actual builtin-bool vector.
+    builder->next_name += 1;
+    const TypeId bool_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, builder->next_name);
+    type_enum_complete(table, bool_enum, BUSTER_TYPE_BOOL, 0);
+    const TypeId enum1 = type_vector(table, bool_enum, 1, true);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_BF16);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_BF16);
+    m[2] = abi_test_member(builder, enum1);
+    m[2].alignment_log2 = 4;
+    abi_test_in_registers(builder, "struct {__bf16, __bf16, _Alignas(8) enum : bool ext1}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0),
+                          BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_INTEGER), BUSTER_ABI_PASS_LOW_SSE | BUSTER_ABI_PASS_HIGH_INTEGER,
+                          refused | BUSTER_ABI_PASS_LOW_GENERAL, xmm0, rax);
+    abi_test_in_registers(builder, "enum : bool ext8", type_vector(table, bool_enum, 8, true), BUSTER_ABI_TEST_SSE_ONLY,
+                          BUSTER_ABI_PASS_LOW_SSE | BUSTER_ABI_PASS_SMALLER, refused, xmm0, none);
+    abi_test_vector_refused(builder, "enum : bool ext16", type_vector(table, bool_enum, 16, true), any, none, none);
+    abi_test_vector_copy(builder, "enum : bool ext65", type_vector(table, bool_enum, 65, true), 16, 7, none, none);
+    abi_test_result_detail(builder, demoted, 0, none);
     // Long doubles.
     const TypeId long_double1 = abi_test_vector(builder, BUSTER_TYPE_LONG_DOUBLE, 16);
     const TypeId long_double2 = abi_test_vector(builder, BUSTER_TYPE_LONG_DOUBLE, 32);
@@ -2911,9 +2928,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         abi_assign_scalar(&tables->abi, signatures, locations, calls);
     }
     char detail[160];
-    // The last call only at 16 bytes: at 32 and 64 the module returns a vector of 1,024 bools in four ymm or two zmm
-    // registers, where LLVM demotes it too (a vector of bools that isn't _Atomic, see "Next steps").
-    const uint32_t checked = vector_bytes == 16 ? BUSTER_ARRAY_LENGTH(arguments) : BUSTER_ARRAY_LENGTH(arguments) - 1;
+    const uint32_t checked = BUSTER_ARRAY_LENGTH(arguments);
     for (uint32_t i = 0; i < checked; i += 1)
     {
         snprintf(detail, sizeof(detail), "argument %u (%s, %u bytes): kind %u, registers %02x %02x, flags %u, offset %u", i, vector ? "vector" : "scalar", vector_bytes,
