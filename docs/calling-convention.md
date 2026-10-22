@@ -165,6 +165,20 @@ element's, and an `_Atomic` type's as of its value without one), and
 `results`, its `AbiReturn`. An aligned typedef (`ALIGNED`) passes as its base:
 `abi_copy` gives it its base's row, bits, slot, result and LLVM type.
 
+An uncounted atomic vector uses its legalized register type's overflow slot.
+Genuine short vectors widen to a 128-bit type, including a single `_Float16`
+or `__bf16`, so their slot is 16 bytes aligned to 16 even when the memory
+object is smaller. A vector of a single ordinary scalar keeps that scalar's
+8-byte slot, and a builtin-bool vector keeps its integer representation.
+Vectors of an enum backed by bool retain `<N x i1>` and therefore take the
+vector slot. This is register spilling, without the `LARGER` copy flag.
+`abi_test_atomic_vector_overflow` checks two spilled values after eight
+vector arguments and six integer arguments, including the following integer:
+16-byte slots put it at offset 32, while the scalar controls put it at 16.
+The rule follows LLVM's `getRegisterTypeForCallingConv` and
+`CC_X86_64_C` at the pinned revision listed in "Sources".
+
+
 ### clang's LLVM types
 
 Some of clang's and LLVM's choices follow from the LLVM IR type clang gives a
