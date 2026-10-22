@@ -223,6 +223,13 @@ members' own:
   takes its value's alignment as its size, and is refused for an inexact one.
   A type of 16 bytes or less holds such a type only through an array of none
   of them, and passes by that alignment unchecked.
+  Short bit-field runs of eight bytes or less also propagate `STORAGE_INEXACT`
+  through both the scalar storage calculation and vector parts, and through the
+  wide-record walk. Their access units remain a separate follow-up. Wide
+  `_BitInt` storage uses LLVM's memory type: alignment 16 for sizes divisible
+  by 16 bytes, and a byte array aligned to 1 otherwise. An enum backed by bool
+  keeps vector storage; only a vector written with builtin bool elements uses
+  the atomic integer-coercion rule.
 - **`layout`**, 8 bytes, which only a type of 16 bytes or less gets, since
   only such types read their own and their members' and elements': the scalars
   of the LLVM type, as `GetSSETypeAtOffset` and `GetINTEGERTypeAtOffset` find
