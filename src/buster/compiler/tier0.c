@@ -573,6 +573,7 @@ struct Tier0Builder
 static Tier0Builder tier0_builder;
 
 static void tier0_build_windows(void);
+static bool tier0_build_vector_tables(void);
 
 static Tier0RecordSpec tier0_spec(uint32_t form)
 {
@@ -1713,7 +1714,7 @@ static bool tier0_initialize(void)
         tier0_slot_count = BUSTER_TIER0_VARIANTS;
         tier0_build_windows();
         tier0_define_templates();
-        tier0_initialized = tier0_builder.valid;
+        tier0_initialized = tier0_builder.valid && tier0_build_vector_tables();
     }
     return tier0_initialized;
 }
@@ -1909,8 +1910,9 @@ static bool tier0_constant_fits(uint32_t kind, uint32_t class, uint64_t value, u
     }
     else if (kind == BUSTER_TYPED_PTR_ADD)
     {
-        int64_t product = 0;
-        fits = !__builtin_mul_overflow((int64_t)value, (int64_t)scale, &product) && tier0_fits_int32(product);
+        // The index fits 32 bits and the size is below 2^31, so that their product can't overflow: it must fit too.
+        const int64_t product = (int64_t)value * (int64_t)scale;
+        fits = tier0_fits_int32((int64_t)value) && scale <= INT32_MAX && tier0_fits_int32(product);
     }
     else if (kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_STORE_GLOBAL)
     {
@@ -3642,10 +3644,781 @@ static Tier0Check tier0_validate(const Tier0Function* function)
     return validator.check;
 }
 
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The vector path
 
+// The vector fusion's tables, built from the slots once (tier0_build_vector_tables), so that both paths follow one
+// table: a kind's shape (first operand, last operand, push: BUSTER_TIER0_STACK_* in bits 0-1, 2 and 3-4) and flags, a
+// class's stack, width and kind, and the properties of a (kind, key class): which fused variants exist. The properties
+// are a byte table indexed by (row << 4 | class), where a kind's row groups the kinds with the same properties over the
+// classes (at most 16 rows, so that the table is 256 bytes, two vpermi2b and a blend), and a CONVERT's (to << 4 | from)
+// table says which conversions take a home.
+#define BUSTER_TIER0_PROPERTY_CONST 0x01
+#define BUSTER_TIER0_PROPERTY_HOME 0x02
+#define BUSTER_TIER0_PROPERTY_HOME_CONST 0x04
+#define BUSTER_TIER0_PROPERTY_RMW_CONST 0x08
+#define BUSTER_TIER0_PROPERTY_RMW_HOME 0x10
+#define BUSTER_TIER0_PROPERTY_BRANCH 0x20
+#define BUSTER_TIER0_PROPERTY_ADDRESS 0x40
+#define BUSTER_TIER0_PROPERTY_ADDRESS_CONST 0x80
+// Kind flags.
+#define BUSTER_TIER0_KIND_COMPARE 0x01
+#define BUSTER_TIER0_KIND_BRANCH 0x02
+#define BUSTER_TIER0_KIND_SHIFT 0x04
+#define BUSTER_TIER0_KIND_EXEMPT 0x08
+#define BUSTER_TIER0_KIND_HOME_CONST 0x10
+#define BUSTER_TIER0_KIND_RMW 0x20
+#define BUSTER_TIER0_KIND_CONTROL 0x40
+#define BUSTER_TIER0_ROWS 16
+
+static uint8_t tier0_vector_shapes[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static uint8_t tier0_vector_kind_flags[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static uint8_t tier0_vector_rows[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static uint8_t tier0_vector_stacks[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static uint8_t tier0_vector_wide[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static uint8_t tier0_vector_integer[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64)));
+static uint8_t tier0_vector_properties[BUSTER_TIER0_ROWS * BUSTER_TYPED_CLASS_LIMIT] __attribute__((aligned(64)));
+static uint8_t tier0_vector_convert_home[BUSTER_TYPED_CLASS_LIMIT * BUSTER_TYPED_CLASS_LIMIT] __attribute__((aligned(64)));
+
+// A (kind, class)'s properties, from its slots.
+static uint8_t tier0_properties_of(uint32_t kind, uint32_t class)
+{
+    uint8_t properties = 0;
+    properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_CONST) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_CONST : 0;
+    properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_HOME : 0;
+    properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_HOME_CONST) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_HOME_CONST : 0;
+    properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_RMW_CONST) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_RMW_CONST : 0;
+    properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_RMW_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_RMW_HOME : 0;
+    bool branch = true;
+    for (uint32_t v = 0; v < 4; v += 1)
+    {
+        branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_BRANCH_FALSE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+        branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_BRANCH_TRUE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+    }
+    properties |= branch ? BUSTER_TIER0_PROPERTY_BRANCH : 0;
+    bool address = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_SET;
+    bool address_const = kind == BUSTER_TYPED_SET;
+    for (uint32_t s = 0; s < 4; s += 1)
+    {
+        if (kind == BUSTER_TYPED_LOAD)
+        {
+            address &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_INDEX(s)) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+        }
+        else
+        {
+            address &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_INDEX_HOME(s)) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+            address_const &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_INDEX_CONST(s)) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+        }
+    }
+    address &= tier0_slot(kind, class, kind == BUSTER_TYPED_LOAD ? BUSTER_TIER0_VARIANT_OFFSET : BUSTER_TIER0_VARIANT_OFFSET_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+    properties |= address ? BUSTER_TIER0_PROPERTY_ADDRESS : 0;
+    properties |= address_const ? BUSTER_TIER0_PROPERTY_ADDRESS_CONST : 0;
+    return properties;
+}
+
+// Builds the vector tables. Returns false if the kinds need more than BUSTER_TIER0_ROWS rows of properties, or a
+// property the vector path reads as all-or-none is some (a table the twins would disagree on).
+static bool tier0_build_vector_tables(void)
+{
+    bool valid = true;
+    uint8_t rows[BUSTER_TIER0_ROWS][BUSTER_TYPED_CLASS_LIMIT];
+    uint32_t row_count = 1;
+    memset(rows, 0, sizeof(rows));
+    for (uint32_t kind = 0; kind < BUSTER_TYPED_KIND_LIMIT; kind += 1)
+    {
+        const Tier0Shape shape = tier0_shapes[kind];
+        tier0_vector_shapes[kind] = (uint8_t)(shape.first | (shape.last == BUSTER_TIER0_STACK_OPERAND ? 4 : 0) | shape.push << 3);
+        uint8_t flags = 0;
+        flags |= kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE ? BUSTER_TIER0_KIND_COMPARE : 0;
+        flags |= kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE ? BUSTER_TIER0_KIND_BRANCH : 0;
+        flags |= kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR ? BUSTER_TIER0_KIND_SHIFT : 0;
+        flags |= kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_STORE_GLOBAL ? BUSTER_TIER0_KIND_EXEMPT : 0;
+        flags |= kind == BUSTER_TYPED_MUL || (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE) ? BUSTER_TIER0_KIND_HOME_CONST : 0;
+        flags |= kind == BUSTER_TYPED_ADD || kind == BUSTER_TYPED_SUB || (kind >= BUSTER_TYPED_AND && kind <= BUSTER_TYPED_SHR) ? BUSTER_TIER0_KIND_RMW : 0;
+        flags |= kind >= BUSTER_TYPED_BRANCH_FALSE && kind <= BUSTER_TYPED_JUMP_VALUE ? BUSTER_TIER0_KIND_CONTROL : 0;
+        tier0_vector_kind_flags[kind] = flags;
+        uint8_t row[BUSTER_TYPED_CLASS_LIMIT];
+        for (uint32_t class = 0; class < BUSTER_TYPED_CLASS_LIMIT; class += 1)
+        {
+            row[class] = kind < BUSTER_TYPED_KINDS && kind != BUSTER_TYPED_CONVERT ? tier0_properties_of(kind, class) : 0;
+        }
+        uint32_t found = row_count;
+        for (uint32_t r = 0; r < row_count && found == row_count; r += 1)
+        {
+            found = memcmp(rows[r], row, sizeof(row)) == 0 ? r : found;
+        }
+        if (found == row_count)
+        {
+            valid &= row_count < BUSTER_TIER0_ROWS;
+            if (row_count < BUSTER_TIER0_ROWS)
+            {
+                memcpy(rows[row_count], row, sizeof(row));
+                row_count += 1;
+            }
+        }
+        tier0_vector_rows[kind] = (uint8_t)(found < BUSTER_TIER0_ROWS ? found : 0);
+    }
+    for (uint32_t r = 0; r < BUSTER_TIER0_ROWS; r += 1)
+    {
+        memcpy(tier0_vector_properties + r * BUSTER_TYPED_CLASS_LIMIT, rows[r], BUSTER_TYPED_CLASS_LIMIT);
+    }
+    for (uint32_t class = 0; class < BUSTER_TYPED_KIND_LIMIT; class += 1)
+    {
+        const uint32_t c = class & (BUSTER_TYPED_CLASS_LIMIT - 1);
+        tier0_vector_stacks[class] = (uint8_t)(c < BUSTER_TYPED_CLASSES ? tier0_stack(c) : 0);
+        tier0_vector_wide[class] = c < BUSTER_TYPED_CLASSES && tier0_class_bytes(c) == 8 ? 0xff : 0;
+        tier0_vector_integer[class] = c < BUSTER_TYPED_CLASSES && tier0_class_integer(c) ? 0xff : 0;
+    }
+    for (uint32_t to = 0; to < BUSTER_TYPED_CLASS_LIMIT; to += 1)
+    {
+        for (uint32_t from = 0; from < BUSTER_TYPED_CLASS_LIMIT; from += 1)
+        {
+            const bool home = to < BUSTER_TYPED_CLASSES && from < BUSTER_TYPED_CLASSES &&
+                              tier0_slot(BUSTER_TYPED_CONVERT, to, from | BUSTER_TIER0_VARIANT_CONVERT_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+            tier0_vector_convert_home[to << 4 | from] = home ? BUSTER_TIER0_PROPERTY_HOME : 0;
+        }
+    }
+    return valid;
+}
+
+// The lanes of a 64-entry block from `first` that hold entries (0 <= first + lane < count).
+static __mmask64 tier0_lanes(int64_t first, uint32_t count)
+{
+    const int64_t low = first < 0 ? -first : 0;
+    const int64_t high = (int64_t)count - first;
+    uint64_t mask = 0;
+    if (high > low)
+    {
+        const uint64_t below_high = high >= 64 ? ~0ull : (1ull << high) - 1;
+        const uint64_t below_low = low >= 64 ? ~0ull : (1ull << low) - 1;
+        mask = below_high & ~below_low;
+    }
+    return (__mmask64)mask;
+}
+
+// 64 bytes of a column from entry `first`, zero outside the entries (no lane outside them is read).
+static __m512i tier0_bytes_at(const uint8_t* column, int64_t first, uint32_t count)
+{
+    return _mm512_maskz_loadu_epi8(tier0_lanes(first, count), (const void*)((uintptr_t)column + (uintptr_t)first));
+}
+
+// A table lookup per byte: vpermb from a 64-byte table.
+static __m512i tier0_lookup(const uint8_t* table, __m512i index)
+{
+    return _mm512_permutexvar_epi8(index, _mm512_load_si512(table));
+}
+
+// A 256-byte table's lookup per byte: two vpermi2b and a blend by the index's top bit.
+static __m512i tier0_lookup256(const uint8_t* table, __m512i index)
+{
+    const __m512i low = _mm512_permutex2var_epi8(_mm512_load_si512(table), index, _mm512_load_si512(table + 64));
+    const __m512i high = _mm512_permutex2var_epi8(_mm512_load_si512(table + 128), index, _mm512_load_si512(table + 192));
+    return _mm512_mask_blend_epi8(_mm512_movepi8_mask(index), low, high);
+}
+
+// The bits of a 64-bit-per-block bitset for the 64 entries from `first` shifted back by `back` entries (bit j is entry
+// first + j - back's), across the block before.
+static uint64_t tier0_bits_back(const uint64_t* bits, uint32_t block, uint32_t back)
+{
+    const uint64_t current = bits[block];
+    const uint64_t previous = block != 0 ? bits[block - 1] : 0;
+    return back == 0 ? current : current << back | previous >> (64 - back);
+}
+
+// And forward by `ahead` (bit j is entry first + j + ahead's), across the block after (`blocks` of them).
+static uint64_t tier0_bits_ahead(const uint64_t* bits, uint32_t block, uint32_t blocks, uint32_t ahead)
+{
+    const uint64_t current = bits[block];
+    const uint64_t next = block + 1 < blocks ? bits[block + 1] : 0;
+    return ahead == 0 ? current : current >> ahead | next << (64 - ahead);
+}
+
+// A byte vector's lanes shifted back by `back` (lane j holds lane j - back), the block before's last lanes first.
+static __m512i tier0_shift_back(__m512i current, __m512i previous, uint32_t back)
+{
+    const __m512i index = _mm512_add_epi8(_mm512_set_epi8(63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39,
+                                                          38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15,
+                                                          14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0),
+                                          _mm512_set1_epi8((char)(64 - back)));
+    return _mm512_permutex2var_epi8(previous, index, current);
+}
+
+// The vector fusion's bitsets and columns: P0's predicates of each entry's value (as an immediate of 32 bits, a count up
+// to 255, zero, a size below 2^31, the product with the entry before's fitting 32 bits, the value of three entries back),
+// P1's leaf fusions per consumer and P2's compound ones.
+typedef struct Tier0Bits Tier0Bits;
+struct Tier0Bits
+{
+    uint64_t* fits;
+    uint64_t* count;
+    uint64_t* zero;
+    uint64_t* size;
+    uint64_t* product;
+    uint64_t* same;
+    uint64_t* sib;
+    uint8_t* sib_log2;
+    uint64_t* labels;
+    // A consumer takes the leaf before it; takes a local and a constant (HOME_CONST); takes a pointer addition or a
+    // compare before it; takes a pointer addition two back; takes x = x op v's op and x.
+    uint64_t* leaf;
+    uint64_t* home_const;
+    uint64_t* one;
+    uint64_t* two;
+    uint64_t* rmw;
+    uint32_t blocks;
+};
+
+// P0: each entry's value predicates, 8 entries at a time (a byte of each bitset), and its SIB scale's log2.
+static void tier0_vector_values(const Tier0Function* function, Tier0Bits* bits)
+{
+    const uint32_t count = function->count;
+    const __m512i int32_max = _mm512_set1_epi64(INT32_MAX);
+    for (uint32_t first = 0; first < bits->blocks * 64; first += 8)
+    {
+        const __mmask8 lanes = (__mmask8)tier0_lanes((int64_t)first, count);
+        const __mmask8 lanes_1 = (__mmask8)(tier0_lanes((int64_t)first - 1, count));
+        const __mmask8 lanes_3 = (__mmask8)(tier0_lanes((int64_t)first - 3, count));
+        const __m512i value = _mm512_maskz_loadu_epi64(lanes, function->values + first);
+        const __m512i previous = _mm512_maskz_loadu_epi64(lanes_1, (const void*)((uintptr_t)(function->values + first) - 8));
+        const __m512i back3 = _mm512_maskz_loadu_epi64(lanes_3, (const void*)((uintptr_t)(function->values + first) - 24));
+        const __m512i narrowed = _mm512_cvtepi32_epi64(_mm512_cvtepi64_epi32(value));
+        const __m512i product = _mm512_mullo_epi64(previous, value);
+        const __m512i narrowed_product = _mm512_cvtepi32_epi64(_mm512_cvtepi64_epi32(product));
+        const __m512i previous_narrowed = _mm512_cvtepi32_epi64(_mm512_cvtepi64_epi32(previous));
+        const uint32_t byte = first / 8;
+        ((uint8_t*)bits->fits)[byte] = (uint8_t)_mm512_mask_cmpeq_epi64_mask(lanes, value, narrowed);
+        ((uint8_t*)bits->count)[byte] = (uint8_t)_mm512_mask_cmple_epu64_mask(lanes, value, _mm512_set1_epi64(255));
+        ((uint8_t*)bits->zero)[byte] = (uint8_t)_mm512_mask_testn_epi64_mask(lanes, value, value);
+        ((uint8_t*)bits->size)[byte] = (uint8_t)_mm512_mask_cmple_epu64_mask(lanes, value, int32_max);
+        ((uint8_t*)bits->product)[byte] =
+            (uint8_t)(_mm512_mask_cmpeq_epi64_mask(lanes, product, narrowed_product) & _mm512_cmpeq_epi64_mask(previous, previous_narrowed));
+        ((uint8_t*)bits->same)[byte] = (uint8_t)_mm512_mask_cmpeq_epi64_mask(lanes & lanes_3, back3, value);
+        // A SIB scale: one bit set, at most 8; its log2 is 63 less its leading zeros.
+        const __mmask8 one_bit = _mm512_cmpeq_epi64_mask(_mm512_popcnt_epi64(value), _mm512_set1_epi64(1));
+        const __mmask8 small = _mm512_cmple_epu64_mask(value, _mm512_set1_epi64(8));
+        ((uint8_t*)bits->sib)[byte] = (uint8_t)(lanes & one_bit & small);
+        const __m512i log2 = _mm512_sub_epi64(_mm512_set1_epi64(63), _mm512_lzcnt_epi64(value));
+        _mm_storel_epi64((__m128i*)(bits->sib_log2 + first), _mm512_cvtepi64_epi8(_mm512_maskz_mov_epi64(one_bit & small, log2)));
+    }
+}
+
+// The labels, a bit per entry: the control entries' targets (found 64 at a time, then set one at a time: they are few).
+static void tier0_vector_labels(const Tier0Function* function, uint64_t* labels)
+{
+    const uint32_t count = function->count;
+    for (uint32_t first = 0; first < count; first += 64)
+    {
+        const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
+        const __m512i flags = tier0_lookup(tier0_vector_kind_flags, kinds);
+        uint64_t control = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_CONTROL)) & tier0_lanes(first, count);
+        while (control != 0)
+        {
+            const uint32_t entry = first + (uint32_t)__builtin_ctzll(control);
+            const uint64_t target = function->values[entry];
+            labels[target >> 6] |= 1ull << (target & 63);
+            control &= control - 1;
+        }
+    }
+}
+
+// The fixed byte vectors of a variant code.
+static __m512i tier0_variant(uint32_t variant)
+{
+    return _mm512_set1_epi8((char)variant);
+}
+
+// P1 and P2: each consumer's fusions and key, and every entry's raw effects, 64 entries at a time.
+static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries)
+{
+    const uint32_t count = function->count;
+    const __m512i one = _mm512_set1_epi8(1);
+    __m512i previous_kinds = _mm512_setzero_si512();
+    __m512i previous_classes = _mm512_setzero_si512();
+    __m512i previous_kinds_2 = _mm512_setzero_si512();
+    // P1: raw effects, leaf fusions, the entries' own variants and keys.
+    for (uint32_t block = 0; block < bits->blocks; block += 1)
+    {
+        const uint32_t first = block * 64;
+        const __mmask64 lanes = tier0_lanes(first, count);
+        const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
+        const __m512i classes = tier0_bytes_at(function->classes, first, count);
+        const __m512i kinds_1 = tier0_shift_back(kinds, previous_kinds, 1);
+        const __m512i classes_1 = tier0_shift_back(classes, previous_classes, 1);
+        const __m512i kinds_2 = tier0_shift_back(kinds, previous_kinds, 2);
+        (void)previous_kinds_2;
+        const __m512i shape = tier0_lookup(tier0_vector_shapes, kinds);
+        const __m512i flags = tier0_lookup(tier0_vector_kind_flags, kinds);
+        const __m512i stack = tier0_lookup(tier0_vector_stacks, classes);
+        const __m512i stack_1 = tier0_lookup(tier0_vector_stacks, classes_1);
+        // The shape's codes.
+        const __m512i first_code = _mm512_and_si512(shape, _mm512_set1_epi8(3));
+        const __mmask64 has_last = _mm512_test_epi8_mask(shape, _mm512_set1_epi8(4)) &
+                                   ~(_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_RETURN)) & _mm512_testn_epi8_mask(classes, classes));
+        const __m512i push_code = _mm512_and_si512(_mm512_srli_epi16(shape, 3), _mm512_set1_epi8(3));
+        // Raw effects per stack: pushes less pops.
+        __m512i integer = _mm512_setzero_si512();
+        __m512i floating = _mm512_setzero_si512();
+        const __mmask64 push_class = _mm512_cmpeq_epi8_mask(push_code, _mm512_set1_epi8(BUSTER_TIER0_STACK_CLASS));
+        const __mmask64 push_integer = _mm512_cmpeq_epi8_mask(push_code, _mm512_set1_epi8(BUSTER_TIER0_STACK_INTEGER)) |
+                                       (push_class & _mm512_cmpeq_epi8_mask(stack, one));
+        const __mmask64 push_floating = push_class & _mm512_cmpeq_epi8_mask(stack, _mm512_set1_epi8(2));
+        const __mmask64 first_class = _mm512_cmpeq_epi8_mask(first_code, _mm512_set1_epi8(BUSTER_TIER0_STACK_CLASS));
+        const __mmask64 first_operand = _mm512_cmpeq_epi8_mask(first_code, _mm512_set1_epi8(BUSTER_TIER0_STACK_OPERAND));
+        const __mmask64 first_integer = _mm512_cmpeq_epi8_mask(first_code, _mm512_set1_epi8(BUSTER_TIER0_STACK_INTEGER)) |
+                                        (first_class & _mm512_cmpeq_epi8_mask(stack, one)) | (first_operand & _mm512_cmpeq_epi8_mask(stack_1, one));
+        const __mmask64 first_floating = (first_class & _mm512_cmpeq_epi8_mask(stack, _mm512_set1_epi8(2))) |
+                                         (first_operand & _mm512_cmpeq_epi8_mask(stack_1, _mm512_set1_epi8(2)));
+        const __mmask64 last_integer = has_last & _mm512_cmpeq_epi8_mask(stack_1, one);
+        const __mmask64 last_floating = has_last & _mm512_cmpeq_epi8_mask(stack_1, _mm512_set1_epi8(2));
+        integer = _mm512_mask_add_epi8(integer, push_integer, integer, one);
+        integer = _mm512_mask_sub_epi8(integer, first_integer, integer, one);
+        integer = _mm512_mask_sub_epi8(integer, last_integer, integer, one);
+        floating = _mm512_mask_add_epi8(floating, push_floating, floating, one);
+        floating = _mm512_mask_sub_epi8(floating, first_floating, floating, one);
+        floating = _mm512_mask_sub_epi8(floating, last_floating, floating, one);
+        _mm512_mask_storeu_epi8(entries->integer_effects + first, lanes, integer);
+        _mm512_mask_storeu_epi8(entries->floating_effects + first, lanes, floating);
+        // The key class: a compare's operands'.
+        const __mmask64 compare = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE));
+        const __m512i key_class = _mm512_mask_blend_epi8(compare, classes, classes_1);
+        const __m512i row = tier0_lookup(tier0_vector_rows, kinds);
+        __m512i properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(row, 4), key_class));
+        const __mmask64 convert = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CONVERT));
+        const __m512i convert_home = tier0_lookup256(tier0_vector_convert_home, _mm512_or_si512(_mm512_slli_epi16(classes, 4), classes_1));
+        properties = _mm512_mask_blend_epi8(convert, properties, convert_home);
+        // The value predicates for this block, and one back and two back.
+        const uint64_t labels = bits->labels[block];
+        const uint64_t labels_1 = tier0_bits_back(bits->labels, block, 1);
+        const uint64_t fits_1 = tier0_bits_back(bits->fits, block, 1);
+        const uint64_t count_1 = tier0_bits_back(bits->count, block, 1);
+        const uint64_t size = bits->size[block];
+        const uint64_t product = bits->product[block];
+        const uint64_t wide = _mm512_movepi8_mask(tier0_lookup(tier0_vector_wide, key_class));
+        const uint64_t shift = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_SHIFT));
+        const uint64_t exempt = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_EXEMPT));
+        const uint64_t pointer_add = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_PTR_ADD));
+        const uint64_t discard = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_DISCARD));
+        // Whether the constant before fits the consumer's immediate.
+        const uint64_t general_fits = exempt | ~wide | fits_1;
+        const uint64_t fits = (shift & count_1) | (pointer_add & fits_1 & size & product) | (~shift & ~pointer_add & general_fits);
+        const uint64_t constant_1 = _mm512_cmpeq_epi8_mask(kinds_1, _mm512_set1_epi8(BUSTER_TYPED_CONST));
+        const uint64_t integer_1 = _mm512_movepi8_mask(tier0_lookup(tier0_vector_integer, classes_1));
+        const uint64_t local_1 = _mm512_cmpeq_epi8_mask(kinds_1, _mm512_set1_epi8(BUSTER_TYPED_LOCAL));
+        const uint64_t local_2 = _mm512_cmpeq_epi8_mask(kinds_2, _mm512_set1_epi8(BUSTER_TYPED_LOCAL));
+        const uint64_t property_const = _mm512_test_epi8_mask(properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_CONST));
+        const uint64_t property_home = _mm512_test_epi8_mask(properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_HOME));
+        const uint64_t property_home_const = _mm512_test_epi8_mask(properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_HOME_CONST));
+        const uint64_t home_const_kind = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_HOME_CONST));
+        const uint64_t home_const = lanes & home_const_kind & ~labels & ~labels_1 & constant_1 & local_2 & integer_1 & (~wide | fits_1) & property_home_const &
+                                    (block != 0 ? ~0ull : ~3ull);
+        const uint64_t leaf_constant = constant_1 & (integer_1 | discard) & fits & property_const;
+        const uint64_t leaf_home = local_1 & property_home;
+        const uint64_t leaf = lanes & has_last & ~labels & (leaf_constant | leaf_home) & ~home_const & (block != 0 ? ~0ull : ~1ull);
+        bits->leaf[block] = leaf;
+        bits->home_const[block] = home_const;
+        // The variants: the entry's own, then the leaf fusion's.
+        __m512i variant = _mm512_setzero_si512();
+        const uint64_t floating_zero = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CONST)) & _mm512_cmpeq_epi8_mask(stack, _mm512_set1_epi8(2)) &
+                                       bits->zero[block];
+        variant = _mm512_mask_mov_epi8(variant, floating_zero, tier0_variant(BUSTER_TIER0_VARIANT_CONST));
+        const __m512i sib_log2 = _mm512_maskz_loadu_epi8(lanes, bits->sib_log2 + first);
+        variant = _mm512_mask_add_epi8(variant, pointer_add & bits->sib[block], sib_log2, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(0)));
+        const uint64_t last_entry = count != 0 && count - 1 >= first && count - 1 < first + 64 ? 1ull << (count - 1 - first) : 0;
+        variant = _mm512_mask_mov_epi8(variant, _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_RETURN)) & last_entry,
+                                       tier0_variant(BUSTER_TIER0_VARIANT_LAST));
+        variant = _mm512_mask_mov_epi8(variant, convert, classes_1);
+        variant = _mm512_mask_mov_epi8(variant, leaf & leaf_constant, tier0_variant(BUSTER_TIER0_VARIANT_CONST));
+        variant = _mm512_mask_mov_epi8(variant, leaf & leaf_home & ~convert, tier0_variant(BUSTER_TIER0_VARIANT_HOME));
+        variant = _mm512_mask_mov_epi8(variant, leaf & leaf_home & convert, _mm512_or_si512(classes_1, tier0_variant(BUSTER_TIER0_VARIANT_CONVERT_HOME)));
+        variant = _mm512_mask_mov_epi8(variant, home_const, tier0_variant(BUSTER_TIER0_VARIANT_HOME_CONST));
+        _mm512_mask_storeu_epi8(entries->variants + first, lanes, variant);
+        _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes, kinds);
+        _mm512_mask_storeu_epi8(entries->key_classes + first, lanes, key_class);
+        previous_kinds_2 = previous_kinds;
+        previous_kinds = kinds;
+        previous_classes = classes;
+    }
+    // The calls' effects, from the calls table (they are few).
+    for (uint32_t first = 0; first < count; first += 64)
+    {
+        uint64_t calls = _mm512_cmpeq_epi8_mask(tier0_bytes_at(function->kinds, first, count), _mm512_set1_epi8(BUSTER_TYPED_CALL)) & tier0_lanes(first, count);
+        while (calls != 0)
+        {
+            const uint32_t entry = first + (uint32_t)__builtin_ctzll(calls);
+            int32_t integer = 0;
+            int32_t floating = 0;
+            tier0_raw_effects(function, entry, &integer, &floating);
+            entries->integer_effects[entry] = (int8_t)integer;
+            entries->floating_effects[entry] = (int8_t)floating;
+            calls &= calls - 1;
+        }
+    }
+    // P2: the compound fusions, from P1's variants of the entries before.
+    __m512i previous_variants = _mm512_setzero_si512();
+    __m512i previous_key_classes = _mm512_setzero_si512();
+    previous_kinds = _mm512_setzero_si512();
+    previous_classes = _mm512_setzero_si512();
+    for (uint32_t block = 0; block < bits->blocks; block += 1)
+    {
+        const uint32_t first = block * 64;
+        const __mmask64 lanes = tier0_lanes(first, count);
+        const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
+        const __m512i classes = tier0_bytes_at(function->classes, first, count);
+        const __m512i variants = _mm512_maskz_loadu_epi8(lanes, entries->variants + first);
+        const __m512i key_classes = _mm512_maskz_loadu_epi8(lanes, entries->key_classes + first);
+        const __m512i kinds_1 = tier0_shift_back(kinds, previous_kinds, 1);
+        const __m512i kinds_2 = tier0_shift_back(kinds, previous_kinds, 2);
+        const __m512i kinds_3 = tier0_shift_back(kinds, previous_kinds, 3);
+        const __m512i classes_1 = tier0_shift_back(classes, previous_classes, 1);
+        const __m512i classes_3 = tier0_shift_back(classes, previous_classes, 3);
+        const __m512i variants_1 = tier0_shift_back(variants, previous_variants, 1);
+        const __m512i variants_2 = tier0_shift_back(variants, previous_variants, 2);
+        const __m512i key_classes_1 = tier0_shift_back(key_classes, previous_key_classes, 1);
+        const uint64_t labels = bits->labels[block];
+        const uint64_t labels_1 = tier0_bits_back(bits->labels, block, 1);
+        const uint64_t labels_2 = tier0_bits_back(bits->labels, block, 2);
+        const uint64_t leaf = bits->leaf[block];
+        const uint64_t leaf_2 = tier0_bits_back(bits->leaf, block, 2);
+        const uint64_t home_const_2 = tier0_bits_back(bits->home_const, block, 2);
+        const uint64_t valid_1 = block != 0 ? ~0ull : ~1ull;
+        const uint64_t valid_2 = block != 0 ? ~0ull : ~3ull;
+        const uint64_t valid_3 = block != 0 ? ~0ull : ~7ull;
+        const __m512i row = tier0_lookup(tier0_vector_rows, kinds);
+        const __m512i properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(row, 4), classes));
+        const __m512i flags_1 = tier0_lookup(tier0_vector_kind_flags, kinds_1);
+        const uint64_t index_1 = _mm512_cmpge_epu8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(0))) &
+                                 _mm512_cmple_epu8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(3)));
+        const uint64_t constant_variant_1 = _mm512_cmpeq_epi8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_CONST));
+        const uint64_t pointer_add_1 = _mm512_cmpeq_epi8_mask(kinds_1, _mm512_set1_epi8(BUSTER_TYPED_PTR_ADD));
+        const uint64_t pointer_add_2 = _mm512_cmpeq_epi8_mask(kinds_2, _mm512_set1_epi8(BUSTER_TYPED_PTR_ADD));
+        const uint64_t index_2 = _mm512_cmpge_epu8_mask(variants_2, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(0))) &
+                                 _mm512_cmple_epu8_mask(variants_2, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(3)));
+        const uint64_t constant_variant_2 = _mm512_cmpeq_epi8_mask(variants_2, tier0_variant(BUSTER_TIER0_VARIANT_CONST));
+        const uint64_t property_address = _mm512_test_epi8_mask(properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_ADDRESS));
+        const uint64_t property_address_const = _mm512_test_epi8_mask(properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_ADDRESS_CONST));
+        // A load's address.
+        const uint64_t load = lanes & valid_1 & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_LOAD)) & ~labels & pointer_add_1 &
+                              (index_1 | constant_variant_1) & property_address;
+        // A store's address, before its fused value.
+        const uint64_t set = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_SET));
+        const uint64_t value_constant = _mm512_cmpeq_epi8_mask(variants, tier0_variant(BUSTER_TIER0_VARIANT_CONST));
+        const uint64_t value_home = _mm512_cmpeq_epi8_mask(variants, tier0_variant(BUSTER_TIER0_VARIANT_HOME));
+        const uint64_t store = lanes & valid_2 & set & leaf & ~labels & ~labels_1 & pointer_add_2 &
+                               ((index_2 & value_constant & property_address_const) | (index_2 & value_home & property_address) |
+                                (constant_variant_2 & value_home & property_address));
+        // A branch's compare.
+        const uint64_t branch = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_FALSE)) |
+                                _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_TRUE));
+        const __m512i compare_row = tier0_lookup(tier0_vector_rows, kinds_1);
+        const __m512i compare_properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(compare_row, 4), key_classes_1));
+        const uint64_t compare_1 = _mm512_test_epi8_mask(flags_1, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE));
+        const uint64_t compare_fusable = _mm512_cmple_epu8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_HOME_CONST)) &
+                                         _mm512_test_epi8_mask(compare_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_BRANCH));
+        const uint64_t fused_branch = lanes & valid_1 & branch & ~labels & compare_1 & compare_fusable;
+        // x = x op v.
+        const uint64_t set_local = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_SET_LOCAL));
+        const uint64_t rmw_kind_1 = _mm512_test_epi8_mask(flags_1, _mm512_set1_epi8(BUSTER_TIER0_KIND_RMW));
+        const uint64_t inner_home_1 = _mm512_cmpeq_epi8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_HOME));
+        const __m512i op_row = tier0_lookup(tier0_vector_rows, kinds_1);
+        const __m512i op_properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(op_row, 4), classes));
+        const uint64_t rmw_property = (constant_variant_1 & _mm512_test_epi8_mask(op_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_RMW_CONST))) |
+                                      (inner_home_1 & _mm512_test_epi8_mask(op_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_RMW_HOME)));
+        const uint64_t x_local = _mm512_cmpeq_epi8_mask(kinds_3, _mm512_set1_epi8(BUSTER_TYPED_LOCAL));
+        // x is never absorbed already: the entry after it is a leaf, which absorbs nothing, and the op two after it
+        // isn't a kind that takes a local and a constant.
+        (void)home_const_2;
+        (void)leaf_2;
+        const uint64_t rmw = lanes & valid_3 & set_local & ~labels & ~labels_1 & ~labels_2 & rmw_kind_1 & rmw_property & x_local &
+                             bits->same[block] & _mm512_cmpeq_epi8_mask(classes_3, classes) & _mm512_cmpeq_epi8_mask(classes_1, classes);
+        bits->one[block] = load | fused_branch | rmw;
+        bits->two[block] = store;
+        bits->rmw[block] = rmw;
+        // The keys and variants of the compound fusions.
+        __m512i variant = variants;
+        variant = _mm512_mask_mov_epi8(variant, load & constant_variant_1, tier0_variant(BUSTER_TIER0_VARIANT_OFFSET));
+        variant = _mm512_mask_mov_epi8(variant, load & index_1, variants_1);
+        const __m512i store_index = _mm512_sub_epi8(variants_2, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(0)));
+        variant = _mm512_mask_add_epi8(variant, store & index_2 & value_constant, store_index, tier0_variant(BUSTER_TIER0_VARIANT_INDEX_CONST(0)));
+        variant = _mm512_mask_add_epi8(variant, store & index_2 & value_home, store_index, tier0_variant(BUSTER_TIER0_VARIANT_INDEX_HOME(0)));
+        variant = _mm512_mask_mov_epi8(variant, store & constant_variant_2, tier0_variant(BUSTER_TIER0_VARIANT_OFFSET_HOME));
+        const __m512i branch_base = _mm512_mask_blend_epi8(_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_TRUE)),
+                                                           tier0_variant(BUSTER_TIER0_VARIANT_BRANCH_FALSE), tier0_variant(BUSTER_TIER0_VARIANT_BRANCH_TRUE));
+        variant = _mm512_mask_add_epi8(variant, fused_branch, branch_base, variants_1);
+        variant = _mm512_mask_mov_epi8(variant, rmw & constant_variant_1, tier0_variant(BUSTER_TIER0_VARIANT_RMW_CONST));
+        variant = _mm512_mask_mov_epi8(variant, rmw & inner_home_1, tier0_variant(BUSTER_TIER0_VARIANT_RMW_HOME));
+        _mm512_mask_storeu_epi8(entries->variants + first, lanes, variant);
+        _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes & (fused_branch | rmw), kinds_1);
+        _mm512_mask_storeu_epi8(entries->key_classes + first, lanes & fused_branch, key_classes_1);
+        previous_variants = variants;
+        previous_key_classes = key_classes;
+        previous_kinds = kinds;
+        previous_classes = classes;
+    }
+}
+
+// P3 and P4: each entry's absorber (the consumer that takes it, 1 to 3 entries on, after one pointer-jump step for an
+// absorber that is absorbed itself), the effects folded into the absorbers, and the depths, their prefix sums.
+static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries)
+{
+    const uint32_t count = function->count;
+    const uint32_t blocks = bits->blocks;
+    // P3a: the direct absorber's distance (0 for none), into the `absorbed` column (overwritten in P3b by the absorbed
+    // flag).
+    for (uint32_t block = 0; block < blocks; block += 1)
+    {
+        const uint32_t first = block * 64;
+        const __mmask64 lanes = tier0_lanes(first, count);
+        const uint64_t by_one = tier0_bits_ahead(bits->leaf, block, blocks, 1) | tier0_bits_ahead(bits->home_const, block, blocks, 1) |
+                                tier0_bits_ahead(bits->one, block, blocks, 1);
+        const uint64_t by_two = tier0_bits_ahead(bits->home_const, block, blocks, 2) | tier0_bits_ahead(bits->two, block, blocks, 2);
+        const uint64_t by_three = tier0_bits_ahead(bits->rmw, block, blocks, 3);
+        __m512i distance = _mm512_setzero_si512();
+        distance = _mm512_mask_mov_epi8(distance, by_three, _mm512_set1_epi8(3));
+        distance = _mm512_mask_mov_epi8(distance, by_two, _mm512_set1_epi8(2));
+        distance = _mm512_mask_mov_epi8(distance, by_one, _mm512_set1_epi8(1));
+        _mm512_mask_storeu_epi8(entries->absorbed + first, lanes, distance);
+    }
+    // P3b: the ultimate absorber's distance (the direct one's plus its own), then the folded effects: an absorbed
+    // entry's effects count at its ultimate absorber. Both read the distances around the block: loads from the column
+    // (each block's lanes ahead are P3a's, which is done).
+    int32_t integer_depth = 0;
+    int32_t floating_depth = 0;
+    __m512i previous_ultimate = _mm512_setzero_si512();
+    __m512i previous_integer = _mm512_setzero_si512();
+    __m512i previous_floating = _mm512_setzero_si512();
+    const __m512i lane_index = _mm512_set_epi8(63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36,
+                                               35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7,
+                                               6, 5, 4, 3, 2, 1, 0);
+    __m512i next_direct = blocks > 0 ? _mm512_maskz_loadu_epi8(tier0_lanes(0, count), entries->absorbed) : _mm512_setzero_si512();
+    for (uint32_t block = 0; block < blocks; block += 1)
+    {
+        const uint32_t first = block * 64;
+        const __mmask64 lanes = tier0_lanes(first, count);
+        const __m512i direct = next_direct;
+        next_direct = block + 1 < blocks ? _mm512_maskz_loadu_epi8(tier0_lanes(first + 64, count), entries->absorbed + first + 64) : _mm512_setzero_si512();
+        // The absorber's own distance: lane j + direct[j], across into the next block.
+        const __m512i at = _mm512_add_epi8(lane_index, direct);
+        const __m512i absorber_direct = _mm512_permutex2var_epi8(direct, at, next_direct);
+        const __mmask64 absorbed = _mm512_test_epi8_mask(direct, direct);
+        const __m512i ultimate = _mm512_maskz_add_epi8(absorbed, direct, absorber_direct);
+        const __m512i integer_raw = _mm512_maskz_loadu_epi8(lanes, entries->integer_effects + first);
+        const __m512i floating_raw = _mm512_maskz_loadu_epi8(lanes, entries->floating_effects + first);
+        // An entry's folded effects: its own unless absorbed, plus each entry 1 to 3 back whose ultimate absorber it is.
+        __m512i integer = _mm512_maskz_mov_epi8(~absorbed, integer_raw);
+        __m512i floating = _mm512_maskz_mov_epi8(~absorbed, floating_raw);
+        for (uint32_t back = 1; back <= 3; back += 1)
+        {
+            const __m512i ultimate_back = tier0_shift_back(ultimate, previous_ultimate, back);
+            const __mmask64 mine = _mm512_cmpeq_epi8_mask(ultimate_back, _mm512_set1_epi8((char)back));
+            integer = _mm512_mask_add_epi8(integer, mine, integer, tier0_shift_back(integer_raw, previous_integer, back));
+            floating = _mm512_mask_add_epi8(floating, mine, floating, tier0_shift_back(floating_raw, previous_floating, back));
+        }
+        _mm512_mask_storeu_epi8(entries->absorbed + first, lanes, _mm512_maskz_mov_epi8(absorbed, _mm512_set1_epi8(1)));
+        _mm512_mask_storeu_epi8(entries->integer_effects + first, lanes, integer);
+        _mm512_mask_storeu_epi8(entries->floating_effects + first, lanes, floating);
+        // P4: the depths, the exclusive prefix sums of the folded effects: in-register scans of bytes (log steps), plus
+        // the depth the block starts at.
+        __m512i integer_sum = _mm512_maskz_mov_epi8(lanes, integer);
+        __m512i floating_sum = _mm512_maskz_mov_epi8(lanes, floating);
+        for (uint32_t step = 1; step < 64; step *= 2)
+        {
+            const __m512i zero = _mm512_setzero_si512();
+            integer_sum = _mm512_add_epi8(integer_sum, tier0_shift_back(integer_sum, zero, step));
+            floating_sum = _mm512_add_epi8(floating_sum, tier0_shift_back(floating_sum, zero, step));
+        }
+        const __m512i zero = _mm512_setzero_si512();
+        const __m512i integer_depths = _mm512_add_epi8(tier0_shift_back(integer_sum, zero, 1), _mm512_set1_epi8((char)integer_depth));
+        const __m512i floating_depths = _mm512_add_epi8(tier0_shift_back(floating_sum, zero, 1), _mm512_set1_epi8((char)floating_depth));
+        _mm512_mask_storeu_epi8(entries->depths + first, lanes, integer_depths);
+        _mm512_mask_storeu_epi8(entries->floating_depths + first, lanes, floating_depths);
+        integer_depth += (int8_t)_mm_extract_epi8(_mm512_extracti32x4_epi32(integer_sum, 3), 15);
+        floating_depth += (int8_t)_mm_extract_epi8(_mm512_extracti32x4_epi32(floating_sum, 3), 15);
+        previous_ultimate = ultimate;
+        previous_integer = integer_raw;
+        previous_floating = floating_raw;
+    }
+}
+
+// Each entry's first record, after the prologue: the lengths' exclusive prefix sum, 16 at a time in 32-bit lanes.
+static void tier0_vector_positions(const Tier0Function* function, Tier0Entries* entries, uint32_t prologue)
+{
+    const uint32_t count = function->count;
+    uint32_t carry = prologue;
+    const __m512i zero = _mm512_setzero_si512();
+    for (uint32_t first = 0; first < count; first += 16)
+    {
+        const __mmask16 lanes = (__mmask16)tier0_lanes(first, count);
+        __m512i sum = _mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(lanes, entries->lengths + first));
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 15));
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 14));
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 12));
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 8));
+        const __m512i exclusive = _mm512_add_epi32(_mm512_alignr_epi32(sum, zero, 15), _mm512_set1_epi32((int32_t)carry));
+        _mm512_mask_storeu_epi32(entries->positions + first, lanes, exclusive);
+        carry += (uint32_t)_mm_extract_epi32(_mm512_extracti32x4_epi32(sum, 3), 3);
+    }
+    entries->positions[count] = carry;
+}
+
+// Copy and patch: each entry's template, four records in one register, its bytes taken from its 32-byte hole block
+// where the template has a hole (vpermb) and from the template elsewhere (a blend), stored at its place with one 64-byte
+// store. The store may write past the entry's records: entries are written in order, so the next entry's store (or the
+// deferred entries' and the epilogue's records, written after) overwrite them, and the output has room for the last.
+static void tier0_vector_expand(const Tier0Function* function, const Tier0Entries* entries, const Tier0Shared* shared, Tier0Code* code)
+{
+    for (uint32_t i = 0; i < function->count; i += 1)
+    {
+        const uint16_t entry = entries->templates[i];
+        if (entry != BUSTER_TIER0_ENTRY_ABSORBED && !tier0_is_deferred(entry) && tier0_templates[entry].length != 0)
+        {
+            const Tier0Template* template = &tier0_templates[entry];
+            const Tier0Holes holes = tier0_holes_scalar(function, entries, shared->homes, i, template);
+            const __m512i block = _mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*)&holes));
+            const __m512i patched = _mm512_permutexvar_epi8(_mm512_loadu_si512(template->holes), block);
+            const __m512i record = _mm512_mask_blend_epi8(template->mask, _mm512_load_si512(template->bytes), patched);
+            _mm512_storeu_si512(code->records + entries->positions[i], record);
+        }
+    }
+}
+
+// The immediates' choice for the vector path: every CHOICE record's row, value and context gathered into columns, one
+// x86_choose_forms over them all, and each record rebuilt for its form.
+static Tier0Error tier0_vector_choose(const Tier0Function* function, const Tier0Entries* entries, const Tier0Shared* shared, Tier0Code* code, Arena* scratch)
+{
+    uint32_t requests = 0;
+    for (uint32_t i = 0; i < function->count; i += 1)
+    {
+        const uint16_t entry = entries->templates[i];
+        if (entry != BUSTER_TIER0_ENTRY_ABSORBED && !tier0_is_deferred(entry))
+        {
+            const Tier0Template* template = &tier0_templates[entry];
+            for (uint32_t r = 0; r < template->length; r += 1)
+            {
+                requests += (template->specs[r].flags & BUSTER_TIER0_RECORD_CHOICE) != 0 ? 1 : 0;
+            }
+        }
+    }
+    uint16_t* rows = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, requests + 1);
+    int64_t* values = BUSTER_ARENA_PUSH_ARRAY(scratch, int64_t, requests + 1);
+    uint16_t* contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, requests + 1);
+    uint32_t* records = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, requests + 1);
+    uint16_t* forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, requests + 1);
+    Tier0Error error = rows != 0 && values != 0 && contexts != 0 && records != 0 && forms != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+    if (error == TIER0_OK)
+    {
+        uint32_t request = 0;
+        for (uint32_t i = 0; i < function->count; i += 1)
+        {
+            const uint16_t entry = entries->templates[i];
+            if (entry != BUSTER_TIER0_ENTRY_ABSORBED && !tier0_is_deferred(entry))
+            {
+                const Tier0Template* template = &tier0_templates[entry];
+                uint64_t k = 0;
+                bool k_known = false;
+                for (uint32_t r = 0; r < template->length; r += 1)
+                {
+                    const Tier0RecordSpec* spec = &template->specs[r];
+                    if ((spec->flags & BUSTER_TIER0_RECORD_CHOICE) != 0)
+                    {
+                        if (!k_known)
+                        {
+                            k = tier0_holes_scalar(function, entries, shared->homes, i, template).k;
+                            k_known = true;
+                        }
+                        const uint32_t at = entries->positions[i] + r;
+                        rows[request] = spec->row;
+                        values[request] = tier0_choice_value(spec, k);
+                        contexts[request] = tier0_choice_context(&code->records[at], spec);
+                        records[request] = at;
+                        request += 1;
+                    }
+                }
+            }
+        }
+        x86_choose_forms(rows, values, contexts, requests, forms);
+        for (uint32_t q = 0; q < requests; q += 1)
+        {
+            tier0_apply_choice(&code->records[records[q]], forms[q], values[q]);
+        }
+    }
+    return error;
+}
+
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 {
-    return tier0_compile_scalar(function, output);
+    Tier0Code code;
+    memset(&code, 0, sizeof(code));
+    const uint64_t output_length = output->length;
+    Scratch scratch = scratch_begin(output);
+    Tier0Entries entries;
+    const uint32_t count = function->count;
+    const uint32_t blocks = (count + 63) / 64;
+    Tier0Bits bits;
+    memset(&bits, 0, sizeof(bits));
+    bits.blocks = blocks;
+    uint64_t** columns[] = { &bits.fits, &bits.count, &bits.zero, &bits.size, &bits.product, &bits.same, &bits.sib, &bits.labels, &bits.leaf,
+                             &bits.home_const, &bits.one, &bits.two, &bits.rmw };
+    bool pushed = tier0_push_entries(&entries, scratch.arena, count);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+    {
+        // A word past the blocks for the labels' target past the last entry (the function's end).
+        *columns[c] = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)blocks + 2);
+        pushed = pushed && *columns[c] != 0;
+        if (*columns[c] != 0)
+        {
+            memset(*columns[c], 0, ((uint64_t)blocks + 2) * sizeof(uint64_t));
+        }
+    }
+    bits.sib_log2 = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)blocks * 64 + 64);
+    Tier0Error error = pushed && bits.sib_log2 != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+    Tier0Shared shared;
+    memset(&shared, 0, sizeof(shared));
+    if (error == TIER0_OK)
+    {
+        tier0_vector_labels(function, bits.labels);
+        tier0_vector_values(function, &bits);
+        tier0_vector_fuse(function, &bits, &entries);
+        tier0_vector_depths(function, &bits, &entries);
+        const uint32_t unsupported = tier0_templates_scalar(function, &entries);
+        if (unsupported != count)
+        {
+            error = TIER0_ERROR_UNSUPPORTED;
+            code.node = unsupported;
+        }
+    }
+    error = error == TIER0_OK ? tier0_prepare(function, &entries, &shared, scratch.arena) : error;
+    if (error == TIER0_OK)
+    {
+        tier0_lengths_scalar(function, &entries, &shared);
+        tier0_vector_positions(function, &entries, shared.prologue);
+        Tier0Writer counter = { 0, 0, 0, 0 };
+        tier0_emit_epilogue(&shared.frame, &counter);
+        uint32_t branches = 0;
+        uint32_t references = 0;
+        tier0_count_columns(function, &entries, &branches, &references);
+        if (!tier0_push_output(&code, output, entries.positions[count] + counter.count, branches, references))
+        {
+            error = TIER0_ERROR_MEMORY;
+        }
+    }
+    if (error == TIER0_OK)
+    {
+        tier0_vector_expand(function, &entries, &shared, &code);
+        error = tier0_vector_choose(function, &entries, &shared, &code, scratch.arena);
+    }
+    if (error == TIER0_OK)
+    {
+        tier0_finish(function, &entries, &shared, &code);
+    }
+    if (error != TIER0_OK)
+    {
+        arena_pop_to(output, output_length);
+        const uint32_t node = code.node;
+        memset(&code, 0, sizeof(code));
+        code.node = node;
+    }
+    code.error = error;
+    scratch_end(scratch);
+    return code;
 }
