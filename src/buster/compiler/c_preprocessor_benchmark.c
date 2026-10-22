@@ -47,6 +47,7 @@
 #include "buster/compiler/lane.c"
 #include "buster/compiler/c_intern.c"
 #include "buster/compiler/c_refine.c"
+#include "buster/compiler/c_predefines.c"
 #include "buster/compiler/c_preprocessor.c"
 
 #define BUSTER_PP_BENCHMARK_PASSES 21
@@ -244,7 +245,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
         const char* argument = argv[i];
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
-                                 strcmp(argument, "--predefines") == 0;
+                                 strcmp(argument, "--predefines") == 0 || strcmp(argument, "-target") == 0;
         // --predefines (clang's predefines for the options, from `clang -dM -E`) is ours alone.
         const bool ours = strcmp(argument, "--predefines") == 0;
         if (strcmp(argument, "--clang") == 0)
@@ -318,6 +319,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
     }
     else
     {
+        // The feature queries answer as clang's, so that the runs do the work `clang -E` does on the same headers.
+        options.clang_features = true;
         const int cycles_fd = pp_benchmark_open_counter(PERF_COUNT_HW_CPU_CYCLES);
         const int instructions_fd = pp_benchmark_open_counter(PERF_COUNT_HW_INSTRUCTIONS);
         if (cycles_fd < 0 || instructions_fd < 0)
