@@ -168,7 +168,7 @@ element's, and an `_Atomic` type's as of its value without one), and
 An uncounted atomic vector uses its legalized register type's overflow slot.
 Genuine short vectors widen to a 128-bit type, including a single `_Float16`
 or `__bf16`, so their slot is 16 bytes aligned to 16 even when the memory
-object is smaller. A vector of a single ordinary scalar keeps that scalar's
+object is smaller. A vector of a single ordinary scalar of at most 8 bytes keeps that scalar's
 8-byte slot, and a builtin-bool vector keeps its integer representation.
 Vectors of an enum backed by bool retain `<N x i1>` and therefore take the
 vector slot. This is register spilling, without the `LARGER` copy flag.
@@ -176,7 +176,7 @@ vector slot. This is register spilling, without the `LARGER` copy flag.
 vector arguments and six integer arguments, including the following integer:
 16-byte slots put it at offset 32, while the scalar controls put it at 16.
 The rule follows LLVM's `getRegisterTypeForCallingConv` and
-`CC_X86_64_C` at the pinned revision listed in "Sources".
+`CC_X86_64_C` at [LLVM revision 0d261d1](https://github.com/llvm/llvm-project/blob/0d261d1ca552c95a8f007e061c787ac7132fbcbc/llvm/lib/Target/X86/X86CallingConv.td#L477-L554).
 
 
 ### clang's LLVM types
@@ -1191,7 +1191,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (2,752 checks): about 220 types whose classes, pass bits and
+- **Fixtures** (3,158 checks): types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
