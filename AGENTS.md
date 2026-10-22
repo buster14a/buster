@@ -100,7 +100,8 @@ old `buster14a/buster` links now address this compiler.
 Local checkout directories, `~/buster-fast-bench/`, the shared host lock,
 `~/llm-memory/projects/buster-fast/` and its memory symlinks retain their existing
 names. The repository-local `buster-fast-9700x` concurrency key is also retained.
-Queues use that prefix per PR/ref; the runner hooks serialize every CI job with
+Queues use that prefix per PR/ref, each holding one pending run (a newer push
+replaces its PR's); the runner hooks serialize every CI job with
 the shared host lock. These are operational resources, not canonical repository URLs; do not rename
 them by replacing text. Source paths, executable names and object-file metadata
 are unchanged by the repository rename.
@@ -159,6 +160,15 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
+  #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
+  AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
+  undefined/invalid cases and guarded tails. `benchmark-builtins [--only
+  scalar|vector] [--after-scalar MS]` measures synthetic action batches on the
+  locked 9700X, pinned to CPU 2. [The builtin guide](docs/c-builtins.md) records
+  the API and the checking, C selector, feature-query and corpus integration
+  still required before #148 can close.
+
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
   observation table and scalar/AVX-512 cost-column lookups. `test-x86-zen5`
   checks unknowns, guard-page tails and generated microbenchmark loops;
@@ -195,6 +205,8 @@ designs and the compilers already built this way.
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
   `-march=native`, so the machine executing the build determines the host ISA.
   The benchmark is linked into this executable rather than built separately.
+  It compiles the translation units at once, a clang process each, and links
+  them in order: the same executable as one clang command for all of them.
 - `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
   it, and `./build/compiler test-lexer` runs them.
 - `src/buster/compiler/c_lexer_benchmark.c` provides the `benchmark-lexer`
@@ -583,7 +595,8 @@ can't read. An entry names a component's functions, each as many times as
 the component has a function of that name; add one only for the
 style's "trivial statically bounded recursion", with a comment saying what
 bounds its depth. The list is empty: the tree has no cycle. The 9700X job runs
-`test-call-graph` and the check after the build; the IR takes about 1.5 s.
+`test-call-graph` and the check after the build; the check, which captures the
+units' IR at once, takes about 1.8 s.
 
 `./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
 on IR of the call forms clang writes and of what must be left out, a
@@ -2062,7 +2075,11 @@ Run it under the 9700X's lock without `taskset`: it pins its lanes and the
 linkers' runs on one thread itself, and the linkers' other runs need every CPU.
 `docs/object-writer-and-linker.md` ("The whole link") has the numbers. The
 default 9700X job runs it after benchmark-snapshot, with its lane on the job's
-first allowed CPU; like the others, its measurements are informational.
+first allowed CPU; like the others, its measurements are informational. The
+linkers' side, about 121 s of its 122, times other programs on the machine,
+the same for every pull request: the job runs it on pushes to main, dispatched
+runs and pull requests that change `link_benchmark.c` or `floors_benchmark.c`,
+and only the direct path (`--only direct`, about 1 s) on other pull requests.
 
 ## Floors benchmark
 
@@ -2096,8 +2113,9 @@ write, naming its `errno`, or a child that dies before its message or its exit.
 
 Run it under the 9700X's lock without `taskset`, and with `--directory` on each
 file system to measure. `docs/object-writer-and-linker.md` ("The floors") has
-the numbers. The default 9700X job runs it after benchmark-link; like the
-others, its measurements are informational.
+the numbers. The default 9700X job runs it after benchmark-link, where that
+runs the linkers' side (the machine's floors don't depend on a pull request
+either); like the others, its measurements are informational.
 
 ## Dataflow tests
 
