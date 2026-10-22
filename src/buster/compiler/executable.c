@@ -2779,10 +2779,16 @@ struct ExecutableShared
     uint64_t version_words;
     uint32_t version_limit;
     uint16_t* version_numbers;
-    // A PIE's exports in .dynsym's order (executable_number_exports): each one's GNU hash, and their order, as indices
-    // into ExecutableDynamic.exports.
+    // A PIE's exports (ExecutableDynamic.exports), each lane its range of them: their GNU hashes, each lane's count of
+    // them in each of .gnu.hash's `buckets` (`buckets` words a lane) and of their names' bytes with NULs
+    // (executable_hash_exports); then each one's place among .dynsym's exports, and each bucket's first place
+    // (buckets + 1 words, the last the exports' count: executable_place_exports).
+    uint32_t buckets;
     uint32_t* export_hashes;
-    uint32_t* export_order;
+    uint32_t* bucket_counts;
+    uint64_t* export_name_bytes;
+    uint32_t* export_places;
+    uint32_t* bucket_starts;
     // Once the layout is known, the bytes of the linker's sections (its pieces'): the note's and the GOT's, and a
     // dynamic PIE's others.
     uint8_t* section_bytes[EXECUTABLE_SECTION_COUNT];
@@ -4051,12 +4057,26 @@ static bool executable_relr_eligible(uint8_t alignment_log2, uint32_t offset)
     return alignment_log2 >= 1 && offset % 2 == 0;
 }
 
-// The relocation class of an ABS64 fixup's target: RELATIVE for one the image defines (link_check refuses ABS64 to a
-// TLS symbol), the exact class otherwise. `outside` is whether the image may not define it: a bit of the filter's, or
-// with `exact` its atom's being 0 (the linker's symbols too, which the exact class makes RELATIVE).
-static uint8_t executable_abs64_class(const Link* link, SymbolId target, bool outside, uint8_t scope)
+// The relocation class of an ABS64 fixup's target: RELATIVE for one the image defines and no library preempts
+// (link_check refuses ABS64 to a TLS symbol), and the class otherwise: from the bitsets (executable_mark_symbols's), or
+// with `exact` executable_relocation_class. `outside` is whether the target may be outside the image or preemptible: a
+// bit of the filter's, or with `exact` executable_is_outside (the linker's symbols too, which the exact class makes
+// RELATIVE). In a shared library, the filter takes almost every target, its preemptible definitions.
+static uint8_t executable_abs64_class(const Link* link, const ExecutableShared* shared, SymbolId target, bool outside)
 {
-    return outside ? executable_relocation_class(link, target, scope) : BUSTER_EXECUTABLE_RELOCATION_RELATIVE;
+    uint8_t result = BUSTER_EXECUTABLE_RELOCATION_RELATIVE;
+    if (outside && shared->exact)
+    {
+        result = executable_relocation_class(link, target, shared->scope);
+    }
+    else if (outside)
+    {
+        result = executable_bit(shared->dynamic_bits, target)    ? BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC
+                 : executable_bit(shared->relative_bits, target) ? BUSTER_EXECUTABLE_RELOCATION_RELATIVE
+                 : executable_bit(shared->tpoff_bits, target)    ? BUSTER_EXECUTABLE_RELOCATION_TPOFF
+                                                                 : BUSTER_EXECUTABLE_RELOCATION_NONE;
+    }
+    return result;
 }
 
 // Whether a written atom is dense: every fixup ABS64 to a RELATIVE target, 8 bytes apart from an even first offset, in
@@ -4104,7 +4124,7 @@ static uint64_t executable_classify_atom(const Link* link, const ExecutableShare
         const SymbolId target = fixups->target[fixup];
         const __mmask16 hit = shared->exact ? 0 : executable_filter_test(filter, _mm512_set1_epi32((int)target), 1);
         const bool outside = shared->exact ? executable_is_outside(link, shared, target) : hit != 0;
-        const uint8_t class = abs64 ? executable_abs64_class(link, target, outside, shared->scope) : BUSTER_EXECUTABLE_RELOCATION_NONE;
+        const uint8_t class = abs64 ? executable_abs64_class(link, shared, target, outside) : BUSTER_EXECUTABLE_RELOCATION_NONE;
         const bool relative = class == BUSTER_EXECUTABLE_RELOCATION_RELATIVE;
         const bool packed = relative && shared->relr && executable_relr_eligible(alignment_log2, fixups->offset[fixup]);
         counts->abs64_written += abs64 ? 1 : 0;
@@ -4326,6 +4346,85 @@ static uint32_t executable_gnu_hash(const uint8_t* bytes, uint64_t length)
     return hash;
 }
 
+// .gnu.hash's buckets for `exports` exports: one per four, at least one, as lld sizes them.
+static uint32_t executable_gnu_hash_buckets(uint64_t exports)
+{
+    return exports / 4 > 1 ? (uint32_t)(exports / 4) : 1;
+}
+
+// The exports' passes (a PIE's ExecutableDynamic.exports): scalar, a name at a time, and data-parallel over the lanes,
+// each its range of the exports and of .gnu.hash's buckets, in three phases. The files that every lane count writes
+// compare them, as an exact twin would.
+//
+// In the count's phase: this lane's exports' GNU hashes, its count of them in each bucket, and its names' bytes with
+// their NULs.
+static void executable_hash_exports(const Link* link, ExecutableShared* shared, const ExecutableDynamic* dynamic, uint32_t lane)
+{
+    const uint32_t buckets = shared->buckets;
+    uint32_t* counts = shared->bucket_counts + (uint64_t)lane * buckets;
+    memset(counts, 0, (uint64_t)buckets * sizeof(uint32_t));
+    const Range64 range = lane_range(dynamic->export_count);
+    uint64_t bytes = 0;
+    for (uint64_t e = range.begin; e < range.end; e += 1)
+    {
+        const NameId name = link->symbols.name[dynamic->exports[e]];
+        const uint32_t hash = executable_gnu_hash(link->names.bytes[name], link->names.length[name]);
+        shared->export_hashes[e] = hash;
+        counts[hash % buckets] += 1;
+        bytes += (uint64_t)link->names.length[name] + 1;
+    }
+    shared->export_name_bytes[lane] = bytes;
+}
+
+// In the layout's phase: this lane's exports placed in .dynsym's order, lld's (by bucket, each bucket's in
+// ExecutableDynamic.exports' order), from every lane's counts: an export's place is its bucket's first, past the lanes'
+// before this one in it and this lane's before it, and its dynamic index follows the `undefined` entries. Before any
+// lane writes a relocation against one: a shared library's preemptible definitions get GLOB_DAT and R_X86_64_64
+// relocations (executable_dynamic_relocations). This lane writes its range of the buckets' first places, and the last
+// lane the end. False if this lane's scratch arena can't hold its places by bucket.
+static bool executable_place_exports(Link* link, ExecutableShared* shared, const ExecutableDynamic* dynamic, uint64_t undefined, uint32_t lane, uint32_t lanes,
+                                     Arena* arena)
+{
+    const uint32_t buckets = shared->buckets;
+    const uint64_t length = arena->length;
+    uint32_t* next = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, buckets);
+    const bool result = next != 0;
+    const Range64 bucket_range = lane_range(buckets);
+    uint32_t place = 0;
+    for (uint32_t b = 0; result && b < buckets; b += 1)
+    {
+        uint32_t before = 0;
+        uint32_t total = 0;
+        for (uint32_t other = 0; other < lanes; other += 1)
+        {
+            const uint32_t count = shared->bucket_counts[(uint64_t)other * buckets + b];
+            before += other < lane ? count : 0;
+            total += count;
+        }
+        next[b] = place + before;
+        if (b >= bucket_range.begin && b < bucket_range.end)
+        {
+            shared->bucket_starts[b] = place;
+        }
+        place += total;
+    }
+    if (result && lane == lanes - 1)
+    {
+        shared->bucket_starts[buckets] = place;
+    }
+    const Range64 range = lane_range(dynamic->export_count);
+    for (uint64_t e = range.begin; result && e < range.end; e += 1)
+    {
+        const uint32_t b = shared->export_hashes[e] % buckets;
+        const uint32_t at = next[b];
+        next[b] = at + 1;
+        shared->export_places[e] = at;
+        link->symbols.dynamic_index[dynamic->exports[e]] = (uint32_t)(1 + undefined + at);
+    }
+    arena_pop_to(arena, length);
+    return result;
+}
+
 // A PIE's totals, the same on every lane, from the lanes' counts: what its sections hold, and their sizes for the
 // layout. .gnu.hash has a bucket per four exports, at least one, and a Bloom filter of 12 bits per export in the next
 // power of two of 64-bit words above them, as lld sizes them. A static PIE (with the static runtime) has no interpreter,
@@ -4368,9 +4467,9 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
         totals->verneed_files += totals->library_versions[l] != 0 ? 1 : 0;
     }
     uint64_t export_bytes = 0;
-    for (uint32_t e = 0; e < dynamic->export_count; e += 1)
+    for (uint32_t lane = 0; lane < lanes; lane += 1)
     {
-        export_bytes += (uint64_t)link->names.length[link->symbols.name[dynamic->exports[e]]] + 1;
+        export_bytes += shared->export_name_bytes[lane];
     }
     totals->irelatives += shared->runtime ? totals->stubs : 0;
     totals->has_init = dynamic->init != 0;
@@ -4383,7 +4482,7 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
     totals->soname_name = dynamic->soname.length != 0 ? soname : 0;
     totals->version_names = soname + (dynamic->soname.length != 0 ? dynamic->soname.length + 1 : 0);
     totals->shared = dynamic->shared;
-    totals->buckets = totals->exports / 4 > 1 ? totals->exports / 4 : 1;
+    totals->buckets = executable_gnu_hash_buckets(totals->exports);
     uint64_t words = 1;
     while (totals->exports != 0 && words <= totals->exports * 12 / 64)
     {
@@ -5056,7 +5155,7 @@ static void executable_dynamic_relocations(const Link* link, ExecutableShared* s
                 const SymbolId target = fixups->target[fixup];
                 const bool outside = shared->exact ? executable_is_outside(link, shared, target) : executable_filter_test(filter, _mm512_set1_epi32((int)target), 1) != 0;
                 const uint8_t class =
-                    (kind & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_ABS64 ? executable_abs64_class(link, target, outside, shared->scope) : BUSTER_EXECUTABLE_RELOCATION_NONE;
+                    (kind & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_ABS64 ? executable_abs64_class(link, shared, target, outside) : BUSTER_EXECUTABLE_RELOCATION_NONE;
                 const bool packed = shared->relr && executable_relr_eligible(atoms->alignment_log2[atom], fixups->offset[fixup]);
                 const int64_t addend = (kind & BUSTER_LINK_FIXUP_WIDE) != 0 ? fixups->wide_addends[(uint32_t)fixups->addend[fixup]] : fixups->addend[fixup];
                 const uint64_t place = layout->base + atoms->address[atom] + fixups->offset[fixup];
@@ -5185,7 +5284,7 @@ static void executable_relr_relocations(const Link* link, ExecutableShared* shar
                 const SymbolId target = fixups->target[fixup];
                 const bool outside = shared->exact ? executable_is_outside(link, shared, target) : executable_filter_test(filter, _mm512_set1_epi32((int)target), 1) != 0;
                 const bool abs64 = (fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_ABS64;
-                const bool relative = abs64 && executable_abs64_class(link, target, outside, shared->scope) == BUSTER_EXECUTABLE_RELOCATION_RELATIVE;
+                const bool relative = abs64 && executable_abs64_class(link, shared, target, outside) == BUSTER_EXECUTABLE_RELOCATION_RELATIVE;
                 if (relative && executable_relr_eligible(atoms->alignment_log2[atom], fixups->offset[fixup]))
                 {
                     executable_relr_add(&relr, address + fixups->offset[fixup]);
@@ -5202,122 +5301,99 @@ static void executable_relr_relocations(const Link* link, ExecutableShared* shar
 // one), their indices, and .gnu.hash; the library's name and the needed versions' after the names in .dynstr, and
 // .gnu.version_r; and .dynamic. A static PIE's .dynsym has the null symbol alone, and its .gnu.hash no symbols, as lld
 // writes them. Returns false if the arena can't hold the exports' hashes and order.
-// A PIE's exports in .dynsym's order, which .gnu.hash's buckets set, each bucket's in ExecutableDynamic.exports' order
-// (lld's): their GNU hashes and their order (ExecutableShared.export_hashes and export_order), and each one's dynamic
-// index, after the undefined entries. Lane 0 numbers them once the counts are known, in the layout's phase, before any
-// lane writes a relocation against one: a shared library's preemptible definitions get GLOB_DAT and R_X86_64_64
-// relocations (executable_dynamic_relocations). Returns false if the arena can't hold them.
-static bool executable_number_exports(Arena* arena, Link* link, ExecutableShared* shared, const ExecutableDynamic* dynamic, const ExecutableDynamicTotals* totals)
+// In the dynamic sections' phase: this lane's exports (executable_place_exports placed them), each one's name in .dynstr,
+// after the lanes' before this one's (the exports' names are in ExecutableDynamic.exports' order), its .dynsym entry at
+// its place, its version (global), its hash in .gnu.hash's chain with the low bit set for its bucket's last, and its
+// two Bloom bits (by bits 0 to 5 and 26 to 31 of its hash, in the word bits 6 and up select), one OR of a word, atomic
+// with more than one lane, since the lanes' exports share words; and this lane's range of .gnu.hash's buckets, each
+// one's first .dynsym index, or 0 for none. executable_prepare zeroed .gnu.hash, and lane 0 writes its header.
+static void executable_write_exports(const Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutableDynamic* dynamic,
+                                     const ExecutableDynamicTotals* totals, uint32_t lane, uint32_t lanes)
 {
-    const uint32_t count = dynamic->export_count;
-    const uint32_t buckets = (uint32_t)totals->buckets;
-    uint32_t* hashes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1);
-    uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1);
-    uint32_t* starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)buckets + 1);
-    const bool result = hashes != 0 && order != 0 && starts != 0;
-    if (result)
+    const LinkSymbols* symbols = &link->symbols;
+    const uint32_t buckets = shared->buckets;
+    Elf64_Sym* dynsym = (Elf64_Sym*)shared->section_bytes[EXECUTABLE_SECTION_DYNSYM];
+    Elf64_Half* versym = (Elf64_Half*)shared->section_bytes[EXECUTABLE_SECTION_VERSYM];
+    uint8_t* dynstr = shared->section_bytes[EXECUTABLE_SECTION_DYNSTR];
+    uint8_t* gnu_hash = shared->section_bytes[EXECUTABLE_SECTION_GNU_HASH];
+    uint64_t* bloom = (uint64_t*)(gnu_hash + 16);
+    uint8_t* bucket_bytes = gnu_hash + 16 + 8 * totals->bloom_words;
+    uint8_t* chain = bucket_bytes + 4 * (uint64_t)buckets;
+    const ExecutableSectionLayout* tdata = &layout->sections[EXECUTABLE_SECTION_TDATA];
+    uint64_t name_offset = totals->export_names;
+    for (uint32_t other = 0; other < lane; other += 1)
     {
-        LinkSymbols* symbols = &link->symbols;
-        memset(starts, 0, ((uint64_t)buckets + 1) * sizeof(uint32_t));
-        for (uint32_t e = 0; e < count; e += 1)
-        {
-            const NameId name = symbols->name[dynamic->exports[e]];
-            hashes[e] = executable_gnu_hash(link->names.bytes[name], link->names.length[name]);
-            starts[hashes[e] % buckets + 1] += 1;
-        }
-        for (uint32_t b = 0; b < buckets; b += 1)
-        {
-            starts[b + 1] += starts[b];
-        }
-        for (uint32_t e = 0; e < count; e += 1)
-        {
-            const uint32_t b = hashes[e] % buckets;
-            order[starts[b]] = e;
-            starts[b] += 1;
-        }
-        for (uint32_t k = 0; k < count; k += 1)
-        {
-            symbols->dynamic_index[dynamic->exports[order[k]]] = (uint32_t)(1 + totals->undefined + k);
-        }
-        shared->export_hashes = hashes;
-        shared->export_order = order;
+        name_offset += shared->export_name_bytes[other];
     }
-    return result;
+    const Range64 range = lane_range(dynamic->export_count);
+    for (uint64_t e = range.begin; e < range.end; e += 1)
+    {
+        const SymbolId symbol = dynamic->exports[e];
+        const uint32_t hash = shared->export_hashes[e];
+        const uint32_t place = shared->export_places[e];
+        const uint32_t b = hash % buckets;
+        const uint32_t index = (uint32_t)(1 + totals->undefined + place);
+        const NameId name = symbols->name[symbol];
+        const uint64_t length = link->names.length[name];
+        memcpy(dynstr + name_offset, link->names.bytes[name], length);
+        dynstr[name_offset + length] = 0;
+        // Defined in its atom's section at its address, or for a TLS symbol at its offset in the TLS segment.
+        const AtomId atom = symbols->atom[symbol];
+        const uint8_t section = atom != 0 ? executable_class_section(link->atoms.class[atom], true) : EXECUTABLE_SECTION_COUNT;
+        const bool tls = executable_is_tls(link, symbol);
+        const uint64_t address = atom != 0 ? link->atoms.address[atom] + symbols->value[symbol] : (uint64_t)(int64_t)(int32_t)symbols->reference[symbol];
+        dynsym[index] = (Elf64_Sym){
+            .st_name = (uint32_t)name_offset,
+            .st_info = (uint8_t)(symbols->flags[symbol] & (BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_TYPE)),
+            .st_other = (uint8_t)(symbols->flags[symbol] >> 6),
+            .st_shndx = (uint16_t)(section != EXECUTABLE_SECTION_COUNT ? layout->section_index[section] : SHN_ABS),
+            .st_value = tls ? address - tdata->address : layout->base + address,
+            .st_size = symbols->size[symbol],
+        };
+        if (versym != 0)
+        {
+            versym[index] = VER_NDX_GLOBAL;
+        }
+        const uint64_t bits = 1ull << (hash % 64) | 1ull << ((hash >> 26) % 64);
+        uint64_t* word = bloom + (hash / 64) % totals->bloom_words;
+        if (lanes > 1)
+        {
+            __atomic_fetch_or(word, bits, __ATOMIC_RELAXED);
+        }
+        else
+        {
+            *word |= bits;
+        }
+        const bool last = place + 1 == shared->bucket_starts[b + 1];
+        const uint32_t chained = last ? hash | 1 : hash & ~1u;
+        memcpy(chain + 4 * (uint64_t)place, &chained, sizeof(chained));
+        name_offset += length + 1;
+    }
+    const Range64 bucket_range = lane_range(buckets);
+    for (uint64_t b = bucket_range.begin; b < bucket_range.end; b += 1)
+    {
+        const uint32_t first = shared->bucket_starts[b];
+        const uint32_t index = first != shared->bucket_starts[b + 1] ? (uint32_t)(1 + totals->undefined + first) : 0;
+        memcpy(bucket_bytes + 4 * b, &index, sizeof(index));
+    }
 }
 
+// Lane 0's part of the dynamic sections, but the exports' (executable_write_exports): .gnu.hash's header, the needed
+// libraries' and versions' names and .gnu.version_r, .interp, the ABI note and .dynamic.
 static bool executable_dynamic_sections(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutableDynamic* dynamic, const ExecutableDynamicTotals* totals)
 {
-    const uint32_t count = dynamic->export_count;
-    const uint32_t buckets = (uint32_t)totals->buckets;
-    const uint32_t* hashes = shared->export_hashes;
-    const uint32_t* order = shared->export_order;
-    const bool result = hashes != 0 && order != 0;
-    if (result)
+    const bool result = true;
     {
         LinkSymbols* symbols = &link->symbols;
-        Elf64_Sym* dynsym = (Elf64_Sym*)shared->section_bytes[EXECUTABLE_SECTION_DYNSYM];
-        Elf64_Half* versym = (Elf64_Half*)shared->section_bytes[EXECUTABLE_SECTION_VERSYM];
         uint8_t* dynstr = shared->section_bytes[EXECUTABLE_SECTION_DYNSTR];
-
-        // .gnu.hash: its header, the Bloom filter (two bits per export, by bits 0 to 5 and 26 to 31 of its hash, in the
-        // word bits 6 and up select), each bucket's first .dynsym index (0 for none) and the chain of hashes, the last
-        // of each bucket's with its low bit set.
-        uint8_t* gnu_hash = shared->section_bytes[EXECUTABLE_SECTION_GNU_HASH];
-        memset(gnu_hash, 0, totals->linker_bytes[EXECUTABLE_SECTION_GNU_HASH]);
+        // .gnu.hash's header: its buckets, the first export's .dynsym index, its Bloom words and its shift.
         const uint32_t header[4] = {
-            buckets,
+            shared->buckets,
             (uint32_t)(1 + totals->undefined),
             (uint32_t)totals->bloom_words,
             26,
         };
-        memcpy(gnu_hash, header, sizeof(header));
-        uint8_t* bloom = gnu_hash + sizeof(header);
-        uint8_t* bucket_bytes = bloom + 8 * totals->bloom_words;
-        uint8_t* chain = bucket_bytes + 4 * (uint64_t)buckets;
-        const ExecutableSectionLayout* tdata = &layout->sections[EXECUTABLE_SECTION_TDATA];
-        uint64_t name_offset = totals->export_names;
-        for (uint32_t k = 0; k < count; k += 1)
-        {
-            const uint32_t e = order[k];
-            const SymbolId symbol = dynamic->exports[e];
-            const uint32_t hash = hashes[e];
-            const uint32_t b = hash % buckets;
-            const uint32_t index = (uint32_t)(1 + totals->undefined + k);
-            const NameId name = symbols->name[symbol];
-            const uint64_t length = link->names.length[name];
-            memcpy(dynstr + name_offset, link->names.bytes[name], length);
-            dynstr[name_offset + length] = 0;
-            // Defined in its atom's section at its address, or for a TLS symbol at its offset in the TLS segment.
-            const AtomId atom = symbols->atom[symbol];
-            const uint8_t section = atom != 0 ? executable_class_section(link->atoms.class[atom], true) : EXECUTABLE_SECTION_COUNT;
-            const bool tls = executable_is_tls(link, symbol);
-            const uint64_t address = atom != 0 ? link->atoms.address[atom] + symbols->value[symbol] : (uint64_t)(int64_t)(int32_t)symbols->reference[symbol];
-            dynsym[index] = (Elf64_Sym){
-                .st_name = (uint32_t)name_offset,
-                .st_info = (uint8_t)(symbols->flags[symbol] & (BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_TYPE)),
-                .st_other = (uint8_t)(symbols->flags[symbol] >> 6),
-                .st_shndx = (uint16_t)(section != EXECUTABLE_SECTION_COUNT ? layout->section_index[section] : SHN_ABS),
-                .st_value = tls ? address - tdata->address : layout->base + address,
-                .st_size = symbols->size[symbol],
-            };
-            if (versym != 0)
-            {
-                versym[index] = VER_NDX_GLOBAL;
-            }
-            uint64_t word = 0;
-            memcpy(&word, bloom + 8 * ((hash / 64) % totals->bloom_words), sizeof(word));
-            word |= 1ull << (hash % 64) | 1ull << ((hash >> 26) % 64);
-            memcpy(bloom + 8 * ((hash / 64) % totals->bloom_words), &word, sizeof(word));
-            const bool first = k == 0 || hashes[order[k - 1]] % buckets != b;
-            const bool last = k + 1 == count || hashes[order[k + 1]] % buckets != b;
-            const uint32_t chained = last ? hash | 1 : hash & ~1u;
-            memcpy(chain + 4 * (uint64_t)k, &chained, sizeof(chained));
-            if (first)
-            {
-                memcpy(bucket_bytes + 4 * (uint64_t)b, &index, sizeof(index));
-            }
-            name_offset += length + 1;
-        }
+        memcpy(shared->section_bytes[EXECUTABLE_SECTION_GNU_HASH], header, sizeof(header));
 
         // The needed libraries' names, a shared library's soname, then the needed versions' names, each with its NUL,
         // and .gnu.version_r as lld lays it out: an entry per library with a needed version, in ExecutableDynamic's
@@ -5457,8 +5533,15 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
         shared->relr_words = shared->relr ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, link->atoms.count) : 0;
         shared->versions_used = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, lanes * shared->version_words);
         shared->version_numbers = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, limit);
+        shared->buckets = executable_gnu_hash_buckets(dynamic->export_count);
+        shared->export_hashes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)dynamic->export_count + 1);
+        shared->bucket_counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)lanes * shared->buckets);
+        shared->export_name_bytes = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, lanes);
+        shared->export_places = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)dynamic->export_count + 1);
+        shared->bucket_starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)shared->buckets + 1);
         fits = shared->dynamic_bits != 0 && shared->relative_bits != 0 && shared->tpoff_bits != 0 && (!shared->relr || shared->relr_words != 0) &&
-               shared->versions_used != 0 && shared->version_numbers != 0;
+               shared->versions_used != 0 && shared->version_numbers != 0 && shared->export_hashes != 0 && shared->bucket_counts != 0 &&
+               shared->export_name_bytes != 0 && shared->export_places != 0 && shared->bucket_starts != 0;
     }
     if (fits && shared->runtime)
     {
@@ -5499,6 +5582,8 @@ static bool executable_prepare(Arena* arena, ExecutableShared* shared, const Exe
     {
         memset(shared->section_bytes[EXECUTABLE_SECTION_DYNSYM], 0, sizeof(Elf64_Sym));
         shared->section_bytes[EXECUTABLE_SECTION_DYNSTR][0] = 0;
+        // .gnu.hash's Bloom words, which the lanes OR the exports' bits into (executable_write_exports).
+        memset(shared->section_bytes[EXECUTABLE_SECTION_GNU_HASH], 0, layout->sections[EXECUTABLE_SECTION_GNU_HASH].size);
         if (shared->section_bytes[EXECUTABLE_SECTION_VERSYM] != 0)
         {
             memset(shared->section_bytes[EXECUTABLE_SECTION_VERSYM], 0, sizeof(Elf64_Half));
@@ -5771,6 +5856,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     if (ok && dynamic)
     {
         executable_mark_symbols(link, shared, lane);
+        executable_hash_exports(link, shared, dynamic_options, lane);
     }
     if (ok)
     {
@@ -5901,7 +5987,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
     }
-    if (laid_out && dynamic && lane == 0 && !executable_number_exports(scratch.arena, link, shared, dynamic_options, &totals))
+    if (laid_out && dynamic && !executable_place_exports(link, shared, dynamic_options, totals.undefined, lane, lanes, scratch.arena))
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
     }
@@ -5929,8 +6015,8 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         result->phase_times[EXECUTABLE_PHASE_SYMBOLS] = executable_now();
     }
 
-    // .eh_frame_hdr's table, each lane its atoms' entries; a dynamic PIE's relocations, and lane 0 its other dynamic
-    // sections.
+    // .eh_frame_hdr's table, each lane its atoms' entries; a dynamic PIE's relocations and exports, and lane 0 its other
+    // dynamic sections.
     const bool indexed = ok && layout->sections[EXECUTABLE_SECTION_EH_FRAME_HDR].size != 0;
     if (indexed)
     {
@@ -5940,6 +6026,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         executable_dynamic_relocations(link, shared, layout, &totals, &filter, lane);
         executable_relr_relocations(link, shared, layout, &filter, lane, lanes);
+        executable_write_exports(link, shared, layout, dynamic_options, &totals, lane, lanes);
     }
     if (ok && dynamic && lane == 0 && !executable_dynamic_sections(link, shared, layout, dynamic_options, &totals))
     {
