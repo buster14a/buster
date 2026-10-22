@@ -3167,24 +3167,33 @@ others, its measurements are informational.
   LLVM makes larger (to 32 KB, and refused past the alignment the module
   keeps), as the records ending in one, with their slots, the records it lays
   out otherwise than C, and vectors LLVM keeps whole, splits or, of bools,
-  passes as integers), and calls whose locations clang and LLVM give (an
-  `UNCOUNTED` argument that splits the next record, an `__int128` without two
-  registers left, a hidden pointer, a record of a flexible array member alone
-  as an `i0`, a struct whose narrow low part takes a general register, unions
-  stored as an `i128`, which clang counts as two registers with a NO_CLASS or
-  SSE high eightbyte, runs of bit-fields where an uncounted `_Atomic int`
-  leaves one register, split or whole on the stack, the larger copies' slots,
-  byval or an integer by clang's count, `_Atomic` bool vectors, a vector of
-  bools that isn't `_Atomic` returned through a hidden pointer, and a result
-  LLVM demotes to a hidden pointer clang doesn't count), `va_arg`'s plans for
-  an aligned `long` and an `i128` with an SSE high eightbyte, and the levels
-  across calls (a record larger than 64 bytes that waits for a `LARGER`
-  member, and records of no size that an `_Atomic` of them in a later call
-  reads: a flexible one, and two that hold a struct of 128 bytes by an array
-  of none, which wait for what its alignment reads), the walk without scratch
-  memory for its stack, after which every type must be classified and an
-  `_Atomic` it aligns be right or refused, and the walk over 64 unions of two
-  members of the one before, 2^64 paths, under an alarm;
+  passes as integers; and the vectors that aren't `_Atomic` which LLVM breaks
+  up or packs: of bools, with their integer storage and layout, refused from
+  16 bytes up where clang passes them as `<N x i1>`, with the records of one,
+  and smaller copies past 128 (`SMALLER`), of `_BitInt`s narrower than a byte,
+  of long doubles (refused in registers, st0 and st1 as results), of
+  `__float128`s, of `_BitInt`s of 128 bits and more, and of lengths that
+  aren't a power of two in memory, returned in rax, rdx and rcx, in xmm0, xmm1
+  and st0, or through a hidden pointer), and calls whose locations clang and
+  LLVM give (an `UNCOUNTED` argument that splits the next record, an
+  `__int128` without two registers left, a hidden pointer, a record of a
+  flexible array member alone as an `i0`, a struct whose narrow low part takes
+  a general register, unions stored as an `i128`, which clang counts as two
+  registers with a NO_CLASS or SSE high eightbyte, runs of bit-fields where an
+  uncounted `_Atomic int` leaves one register, split or whole on the stack,
+  the larger copies' slots, byval or an integer by clang's count, `_Atomic`
+  bool vectors, a vector of bools that isn't `_Atomic` returned through a
+  hidden pointer, a result LLVM demotes to a hidden pointer clang doesn't
+  count, and 513 bools, an 80-byte copy, and as a result a hidden pointer
+  clang doesn't count), `va_arg`'s plans for an aligned `long` and an `i128`
+  with an SSE high eightbyte, and the levels across calls (a record larger
+  than 64 bytes that waits for a `LARGER` member, and records of no size that
+  an `_Atomic` of them in a later call reads: a flexible one, and two that
+  hold a struct of 128 bytes by an array of none, which wait for what its
+  alignment reads), the walk without scratch memory for its stack, after which
+  every type must be classified and an `_Atomic` it aligns be right or
+  refused, and the walk over 64 unions of two members of the one before, 2^64
+  paths, under an alarm;
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's
@@ -3217,13 +3226,19 @@ GCC's worlds leave out
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
 own bugs among them, and `docs/calling-convention.md` lists them), and clang's
 a type in registers that holds an array of elements of no size, on which clang
-23 crashes now and then, and one with an SSE low eightbyte and bit-fields in
-an INTEGER high one, whose access units the module doesn't work out yet; an
-argument clang would pass as an `i0` becomes a long (its passes crash on them
-now and then), as does an unnamed one clang's `va_arg` reads elsewhere than
-its call puts it; and bytes clang doesn't pass aren't compared. The files go
-in a new directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a
-failure. The 9700X job's test step runs it with `--cross-check`.
+23 crashes now and then, one with an SSE low eightbyte and bit-fields in an
+INTEGER high one, whose access units the module doesn't work out yet, an
+aligned typedef of an `_Atomic` vector of bools, whose atomic loads crash it,
+a record SSE, SSEUP of a size other than 16, 32 or 64 bytes and one SSE, SSE
+that holds a `__float128`, which the module doesn't model yet either, and a
+union of a vector LLVM packs into fewer bits than its bytes, whose copies lose
+the other members' bits; an argument clang would pass as an `i0` becomes a
+long (its passes crash on them now and then), as does an unnamed one clang's
+`va_arg` reads elsewhere than its call puts it; bytes clang doesn't pass
+aren't compared; and the C side copies a `SMALLER` type's LLVM bytes, all that
+clang's objects of it hold. The files go in a new directory under `$TMPDIR`
+(or `/tmp`), removed unless `--keep` or a failure. The 9700X job's test step
+runs it with `--cross-check`.
 
 ## Calling convention benchmark
 
