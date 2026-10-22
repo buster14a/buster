@@ -662,6 +662,7 @@ static bool import_benchmark_runtime_import(RuntimeKind kind, int cycles_counter
         [RUNTIME_KIND_DYNAMIC] = "runtime_import",
         [RUNTIME_KIND_STATIC] = "runtime_import_static",
         [RUNTIME_KIND_STATIC_PIE] = "runtime_import_static_pie",
+        [RUNTIME_KIND_SHARED] = "runtime_import_shared",
     };
     uint64_t nanoseconds[BUSTER_IMPORT_BENCHMARK_RUNS];
     uint64_t cycles[BUSTER_IMPORT_BENCHMARK_RUNS];
