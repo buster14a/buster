@@ -6975,7 +6975,7 @@ static bool pp_header_name(Preprocessor* pp, const PPTokens* tokens, uint32_t be
         const uint8_t* spelling = 0;
         const uint32_t spelled = buffer != 0 ? pp_spelling(pp, tokens->kinds[begin], tokens->values[begin], tokens->locations[begin], buffer, &spelling) : 0;
         // (A raw string literal is no header name, as in clang.)
-        result = spelled >= 2 && spelled - 2 < capacity && spelling[0] == '"';
+        result = spelled >= 2 && spelled - 2 < capacity && (tokens->kinds[begin] == C_TOKEN_LESS || spelling[0] == '"');
         if (result)
         {
             memcpy(name, spelling + 1, spelled - 2);
