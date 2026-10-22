@@ -255,7 +255,8 @@ static bool cbuiltin_test_generated(uint64_t seed)
             }
             if (round >= 512 && i % 13 == 0)
             {
-                rows.rt[i] = (uint32_t)cbuiltin_test_random(&random);
+                uint32_t* types[] = { rows.at, rows.bt, rows.rt };
+                types[i % 3][i] = (uint32_t)cbuiltin_test_random(&random);
             }
         }
         memset(rows.value, 0xA5, sizeof(rows.value));
@@ -334,7 +335,17 @@ static bool cbuiltin_test_pages(void)
             ((uint32_t*)columns[4])[lane] = 192;
             ((uint32_t*)columns[5])[lane] = 160;
         }
-        passed = cbuiltin_test_check(input, scalar, vector, count);
+        for (uint32_t id = 0; id <= CBUILTIN_COUNT && passed; id += 1)
+        {
+            if (id != 0)
+            {
+                for (uint32_t lane = 0; lane < count; lane += 1)
+                {
+                    ((uint32_t*)columns[0])[lane] = id == CBUILTIN_COUNT ? UINT32_MAX : id;
+                }
+            }
+            passed = cbuiltin_test_check(input, scalar, vector, count);
+        }
         for (uint32_t c = 0; c < 12; c += 1)
         {
             for (uint32_t b = 1; b <= 16; b += 1)
