@@ -1064,7 +1064,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (2,074 checks): about 165 types whose classes, pass bits and
+- **Fixtures** (2,086 checks): about 170 types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -1077,8 +1077,9 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   byte, not, unions of a struct of an unnamed bit-field, one `PAIR` under an
   SSE high eightbyte too and refused with an INTEGER high eightbyte under
   another low one, and unions whose struct holds a zero-length array of a
-  larger record, plain, nested, packed or with a run of bit-fields that is an
-  `i128` or bytes, which ties with an `__int128` or doesn't) and narrow low
+  larger record, plain (of 32 bytes, and of 80, whose row doesn't wait for its
+  members), nested, packed or with a run of bit-fields that is an `i128` or
+  bytes, which ties with an `__int128` or doesn't) and narrow low
   parts (`{__bf16, _Alignas(8) char}` and its kin). Then the `_Atomic` types
   clang's LLVM types decide, with the slots that `-mllvm
   -stop-after=finalize-isel`'s fixed stack objects show: `_Atomic`s of

@@ -989,6 +989,23 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     m[1] = abi_test_member(builder, tail);
     abi_test_in_registers(builder, "union {__int128, {long, long, {__int128, long}[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
                           BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    // The same with a record larger than 64 bytes in the array, {__int128, char[64]}, whose row doesn't depend on its
+    // members: its alignment in LLVM's type comes from them all the same (abi_wide_alignment).
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 64));
+    const TypeId big80 = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[2] = abi_test_member(builder, type_array(table, big80, 0));
+    const TypeId tail80 = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0);
+    m[0] = abi_test_member(builder, tail80);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{long, long, {__int128, char[64]}[0]}, __int128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, 0, BUSTER_ABI_PASS_PAIR, rax, rdx);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    m[1] = abi_test_member(builder, tail80);
+    abi_test_in_registers(builder, "union {__int128, {long, long, {__int128, char[64]}[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
     // The same with the large record inside another ({char, {__int128, long}}, aligned to 16 too), and with a packed one
     // in the array, aligned to 1 in LLVM's type (a long double off its own): the __int128 is then the most aligned.
     m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
