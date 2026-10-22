@@ -193,6 +193,10 @@ designs and the compilers already built this way.
   The benchmark is linked into this executable rather than built separately.
   It compiles the translation units at once, a clang process each, and links
   them in order: the same executable as one clang command for all of them.
+- `C_TOKENIZER_NO_DIGIT_SEPARATORS` makes both lexer paths end pp-numbers
+  before `'`; the preprocessor sets it in modes before C23, including file
+  caches, scratch text and pastes. The standalone lexer's default keeps C23
+  separators. `benchmark-lexer --no-digit-separators` measures the flag.
 - `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
   it, and `./build/compiler test-lexer` runs them.
   The same command also runs `main_test.c`'s input-loader error and cleanup
@@ -592,6 +596,13 @@ ring of 100,000, deeper than a recursive walk's stack.
 
 ## Lexer tests
 
+Every lexer check runs both with and without
+`C_TOKENIZER_NO_DIGIT_SEPARATORS`, including the guarded-page cases. An
+additional 80,946-case sweep per number mode places apostrophes through
+17 number forms, 18 followers and line splices around SIMD boundaries;
+20 independent Clang token fixtures pin the modes' spellings. See
+[the lexer guide](docs/c-lexer.md#pre-c23-pp-numbers-264).
+
 `./build/compiler test-lexer` needs no corpus. Its checks are ports of the
 snippet and random-input checks of `c/c_tokenizer_test.c` in
 Accelerated-Zig-Parser, where the lexer comes from. They compare `c_tokenize`
@@ -642,7 +653,8 @@ without replacing the driver being developed under #116, #117 and #145.
 
 ## Lexer benchmarks
 
-`./build/compiler benchmark-lexer [--cplusplus] path...` checks each matching
+`./build/compiler benchmark-lexer [--cplusplus] [--no-digit-separators] path...`
+checks each matching
 source against the scalar lexer and reports 21 interleaved-pass median
 throughput, cycles per byte, instructions per byte and IPC (hardware counters
 are zero when unavailable). Paths can be files or directories; `--cplusplus`

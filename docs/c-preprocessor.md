@@ -113,7 +113,8 @@ A/B on the 9700X against `main` (e71d7fd), with this branch merged into it
 | `sqlite3.c` | 11.21 ms | 11.90 ms | 123.28 → 133.31 |
 | `main.c` (`main`'s) | 25.23 ms | 26.37 ms | 340.41 → 372.80 |
 
-On `sqlite3.c`, lexing takes 0.36 ms more (the digit separators, below) and
+At `4c6160f`, before #264, `sqlite3.c`'s lexing takes 0.36 ms more (the digit
+separators, below) and
 the main loop 0.38 ms more. On `main.c`, the main loop takes 0.79 ms more.
 
 What they pay for, each a difference from clang that the fuzzing found:
@@ -122,9 +123,9 @@ What they pay for, each a difference from clang that the fuzzing found:
 - arguments expanded in the order of their parameters' first uses: a macro
   without `__VA_OPT__` lists that order when it is compiled, and one with it
   walks its body;
-- before C23, the search for digit separators, which reads every number's
-  bytes ("Not yet"), and the prefixes the mode lacks on unknown tokens
-  (`u8''`);
+- at that revision, before C23, the search for digit separators, which reads
+  every number's bytes, and the prefixes the mode lacks on unknown tokens
+  (`u8''`); #264 removes the separator search, keeping prefix splitting;
 - a paste's check of its operands for bytes past 0x7F, 64 at a time: an
   identifier written with UCNs pastes as written.
 
@@ -132,6 +133,18 @@ Their first versions cost 21% more instructions on `main.c` and 7.5% on
 `sqlite3.c` than the branch's base did (on the 7940HS). Listing the arguments'
 order and checking pastes 64 bytes at a time took back more than half of
 `main.c`'s.
+
+**#264's separator flag.** `pp_prepare_options` sets
+`C_TOKENIZER_NO_DIGIT_SEPARATORS` in `PPPrepare.refine_flags` before C23.
+The same flags reach file preparation, cache workers, scratch text and pasted
+spellings. Both lexer implementations end a pp-number before `'` directly,
+so `pp_lex_mode` now only splits literal prefixes and
+`pp_find_separator_vector` and its scalar twin are removed. The standalone
+lexer's default keeps C23's numbers. [The lexer guide](c-lexer.md#pre-c23-pp-numbers-264)
+describes the new flag, boundary tests and reproducible qualification.
+The new locked-9700X A/B and 300,000-case C17 differential are pending in
+[PR #278](https://github.com/buster14a/buster/pull/278); the historical cost
+table above remains attributed to `4c6160f`.
 
 **Budget.** The front-end plan (#115) proposed 2 ms to preprocess `sqlite3.c`,
 about 16 cycles per output token, next to 2 ms for lexing every input and
@@ -1263,11 +1276,6 @@ cleared once and reused.
 - `-E -P` keeps no line numbers, so it doesn't move the token after a
   `_Pragma` that prints nothing to its own line, as clang's printer does when
   that token is on another line; `-E` with line markers does.
-- Before C23, the digit-separator pass (`pp_lex_mode`) costs about 2% of
-  `sqlite3.c`'s instructions: it reads every number's bytes for a `'`. Most
-  64-token blocks have a `'` somewhere, in a character constant or a comment,
-  so a block's bytes can't rule it out. A lexer flag that leaves `'` out of
-  numbers would make it free (`c_lexer.c`'s `apostrophe_separator`).
 
 ## Next steps
 
