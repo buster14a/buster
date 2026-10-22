@@ -126,7 +126,9 @@ struct ParseTestClang
 };
 
 // Runs `clang -fsyntax-only` with `arguments` on `count` files at once, and reads each file's first error from its
-// output into `results`. Returns false if clang couldn't be run.
+// output into `results`: one in a header the file includes counts for the file. Returns false if clang couldn't be
+// run, or didn't parse the files: an error no file accounts for (clang's driver's, for an unknown option), or a failing
+// exit with no file rejected.
 static bool parse_test_clang(const char* clang_path, const char* const* arguments, uint32_t argument_count, char** paths, uint32_t count, ParseTestClang* results)
 {
     bool result = true;
@@ -198,8 +200,33 @@ static bool parse_test_clang(const char* clang_path, const char* const* argument
     {
         FILE* stream = fdopen(pipe_fds[0], "r");
         char line[4096];
+        // The file the last "In file included from" line named, whose header the errors after it are in (clang names the
+        // includes again only where they change), and whether an error came that no file accounts for.
+        static const char included[] = "In file included from ";
+        uint32_t including = BUSTER_PARSE_NONE;
+        bool unaccounted = false;
         while (stream != 0 && fgets(line, sizeof(line), stream) != 0)
         {
+            bool accounted = false;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const size_t length = strlen(paths[i]);
+                const size_t prefix = sizeof(included) - 1;
+                if (strncmp(line, included, prefix) == 0 && strncmp(line + prefix, paths[i], length) == 0 && line[prefix + length] == ':')
+                {
+                    including = i;
+                }
+                accounted |= strncmp(line, paths[i], length) == 0 && line[length] == ':';
+            }
+            const bool error = strstr(line, "error: ") != 0;
+            if (error && !accounted && strncmp(line, included, sizeof(included) - 1) != 0 && including != BUSTER_PARSE_NONE && !results[including].rejected)
+            {
+                // An error in a header: the file that includes it is rejected, at a place in the header.
+                results[including].rejected = true;
+                results[including].parse_issue = strstr(line, "Parse Issue]") != 0;
+                snprintf(results[including].message, sizeof(results[including].message), "%.*s", (int)strcspn(line, "\n"), line);
+            }
+            unaccounted |= error && !accounted && including == BUSTER_PARSE_NONE;
             // "path:line:column: error: message [category]"
             for (uint32_t i = 0; i < count; i += 1)
             {
@@ -236,7 +263,12 @@ static bool parse_test_clang(const char* clang_path, const char* const* argument
             close(pipe_fds[0]);
         }
         int status = 0;
-        result = waitpid(child, &status, 0) == child && WIFEXITED(status);
+        bool rejected = false;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            rejected |= results[i].rejected;
+        }
+        result = waitpid(child, &status, 0) == child && WIFEXITED(status) && !unaccounted && (WEXITSTATUS(status) == 0 || rejected);
     }
     return result;
 }
@@ -352,6 +384,28 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(void) {\n  int x;\n\n", "3:1: expected '}'", 0 },
     { "int x\n\n", "1:6: expected ';' after top level declarator", 0 },
     { "int x = (1 +\n\n", "2:1: expected expression", 0 },
+    // sizeof of a compound literal, whose parentheses aren't sizeof's.
+    { "int x = sizeof (int){1};\nint y = sizeof (int[]){1,2,3};\nint z = sizeof (int[]){1,2}[0];\n", "", 0 },
+    // A declarator's name is in scope once its declarator is complete: the inner T's array size still sees the typedef,
+    // its initializer and later declarators the object.
+    { "typedef int T; void f(void) { int T[sizeof((T)0)]; }\n", "", 0 },
+    { "typedef int T; void m(void) { int T = (T)1; }\n", "1:42: expected ';' at end of declaration", 0 },
+    { "typedef int T; void k(int T, int u[sizeof(T)]);\n", "", 0 },
+    // A definition's parameters stay in scope through the rest of its declarator and attributes, into its body, and
+    // only there: after the body, the typedef is back.
+    { "typedef int T;\nint (*h(int T))(int) { (void)T; return 0; }\n", "", 0 },
+    { "int g(int x) __attribute__((unused)) { return x; }\n", "", 0 },
+    { "typedef int T; int f(int T) { return T; } T g;\n", "", 0 },
+    // Whether a body may follow is what the declarator makes its name first: a function through groups and later
+    // suffixes, not a pointer to one, and only for a declaration's one declarator.
+    { "void (f(void)) {}\nint (*g(void))[3] { return 0; }\n", "", 0 },
+    { "int (q)(int x) { return x; }\nint *(r)(void) { return 0; }\n", "", 0 },
+    { "int (*p)(int) { return 0; }\n", "1:14: expected ';' after top level declarator", 0 },
+    { "int f(int a), g(int b) { return b; }\n", "1:23: expected ';' after top level declarator", 0 },
+    { "int (*f(void)) x\n", "1:16: expected function body after function declarator", 0 },
+    // The end of an identifier is where its spelling ends: a UCN and a line splice make it longer than its bytes.
+    { "int \\u00E9\n", "1:11: expected ';' after top level declarator", 0 },
+    { "int ve\\\nctor\n", "2:5: expected ';' after top level declarator", 0 },
 };
 
 // Writes `text` to `path`. Returns false if it can't.
@@ -493,6 +547,34 @@ static uint32_t parse_test_check_fixtures(const char* directory)
         remove(path);
     }
     printf("fixtures: %u trees checked by hand, %u failures\n", count, failures);
+    return failures;
+}
+
+// The oracle itself: clang that fails before it reads the file (an option it doesn't know) is no answer, and an error
+// in a header the file includes rejects the file.
+static uint32_t parse_test_check_oracle(const char* directory, const char* clang)
+{
+    uint32_t failures = 0;
+    char path[4096];
+    char header[4096];
+    snprintf(path, sizeof(path), "%s/oracle.c", directory);
+    snprintf(header, sizeof(header), "%s/oracle.h", directory);
+    const bool written = parse_test_write(path, "#include \"oracle.h\"\nint y;\n", 27) && parse_test_write(header, "int x\n", 6);
+    char* paths[] = { path };
+    ParseTestClang result;
+    const char* unknown[] = { "--buster-test-unknown-option" };
+    const bool refused = written && !parse_test_clang(clang, unknown, 1, paths, 1, &result);
+    const bool included = written && parse_test_clang(clang, 0, 0, paths, 1, &result) && result.rejected;
+    failures += !refused;
+    failures += !included;
+    if (!refused || !included)
+    {
+        printf("oracle: %s%s\n", refused ? "" : "a clang that failed before reading its input counted as an answer; ",
+               included ? "" : "an error in an included header didn't reject its file");
+    }
+    remove(path);
+    remove(header);
+    printf("oracle: %u failures\n", failures);
     return failures;
 }
 
@@ -2455,7 +2537,7 @@ static int run_parser_tests(int argument_count, char** arguments)
         }
         else
         {
-            // -E's options, for our preprocessor and for clang (but --predefines, ours only, and its file).
+            // -E's options, for our preprocessor and for clang (but --predefines, ours only, with its file, and --scalar).
             rest[rest_count] = arguments[i];
             rest_count += 1;
             if (strcmp(argument, "--predefines") == 0 && i + 1 < argument_count)
@@ -2464,8 +2546,9 @@ static int run_parser_tests(int argument_count, char** arguments)
                 rest_count += 1;
                 i += 1;
             }
-            else
+            else if (strcmp(argument, "--scalar") != 0)
             {
+                // Everything but our own options (--predefines and --scalar) goes to clang too.
                 const bool takes = (strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                     strcmp(argument, "-include") == 0 || strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0) && i + 1 < argument_count;
                 clang_arguments[clang_argument_count] = argument;
@@ -2511,6 +2594,7 @@ static int run_parser_tests(int argument_count, char** arguments)
     {
         failures += parse_test_check_postorder_self(&arena);
         failures += parse_test_check_snippets(directory, clang);
+        failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
         failures += parse_test_check_fixtures(directory);
         if (input_count == 0)
         {
