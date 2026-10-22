@@ -138,19 +138,29 @@ static void dynamic_test_lane_main(void* argument)
     }
 }
 
-// Writes a bound link to `path` as a dynamic PIE with a group of `lanes` lanes, its inputs from `bind` and `runtime`,
-// from _start: whether executable_write succeeded, and its result. `write` holds the poison and starve options.
+// The soname the tests give their shared libraries (DT_SONAME).
+#define BUSTER_DYNAMIC_TEST_SONAME "libbuster-test.so"
+
+// Writes a bound link to `path` with a group of `lanes` lanes, its inputs from `bind` and `runtime`: as a dynamic PIE
+// from _start, or against a shared library's runtime (RUNTIME_KIND_SHARED) as a shared library without an entry point,
+// whose soname is BUSTER_DYNAMIC_TEST_SONAME: whether executable_write succeeded, and its result. `write` holds the
+// poison and starve options.
 static bool dynamic_test_write_with(DynamicTestWrite* write, Link* link, const Bind* bind, const Runtime* runtime, String8 path, uint32_t lanes, ExecutableResult* result)
 {
     Scratch scratch = scratch_begin(0);
     ExecutableDynamic dynamic;
-    const bool prepared = dynamic_inputs(&dynamic, runtime, bind, scratch.arena);
+    const bool library = runtime->kind == RUNTIME_KIND_SHARED;
+    const String8 soname = {
+        .pointer = BUSTER_DYNAMIC_TEST_SONAME,
+        .length = sizeof(BUSTER_DYNAMIC_TEST_SONAME) - 1,
+    };
+    const bool prepared = library ? dynamic_shared_inputs(&dynamic, runtime, bind, soname, scratch.arena) : dynamic_inputs(&dynamic, runtime, bind, scratch.arena);
     dynamic.relr_version = write->rela_only ? 0 : dynamic.relr_version;
     dynamic.relr = dynamic.relr && !write->rela_only;
     write->link = link;
     write->options = (ExecutableOptions){
         .path = path,
-        .entry = dynamic_global(runtime, bind, "_start"),
+        .entry = library ? 0 : dynamic_global(runtime, bind, "_start"),
         .dynamic = &dynamic,
         .exact = write->exact,
     };
@@ -449,26 +459,50 @@ static uint64_t dynamic_test_address(const Link* link, SymbolId symbol)
 }
 
 // The test's own rules. A symbol is dynamic, and the loader looks it up, if it is an import or a weak reference to
-// nothing with default visibility, a name and a type other than TLS; the loader relocates a dynamic symbol's address
-// and a defined one's that isn't TLS (RELATIVE), but not a TLS symbol's offset, a weak reference to nothing that isn't
-// dynamic or an absolute symbol's value, which are the executable's to know.
-static bool dynamic_test_is_dynamic(const Link* link, SymbolId symbol)
+// nothing with default visibility, a name and a type other than TLS; and in a shared library (`library`), any global or
+// weak symbol with default visibility and a name that is a reference to nothing, strong or weak (the loader binds it:
+// -z undefs), or a definition, in an atom or absolute (another object the loader finds first may define it too, and
+// the library's own references then reach that one: it is preemptible). The loader relocates a dynamic symbol's
+// address and a defined one's that isn't TLS (RELATIVE), but not a TLS symbol's offset, a weak reference to nothing
+// that isn't dynamic or an absolute symbol's value, which are the executable's to know; and in a shared library, its
+// own TLS symbol's offset from the thread pointer once it places the library's TLS block, from the symbol's offset in
+// the TLS segment (TPOFF64 without a symbol).
+static bool dynamic_test_is_dynamic(const Link* link, SymbolId symbol, bool library)
 {
     const uint8_t flags = link->symbols.flags[symbol];
-    const bool nowhere = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE && link->symbols.atom[symbol] == 0;
+    const uint8_t source = link->symbols.source[symbol];
+    const bool nowhere = source == BUSTER_LINK_SOURCE_NONE && link->symbols.atom[symbol] == 0;
     const bool weak = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    const bool global = (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
     const bool visible = (flags & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT;
     const bool tls = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
-    return link->symbols.source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED || (nowhere && weak && visible && !tls && link->symbols.name[symbol] != 0);
+    const bool named = link->symbols.name[symbol] != 0;
+    const bool defined = link->symbols.atom[symbol] != 0 || source == BUSTER_LINK_SOURCE_ABSOLUTE;
+    return source == BUSTER_LINK_SOURCE_RUNTIME_SHARED || (nowhere && weak && visible && !tls && named) || (library && global && visible && named && (defined || nowhere));
 }
 
-static bool dynamic_test_is_relative(const Link* link, SymbolId symbol)
+// A dynamic symbol that .dynsym has as undefined: an import or a reference to nothing. A shared library's preemptible
+// definitions are its exports.
+static bool dynamic_test_is_undefined(const Link* link, SymbolId symbol, bool library)
+{
+    const bool defined = link->symbols.atom[symbol] != 0 || link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
+    return dynamic_test_is_dynamic(link, symbol, library) && !defined;
+}
+
+static bool dynamic_test_is_relative(const Link* link, SymbolId symbol, bool library)
 {
     const AtomId atom = link->symbols.atom[symbol];
     const bool tls = atom != 0 ? link_class_is_tls(link->atoms.class[atom]) : (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
     const bool nowhere = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE && atom == 0;
     const bool absolute = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
-    return !dynamic_test_is_dynamic(link, symbol) && !tls && !nowhere && !absolute;
+    return !dynamic_test_is_dynamic(link, symbol, library) && !tls && !nowhere && !absolute;
+}
+
+// A shared library's own TLS symbol: defined in an atom of TLS, and not dynamic.
+static bool dynamic_test_is_own_tls(const Link* link, SymbolId symbol, bool library)
+{
+    const AtomId atom = link->symbols.atom[symbol];
+    return library && atom != 0 && link_class_is_tls(link->atoms.class[atom]) && !dynamic_test_is_dynamic(link, symbol, library);
 }
 
 // A relocation the loader needs: where, its type, its symbol's .dynsym name (or 0) and its addend.
@@ -645,10 +679,11 @@ static void dynamic_test_symbols(DynamicTestTally* tally, const Link* link, cons
     dynamic_test_expect(tally, tables && memcmp(&dynsym[0], &none, sizeof(none)) == 0 && (versym == 0 || versym[0] == 0), "the null symbol", index);
     memset(indices, 0, link->symbols.count * sizeof(uint32_t));
     // Each entry's symbol, by name: the link's one symbol of each global name.
+    const bool shared_library = runtime->kind == RUNTIME_KIND_SHARED;
     uint64_t undefined = 0;
     for (SymbolId symbol = 1; tables && symbol < link->symbols.count; symbol += 1)
     {
-        undefined += dynamic_test_is_dynamic(link, symbol) ? 1 : 0;
+        undefined += dynamic_test_is_undefined(link, symbol, shared_library) ? 1 : 0;
     }
     for (uint64_t i = 1; tables && i < count; i += 1)
     {
@@ -711,7 +746,7 @@ static void dynamic_test_symbols(DynamicTestTally* tally, const Link* link, cons
             const bool versioned = import ? version.length == expected.length && version.length != 0 && memcmp(version.pointer, expected.pointer, version.length) == 0 &&
                                                 file.length == library.length && memcmp(file.pointer, library.pointer, file.length) == 0
                                           : number == VER_NDX_LOCAL;
-            dynamic_test_expect(tally, found != 0 && dynamic_test_is_dynamic(link, found), "an undefined entry a dynamic symbol's", i);
+            dynamic_test_expect(tally, found != 0 && dynamic_test_is_undefined(link, found, shared_library), "an undefined entry a dynamic symbol's", i);
             dynamic_test_expect(tally, kind && entry->st_shndx == SHN_UNDEF && entry->st_value == 0 && entry->st_size == 0, "an undefined entry as its symbol is", i);
             dynamic_test_expect(tally, versioned, "an import at its export's version", i);
             dynamic_test_expect(tally, dynamic_test_lookup(image, name) == 0, ".gnu.hash without the undefined", i);
@@ -725,8 +760,13 @@ static void dynamic_test_symbols(DynamicTestTally* tally, const Link* link, cons
             }
             const AtomId atom = found != 0 ? link->symbols.atom[found] : 0;
             const Elf64_Shdr* section = entry->st_shndx < image->header->e_shnum ? &image->section_headers[entry->st_shndx] : 0;
-            const bool placed = atom != 0 && section != 0 && entry->st_value == dynamic_test_address(link, found) && entry->st_size == link->symbols.size[found] &&
-                                entry->st_value >= section->sh_addr && entry->st_value <= section->sh_addr + section->sh_size;
+            // A TLS symbol's value is its offset in the TLS segment, in its section.
+            const Elf64_Phdr* tls_segment = dynamic_test_segment(image, PT_TLS);
+            const bool tls = atom != 0 && link_class_is_tls(link->atoms.class[atom]);
+            const uint64_t address = found != 0 ? dynamic_test_address(link, found) : 0;
+            const uint64_t value = !tls ? address : tls_segment != 0 ? address - tls_segment->p_vaddr : UINT64_MAX;
+            const bool placed = atom != 0 && section != 0 && entry->st_value == value && entry->st_size == link->symbols.size[found] && address >= section->sh_addr &&
+                                address <= section->sh_addr + section->sh_size;
             dynamic_test_expect(tally, exported, "a defined entry an export of binding's", i);
             dynamic_test_expect(tally, kind && placed, "an export at its address, size and section", i);
             dynamic_test_expect(tally, versym == 0 || versym[i] == VER_NDX_GLOBAL, "an export unversioned", i);
@@ -737,15 +777,19 @@ static void dynamic_test_symbols(DynamicTestTally* tally, const Link* link, cons
 }
 
 // .rela.dyn and .relr.dyn against the relocations the test's rules ask for: one for each GOT slot of a dynamic or
-// relocated symbol (GLOB_DAT, TPOFF64 for a TLS import, or RELATIVE to the symbol's address) and for each ABS64 field of
-// a written atom whose target is one (R_X86_64_64 with the fixup's addend, or RELATIVE to the target's address plus
-// it): with `relr`, a RELATIVE one of a slot, or of a field at an even address of an atom aligned to 2 or more, is
-// .relr.dyn's, whose addend is the slot's or the field's bytes; the others are .rela.dyn's, RELATIVE ones first, as many as DT_RELACOUNT says; each GOT
-// slot holding the address at base 0 that its RELATIVE addend repeats, 0 for a dynamic symbol, or a TLS symbol's offset
-// from the thread pointer. Every CALL to a dynamic symbol reaches its stub, jmp [rip + its GOT slot].
-static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, const DynamicTestImage* image, const uint32_t* indices, bool relr, Arena* arena,
-                                     uint64_t index)
+// relocated symbol (GLOB_DAT, TPOFF64 for a TLS one, or RELATIVE to the symbol's address), and in a shared library
+// (`library`) of its own TLS symbol (TPOFF64 without a symbol, its offset in the TLS segment as the addend), and for
+// each ABS64 field of a written atom whose target is one (R_X86_64_64 with the fixup's addend, or RELATIVE to the
+// target's address plus it): with `relr`, a RELATIVE one of a slot, or of a field at an even address of an atom aligned
+// to 2 or more, is .relr.dyn's, whose addend is the slot's or the field's bytes; the others are .rela.dyn's, RELATIVE
+// ones first, as many as DT_RELACOUNT says; each GOT slot holding the address at base 0 that its RELATIVE addend
+// repeats, 0 for a dynamic symbol, a TLS symbol's offset from the thread pointer, or in a shared library its own TLS
+// symbol's offset in the TLS segment, which its TPOFF64 addend repeats. Every CALL to a dynamic symbol reaches its
+// stub, jmp [rip + its GOT slot].
+static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, const DynamicTestImage* image, const uint32_t* indices, bool relr, bool library,
+                                     Arena* arena, uint64_t index)
 {
+    const Elf64_Phdr* tls_segment = dynamic_test_segment(image, PT_TLS);
     const Elf64_Shdr* rela_section = dynamic_test_section(image, ".rela.dyn");
     const Elf64_Shdr* got_section = dynamic_test_section(image, ".got");
     const Elf64_Shdr* stubs_section = dynamic_test_section(image, ".plt.got");
@@ -763,25 +807,29 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
     for (SymbolId symbol = 1; expected != 0 && symbol < link->symbols.count; symbol += 1)
     {
         const uint32_t slot = link->symbols.got_slot[symbol];
-        const bool dynamic = dynamic_test_is_dynamic(link, symbol);
-        const bool relative = dynamic_test_is_relative(link, symbol);
+        const bool dynamic = dynamic_test_is_dynamic(link, symbol, library);
+        const bool relative = dynamic_test_is_relative(link, symbol, library);
+        const bool own_tls = dynamic_test_is_own_tls(link, symbol, library);
         const bool tls = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
-        if (slot != 0 && got_section != 0 && (dynamic || relative))
+        // A shared library's own TLS symbol's offset in the TLS segment, from the segment's address.
+        const int64_t tls_offset = own_tls && tls_segment != 0 ? (int64_t)(dynamic_test_address(link, symbol) - tls_segment->p_vaddr) : 0;
+        if (slot != 0 && got_section != 0 && (dynamic || relative || own_tls))
         {
             // With RELR, a RELATIVE slot is .relr.dyn's, its address in the slot.
             expected[wanted] = (DynamicTestRelocation){
                 .offset = got_section->sh_addr + 8 * (uint64_t)slot,
-                .type = dynamic ? (tls ? R_X86_64_TPOFF64 : R_X86_64_GLOB_DAT) : relr ? 0 : R_X86_64_RELATIVE,
+                .type = dynamic ? (tls ? R_X86_64_TPOFF64 : R_X86_64_GLOB_DAT) : own_tls ? R_X86_64_TPOFF64 : relr ? 0 : R_X86_64_RELATIVE,
                 .symbol = dynamic ? symbol : 0,
-                .addend = dynamic ? 0 : (int64_t)dynamic_test_address(link, symbol),
+                .addend = dynamic ? 0 : own_tls ? tls_offset : (int64_t)dynamic_test_address(link, symbol),
             };
             wanted += 1;
         }
-        // The slot's own bytes: the RELATIVE addend, 0 for a dynamic symbol, an absolute symbol's value, or a TLS
-        // offset, which the patch's references give.
+        // The slot's own bytes: the RELATIVE addend, 0 for a dynamic symbol, an absolute symbol's value, a TLS offset,
+        // which the patch's references give, or in a shared library its own TLS symbol's TPOFF64 addend.
         int64_t value = 0;
         const bool absolute = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
         const int64_t expected_value = dynamic                ? 0
+                                       : own_tls              ? tls_offset
                                        : relative || absolute ? (int64_t)dynamic_test_address(link, symbol)
                                                               : (int64_t)(int32_t)link->symbols.reference[symbol];
         if (slot != 0 && got != 0 && 8 * (uint64_t)slot + 8 <= got_section->sh_size)
@@ -800,8 +848,8 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
         {
             const SymbolId target = fixups->target[fixup];
             const bool abs64 = (fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_ABS64;
-            const bool dynamic = dynamic_test_is_dynamic(link, target);
-            if (abs64 && (dynamic || dynamic_test_is_relative(link, target)))
+            const bool dynamic = dynamic_test_is_dynamic(link, target, library);
+            if (abs64 && (dynamic || dynamic_test_is_relative(link, target, library)))
             {
                 const int64_t addend = link_fixup_addend(link, fixup);
                 // RELR's (marked with type 0 here) take their addends from the fields.
@@ -835,7 +883,9 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
             .symbol = symbol,
             .addend = rela[i].r_addend,
         };
-        ordered = ordered && (type == R_X86_64_RELATIVE) == (i < relative_count) && (type == R_X86_64_RELATIVE) == (dynamic_index == 0);
+        // Without a symbol: the RELATIVE ones, and a shared library's TPOFF64 ones of its own TLS symbols.
+        ordered = ordered && (type == R_X86_64_RELATIVE) == (i < relative_count) &&
+                  (dynamic_index == 0) == (type == R_X86_64_RELATIVE || (library && type == R_X86_64_TPOFF64 && symbol == 0));
     }
     dynamic_test_expect(tally, ordered, "RELATIVE relocations first, as many as DT_RELACOUNT", index);
     // .relr.dyn's, in increasing order, each with its field's bytes as its addend.
@@ -881,7 +931,7 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
         for (FixupId fixup = begin; fixup < begin + atoms->fixup_count[atom]; fixup += 1)
         {
             const SymbolId target = fixups->target[fixup];
-            if ((fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_CALL && dynamic_test_is_dynamic(link, target))
+            if ((fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_CALL && dynamic_test_is_dynamic(link, target, library))
             {
                 // The field from the file: the link's bytes are binding's again (dynamic_test_lanes).
                 const uint64_t place = atoms->address[atom] + fixups->offset[fixup];
@@ -909,11 +959,12 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
     }
 }
 
-// The loads and calls through the GOT, by the test's own rule (executable_test_relaxes): each that relaxes rewritten in
-// the file (executable_test_relaxed), and each other keeping its instruction; and a GOT slot for each symbol that a
-// fixup reads unrelaxed or that a call reaches as a dynamic symbol (through its stub, which reads the slot), and for no
-// other, numbered from 1 in symbol order, after slot 0, which holds 0. Returns how many relaxed.
-static uint64_t dynamic_test_got(DynamicTestTally* tally, const Link* link, const DynamicTestImage* image, Arena* arena, uint64_t index)
+// The loads and calls through the GOT, by the test's own rule (executable_test_relaxes, which in a shared library
+// leaves its dynamic symbols out: another object may define them): each that relaxes rewritten in the file
+// (executable_test_relaxed), and each other keeping its instruction; and a GOT slot for each symbol that a fixup reads
+// unrelaxed or that a call reaches as a dynamic symbol (through its stub, which reads the slot), and for no other,
+// numbered from 1 in symbol order, after slot 0, which holds 0. Returns how many relaxed.
+static uint64_t dynamic_test_got(DynamicTestTally* tally, const Link* link, const DynamicTestImage* image, bool library, Arena* arena, uint64_t index)
 {
     const LinkAtoms* atoms = &link->atoms;
     const LinkFixups* fixups = &link->fixups;
@@ -936,8 +987,9 @@ static uint64_t dynamic_test_got(DynamicTestTally* tally, const Link* link, cons
             const uint8_t kind = fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND;
             const SymbolId target = fixups->target[fixup];
             const bool reads = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
-            const bool relaxes = executable_test_relaxes(link, fixup);
-            const bool stub = kind == BUSTER_LINK_FIXUP_CALL && dynamic_test_is_dynamic(link, target);
+            const bool dynamic = dynamic_test_is_dynamic(link, target, library);
+            const bool relaxes = executable_test_relaxes(link, fixup) && !(library && dynamic);
+            const bool stub = kind == BUSTER_LINK_FIXUP_CALL && dynamic;
             targets[target] |= (reads && !relaxes) || stub ? 1 : 0;
             const uint64_t offset = fixups->offset[fixup];
             const bool readable = atom_offset != UINT64_MAX && atom_offset + offset + 4 <= image->file.length;
@@ -977,18 +1029,24 @@ static uint64_t dynamic_test_got(DynamicTestTally* tally, const Link* link, cons
 // The headers and .dynamic: ET_DYN from _start, PT_INTERP the interpreter, PT_DYNAMIC .dynamic; DT_NEEDED libc.so.6,
 // then the loader exactly when an import is its, as GNU ld and lld take libc.so's AS_NEEDED, and DT_VERNEEDNUM those
 // with a needed version; and the tags lld writes, each with its section's address or size, DT_INIT and DT_FINI crti.o's
-// functions.
+// functions, and DT_FLAGS_1 PIE. A shared library (bound against RUNTIME_KIND_SHARED) instead has no entry point (0) or
+// PT_INTERP, no DT_FLAGS_1 or DT_DEBUG, its soname in DT_SONAME, and DT_FLAGS DF_STATIC_TLS exactly when it has an
+// initial-exec access (GOTTPOFF), as lld writes them.
 static void dynamic_test_headers(DynamicTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, const DynamicTestImage* image, uint64_t index)
 {
     dynamic_test_expect(tally, image->valid, "a PIE's ELF header", index);
+    const bool library = runtime->kind == RUNTIME_KIND_SHARED;
     if (image->valid)
     {
         const SymbolId start = dynamic_global(runtime, bind, "_start");
-        dynamic_test_expect(tally, image->header->e_entry == dynamic_test_address(link, start), "the entry point _start", index);
+        dynamic_test_expect(tally, library ? start == 0 && image->header->e_entry == 0 : image->header->e_entry == dynamic_test_address(link, start), "the entry point _start",
+                            index);
         const Elf64_Phdr* interp = dynamic_test_segment(image, PT_INTERP);
         const char interpreter[] = BUSTER_DYNAMIC_INTERPRETER;
-        dynamic_test_expect(tally, interp != 0 && interp->p_filesz == sizeof(interpreter) && interp->p_offset + sizeof(interpreter) <= image->file.length &&
-                                       memcmp(image->file.pointer + interp->p_offset, interpreter, sizeof(interpreter)) == 0,
+        dynamic_test_expect(tally,
+                            library ? interp == 0
+                                    : interp != 0 && interp->p_filesz == sizeof(interpreter) && interp->p_offset + sizeof(interpreter) <= image->file.length &&
+                                          memcmp(image->file.pointer + interp->p_offset, interpreter, sizeof(interpreter)) == 0,
                             "PT_INTERP", index);
         const Elf64_Phdr* dynamic = dynamic_test_segment(image, PT_DYNAMIC);
         const Elf64_Shdr* dynamic_section = dynamic_test_section(image, ".dynamic");
@@ -1034,7 +1092,23 @@ static void dynamic_test_headers(DynamicTestTally* tally, const Link* link, cons
         const bool ld = !loader || (needed >= 2 && runtime->loader.soname.length == strlen(names[1]) &&
                                     memcmp(names[1], runtime->loader.soname.pointer, runtime->loader.soname.length) == 0);
         dynamic_test_expect(tally, needed == libraries && libc && ld, "DT_NEEDED libc.so.6, and the loader as needed", index);
-        dynamic_test_expect(tally, dynamic_test_tag(image, DT_FLAGS_1, &value) && value == DF_1_PIE, "DT_FLAGS_1 PIE", index);
+        dynamic_test_expect(tally, library ? !dynamic_test_tag(image, DT_FLAGS_1, &value) : dynamic_test_tag(image, DT_FLAGS_1, &value) && value == DF_1_PIE, "DT_FLAGS_1 PIE",
+                            index);
+        dynamic_test_expect(tally, dynamic_test_tag(image, DT_DEBUG, &value) == !library, "DT_DEBUG a PIE's", index);
+        // A shared library's soname, and DF_STATIC_TLS with an initial-exec access.
+        const Elf64_Shdr* dynstr = dynamic_test_section(image, ".dynstr");
+        const char* strings = (const char*)dynamic_test_bytes(image, dynstr);
+        const bool sonamed = dynamic_test_tag(image, DT_SONAME, &value);
+        dynamic_test_expect(tally,
+                            library ? sonamed && strings != 0 && value < dynstr->sh_size && strcmp(strings + value, BUSTER_DYNAMIC_TEST_SONAME) == 0 : !sonamed,
+                            "DT_SONAME a shared library's", index);
+        bool initial_exec = false;
+        for (FixupId fixup = 1; fixup < link->fixups.count; fixup += 1)
+        {
+            initial_exec = initial_exec || (link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_GOTTPOFF;
+        }
+        const bool flagged = dynamic_test_tag(image, DT_FLAGS, &value);
+        dynamic_test_expect(tally, library && initial_exec ? flagged && value == DF_STATIC_TLS : !flagged, "DT_FLAGS DF_STATIC_TLS with initial-exec accesses", index);
         dynamic_test_expect(tally, dynamic_test_tag(image, DT_INIT, &value) && value == dynamic_test_address(link, dynamic_global(runtime, bind, "_init")), "DT_INIT _init",
                             index);
         dynamic_test_expect(tally, dynamic_test_tag(image, DT_FINI, &value) && value == dynamic_test_address(link, dynamic_global(runtime, bind, "_fini")), "DT_FINI _fini",
@@ -1074,8 +1148,9 @@ static uint64_t dynamic_test_structure(DynamicTestTally* tally, const Link* link
     {
         dynamic_test_symbols(tally, link, bind, runtime, &image, indices, index);
         dynamic_test_gnu_hash(tally, &image, index);
-        dynamic_test_relocations(tally, link, &image, indices, relr, scratch.arena, index);
-        relaxed = dynamic_test_got(tally, link, &image, scratch.arena, index);
+        const bool library = runtime->kind == RUNTIME_KIND_SHARED;
+        dynamic_test_relocations(tally, link, &image, indices, relr, library, scratch.arena, index);
+        relaxed = dynamic_test_got(tally, link, &image, library, scratch.arena, index);
         const char* unwind = executable_test_unwind(link, file, 0, bind->unit_base, 0);
         dynamic_test_expect(tally, unwind == 0, unwind != 0 ? unwind : "the unwind tables", index);
     }
@@ -1098,11 +1173,25 @@ static bool dynamic_test_relr_supported(const Runtime* runtime)
 // ---------------------------------------------------------------------------------------------------------------------
 // The variants
 
+// Whether the harness (object_test_harness) at `harness` loads the library at `library`, whose buster_library_main
+// exits with status 0 having written exactly `expected`.
+static bool dynamic_test_loads(const char* harness, const char* library, const uint8_t* expected, uint64_t expected_length)
+{
+    uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
+    uint64_t length = 0;
+    int status = -1;
+    char* arguments[] = { (char*)harness, (char*)library, 0 };
+    char* environment[] = { "BUSTER=1", 0 };
+    const bool ran = executable_test_run_arguments(arguments, environment, output, &length, &status);
+    return ran && WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == expected_length && memcmp(output, expected, length) == 0;
+}
+
 // The same link by the writer's exact twins, with 1 and 8 lanes: the same bytes as `file`; and without RELR, with one
 // lane: .rela.dyn alone, whose structure the checks read and which must run as the program does, writing `expected`
-// and exiting with `status`. They go beside `path`.
+// and exiting with `status`, or for a shared library, which `harness` loads (dynamic_test_loads), with status 0. They
+// go beside `path`.
 static void dynamic_test_variants(DynamicTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, String8 file, const uint8_t* expected,
-                                  uint64_t expected_length, int status, uint64_t index)
+                                  uint64_t expected_length, int status, const char* harness, uint64_t index)
 {
     char variant_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     const int length = snprintf(variant_bytes, sizeof(variant_bytes), "%.*s-variant", (int)path.length, path.pointer);
@@ -1139,8 +1228,9 @@ static void dynamic_test_variants(DynamicTestTally* tally, Link* link, const Bin
     uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
     uint64_t output_length = 0;
     int ended = -1;
-    const bool ran = bytes.pointer != 0 && executable_test_run(variant.pointer, output, &output_length, &ended) && WIFEXITED(ended) && WEXITSTATUS(ended) == status &&
-                     output_length == expected_length && memcmp(output, expected, expected_length) == 0;
+    const bool ran = harness != 0 ? bytes.pointer != 0 && dynamic_test_loads(harness, variant.pointer, expected, expected_length)
+                                  : bytes.pointer != 0 && executable_test_run(variant.pointer, output, &output_length, &ended) && WIFEXITED(ended) &&
+                                        WEXITSTATUS(ended) == status && output_length == expected_length && memcmp(output, expected, expected_length) == 0;
     dynamic_test_expect(tally, ran, "runs without RELR", index);
     scratch_end(scratch);
     unlink(variant.pointer);
@@ -1217,7 +1307,8 @@ static uint64_t dynamic_test_fdes(const DynamicTestImage* image, const Link* lin
         memcpy(&count, index + 8, sizeof(count));
     }
     uint64_t result = index != 0 && header->sh_size == 12 + 8 * (uint64_t)count && count <= capacity ? count : UINT64_MAX;
-    // The functions by address: the link's TEXT atoms' first named symbols, or .symtab's functions.
+    // The functions by address: the link's named symbols in TEXT atoms that are functions (a compiler's object has many
+    // in one atom) or at an atom's start, or .symtab's functions.
     const Elf64_Shdr* symtab = link == 0 ? dynamic_test_section(image, ".symtab") : 0;
     const Elf64_Shdr* strtab = symtab != 0 && symtab->sh_link < image->header->e_shnum ? &image->section_headers[symtab->sh_link] : 0;
     const uint64_t limit = link != 0 ? link->symbols.count : symtab != 0 ? symtab->sh_size / sizeof(Elf64_Sym) : 0;
@@ -1230,10 +1321,11 @@ static uint64_t dynamic_test_fdes(const DynamicTestImage* image, const Link* lin
         {
             const AtomId atom = link->symbols.atom[(SymbolId)s];
             const NameId name = link->symbols.name[(SymbolId)s];
-            if (atom != 0 && name != 0 && link->symbols.value[(SymbolId)s] == 0 && link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT)
+            const bool function = (link->symbols.flags[(SymbolId)s] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
+            if (atom != 0 && name != 0 && (function || link->symbols.value[(SymbolId)s] == 0) && link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT)
             {
                 functions[function_count] = (DynamicTestFunction){
-                    .address = link->atoms.address[atom],
+                    .address = link->atoms.address[atom] + link->symbols.value[(SymbolId)s],
                     .name = link->names.bytes[name],
                     .name_length = link->names.length[name],
                 };
@@ -1929,6 +2021,27 @@ static uint64_t dynamic_test_read_references(const DynamicTestImage* image, Dyna
     return result;
 }
 
+// How many of a file's .rela.dyn and .rela.plt relocations are of `type`.
+static uint64_t dynamic_test_count_relocations(const DynamicTestImage* image, uint32_t type)
+{
+    static const char* const sections[] = {
+        ".rela.dyn",
+        ".rela.plt",
+    };
+    uint64_t result = 0;
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sections); s += 1)
+    {
+        const Elf64_Shdr* section = dynamic_test_section(image, sections[s]);
+        const Elf64_Rela* rela = (const Elf64_Rela*)dynamic_test_bytes(image, section);
+        const uint64_t count = section != 0 ? section->sh_size / sizeof(Elf64_Rela) : 0;
+        for (uint64_t i = 0; rela != 0 && i < count; i += 1)
+        {
+            result += ELF64_R_TYPE(rela[i].r_info) == type ? 1 : 0;
+        }
+    }
+    return result;
+}
+
 static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, uint32_t units, String8 file, const char* directory,
                                      const char* name, bool keep, Arena* arena)
 {
@@ -1966,10 +2079,13 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
             arguments[6] = "-z";
             arguments[7] = "pack-relative-relocs";
         }
-        // A build ID, as the writer's file has, whose note makes a segment.
+        // A build ID, as the writer's file has, whose note makes a segment; and a shared library's soname.
         const uint32_t last = count + (relr ? 2 : 0);
+        const bool library = runtime->kind == RUNTIME_KIND_SHARED;
         arguments[last] = "--build-id";
-        arguments[last + 1] = 0;
+        arguments[last + 1] = library ? "-soname" : 0;
+        arguments[last + 2] = library ? BUSTER_DYNAMIC_TEST_SONAME : 0;
+        arguments[last + 3] = 0;
     }
     const bool linked = written && object_test_run(arguments, output_path, error_path) == 0;
     dynamic_test_expect(tally, linked, "lld links the objects", 0);
@@ -2028,12 +2144,14 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
         dynamic_test_expect(tally, same_references, "lld's relocations against dynamic symbols", our_references_count);
         dynamic_test_expect(tally, our_pointers == their_pointers, "as many RELATIVE pointers as lld's", our_pointers * 100000 + their_pointers);
         // The GOT: as many slots of the image's symbols (RELATIVE) as lld's, which relaxes the same loads and calls, and
-        // as many that hold values the loader leaves alone, but for our slot 0 and the thread-locals' offsets, whose
-        // initial-exec accesses lld relaxes to local-exec. Its slots of dynamic symbols are the references above (lld's
-        // PLT has a slot of its own for a call, which ours reads the symbol's slot for).
+        // as many that hold values the loader leaves alone, but for our slot 0 and, in a PIE, the thread-locals'
+        // offsets, whose initial-exec accesses lld relaxes to local-exec (a shared library's keep theirs, with TPOFF64
+        // relocations). Its slots of dynamic symbols are the references above (lld's PLT has a slot of its own for a
+        // call, which ours reads the symbol's slot for).
+        const bool library = runtime->kind == RUNTIME_KIND_SHARED;
         const ExecutableTestGot our_got = executable_test_got(file, ET_DYN);
         const ExecutableTestGot their_got = executable_test_got(lld_file, ET_DYN);
-        const uint64_t tls_slots = executable_test_tls_slots(link);
+        const uint64_t tls_slots = library ? 0 : executable_test_tls_slots(link);
         dynamic_test_expect(tally, our_got.valid && their_got.valid && our_got.relative == their_got.relative, "as many RELATIVE GOT slots as lld's",
                             our_got.relative * 100000 + their_got.relative);
         dynamic_test_expect(tally, our_got.plain >= 1 + tls_slots && our_got.plain - 1 - tls_slots == their_got.plain, "as many GOT slots without relocations as lld's",
@@ -2059,6 +2177,10 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
             DT_FINI,
             DT_GNU_HASH,
             DT_VERNEED,
+            DT_SONAME,
+            DT_FLAGS,
+            DT_FLAGS_1,
+            DT_DEBUG,
         };
         for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(present); t += 1)
         {
@@ -2077,6 +2199,16 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
             same_needed = strcmp(our_needed[n], their_needed[n]) == 0;
         }
         dynamic_test_expect(tally, same_needed, "lld's DT_NEEDED libraries, in order", our_needed_count * 100 + their_needed_count);
+        // DT_FLAGS's value (a shared library's DF_STATIC_TLS), and as many TPOFF64 relocations as lld's: a shared
+        // library's initial-exec slots, each of its own thread-locals' without a symbol.
+        uint64_t our_flags = 0;
+        uint64_t their_flags = 0;
+        dynamic_test_tag(&ours, DT_FLAGS, &our_flags);
+        dynamic_test_tag(&theirs, DT_FLAGS, &their_flags);
+        dynamic_test_expect(tally, our_flags == their_flags, "lld's DT_FLAGS", our_flags * 100 + their_flags);
+        const uint64_t our_tpoff = dynamic_test_count_relocations(&ours, R_X86_64_TPOFF64);
+        const uint64_t their_tpoff = dynamic_test_count_relocations(&theirs, R_X86_64_TPOFF64);
+        dynamic_test_expect(tally, our_tpoff == their_tpoff, "as many TPOFF64 relocations as lld's", our_tpoff * 100000 + their_tpoff);
         char our_versions[4096];
         char their_versions[4096];
         const bool versions_read = dynamic_test_version_needs(&ours, our_versions, sizeof(our_versions)) &&
@@ -2205,7 +2337,7 @@ static bool dynamic_test_programs(const ExecutableTestDirectory* directory, cons
             }
             if (written)
             {
-                dynamic_test_variants(&tally, &bound.program.link, &bound.bind, runtime, path, file, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES, 0, i);
+                dynamic_test_variants(&tally, &bound.program.link, &bound.bind, runtime, path, file, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES, 0, 0, i);
             }
             printf("  %s: %u atoms, %u fixups, %llu dynamic symbols, %llu relocations in .rela.dyn (%llu relative) and %llu in %llu words of .relr.dyn, %llu stubs, %llu "
                    "loads and calls relaxed, %llu GOT slots, %llu FDEs, %llu bytes: %s\n",
@@ -2274,7 +2406,7 @@ static bool dynamic_test_cases(const ExecutableTestDirectory* directory, const R
         dynamic_test_expect(&tally, !bound || exited, "runs with the linkers' status", which);
         if (written)
         {
-            dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, expected, which);
+            dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, expected, 0, which);
         }
         printf("  %s: %s\n", name, !bound ? "refused" : exited ? "ran" : "didn't run");
         scratch_end(scratch);
@@ -2468,7 +2600,7 @@ static bool dynamic_test_exports(const ExecutableTestDirectory* directory, const
     }
     if (written)
     {
-        dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, 0, 0);
+        dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, 0, 0, 0);
     }
     uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
     uint64_t length = 0;
@@ -2619,7 +2751,7 @@ static bool dynamic_test_imports(const ExecutableTestDirectory* directory, const
     }
     if (written)
     {
-        dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, 0, 0);
+        dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, 0, 0, 0);
     }
     // At least a stub and a slot for each import, which crtbeginS.o's and the members' calls add to.
     dynamic_test_expect(&tally, result.stubs >= BUSTER_DYNAMIC_TEST_IMPORTS && result.relocations >= 2 * BUSTER_DYNAMIC_TEST_IMPORTS, "a stub, a slot and a pointer for each import",
@@ -2715,7 +2847,7 @@ static bool dynamic_test_got_order(const Link* link)
         for (uint64_t symbol = first; symbol < first + 64 && symbol < link->symbols.count; symbol += 1)
         {
             const bool slot = link->symbols.got_slot[symbol] != 0;
-            const bool relative = slot && dynamic_test_is_relative(link, (SymbolId)symbol);
+            const bool relative = slot && dynamic_test_is_relative(link, (SymbolId)symbol, false);
             result = result || (other_first && relative);
             other_first = other_first || (slot && !marked && !relative);
             marked = marked || slot;
@@ -2875,6 +3007,58 @@ static void dynamic_test_small(DynamicTestSmallProgram* program, const Runtime* 
     program->bound = built && bind_end(&test->bind, &test->link) && link_check(&test->link) == LINK_ERROR_NONE;
 }
 
+// The lanes short of scratch memory (dynamic_test_starve): lane 0 of 1 and of 8 lanes, and the last of 2 and of 8.
+static const uint32_t dynamic_test_starved[][2] = {
+    { 1, 0 },
+    { 8, 0 },
+    { 2, 1 },
+    { 8, 7 },
+};
+
+// A link written with case `c` of dynamic_test_starved's lanes short of scratch memory: every write that fails must
+// fail with EXECUTABLE_ERROR_MEMORY and leave no output, and one with room enough must succeed, which it returns, its
+// output at `path`. The room a lane needs isn't quite the same from link to link (a lane that takes a chunk needs room
+// for its runs, and the lanes take them as they come), so a bisection over multiples of 64 bytes (which leave the
+// room's start alike aligned) only finds about the least, and the rooms tried are every KB up to it and every 64 bytes
+// from 4 KB below it to 1 KB above.
+static bool dynamic_test_starve(DynamicTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, uint32_t c)
+{
+    const uint32_t lanes = dynamic_test_starved[c][0];
+    DynamicTestWrite write = {
+        .starve = true,
+        .starved_lane = dynamic_test_starved[c][1],
+    };
+    ExecutableResult result;
+    uint64_t low = 0;
+    uint64_t high = BUSTER_DYNAMIC_TEST_MAX_ROOM / BUSTER_DYNAMIC_TEST_ROOM_STEP;
+    write.room = high * BUSTER_DYNAMIC_TEST_ROOM_STEP;
+    const bool enough = dynamic_test_write_with(&write, link, bind, runtime, path, lanes, &result);
+    while (enough && low < high)
+    {
+        const uint64_t middle = low + (high - low) / 2;
+        write.room = middle * BUSTER_DYNAMIC_TEST_ROOM_STEP;
+        unlink(path.pointer);
+        const bool succeeded = dynamic_test_write_with(&write, link, bind, runtime, path, lanes, &result);
+        low = succeeded ? low : middle + 1;
+        high = succeeded ? middle : high;
+    }
+    const uint64_t least = high * BUSTER_DYNAMIC_TEST_ROOM_STEP;
+    uint64_t wrong = UINT64_MAX;
+    for (uint64_t room = 0; enough && room < least + 1024; room += room + 4096 < least ? 1024 : BUSTER_DYNAMIC_TEST_ROOM_STEP)
+    {
+        unlink(path.pointer);
+        write.room = room;
+        const bool succeeded = dynamic_test_write_with(&write, link, bind, runtime, path, lanes, &result);
+        const bool clean = succeeded || (result.error == EXECUTABLE_ERROR_MEMORY && access(path.pointer, F_OK) != 0);
+        wrong = !clean && wrong == UINT64_MAX ? room : wrong;
+    }
+    write.room = BUSTER_DYNAMIC_TEST_MAX_ROOM;
+    unlink(path.pointer);
+    const bool succeeded = enough && dynamic_test_write_with(&write, link, bind, runtime, path, lanes, &result);
+    dynamic_test_expect(tally, wrong == UINT64_MAX, "a lane short of memory fails the link with no output", wrong);
+    return succeeded;
+}
+
 // Each small program refused with its fixup by every lane count, without an output, or written and run with status 0.
 static bool dynamic_test_smalls(const ExecutableTestDirectory* directory, const Runtime* runtime)
 {
@@ -2914,7 +3098,7 @@ static bool dynamic_test_smalls(const ExecutableTestDirectory* directory, const 
             if (written)
             {
                 dynamic_test_structure(&tally, &test->link, &test->bind, runtime, file, dynamic_test_relr_supported(runtime), which);
-                dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, 0, which);
+                dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, 0, 0, which);
             }
             dynamic_test_expect(&tally, !written || which != DYNAMIC_TEST_SMALL_GOT_ORDER || dynamic_test_got_order(&test->link), "a dynamic symbol's slot first in a word",
                                 which);
@@ -2927,53 +3111,10 @@ static bool dynamic_test_smalls(const ExecutableTestDirectory* directory, const 
             dynamic_test_expect(&tally, outcome, "runs with status 0", which);
             scratch_end(scratch);
         }
-        // A lane short of scratch memory: lane 0 of 1 and of 8 lanes, and the last of 2 and of 8. Every link that fails
-        // must fail with EXECUTABLE_ERROR_MEMORY and leave no output, and one with room enough must run. The room a lane
-        // needs isn't quite the same from link to link (a lane that takes a chunk needs room for its runs, and the lanes
-        // take them as they come), so a bisection over multiples of 64 bytes (which leave the room's start alike
-        // aligned) only finds about the least, and the rooms tried are every KB up to it and every 64 bytes from 4 KB
-        // below it to 1 KB above.
-        static const uint32_t starved[][2] = {
-            { 1, 0 },
-            { 8, 0 },
-            { 2, 1 },
-            { 8, 7 },
-        };
-        for (uint32_t c = 0; program.bound && which == DYNAMIC_TEST_SMALL_WEAK_POINTER && c < BUSTER_ARRAY_LENGTH(starved); c += 1)
+        // A lane short of scratch memory (dynamic_test_starve), with which the program must run once it has room.
+        for (uint32_t c = 0; program.bound && which == DYNAMIC_TEST_SMALL_WEAK_POINTER && c < BUSTER_ARRAY_LENGTH(dynamic_test_starved); c += 1)
         {
-            const uint32_t lanes = starved[c][0];
-            DynamicTestWrite write = {
-                .starve = true,
-                .starved_lane = starved[c][1],
-            };
-            ExecutableResult result;
-            uint64_t low = 0;
-            uint64_t high = BUSTER_DYNAMIC_TEST_MAX_ROOM / BUSTER_DYNAMIC_TEST_ROOM_STEP;
-            write.room = high * BUSTER_DYNAMIC_TEST_ROOM_STEP;
-            const bool enough = dynamic_test_write_with(&write, &test->link, &test->bind, runtime, path, lanes, &result);
-            while (enough && low < high)
-            {
-                const uint64_t middle = low + (high - low) / 2;
-                write.room = middle * BUSTER_DYNAMIC_TEST_ROOM_STEP;
-                unlink(path.pointer);
-                const bool succeeded = dynamic_test_write_with(&write, &test->link, &test->bind, runtime, path, lanes, &result);
-                low = succeeded ? low : middle + 1;
-                high = succeeded ? middle : high;
-            }
-            const uint64_t least = high * BUSTER_DYNAMIC_TEST_ROOM_STEP;
-            uint64_t wrong = UINT64_MAX;
-            for (uint64_t room = 0; enough && room < least + 1024; room += room + 4096 < least ? 1024 : BUSTER_DYNAMIC_TEST_ROOM_STEP)
-            {
-                unlink(path.pointer);
-                write.room = room;
-                const bool succeeded = dynamic_test_write_with(&write, &test->link, &test->bind, runtime, path, lanes, &result);
-                const bool clean = succeeded || (result.error == EXECUTABLE_ERROR_MEMORY && access(path.pointer, F_OK) != 0);
-                wrong = !clean && wrong == UINT64_MAX ? room : wrong;
-            }
-            write.room = BUSTER_DYNAMIC_TEST_MAX_ROOM;
-            unlink(path.pointer);
-            const bool succeeded = enough && dynamic_test_write_with(&write, &test->link, &test->bind, runtime, path, lanes, &result);
-            dynamic_test_expect(&tally, wrong == UINT64_MAX, "a lane short of memory fails the link with no output", wrong);
+            const bool succeeded = dynamic_test_starve(&tally, &test->link, &test->bind, runtime, path, c);
             dynamic_test_expect(&tally, succeeded && executable_test_runs(path.pointer, (const uint8_t*)"", 0), "then succeeds with room enough", c);
         }
         printf("  %s: %s\n", dynamic_test_small_names[which], !outcome ? "wrong" : program.refused != 0 ? "refused" : "ran");
@@ -2981,6 +3122,348 @@ static bool dynamic_test_smalls(const ExecutableTestDirectory* directory, const 
         bind_test_link_end(test);
     }
     return dynamic_test_report(&tally);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Shared libraries
+
+// test-link's shared libraries (link_test_shared_options) and one of --functions workers, each bound against the shared
+// library's runtime (runtime_import_shared) and written by every lane count, which the harness must load and run as the
+// model predicts.
+static bool dynamic_test_shared(const ExecutableTestDirectory* directory, const Runtime* runtime, uint64_t seed, uint32_t functions, bool cross_check)
+{
+    DynamicTestTally tally = {
+        .check = "shared libraries",
+    };
+    char harness[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const bool harnessed = object_test_harness(directory->path, harness, sizeof(harness), directory->keep);
+    dynamic_test_expect(&tally, harnessed, "cc builds the harness", 0);
+    LinkProgramOptions options[BUSTER_LINK_TEST_SHARED_PROGRAMS + 1];
+    link_test_shared_options(options, seed, functions);
+    options[BUSTER_LINK_TEST_SHARED_PROGRAMS] = options[0];
+    options[BUSTER_LINK_TEST_SHARED_PROGRAMS].seed = seed + BUSTER_LINK_TEST_ALL_PROGRAMS;
+    options[BUSTER_LINK_TEST_SHARED_PROGRAMS].functions = functions;
+    for (uint32_t i = 0; i < BUSTER_LINK_TEST_SHARED_PROGRAMS + 1; i += 1)
+    {
+        const bool workers = i == BUSTER_LINK_TEST_SHARED_PROGRAMS;
+        const char* name = workers ? "a shared library, --functions workers" : link_test_shared_names[i];
+        const char* directory_name = workers ? "shared-functions" : link_test_shared_directories[i];
+        BindTestProgram bound;
+        const bool built = bind_test_program(&bound, runtime, options[i], BIND_PATH_VECTOR) && link_check(&bound.program.link) == LINK_ERROR_NONE;
+        dynamic_test_expect(&tally, built, "the library bound", i);
+        char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        const String8 path = executable_test_path(directory, directory_name, path_bytes);
+        Scratch scratch = scratch_begin(0);
+        ExecutableResult result = { 0 };
+        String8 file = { 0 };
+        const bool written = built && dynamic_test_lanes(&tally, &bound.program.link, &bound.bind, runtime, path, name, &result, &file, scratch.arena);
+        if (written)
+        {
+            dynamic_test_structure(&tally, &bound.program.link, &bound.bind, runtime, file, dynamic_test_relr_supported(runtime), i);
+        }
+        if (written && cross_check)
+        {
+            dynamic_test_against_lld(&tally, &bound.program.link, &bound.bind, runtime, options[i].units, file, directory->path, directory_name, directory->keep, scratch.arena);
+        }
+        const bool loaded = written && harnessed && dynamic_test_loads(harness, path.pointer, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES);
+        dynamic_test_expect(&tally, loaded, "the library loads and runs as its model predicts", i);
+        if (written && harnessed)
+        {
+            dynamic_test_variants(&tally, &bound.program.link, &bound.bind, runtime, path, file, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES, 0, harness, i);
+        }
+        printf("  %s: %u atoms, %u fixups, %llu dynamic symbols, %llu relocations in .rela.dyn (%llu relative) and %llu in %llu words of .relr.dyn, %llu stubs, %llu GOT "
+               "slots, %llu bytes: %s\n",
+               name, bound.program.link.atoms.count - 1, bound.program.link.fixups.count - 1, (unsigned long long)result.dynamic_symbols,
+               (unsigned long long)result.relocations, (unsigned long long)result.relative_relocations, (unsigned long long)result.relr_relocations,
+               (unsigned long long)result.relr_words, (unsigned long long)result.stubs, (unsigned long long)result.got_slots, (unsigned long long)result.file_size,
+               loaded ? "loaded" : "didn't load");
+        scratch_end(scratch);
+        if (!directory->keep)
+        {
+            unlink(path.pointer);
+        }
+        bind_test_release(&bound);
+    }
+    if (harnessed && !directory->keep)
+    {
+        unlink(harness);
+    }
+    return dynamic_test_report(&tally);
+}
+
+// The C libraries the compiled check builds, each with a buster_check that the program calls with its own buster_helper
+// and buster_data, which preempt the library's: their checks fail by a count. Each compiled with `pic` (-fPIC, or the
+// code a shared library refuses) and `option`; `refused` if a shared library can't relocate it, and `lld_refuses` if
+// lld's -shared refuses it too.
+typedef struct DynamicTestSharedSource DynamicTestSharedSource;
+struct DynamicTestSharedSource
+{
+    const char* name;
+    const char* source;
+    const char* pic;
+    const char* option;
+    bool refused;
+    bool lld_refuses;
+};
+
+static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
+    {
+        .name = "preemption",
+        .source = "int buster_helper(void) { return 1; }\n"
+                  "int buster_data = 5;\n"
+                  "__attribute__((visibility(\"hidden\"))) int buster_hidden(void) { return 7; }\n"
+                  "__attribute__((visibility(\"protected\"))) int buster_protected(void) { return 3; }\n"
+                  "__thread int buster_thread = 4;\n"
+                  "static __thread int buster_own_thread = 6;\n"
+                  "extern int buster_nowhere(void) __attribute__((weak));\n"
+                  "int (*const buster_table[])(void) = { buster_helper, buster_hidden, buster_protected };\n"
+                  "static int buster_count;\n"
+                  "int buster_check(int (*helper)(void), int* data)\n"
+                  "{\n"
+                  "    int failures = 0;\n"
+                  "    failures += buster_helper() != 2;\n"
+                  "    failures += buster_helper != helper;\n"
+                  "    failures += &buster_data != data || buster_data != 9;\n"
+                  "    failures += buster_table[0] != helper || buster_table[1]() != 7 || buster_table[2]() != 3;\n"
+                  "    failures += buster_hidden() != 7 || buster_protected() != 3;\n"
+                  "    failures += buster_thread != 4 || buster_own_thread != 6;\n"
+                  "    buster_thread += 1;\n"
+                  "    buster_own_thread += 2;\n"
+                  "    failures += buster_thread != 5 || buster_own_thread != 8;\n"
+                  "    failures += &buster_nowhere != 0;\n"
+                  "    failures += ++buster_count != 1;\n"
+                  "    return failures;\n"
+                  "}\n",
+        // Its thread-locals by initial-exec accesses: general- and local-dynamic ones come next.
+        .pic = "-fPIC",
+        .option = "-ftls-model=initial-exec",
+    },
+    {
+        .name = "atexit",
+        .source = "#include <stdlib.h>\n"
+                  "static void buster_handler(void) {}\n"
+                  "int buster_check(int (*helper)(void), int* data)\n"
+                  "{\n"
+                  "    return atexit(buster_handler) != 0 || helper() != 2 || *data != 9;\n"
+                  "}\n",
+        .pic = "-fPIC",
+    },
+    {
+        // A protected function's address by a lea (PC32): no other object preempts it.
+        .name = "protected-lea",
+        .source = "__attribute__((visibility(\"protected\"))) int buster_protected(void) { return 3; }\n"
+                  "int buster_check(int (*helper)(void), int* data)\n"
+                  "{\n"
+                  "    int (*volatile pointer)(void) = buster_protected;\n"
+                  "    return pointer() != 3 || helper() != 2 || *data != 9;\n"
+                  "}\n",
+        .pic = "-fPIC",
+    },
+    {
+        // -fPIE code takes its preemptible function's address by a lea (PC32): lld says to recompile it with -fPIC.
+        .name = "pie-code",
+        .source = "int buster_exported(void) { return 1; }\n"
+                  "int buster_check(int (*helper)(void), int* data)\n"
+                  "{\n"
+                  "    int (*volatile pointer)(void) = buster_exported;\n"
+                  "    return pointer() != 1 || helper() != 2 || *data != 9;\n"
+                  "}\n",
+        .pic = "-fPIE",
+        .refused = true,
+        .lld_refuses = true,
+    },
+    {
+        // A local-exec access (TPOFF32), whose offset from the thread pointer a shared library can't know.
+        .name = "local-exec",
+        .source = "__thread int buster_thread = 4;\n"
+                  "int buster_check(int (*helper)(void), int* data) { return buster_thread != 4 || helper() != 2 || *data != 9; }\n",
+        .pic = "-fPIC",
+        .option = "-ftls-model=local-exec",
+        .refused = true,
+        .lld_refuses = true,
+    },
+    {
+        // A pointer to a preemptible function in .rodata (a text relocation), from code without -fPIC.
+        .name = "text-relocation",
+        .source = "int buster_exported(void) { return 1; }\n"
+                  "int (*const buster_table[])(void) = { buster_exported };\n"
+                  "int buster_check(int (*helper)(void), int* data) { return buster_table[0]() != 1 || helper() != 2 || *data != 9; }\n",
+        .pic = "-fno-pic",
+        .refused = true,
+        .lld_refuses = true,
+    },
+    {
+        // A general-dynamic access (TLSGD and its call of __tls_get_addr), whose GOT pair comes in the next part.
+        .name = "general-dynamic",
+        .source = "__thread int buster_thread = 4;\n"
+                  "int buster_check(int (*helper)(void), int* data) { return buster_thread != 4 || helper() != 2 || *data != 9; }\n",
+        .pic = "-fPIC",
+        .option = "-mtls-dialect=gnu",
+        .refused = true,
+    },
+};
+
+// The program that loads a compiled library: it defines buster_helper and buster_data, which -rdynamic exports, so
+// that they preempt the library's, and returns the count of the library's failed checks, or 99 if it can't load it.
+static const char dynamic_test_shared_program[] = "#include <dlfcn.h>\n"
+                                                  "#include <stdio.h>\n"
+                                                  "int buster_helper(void) { return 2; }\n"
+                                                  "int buster_data = 9;\n"
+                                                  "int main(int argc, char** argv)\n"
+                                                  "{\n"
+                                                  "    void* library = argc >= 2 ? dlopen(argv[1], RTLD_NOW) : 0;\n"
+                                                  "    int (*check)(int (*)(void), int*) = library != 0 ? (int (*)(int (*)(void), int*))dlsym(library, \"buster_check\") : 0;\n"
+                                                  "    if (check == 0)\n"
+                                                  "    {\n"
+                                                  "        fprintf(stderr, \"%s\\n\", dlerror());\n"
+                                                  "    }\n"
+                                                  "    return check != 0 ? check(buster_helper, &buster_data) : 99;\n"
+                                                  "}\n";
+
+// Whether the program at `program` loads the library at `library` and exits with status 0: every check held.
+static bool dynamic_test_checks_hold(const char* program, const char* library)
+{
+    uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
+    uint64_t length = 0;
+    int status = -1;
+    char* arguments[] = { (char*)program, (char*)library, 0 };
+    char* environment[] = { "BUSTER=1", 0 };
+    const bool ran = executable_test_run_arguments(arguments, environment, output, &length, &status);
+    return ran && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// The compiled libraries (dynamic_test_shared_sources): each compiled by cc with -fPIC, imported as the program, bound
+// against the shared library's runtime and written by every lane count, read back by the structure's rules, and
+// loaded by the program (dynamic_test_shared_program, which cc builds with -rdynamic), whose checks of preemption must
+// hold. With `cross_check`, lld links the same object with cc -shared, whose library must pass the same checks, and the
+// bound link's objects as dynamic_test_against_lld compares.
+static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* directory, const Runtime* runtime, bool cross_check)
+{
+    DynamicTestTally tally = {
+        .check = "compiled shared libraries",
+    };
+    char program_source[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char program[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char out[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char err[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    snprintf(program_source, sizeof(program_source), "%s/shared-loader.c", directory->path);
+    snprintf(program, sizeof(program), "%s/shared-loader", directory->path);
+    snprintf(out, sizeof(out), "%s/shared-compiled.out", directory->path);
+    snprintf(err, sizeof(err), "%s/shared-compiled.err", directory->path);
+    FILE* program_file = fopen(program_source, "w");
+    const bool program_written = program_file != 0 && fputs(dynamic_test_shared_program, program_file) >= 0;
+    if (program_file != 0)
+    {
+        fclose(program_file);
+    }
+    char* build[] = { "cc", "-O1", "-rdynamic", "-o", program, program_source, 0 };
+    const bool built = program_written && object_test_run(build, out, err) == 0;
+    dynamic_test_expect(&tally, built, "cc builds the program that loads the libraries", 0);
+    for (uint32_t s = 0; built && s < BUSTER_ARRAY_LENGTH(dynamic_test_shared_sources); s += 1)
+    {
+        const DynamicTestSharedSource* library = &dynamic_test_shared_sources[s];
+        Scratch scratch = scratch_begin(0);
+        char source_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        char object_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        char lld_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        char name[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        snprintf(source_path, sizeof(source_path), "%s/shared-%s.c", directory->path, library->name);
+        snprintf(object_path, sizeof(object_path), "%s/shared-%s.o", directory->path, library->name);
+        snprintf(lld_path, sizeof(lld_path), "%s/shared-%s-lld.so", directory->path, library->name);
+        snprintf(name, sizeof(name), "shared-%s.so", library->name);
+        FILE* file = fopen(source_path, "w");
+        const bool written = file != 0 && fputs(library->source, file) >= 0;
+        if (file != 0)
+        {
+            fclose(file);
+        }
+        char* compile[] = { "cc", "-O2", (char*)library->pic, "-c", "-o", object_path, source_path, (char*)library->option, 0 };
+        const bool compiled = written && object_test_run(compile, out, err) == 0;
+        dynamic_test_expect(&tally, compiled, library->name, s);
+        const String8 object = compiled ? object_test_read_file(scratch.arena, object_path) : (String8){ 0 };
+        BindTestLink bound;
+        const bool imported = object.pointer != 0 && bind_test_static_import(&bound, runtime, object);
+        const bool bound_ok = imported && bind_begin(&bound.bind, &bound.link, runtime, BIND_PATH_VECTOR, &bound.bytes, 1, &bound.arena) && bind_end(&bound.bind, &bound.link) &&
+                              link_check(&bound.link) == LINK_ERROR_NONE;
+        dynamic_test_expect(&tally, bound_ok, "imported and bound", s);
+        char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        const String8 path = executable_test_path(directory, name, path_bytes);
+        ExecutableResult result = { 0 };
+        String8 bytes = { 0 };
+        // A refused one by every lane count, then by the exact twins with 1 and 8 lanes, each without an output.
+        bool refused = bound_ok;
+        for (uint32_t l = 0; bound_ok && library->refused && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) + 2; l += 1)
+        {
+            const bool exact = l >= BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts);
+            const uint32_t lanes = exact ? (l == BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) ? 1 : 8) : dynamic_test_lane_counts[l];
+            DynamicTestWrite write = {
+                .exact = exact,
+            };
+            ExecutableResult refusal;
+            unlink(path.pointer);
+            const bool written = dynamic_test_write_with(&write, &bound.link, &bound.bind, runtime, path, lanes, &refusal);
+            const bool clean = !written && refusal.error == EXECUTABLE_ERROR_RELOCATION && refusal.fixup != 0 && access(path.pointer, F_OK) != 0;
+            dynamic_test_expect(&tally, clean, "refused by every lane count", (exact ? 100 : 0) + lanes);
+            refused = refused && clean;
+        }
+        const bool linked = bound_ok && !library->refused && dynamic_test_lanes(&tally, &bound.link, &bound.bind, runtime, path, library->name, &result, &bytes, scratch.arena);
+        if (linked)
+        {
+            dynamic_test_structure(&tally, &bound.link, &bound.bind, runtime, bytes, dynamic_test_relr_supported(runtime), s);
+        }
+        const bool held = library->refused ? refused : linked && dynamic_test_checks_hold(program, path.pointer);
+        dynamic_test_expect(&tally, held, library->refused ? "refused" : "the program loads it and its checks hold", s);
+        // A lane short of scratch memory, with which the first library must still load and hold.
+        for (uint32_t c = 0; linked && s == 0 && c < BUSTER_ARRAY_LENGTH(dynamic_test_starved); c += 1)
+        {
+            const bool succeeded = dynamic_test_starve(&tally, &bound.link, &bound.bind, runtime, path, c);
+            dynamic_test_expect(&tally, succeeded && dynamic_test_checks_hold(program, path.pointer), "then succeeds with room enough", c);
+        }
+        if (bound_ok && cross_check)
+        {
+            char* lld[] = { "cc", "-shared", "-fuse-ld=lld", "-o", lld_path, object_path, 0 };
+            const bool lld_linked = object_test_run(lld, out, err) == 0;
+            dynamic_test_expect(&tally, lld_linked == !library->lld_refuses, "lld links it or refuses it alike", s);
+            dynamic_test_expect(&tally, !lld_linked || dynamic_test_checks_hold(program, lld_path), "lld's library passes the same checks", s);
+            if (linked)
+            {
+                dynamic_test_against_lld(&tally, &bound.link, &bound.bind, runtime, 1, bytes, directory->path, name, directory->keep, scratch.arena);
+            }
+        }
+        printf("  %s: %u atoms, %u fixups, %llu dynamic symbols, %llu relocations in .rela.dyn and %llu in .relr.dyn, %llu stubs, %llu GOT slots: %s\n", library->name,
+               bound.link.atoms.count - 1, bound.link.fixups.count - 1, (unsigned long long)result.dynamic_symbols, (unsigned long long)result.relocations,
+               (unsigned long long)result.relr_relocations, (unsigned long long)result.stubs, (unsigned long long)result.got_slots,
+               !held ? "failed" : library->refused ? "refused" : "its checks held");
+        if (imported)
+        {
+            bind_test_link_end(&bound);
+        }
+        scratch_end(scratch);
+        if (!directory->keep)
+        {
+            unlink(source_path);
+            unlink(object_path);
+            unlink(lld_path);
+            unlink(path.pointer);
+        }
+    }
+    if (!directory->keep)
+    {
+        unlink(program_source);
+        unlink(program);
+        unlink(out);
+        unlink(err);
+    }
+    return dynamic_test_report(&tally);
+}
+
+// A runtime that didn't import, named.
+static void dynamic_test_report_import(RuntimeError error, const Runtime* runtime)
+{
+    if (error != RUNTIME_ERROR_NONE)
+    {
+        fprintf(stderr, "the shared library's runtime didn't import: error %d, %s\n", (int)error, runtime->failed_file);
+    }
 }
 
 static int run_dynamic_tests(int argc, char** argv)
@@ -3051,6 +3534,15 @@ static int run_dynamic_tests(int argc, char** argv)
         passed = dynamic_test_exports(&directory, &runtime, cross_check) && passed;
         passed = dynamic_test_imports(&directory, &runtime, cross_check) && passed;
         passed = dynamic_test_smalls(&directory, &runtime) && passed;
+        Runtime shared_runtime;
+        const RuntimeError shared_imported = runtime_import_shared(&shared_runtime);
+        dynamic_test_report_import(shared_imported, &shared_runtime);
+        passed = shared_imported == RUNTIME_ERROR_NONE && dynamic_test_shared(&directory, &shared_runtime, seed, (uint32_t)functions, cross_check) && passed;
+        passed = shared_imported == RUNTIME_ERROR_NONE && dynamic_test_shared_compiled(&directory, &shared_runtime, cross_check) && passed;
+        if (shared_imported == RUNTIME_ERROR_NONE)
+        {
+            runtime_release(&shared_runtime);
+        }
         result = passed ? 0 : 1;
         if (keep)
         {

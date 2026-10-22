@@ -137,9 +137,9 @@ static String8 executable_test_path(const ExecutableTestDirectory* directory, co
     return result;
 }
 
-// Runs the executable at `path` without arguments, in `environment`: what it writes to standard output, and how it
-// ended.
-static bool executable_test_run_with(const char* path, char** environment, uint8_t* output, uint64_t* output_length, int* status)
+// Runs the executable `arguments` name first with them (a null-terminated list), in `environment`: what it writes to
+// standard output, and how it ended.
+static bool executable_test_run_arguments(char** arguments, char** environment, uint8_t* output, uint64_t* output_length, int* status)
 {
     int ends[2];
     bool result = pipe(ends) == 0;
@@ -156,8 +156,7 @@ static bool executable_test_run_with(const char* path, char** environment, uint8
             close(ends[0]);
             close(ends[1]);
             alarm(BUSTER_EXECUTABLE_TEST_RUN_SECONDS);
-            char* arguments[] = { (char*)path, 0 };
-            execve(path, arguments, environment);
+            execve(arguments[0], arguments, environment);
             _exit(127);
         }
         close(ends[1]);
@@ -172,6 +171,14 @@ static bool executable_test_run_with(const char* path, char** environment, uint8
         result = result && waitpid(child, status, 0) == child;
     }
     return result;
+}
+
+// Runs the executable at `path` without arguments, in `environment`: what it writes to standard output, and how it
+// ended.
+static bool executable_test_run_with(const char* path, char** environment, uint8_t* output, uint64_t* output_length, int* status)
+{
+    char* arguments[] = { (char*)path, 0 };
+    return executable_test_run_arguments(arguments, environment, output, output_length, status);
 }
 
 // Runs the executable at `path` without arguments, in an environment of its own: what it writes to standard output, and

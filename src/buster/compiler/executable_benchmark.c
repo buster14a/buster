@@ -6,7 +6,7 @@
 // build ID's chunk hash.
 //
 // Usage: build/compiler benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N]
-//                                            [--only kernels|hash|links|dynamic|static|static-pie]
+//                                            [--only kernels|hash|links|dynamic|static|static-pie|shared]
 //
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...), or with --lanes N to N CPUs, one per core
 // (taskset -c 0-7 for 8), since the lanes' threads keep the affinity they start with. Each figure is a median:
@@ -25,9 +25,10 @@
 //     its mix, and the unwind tables' passes (executable_benchmark_unwind). Then the same sizes as programs that call
 //     libc, bound against the system's runtime (runtime.c and bind.c) and written as dynamic PIEs, the same way (--only
 //     dynamic for these alone); bound against its static runtime (runtime_import_static) and written as static
-//     executables (--only static); and bound against the static PIE's runtime (runtime_import_static_pie) and written
-//     as static PIEs (--only static-pie). Every kind's GOT relaxation takes the forms it writes, so that a write over
-//     them again writes the same file.
+//     executables (--only static); bound against the static PIE's runtime (runtime_import_static_pie) and written
+//     as static PIEs (--only static-pie); and generated as shared libraries (LinkProgramOptions.shared), bound against
+//     the shared library's runtime (runtime_import_shared) and written as shared libraries (--only shared). Every
+//     kind's GOT relaxation takes the forms it writes, so that a write over them again writes the same file.
 // The exit status is 1 if the arguments are invalid, a variant's bytes differ, the runtime doesn't import, or a link
 // fails.
 
@@ -692,15 +693,24 @@ static const char* const executable_benchmark_phase_names[EXECUTABLE_PHASES] = {
     "finish",
 };
 
+// The soname of the benchmark's shared libraries.
+#define BUSTER_EXECUTABLE_BENCHMARK_SONAME "libbuster-benchmark.so"
+
 // With `runtime`, the program calls libc: it is bound against the runtime (bind.c) and written as the runtime's kind
-// is for, a dynamic PIE, a static executable (runtime_import_static's) or a static PIE (runtime_import_static_pie's),
-// its inputs from dynamic.c; otherwise it is written as a static executable without libc. The programs that call libc
+// is for, a dynamic PIE, a static executable (runtime_import_static's), a static PIE (runtime_import_static_pie's) or a
+// shared library (runtime_import_shared's, the program generated as one), its inputs from dynamic.c; otherwise it is
+// written as a static executable without libc. The programs that call libc
 // have no general- or local-dynamic TLS accesses, whose relaxation rewrites the atoms' bytes so that a write over them
 // again would fail.
 static bool executable_benchmark_link(const char* directory, uint32_t functions, uint32_t lanes, uint64_t seed, const Runtime* runtime)
 {
     const bool static_runtime = runtime != 0 && runtime_kind_is_static(runtime->kind);
     const bool pie = runtime != 0 && runtime->kind == RUNTIME_KIND_STATIC_PIE;
+    const bool library = runtime != 0 && runtime->kind == RUNTIME_KIND_SHARED;
+    const String8 soname = {
+        .pointer = BUSTER_EXECUTABLE_BENCHMARK_SONAME,
+        .length = sizeof(BUSTER_EXECUTABLE_BENCHMARK_SONAME) - 1,
+    };
     LinkProgramOptions options = link_program_default_options();
     options.seed = seed;
     options.functions = functions;
@@ -708,6 +718,7 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     options.globals = functions / 50 > 32 ? functions / 50 : 32;
     options.libc = runtime != 0;
     options.absolute = runtime == 0;
+    options.shared = library;
     LinkProgram program;
     char path[BUSTER_EXECUTABLE_BENCHMARK_PATH_BYTES];
     snprintf(path, sizeof(path), "%s/buster-executable-benchmark-%d", directory, (int)getpid());
@@ -727,7 +738,8 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
         result = result && link_program_generate_atoms(&program);
         result = result && bind_end(&bind, &program.link);
         result = result && link_program_generate_end(&program);
-        result = result && link_check(&program.link) == LINK_ERROR_NONE && (static_runtime || dynamic_inputs(&dynamic, runtime, &bind, &bind_arena));
+        result = result && link_check(&program.link) == LINK_ERROR_NONE &&
+                 (static_runtime || (library ? dynamic_shared_inputs(&dynamic, runtime, &bind, soname, &bind_arena) : dynamic_inputs(&dynamic, runtime, &bind, &bind_arena)));
         if (result && pie)
         {
             dynamic_static_pie_inputs(&dynamic, &static_inputs, runtime, &bind);
@@ -748,7 +760,7 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
                 .pointer = path,
                 .length = strlen(path),
             },
-            .entry = runtime != 0 ? dynamic_global(runtime, &bind, "_start") : program.entry,
+            .entry = library ? 0 : runtime != 0 ? dynamic_global(runtime, &bind, "_start") : program.entry,
             .dynamic = runtime != 0 && (!static_runtime || pie) ? &dynamic : 0,
             .runtime = static_runtime ? &static_inputs : 0,
         },
@@ -773,6 +785,15 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
                functions, program.link.atoms.count - 1, program.link.fixups.count - 1, (unsigned long long)program.code_bytes, (unsigned long long)write.result.stubs,
                (unsigned long long)write.result.relocations, (unsigned long long)write.result.got_slots, (unsigned long long)size, (unsigned long long)write.result.chunks,
                lanes, lanes == 1 ? "" : "s");
+    }
+    else if (result && library)
+    {
+        printf("%u workers, bound against the shared library's runtime and written as a shared library: %u atoms, %u fixups, %llu bytes of code, %llu dynamic "
+               "symbols, %llu relocations in .rela.dyn (%llu relative) and %llu in %llu words of .relr.dyn, %llu stubs, a %llu-byte file in %llu chunks, %u lane%s:\n",
+               functions, program.link.atoms.count - 1, program.link.fixups.count - 1, (unsigned long long)program.code_bytes, (unsigned long long)write.result.dynamic_symbols,
+               (unsigned long long)write.result.relocations, (unsigned long long)write.result.relative_relocations, (unsigned long long)write.result.relr_relocations,
+               (unsigned long long)write.result.relr_words, (unsigned long long)write.result.stubs, (unsigned long long)size, (unsigned long long)write.result.chunks, lanes,
+               lanes == 1 ? "" : "s");
     }
     else if (result && runtime != 0)
     {
@@ -908,7 +929,7 @@ int run_executable_benchmark(int argc, char** argv)
         {
             only = argv[i + 1];
             valid = valid && (strcmp(only, "kernels") == 0 || strcmp(only, "hash") == 0 || strcmp(only, "links") == 0 || strcmp(only, "dynamic") == 0 ||
-                              strcmp(only, "static") == 0 || strcmp(only, "static-pie") == 0);
+                              strcmp(only, "static") == 0 || strcmp(only, "static-pie") == 0 || strcmp(only, "shared") == 0);
             i += 1;
         }
         else
@@ -920,7 +941,7 @@ int run_executable_benchmark(int argc, char** argv)
     if (!valid)
     {
         fprintf(stderr, "usage: benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N] [--only "
-                        "kernels|hash|links|dynamic|static|static-pie]\n");
+                        "kernels|hash|links|dynamic|static|static-pie|shared]\n");
     }
     else
     {
@@ -980,6 +1001,23 @@ int run_executable_benchmark(int argc, char** argv)
             {
                 runtime_release(&static_runtime);
             }
+        }
+        // And as shared libraries, against the system's shared library's runtime.
+        Runtime shared_runtime;
+        const bool libraries = only == 0 || strcmp(only, "links") == 0 || strcmp(only, "shared") == 0;
+        const RuntimeError shared_imported = libraries ? runtime_import_shared(&shared_runtime) : RUNTIME_ERROR_NONE;
+        if (libraries && shared_imported != RUNTIME_ERROR_NONE)
+        {
+            fprintf(stderr, "the shared library's runtime didn't import: error %d, %s\n", (int)shared_imported, shared_runtime.failed_file);
+            passed = false;
+        }
+        for (uint32_t i = 0; libraries && shared_imported == RUNTIME_ERROR_NONE && i < program_count; i += 1)
+        {
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &shared_runtime) && passed;
+        }
+        if (libraries)
+        {
+            runtime_release(&shared_runtime);
         }
         result = passed ? 0 : 1;
     }

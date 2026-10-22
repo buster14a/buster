@@ -16,7 +16,8 @@
 // A static executable's with the C runtime (ExecutableRuntime, dynamic_static_inputs) are crt1.o's ABI note and the
 // link's __tls_get_addr. A static PIE's (dynamic_static_pie_inputs) are both: an ExecutableDynamic without an
 // interpreter, a library, versions or exports, with rcrt1.o's ABI note, crti.o's _init and _fini and RELR when libc.a's
-// startup takes it (dynamic_static_relr), and the static executable's ExecutableRuntime.
+// startup takes it (dynamic_static_relr), and the static executable's ExecutableRuntime. A shared library's
+// (dynamic_shared_inputs) are a dynamic PIE's without the interpreter or the ABI note, with its soname.
 //
 // main.c includes this file after bind.c and executable.c.
 
@@ -124,4 +125,19 @@ static __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, c
         .relr = relr_version != 0,
     };
     return versions != 0;
+}
+
+// Fills `dynamic` for a link that `bind` bound against a shared library's runtime (runtime_import_shared), as
+// dynamic_inputs fills a dynamic PIE's but without an interpreter or an ABI note (the runtime has no start object): a
+// shared library (ExecutableDynamic.shared), whose exports are binding's (every global and weak definition of default
+// or protected visibility) and whose soname is `soname` (empty for none). False if the arena has no room for the
+// versions.
+static __attribute__((unused)) bool dynamic_shared_inputs(ExecutableDynamic* dynamic, const Runtime* runtime, const Bind* bind, String8 soname, Arena* arena)
+{
+    const bool result = dynamic_inputs(dynamic, runtime, bind, arena);
+    dynamic->interpreter = (String8){ 0 };
+    dynamic->note = (String8){ 0 };
+    dynamic->shared = true;
+    dynamic->soname = soname;
+    return result;
 }
