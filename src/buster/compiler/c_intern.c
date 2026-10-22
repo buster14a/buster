@@ -16,7 +16,10 @@
 // the record arena, where one masked compare of the key's bytes and its terminating zero confirms both the bytes and the
 // length. Buckets are probed in order from the hash's; spellings are never removed, so a key is absent once a probe meets
 // a bucket with an empty slot. (docs/c-refinement.md has the measurements that chose this over a Swiss table of 1-byte
-// tags, which needed a tag group, a slot and a record: three dependent loads.)
+// tags, which needed a tag group, a slot and a record: three dependent loads.) Each id's span (its record's offset and
+// length) is in the same mapping as the buckets, past them, and the first buckets and spans are at the start of the record
+// arena, so that a table of up to 16,384 buckets, 40,960 ids and about 700 KB of records touches its first 64 KB, in
+// base pages, and one huge page: the kernel clears each fresh huge page, 2 MB, on its first touch.
 //
 // IDs are opaque: they are given in the order spellings are first interned, and nothing may be emitted in their order,
 // so that interning from several threads later can't change the compiler's output. Two exceptions are fixed: id 0 is
@@ -38,11 +41,15 @@
 // this order:
 //   - The predefined names: BUSTER_C_NAMES (keywords, then directive names, then the preprocessor's names), IdentId,
 //     the C_NAME_* ids, CLanguage and c_keyword_kind (which keyword kinds a language mode has).
-//   - The table: InternTable, the hash (intern_lane_rounds, intern_chain, intern_hash_bytes_scalar, intern_fold,
-//     intern_with_length, intern_hash_vector, intern_chain_chunks, intern_hash_bytes), the bucket helpers (intern_bucket_key, intern_bucket_matches, intern_bucket_empties,
-//     intern_slot_id, intern_first_bytes), intern_allocate_buckets, intern_place, intern_grow, intern_insert,
-//     intern_find_hashed, intern_find_or_add_hashed, intern_find_or_add, intern_find, intern_bytes, intern_length,
-//     intern_initialize, intern_release and intern_reset.
+//   - The table: InternSpan, InternTable, the hash (intern_lane_rounds, intern_chain, intern_hash_bytes_scalar,
+//     intern_fold, intern_with_length, intern_hash_vector, intern_hash_zero_lanes, intern_hash_vectors4_short,
+//     intern_chain_chunks, intern_hash_bytes), the bucket helpers
+//     (intern_bucket_key, intern_bucket_matches, intern_bucket_empties, intern_slot_id, intern_first_bytes),
+//     intern_layout_bytes, intern_lay_out, intern_place, intern_slot, intern_grow, intern_reserve_record, intern_insert, intern_find_hashed,
+//     intern_find_or_add_hashed, intern_find_or_add, intern_find_or_add_vector, intern_find, intern_bytes,
+//     intern_length, intern_add_names, intern_initialize_with, intern_initialize, intern_release and intern_reset.
+//   - Spellings added from several lanes: InternBulk, intern_place_shared, intern_bulk_begin, intern_bulk_replace,
+//     intern_bulk_add and intern_bulk_end.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -363,10 +370,12 @@ static __attribute__((unused)) bool c_name_is_keyword(IdentId id, CLanguage lang
 // first bucket.
 #define BUSTER_INTERN_LOAD_NUMERATOR 5
 #define BUSTER_INTERN_LOAD_DENOMINATOR 8
-// 8,192 buckets: 32,768 slots in 512 KB, room for 20,480 spellings before the first growth. A translation unit that
-// includes a libc header interns thousands; the buckets are address space, touched as they are used.
-#define BUSTER_INTERN_INITIAL_BUCKETS 8192
-// The record arena (offsets are u32) and the id columns, reserved up front and committed as they are written.
+// 16,384 buckets: 65,536 slots in 1 MB, room for 40,960 spellings before the first growth. sqlite3.c and its headers
+// intern 24,000, which outgrew 8,192 buckets: the growth placed every spelling again and cleared a new huge page, and the
+// load before it deferred a fifth more identifiers. 1 MB fits the same huge page (past the arena's first 64 KB) as
+// 512 KB, so it costs no more to clear.
+#define BUSTER_INTERN_INITIAL_BUCKETS 16384
+// The record arena (offsets are u32), reserved up front and committed as it is written, and the most ids.
 #define BUSTER_INTERN_RECORD_BYTES_MAX (1ull << 32)
 #define BUSTER_INTERN_MAX_IDS (1u << 28)
 // The longest spelling the vectorized lookup handles: its masked load and the compare of its terminating zero fit one
@@ -374,20 +383,31 @@ static __attribute__((unused)) bool c_name_is_keyword(IdentId id, CLanguage lang
 #define BUSTER_INTERN_VECTOR_BYTES 64
 #define BUSTER_INTERN_FAST_LENGTH (BUSTER_INTERN_VECTOR_BYTES - 1)
 
+// Where a spelling's record is: its offset in the record arena, and its length (the NUL after it isn't counted).
+typedef struct InternSpan InternSpan;
+struct InternSpan
+{
+    uint32_t offset;
+    uint32_t length;
+};
+
 typedef struct InternTable InternTable;
 struct InternTable
 {
-    // (bucket_mask + 1) buckets of BUSTER_INTERN_BUCKET_BYTES, in a mapping of their own (`bucket_arena`).
+    // (bucket_mask + 1) buckets of BUSTER_INTERN_BUCKET_BYTES, then the spans of up to `capacity` ids (by IdentId; id
+    // 0's is zero), in one mapping, so that they share its pages. The table grows both at once (intern_grow), when
+    // `count` reaches `capacity`, the load of 5/8 of the slots. The first ones are at the start of `record_arena`, before
+    // the records, so that with the first records they take its first 64 KB, in base pages, and one huge page; after a
+    // growth they have a mapping of their own, `arena`.
     uint8_t* buckets;
     uint64_t bucket_mask;
-    Arena bucket_arena;
-    // The spellings, each followed by a NUL, from offset 0.
+    InternSpan* spans;
+    uint32_t capacity;
+    Arena arena;
+    // The spellings, each followed by a NUL, from offset 0, which is past the first buckets and spans in
+    // `record_arena`. Records never move, so a pointer to one stays valid as the table grows.
     uint8_t* records;
     Arena record_arena;
-    // By IdentId: the offset of the spelling in `records`, and its length. Id 0's are zero.
-    uint32_t* record_of;
-    uint32_t* length_of;
-    Arena column_arena;
     // Ids in use, counting id 0.
     uint32_t count;
 };
@@ -477,6 +497,34 @@ BUSTER_INLINE uint64_t intern_hash_vector(__m512i v, uint64_t length)
     return (uint64_t)_mm_cvtsi128_si64(intern_fold(intern_with_length(v, length)));
 }
 
+// What a spelling's lanes 2 and 3 add to its chunk's fold when they are zero (it has at most 32 bytes): their rounds of
+// their whitening alone, in each 128-bit lane. intern_hash_vectors4_short adds it in place of the two lanes.
+BUSTER_INLINE __m512i intern_hash_zero_lanes(void)
+{
+    return _mm512_broadcast_i32x4(_mm_xor_si128(intern_lane_rounds(_mm_setzero_si128(), 2), intern_lane_rounds(_mm_setzero_si128(), 3)));
+}
+
+// The hashes of four spellings of up to 32 bytes each, at once: the 32 bytes of the first two in `ab` (the first's in the
+// low half) and of the other two in `cd`, each zero past its length; hash i in qword 2i, intern_hash_vector's of each.
+// `lengths` has spelling i's length in dword 4i and zeros elsewhere. The spellings' two 16-byte lanes are transposed (two
+// lane shuffles), so that one vector holds the four first lanes and another the four second ones: each is whitened with
+// its lane's constants (the first with the lengths too) and goes through its two AES rounds, and the four folds are one
+// three-way XOR, with `zero_lanes` (intern_hash_zero_lanes) for the zero lanes 2 and 3. That replaces a fold's four
+// shuffles and XORs per spelling, and half the rounds. `*firsts` gets the first lanes: spelling i's first 16 bytes in
+// lane i.
+BUSTER_INLINE __m512i intern_hash_vectors4_short(__m512i ab, __m512i cd, __m512i lengths, __m512i zero_lanes, __m512i* firsts)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i first_lanes = _mm512_shuffle_i64x2(ab, cd, _MM_SHUFFLE(2, 0, 2, 0));
+    const __m512i second_lanes = _mm512_shuffle_i64x2(ab, cd, _MM_SHUFFLE(3, 1, 3, 1));
+    const __m512i whitening0 = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i*)intern_lane_whitening));
+    const __m512i whitening1 = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i*)(intern_lane_whitening + 2)));
+    *firsts = first_lanes;
+    const __m512i lane0 = _mm512_aesenc_epi128(_mm512_aesenc_epi128(_mm512_ternarylogic_epi64(first_lanes, lengths, whitening0, 0x96), zero), zero);
+    const __m512i lane1 = _mm512_aesenc_epi128(_mm512_aesenc_epi128(_mm512_xor_si512(second_lanes, whitening1), zero), zero);
+    return _mm512_ternarylogic_epi64(lane0, lane1, zero_lanes, 0x96);
+}
+
 // The state after the chunks past a spelling's first 64 bytes, chained onto the first's (`state`): out of line, since
 // nearly every spelling is one chunk.
 static __attribute__((noinline)) __m128i intern_chain_chunks(const uint8_t* bytes, uint64_t length, __m128i state)
@@ -538,35 +586,41 @@ BUSTER_INLINE __m128i intern_first_bytes(const uint8_t* bytes, uint32_t length)
     return _mm_maskz_loadu_epi8((__mmask16)_bzhi_u32(0xFFFF, length < 16 ? length : 16), bytes);
 }
 
-// The buckets of a table of `buckets` buckets (a power of two), cleared: every slot empty.
-static bool intern_allocate_buckets(InternTable* table, uint64_t buckets)
+// The bytes of the buckets and spans of a table of `buckets` buckets, from the start of a mapping (so aligned), and the
+// ids it has room for before it grows. The records follow them in the record arena: exactly
+// BUSTER_INTERN_RECORD_BYTES_MAX of room, so that their offsets fit 32 bits.
+static uint64_t intern_layout_bytes(uint64_t buckets, uint32_t* capacity)
 {
-    Arena arena = arena_reserve(buckets * BUSTER_INTERN_BUCKET_BYTES + BUSTER_INTERN_BUCKET_BYTES);
-    uint8_t* memory = arena_push(&arena, buckets * BUSTER_INTERN_BUCKET_BYTES, BUSTER_INTERN_BUCKET_BYTES);
-    bool result = memory != 0;
+    const uint64_t load = buckets * BUSTER_INTERN_BUCKET_SLOTS * BUSTER_INTERN_LOAD_NUMERATOR / BUSTER_INTERN_LOAD_DENOMINATOR;
+    *capacity = load < BUSTER_INTERN_MAX_IDS ? (uint32_t)load : BUSTER_INTERN_MAX_IDS;
+    return buckets * BUSTER_INTERN_BUCKET_BYTES + (uint64_t)*capacity * sizeof(InternSpan);
+}
+
+// The buckets of a table of `buckets` buckets (a power of two), cleared (every slot empty), and room for the spans of the
+// ids it holds before it grows, from `arena`, whose memory past its length must be fresh (zero). The spans are left for
+// the caller to fill. Returns false if they don't fit.
+static bool intern_lay_out(InternTable* table, Arena* arena, uint64_t buckets)
+{
+    uint32_t capacity;
+    intern_layout_bytes(buckets, &capacity);
+    uint8_t* memory = arena_push(arena, buckets * BUSTER_INTERN_BUCKET_BYTES, BUSTER_INTERN_BUCKET_BYTES);
+    InternSpan* spans = arena_push_array(arena, capacity, sizeof(InternSpan), BUSTER_INTERN_BUCKET_BYTES);
+    bool result = memory != 0 && spans != 0;
     if (result)
     {
         // Fresh mappings read as zero, so every slot is empty already.
         table->buckets = memory;
         table->bucket_mask = buckets - 1;
-        table->bucket_arena = arena;
-    }
-    else
-    {
-        arena_release(&arena);
+        table->spans = spans;
+        table->capacity = capacity;
     }
     return result;
 }
 
-// Puts spelling `id` (with `hash`, known to be absent) in the first empty slot of its probe sequence: its bucket, then
-// the next ones.
-static void intern_place(InternTable* table, IdentId id, uint64_t hash)
+// Puts `slot` (a spelling's prefix and id; the spelling has `hash` and is known to be absent) in the first empty slot of
+// its probe sequence: its bucket, then the next ones.
+static void intern_place(InternTable* table, __m128i slot, uint64_t hash)
 {
-    const uint8_t* bytes = table->records + table->record_of[id];
-    const uint32_t length = table->length_of[id];
-    uint8_t slot[BUSTER_INTERN_SLOT_BYTES] = { 0 };
-    memcpy(slot, bytes, length < BUSTER_INTERN_PREFIX_BYTES ? length : BUSTER_INTERN_PREFIX_BYTES);
-    memcpy(slot + BUSTER_INTERN_PREFIX_BYTES, &id, sizeof(id));
     uint64_t bucket = hash & table->bucket_mask;
     uint32_t empties = 0;
     while (empties == 0)
@@ -576,49 +630,72 @@ static void intern_place(InternTable* table, IdentId id, uint64_t hash)
         if (empties != 0)
         {
             // Bit 4s + 3 is slot s's id.
-            memcpy(bucket_bytes + ((uint32_t)__builtin_ctz(empties) - 3) * 4, slot, sizeof(slot));
+            _mm_storeu_si128((__m128i*)(bucket_bytes + ((uint32_t)__builtin_ctz(empties) - 3) * 4), slot);
         }
         bucket = (bucket + 1) & table->bucket_mask;
     }
 }
 
-// Doubles the buckets and places every spelling again.
+// The slot of spelling `id` from its first 16 bytes (`first`, zero past its end): the first BUSTER_INTERN_PREFIX_BYTES,
+// then the id in place of the rest.
+BUSTER_INLINE __m128i intern_slot(__m128i first, IdentId id)
+{
+    return _mm_insert_epi32(first, (int)id, BUSTER_INTERN_PREFIX_BYTES / sizeof(IdentId));
+}
+
+// Doubles the buckets (and the spans' room) and places every spelling again.
 static bool intern_grow(InternTable* table)
 {
+    const uint64_t buckets = (table->bucket_mask + 1) * 2;
+    uint32_t capacity;
     InternTable grown = *table;
-    bool result = intern_allocate_buckets(&grown, (table->bucket_mask + 1) * 2);
-    if (result)
+    grown.arena = arena_reserve(intern_layout_bytes(buckets, &capacity));
+    bool result = intern_lay_out(&grown, &grown.arena, buckets);
+    if (!result)
     {
+        arena_release(&grown.arena);
+    }
+    else
+    {
+        memcpy(grown.spans, table->spans, (uint64_t)table->count * sizeof(InternSpan));
         for (IdentId id = 1; id < table->count; id += 1)
         {
-            intern_place(&grown, id, intern_hash_bytes(table->records + table->record_of[id], table->length_of[id]));
+            const uint8_t* bytes = table->records + table->spans[id].offset;
+            const uint32_t length = table->spans[id].length;
+            intern_place(&grown, intern_slot(intern_first_bytes(bytes, length), id), intern_hash_bytes(bytes, length));
         }
-        arena_release(&table->bucket_arena);
+        // The first buckets are in the record arena, which keeps them (`arena` has no capacity then).
+        arena_release(&table->arena);
         *table = grown;
     }
     return result;
+}
+
+// Room for one more spelling of `length` bytes: an id (the table grows first if it is at its load) and its record, or 0
+// if the table is full.
+BUSTER_INLINE uint8_t* intern_reserve_record(InternTable* table, uint32_t length)
+{
+    bool fits = table->count < BUSTER_INTERN_MAX_IDS;
+    if (fits && table->count >= table->capacity)
+    {
+        fits = intern_grow(table);
+    }
+    return fits ? arena_push(&table->record_arena, (uint64_t)length + 1, 1) : 0;
 }
 
 // Adds a spelling (known to be absent) with `hash`: its record, its id and its slot. Returns 0 if the table is full.
 static IdentId intern_insert(InternTable* table, const uint8_t* bytes, uint32_t length, uint64_t hash)
 {
     IdentId result = 0;
-    bool fits = table->count < BUSTER_INTERN_MAX_IDS;
-    const uint64_t slot_count = (table->bucket_mask + 1) * BUSTER_INTERN_BUCKET_SLOTS;
-    if (fits && (uint64_t)table->count * BUSTER_INTERN_LOAD_DENOMINATOR >= slot_count * BUSTER_INTERN_LOAD_NUMERATOR)
-    {
-        fits = intern_grow(table);
-    }
-    uint8_t* record = fits ? arena_push(&table->record_arena, (uint64_t)length + 1, 1) : 0;
+    uint8_t* record = intern_reserve_record(table, length);
     if (record != 0)
     {
         result = table->count;
         memcpy(record, bytes, length);
         record[length] = 0;
-        table->record_of[result] = (uint32_t)(record - table->records);
-        table->length_of[result] = length;
+        table->spans[result] = (InternSpan){ .offset = (uint32_t)(record - table->records), .length = length };
         table->count += 1;
-        intern_place(table, result, hash);
+        intern_place(table, intern_slot(intern_first_bytes(bytes, length), result), hash);
     }
     return result;
 }
@@ -639,7 +716,7 @@ static IdentId intern_find_hashed(const InternTable* table, const uint8_t* bytes
         {
             const IdentId id = intern_slot_id(bucket_bytes, (uint32_t)__builtin_ctz(matches));
             if (length <= BUSTER_INTERN_SHORT_LENGTH ||
-                (table->length_of[id] == length && memcmp(table->records + table->record_of[id], bytes, length) == 0))
+                (table->spans[id].length == length && memcmp(table->records + table->spans[id].offset, bytes, length) == 0))
             {
                 result = id;
                 done = true;
@@ -669,6 +746,61 @@ static IdentId intern_find_or_add(InternTable* table, const uint8_t* bytes, uint
     return intern_find_or_add_hashed(table, bytes, length, intern_hash_bytes(bytes, length));
 }
 
+// intern_find_or_add for a spelling of 1 to BUSTER_INTERN_FAST_LENGTH bytes, from one masked load of it: its key, the
+// compare of a longer spelling's bytes and terminating zero with a candidate's record, its record's bytes and NUL, and
+// its slot, all from that vector (zero past the spelling). `home` is its hash's bucket in a table of `bucket_mask` (the
+// caller hashed it); if the table has grown since, the function hashes it again. It finds and adds exactly what
+// intern_find_or_add does; the vectorized refinement interns the identifiers it defers with it.
+static IdentId intern_find_or_add_vector(InternTable* table, const uint8_t* bytes, uint32_t length, uint64_t bucket_mask, uint64_t home)
+{
+    const __m512i spelling = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, length), bytes);
+    const __m512i key = intern_bucket_key(_mm512_castsi512_si128(spelling));
+    const __mmask64 compare_mask = _bzhi_u64(~0ull, length + 1);
+    if (table->bucket_mask != bucket_mask)
+    {
+        home = intern_hash_vector(spelling, length) & table->bucket_mask;
+    }
+    uint64_t bucket = home;
+    IdentId result = 0;
+    bool done = false;
+    while (!done)
+    {
+        const uint8_t* bucket_bytes = table->buckets + bucket * BUSTER_INTERN_BUCKET_BYTES;
+        const __m512i slots = _mm512_load_si512(bucket_bytes);
+        for (uint32_t matches = intern_bucket_matches(slots, key); !done && matches != 0; matches &= matches - 1)
+        {
+            const IdentId id = intern_slot_id(bucket_bytes, (uint32_t)__builtin_ctz(matches));
+            bool same = length <= BUSTER_INTERN_SHORT_LENGTH;
+            if (!same)
+            {
+                const __m512i record = _mm512_maskz_loadu_epi8(compare_mask, table->records + table->spans[id].offset);
+                same = _mm512_mask_cmpneq_epi8_mask(compare_mask, spelling, record) == 0;
+            }
+            if (same)
+            {
+                result = id;
+                done = true;
+            }
+        }
+        done |= intern_bucket_empties(slots) != 0;
+        bucket = (bucket + 1) & table->bucket_mask;
+    }
+    const uint64_t probed_mask = table->bucket_mask;
+    uint8_t* record = result == 0 ? intern_reserve_record(table, length) : 0;
+    if (record != 0)
+    {
+        result = table->count;
+        // The spelling and its NUL: the vector is zero past the spelling.
+        _mm512_mask_storeu_epi8(record, compare_mask, spelling);
+        table->spans[result] = (InternSpan){ .offset = (uint32_t)(record - table->records), .length = length };
+        table->count += 1;
+        // intern_place takes the bucket's index as the hash, but in a table that has just grown.
+        const uint64_t place = table->bucket_mask == probed_mask ? home : intern_hash_vector(spelling, length);
+        intern_place(table, intern_slot(_mm512_castsi512_si128(spelling), result), place);
+    }
+    return result;
+}
+
 // The id of a spelling, or 0 if it was never interned.
 static __attribute__((unused)) IdentId intern_find(const InternTable* table, const uint8_t* bytes, uint32_t length)
 {
@@ -677,12 +809,12 @@ static __attribute__((unused)) IdentId intern_find(const InternTable* table, con
 
 static __attribute__((unused)) const uint8_t* intern_bytes(const InternTable* table, IdentId id)
 {
-    return table->records + table->record_of[id];
+    return table->records + table->spans[id].offset;
 }
 
 static __attribute__((unused)) uint32_t intern_length(const InternTable* table, IdentId id)
 {
-    return table->length_of[id];
+    return table->spans[id].length;
 }
 
 // Adds the predefined names, which get ids 1 to C_NAME_COUNT - 1 in order.
@@ -697,32 +829,39 @@ static bool intern_add_names(InternTable* table)
     return result;
 }
 
-// Reserves the table's memory and adds the predefined names. Returns false if the memory can't be reserved.
-static __attribute__((unused)) bool intern_initialize(InternTable* table)
+// Reserves the table's memory, with `buckets` buckets (a power of two) to start with, and adds the predefined names.
+// Returns false if the memory can't be reserved. c_files.c starts each lane's table at the size of the lane's share of
+// the files, so that it grows little or not at all.
+static __attribute__((unused)) bool intern_initialize_with(InternTable* table, uint64_t buckets)
 {
+    uint32_t capacity;
     *table = (InternTable){ 0 };
-    table->record_arena = arena_reserve(BUSTER_INTERN_RECORD_BYTES_MAX);
-    table->column_arena = arena_reserve(2 * (uint64_t)BUSTER_INTERN_MAX_IDS * sizeof(uint32_t) + 2 * BUSTER_INTERN_VECTOR_BYTES);
-    table->records = table->record_arena.base;
-    table->record_of = arena_push_array(&table->column_arena, BUSTER_INTERN_MAX_IDS, sizeof(uint32_t), BUSTER_INTERN_VECTOR_BYTES);
-    table->length_of = arena_push_array(&table->column_arena, BUSTER_INTERN_MAX_IDS, sizeof(uint32_t), BUSTER_INTERN_VECTOR_BYTES);
+    table->record_arena = arena_reserve(intern_layout_bytes(buckets, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX);
+    bool result = intern_lay_out(table, &table->record_arena, buckets);
+    table->records = result ? table->record_arena.base + table->record_arena.length : 0;
     // Id 0's spelling: an empty one, so that no other spelling is at offset 0.
-    uint8_t* none = table->records != 0 ? arena_push(&table->record_arena, 1, 1) : 0;
-    bool result = none != 0 && table->record_of != 0 && table->length_of != 0 && intern_allocate_buckets(table, BUSTER_INTERN_INITIAL_BUCKETS);
+    uint8_t* none = result ? arena_push(&table->record_arena, 1, 1) : 0;
+    result = none != 0;
     if (result)
     {
         none[0] = 0;
+        table->spans[0] = (InternSpan){ 0 };
         table->count = 1;
         result = intern_add_names(table);
     }
     return result;
 }
 
+// intern_initialize_with the table's usual first size.
+static __attribute__((unused)) bool intern_initialize(InternTable* table)
+{
+    return intern_initialize_with(table, BUSTER_INTERN_INITIAL_BUCKETS);
+}
+
 static __attribute__((unused)) void intern_release(InternTable* table)
 {
-    arena_release(&table->bucket_arena);
+    arena_release(&table->arena);
     arena_release(&table->record_arena);
-    arena_release(&table->column_arena);
     *table = (InternTable){ 0 };
 }
 
@@ -730,7 +869,148 @@ static __attribute__((unused)) void intern_release(InternTable* table)
 static __attribute__((unused)) bool intern_reset(InternTable* table)
 {
     memset(table->buckets, 0, (table->bucket_mask + 1) * BUSTER_INTERN_BUCKET_BYTES);
-    table->record_arena.length = 1;
+    table->record_arena.length = (uint64_t)(table->records - table->record_arena.base) + 1;
     table->count = 1;
     return intern_add_names(table);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Spellings added from several lanes
+//
+// c_files.c refines a round of files on several lanes, each into a table of its own, and merges what they found into
+// one shared table: the merge gives each new spelling its id, in the order of the spellings' first occurrences in the
+// files, which doesn't depend on the lanes (refining the files one after another into one table gives the same ids).
+// These add the merged spellings to the shared table with those ids, on every lane at once:
+//   - intern_bulk_begin, on one lane: room for `count` more ids and `bytes` more bytes of records (each spelling and its
+//     NUL). If the table would pass its load, it lays out buckets and spans large enough at once, and every spelling it
+//     has must then be placed in them again.
+//   - intern_bulk_replace, on every lane for a range of the ids the table had, and intern_bulk_add, on every lane for
+//     the new spellings it adds: spans and slots, and a new spelling's record. A lane takes an empty slot by exchanging
+//     its id, 0, for the spelling's (intern_place_shared), so that lanes placing spellings in one bucket each take a slot
+//     of their own, and the slots a probe passes stay full.
+//   - intern_bulk_end, on one lane once the lanes have synced: the new count, and the old layout released.
+// Nothing reads the table from intern_bulk_begin to intern_bulk_end.
+
+typedef struct InternBulk InternBulk;
+struct InternBulk
+{
+    // The first new id, how many there are, and the offset of the first one's record (the others follow in id order) and
+    // their bytes.
+    IdentId first;
+    uint32_t count;
+    uint32_t records;
+    uint64_t bytes;
+    // If the table grew: the spans it had, whose spellings intern_bulk_replace places again, and the arena of their
+    // layout, which intern_bulk_end releases (none for the first layout, which is in the record arena).
+    bool grew;
+    const InternSpan* old_spans;
+    Arena old_arena;
+};
+
+// intern_place while other lanes place other spellings in the table: a lane takes an empty slot by exchanging its id, 0,
+// for the spelling's (lock cmpxchg), and a lane that finds the slot taken first tries the next empty one. The slot's
+// prefix is written after it is taken: nothing reads a prefix until every lane has placed its spellings, and a lane looks
+// only at the ids to find empty slots. The probe sequence is intern_place's, so a probe that passes a bucket finds it
+// full, as a lookup expects.
+static void intern_place_shared(InternTable* table, __m128i slot, uint64_t hash)
+{
+    const IdentId id = (IdentId)_mm_extract_epi32(slot, BUSTER_INTERN_PREFIX_BYTES / sizeof(IdentId));
+    uint8_t prefix[BUSTER_INTERN_SLOT_BYTES];
+    _mm_storeu_si128((__m128i*)prefix, slot);
+    uint64_t bucket = hash & table->bucket_mask;
+    bool placed = false;
+    while (!placed)
+    {
+        uint8_t* bucket_bytes = table->buckets + bucket * BUSTER_INTERN_BUCKET_BYTES;
+        for (uint32_t s = 0; !placed && s < BUSTER_INTERN_BUCKET_SLOTS; s += 1)
+        {
+            uint8_t* slot_bytes = bucket_bytes + s * BUSTER_INTERN_SLOT_BYTES;
+            IdentId* word = (IdentId*)(slot_bytes + BUSTER_INTERN_PREFIX_BYTES);
+            IdentId expected = 0;
+            if (__atomic_load_n(word, __ATOMIC_RELAXED) == 0 && __atomic_compare_exchange_n(word, &expected, id, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            {
+                memcpy(slot_bytes, prefix, BUSTER_INTERN_PREFIX_BYTES);
+                placed = true;
+            }
+        }
+        bucket = (bucket + 1) & table->bucket_mask;
+    }
+}
+
+// Room in `table` for `count` more spellings of `bytes` bytes of records in all (each spelling's length + 1): their ids
+// from table->count on, and their records from bulk->records on. If the table would pass its load, it gets buckets and
+// spans large enough for all of them at once (bulk->grew), and its spellings must be placed in them again
+// (intern_bulk_replace). One lane. Returns false, leaving the table as it was, if the ids or the memory don't fit.
+static __attribute__((unused)) bool intern_bulk_begin(InternTable* table, uint32_t count, uint64_t bytes, InternBulk* bulk)
+{
+    *bulk = (InternBulk){ .first = table->count, .count = count, .bytes = bytes };
+    bool result = (uint64_t)table->count + count <= BUSTER_INTERN_MAX_IDS;
+    uint64_t buckets = table->bucket_mask + 1;
+    uint32_t capacity = table->capacity;
+    while (result && (uint64_t)table->count + count > capacity)
+    {
+        buckets *= 2;
+        intern_layout_bytes(buckets, &capacity);
+    }
+    const uint64_t mark = table->record_arena.length;
+    uint8_t* records = result ? arena_push(&table->record_arena, bytes, 1) : 0;
+    result = records != 0;
+    if (result && buckets != table->bucket_mask + 1)
+    {
+        InternTable grown = *table;
+        grown.arena = arena_reserve(intern_layout_bytes(buckets, &capacity));
+        result = intern_lay_out(&grown, &grown.arena, buckets);
+        if (result)
+        {
+            bulk->grew = true;
+            bulk->old_spans = table->spans;
+            bulk->old_arena = table->arena;
+            *table = grown;
+        }
+        else
+        {
+            arena_release(&grown.arena);
+            arena_pop_to(&table->record_arena, mark);
+        }
+    }
+    bulk->records = result ? (uint32_t)(records - table->records) : 0;
+    return result;
+}
+
+// The spans of ids [begin, end) of those the table had before intern_bulk_begin, and their slots in the buckets it grew
+// to (nothing if it didn't grow). Every lane, for ranges that cover the old ids.
+static __attribute__((unused)) void intern_bulk_replace(InternTable* table, const InternBulk* bulk, uint32_t begin, uint32_t end)
+{
+    for (uint32_t id = begin; bulk->grew && id < end && id < bulk->first; id += 1)
+    {
+        const InternSpan span = bulk->old_spans[id];
+        table->spans[id] = span;
+        if (id != 0)
+        {
+            const uint8_t* bytes = table->records + span.offset;
+            intern_place_shared(table, intern_slot(intern_first_bytes(bytes, span.length), id), intern_hash_bytes(bytes, span.length));
+        }
+    }
+}
+
+// Adds spelling `id` (one of intern_bulk_begin's new ids) with its record at offset `offset` and `hash`
+// (intern_hash_bytes's). Every lane, each for the spellings it adds.
+static __attribute__((unused)) void intern_bulk_add(InternTable* table, IdentId id, const uint8_t* bytes, uint32_t length, uint32_t offset, uint64_t hash)
+{
+    uint8_t* record = table->records + offset;
+    memcpy(record, bytes, length);
+    record[length] = 0;
+    table->spans[id] = (InternSpan){ .offset = offset, .length = length };
+    intern_place_shared(table, intern_slot(intern_first_bytes(bytes, length), id), hash);
+}
+
+// The table with the spellings intern_bulk_begin made room for, once every lane has added them.
+static __attribute__((unused)) void intern_bulk_end(InternTable* table, InternBulk* bulk)
+{
+    table->count = bulk->first + bulk->count;
+    if (bulk->grew)
+    {
+        arena_release(&bulk->old_arena);
+    }
+    *bulk = (InternBulk){ 0 };
 }

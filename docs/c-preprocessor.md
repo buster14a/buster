@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 88 | |
+| The built-in cases (`pp_test_cases`) | 92 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -108,7 +108,9 @@ about 16 cycles per output token, next to 2 ms for lexing every input and
 refinement 3.6 ms, and directive tables and the main loop 5.7 ms, 2.8 times
 the 2 ms proposed. Each phase's time includes the kernel clearing the fresh
 pages it writes, 13% of the samples (see "Where the time goes"). "Next steps"
-lists what would close the gap.
+lists what would close the gap. Since then, #116's budget work has brought
+refinement to 1.67 ms and the whole run to 10.0 ms (measured on 2026-10-22,
+`docs/c-refinement.md`).
 
 ## Object-macro eligibility cache experiment (#110)
 
@@ -284,12 +286,20 @@ comparison.
 
 ### Files
 
-Every file is read once per translation unit. It is mapped with `MAP_POPULATE`,
-lexed, refined and given a directive table (`pp_prepare_data`), and it stays
-for the whole translation unit, because macro definitions point into the tokens
-of the file that defines them. Files are found by path (`pp_lookup_path`, a
-table that starts at 1,024 slots and doubles) and shared by device and inode,
-so that two paths to one file are one file.
+Every file is read once per process. It is mapped (with `MAP_POPULATE` when a
+unit or one lane maps it; lanes read the files of up to 16 KB instead), lexed,
+refined and given a directive table (`pp_prepare_into`), and it stays as long as
+the file cache that holds it, because macro definitions point into the tokens of
+the file that defines them. The cache (`FileCache`) keeps a record per file
+identity (device and inode), so that two paths to one file are one file, and a
+path entry per path looked up, with the file there or none, so that a search
+makes no system call for a path the cache knows. A translation unit finds files
+by path in a table of its own (`pp_lookup_path`, which starts at 1,024 slots and
+doubles) and asks the cache the first time; it copies a record's prepared fields
+when it first enters the file, and keeps its own state about it (`#pragma once`,
+the line cursor). Without a cache in `PPOptions.files`, a unit makes its own;
+with one, the units and lanes that share it read each file once
+(`docs/c-files.md`, #150).
 
 - **Lexing by the language mode.** The lexer has no language mode, so two of
   clang's rules are applied around it:
@@ -756,7 +766,7 @@ differ by up to 1% from code placement alone.
 
 | Piece | Vectorized design | Scalar twin and rare cases | 9700X comparison |
 | --- | --- | --- | --- |
-| Refinement (#116) | Pass A per 64 tokens; pass B batches of 64 identifiers (`docs/c-refinement.md`) | `refine_tokens_scalar`; spliced, UCN and long identifiers | 4.2 times the scalar twin on `sqlite3.c` |
+| Refinement (#116) | Pass A per 64 tokens; pass B batches of 64 identifiers (`docs/c-refinement.md`) | `refine_tokens_scalar`; spliced, UCN and long identifiers | 6.2 times the scalar twin on `sqlite3.c` (4.2 before #116's budget work) |
 | Directive scan (#118) | A compare of 64 kinds with `#` and the start-of-line bit | Token at a time | Part of the directive tables' 1.9% |
 | Conditional pairing (#118) | Depth as a prefix sum, pairing as nearest smaller values by pointer jumping, 32 conditionals at a time | The stack; files with a continuation too many | 16% faster on a file of 36,868 conditionals; within noise on `sqlite3.c` |
 | File and buffer runs (#122) | 64 tokens per step: one compare finds the identifiers, whole-vector stores | Token at a time | The scalar twins: 22.8 ms against 12.0 ms in all |
@@ -874,9 +884,14 @@ the mispredictions it saves.
 
 ## The oracle
 
+The real-source command is `test-preprocessor --compare-clang [--clang PATH]`.
+[Frozen preprocessor oracle](preprocessor-oracle.md) records its token-kind
+and location checks, explicit skip/error accounting, pinned input manifests,
+full-corpus reproduction and frozen CI subset.
+
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 88 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 92 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -990,7 +1005,7 @@ the mispredictions it saves.
 In both, the two printers must give the same bytes, with line markers and
 without, and the text must lex back into the stream's spellings.
 
-So "token-identical" means the same sequence of token spellings. Whitespace
+So "token-identical" means the same sequence of lexical kinds and spellings. Whitespace
 and line breaks may differ: clang's `-E` spacing heuristics aren't part of the
 contract.
 
@@ -1011,10 +1026,10 @@ The configurations behind the results table:
 ../../build/compiler test-preprocessor --clang -std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX *.c
 ```
 
-The C library corpus (Zig 0.14.1's `lib/libc`) is a collection of headers and
-sources for many targets without their build configurations, so it isn't a set
-of translation units to preprocess. Refinement checks it file by file
-(`docs/c-refinement.md`), and musl stands for it here.
+The C library corpus (Zig 0.14.1's `lib/libc`) contains headers and sources for
+many targets without their build configurations. The corpus oracle tries each
+C/header input alone, compares every one Clang accepts and records every
+rejection's reason. Musl is also checked under its upstream build configuration.
 
 ## Where the time goes
 
@@ -1087,8 +1102,6 @@ cleared once and reused.
   `-mtune=`) are rejected. Other options such as `-funsigned-char` still need
   `--predefines` for their macro effects. The target-builtin query table remains
   a bounded subset; see [the target contract](x86-target.md).
-- The oracle uses the installed `/usr/include`, not the pinned copy of the
-  headers that #125's decision asks for (with its hashed manifest).
 - The feature tests (`__has_attribute` and the others) always answer from
   clang's table, which #117 and #125 keep for the oracle's mode. Outside it, they
   are to answer what the compiler implements (#123, #148).
@@ -1125,14 +1138,20 @@ cleared once and reused.
   about their own benchmarks' speeds here: `tokenize_c`'s samples come to 7.8
   cycles per input token and `refine_tokens`' to about 12, against 7.89 and
   10.50 in their benchmarks. So their next steps apply (`docs/c-lexer.md`,
-  `docs/c-refinement.md`).
+  `docs/c-refinement.md`). Refinement has since come to 1.67 ms of a 10.0 ms
+  run. Its phase takes 0.12 ms more than its kernel does with everything in
+  the caches. The columns, the source and the table come from memory, because
+  a whole file is lexed before it is refined. A lexer that hands over a block
+  at a time would keep them in the caches (`docs/c-refinement.md`, "Next
+  steps").
 - **Streaming to the parser.** The first version preprocesses a whole
   translation unit before the parser reads it. Streaming needs a rule for when
   a block of output is final, since a function-like macro name at the end of an
   expansion can take a `(` from the input after it (#117).
-- **The rest of C23** (`#embed`), the compiler's own headers (#117's open
-  question; this version uses clang's resource directory), and per-file jobs
-  cached for the process (#150).
+- **The rest of C23** (`#embed`), and the compiler's own headers (#117's open
+  question; this version uses clang's resource directory). Per-file jobs cached
+  for the process, which lanes fill ahead of the preprocessor, are
+  `docs/c-files.md`'s (#150).
 
 ## Reproduction
 

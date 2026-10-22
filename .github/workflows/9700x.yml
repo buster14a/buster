@@ -16,11 +16,12 @@ on:
 permissions:
   contents: read
 
-# Repository-local serialization. The runner's job hooks also take the host's benchmark lock, which other
-# repositories' jobs and interactive benchmark sessions share (see AGENTS.md).
+# Keep each PR/ref's pending runs separate: older branches using a single repository-wide pending slot otherwise
+# cancel another PR's qualification. The runner's job hooks serialize all jobs with the shared host lock (AGENTS.md).
 concurrency:
-  group: buster-fast-9700x
+  group: buster-fast-9700x-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   test:
@@ -245,6 +246,63 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+
+      - name: Test the corpus oracle's accounting and process failures
+        run: |
+          ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/clang -nostdinc --files-from tests/preprocessor-oracle/inputs.txt --root tests/preprocessor-oracle --report build/oracle-accounting.tsv
+          awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 1 && counts["skipped"] == 1 && NR == 3) }' build/oracle-accounting.tsv
+          if ./build/compiler test-preprocessor --compare-clang --clang /no-such-buster-clang tests/preprocessor-oracle/accepted.input; then exit 1; fi
+          if ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/false tests/preprocessor-oracle/accepted.input; then exit 1; fi
+          if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/rejected.input; then exit 1; fi
+          if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/no-such-input.c; then exit 1; fi
+
+      - name: Compare a frozen preprocessor corpus subset with Clang
+        # The runner hooks hold the shared host lock for this whole job. This copy is readable by the runner,
+        # unlike the original bundle under /home/david. Verify the manifests and every input/header byte first.
+        run: |
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          export SOURCE_DATE_EPOCH=1792454400
+          printf '%s  %s\n' \
+            939a882527432ec23b094c289e7f170bf2d6ec282e74dde75e31b08602fa3eae /usr/bin/clang \
+            391e729af6587355050881752558e790299cfe638c7dc7803bd028a8535ebcbd "$corpus/MANIFESTS.sha256" \
+            8e6e646951cbd08c07bbc76ff46d6796a83a58e9b1c4959278b60193718cd10c "$corpus/manifests/headers.sha256" \
+            e307b836448ef20e603a617a4b5023831c72ff5f307f614c50f4f8833088717c "$corpus/manifests/headers-bundle.sha256" \
+            9179b7ad7db7366d12a214b562e478ac703e7ec0376f38f4516756bcf7ee0047 "$corpus/manifests/sqlite.sha256" \
+            bf593a94954f3ed9431dd12e60233ec0229f7226a1fc270a701614a20f86baeb "$corpus/manifests/libc.sha256" \
+            89dbe35f0324cf08d0cb9cf31ecf15092fc20783a9e470e80e5f41b1d48251d3 "$corpus/manifests/musl-generated.sha256" | sha256sum --check --status
+          (cd "$corpus/headers/usr" && sha256sum --check --status "$corpus/manifests/headers.sha256")
+          (cd "$corpus/headers" && sha256sum --check --status "$corpus/manifests/headers-bundle.sha256")
+          (cd "$corpus/sqlite" && sha256sum --check --status "$corpus/manifests/sqlite.sha256")
+          (cd "$corpus/libc" && sha256sum --check --status "$corpus/manifests/libc.sha256")
+          (cd "$corpus/musl-generated" && sha256sum --check --status "$corpus/manifests/musl-generated.sha256")
+          for entry in headers:headers-bundle libc:libc sqlite:sqlite musl-generated:musl-generated; do
+            root="$corpus/${entry%:*}"
+            manifest="$corpus/manifests/${entry#*:}.sha256"
+            test "$(find "$root" -type f -printf '.\n' | wc -l)" -eq "$(wc -l < "$manifest")"
+            test -z "$(find "$root" ! -type d ! -type f -print -quit)"
+          done
+          system=(-nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          musl="$corpus/libc/musl"
+          ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/clang -march=znver5 "${system[@]}" "$corpus/sqlite/sqlite3.c" --report build/oracle-sqlite.tsv
+          awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 1 && NR == 2) }' build/oracle-sqlite.tsv
+          ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/clang -march=znver5 "${system[@]}" --files-from tests/preprocessor-oracle/libc-subset.txt --root "$corpus/libc" --report build/oracle-libc.tsv
+          awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 5 && counts["skipped"] == 2 && NR == 8) }' build/oracle-libc.tsv
+          ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/clang -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
+            -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+            --files-from tests/preprocessor-oracle/musl-subset.txt --root "$musl" --report build/oracle-musl.tsv
+          awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 4 && NR == 5) }' build/oracle-musl.tsv
+
+      - name: Test the per-file jobs
+        # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams, and
+        # each unit the spellings it gives alone. Uses the predefines "Benchmark the preprocessor on main.c" wrote.
+        run: |
+          ./build/compiler test-files
+          ./build/compiler test-files --flat src
+          ./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+
+      - name: Benchmark the per-file jobs on the repository's translation units
+        # Without taskset: it pins each lane to an allowed CPU of its own.
+        run: ./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: Test the C type table
         # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a
