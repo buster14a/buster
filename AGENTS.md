@@ -159,6 +159,15 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
+  observation table and scalar/AVX-512 cost-column lookups. `test-x86-zen5`
+  checks unknowns, guard-page tails and generated microbenchmark loops;
+  `measure-x86-zen5` measures instruction cases on the approved 9700X;
+  `benchmark-x86-zen5 [--only scalar|vector] [--after-scalar MS]` times lookups.
+  Each build/test/measurement takes the shared host lock separately. Pin
+  measurements to CPU 2. [The model guide](docs/x86-zen5.md) records what is
+  measured and the coverage, pipe data and real consumers still pending for #181.
+
 - `src/buster/compiler/x86_target.c` defines generated-code ISA profiles, with
   x86-64 baseline as the default, independently of the compiler host.
   `x86_target_forms.c` supplies explicit, fail-closed form eligibility and
@@ -190,7 +199,9 @@ designs and the compilers already built this way.
   default. `docs/c-lexer.md` records the GFNI classifier, the leading-comment
   skip, branch-free chunk state, the pipelined write-out, table-driven
   punctuator kinds, the delimiter scan, chunks read in place, the raw string
-  check and their 9700X measurements.
+  check and their 9700X measurements. `c_lexer_variant.c` is one variant of the
+  lexer as a translation unit of its own, which `./build.sh lexer-variant`
+  compiles in for `benchmark-lexer` to compare (see "Lexer benchmarks").
 - `src/buster/compiler/preprocessor_fuzz.c` provides bounded output comparison
   and the minimizer for the independent preprocessor test harness.
   `preprocessor_fuzz_generate.c` generates cases, `preprocessor_fuzz_clang.c`
@@ -386,13 +397,31 @@ designs and the compilers already built this way.
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
   `c_preprocessor_fuzz.c` its differential fuzzing (#109; `main.c` includes
   it after the tests) and `c_preprocessor_benchmark.c` provides
-  `benchmark-preprocessor`.
+  `benchmark-preprocessor`. Its `FileCache` holds what is prepared from each
+  file (by identity) and every path looked up, for every translation unit that
+  preprocesses with it (`PPOptions.files`; a unit without one makes its own).
 - `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
   records macro expansion history in cold records and compressed output runs;
   `pp_diagnose_output` renders a diagnostic for an output-token index.
   `c_preprocessor_history_test.c` is part of `test-preprocessor`, including its
   Clang diagnostic comparisons. `benchmark-preprocessor --history-cost`
   compares recording on/off and reports retained and temporary history bytes.
+- `src/buster/compiler/c_files.c` is #150's per-file jobs: files prepared on a
+  group of lanes into a `FileCache`, each lane interning into a table of its
+  own that a merge (rule 4's exchange) gives the shared table's ids in the
+  order of first occurrences, so that they don't depend on the lane count; and
+  the run-ahead, a frontier walk over the files' literal includes by the
+  preprocessor's own search. `docs/c-files.md` has the design and the 9700X
+  measurements. `c_files_test.c` holds its tests (`main.c` includes it;
+  `./build/compiler test-files` runs them) and `c_files_benchmark.c` provides
+  `benchmark-files`.
+- `src/buster/compiler/profile.c` is the profiling tools: `ab` (builds of
+  several trees run in turn, under the 9700X's lock) and the reports of perf's
+  and objdump's text, `hot-loops`, `label-spills`, `spill-report` and
+  `branch-misses`. `profile_test.c` holds their tests (`main.c` includes both;
+  `./build/compiler test-profile` runs them). `docs/profiling.md` is how the
+  lexer and the encoder were measured and profiled on the 9700X, with these
+  tools: read it before tuning a stage.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -402,6 +431,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler
 ./build/compiler test-call-graph
 ./build.sh check-call-graph
+./build/compiler test-profile
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
 ./build/compiler benchmark-lexer src
@@ -438,6 +468,10 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler benchmark-preprocessor --embed 16777216
+./build/compiler test-files
+./build/compiler test-files --flat src
+./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+./build/compiler benchmark-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 ./build/compiler test-types
 ./build/compiler benchmark-types
 ```
@@ -595,6 +629,61 @@ selects C++ source/header extensions. The default 9700X job runs
 `benchmark-lexer src` after the tests, pinned to one allowed CPU. Measurements
 are informational: correctness failures fail CI, but throughput values are not
 yet compared against a performance baseline. Keep just one compiler executable.
+
+`./build.sh lexer-variant NAME=SOURCE...` builds `build/compiler` with other
+lexers in it, each SOURCE a copy of `c_lexer.c` (or its assembly, from
+`./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s`), as
+`c_lexer_variant_NAME`. `benchmark-lexer` then also compares each with
+`c_tokenize` on every file (a difference fails it), times them in an order
+that rotates by pass, and prints each one's change from `c_tokenize`.
+Where its code lands moves a variant by up to about 1.5% even when its code
+is `c_tokenize`'s (a copy of it as a variant is the comparison's control), and
+builds in separate processes differ by about 2%: `docs/profiling.md`
+("Comparing two versions") has how to use both.
+
+## Profiling tools
+
+`./build/compiler test-profile` (about 10 ms) checks `profile.c`. Each tool
+runs on texts in objdump's, clang's and perf script's formats, and its report
+must be exactly the expected one:
+
+- `hot-loops`: a loop nested in another, an indirect jump, two copies of the
+  function (the busiest one taken by the samples' addresses: their offsets in
+  the file through its LOAD segments), samples of another function and of
+  another file, of a name that only starts with the function's, past the last
+  instruction and before the first symbol, and an lld executable, whose
+  offsets aren't its addresses; samples without file offsets, a disassembly
+  without objdump -p's headers, a missing function and disassembly out of
+  order (errors);
+- `label-spills` and `spill-report`: spills, reloads and folded reloads
+  labeled with the tag in order in the function and in no other (not source
+  paths or other comments that hold the words), and nothing else changed;
+  their samples by stack slot and source location, the labeled copy found by
+  address, without the samples of a static function of the same name in
+  another unit (after it too), of the function's static local (`f.counter`),
+  of another tag, of a shared library at the same offsets or of another
+  tree's file of the same name, and in an lld executable; a label at the
+  function's address, from the symbol table (`objdump -t`); labels out of order or of another tag, missing from the disassembly
+  or in it twice, samples without file offsets, and an invalid tag (errors);
+  and clang's assembly of a program whose static function `function` (also
+  an assembler keyword) prints `__func__`, labeled, assembled and run, which
+  must print the same;
+  and one whose first instruction is a spill, labeled, linked and
+  disassembled, whose report must find its labels (clang and objdump);
+- `branch-misses`: records mispredicted, predicted and neither, fields that
+  aren't records, the load bias and the disassembly's instructions, and
+  10,000 branches, which grow its table;
+- `ab`: the rotating order, and runs that succeed, fail and can't start, with
+  two argument lists, and through a lock (`env`) pinned to an allowed CPU.
+
+The commands are `ab [--rounds N] [--cpu N] [--lock PATH] TREE... --
+ARGUMENT... [-- ARGUMENT...]...`, `hot-loops FUNCTION DISASSEMBLY SAMPLES
+[--loops N]`, `label-spills FUNCTION TAG INPUT.s OUTPUT.s`, `spill-report
+FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]` and `branch-misses BRSTACK [--bias
+ADDRESS] [--disassembly FILE] [--branches N]`; `docs/profiling.md` has the
+perf and objdump commands that make their inputs. Run `ab` itself outside the
+9700X's lock, with `--lock ~/buster-fast-bench/exclusive.sh`, which takes it
+for each run. The 9700X job runs the tests after the call graph check.
 
 ## x86-64 disassembler
 
@@ -2258,6 +2347,82 @@ are informational.
 after a warm-up: medians per input byte, and the text's throughput. The two
 texts must be the same. Run it pinned to one CPU; `docs/c-preprocessor.md` has
 the 9700X's numbers.
+
+## Per-file jobs tests
+
+`./build/compiler test-files [--lanes LIST] [--seed N] [--keep] [--flat]
+[options] [path...]` (about 0.3 s without paths) checks `c_files.c`. Every
+check fills a file cache on each lane count of `--lanes` (1, 2, 3 and 8), each
+time with a new intern table and cache, and must give the first lane count's
+results byte for byte: the shared table's ids and spellings, every record's
+tokens, values, leading-space bits, directive table and guard, what the walk
+did, and each translation unit's output stream (kinds, flags, values and
+locations) when it preprocesses with the cache. One lane refines straight into
+the shared table, so it is the merge's scalar twin. Each unit's spellings must
+also be those it gives with a cache of its own, with as many errors and
+warnings, and nothing may be written to stderr while the cache is filled:
+
+- the tree: a directory of the test's own (under `$TMPDIR` or `/tmp`) with
+  three translation units and the headers they include, by every kind of
+  include the walk resolves: the includer's directory, `-I` and `-isystem`, an
+  `#include_next` chain through three directories, a header reached by four
+  paths (a symbolic link and `..` among them), a hard link to a header a
+  computed include names, guarded and `#pragma once` headers included twice, a
+  header under `#if 0` that exists and one that doesn't, and a missing header
+  in an active line. The counts are exact: 13 files prepared (each identity
+  once) in 4 rounds, 1 unused, 2 requests not found (no diagnostic), and the
+  units' system calls after the walk (only the computed include's). It runs
+  with the vectorized kernels and with their scalar twins, cut into parts and
+  split once, on every lane (`FilesRun.lane_bytes` 0);
+- spellings: 240 generated files of identifiers (a shared vocabulary drawn
+  unevenly, names of their own, long names, line splices and UCNs) prepared
+  without following includes, 165,562 ids, so that the shared table grows in a
+  merge: in parts, split once, and with two lanes working, and in two runs into
+  one cache, which must equal one run on one lane;
+- contexts: a guarded header that includes itself through `./` and `sub/..`,
+  which the walk must take once (an alias of a file in the same context, by
+  its directory's device and inode, isn't walked again), and one header in two
+  directories (a hard link) whose own `local.h` differ, walked in both;
+- special paths: a FIFO that an `#include` under `#if 0` names (the walk's
+  probe mustn't block) and an active one names (an error, as alone), and a
+  quoted name of 2,400 bytes in a directory of 2,539, three requests of which
+  must share one search;
+- memory: runs on 2 and 3 lanes short of the round's arena or of one lane's
+  scratch memory, at sizes that fail the walk's, the merge's and a file's
+  allocations: every unit must give what it gives alone;
+- with paths, their `.c` and `.h` files as translation units with `-E`'s
+  options (`-I`, `-isystem`, `-D`, `--predefines`, `-std=`, ...), all the walk's
+  roots; with `--flat`, only prepared (a corpus such as the C library's).
+
+The checks that would hang if they regressed run under a 60-second alarm, which
+fails the test.
+
+`--seed N` changes the spellings, and `--keep` leaves the directory. On the
+9700X, `sqlite3.c`, Lua 5.4.8, musl 1.2.5's 1,357 sources and the C library
+corpus (`--flat`) pass too.
+The 9700X job runs it, on `src` with `--flat`, and on the repository's
+translation units.
+
+## Per-file jobs benchmark
+
+`./build/compiler benchmark-files [--lanes LIST] [--cpus LIST] [--runs N]
+[--spin MS] [--flat] [--bytes map|read|populate] [--read-limit N]
+[--lane-bytes N] [options] path...` fills a cache from the paths (with
+`--flat`, without following their includes) on each lane count of `--lanes`
+(1 to 8), lane i pinned to the i-th CPU of `--cpus` (the allowed CPUs, in
+order), every run from nothing after `--spin` ms (2) of spinning on every lane.
+`--read-limit` sets the largest file the lanes read rather than map (16 KB),
+`--bytes` how lanes map the larger ones (or read them), and `--lane-bytes` a
+round's bytes per working lane (4 MB). It reports medians of `--runs` (21):
+the run's time, speedup and time to the roots' round, the tokens per second,
+each phase on the lane that spent the most on it (preparing, the merge's
+lookups, exchange, additions and rewrite, the include lines, the searches, the
+work one lane does alone, and the waits), how busy the lanes were, what a run
+did, and without `--flat` the files the walk prepared that no unit entered,
+with the largest. Run it under the 9700X's lock without `taskset`: it pins its
+lanes. `docs/c-files.md` has the numbers for the C library corpus, `sqlite3.c`,
+musl and this repository. The default 9700X job runs it on the repository's
+translation units; like the others, its measurements are informational.
 
 ## Type tests
 

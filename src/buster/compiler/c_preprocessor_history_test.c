@@ -495,10 +495,28 @@ static bool pp_test_history(const char* directory, bool with_clang)
             .name = "include: a quoted name too long for a path",
             .source = "#include \"" BUSTER_PP_TEST_A4096 "\"\n",
         },
+        // A name with a part longer than a file name may be (NAME_MAX), in a path shorter than PATH_MAX: the open fails
+        // (ENAMETOOLONG), and the file cache's probe keeps the error for the search to report. And an absolute name too
+        // long for a path, which is the one place searched, not a name in the includer's directory.
+        {
+            .name = "include: a name with a part longer than NAME_MAX",
+            .source = "#include \"" BUSTER_PP_TEST_A512 ".h\"\n",
+        },
+        {
+            .name = "include: an absolute name too long for a path",
+            .source = "#include \"/" BUSTER_PP_TEST_A4096 "\"\n",
+        },
         {
             .name = "embed: an angled name too long for a path",
             .source = "#define " BUSTER_PP_TEST_A4096 " history.h\n#embed <" BUSTER_PP_TEST_A4096 ">\n",
             .header = "int found;\n",
+        },
+        // Extra tokens after a name written out are a warning at the first of them.
+        {
+            .name = "include: extra tokens after a name written out",
+            .source = "#include \"history.h\" junk\n#include <history.h> more junk\nint a = missing;\n",
+            .header = "int found;\n",
+            .parser = true,
         },
         {
             .name = "include: the header refused at the depth limit",
