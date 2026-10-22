@@ -81,6 +81,7 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <dirent.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <immintrin.h>
 #include "buster/compiler/x86_target.c"
@@ -148,7 +149,8 @@ struct PPStatistics
     uint64_t long_conditions; // the lines of more than 32 of them,
     uint64_t longest_condition; // and the most tokens a line had.
     uint64_t directives;
-    uint64_t skipped_includes; // #include of a file whose guard is defined, or after #pragma once.
+    uint64_t skipped_guards; // #include of a file whose guard is defined (clang's "multi-include optimization"),
+    uint64_t skipped_once; // and of one #pragma once or #import read.
 };
 
 typedef enum PPPhase
@@ -217,6 +219,10 @@ struct PPOptions
     bool clang_features;
     // Recording is on by default; the benchmark's control disables it without changing preprocessing.
     bool no_history;
+    // Enter a file whose include guard is defined rather than skip it (#120's control: the output is the same).
+    bool no_guard_skip;
+    // The location space's size, for tests that run out of it (--location-limit N; 0 is the whole 4 GB).
+    uint32_t location_limit;
     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
     FILE* diagnostics;
 };
@@ -282,6 +288,14 @@ typedef enum PPDirectiveKind
     PP_DIRECTIVE_EMBED,
 } PPDirectiveKind;
 
+// What a directive that a skip passes over must still report, as clang reports it while it skips (the file's notes,
+// PPFileData.note_*): an #elif, #elifdef, #elifndef or #else after its group's #else (an error); an #if, #ifdef or
+// #ifndef whose group has no #endif, when the skip goes to the end of the file (an error, innermost first); and an
+// #elifdef or #elifndef, a C23 extension before C23 (a warning, before the error).
+#define BUSTER_PP_NOTE_AFTER_ELSE 1
+#define BUSTER_PP_NOTE_UNTERMINATED 2
+#define BUSTER_PP_NOTE_ELIFDEF 4
+
 // A file's contents and everything prepared from them, shared by the paths that name it (by device and inode). The file
 // cache's record of a file is one, and so is a translation unit's copy of it, which also has the unit's own state about
 // the file: `once`, the line cursor, and `prepared`, which says the unit has copied the record's prepared fields (a
@@ -314,8 +328,18 @@ struct PPFileData
     uint32_t* directive_end;
     uint8_t* directive_kind;
     uint32_t* directive_next;
-    // The include guard's macro (0 if the file has none), and whether #pragma once (or #import) read it.
+    // The directives a skip must still report (BUSTER_PP_NOTE_*), in order: each one's index and notes. Most files have
+    // none (pp_note_directives).
+    uint32_t note_count;
+    uint32_t* note_directives;
+    uint8_t* note_kinds;
+    // The include guard's macro (0 if the file has none), whether an inclusion that took the guard's group has ended,
+    // from when on the guard skips the file (clang knows a file's guard from the end of such an inclusion, so it enters
+    // the file again from inside it, and every time while the macro was defined before the first), and whether #pragma
+    // once (or #import) read it.
     IdentId guard;
+    uint32_t guard_opener; // The guard's #ifndef or #if: the directive after the null ones that start the file.
+    bool guarded;
     bool once;
     bool prepared;
     // A place whose line is known, from which pp_line_of counts lines forward: the preprocessor asks about later places
@@ -336,6 +360,8 @@ struct PPFile
     // The length of the directory part (before the last '/'), or BUSTER_PP_NONE if there is none.
     uint32_t directory_length;
     uint32_t data;
+    // Why it has no data: an errno value, or -1 for a file that is neither regular nor a directory (0 when it has data).
+    int error;
     // BUSTER_PP_USER_FILE, BUSTER_PP_SYSTEM_FILE or BUSTER_PP_EXTERN_C_FILE: how its inclusions start.
     uint8_t system;
 };
@@ -367,7 +393,8 @@ struct FileCacheCounts
 
 // What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
 // modification time, and either the record that already had that identity when it looked (BUSTER_PP_NONE if none) or
-// its bytes, which the probe mapped (`mapped`) or read into an arena.
+// its bytes, which the probe mapped (`mapped`) or read into an arena; or why no file can be read there, an errno value
+// or -1 for one that is neither a regular file nor a directory.
 typedef struct FileProbe FileProbe;
 struct FileProbe
 {
@@ -377,6 +404,7 @@ struct FileProbe
     const uint8_t* bytes;
     uint32_t length;
     uint32_t record;
+    int error;
     bool found;
     bool mapped;
 };
@@ -607,6 +635,9 @@ struct PPContext
     // A buffer: the leading space its expansion left after its last token (an empty argument there), which the next
     // token read after it takes.
     uint8_t trailing_flags;
+    // A file: this inclusion took the group of the file's include guard (its #ifndef was true). Only such an inclusion
+    // tells clang the guard (its multiple-include optimization), and from its end on the guard skips the file.
+    bool guard_taken;
     // The macro to enable again when the context is popped.
     PPMacroId macro;
     uint32_t position;
@@ -631,8 +662,12 @@ struct PPContext
 typedef struct PPConditional PPConditional;
 struct PPConditional
 {
+    // A branch of the group was taken; the group's #else was read; the group is being skipped to its next directive
+    // (pp_skip_group) rather than read.
     bool taken;
     bool seen_else;
+    bool skipping;
+    // The opening directive's name, where clang reports the group unterminated.
     uint32_t location;
 };
 
@@ -885,6 +920,9 @@ struct Preprocessor
     uint32_t hash_location;
     uint32_t include_depth;
     uint32_t main_file;
+    // The predefines' file data (clang's <built-in> buffer), whose __STDC macros clang reports as builtin when they are
+    // redefined or undefined (pp_language_defined); BUSTER_PP_NONE before it is read.
+    uint32_t predefines_data;
     char date[16];
     char time[16];
     char timestamp[32]; // __TIMESTAMP__'s with SOURCE_DATE_EPOCH (`has_epoch`); else each file's modification time.
@@ -907,13 +945,16 @@ struct Preprocessor
 // ---------------------------------------------------------------------------------------------------------------------
 // Token stacks
 
+// Reserves the columns in turn, until one can't be (pp_tokens_release releases those that were).
 static bool pp_tokens_reserve(PPTokens* tokens, uint32_t capacity)
 {
     const uint64_t slots = (uint64_t)capacity + BUSTER_PP_TOKEN_SLACK;
-    tokens->arenas[0] = arena_reserve(slots);
-    tokens->arenas[1] = arena_reserve(slots);
-    tokens->arenas[2] = arena_reserve(slots * sizeof(uint32_t));
-    tokens->arenas[3] = arena_reserve(slots * sizeof(uint32_t));
+    bool reserved = true;
+    for (uint32_t i = 0; reserved && i < 4; i += 1)
+    {
+        tokens->arenas[i] = arena_reserve(i < 2 ? slots : slots * sizeof(uint32_t));
+        reserved = tokens->arenas[i].base != 0;
+    }
     tokens->kinds = arena_push(&tokens->arenas[0], slots, 64);
     tokens->flags = arena_push(&tokens->arenas[1], slots, 64);
     tokens->values = arena_push_array(&tokens->arenas[2], slots, sizeof(uint32_t), 64);
@@ -970,7 +1011,7 @@ static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, 
     pp->fatal |= severity == PP_SEVERITY_FATAL;
 }
 
-static void* pp_array(Preprocessor* pp, uint64_t count, uint64_t size);
+static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
 
 #include "c_preprocessor_history.c"
 
@@ -994,9 +1035,22 @@ static uint32_t pp_add_range(Preprocessor* pp, uint32_t length, uint32_t file, c
 {
     uint32_t result = BUSTER_PP_NONE;
     const uint64_t size = (uint64_t)length + 1;
-    if ((uint64_t)pp->location_top + size >= UINT32_MAX || pp->range_count == BUSTER_PP_MAX_RANGES)
+    const uint64_t limit = pp->options.location_limit != 0 ? pp->options.location_limit : UINT32_MAX;
+    if ((uint64_t)pp->location_top + size >= limit || pp->range_count == BUSTER_PP_MAX_RANGES)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "the translation unit's sources pass 4 GB");
+        // As clang reports it: an inclusion at its #include, and generated spellings without a place; once.
+        if (pp->fatal)
+        {
+        }
+        else if (include_location != 0)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, include_location, "this include makes the translation unit too large: it passes the location space (%lu bytes)",
+                        (unsigned long)limit);
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "the translation unit is too large: it passes the location space (%lu bytes)", (unsigned long)limit);
+        }
     }
     else
     {
@@ -1364,8 +1418,9 @@ BUSTER_INLINE __m512i pp_prefix_sum_words(__m512i x)
 // candidate's own pointer, which in a balanced file never passes its answer, so that about five rounds settle 32 lanes.
 // Lanes still unanswered at a block's end are its open groups (as many as the nesting depth); each later block answers
 // them with one compare of its levels against each one's. Returns false, having paired nothing, for a file with a
-// continuation that has no open group (an #endif or #else too many), which the stack then pairs.
-static bool pp_pair_conditionals_vector(PPFileData* data, uint32_t* scratch_indices)
+// continuation that has no open group (an #endif or #else too many), which the stack then pairs. Sets *notable if a
+// group has a directive after its #else or no #endif, for pp_note_directives.
+static bool pp_pair_conditionals_vector(PPFileData* data, uint32_t* scratch_indices, bool* notable)
 {
     const uint32_t count = data->directive_count;
     Scratch scratch = scratch_begin(0);
@@ -1456,12 +1511,84 @@ static bool pp_pair_conditionals_vector(PPFileData* data, uint32_t* scratch_indi
         _mm512_storeu_si512(carried + carried_count, _mm512_maskz_compress_epi32((__mmask16)(open >> 16), _mm512_add_epi32(entries, _mm512_set1_epi32(16))));
         carried_count += (uint32_t)__builtin_popcount(open >> 16);
     }
-    // Each opener's, #elif's and #else's answer, as directives.
+    // Each opener's, #elif's and #else's answer, as directives; an unanswered one is in a group without #endif.
+    bool found = false;
     for (uint32_t i = 0; result && i < n; i += 1)
     {
         if (kinds[i] != PP_DIRECTIVE_ENDIF)
         {
-            data->directive_next[conditionals[i]] = answers[i] != BUSTER_PP_NONE ? conditionals[answers[i]] : BUSTER_PP_NONE;
+            const uint32_t answer = answers[i];
+            data->directive_next[conditionals[i]] = answer != BUSTER_PP_NONE ? conditionals[answer] : BUSTER_PP_NONE;
+            found |= answer == BUSTER_PP_NONE || (kinds[i] == PP_DIRECTIVE_ELSE && kinds[answer] != PP_DIRECTIVE_ENDIF);
+        }
+    }
+    *notable = found;
+    scratch_end(scratch);
+    return result;
+}
+
+// The file's notes (BUSTER_PP_NOTE_*), with an explicit stack of the open groups and whether each has had its #else,
+// which pairs the directives as pp_pair_conditionals_scalar does: the scalar kernels' notes, and the vectorized
+// kernels' for a file whose pairing found a group with a directive after its #else or without its #endif, or that has
+// an #elifdef or #elifndef. Returns false if memory runs out.
+static bool pp_note_directives(Arena* arena, PPFileData* data)
+{
+    const uint32_t count = data->directive_count;
+    Scratch scratch = scratch_begin(0);
+    uint8_t* notes = arena_push(scratch.arena, (uint64_t)count + 1, 1);
+    uint32_t* open = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(uint32_t), 4);
+    bool* seen_else = arena_push(scratch.arena, (uint64_t)count + 1, 1);
+    bool result = notes != 0 && open != 0 && seen_else != 0;
+    uint32_t open_count = 0;
+    for (uint32_t d = 0; result && d < count; d += 1)
+    {
+        const uint8_t kind = data->directive_kind[d];
+        uint8_t note = kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF ? BUSTER_PP_NOTE_ELIFDEF : 0;
+        switch (kind)
+        {
+            case PP_DIRECTIVE_IF:
+            case PP_DIRECTIVE_IFDEF:
+            case PP_DIRECTIVE_IFNDEF:
+                open[open_count] = d;
+                seen_else[open_count] = false;
+                open_count += 1;
+                break;
+            case PP_DIRECTIVE_ELIF:
+            case PP_DIRECTIVE_ELIFDEF:
+            case PP_DIRECTIVE_ELIFNDEF:
+            case PP_DIRECTIVE_ELSE:
+                if (open_count != 0)
+                {
+                    note |= seen_else[open_count - 1] ? BUSTER_PP_NOTE_AFTER_ELSE : 0;
+                    seen_else[open_count - 1] |= kind == PP_DIRECTIVE_ELSE;
+                }
+                break;
+            case PP_DIRECTIVE_ENDIF:
+                open_count -= open_count != 0;
+                break;
+        }
+        notes[d] = note;
+    }
+    for (uint32_t i = 0; result && i < open_count; i += 1)
+    {
+        notes[open[i]] |= BUSTER_PP_NOTE_UNTERMINATED;
+    }
+    uint32_t note_count = 0;
+    for (uint32_t d = 0; result && d < count; d += 1)
+    {
+        note_count += notes[d] != 0;
+    }
+    data->note_directives = result ? arena_push_array(arena, (uint64_t)note_count + 1, sizeof(uint32_t), 4) : 0;
+    data->note_kinds = result ? arena_push(arena, (uint64_t)note_count + 1, 1) : 0;
+    result = data->note_directives != 0 && data->note_kinds != 0;
+    data->note_count = 0;
+    for (uint32_t d = 0; result && d < count; d += 1)
+    {
+        if (notes[d] != 0)
+        {
+            data->note_directives[data->note_count] = d;
+            data->note_kinds[data->note_count] = notes[d];
+            data->note_count += 1;
         }
     }
     scratch_end(scratch);
@@ -1469,9 +1596,11 @@ static bool pp_pair_conditionals_vector(PPFileData* data, uint32_t* scratch_indi
 }
 
 // Each directive's kind and line end, then the conditional groups' pairing (pp_pair_conditionals_vector, or
-// pp_pair_conditionals_scalar for the scalar kernels and for files the vectorized pairing leaves to it).
-static bool pp_finish_directives(bool vectorized, PPFileData* data, const uint64_t* lines)
+// pp_pair_conditionals_scalar for the scalar kernels and for files the vectorized pairing leaves to it), then the
+// notes (pp_note_directives) where there can be any, in `arena` with the rest of the table.
+static bool pp_finish_directives(bool vectorized, Arena* arena, PPFileData* data, const uint64_t* lines)
 {
+    bool elifdef = false;
     for (uint32_t d = 0; d < data->directive_count; d += 1)
     {
         const uint32_t hash = data->directive_hash[d];
@@ -1485,46 +1614,76 @@ static bool pp_finish_directives(bool vectorized, PPFileData* data, const uint64
         data->directive_end[d] = end;
         data->directive_kind[d] = kind;
         data->directive_next[d] = BUSTER_PP_NONE;
+        elifdef |= kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF;
     }
     Scratch scratch = scratch_begin(0);
     uint32_t* indices = arena_push_array(scratch.arena, (uint64_t)data->directive_count + 32, sizeof(uint32_t), 64);
-    const bool result = indices != 0;
-    if (result && !(vectorized && pp_pair_conditionals_vector(data, indices)))
+    bool result = indices != 0;
+    bool notable = true;
+    if (result && !(vectorized && pp_pair_conditionals_vector(data, indices, &notable)))
     {
         pp_pair_conditionals_scalar(data, indices);
+        notable = true;
     }
     scratch_end(scratch);
+    data->note_count = 0;
+    result = result && (!(notable || elifdef) || pp_note_directives(arena, data));
     return result;
 }
 
-// The include guard of a prepared file, or 0: its first token starts `#ifndef X` (or `#if !defined X`, or
-// `#if !defined(X)`), whose group has no other branch and whose #endif ends the file.
-static IdentId pp_find_guard(const PPFileData* data)
+// The include guard of a prepared file, or 0, as clang's multiple-include optimization finds one: the file is null
+// directives ('#' alone), then `#ifndef X` (with extra tokens or not) or a `#if` whose line is `defined X` or
+// `defined(X)` under an odd number of '!' and any parentheses, whose group has no other branch, and whose #endif's line
+// only null directives follow. *opener gets the #ifndef's or #if's index.
+static IdentId pp_find_guard(const PPFileData* data, uint32_t* opener)
 {
     IdentId result = 0;
-    if (data->directive_count >= 2 && data->directive_hash[0] == 0 && data->directive_next[0] != BUSTER_PP_NONE)
+    const uint8_t* kinds = data->kinds;
+    uint32_t first = 0;
+    while (first < data->directive_count && data->directive_kind[first] == PP_DIRECTIVE_NULL && data->directive_hash[first] == first)
     {
-        const uint32_t endif = data->directive_next[0];
-        const bool closes = data->directive_kind[endif] == PP_DIRECTIVE_ENDIF && data->directive_end[endif] == data->token_count;
-        const uint32_t end = data->directive_end[0];
-        const uint8_t* kinds = data->kinds;
-        if (closes && data->directive_kind[0] == PP_DIRECTIVE_IFNDEF && end == 3 && (kinds[2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER)
-        {
-            result = data->values[2];
-        }
-        else if (closes && data->directive_kind[0] == PP_DIRECTIVE_IF && end >= 5 && (kinds[2] & 0x7F) == C_TOKEN_EXCLAIM &&
-                 (kinds[3] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[3] == C_NAME_DEFINED)
-        {
-            if (end == 5 && (kinds[4] & 0x7F) == C_TOKEN_RAW_IDENTIFIER)
-            {
-                result = data->values[4];
-            }
-            else if (end == 7 && (kinds[4] & 0x7F) == C_TOKEN_L_PAREN && (kinds[5] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && (kinds[6] & 0x7F) == C_TOKEN_R_PAREN)
-            {
-                result = data->values[5];
-            }
-        }
+        first += 1;
     }
+    const uint32_t endif = first < data->directive_count && data->directive_hash[first] == first ? data->directive_next[first] : BUSTER_PP_NONE;
+    bool closes = endif != BUSTER_PP_NONE && data->directive_kind[endif] == PP_DIRECTIVE_ENDIF;
+    // Each null directive is one token, so only they follow the #endif's line when as many tokens as directives do.
+    for (uint32_t d = endif + 1; closes && d < data->directive_count; d += 1)
+    {
+        closes = data->directive_kind[d] == PP_DIRECTIVE_NULL;
+    }
+    closes = closes && data->directive_end[endif] + (data->directive_count - 1 - endif) == data->token_count;
+    const uint32_t hash = closes ? data->directive_hash[first] : 0;
+    const uint32_t end = closes ? data->directive_end[first] : 0;
+    if (closes && data->directive_kind[first] == PP_DIRECTIVE_IFNDEF && hash + 2 < end && (kinds[hash + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER)
+    {
+        result = data->values[hash + 2];
+    }
+    else if (closes && data->directive_kind[first] == PP_DIRECTIVE_IF)
+    {
+        // Parentheses and '!' before `defined`, then as many ')' after its operand as there were '(' before.
+        uint32_t t = hash + 2;
+        uint32_t negations = 0;
+        uint32_t parentheses = 0;
+        while (t < end && ((kinds[t] & 0x7F) == C_TOKEN_EXCLAIM || (kinds[t] & 0x7F) == C_TOKEN_L_PAREN))
+        {
+            negations += (kinds[t] & 0x7F) == C_TOKEN_EXCLAIM;
+            parentheses += (kinds[t] & 0x7F) == C_TOKEN_L_PAREN;
+            t += 1;
+        }
+        const bool defined = t + 1 < end && (kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_DEFINED;
+        const bool plain = defined && (kinds[t + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
+        const bool enclosed = defined && !plain && t + 3 < end && (kinds[t + 1] & 0x7F) == C_TOKEN_L_PAREN && (kinds[t + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER &&
+                              (kinds[t + 3] & 0x7F) == C_TOKEN_R_PAREN;
+        const IdentId name = plain ? data->values[t + 1] : enclosed ? data->values[t + 2] : 0;
+        t += plain ? 2 : enclosed ? 4 : 0;
+        uint32_t closing = 0;
+        while (name != 0 && t + closing < end && (kinds[t + closing] & 0x7F) == C_TOKEN_R_PAREN)
+        {
+            closing += 1;
+        }
+        result = name != 0 && t + closing == end && closing == parentheses && negations % 2 == 1 ? name : 0;
+    }
+    *opener = first;
     return result;
 }
 
@@ -1717,6 +1876,42 @@ static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint
     return result;
 }
 
+// A file's directive table (#118) from its refined tokens, in `arena`, by the kernels `vectorized` picks: the
+// directives (pp_scan_directives_*), their kinds, line ends, pairing and notes (pp_finish_directives), and the include
+// guard. Returns false if memory runs out. benchmark-preprocessor --tables times it alone.
+static bool pp_directive_table(bool vectorized, Arena* arena, PPFileData* data)
+{
+    Scratch scratch = scratch_begin(0);
+    uint64_t* lines = arena_push_array(scratch.arena, data->token_count / 64 + 1, sizeof(uint64_t), 64);
+    bool result = lines != 0;
+    if (result)
+    {
+        const uint32_t directive_count = vectorized ? pp_scan_directives_vector(data->kinds, data->token_count, 0, lines)
+                                                    : pp_scan_directives_scalar(data->kinds, data->token_count, 0, lines);
+        data->directive_count = directive_count;
+        data->directive_hash = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
+        data->directive_end = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
+        data->directive_kind = arena_push(arena, directive_count + 1, 1);
+        data->directive_next = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
+        result = data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
+    }
+    if (result)
+    {
+        if (vectorized)
+        {
+            pp_scan_directives_vector(data->kinds, data->token_count, data->directive_hash, lines);
+        }
+        else
+        {
+            pp_scan_directives_scalar(data->kinds, data->token_count, data->directive_hash, lines);
+        }
+        result = pp_finish_directives(vectorized, arena, data, lines);
+    }
+    scratch_end(scratch);
+    data->guard = result ? pp_find_guard(data, &data->guard_opener) : 0;
+    return result;
+}
+
 // What preparing a file came to (pp_prepare_into).
 typedef enum PPPrepareStatus
 {
@@ -1790,36 +1985,9 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
             ticks[PP_PHASE_REFINE] += now - tick;
             tick = now;
         }
-        Scratch scratch = scratch_begin(0);
-        uint64_t* lines = refined ? arena_push_array(scratch.arena, data->token_count / 64 + 1, sizeof(uint64_t), 64) : 0;
-        bool indexed = lines != 0;
+        const bool indexed = refined && pp_directive_table(prepare->vectorized, arena, data);
         if (indexed)
         {
-            const uint32_t directive_count = prepare->vectorized ? pp_scan_directives_vector(data->kinds, data->token_count, 0, lines)
-                                                                 : pp_scan_directives_scalar(data->kinds, data->token_count, 0, lines);
-            data->directive_count = directive_count;
-            data->directive_hash = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
-            data->directive_end = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
-            data->directive_kind = arena_push(arena, directive_count + 1, 1);
-            data->directive_next = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
-            indexed = data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
-        }
-        if (indexed)
-        {
-            if (prepare->vectorized)
-            {
-                pp_scan_directives_vector(data->kinds, data->token_count, data->directive_hash, lines);
-            }
-            else
-            {
-                pp_scan_directives_scalar(data->kinds, data->token_count, data->directive_hash, lines);
-            }
-            indexed = pp_finish_directives(prepare->vectorized, data, lines);
-        }
-        scratch_end(scratch);
-        if (indexed)
-        {
-            data->guard = pp_find_guard(data);
             data->prepared = true;
         }
         result = indexed ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
@@ -1963,11 +2131,16 @@ static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, Inte
     cache->prepare = prepare;
     cache->table = table;
     cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
-    cache->arrays[0] = arena_reserve((uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData) + 64);
-    cache->arrays[1] = arena_reserve(2ull * BUSTER_PP_MAX_FILES * sizeof(uint32_t) + 64);
-    cache->arrays[2] = arena_reserve((uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath) + 64);
-    cache->arrays[3] = arena_reserve(2ull * BUSTER_FILE_CACHE_MAX_PATHS * sizeof(uint32_t) + 64);
-    cache->path_arena = arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES);
+    // Reserved in turn until one can't be (file_cache_release releases those that were).
+    const uint64_t sizes[] = { (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData) + 64, 2ull * BUSTER_PP_MAX_FILES * sizeof(uint32_t) + 64,
+                               (uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath) + 64, 2ull * BUSTER_FILE_CACHE_MAX_PATHS * sizeof(uint32_t) + 64 };
+    bool reserved = true;
+    for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
+    {
+        cache->arrays[i] = arena_reserve(sizes[i]);
+        reserved = cache->arrays[i].base != 0;
+    }
+    cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
     cache->records = arena_push_array(&cache->arrays[0], BUSTER_PP_MAX_FILES, sizeof(PPFileData), 64);
     cache->identity_slots = arena_push_array(&cache->arrays[1], 2ull * BUSTER_PP_MAX_FILES, sizeof(uint32_t), 64);
     cache->paths = arena_push_array(&cache->arrays[2], BUSTER_FILE_CACHE_MAX_PATHS, sizeof(FileCachePath), 64);
@@ -2020,12 +2193,19 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
     FileCacheArenas* result = &cache->lanes[lane];
     if (result->arena.base == 0)
     {
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(result->columns); i += 1)
+        // Reserved in turn until one can't be, and then none of them, so that a lane short of address space fails to
+        // prepare, as a reservation that fails stops a run, rather than going on without the arena it lacked.
+        Arena* arenas[] = { &result->columns[0], &result->columns[1], &result->columns[2], &result->arena, &result->bytes };
+        bool reserved = true;
+        for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
         {
-            result->columns[i] = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+            *arenas[i] = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+            reserved = arenas[i]->base != 0;
         }
-        result->arena = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
-        result->bytes = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+        for (uint32_t i = 0; !reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
+        {
+            arena_release(arenas[i]);
+        }
     }
     return result;
 }
@@ -2141,9 +2321,14 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
     // no unit reaches. A FIFO, a device or a directory then isn't a regular file, and is none. O_NONBLOCK changes
     // nothing for a regular file, and O_NOCTTY keeps a terminal from becoming the process's controlling one.
     const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+    int error = fd >= 0 ? 0 : errno;
     counts->opens += 1;
     struct stat stats;
-    if (fd >= 0 && fstat(fd, &stats) == 0 && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
+    const bool stated = fd >= 0 && fstat(fd, &stats) == 0;
+    error = fd >= 0 && !stated ? errno : error;
+    error = stated && !S_ISREG(stats.st_mode) ? (S_ISDIR(stats.st_mode) ? EISDIR : -1) : error;
+    error = stated && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK ? EFBIG : error;
+    if (stated && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
     {
         probe->device = (uint64_t)stats.st_dev;
         probe->inode = (uint64_t)stats.st_ino;
@@ -2155,6 +2340,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
         if (probe->record == BUSTER_PP_NONE && probe->length != 0 && !read)
         {
             void* mapped = mmap(0, probe->length, PROT_READ, MAP_PRIVATE | (how == FILE_CACHE_MAP_POPULATED ? MAP_POPULATE : 0), fd, 0);
+            error = mapped != MAP_FAILED ? 0 : errno;
             bytes = mapped != MAP_FAILED ? mapped : 0;
             probe->mapped = bytes != 0;
             counts->maps += 1;
@@ -2169,6 +2355,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
                 got = pread(fd, buffer + done, probe->length - done, (off_t)done);
                 done += got > 0 ? (uint64_t)got : 0;
             }
+            error = buffer == 0 ? ENOMEM : done == probe->length ? 0 : got < 0 ? errno : EIO;
             if (buffer != 0 && done == probe->length)
             {
                 memset(buffer + done, 0, 64);
@@ -2179,6 +2366,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
         probe->bytes = bytes;
         probe->found = bytes != 0;
     }
+    probe->error = probe->found ? 0 : error;
     if (fd >= 0)
     {
         close(fd);
@@ -2250,14 +2438,16 @@ static void file_cache_identify(FileCache* cache, FileCachePath* entry)
 }
 
 // The record of the file at `path` (`length` bytes, NUL-terminated), probing the file system only the first time the
-// cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full. A file of up to
-// the cache's read limit is read into the calling lane's bytes arena, which the cache keeps as long as its records, and
-// a larger one is mapped with MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation,
-// which needs the lane's other arenas, says why it fails). One lane at a time.
-static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, FileCacheCounts* counts)
+// cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full, with why in
+// `*error` (the probe's errno value or -1, or EMFILE for a full cache). A file of up to the cache's read limit is read
+// into the calling lane's bytes arena, which the cache keeps as long as its records, and a larger one is mapped with
+// MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation, which needs the lane's other
+// arenas, says why it fails). One lane at a time.
+static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, FileCacheCounts* counts, int* error)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
     FileCachePath* entry = file_cache_find_path(cache, path, length, hash);
+    int unheld = 0;
     if (entry == 0)
     {
         Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
@@ -2272,8 +2462,11 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
         {
             munmap((void*)probe.bytes, probe.length);
         }
+        unheld = probe.found ? EMFILE : probe.error;
     }
-    return entry != 0 ? entry->record : BUSTER_PP_NONE;
+    const uint32_t result = entry != 0 ? entry->record : BUSTER_PP_NONE;
+    *error = result != BUSTER_PP_NONE ? 0 : entry == 0 ? unheld : entry->probe.found ? EMFILE : entry->probe.error;
+    return result;
 }
 
 // Prepares record `record` (pp_prepare_into) unless it is prepared, into lane `lane`'s arenas and with the cache's intern
@@ -2353,7 +2546,11 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
     data->directive_end = record->directive_end;
     data->directive_kind = record->directive_kind;
     data->directive_next = record->directive_next;
+    data->note_count = record->note_count;
+    data->note_directives = record->note_directives;
+    data->note_kinds = record->note_kinds;
     data->guard = record->guard;
+    data->guard_opener = record->guard_opener;
     data->prepared = true;
 }
 
@@ -2451,8 +2648,12 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
                 directory_length = path[i] == '/' ? i : directory_length;
             }
             const uint64_t start = pp->options.timing ? __rdtsc() : 0;
-            const uint32_t record = file_cache_lookup_path(pp->cache, copy, length, &pp->probes);
+            // Why the file has no data, for the message that may report it: why no file can be read at the path, or
+            // that the unit has as many files as it can hold.
+            int error = 0;
+            const uint32_t record = file_cache_lookup_path(pp->cache, copy, length, &pp->probes, &error);
             const uint32_t data = record != BUSTER_PP_NONE ? pp_data_of_record(pp, record) : BUSTER_PP_NONE;
+            error = record != BUSTER_PP_NONE && data == BUSTER_PP_NONE ? EMFILE : error;
             pp->ticks[PP_PHASE_READ] += pp->options.timing ? __rdtsc() - start : 0;
             result = pp->file_count;
             pp->files[result] = (PPFile){
@@ -2460,6 +2661,7 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
                 .path_length = length,
                 .directory_length = directory_length,
                 .data = data,
+                .error = error,
                 .system = system,
             };
             pp->file_count += 1;
@@ -2795,32 +2997,128 @@ static bool pp_same_definition(const Preprocessor* pp, const PPMacro* a, const P
     return result;
 }
 
-// Whether a replacement list's tokens [begin, end) hold a '##' (`*pastes`) and a '#' (`*hashes`), 64 kinds at a time:
-// two compares per 64, masked to the list (a masked load doesn't touch the bytes it leaves out).
-static void pp_scan_body_vector(const uint8_t* kinds, uint32_t begin, uint32_t end, bool* pastes, bool* hashes)
+// Whether a replacement list's tokens [begin, end) hold a '##' (`*pastes`), a '#' (`*hashes`) and the identifier
+// __VA_OPT__ (`*va_opt`), 64 kinds at a time: compares per 64, masked to the list (a masked load doesn't touch the bytes
+// it leaves out), and of the identifiers' values 16 at a time.
+static void pp_scan_body_vector(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
 {
     uint64_t found_pastes = 0;
     uint64_t found_hashes = 0;
+    uint32_t found_va_opt = 0;
     for (uint32_t t = begin; t < end; t += 64)
     {
         const __mmask64 lanes = _bzhi_u64(~0ull, end - t < 64 ? end - t : 64);
         const __m512i kind = _mm512_and_si512(_mm512_maskz_loadu_epi8(lanes, kinds + t), _mm512_set1_epi8(0x7F));
         found_pastes |= _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_HASHHASH));
         found_hashes |= _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_HASH));
+        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+        for (uint32_t q = 0; identifiers != 0 && q < 4; q += 1)
+        {
+            const __mmask16 these = (__mmask16)(identifiers >> (16 * q));
+            const __m512i value = _mm512_maskz_loadu_epi32(these, values + t + 16 * q);
+            found_va_opt |= _mm512_mask_cmpeq_epi32_mask(these, value, _mm512_set1_epi32((int)C_NAME_VA_OPT));
+        }
     }
     *pastes = found_pastes != 0;
     *hashes = found_hashes != 0;
+    *va_opt = found_va_opt != 0;
 }
 
 // pp_scan_body_vector's scalar twin.
-static void pp_scan_body_scalar(const uint8_t* kinds, uint32_t begin, uint32_t end, bool* pastes, bool* hashes)
+static void pp_scan_body_scalar(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
 {
     *pastes = false;
     *hashes = false;
+    *va_opt = false;
     for (uint32_t t = begin; t < end; t += 1)
     {
         *pastes |= (kinds[t] & 0x7F) == C_TOKEN_HASHHASH;
         *hashes |= (kinds[t] & 0x7F) == C_TOKEN_HASH;
+        *va_opt |= (kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && values[t] == C_NAME_VA_OPT;
+    }
+}
+
+static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start);
+
+// Where clang reports what a directive's line lacks ("macro name missing"): its end, the newline after its last token
+// (`last`), past blanks, comments and line splices, or the end of the file.
+static uint32_t pp_line_end_location(const Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t last)
+{
+    const uint8_t* bytes = data->bytes;
+    const uint32_t length = data->length;
+    uint32_t p = pp_file_token_end(pp, data, last);
+    bool done = false;
+    while (!done && p < length)
+    {
+        const uint8_t c = bytes[p];
+        const uint32_t splice = c == '\\' && p + 1 < length && bytes[p + 1] == '\n' ? 2 : c == '\\' && p + 2 < length && bytes[p + 1] == '\r' && bytes[p + 2] == '\n' ? 3 : 0;
+        if (c == ' ' || c == '\t' || c == '\v' || c == '\f' || splice != 0)
+        {
+            p += splice != 0 ? splice : 1;
+        }
+        else if (c == '/' && p + 1 < length && bytes[p + 1] == '*')
+        {
+            p += 2;
+            while (p < length && !(bytes[p] == '*' && p + 1 < length && bytes[p + 1] == '/'))
+            {
+                p += 1;
+            }
+            p = p < length ? p + 2 : length;
+        }
+        else if (c == '/' && p + 1 < length && bytes[p + 1] == '/')
+        {
+            // To the line's newline, which a splice continues.
+            while (p < length && bytes[p] != '\n')
+            {
+                p += bytes[p] == '\\' && p + 1 < length && bytes[p + 1] == '\n' ? 2 : 1;
+            }
+            p -= p > 0 && p < length && bytes[p - 1] == '\r';
+            done = true;
+        }
+        else
+        {
+            done = true;
+        }
+    }
+    return base + p;
+}
+
+// Where clang reports token t of a definition's line, [.., end): the token, or the line's end if t is past its last.
+static uint32_t pp_define_location(const Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t t, uint32_t end)
+{
+    return t < end ? base + pp_start_with_splices(data->bytes, data->starts[t]) : pp_line_end_location(pp, data, base, end - 1);
+}
+
+// The punctuators' spellings, from C_TOKEN_L_SQUARE on (a digraph's is the token it stands for).
+static const char* const pp_punctuator_spellings[] = {
+    "[", "]", "(", ")", "{", "}", ".", "...", "&", "&&", "&=", "*", "*=", "+", "++", "+=", "-", "->", "--", "-=", "~", "!", "!=", "/", "/=", "%", "%=",
+    "<", "<<", "<=", "<<=", ">", ">>", ">=", ">>=", "^", "^=", "|", "||", "|=", "?", ":", "::", ";", "=", "==", ",", "#", "##", ".*", "->*", "<=>",
+};
+_Static_assert(BUSTER_ARRAY_LENGTH(pp_punctuator_spellings) == C_TOKEN_KIND_COUNT - C_TOKEN_L_SQUARE, "a spelling per punctuator");
+
+// How clang names token t's kind in a diagnostic ("missing ')' after %s"): a punctuator's spelling in quotes, a
+// keyword's bare, "identifier", or another kind's name in angle brackets (<numeric_constant>).
+static void pp_token_name(const Preprocessor* pp, const PPFileData* data, uint32_t t, char* name, uint32_t capacity)
+{
+    static const char* const kinds[] = {
+        "unknown", "identifier", "numeric_constant", "char_constant", "wide_char_constant", "utf8_char_constant", "utf16_char_constant",
+        "utf32_char_constant", "string_literal", "wide_string_literal", "utf8_string_literal", "utf16_string_literal", "utf32_string_literal",
+    };
+    _Static_assert(BUSTER_ARRAY_LENGTH(kinds) == C_TOKEN_L_SQUARE, "a name per kind before the punctuators");
+    const uint8_t kind = data->kinds[t] & 0x7F;
+    const IdentId id = data->values[t];
+    const bool keyword = kind == C_TOKEN_RAW_IDENTIFIER && id < BUSTER_PP_KEYWORD_TABLE && pp->keyword_kinds[id] != C_TOKEN_RAW_IDENTIFIER;
+    if (keyword)
+    {
+        snprintf(name, capacity, "%.*s", (int)intern_length(pp->table, id), (const char*)intern_bytes(pp->table, id));
+    }
+    else if (kind >= C_TOKEN_L_SQUARE && kind < C_TOKEN_KIND_COUNT)
+    {
+        snprintf(name, capacity, "'%s'", pp_punctuator_spellings[kind - C_TOKEN_L_SQUARE]);
+    }
+    else
+    {
+        snprintf(name, capacity, kind == C_TOKEN_RAW_IDENTIFIER ? "%s" : "<%s>", kinds[kind < C_TOKEN_L_SQUARE ? kind : 0]);
     }
 }
 
@@ -2837,38 +3135,57 @@ static bool pp_names_parameter(const PPFileData* data, const PPMacro* macro, Ide
 }
 
 // Checks a function-like macro's replacement list as it is defined, for what pp_compile_macro would reject at its first
-// expansion: # not followed by a parameter (or by __VA_OPT__ and its '(' in a variadic macro), and __VA_OPT__ not followed
-// by '(', inside another, or left open. Returns false after a diagnostic.
+// expansion, as clang reports it: # not followed by a parameter (or by __VA_OPT__ in a variadic macro), and __VA_OPT__
+// not followed by '(', inside another, or left open. Returns false after a diagnostic.
 static bool pp_check_replacement_list(Preprocessor* pp, const PPFileData* data, const PPMacro* macro)
 {
     const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0;
+    const uint32_t end = macro->body_end;
     bool result = true;
     uint32_t va_opt_depth = 0;
-    for (uint32_t t = macro->body_begin; result && t < macro->body_end; t += 1)
+    uint32_t va_opt_open = 0;
+    for (uint32_t t = macro->body_begin; result && t < end; t += 1)
     {
         const uint8_t kind = data->kinds[t] & 0x7F;
-        const bool next_is_identifier = t + 1 < macro->body_end && (data->kinds[t + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
+        const bool next_is_identifier = t + 1 < end && (data->kinds[t + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
         const bool va_opt = variadic && kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT;
         const bool next_va_opt = variadic && next_is_identifier && data->values[t + 1] == C_NAME_VA_OPT;
         if (kind == C_TOKEN_HASH && !(next_is_identifier && pp_names_parameter(data, macro, data->values[t + 1])) && !next_va_opt)
         {
-            // At the token after '#', as clang reports it.
-            pp_diagnose(pp, PP_SEVERITY_ERROR, macro->base + data->starts[t + (t + 1 < macro->body_end)], "'#' is not followed by a macro parameter");
+            // At the token after '#' (the line's end after the last), as clang reports it.
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t + 1, end), "'#' is not followed by a macro parameter");
             result = false;
         }
-        else if (va_opt && (va_opt_depth != 0 || t + 1 >= macro->body_end || (data->kinds[t + 1] & 0x7F) != C_TOKEN_L_PAREN))
+        else if (va_opt && va_opt_depth != 0)
         {
-            pp_diagnose(pp, PP_SEVERITY_ERROR, macro->base + data->starts[t], "__VA_OPT__ must be followed by '(' and can't nest");
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t, end), "__VA_OPT__ cannot be nested within its own replacement tokens");
+            result = false;
+        }
+        else if (va_opt && (t + 1 >= end || (data->kinds[t + 1] & 0x7F) != C_TOKEN_L_PAREN))
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t + 1, end), "missing '(' following __VA_OPT__");
+            result = false;
+        }
+        else if (va_opt && t + 2 < end && (data->kinds[t + 2] & 0x7F) == C_TOKEN_HASHHASH)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t + 2, end), "'##' cannot appear at start of __VA_OPT__ argument");
             result = false;
         }
         else if (va_opt)
         {
             va_opt_depth = 1;
+            va_opt_open = t + 1;
             t += 1;
         }
         else if (va_opt_depth != 0 && kind == C_TOKEN_L_PAREN)
         {
             va_opt_depth += 1;
+        }
+        else if (va_opt_depth == 1 && kind == C_TOKEN_R_PAREN && (data->kinds[t - 1] & 0x7F) == C_TOKEN_HASHHASH)
+        {
+            // At the ')' that closes the group, as clang reports it.
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t, end), "'##' cannot appear at end of __VA_OPT__ argument");
+            result = false;
         }
         else if (va_opt_depth != 0 && kind == C_TOKEN_R_PAREN)
         {
@@ -2877,20 +3194,143 @@ static bool pp_check_replacement_list(Preprocessor* pp, const PPFileData* data, 
     }
     if (result && va_opt_depth != 0)
     {
-        pp_diagnose(pp, PP_SEVERITY_ERROR, macro->location, "unterminated __VA_OPT__");
+        // At the line's end, after the list's last token (the __VA_OPT__ itself when the '(' ends the list: clang reads
+        // that '(' with it), with a note at the '('.
+        char name[64];
+        pp_token_name(pp, data, end - 1 == va_opt_open ? va_opt_open - 1 : end - 1, name, sizeof(name));
+        pp_diagnose(pp, PP_SEVERITY_ERROR, pp_line_end_location(pp, data, macro->base, end - 1), "missing ')' after %s", name);
+        if (!pp->fatal)
+        {
+            FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
+            pp_diagnostic_place(pp, stream, pp_define_location(pp, data, macro->base, va_opt_open, end));
+            fprintf(stream, "note: to match this '('\n");
+        }
         result = false;
     }
     return result;
 }
 
-// #define, on the line [begin, end) of a file's tokens (the name's token first), read in the range at `base`.
+// Is a defined macro one of clang's language-defined ones, whose redefinition and #undef it reports as "builtin": a
+// builtin (__FILE__, __LINE__, _Pragma, __has_include, ...), or a name from __STDC that the predefines define?
+static bool pp_language_defined(const Preprocessor* pp, const PPMacro* macro)
+{
+    const uint8_t* name = intern_bytes(pp->table, macro->name);
+    const bool stdc = intern_length(pp->table, macro->name) >= 6 && memcmp(name, "__STDC", 6) == 0;
+    return (macro->flags & BUSTER_PP_MACRO_BUILTIN) != 0 || (stdc && macro->data == pp->predefines_data);
+}
+
+// The parameter list of a function-like macro being defined, from its '(' at `open`, as clang reads it
+// (ReadMacroParameterList): identifiers (keywords too) separated by commas, then `...` or GNU's `name...`, or none.
+// Sets the macro's parameters, flags and body start, or reports the first error where clang does and returns false.
+static bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMacro* macro, uint32_t open, uint32_t end)
+{
+    bool result = true;
+    bool closed = false;
+    uint32_t t = open + 1;
+    macro->flags |= BUSTER_PP_MACRO_FUNCTION;
+    macro->parameters_begin = t;
+    while (result && !closed)
+    {
+        const uint8_t kind = t < end ? data->kinds[t] & 0x7F : C_TOKEN_UNKNOWN;
+        if (t >= end)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t, end), "missing ')' in macro parameter list");
+            result = false;
+        }
+        else if (kind == C_TOKEN_R_PAREN && macro->parameter_count == 0)
+        {
+            closed = true;
+        }
+        else if (kind == C_TOKEN_R_PAREN)
+        {
+            // #define F(a,)
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t, end), "expected identifier in macro parameter list");
+            result = false;
+        }
+        else if (kind == C_TOKEN_ELLIPSIS)
+        {
+            macro->flags |= BUSTER_PP_MACRO_VARIADIC;
+            macro->parameter_count += 1;
+            t += 1;
+            closed = t < end && (data->kinds[t] & 0x7F) == C_TOKEN_R_PAREN;
+            if (!closed)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t, end), "missing ')' in macro parameter list");
+                result = false;
+            }
+        }
+        else if (kind != C_TOKEN_RAW_IDENTIFIER)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t, end), "invalid token in macro parameter list");
+            result = false;
+        }
+        else
+        {
+            const IdentId parameter = data->values[t];
+            bool repeated = false;
+            for (uint32_t p = macro->parameters_begin; p < t; p += 1)
+            {
+                repeated |= (data->kinds[p] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[p] == parameter;
+            }
+            if (repeated)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t, end), "duplicate macro parameter name '%.*s'",
+                            (int)intern_length(pp->table, parameter), intern_bytes(pp->table, parameter));
+                result = false;
+            }
+            macro->parameter_count += 1;
+            t += 1;
+            const uint8_t next = t < end ? data->kinds[t] & 0x7F : C_TOKEN_UNKNOWN;
+            if (result && t < end && next == C_TOKEN_COMMA)
+            {
+                // Another parameter follows.
+            }
+            else if (result && t < end && next == C_TOKEN_R_PAREN)
+            {
+                closed = true;
+            }
+            else if (result && t < end && next == C_TOKEN_ELLIPSIS)
+            {
+                // GNU's named variadic parameter: `name...`.
+                macro->flags |= BUSTER_PP_MACRO_VARIADIC;
+                t += 1;
+                closed = t < end && (data->kinds[t] & 0x7F) == C_TOKEN_R_PAREN;
+                if (!closed)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t, end), "missing ')' in macro parameter list");
+                    result = false;
+                }
+            }
+            else if (result)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t, end), "expected comma in macro parameter list");
+                result = false;
+            }
+        }
+        t += 1;
+    }
+    if (result && macro->parameter_count > BUSTER_PP_MAX_PARAMETERS)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, macro->location, "too many macro parameters (more than %u)", BUSTER_PP_MAX_PARAMETERS);
+        result = false;
+    }
+    macro->body_begin = t;
+    return result;
+}
+
+// #define, on the line [begin, end) of a file's tokens (the name's token first), read in the range at `base`. Its
+// constraints (C 6.10.4) are checked as clang checks them, in its order, and reported where and as it reports them.
 static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint32_t begin, uint32_t end)
 {
     const PPFileData* data = &pp->datas[data_index];
     const uint32_t location = base + (begin < data->token_count ? data->starts[begin] : data->length);
-    if (begin >= end || (data->kinds[begin] & 0x7F) != C_TOKEN_RAW_IDENTIFIER)
+    if (begin >= end)
     {
-        pp_diagnose(pp, PP_SEVERITY_ERROR, location, begin >= end ? "macro name missing" : "macro name must be an identifier");
+        pp_diagnose(pp, PP_SEVERITY_ERROR, pp_line_end_location(pp, data, base, begin - 1), "macro name missing");
+    }
+    else if ((data->kinds[begin] & 0x7F) != C_TOKEN_RAW_IDENTIFIER)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "macro name must be an identifier");
     }
     else if (data->values[begin] == C_NAME_DEFINED)
     {
@@ -2912,96 +3352,73 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
         // Function-like when '(' follows the name with no whitespace or comment between them (a line splice is none).
         if (begin + 1 < end && (data->kinds[begin + 1] & 0x7F) == C_TOKEN_L_PAREN && !pp_file_space(data, begin + 1))
         {
-            macro.flags |= BUSTER_PP_MACRO_FUNCTION;
-            macro.parameters_begin = begin + 2;
-            uint32_t t = begin + 2;
-            bool closed = false;
-            bool expect_parameter = true;
-            while (valid && !closed && t < end)
-            {
-                const uint8_t kind = data->kinds[t] & 0x7F;
-                if (kind == C_TOKEN_R_PAREN && (!expect_parameter || macro.parameter_count == 0))
-                {
-                    closed = true;
-                }
-                else if (expect_parameter && kind == C_TOKEN_ELLIPSIS)
-                {
-                    macro.flags |= BUSTER_PP_MACRO_VARIADIC;
-                    macro.parameter_count += 1;
-                    expect_parameter = false;
-                    valid = t + 1 < end && (data->kinds[t + 1] & 0x7F) == C_TOKEN_R_PAREN;
-                }
-                else if (expect_parameter && kind == C_TOKEN_RAW_IDENTIFIER)
-                {
-                    const IdentId parameter = data->values[t];
-                    for (uint32_t p = macro.parameters_begin; valid && p < t; p += 1)
-                    {
-                        valid = !((data->kinds[p] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[p] == parameter);
-                    }
-                    valid &= parameter != C_NAME_VA_ARGS;
-                    macro.parameter_count += 1;
-                    expect_parameter = false;
-                    // GNU's named variadic parameter: `name...`.
-                    if (valid && t + 1 < end && (data->kinds[t + 1] & 0x7F) == C_TOKEN_ELLIPSIS)
-                    {
-                        macro.flags |= BUSTER_PP_MACRO_VARIADIC;
-                        t += 1;
-                        valid = t + 1 < end && (data->kinds[t + 1] & 0x7F) == C_TOKEN_R_PAREN;
-                    }
-                }
-                else if (!expect_parameter && kind == C_TOKEN_COMMA && !(macro.flags & BUSTER_PP_MACRO_VARIADIC))
-                {
-                    expect_parameter = true;
-                }
-                else
-                {
-                    valid = false;
-                }
-                t += 1;
-            }
-            valid &= closed && macro.parameter_count <= BUSTER_PP_MAX_PARAMETERS;
-            macro.body_begin = t;
-            if (!valid)
-            {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid macro parameter list");
-            }
+            valid = pp_define_parameters(pp, data, &macro, begin + 1, end);
+        }
+        else if (begin + 1 < end && !pp_file_space(data, begin + 1))
+        {
+            // An object-like macro's name needs whitespace after it: C99 requires it, C90 for characters outside its
+            // basic set (clang's '@' and unknown tokens).
+            const bool unknown = (data->kinds[begin + 1] & 0x7F) == C_TOKEN_UNKNOWN;
+            const char* message = pp->options.language.standard >= 1999 ? "ISO C99 requires whitespace after the macro name"
+                                  : unknown                              ? "whitespace required after macro name"
+                                                                         : "whitespace recommended after macro name";
+            pp_diagnose(pp, PP_SEVERITY_WARNING, pp_define_location(pp, data, base, begin + 1, end), "%s", message);
         }
         // ## can't begin or end a replacement list, and in a function-like macro # must precede a parameter and
-        // __VA_OPT__ a '(' (pp_check_replacement_list): clang rejects such a definition when it reads it, used or not.
+        // __VA_OPT__ a '(' (pp_check_replacement_list): clang rejects such a definition when it reads it, used or not,
+        // at the first of these it finds, in that order. __VA_OPT__ outside a variadic macro is a warning.
         if (valid && macro.body_begin < macro.body_end)
         {
-            const bool starts_pasting = (data->kinds[macro.body_begin] & 0x7F) == C_TOKEN_HASHHASH;
-            const bool ends_pasting = (data->kinds[macro.body_end - 1] & 0x7F) == C_TOKEN_HASHHASH;
-            if (starts_pasting || ends_pasting)
-            {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "'##' cannot appear at either end of a macro expansion");
-                valid = false;
-            }
             bool pastes;
             bool hashes;
+            bool va_opt;
             if (pp->vectorized)
             {
-                pp_scan_body_vector(data->kinds, macro.body_begin, macro.body_end, &pastes, &hashes);
+                pp_scan_body_vector(data->kinds, data->values, macro.body_begin, macro.body_end, &pastes, &hashes, &va_opt);
             }
             else
             {
-                pp_scan_body_scalar(data->kinds, macro.body_begin, macro.body_end, &pastes, &hashes);
+                pp_scan_body_scalar(data->kinds, data->values, macro.body_begin, macro.body_end, &pastes, &hashes, &va_opt);
             }
             macro.flags |= pastes ? BUSTER_PP_MACRO_PASTES : 0;
+            const bool variadic = (macro.flags & BUSTER_PP_MACRO_VARIADIC) != 0;
+            for (uint32_t t = macro.body_begin; va_opt && !variadic && t < macro.body_end; t += 1)
+            {
+                if ((data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, pp_define_location(pp, data, base, t, end), "__VA_OPT__ can only appear in the expansion of a variadic macro");
+                }
+            }
+            if ((data->kinds[macro.body_begin] & 0x7F) == C_TOKEN_HASHHASH)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, base, macro.body_begin, end), "'##' cannot appear at start of macro expansion");
+                valid = false;
+            }
             // A function-like macro with a '#', or a variadic one (which may have __VA_OPT__), gets the whole check.
-            const bool to_check = hashes || (macro.flags & BUSTER_PP_MACRO_VARIADIC) != 0;
-            valid = valid && (!to_check || !(macro.flags & BUSTER_PP_MACRO_FUNCTION) || pp_check_replacement_list(pp, data, &macro));
+            const bool to_check = (macro.flags & BUSTER_PP_MACRO_FUNCTION) != 0 && (hashes || (variadic && va_opt));
+            valid = valid && (!to_check || pp_check_replacement_list(pp, data, &macro));
+            if (valid && (data->kinds[macro.body_end - 1] & 0x7F) == C_TOKEN_HASHHASH)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, base, macro.body_end - 1, end), "'##' cannot appear at end of macro expansion");
+                valid = false;
+            }
         }
         if (valid)
         {
             const PPMacroId previous = pp->macro_of[name];
-            if (previous != 0 && (pp->macros[previous].flags & BUSTER_PP_MACRO_BUILTIN))
+            if (previous != 0 && pp_language_defined(pp, &pp->macros[previous]))
             {
                 pp_diagnose(pp, PP_SEVERITY_WARNING, location, "redefining builtin macro");
             }
             else if (previous != 0 && !pp_same_definition(pp, &pp->macros[previous], &macro))
             {
                 pp_diagnose(pp, PP_SEVERITY_WARNING, location, "'%.*s' macro redefined", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                if (!pp->fatal)
+                {
+                    FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
+                    pp_diagnostic_place(pp, stream, pp->macros[previous].location);
+                    fprintf(stream, "note: previous definition is here\n");
+                }
             }
             const PPMacroId id = pp_new_macro(pp, name);
             if (id != 0)
@@ -3286,6 +3703,7 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
             pp->conditional_count -= 1;
         }
         pp->include_depth -= pp->include_depth != 0;
+        pp->datas[pp->files[context->file].data].guarded |= context->guard_taken;
     }
     pp->context_count -= 1;
     // An expansion that ends passes its pending flags on to the context it was read from; an argument's or a line's
@@ -5728,14 +6146,17 @@ static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t be
     return result;
 }
 
-// Enters a file (prepared on first use) included at `include_location` from range `parent`, unless its guard is defined
-// or #pragma once read it. The inclusion is as much a system header as the file and as the includer there are, as
-// clang has it (HandleHeaderIncludeOrImport): a file included from a system header is one too.
+// Enters a file (prepared on first use) included at `include_location` from range `parent`, unless #pragma once read it
+// or its guard is defined after its first inclusion ended. The inclusion is as much a system header as the file and as
+// the includer there are, as clang has it (HandleHeaderIncludeOrImport): a file included from a system header is one
+// too.
 static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index)
 {
     PPFileData* data = &pp->datas[pp->files[file].data];
-    const bool skipped = data->prepared && (data->once || (data->guard != 0 && pp_is_macro(pp, data->guard)));
-    pp->statistics.skipped_includes += skipped && pp->options.timing;
+    const bool guarded = data->guarded && data->guard != 0 && !pp->options.no_guard_skip && pp_is_macro(pp, data->guard);
+    const bool skipped = data->prepared && (data->once || guarded);
+    pp->statistics.skipped_once += data->prepared && data->once && pp->options.timing;
+    pp->statistics.skipped_guards += data->prepared && !data->once && guarded && pp->options.timing;
     if (pp->include_depth >= BUSTER_PP_MAX_INCLUDE_DEPTH)
     {
         pp_diagnose(pp, PP_SEVERITY_FATAL, include_location, "#include nested too deeply");
@@ -5773,7 +6194,60 @@ static void pp_line_text(const Preprocessor* pp, const PPFileData* data, uint32_
 
 static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location);
 
-// Skips to the next directive of directive d's conditional group (or to the end of the file if it is unterminated).
+// Where clang puts token t of the context's file in diagnostics: where its lexer starts the token, at the first of any
+// line splices right before it (pp_start_with_splices).
+static uint32_t pp_token_location(const Preprocessor* pp, const PPContext* context, const PPFileData* data, uint32_t t)
+{
+    return pp->ranges[context->range].base + pp_start_with_splices(data->bytes, data->starts[t]);
+}
+
+// A conditional directive's name, for diagnostics.
+static const char* pp_conditional_name(uint8_t kind)
+{
+    return kind == PP_DIRECTIVE_ELIFDEF ? "elifdef" : kind == PP_DIRECTIVE_ELIFNDEF ? "elifndef" : kind == PP_DIRECTIVE_ELSE ? "else" : "elif";
+}
+
+// The notes of the directives a skip passes over (PPFileData.note_*), from directive `from` (not included) to `to`
+// (the next directive of the group, or the directive count for a skip to the end of the file): what clang reports as
+// it skips them, at their names.
+static void pp_report_skipped(Preprocessor* pp, const PPContext* context, const PPFileData* data, uint32_t from, uint32_t to)
+{
+    uint32_t low = 0;
+    uint32_t high = data->note_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = data->note_directives[middle] <= from ? middle + 1 : low;
+        high = data->note_directives[middle] <= from ? high : middle;
+    }
+    uint32_t last = low;
+    for (; last < data->note_count && data->note_directives[last] < to; last += 1)
+    {
+        const uint32_t d = data->note_directives[last];
+        const uint8_t notes = data->note_kinds[last];
+        const uint32_t name = pp_token_location(pp, context, data, data->directive_hash[d] + 1);
+        const char* spelling = pp_conditional_name(data->directive_kind[d]);
+        if ((notes & BUSTER_PP_NOTE_ELIFDEF) != 0 && pp->options.language.standard < 2023)
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, name, "use of a '#%s' directive is a C23 extension", spelling);
+        }
+        if ((notes & BUSTER_PP_NOTE_AFTER_ELSE) != 0)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#%s after #else", spelling);
+        }
+    }
+    // A skip to the end leaves the groups opened inside it open, which are unterminated, innermost (last) first.
+    for (uint32_t i = last; to == data->directive_count && i > low; i -= 1)
+    {
+        if ((data->note_kinds[i - 1] & BUSTER_PP_NOTE_UNTERMINATED) != 0)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp_token_location(pp, context, data, data->directive_hash[data->note_directives[i - 1]] + 1), "unterminated conditional directive");
+        }
+    }
+}
+
+// Skips to the next directive of directive d's conditional group (or to the end of the file if it is unterminated),
+// reporting what the directives it passes over must (pp_report_skipped).
 static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
@@ -5788,23 +6262,35 @@ static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
         context->position = data->directive_hash[next];
         context->next_directive = next;
     }
+    if (pp->conditional_count > context->conditional_base)
+    {
+        pp->conditionals[pp->conditional_count - 1].skipping = true;
+    }
+    if (data->note_count != 0)
+    {
+        pp_report_skipped(pp, context, data, d, context->next_directive);
+    }
 }
 
 // A #if's, #ifdef's or #ifndef's group is open (taken or not), or a #elif's, #elifdef's or #elifndef's branch is
 // decided, at directive d: a group not taken is skipped to its next directive.
-static void pp_apply_condition(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind, bool taken, uint32_t location)
+static void pp_apply_condition(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind, bool taken)
 {
     if (kind == PP_DIRECTIVE_IF || kind == PP_DIRECTIVE_IFDEF || kind == PP_DIRECTIVE_IFNDEF)
     {
+        const PPFileData* data = &pp->datas[pp->files[context->file].data];
+        context->guard_taken |= d == data->guard_opener && data->guard != 0 && taken;
+        const uint32_t name = pp_token_location(pp, context, data, data->directive_hash[d] + 1);
         if (pp->conditional_count < BUSTER_PP_MAX_CONTEXTS)
         {
-            pp->conditionals[pp->conditional_count] = (PPConditional){ .taken = taken, .seen_else = false, .location = location };
+            pp->conditionals[pp->conditional_count] = (PPConditional){ .taken = taken, .location = name };
             pp->conditional_count += 1;
         }
     }
     else
     {
         pp->conditionals[pp->conditional_count - 1].taken = taken;
+        pp->conditionals[pp->conditional_count - 1].skipping = false;
     }
     if (!taken)
     {
@@ -5838,7 +6324,7 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     if (!started)
     {
         pp->arguments.count = line;
-        pp_apply_condition(pp, context, d, kind, false, location);
+        pp_apply_condition(pp, context, d, kind, false);
     }
 }
 
@@ -5858,10 +6344,25 @@ static void pp_finish_condition(Preprocessor* pp)
     pp->capture_count -= 1;
     pp->captures.count = capture.begin;
     pp->arguments.count = capture.arguments_begin;
-    pp_apply_condition(pp, &pp->contexts[capture.context], capture.directive, capture.directive_kind, taken, capture.location);
+    pp_apply_condition(pp, &pp->contexts[capture.context], capture.directive, capture.directive_kind, taken);
 }
 
-// The conditional directives (C 6.10.2), at directive d.
+// A directive at `hash` whose line [hash, end) lacks the macro name it needs, reported as clang reports it: missing at the
+// line's end, or not an identifier at the token.
+static void pp_report_macro_name(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t hash, uint32_t end)
+{
+    if (hash + 2 < end)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, base, hash + 2, end), "macro name must be an identifier");
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, pp_line_end_location(pp, data, base, hash + 1), "macro name missing");
+    }
+}
+
+// The conditional directives (C 6.10.2), at directive d. Their structure is reported at the directive's name and
+// extra tokens at the first of them, where clang reports them, and in clang's order.
 static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
@@ -5869,6 +6370,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
     const uint32_t end = data->directive_end[d];
     const uint32_t base = pp->ranges[context->range].base;
     const uint32_t location = base + data->starts[hash];
+    const uint32_t name = pp_token_location(pp, context, data, hash + 1);
     const bool open = pp->conditional_count > context->conditional_base;
     PPConditional* group = open ? &pp->conditionals[pp->conditional_count - 1] : 0;
     switch (kind)
@@ -5882,26 +6384,30 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             const bool named = hash + 2 < end && (data->kinds[hash + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
             if (!named)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "macro name missing");
+                pp_report_macro_name(pp, data, base, hash, end);
             }
             else if (hash + 3 < end)
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #%s directive", kind == PP_DIRECTIVE_IFDEF ? "ifdef" : "ifndef");
+                pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 3), "extra tokens at end of #%s directive", kind == PP_DIRECTIVE_IFDEF ? "ifdef" : "ifndef");
             }
             const bool defined = named && pp_is_macro(pp, data->values[hash + 2]);
-            pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_IFDEF ? defined : !defined), location);
+            pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_IFDEF ? defined : !defined));
             break;
         }
         case PP_DIRECTIVE_ELIF:
         case PP_DIRECTIVE_ELIFDEF:
         case PP_DIRECTIVE_ELIFNDEF:
+            if (kind != PP_DIRECTIVE_ELIF && pp->options.language.standard < 2023)
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, name, "use of a '#%s' directive is a C23 extension", pp_conditional_name(kind));
+            }
             if (!open)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#elif without #if");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#%s without #if", pp_conditional_name(kind));
             }
             else if (group->seen_else)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#elif after #else");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#%s after #else", pp_conditional_name(kind));
                 pp_skip_group(pp, context, d);
             }
             else if (group->taken)
@@ -5915,33 +6421,60 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             else
             {
                 const bool named = hash + 2 < end && (data->kinds[hash + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
+                if (!named)
+                {
+                    pp_report_macro_name(pp, data, base, hash, end);
+                }
+                else if (hash + 3 < end)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 3), "extra tokens at end of #%s directive", pp_conditional_name(kind));
+                }
                 const bool defined = named && pp_is_macro(pp, data->values[hash + 2]);
-                pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_ELIFDEF ? defined : !defined), location);
+                pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_ELIFDEF ? defined : !defined));
             }
             break;
         case PP_DIRECTIVE_ELSE:
+        {
+            // clang checks the line's end before the structure in a group it is reading (or with no group), after it
+            // where it enters the #else from a skip, and not at all where it skips past a taken group.
+            const bool entering = open && !group->taken;
+            const bool extra = hash + 2 < end && !(open && group->taken && group->skipping);
+            if (extra && !entering)
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #else directive");
+            }
             if (!open)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#else without #if");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#else without #if");
             }
             else
             {
                 if (group->seen_else)
                 {
-                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#else after #else");
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#else after #else");
+                }
+                if (extra && entering)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #else directive");
                 }
                 group->seen_else = true;
                 if (group->taken)
                 {
                     pp_skip_group(pp, context, d);
                 }
+                group->skipping &= group->taken;
                 group->taken = true;
             }
             break;
+        }
         case PP_DIRECTIVE_ENDIF:
+            if (hash + 2 < end)
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #endif directive");
+            }
             if (!open)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#endif without #if");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#endif without #if");
             }
             else
             {
@@ -5951,22 +6484,21 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
     }
 }
 
-// The file a #include, #include_next or #import (`kind`) in the context's file names: entered, unless #import read it.
-static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, const uint8_t* name, uint32_t length, bool angled, uint32_t location)
+// The file a #include, #include_next or #import (`kind`) at `location` in the context's file names: entered, unless
+// #import read it. A name no file has is reported at `name_location`, where clang reports it: the name's.
+static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, const uint8_t* name, uint32_t length, bool angled, uint32_t location,
+                            uint32_t name_location)
 {
     const bool next = kind == PP_DIRECTIVE_INCLUDE_NEXT && pp->include_depth != 0;
     uint32_t found_in;
     const uint32_t file = pp_find_include(pp, name, length, angled, next, context->file, context->search_index, &found_in);
     if (file == BUSTER_PP_NONE)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, location, "'%.*s' file not found", (int)length, (const char*)name);
-    }
-    else if (kind == PP_DIRECTIVE_IMPORT && pp->datas[pp->files[file].data].prepared && pp->datas[pp->files[file].data].once)
-    {
-        // Already imported.
+        pp_diagnose(pp, PP_SEVERITY_FATAL, name_location, "'%.*s' file not found", (int)length, (const char*)name);
     }
     else
     {
+        // An imported file is read once, as after #pragma once: pp_enter_file skips it after that.
         pp_enter_file(pp, file, context->range, location, found_in);
         if (kind == PP_DIRECTIVE_IMPORT)
         {
@@ -5992,7 +6524,7 @@ static void pp_finish_include(Preprocessor* pp)
     }
     else
     {
-        pp_include_file(pp, &pp->contexts[capture.context], capture.directive_kind, name, length, angled, capture.location);
+        pp_include_file(pp, &pp->contexts[capture.context], capture.directive_kind, name, length, angled, capture.location, capture.location);
     }
 }
 
@@ -6033,7 +6565,8 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     }
     else if (form == PP_HEADER_LITERAL)
     {
-        pp_include_file(pp, context, kind, name, length, angled, location);
+        // A name no file has is reported at the name, its first token (pp_literal_header_name's).
+        pp_include_file(pp, context, kind, name, length, angled, location, base + data->starts[hash + 2]);
     }
 }
 
@@ -6382,21 +6915,36 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
             pp_define(pp, data_index, base, hash + 2, end);
             break;
         case PP_DIRECTIVE_UNDEF:
+            // As clang: the name, then the line's end, then whether it undefines a builtin.
             if (hash + 2 < end && (data->kinds[hash + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER)
             {
                 const IdentId name = data->values[hash + 2];
+                const uint32_t name_location = pp_define_location(pp, data, base, hash + 2, end);
                 if (name == C_NAME_DEFINED)
                 {
-                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "'defined' cannot be used as a macro name");
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "'defined' cannot be used as a macro name");
                 }
                 else
                 {
+                    if (hash + 3 < end)
+                    {
+                        pp_diagnose(pp, PP_SEVERITY_WARNING, pp_define_location(pp, data, base, hash + 3, end), "extra tokens at end of #undef directive");
+                    }
+                    const PPMacroId previous = pp->macro_of[name];
+                    if (previous != 0 && pp_language_defined(pp, &pp->macros[previous]))
+                    {
+                        pp_diagnose(pp, PP_SEVERITY_WARNING, name_location, "undefining builtin macro");
+                    }
                     pp_set_macro(pp, name, 0);
                 }
             }
+            else if (hash + 2 < end)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, base, hash + 2, end), "macro name must be an identifier");
+            }
             else
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "macro name missing");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_line_end_location(pp, data, base, hash + 1), "macro name missing");
             }
             break;
         case PP_DIRECTIVE_INCLUDE:
@@ -6424,7 +6972,9 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
             const uint8_t* text;
             uint32_t length;
             pp_line_text(pp, data, hash + 2, end, &text, &length);
-            pp_diagnose(pp, kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, location, "%.*s", (int)length, (const char*)text);
+            // At the directive's name, as clang reports it.
+            pp_diagnose(pp, kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, base + data->starts[hash + 1], "%.*s", (int)length,
+                        (const char*)text);
             break;
         }
         case PP_DIRECTIVE_PRAGMA:
@@ -7899,16 +8449,19 @@ static void pp_dedupe_directories(Preprocessor* pp)
 }
 
 // An array of `count` records of `size` bytes, in an arena of its own (address space, touched as it is used).
-static void* pp_array(Preprocessor* pp, uint64_t count, uint64_t size)
+// An array of its own of `count` entries of `size` bytes, while `*reserved` (which becomes false if it can't be): the
+// reservations stop at the first that fails.
+static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size)
 {
     void* result = 0;
-    if (pp->array_count < BUSTER_PP_ARRAYS)
+    if (*reserved && pp->array_count < BUSTER_PP_ARRAYS)
     {
         Arena* arena = &pp->arrays[pp->array_count];
         *arena = arena_reserve(count * size + 64);
         result = arena_push_array(arena, count, size, 64);
         pp->array_count += 1;
     }
+    *reserved = result != 0;
     return result;
 }
 
@@ -7916,47 +8469,54 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
 {
     *pp = (Preprocessor){ 0 };
     pp->diagnostic_include_range = BUSTER_PP_NONE;
+    pp->predefines_data = BUSTER_PP_NONE;
     pp->options = *options;
     pp->table = table;
     const PPPrepare prepare = pp_prepare_options(options);
     pp->vectorized = prepare.vectorized;
     pp->refine_flags = prepare.refine_flags;
     pp->split_kinds = prepare.split_kinds;
+    // The memory, reserved in turn until a reservation fails (pp_release releases what was).
     pp->arena = arena_reserve(BUSTER_PP_ARENA_BYTES);
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
+    bool result = pp->arena.base != 0;
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {
         pp->columns[i] = arena_reserve(BUSTER_PP_ARENA_BYTES);
+        result = pp->columns[i].base != 0;
     }
-    pp->scratch[0] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
-    pp->scratch[1] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
+    for (uint32_t i = 0; result && i < 2; i += 1)
+    {
+        pp->scratch[i] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
+        result = pp->scratch[i].base != 0;
+    }
     pp->scratch_range[0] = BUSTER_PP_NONE;
     pp->scratch_range[1] = BUSTER_PP_NONE;
-    bool result = pp_tokens_reserve(&pp->output, BUSTER_PP_MAX_OUTPUT_TOKENS) && pp_tokens_reserve(&pp->arguments, BUSTER_PP_MAX_STACK_TOKENS) &&
-                  pp_tokens_reserve(&pp->captures, BUSTER_PP_MAX_STACK_TOKENS) && pp_tokens_reserve(&pp->expansions, BUSTER_PP_MAX_STACK_TOKENS);
-    pp->ranges = pp_array(pp, BUSTER_PP_MAX_RANGES, sizeof(PPRange));
-    pp->datas = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(PPFileData));
-    pp->record_data = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
-    pp->files = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(PPFile));
-    pp->file_slots = pp_array(pp, BUSTER_PP_FILE_SLOTS, sizeof(uint32_t));
+    result = result && pp_tokens_reserve(&pp->output, BUSTER_PP_MAX_OUTPUT_TOKENS) && pp_tokens_reserve(&pp->arguments, BUSTER_PP_MAX_STACK_TOKENS) &&
+             pp_tokens_reserve(&pp->captures, BUSTER_PP_MAX_STACK_TOKENS) && pp_tokens_reserve(&pp->expansions, BUSTER_PP_MAX_STACK_TOKENS);
+    pp->ranges = pp_array(pp, &result, BUSTER_PP_MAX_RANGES, sizeof(PPRange));
+    pp->datas = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(PPFileData));
+    pp->record_data = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
+    pp->files = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(PPFile));
+    pp->file_slots = pp_array(pp, &result, BUSTER_PP_FILE_SLOTS, sizeof(uint32_t));
     pp->file_slot_mask = BUSTER_PP_INITIAL_FILE_SLOTS - 1;
-    pp->directories = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(char*));
-    pp->directory_lengths = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(uint32_t));
-    pp->directory_system = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(uint8_t));
-    pp->line_directives = pp_array(pp, BUSTER_PP_MAX_LINE_DIRECTIVES, sizeof(PPLineDirective));
-    pp->expansion_starts = pp_array(pp, (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPExpansionStart));
-    pp->macro_of = pp_array(pp, BUSTER_INTERN_MAX_IDS, sizeof(PPMacroId));
-    pp->is_macro = pp_array(pp, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
-    pp->macros = pp_array(pp, BUSTER_PP_MAX_MACROS, sizeof(PPMacro));
-    pp->items = pp_array(pp, BUSTER_PP_MAX_ITEMS, sizeof(PPItem));
-    pp->parameters = pp_array(pp, BUSTER_PP_MAX_ITEMS, sizeof(IdentId));
-    pp->pushed_names = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(IdentId));
-    pp->pushed_macros = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(PPMacroId));
-    pp->contexts = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPContext));
-    pp->conditionals = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPConditional));
-    pp->invocations = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPInvocation));
-    pp->argument_records = pp_array(pp, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
-    pp->capture_frames = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
-    if (!options->no_history)
+    pp->directories = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(char*));
+    pp->directory_lengths = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(uint32_t));
+    pp->directory_system = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(uint8_t));
+    pp->line_directives = pp_array(pp, &result, BUSTER_PP_MAX_LINE_DIRECTIVES, sizeof(PPLineDirective));
+    pp->expansion_starts = pp_array(pp, &result, (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPExpansionStart));
+    pp->macro_of = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS, sizeof(PPMacroId));
+    pp->is_macro = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
+    pp->macros = pp_array(pp, &result, BUSTER_PP_MAX_MACROS, sizeof(PPMacro));
+    pp->items = pp_array(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(PPItem));
+    pp->parameters = pp_array(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(IdentId));
+    pp->pushed_names = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(IdentId));
+    pp->pushed_macros = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(PPMacroId));
+    pp->contexts = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPContext));
+    pp->conditionals = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPConditional));
+    pp->invocations = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPInvocation));
+    pp->argument_records = pp_array(pp, &result, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
+    pp->capture_frames = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
+    if (result && !options->no_history)
     {
         // Five retained tables and three temporary columns share base pages for their first few records. Only a
         // table that outgrows its slice reserves a large arena, avoiding eight mappings/advice calls on small units.
@@ -7989,10 +8549,6 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         fprintf(stderr, "error: the file cache was made for another language mode or intern table\n");
         result = false;
     }
-    result = result && pp->ranges != 0 && pp->datas != 0 && pp->record_data != 0 && pp->files != 0 && pp->file_slots != 0 && pp->directories != 0 && pp->directory_lengths != 0 &&
-             pp->directory_system != 0 && pp->line_directives != 0 && pp->expansion_starts != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->macros != 0 && pp->items != 0 &&
-             pp->parameters != 0 && pp->pushed_names != 0 && pp->pushed_macros != 0 && pp->contexts != 0 && pp->conditionals != 0 && pp->invocations != 0 &&
-             pp->argument_records != 0 && pp->capture_frames != 0 && pp->scratch[0].base != 0 && pp->scratch[1].base != 0;
     if (result)
     {
         // Macro 0 is none; location 0 is none.
@@ -8147,6 +8703,13 @@ static void pp_release(Preprocessor* pp)
 
 static void pp_resolve_keywords(Preprocessor* pp);
 
+// Why the file of record `file` (BUSTER_PP_NONE if its record couldn't be made) has no data, for a message.
+static const char* pp_read_error(const Preprocessor* pp, uint32_t file)
+{
+    const int error = file != BUSTER_PP_NONE ? pp->files[file].error : ENOMEM;
+    return error > 0 ? strerror(error) : "not a regular file";
+}
+
 // Preprocesses the main file: the predefines (or PPOptions.predefines_path's), the command line's -D, -U and -include,
 // then the file. The output is pp->output, with keywords' kinds. Returns false if there were errors.
 static bool pp_run(Preprocessor* pp, const char* main_path)
@@ -8160,11 +8723,12 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
         result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE;
         if (result)
         {
+            pp->predefines_data = pp->files[file].data;
             pp_run_file(pp, file);
         }
         else
         {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the predefines file %s", pp->options.predefines_path);
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the predefines file '%s': %s", pp->options.predefines_path, pp_read_error(pp, file));
         }
     }
     else
@@ -8175,6 +8739,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
         result = file != BUSTER_PP_NONE;
         if (result)
         {
+            pp->predefines_data = pp->files[file].data;
             pp_run_file(pp, file);
         }
         else
@@ -8241,7 +8806,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     }
     else if (!pp->fatal)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "no such file: '%s'", main_path);
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read '%s': %s", main_path, pp_read_error(pp, file));
     }
     pp_resolve_keywords(pp);
     return pp->errors == 0 && !pp->fatal;
@@ -9248,6 +9813,15 @@ static bool pp_parse_standard(const char* value, CLanguage* language)
     return result;
 }
 
+// Is `argument` one of our options that clang doesn't have and that take the next argument as their value
+// (--predefines FILE, --location-limit N)? The commands that split -E's options from their files take the value with
+// the option, and those that give the options to clang too (test-preprocessor's files and --compare-clang,
+// benchmark-preprocessor --clang) leave both out of clang's arguments.
+static bool pp_own_option_with_value(const char* argument)
+{
+    return strcmp(argument, "--predefines") == 0 || strcmp(argument, "--location-limit") == 0;
+}
+
 // The preprocessor's options from clang-style arguments (the ones -E needs). `input` gets the source file, `output`
 // the -o file (or null), `markers` false for -P. Returns false for an argument it doesn't know.
 static bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)
@@ -9308,6 +9882,15 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         else if (strcmp(argument, "--scalar") == 0)
         {
             options->scalar = true;
+        }
+        else if (strcmp(argument, "--location-limit") == 0 && next != 0)
+        {
+            // A test option: a location space this many bytes long, to run out of it (#124).
+            char* rest;
+            const unsigned long long limit = strtoull(next, &rest, 10);
+            result = *rest == 0 && limit != 0 && limit <= UINT32_MAX;
+            options->location_limit = (uint32_t)limit;
+            i += 1;
         }
         else if (strcmp(argument, "-trigraphs") == 0 || strcmp(argument, "-ftrigraphs") == 0 || strcmp(argument, "-fno-trigraphs") == 0)
         {
@@ -9431,10 +10014,14 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     PPOptions options;
     const char* input;
     const char* output;
-    bool markers;
-    const bool parsed = pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
+    bool markers = true;
+    const bool parsed = arena.base != 0 && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
     options.expansion_starts = markers;
-    if (!parsed)
+    if (arena.base == 0)
+    {
+        fprintf(stderr, "fatal error: can't reserve memory\n");
+    }
+    else if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
                         "[-include file] [-dM] [-std=...] [-ansi] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-march=cpu] [-m[no-]feature] [-O...] [-f...] "
@@ -9446,7 +10033,11 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
         static Preprocessor pp;
         if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table))
         {
-            fprintf(stderr, "can't reserve memory\n");
+            // A failure pp_initialize reported (a location space too small for its first spellings) or memory.
+            if (!pp.fatal)
+            {
+                fprintf(stderr, "fatal error: can't reserve memory\n");
+            }
         }
         else
         {
@@ -9462,9 +10053,10 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
                 fprintf(stderr, "can't write %s\n", output);
             }
             result = preprocessed && printed ? 0 : 1;
-            pp_release(&pp);
-            intern_release(&table);
         }
+        // What a failed reservation left reserved too.
+        pp_release(&pp);
+        intern_release(&table);
     }
     arena_release(&arena);
     return result;

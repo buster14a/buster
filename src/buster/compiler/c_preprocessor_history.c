@@ -20,7 +20,8 @@ static bool pp_history_grow(Preprocessor* pp, void** records, uint32_t* capacity
     bool result = needed <= *capacity;
     if (!result && needed <= maximum)
     {
-        void* grown = pp_array(pp, maximum, size);
+        bool reserved = true;
+        void* grown = pp_array(pp, &reserved, maximum, size);
         if (grown != 0)
         {
             memcpy(grown, *records, (uint64_t)*capacity * size);
