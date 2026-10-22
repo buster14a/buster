@@ -3951,6 +3951,7 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
     bool va_opt_paste_left = false; // Whether ## precedes the next __VA_OPT__ (set by the ##).
     bool va_opt_merged = false; // Whether the open __VA_OPT__'s first token was pasted onto the ##'s left operand.
     bool va_opt_pseudo_paste = false; // Whether its content starts with GNU's comma's __VA_ARGS__ (set by the ##).
+    uint32_t va_opt_pseudo_lead = BUSTER_PP_NONE; // That __VA_ARGS__'s item, after the empty arguments pasted onto it.
     bool next_space = false;
     bool literal_paste = false; // Whether the last token is a ## that stays a token, after which a body token keeps its own space.
     bool placemarkers = false;
@@ -3994,6 +3995,7 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
             va_opt_paste_left = false;
             va_opt_merged = false;
             va_opt_pseudo_paste = false;
+            va_opt_pseudo_lead = BUSTER_PP_NONE;
             va_opt_end = BUSTER_PP_NONE;
             va_opt_first = BUSTER_PP_NONE;
         }
@@ -4094,6 +4096,13 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     va_opt_mark = item->kind == PP_ITEM_STRINGIZE_VA_OPT ? out->count : BUSTER_PP_NONE;
                     va_opt_string_space = string_space;
                     va_opt_string_location = pp->history_anchor;
+                    if (va_opt_pseudo_paste && va_opt_pseudo_lead > i + 1)
+                    {
+                        // GNU's comma past empty arguments: clang drops them with their ##, and the variadic argument
+                        // keeps its first token's own space, as at the content's start, which it is read as.
+                        va_opt_first = va_opt_pseudo_lead;
+                        i = va_opt_pseudo_lead - 1;
+                    }
                 }
                 else
                 {
@@ -4268,6 +4277,7 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     va_opt_pseudo_paste = variadic_present && next->kind == PP_ITEM_VA_OPT && left.kind == C_TOKEN_COMMA && lead < content_end &&
                                           items[lead].kind == PP_ITEM_PARAMETER && items[lead].parameter == variadic_index &&
                                           (lead > operand + 1 || (lead + 1 < content_end && items[lead + 1].kind == PP_ITEM_PASTE));
+                    va_opt_pseudo_lead = va_opt_pseudo_paste ? lead : BUSTER_PP_NONE;
                     va_opt_paste_left = !va_opt_pseudo_paste;
                     va_opt_paste_location = pp->history_anchor;
                     va_opt_paste_spelling = pp->history_spelling;
