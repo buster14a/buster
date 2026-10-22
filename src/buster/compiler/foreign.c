@@ -62,9 +62,9 @@
 //   - Archives' and libraries' indices: foreign_list_inputs, foreign_read_archive, foreign_read_library and
 //     foreign_read_indices.
 //   - The first round: foreign_first_round.
-//   - The parse: foreign_member_bytes, foreign_check_tables, foreign_headers_exact, foreign_headers_vector,
-//     foreign_object_headers, foreign_class, foreign_symbol_exact, foreign_symbols_vector, foreign_fill_symbols,
-//     foreign_object_groups, foreign_partitions, foreign_round_columns and foreign_parse.
+//   - The parse: foreign_thin_member, foreign_member_bytes, foreign_check_tables, foreign_headers_exact,
+//     foreign_headers_vector, foreign_object_headers, foreign_class, foreign_symbol_exact, foreign_symbols_vector,
+//     foreign_fill_symbols, foreign_object_groups, foreign_partitions, foreign_round_columns and foreign_parse.
 //   - The exchange: foreign_partition, foreign_records_vector, foreign_count_items, foreign_exchange_items and
 //     foreign_exchange.
 //   - Resolution and archive members: the tables (foreign_entry, foreign_group_entry), foreign_touch, foreign_fold,
@@ -193,6 +193,10 @@ struct ForeignCommand
     // How many records each partition of the exchange aims at: 0 for BUSTER_FOREIGN_PARTITION_RECORDS. The tests take
     // a few, so that small inputs spread over many partitions and lanes.
     uint32_t partition_records;
+    // A lane, plus 1, that waits BUSTER_FOREIGN_SLOW_LANE_NANOSECONDS before each of its decisions to go on, so that
+    // the others take each first and start the next phase: the tests' check that the lanes still decide alike when a
+    // failure comes meanwhile. 0 for none.
+    uint32_t slow_lane;
 };
 
 // An input in link order, a script's inputs in place of the script: its path (NUL-terminated), its bytes (the file,
@@ -239,11 +243,17 @@ struct ForeignArchive
     uint32_t* member_objects;
 };
 
-// A shared library: its exports, versions and references (import_library), indexed by hash.
+// A shared library: its exports, versions and references (import_library), indexed by hash; whether it came under
+// --as-needed; and once it is needed (from the start without --as-needed), the object, plus 1, that holds its
+// references: a library's undefined symbols join the resolution as an object's, at the library's position, and so load
+// the archive members that define them, as GNU ld and lld load them (foreign_needed_library has when an as-needed one is
+// needed).
 typedef struct ForeignLibrary ForeignLibrary;
 struct ForeignLibrary
 {
     uint32_t input;
+    bool as_needed;
+    uint32_t object;
     ImportLibrary library;
 };
 
@@ -258,9 +268,13 @@ struct ForeignObject
     uint64_t position;
     uint32_t input;
     uint32_t member;
+    // For the object that holds a shared library's references (ForeignLibrary.object), the library plus 1: it has no
+    // ELF of its own, and its global symbols are the library's references, each undefined, weak or not; 0 otherwise.
+    uint32_t library;
     String8 bytes;
-    // Whether `bytes` is a mapping of its own (a thin archive's member), which foreign_release unmaps.
-    bool mapped;
+    // A mapping of its own that holds `bytes` (a thin archive's member's file, or for a member of another archive that
+    // archive's), which foreign_release unmaps; empty for bytes the input's mapping holds.
+    String8 mapping;
     // The header and section table, and the symbol table (import_elf and import_symbols), and the index of the first
     // global symbol (the symbol table's sh_info).
     ImportElf elf;
@@ -279,12 +293,20 @@ struct ForeignObject
     uint8_t* discarded;
 };
 
+// A symbol's reserved section indices as the columns and records keep them, out of every section's range (see
+// ForeignSymbols).
+#define BUSTER_FOREIGN_SECTION_RESERVED 0xffff0000u
+#define BUSTER_FOREIGN_SECTION_ABS (BUSTER_FOREIGN_SECTION_RESERVED | SHN_ABS)
+#define BUSTER_FOREIGN_SECTION_COMMON (BUSTER_FOREIGN_SECTION_RESERVED | SHN_COMMON)
+
 // A round's global symbols, as columns indexed by a symbol's place in the round (its global id less the round's
 // first): the round's objects' symbols one after another in object order. Each one's name (a copy, NUL-terminated, in
 // the lane's arena that parsed it: the resolution compares names, and copies made while the parse reads them anyway
 // are a few megabytes, where the objects' string tables are spread over every input's pages) with its length and
-// link_hash, its value, size and section index (st_shndx through SHN_XINDEX: SHN_UNDEF, SHN_ABS and SHN_COMMON as they
-// are), st_info and st_other; and in the end its name's id.
+// link_hash, its value, size and section index (st_shndx, or through SHN_XINDEX, its section's index; SHN_UNDEF as it
+// is, and SHN_ABS and SHN_COMMON as BUSTER_FOREIGN_SECTION_ABS and BUSTER_FOREIGN_SECTION_COMMON, out of every
+// section's range: an object of more than 65,280 sections has sections numbered as those), st_info and st_other; and
+// in the end its name's id.
 typedef struct ForeignSymbols ForeignSymbols;
 struct ForeignSymbols
 {
@@ -469,7 +491,9 @@ struct ForeignFailure
 };
 
 // What each lane owns: its arena (the partitions' tables, its lists), its first failure, the members its partitions
-// need this round, and how long each phase took it, until it arrived at the phase's last sync.
+// need this round, and how long each phase took it, until it arrived at the phase's last sync. And how many of the
+// lanes' decisions to go on it has taken (foreign_proceed), and when it first failed: the decisions it had taken then,
+// or UINT32_MAX while it hasn't. Only its lane writes failed_at, once; the others read it (atomically) to decide.
 typedef struct ForeignLane ForeignLane;
 struct ForeignLane
 {
@@ -479,6 +503,8 @@ struct ForeignLane
     uint32_t need_count;
     uint32_t need_capacity;
     uint64_t nanoseconds[FOREIGN_PHASES];
+    uint32_t decisions;
+    uint32_t failed_at;
 };
 
 // The state every lane shares. foreign_run fills it from a command, on a group of `lanes` lanes.
@@ -498,6 +524,8 @@ struct Foreign
     uint32_t archive_count;
     ForeignLibrary* libraries;
     uint32_t library_count;
+    // The libraries under --as-needed that aren't needed yet, which the decisions look for.
+    uint32_t as_needed_waiting;
     // The loaded objects, by id: object 0 holds the command line's references (-u), then each round's in position
     // order; each one's position, which the resolution reads per record; and once the groups are picked, whether it has
     // a section of a discarded group (ForeignObject.discarded), which the winners read per record.
@@ -518,6 +546,8 @@ struct Foreign
     ForeignNames names;
     // Each lane's own.
     ForeignLane* lane_states;
+    // Whether the lanes ran: lane_run starts none when it can't start them all.
+    bool started;
     // The first failure by position, once the lanes are done.
     ForeignFailure failure;
 };
@@ -588,22 +618,55 @@ static bool foreign_earlier(const ForeignFailure* failure, const ForeignFailure*
     return kept->error == FOREIGN_ERROR_NONE || failure->position < kept->position || (failure->position == kept->position && failure->import.offset < kept->import.offset);
 }
 
-// Records a failure of this lane's, keeping its first.
+// Records a failure of this lane's, keeping its first by position, and the decisions taken when the lane first failed.
 static void foreign_fail(ForeignLane* lane, ForeignFailure failure)
 {
     if (failure.error != FOREIGN_ERROR_NONE && foreign_earlier(&failure, &lane->failure))
     {
         lane->failure = failure;
     }
+    if (failure.error != FOREIGN_ERROR_NONE && lane->failed_at == UINT32_MAX)
+    {
+        __atomic_store_n(&lane->failed_at, lane->decisions, __ATOMIC_RELAXED);
+    }
 }
 
-// After a sync: whether any lane has failed. Every lane reads every lane's failure, so every lane decides alike.
+// Whether any lane has failed yet, for work within a phase: a lane may see another's failure from this phase or not,
+// so it must not decide on it whether to take part in a sync.
 static bool foreign_failed(const Foreign* foreign)
 {
     bool result = false;
     for (uint32_t i = 0; i < foreign->lanes; i += 1)
     {
-        result = result || foreign->lane_states[i].failure.error != FOREIGN_ERROR_NONE;
+        result = result || __atomic_load_n(&foreign->lane_states[i].failed_at, __ATOMIC_RELAXED) != UINT32_MAX;
+    }
+    return result;
+}
+
+// How long the tests' slow lane waits before each decision (ForeignCommand.slow_lane).
+#define BUSTER_FOREIGN_SLOW_LANE_NANOSECONDS 2000000
+
+// Whether every lane goes on to the next phase, which every lane calls at the same points, after a sync, so that every
+// lane takes part in the same syncs: a lane that skipped a phase another took would leave that one waiting at the
+// phase's syncs for ever. The decision counts only the failures that came before its sync, which every lane sees:
+// each failure carries the decisions its lane had taken (ForeignLane.failed_at), and this one counts those taken
+// before it. A lane that has decided and gone on, and fails in the next phase, carries this decision's number, which a
+// lane still deciding doesn't count, as the first didn't when it went on.
+static bool foreign_proceed(Foreign* foreign, ForeignLane* lane)
+{
+    if (foreign->command->slow_lane == lane_index() + 1)
+    {
+        const struct timespec pause = {
+            .tv_sec = 0,
+            .tv_nsec = BUSTER_FOREIGN_SLOW_LANE_NANOSECONDS,
+        };
+        nanosleep(&pause, 0);
+    }
+    lane->decisions += 1;
+    bool result = true;
+    for (uint32_t i = 0; i < foreign->lanes; i += 1)
+    {
+        result = result && __atomic_load_n(&foreign->lane_states[i].failed_at, __ATOMIC_RELAXED) >= lane->decisions;
     }
     return result;
 }
@@ -863,10 +926,12 @@ static bool foreign_find(const Foreign* foreign, const ForeignInput* input, char
 }
 
 // Maps a file privately and writably (a later phase patches sections in place): its bytes, or empty with *error set.
+// The open doesn't block: a FIFO without a writer would block it before fstat could tell that it isn't a regular file
+// (a check of the path before the open would leave a race with a rename over it).
 static String8 foreign_map(const char* path, int* error)
 {
     String8 result = { 0 };
-    const int file = open(path, O_RDONLY | O_CLOEXEC);
+    const int file = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     struct stat status;
     *error = 0;
     if (file < 0 || fstat(file, &status) != 0)
@@ -1103,11 +1168,14 @@ static bool foreign_list_inputs(Foreign* foreign, ForeignLane* lane)
         }
         else if (input->kind == FOREIGN_KIND_LIBRARY)
         {
+            const bool as_needed = (input->flags & BUSTER_FOREIGN_INPUT_AS_NEEDED) != 0;
             input->item = foreign->library_count;
             foreign->libraries[foreign->library_count] = (ForeignLibrary){
                 .input = i,
+                .as_needed = as_needed,
             };
             foreign->library_count += 1;
+            foreign->as_needed_waiting += as_needed ? 1 : 0;
         }
     }
     if (!result)
@@ -1262,11 +1330,12 @@ static void foreign_read_indices(Foreign* foreign, ForeignLane* lane)
 // symbols, groups and records get columns of their own once its headers have counted them (ForeignRound), and round 0's
 // count decides the partitions (foreign_partitions).
 
-// Lane 0: round 0's objects listed, and the objects and rounds pushed.
+// Lane 0: round 0's objects listed, and the objects and rounds pushed. Room for every object the link could load: the
+// command line's, the archives' members, and an object of references per shared library.
 static bool foreign_first_round(Foreign* foreign, ForeignLane* lane)
 {
     const ForeignCommand* command = foreign->command;
-    uint64_t objects = 1;
+    uint64_t objects = 1 + (uint64_t)foreign->library_count;
     for (uint32_t i = 0; i < foreign->input_count; i += 1)
     {
         objects += foreign->inputs[i].kind == FOREIGN_KIND_OBJECT ? 1 : 0;
@@ -1329,6 +1398,18 @@ static bool foreign_first_round(Foreign* foreign, ForeignLane* lane)
                 };
                 foreign->object_count += 1;
             }
+            // A library without --as-needed is needed from the start: its references are round 0's, where it is.
+            ForeignLibrary* library = input->kind == FOREIGN_KIND_LIBRARY ? &foreign->libraries[input->item] : 0;
+            if (library != 0 && !library->as_needed)
+            {
+                library->object = foreign->object_count + 1;
+                foreign->objects[foreign->object_count] = (ForeignObject){
+                    .position = foreign_position(i, 0),
+                    .input = i,
+                    .library = input->item + 1,
+                };
+                foreign->object_count += 1;
+            }
         }
         for (uint32_t id = 0; id < foreign->object_count; id += 1)
         {
@@ -1367,30 +1448,54 @@ static bool foreign_first_round(Foreign* foreign, ForeignLane* lane)
 // variables, in COMDAT groups.
 #define BUSTER_FOREIGN_UNIQUE STB_GNU_UNIQUE
 
-// Maps a thin archive member's file: the archive's directory and the member's name (or the name alone if absolute).
-static String8 foreign_map_member(const ForeignInput* input, String8 name, int* error)
+// A thin archive's member's bytes: the file its name gives, from the archive's directory (or the name alone if
+// absolute), or for a member of another archive (ImportMember.nested), that member's bytes in the archive the name
+// gives, a regular one: its header at the offset, whole, and its bytes after it. *mapping gets the file's mapping, to
+// unmap, and both stay empty, with *error set, on failure.
+static String8 foreign_thin_member(const ForeignInput* input, const ImportMember* member, String8* mapping, int* error)
 {
     const String8 none = { 0 };
     char path[BUSTER_FOREIGN_PATH_BYTES];
-    const bool absolute = name.length != 0 && name.pointer[0] == '/';
+    const bool absolute = member->name.length != 0 && member->name.pointer[0] == '/';
+    const uint64_t magic = sizeof(BUSTER_IMPORT_ARCHIVE_MAGIC) - 1;
     String8 result = { 0 };
+    *mapping = none;
     *error = ENAMETOOLONG;
-    if (foreign_join(path, absolute ? none : foreign_directory(input->path), "", name, ""))
+    if (foreign_join(path, absolute ? none : foreign_directory(input->path), "", member->name, ""))
     {
-        result = foreign_map(path, error);
-        *error = *error == 0 && result.length == 0 ? EINVAL : *error;
+        *mapping = foreign_map(path, error);
+        *error = *error == 0 && mapping->length == 0 ? EINVAL : *error;
+        result = *mapping;
+    }
+    if (*error == 0 && member->nested != 0)
+    {
+        const uint64_t at = member->nested - 1;
+        const char* header = mapping->pointer + at;
+        uint64_t size = 0;
+        const bool valid = mapping->length >= magic && memcmp(mapping->pointer, BUSTER_IMPORT_ARCHIVE_MAGIC, magic) == 0 && at >= magic &&
+                           import_within(mapping->length, at, BUSTER_IMPORT_ARCHIVE_HEADER_BYTES) && header[58] == '`' && header[59] == '\n' &&
+                           import_archive_number(header + 48, 10, &size) && import_within(mapping->length, at + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES, size);
+        result.pointer = valid ? (char*)header + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES : 0;
+        result.length = valid ? size : 0;
+        *error = valid ? 0 : EINVAL;
+        if (!valid)
+        {
+            munmap(mapping->pointer, mapping->length);
+            *mapping = none;
+        }
     }
     return result;
 }
 
 // Archive `archive`'s member `member`: its header read (import_archive_member) into the archive's members, for a
-// lazy archive, and its bytes, a thin archive's mapped (*mapped then says so). False, with *failure, if either fails.
-static bool foreign_member_bytes(const ForeignArchive* archive, const ForeignInput* input, uint32_t member, String8* bytes, bool* mapped, ForeignFailure* failure)
+// lazy archive, and its bytes, a thin archive's mapped (*mapping then holds the mapping). False, with *failure, if
+// either fails.
+static bool foreign_member_bytes(const ForeignArchive* archive, const ForeignInput* input, uint32_t member, String8* bytes, String8* mapping, ForeignFailure* failure)
 {
     const uint64_t position = foreign_position(archive->input, member + 1);
     ImportResult read = { 0 };
     bool result = true;
-    *mapped = false;
+    *mapping = (String8){ 0 };
     if (!archive->whole)
     {
         read = import_archive_member(&archive->members[member], input->bytes, &archive->index, member);
@@ -1401,8 +1506,7 @@ static bool foreign_member_bytes(const ForeignArchive* archive, const ForeignInp
     if (result && archive->thin)
     {
         int error = 0;
-        *bytes = foreign_map_member(input, archive->members[member].name, &error);
-        *mapped = error == 0;
+        *bytes = foreign_thin_member(input, &archive->members[member], mapping, &error);
         result = error == 0;
         *failure = foreign_failure(FOREIGN_ERROR_FILE, position, archive->input, member + 1);
         failure->system_error = error;
@@ -1591,7 +1695,8 @@ static bool foreign_headers_vector(ForeignObject* object, Arena* arena)
     return result;
 }
 
-// An object's headers, by the path's way; an archive member's header and bytes first.
+// An object's headers, by the path's way; an archive member's header and bytes first. A library's object of references
+// has no headers: its global symbols are the library's references.
 static void foreign_object_headers(Foreign* foreign, uint32_t id, ForeignLane* lane)
 {
     ForeignObject* object = &foreign->objects[id];
@@ -1600,9 +1705,13 @@ static void foreign_object_headers(Foreign* foreign, uint32_t id, ForeignLane* l
     bool readable = true;
     if (object->member != 0)
     {
-        readable = foreign_member_bytes(&foreign->archives[input->item], input, object->member - 1, &object->bytes, &object->mapped, &failure);
+        readable = foreign_member_bytes(&foreign->archives[input->item], input, object->member - 1, &object->bytes, &object->mapping, &failure);
     }
-    if (!readable)
+    if (object->library != 0)
+    {
+        object->global_count = foreign->libraries[object->library - 1].library.references.count;
+    }
+    else if (!readable)
     {
         foreign_fail(lane, failure);
     }
@@ -1636,7 +1745,7 @@ static ForeignClass foreign_class(uint8_t info, uint32_t section)
     {
         result = binding == STB_WEAK ? FOREIGN_CLASS_WEAK_REFERENCE : FOREIGN_CLASS_REFERENCE;
     }
-    else if (section == SHN_COMMON)
+    else if (section == BUSTER_FOREIGN_SECTION_COMMON)
     {
         result = FOREIGN_CLASS_COMMON;
     }
@@ -1700,7 +1809,7 @@ static bool foreign_symbol_exact(const ForeignObject* object, uint32_t index, ui
         symbols->hash[at] = link_hash((const uint8_t*)name.pointer, name.length);
         symbols->value[at] = symbol.st_value;
         symbols->size[at] = symbol.st_size;
-        symbols->section[at] = section;
+        symbols->section[at] = reserved ? BUSTER_FOREIGN_SECTION_RESERVED | section : section;
         symbols->info[at] = symbol.st_info;
         symbols->other[at] = symbol.st_other;
         result = copy != 0;
@@ -1802,13 +1911,33 @@ static uint32_t foreign_symbols_vector(const ForeignObject* object, uint32_t fir
             memcpy(symbols->hash + place, hashes, n * sizeof(uint64_t));
             import_store64(symbols->value + place, value, n);
             import_store64(symbols->size + place, words[2], n);
-            import_store32(symbols->section + place, section, n);
+            import_store32(symbols->section + place, _mm512_mask_or_epi64(section, (__mmask8)reserved, section, _mm512_set1_epi64(BUSTER_FOREIGN_SECTION_RESERVED)), n);
             import_store8(symbols->info + place, info, n);
             import_store8(symbols->other + place, other, n);
             stored += n;
         }
     }
     return stored;
+}
+
+// A library's references [first, first + count), into the round's columns from `at`: each undefined, weak or not,
+// with its name where the library's string table has it. A scalar loop on both paths: a library refers to tens of
+// names (libc.so.6 to 21 of the loader's), against the thousands of global symbols the objects have.
+static void foreign_library_symbols(const ForeignLibrary* library, uint32_t first, uint32_t count, uint32_t at, ForeignSymbols* symbols)
+{
+    const ImportReferences* references = &library->library.references;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const uint32_t reference = first + k;
+        symbols->name[at + k] = references->name[reference];
+        symbols->length[at + k] = references->length[reference];
+        symbols->hash[at + k] = references->hash[reference];
+        symbols->value[at + k] = 0;
+        symbols->size[at + k] = 0;
+        symbols->section[at + k] = SHN_UNDEF;
+        symbols->info[at + k] = ELF64_ST_INFO(references->weak[reference] != 0 ? STB_WEAK : STB_GLOBAL, STT_NOTYPE);
+        symbols->other[at + k] = STV_DEFAULT;
+    }
 }
 
 // The object of round `round` that holds global symbol `symbol`: the last whose global_begin is at most it (an object
@@ -1844,7 +1973,12 @@ static void foreign_fill_symbols(Foreign* foreign, ForeignRound* round, uint64_t
         const ForeignObject* object = &foreign->objects[id];
         const uint64_t object_end = (uint64_t)object->global_begin + object->global_count - round->first_symbol;
         const uint64_t stretch_end = object_end < end ? object_end : end;
-        if (id != 0 && place < stretch_end)
+        if (id != 0 && place < stretch_end && object->library != 0)
+        {
+            foreign_library_symbols(&foreign->libraries[object->library - 1], (uint32_t)(round->first_symbol + place - object->global_begin), (uint32_t)(stretch_end - place),
+                                    (uint32_t)place, &round->symbols);
+        }
+        else if (id != 0 && place < stretch_end)
         {
             const uint32_t index = object->first_global + (uint32_t)(round->first_symbol + place - object->global_begin);
             const uint32_t count = (uint32_t)(stretch_end - place);
@@ -2112,7 +2246,7 @@ static void foreign_records_vector(const Foreign* foreign, const ForeignRound* r
     const __m512i other = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(loaded, symbols->other + at));
     const __m512i binding = _mm512_srli_epi64(info, 4);
     const uint32_t undefined = _mm512_testn_epi64_mask(section, section);
-    const uint32_t common = import_lanes_equal(section, SHN_COMMON);
+    const uint32_t common = import_lanes_equal(section, BUSTER_FOREIGN_SECTION_COMMON);
     const uint32_t weak = import_lanes_equal(binding, STB_WEAK);
     const uint32_t global = import_lanes_equal(binding, STB_GLOBAL);
     // FOREIGN_CLASS_STRONG is 0: a definition with a global binding.
@@ -2605,11 +2739,13 @@ static bool foreign_resolve_records(Foreign* foreign, ForeignRound* round, uint3
     return result;
 }
 
-// Looks a name up in the archives' indices: its first member by position. An archive under --whole-archive has no index
-// to look in: its members are all loaded.
-static void foreign_probe_archives(const Foreign* foreign, ForeignEntry* entry)
+// Looks a name up in the archives' indices, in link order, those with members before `bound`, the name's earliest
+// definition: its first member by position. A member after every definition can't load for the name, and definitions
+// only come earlier as rounds go, so the archives past the bound never will matter, and the entry is probed for good.
+// An archive under --whole-archive has no index to look in: its members are all loaded.
+static void foreign_probe_archives(const Foreign* foreign, ForeignEntry* entry, uint64_t bound)
 {
-    for (uint32_t a = 0; entry->owner_archive == 0 && a < foreign->archive_count; a += 1)
+    for (uint32_t a = 0; entry->owner_archive == 0 && a < foreign->archive_count && foreign_position(foreign->archives[a].input, 1) < bound; a += 1)
     {
         const ForeignArchive* archive = &foreign->archives[a];
         uint32_t begin = 0;
@@ -2664,9 +2800,10 @@ static bool foreign_member_defines_data(const Foreign* foreign, const ForeignArc
     ImportMember header = archive->members[member];
     int error = archive->whole ? 0 : import_archive_member(&header, input->bytes, &archive->index, member).error == IMPORT_ERROR_NONE ? 0 : EINVAL;
     String8 bytes = header.bytes;
+    String8 mapping = { 0 };
     if (error == 0 && archive->thin)
     {
-        bytes = foreign_map_member(input, header.name, &error);
+        bytes = foreign_thin_member(input, &header, &mapping, &error);
     }
     ImportElf elf = { 0 };
     ImportSymbols symbols = { 0 };
@@ -2686,9 +2823,9 @@ static bool foreign_member_defines_data(const Foreign* foreign, const ForeignArc
         const bool reserved = symbol.st_shndx >= SHN_LORESERVE && symbol.st_shndx < SHN_ABS;
         result = found && (binding == STB_GLOBAL || binding >= STB_LOOS) && type != STT_FUNC && type != STT_GNU_IFUNC && symbol.st_shndx != SHN_COMMON && !reserved;
     }
-    if (archive->thin && error == 0 && bytes.length != 0)
+    if (mapping.length != 0)
     {
-        munmap(bytes.pointer, bytes.length);
+        munmap(mapping.pointer, mapping.length);
     }
     return result;
 }
@@ -2731,13 +2868,41 @@ static uint64_t foreign_shared_position(const Foreign* foreign, const ForeignEnt
     return bindable ? foreign_position(foreign->libraries[entry->shared_library - 1].input, 0) : BUSTER_FOREIGN_NO_POSITION;
 }
 
+// A need of a library's rather than an archive member's (ForeignLane.needs: the library's index below it).
+#define BUSTER_FOREIGN_LIBRARY_NEED UINT32_MAX
+
+// The library under --as-needed, not needed yet, that a name's strong reference makes needed, as GNU ld decides it left
+// to right: the first library after the reference and before `bound` (the name's earliest definition, or the member
+// that loads for it) that exports the name, unless a library before the reference that is needed exports it already,
+// which the reference binds to (GNU ld has dropped one under --as-needed that wasn't needed when it came). UINT32_MAX
+// for none. lld counts a library's references whether or not it is needed, and loads members for those of one that
+// isn't (documented in the tests).
+static uint32_t foreign_needed_library(const Foreign* foreign, const ForeignEntry* entry, uint64_t bound)
+{
+    uint32_t result = UINT32_MAX;
+    bool binds = false;
+    for (uint32_t l = 0; !binds && l < foreign->library_count && foreign_position(foreign->libraries[l].input, 0) < bound; l += 1)
+    {
+        const ForeignLibrary* library = &foreign->libraries[l];
+        const bool needed = library->object != 0;
+        const bool counted = needed || foreign_position(library->input, 0) > entry->reference;
+        binds = counted && import_library_find(&library->library, entry->name, entry->length, entry->hash) != 0;
+        result = binds && !needed ? l : result;
+    }
+    return result;
+}
+
 // What an entry the round touched loads (see the section's comment): its first member, and by GNU ld's common rule the
 // first member after its earliest common symbol that defines it as global data.
 static void foreign_decide(const Foreign* foreign, ForeignEntry* entry, ForeignLane* lane)
 {
-    if ((entry->flags & BUSTER_FOREIGN_ENTRY_ARCHIVES_PROBED) == 0 && (entry->defined == BUSTER_FOREIGN_NO_POSITION || (entry->flags & BUSTER_FOREIGN_ENTRY_COMMON) != 0))
+    // Where a member that loads for the name will define it, if one does.
+    uint64_t loading = BUSTER_FOREIGN_NO_POSITION;
+    // A member can load for a strong reference before every definition of the name, a later one included: GNU ld
+    // takes the member that an archive between the two offers.
+    if ((entry->flags & BUSTER_FOREIGN_ENTRY_ARCHIVES_PROBED) == 0 && entry->reference < entry->defined)
     {
-        foreign_probe_archives(foreign, entry);
+        foreign_probe_archives(foreign, entry, entry->defined);
     }
     if (entry->owner_archive != 0 && entry->reference != BUSTER_FOREIGN_NO_POSITION)
     {
@@ -2753,6 +2918,16 @@ static void foreign_decide(const Foreign* foreign, ForeignEntry* entry, ForeignL
         if (before && bound < foreign_shared_position(foreign, entry))
         {
             foreign_need(lane, entry->owner_archive - 1, entry->owner_member);
+            loading = owner;
+        }
+    }
+    // A library under --as-needed is needed once a strong reference before it finds a name it exports still undefined.
+    if (foreign->as_needed_waiting != 0 && entry->reference != BUSTER_FOREIGN_NO_POSITION && entry->visibility == 0)
+    {
+        const uint32_t library = foreign_needed_library(foreign, entry, foreign_min(entry->defined, loading));
+        if (library != UINT32_MAX)
+        {
+            foreign_need(lane, BUSTER_FOREIGN_LIBRARY_NEED, library);
         }
     }
     const bool common_rule = (entry->flags & BUSTER_FOREIGN_ENTRY_COMMON) != 0 && (entry->flags & (BUSTER_FOREIGN_ENTRY_STRONG_DEFINED | BUSTER_FOREIGN_ENTRY_DATA_PROBED)) == 0;
@@ -2837,14 +3012,17 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
         words += foreign->archives[a].member_count / 64 + 1;
     }
     uint64_t* pending = bases != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, words + 1) : 0;
+    // The libraries under --as-needed that this round made needed, a byte each.
+    uint8_t* needed = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)foreign->library_count + 1);
     uint32_t added = 0;
-    if (pending == 0)
+    if (pending == 0 || needed == 0)
     {
         foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0));
     }
     else
     {
         memset(pending, 0, (words + 1) * sizeof(uint64_t));
+        memset(needed, 0, (uint64_t)foreign->library_count + 1);
         for (uint32_t l = 0; l < foreign->lanes; l += 1)
         {
             const ForeignLane* other = &foreign->lane_states[l];
@@ -2852,21 +3030,28 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
             {
                 const uint32_t a = (uint32_t)(other->needs[n] >> 32);
                 const uint32_t m = (uint32_t)other->needs[n];
-                ForeignArchive* archive = &foreign->archives[a];
-                if (!foreign_member_loaded(archive, m))
+                if (a == BUSTER_FOREIGN_LIBRARY_NEED)
                 {
+                    needed[m] = foreign->libraries[m].object == 0 ? 1 : 0;
+                }
+                else if (!foreign_member_loaded(&foreign->archives[a], m))
+                {
+                    ForeignArchive* archive = &foreign->archives[a];
                     archive->loaded[m / 64] |= 1ull << (m % 64);
                     pending[bases[a] + m / 64] |= 1ull << (m % 64);
                 }
             }
         }
-        for (uint32_t a = 0; a < foreign->archive_count; a += 1)
+        // Input by input, so that the objects come in position order: an archive's pending members, a library's
+        // object of references.
+        for (uint32_t i = 0; i < foreign->input_count; i += 1)
         {
-            ForeignArchive* archive = &foreign->archives[a];
-            const uint32_t archive_words = archive->member_count / 64 + 1;
+            const ForeignInput* input = &foreign->inputs[i];
+            ForeignArchive* archive = input->kind == FOREIGN_KIND_ARCHIVE ? &foreign->archives[input->item] : 0;
+            const uint32_t archive_words = archive != 0 ? archive->member_count / 64 + 1 : 0;
             for (uint32_t w = 0; w < archive_words; w += 1)
             {
-                for (uint64_t bits = pending[bases[a] + w]; bits != 0; bits &= bits - 1)
+                for (uint64_t bits = pending[bases[input->item] + w]; bits != 0; bits &= bits - 1)
                 {
                     const uint32_t m = w * 64 + (uint32_t)__builtin_ctzll(bits);
                     const uint32_t id = foreign->object_count;
@@ -2880,6 +3065,20 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
                     foreign->object_count += 1;
                     added += 1;
                 }
+            }
+            if (input->kind == FOREIGN_KIND_LIBRARY && needed[input->item] != 0)
+            {
+                const uint32_t id = foreign->object_count;
+                foreign->libraries[input->item].object = id + 1;
+                foreign->objects[id] = (ForeignObject){
+                    .position = foreign_position(i, 0),
+                    .input = i,
+                    .library = input->item + 1,
+                };
+                foreign->positions[id] = foreign->objects[id].position;
+                foreign->object_count += 1;
+                foreign->as_needed_waiting -= 1;
+                added += 1;
             }
         }
     }
@@ -3178,17 +3377,23 @@ static void foreign_lane_main(void* argument)
 {
     Foreign* foreign = argument;
     ForeignLane* lane = &foreign->lane_states[lane_index()];
+    if (lane_index() == 0)
+    {
+        foreign->started = true;
+    }
     lane->arena = arena_reserve(BUSTER_FOREIGN_LANE_ARENA_BYTES);
     if (lane->arena.base == 0)
     {
         foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0));
     }
     lane_sync();
-    if (!foreign_failed(foreign))
+    // Every lane calls foreign_proceed at each of these points, each after a sync (or a broadcast); && evaluates it
+    // first, on every lane.
+    if (foreign_proceed(foreign, lane))
     {
         foreign_open(foreign, lane);
     }
-    if (!foreign_failed(foreign))
+    if (foreign_proceed(foreign, lane))
     {
         uint64_t start = foreign_now();
         if (lane_index() == 0)
@@ -3196,12 +3401,12 @@ static void foreign_lane_main(void* argument)
             foreign_list_inputs(foreign, lane);
         }
         lane_sync();
-        if (!foreign_failed(foreign))
+        if (foreign_proceed(foreign, lane))
         {
             foreign_read_indices(foreign, lane);
         }
         lane_sync();
-        if (!foreign_failed(foreign) && lane_index() == 0)
+        if (foreign_proceed(foreign, lane) && lane_index() == 0)
         {
             foreign_first_round(foreign, lane);
         }
@@ -3209,20 +3414,20 @@ static void foreign_lane_main(void* argument)
         (void)start;
         lane_sync();
     }
-    bool more = !foreign_failed(foreign);
+    bool more = foreign_proceed(foreign, lane);
     for (uint32_t round = 0; more; round += 1)
     {
         foreign_parse(foreign, round, lane);
-        more = !foreign_failed(foreign);
+        more = foreign_proceed(foreign, lane);
         if (more)
         {
             foreign_exchange(foreign, round, lane);
-            more = !foreign_failed(foreign);
+            more = foreign_proceed(foreign, lane);
         }
         if (more)
         {
             foreign_resolve(foreign, round, lane);
-            more = !foreign_failed(foreign);
+            more = foreign_proceed(foreign, lane);
         }
         uint32_t added = 0;
         if (more && lane_index() == 0)
@@ -3230,13 +3435,13 @@ static void foreign_lane_main(void* argument)
             added = foreign_load(foreign, round, lane);
         }
         added = (uint32_t)lane_broadcast(added, 0);
-        more = more && !foreign_failed(foreign) && added != 0;
+        more = foreign_proceed(foreign, lane) && added != 0;
     }
-    if (!foreign_failed(foreign))
+    if (foreign_proceed(foreign, lane))
     {
         foreign_groups(foreign, lane);
     }
-    if (!foreign_failed(foreign))
+    if (foreign_proceed(foreign, lane))
     {
         foreign_winners(foreign, lane);
     }
@@ -3260,6 +3465,10 @@ static ForeignFailure foreign_run(Foreign* foreign, const ForeignCommand* comman
     else
     {
         memset(foreign->lane_states, 0, lanes * sizeof(ForeignLane));
+        for (uint32_t i = 0; i < lanes; i += 1)
+        {
+            foreign->lane_states[i].failed_at = UINT32_MAX;
+        }
         for (uint32_t i = 0; i < command->argument_count; i += 1)
         {
             foreign->inputs[i] = (ForeignInput){
@@ -3270,8 +3479,10 @@ static ForeignFailure foreign_run(Foreign* foreign, const ForeignCommand* comman
             };
         }
         foreign->input_count = command->argument_count;
-        // lane_run returns false too when a lane couldn't be pinned, which only a benchmark asks for: it ran then.
-        if (!lane_run(lanes, foreign_lane_main, foreign, cpus) && cpus == 0)
+        // lane_run returns false when it couldn't start every lane, and then ran none, and also when a lane couldn't be
+        // pinned to its CPU, which only a benchmark asks for: the lanes ran then.
+        lane_run(lanes, foreign_lane_main, foreign, cpus);
+        if (!foreign->started)
         {
             result = foreign_failure(FOREIGN_ERROR_LANES, 0, 0, 0);
         }
@@ -3297,9 +3508,9 @@ static void foreign_release(Foreign* foreign)
     }
     for (uint32_t id = 0; foreign->objects != 0 && id < foreign->object_count; id += 1)
     {
-        if (foreign->objects[id].mapped)
+        if (foreign->objects[id].mapping.length != 0)
         {
-            munmap(foreign->objects[id].bytes.pointer, foreign->objects[id].bytes.length);
+            munmap(foreign->objects[id].mapping.pointer, foreign->objects[id].mapping.length);
         }
     }
     for (uint32_t i = 0; foreign->lane_states != 0 && i < foreign->lanes; i += 1)

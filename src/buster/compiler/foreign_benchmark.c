@@ -238,8 +238,9 @@ struct ForeignBenchmarkSystem
 
 static bool foreign_benchmark_system(ForeignBenchmarkSystem* system)
 {
-    Runtime dynamic;
-    Runtime static_runtime;
+    // Zeroed, so that either releases whether or not its import ran (the second doesn't when the first fails).
+    Runtime dynamic = { 0 };
+    Runtime static_runtime = { 0 };
     *system = (ForeignBenchmarkSystem){ 0 };
     const bool imported = runtime_import(&dynamic) == RUNTIME_ERROR_NONE && runtime_import_static(&static_runtime) == RUNTIME_ERROR_NONE;
     if (imported)

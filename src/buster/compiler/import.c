@@ -146,6 +146,9 @@ struct ImportMember
     String8 bytes;
     // The offset of the member's header in the archive, which the symbol index names it by.
     uint64_t offset;
+    // In a thin archive, for a member of another archive (GNU ar's "/N:M", whose long name is that archive's path): the
+    // member's header's offset in it plus 1; 0 for any other member.
+    uint64_t nested;
 };
 
 typedef struct ImportArchiveSymbol ImportArchiveSymbol;
@@ -2107,13 +2110,38 @@ static bool import_archive_number(const char* field, uint32_t width, uint64_t* v
 }
 
 // A member's name, from its header's field: up to the '/' that ends it (GNU), or from the long names' table for "/N".
-static bool import_archive_name(const char* field, String8 long_names, String8* name)
+// In a thin archive, "/N:M" names a member of another archive (GNU ar's when a regular archive is added to a thin one):
+// the long name is that archive's path, and M is the member's header's offset in it, which *nested gets plus 1 (0 for
+// any other name).
+static bool import_archive_name(const char* field, String8 long_names, bool thin, String8* name, uint64_t* nested)
 {
     bool result = true;
+    *nested = 0;
     if (field[0] == '/' && field[1] >= '0' && field[1] <= '9')
     {
+        // The offset's digits, in a thin archive maybe ':' and the member's digits, then spaces to the field's end.
         uint64_t offset = 0;
-        result = import_archive_number(field + 1, 15, &offset) && offset < long_names.length;
+        uint64_t member = 0;
+        uint32_t at = 1;
+        uint32_t member_digits = 0;
+        for (; at < 16 && field[at] >= '0' && field[at] <= '9'; at += 1)
+        {
+            offset = offset * 10 + (uint64_t)(field[at] - '0');
+        }
+        const bool reference = thin && at < 16 && field[at] == ':';
+        at += reference ? 1 : 0;
+        for (; reference && at < 16 && field[at] >= '0' && field[at] <= '9'; at += 1)
+        {
+            member = member * 10 + (uint64_t)(field[at] - '0');
+            member_digits += 1;
+        }
+        bool spaces = true;
+        for (; at < 16; at += 1)
+        {
+            spaces = spaces && field[at] == ' ';
+        }
+        result = spaces && (!reference || member_digits != 0) && offset < long_names.length;
+        *nested = result && reference ? member + 1 : 0;
         if (result)
         {
             const char* start = long_names.pointer + offset;
@@ -2285,7 +2313,8 @@ static ImportResult import_archive_scalar(ImportArchive* archive, String8 bytes,
                 else
                 {
                     String8 name = { 0 };
-                    if (!import_archive_name(header, long_names, &name))
+                    uint64_t nested = 0;
+                    if (!import_archive_name(header, long_names, thin, &name, &nested))
                     {
                         result = import_fail(IMPORT_ERROR_BOUNDS, offset);
                     }
@@ -2293,6 +2322,7 @@ static ImportResult import_archive_scalar(ImportArchive* archive, String8 bytes,
                         .name = name,
                         .bytes = data,
                         .offset = offset,
+                        .nested = nested,
                     };
                     member += 1;
                 }
@@ -2354,9 +2384,11 @@ static bool import_vector_member(String8 bytes, String8 long_names, uint64_t at,
     const char* header = bytes.pointer + at;
     uint64_t size = 0;
     String8 name = { 0 };
+    uint64_t nested = 0;
     bool result = import_within(bytes.length, at, BUSTER_IMPORT_ARCHIVE_HEADER_BYTES) && header[58] == '`' && header[59] == '\n' && import_archive_size(header + 48, &size) &&
                   (thin || import_within(bytes.length, at + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES, size));
-    result = result && header[0] != '#' && !(header[0] == '/' && (header[1] == ' ' || header[1] == '/' || header[1] == 'S')) && import_archive_name(header, long_names, &name);
+    result = result && header[0] != '#' && !(header[0] == '/' && (header[1] == ' ' || header[1] == '/' || header[1] == 'S')) &&
+             import_archive_name(header, long_names, thin, &name, &nested);
     const uint64_t length = thin ? 0 : size;
     if (result)
     {
@@ -2367,6 +2399,7 @@ static bool import_vector_member(String8 bytes, String8 long_names, uint64_t at,
                 .length = length,
             },
             .offset = at,
+            .nested = nested,
         };
         *end = at + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES + length + (length & 1);
     }

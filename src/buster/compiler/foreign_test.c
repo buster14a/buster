@@ -45,9 +45,12 @@
 
 // OS-dependent includes
 #include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The tally
@@ -163,22 +166,47 @@ static void foreign_test_object_name(const Foreign* foreign, uint32_t id, char* 
     }
 }
 
-// Whether an object is a thin archive's member, which GNU ld names by its path alone (the test's thin archives name their
-// members by absolute paths).
+// A thin archive's member that is a member of another archive (ImportMember.nested): its name there, from its header in
+// that archive (its file's mapping, the object's), up to the '/' that ends it; false for any other object.
+static bool foreign_test_nested_name(const Foreign* foreign, uint32_t id, String8* name)
+{
+    const ForeignObject* object = &foreign->objects[id];
+    const ImportMember* member = id != 0 && object->member != 0 ? &foreign->archives[foreign->inputs[object->input].item].members[object->member - 1] : 0;
+    const bool result = member != 0 && member->nested != 0 && object->mapping.length >= member->nested - 1 + 16;
+    if (result)
+    {
+        const char* field = object->mapping.pointer + member->nested - 1;
+        const char* slash = memchr(field, '/', 16);
+        name->pointer = (char*)field;
+        name->length = slash != 0 ? (uint64_t)(slash - field) : 16;
+    }
+    return result;
+}
+
+// Whether an object is a thin archive's member of its own file, which GNU ld names by its path alone (the test's thin
+// archives name their members by absolute paths).
 static bool foreign_test_thin_member(const Foreign* foreign, uint32_t id)
 {
     const ForeignObject* object = &foreign->objects[id];
-    return id != 0 && object->member != 0 && foreign->archives[foreign->inputs[object->input].item].thin;
+    String8 nested = { 0 };
+    return id != 0 && object->member != 0 && foreign->archives[foreign->inputs[object->input].item].thin && !foreign_test_nested_name(foreign, id, &nested);
 }
 
-// An object's name as a linker prints it: lld's, or GNU ld's, which is a thin archive member's path alone.
+// An object's name as a linker prints it: lld's, or GNU ld's, which is a thin archive member's path alone, or for a
+// member of another archive that archive's path (as the thin archive names it) and the member's name there.
 static void foreign_test_linker_name(const Foreign* foreign, uint32_t id, bool bfd, char* buffer, uint64_t size)
 {
+    const ForeignObject* object = &foreign->objects[id];
+    String8 nested = { 0 };
     if (bfd && foreign_test_thin_member(foreign, id))
     {
-        const ForeignObject* object = &foreign->objects[id];
         const String8 member = foreign->archives[foreign->inputs[object->input].item].members[object->member - 1].name;
         snprintf(buffer, size, "%.*s", (int)member.length, member.pointer);
+    }
+    else if (bfd && foreign_test_nested_name(foreign, id, &nested))
+    {
+        const String8 member = foreign->archives[foreign->inputs[object->input].item].members[object->member - 1].name;
+        snprintf(buffer, size, "%.*s(%.*s)", (int)member.length, member.pointer, (int)nested.length, nested.pointer);
     }
     else
     {
@@ -191,11 +219,11 @@ static String8 foreign_test_section_name(const Foreign* foreign, uint32_t id, ui
 {
     const ForeignObject* object = &foreign->objects[id];
     String8 result = BUSTER_S8("?");
-    if (section == SHN_COMMON)
+    if (section == BUSTER_FOREIGN_SECTION_COMMON)
     {
         result = BUSTER_S8("COMMON");
     }
-    else if (section == SHN_ABS)
+    else if (section == BUSTER_FOREIGN_SECTION_ABS)
     {
         result = BUSTER_S8("ABS");
     }
@@ -919,6 +947,21 @@ static bool foreign_test_same_trace(const Foreign* foreign, const ForeignTestLin
     uint32_t our_count = 0;
     bool result = ours != 0 && matched != 0;
     const uint32_t name = foreign_test_name(foreign, traced);
+    // The earliest regular definition of the name (strong or weak, not common): GNU ld skips a weak definition after
+    // one, before it would trace it, so that one's line is the resolution's but GNU ld needn't print it.
+    uint64_t earliest = BUSTER_FOREIGN_NO_POSITION;
+    for (uint32_t r = 0; name != 0 && r < foreign->round_count; r += 1)
+    {
+        const ForeignRound* round = &foreign->rounds[r];
+        for (uint32_t s = 0; s < round->symbol_count; s += 1)
+        {
+            const uint32_t symbol = round->first_symbol + s;
+            const uint32_t section = round->symbols.section[s];
+            const bool regular = section != SHN_UNDEF && section != BUSTER_FOREIGN_SECTION_COMMON && !foreign_test_discarded(foreign, symbol);
+            const uint64_t position = foreign->objects[foreign_symbol_object(foreign, symbol)].position;
+            earliest = round->symbols.name_id[s] == name - 1 && regular && position < earliest ? position : earliest;
+        }
+    }
     for (uint32_t r = 0; result && name != 0 && r < foreign->round_count; r += 1)
     {
         const ForeignRound* round = &foreign->rounds[r];
@@ -929,9 +972,10 @@ static bool foreign_test_same_trace(const Foreign* foreign, const ForeignTestLin
             if (round->symbols.name_id[s] == name - 1 && id != 0 && our_count < BUSTER_FOREIGN_TEST_TRACE_LINES)
             {
                 const bool definition = round->symbols.section[s] != SHN_UNDEF && !foreign_test_discarded(foreign, symbol);
+                const bool weak = ELF64_ST_BIND(round->symbols.info[s]) == STB_WEAK && round->symbols.section[s] != BUSTER_FOREIGN_SECTION_COMMON;
                 foreign_test_linker_name(foreign, id, bfd, object, sizeof(object));
                 snprintf(ours[our_count], sizeof(ours[0]), "%s: %s %s", object, definition ? "definition of" : "reference to", traced);
-                matched[our_count] = false;
+                matched[our_count] = bfd && definition && weak && foreign->objects[id].position > earliest;
                 our_count += 1;
             }
         }
@@ -1087,7 +1131,7 @@ static void foreign_test_against(ForeignTestTally* tally, const char* what, cons
                     snprintf(text, sizeof(text), "%.*s", (int)foreign->names.length[n], foreign->names.bytes[n]);
                     uint64_t value = 0;
                     foreign_test_linker_name(foreign, id, is_bfd, name, sizeof(name));
-                    if (section != SHN_ABS && !foreign_test_merged(foreign, id, section) && foreign_test_symbol_value(linked.executable, text, &value))
+                    if (section != BUSTER_FOREIGN_SECTION_ABS && !foreign_test_merged(foreign, id, section) && foreign_test_symbol_value(linked.executable, text, &value))
                     {
                         snprintf(detail, sizeof(detail), "%s puts %s (0x%llx) outside %s's %.*s", linker, text, (unsigned long long)value, name, (int)section_name.length,
                                  section_name.pointer);
@@ -1448,6 +1492,14 @@ static const ForeignTestSource foreign_test_sources[] = {
     { "co_early.cc", "", "#include \"co.h\"\nint early_function(int v) { return twice(v) + 1; }\n" },
     { "co_late.cc", "", "#include \"co.h\"\nint early_function(int); int late_function(int v) { return twice(v) + early_function(v); }\n" },
     { "co_back_main.cc", "", "int late_function(int); int main() { return late_function(1); }\n" },
+    { "pb_main.c", "", "extern int probed(void); int main(void) { return probed(); }\n" },
+    { "pb_strong.c", "", "int probed(void) { return 1; }\n" },
+    { "pb_weak.c", "", "__attribute__((weak)) int probed(void) { return 2; }\n" },
+    { "pb_late.c", "", "int probed(void) { return 3; }\n" },
+    { "dep_main.c", "", "extern int dependent(void); int main(void) { return dependent(); }\n" },
+    { "dep_plain.c", "", "int main(void) { return 0; }\n" },
+    { "dep_library.c", "-fPIC", "extern int dep_foo(void); int dependent(void) { return dep_foo(); }\n" },
+    { "dep_foo.c", "", "int dep_foo(void) { return 4; }\n" },
 };
 
 static const char foreign_test_header_text[] =
@@ -1554,6 +1606,12 @@ static const ForeignTestCase foreign_test_cases[] = {
     { "a PIE with libc", { "@pie", "hello.o" }, true, true, false },
     { "COMDAT groups", { "co_main.o", "co_a.o", "libco.a" }, true, true, true },
     { "COMDAT groups, members loaded later first", { "co_back_main.o", "libco_back.a" }, false, false, true },
+    { "a later weak definition", { "pb_main.o", "libpb.a", "pb_weak.o" }, true, true, false },
+    { "a later strong definition", { "pb_main.o", "libpb.a", "pb_late.o" }, true, true, false },
+    { "a library's reference", { "dep_main.o", "libdep.so", "libdepfoo.a" }, true, true, false },
+    { "an as-needed library's reference", { "dep_main.o", "--as-needed", "libdep.so", "--no-as-needed", "libdepfoo.a" }, true, true, false },
+    { "an as-needed library nothing needs", { "dep_plain.o", "--as-needed", "libdep.so", "--no-as-needed", "libdepfoo.a" }, true, false, false },
+    { "a thin archive of another archive's member", { "ar_main.o", "libnest.a", "libsecond.a", "liblate.a" }, true, false, false },
 };
 
 // What a compiled case's resolution must be, whatever the linkers say: names, each with its resolution and where its
@@ -1748,6 +1806,56 @@ static const ForeignTestOutcome foreign_test_outcomes[] = {
         { "libco_back.a(co_early.o)", "libco_back.a(co_late.o)" },
         2,
     },
+    {
+        "a later weak definition",
+        {
+            { "probed", FOREIGN_RESOLUTION_STRONG, "libpb.a(pb_strong.o)", 0, 0, 1 },
+        },
+        { "libpb.a(pb_strong.o)" },
+        1,
+    },
+    {
+        "a later strong definition",
+        {
+            { "probed", FOREIGN_RESOLUTION_STRONG, "libpb.a(pb_strong.o)", 0, 0, 2 },
+        },
+        { "libpb.a(pb_strong.o)" },
+        1,
+    },
+    {
+        "a library's reference",
+        {
+            { "dependent", FOREIGN_RESOLUTION_SHARED, "libdep.so", 0, 0, 0 },
+            { "dep_foo", FOREIGN_RESOLUTION_STRONG, "libdepfoo.a(dep_foo.o)", 0, 0, 1 },
+        },
+        { "libdepfoo.a(dep_foo.o)" },
+        1,
+    },
+    {
+        "an as-needed library's reference",
+        {
+            { "dependent", FOREIGN_RESOLUTION_SHARED, "libdep.so", 0, 0, 0 },
+            { "dep_foo", FOREIGN_RESOLUTION_STRONG, "libdepfoo.a(dep_foo.o)", 0, 0, 1 },
+        },
+        { "libdepfoo.a(dep_foo.o)" },
+        1,
+    },
+    {
+        "an as-needed library nothing needs",
+        {
+            { "main", FOREIGN_RESOLUTION_STRONG, "dep_plain.o", 0, 0, 1 },
+        },
+        { 0 },
+        0,
+    },
+    {
+        "a thin archive of another archive's member",
+        {
+            { "first", FOREIGN_RESOLUTION_STRONG, "libnest_inner.a)", 0, 0, 1 },
+        },
+        { "libnest_inner.a)", "libsecond.a(ar_second.o)" },
+        4,
+    },
 };
 
 static bool foreign_test_ends_with(const char* text, const char* end)
@@ -1842,6 +1950,8 @@ static bool foreign_test_compiled(bool cross_check, const char* directory, Forei
     static const char* const shared[] = { "sh_archive.o" };
     static const char* const comdat[] = { "co_b.o", "co_c.o" };
     static const char* const comdat_back[] = { "co_early.o", "co_late.o" };
+    static const char* const probe[] = { "pb_strong.o" };
+    static const char* const dependency[] = { "dep_foo.o" };
     bool made = c;
     made = made && foreign_test_archive(directory, "librule.a", rule, 4, false, arena) != 0;
     made = made && foreign_test_archive(directory, "libwk.a", weak, 3, false, arena) != 0;
@@ -1852,6 +1962,8 @@ static bool foreign_test_compiled(bool cross_check, const char* directory, Forei
     made = made && foreign_test_archive(directory, "liblate.a", late, 2, false, arena) != 0;
     made = made && foreign_test_archive(directory, "libforced.a", forced, 1, false, arena) != 0;
     made = made && foreign_test_archive(directory, "libsh.a", shared, 1, false, arena) != 0;
+    made = made && foreign_test_archive(directory, "libpb.a", probe, 1, false, arena) != 0;
+    made = made && foreign_test_archive(directory, "libdepfoo.a", dependency, 1, false, arena) != 0;
     if (cplusplus)
     {
         made = made && foreign_test_archive(directory, "libco.a", comdat, 2, false, arena) != 0;
@@ -1874,7 +1986,44 @@ static bool foreign_test_compiled(bool cross_check, const char* directory, Forei
         0,
     };
     made = made && object_test_run(library_arguments, output, errors) == 0;
-    foreign_test_expect(&tally, !c || made, "the archives and the library", 0);
+    // A library that refers to a name an archive after it defines.
+    char dependency_library[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    char dependency_object[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    snprintf(dependency_library, sizeof(dependency_library), "%s/libdep.so", directory);
+    snprintf(dependency_object, sizeof(dependency_object), "%s/dep_library.o", directory);
+    char* dependency_arguments[] = {
+        (char*)"cc",
+        (char*)"-shared",
+        (char*)"-o",
+        dependency_library,
+        dependency_object,
+        0,
+    };
+    made = made && object_test_run(dependency_arguments, output, errors) == 0;
+    // A thin archive of another archive's member, as GNU ar writes one when given the archive (a member named "/N:M"),
+    // the other archive GNU ar's too, so that its member's name is in its header (the test reads it there).
+    char nested[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    char nested_inner[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    char nested_member[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    snprintf(nested, sizeof(nested), "%s/libnest.a", directory);
+    snprintf(nested_inner, sizeof(nested_inner), "%s/libnest_inner.a", directory);
+    snprintf(nested_member, sizeof(nested_member), "%s/ar_first_a.o", directory);
+    char* inner_arguments[] = {
+        (char*)"ar",
+        (char*)"crs",
+        nested_inner,
+        nested_member,
+        0,
+    };
+    char* nested_arguments[] = {
+        (char*)"ar",
+        (char*)"crsT",
+        nested,
+        nested_inner,
+        0,
+    };
+    made = made && object_test_run(inner_arguments, output, errors) == 0 && object_test_run(nested_arguments, output, errors) == 0;
+    foreign_test_expect(&tally, !c || made, "the archives and the libraries", 0);
     ForeignTestLine* line = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTestLine, 1);
     for (uint32_t k = 0; made && line != 0 && k < BUSTER_ARRAY_LENGTH(foreign_test_cases); k += 1)
     {
@@ -2062,6 +2211,61 @@ static bool foreign_test_find_section(String8 bytes, uint32_t type, uint32_t* in
     return found;
 }
 
+// The check the watchdog names if a resolution's lanes wait for each other for good, which is how lanes that decide
+// differently show: one waits at a sync that another skipped.
+#define BUSTER_FOREIGN_TEST_TIMEOUT_SECONDS 60
+static const char* volatile foreign_test_watched;
+
+static void foreign_test_report_hang(int signal_number)
+{
+    (void)signal_number;
+    char message[256];
+    const int length = snprintf(message, sizeof(message), "test-foreign: %s didn't finish in %d s\n", foreign_test_watched, BUSTER_FOREIGN_TEST_TIMEOUT_SECONDS);
+    if (length > 0 && write(STDOUT_FILENO, message, (size_t)length) < 0)
+    {
+        _exit(1);
+    }
+    _exit(1);
+}
+
+// Resolves a command on `lanes` lanes with lane `slow` (plus 1) slow at each decision (ForeignCommand.slow_lane), under
+// the watchdog: its failure.
+static ForeignFailure foreign_test_slow(const ForeignCommand* given, uint32_t lanes, uint32_t slow, const char* what)
+{
+    ForeignCommand command = *given;
+    command.slow_lane = slow;
+    foreign_test_watched = what;
+    alarm(BUSTER_FOREIGN_TEST_TIMEOUT_SECONDS);
+    Foreign foreign;
+    const ForeignFailure result = foreign_run(&foreign, &command, FOREIGN_PATH_VECTOR, lanes, 0);
+    alarm(0);
+    foreign_release(&foreign);
+    return result;
+}
+
+static bool foreign_test_same_failure(const ForeignFailure* a, const ForeignFailure* b)
+{
+    return a->error == b->error && a->input == b->input && a->member == b->member && a->position == b->position && a->system_error == b->system_error &&
+           a->import.error == b->import.error && a->import.section == b->import.section && a->import.symbol == b->import.symbol && a->import.offset == b->import.offset;
+}
+
+// A failing command on two and three lanes, each lane the slow one in turn, so that the others decide first and go on
+// to the next phase, where one fails while the slow one still decides: every lane must decide alike (the watchdog
+// catches one that waits for good), and the failure must be the one lane's.
+static void foreign_test_decisions(ForeignTestTally* tally, const char* what, const ForeignCommand* command, const ForeignFailure* expected)
+{
+    for (uint32_t lanes = 2; lanes <= 3; lanes += 1)
+    {
+        for (uint32_t slow = 1; slow <= lanes; slow += 1)
+        {
+            const ForeignFailure got = foreign_test_slow(command, lanes, slow, what);
+            char detail[160];
+            snprintf(detail, sizeof(detail), "on %u lanes with lane %u slow: %s, not %s", lanes, slow - 1, foreign_test_errors[got.error], foreign_test_errors[expected->error]);
+            foreign_test_expect(tally, foreign_test_same_failure(&got, expected), what, detail);
+        }
+    }
+}
+
 // One malformed object: a copy of `base` with `width` bytes at `offset` set to `value`, given alone, which must fail as
 // `expected` (the failure's error, and the reader's error, section, symbol and offset).
 static void foreign_test_malformed(ForeignTestTally* tally, const char* what, String8 base, uint64_t offset, uint32_t width, uint64_t value, ForeignError error, ImportResult expected,
@@ -2088,6 +2292,15 @@ static void foreign_test_malformed(ForeignTestTally* tally, const char* what, St
                                        failure.import.symbol == expected.symbol && failure.import.offset == expected.offset && failure.input == 0 && failure.member == 0 &&
                                        (expected.type == 0 || failure.import.type == expected.type),
                             what, detail);
+        ForeignArgument argument = {
+            .name = foreign_string(names[0]),
+            .bytes = inputs[0],
+        };
+        const ForeignCommand command = {
+            .arguments = &argument,
+            .argument_count = 1,
+        };
+        foreign_test_decisions(tally, what, &command, &failure);
     }
     else
     {
@@ -2108,18 +2321,67 @@ static ImportResult foreign_test_place(ImportError error, uint32_t section, uint
     return result;
 }
 
-// A command line's failure, resolved as it is (files on disk): its error.
-static ForeignFailure foreign_test_failure(char** arguments, uint32_t count, Arena* arena)
+// A command line's failure, resolved as it is (files on disk): its error. With a tally, the same failure on more
+// lanes, each slow in turn (foreign_test_decisions).
+static ForeignFailure foreign_test_failure_on(ForeignTestTally* tally, const char* what, char** arguments, uint32_t count, Arena* arena)
 {
     ForeignCommand command;
     ForeignFailure result = foreign_arguments(&command, (int)count, arguments, arena);
     if (result.error == FOREIGN_ERROR_NONE)
     {
         Foreign foreign;
+        foreign_test_watched = what != 0 ? what : "a refusal";
+        alarm(BUSTER_FOREIGN_TEST_TIMEOUT_SECONDS);
         result = foreign_run(&foreign, &command, FOREIGN_PATH_VECTOR, 1, 0);
+        alarm(0);
         foreign_release(&foreign);
+        if (tally != 0)
+        {
+            foreign_test_decisions(tally, what, &command, &result);
+        }
     }
     return result;
+}
+
+static ForeignFailure foreign_test_failure(char** arguments, uint32_t count, Arena* arena)
+{
+    return foreign_test_failure_on(0, 0, arguments, count, arena);
+}
+
+// lane_run starting no lane: a child limited to the processes it has can't start a thread, and the resolution must
+// fail as FOREIGN_ERROR_LANES, with CPUs given and without, rather than succeed having done nothing. RLIMIT_NPROC
+// doesn't limit root.
+static void foreign_test_unstarted(ForeignTestTally* tally, char** arguments, uint32_t count, Arena* arena)
+{
+    ForeignCommand command;
+    const bool parsed = foreign_arguments(&command, (int)count, arguments, arena).error == FOREIGN_ERROR_NONE;
+    if (geteuid() == 0)
+    {
+        printf("  %s: lanes that don't start aren't checked as root, whom RLIMIT_NPROC doesn't limit\n", tally->check);
+    }
+    else
+    {
+        fflush(stdout);
+        const pid_t child = parsed ? fork() : -1;
+        if (child == 0)
+        {
+            const struct rlimit limit = {
+                .rlim_cur = 0,
+                .rlim_max = 0,
+            };
+            const uint32_t cpus[2] = { 0, 1 };
+            const bool limited = setrlimit(RLIMIT_NPROC, &limit) == 0;
+            Foreign foreign;
+            const ForeignFailure pinned = foreign_run(&foreign, &command, FOREIGN_PATH_VECTOR, 2, cpus);
+            foreign_release(&foreign);
+            const ForeignFailure unpinned = foreign_run(&foreign, &command, FOREIGN_PATH_VECTOR, 2, 0);
+            foreign_release(&foreign);
+            _exit(limited && pinned.error == FOREIGN_ERROR_LANES && unpinned.error == FOREIGN_ERROR_LANES ? 0 : 1);
+        }
+        int status = 0;
+        const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+        foreign_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "lanes that don't start", "FOREIGN_ERROR_LANES with CPUs given and without");
+    }
 }
 
 static bool foreign_test_refusals(const char* directory, Arena* arena)
@@ -2188,16 +2450,51 @@ static bool foreign_test_refusals(const char* directory, Arena* arena)
     char* no_library[] = { directory_option, (char*)"-lnothing_by_this_name" };
     char* bad_script[] = { script };
     char* bad_option[] = { (char*)"--no-such-option" };
-    ForeignFailure failure = foreign_test_failure(missing_file, 1, arena);
+    ForeignFailure failure = foreign_test_failure_on(&tally, "a missing file", missing_file, 1, arena);
     foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_FILE && failure.system_error == ENOENT && failure.input == 0, "a missing file", foreign_test_errors[failure.error]);
-    failure = foreign_test_failure(no_library, 2, arena);
+    failure = foreign_test_failure_on(&tally, "a -l name no directory has", no_library, 2, arena);
     foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_NOT_FOUND && failure.input == 0, "a -l name no directory has", foreign_test_errors[failure.error]);
     // The unclosed comment is the failure's place.
-    failure = foreign_test_failure(bad_script, 1, arena);
+    failure = foreign_test_failure_on(&tally, "a script that doesn't parse", bad_script, 1, arena);
     foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_MALFORMED && failure.import.error == IMPORT_ERROR_SCRIPT && failure.import.offset == (uint64_t)(strstr(broken, "/*") - broken),
                         "a script that doesn't parse", foreign_test_errors[failure.error]);
     failure = foreign_test_failure(bad_option, 1, arena);
     foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_ARGUMENTS && failure.argument == 0, "an unknown option", foreign_test_errors[failure.error]);
+    // A FIFO: the open mustn't wait for a writer, and the input isn't a regular file.
+    char fifo[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    snprintf(fifo, sizeof(fifo), "%s/input.fifo", directory);
+    unlink(fifo);
+    char* fifo_line[] = { fifo };
+    const bool made_fifo = mkfifo(fifo, 0600) == 0;
+    foreign_test_expect(&tally, made_fifo, "the FIFO", 0);
+    if (made_fifo)
+    {
+        failure = foreign_test_failure_on(&tally, "a FIFO", fifo_line, 1, arena);
+        foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_FILE && failure.system_error == EINVAL && failure.input == 0, "a FIFO", foreign_test_errors[failure.error]);
+    }
+    // The review's case: an input of four bytes, the ELF magic alone, which the lane that opens it refuses, and lanes
+    // that don't start.
+    char truncated[4] = { 0x7f, 'E', 'L', 'F' };
+    ForeignArgument truncated_argument = {
+        .name = foreign_string("truncated.o"),
+        .bytes = {
+            .pointer = truncated,
+            .length = sizeof(truncated),
+        },
+    };
+    const ForeignCommand truncated_command = {
+        .arguments = &truncated_argument,
+        .argument_count = 1,
+    };
+    Foreign truncated_foreign;
+    failure = foreign_run(&truncated_foreign, &truncated_command, FOREIGN_PATH_VECTOR, 1, 0);
+    foreign_release(&truncated_foreign);
+    foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_FORMAT && failure.input == 0, "a truncated ELF header", foreign_test_errors[failure.error]);
+    foreign_test_decisions(&tally, "a truncated ELF header", &truncated_command, &failure);
+    char unstarted_object[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    snprintf(unstarted_object, sizeof(unstarted_object), "%s/rule_main.o", directory);
+    char* unstarted_line[] = { unstarted_object };
+    foreign_test_unstarted(&tally, unstarted_line, 1, arena);
     // Archives: a broken member refused only when it loads, a thin archive's missing member, a member that isn't one.
     char archive[BUSTER_FOREIGN_TEST_PATH_BYTES];
     char member[BUSTER_FOREIGN_TEST_PATH_BYTES];
@@ -2221,7 +2518,7 @@ static bool foreign_test_refusals(const char* directory, Arena* arena)
             failure = foreign_test_failure(unused, 1, arena);
             foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_NONE, "a broken member nothing loads", foreign_test_errors[failure.error]);
             char* loads[] = { main_object, archive };
-            failure = foreign_test_failure(loads, 2, arena);
+            failure = foreign_test_failure_on(&tally, "a broken member that loads", loads, 2, arena);
             foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_MALFORMED && failure.input == 1 && failure.member == 1 && failure.import.offset == index.member_offsets[0],
                                 "a broken member that loads", foreign_test_errors[failure.error]);
         }
@@ -2235,7 +2532,7 @@ static bool foreign_test_refusals(const char* directory, Arena* arena)
     if (found && copied.pointer != 0 && foreign_test_write(moved, copied.pointer, copied.length) && foreign_test_write_archive(thin, thin_members, 1, true, arena) && unlink(moved) == 0)
     {
         char* loads[] = { main_object, thin };
-        failure = foreign_test_failure(loads, 2, arena);
+        failure = foreign_test_failure_on(&tally, "a thin archive's missing member", loads, 2, arena);
         foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_FILE && failure.system_error == ENOENT && failure.input == 1 && failure.member == 1, "a thin archive's missing member",
                             foreign_test_errors[failure.error]);
     }
@@ -2255,7 +2552,7 @@ static bool foreign_test_refusals(const char* directory, Arena* arena)
             memcpy(outer.pointer + index.member_offsets[0] + BUSTER_IMPORT_ARCHIVE_HEADER_BYTES, BUSTER_IMPORT_ARCHIVE_MAGIC, 8);
             foreign_test_write(odd_archive, outer.pointer, outer.length);
             char* loads[] = { main_object, odd_archive };
-            failure = foreign_test_failure(loads, 2, arena);
+            failure = foreign_test_failure_on(&tally, "a member that isn't an object", loads, 2, arena);
             foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_UNSUPPORTED && failure.input == 1 && failure.member == 1, "a member that isn't an object",
                                 foreign_test_errors[failure.error]);
         }
@@ -2279,8 +2576,9 @@ static bool foreign_test_edges(const char* directory, uint64_t seed, Arena* aren
     const String8 object = foreign_test_read(arena, path);
     const bool archived = foreign_test_write_archive(archive_path, members, 1, false, arena);
     const String8 archive = archived ? foreign_test_read(arena, archive_path) : (String8){ 0 };
-    ForeignTestEdge edge;
-    ForeignTestEdge second;
+    // Zeroed, so that both release whether or not their mappings were made (&& skips the second after the first fails).
+    ForeignTestEdge edge = { 0 };
+    ForeignTestEdge second = { 0 };
     const bool mapped = object.pointer != 0 && archive.pointer != 0 && foreign_test_edge(&edge, object.length) && foreign_test_edge(&second, archive.length);
     foreign_test_expect(&tally, mapped, "the inputs and their pages", 0);
     uint64_t state = seed ^ 0x6a09e667f3bcc909ull;
@@ -2345,6 +2643,199 @@ static bool foreign_test_edges(const char* directory, uint64_t seed, Arena* aren
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Extended section indices
+//
+// An object made by hand of 65,527 sections, past SHN_LORESERVE (so e_shnum and e_shstrndx are in section 0), its
+// global symbols in sections 65522 and 65521 through SHN_XINDEX, the values of SHN_COMMON and SHN_ABS, beside an absolute
+// symbol and a common one: each must be what its st_shndx says, the first two ordinary definitions. With a second
+// object that defines the first strongly too, it is a duplicate.
+
+typedef struct ForeignTestSymbol ForeignTestSymbol;
+struct ForeignTestSymbol
+{
+    const char* name;
+    uint8_t info;
+    uint16_t shndx;
+    uint32_t extended;
+    uint64_t value;
+    uint64_t size;
+};
+
+// Writes a relocatable object of `section_count` sections: empty PROGBITS but for the last four, its symbol table, its
+// strings, its extended indices and the section names, with `symbols` after the null symbol, all global.
+static bool foreign_test_write_sections(const char* path, uint32_t section_count, const ForeignTestSymbol* symbols, uint32_t symbol_count, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    static const char section_names[] = "\0.x\0.symtab\0.strtab\0.symtab_shndx\0.shstrtab";
+    const uint32_t symtab = section_count - 4;
+    const uint32_t strtab = section_count - 3;
+    const uint32_t shndx = section_count - 2;
+    const uint32_t shstrtab = section_count - 1;
+    uint64_t string_bytes = 1;
+    for (uint32_t i = 0; i < symbol_count; i += 1)
+    {
+        string_bytes += strlen(symbols[i].name) + 1;
+    }
+    const uint64_t names_at = sizeof(Elf64_Ehdr);
+    const uint64_t strings_at = names_at + sizeof(section_names);
+    const uint64_t symbols_at = (strings_at + string_bytes + 7) & ~7ull;
+    const uint64_t shndx_at = symbols_at + (uint64_t)(symbol_count + 1) * sizeof(Elf64_Sym);
+    const uint64_t headers_at = (shndx_at + (uint64_t)(symbol_count + 1) * sizeof(uint32_t) + 7) & ~7ull;
+    const uint64_t size = headers_at + (uint64_t)section_count * sizeof(Elf64_Shdr);
+    uint8_t* bytes = arena_push(arena, size, 64);
+    bool result = bytes != 0;
+    if (result)
+    {
+        memset(bytes, 0, size);
+        Elf64_Ehdr header = { 0 };
+        memcpy(header.e_ident, ELFMAG, SELFMAG);
+        header.e_ident[EI_CLASS] = ELFCLASS64;
+        header.e_ident[EI_DATA] = ELFDATA2LSB;
+        header.e_ident[EI_VERSION] = EV_CURRENT;
+        header.e_type = ET_REL;
+        header.e_machine = EM_X86_64;
+        header.e_version = EV_CURRENT;
+        header.e_shoff = headers_at;
+        header.e_ehsize = sizeof(Elf64_Ehdr);
+        header.e_shentsize = sizeof(Elf64_Shdr);
+        header.e_shnum = section_count < SHN_LORESERVE ? (uint16_t)section_count : 0;
+        header.e_shstrndx = section_count < SHN_LORESERVE ? (uint16_t)shstrtab : SHN_XINDEX;
+        memcpy(bytes, &header, sizeof(header));
+        memcpy(bytes + names_at, section_names, sizeof(section_names));
+        uint64_t string_at = 1;
+        for (uint32_t i = 0; i < symbol_count; i += 1)
+        {
+            const uint64_t length = strlen(symbols[i].name);
+            memcpy(bytes + strings_at + string_at, symbols[i].name, length);
+            const Elf64_Sym symbol = {
+                .st_name = (uint32_t)string_at,
+                .st_info = symbols[i].info,
+                .st_other = STV_DEFAULT,
+                .st_shndx = symbols[i].shndx,
+                .st_value = symbols[i].value,
+                .st_size = symbols[i].size,
+            };
+            memcpy(bytes + symbols_at + (uint64_t)(i + 1) * sizeof(Elf64_Sym), &symbol, sizeof(symbol));
+            memcpy(bytes + shndx_at + (uint64_t)(i + 1) * sizeof(uint32_t), &symbols[i].extended, sizeof(uint32_t));
+            string_at += length + 1;
+        }
+        // Section 0 holds the count and the names' index past SHN_LORESERVE; the others are empty PROGBITS, but the tables.
+        for (uint32_t i = 0; i < section_count; i += 1)
+        {
+            Elf64_Shdr section = { 0 };
+            if (i == 0)
+            {
+                section.sh_size = section_count < SHN_LORESERVE ? 0 : section_count;
+                section.sh_link = section_count < SHN_LORESERVE ? 0 : shstrtab;
+            }
+            else if (i < symtab)
+            {
+                section.sh_name = 1;
+                section.sh_type = SHT_PROGBITS;
+                section.sh_flags = SHF_ALLOC;
+                section.sh_addralign = 1;
+            }
+            else if (i == symtab)
+            {
+                section.sh_name = 4;
+                section.sh_type = SHT_SYMTAB;
+                section.sh_offset = symbols_at;
+                section.sh_size = (uint64_t)(symbol_count + 1) * sizeof(Elf64_Sym);
+                section.sh_link = strtab;
+                section.sh_info = 1;
+                section.sh_addralign = 8;
+                section.sh_entsize = sizeof(Elf64_Sym);
+            }
+            else if (i == strtab)
+            {
+                section.sh_name = 12;
+                section.sh_type = SHT_STRTAB;
+                section.sh_offset = strings_at;
+                section.sh_size = string_bytes;
+                section.sh_addralign = 1;
+            }
+            else if (i == shndx)
+            {
+                section.sh_name = 20;
+                section.sh_type = SHT_SYMTAB_SHNDX;
+                section.sh_offset = shndx_at;
+                section.sh_size = (uint64_t)(symbol_count + 1) * sizeof(uint32_t);
+                section.sh_link = symtab;
+                section.sh_addralign = 4;
+                section.sh_entsize = sizeof(uint32_t);
+            }
+            else
+            {
+                section.sh_name = 34;
+                section.sh_type = SHT_STRTAB;
+                section.sh_offset = names_at;
+                section.sh_size = sizeof(section_names);
+                section.sh_addralign = 1;
+            }
+            memcpy(bytes + headers_at + (uint64_t)i * sizeof(Elf64_Shdr), &section, sizeof(section));
+        }
+        result = foreign_test_write(path, bytes, size);
+    }
+    arena_pop_to(arena, mark);
+    return result;
+}
+
+// A name's resolution and its counts in a resolution, as the test expects them.
+static void foreign_test_expect_name(ForeignTestTally* tally, const char* what, const Foreign* foreign, const char* text, uint8_t resolution, uint32_t definitions)
+{
+    const uint32_t id = foreign_test_name(foreign, text);
+    char detail[256];
+    snprintf(detail, sizeof(detail), "%s: %s with %u strong definitions", text, id != 0 ? foreign_test_resolutions[foreign->names.resolution[id - 1]] : "none",
+             id != 0 ? foreign->names.definitions[id - 1] : 0);
+    foreign_test_expect(tally, id != 0 && foreign->names.resolution[id - 1] == resolution && foreign->names.definitions[id - 1] == definitions, what, detail);
+}
+
+static bool foreign_test_extended(const char* directory, Arena* arena)
+{
+    ForeignTestTally tally = {
+        .check = "extended sections",
+    };
+    static const ForeignTestSymbol many[] = {
+        { "extended", ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT), SHN_XINDEX, SHN_COMMON, 0, 4 },
+        { "extended_abs_number", ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT), SHN_XINDEX, SHN_ABS, 0, 4 },
+        { "true_abs", ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), SHN_ABS, 0, 42, 0 },
+        { "true_common", ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT), SHN_COMMON, 0, 8, 4 },
+    };
+    static const ForeignTestSymbol again[] = {
+        { "extended", ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT), 1, 0, 0, 4 },
+    };
+    char path[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    char second[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    snprintf(path, sizeof(path), "%s/extended.o", directory);
+    snprintf(second, sizeof(second), "%s/extended_again.o", directory);
+    const bool written = foreign_test_write_sections(path, SHN_COMMON + 5, many, BUSTER_ARRAY_LENGTH(many), arena) &&
+                         foreign_test_write_sections(second, 6, again, BUSTER_ARRAY_LENGTH(again), arena);
+    foreign_test_expect(&tally, written, "the objects", 0);
+    char* alone[] = { path };
+    char* both[] = { path, second };
+    ForeignCommand command;
+    if (written && foreign_test_command(&command, alone, 1, arena))
+    {
+        Foreign foreign = { 0 };
+        foreign_test_resolve(&tally, "an object of 65,527 sections", &command, &foreign, arena);
+        foreign_test_expect(&tally, foreign.failure.error == FOREIGN_ERROR_NONE, "an object of 65,527 sections", foreign_test_errors[foreign.failure.error]);
+        foreign_test_expect_name(&tally, "an object of 65,527 sections", &foreign, "extended", FOREIGN_RESOLUTION_STRONG, 1);
+        foreign_test_expect_name(&tally, "an object of 65,527 sections", &foreign, "extended_abs_number", FOREIGN_RESOLUTION_STRONG, 1);
+        foreign_test_expect_name(&tally, "an object of 65,527 sections", &foreign, "true_abs", FOREIGN_RESOLUTION_STRONG, 1);
+        foreign_test_expect_name(&tally, "an object of 65,527 sections", &foreign, "true_common", FOREIGN_RESOLUTION_COMMON, 0);
+        foreign_release(&foreign);
+    }
+    if (written && foreign_test_command(&command, both, 2, arena))
+    {
+        Foreign foreign = { 0 };
+        foreign_test_resolve(&tally, "a second definition", &command, &foreign, arena);
+        foreign_test_expect_name(&tally, "a second definition", &foreign, "extended", FOREIGN_RESOLUTION_STRONG, 2);
+        foreign_release(&foreign);
+    }
+    return foreign_test_report(&tally);
+}
+
 static int run_foreign_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -2387,6 +2878,7 @@ static int run_foreign_tests(int argc, char** argv)
     char directory[BUSTER_FOREIGN_TEST_PATH_BYTES];
     snprintf(directory, sizeof(directory), "%s/buster-foreign-XXXXXX", base);
     Arena arena = arena_reserve(BUSTER_FOREIGN_TEST_ARENA_BYTES);
+    struct sigaction watchdog = { .sa_handler = foreign_test_report_hang };
     bool passed = valid;
     if (!valid)
     {
@@ -2395,6 +2887,11 @@ static int run_foreign_tests(int argc, char** argv)
     else if (arena.base == 0 || mkdtemp(directory) == 0)
     {
         printf("test-foreign: no room for the test's arena or directory\n");
+        passed = false;
+    }
+    else if (sigaction(SIGALRM, &watchdog, 0) != 0)
+    {
+        printf("test-foreign: the watchdog's signal handler couldn't be installed\n");
         passed = false;
     }
     else
@@ -2409,6 +2906,7 @@ static int run_foreign_tests(int argc, char** argv)
         passed = foreign_test_compiled(cross_check, directory, &system, &arena) && passed;
         passed = foreign_test_refusals(directory, &arena) && passed;
         passed = foreign_test_edges(directory, seed, &arena) && passed;
+        passed = foreign_test_extended(directory, &arena) && passed;
         if (!keep)
         {
             char* remove[] = {
