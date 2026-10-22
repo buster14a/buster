@@ -592,6 +592,25 @@ static void preprocessor_fuzz_test_oracle(PreprocessorFuzzTestTally* tally, Aren
     preprocessor_fuzz_test_expect(tally, recovered && preprocessor_fuzz_compare(memory, rejected[1], forty_two) == BUSTER_PPF_EQUAL,
         "rejected batch did not recover its accepted case");
 
+    // Clang reports this case's only error at no location: it is still the case's rejection, alone and in a batch.
+    const PreprocessorFuzzCase unplaced_cases[] = {
+        {
+            .source = BUSTER_S8_INIT("#define ppf_10014_f(a) __has_include a ~\n#if ppf_10014_f() 1\n#endif\n"),
+            .id = 10014,
+        },
+        {
+            .source = BUSTER_S8_INIT("43\n"),
+            .id = 10015,
+        },
+    };
+    PreprocessorFuzzOutput unplaced[2] = { 0 };
+    const bool unplaced_alone = preprocessor_fuzz_clang(memory, clang_path, c23, unplaced_cases, 1, true, unplaced);
+    preprocessor_fuzz_test_expect(tally, unplaced_alone && unplaced[0].valid && !unplaced[0].accepted, "an error at no location wasn't the case's rejection");
+    const bool unplaced_batch = preprocessor_fuzz_clang(memory, clang_path, c23, unplaced_cases, 2, false, unplaced);
+    const PreprocessorFuzzOutput forty_three = preprocessor_fuzz_test_output(BUSTER_S8("43"), true);
+    preprocessor_fuzz_test_expect(tally, unplaced_batch && unplaced[0].valid && !unplaced[0].accepted && preprocessor_fuzz_compare(memory, unplaced[1], forty_three) == BUSTER_PPF_EQUAL,
+        "a batch with an error at no location wasn't read case by case");
+
     const uint64_t failure_mark = memory->length;
     PreprocessorFuzzOutput failed = { 0 };
     const bool launched = preprocessor_fuzz_clang(memory, "/this/path/does/not/exist/buster-clang", c23, cases, 1, false, &failed);

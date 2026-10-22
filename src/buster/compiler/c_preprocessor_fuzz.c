@@ -373,18 +373,9 @@ static uint32_t pp_fuzz_presumed_line(Preprocessor* pp, uint32_t location)
     return range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE ? pp_presumed(pp, location, &name, &length) : BUSTER_PP_NONE;
 }
 
-// The presumed line where -E places output token `i` when it starts a line, as pp_print_location places it (its
-// expansion's start for a token a macro made, the directive's name for a #pragma's '#'), with *at the expansion starts'
-// cursor, which moves forward; and the place's column in *column (0 for a scratch spelling's).
-static uint32_t pp_fuzz_place_line(Preprocessor* pp, uint32_t i, uint32_t* at, uint32_t* column)
+// The presumed line of `location`, and its column in *column (0 for a scratch spelling's).
+static uint32_t pp_fuzz_line_at(Preprocessor* pp, uint32_t location, uint32_t* column)
 {
-    const PPTokens* out = &pp->output;
-    while (*at < pp->expansion_start_count && pp->expansion_starts[*at].token <= i)
-    {
-        *at += 1;
-    }
-    const bool directive = out->kinds[i] == C_TOKEN_HASH && out->locations[i] == pp->hash_location && !(out->flags[i] & BUSTER_PP_FROM_MACRO) && i + 1 < out->count;
-    const uint32_t location = (out->flags[i] & BUSTER_PP_FROM_MACRO) && *at != 0 ? pp->expansion_starts[*at - 1].location : directive ? out->locations[i + 1] : out->locations[i];
     const uint32_t range = pp_find_range(pp, location);
     *column = 0;
     if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
@@ -394,16 +385,51 @@ static uint32_t pp_fuzz_place_line(Preprocessor* pp, uint32_t i, uint32_t* at, u
     return pp_fuzz_presumed_line(pp, location);
 }
 
+// The presumed line where -E places output token `i` when it starts a line, as pp_print_location places it (its
+// expansion's start for a token a macro made, the directive's name for a #pragma's '#'), with *at the expansion starts'
+// cursor, which moves forward; the place in *place, and its column in *column (0 for a scratch spelling's). Clang's
+// printer has the place where its lexer starts the token there, with any line splices right before it.
+static uint32_t pp_fuzz_place_line(Preprocessor* pp, uint32_t i, uint32_t* at, uint32_t* place, uint32_t* column)
+{
+    const PPTokens* out = &pp->output;
+    while (*at < pp->expansion_start_count && pp->expansion_starts[*at].token <= i)
+    {
+        *at += 1;
+    }
+    const bool directive = out->kinds[i] == C_TOKEN_HASH && out->locations[i] == pp->hash_location && !(out->flags[i] & BUSTER_PP_FROM_MACRO) && i + 1 < out->count;
+    const uint32_t location = (out->flags[i] & BUSTER_PP_FROM_MACRO) && *at != 0 ? pp->expansion_starts[*at - 1].location : directive ? out->locations[i + 1] : out->locations[i];
+    *place = pp_lexed_start(pp, location);
+    return pp_fuzz_line_at(pp, *place, column);
+}
+
+// Whether clang's token has a leading space where -P puts output token `i` first on a line, at `place`, which its
+// printer's indentation counts (HandleWhitespaceBeforeTok: column 1 with one is column 2). Our BUSTER_PP_SPACE counts a
+// line's start, clang's only whitespace or a comment before the token on its line: a token's own from a file, or for
+// the first token of an expansion (BUSTER_PP_NAME_SPACE), its name's at the place.
+static bool pp_fuzz_line_start_space(Preprocessor* pp, const PPTokens* out, uint32_t i, uint32_t place)
+{
+    bool result = (out->flags[i] & BUSTER_PP_SPACE) != 0;
+    const bool name = (out->flags[i] & BUSTER_PP_NAME_SPACE) != 0;
+    if (result && (name || !(out->flags[i] & BUSTER_PP_FROM_MACRO)))
+    {
+        uint32_t offset = 0;
+        uint32_t available = 0;
+        const uint8_t* bytes = pp_fuzz_bytes(pp, name ? place : pp_lexed_start(pp, out->locations[i]), &offset, &available);
+        result = bytes != 0 && offset != 0 && bytes[offset - 1] != '\n' && bytes[offset - 1] != '\r';
+    }
+    return result;
+}
+
 // Our stream printed with clang's -E -P spacing, for the comparison with clang's text: clang's text can join two tokens
 // that then lex as one (a number and an identifier that starts with a non-ASCII character, or a `'`; `:` and `:` in
 // C), which our printer never does, so the comparison must see clang's spacing on both sides. A token that starts a
 // line, and the one after a pragma's line, starts a new line; another gets a space when it had whitespace before it, or
 // when clang's AvoidConcat asks for one (pp_fuzz_avoid_concat). Each token is spelled as our printers spell it (a
-// pragma line's identifiers as written: pp_spelled_as_written). And as clang handles a _Pragma that prints nothing, its
-// printer moves to the operator's line (MoveToLine): when that is another than the current one (after a line splice),
-// the next token starts a line. A line's first token is indented to its column, as clang's printer indents it
-// (HandleWhitespaceBeforeTok), which keeps it apart from a `\` that ends the line before. `free` the text; null if it
-// can't be made.
+// pragma line's identifiers as written: pp_spelled_as_written). After a _Pragma that prints nothing, clang's lexer starts
+// a line at the next token, and its printer moves to that token's line (its own, or its expansion's: PPExpansionStart
+// in Preprocessor.silent_pragmas) only when it is another than the current one (MoveToLine), as after a line splice. A
+// line's first token is indented to its column, as clang's printer indents it (HandleWhitespaceBeforeTok), which keeps
+// it apart from a `\` that ends the line before. `free` the text; null if it can't be made.
 static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length)
 {
     char* result = 0;
@@ -422,11 +448,10 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length)
         const uint8_t kind = out->kinds[i];
         const bool written = pp_spelled_as_written(pragma, kind);
         pragma = pp_pragma_state(pp, pragma, kind, out->locations[i]);
+        uint32_t silent_place = BUSTER_PP_NONE;
         for (; silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i; silent += 1)
         {
-            const uint32_t line = pp_fuzz_presumed_line(pp, pp->silent_pragmas[silent].location);
-            line_start |= line != BUSTER_PP_NONE && line != current_line;
-            current_line = line != BUSTER_PP_NONE ? line : current_line;
+            silent_place = pp->silent_pragmas[silent].token == i ? pp->silent_pragmas[silent].location : silent_place;
         }
         if (kind == BUSTER_PP_KIND_PRAGMA_END)
         {
@@ -435,14 +460,27 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length)
         else
         {
             uint32_t column = 0;
-            if ((out->flags[i] & BUSTER_PP_START_OF_LINE) || (line_start && i != 0) || i == 0)
+            uint32_t place = 0;
+            bool starts = (out->flags[i] & BUSTER_PP_START_OF_LINE) || (line_start && i != 0);
+            if (starts || i == 0)
             {
-                const uint32_t line = pp_fuzz_place_line(pp, i, &at, &column);
+                const uint32_t line = pp_fuzz_place_line(pp, i, &at, &place, &column);
                 current_line = line != BUSTER_PP_NONE ? line : current_line;
-                // A first column with a space before the token (an empty argument or expansion before it) is 2.
-                column = column == 1 && (out->flags[i] & BUSTER_PP_SPACE) ? 2 : column;
             }
-            if ((out->flags[i] & BUSTER_PP_START_OF_LINE) || (line_start && i != 0))
+            else if (silent_place != BUSTER_PP_NONE)
+            {
+                // After a _Pragma that printed nothing: a line break when the token is on another line (where clang's
+                // lexer starts it, with any line splices right before it).
+                place = pp_lexed_start(pp, (out->flags[i] & BUSTER_PP_FROM_MACRO) ? silent_place : out->locations[i]);
+                const uint32_t line = pp_fuzz_line_at(pp, place, &column);
+                starts = line != BUSTER_PP_NONE && line != current_line;
+                current_line = line != BUSTER_PP_NONE ? line : current_line;
+            }
+            // A first column with a leading space before the token (an empty argument or expansion before it) is 2; a
+            // pragma line's '#' isn't indented (clang's printer writes "#pragma" after MoveToLine).
+            column = column == 1 && pp_fuzz_line_start_space(pp, out, i, place) ? 2 : column;
+            column = kind == C_TOKEN_HASH && out->locations[i] == pp->hash_location ? 0 : column;
+            if (starts)
             {
                 fputc('\n', stream);
                 for (uint32_t c = 1; c < column; c += 1)
@@ -624,8 +662,9 @@ static bool pp_fuzz_by_spellings(Preprocessor* pp)
 // The kernels
 
 // Whether a stream's -P text can't lex back into it, as clang's text for it can't either: an unterminated literal runs
-// to its line's end, so a token after it on its line lexes into it; a stray `\` that ends a line splices it to the
-// next; and stringizing an unterminated literal leaves its quote in the string (clang escapes only literals' quotes).
+// to its line's end, so a token after it on its line lexes into it; a stray `\` that ends a line, or an unterminated
+// literal that ends in one, splices it to the next; and stringizing an unterminated literal leaves its quote in the
+// string (clang escapes only literals' quotes).
 // Sets state->unprintable; pp_fuzz counts these cases.
 static bool pp_fuzz_unprintable(Preprocessor* pp, PPFuzzState* state)
 {
@@ -655,7 +694,8 @@ static bool pp_fuzz_unprintable(Preprocessor* pp, PPFuzzState* state)
             }
             const bool literal = quote < length && (bytes[quote] == '"' || bytes[quote] == '\'');
             const bool next_on_line = i + 1 < out->count && (out->flags[i + 1] & BUSTER_PP_START_OF_LINE) == 0 && out->kinds[i + 1] != BUSTER_PP_KIND_PRAGMA_END;
-            result = (literal && next_on_line) || (length == 1 && bytes[0] == '\\' && !next_on_line);
+            // Its text ends its line with a `\`, a stray one's or an unterminated literal's: it splices the next.
+            result = (literal && next_on_line) || (length != 0 && bytes[length - 1] == '\\' && !next_on_line);
         }
     }
     state->unprintable = result;

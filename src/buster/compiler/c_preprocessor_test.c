@@ -1051,6 +1051,7 @@ static const PPTestCase pp_test_cases[] = {
     { "a scope only in __has_c_attribute", "__has_attribute(gnu::noreturn)\n", 0, "c23", "", true, 0 },
     { "a macro after __has_c_attribute's name", "#define E\n__has_c_attribute(x E)\n", 0, "c23", "", true, 0 },
     { "an attribute query's operand unterminated", "__has_attribute(x\n", 0, "c17", "", true, 0 },
+    { "a scoped attribute query's operand at the end of the file", "__has_c_attribute(x", 0, "c23", "", true, 0 },
     // A _Pragma in a directive's line runs, as clang reads the line: its pragma line comes first.
     { "_Pragma in directives' lines", "#if _Pragma(\"ppf a\") 1\nyes\n#endif\n#line _Pragma(\"ppf b\") 5\n__LINE__\n#pragma message(_Pragma(\"ppf c\") \"s\")\n__has_attribute(_Pragma(\"ppf d\") x) after\n",
       0, "c17", "#pragma ppf a\nyes\n#pragma ppf b\n5\n#pragma ppf c\n#pragma message(\"s\")\n#pragma ppf d\n0 after\n", false, 1 },
@@ -1061,6 +1062,43 @@ static const PPTestCase pp_test_cases[] = {
     { "GNU's comma paste's spaces and placemarkers", "#define S(...) #__VA_ARGS__\n#define T(...) S(__VA_ARGS__)\n#define f(x, ...) [x , ## __VA_ARGS__]\nT(f(a,b))\nT(f(a, b))\n#define g(p, q, ...) [p ,q ## __VA_ARGS__]\nT(g(a,))\n#define h(p, ...) [, __VA_OPT__(__VA_ARGS__ ## a) ## __VA_ARGS__ ## b]\nT(h(u))\n#define X(p, ...) [p ## , ## __VA_ARGS__]\nT(X(a))\n",
       0, "c17", "\n\"[a ,b]\"\n\"[a , b]\"\n\"[a]\"\n\"[, b]\"\n\"[a]\"\n", false, 0 },
     { "GNU's comma paste with ## after __VA_ARGS__", "#define e(d, ...) , ## __VA_ARGS__ ## )\ne( )\n", 0, "c23", "", true, 0 },
+    // The campaigns' differences (docs/preprocessor-fuzz.md): a function-like macro without parameters substitutes
+    // nothing, so its __VA_OPT__ and a # before it stay tokens (TokenLexer::Init).
+    { "__VA_OPT__ in a macro without parameters", "#define Z() a ## __VA_OPT__(b) # __VA_OPT__(c)\nZ()\n#define Y() __VA_OPT__ ( )\nY()\n", 0, "c23", "\na__VA_OPT__(b) # __VA_OPT__(c)\n__VA_OPT__ ( )\n", false, 0 },
+    // A token right after a line splice starts at the splice for clang's lexer: an expansion's ')' or name there gives
+    // __LINE__ the splice's line, and so does a #line's number.
+    { "__LINE__ at a ')' that starts at a line splice", "#define L() __LINE__\nL(\n\\\n)\n#define M __LINE__\nx\n\\\nM\n", 0, "c17", "\n3\nx\n7\n", false, 0 },
+    { "#line's number after a _Pragma and an empty macro", "#lin\\\ne _Pragma(\"ppf_lin\\\ne\") 010\n__LINE__\n#define E\n#line E \\\n 30\n__LINE__\n#line E \\\n40\n__LINE__\n",
+      0, "c17", "\n#pragma ppf_line\n10\n30\n41\n", false, 1 },
+    // Character constants in #if as clang's CharLiteralParser reads them.
+    { "character constants' values", "#if 'ab' == 24930 && '\\xff\\x01' == 65281 && '\\377' == -1 && L'\\xffffffff' == -1 && u'\\xffff' == 65535 && U'\\U0010FFFF' == 0x10FFFF && '\\e' == 27 && '\\q' == 'q'\nok\n#endif\n",
+      0, "c17", "\nok\n", false, 3 },
+    { "a character constant's UCN past ASCII", "#if '\\u00e9'\n#endif\n", 0, "c17", "", true, 0 },
+    { "UCNs of basic characters in C23 character constants", "#if '\\u0041' == 65 && u8'\\u0024' == 36\nyes\n#endif\n", 0, "c23", "\nyes\n", false, 0 },
+    { "a UCN of a basic character before C23", "#if '\\u0041' == 65\n#endif\n", 0, "c17", "", true, 0 },
+    { "several characters in a wide character constant", "#if L'ab'\n#endif\n", 0, "c17", "", true, 0 },
+    { "an octal escape out of range", "#if '\\400' == 0\nzero\n#endif\n", 0, "c17", "\nzero\n", true, 0 },
+    // _Pragma reads its '(', string literal and ')' expanded, a token at a time (Preprocessor::Handle_Pragma).
+    { "_Pragma's operand read expanded", "#define A(c) ( #c\n_Pragma A(ppf a) )\n#define P (\"ppf p\")\n_Pragma P after\n#define S \"ppf s\"\n_Pragma(S)\n",
+      0, "c17", "\n#pragma ppf a\n#pragma ppf p\nafter\n#pragma ppf s\n", false, 0 },
+    { "_Pragma without its operand", "_Pragma x y\n", 0, "c17", "", true, 0 },
+    // A __VA_OPT__'s content pastes left to right with a ## before it, as clang's TokenLexer does: (.5 e) .5, and GNU's
+    // comma before `__VA_ARGS__ ##` in it (VaArgsPseudoPaste).
+    { "__VA_OPT__'s content pasted left to right", "#define C(...) .5 ## __VA_OPT__(e ## .5)\nC(1)\n#define V(...) __VA_OPT__(, ) ## __VA_OPT__(__VA_ARGS__ ## __VA_ARGS__)\nV(u)\n",
+      0, "c23", "\n.5e.5\n,uu\n", false, 0 },
+    // A prefix the mode doesn't have before an empty character constant is an identifier before C23 (`u8` and `''`), so
+    // pasting them forms two tokens there, and one in C23.
+    { "a prefix pasted onto an empty character constant before C23", "#define P(a, b) a ## b\nP(u8,'')\n", 0, "c17", "", true, 0 },
+    { "a prefix pasted onto an empty character constant in C23", "#define P(a, b) a ## b\nP(u8,'')\n", 0, "c23", "\nu8''\n", false, 0 },
+    // Among a macro's arguments clang's macro expansion is off, and only #if and #elif turn it back on: #line's and
+    // #ident's operands stay as written.
+    { "#line among a macro's arguments, unexpanded", "#define F(x) [x]\n#define N 10\nF(\n#line N\n)\n", 0, "c17", "", true, 0 },
+    { "#line among a macro's arguments", "#define F(x) [x]\nF(a\n#line 20\n__LINE__)\n__LINE__\n", 0, "c17", "\n[a 20]\n21\n", false, 0 },
+    { "#ident among a macro's arguments, unexpanded", "#define F(x) [x]\n#define ID \"s\"\nF(\n#ident ID\n)\n#ident ID\n", 0, "c17", "\n[]\n#ident \"s\"\n", true, 0 },
+    // After a _Pragma that prints nothing, clang's lexer starts a line, which its printer moves to when the next token
+    // is on another one.
+    { "the token after a _Pragma that prints nothing", "#define h(x) _Pragma(x)\na h(\"once\") \\\n    b\n#define g(x) _Pragma(x) y\nc g(\"once\") \\\nd\n",
+      0, "c17", "\na\nb\nc y d\n", false, 2 },
     {
         .name = "builtin and feature names are raw, attribute names may expand",
         .source = "#define BUILTIN_NAME __builtin_expect\n#define FEATURE_NAME c_atomic\n#define ATTRIBUTE_NAME __const__\n"

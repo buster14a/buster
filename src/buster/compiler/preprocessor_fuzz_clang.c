@@ -289,7 +289,12 @@ static bool preprocessor_fuzz_clang_source_error(String8 diagnostic)
                 driver_error |= !positioned;
             }
         }
-        if (!severity_found)
+        // An error at no location: the frontend's for a source position it couldn't name (clang's driver prefixes its own
+        // with "clang: "), as `__has_include` after an empty argument at a macro's end gives.
+        const bool unplaced = !severity_found && ((end - begin >= 7 && memcmp(diagnostic.pointer + begin, "error: ", 7) == 0) ||
+                                                  (end - begin >= 13 && memcmp(diagnostic.pointer + begin, "fatal error: ", 13) == 0));
+        source_error |= unplaced;
+        if (!severity_found && !unplaced)
         {
             const String8 line =
             {
@@ -466,8 +471,8 @@ static bool preprocessor_fuzz_batch_source(PreprocessorFuzzBuffer* source, const
 
 // Which cases of a rejected batch the errors in clang's diagnostics belong to: an error's location starts with the file
 // name its case's #line gives, "ppf_<id>.c:<line>:<column>: error:". Sets errors[i] for case i. Returns false if an
-// error names no case's file, a case shares its id with another, or an error is fatal (after which clang reports
-// nothing more, though it goes on printing), so that the batch must run case by case.
+// error names no case's file (or has no location), a case shares its id with another, or an error is fatal (after which
+// clang reports nothing more, though it goes on printing), so that the batch must run case by case.
 static bool preprocessor_fuzz_clang_attribute(String8 diagnostic, const PreprocessorFuzzCase* const* cases, uint64_t count, bool* errors)
 {
     bool result = true;
@@ -494,7 +499,9 @@ static bool preprocessor_fuzz_clang_attribute(String8 diagnostic, const Preproce
         };
         const bool fatal = preprocessor_fuzz_clang_contains(line, BUSTER_S8(": fatal error:"));
         const bool error = fatal || preprocessor_fuzz_clang_contains(line, BUSTER_S8(": error:"));
-        result = !fatal;
+        // An error at no location names no case.
+        const bool unplaced = (line.length >= 7 && memcmp(line.pointer, "error: ", 7) == 0) || (line.length >= 13 && memcmp(line.pointer, "fatal error: ", 13) == 0);
+        result = !fatal && !unplaced;
         if (result && error)
         {
             // "ppf_", the id's digits, ".c:", then the line's digits and ':'.

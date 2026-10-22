@@ -19,7 +19,8 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 92 | |
+| The built-in cases (`pp_test_cases`) | 185 | |
+| #109's generated cases, against `clang -E -P` ([the fuzzing](preprocessor-fuzz.md)) | 40,000,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -881,7 +882,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 92 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 185 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -953,7 +954,29 @@ full-corpus reproduction and frozen CI subset.
   - the cases from #202's review: a line splice before the quote of a split
     literal (with `u`, `U` and `u8`, and a trigraph splice), and a trigraph a
     stringized argument spells, which stays, beside one a paste forms, which is
-    replaced.
+    replaced;
+  - a case for each difference from clang that #109's fuzzing found
+    (minimized) and for each that probing around one found:
+    - the order arguments expand in;
+    - `_Pragma` in arguments and in directives' lines;
+    - GCC poison;
+    - `## ##` and GNU's comma;
+    - substitution spacing around `__VA_OPT__`, its content's pastes left to
+      right, and `__VA_OPT__` in a macro without parameters;
+    - `_Pragma`'s operand, read expanded a token at a time;
+    - line splices before a `)` and a `#line`'s number;
+    - `#line` and `#ident` among a macro's arguments, read unexpanded;
+    - character constants in `#if`, and a prefix before an empty one;
+    - the line after a `_Pragma` that prints nothing;
+    - the attribute queries' operands, one at the file's end among them;
+    - `#line` and line markers;
+    - extra tokens after directives;
+    - every pragma clang handles;
+    - `__has_warning`, `__has_embed` and the target queries;
+    - `-undef`;
+    - UCN spellings;
+    - lexing by the mode
+    ([the fuzzing](preprocessor-fuzz.md) lists them).
 
   A case can name more files, and options for both sides (`-I`, `-include`,
   with `%d` for its directory), and the text `-E` prints with line markers. A
@@ -965,6 +988,10 @@ full-corpus reproduction and frozen CI subset.
   `clang -E`. It must give the same spellings, and its line markers must place
   every token as ours do: on the same presumed line, in the same include stack
   (each file's name as the marker spells it, and its system flags).
+- **Fuzzing.** Then 1,500 generated cases in each of C17 and C23
+  (`c_preprocessor_fuzz.c`, `--fuzz N` for more). Both kernels must agree on
+  each case. With `--clang`, each case must also have clang's acceptance and
+  tokens ([the fuzzing](preprocessor-fuzz.md)).
 - **Timestamps.** `__TIMESTAMP__` in a file and in the header it includes,
   written with modification times of their own, must give each file's time in
   UTC, and `SOURCE_DATE_EPOCH`'s time when that is set, by both kernels and with
@@ -1087,7 +1114,7 @@ cleared once and reused.
 
 ## Not yet
 
-- `#embed` is an error, and `__has_embed` isn't answered (C23).
+- `#embed` is an error (C23); `__has_embed` is answered.
 - Individual feature switches (`-m*`, other than the supported `-march=` and
   `-mtune=`) are rejected. Other options such as `-funsigned-char` still need
   `--predefines` for their macro effects. The target-builtin query table remains
@@ -1097,17 +1124,36 @@ cleared once and reused.
   are to answer what the compiler implements (#123, #148).
 - The printer's spacing differs from clang's in places. It puts a space between
   `<` and `>`, where clang doesn't, and it doesn't indent a line's first token
-  to its column. Line markers differ in form but not in what they say: clang
-  marks every file it enters, even one that gives no tokens, and we mark only
-  where a token needs it.
+  to its column. It keeps apart tokens that clang's printer joins into one,
+  such as a number and a UTF-8 identifier. Line markers differ in form but not
+  in what they say: clang marks every file it enters, even one that gives no
+  tokens, and every `#line`, and we mark only where a token needs it.
+  #109's comparison prints our stream with clang's spacing
+  ([the fuzzing](preprocessor-fuzz.md), "Clang's `-P` printer, emulated").
 - Diagnostics include presumed locations, include stacks and macro backtraces
   (#108, above). Source excerpts and carets remain unimplemented.
 - C++ (`-x c++`), dependency output (`-M`) and `-dM` aren't supported.
-- Stringizing an identifier that pasting made from a UCN gives its UTF-8
-  spelling, where clang keeps the UCN.
-- `defined` that a macro's argument brings into a `#if` line (`ID(defined X)`)
-  is an error here. clang evaluates it in the line, with a warning that it is
-  undefined behavior.
+- `-E`'s line markers when an attribute query's operand runs past an
+  included file's end. Clang prints the file's exit before the answer and
+  places the answer on the query's line; we place it in the included file.
+  Under `-P` the tokens agree.
+- A `_Pragma` in a computed `#include`'s line, where clang reads the string
+  of a `_Pragma` written in the line itself as a header name and rejects it,
+  but runs one from a macro. We reject both.
+- Clang's `#pragma clang __debug` commands, a UCN that names a basic
+  character (`\u0041`, which clang rejects in an identifier), and warnings
+  that don't change acceptance (`-Wvariadic-macros`, `-Wexpansion-to-defined`
+  and others). #109's generator writes none of these.
+- In `#if`, a character constant's `\N{name}` escape is refused (there is no
+  table of Unicode's names), and `-funsigned-char` doesn't make ordinary
+  character constants unsigned, as it does in clang.
+- `-E -P` keeps no line numbers, so it doesn't move the token after a
+  `_Pragma` that prints nothing to its own line, as clang's printer does when
+  that token is on another line; `-E` with line markers does.
+- Before C23, the digit-separator pass (`pp_lex_mode`) costs about 1.2% of
+  `sqlite3.c`'s instructions: it reads every number's bytes for a `'`. A lexer
+  flag that leaves `'` out of numbers would make it free (`c_lexer.c`'s
+  `apostrophe_separator`).
 
 ## Next steps
 

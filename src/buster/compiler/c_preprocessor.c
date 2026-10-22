@@ -89,6 +89,11 @@
 // Its BUSTER_PP_SPACE stands for the line it started among a macro's arguments, where clang's token keeps its own
 // flags: clang's -P printer gives it no space for that (test-preprocessor's emulation of it reads this).
 #define BUSTER_PP_LINE_SPACE 0x10
+// Its BUSTER_PP_SPACE is an expansion's name's, which the expansion's first token takes (and an empty expansion passes
+// on to the next token): clang's token then has a leading space only as the name does, for whitespace or a comment
+// before it on its line, where ours counts the line's start too. Clang's -P printer shows that in a line's first token's
+// indentation (test-preprocessor's emulation of it reads this).
+#define BUSTER_PP_NAME_SPACE 0x20
 
 // Kinds that only buffers hold, and the end of a pragma's tokens in the output (its '#' starts a line).
 #define BUSTER_PP_KIND_PLACEMARKER 0xFE // An empty argument next to ##, while substituting.
@@ -582,9 +587,6 @@ struct PPInvocation
     bool opened;
     uint32_t depth;
     uint32_t capture_mark;
-    // Its '(' and ')', which a _Pragma in an argument's expansion gives back (pp_defer_pragma).
-    PPToken open;
-    PPToken close;
 };
 
 // What a capture is for: which continuation takes its tokens when its barrier ends (pp_finish_capture).
@@ -597,10 +599,16 @@ struct PPInvocation
 #define BUSTER_PP_CAPTURE_STREAM 6 // An attribute query's operand, read expanded a token at a time (pp_stream_check).
 
 // A stream's stages: before its operand's first token, after a first identifier whose next token clang reads
-// unexpanded (__has_c_attribute's and __has_cpp_attribute's, for a `::`), and after that.
+// unexpanded (__has_c_attribute's and __has_cpp_attribute's, for a `::`), and after that. A _Pragma's stream reads a
+// '(', a string literal and a ')', and after another token where the string literal goes, drops the tokens up to a ')'
+// or a line's first token, as clang's Handle_Pragma does.
 #define BUSTER_PP_STREAM_FIRST 0
 #define BUSTER_PP_STREAM_UNEXPANDED 1
 #define BUSTER_PP_STREAM_REST 2
+#define BUSTER_PP_STREAM_PRAGMA_OPEN 3
+#define BUSTER_PP_STREAM_PRAGMA_STRING 4
+#define BUSTER_PP_STREAM_PRAGMA_CLOSE 5
+#define BUSTER_PP_STREAM_PRAGMA_SKIP 6
 
 typedef struct PPCapture PPCapture;
 struct PPCapture
@@ -622,9 +630,6 @@ struct PPCapture
     uint8_t builtin;
     uint8_t flags;
     uint32_t location;
-    // _Pragma's '(' and ')', for pp_defer_pragma.
-    PPToken open;
-    PPToken close;
     // pp->pragma_lines when the capture started: the pragma lines a _Pragma or a #pragma among its tokens emitted into it
     // since then go to the target below (pp_lift_pragma_lines).
     uint32_t pragma_mark;
@@ -634,6 +639,13 @@ struct PPCapture
     uint32_t scanned;
     bool in_pragma;
     uint8_t stage;
+    // A #line's: the place of the last name read from its line while the capture had no token outside pragma lines,
+    // whose expansion gives the line's first token when a macro made it (pp_note_line_anchor), or BUSTER_PP_NONE.
+    uint32_t anchor;
+    // One over a barrier: the place of the latest name the main loop read from the barrier while the capture was on
+    // top, or 0. A _Pragma's line in a directive's goes there (pp_emit_pragma_start), as clang places it at its
+    // expansion in the line.
+    uint32_t name_location;
 };
 
 // The regions #pragma clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage open (pp_pragma_region), as
@@ -756,9 +768,15 @@ struct Preprocessor
     PPExpansionStart* expansion_starts;
     uint32_t expansion_start_count;
     uint32_t expansion_location;
-    // With expansion_starts: the _Pragma operators that printed nothing, by the output token after them and the place
-    // of their expansion, which clang's printer moves to (MoveToLine) as it handles one: test-preprocessor's fuzz runs
-    // print the line break that gives, as clang's text has it.
+    // With expansion_starts: the start of an expansion that a _Pragma's line in a capture took the place of before the
+    // expansion had a token (a #if's _Pragma among its arguments), which starts again after that line when it is lifted
+    // into the output (pp_lift_pragma_lines); or 0.
+    uint32_t displaced_location;
+    // With expansion_starts: the _Pragma operators that printed nothing, by the output token after them, and the place
+    // of the expansion that token comes from if a macro made it (the one the _Pragma is in, or one read after it): clang's
+    // lexer starts a line at the token after a _Pragma (Lexer::PropagateLineStartLeadingSpaceInfo, as its pragma lexer
+    // ends), which its printer moves to when that is another line (MoveToLine). test-preprocessor's fuzz runs print the
+    // line break that gives, as clang's text has it.
     PPExpansionStart* silent_pragmas;
     uint32_t silent_pragma_count;
     PPExpansion* history;
@@ -822,8 +840,8 @@ struct Preprocessor
     uint32_t argument_record_count;
     PPCapture* capture_frames;
     uint32_t capture_count;
-    // The open streams (BUSTER_PP_CAPTURE_STREAM), which the main loop checks after each step, and how many pragma lines
-    // were emitted (PPCapture.pragma_mark).
+    // The open streams (BUSTER_PP_CAPTURE_STREAM), which the main loop checks after each step (of a token at a time
+    // while one is open: pp_step_limit), and how many pragma lines were emitted (PPCapture.pragma_mark).
     uint32_t stream_count;
     uint32_t pragma_lines;
     // Built-in state: __COUNTER__, the inclusion depth, the main file, and the spellings "0", "1" and "#".
@@ -904,6 +922,7 @@ typedef enum PPSeverity
 static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location);
 static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, uint32_t* column);
 static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** name, uint32_t* name_length);
+static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range);
 static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const char* format, va_list arguments);
 
@@ -1531,9 +1550,37 @@ BUSTER_INLINE bool pp_splits_kind(uint64_t split, uint8_t kind)
     return base < 64 && ((split >> base) & 1) != 0;
 }
 
+// Does the mode split an unknown token [start, end): an empty character constant or an unterminated literal that a
+// prefix the mode doesn't have starts (`u8''` before C23), which clang lexes as the prefix and an unknown token from the
+// quote? Such a token starts with u or U, and its prefix's letters are the u, U and 8 before its first quote (any other
+// byte there is a line splice's); no other unknown token starts so.
+static bool pp_splits_unknown(const uint8_t* bytes, uint32_t start, uint32_t end, uint64_t split)
+{
+    uint32_t at = start < end && (bytes[start] == 'u' || bytes[start] == 'U') ? start : end;
+    uint32_t letters = 0;
+    bool u = false;
+    bool upper = false;
+    bool eight = false;
+    while (at < end && bytes[at] != '\'' && bytes[at] != '"')
+    {
+        letters += bytes[at] == 'u' || bytes[at] == 'U' || bytes[at] == '8';
+        u |= letters == 1 && bytes[at] == 'u';
+        upper |= letters == 1 && bytes[at] == 'U';
+        eight |= letters == 2 && bytes[at] == '8';
+        at += 1;
+    }
+    const bool character = at < end && bytes[at] == '\'';
+    const uint8_t kind = !(at < end) ? 0
+                         : u && eight && letters == 2 ? (character ? C_TOKEN_UTF8_CHAR_CONSTANT : C_TOKEN_UTF8_STRING_LITERAL)
+                         : u && letters == 1 ? (character ? C_TOKEN_UTF16_CHAR_CONSTANT : C_TOKEN_UTF16_STRING_LITERAL)
+                         : upper && letters == 1 ? (character ? C_TOKEN_UTF32_CHAR_CONSTANT : C_TOKEN_UTF32_STRING_LITERAL)
+                         : 0;
+    return kind != 0 && pp_splits_kind(split, kind);
+}
+
 // How many of `count` tokens a mode splits (`split`, pp_split_kinds), 64 kinds at a time: the mask spread to a byte per
 // kind is a vpermi2b table, which reads only a kind's low 7 bits, so the start-of-line bit doesn't matter.
-static uint32_t pp_count_splits_vector(const uint8_t* kinds, uint32_t count, uint64_t split)
+static uint32_t pp_count_splits_vector(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t count, uint64_t split)
 {
     const __m512i ones = _mm512_set1_epi8(1);
     const __m512i low = _mm512_maskz_mov_epi8((__mmask64)split, ones);
@@ -1544,17 +1591,23 @@ static uint32_t pp_count_splits_vector(const uint8_t* kinds, uint32_t count, uin
         const __mmask64 valid = _bzhi_u64(~0ull, count - i < 64 ? count - i : 64);
         const __m512i kind = _mm512_maskz_loadu_epi8(valid, kinds + i);
         result += (uint32_t)__builtin_popcountll(_mm512_mask_test_epi8_mask(valid, _mm512_permutex2var_epi8(low, kind, high), ones));
+        // The rare unknown tokens, one at a time (pp_splits_unknown).
+        for (uint64_t unknown = _mm512_mask_cmpeq_epi8_mask(valid, _mm512_and_si512(kind, _mm512_set1_epi8(0x7F)), _mm512_set1_epi8(C_TOKEN_UNKNOWN)); unknown != 0; unknown &= unknown - 1)
+        {
+            const uint32_t t = i + (uint32_t)__builtin_ctzll(unknown);
+            result += pp_splits_unknown(bytes, starts[t], ends[t], split);
+        }
     }
     return result;
 }
 
 // pp_count_splits_vector's scalar twin.
-static uint32_t pp_count_splits_scalar(const uint8_t* kinds, uint32_t count, uint64_t split)
+static uint32_t pp_count_splits_scalar(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t count, uint64_t split)
 {
     uint32_t result = 0;
     for (uint32_t i = 0; i < count; i += 1)
     {
-        result += pp_splits_kind(split, kinds[i]);
+        result += pp_splits_kind(split, kinds[i]) || ((kinds[i] & 0x7F) == C_TOKEN_UNKNOWN && pp_splits_unknown(bytes, starts[i], ends[i], split));
     }
     return result;
 }
@@ -1573,7 +1626,8 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
         const uint8_t kind = kinds[t];
         const uint32_t start = starts[t];
         const uint32_t end = ends[t];
-        if (pp_splits_kind(split, kind))
+        const bool unknown = (kind & 0x7F) == C_TOKEN_UNKNOWN && pp_splits_unknown(bytes, start, end, split);
+        if (pp_splits_kind(split, kind) || unknown)
         {
             uint32_t quote = start;
             uint32_t prefix_end = start;
@@ -1582,7 +1636,7 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
                 prefix_end = bytes[quote] == 'u' || bytes[quote] == 'U' || bytes[quote] == '8' ? quote + 1 : prefix_end;
                 quote += 1;
             }
-            kinds[t + remaining] = (kind & 0x7F) <= C_TOKEN_UTF32_CHAR_CONSTANT ? C_TOKEN_CHAR_CONSTANT : C_TOKEN_STRING_LITERAL;
+            kinds[t + remaining] = unknown ? C_TOKEN_UNKNOWN : (kind & 0x7F) <= C_TOKEN_UTF32_CHAR_CONSTANT ? C_TOKEN_CHAR_CONSTANT : C_TOKEN_STRING_LITERAL;
             starts[t + remaining] = quote;
             ends[t + remaining] = end;
             kinds[t + remaining - 1] = (uint8_t)((kind & 0x80) | C_TOKEN_RAW_IDENTIFIER);
@@ -1769,7 +1823,7 @@ static int64_t pp_lex_mode(const uint8_t* bytes, uint32_t length, uint8_t* kinds
     if (split != 0 && result > 0)
     {
         const uint32_t n = (uint32_t)result;
-        const uint32_t splits = vectorized ? pp_count_splits_vector(kinds, n, split) : pp_count_splits_scalar(kinds, n, split);
+        const uint32_t splits = vectorized ? pp_count_splits_vector(bytes, kinds, starts, ends, n, split) : pp_count_splits_scalar(bytes, kinds, starts, ends, n, split);
         result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, n, splits, split) : result;
     }
     return result;
@@ -2672,19 +2726,21 @@ BUSTER_INLINE bool pp_space_read(const PPMacro* macro, const PPFileData* data, u
 }
 
 // Compiles a macro's replacement list into items (PPItem): its parameters by index, # with its parameter, ## and
-// __VA_OPT__ with its content. Returns false (with a diagnostic) if the list is invalid.
+// __VA_OPT__ with its content. Returns false (with a diagnostic) if the list is invalid. A function-like macro without
+// parameters has only tokens and ##, as in clang (TokenLexer::Init substitutes nothing then): its definition's checks
+// passed, and its __VA_OPT__, '(' and ')' and a # before them stay tokens.
 static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
 {
     PPMacro* macro = &pp->macros[id];
     const PPFileData* data = &pp->datas[macro->data];
-    const bool function_like = (macro->flags & BUSTER_PP_MACRO_FUNCTION) != 0;
+    const bool substitutes = (macro->flags & BUSTER_PP_MACRO_FUNCTION) != 0 && macro->parameter_count != 0;
     const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0;
     bool result = pp->item_count + (macro->body_end - macro->body_begin) <= BUSTER_PP_MAX_ITEMS &&
                   pp->parameter_count + macro->parameter_count <= BUSTER_PP_MAX_ITEMS;
     // The parameters' ids: the identifiers of the parameter list, and __VA_ARGS__ for `...`.
     macro->parameters = pp->parameter_count;
     uint32_t parameter = 0;
-    for (uint32_t t = macro->parameters_begin; result && function_like && t < macro->body_begin; t += 1)
+    for (uint32_t t = macro->parameters_begin; result && substitutes && t < macro->body_begin; t += 1)
     {
         const uint8_t kind = data->kinds[t] & 0x7F;
         if (kind == C_TOKEN_RAW_IDENTIFIER)
@@ -2710,8 +2766,8 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
         const uint8_t flags = pp_space_read(macro, data, t) ? BUSTER_PP_ITEM_SPACE : 0;
         PPItem item = { .kind = PP_ITEM_TOKEN, .flags = flags, .token = t };
         // __VA_OPT__ is the operator even when a parameter has its name, as in clang.
-        const bool va_opt = function_like && kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT;
-        const uint32_t index = kind == C_TOKEN_RAW_IDENTIFIER && function_like && !va_opt ? pp_parameter_index(pp, macro, data->values[t]) : BUSTER_PP_NONE;
+        const bool va_opt = substitutes && kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT;
+        const uint32_t index = kind == C_TOKEN_RAW_IDENTIFIER && substitutes && !va_opt ? pp_parameter_index(pp, macro, data->values[t]) : BUSTER_PP_NONE;
         if (index != BUSTER_PP_NONE)
         {
             item.kind = PP_ITEM_PARAMETER;
@@ -2734,7 +2790,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             t += 1;
             va_opt_content = t + 1;
         }
-        else if (kind == C_TOKEN_HASH && function_like)
+        else if (kind == C_TOKEN_HASH && substitutes)
         {
             const uint32_t next = t + 1;
             const bool next_va_opt = next < macro->body_end && (data->kinds[next] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[next] == C_NAME_VA_OPT;
@@ -2852,6 +2908,13 @@ static void pp_emit(Preprocessor* pp, PPToken token)
 }
 
 // Token `token` of a prepared file read in the range at `base`, as buffers hold it.
+// A token's flags with a context's pending ones added: a space of its own (not a name's) stays its own.
+BUSTER_INLINE uint8_t pp_with_pending(uint8_t flags, uint8_t pending)
+{
+    const bool own = (flags & BUSTER_PP_SPACE) && !(flags & BUSTER_PP_NAME_SPACE);
+    return (uint8_t)((flags | pending) & ~(own ? BUSTER_PP_NAME_SPACE : 0));
+}
+
 BUSTER_INLINE PPToken pp_file_token(const PPFileData* data, uint32_t base, uint32_t token)
 {
     const uint8_t kind = data->kinds[token] & 0x7F;
@@ -2961,7 +3024,7 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
     pp->context_count -= 1;
     // An expansion that ends passes its pending flags on to the context it was read from; an argument's or a line's
     // barrier doesn't.
-    const uint8_t passed = context->pending_flags | context->trailing_flags;
+    const uint8_t passed = (uint8_t)((context->pending_flags | context->trailing_flags) & ~((context->trailing_flags & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0));
     if (context->kind == BUSTER_PP_CONTEXT_BUFFER && !context->barrier && passed != 0 && pp->context_count != 0)
     {
         pp->contexts[pp->context_count - 1].pending_flags |= passed;
@@ -3594,7 +3657,7 @@ static void pp_append_tokens(Preprocessor* pp, const PPTokens* tokens, uint32_t 
             token_flags = (uint8_t)((token_flags & ~BUSTER_PP_START_OF_LINE) | ((token_flags & BUSTER_PP_START_OF_LINE) ? BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE : 0) | BUSTER_PP_FROM_MACRO);
             if (i == begin && replace_first)
             {
-                token_flags = (uint8_t)((token_flags & ~(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE)) | (first_flags & BUSTER_PP_SPACE));
+                token_flags = (uint8_t)((token_flags & ~(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_SPACE)) | (first_flags & BUSTER_PP_SPACE));
             }
             out_kinds[count] = kinds[i];
             out_flags[count] = token_flags;
@@ -3705,6 +3768,8 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
     uint32_t va_opt_paste_spelling = 0;
     bool va_opt_pasted_after = false; // Whether ## follows the open __VA_OPT__.
     bool va_opt_paste_left = false; // Whether ## precedes the next __VA_OPT__ (set by the ##).
+    bool va_opt_merged = false; // Whether the open __VA_OPT__'s first token was pasted onto the ##'s left operand.
+    bool va_opt_pseudo_paste = false; // Whether its content starts with GNU's comma's __VA_ARGS__ (set by the ##).
     bool next_space = false;
     bool literal_paste = false; // Whether the last token is a ## that stays a token, after which a body token keeps its own space.
     bool placemarkers = false;
@@ -3722,14 +3787,14 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 pp_push_token(pp, out, string);
                 va_opt_mark = BUSTER_PP_NONE;
             }
-            // Content of placemarkers alone gives no tokens.
-            bool only_placemarkers = true;
+            // Content of placemarkers alone gives no tokens (but one whose first token the ## on its left took has one).
+            bool only_placemarkers = !va_opt_merged;
             for (uint32_t k = va_opt_begin; only_placemarkers && k < out->count; k += 1)
             {
                 only_placemarkers = out->kinds[k] == BUSTER_PP_KIND_PLACEMARKER;
             }
             out->count = only_placemarkers ? va_opt_begin : out->count;
-            if (out->count == va_opt_begin)
+            if (out->count == va_opt_begin && !va_opt_merged)
             {
                 // A placemarker, which ## on the right takes as its left operand and ## on the left leaves alone.
                 if (va_opt_pasted_after && !va_opt_paste_left)
@@ -3740,11 +3805,14 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
             }
             else if (va_opt_paste_left)
             {
+                // # __VA_OPT__'s string, or a placemarker that stayed first.
                 pp->history_anchor = va_opt_paste_location;
                 pp->history_spelling = va_opt_paste_spelling;
                 pp_paste_in_place(pp, out, va_opt_begin);
             }
             va_opt_paste_left = false;
+            va_opt_merged = false;
+            va_opt_pseudo_paste = false;
             va_opt_end = BUSTER_PP_NONE;
             va_opt_first = BUSTER_PP_NONE;
         }
@@ -3799,7 +3867,9 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 pp_argument_range(pp, invocation, item->parameter, !pasted_after && !pasted_before, &tokens, &first, &last);
                 if (first != last)
                 {
-                    pp_append_tokens(pp, tokens, first, last, true, next_space ? BUSTER_PP_SPACE : 0);
+                    // GNU's comma's variadic argument keeps its first token's own space (VaArgsPseudoPaste).
+                    const bool pseudo_paste = va_opt_pseudo_paste && i == va_opt_first;
+                    pp_append_tokens(pp, tokens, first, last, !pseudo_paste, next_space ? BUSTER_PP_SPACE : 0);
                     next_space = false;
                 }
                 else
@@ -3995,9 +4065,15 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 }
                 else if (next->kind == PP_ITEM_VA_OPT || next->kind == PP_ITEM_STRINGIZE_VA_OPT)
                 {
-                    // `## __VA_OPT__(...)`: the __VA_OPT__ pastes its first token onto the left operand when its tokens
-                    // are known (above).
-                    va_opt_paste_left = true;
+                    // `## __VA_OPT__(...)`: the __VA_OPT__'s first token pastes onto the left operand as soon as it is
+                    // known (below), and # __VA_OPT__'s string when it is made (above). But `, ## __VA_OPT__(__VA_ARGS__
+                    // ## ...)` is GNU's comma, as clang sees the comma before the ## (VaArgsPseudoPaste): the variadic
+                    // argument follows it unpasted.
+                    const uint32_t content_end = operand + 1 + next->parameter;
+                    va_opt_pseudo_paste = variadic_present && next->kind == PP_ITEM_VA_OPT && left.kind == C_TOKEN_COMMA && operand + 2 < content_end &&
+                                          items[operand + 1].kind == PP_ITEM_PARAMETER && items[operand + 1].parameter == variadic_index &&
+                                          items[operand + 2].kind == PP_ITEM_PASTE;
+                    va_opt_paste_left = !va_opt_pseudo_paste;
                     va_opt_paste_location = pp->history_anchor;
                     va_opt_paste_spelling = pp->history_spelling;
                     i = operand - 1;
@@ -4053,6 +4129,19 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 }
                 break;
             }
+        }
+        // The first token of the content of a __VA_OPT__ after ## pastes onto the ##'s left operand as soon as it is
+        // made, as clang's pastes go left to right (TokenLexer::Lex): `x ## __VA_OPT__(a ## b)` is (x a) b. A
+        // placemarker first (an empty argument) waits: one that a ## gives a token takes it then, and one that stays
+        // takes the ## away when the content ends (above), as clang's placeholder does.
+        if (va_opt_paste_left && va_opt_end != BUSTER_PP_NONE && va_opt_mark == BUSTER_PP_NONE && out->count > va_opt_begin &&
+            out->kinds[va_opt_begin] != BUSTER_PP_KIND_PLACEMARKER)
+        {
+            pp->history_anchor = va_opt_paste_location;
+            pp->history_spelling = va_opt_paste_spelling;
+            pp_paste_in_place(pp, out, va_opt_begin);
+            va_opt_paste_left = false;
+            va_opt_merged = true;
         }
     }
     // The pending space: the token after the expansion takes it.
@@ -4254,7 +4343,7 @@ static void pp_finish_invocation(Preprocessor* pp)
     if (begin < end)
     {
         uint8_t* flags = &pp->expansions.flags[begin];
-        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | name_flags);
+        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
     }
     pp->captures.count = invocation.captures_begin;
     pp->arguments.count = invocation.arguments_begin;
@@ -4271,7 +4360,8 @@ static void pp_finish_invocation(Preprocessor* pp)
     else
     {
         // An empty expansion: the next token read after the invocation's ')' takes its name's flags.
-        pp->contexts[pp->context_count - 1].pending_flags |= name_flags | trailing;
+        const uint8_t name_space = (name_flags & BUSTER_PP_SPACE) && !(trailing & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0;
+        pp->contexts[pp->context_count - 1].pending_flags |= name_flags | trailing | name_space;
     }
 }
 
@@ -4538,13 +4628,11 @@ static PPCollected pp_collect_token(Preprocessor* pp, PPInvocation* invocation, 
     if (!invocation->opened)
     {
         invocation->opened = token.kind == C_TOKEN_L_PAREN;
-        invocation->open = token;
         result = !invocation->opened ? PP_COLLECTED_INVALID : pp_builtin_streams(macro->builtin) ? PP_COLLECTED_STREAM : PP_COLLECTED_MORE;
     }
     else if (token.kind == C_TOKEN_R_PAREN && invocation->depth == 0)
     {
         invocation->expansion_end = expansion_end;
-        invocation->close = token;
         if (invocation->history != 0)
         {
             pp->history[invocation->history - 1].end = token.location;
@@ -4726,7 +4814,9 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
     pp->history_current = pp_history_expansion(pp, id, name.location, name.origin);
     PPMacro* macro = &pp->macros[id];
     const PPFileData* data = &pp->datas[macro->data];
-    bool direct = (macro->flags & BUSTER_PP_MACRO_PASTES) == 0;
+    // Straight into the target, when nothing in the body expands (but while a stream is open, which reads a token at a
+    // time: pp_step_limit).
+    bool direct = (macro->flags & BUSTER_PP_MACRO_PASTES) == 0 && pp->stream_count == 0;
     for (uint32_t t = macro->body_begin; direct && t < macro->body_end; t += 1)
     {
         direct = (data->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro(pp, data->values[t]);
@@ -4762,12 +4852,12 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
     if (!empty)
     {
         uint8_t* flags = &tokens->flags[begin];
-        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)));
+        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | BUSTER_PP_NAME_SPACE);
     }
     else
     {
         // An empty expansion: the next token read from this context takes the name's flags.
-        pp->contexts[pp->context_count - 1].pending_flags |= name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE);
+        pp->contexts[pp->context_count - 1].pending_flags |= (uint8_t)((name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | ((name.flags & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0));
     }
     if (!direct && !empty)
     {
@@ -5164,7 +5254,7 @@ static void pp_defer_pragma(Preprocessor* pp, uint32_t name_location, uint8_t na
     pp_emit(pp, close);
 }
 
-// Starts a builtin that takes a parenthesized operand (_Pragma, the feature queries, __has_include): the main loop
+// Starts a builtin that takes a parenthesized operand (the feature queries, __has_include): the main loop
 // collects the operand (pp_collect_step, as an invocation's arguments, from its '(' on), then pp_close_builtin takes it.
 static void pp_start_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint8_t flags, uint32_t expansion_end)
 {
@@ -5193,8 +5283,8 @@ static void pp_start_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint8
     }
 }
 
-// A builtin's operand is collected (`closed`: its ')' was read): _Pragma takes its string literal; attribute queries
-// expand their operand through pp_finish_builtin, name queries read it literally, and __has_include does either.
+// A builtin's operand is collected (`closed`: its ')' was read): attribute queries expand their operand through
+// pp_finish_builtin, name queries read it literally, and __has_include does either.
 // An unterminated or malformed operand is an error, and a query's answer then 0.
 static void pp_close_builtin(Preprocessor* pp, bool closed)
 {
@@ -5212,76 +5302,38 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
     const uint32_t end = pp->arguments.count;
     const IdentId name = pp->macros[invocation.macro].name;
     const PPTokens* tokens = &pp->arguments;
-    if (builtin == PP_BUILTIN_PRAGMA)
+    const bool include = builtin == PP_BUILTIN_HAS_INCLUDE || builtin == PP_BUILTIN_HAS_INCLUDE_NEXT || builtin == PP_BUILTIN_HAS_EMBED;
+    // A header name in <...> or a string literal is read as it is, and so are the operands clang reads unexpanded
+    // (EvaluateFeatureLikeBuiltinMacro without ExpandArgs): the queries' that come here (an attribute query's
+    // operand is a stream, pp_start_stream, and one comes here only without its '('). A computed header name is
+    // expanded first.
+    const bool direct = (include && begin < end && (tokens->kinds[begin] == C_TOKEN_LESS || tokens->kinds[begin] == C_TOKEN_STRING_LITERAL)) || !include;
+    const PPCapture capture = {
+        .kind = BUSTER_PP_CAPTURE_BUILTIN,
+        .history = invocation.history,
+        .arguments_begin = begin,
+        .builtin = (uint8_t)builtin,
+        .flags = invocation.name_flags,
+        .location = invocation.name_location,
+    };
+    bool started = false;
+    uint64_t value = 0;
+    if (!closed)
     {
-        const bool string = closed && end == begin + 1 && tokens->kinds[begin] >= C_TOKEN_STRING_LITERAL && tokens->kinds[begin] <= C_TOKEN_UTF32_STRING_LITERAL;
-        bool started = false;
-        if (string && pp_expanding_argument(pp))
-        {
-            pp_defer_pragma(pp, invocation.name_location, invocation.name_flags, invocation.open, pp_stack_token(tokens, begin), invocation.close);
-        }
-        else if (string)
-        {
-            // The pragma's tokens, after the operand's, stay while a capture expands them; it then gives back both.
-            started = pp_pragma_string(pp, pp_stack_token(tokens, begin), invocation.name_location, begin);
-        }
-        else if (closed && begin < end)
-        {
-            // Another operand is expanded first, as clang and GCC do (`_Pragma(P)` with P a string literal), and
-            // pp_finish_builtin takes the string literal it must give.
-            const PPCapture capture = {
-                .kind = BUSTER_PP_CAPTURE_BUILTIN,
-                .history = invocation.history,
-                .arguments_begin = begin,
-                .builtin = (uint8_t)builtin,
-                .flags = invocation.name_flags,
-                .location = invocation.name_location,
-                .open = invocation.open,
-                .close = invocation.close,
-            };
-            started = pp_start_capture(pp, capture, begin, end, invocation.expansion_end);
-        }
-        else
-        {
-            pp_diagnose(pp, PP_SEVERITY_ERROR, invocation.name_location, "_Pragma takes a parenthesized string literal");
-        }
-        pp->arguments.count = started ? pp->arguments.count : begin;
+        pp_diagnose(pp, PP_SEVERITY_ERROR, invocation.name_location, "missing '(' or ')' after '%.*s'", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+    }
+    else if (direct)
+    {
+        value = pp_builtin_value(pp, builtin, tokens, begin, end, invocation.name_location);
     }
     else
     {
-        const bool include = builtin == PP_BUILTIN_HAS_INCLUDE || builtin == PP_BUILTIN_HAS_INCLUDE_NEXT || builtin == PP_BUILTIN_HAS_EMBED;
-        // A header name in <...> or a string literal is read as it is, and so are the operands clang reads unexpanded
-        // (EvaluateFeatureLikeBuiltinMacro without ExpandArgs): the queries' that come here (an attribute query's
-        // operand is a stream, pp_start_stream, and one comes here only without its '('). A computed header name is
-        // expanded first.
-        const bool direct = (include && begin < end && (tokens->kinds[begin] == C_TOKEN_LESS || tokens->kinds[begin] == C_TOKEN_STRING_LITERAL)) || !include;
-        const PPCapture capture = {
-            .kind = BUSTER_PP_CAPTURE_BUILTIN,
-            .history = invocation.history,
-            .arguments_begin = begin,
-            .builtin = (uint8_t)builtin,
-            .flags = invocation.name_flags,
-            .location = invocation.name_location,
-        };
-        bool started = false;
-        uint64_t value = 0;
-        if (!closed)
-        {
-            pp_diagnose(pp, PP_SEVERITY_ERROR, invocation.name_location, "missing '(' or ')' after '%.*s'", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-        }
-        else if (direct)
-        {
-            value = pp_builtin_value(pp, builtin, tokens, begin, end, invocation.name_location);
-        }
-        else
-        {
-            started = pp_start_capture(pp, capture, begin, end, invocation.expansion_end);
-        }
-        if (!started)
-        {
-            pp->arguments.count = begin;
-            pp_emit(pp, include ? pp_number_token(pp, value, invocation.name_flags) : pp_feature_token(pp, value, invocation.name_flags));
-        }
+        started = pp_start_capture(pp, capture, begin, end, invocation.expansion_end);
+    }
+    if (!started)
+    {
+        pp->arguments.count = begin;
+        pp_emit(pp, include ? pp_number_token(pp, value, invocation.name_flags) : pp_feature_token(pp, value, invocation.name_flags));
     }
     pp->history_current = saved_history;
     pp->diagnostic_origin = saved_origin;
@@ -5297,37 +5349,12 @@ static void pp_finish_builtin(Preprocessor* pp)
     pp->history_anchor = capture.location;
     pp->diagnostic_origin = capture.history != 0 ? pp->history[capture.history - 1].parent : 0;
     pp->capture_count -= 1;
-    if (capture.builtin == PP_BUILTIN_PRAGMA)
-    {
-        // _Pragma's operand expanded: it must be one string literal.
-        const PPTokens* tokens = &pp->captures;
-        const bool string = tokens->count == capture.begin + 1 && tokens->kinds[capture.begin] >= C_TOKEN_STRING_LITERAL &&
-                            tokens->kinds[capture.begin] <= C_TOKEN_UTF32_STRING_LITERAL;
-        const PPToken token = string ? pp_stack_token(tokens, capture.begin) : (PPToken){ 0 };
-        pp->captures.count = capture.begin;
-        pp->arguments.count = capture.arguments_begin;
-        if (string && pp_expanding_argument(pp))
-        {
-            pp_defer_pragma(pp, capture.location, capture.flags, capture.open, token, capture.close);
-        }
-        else if (string)
-        {
-            pp_pragma_string(pp, token, capture.location, capture.arguments_begin);
-        }
-        else
-        {
-            pp_diagnose(pp, PP_SEVERITY_ERROR, capture.location, "_Pragma takes a parenthesized string literal");
-        }
-    }
-    else
-    {
-        const uint64_t value = pp_builtin_value(pp, (PPBuiltin)capture.builtin, &pp->captures, capture.begin, pp->captures.count, capture.location);
-        pp->captures.count = capture.begin;
-        pp->arguments.count = capture.arguments_begin;
-        // __has_embed's 2 has no L (clang prints its answer as an int).
-        const bool numeric = capture.builtin == PP_BUILTIN_HAS_INCLUDE || capture.builtin == PP_BUILTIN_HAS_INCLUDE_NEXT || capture.builtin == PP_BUILTIN_HAS_EMBED;
-        pp_emit(pp, numeric ? pp_number_token(pp, value, capture.flags) : pp_feature_token(pp, value, capture.flags));
-    }
+    const uint64_t value = pp_builtin_value(pp, (PPBuiltin)capture.builtin, &pp->captures, capture.begin, pp->captures.count, capture.location);
+    pp->captures.count = capture.begin;
+    pp->arguments.count = capture.arguments_begin;
+    // __has_embed's 2 has no L (clang prints its answer as an int).
+    const bool numeric = capture.builtin == PP_BUILTIN_HAS_INCLUDE || capture.builtin == PP_BUILTIN_HAS_INCLUDE_NEXT || capture.builtin == PP_BUILTIN_HAS_EMBED;
+    pp_emit(pp, numeric ? pp_number_token(pp, value, capture.flags) : pp_feature_token(pp, value, capture.flags));
     pp->history_current = saved_history;
     pp->diagnostic_origin = saved_origin;
 }
@@ -5358,7 +5385,6 @@ static void pp_start_stream(Preprocessor* pp)
             .builtin = pp->macros[invocation.macro].builtin,
             .flags = invocation.name_flags,
             .location = invocation.name_location,
-            .open = invocation.open,
             .pragma_mark = pp->pragma_lines,
             .depth = 1,
             .scanned = pp->captures.count,
@@ -5371,6 +5397,17 @@ static void pp_start_stream(Preprocessor* pp)
     {
         pp_diagnose(pp, PP_SEVERITY_FATAL, invocation.name_location, "macro expansion nests too deeply");
     }
+}
+
+// An expansion whose tokens can start a line is read from a file into the output, from the name at `location`: they
+// start at the output's end (PPExpansionStart). One that gives none is replaced by the next.
+BUSTER_INLINE void pp_note_expansion(Preprocessor* pp, uint32_t location)
+{
+    const uint32_t token = pp->output.count;
+    const uint32_t count = pp->expansion_start_count;
+    const bool replaces = count != 0 && pp->expansion_starts[count - 1].token == token;
+    pp->expansion_starts[replaces ? count - 1 : count] = (PPExpansionStart){ .token = token, .location = location };
+    pp->expansion_start_count = replaces ? count : count + 1;
 }
 
 // Moves the pragma lines that a _Pragma or a #pragma among the top capture's tokens emitted into it (clang prints them
@@ -5417,6 +5454,11 @@ static uint32_t pp_lift_pragma_lines(Preprocessor* pp)
                     pp_tokens_put(pp, output, output->count, pp_stack_token(tokens, i));
                     output->count += 1;
                 }
+                if (pp->displaced_location != 0)
+                {
+                    pp_note_expansion(pp, pp->displaced_location);
+                    pp->displaced_location = 0;
+                }
                 for (uint32_t k = 0; k < count; k += 1)
                 {
                     pp_tokens_put(pp, tokens, begin + k, kept[k]);
@@ -5443,6 +5485,78 @@ static uint32_t pp_lift_pragma_lines(Preprocessor* pp)
 // a barrier or of the input, which clang reports and answers nothing for. Its pragma lines go first, then the answer
 // replaces the operand, and the tokens read after the ')' in the same step follow it: they are read as they would be
 // without the stream (a run's or an expansion's tokens that name no macro).
+// _Pragma: a stream (BUSTER_PP_STREAM_PRAGMA_OPEN) that the main loop expands into, as clang's Handle_Pragma reads its
+// '(', its string literal and its ')' with Lex, wherever they come from; pp_stream_check reads them, and
+// pp_end_pragma_stream runs the pragma.
+static void pp_start_pragma_stream(Preprocessor* pp, PPToken name, uint8_t flags)
+{
+    if (pp->capture_count < BUSTER_PP_MAX_CONTEXTS)
+    {
+        pp->capture_frames[pp->capture_count] = (PPCapture){
+            .kind = BUSTER_PP_CAPTURE_STREAM,
+            .history = pp->history_current,
+            .begin = pp->captures.count,
+            .builtin = PP_BUILTIN_PRAGMA,
+            .flags = flags,
+            .location = name.location,
+            .pragma_mark = pp->pragma_lines,
+            .scanned = pp->captures.count,
+            .stage = BUSTER_PP_STREAM_PRAGMA_OPEN,
+        };
+        pp->capture_count += 1;
+        pp->stream_count += 1;
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, name.location, "macro expansion nests too deeply");
+    }
+}
+
+// A _Pragma's stream ended (pp_stream_check), `valid` after its ')', or after a token it doesn't take, which with the
+// rest of the `back` tokens after it are read next, as clang's Handle_Pragma leaves the token after its operand to Lex.
+// A valid one's pragma runs (pp_pragma_string), or in an argument's expansion its tokens are given back
+// (pp_defer_pragma). The pragma lines of directives among its tokens go first (pp_lift_pragma_lines).
+static void pp_end_pragma_stream(Preprocessor* pp, bool valid, uint32_t back)
+{
+    pp_lift_pragma_lines(pp);
+    const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
+    const uint32_t saved_history = pp->history_current;
+    const uint32_t saved_origin = pp->diagnostic_origin;
+    pp->history_current = capture.history;
+    pp->history_anchor = capture.location;
+    pp->diagnostic_origin = capture.history != 0 ? pp->history[capture.history - 1].parent : 0;
+    pp->capture_count -= 1;
+    pp->stream_count -= 1;
+    // The operand, `(` "string" `)`, is the capture's tokens before those given back, which are saved first: the
+    // pragma's line may take their places.
+    const uint32_t end = pp->captures.count;
+    const PPToken open = valid ? pp_stack_token(&pp->captures, capture.begin) : (PPToken){ 0 };
+    const PPToken string = valid ? pp_stack_token(&pp->captures, capture.begin + 1) : (PPToken){ 0 };
+    const PPToken close = valid ? pp_stack_token(&pp->captures, end - back - 1) : (PPToken){ 0 };
+    Scratch scratch = scratch_begin(0);
+    PPToken* rest = back != 0 ? arena_push(scratch.arena, (uint64_t)back * sizeof(PPToken), _Alignof(PPToken)) : 0;
+    for (uint32_t i = 0; rest != 0 && i < back; i += 1)
+    {
+        rest[i] = pp_stack_token(&pp->captures, end - back + i);
+    }
+    pp->captures.count = capture.begin;
+    if (valid && pp_expanding_argument(pp))
+    {
+        pp_defer_pragma(pp, capture.location, capture.flags, open, string, close);
+    }
+    else if (valid)
+    {
+        pp_pragma_string(pp, string, capture.location, pp->arguments.count);
+    }
+    for (uint32_t i = 0; rest != 0 && i < back; i += 1)
+    {
+        pp_emit(pp, rest[i]);
+    }
+    scratch_end(scratch);
+    pp->history_current = saved_history;
+    pp->diagnostic_origin = saved_origin;
+}
+
 static void pp_finish_stream(Preprocessor* pp, uint32_t close)
 {
     const uint32_t lifted = pp_lift_pragma_lines(pp);
@@ -5482,6 +5596,26 @@ static void pp_finish_stream(Preprocessor* pp, uint32_t close)
     pp->diagnostic_origin = saved_origin;
 }
 
+// The top stream ends without its ')', at the end of a line, of an argument or of the main file, where clang's Lex
+// gives an eod or an eof: an attribute query's is unterminated (pp_finish_stream), and a _Pragma's malformed (once).
+static void pp_cut_stream(Preprocessor* pp)
+{
+    const PPCapture* capture = &pp->capture_frames[pp->capture_count - 1];
+    if (capture->builtin == PP_BUILTIN_PRAGMA)
+    {
+        if (capture->stage != BUSTER_PP_STREAM_PRAGMA_SKIP)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, capture->location, "_Pragma takes a parenthesized string literal");
+        }
+        pp->unterminated += 1;
+        pp_end_pragma_stream(pp, false, 0);
+    }
+    else
+    {
+        pp_finish_stream(pp, BUSTER_PP_NONE);
+    }
+}
+
 // A stream's first identifier, __has_c_attribute's or __has_cpp_attribute's, is followed by a token clang reads
 // unexpanded (to see a `::`): a macro's name next in the top context is taken as it is, painted. Any other token is read
 // alike either way, and the main loop reads it; at a directive or the end of a context, the main loop goes first (it
@@ -5510,7 +5644,7 @@ static void pp_stream_unexpanded(Preprocessor* pp)
             pp_check_poison(pp, token.value, token.location);
         }
         context->position += 1;
-        token.flags |= (uint8_t)(context->pending_flags | BUSTER_PP_NO_EXPAND);
+        token.flags = (uint8_t)(pp_with_pending(token.flags, context->pending_flags) | BUSTER_PP_NO_EXPAND);
         context->pending_flags = 0;
         pp_emit(pp, token);
     }
@@ -5520,58 +5654,110 @@ static void pp_stream_unexpanded(Preprocessor* pp)
     }
 }
 
-// After a step of the main loop with a stream open: reads the top stream's new tokens, but its pragma lines, counting
-// parentheses as clang does (a ',' and any token after the first are errors that pp_builtin_value finds), and ends it at
-// the ')' that closes its operand (pp_finish_stream), which may close the stream below too. Kept out of the main loop's
-// code, which only tests whether a stream is open.
+// Reads an attribute query's stream's new tokens, but its pragma lines, counting parentheses as clang does (a ',' and
+// any token after the first are errors that pp_builtin_value finds), and ends it at the ')' that closes its operand
+// (pp_finish_stream). Returns whether the stream below is to be read too.
+static bool pp_check_query_stream(Preprocessor* pp)
+{
+    PPCapture* capture = &pp->capture_frames[pp->capture_count - 1];
+    const PPTokens* tokens = &pp->captures;
+    const bool scoped = capture->builtin == PP_BUILTIN_HAS_C_ATTRIBUTE || capture->builtin == PP_BUILTIN_HAS_CPP_ATTRIBUTE;
+    uint32_t close = BUSTER_PP_NONE;
+    uint32_t i = capture->scanned;
+    bool result = false;
+    while (close == BUSTER_PP_NONE && i < tokens->count)
+    {
+        const uint8_t kind = tokens->kinds[i];
+        const bool pragma = capture->in_pragma || (kind == C_TOKEN_HASH && tokens->locations[i] == pp->hash_location);
+        capture->in_pragma = pragma && kind != BUSTER_PP_KIND_PRAGMA_END;
+        if (!pragma)
+        {
+            const bool paren = kind == C_TOKEN_L_PAREN || kind == C_TOKEN_R_PAREN || kind == C_TOKEN_COMMA;
+            const bool identifier = pp_names_kind(kind);
+            if (capture->stage == BUSTER_PP_STREAM_UNEXPANDED)
+            {
+                capture->stage = BUSTER_PP_STREAM_REST;
+            }
+            else if (capture->stage == BUSTER_PP_STREAM_FIRST && !paren)
+            {
+                capture->stage = scoped && identifier ? BUSTER_PP_STREAM_UNEXPANDED : BUSTER_PP_STREAM_REST;
+            }
+            capture->depth += kind == C_TOKEN_L_PAREN;
+            capture->depth -= kind == C_TOKEN_R_PAREN;
+            close = capture->depth == 0 ? i : BUSTER_PP_NONE;
+        }
+        i += 1;
+    }
+    capture->scanned = i;
+    if (close != BUSTER_PP_NONE)
+    {
+        pp_finish_stream(pp, close);
+        result = true;
+    }
+    else if (capture->stage == BUSTER_PP_STREAM_UNEXPANDED && pp->context_count != 0)
+    {
+        // (With no context left, the main file ended, and pp_run_file ends the stream.)
+        const uint32_t count = tokens->count;
+        pp_stream_unexpanded(pp);
+        result = tokens->count != count;
+    }
+    return result;
+}
+
+// Reads a _Pragma's stream's new tokens, but its pragma lines: a '(', a string literal and a ')' (each malformed
+// operand is reported once, at the _Pragma), and ends it at its ')' or at the token it doesn't take
+// (pp_end_pragma_stream). After another token where the string literal goes, that token and the next ones up to a ')'
+// go, or up to a line's first token, which it doesn't take. Returns whether the stream below is to be read too.
+static bool pp_check_pragma_stream(Preprocessor* pp)
+{
+    PPCapture* capture = &pp->capture_frames[pp->capture_count - 1];
+    const PPTokens* tokens = &pp->captures;
+    uint32_t i = capture->scanned;
+    bool ended = false;
+    bool valid = false;
+    uint32_t next = 0; // The first token it doesn't take.
+    while (!ended && i < tokens->count)
+    {
+        const uint8_t kind = tokens->kinds[i];
+        const bool pragma = capture->in_pragma || (kind == C_TOKEN_HASH && tokens->locations[i] == pp->hash_location);
+        capture->in_pragma = pragma && kind != BUSTER_PP_KIND_PRAGMA_END;
+        if (!pragma)
+        {
+            const uint8_t stage = capture->stage;
+            const bool string = kind >= C_TOKEN_STRING_LITERAL && kind <= C_TOKEN_UTF32_STRING_LITERAL;
+            const bool line_start = (tokens->flags[i] & BUSTER_PP_START_OF_LINE) != 0;
+            const bool taken = (stage == BUSTER_PP_STREAM_PRAGMA_OPEN && kind == C_TOKEN_L_PAREN) || (stage == BUSTER_PP_STREAM_PRAGMA_STRING && string) ||
+                               (stage == BUSTER_PP_STREAM_PRAGMA_CLOSE && kind == C_TOKEN_R_PAREN);
+            if (!taken && stage != BUSTER_PP_STREAM_PRAGMA_SKIP)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, capture->location, "_Pragma takes a parenthesized string literal");
+            }
+            valid = taken && stage == BUSTER_PP_STREAM_PRAGMA_CLOSE;
+            // Without a string literal, a ')' ends it, and any other token goes; past that, a line's first token ends it too.
+            const bool skipping = stage == BUSTER_PP_STREAM_PRAGMA_SKIP || (!taken && stage == BUSTER_PP_STREAM_PRAGMA_STRING);
+            const bool kept = skipping && stage == BUSTER_PP_STREAM_PRAGMA_SKIP && kind != C_TOKEN_R_PAREN && line_start;
+            ended = valid || (!taken && !skipping) || (skipping && (kind == C_TOKEN_R_PAREN || kept));
+            next = (!taken && !skipping) || kept ? i : i + 1;
+            capture->stage = taken ? (uint8_t)(stage + 1) : skipping ? BUSTER_PP_STREAM_PRAGMA_SKIP : stage;
+        }
+        i += 1;
+    }
+    capture->scanned = i;
+    if (ended)
+    {
+        pp_end_pragma_stream(pp, valid, tokens->count - next);
+    }
+    return ended;
+}
+
+// After a step of the main loop with a stream open: reads the top stream's new tokens, which may end it, and then the
+// stream below it. Kept out of the main loop's code, which only tests whether a stream is open.
 static __attribute__((noinline, cold)) void pp_stream_check(Preprocessor* pp)
 {
     bool more = true;
     while (more && pp->capture_count != 0 && pp->capture_frames[pp->capture_count - 1].kind == BUSTER_PP_CAPTURE_STREAM)
     {
-        PPCapture* capture = &pp->capture_frames[pp->capture_count - 1];
-        const PPTokens* tokens = &pp->captures;
-        const bool scoped = capture->builtin == PP_BUILTIN_HAS_C_ATTRIBUTE || capture->builtin == PP_BUILTIN_HAS_CPP_ATTRIBUTE;
-        uint32_t close = BUSTER_PP_NONE;
-        uint32_t i = capture->scanned;
-        while (close == BUSTER_PP_NONE && i < tokens->count)
-        {
-            const uint8_t kind = tokens->kinds[i];
-            const bool pragma = capture->in_pragma || (kind == C_TOKEN_HASH && tokens->locations[i] == pp->hash_location);
-            capture->in_pragma = pragma && kind != BUSTER_PP_KIND_PRAGMA_END;
-            if (!pragma)
-            {
-                const bool paren = kind == C_TOKEN_L_PAREN || kind == C_TOKEN_R_PAREN || kind == C_TOKEN_COMMA;
-                const bool identifier = pp_names_kind(kind);
-                if (capture->stage == BUSTER_PP_STREAM_UNEXPANDED)
-                {
-                    capture->stage = BUSTER_PP_STREAM_REST;
-                }
-                else if (capture->stage == BUSTER_PP_STREAM_FIRST && !paren)
-                {
-                    capture->stage = scoped && identifier ? BUSTER_PP_STREAM_UNEXPANDED : BUSTER_PP_STREAM_REST;
-                }
-                capture->depth += kind == C_TOKEN_L_PAREN;
-                capture->depth -= kind == C_TOKEN_R_PAREN;
-                close = capture->depth == 0 ? i : BUSTER_PP_NONE;
-            }
-            i += 1;
-        }
-        capture->scanned = i;
-        if (close != BUSTER_PP_NONE)
-        {
-            pp_finish_stream(pp, close);
-        }
-        else if (capture->stage == BUSTER_PP_STREAM_UNEXPANDED)
-        {
-            const uint32_t count = tokens->count;
-            pp_stream_unexpanded(pp);
-            more = tokens->count != count;
-        }
-        else
-        {
-            more = false;
-        }
+        more = pp->capture_frames[pp->capture_count - 1].builtin == PP_BUILTIN_PRAGMA ? pp_check_pragma_stream(pp) : pp_check_query_stream(pp);
     }
 }
 
@@ -5595,7 +5781,9 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
     pp->diagnostic_origin = name.origin;
     const PPBuiltin builtin = (PPBuiltin)pp->macros[id].builtin;
     const uint8_t flags = name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE);
-    const uint32_t where = (name.flags & BUSTER_PP_FROM_MACRO) ? expansion_end : name.location;
+    // A name a macro made is at the end of its outermost expansion, the last token's place as clang's lexer has it (with
+    // the line splices right before it); a name in the file at its first character.
+    const uint32_t where = (name.flags & BUSTER_PP_FROM_MACRO) ? pp_lexed_start(pp, expansion_end) : name.location;
     const char* file_name;
     uint32_t file_name_length;
     switch (builtin)
@@ -5670,7 +5858,7 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             break;
         }
         case PP_BUILTIN_PRAGMA:
-            pp_start_builtin(pp, id, name, flags, expansion_end);
+            pp_start_pragma_stream(pp, name, flags);
             break;
         case PP_BUILTIN_POISONED:
             // The name, which pp_expand_current reported if a file has it.
@@ -5726,20 +5914,27 @@ BUSTER_INLINE void pp_take_pending_flags(Preprocessor* pp, PPContext* context, u
     if (context->pending_flags != 0 && copied != 0)
     {
         PPTokens* target = pp_target(pp);
-        target->flags[target->count - copied] |= context->pending_flags;
+        target->flags[target->count - copied] = pp_with_pending(target->flags[target->count - copied], context->pending_flags);
         context->pending_flags = 0;
     }
 }
 
-// An expansion whose tokens can start a line is read from a file into the output, from the name at `location`: they
-// start at the output's end (PPExpansionStart). One that gives none is replaced by the next.
-BUSTER_INLINE void pp_note_expansion(Preprocessor* pp, uint32_t location)
+
+// A name read from a #line's line, at `location`: the line's first token comes from the expansion of the last name read
+// while its capture has no token outside pragma lines (a _Pragma's, which go before the line), as clang's line note is
+// at that token's expansion.
+static __attribute__((noinline, cold)) void pp_note_line_anchor(Preprocessor* pp, uint32_t location)
 {
-    const uint32_t token = pp->output.count;
-    const uint32_t count = pp->expansion_start_count;
-    const bool replaces = count != 0 && pp->expansion_starts[count - 1].token == token;
-    pp->expansion_starts[replaces ? count - 1 : count] = (PPExpansionStart){ .token = token, .location = location };
-    pp->expansion_start_count = replaces ? count : count + 1;
+    PPCapture* capture = &pp->capture_frames[pp->capture_count - 1];
+    const PPTokens* tokens = &pp->captures;
+    uint32_t state = BUSTER_PP_PRAGMA_OUTSIDE;
+    bool empty = true;
+    for (uint32_t i = capture->begin; empty && i < tokens->count; i += 1)
+    {
+        state = pp_pragma_state(pp, state, tokens->kinds[i], tokens->locations[i]);
+        empty = state != BUSTER_PP_PRAGMA_OUTSIDE || tokens->kinds[i] == BUSTER_PP_KIND_PRAGMA_END;
+    }
+    capture->anchor = empty ? location : capture->anchor;
 }
 
 // Expands the macro whose name is the top context's current token. A stream open reads what came before the name first
@@ -5748,16 +5943,18 @@ static void pp_expand_current(Preprocessor* pp)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
     const uint32_t position = context->position;
+    const uint32_t depth = pp->context_count;
     if (pp->stream_count != 0)
     {
         pp_stream_check(pp);
     }
-    if (context->position == position)
+    // A _Pragma that ended may have started a capture for its pragma's operands, which the main loop runs first.
+    if (context->position == position && pp->context_count == depth)
     {
         PPToken name = pp_context_token(pp, context, context->position);
         if (context->pending_flags != 0)
         {
-            name.flags |= context->pending_flags;
+            name.flags = pp_with_pending(name.flags, context->pending_flags);
             context->pending_flags = 0;
         }
         if (pp->options.expansion_starts && context->kind == BUSTER_PP_CONTEXT_FILE && pp->capture_count == 0)
@@ -5767,10 +5964,25 @@ static void pp_expand_current(Preprocessor* pp)
             {
                 pp_note_expansion(pp, name.location);
             }
+            // The next token after a _Pragma that printed nothing comes from this expansion, if any.
+            const uint32_t silent = pp->silent_pragma_count;
+            if (silent != 0 && pp->silent_pragmas[silent - 1].token == pp->output.count)
+            {
+                pp->silent_pragmas[silent - 1].location = name.location;
+            }
         }
         if (context->kind == BUSTER_PP_CONTEXT_FILE)
         {
             pp_check_poison(pp, name.value, name.location);
+        }
+        else if (context->barrier)
+        {
+            PPCapture* top = &pp->capture_frames[pp->capture_count - 1];
+            top->name_location = name.location;
+            if (top->kind == BUSTER_PP_CAPTURE_LINE)
+            {
+                pp_note_line_anchor(pp, name.location);
+            }
         }
         const PPMacroId id = pp->macro_of[name.value];
         PPMacro* macro = &pp->macros[id];
@@ -5806,6 +6018,14 @@ static void pp_expand_current(Preprocessor* pp)
     }
 }
 
+// The end of the run a step of the main loop copies from `position` (up to `limit`): one token while a stream is open,
+// so that a stream ends at the token that closes it, before any token after it is read: a _Pragma's pragma runs before
+// them, as clang's does (it can change what they expand to).
+BUSTER_INLINE uint32_t pp_step_limit(const Preprocessor* pp, uint32_t position, uint32_t limit)
+{
+    return pp->stream_count != 0 && limit - position > 1 ? position + 1 : limit;
+}
+
 static void pp_step_file(Preprocessor* pp, PPContext* context)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
@@ -5813,7 +6033,8 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
     if (context->position < limit)
     {
         const uint32_t base = pp->ranges[context->range].base;
-        const uint32_t stop = pp->vectorized ? pp_copy_file_run_vector(pp, data, base, context->position, limit) : pp_copy_file_run_scalar(pp, data, base, context->position, limit);
+        const uint32_t run_end = pp_step_limit(pp, context->position, limit);
+        const uint32_t stop = pp->vectorized ? pp_copy_file_run_vector(pp, data, base, context->position, run_end) : pp_copy_file_run_scalar(pp, data, base, context->position, run_end);
         if (pp->capture_count != 0)
         {
             pp_history_fill(pp, &pp->captures, pp->captures.count - (stop - context->position), pp->captures.count, 0);
@@ -5825,7 +6046,7 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
             pp->statistics.file_run_tokens += stop - context->position;
         }
         context->position = stop;
-        if (stop < limit && !pp->fatal)
+        if (stop < run_end && !pp->fatal)
         {
             pp_expand_current(pp);
         }
@@ -5842,8 +6063,9 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
 
 static void pp_step_buffer(Preprocessor* pp, PPContext* context)
 {
-    const uint32_t stop = pp->vectorized ? pp_copy_buffer_run_vector(pp, context->tokens, context->position, context->end)
-                                         : pp_copy_buffer_run_scalar(pp, context->tokens, context->position, context->end);
+    const uint32_t run_end = pp_step_limit(pp, context->position, context->end);
+    const uint32_t stop = pp->vectorized ? pp_copy_buffer_run_vector(pp, context->tokens, context->position, run_end)
+                                         : pp_copy_buffer_run_scalar(pp, context->tokens, context->position, run_end);
     PPTokens* target = pp_target(pp);
     pp_history_copy(pp, target, target->count - (stop - context->position), context->tokens, context->position, stop);
     pp_take_pending_flags(pp, context, stop - context->position);
@@ -5853,7 +6075,7 @@ static void pp_step_buffer(Preprocessor* pp, PPContext* context)
         pp->statistics.buffer_run_tokens += stop - context->position;
     }
     context->position = stop;
-    if (stop < context->end && !pp->fatal)
+    if (stop < run_end && !pp->fatal)
     {
         pp_expand_current(pp);
     }
@@ -5874,7 +6096,7 @@ static void pp_finish_capture(Preprocessor* pp)
 {
     while (pp->capture_frames[pp->capture_count - 1].kind == BUSTER_PP_CAPTURE_STREAM)
     {
-        pp_finish_stream(pp, BUSTER_PP_NONE);
+        pp_cut_stream(pp);
     }
     if (pp->capture_frames[pp->capture_count - 1].kind != BUSTER_PP_CAPTURE_INCLUDE)
     {
@@ -6476,6 +6698,14 @@ static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start)
     return result;
 }
 
+// pp_start_with_splices for a token's location in a file (another place has no line splices).
+static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location)
+{
+    const uint32_t range = pp_find_range(pp, location);
+    const PPRange* record = range != BUSTER_PP_NONE ? &pp->ranges[range] : 0;
+    return record != 0 && record->file != BUSTER_PP_NONE ? record->base + pp_start_with_splices(record->bytes, location - record->base) : location;
+}
+
 // Adds a line note to a range, from `location` on (PPLineDirective): `name` null keeps the presumed name, the name of
 // the range's latest note, and `system` BUSTER_PP_NONE keeps the system level (that note's, else the inclusion's).
 static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location, int64_t delta, const char* name, uint32_t name_length, uint32_t system)
@@ -6510,12 +6740,14 @@ static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location
 }
 
 // A #line's or a line marker's number, token `i` of `tokens`, as clang's GetLineValue reads it: digits (without the
-// line splices in its spelling, and skipping a digit separator, C23's, in a number C23 lexes) whose value fits 32 bits
-// (past C's 2^31 - 1, as clang allows without -pedantic). Returns whether it is one.
-static bool pp_line_value(Preprocessor* pp, const PPTokens* tokens, uint32_t i, uint64_t* number)
+// line splices in its spelling, and skipping a digit separator, C23's, in a number C23 lexes), each step of whose value
+// in 32 bits doesn't go below the last (clang's overflow test, which lets some wrap). A leading 0 is a warning (the
+// number is decimal), named for a line marker's number with `marker` (and for a #line's, or a marker's flags, without).
+// Returns whether it is one.
+static bool pp_line_value(Preprocessor* pp, const PPTokens* tokens, uint32_t i, bool marker, uint64_t* number)
 {
     bool result = tokens->kinds[i] == C_TOKEN_NUMERIC_CONSTANT;
-    *number = 0;
+    uint32_t value = 0;
     Scratch scratch = scratch_begin(0);
     uint8_t* buffer = result ? arena_push(scratch.arena, (uint64_t)(tokens->values[i] - tokens->locations[i]) + 1, 1) : 0;
     const uint8_t* digits = 0;
@@ -6524,11 +6756,16 @@ static bool pp_line_value(Preprocessor* pp, const PPTokens* tokens, uint32_t i, 
     for (uint32_t k = 0; result && k < count; k += 1)
     {
         const bool separator = digits[k] == '\'';
-        const uint64_t next = separator ? *number : *number * 10 + (uint64_t)(digits[k] - '0');
-        result = separator || (digits[k] >= '0' && digits[k] <= '9' && next <= UINT32_MAX);
-        *number = next;
+        const uint32_t next = separator ? value : value * 10u + (uint32_t)(digits[k] - '0');
+        result = separator || (digits[k] >= '0' && digits[k] <= '9' && next >= value);
+        value = next;
+    }
+    if (result && digits[0] == '0' && value != 0)
+    {
+        pp_diagnose(pp, PP_SEVERITY_WARNING, tokens->locations[i], "%s directive interprets number as decimal, not octal", marker ? "GNU line marker" : "#line");
     }
     scratch_end(scratch);
+    *number = value;
     return result;
 }
 
@@ -6538,13 +6775,12 @@ static bool pp_line_value(Preprocessor* pp, const PPTokens* tokens, uint32_t i, 
 // (one left, which a marker with 1 in the same inclusion entered), then 3 (a system header), then 4 (one in extern
 // "C"); anything else is an error, which drops the marker. The marker's file is a system header for 3 and a user file
 // without it; a #line keeps what the file is, and tokens after its name are a warning.
-static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, const PPTokens* tokens, uint32_t begin, uint32_t stop, uint32_t location)
+static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, const PPTokens* tokens, uint32_t begin, uint32_t stop, uint32_t location, uint32_t anchor)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
-    const uint32_t hash = data->directive_hash[d];
-    const uint32_t base = pp->ranges[context->range].base;
     uint64_t number = 0;
-    bool valid = begin < stop && pp_line_value(pp, tokens, begin, &number);
+    const bool marker = data->directive_kind[d] == PP_DIRECTIVE_LINE_MARKER;
+    bool valid = begin < stop && pp_line_value(pp, tokens, begin, marker, &number);
     // The operands' spellings without their line splices (translation phase 2), as clang reads them.
     Scratch scratch = scratch_begin(0);
     const char* name = 0;
@@ -6565,7 +6801,6 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         name_length = valid ? name_length : 0;
     }
     scratch_end(scratch);
-    const bool marker = data->directive_kind[d] == PP_DIRECTIVE_LINE_MARKER;
     uint32_t system = marker ? BUSTER_PP_USER_FILE : BUSTER_PP_NONE;
     bool entered = false;
     bool left = false;
@@ -6574,7 +6809,7 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
     for (uint32_t i = begin + 2; valid && marker && i < stop; i += 1)
     {
         uint64_t flag = 0;
-        const bool expected = pp_line_value(pp, tokens, i, &flag) && ((stage == 0 && flag >= 1 && flag <= 3) || (stage == 1 && flag == 3) || (stage == 2 && flag == 4));
+        const bool expected = pp_line_value(pp, tokens, i, false, &flag) && ((stage == 0 && flag >= 1 && flag <= 3) || (stage == 1 && flag == 3) || (stage == 2 && flag == 4));
         valid = expected;
         flags_reported = !expected;
         entered |= flag == 1;
@@ -6604,15 +6839,18 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
     {
         pp->ranges[context->range].marker_entries += entered;
         pp->ranges[context->range].marker_entries -= left;
-        // The line after the number token's is `number`, as clang counts: from where it lexes that token (the digits'
-        // line, or for digits right after a line splice, the splice's, since its lexer reads a splice as part of the
-        // token after it). The token is the directive's first operand (the macro name for a #line it expands).
-        const uint32_t first = (data->kinds[hash + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER ? hash + 2 : hash + 1;
-        const uint32_t anchor = first < data->directive_end[d] ? pp_start_with_splices(data->bytes, data->starts[first]) : data->starts[hash];
+        // The line after the number token's is `number`, as clang counts, and its line note starts at that token
+        // (SourceManager::AddLineNote at DigitTok): where clang lexes it, or for one an expansion made (a macro's, or a
+        // builtin's in the scratch space), where it lexes the expansion's name (`anchor`, pp_note_line_anchor's); with
+        // the line splices right before it, since its lexer reads a splice as part of the token after it.
+        const uint32_t digits = tokens->locations[begin];
+        const bool made = (tokens->flags[begin] & BUSTER_PP_FROM_MACRO) || pp_find_range(pp, digits) != context->range;
+        const uint32_t place = pp_lexed_start(pp, made && anchor != BUSTER_PP_NONE ? anchor : digits);
+        const uint32_t note = pp_find_range(pp, place) == context->range ? place : location + 1;
         uint32_t column;
-        const uint32_t physical = pp_line_of(pp, context->range, base + anchor, &column) + 1;
+        const uint32_t physical = pp_line_of(pp, context->range, note, &column) + 1;
         // A #line without a name keeps the presumed one.
-        pp_add_line_note(pp, context->range, location + 1, (int64_t)number - (int64_t)physical, name, name_length, system);
+        pp_add_line_note(pp, context->range, note, (int64_t)number - (int64_t)physical, name, name_length, system);
     }
 }
 
@@ -6620,7 +6858,7 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
 static void pp_finish_line(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
-    pp_apply_line(pp, &pp->contexts[capture.context], capture.directive, &pp->captures, capture.begin, pp->captures.count, capture.location);
+    pp_apply_line(pp, &pp->contexts[capture.context], capture.directive, &pp->captures, capture.begin, pp->captures.count, capture.location, capture.anchor);
     pp->capture_count -= 1;
     pp->captures.count = capture.begin;
     pp->arguments.count = capture.arguments_begin;
@@ -6644,11 +6882,14 @@ static void pp_line(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t ki
         .context = (uint32_t)(context - pp->contexts),
         .directive_kind = kind,
         .location = location,
+        .anchor = BUSTER_PP_NONE,
     };
-    const bool started = copied && kind == PP_DIRECTIVE_LINE && pp_start_capture(pp, capture, line, pp->arguments.count, location);
+    // Among a macro's arguments, clang reads it unexpanded: its macro expansion is off there, and only #if's and #elif's
+    // turn it back on (Preprocessor::EvaluateDirectiveExpression).
+    const bool started = copied && kind == PP_DIRECTIVE_LINE && !pp_collecting(pp) && pp_start_capture(pp, capture, line, pp->arguments.count, location);
     if (!started)
     {
-        pp_apply_line(pp, context, d, &pp->arguments, line, copied ? pp->arguments.count : line, location);
+        pp_apply_line(pp, context, d, &pp->arguments, line, copied ? pp->arguments.count : line, location, BUSTER_PP_NONE);
         pp->arguments.count = line;
     }
 }
@@ -6663,15 +6904,19 @@ static void pp_emit_pragma_start(Preprocessor* pp, IdentId name, uint32_t locati
     pp->pragma_lines += 1;
     if (from_operator && pp->options.expansion_starts)
     {
-        // At the line its expansion came from, or for a _Pragma in a directive's line, at that line (where clang's
-        // printer moves to for it).
+        // At the line its expansion came from, or for a _Pragma in a directive's line, at its expansion there (the
+        // latest name read from the line: the _Pragma, or the macro it came from), where clang's printer moves to for it.
         uint32_t where = pp->expansion_location;
         for (uint32_t c = pp->capture_count; c > 0; c -= 1)
         {
-            const uint8_t kind = pp->capture_frames[c - 1].kind;
-            const bool directive = kind == BUSTER_PP_CAPTURE_CONDITION || kind == BUSTER_PP_CAPTURE_INCLUDE || kind == BUSTER_PP_CAPTURE_LINE || kind == BUSTER_PP_CAPTURE_PRAGMA;
-            where = directive && where == pp->expansion_location ? pp->capture_frames[c - 1].location : where;
+            const PPCapture* frame = &pp->capture_frames[c - 1];
+            const bool directive = frame->kind == BUSTER_PP_CAPTURE_CONDITION || frame->kind == BUSTER_PP_CAPTURE_INCLUDE || frame->kind == BUSTER_PP_CAPTURE_LINE ||
+                                   frame->kind == BUSTER_PP_CAPTURE_PRAGMA;
+            where = directive && where == pp->expansion_location ? (frame->name_location != 0 ? frame->name_location : frame->location) : where;
         }
+        const uint32_t count = pp->expansion_start_count;
+        const bool displaces = pp->capture_count != 0 && count != 0 && pp->expansion_starts[count - 1].token == pp->output.count;
+        pp->displaced_location = displaces && pp->displaced_location == 0 ? pp->expansion_starts[count - 1].location : pp->displaced_location;
         pp_note_expansion(pp, where);
     }
     pp_emit(pp, (PPToken){ .kind = C_TOKEN_HASH, .flags = flags, .value = pp->hash_location + 1, .location = pp->hash_location });
@@ -7384,7 +7629,8 @@ static bool pp_pragma(Preprocessor* pp, uint32_t begin, uint32_t end, uint32_t l
     const bool expanded = kind == PP_PRAGMA_MESSAGE || kind == PP_PRAGMA_WARNING || kind == PP_PRAGMA_ERROR || kind == PP_PRAGMA_PUSH_MACRO || kind == PP_PRAGMA_POP_MACRO ||
                           kind == PP_PRAGMA_OMP || kind == PP_PRAGMA_IDENT;
     bool started = false;
-    if (expanded && pp_needs_expansion(pp, tokens, operands, end))
+    // Not among a macro's arguments (or a builtin's operand), where clang's macro expansion is off (as for #line).
+    if (expanded && !pp_collecting(pp) && pp_needs_expansion(pp, tokens, operands, end))
     {
         const PPCapture capture = {
             .kind = BUSTER_PP_CAPTURE_PRAGMA,
@@ -7760,114 +8006,400 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
     return valid && !overflow;
 }
 
-// A character constant's value (C 6.4.4.4): 'c' is an int of the (signed) char's value, a multicharacter one packs its
-// characters, and L'', u'', U'' and u8'' have their types' values.
+// The length of the UTF-8 sequence at `bytes` (`available` long) and its code point, as LLVM's strict conversion reads
+// it; 0 if it isn't one (overlong, a surrogate, past U+10FFFF, or cut short).
+static uint32_t pp_utf8_sequence(const uint8_t* bytes, uint32_t available, uint32_t* code_point)
+{
+    const uint8_t lead = bytes[0];
+    uint32_t result = lead < 0x80 ? 1 : lead >= 0xC2 && lead <= 0xDF ? 2 : lead >= 0xE0 && lead <= 0xEF ? 3 : lead >= 0xF0 && lead <= 0xF4 ? 4 : 0;
+    const uint8_t second_min = lead == 0xE0 ? 0xA0 : lead == 0xF0 ? 0x90 : 0x80;
+    const uint8_t second_max = lead == 0xED ? 0x9F : lead == 0xF4 ? 0x8F : 0xBF;
+    uint32_t value = result == 1 ? lead : result == 2 ? lead & 0x1Fu : result == 3 ? lead & 0x0Fu : lead & 0x07u;
+    result = result <= available && (result < 2 || (bytes[1] >= second_min && bytes[1] <= second_max)) ? result : 0;
+    for (uint32_t k = 1; k < result; k += 1)
+    {
+        value = (value << 6) | (bytes[k] & 0x3Fu);
+        result = (bytes[k] & 0xC0) == 0x80 ? result : 0;
+    }
+    *code_point = value;
+    return result;
+}
+
+// A character constant's characters so far: how many, the last, the low bytes of all (an ordinary constant's value
+// when it has several, its first character highest), and whether that value has lost a character.
+typedef struct PPCharacters PPCharacters;
+struct PPCharacters
+{
+    uint32_t count;
+    uint32_t last;
+    uint32_t packed;
+    bool too_long;
+};
+
+BUSTER_INLINE void pp_characters_add(PPCharacters* characters, uint32_t c)
+{
+    characters->too_long |= (characters->packed >> 24) != 0;
+    characters->packed = (characters->packed << 8) | (c & 0xFF);
+    characters->last = c;
+    characters->count += 1;
+}
+
+// The universal character name at spelling[*at] (its backslash) of a character constant, as clang reads one there
+// (ProcessUCNEscape): \u and four hex digits, \U and eight, or \u{...}; one that names a surrogate or a code point
+// past U+10FFFF is an error, and so before C23 is one below U+00A0 but $, @ and `. \N{name} is refused: there is no
+// table of Unicode's names here. Moves *at past it, and returns whether it is valid, with its code point.
+static bool pp_parse_ucn(Preprocessor* pp, const uint8_t* spelling, uint32_t end, uint32_t* at, uint32_t location, uint32_t* code_point)
+{
+    const uint8_t letter = spelling[*at + 1];
+    uint32_t i = *at + 2;
+    uint32_t value = 0;
+    bool result = false;
+    if (letter == 'N')
+    {
+        // Through the closing brace (or to the end), as clang skips it.
+        while (i < end && spelling[i] != '}')
+        {
+            i += 1;
+        }
+        i += i < end;
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "\\N{...} escapes are not supported");
+    }
+    else
+    {
+        const bool delimited = letter == 'u' && i < end && spelling[i] == '{';
+        const uint32_t wanted = letter == 'u' ? 4 : 8;
+        if (!delimited && (i >= end || hex_digit_value(spelling[i]) < 0))
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, location, "\\%c used with no following hex digits", letter);
+        }
+        else
+        {
+            i += delimited;
+            bool overflow = false;
+            bool invalid = false;
+            bool closed = false;
+            bool stopped = false;
+            uint32_t count = 0;
+            while (!stopped && i < end && (delimited || count != wanted))
+            {
+                const int32_t digit = hex_digit_value(spelling[i]);
+                if (delimited && spelling[i] == '}')
+                {
+                    closed = true;
+                    stopped = true;
+                }
+                else if (digit < 0 && !delimited)
+                {
+                    invalid = true;
+                    stopped = true;
+                    i -= 1;
+                }
+                else if (digit < 0)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid digit '%c' in escape sequence", spelling[i]);
+                    invalid = true;
+                    count += 1;
+                }
+                else if (value & 0xF0000000u)
+                {
+                    overflow = true;
+                }
+                else
+                {
+                    value = (value << 4) | (uint32_t)digit;
+                    count += 1;
+                }
+                i += 1;
+            }
+            if (overflow)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "hex escape sequence out of range");
+            }
+            else if (delimited && !closed)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "expected '}'");
+            }
+            else if (count == 0 || (!delimited && count != wanted))
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, delimited ? "delimited escape sequence cannot be empty" : "incomplete universal character name");
+            }
+            else if ((value >= 0xD800 && value <= 0xDFFF) || value > 0x10FFFF)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid universal character");
+            }
+            else if (value < 0xA0 && value != 0x24 && value != 0x40 && value != 0x60 && pp->options.language.standard < 2023)
+            {
+                if (value >= 0x20 && value < 0x7F)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "character '%c' cannot be specified by a universal character name", (char)value);
+                }
+                else
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "universal character name refers to a control character");
+                }
+            }
+            else
+            {
+                result = !invalid;
+                if (result && pp->options.language.standard < 1999)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "universal character names are only valid in C99 or C++");
+                }
+            }
+        }
+    }
+    *at = i;
+    *code_point = value;
+    return result;
+}
+
+// The escape at spelling[*at] (its backslash) of a character constant whose code units are `width` bits wide, as clang
+// reads it (ProcessCharEscape): its value, and *error for one that makes the constant invalid (a \x past the code
+// unit, \o{} and \x{} that are empty, out of range or have another digit). An octal escape past the code unit and \x
+// without digits are errors that leave a value, and an unknown escape is its character (a byte past ASCII as a signed
+// char gives it), after a warning. Moves *at past it.
+static uint32_t pp_parse_escape(Preprocessor* pp, const uint8_t* spelling, uint32_t end, uint32_t* at, uint32_t width, uint32_t location, bool* error)
+{
+    const uint8_t e = spelling[*at + 1];
+    uint32_t i = *at + 2;
+    uint32_t result = e;
+    const uint32_t unit_mask = width == 32 ? 0xFFFFFFFFu : (1u << width) - 1;
+    switch (e)
+    {
+        case 'a': result = 7; break;
+        case 'b': result = 8; break;
+        case 'f': result = 12; break;
+        case 'n': result = 10; break;
+        case 'r': result = 13; break;
+        case 't': result = 9; break;
+        case 'v': result = 11; break;
+        case 'e': case 'E': result = 27; break;
+        case '\\': case '\'': case '"': case '?': case '(': case '{': case '[': case '%': break;
+        case 'x':
+        case 'o':
+        {
+            // Hex digits, as many as there are, or in braces (\x{} and \o{}, whose digits are all checked).
+            const bool hex = e == 'x';
+            const bool delimited = i < end && spelling[i] == '{';
+            bool overflow = false;
+            bool invalid = false;
+            bool closed = !delimited;
+            bool stopped = false;
+            uint32_t count = 0;
+            result = 0;
+            i += delimited;
+            if (!hex && !delimited)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "expected '{' after '\\o' escape sequence");
+                invalid = true;
+                stopped = true;
+                result = 'o';
+            }
+            while (!stopped && i < end)
+            {
+                const int32_t digit = hex ? hex_digit_value(spelling[i]) : spelling[i] >= '0' && spelling[i] <= '7' ? spelling[i] - '0' : -1;
+                if (delimited && spelling[i] == '}')
+                {
+                    closed = true;
+                    stopped = true;
+                }
+                else if (digit < 0 && !delimited)
+                {
+                    stopped = true;
+                    i -= 1;
+                }
+                else if (digit < 0)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid digit '%c' in escape sequence", spelling[i]);
+                    invalid = true;
+                }
+                else
+                {
+                    overflow |= (result & (hex ? 0xF0000000u : 0xE0000000u)) != 0;
+                    result = (result << (hex ? 4 : 3)) | (uint32_t)digit;
+                    count += 1;
+                }
+                i += 1;
+            }
+            if (hex && !delimited && count == 0)
+            {
+                // An error that leaves 0.
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "\\x used with no following hex digits");
+            }
+            else if (delimited && count == 0 && !invalid && closed)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "delimited escape sequence cannot be empty");
+                invalid = true;
+            }
+            else if (!invalid && (overflow || (result & ~unit_mask) != 0))
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, hex ? "hex escape sequence out of range" : "octal escape sequence out of range");
+                invalid = true;
+            }
+            if (delimited && !closed)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "expected '}'");
+            }
+            result &= unit_mask;
+            *error |= invalid;
+            break;
+        }
+        default:
+            if (e >= '0' && e <= '7')
+            {
+                // One to three octal digits; past the code unit, an error that leaves its low bits.
+                result = e - '0';
+                for (uint32_t k = 1; k < 3 && i < end && spelling[i] >= '0' && spelling[i] <= '7'; k += 1)
+                {
+                    result = result * 8 + (uint32_t)(spelling[i] - '0');
+                    i += 1;
+                }
+                if ((result & ~unit_mask) != 0)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "octal escape sequence out of range");
+                    result &= unit_mask;
+                }
+            }
+            else
+            {
+                result = (uint32_t)(int32_t)(int8_t)e;
+                if (e >= 0x20 && e < 0x7F)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "unknown escape sequence '\\%c'", e);
+                }
+                else
+                {
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "unknown escape sequence '\\x%X'", result);
+                }
+            }
+            break;
+    }
+    *at = i;
+    return result;
+}
+
+// A character constant's value (C 6.4.4.4), as clang's CharLiteralParser and #if read it. Its characters are UTF-8
+// sequences (an ordinary constant's bytes, after a warning, where a run of them isn't one: a constant of another kind
+// can't have that), escapes (pp_parse_escape) and universal character names (pp_parse_ucn); one past the kind's
+// largest (0x7F for an ordinary or a u8 constant, U+FFFF for u, U+10FFFF for U) is an error, and so are several in a
+// constant that isn't ordinary. An ordinary constant is a char, or an int of its characters' bytes when it has several
+// (a warning), and the others are their types' values: wchar_t's int, and u8, u and U's unsigned ones. Returns false
+// after an error that leaves no value (as for clang's hadError); the other errors leave one.
 static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* spelling, uint32_t length, uint32_t location, PPValue* value)
 {
+    const bool ordinary = kind == C_TOKEN_CHAR_CONSTANT;
+    const uint32_t largest = kind == C_TOKEN_WIDE_CHAR_CONSTANT ? 0xFFFFFFFFu : kind == C_TOKEN_UTF16_CHAR_CONSTANT ? 0xFFFFu : kind == C_TOKEN_UTF32_CHAR_CONSTANT ? 0x10FFFFu : 0x7Fu;
+    const uint32_t width = kind == C_TOKEN_WIDE_CHAR_CONSTANT || kind == C_TOKEN_UTF32_CHAR_CONSTANT ? 32 : kind == C_TOKEN_UTF16_CHAR_CONSTANT ? 16 : 8;
     uint32_t i = 0;
     while (i < length && spelling[i] != '\'')
     {
         i += 1;
     }
     i += 1;
-    int64_t result = 0;
-    uint32_t count = 0;
-    bool valid = i < length;
-    while (valid && i < length && spelling[i] != '\'')
-    {
-        uint64_t c = spelling[i];
-        i += 1;
-        if (c == '\\' && i < length)
-        {
-            const uint8_t e = spelling[i];
-            i += 1;
-            switch (e)
-            {
-                case 'n': c = '\n'; break;
-                case 't': c = '\t'; break;
-                case 'r': c = '\r'; break;
-                case 'a': c = 7; break;
-                case 'b': c = 8; break;
-                case 'f': c = 12; break;
-                case 'v': c = 11; break;
-                case 'e': case 'E': c = 27; break;
-                case 'x':
-                    c = 0;
-                    while (i < length && hex_digit_value(spelling[i]) >= 0)
-                    {
-                        c = c * 16 + (uint64_t)hex_digit_value(spelling[i]);
-                        i += 1;
-                    }
-                    break;
-                case 'u':
-                case 'U':
-                {
-                    const uint32_t digits_wanted = e == 'u' ? 4 : 8;
-                    c = 0;
-                    for (uint32_t k = 0; k < digits_wanted && i < length && hex_digit_value(spelling[i]) >= 0; k += 1)
-                    {
-                        c = c * 16 + (uint64_t)hex_digit_value(spelling[i]);
-                        i += 1;
-                    }
-                    break;
-                }
-                default:
-                    if (e >= '0' && e <= '7')
-                    {
-                        c = e - '0';
-                        for (uint32_t k = 1; k < 3 && i < length && spelling[i] >= '0' && spelling[i] <= '7'; k += 1)
-                        {
-                            c = c * 8 + (uint64_t)(spelling[i] - '0');
-                            i += 1;
-                        }
-                    }
-                    else
-                    {
-                        c = e;
-                    }
-                    break;
-            }
-        }
-        else if (c >= 0x80 && kind != C_TOKEN_CHAR_CONSTANT && kind != C_TOKEN_UTF8_CHAR_CONSTANT)
-        {
-            // A UTF-8 sequence: its code point.
-            uint32_t extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : 1;
-            c &= extra == 3 ? 0x07 : extra == 2 ? 0x0F : 0x1F;
-            for (; extra != 0 && i < length; extra -= 1)
-            {
-                c = (c << 6) | (spelling[i] & 0x3F);
-                i += 1;
-            }
-        }
-        switch (kind)
-        {
-            case C_TOKEN_CHAR_CONSTANT:
-                result = count == 0 ? (int64_t)(int8_t)(uint8_t)c : (int64_t)(int32_t)(((uint32_t)result << 8) | (uint8_t)c);
-                break;
-            case C_TOKEN_UTF8_CHAR_CONSTANT:
-                result = (uint8_t)c;
-                break;
-            case C_TOKEN_UTF16_CHAR_CONSTANT:
-                result = (uint16_t)c;
-                break;
-            case C_TOKEN_UTF32_CHAR_CONSTANT:
-                result = (uint32_t)c;
-                break;
-            default:
-                result = (int64_t)(int32_t)(uint32_t)c;
-                break;
-        }
-        count += 1;
-    }
-    valid &= count != 0;
-    if (!valid)
+    // The characters end at the closing quote, the last byte of a lexed constant.
+    const uint32_t end = length > i && spelling[length - 1] == '\'' ? length - 1 : length;
+    bool error = i > end || end == length;
+    if (error)
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid character constant in preprocessor expression");
     }
+    PPCharacters characters = { 0 };
+    while (!error && i < end)
+    {
+        if (spelling[i] != '\\' || i + 1 >= end)
+        {
+            // A run up to the next backslash: UTF-8 (clang converts it strictly), or for an ordinary constant, bytes.
+            uint32_t run = i + 1;
+            while (run < end && spelling[run] != '\\')
+            {
+                run += 1;
+            }
+            bool decoded = true;
+            for (uint32_t k = i; decoded && k < run;)
+            {
+                uint32_t code_point;
+                const uint32_t n = pp_utf8_sequence(spelling + k, run - k, &code_point);
+                decoded = n != 0;
+                k += n;
+            }
+            if (!decoded)
+            {
+                pp_diagnose(pp, ordinary ? PP_SEVERITY_WARNING : PP_SEVERITY_ERROR, location, "illegal character encoding in character literal");
+                error |= !ordinary;
+            }
+            for (uint32_t k = i; k < run;)
+            {
+                uint32_t code_point = spelling[k];
+                const uint32_t n = decoded ? pp_utf8_sequence(spelling + k, run - k, &code_point) : 1;
+                if (decoded && code_point > largest)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "character too large for enclosing character literal type");
+                    error = true;
+                }
+                pp_characters_add(&characters, code_point);
+                k += n;
+            }
+            i = run;
+        }
+        else if (spelling[i + 1] == 'u' || spelling[i + 1] == 'U' || spelling[i + 1] == 'N')
+        {
+            uint32_t code_point;
+            bool valid = pp_parse_ucn(pp, spelling, end, &i, location, &code_point);
+            if (valid && code_point > largest)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "character too large for enclosing character literal type");
+                valid = false;
+            }
+            error |= !valid;
+            pp_characters_add(&characters, code_point);
+        }
+        else
+        {
+            pp_characters_add(&characters, pp_parse_escape(pp, spelling, end, &i, width, location, &error));
+        }
+    }
+    if (characters.count == 0 && !error)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid character constant in preprocessor expression");
+        error = true;
+    }
+    else if (characters.count > 1 && ordinary && characters.count != 4)
+    {
+        // Four characters have a warning of their own, which clang leaves off.
+        pp_diagnose(pp, PP_SEVERITY_WARNING, location, "multi-character character constant");
+    }
+    else if (characters.count > 1 && !ordinary)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "%s character literals may not contain multiple characters", kind == C_TOKEN_WIDE_CHAR_CONSTANT ? "wide" : "Unicode");
+        error = true;
+    }
+    if (!error && ordinary && characters.count > 1 && characters.too_long)
+    {
+        pp_diagnose(pp, PP_SEVERITY_WARNING, location, "character constant too long for its type");
+    }
+    int64_t bits;
+    switch (kind)
+    {
+        case C_TOKEN_CHAR_CONSTANT:
+            bits = characters.count > 1 ? (int64_t)(int32_t)characters.packed : (int64_t)(int8_t)(uint8_t)characters.last;
+            break;
+        case C_TOKEN_UTF8_CHAR_CONSTANT:
+            bits = (uint8_t)characters.last;
+            break;
+        case C_TOKEN_UTF16_CHAR_CONSTANT:
+            bits = (uint16_t)characters.last;
+            break;
+        case C_TOKEN_UTF32_CHAR_CONSTANT:
+            bits = characters.last;
+            break;
+        default:
+            bits = (int64_t)(int32_t)characters.last;
+            break;
+    }
     // UTF-8, UTF-16 and UTF-32 character constants are unsigned in C (unsigned char, char16_t, char32_t), as in clang.
     const bool is_unsigned = kind == C_TOKEN_UTF8_CHAR_CONSTANT || kind == C_TOKEN_UTF16_CHAR_CONSTANT || kind == C_TOKEN_UTF32_CHAR_CONSTANT;
-    *value = (PPValue){ .bits = (uint64_t)result, .is_unsigned = is_unsigned };
-    return valid;
+    *value = (PPValue){ .bits = (uint64_t)bits, .is_unsigned = is_unsigned };
+    return !error;
 }
 
 // Applies an operator to the values on top of the stack (two for a binary one, three for ?:, which is COLON here).
@@ -9386,7 +9918,7 @@ static void pp_run_file(Preprocessor* pp, uint32_t file)
     // A stream (an attribute query's operand) reads on past an included file's end, but not past this one's.
     while (!pp->fatal && pp->stream_count != 0)
     {
-        pp_finish_stream(pp, BUSTER_PP_NONE);
+        pp_cut_stream(pp);
     }
 }
 
@@ -10164,7 +10696,8 @@ static __attribute__((noinline)) bool pp_print_keeps_line(const Preprocessor* pp
 
 // Where -E places a token that starts an output line: at its own location; or for one a macro made, at the start of
 // the expansion it came from (the expansion starts are passed in the output's order), as clang places a token by its
-// expansion location; or for a #pragma's '#', which is in no source, at the directive (its name's location).
+// expansion location; or for a #pragma's '#', which is in no source, at the directive (its name's location). The
+// printers then move it to where clang's lexer starts that token, with the line splices right before it.
 static uint32_t pp_print_location(const Preprocessor* pp, PPMarkers* markers, uint32_t token)
 {
     uint32_t at = markers->expansion;
@@ -10295,6 +10828,31 @@ BUSTER_INLINE uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint
     return result;
 }
 
+// Where -E puts output token `token`, a line's first, when a _Pragma that printed nothing came before it
+// (Preprocessor.silent_pragmas, from *silent on, which moves past the ones before it), or BUSTER_PP_NONE when it stays on
+// the line: clang's lexer starts a line there, and its printer moves to the token's place (its own, or its expansion's
+// for one a macro or a builtin made) only when that is another line than the current one (MoveToLine).
+static __attribute__((noinline, cold)) uint32_t pp_print_moves(Preprocessor* pp, const PPMarkers* markers, uint32_t token, uint32_t* silent)
+{
+    uint32_t result = BUSTER_PP_NONE;
+    while (*silent < pp->silent_pragma_count && pp->silent_pragmas[*silent].token <= token)
+    {
+        if (pp->silent_pragmas[*silent].token == token)
+        {
+            const uint32_t own = pp_lexed_start(pp, pp->output.locations[token]);
+            const uint32_t own_range = pp_find_range(pp, own);
+            const bool made = (pp->output.flags[token] & BUSTER_PP_FROM_MACRO) || own_range == BUSTER_PP_NONE || pp->ranges[own_range].file == BUSTER_PP_NONE;
+            const uint32_t place = made ? pp_lexed_start(pp, pp->silent_pragmas[*silent].location) : own;
+            const char* name;
+            uint32_t length;
+            const bool moves = pp_find_range(pp, place) != markers->range || pp_presumed(pp, place, &name, &length) != markers->line;
+            result = moves ? place : BUSTER_PP_NONE;
+        }
+        *silent += 1;
+    }
+    return result;
+}
+
 static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
 {
     const PPTokens* out = &pp->output;
@@ -10306,6 +10864,7 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
     bool line_start = true;
     bool force_line = false;
     uint32_t pragma = BUSTER_PP_PRAGMA_OUTSIDE;
+    uint32_t silent = 0;
     PPMarkers marked;
     bool result = buffer != 0 && pp_markers_initialize(pp, &marked, scratch.arena) && (!markers || pp_print_start(pp, &marked));
     if (result && markers)
@@ -10323,13 +10882,17 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
             force_line = true;
             continue;
         }
-        if ((flags & BUSTER_PP_START_OF_LINE) || force_line || i == 0)
+        const bool starts = (flags & BUSTER_PP_START_OF_LINE) || force_line || i == 0;
+        const uint32_t moved = markers && !starts && silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i ? pp_print_moves(pp, &marked, i, &silent) : BUSTER_PP_NONE;
+        if (starts || moved != BUSTER_PP_NONE)
         {
             uint32_t breaks = !line_start;
-            const uint32_t place = markers ? pp_print_location(pp, &marked, i) : 0;
+            const uint32_t located = markers ? pp_print_location(pp, &marked, i) : 0;
+            uint32_t place = moved != BUSTER_PP_NONE ? moved : located;
             const uint32_t range = markers ? pp_find_range(pp, place) : BUSTER_PP_NONE;
             if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
             {
+                place = pp->ranges[range].base + pp_start_with_splices(pp->ranges[range].bytes, place - pp->ranges[range].base);
                 uint32_t column;
                 breaks = pp_print_place(pp, &marked, range, place, pp_line_of(pp, range, place, &column), line_start, &result);
                 fwrite(marked.text, 1, marked.length, stream);
@@ -10506,6 +11069,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     // The state between tokens, as pp_print_scalar keeps it.
     bool line_start = true;
     bool force_line = false;
+    uint32_t silent = 0;
     PPMarkers marked;
     result = result && pp_markers_initialize(pp, &marked, scratch.arena) && (!markers || pp_print_start(pp, &marked));
     if (result && markers)
@@ -10642,15 +11206,21 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                 result = fwrite(buffer, 1, used, stream) == used;
                 used = 0;
             }
-            const uint32_t starts_line = (uint32_t)((line_starts >> k) & 1);
+            const uint32_t moved = markers && !((line_starts >> k) & 1) && BUSTER_UNLIKELY(silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i)
+                                       ? pp_print_moves(pp, &marked, i, &silent)
+                                       : BUSTER_PP_NONE;
+            const bool moves = moved != BUSTER_PP_NONE;
+            const uint32_t starts_line = (uint32_t)((line_starts >> k) & 1) | (uint32_t)moves;
             // A line start's break after something on the line; with markers, as many as pp_print_place puts.
             uint32_t breaks = starts_line & (uint32_t)!line_start;
             if (markers && starts_line)
             {
-                const uint32_t place = pp_print_location(pp, &marked, i);
+                const uint32_t located = pp_print_location(pp, &marked, i);
+                uint32_t place = moves ? moved : located;
                 const uint32_t range = pp_directory_range(pp, directory, place);
                 if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
                 {
+                    place = pp->ranges[range].base + pp_start_with_splices(pp->ranges[range].bytes, place - pp->ranges[range].base);
                     bool placed = true;
                     breaks = pp_print_place(pp, &marked, range, place, pp_print_line(pp, &lines, range, place), line_start, &placed);
                     // The markers go through the buffer, or past it when they are longer than its room.
@@ -10685,7 +11255,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
             line_start = line_start || starts_line;
             force_line = false;
             buffer[used] = ' ';
-            used += ((spaced >> k) & 1) & (length != 0);
+            used += ((spaced >> k) & 1) & (length != 0) & (uint32_t)!moves;
             // The spelling: one masked 64-byte copy, or more for a longer one (written straight out past the buffer's
             // room).
             const uint8_t* spelling = spellings[k];
