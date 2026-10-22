@@ -256,15 +256,17 @@ struct ForeignArchive
 };
 
 // A shared library: its exports, versions and references (import_library), indexed by hash; whether it came under
-// --as-needed; and once it is needed (from the start without --as-needed), the object, plus 1, that holds its
-// references: a library's undefined symbols join the resolution as an object's, at the library's position, and so load
-// the archive members that define them, as GNU ld and lld load them (foreign_needed_library has when an as-needed one is
-// needed).
+// --as-needed, and whether it is needed (from the start without --as-needed; foreign_needed_library has when an
+// as-needed one is); and once it is needed, if it refers to any name, the object, plus 1, that holds its references: a
+// library's undefined symbols join the resolution as an object's, at the library's position, and so load the archive
+// members that define them, as GNU ld and lld load them. A library that refers to nothing (the loader) takes no object,
+// and so no round of its own.
 typedef struct ForeignLibrary ForeignLibrary;
 struct ForeignLibrary
 {
     uint32_t input;
     bool as_needed;
+    bool needed;
     uint32_t object;
     ImportLibrary library;
 };
@@ -1413,6 +1415,10 @@ static bool foreign_first_round(Foreign* foreign, ForeignLane* lane)
             // A library without --as-needed is needed from the start: its references are round 0's, where it is.
             ForeignLibrary* library = input->kind == FOREIGN_KIND_LIBRARY ? &foreign->libraries[input->item] : 0;
             if (library != 0 && !library->as_needed)
+            {
+                library->needed = true;
+            }
+            if (library != 0 && library->needed && library->library.references.count != 0)
             {
                 library->object = foreign->object_count + 1;
                 foreign->objects[foreign->object_count] = (ForeignObject){
@@ -2902,7 +2908,7 @@ static uint32_t foreign_needed_library(const Foreign* foreign, const ForeignEntr
     for (uint32_t l = 0; !binds && l < foreign->library_count && foreign_position(foreign->libraries[l].input, 0) < bound; l += 1)
     {
         const ForeignLibrary* library = &foreign->libraries[l];
-        const bool needed = library->object != 0;
+        const bool needed = library->needed;
         const bool counted = needed || foreign_position(library->input, 0) > entry->reference;
         binds = counted && import_library_find(&library->library, entry->name, entry->length, entry->hash) != 0;
         result = binds && !needed ? l : result;
@@ -3050,7 +3056,7 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
                 const uint32_t m = (uint32_t)other->needs[n];
                 if (a == BUSTER_FOREIGN_LIBRARY_NEED)
                 {
-                    needed[m] = foreign->libraries[m].object == 0 ? 1 : 0;
+                    needed[m] = foreign->libraries[m].needed ? 0 : 1;
                 }
                 else if (!foreign_member_loaded(&foreign->archives[a], m))
                 {
@@ -3084,10 +3090,16 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
                     added += 1;
                 }
             }
-            if (input->kind == FOREIGN_KIND_LIBRARY && needed[input->item] != 0)
+            ForeignLibrary* library = input->kind == FOREIGN_KIND_LIBRARY && needed[input->item] != 0 ? &foreign->libraries[input->item] : 0;
+            if (library != 0)
+            {
+                library->needed = true;
+                foreign->as_needed_waiting -= 1;
+            }
+            if (library != 0 && library->library.references.count != 0)
             {
                 const uint32_t id = foreign->object_count;
-                foreign->libraries[input->item].object = id + 1;
+                library->object = id + 1;
                 foreign->objects[id] = (ForeignObject){
                     .position = foreign_position(i, 0),
                     .input = i,
@@ -3095,7 +3107,6 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
                 };
                 foreign->positions[id] = foreign->objects[id].position;
                 foreign->object_count += 1;
-                foreign->as_needed_waiting -= 1;
                 added += 1;
             }
         }

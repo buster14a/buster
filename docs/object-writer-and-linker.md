@@ -2978,10 +2978,12 @@ are the later parts.
   line's, with an object of references for each shared library not under
   `--as-needed`: its undefined symbols, weak or not, at its place, which load
   the members that define them as an object's references do (as GNU ld and
-  lld load them). Each round parses its objects, exchanges their records,
-  resolves them and decides which members load, which are the next round's
-  objects, until a round loads none. A round's columns are pushed once its
-  headers have counted them, so the link touches no more memory than it uses.
+  lld load them). A library that refers to no name, such as the loader,
+  takes no object: it becomes needed without a round of its own. Each round
+  parses its objects, exchanges their records, resolves them and decides
+  which members load, which are the next round's objects, until a round
+  loads none. A round's columns are pushed once its headers have counted
+  them, so the link touches no more memory than it uses.
   - *The parse:* each object's header, section table, COMDAT groups and
     relocation sections, by object, eight section headers at a time on the
     vector path (transposed by `link_transpose_words`); then the global
