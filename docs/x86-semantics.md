@@ -507,22 +507,25 @@ clang's code.
 - the index takes 16,704 bytes (a u16 per form, of 8,352), of which the
   compiler touches the lines of the forms it emits;
 - the choice's tables take 2,176 bytes, and the scalar twin's rows 2,304 more;
-- `x86_semantics_initialize` takes 5.9 µs, 33,000 cycles.
+- `x86_semantics_initialize` takes 36,000 cycles (9.6 µs from a process's
+  start), 3,700 more since the shift rows' candidates for the value 1 are
+  worked out at that count (`x86_instruction_flags_substitutable`).
 
-**Choice and effects**, per request or record, both states:
+**Choice and effects**, per request or record, both states, at the PR's head
+after the review's fixes:
 
 | Path | Interleaved | Back to back (`--only`) | After 200 ms of the scalar twin |
 | --- | --- | --- | --- |
-| choose, scalar | 48.7 cycles, 8.84 ns | 48.9 cycles | 48.5 cycles |
-| choose, AVX-512 | 3.32 cycles, 0.60 ns | 3.33 cycles, 0.60 ns | 3.44 cycles, 0.62 ns |
-| effects (-O0's shape), scalar | 48.9 cycles, 8.82 ns | 48.6 cycles | 48.5 cycles |
-| effects (-O0's shape), AVX-512 | 5.74 cycles, 1.04 ns | 5.74 cycles, 1.04 ns | 5.74 cycles, 1.04 ns |
-| x86_encode of the same records | 3.21 cycles, 0.59 ns | 3.12 cycles, 0.58 ns | 3.23 cycles |
+| choose, scalar | 48.3 cycles, 8.72 ns | 48.5 cycles | 48.3 cycles |
+| choose, AVX-512 | 3.32 cycles, 0.60 ns | 3.32 cycles, 0.60 ns | 3.44 cycles, 0.62 ns |
+| effects (-O0's shape), scalar | 49.7 cycles, 8.96 ns | 49.6 cycles | 49.7 cycles |
+| effects (-O0's shape), AVX-512 | 5.86 cycles, 1.06 ns | 5.88 cycles, 1.07 ns | 5.88 cycles, 1.06 ns |
+| x86_encode of the same records | 3.22 cycles, 0.58 ns | 3.01 cycles, 0.56 ns | 3.23 cycles |
 
 Choice is 15 times the scalar twin's speed and effects 8.5 times; -O2's shape
-measures the same. Both loops are light enough that the power cap hardly takes
-them: choice is 3% slower after the scalar twin, effects unchanged (#199's
-method).
+measures the same (5.91, 5.88 and 5.86 cycles for effects). Both loops are
+light enough that the power cap hardly takes them: choice is 4% slower after
+the scalar twin, effects unchanged (#199's method).
 
 **The upper-lane read** (the read of the vector registers a legacy SSE form
 writes, from #239's review) costs about 2% of the effects loop. Cycles per
@@ -537,7 +540,7 @@ the loop without it, but for the two marked, which ran on their own:
 | a zero-masked `vpandq`, joined with the memory operand's registers | 5.97 | 6.03 | 31.25 | 5.23 |
 | the same, joined at the end | 5.91 | 5.93 | 31.38 | 5.31 |
 | a shift of the property's bit 2 to a lane mask, at the end | 5.86 | 5.93 | 31.50 | 5.37 |
-| `KEEP_UPPER` as the record's top bit, one shift, at the end | 5.86 | 5.86 | 31.38 | 5.36 |
+| `KEEP_UPPER` as the record's top bit, one shift, at the end | 5.85 | 5.87 | 31.38 | 5.36 |
 
 The instructions hardly change. What costs is a `vptestmq`, one more mask
 register in a loop that has many in flight, and a join inside the read set's
