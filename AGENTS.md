@@ -2397,7 +2397,9 @@ features:
   next to each other make, and our tokens that don't lex back whole:
   `preprocessor_fuzz_lex_printed`). Where clang's text can't show where such a
   token ends (an unterminated literal off a pragma's line), clang's own tokens
-  for the case alone (`clang -Xclang -dump-tokens`) must confirm ours; a
+  for the case alone (`clang -Xclang -dump-tokens`) must confirm ours; on a
+  pragma's line that goes on past one (`#pragma omp` expands its tokens),
+  which clang's tokens don't have, the case counts as unverified; a
   comparison that can't be made leaves its case without a result. With
   `--clang`, the batch first checks these on fixtures of its own, among them
   #263's second review's probes.
