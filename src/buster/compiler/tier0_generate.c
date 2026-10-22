@@ -56,6 +56,10 @@ struct Tier0ProgramOptions
     bool loops;
     bool floating;
     bool pointers;
+    // Only what C defines: a floating value converts to an integer only from a narrow integer's value, into int or
+    // long, so that it is in range (clang folds an out-of-range constant conversion its own way; cvttsd2si, Tier 0's
+    // and the tests' interpreter's, gives the indefinite integer).
+    bool defined;
 };
 
 typedef struct Tier0GeneratedFunction Tier0GeneratedFunction;
@@ -106,6 +110,7 @@ struct Tier0Program
     uint64_t text_length;
     uint64_t text_capacity;
     bool overflow;
+    bool defined;
 };
 
 // The C name of a class.
@@ -407,7 +412,7 @@ static void tier0_generate_leaf(const Tier0Program* program, const Tier0Scope* s
 // room; an item becomes a leaf when the budget is spent or by chance, otherwise an operation whose children are new
 // items, a binary operation's right child with one slot less room (its left value waits on the stack).
 static void tier0_generate_expression(const Tier0Program* program, const Tier0Scope* scope, uint64_t* state, Tier0ExpressionTree* tree, uint32_t class,
-                                      uint32_t budget, bool floating, uint32_t room_slots)
+                                      uint32_t budget, bool floating, uint32_t room_slots, bool defined)
 {
     uint32_t work[BUSTER_TIER0_GENERATE_EXPRESSION_NODES * 2];
     uint32_t work_count = 0;
@@ -456,11 +461,34 @@ static void tier0_generate_expression(const Tier0Program* program, const Tier0Sc
             // A conversion from another class (never between U64 and a floating class, which Tier 0 leaves out).
             uint32_t from = tier0_generate_class(state, floating);
             const bool unsupported = (from == BUSTER_TYPED_CLASS_U64 && is_floating) || (wanted == BUSTER_TYPED_CLASS_U64 && tier0_class_floating(from));
-            if (from != wanted && !unsupported)
+            // C's defined conversions to an integer from a floating value: of a short's value, into int or long.
+            const bool into_wide = wanted == BUSTER_TYPED_CLASS_I32 || wanted == BUSTER_TYPED_CLASS_I64;
+            const bool undefined = defined && tier0_class_floating(from) && !tier0_class_floating(wanted) && (!into_wide || tree->count + 2 > budget);
+            if (from != wanted && !unsupported && !undefined)
             {
                 node->kind = BUSTER_TIER0_EXPRESSION_CONVERT;
                 child_classes[0] = (uint8_t)from;
                 children = 1;
+                if (defined && tier0_class_floating(from) && !tier0_class_floating(wanted))
+                {
+                    // The floating child is itself a conversion, of a short.
+                    const uint32_t child = tree->count;
+                    const uint32_t grandchild = tree->count + 1;
+                    tree->count += 2;
+                    memset(&tree->nodes[child], 0, sizeof(tree->nodes[child]));
+                    memset(&tree->nodes[grandchild], 0, sizeof(tree->nodes[grandchild]));
+                    node->count = 1;
+                    node->children[0] = child;
+                    tree->nodes[child].kind = BUSTER_TIER0_EXPRESSION_CONVERT;
+                    tree->nodes[child].class = (uint8_t)from;
+                    tree->nodes[child].count = 1;
+                    tree->nodes[child].children[0] = grandchild;
+                    work[work_count] = grandchild << 16 | slots << 8 | BUSTER_TYPED_CLASS_I16;
+                    work_count += 1;
+                    children = 0;
+                    node->kind = BUSTER_TIER0_EXPRESSION_CONVERT;
+                    continue;
+                }
             }
         }
         else if (choice < 64 && two && wanted == BUSTER_TYPED_CLASS_I32)
@@ -821,7 +849,8 @@ static void tier0_generate_value_of(Tier0Program* program, Tier0GeneratedFunctio
                                     uint32_t budget, bool floating, const char* prefix, uint32_t held)
 {
     Tier0ExpressionTree tree;
-    tier0_generate_expression(program, scope, state, &tree, class, budget, floating, held < BUSTER_TIER0_GENERATE_ROOM ? BUSTER_TIER0_GENERATE_ROOM - held : 1);
+    tier0_generate_expression(program, scope, state, &tree, class, budget, floating, held < BUSTER_TIER0_GENERATE_ROOM ? BUSTER_TIER0_GENERATE_ROOM - held : 1,
+                              program->defined);
     tier0_emit_expression(program, function, &tree);
     tier0_print_expression(program, prefix, &tree);
 }
@@ -1609,6 +1638,7 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
     uint64_t random = seed;
     const uint32_t functions = options.functions < 1 ? 1 : options.functions > BUSTER_TIER0_GENERATE_MAX_FUNCTIONS ? BUSTER_TIER0_GENERATE_MAX_FUNCTIONS : options.functions;
     program->function_count = functions;
+    program->defined = options.defined;
     // Every statement can hold a few expressions and a call's arguments.
     const uint64_t per_function = (uint64_t)(options.statements + 16) * (4 * options.expression_nodes + 64) + 512;
     program->entry_capacity = (uint32_t)(per_function * functions);
