@@ -1096,6 +1096,57 @@ runtime. In one run of `benchmark-bind` at 5cd1e31, vector / exact:
 | 102,400 | static | 92.4 / 818 µs | 1.87 / 3.62 µs | 97.7 / 142.2 µs |
 | 102,400 | static PIE | 92.6 / 818 µs | 1.76 / 3.60 µs | 99.6 / 142.0 µs |
 
+**Shared libraries, as built so far** (`runtime.c` and `bind.c`, step 6's
+fifth part). GCC's driver links `-shared` with the dynamic PIE's crt objects
+but `Scrt1.o` (`crti.o` and `crtbeginS.o` before the objects, `crtendS.o` and
+`crtn.o` after them), around the same libraries. So a shared library's runtime
+(`runtime_import_shared`) is the dynamic one without a start object: its unit
+and piece are there, empty, so that each crt object keeps its unit, and
+nothing refers to `main`. Its snapshot (`runtime-shared.snapshot`) is 196 KB
+on the 9700X, with 16 probes and 2,680 global names; importing it takes
+153 µs, and opening it from the snapshot 8.9 µs. Binding against it is binding
+against the dynamic runtime with two of GNU ld's and lld's `-shared` rules:
+
+- **A name nothing defines** stays undefined when a strong reference of
+  default visibility names it: a dynamic symbol for the loader to bind in the
+  libraries the program loads (`-z undefs`, which `-shared` defaults to). A
+  hidden reference to it is an error, as for a PIE.
+- **Every definition with default or protected visibility is an export**
+  (`bind_shared_exports`), not only those of names a library defines or
+  `libc.so.6` refers to. The crt objects' and `libc_nonshared.a`'s global
+  names are all hidden, so the exports are the program's. The vector path
+  takes 16 symbols at a time, a mask of their flags', atoms' and sources'
+  columns, compressed in a register and stored with a mask of its count; its
+  exact twin takes a symbol at a time.
+
+`test-bind --cross-check` compiles three C libraries with `-fPIC` and compares
+binding with lld's `-shared` link of each: the same `.dynsym`, with the
+imports at their versions (`__tls_get_addr@GLIBC_2.3` from the loader), the
+undefined and weak references, and the exports.
+
+Measured on the 9700X (`benchmark-bind`, one CPU, medians of 21 runs, vector
+/ exact), binding a program as a shared library costs what binding it as a
+dynamic PIE does but for the exports:
+
+| Workers | Runtime | `bind_begin` | `bind_end` |
+| --- | --- | ---: | ---: |
+| 1 | dynamic PIE | 0.45 / 0.62 µs | 0.39 / 0.32 µs |
+| 1 | shared library | 0.26 / 0.35 µs | 0.26 / 0.22 µs |
+| 2,000 | dynamic PIE | 2.05 / 4.93 µs | 0.75 / 0.64 µs |
+| 2,000 | shared library | 2.02 / 4.84 µs | 1.05 / 1.54 µs |
+| 102,400 | dynamic PIE | 90.4 / 756 µs | 25.2 / 20.8 µs |
+| 102,400 | shared library | 90.1 / 755 µs | 41.9 / 63.3 µs |
+
+At 102,400 workers the exports pass over the link's 112,677 symbols, 106,260
+of them exports, is about 17 µs of `bind_end`'s 42: 13 cycles per 16 symbols,
+which read three columns and write the 425 KB of exports. With the export
+count and the columns' pointers read from the structures in the loop, as
+`-fno-strict-aliasing` has clang reload them after each store, it took 43 µs
+and the exact path 75; with them in locals, 42 and 63. Storing the compress
+straight to memory (`vpcompressd` with a memory destination) measured the same
+as compressing in a register and storing with a mask: 43.2 to 43.5 µs against
+42.8 to 42.9, both with the reloads.
+
 **What the snapshot buys.** Synthetic sections and patching for the runtime
 are a few dozen records. `__libc_start_main`, `__cxa_finalize` and the
 program's imports each get a GOT slot and a `GLOB_DAT`. `__dso_handle` and the
@@ -3539,7 +3590,13 @@ and with this document updated with what was measured:
    The fifth part's first half is done: the static PIE (the static PIE's
    runtime, `runtime_import_static_pie`; `executable.c`'s static PIE with GOT
    relaxation and RELR, `dynamic_static_pie_inputs`, and `test-static` and
-   `benchmark-executable`'s static PIEs: "The static PIE"). Next, `-shared`.
+   `benchmark-executable`'s static PIEs: "The static PIE"). Its second half,
+   `-shared`, has its runtime and binding: the loader as a library of the
+   dynamic runtimes, needed as `libc.so`'s script says ("The runtime
+   snapshot", "The dynamic PIE"), and a shared library's runtime
+   (`runtime_import_shared`, `runtime_open_shared`) and binding
+   (`bind_shared_exports`: "Shared libraries, as built so far"). Next, its
+   writer.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
    and the exchange. Done when the differential tests against lld and mold
    pass on a corpus.

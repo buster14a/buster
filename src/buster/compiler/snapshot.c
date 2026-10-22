@@ -4,9 +4,9 @@
 // The runtime snapshot (docs/object-writer-and-linker.md, "The runtime snapshot"): what runtime_import makes of the C
 // runtime, kept in a file in the cache directory, so that a link maps one file instead of finding, reading and
 // importing the runtime's. runtime_open loads the snapshot if it still describes the system, and otherwise imports the
-// runtime and writes a new snapshot; runtime_open_static and runtime_open_static_pie do the same for a static
-// executable's runtime and a static PIE's (runtime_import_static and runtime_import_static_pie), each in a file of its
-// own. Each kind's file holds that kind, which the loader checks.
+// runtime and writes a new snapshot; runtime_open_static, runtime_open_static_pie and runtime_open_shared do the same for
+// a static executable's runtime, a static PIE's and a shared library's (runtime_import_static, runtime_import_static_pie
+// and runtime_import_shared), each in a file of its own. Each kind's file holds that kind, which the loader checks.
 //
 // The file holds the runtime's records as this executable lays them out in memory, each region at a multiple of 64
 // bytes: a header, then the directory, which every link reads (from the second page: the probes, libc.so.6's and the
@@ -103,11 +103,12 @@ struct SnapshotResult
 static __attribute__((unused)) bool snapshot_directory(char* path, uint64_t capacity);
 // The runtime: loaded from the snapshot in `directory` if it describes the system, otherwise imported and its snapshot
 // written there, the directory made if it is missing. With no directory (0), imported. A snapshot that can't be written
-// doesn't fail the import. runtime_release frees the runtime either way. runtime_open_static and runtime_open_static_pie
-// do the same for a static executable's runtime and a static PIE's.
+// doesn't fail the import. runtime_release frees the runtime either way. runtime_open_static, runtime_open_static_pie
+// and runtime_open_shared do the same for a static executable's runtime, a static PIE's and a shared library's.
 static __attribute__((unused)) SnapshotResult runtime_open(Runtime* runtime, const char* directory);
 static __attribute__((unused)) SnapshotResult runtime_open_static(Runtime* runtime, const char* directory);
 static __attribute__((unused)) SnapshotResult runtime_open_static_pie(Runtime* runtime, const char* directory);
+static __attribute__((unused)) SnapshotResult runtime_open_shared(Runtime* runtime, const char* directory);
 // Removes a kind's snapshot from `directory`, as the caller of a link whose binding found a piece of a loaded runtime
 // damaged does (BIND_ERROR_SNAPSHOT), before it releases the runtime and opens it again, which then imports it and
 // writes a new snapshot: whether no snapshot of the kind is there now.
@@ -118,10 +119,11 @@ static __attribute__((unused)) bool snapshot_discard(const char* directory, Runt
 
 #define BUSTER_SNAPSHOT_MAGIC 0x504e535254535542ull
 #define BUSTER_SNAPSHOT_VERSION 5
-// Each kind's file: a dynamic PIE's runtime's, a static executable's and a static PIE's.
+// Each kind's file: a dynamic PIE's runtime's, a static executable's, a static PIE's and a shared library's.
 #define BUSTER_SNAPSHOT_NAME "runtime.snapshot"
 #define BUSTER_SNAPSHOT_STATIC_NAME "runtime-static.snapshot"
 #define BUSTER_SNAPSHOT_STATIC_PIE_NAME "runtime-static-pie.snapshot"
+#define BUSTER_SNAPSHOT_SHARED_NAME "runtime-shared.snapshot"
 #define BUSTER_SNAPSHOT_ALIGNMENT 64
 // The records with pointers start a page of their own, so that rebasing them copies a page (or as few as they need),
 // and not the header's.
@@ -411,6 +413,7 @@ static const char* snapshot_name(RuntimeKind kind)
         [RUNTIME_KIND_DYNAMIC] = BUSTER_SNAPSHOT_NAME,
         [RUNTIME_KIND_STATIC] = BUSTER_SNAPSHOT_STATIC_NAME,
         [RUNTIME_KIND_STATIC_PIE] = BUSTER_SNAPSHOT_STATIC_PIE_NAME,
+        [RUNTIME_KIND_SHARED] = BUSTER_SNAPSHOT_SHARED_NAME,
     };
     return names[kind];
 }
@@ -1116,6 +1119,13 @@ static SnapshotResult runtime_open_static_pie(Runtime* runtime, const char* dire
     RuntimeProbe compiler;
     const bool identified = snapshot_compiler(&compiler);
     return runtime_open_as(runtime, directory, RUNTIME_KIND_STATIC_PIE, identified ? &compiler : 0);
+}
+
+static SnapshotResult runtime_open_shared(Runtime* runtime, const char* directory)
+{
+    RuntimeProbe compiler;
+    const bool identified = snapshot_compiler(&compiler);
+    return runtime_open_as(runtime, directory, RUNTIME_KIND_SHARED, identified ? &compiler : 0);
 }
 
 static bool snapshot_discard(const char* directory, RuntimeKind kind)

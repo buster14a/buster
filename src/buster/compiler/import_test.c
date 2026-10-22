@@ -3764,6 +3764,72 @@ static bool import_test_edges(uint64_t seed, Arena* arena)
     return result;
 }
 
+// A shared library's runtime (runtime_import_shared): no start object, its unit's piece empty and no ABI note; crti.o,
+// crtbeginS.o, crtendS.o and crtn.o; libc.so.6, the loader and libc_nonshared.a; nothing refers to main, which is no
+// global name; crti.o's _init and crtbeginS.o's __dso_handle; the names the kind's linker defines (_DYNAMIC among them)
+// and no other; and every crt object and member taking the vector path.
+static bool import_test_shared_runtime(Arena* arena)
+{
+    ImportTestTally tally = {
+        .check = "shared runtime",
+    };
+    Runtime runtime;
+    const RuntimeError error = runtime_import_shared(&runtime);
+    import_test_expect(&tally, error == RUNTIME_ERROR_NONE, "runtime_import_shared", (uint64_t)error);
+    if (error == RUNTIME_ERROR_NONE)
+    {
+        const RuntimePiece* start = &runtime.pieces[RUNTIME_OBJECT_START];
+        const bool empty = runtime.object_paths[RUNTIME_OBJECT_START].length == 0 && start->begin.atoms == start->end.atoms &&
+                           start->begin.symbols == start->end.symbols && start->begin.fixups == start->end.fixups && runtime.abi_note.length == 0;
+        import_test_expect(&tally, empty, "no start object: an empty piece, and no ABI note", 0);
+        static const char* const objects[RUNTIME_OBJECTS] = {
+            [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
+            [RUNTIME_OBJECT_BEGIN] = "crtbeginS.o",
+            [RUNTIME_OBJECT_END] = "crtendS.o",
+            [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
+        };
+        for (uint32_t i = RUNTIME_OBJECT_INIT_PROLOGUE; i < RUNTIME_OBJECTS; i += 1)
+        {
+            const String8 path = runtime.object_paths[i];
+            const uint64_t length = strlen(objects[i]);
+            const bool found = path.length > length && memcmp(path.pointer + path.length - length, objects[i], length) == 0 && path.pointer[path.length - length - 1] == '/';
+            import_test_expect(&tally, found, objects[i], i);
+        }
+        import_test_expect(&tally, import_equal(runtime.libc.soname, "libc.so.6") && import_equal(runtime.loader.soname, "ld-linux-x86-64.so.2") && runtime.archive_count == 1,
+                           "libc.so.6, the loader and libc_nonshared.a", runtime.archive_count);
+        const RuntimeNames* names = &runtime.global_names;
+        const Link* link = &runtime.link;
+        const uint32_t main_entry = runtime_find_global_name(names, (const uint8_t*)"main", 4, link_hash((const uint8_t*)"main", 4));
+        bool program = false;
+        for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+        {
+            program = program || runtime.bindings[symbol].kind == RUNTIME_BINDING_PROGRAM;
+        }
+        import_test_expect(&tally, main_entry == 0 && !program, "nothing refers to main", main_entry);
+        const uint32_t init = runtime_find_global_name(names, (const uint8_t*)"_init", 5, link_hash((const uint8_t*)"_init", 5));
+        const uint32_t dso = runtime_find_global_name(names, (const uint8_t*)"__dso_handle", 12, link_hash((const uint8_t*)"__dso_handle", 12));
+        const SymbolId init_symbol = init != 0 ? names->definition[init - 1] : 0;
+        const SymbolId dso_symbol = dso != 0 ? names->definition[dso - 1] : 0;
+        import_test_expect(&tally, init_symbol != 0 && link->atoms.unit[link->symbols.atom[init_symbol]] == RUNTIME_OBJECT_INIT_PROLOGUE, "_init: crti.o's", 0);
+        import_test_expect(&tally, dso_symbol != 0 && link->atoms.unit[link->symbols.atom[dso_symbol]] == RUNTIME_OBJECT_BEGIN, "__dso_handle: crtbeginS.o's", 0);
+        import_test_linker_names(&tally, &runtime);
+        // The vector paths read each crt object and each member, as the exact paths do.
+        for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
+        {
+            if (runtime.object_paths[i].length != 0)
+            {
+                import_test_paths(&tally, runtime.object_bytes[i], IMPORT_TEST_VECTOR, "a crt object", i, arena);
+            }
+        }
+        for (uint32_t m = 0; m < runtime.member_count; m += 1)
+        {
+            import_test_paths(&tally, runtime.members[m].bytes, IMPORT_TEST_VECTOR, "a member", m, arena);
+        }
+        runtime_release(&runtime);
+    }
+    return import_test_report(&tally);
+}
+
 static int run_import_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -3804,6 +3870,7 @@ static int run_import_tests(int argc, char** argv)
         passed = import_test_runtime(cross_check, &arena) && passed;
         passed = import_test_static_runtime(RUNTIME_KIND_STATIC, cross_check, &arena) && passed;
         passed = import_test_static_runtime(RUNTIME_KIND_STATIC_PIE, cross_check, &arena) && passed;
+        passed = import_test_shared_runtime(&arena) && passed;
         arena_release(&arena);
         result = passed ? 0 : 1;
     }
