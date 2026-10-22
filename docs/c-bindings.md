@@ -1,9 +1,11 @@
 # Scoped C binding kernels
 
 `c_bindings.c` implements the resolution kernels for
-[#128](https://github.com/buster14a/buster/issues/128). The parser adapter is
-pending coordination with the owner of
-[#244](https://github.com/buster14a/buster/pull/244). The compiler's normal
+[#128](https://github.com/buster14a/buster/issues/128). This PR's bounded scope
+is the reusable event-stream kernels, their oracle and tests, and their
+synthetic benchmark. The optional parser adapter was authorized on
+[#244](https://github.com/buster14a/buster/pull/244#issuecomment-6346496936)
+and remains a separate implementation slice under #128. The compiler's normal
 parse command does **not** yet produce resolved declaration columns from
 these kernels, and this work does not close #128.
 
@@ -120,10 +122,10 @@ takes `~/buster-fast-bench/exclusive.sh` separately and is pinned to CPU 2.
 
 ## Remaining acceptance for #128
 
-- Agree on and implement the parser's declaration/use/scope output, including
+- Implement the authorized optional parser declaration/use/scope output, including
   ordinary versus member names, tag declarations versus references, parameters,
-  enumerators, labels and recovery. The coordination request is
-  [on #244](https://github.com/buster14a/buster/pull/244#issuecomment-6343472228).
+  enumerators, labels and recovery. The authorization and exact hook sites are
+  [on #244](https://github.com/buster14a/buster/pull/244#issuecomment-6346496936).
 - Integrate scoped typedef classification into K3 with its exact parser
   fallback, preserving the existing parser owner's changes.
 - Check `(T) * x` and the scope fixtures through the actual parser; compare
