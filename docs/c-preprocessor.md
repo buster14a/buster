@@ -558,7 +558,11 @@ arenas. Popping a context gives its tokens back when they are on top.
 
 - **The header name** is read as an `#include`'s (`pp_read_header_name`, which
   `pp_include` shares): `<...>` or a string literal as written, or a computed
-  one from the line's expanded tokens.
+  one from the line's expanded tokens. The file was lexed before the name was
+  known, so after a written `<...>` one of its tokens or comments may run past
+  the `>`: in `<a//b.bin> limit(1)`, the `//` began a comment to the line's
+  end. Then the rest of the line is lexed again from the `>`, as clang lexes on
+  after the name (`pp_header_name_tail`, `pp_copy_relexed`).
 - **The parameters** are read expanded, as clang reads them. When a macro's
   name is among them, or the name is computed, the line goes through a capture
   (`BUSTER_PP_CAPTURE_EMBED`, `pp_finish_embed`); otherwise it is read as it is.
@@ -582,8 +586,11 @@ arenas. Popping a context gives its tokens back when they are on top.
 - **The file** is found as clang's `LookupEmbedFile` finds it (`pp_find_embed`).
   An absolute name is used as it is. A quoted name is looked for in the
   directory of the file the directive is in, then in the working directory,
-  then in the `--embed-dir=` directories; an angled one in those alone. A
-  missing file is fatal, and a device file an error.
+  then in the `--embed-dir=` directories; an angled one in those alone. An
+  empty `--embed-dir=` is the working directory: the name gets no `/` before
+  it. The file is only looked at: `#embed` reads it (through the file cache),
+  and `__has_embed` needs its size alone. A missing file is fatal, and a device
+  file an error.
 - **The data** is one output token, `BUSTER_PP_KIND_EMBED`, as clang's is one
   `annot_embed`. A file of N bytes doesn't become 2N - 1 numbers and commas,
   which would take about 28 bytes of output columns per byte. Its value indexes
@@ -593,8 +600,10 @@ arenas. Popping a context gives its tokens back when they are on top.
   `limit`, `if_empty`'s tokens come alone. They go in as a buffer whose tokens
   never expand, as clang enters them with macro expansion off, having read them
   expanded.
-- **`__has_embed`** answers as clang 23's does. A `limit` past the bytes left
-  gives 2 (empty), not 1, and a device file's size is 0.
+- **`__has_embed`** answers as clang 23's does, from the file's size without
+  reading it (clang's `LookupEmbedFile` without opening the file), so that a
+  file too big or unreadable for `#embed` is there. A `limit` past the bytes
+  left gives 2 (empty), not 1, and a device file's size is 0.
 - **`-E`** prints the data as clang does: the values, separated by `, `.
   `pp_embed_text_vector` formats 16 bytes per iteration:
   - each value's tens and hundreds by multiplications in 16-bit lanes
@@ -634,12 +643,15 @@ arenas. Popping a context gives its tokens back when they are on top.
   lexer starts no line there, because the end of the token stream that the
   directive entered passes no line start on. The join holds unless a newline
   outside comments comes before the token, or the token is a directive's `#`.
-  A change of file or of presumed position starts a line in clang's printer
-  (`FileChanged`): an included file entered or left, or a `#line`. An
-  `#embed`'s first tokens after one, with no output since, go at the place the
-  change left the printer: the file's first line, the line after the
-  `#include`, or `#line`'s number. That is where clang prints them, though the
-  `#embed` may be further down (`Preprocessor.file_change_token`).
+  The scans between tokens read comment delimiters as the lexer does, through
+  line splices (`pp_skip_blanks`): `*\` with a `/` on the next line closes a
+  comment. A change of file or of presumed position starts a line in clang's
+  printer (`FileChanged`): an included file entered or left, a `#line`, or
+  `#pragma GCC system_header`. An `#embed`'s first tokens after one, with no
+  output since, go at the place the change left the printer: the file's first
+  line, the line after the `#include` or the pragma, or `#line`'s number. That
+  is where clang prints them, though the `#embed` may be further down
+  (`Preprocessor.file_change_token`).
 
 ### Built-in macros and the predefines
 

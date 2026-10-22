@@ -267,6 +267,10 @@ int run_x86_encoder_benchmark(int argc, char** argv);
 #include "buster/compiler/lane_test.c"
 int run_lane_benchmark(int argc, char** argv);
 
+#include "buster/compiler/diagnostic.c"
+#include "buster/compiler/diagnostic_test.c"
+#include "buster/compiler/diagnostic_benchmark.c"
+
 // Liveness and interference over aligned bitsets, independent of the future IR's use/def construction.
 #include "buster/compiler/dataflow.c"
 #include "buster/compiler/dataflow_program.c"
@@ -309,6 +313,7 @@ int run_files_benchmark(int argc, char** argv);
 #include "buster/compiler/link.c"
 #include "buster/compiler/link_program.c"
 #include "buster/compiler/link_test.c"
+#include "buster/compiler/link_order_test.c"
 
 // The object writer (ET_REL objects from the link representation, for -c) and its tests, for the test-object-writer
 // command. Its benchmark is another translation unit.
@@ -371,6 +376,12 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/c_types_test.c"
 int run_type_benchmark(int argc, char** argv);
 
+// The System V calling convention (each type's classes, and each call's argument locations) and its tests, for the
+// test-calling-convention command. Its benchmark is another translation unit.
+#include "buster/compiler/calling_convention.c"
+#include "buster/compiler/calling_convention_test.c"
+int run_calling_convention_benchmark(int argc, char** argv);
+
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
 // check-call-graph and test-call-graph commands.
 #include "buster/compiler/call_graph.c"
@@ -384,7 +395,15 @@ int run_type_benchmark(int argc, char** argv);
 int main(int argc, char** argv)
 {
     int result = 0;
-    if (argc >= 2 && (strcmp(argv[1], "assemble") == 0 || strcmp(argv[1], "-c") == 0))
+    if (argc == 2 && strcmp(argv[1], "test-diagnostics") == 0)
+    {
+        result = run_diagnostic_tests();
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-diagnostics") == 0)
+    {
+        result = run_diagnostic_benchmark(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && (strcmp(argv[1], "assemble") == 0 || strcmp(argv[1], "-c") == 0))
     {
         result = run_assembler_command(argc - 2, argv + 2);
     }
@@ -575,6 +594,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-types") == 0)
     {
         result = run_type_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-calling-convention") == 0)
+    {
+        result = run_calling_convention_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-calling-convention") == 0)
+    {
+        result = run_calling_convention_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
     {

@@ -806,6 +806,15 @@ static const PPTestFile pp_test_files_stack[] = {
 
 // #embed's resources: text, bytes of every kind (a zero, 255, the edges of one, two and three digits), every value in
 // turn, nothing, and headers that end with an #embed, with and without a newline after it.
+// #252's review's #embed files: a resource in a directory of its own, for a name with "//", and a header that becomes a
+// system header before it embeds one.
+static const PPTestFile pp_test_files_embed_review[] = {
+    { "dir/bytes.bin", "A\n" },
+    { "hi.txt", "Hi!\n" },
+    { "sys.h", "unsigned char a[] = {\n#pragma GCC system_header\n#embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
+    { 0, 0 },
+};
+
 static const PPTestFile pp_test_files_embed[] = {
     { "hi.txt", "Hi!\n" },
     { "bin.dat", "\x00\xff\x7f\x80\x09\x0a\x63\x64", 8 },
@@ -1387,6 +1396,45 @@ static const PPTestCase pp_test_cases[] = {
         .standard = "c23",
         .expected = "ok",
     },
+    // #252's review, against clang 23: an #embed's parameters past an angled name in which "//" began a comment for the
+    // file's tokens, so that the line is lexed again from the '>', and the errors of a token the name's
+    // '>' starts; an #embed after #pragma GCC system_header, which starts its line where the system header's line marker
+    // puts it; and comment delimiters that a line splice splits, after an #embed and in a #line's comment.
+    {
+        .name = "#252's review: an #embed's parameters past an angled name with \"//\"",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(0) if_empty(42)\n};\nint b[] = {\n#embed <dir//bytes.bin> limit(1)\n};\n"
+                  "int c[] = {\n#embed <dir//bytes.bin> clang::offset(1)\n};\nint d[] = {\n#embed <dir//bytes.bin> /* c */ limit(1) /* d */\n};\n"
+                  "int e[] = {\n#embed <dir/\\\n/bytes.bin> limit(1)\n};\nx\n",
+        .standard = "c23",
+        .expected = "int a[] = {42}; int b[] = {65 }; int c[] = {10 }; int d[] = {65 }; int e[] = {65 }; x",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's review: a token an #embed name's '>' starts",
+        .source = "int a[] = {\n#embed <dir/bytes.bin>> limit(1)\n};\nint b[] = {\n#embed <dir/bytes.bin>= limit(1)\n};\nx\n",
+        .standard = "c23",
+        .expected = "int a[] = { }; int b[] = { }; x",
+        .fails = true,
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's review: an #embed after #pragma GCC system_header",
+        .source = "#include \"sys.h\"\nint after;\n",
+        .standard = "c23",
+        .expected = "unsigned char a[] = { 72, 300 }; int after;",
+        .files = pp_test_files_embed_review,
+        .markers = "# 1 \"%d/case.c\"\n# 1 \"%d/sys.h\" 1\nunsigned char a[] = {\n# 3 \"%d/sys.h\" 3\n72, 300 };\n# 2 \"%d/case.c\" 2\nint after;\n",
+    },
+    {
+        .name = "#252's review: comment delimiters a line splice splits, after an #embed and in a #line's comment",
+        .source = "int a[] = {\n#embed \"hi.txt\" limit(1)\n/* comment *\\\n/\n\n};\nint b[] = {\n#embed \"hi.txt\" limit(1)\n/\\\n* comment */\n\n};\n"
+                  "int c[] = {\n#embed \"hi.txt\" limit(1)\n/\\\n* comment\n*/ };\n#line 100 /* x *\\\n/\n#embed \"hi.txt\" limit(1)\nint z;\n",
+        .standard = "c23",
+        .expected = "int a[] = {72 }; int b[] = {72 }; int c[] = {72 }; 72 int z;",
+        .files = pp_test_files_embed_review,
+    },
     {
         .name = "__has_embed: clang's limit and clang::offset",
         .source = "#if __has_embed(\"hi.txt\") == 1 && __has_embed(\"hi.txt\" limit(4)) == 1 && __has_embed(\"hi.txt\" "
@@ -1770,6 +1818,64 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     arena_release(&arena);
     pp_test_remove_case(test, directory);
     return result;
+}
+
+// #embed's lookups that the cases can't set up (#252's review): an empty --embed-dir= is the working directory, with no
+// '/' put before the name (clang's LookupEmbedFile), from the case's directory as the working directory; and __has_embed
+// answers from a file's size without reading it, as clang's EvaluateHasEmbed does (LookupEmbedFile without opening the
+// file), also for a sparse file of 5 GiB, past what #embed reads, and one it may not read. Both cases run as the others
+// do (pp_test_case), with clang too under --clang; the run's working directory is restored after.
+static bool pp_test_embed_lookups(const char* directory, bool with_clang)
+{
+    static const PPTestFile files[] = {
+        { "bytes.bin", "XY" },
+        { 0, 0 },
+    };
+    const PPTestCase cases[] = {
+        {
+            .name = "#252's review: an empty --embed-dir= is the working directory",
+            .source = "#embed <bytes.bin>\nx\n",
+            .standard = "c23",
+            .expected = "88, 89 x",
+            .options = "--embed-dir=",
+            .files = files,
+        },
+        {
+            .name = "#252's review: __has_embed of files it only looks at",
+            .source = "#if __has_embed(\"big.bin\") == 1 && __has_embed(\"big.bin\" limit(1)) == 1\nbig\n#endif\n"
+                      "#if __has_embed(\"locked.bin\") == 1 && __has_embed(\"locked.bin\" clang::offset(2)) == 2\nlocked\n#endif\n",
+            .standard = "c23",
+            .expected = "big locked",
+        },
+    };
+    char big[4096];
+    char locked[4096];
+    snprintf(big, sizeof(big), "%s/big.bin", directory);
+    snprintf(locked, sizeof(locked), "%s/locked.bin", directory);
+    const int big_fd = open(big, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    bool result = big_fd >= 0 && ftruncate(big_fd, 5ll << 30) == 0;
+    if (big_fd >= 0)
+    {
+        close(big_fd);
+    }
+    result = result && pp_test_write_file(locked, "AB") && chmod(locked, 0) == 0;
+    const int saved = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    result = result && saved >= 0 && chdir(directory) == 0;
+    uint32_t failures = 0;
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        failures += !pp_test_case(&cases[i], directory, with_clang);
+    }
+    const bool back = saved >= 0 && fchdir(saved) == 0;
+    if (saved >= 0)
+    {
+        close(saved);
+    }
+    unlink(big);
+    unlink(locked);
+    printf("embed lookups: %u of %lu fail%s\n", result ? failures : (uint32_t)BUSTER_ARRAY_LENGTH(cases), (unsigned long)BUSTER_ARRAY_LENGTH(cases),
+           result ? "" : " (the files or the working directory couldn't be set up)");
+    return result && back && failures == 0;
 }
 
 // One accepted file, by both kernels, and (when supplied) against Clang's already-collected output.
@@ -2341,6 +2447,7 @@ static bool pp_test_number(const char* text, uint64_t* value)
 }
 
 #include "c_preprocessor_history_test.c"
+#include "c_preprocessor_order_test.c"
 
 static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
 {
@@ -2358,6 +2465,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         .clang_path = "clang",
         .jobs = 1,
     };
+    uint64_t id_order = 153;
     bool valid = true;
     // --print-case: print that fuzz case (as clang reads it), and nothing else.
     bool print_case = false;
@@ -2375,7 +2483,19 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0;
         uint64_t number = 0;
-        if (strcmp(argument, "--clang") == 0)
+        if (strcmp(argument, "--id-order") == 0 && i + 1 < argument_count)
+        {
+            char* end;
+            errno = 0;
+            i += 1;
+            id_order = strtoull(arguments[i], &end, 10);
+            valid = valid && errno == 0 && end != arguments[i] && *end == 0 && arguments[i][0] != '-';
+        }
+        else if (strcmp(argument, "--id-order") == 0)
+        {
+            valid = false;
+        }
+        else if (strcmp(argument, "--clang") == 0)
         {
             with_clang = true;
         }
@@ -2422,12 +2542,13 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     fuzz.with_clang = with_clang;
     if (!valid || fuzz.jobs == 0 || fuzz.jobs > BUSTER_PP_FUZZ_MAX_JOBS)
     {
-        fprintf(stderr, "usage: test-preprocessor [--clang] [--keep] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--print-case N] [options] [file...]\n");
+        fprintf(stderr, "usage: test-preprocessor [--clang] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--print-case N] [options] [file...]\n");
     }
     char directory[4096];
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
-    bool passed_all = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    const bool created = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    bool passed_all = created;
     if (passed_all && file_count == 0)
     {
         uint32_t failures = 0;
@@ -2440,6 +2561,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_timestamps(directory, with_clang);
         passed_all &= pp_test_history(directory, with_clang);
         passed_all &= pp_test_embed_text(fuzz.seed);
+        passed_all &= pp_test_embed_lookups(directory, with_clang);
+        passed_all &= pp_test_id_order(directory, id_order);
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);
@@ -2479,7 +2602,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     {
         passed_all = pp_fuzz_print_case(&fuzz, printed_case);
     }
-    else if (!keep)
+    else if (!keep && created)
     {
         // The files the cases and the clang runs write, then the directory.
         static const char* const names[] = { "case.c", "other.h", "predefines.h" };
