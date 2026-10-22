@@ -169,7 +169,7 @@ static uint32_t static_test_write_lanes(uint32_t write)
 // last write left it, but for its bytes, which are binding's again: the checks read there the instructions a write
 // rewrites.
 static bool static_test_lanes(StaticTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, const char* name, ExecutableResult* result,
-                              String8* file, Arena* arena)
+                              String8* file, uint64_t id_order, Arena* arena)
 {
     bool same = true;
     *file = (String8){ 0 };
@@ -179,14 +179,16 @@ static bool static_test_lanes(StaticTestTally* tally, Link* link, const Bind* bi
     {
         executable_test_restore(link, saved);
         const uint32_t lanes = static_test_write_lanes(w);
+        const bool permuted = w == 0 || link_test_permute_names(link, id_order + w, arena);
+        static_test_expect(tally, permuted, "permuted NameIds", lanes);
         const bool exact = w >= BUSTER_ARRAY_LENGTH(static_test_lane_counts);
-        ExecutableResult written;
+        ExecutableResult written = { 0 };
         DynamicTestWrite write = {
             .exact = exact,
             .poison = w % 2 == 1,
         };
         const bool reset = executable_test_reset(link, path.pointer);
-        const bool succeeded = reset && static_test_write_with(&write, link, bind, runtime, path, lanes, &written);
+        const bool succeeded = permuted && reset && static_test_write_with(&write, link, bind, runtime, path, lanes, &written);
         static_test_expect(tally, succeeded, name, w);
         if (!succeeded)
         {
@@ -1049,7 +1051,7 @@ static bool static_test_programs(const ExecutableTestDirectory* directory, const
             Scratch scratch = scratch_begin(0);
             ExecutableResult result = { 0 };
             String8 file = { 0 };
-            const bool written = built && static_test_lanes(&tally, &bound.program.link, &bound.bind, runtime, path, name, &result, &file, scratch.arena);
+            const bool written = built && static_test_lanes(&tally, &bound.program.link, &bound.bind, runtime, path, name, &result, &file, directory->id_order, scratch.arena);
             const uint64_t relaxed = written ? static_test_structure(&tally, &bound.program.link, &bound.bind, runtime, file, &result, scratch.arena) : 0;
             const bool ran = written && executable_test_runs(path.pointer, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES);
             static_test_expect(&tally, ran, "the program runs as its model predicts", i);
@@ -1632,7 +1634,7 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
         const bool refused = bound && refusing &&
                              static_test_refuses(&tally, &test.link, &test.bind, runtime, path, program.name, EXECUTABLE_ERROR_RELOCATION, 0,
                                                  static_test_first_fixup(&test.link, BUSTER_LINK_FIXUP_PC32, 0));
-        const bool written = bound && !refusing && static_test_lanes(&tally, &test.link, &test.bind, runtime, path, program.name, &result, &file, scratch.arena);
+        const bool written = bound && !refusing && static_test_lanes(&tally, &test.link, &test.bind, runtime, path, program.name, &result, &file, directory->id_order, scratch.arena);
         const uint64_t relaxed = written ? static_test_structure(&tally, &test.link, &test.bind, runtime, file, &result, scratch.arena) : 0;
         const StaticTestRun ours = written ? static_test_run(paths[0]) : (StaticTestRun){ 0 };
         const StaticTestRun theirs = referenced ? static_test_run(paths[1]) : (StaticTestRun){ 0 };
@@ -2045,6 +2047,7 @@ static bool static_test_refused(const ExecutableTestDirectory* directory, const 
 static int run_static_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
+    uint64_t id_order = 153;
     uint64_t functions = BUSTER_EXECUTABLE_TEST_DEFAULT_FUNCTIONS;
     const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
     bool keep = false;
@@ -2055,6 +2058,11 @@ static int run_static_tests(int argc, char** argv)
         if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
         {
             valid = valid && executable_test_parse_u64(argv[i + 1], &seed);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--id-order") == 0 && i + 1 < argc)
+        {
+            valid = valid && executable_test_parse_u64(argv[i + 1], &id_order);
             i += 1;
         }
         else if (strcmp(argv[i], "--functions") == 0 && i + 1 < argc)
@@ -2082,6 +2090,7 @@ static int run_static_tests(int argc, char** argv)
     }
     ExecutableTestDirectory directory = {
         .keep = keep,
+        .id_order = id_order,
     };
     const int length = snprintf(directory.path, sizeof(directory.path), "%s/buster-static-XXXXXX", parent);
     int result = 1;
@@ -2091,7 +2100,7 @@ static int run_static_tests(int argc, char** argv)
     const RuntimeError pie_imported = valid ? runtime_import_static_pie(&pie) : RUNTIME_ERROR_NONE;
     if (!valid)
     {
-        fprintf(stderr, "usage: test-static [--seed N] [--functions N] [--directory PATH] [--cross-check] [--keep]\n");
+        fprintf(stderr, "usage: test-static [--seed N] [--id-order N] [--functions N] [--directory PATH] [--cross-check] [--keep]\n");
     }
     else if (imported != RUNTIME_ERROR_NONE)
     {

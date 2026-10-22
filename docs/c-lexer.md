@@ -283,6 +283,9 @@ first on a corpus and then times them in 21 interleaved passes in one process (`
 ssh), labels a variant's spills and reloads in its assembly, samples it with IBS and lists the hot spill slots. `trees/` has the trees of the results table, and `trees/run_round.sh` the interleaved rounds.
 Build and run each under `exclusive.sh`.
 
+The executable has these tools now (`./build.sh lexer-variant`, `benchmark-lexer`'s variants, `ab`, `label-spills`,
+`spill-report` and `branch-misses`); [profiling.md](profiling.md) has how to use them.
+
 # Third round: raw strings, chunks read in place and carried lanes
 
 Measured on 2026-10-19 on the same 9700X, on top of the second round, with the same lock and pinning.

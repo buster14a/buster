@@ -123,6 +123,7 @@ static uint64_t executable_test_random(uint64_t* state)
 typedef struct ExecutableTestDirectory ExecutableTestDirectory;
 struct ExecutableTestDirectory
 {
+    uint64_t id_order;
     char path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     bool keep;
 };
@@ -1404,7 +1405,7 @@ static bool executable_test_boundaries(const Link* link, String8 file, const uin
     return result;
 }
 
-static bool executable_test_programs(const ExecutableTestDirectory* directory, uint64_t seed, uint32_t functions)
+static bool executable_test_programs(const ExecutableTestDirectory* directory, uint64_t seed, uint64_t id_order, uint32_t functions)
 {
     ExecutableTestTally tally = {
         .check = "programs",
@@ -1453,6 +1454,10 @@ static bool executable_test_programs(const ExecutableTestDirectory* directory, u
         for (uint32_t l = 0; generated && !libc && boundaries != 0 && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
         {
             const uint32_t lanes = executable_test_lane_counts[l];
+            if (l != 0)
+            {
+                executable_test_expect(&tally, link_test_permute_names(&program.link, id_order + l, scratch.arena), "permuted NameIds", i * 10 + lanes);
+            }
             ExecutableResult result;
             executable_test_expect(&tally, executable_test_reset(&program.link, path.pointer), "the last file overwritten", i * 10 + lanes);
             const bool written = executable_test_write(&program.link, program.entry, path, lanes, &result, boundaries, BUSTER_EXECUTABLE_TEST_MAX_BOUNDARIES);
@@ -3640,6 +3645,7 @@ static bool executable_test_parse_u64(const char* text, uint64_t* value)
 static int run_executable_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
+    uint64_t id_order = 153;
     uint64_t functions = BUSTER_EXECUTABLE_TEST_DEFAULT_FUNCTIONS;
     const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
     bool keep = false;
@@ -3649,6 +3655,11 @@ static int run_executable_tests(int argc, char** argv)
         if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
         {
             valid = valid && executable_test_parse_u64(argv[i + 1], &seed);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--id-order") == 0 && i + 1 < argc)
+        {
+            valid = valid && executable_test_parse_u64(argv[i + 1], &id_order);
             i += 1;
         }
         else if (strcmp(argv[i], "--functions") == 0 && i + 1 < argc)
@@ -3677,7 +3688,7 @@ static int run_executable_tests(int argc, char** argv)
     int result = 1;
     if (!valid)
     {
-        fprintf(stderr, "usage: test-executable [--seed N] [--functions N] [--directory PATH] [--keep]\n");
+        fprintf(stderr, "usage: test-executable [--seed N] [--id-order N] [--functions N] [--directory PATH] [--keep]\n");
     }
     else if (length <= 0 || (uint64_t)length + 64 >= sizeof(directory.path) || mkdtemp(directory.path) == 0)
     {
@@ -3690,7 +3701,7 @@ static int run_executable_tests(int argc, char** argv)
     else
     {
         bool passed = executable_test_hash(seed);
-        passed = executable_test_programs(&directory, seed, (uint32_t)functions) && passed;
+        passed = executable_test_programs(&directory, seed, id_order, (uint32_t)functions) && passed;
         passed = executable_test_chunks(&directory) && passed;
         passed = executable_test_files(&directory, seed) && passed;
         passed = executable_test_limits(&directory, seed) && passed;

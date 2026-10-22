@@ -166,7 +166,7 @@ static bool dynamic_test_write_with(DynamicTestWrite* write, Link* link, const B
 // succeeded with the same bytes and build ID, which `file` then holds, read into `arena`. The link's bytes are then as
 // binding left them again (executable_test_save), as the checks and an object written from the link want them.
 static bool dynamic_test_lanes(DynamicTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, const char* name, ExecutableResult* result,
-                               String8* file, Arena* arena)
+                               String8* file, uint64_t id_order, Arena* arena)
 {
     bool same = true;
     *file = (String8){ 0 };
@@ -175,13 +175,15 @@ static bool dynamic_test_lanes(DynamicTestTally* tally, Link* link, const Bind* 
     for (uint32_t l = 0; saved != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts); l += 1)
     {
         const uint32_t lanes = dynamic_test_lane_counts[l];
-        ExecutableResult written;
+        const bool permuted = l == 0 || link_test_permute_names(link, id_order + l, arena);
+        dynamic_test_expect(tally, permuted, "permuted NameIds", lanes);
+        ExecutableResult written = { 0 };
         // Every other write over poisoned scratch memory: the files must still be the same.
         DynamicTestWrite write = {
             .poison = l % 2 == 1,
         };
         const bool reset = executable_test_reset(link, path.pointer);
-        const bool succeeded = reset && dynamic_test_write_with(&write, link, bind, runtime, path, lanes, &written);
+        const bool succeeded = permuted && reset && dynamic_test_write_with(&write, link, bind, runtime, path, lanes, &written);
         dynamic_test_expect(tally, succeeded, name, lanes);
         if (!succeeded)
         {
@@ -2183,7 +2185,7 @@ static bool dynamic_test_programs(const ExecutableTestDirectory* directory, cons
             Scratch scratch = scratch_begin(0);
             ExecutableResult result = { 0 };
             String8 file = { 0 };
-            const bool written = built && dynamic_test_lanes(&tally, &bound.program.link, &bound.bind, runtime, path, name, &result, &file, scratch.arena);
+            const bool written = built && dynamic_test_lanes(&tally, &bound.program.link, &bound.bind, runtime, path, name, &result, &file, directory->id_order, scratch.arena);
             uint64_t relaxed = 0;
             if (written)
             {
@@ -2257,7 +2259,7 @@ static bool dynamic_test_cases(const ExecutableTestDirectory* directory, const R
         Scratch scratch = scratch_begin(0);
         ExecutableResult result = { 0 };
         String8 file = { 0 };
-        const bool written = bound && dynamic_test_lanes(&tally, &test->link, &test->bind, runtime, path, name, &result, &file, scratch.arena);
+        const bool written = bound && dynamic_test_lanes(&tally, &test->link, &test->bind, runtime, path, name, &result, &file, directory->id_order, scratch.arena);
         if (written)
         {
             dynamic_test_structure(&tally, &test->link, &test->bind, runtime, file, dynamic_test_relr_supported(runtime), which);
@@ -2455,7 +2457,7 @@ static bool dynamic_test_exports(const ExecutableTestDirectory* directory, const
     Scratch scratch = scratch_begin(0);
     ExecutableResult result = { 0 };
     String8 file = { 0 };
-    const bool written = program.bound && dynamic_test_lanes(&tally, &test->link, &test->bind, runtime, path, "exports", &result, &file, scratch.arena);
+    const bool written = program.bound && dynamic_test_lanes(&tally, &test->link, &test->bind, runtime, path, "exports", &result, &file, directory->id_order, scratch.arena);
     if (written)
     {
         dynamic_test_structure(&tally, &test->link, &test->bind, runtime, file, dynamic_test_relr_supported(runtime), 0);
@@ -2606,7 +2608,7 @@ static bool dynamic_test_imports(const ExecutableTestDirectory* directory, const
     Scratch scratch = scratch_begin(0);
     ExecutableResult result = { 0 };
     String8 file = { 0 };
-    const bool written = program.bound && dynamic_test_lanes(&tally, &test->link, &test->bind, runtime, path, "imports", &result, &file, scratch.arena);
+    const bool written = program.bound && dynamic_test_lanes(&tally, &test->link, &test->bind, runtime, path, "imports", &result, &file, directory->id_order, scratch.arena);
     if (written)
     {
         dynamic_test_structure(&tally, &test->link, &test->bind, runtime, file, dynamic_test_relr_supported(runtime), 0);
@@ -2910,7 +2912,7 @@ static bool dynamic_test_smalls(const ExecutableTestDirectory* directory, const 
             Scratch scratch = scratch_begin(0);
             ExecutableResult result = { 0 };
             String8 file = { 0 };
-            const bool written = dynamic_test_lanes(&tally, &test->link, &test->bind, runtime, path, dynamic_test_small_names[which], &result, &file, scratch.arena);
+            const bool written = dynamic_test_lanes(&tally, &test->link, &test->bind, runtime, path, dynamic_test_small_names[which], &result, &file, directory->id_order, scratch.arena);
             if (written)
             {
                 dynamic_test_structure(&tally, &test->link, &test->bind, runtime, file, dynamic_test_relr_supported(runtime), which);
@@ -2986,6 +2988,7 @@ static bool dynamic_test_smalls(const ExecutableTestDirectory* directory, const 
 static int run_dynamic_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
+    uint64_t id_order = 153;
     uint64_t functions = BUSTER_EXECUTABLE_TEST_DEFAULT_FUNCTIONS;
     const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
     bool keep = false;
@@ -2996,6 +2999,11 @@ static int run_dynamic_tests(int argc, char** argv)
         if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
         {
             valid = valid && executable_test_parse_u64(argv[i + 1], &seed);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--id-order") == 0 && i + 1 < argc)
+        {
+            valid = valid && executable_test_parse_u64(argv[i + 1], &id_order);
             i += 1;
         }
         else if (strcmp(argv[i], "--functions") == 0 && i + 1 < argc)
@@ -3023,6 +3031,7 @@ static int run_dynamic_tests(int argc, char** argv)
     }
     ExecutableTestDirectory directory = {
         .keep = keep,
+        .id_order = id_order,
     };
     const int length = snprintf(directory.path, sizeof(directory.path), "%s/buster-dynamic-XXXXXX", parent);
     int result = 1;
@@ -3030,7 +3039,7 @@ static int run_dynamic_tests(int argc, char** argv)
     const RuntimeError imported = valid ? runtime_import(&runtime) : RUNTIME_ERROR_NONE;
     if (!valid)
     {
-        fprintf(stderr, "usage: test-dynamic [--seed N] [--functions N] [--directory PATH] [--cross-check] [--keep]\n");
+        fprintf(stderr, "usage: test-dynamic [--seed N] [--id-order N] [--functions N] [--directory PATH] [--cross-check] [--keep]\n");
     }
     else if (imported != RUNTIME_ERROR_NONE)
     {
