@@ -13,7 +13,8 @@
 // compile of one translation unit does. After a warm-up pass come BUSTER_PP_BENCHMARK_PASSES passes; it reports the
 // medians of wall time and of user-space cycles and instructions (perf_event_open; zero when unavailable), per input
 // token (the tokens of every file the runs prepared) and per output token, the share of the time each phase took
-// (PPPhase: reading, lexing, refining and directive tables; the rest is the main loop with its directives), and what
+// (PPPhase: reading, lexing, refining and directive tables; the rest is the main loop with its directives), -E -P's
+// throughput with its printing (to /dev/null, timed after each run: input bytes and output tokens per second), and what
 // a run did (PPStatistics). With --clang it also times `clang -E -P` with the same options (but --predefines, which is
 // ours) writing to /dev/null, a process per file, the median of as many runs, for scale. --history-cost and
 // --guard-cost replace the scalar twins with the vectorized kernels without recording macro expansion history, or
@@ -62,6 +63,9 @@ struct PPBenchmarkSample
     uint64_t nanoseconds;
     uint64_t cycles;
     uint64_t instructions;
+    // -E -P's printing of the output, after the run (to /dev/null), and the bytes of the files the runs read.
+    uint64_t print_nanoseconds;
+    uint64_t input_bytes;
     uint64_t ticks[PP_PHASE_COUNT + 1]; // The phases', and the whole runs'.
     uint64_t history_bytes;
     uint64_t history_max_bytes;
@@ -148,6 +152,16 @@ static bool pp_benchmark_pass(const PPOptions* run, char** files, int file_count
         for (uint32_t phase = 0; phase < PP_PHASE_COUNT; phase += 1)
         {
             sample->ticks[phase] += pp.ticks[phase];
+        }
+        // Then -E -P's printing, timed apart (#124's throughput).
+        static FILE* null_stream;
+        null_stream = null_stream != 0 ? null_stream : fopen("/dev/null", "w");
+        const uint64_t printing = pp_benchmark_nanoseconds();
+        result = result && null_stream != 0 && pp_print(&pp, null_stream, false);
+        sample->print_nanoseconds += pp_benchmark_nanoseconds() - printing;
+        for (uint32_t d = 0; d < pp.data_count; d += 1)
+        {
+            sample->input_bytes += pp.datas[d].prepared ? pp.datas[d].length : 0;
         }
         *input_tokens += pp.input_tokens;
         *output_tokens += pp.output.count;
@@ -655,6 +669,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 uint64_t nanoseconds[BUSTER_PP_BENCHMARK_PASSES];
                 uint64_t cycles[BUSTER_PP_BENCHMARK_PASSES];
                 uint64_t instructions[BUSTER_PP_BENCHMARK_PASSES];
+                uint64_t with_printing[BUSTER_PP_BENCHMARK_PASSES];
+                uint64_t printing[BUSTER_PP_BENCHMARK_PASSES];
                 uint64_t phases[PP_PHASE_COUNT + 1][BUSTER_PP_BENCHMARK_PASSES];
                 for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
                 {
@@ -662,6 +678,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
                     nanoseconds[pass] = sample->nanoseconds;
                     cycles[pass] = sample->cycles;
                     instructions[pass] = sample->instructions;
+                    with_printing[pass] = sample->nanoseconds + sample->print_nanoseconds;
+                    printing[pass] = sample->print_nanoseconds;
                     uint64_t phase_sum = 0;
                     for (uint32_t phase = 0; phase < PP_PHASE_COUNT; phase += 1)
                     {
@@ -696,6 +714,13 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 }
                 printf("\n");
                 const PPBenchmarkSample* memory = &samples[implementation][0];
+                pp_benchmark_sort(with_printing, BUSTER_PP_BENCHMARK_PASSES);
+                pp_benchmark_sort(printing, BUSTER_PP_BENCHMARK_PASSES);
+                const double whole = (double)with_printing[BUSTER_PP_BENCHMARK_PASSES / 2];
+                const uint64_t bytes = samples[implementation][0].input_bytes;
+                printf("             -E -P with printing %.3f ms (printing %.3f ms): %.0f MB/s of input (%lu bytes), %.1f million output tokens/s\n", whole / 1e6,
+                       (double)printing[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6, whole != 0 ? (double)bytes / whole * 1e3 : 0.0, (unsigned long)bytes,
+                       whole != 0 ? (double)output_tokens / whole * 1e3 : 0.0);
                 printf("             history: %lu bytes total, %.1f bytes/TU mean, %lu bytes/TU maximum; temporary origins peak %lu bytes/TU\n",
                        (unsigned long)memory->history_bytes, (double)memory->history_bytes / file_count, (unsigned long)memory->history_max_bytes,
                        (unsigned long)memory->temporary_max_bytes);

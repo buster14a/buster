@@ -1077,6 +1077,11 @@ full-corpus reproduction and frozen CI subset.
   They avoid redefining a predefined macro other than `__STDC_*`: clang's note
   for it gives a line of its `<built-in>` buffer, whose lines ours doesn't
   keep in clang's order.
+- **The location space** (#124). A file runs in a space shrunk to end where
+  an inclusion would start (`PPOptions.location_limit`, `--location-limit N`),
+  and another where its first pasted spelling would: both kernels must stop
+  there, with the output before it, reporting the inclusion at its `#include`
+  and the spelling without a place, as clang reports running out.
 - **Include guards** (#120). 20 fixtures:
   - the issue's: a guarded file included twice, `#undef` between inclusions,
     `#if !defined X` and `#if !defined(X)`, `#else` in the group, a token

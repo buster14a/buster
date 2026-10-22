@@ -2048,7 +2048,11 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   optimization takes and those it doesn't, `#undef` between inclusions, an
   inclusion from inside the file, the macro defined before the first, links to
   a `#pragma once` file, `#import`. Each run must skip as many inclusions by
-  guards and by `#pragma once` as expected, by both kernels;
+  guards and by `#pragma once` as expected, by both kernels. Then a location
+  space shrunk to end where an inclusion, and then the first pasted spelling,
+  would start (`--location-limit N`, #124): both kernels must stop there, with
+  the output before it, and report the inclusion at its `#include` and the
+  spelling without a place;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, ...), by both kernels, which must agree;
 - with `--tables`, the directive tables of every `.c` and `.h` file under each
@@ -2088,8 +2092,10 @@ and the repository's translation units with `--clang`, and `--tables src`.
 table and preprocessor), with the vectorized kernels and their scalar twins, 21
 passes after a warm-up, and reports the medians of time, cycles and instructions
 per input token and per output token, IPC, each phase's share (read, lex,
-refine, directive tables, main loop) and what a run did (directives, runs,
-expansions, invocations, pastes, and the `#if` lines and their lengths).
+refine, directive tables, main loop), `-E -P`'s throughput with its printing
+(input bytes and output tokens per second, #124) and what a run did
+(directives, runs, expansions, invocations, pastes, the `#if` lines and their
+lengths, and the inclusions skipped by guards and by `#pragma once`).
 `--clang` also times `clang -E -P` with the same options, a process per file.
 `-march` selects the shared target's predefines. `--predefines FILE` can replace
 them with `clang -dM -E` output (the benchmark leaves this option out of clang's
