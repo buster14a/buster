@@ -232,6 +232,7 @@ int run_calling_convention_benchmark(int argc, char** argv);
 #include "buster/compiler/tier0.c"
 #include "buster/compiler/tier0_generate.c"
 #include "buster/compiler/tier0_test.c"
+int run_backend_benchmark(int argc, char** argv);
 
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
 // check-call-graph and test-call-graph commands.
@@ -512,6 +513,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier0") == 0)
     {
         result = run_tier0_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-backend") == 0)
+    {
+        result = run_backend_benchmark(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
     {

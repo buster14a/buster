@@ -21,8 +21,9 @@
 // Nothing here recurses: expressions are built top-down from a worklist into node arrays, and emitted (as stream and
 // as C) by walks with explicit stacks of (node, phase); statements are generated with a stack of open constructs.
 //
-// Entry points: tier0_generate_program and tier0_program_entry_function (the function the tests call, the last:
-// uint64_t entry(uint64_t, uint64_t, uint64_t)). tier0_test.c and tier0_benchmark.c include it after tier0.c; every
+// Entry points: tier0_generate_program (the entry it makes last is the function the tests call: uint64_t
+// entry(uint64_t, uint64_t, uint64_t)), and tier0_tables_open and tier0_program_functions (a program's functions as
+// Tier 0 takes them, with abi_assign's locations). tier0_test.c and tier0_benchmark.c include it after tier0.c; every
 // function in it is static.
 
 #include <stdint.h>
@@ -1697,6 +1698,163 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
             tier0_generate_function(program, f, &random, &options, prefix);
         }
         result = !program->overflow;
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A program's functions as Tier 0 takes them
+
+// A class's builtin type, for the calling convention.
+static TypeId tier0_program_class_type(uint32_t class)
+{
+    static const TypeId types[BUSTER_TYPED_CLASSES] = {
+        BUSTER_TYPE_VOID, BUSTER_TYPE_SCHAR, BUSTER_TYPE_UCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_USHORT, BUSTER_TYPE_INT,
+        BUSTER_TYPE_UINT, BUSTER_TYPE_LONG, BUSTER_TYPE_ULONG, BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE,
+    };
+    return types[class < BUSTER_TYPED_CLASSES ? class : 0];
+}
+
+// The type table and the calling convention's, for the programs' signatures (abi_assign gives them the locations).
+typedef struct Tier0Tables Tier0Tables;
+struct Tier0Tables
+{
+    TypeTable types;
+    Arena type_arena;
+    Arena index_arena;
+    AbiTable abi;
+    Arena abi_arena;
+};
+
+static bool tier0_tables_open(Tier0Tables* tables)
+{
+    const TypeCapacity capacity = {
+        .types = 256,
+        .parameters = 1024,
+        .tags = 16,
+        .members = 64,
+    };
+    tables->type_arena = arena_reserve(type_capacity_bytes(capacity));
+    tables->index_arena = arena_reserve(type_index_capacity_bytes(capacity));
+    bool result = type_initialize(&tables->types, &tables->type_arena, &tables->index_arena, capacity);
+    tables->abi_arena = arena_reserve(abi_capacity_bytes(tables->types.types.capacity));
+    result = result && abi_initialize(&tables->abi, &tables->abi_arena, &tables->types, 16);
+    return result;
+}
+
+static void tier0_tables_close(Tier0Tables* tables)
+{
+    arena_release(&tables->type_arena);
+    arena_release(&tables->index_arena);
+    arena_release(&tables->abi_arena);
+}
+
+// A program's functions as Tier 0 takes them, with every signature's locations from one abi_assign batch: each
+// function's own (its parameters and result) and each call's (its callee's).
+typedef struct Tier0Functions Tier0Functions;
+struct Tier0Functions
+{
+    Tier0Function functions[BUSTER_TIER0_GENERATE_MAX_FUNCTIONS];
+    uint32_t count;
+    // SymbolIds: globals 1 to global_count, then the functions.
+    SymbolId* call_targets;
+    AbiLocation* parameter_locations;
+    AbiLocation* argument_locations;
+    AbiCall* entries;
+    AbiCall* calls;
+    uint8_t* call_variadic;
+};
+
+static bool tier0_program_functions(const Tier0Program* program, const Tier0Tables* tables, Arena* arena, Tier0Functions* functions)
+{
+    const uint32_t function_count = program->function_count;
+    const uint32_t signatures = function_count + program->call_count;
+    uint32_t parameters = 0;
+    for (uint32_t f = 0; f < function_count; f += 1)
+    {
+        parameters += program->functions[f].parameter_count;
+    }
+    const uint32_t arguments = parameters + program->argument_count;
+    TypeId* results = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, signatures + 1);
+    uint32_t* counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, signatures + 1);
+    uint8_t* variadic = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, signatures + 1);
+    TypeId* types = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, arguments + 1);
+    AbiLocation* locations = BUSTER_ARENA_PUSH_ARRAY(arena, AbiLocation, arguments + 1);
+    AbiCall* calls = BUSTER_ARENA_PUSH_ARRAY(arena, AbiCall, signatures + 1);
+    functions->call_targets = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, program->call_count + 1);
+    functions->call_variadic = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->call_count + 1);
+    bool result = results != 0 && counts != 0 && variadic != 0 && types != 0 && locations != 0 && calls != 0 && functions->call_targets != 0 &&
+                  functions->call_variadic != 0;
+    if (result)
+    {
+        uint32_t argument = 0;
+        for (uint32_t f = 0; f < function_count; f += 1)
+        {
+            const Tier0GeneratedFunction* function = &program->functions[f];
+            results[f] = tier0_program_class_type(function->result_class);
+            counts[f] = function->parameter_count;
+            variadic[f] = 0;
+            for (uint32_t p = 0; p < function->parameter_count; p += 1)
+            {
+                types[argument] = tier0_program_class_type(program->local_classes[function->first_local + p]);
+                argument += 1;
+            }
+        }
+        for (uint32_t c = 0; c < program->call_count; c += 1)
+        {
+            const Tier0GeneratedFunction* callee = &program->functions[program->call_callees[c]];
+            results[function_count + c] = tier0_program_class_type(callee->result_class);
+            counts[function_count + c] = program->call_argument_counts[c];
+            variadic[function_count + c] = 0;
+            for (uint32_t a = 0; a < program->call_argument_counts[c]; a += 1)
+            {
+                types[argument] = tier0_program_class_type(program->argument_classes[program->call_first[c] + a]);
+                argument += 1;
+            }
+            functions->call_targets[c] = program->global_count + 1 + program->call_callees[c];
+            functions->call_variadic[c] = 0;
+        }
+        const AbiSignatures batch = {
+            .results = results,
+            .counts = counts,
+            .named = counts,
+            .variadic = variadic,
+            .count = signatures,
+            .arguments = types,
+        };
+        abi_assign(&tables->abi, batch, locations, calls);
+        // Each function's columns are its ranges of the program's; its calls' arguments index the program's argument
+        // columns, which start after every function's parameters in the batch.
+        functions->argument_locations = locations + parameters;
+        functions->calls = calls + function_count;
+        uint32_t parameter = 0;
+        for (uint32_t f = 0; f < function_count; f += 1)
+        {
+            const Tier0GeneratedFunction* function = &program->functions[f];
+            Tier0Function* t = &functions->functions[f];
+            memset(t, 0, sizeof(*t));
+            t->kinds = program->kinds + function->first_entry;
+            t->classes = program->classes + function->first_entry;
+            t->values = program->values + function->first_entry;
+            t->count = function->entry_count;
+            t->local_classes = program->local_classes + function->first_local;
+            t->local_flags = program->local_flags + function->first_local;
+            t->local_count = function->local_count;
+            t->parameter_count = function->parameter_count;
+            t->parameters = locations + parameter;
+            t->result = calls[f].result;
+            parameter += function->parameter_count;
+            t->call_targets = functions->call_targets + function->first_call;
+            t->call_first = program->call_first + function->first_call;
+            t->call_argument_counts = program->call_argument_counts + function->first_call;
+            t->call_variadic = functions->call_variadic + function->first_call;
+            t->calls = functions->calls + function->first_call;
+            t->argument_locations = functions->argument_locations;
+            t->argument_classes = program->argument_classes;
+            t->call_count = function->call_count;
+            t->argument_count = program->argument_count;
+        }
+        functions->count = function_count;
     }
     return result;
 }

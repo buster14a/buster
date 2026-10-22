@@ -11,7 +11,7 @@
 // Usage: build/compiler test-tier0 [--seed N] [--count N] [--cross-check] [--clang PATH] [--keep]
 //
 // Layout, in this order: the tally; the tables (types and the calling convention) and the functions of a program
-// (tier0_test_functions); the interpreter (tier0_test_interpret); compiling, sizing and encoding a program
+// (tier0_program_functions); the interpreter (tier0_test_interpret); compiling, sizing and encoding a program
 // (tier0_test_build); the native run in a child process (tier0_test_run); the checks; the cross-check; the command.
 
 #include <stdint.h>
@@ -63,160 +63,6 @@ static void tier0_test_report(const char* check, Tier0TestTally tally)
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The functions of a program
-
-// A class's builtin type, for the calling convention.
-static TypeId tier0_test_class_type(uint32_t class)
-{
-    static const TypeId types[BUSTER_TYPED_CLASSES] = {
-        BUSTER_TYPE_VOID, BUSTER_TYPE_SCHAR, BUSTER_TYPE_UCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_USHORT, BUSTER_TYPE_INT,
-        BUSTER_TYPE_UINT, BUSTER_TYPE_LONG, BUSTER_TYPE_ULONG, BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE,
-    };
-    return types[class < BUSTER_TYPED_CLASSES ? class : 0];
-}
-
-// The calling convention's tables, for the programs' signatures.
-typedef struct Tier0TestTables Tier0TestTables;
-struct Tier0TestTables
-{
-    TypeTable types;
-    Arena type_arena;
-    Arena index_arena;
-    AbiTable abi;
-    Arena abi_arena;
-};
-
-static bool tier0_test_tables_open(Tier0TestTables* tables)
-{
-    const TypeCapacity capacity = {
-        .types = 256,
-        .parameters = 1024,
-        .tags = 16,
-        .members = 64,
-    };
-    tables->type_arena = arena_reserve(type_capacity_bytes(capacity));
-    tables->index_arena = arena_reserve(type_index_capacity_bytes(capacity));
-    bool result = type_initialize(&tables->types, &tables->type_arena, &tables->index_arena, capacity);
-    tables->abi_arena = arena_reserve(abi_capacity_bytes(tables->types.types.capacity));
-    result = result && abi_initialize(&tables->abi, &tables->abi_arena, &tables->types, 16);
-    return result;
-}
-
-static void tier0_test_tables_close(Tier0TestTables* tables)
-{
-    arena_release(&tables->type_arena);
-    arena_release(&tables->index_arena);
-    arena_release(&tables->abi_arena);
-}
-
-// A program's functions as Tier 0 takes them, with every signature's locations from one abi_assign batch: each
-// function's own (its parameters and result) and each call's (its callee's).
-typedef struct Tier0TestProgram Tier0TestProgram;
-struct Tier0TestProgram
-{
-    Tier0Function functions[BUSTER_TIER0_GENERATE_MAX_FUNCTIONS];
-    uint32_t count;
-    // SymbolIds: globals 1 to global_count, then the functions.
-    SymbolId* call_targets;
-    AbiLocation* parameter_locations;
-    AbiLocation* argument_locations;
-    AbiCall* entries;
-    AbiCall* calls;
-    uint8_t* call_variadic;
-};
-
-static bool tier0_test_functions(const Tier0Program* program, const Tier0TestTables* tables, Arena* arena, Tier0TestProgram* functions)
-{
-    const uint32_t function_count = program->function_count;
-    const uint32_t signatures = function_count + program->call_count;
-    uint32_t parameters = 0;
-    for (uint32_t f = 0; f < function_count; f += 1)
-    {
-        parameters += program->functions[f].parameter_count;
-    }
-    const uint32_t arguments = parameters + program->argument_count;
-    TypeId* results = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, signatures + 1);
-    uint32_t* counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, signatures + 1);
-    uint8_t* variadic = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, signatures + 1);
-    TypeId* types = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, arguments + 1);
-    AbiLocation* locations = BUSTER_ARENA_PUSH_ARRAY(arena, AbiLocation, arguments + 1);
-    AbiCall* calls = BUSTER_ARENA_PUSH_ARRAY(arena, AbiCall, signatures + 1);
-    functions->call_targets = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, program->call_count + 1);
-    functions->call_variadic = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->call_count + 1);
-    bool result = results != 0 && counts != 0 && variadic != 0 && types != 0 && locations != 0 && calls != 0 && functions->call_targets != 0 &&
-                  functions->call_variadic != 0;
-    if (result)
-    {
-        uint32_t argument = 0;
-        for (uint32_t f = 0; f < function_count; f += 1)
-        {
-            const Tier0GeneratedFunction* function = &program->functions[f];
-            results[f] = tier0_test_class_type(function->result_class);
-            counts[f] = function->parameter_count;
-            variadic[f] = 0;
-            for (uint32_t p = 0; p < function->parameter_count; p += 1)
-            {
-                types[argument] = tier0_test_class_type(program->local_classes[function->first_local + p]);
-                argument += 1;
-            }
-        }
-        for (uint32_t c = 0; c < program->call_count; c += 1)
-        {
-            const Tier0GeneratedFunction* callee = &program->functions[program->call_callees[c]];
-            results[function_count + c] = tier0_test_class_type(callee->result_class);
-            counts[function_count + c] = program->call_argument_counts[c];
-            variadic[function_count + c] = 0;
-            for (uint32_t a = 0; a < program->call_argument_counts[c]; a += 1)
-            {
-                types[argument] = tier0_test_class_type(program->argument_classes[program->call_first[c] + a]);
-                argument += 1;
-            }
-            functions->call_targets[c] = program->global_count + 1 + program->call_callees[c];
-            functions->call_variadic[c] = 0;
-        }
-        const AbiSignatures batch = {
-            .results = results,
-            .counts = counts,
-            .named = counts,
-            .variadic = variadic,
-            .count = signatures,
-            .arguments = types,
-        };
-        abi_assign(&tables->abi, batch, locations, calls);
-        // Each function's columns are its ranges of the program's; its calls' arguments index the program's argument
-        // columns, which start after every function's parameters in the batch.
-        functions->argument_locations = locations + parameters;
-        functions->calls = calls + function_count;
-        uint32_t parameter = 0;
-        for (uint32_t f = 0; f < function_count; f += 1)
-        {
-            const Tier0GeneratedFunction* function = &program->functions[f];
-            Tier0Function* t = &functions->functions[f];
-            memset(t, 0, sizeof(*t));
-            t->kinds = program->kinds + function->first_entry;
-            t->classes = program->classes + function->first_entry;
-            t->values = program->values + function->first_entry;
-            t->count = function->entry_count;
-            t->local_classes = program->local_classes + function->first_local;
-            t->local_flags = program->local_flags + function->first_local;
-            t->local_count = function->local_count;
-            t->parameter_count = function->parameter_count;
-            t->parameters = locations + parameter;
-            t->result = calls[f].result;
-            parameter += function->parameter_count;
-            t->call_targets = functions->call_targets + function->first_call;
-            t->call_first = program->call_first + function->first_call;
-            t->call_argument_counts = program->call_argument_counts + function->first_call;
-            t->call_variadic = functions->call_variadic + function->first_call;
-            t->calls = functions->calls + function->first_call;
-            t->argument_locations = functions->argument_locations;
-            t->argument_classes = program->argument_classes;
-            t->call_count = function->call_count;
-            t->argument_count = program->argument_count;
-        }
-        functions->count = function_count;
-    }
-    return result;
-}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The interpreter
@@ -495,7 +341,7 @@ struct Tier0TestFrame
 
 // Runs the program's entry (its last function) on three arguments over the globals at `globals` (the data layout's),
 // and returns its result; `fault` is set on a division the generator should have made safe, or past the step budget.
-static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0TestProgram* functions, const Tier0TestData* data, uint8_t* globals,
+static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Functions* functions, const Tier0TestData* data, uint8_t* globals,
                                      const uint64_t* inputs, bool* fault)
 {
     static Tier0TestFrame frames[BUSTER_TIER0_TEST_FRAMES];
@@ -708,7 +554,7 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
 
 // Compiles every function of the program by both paths (which must agree), checks the records and branch columns,
 // sizes the branches and encodes each function into `code`.
-static bool tier0_test_build(Tier0TestTally* tally, const Tier0TestProgram* functions, Arena* arena, Tier0TestCode* code, uint64_t seed)
+static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functions, Arena* arena, Tier0TestCode* code, uint64_t seed)
 {
     bool result = true;
     code->size = 0;
@@ -870,7 +716,7 @@ static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* cod
 // The checks
 
 // Programs from consecutive seeds: generated, compiled by both paths, run natively and by the interpreter, compared.
-static void tier0_test_programs(Tier0TestTally* tally, Tier0TestTables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, uint64_t* records,
+static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, uint64_t* records,
                                 uint64_t* entries, uint64_t* deferred)
 {
     Arena arena = arena_reserve(1ull << 32);
@@ -885,10 +731,10 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0TestTables* tables, 
             const uint64_t program_seed = seed + p;
             const uint64_t mark = arena.length;
             Tier0Program* program = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0Program, 1);
-            Tier0TestProgram* functions = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0TestProgram, 1);
+            Tier0Functions* functions = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0Functions, 1);
             bool ok = program != 0 && functions != 0 && tier0_generate_program(program, &arena, program_seed, options, "c_");
             ok = tier0_test_expect(tally, ok, "programs", "seed %" PRIu64 ": the generator ran out of room", program_seed);
-            ok = ok && tier0_test_expect(tally, tier0_test_functions(program, tables, &arena, functions), "programs", "seed %" PRIu64 ": no room for the signatures",
+            ok = ok && tier0_test_expect(tally, tier0_program_functions(program, tables, &arena, functions), "programs", "seed %" PRIu64 ": no room for the signatures",
                                          program_seed);
             code->records = 0;
             code->entries = 0;
@@ -1104,7 +950,7 @@ static int tier0_test_shell(const char* command, const char* prefix, char* line,
 // The cross-check: `count` programs, each compiled by clang -O0 (as C) and by Tier 0 (as an object), linked into one
 // harness that runs both on the same inputs; their results and globals must agree. Also reports the code's sizes (clang's
 // .text, Tier 0's functions) and the harness's times.
-static void tier0_test_cross(Tier0TestTally* tally, Tier0TestTables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, const char* clang,
+static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, const char* clang,
                              bool keep)
 {
     const char* temporary = getenv("TMPDIR");
@@ -1126,9 +972,9 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0TestTables* tables, uin
             const uint64_t program_seed = seed + 7000001ull + p;
             const uint64_t mark = arena.length;
             Tier0Program* program = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0Program, 1);
-            Tier0TestProgram* functions = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0TestProgram, 1);
+            Tier0Functions* functions = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0Functions, 1);
             bool ok = program != 0 && functions != 0 && tier0_generate_program(program, &arena, program_seed, options, "c_") &&
-                      tier0_test_functions(program, tables, &arena, functions);
+                      tier0_program_functions(program, tables, &arena, functions);
             ok = tier0_test_expect(tally, ok, "cross-check", "seed %" PRIu64 ": the generator ran out of room", program_seed);
             ok = ok && tier0_test_build(tally, functions, &arena, code, program_seed);
             char source[600];
@@ -1253,9 +1099,9 @@ static int run_tier0_tests(int argc, char** argv)
     }
     else
     {
-        Tier0TestTables tables;
+        Tier0Tables tables;
         Tier0TestTally total = { 0, 0 };
-        if (tier0_test_tables_open(&tables))
+        if (tier0_tables_open(&tables))
         {
             static const Tier0ProgramOptions shapes[4] = {
                 { .functions = 1, .statements = 6, .expression_nodes = 6, .calls = false, .loops = false, .floating = false, .pointers = false },
@@ -1286,7 +1132,7 @@ static int run_tier0_tests(int argc, char** argv)
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
-            tier0_test_tables_close(&tables);
+            tier0_tables_close(&tables);
         }
         else
         {

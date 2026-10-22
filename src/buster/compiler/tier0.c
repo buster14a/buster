@@ -73,6 +73,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <string.h>
 #include <immintrin.h>
 
@@ -489,10 +490,10 @@ struct Tier0RecordSpec
 // branch that absorbs a compare the kind and class are the compare's (and its operands' class), for x = x op v the
 // operation's, and for CONVERT the variant is the source class (plus BUSTER_TIER0_VARIANT_CONVERT_HOME from a home).
 //   - PLAIN: every operand on the stack. CONST: the last operand is a constant (K). HOME: the last is a local (A).
-//     HOME_CONST: the first operand is a local (A) and the last a constant (K). For a floating constant, CONST is its
-//     zero (xorps).
+//     HOME_CONST: the first operand is a local (A) and the last a constant (K). HOME_HOME (a compare's): both operands
+//     are locals (the first B, the last A). For a floating constant, CONST is its zero (xorps).
 //   - INDEX(s): a load's address (or a pointer addition's lea) is [R2 + R1 * 2^s]; OFFSET: [R1 + K].
-//   - BRANCH_FALSE and BRANCH_TRUE, plus the compare's PLAIN to HOME_CONST: a branch with its compare.
+//   - BRANCH_FALSE and BRANCH_TRUE, plus the compare's PLAIN to HOME_HOME: a branch with its compare.
 //   - RMW_CONST and RMW_HOME: x = x op v as op x, v (SET_LOCAL's).
 //   - INDEX_CONST(s), INDEX_HOME(s), OFFSET_HOME: a store's address [R2 + R1 * 2^s] (or [R1 + K]) and its value a
 //     constant (K) or a local (A).
@@ -501,16 +502,18 @@ struct Tier0RecordSpec
 #define BUSTER_TIER0_VARIANT_CONST 1
 #define BUSTER_TIER0_VARIANT_HOME 2
 #define BUSTER_TIER0_VARIANT_HOME_CONST 3
+// A compare's alone, so it shares its number with a load's INDEX(0).
+#define BUSTER_TIER0_VARIANT_HOME_HOME 4
 #define BUSTER_TIER0_VARIANT_INDEX(s) (4 + (s))
 #define BUSTER_TIER0_VARIANT_OFFSET 8
 #define BUSTER_TIER0_VARIANT_BRANCH_FALSE 9
-#define BUSTER_TIER0_VARIANT_BRANCH_TRUE 13
-#define BUSTER_TIER0_VARIANT_RMW_CONST 17
-#define BUSTER_TIER0_VARIANT_RMW_HOME 18
-#define BUSTER_TIER0_VARIANT_INDEX_CONST(s) (19 + (s))
-#define BUSTER_TIER0_VARIANT_INDEX_HOME(s) (23 + (s))
-#define BUSTER_TIER0_VARIANT_OFFSET_HOME 27
-#define BUSTER_TIER0_VARIANT_LAST 28
+#define BUSTER_TIER0_VARIANT_BRANCH_TRUE 14
+#define BUSTER_TIER0_VARIANT_RMW_CONST 19
+#define BUSTER_TIER0_VARIANT_RMW_HOME 20
+#define BUSTER_TIER0_VARIANT_INDEX_CONST(s) (21 + (s))
+#define BUSTER_TIER0_VARIANT_INDEX_HOME(s) (25 + (s))
+#define BUSTER_TIER0_VARIANT_OFFSET_HOME 29
+#define BUSTER_TIER0_VARIANT_LAST 30
 #define BUSTER_TIER0_VARIANT_CONVERT_HOME 16
 #define BUSTER_TIER0_VARIANTS 32
 
@@ -518,7 +521,7 @@ struct Tier0RecordSpec
 // compiled (for the vector expansion: the records' static bytes, each byte's hole in the hole block, and which bytes take
 // their hole). Its holes: K is the value of entry `k_offset` back (BUSTER_TIER0_NO_OFFSET: none), times the value of
 // entry `k_scale` back when there is one (a pointer addition's element size); A is the home of the local entry
-// `a_offset` back reads. `required_depth` is the integer depth its fixed registers need (BUSTER_TIER0_ANY_DEPTH: any);
+// `a_offset` back reads, and B the home of entry `b_offset` back's (without one, the entry's own local's). `required_depth` is the integer depth its fixed registers need (BUSTER_TIER0_ANY_DEPTH: any);
 // at another, the entry goes to tier0_emit_deferred. `reach` is how far above the entry's depth its registers go on each
 // stack (3 for R0 or X0, 2 for R1, 1 for R2, 0 for none), and `clobbers` the fixed registers it writes.
 #define BUSTER_TIER0_TEMPLATE_RECORDS 4
@@ -535,6 +538,7 @@ struct Tier0Template
     uint8_t k_offset;
     uint8_t k_scale;
     uint8_t a_offset;
+    uint8_t b_offset;
     uint8_t required_depth;
     uint8_t integer_reach;
     uint8_t floating_reach;
@@ -557,6 +561,52 @@ struct Tier0Template
 
 static Tier0Template tier0_templates[BUSTER_TIER0_TEMPLATE_CAPACITY];
 static uint32_t tier0_template_count;
+
+// What the passes after selection read of a template, in 32 bytes (the templates themselves are 270): its length, its
+// branch record (0xff: none) and whether it goes to the function's end, its symbolic record (0xff: none), its choice
+// record (0xff: none) with its row, live flags and immediate, its holes' offsets, its required depth, its slot's reach
+// (the most of a home-dependent slot's cases', for the frame's touches, read before the homes are known) and its fixed
+// clobbers. Every template has at most one record of each role (tier0_end checks).
+typedef struct Tier0TemplateInfo Tier0TemplateInfo;
+struct Tier0TemplateInfo
+{
+    uint8_t length;
+    uint8_t branch;
+    uint8_t end;
+    uint8_t fixup;
+    uint8_t choice;
+    uint8_t choice_live;
+    uint16_t choice_row;
+    uint8_t k_offset;
+    uint8_t k_scale;
+    uint8_t a_offset;
+    uint8_t b_offset;
+    uint8_t required_depth;
+    uint8_t integer_reach;
+    uint8_t floating_reach;
+    uint8_t choice_static;
+    // B is the entry's own local's home (LOCAL, LOCAL_ADDRESS, STORE_LOCAL and SET_LOCAL's templates, x = x op v's).
+    uint8_t b_own;
+    uint8_t padding[3];
+    int32_t choice_immediate;
+    uint32_t clobbers;
+    // Which bytes of the compiled records take their hole (tier0_compiled).
+    uint64_t mask;
+};
+_Static_assert(sizeof(Tier0TemplateInfo) == 40, "a template's summary");
+
+static Tier0TemplateInfo tier0_template_infos[BUSTER_TIER0_TEMPLATE_CAPACITY];
+
+// Each template's four records compiled into one cache line, for the vector expansion: a byte the template fixes is
+// that byte, and a hole's is its index in the hole block (below 32), which vpermb reads from its low bits; the
+// summary's mask says which are holes, so that one load gives vpermb its indices and the blend its static bytes.
+typedef struct Tier0Compiled Tier0Compiled;
+struct Tier0Compiled
+{
+    _Alignas(64) uint8_t bytes[64];
+};
+
+static Tier0Compiled tier0_compiled[BUSTER_TIER0_TEMPLATE_CAPACITY];
 static uint16_t tier0_slot_bases[BUSTER_TYPED_KIND_LIMIT * BUSTER_TYPED_CLASS_LIMIT];
 static uint16_t tier0_slots[BUSTER_TIER0_SLOT_CAPACITY];
 static uint32_t tier0_slot_count;
@@ -672,6 +722,7 @@ static void tier0_begin(void)
     tier0_builder.current.k_offset = BUSTER_TIER0_NO_OFFSET;
     tier0_builder.current.k_scale = BUSTER_TIER0_NO_OFFSET;
     tier0_builder.current.a_offset = BUSTER_TIER0_NO_OFFSET;
+    tier0_builder.current.b_offset = BUSTER_TIER0_NO_OFFSET;
     tier0_builder.current.required_depth = BUSTER_TIER0_ANY_DEPTH;
 }
 
@@ -862,6 +913,56 @@ static void tier0_end(uint32_t kind, uint32_t class, uint32_t variant, uint32_t 
         const uint32_t index = tier0_template_count;
         tier0_templates[index] = *template;
         tier0_template_count += 1;
+        Tier0TemplateInfo info;
+        memset(&info, 0, sizeof(info));
+        info.length = template->length;
+        info.branch = 0xff;
+        info.fixup = 0xff;
+        info.choice = 0xff;
+        info.choice_row = BUSTER_X86_CHOICE_NO_ROW;
+        info.k_offset = template->k_offset;
+        info.k_scale = template->k_scale;
+        info.a_offset = template->a_offset;
+        info.b_offset = template->b_offset;
+        info.required_depth = template->required_depth;
+        info.integer_reach = template->integer_reach;
+        info.floating_reach = template->floating_reach;
+        info.clobbers = template->clobbers;
+        info.mask = template->mask;
+        info.b_own = template->b_offset == BUSTER_TIER0_NO_OFFSET &&
+                             (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL ||
+                              variant == BUSTER_TIER0_VARIANT_RMW_CONST || variant == BUSTER_TIER0_VARIANT_RMW_HOME)
+                         ? 1
+                         : 0;
+        for (uint32_t b = 0; b < 64; b += 1)
+        {
+            tier0_compiled[index].bytes[b] = ((template->mask >> b) & 1) != 0 ? template->holes[b] : template->bytes[b];
+        }
+        for (uint32_t r = 0; r < template->length; r += 1)
+        {
+            const Tier0RecordSpec* spec = &template->specs[r];
+            if ((spec->flags & (BUSTER_TIER0_RECORD_BRANCH | BUSTER_TIER0_RECORD_END)) != 0)
+            {
+                tier0_builder.valid &= info.branch == 0xff;
+                info.branch = (uint8_t)r;
+                info.end = (spec->flags & BUSTER_TIER0_RECORD_END) != 0 ? 1 : 0;
+            }
+            if ((spec->flags & BUSTER_TIER0_RECORD_FIXUP) != 0)
+            {
+                tier0_builder.valid &= info.fixup == 0xff;
+                info.fixup = (uint8_t)r;
+            }
+            if ((spec->flags & BUSTER_TIER0_RECORD_CHOICE) != 0)
+            {
+                tier0_builder.valid &= info.choice == 0xff;
+                info.choice = (uint8_t)r;
+                info.choice_row = spec->row;
+                info.choice_live = spec->live;
+                info.choice_static = spec->immediate_kind == BUSTER_TIER0_IMMEDIATE_STATIC ? 1 : 0;
+                info.choice_immediate = spec->immediate;
+            }
+        }
+        tier0_template_infos[index] = info;
         if (home_part <= 1 && tier0_builder.valid)
         {
             // A slot is made once: a second template for it is a broken table.
@@ -1602,6 +1703,41 @@ static void tier0_define_templates(void)
                     tier0_end(kind, class, (when != 0 ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE) + variant, 0);
                 }
             }
+            // Two locals: cmp x, y with x (B) or y (A) a register, or through the scratch, as a value and as a branch.
+            const uint32_t cmp_r_rm = tier0_wide(class, X86_FORM_CMP_R32_RM32, X86_FORM_CMP_R64_RM64);
+            const uint32_t cmp_rm_r = tier0_wide(class, X86_FORM_CMP_RM32_R32, X86_FORM_CMP_RM64_R64);
+            const uint32_t load = tier0_wide(class, X86_FORM_MOV_R32_RM32, X86_FORM_MOV_R64_RM64);
+            for (uint32_t context = 0; context < 3; context += 1)
+            {
+                const uint32_t shift = context == 0 ? 0 : 1;
+                const uint32_t variant = context == 0 ? BUSTER_TIER0_VARIANT_HOME_HOME
+                                         : context == 1 ? BUSTER_TIER0_VARIANT_BRANCH_FALSE + BUSTER_TIER0_VARIANT_HOME_HOME
+                                                        : BUSTER_TIER0_VARIANT_BRANCH_TRUE + BUSTER_TIER0_VARIANT_HOME_HOME;
+                BUSTER_TIER0_HOME_CASES(kind, class, variant, no, 1 + shift, {
+                    tier0_builder.current.b_offset = (uint8_t)(2 + shift);
+                    Tier0RecordSpec compare = tier0_rh(cmp_r_rm, BUSTER_TIER0_SOURCE_B, BUSTER_TIER0_RM_HOME_A);
+                    if (!b_register && a_register)
+                    {
+                        compare = tier0_rh(cmp_rm_r, BUSTER_TIER0_SOURCE_A, BUSTER_TIER0_RM_HOME_B);
+                    }
+                    else if (!b_register)
+                    {
+                        tier0_add(tier0_rh(load, BUSTER_TIER0_SOURCE_R0, BUSTER_TIER0_RM_HOME_B));
+                        compare = tier0_rh(cmp_r_rm, BUSTER_TIER0_SOURCE_R0, BUSTER_TIER0_RM_HOME_A);
+                    }
+                    compare.live = live;
+                    tier0_add(compare);
+                    if (context == 0)
+                    {
+                        tier0_add(tier0_r(tier0_setcc[cc], BUSTER_TIER0_SOURCE_R0));
+                        tier0_add(tier0_rr(X86_FORM_MOVZX_R32_RM8, BUSTER_TIER0_SOURCE_R0, BUSTER_TIER0_SOURCE_R0));
+                    }
+                    else
+                    {
+                        tier0_add(tier0_branch(tier0_jcc_rel8[context == 2 ? cc : cc ^ 1], BUSTER_TIER0_RECORD_BRANCH));
+                    }
+                });
+            }
         }
     }
     // Branches on a value: test it (or compare a home with 0), then je or jne.
@@ -1714,6 +1850,21 @@ static bool tier0_initialize(void)
         tier0_slot_count = BUSTER_TIER0_VARIANTS;
         tier0_build_windows();
         tier0_define_templates();
+        for (uint32_t slot = 0; slot < tier0_slot_count; slot += 1)
+        {
+            const uint16_t value = tier0_slots[slot];
+            if (value != BUSTER_TIER0_SLOT_UNSUPPORTED && value != BUSTER_TIER0_SLOT_DEFERRED && (value & BUSTER_TIER0_SLOT_HOME_DEPENDENT) != 0)
+            {
+                Tier0TemplateInfo* first = &tier0_template_infos[value & BUSTER_TIER0_SLOT_TEMPLATE];
+                for (uint32_t c = 1; c < 4; c += 1)
+                {
+                    const Tier0TemplateInfo* other = &tier0_template_infos[(value & BUSTER_TIER0_SLOT_TEMPLATE) + c];
+                    first->integer_reach = other->integer_reach > first->integer_reach ? other->integer_reach : first->integer_reach;
+                    first->floating_reach = other->floating_reach > first->floating_reach ? other->floating_reach : first->floating_reach;
+                    first->clobbers |= other->clobbers;
+                }
+            }
+        }
         tier0_initialized = tier0_builder.valid && tier0_build_vector_tables();
     }
     return tier0_initialized;
@@ -1989,6 +2140,14 @@ static void tier0_fuse_scalar(const Tier0Function* function, const uint64_t* lab
             tier0_absorb(entries, i, i - 2);
             leaf_taken = true;
         }
+        else if (i >= 2 && !here && !before && kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && kinds[i - 1] == BUSTER_TYPED_LOCAL &&
+                 kinds[i - 2] == BUSTER_TYPED_LOCAL && tier0_slot(kind, key_class, BUSTER_TIER0_VARIANT_HOME_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED)
+        {
+            variant = BUSTER_TIER0_VARIANT_HOME_HOME;
+            tier0_absorb(entries, i, i - 1);
+            tier0_absorb(entries, i, i - 2);
+            leaf_taken = true;
+        }
         if (!leaf_taken && i >= 1 && !here && has_last)
         {
             const uint8_t previous = kinds[i - 1];
@@ -2049,7 +2208,7 @@ static void tier0_fuse_scalar(const Tier0Function* function, const uint64_t* lab
         {
             const uint32_t base = kind == BUSTER_TYPED_BRANCH_TRUE ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE;
             const uint32_t fused = base + entries->variants[i - 1];
-            if (entries->variants[i - 1] <= BUSTER_TIER0_VARIANT_HOME_CONST &&
+            if (entries->variants[i - 1] <= BUSTER_TIER0_VARIANT_HOME_HOME &&
                 tier0_slot(kinds[i - 1], entries->key_classes[i - 1], fused) != BUSTER_TIER0_SLOT_UNSUPPORTED)
             {
                 key_kind = kinds[i - 1];
@@ -2094,36 +2253,6 @@ static void tier0_depths_scalar(const Tier0Function* function, Tier0Entries* ent
         integer += entries->integer_effects[i];
         floating += entries->floating_effects[i];
     }
-}
-
-// Each entry's template, from its key's slot (ABSORBED for an absorbed entry; DEFERRED for a deferred slot or a
-// template whose fixed registers need another depth). Returns the first entry without one, or the count.
-static uint32_t tier0_templates_scalar(const Tier0Function* function, Tier0Entries* entries)
-{
-    uint32_t unsupported = function->count;
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        uint16_t entry = BUSTER_TIER0_ENTRY_ABSORBED;
-        if (!entries->absorbed[i])
-        {
-            const uint16_t slot = tier0_slot(entries->key_kinds[i], entries->key_classes[i], entries->variants[i]);
-            entry = slot;
-            if (slot == BUSTER_TIER0_SLOT_UNSUPPORTED)
-            {
-                unsupported = unsupported == function->count ? i : unsupported;
-            }
-            else if (slot != BUSTER_TIER0_SLOT_DEFERRED)
-            {
-                const Tier0Template* template = &tier0_templates[slot & BUSTER_TIER0_SLOT_TEMPLATE];
-                if (template->required_depth != BUSTER_TIER0_ANY_DEPTH && template->required_depth != entries->depths[i])
-                {
-                    entry = BUSTER_TIER0_ENTRY_DEFERRED;
-                }
-            }
-        }
-        entries->templates[i] = entry;
-    }
-    return unsupported;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2175,89 +2304,6 @@ static uint32_t tier0_depth_registers(int32_t integer_top, int32_t floating_top)
         set |= 1u << BUSTER_TIER0_XMM(d);
     }
     return set;
-}
-
-// What the body touches: the depth registers it reaches, the templates' fixed registers, and for a call everything
-// caller-saved; with the call save area's and the fixed slots' sizes. Fails with TIER0_ERROR_DEPTH past the tables.
-static Tier0Error tier0_touches(const Tier0Function* function, const Tier0Entries* entries, Tier0Frame* frame)
-{
-    int32_t integer_top = -1;
-    int32_t floating_top = -1;
-    uint32_t clobbers = 0;
-    uint32_t save_slots = 0;
-    bool fixed = false;
-    bool calls = false;
-    Tier0Error error = TIER0_OK;
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        const uint16_t entry = entries->templates[i];
-        const int32_t depth = entries->depths[i];
-        const int32_t floating = entries->floating_depths[i];
-        if (entry == BUSTER_TIER0_ENTRY_DEFERRED || entry == BUSTER_TIER0_SLOT_DEFERRED)
-        {
-            const uint8_t kind = function->kinds[i];
-            if (kind == BUSTER_TYPED_CALL)
-            {
-                const uint32_t call = (uint32_t)function->values[i];
-                const uint32_t first = function->call_first[call];
-                uint32_t integer_arguments = 0;
-                uint32_t floating_arguments = 0;
-                for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
-                {
-                    const bool is_floating = tier0_class_floating(function->argument_classes[first + a]);
-                    integer_arguments += is_floating ? 0 : 1;
-                    floating_arguments += is_floating ? 1 : 0;
-                }
-                const int32_t below = depth - (int32_t)integer_arguments;
-                const int32_t floating_below = floating - (int32_t)floating_arguments;
-                const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? (uint32_t)below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
-                const uint32_t slots = saved + (uint32_t)floating_below;
-                save_slots = slots > save_slots ? slots : save_slots;
-                const uint32_t result = tier0_stack(function->classes[i]);
-                integer_top = result == 1 && below > integer_top ? below : integer_top;
-                floating_top = result == 2 && floating_below > floating_top ? floating_below : floating_top;
-                clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL;
-                calls = true;
-            }
-            else
-            {
-                // Division and shifts by a register: rax, rdx and rcx, saved around them in the fixed slots.
-                clobbers |= 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX;
-                fixed = true;
-            }
-        }
-        else if (entry != BUSTER_TIER0_ENTRY_ABSORBED)
-        {
-            const uint32_t base = entry & BUSTER_TIER0_SLOT_TEMPLATE;
-            const uint32_t cases = (entry & BUSTER_TIER0_SLOT_HOME_DEPENDENT) != 0 ? 4 : 1;
-            for (uint32_t c = 0; c < cases; c += 1)
-            {
-                const Tier0Template* template = &tier0_templates[base + c];
-                if (template->integer_reach != 0)
-                {
-                    const int32_t top = depth + template->integer_reach - 3;
-                    integer_top = top > integer_top ? top : integer_top;
-                }
-                if (template->floating_reach != 0)
-                {
-                    const int32_t top = floating + template->floating_reach - 3;
-                    floating_top = top > floating_top ? top : floating_top;
-                }
-                clobbers |= template->clobbers;
-            }
-        }
-    }
-    if (integer_top >= BUSTER_TIER0_INTEGER_DEPTHS || floating_top >= BUSTER_TIER0_FLOATING_DEPTHS)
-    {
-        error = TIER0_ERROR_DEPTH;
-    }
-    frame->integer_top = integer_top;
-    frame->floating_top = floating_top;
-    frame->clobbers = clobbers | tier0_depth_registers(integer_top, floating_top);
-    frame->save_slots = save_slots;
-    frame->fixed_slots = fixed ? 2 : 0;
-    frame->calls = calls;
-    return error;
 }
 
 // Phase 3: each local's home, and the frame. A parameter whose register the body doesn't touch stays in it. The other
@@ -2440,29 +2486,34 @@ _Static_assert(offsetof(Tier0Holes, registers) == BUSTER_TIER0_HOLE_REGISTERS, "
 // The registers around each depth, for the hole blocks: entry d holds the integer stack's registers at d - 2, d - 1 and
 // d, and the floating stack's, as R2, R1, R0, X2, X1 and X0 (0 where the table has none, which no template uses).
 #define BUSTER_TIER0_WINDOWS 32
-static uint8_t tier0_integer_window[BUSTER_TIER0_WINDOWS][4] __attribute__((aligned(64)));
-static uint8_t tier0_floating_window[BUSTER_TIER0_WINDOWS][4] __attribute__((aligned(64)));
+static uint32_t tier0_integer_window[BUSTER_TIER0_WINDOWS] __attribute__((aligned(64)));
+static uint32_t tier0_floating_window[BUSTER_TIER0_WINDOWS] __attribute__((aligned(64)));
 
 static void tier0_build_windows(void)
 {
     for (int32_t d = 0; d < BUSTER_TIER0_WINDOWS; d += 1)
     {
+        uint32_t integer = 0;
+        uint32_t floating = 0;
         for (int32_t k = 0; k < 3; k += 1)
         {
             const int32_t depth = d - 2 + k;
-            tier0_integer_window[d][k] = depth >= 0 && depth < BUSTER_TIER0_INTEGER_DEPTHS ? tier0_integer_depths[depth] : 0;
-            tier0_floating_window[d][k] = depth >= 0 && depth < BUSTER_TIER0_FLOATING_DEPTHS ? (uint8_t)depth : 0;
+            integer |= (uint32_t)(depth >= 0 && depth < BUSTER_TIER0_INTEGER_DEPTHS ? tier0_integer_depths[depth] : 0) << (8 * k);
+            floating |= (uint32_t)(depth >= 0 && depth < BUSTER_TIER0_FLOATING_DEPTHS ? depth : 0) << (8 * k);
         }
-        tier0_integer_window[d][3] = 0;
-        tier0_floating_window[d][3] = 0;
+        tier0_integer_window[d] = integer;
+        tier0_floating_window[d] = floating;
     }
 }
 
-// Entry i's hole block, for its template.
-static Tier0Holes tier0_holes_scalar(const Tier0Function* function, const Tier0Entries* entries, const Tier0Home* homes, uint32_t i, const Tier0Template* template)
+// Entry i's hole block, for its template: K, A, B and the registers around its depths (R2, R1 and R0 in bytes 0 to 2,
+// X2, X1 and X0 in bytes 3 to 5). The bytes no template reads (a home's is_register and padding) are left as they are.
+static Tier0Holes tier0_holes_scalar(const Tier0Function* function, const Tier0Entries* entries, const Tier0Home* homes, uint32_t i, const Tier0TemplateInfo* template)
 {
     Tier0Holes holes;
-    memset(&holes, 0, sizeof(holes));
+    holes.k = 0;
+    holes.a = homes[0];
+    holes.b = homes[0];
     if (template->k_offset != BUSTER_TIER0_NO_OFFSET)
     {
         holes.k = function->values[i - template->k_offset];
@@ -2475,20 +2526,18 @@ static Tier0Holes tier0_holes_scalar(const Tier0Function* function, const Tier0E
     {
         holes.a = homes[function->values[i - template->a_offset]];
     }
-    const uint8_t kind = function->kinds[i];
-    if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
+    if (template->b_offset != BUSTER_TIER0_NO_OFFSET)
+    {
+        holes.b = homes[function->values[i - template->b_offset]];
+    }
+    else if (template->b_own != 0)
     {
         holes.b = homes[function->values[i]];
     }
-    const uint32_t depth = entries->depths[i] < BUSTER_TIER0_WINDOWS ? entries->depths[i] : BUSTER_TIER0_WINDOWS - 1;
-    const uint32_t floating = entries->floating_depths[i] < BUSTER_TIER0_WINDOWS ? entries->floating_depths[i] : BUSTER_TIER0_WINDOWS - 1;
-    for (uint32_t k = 0; k < 3; k += 1)
-    {
-        holes.registers[k] = tier0_integer_window[depth][k];
-        holes.registers[3 + k] = tier0_floating_window[floating][k];
-    }
-    holes.a.is_register = 0;
-    holes.b.is_register = 0;
+    const uint32_t depth = entries->depths[i] & (BUSTER_TIER0_WINDOWS - 1);
+    const uint32_t floating = entries->floating_depths[i] & (BUSTER_TIER0_WINDOWS - 1);
+    const uint64_t registers = (uint64_t)tier0_integer_window[depth] | (uint64_t)tier0_floating_window[floating] << 24;
+    memcpy(holes.registers, &registers, sizeof(registers));
     return holes;
 }
 
@@ -2947,76 +2996,7 @@ static void tier0_emit_epilogue(const Tier0Frame* frame, Tier0Writer* writer)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The passes after expansion
-
-// A CHOICE record's shortest form that keeps its immediate (`value`) and the flags its template reads after it: the
-// record rebuilt for the chosen form (x86_choice_instruction), its fixup flag kept. Its context: whether its rm is a
-// register (and rax), inc and dec allowed, and the live flags.
-static uint16_t tier0_choice_context(const X86Instruction* record, const Tier0RecordSpec* spec)
-{
-    const bool reg = record->mode == BUSTER_X86_REGISTER_DIRECT;
-    uint32_t context = BUSTER_X86_CONTEXT_INC_DEC | spec->live;
-    context |= reg ? BUSTER_X86_CONTEXT_REGISTER : 0;
-    context |= reg && record->rm == X86_REGISTER_RAX ? BUSTER_X86_CONTEXT_ACCUMULATOR : 0;
-    return (uint16_t)context;
-}
-
-static int64_t tier0_choice_value(const Tier0RecordSpec* spec, uint64_t k)
-{
-    return spec->immediate_kind == BUSTER_TIER0_IMMEDIATE_K ? (int64_t)k : (int64_t)spec->immediate;
-}
-
-static void tier0_apply_choice(X86Instruction* record, uint32_t form, int64_t value)
-{
-    if (form != X86_FORM_NONE)
-    {
-        const uint16_t fixup = (uint16_t)(record->form & BUSTER_X86_FORM_FIXUP);
-        *record = x86_choice_instruction(form, *record, value);
-        record->form |= fixup;
-    }
-}
-
-// The template of an entry once the homes are known: a home-dependent slot's case for its homes.
-static uint32_t tier0_resolve_template(const Tier0Function* function, const Tier0Home* homes, uint32_t i, uint16_t slot)
-{
-    uint32_t index = slot & BUSTER_TIER0_SLOT_TEMPLATE;
-    if ((slot & BUSTER_TIER0_SLOT_HOME_DEPENDENT) != 0)
-    {
-        const Tier0Template* first = &tier0_templates[index];
-        const uint8_t kind = function->kinds[i];
-        const bool own = kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
-        const bool a_register = first->a_offset != BUSTER_TIER0_NO_OFFSET && homes[function->values[i - first->a_offset]].is_register;
-        const bool b_register = own && homes[function->values[i]].is_register;
-        index += (a_register ? 1u : 0u) + (b_register ? 2u : 0u);
-    }
-    return index;
-}
-
-// The count of branch and fixup records of the body's templates, for the output's columns.
-static void tier0_count_columns(const Tier0Function* function, const Tier0Entries* entries, uint32_t* branches, uint32_t* references)
-{
-    uint32_t branch_count = 0;
-    uint32_t reference_count = 0;
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        const uint16_t entry = entries->templates[i];
-        if (entry == BUSTER_TIER0_ENTRY_DEFERRED || entry == BUSTER_TIER0_SLOT_DEFERRED)
-        {
-            reference_count += function->kinds[i] == BUSTER_TYPED_CALL ? 1 : 0;
-        }
-        else if (entry != BUSTER_TIER0_ENTRY_ABSORBED)
-        {
-            const Tier0Template* template = &tier0_templates[entry];
-            for (uint32_t r = 0; r < template->length; r += 1)
-            {
-                branch_count += (template->specs[r].flags & (BUSTER_TIER0_RECORD_BRANCH | BUSTER_TIER0_RECORD_END)) != 0 ? 1 : 0;
-                reference_count += (template->specs[r].flags & BUSTER_TIER0_RECORD_FIXUP) != 0 ? 1 : 0;
-            }
-        }
-    }
-    *branches = branch_count;
-    *references = reference_count;
-}
+// The passes after fusion
 
 // The deferred entries are those whose template column says so (a deferred slot, or a template at the wrong depth).
 static bool tier0_is_deferred(uint16_t entry)
@@ -3024,52 +3004,107 @@ static bool tier0_is_deferred(uint16_t entry)
     return entry == BUSTER_TIER0_ENTRY_DEFERRED || entry == BUSTER_TIER0_SLOT_DEFERRED;
 }
 
-// What both paths share once the per-entry columns are filled: the frame's touches, the homes, the frame, each entry's
-// resolved template and length (a deferred entry's counted by its emitter), the prologue's length, and the output's
-// columns pushed from `output`. Returns the error, with code->count and the columns set on success.
-typedef struct Tier0Shared Tier0Shared;
-struct Tier0Shared
+// Selection: each entry's template from its key's slot (ABSORBED for an absorbed entry; DEFERRED for a deferred slot
+// or a template whose fixed registers need another depth; with HOME_DEPENDENT until the homes are known), and what the
+// body touches, into the frame: the depth registers it reaches, the templates' fixed registers, and for a call
+// everything caller-saved, with the call save area's and the fixed slots' sizes. Returns the first entry without a
+// template (the count if none), and sets *error to TIER0_ERROR_DEPTH for depths past the tables.
+static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
 {
-    Tier0Frame frame;
-    Tier0Home* homes;
-    uint32_t* references;
-    uint32_t prologue;
-    uint32_t body;
-};
-
-static Tier0Error tier0_prepare(const Tier0Function* function, Tier0Entries* entries, Tier0Shared* shared, Arena* scratch)
-{
-    Tier0Error error = tier0_touches(function, entries, &shared->frame);
-    const uint32_t locals = function->local_count;
-    shared->homes = BUSTER_ARENA_PUSH_ARRAY(scratch, Tier0Home, locals + 1);
-    shared->references = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, locals + 1);
-    uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, locals + 1);
-    if (error == TIER0_OK && (shared->homes == 0 || shared->references == 0 || order == 0))
+    uint32_t unsupported = function->count;
+    int32_t integer_top = -1;
+    int32_t floating_top = -1;
+    uint32_t clobbers = 0;
+    uint32_t save_slots = 0;
+    bool fixed = false;
+    bool calls = false;
+    for (uint32_t i = 0; i < function->count; i += 1)
     {
-        error = TIER0_ERROR_MEMORY;
-    }
-    if (error == TIER0_OK)
-    {
-        tier0_assign_homes(function, &shared->frame, shared->homes, shared->references, order);
-        tier0_layout_frame(function, &shared->frame, shared->homes, shared->references);
-        for (uint32_t i = 0; i < function->count; i += 1)
+        uint16_t entry = BUSTER_TIER0_ENTRY_ABSORBED;
+        if (!entries->absorbed[i])
         {
-            const uint16_t entry = entries->templates[i];
-            if (entry != BUSTER_TIER0_ENTRY_ABSORBED && !tier0_is_deferred(entry))
+            entry = tier0_slot(entries->key_kinds[i], entries->key_classes[i], entries->variants[i]);
+            const int32_t depth = entries->depths[i];
+            const int32_t floating = entries->floating_depths[i];
+            if (entry == BUSTER_TIER0_SLOT_UNSUPPORTED)
             {
-                entries->templates[i] = (uint16_t)tier0_resolve_template(function, shared->homes, i, entry);
+                unsupported = unsupported == function->count ? i : unsupported;
+            }
+            else if (entry != BUSTER_TIER0_SLOT_DEFERRED)
+            {
+                const Tier0TemplateInfo* info = &tier0_template_infos[entry & BUSTER_TIER0_SLOT_TEMPLATE];
+                if (info->required_depth != BUSTER_TIER0_ANY_DEPTH && info->required_depth != depth)
+                {
+                    entry = BUSTER_TIER0_ENTRY_DEFERRED;
+                }
+                else
+                {
+                    const int32_t top = info->integer_reach != 0 ? depth + info->integer_reach - 3 : -1;
+                    const int32_t floating_reach = info->floating_reach != 0 ? floating + info->floating_reach - 3 : -1;
+                    integer_top = top > integer_top ? top : integer_top;
+                    floating_top = floating_reach > floating_top ? floating_reach : floating_top;
+                    clobbers |= info->clobbers;
+                }
+            }
+            if (tier0_is_deferred(entry))
+            {
+                if (function->kinds[i] == BUSTER_TYPED_CALL)
+                {
+                    const uint32_t call = (uint32_t)function->values[i];
+                    const uint32_t first = function->call_first[call];
+                    uint32_t integer_arguments = 0;
+                    uint32_t floating_arguments = 0;
+                    for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
+                    {
+                        const bool is_floating = tier0_class_floating(function->argument_classes[first + a]);
+                        integer_arguments += is_floating ? 0 : 1;
+                        floating_arguments += is_floating ? 1 : 0;
+                    }
+                    const int32_t below = depth - (int32_t)integer_arguments;
+                    const int32_t floating_below = floating - (int32_t)floating_arguments;
+                    const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? (uint32_t)below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+                    const uint32_t slots = saved + (uint32_t)floating_below;
+                    save_slots = slots > save_slots ? slots : save_slots;
+                    const uint32_t result = tier0_stack(function->classes[i]);
+                    integer_top = result == 1 && below > integer_top ? below : integer_top;
+                    floating_top = result == 2 && floating_below > floating_top ? floating_below : floating_top;
+                    clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL;
+                    calls = true;
+                }
+                else
+                {
+                    // Division and shifts by a register: rax, rdx and rcx, saved around them in the fixed slots.
+                    clobbers |= 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX;
+                    fixed = true;
+                }
             }
         }
-        Tier0Writer counter = { 0, 0, 0, 0 };
-        tier0_emit_prologue(function, &shared->frame, shared->homes, shared->references, &counter);
-        shared->prologue = counter.count;
+        entries->templates[i] = entry;
     }
-    return error;
+    *error = integer_top >= BUSTER_TIER0_INTEGER_DEPTHS || floating_top >= BUSTER_TIER0_FLOATING_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
+    frame->integer_top = integer_top;
+    frame->floating_top = floating_top;
+    frame->clobbers = clobbers | tier0_depth_registers(integer_top, floating_top);
+    frame->save_slots = save_slots;
+    frame->fixed_slots = fixed ? 2 : 0;
+    frame->calls = calls;
+    return unsupported;
 }
 
-// Each entry's length: its template's, a deferred one's as its emitter counts it, none for an absorbed one.
-static void tier0_lengths_scalar(const Tier0Function* function, Tier0Entries* entries, const Tier0Shared* shared)
+// The counts the output's columns need, after the homes: each entry's final template (a home-dependent slot's case
+// for its homes) and length (a deferred entry's as its emitter counts it), and the branch records, references and
+// choice requests.
+typedef struct Tier0Counts Tier0Counts;
+struct Tier0Counts
 {
+    uint32_t branches;
+    uint32_t references;
+    uint32_t choices;
+};
+
+static Tier0Counts tier0_measure(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes)
+{
+    Tier0Counts counts = { 0, 0, 0 };
     for (uint32_t i = 0; i < function->count; i += 1)
     {
         const uint16_t entry = entries->templates[i];
@@ -3077,15 +3112,33 @@ static void tier0_lengths_scalar(const Tier0Function* function, Tier0Entries* en
         if (tier0_is_deferred(entry))
         {
             Tier0Writer counter = { 0, 0, 0, 0 };
-            tier0_emit_deferred(function, entries, &shared->frame, shared->homes, i, &counter);
+            tier0_emit_deferred(function, entries, frame, homes, i, &counter);
             length = counter.count;
+            counts.references += counter.reference_count;
         }
         else if (entry != BUSTER_TIER0_ENTRY_ABSORBED)
         {
-            length = tier0_templates[entry].length;
+            uint32_t index = entry & BUSTER_TIER0_SLOT_TEMPLATE;
+            if ((entry & BUSTER_TIER0_SLOT_HOME_DEPENDENT) != 0)
+            {
+                const Tier0TemplateInfo* first = &tier0_template_infos[index];
+                const uint8_t kind = function->kinds[i];
+                const bool own = kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
+                const bool a_register = first->a_offset != BUSTER_TIER0_NO_OFFSET && homes[function->values[i - first->a_offset]].is_register != 0;
+                const bool b_register = first->b_offset != BUSTER_TIER0_NO_OFFSET ? homes[function->values[i - first->b_offset]].is_register != 0
+                                                                                  : own && homes[function->values[i]].is_register != 0;
+                index += (a_register ? 1u : 0u) + (b_register ? 2u : 0u);
+                entries->templates[i] = (uint16_t)index;
+            }
+            const Tier0TemplateInfo* info = &tier0_template_infos[index];
+            length = info->length;
+            counts.branches += info->branch != 0xff ? 1 : 0;
+            counts.references += info->fixup != 0xff ? 1 : 0;
+            counts.choices += info->choice != 0xff ? 1 : 0;
         }
         entries->lengths[i] = (uint16_t)length;
     }
+    return counts;
 }
 
 // Each entry's first record, after the prologue (the entry past the last is the epilogue's first record).
@@ -3101,61 +3154,128 @@ static void tier0_positions_scalar(const Tier0Function* function, Tier0Entries* 
 }
 
 // The output's columns, pushed from `output`: room for the records and, past them, the vector expansion's last store.
-static bool tier0_push_output(Tier0Code* code, Arena* output, uint32_t records, uint32_t branches, uint32_t references)
+static bool tier0_push_output(Tier0Code* code, Arena* output, uint32_t records, Tier0Counts counts)
 {
     code->records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, (uint64_t)records + BUSTER_TIER0_TEMPLATE_RECORDS);
-    code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)branches + 1);
-    code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)branches + 1);
-    code->references = BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)references + 1);
+    code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
+    code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
+    code->references = BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)counts.references + 1);
     code->count = records;
     return code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0;
 }
 
-// The epilogue, the deferred entries' records and the branch columns and references, in entry order, for either path
-// (the templates' records are written already, and so are their choices).
-static void tier0_finish(const Tier0Function* function, const Tier0Entries* entries, const Tier0Shared* shared, Tier0Code* code)
+// A CHOICE record's context: whether its rm is a register (and rax), inc and dec allowed, and the flags live after it.
+static uint16_t tier0_choice_context(const X86Instruction* record, uint8_t live)
+{
+    const bool reg = record->mode == BUSTER_X86_REGISTER_DIRECT;
+    uint32_t context = BUSTER_X86_CONTEXT_INC_DEC | live;
+    context |= reg ? BUSTER_X86_CONTEXT_REGISTER : 0;
+    context |= reg && record->rm == X86_REGISTER_RAX ? BUSTER_X86_CONTEXT_ACCUMULATOR : 0;
+    return (uint16_t)context;
+}
+
+// The record for a chosen form (x86_choice_instruction), its fixup flag kept; none chosen keeps it as it is.
+static void tier0_apply_choice(X86Instruction* record, uint32_t form, int64_t value)
+{
+    if (form != X86_FORM_NONE)
+    {
+        const uint16_t fixup = (uint16_t)(record->form & BUSTER_X86_FORM_FIXUP);
+        *record = x86_choice_instruction(form, *record, value);
+        record->form |= fixup;
+    }
+}
+
+// The immediates' choice requests, gathered by emission: each CHOICE record's index, row, value and context.
+typedef struct Tier0Choices Tier0Choices;
+struct Tier0Choices
+{
+    uint32_t* records;
+    uint16_t* rows;
+    int64_t* values;
+    uint16_t* contexts;
+    uint16_t* forms;
+    uint32_t count;
+};
+
+// Emission, in entry order: the prologue; each entry's template expanded at its place (`vector`: the compiled bytes,
+// four records in one register with one vpermb and a blend and one 64-byte store; otherwise field by field from the
+// specifications), its choice request, branch and reference, or a deferred entry's records; then the epilogue. A
+// vector store may write past its entry's records: the later entries, deferred ones and the epilogue are written after
+// it, and the output has room for the last.
+static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
+                            Tier0Code* code, Tier0Choices* choices, bool vector)
 {
     Tier0Writer writer = { code->records, 0, code->references, 0 };
-    tier0_emit_prologue(function, &shared->frame, shared->homes, shared->references, &writer);
+    tier0_emit_prologue(function, frame, homes, references, &writer);
     uint32_t branches = 0;
     for (uint32_t i = 0; i < function->count; i += 1)
     {
         const uint16_t entry = entries->templates[i];
+        const uint32_t position = entries->positions[i];
         if (tier0_is_deferred(entry))
         {
-            writer.count = entries->positions[i];
-            tier0_emit_deferred(function, entries, &shared->frame, shared->homes, i, &writer);
+            writer.count = position;
+            tier0_emit_deferred(function, entries, frame, homes, i, &writer);
             code->deferred += 1;
         }
-        else if (entry != BUSTER_TIER0_ENTRY_ABSORBED)
+        else if (entry != BUSTER_TIER0_ENTRY_ABSORBED && tier0_template_infos[entry].length != 0)
         {
-            const Tier0Template* template = &tier0_templates[entry];
-            for (uint32_t r = 0; r < template->length; r += 1)
+            const Tier0TemplateInfo* info = &tier0_template_infos[entry];
+            const Tier0Holes holes = tier0_holes_scalar(function, entries, homes, i, info);
+            if (vector)
             {
-                const uint8_t flags = template->specs[r].flags;
-                if ((flags & (BUSTER_TIER0_RECORD_BRANCH | BUSTER_TIER0_RECORD_END)) != 0)
+                // The hole block in a register (from its four quadwords, without a trip through memory), the
+                // template's indices and bytes in one load.
+                uint64_t a = 0;
+                uint64_t b = 0;
+                uint64_t registers = 0;
+                memcpy(&a, &holes.a, sizeof(a));
+                memcpy(&b, &holes.b, sizeof(b));
+                memcpy(&registers, holes.registers, sizeof(registers));
+                const __m512i block = _mm512_castsi256_si512(_mm256_set_epi64x((int64_t)registers, (int64_t)b, (int64_t)a, (int64_t)holes.k));
+                const __m512i compiled = _mm512_load_si512(tier0_compiled[entry].bytes);
+                const __m512i patched = _mm512_permutexvar_epi8(compiled, block);
+                _mm512_storeu_si512(code->records + position, _mm512_mask_blend_epi8(info->mask, compiled, patched));
+            }
+            else
+            {
+                const Tier0Template* template = &tier0_templates[entry];
+                for (uint32_t r = 0; r < info->length; r += 1)
                 {
-                    const uint32_t target = (flags & BUSTER_TIER0_RECORD_END) != 0 ? function->count : (uint32_t)function->values[i];
-                    code->branches[branches] = entries->positions[i] + r;
-                    code->targets[branches] = entries->positions[target];
-                    branches += 1;
+                    code->records[position + r] = tier0_record_scalar(&template->specs[r], &holes);
                 }
-                if ((flags & BUSTER_TIER0_RECORD_FIXUP) != 0)
-                {
-                    code->references[writer.reference_count] = (LinkReference){
-                        .instruction = entries->positions[i] + r,
-                        .field = X86_FIXUP_DISPLACEMENT,
-                        .kind = BUSTER_LINK_FIXUP_PC32,
-                        .target = (SymbolId)function->values[i],
-                        .addend = 0,
-                    };
-                    writer.reference_count += 1;
-                }
+            }
+            if (info->choice != 0xff)
+            {
+                const uint32_t at = position + info->choice;
+                choices->records[choices->count] = at;
+                choices->rows[choices->count] = info->choice_row;
+                choices->values[choices->count] = info->choice_static != 0 ? (int64_t)info->choice_immediate : (int64_t)holes.k;
+                choices->contexts[choices->count] = tier0_choice_context(&code->records[at], info->choice_live);
+                choices->count += 1;
+            }
+            if (info->branch != 0xff)
+            {
+                const uint32_t target = info->end != 0 ? function->count : (uint32_t)function->values[i];
+                code->branches[branches] = position + info->branch;
+                code->targets[branches] = entries->positions[target];
+                branches += 1;
+            }
+            if (info->fixup != 0xff)
+            {
+                code->references[writer.reference_count] = (LinkReference){
+                    .instruction = position + info->fixup,
+                    .field = X86_FIXUP_DISPLACEMENT,
+                    .kind = BUSTER_LINK_FIXUP_PC32,
+                    .target = (SymbolId)function->values[i],
+                    .addend = 0,
+                };
+                writer.reference_count += 1;
             }
         }
     }
     writer.count = entries->positions[function->count];
-    tier0_emit_epilogue(&shared->frame, &writer);
+    tier0_emit_epilogue(frame, &writer);
     code->branch_count = branches;
     code->reference_count = writer.reference_count;
 }
@@ -3180,32 +3300,91 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
            entries->positions != 0;
 }
 
-// The scalar expansion and choice: each template's records from its specifications, then each CHOICE record's form.
-static void tier0_expand_scalar(const Tier0Function* function, const Tier0Entries* entries, const Tier0Shared* shared, Tier0Code* code)
+static void tier0_vector_positions(const Tier0Function* function, Tier0Entries* entries, uint32_t prologue);
+
+// What both paths share once the fusion and the depths are in the entries' columns: selection, the homes and the
+// frame, measuring, positions (the vector path's prefix sum or the scalar one), the output, emission (vector or
+// scalar expansion) and the immediates' choice (x86_choose_forms or its twin, one request at a time).
+static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* entries, Arena* scratch, Arena* output, Tier0Code* code, bool vector)
 {
-    for (uint32_t i = 0; i < function->count; i += 1)
+    Tier0Frame frame;
+    memset(&frame, 0, sizeof(frame));
+    Tier0Error error = TIER0_OK;
+    const uint32_t unsupported = tier0_select(function, entries, &frame, &error);
+    if (unsupported != function->count)
     {
-        const uint16_t entry = entries->templates[i];
-        if (entry != BUSTER_TIER0_ENTRY_ABSORBED && !tier0_is_deferred(entry))
+        error = TIER0_ERROR_UNSUPPORTED;
+        code->node = unsupported;
+    }
+    const uint32_t locals = function->local_count;
+    Tier0Home* homes = BUSTER_ARENA_PUSH_ARRAY(scratch, Tier0Home, locals + 1);
+    uint32_t* references = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, locals + 1);
+    uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, locals + 1);
+    if (error == TIER0_OK && (homes == 0 || references == 0 || order == 0))
+    {
+        error = TIER0_ERROR_MEMORY;
+    }
+    Tier0Choices choices;
+    memset(&choices, 0, sizeof(choices));
+    if (error == TIER0_OK)
+    {
+        tier0_assign_homes(function, &frame, homes, references, order);
+        tier0_layout_frame(function, &frame, homes, references);
+        const Tier0Counts counts = tier0_measure(function, entries, &frame, homes);
+        Tier0Writer counter = { 0, 0, 0, 0 };
+        tier0_emit_prologue(function, &frame, homes, references, &counter);
+        if (vector)
         {
-            const Tier0Template* template = &tier0_templates[entry];
-            const Tier0Holes holes = tier0_holes_scalar(function, entries, shared->homes, i, template);
-            for (uint32_t r = 0; r < template->length; r += 1)
-            {
-                const Tier0RecordSpec* spec = &template->specs[r];
-                X86Instruction record = tier0_record_scalar(spec, &holes);
-                if ((spec->flags & BUSTER_TIER0_RECORD_CHOICE) != 0)
-                {
-                    const int64_t value = tier0_choice_value(spec, holes.k);
-                    const uint16_t context = tier0_choice_context(&record, spec);
-                    uint16_t form = X86_FORM_NONE;
-                    x86_choose_forms_scalar(&spec->row, &value, &context, 1, &form);
-                    tier0_apply_choice(&record, form, value);
-                }
-                code->records[entries->positions[i] + r] = record;
-            }
+            tier0_vector_positions(function, entries, counter.count);
+        }
+        else
+        {
+            tier0_positions_scalar(function, entries, counter.count);
+        }
+        counter.count = 0;
+        tier0_emit_epilogue(&frame, &counter);
+        choices.records = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, counts.choices + 1);
+        choices.rows = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 1);
+        choices.values = BUSTER_ARENA_PUSH_ARRAY(scratch, int64_t, counts.choices + 1);
+        choices.contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 1);
+        choices.forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 1);
+        const bool room = choices.records != 0 && choices.rows != 0 && choices.values != 0 && choices.contexts != 0 && choices.forms != 0;
+        if (!room || !tier0_push_output(code, output, entries->positions[function->count] + counter.count, counts))
+        {
+            error = TIER0_ERROR_MEMORY;
         }
     }
+    if (error == TIER0_OK)
+    {
+        tier0_emit_body(function, entries, &frame, homes, references, code, &choices, vector);
+        if (vector)
+        {
+            x86_choose_forms(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
+        }
+        else
+        {
+            x86_choose_forms_scalar(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
+        }
+        for (uint32_t q = 0; q < choices.count; q += 1)
+        {
+            tier0_apply_choice(&code->records[choices.records[q]], choices.forms[q], choices.values[q]);
+        }
+    }
+    return error;
+}
+
+// Ends a compilation: on an error, what was pushed to `output` is popped and only the error and its entry are kept.
+static Tier0Code tier0_conclude(Tier0Code code, Tier0Error error, Arena* output, uint64_t output_length)
+{
+    if (error != TIER0_OK)
+    {
+        arena_pop_to(output, output_length);
+        const uint32_t node = code.node;
+        memset(&code, 0, sizeof(code));
+        code.node = node;
+    }
+    code.error = error;
+    return code;
 }
 
 static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* output)
@@ -3218,49 +3397,15 @@ static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* outp
     const uint32_t count = function->count;
     uint64_t* labels = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)count / 64 + 2);
     Tier0Error error = labels != 0 && tier0_push_entries(&entries, scratch.arena, count) ? TIER0_OK : TIER0_ERROR_MEMORY;
-    Tier0Shared shared;
-    memset(&shared, 0, sizeof(shared));
     if (error == TIER0_OK)
     {
         memset(labels, 0, ((uint64_t)count / 64 + 2) * sizeof(uint64_t));
         tier0_labels(function, labels);
         tier0_fuse_scalar(function, labels, &entries);
         tier0_depths_scalar(function, &entries);
-        const uint32_t unsupported = tier0_templates_scalar(function, &entries);
-        if (unsupported != count)
-        {
-            error = TIER0_ERROR_UNSUPPORTED;
-            code.node = unsupported;
-        }
+        error = tier0_generate(function, &entries, scratch.arena, output, &code, false);
     }
-    error = error == TIER0_OK ? tier0_prepare(function, &entries, &shared, scratch.arena) : error;
-    if (error == TIER0_OK)
-    {
-        tier0_lengths_scalar(function, &entries, &shared);
-        tier0_positions_scalar(function, &entries, shared.prologue);
-        Tier0Writer counter = { 0, 0, 0, 0 };
-        tier0_emit_epilogue(&shared.frame, &counter);
-        uint32_t branches = 0;
-        uint32_t references = 0;
-        tier0_count_columns(function, &entries, &branches, &references);
-        if (!tier0_push_output(&code, output, entries.positions[count] + counter.count, branches, references))
-        {
-            error = TIER0_ERROR_MEMORY;
-        }
-    }
-    if (error == TIER0_OK)
-    {
-        tier0_expand_scalar(function, &entries, &shared, &code);
-        tier0_finish(function, &entries, &shared, &code);
-    }
-    if (error != TIER0_OK)
-    {
-        arena_pop_to(output, output_length);
-        const uint32_t node = code.node;
-        memset(&code, 0, sizeof(code));
-        code.node = node;
-    }
-    code.error = error;
+    code = tier0_conclude(code, error, output, output_length);
     scratch_end(scratch);
     return code;
 }
@@ -3691,7 +3836,7 @@ static uint8_t tier0_properties_of(uint32_t kind, uint32_t class)
     properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_RMW_CONST) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_RMW_CONST : 0;
     properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_RMW_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_RMW_HOME : 0;
     bool branch = true;
-    for (uint32_t v = 0; v < 4; v += 1)
+    for (uint32_t v = 0; v <= BUSTER_TIER0_VARIANT_HOME_HOME; v += 1)
     {
         branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_BRANCH_FALSE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
         branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_BRANCH_TRUE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
@@ -3742,6 +3887,12 @@ static bool tier0_build_vector_tables(void)
         for (uint32_t class = 0; class < BUSTER_TYPED_CLASS_LIMIT; class += 1)
         {
             row[class] = kind < BUSTER_TYPED_KINDS && kind != BUSTER_TYPED_CONVERT ? tier0_properties_of(kind, class) : 0;
+            // A compare takes two locals exactly where it takes a local and a constant: the vector path reads one bit.
+            if ((flags & BUSTER_TIER0_KIND_COMPARE) != 0)
+            {
+                const bool home_home = tier0_slot(kind, class, BUSTER_TIER0_VARIANT_HOME_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+                valid &= home_home == ((row[class] & BUSTER_TIER0_PROPERTY_HOME_CONST) != 0);
+            }
         }
         uint32_t found = row_count;
         for (uint32_t r = 0; r < row_count && found == row_count; r += 1)
@@ -4012,11 +4163,12 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const uint64_t home_const_kind = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_HOME_CONST));
         const uint64_t home_const = lanes & home_const_kind & ~labels & ~labels_1 & constant_1 & local_2 & integer_1 & (~wide | fits_1) & property_home_const &
                                     (block != 0 ? ~0ull : ~3ull);
+        const uint64_t home_home = lanes & compare & ~labels & ~labels_1 & local_1 & local_2 & property_home_const & (block != 0 ? ~0ull : ~3ull);
         const uint64_t leaf_constant = constant_1 & (integer_1 | discard) & fits & property_const;
         const uint64_t leaf_home = local_1 & property_home;
-        const uint64_t leaf = lanes & has_last & ~labels & (leaf_constant | leaf_home) & ~home_const & (block != 0 ? ~0ull : ~1ull);
+        const uint64_t leaf = lanes & has_last & ~labels & (leaf_constant | leaf_home) & ~home_const & ~home_home & (block != 0 ? ~0ull : ~1ull);
         bits->leaf[block] = leaf;
-        bits->home_const[block] = home_const;
+        bits->home_const[block] = home_const | home_home;
         // The variants: the entry's own, then the leaf fusion's.
         __m512i variant = _mm512_setzero_si512();
         const uint64_t floating_zero = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CONST)) & _mm512_cmpeq_epi8_mask(stack, _mm512_set1_epi8(2)) &
@@ -4032,6 +4184,7 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         variant = _mm512_mask_mov_epi8(variant, leaf & leaf_home & ~convert, tier0_variant(BUSTER_TIER0_VARIANT_HOME));
         variant = _mm512_mask_mov_epi8(variant, leaf & leaf_home & convert, _mm512_or_si512(classes_1, tier0_variant(BUSTER_TIER0_VARIANT_CONVERT_HOME)));
         variant = _mm512_mask_mov_epi8(variant, home_const, tier0_variant(BUSTER_TIER0_VARIANT_HOME_CONST));
+        variant = _mm512_mask_mov_epi8(variant, home_home, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME));
         _mm512_mask_storeu_epi8(entries->variants + first, lanes, variant);
         _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes, kinds);
         _mm512_mask_storeu_epi8(entries->key_classes + first, lanes, key_class);
@@ -4113,7 +4266,7 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const __m512i compare_row = tier0_lookup(tier0_vector_rows, kinds_1);
         const __m512i compare_properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(compare_row, 4), key_classes_1));
         const uint64_t compare_1 = _mm512_test_epi8_mask(flags_1, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE));
-        const uint64_t compare_fusable = _mm512_cmple_epu8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_HOME_CONST)) &
+        const uint64_t compare_fusable = _mm512_cmple_epu8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME)) &
                                          _mm512_test_epi8_mask(compare_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_BRANCH));
         const uint64_t fused_branch = lanes & valid_1 & branch & ~labels & compare_1 & compare_fusable;
         // x = x op v.
@@ -4261,90 +4414,6 @@ static void tier0_vector_positions(const Tier0Function* function, Tier0Entries* 
     entries->positions[count] = carry;
 }
 
-// Copy and patch: each entry's template, four records in one register, its bytes taken from its 32-byte hole block
-// where the template has a hole (vpermb) and from the template elsewhere (a blend), stored at its place with one 64-byte
-// store. The store may write past the entry's records: entries are written in order, so the next entry's store (or the
-// deferred entries' and the epilogue's records, written after) overwrite them, and the output has room for the last.
-static void tier0_vector_expand(const Tier0Function* function, const Tier0Entries* entries, const Tier0Shared* shared, Tier0Code* code)
-{
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        const uint16_t entry = entries->templates[i];
-        if (entry != BUSTER_TIER0_ENTRY_ABSORBED && !tier0_is_deferred(entry) && tier0_templates[entry].length != 0)
-        {
-            const Tier0Template* template = &tier0_templates[entry];
-            const Tier0Holes holes = tier0_holes_scalar(function, entries, shared->homes, i, template);
-            const __m512i block = _mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*)&holes));
-            const __m512i patched = _mm512_permutexvar_epi8(_mm512_loadu_si512(template->holes), block);
-            const __m512i record = _mm512_mask_blend_epi8(template->mask, _mm512_load_si512(template->bytes), patched);
-            _mm512_storeu_si512(code->records + entries->positions[i], record);
-        }
-    }
-}
-
-// The immediates' choice for the vector path: every CHOICE record's row, value and context gathered into columns, one
-// x86_choose_forms over them all, and each record rebuilt for its form.
-static Tier0Error tier0_vector_choose(const Tier0Function* function, const Tier0Entries* entries, const Tier0Shared* shared, Tier0Code* code, Arena* scratch)
-{
-    uint32_t requests = 0;
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        const uint16_t entry = entries->templates[i];
-        if (entry != BUSTER_TIER0_ENTRY_ABSORBED && !tier0_is_deferred(entry))
-        {
-            const Tier0Template* template = &tier0_templates[entry];
-            for (uint32_t r = 0; r < template->length; r += 1)
-            {
-                requests += (template->specs[r].flags & BUSTER_TIER0_RECORD_CHOICE) != 0 ? 1 : 0;
-            }
-        }
-    }
-    uint16_t* rows = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, requests + 1);
-    int64_t* values = BUSTER_ARENA_PUSH_ARRAY(scratch, int64_t, requests + 1);
-    uint16_t* contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, requests + 1);
-    uint32_t* records = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, requests + 1);
-    uint16_t* forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, requests + 1);
-    Tier0Error error = rows != 0 && values != 0 && contexts != 0 && records != 0 && forms != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
-    if (error == TIER0_OK)
-    {
-        uint32_t request = 0;
-        for (uint32_t i = 0; i < function->count; i += 1)
-        {
-            const uint16_t entry = entries->templates[i];
-            if (entry != BUSTER_TIER0_ENTRY_ABSORBED && !tier0_is_deferred(entry))
-            {
-                const Tier0Template* template = &tier0_templates[entry];
-                uint64_t k = 0;
-                bool k_known = false;
-                for (uint32_t r = 0; r < template->length; r += 1)
-                {
-                    const Tier0RecordSpec* spec = &template->specs[r];
-                    if ((spec->flags & BUSTER_TIER0_RECORD_CHOICE) != 0)
-                    {
-                        if (!k_known)
-                        {
-                            k = tier0_holes_scalar(function, entries, shared->homes, i, template).k;
-                            k_known = true;
-                        }
-                        const uint32_t at = entries->positions[i] + r;
-                        rows[request] = spec->row;
-                        values[request] = tier0_choice_value(spec, k);
-                        contexts[request] = tier0_choice_context(&code->records[at], spec);
-                        records[request] = at;
-                        request += 1;
-                    }
-                }
-            }
-        }
-        x86_choose_forms(rows, values, contexts, requests, forms);
-        for (uint32_t q = 0; q < requests; q += 1)
-        {
-            tier0_apply_choice(&code->records[records[q]], forms[q], values[q]);
-        }
-    }
-    return error;
-}
-
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 {
     Tier0Code code;
@@ -4372,53 +4441,15 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
     }
     bits.sib_log2 = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)blocks * 64 + 64);
     Tier0Error error = pushed && bits.sib_log2 != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
-    Tier0Shared shared;
-    memset(&shared, 0, sizeof(shared));
     if (error == TIER0_OK)
     {
         tier0_vector_labels(function, bits.labels);
         tier0_vector_values(function, &bits);
         tier0_vector_fuse(function, &bits, &entries);
         tier0_vector_depths(function, &bits, &entries);
-        const uint32_t unsupported = tier0_templates_scalar(function, &entries);
-        if (unsupported != count)
-        {
-            error = TIER0_ERROR_UNSUPPORTED;
-            code.node = unsupported;
-        }
+        error = tier0_generate(function, &entries, scratch.arena, output, &code, true);
     }
-    error = error == TIER0_OK ? tier0_prepare(function, &entries, &shared, scratch.arena) : error;
-    if (error == TIER0_OK)
-    {
-        tier0_lengths_scalar(function, &entries, &shared);
-        tier0_vector_positions(function, &entries, shared.prologue);
-        Tier0Writer counter = { 0, 0, 0, 0 };
-        tier0_emit_epilogue(&shared.frame, &counter);
-        uint32_t branches = 0;
-        uint32_t references = 0;
-        tier0_count_columns(function, &entries, &branches, &references);
-        if (!tier0_push_output(&code, output, entries.positions[count] + counter.count, branches, references))
-        {
-            error = TIER0_ERROR_MEMORY;
-        }
-    }
-    if (error == TIER0_OK)
-    {
-        tier0_vector_expand(function, &entries, &shared, &code);
-        error = tier0_vector_choose(function, &entries, &shared, &code, scratch.arena);
-    }
-    if (error == TIER0_OK)
-    {
-        tier0_finish(function, &entries, &shared, &code);
-    }
-    if (error != TIER0_OK)
-    {
-        arena_pop_to(output, output_length);
-        const uint32_t node = code.node;
-        memset(&code, 0, sizeof(code));
-        code.node = node;
-    }
-    code.error = error;
+    code = tier0_conclude(code, error, output, output_length);
     scratch_end(scratch);
     return code;
 }
