@@ -925,9 +925,9 @@ static const PPTestCase pp_test_cases[] = {
     // Character constants in #if are unsigned with -funsigned-char (or -fno-signed-char), and a multi-character one's
     // first byte isn't sign-extended (#281).
     { "-funsigned-char in #if", "#if '\\xff' == 255 && 'a' - 'b' > 0 && -'\\x01' > 0 && '\\377\\377' == 65535 && '\\377abc' > 0\nyes\n#endif\n",
-      0, "c17", "yes\n", false, 0, "-fsigned-char -fno-signed-char", 0 },
+      0, "c17", "yes\n", false, 1, "-fsigned-char -fno-signed-char", 0 },
     { "signed char in #if", "#if '\\xff' == -1 && 'a' - 'b' < 0 && '\\377\\377' == 65535 && '\\377abc' < 0 && 'abcde' == 0x62636465\nyes\n#endif\n",
-      0, "c17", "yes\n", false, 0, "-funsigned-char -fno-unsigned-char", 0 },
+      0, "c17", "yes\n", false, 3, "-funsigned-char -fno-unsigned-char", 0 },
     // c89 lexes neither digraphs nor "//" comments, as clang's -E has it: "%:define" is no directive, a digraph is two
     // punctuators ("<%=" is '<' and "%=", and "<::>" '<', "::" and '>'), and "//" two slashes, of which the second starts
     // a block comment before a '*'. Pasting a digraph's characters or "//" forms no token (#288).
