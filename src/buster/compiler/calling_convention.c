@@ -911,8 +911,8 @@ static uint8_t abi_canonical_alignment_log2(const AbiTable* abi, const TypeTable
 // a union iN for N the smaller of its width and its type's bits rounded up to bytes (lowerUnion's getStorageType, an
 // i128 for 121 to 128 bits); in a struct, as aligned as its type, unless its run of bit-fields is wider than an
 // eightbyte (abi_storage takes the run's unit from abi_bit_field_run; clang's smaller units, which this doesn't work
-// out, are integers no wider than an eightbyte). A flexible array member (`open`), whose type is never classified, is
-// an array of no elements: its element's storage, never EMPTY. `bytes` is its size there.
+// out, are integers no wider than an eightbyte: INEXACT). A flexible array member (`open`), whose type is never
+// classified, is an array of no elements: its element's storage, never EMPTY. `bytes` is its size there.
 static uint8_t abi_member_storage(const AbiTable* abi, const TypeTable* table, uint32_t member, bool in_union, bool open, uint64_t* bytes)
 {
     const uint32_t resolved = abi_resolved_index(table, table->members.type[member]);
@@ -1182,7 +1182,7 @@ static uint32_t abi_union_storage_member(const AbiTable* abi, const TypeTable* t
 
 // clang's LLVM type for a type whose members' are in place (AbiTable.storage), from CGRecordLowering and LLVM's
 // x86-64 data layout: a 128-bit integer is an i128, aligned to 16, and so is a _BitInt of 65 to 128 bits in memory (a
-// wider one is an integer aligned to 16 too); a struct's storage at offset 0 is its first member's there with a size
+// wider one: below); a struct's storage at offset 0 is its first member's there with a size
 // (for a bit-field, its run's unit: abi_bit_field_run), and it is aligned to its members' largest alignment unless a
 // member is off its own or the size isn't a multiple of it (determinePacked: a packed struct, aligned to 1); a union's
 // storage is its most aligned and then largest member's, the first of equals (lowerUnion), packed if the size isn't a
@@ -1194,7 +1194,9 @@ static uint32_t abi_union_storage_member(const AbiTable* abi, const TypeTable* t
 // (abi_wide_alignment); and it is never EMPTY, which takes a size of 0. So does a record with a flexible array member
 // and a size, MEMORY, its members maybe not classified yet; one of no size waits for them, since an _Atomic of it takes
 // its alignment as its LLVM size (abi_copy_bytes). A type aligned past the 2^15 the storage holds is INEXACT too (LLVM
-// aligns a vector as large as itself, so one of 64 KB or more), and so is a record holding an INEXACT type.
+// aligns a vector as large as itself, so one of 64 KB or more), and so is a record holding an INEXACT type. A struct
+// with a bit-field run of an eightbyte or less is INEXACT until its unit is modeled. A wide _BitInt is an integer
+// aligned to 16 for a size divisible by 16, and otherwise an array of its bytes, aligned to 1 (ConvertTypeForMem).
 static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const uint8_t kind = table->types.kind[index];
@@ -1209,7 +1211,7 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
     }
     else if (kind == BUSTER_TYPE_KIND_BIT_INT)
     {
-        result = size <= 8 ? (uint8_t)__builtin_ctzll(size) : (uint8_t)(4 | (size == 16 ? BUSTER_ABI_STORAGE_I128 : 0));
+        result = size <= 8 ? (uint8_t)__builtin_ctzll(size) : (size & 15) != 0 ? 0 : (uint8_t)(4 | (size == 16 ? BUSTER_ABI_STORAGE_I128 : 0));
     }
     else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || kind == BUSTER_TYPE_KIND_COMPLEX || kind == BUSTER_TYPE_KIND_ENUM ||
              kind == BUSTER_TYPE_KIND_ATOMIC)
@@ -1250,7 +1252,12 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
             uint8_t storage = member == open ? abi_open_storage(abi, table, member, in_union, &bytes) : abi_member_storage(abi, table, member, in_union, false, &bytes);
             // A struct's bit-fields share their run's unit when it is wider than an eightbyte.
             const bool in_run = !in_union && bit_field && !zero_width;
-            run_storage = in_run && member >= run_end ? abi_bit_field_run(abi, table, member, end, size, &run_end) : run_storage;
+            if (in_run && member >= run_end)
+            {
+                run_storage = abi_bit_field_run(abi, table, member, end, size, &run_end);
+                // A run of an eightbyte or less: clang's smaller unit, which this doesn't work out.
+                inexact |= run_storage == UINT8_MAX ? BUSTER_ABI_STORAGE_INEXACT : 0;
+            }
             storage = in_run && run_storage != UINT8_MAX ? run_storage : storage;
             empty = empty && (zero_width || (!bit_field && (storage & BUSTER_ABI_STORAGE_EMPTY) != 0));
             inexact |= storage & BUSTER_ABI_STORAGE_INEXACT;
@@ -1531,6 +1538,14 @@ static uint32_t abi_value_type(const TypeTable* table, uint32_t index)
     return value;
 }
 
+// Whether a vector's element is bool as written (clang's isExtVectorBoolType): the builtin bool, which clang stores as
+// a bit of an integer, and not an enum of bool, whose vector LLVM has as <N x i1>.
+static bool abi_is_bool_vector(const TypeTable* table, uint32_t vector)
+{
+    const uint32_t element = abi_resolved_index(table, table->types.base[vector]);
+    return table->types.kind[element] == BUSTER_TYPE_KIND_INTEGER && table->types.code[element] == BUSTER_TYPE_CODE_BOOL;
+}
+
 // A vector's element as LLVM has it: an enum's integer type.
 static uint32_t abi_vector_element(const TypeTable* table, uint32_t vector)
 {
@@ -1547,7 +1562,8 @@ static uint32_t abi_vector_element(const TypeTable* table, uint32_t vector)
 // bytes, whose halves it splits as it never does an i128 (<1 x i128>, <1 x _BitInt(128)>). clang stores a vector of
 // bools as an integer of its bits, at least 8 (ConvertTypeForMem), and passes an _Atomic one as that: a general register
 // up to 64 bits, two halves past them (an i65 to an i127 isn't an i128), and an i128 for 128 bits. One that isn't _Atomic
-// is a vector, <N x i1> (abi_result reaches it as one MEMORY by its size).
+// is a vector, <N x i1> (abi_result reaches it as one MEMORY by its size), and so is any of an enum of bool
+// (abi_is_bool_vector).
 static uint32_t abi_value_class(const TypeTable* table, uint32_t index)
 {
     const uint32_t value = abi_value_type(table, index);
@@ -1556,7 +1572,7 @@ static uint32_t abi_value_class(const TypeTable* table, uint32_t index)
     const uint8_t kind = table->types.kind[element];
     const uint64_t count = table->types.extent[value];
     const bool atomic = table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC;
-    const bool bits = atomic && vector && kind == BUSTER_TYPE_KIND_INTEGER && table->types.code[element] == BUSTER_TYPE_CODE_BOOL;
+    const bool bits = atomic && vector && abi_is_bool_vector(table, value);
     const bool single = vector && count == 1 && !bits;
     const bool wide_integer = (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && table->types.size[element] == 16;
     uint32_t result = BUSTER_ABI_VALUE_GENERAL;
@@ -1585,7 +1601,9 @@ static uint32_t abi_value_class(const TypeTable* table, uint32_t index)
 // holds; one of less than 16 bytes whose length isn't a power of two, but of 16-bit floating elements (an xmm register,
 // X86's v8f16): LLVM has no vector type of the next power of two (<4 x i8>, <8 x i8>, <4 x i16>), and passes each
 // element as a value of its own (getVectorTypeBreakdown); and an integer of more than 128 bits, a vector of one _BitInt
-// of more or of more than 128 bools.
+// of more or of more than 128 bools. A vector of an enum of bool is <N x i1>, which X86 passes in one vector register
+// for N a power of two up to 16, and 32 with registers of 32 bytes (v64i1 goes in two ymm halves with AVX-512), and
+// otherwise as its elements one by one.
 __attribute__((cold, noinline)) static bool abi_value_splits(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const uint32_t value = abi_value_type(table, index);
@@ -1599,7 +1617,8 @@ __attribute__((cold, noinline)) static bool abi_value_splits(const AbiTable* abi
         const uint64_t element_size = table->types.size[element];
         const uint64_t size = table->types.size[value];
         const uint64_t count = table->types.extent[value];
-        const bool bits = kind == BUSTER_TYPE_KIND_INTEGER && code == BUSTER_TYPE_CODE_BOOL;
+        const bool bits = abi_is_bool_vector(table, value);
+        const bool enum_bits = !bits && kind == BUSTER_TYPE_KIND_INTEGER && code == BUSTER_TYPE_CODE_BOOL;
         const bool half = kind == BUSTER_TYPE_KIND_FLOATING && (code == BUSTER_TYPE_CODE_FLOAT16 || code == BUSTER_TYPE_CODE_BF16 || code == BUSTER_TYPE_CODE_HALF);
         const bool power = (count & (count - 1)) == 0;
         if (bits)
@@ -1609,6 +1628,10 @@ __attribute__((cold, noinline)) static bool abi_value_splits(const AbiTable* abi
         else if (count == 1)
         {
             result = element_size > 16;
+        }
+        else if (enum_bits)
+        {
+            result = !power || size > BUSTER_ABI_REGISTER_BYTES * 2 || size > abi->vector_bytes;
         }
         else
         {

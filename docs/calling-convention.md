@@ -175,8 +175,10 @@ members' own:
   and `STORAGE_EMPTY` for a record clang's layout counts empty
   (`isEmptyRecordForLayout`: each member a zero-width bit-field or of such a
   record's type). An `__int128` is an `i128` aligned to 16, and so is a
-  `_BitInt` of 65 to 128 bits as LLVM stores it (a wider one is aligned to 16
-  too). A struct's storage at offset 0 is its first member's there, and the
+  `_BitInt` of 65 to 128 bits as LLVM stores it; a wider one is an integer of
+  its size, aligned to 16, where that is a multiple of 16 bytes, and otherwise
+  an array of its bytes, aligned to 1 (`_BitInt(129)` is `[24 x i8]`). A
+  struct's storage at offset 0 is its first member's there, and the
   struct is aligned to its members' largest alignment unless `determinePacked`
   packs it (a member off its own alignment, or a size that isn't a multiple of
   it). A struct's bit-fields share access units (`accumulateBitFields`): a run
@@ -187,7 +189,9 @@ members' own:
   otherwise an array of its bytes (`abi_bit_field_run`). So `struct { unsigned
   __int128 x : 65; }` stores an `i128`, and packed, or followed by a `char` or
   an `int[0]`, a `[9 x i8]`; a run's narrower units are left as its
-  bit-fields' types are aligned. A union is stored as the member LLVM aligns
+  bit-fields' types are aligned, which LLVM's units may not be (`struct { int
+  a : 3; }` is `{ i8, [3 x i8] }`, aligned to 1). A union is stored as the
+  member LLVM aligns
   most, then the largest, the first of equals
   (`CGRecordLowering::lowerUnion`); a bit-field there is an `iN` of its width,
   or of its type's bits if fewer, rounded up to bytes (`getIntNType`: 121 to
@@ -975,7 +979,12 @@ and has a fixture:
   clang's atomic loads of most of them (every width that isn't 8, 16, 32, 64 or
   128 bits) crash its instruction selection, so a caller clang compiles can't
   pass one. Its callee compiles. A vector of bools that isn't `_Atomic` stays
-  `<N x i1>`, a vector (see "Next steps").
+  `<N x i1>`, a vector (see "Next steps"), and so does any vector of an enum
+  of bool, since clang's `isExtVectorBoolType` reads the element as written
+  (`abi_is_bool_vector`). X86 passes an `_Atomic` one in a vector register
+  for 2 to 16 elements, a power of two, and 32 with 32-byte registers, and
+  otherwise breaks it into its elements (two ymm halves for 64 with
+  AVX-512), which the module refuses (`UNSUPPORTED`).
 
 ## Where GCC passes otherwise
 
