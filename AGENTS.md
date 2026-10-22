@@ -2051,9 +2051,10 @@ others, its measurements are informational.
 ## Foreign tests
 
 `./build/compiler test-foreign [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 0.5 s on the 9700X, and 1.0 s with
-`--cross-check`) checks `foreign.c`. Every resolution runs by both paths and
-with groups of 1, 2, 3 and 8 lanes, with partitions of about 16 records
+[--cross-check] [--keep]` (about 2.4 s on the 9700X, and 2.9 s with
+`--cross-check`, 1.7 s of each the slow lanes' pauses below) checks
+`foreign.c`. Every resolution runs by both paths and with groups of 1, 2, 3
+and 8 lanes, with partitions of about 16 records
 (`ForeignCommand.partition_records`) so that the cases' few records spread
 over every lane, which must describe it byte for byte alike: the loaded
 objects, every name's resolution, winner and counts, every symbol's name id
@@ -2112,13 +2113,13 @@ and every COMDAT group's fate.
   object, a script that doesn't parse, a `-l` name no directory has, a missing
   file, a FIFO (refused, not waited on), an input of four bytes (the ELF
   magic alone) and an unknown option. Each malformed object and each file
-  that fails is resolved again on 2 and 3 lanes, each lane in turn slow at
-  every decision to go on (`ForeignCommand.slow_lane`), so that the others go
-  on to the next phase and fail there while it decides: the failure must be
-  the same, and a watchdog fails the test if the lanes wait for each other
-  for 60 s. Then a group that can't start (in a child whose `RLIMIT_NPROC`
-  leaves no room for a thread, which doesn't bind root) must fail as
-  `FOREIGN_ERROR_LANES`, with CPUs given and without;
+  that fails is resolved again on 2 and 3 lanes, each lane in turn pausing
+  2 ms at every decision to go on (`ForeignCommand.slow_lane`), so that the
+  others go on to the next phase and fail there while it decides: the
+  failure must be the same, and a watchdog fails the test if the lanes wait
+  for each other for 60 s. Then a group that can't start (in a child whose
+  `RLIMIT_NPROC` leaves no room for a thread, which doesn't bind root) must
+  fail as `FOREIGN_ERROR_LANES`, with CPUs given and without;
 - page edges: inputs given in memory (`ForeignArgument.bytes`) ending at a
   `PROT_NONE` page: every prefix of an object and of an archive, and the object
   with each byte set to 0, 0xff and a random value, each resolved by both paths

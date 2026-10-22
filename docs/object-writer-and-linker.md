@@ -3101,14 +3101,14 @@ the PIE with every unit but the first in an archive after it (`members`):
 
 | Program | Kind | Objects (members) | Global symbols | Names | Vector | Exact | wild |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 worker | dynamic | 6 | 36 | 32 | 108 µs | 208 µs | 440 µs |
-| 1 worker | static | 448 (442) | 3,980 | 1,408 | 314 µs | 671 µs | 1,500 µs |
-| 2,000 workers | dynamic | 15 | 6,842 | 2,031 | 227 µs | 386 µs | 630 µs |
-| 2,000 workers | static | 457 (442) | 10,786 | 3,407 | 492 µs | 904 µs | 1,610 µs |
-| 2,000 workers | members | 15 (9) | 6,842 | 2,031 | 249 µs | 461 µs | 600 µs |
-| 102,400 workers | dynamic | 517 | 413,898 | 102,431 | 13.8 ms | 16.5 ms | 16.1 ms |
-| 102,400 workers | static | 959 (442) | 417,842 | 103,807 | 14.8 ms | 17.5 ms | 18.1 ms |
-| 102,400 workers | members | 517 (511) | 413,898 | 102,431 | 18.2 ms | 23.9 ms | 14.8 ms |
+| 1 worker | dynamic | 7 | 57 | 53 | 108 µs | 207 µs | 430 µs |
+| 1 worker | static | 448 (442) | 3,980 | 1,408 | 324 µs | 675 µs | 1,530 µs |
+| 2,000 workers | dynamic | 16 | 6,863 | 2,052 | 225 µs | 387 µs | 620 µs |
+| 2,000 workers | static | 457 (442) | 10,786 | 3,407 | 491 µs | 908 µs | 1,610 µs |
+| 2,000 workers | members | 16 (9) | 6,863 | 2,052 | 256 µs | 467 µs | 600 µs |
+| 102,400 workers | dynamic | 518 | 413,919 | 102,452 | 14.1 ms | 16.7 ms | 16.1 ms |
+| 102,400 workers | static | 959 (442) | 417,842 | 103,807 | 14.6 ms | 17.8 ms | 17.9 ms |
+| 102,400 workers | members | 518 (511) | 413,919 | 102,452 | 18.4 ms | 24.2 ms | 14.5 ms |
 
 wild's figure is the sum of its phases that read and resolve (`--time`:
 opening the inputs, loading them into its symbol database, resolving symbols
@@ -3116,10 +3116,10 @@ and alternative definitions, and resolving sections), on one thread
 (`--no-threads`, the same command line, medians of 11 runs). mold's (`--perf`:
 `read_input_files` and `resolve_symbols`) has a millisecond's resolution, so
 only the synth-size links' mean anything: 20, 23 and 18 ms for the three
-kinds. For the dynamic one, mold's reading takes 9 ms where this path's open,
-indices, headers and symbols take 5.3, and its resolution 11 where the
-exchange, the resolution, the groups and the winners take 8.4. wild's parts
-are 2.05 ms opening, 4.84 loading and 9.20 resolving.
+kinds. For the dynamic one, mold's reading takes 9 ms where this path's
+open, indices, headers and symbols take 5.3, and its resolution 11 where the
+exchange, the resolution, the groups and the winners take 8.8. wild's parts
+are 2.07 ms opening, 4.82 loading and 9.16 resolving.
 
 Phase by phase, for the synth-size links by the vector path, on one lane and
 on 8 (`--lanes 1,8 --cpus 2,0,1,3,4,5,6,7`: lane 0 on CPU 2, the others on
@@ -3128,16 +3128,16 @@ its return, which starts the lanes:
 
 | Phase | dynamic, 1 lane | 8 lanes | static, 1 lane | 8 lanes | members, 1 lane | 8 lanes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| open | 1.35 | 0.72 | 1.25 | 0.64 | 0.07 | 0.04 |
-| indices | 0.08 | 0.21 | 0.13 | 0.27 | 0.90 | 1.17 |
-| headers | 0.48 | 0.10 | 0.67 | 0.14 | 1.11 | 0.17 |
-| symbols | 3.55 | 1.90 | 3.76 | 1.93 | 4.19 | 2.46 |
-| exchange | 1.21 | 1.23 | 1.34 | 1.41 | 1.14 | 1.31 |
-| resolve | 5.11 | 1.43 | 5.34 | 1.45 | 9.05 | 1.83 |
+| open | 1.31 | 0.62 | 1.23 | 0.58 | 0.07 | 0.04 |
+| indices | 0.08 | 0.20 | 0.13 | 0.26 | 0.90 | 1.16 |
+| headers | 0.43 | 0.09 | 0.65 | 0.13 | 0.77 | 0.12 |
+| symbols | 3.47 | 1.88 | 3.66 | 1.92 | 3.98 | 2.51 |
+| exchange | 1.48 | 1.24 | 1.55 | 1.40 | 1.14 | 1.24 |
+| resolve | 5.00 | 1.43 | 5.25 | 1.45 | 9.24 | 1.91 |
 | load | 0.00 | 0.00 | 0.01 | 0.01 | 0.07 | 0.07 |
-| groups | 0.26 | 0.06 | 0.35 | 0.09 | 0.18 | 0.08 |
-| winners | 1.99 | 1.34 | 1.96 | 1.22 | 1.94 | 1.19 |
-| whole | 14.1 | 7.44 | 14.9 | 7.59 | 18.7 | 8.66 |
+| groups | 0.24 | 0.06 | 0.33 | 0.09 | 0.18 | 0.08 |
+| winners | 1.99 | 1.33 | 1.95 | 1.22 | 1.94 | 1.18 |
+| whole | 14.1 | 7.59 | 14.8 | 7.57 | 18.3 | 8.92 |
 
 - **Opening** is the kernel's: 529 inputs at 2.5 µs each (an `open`, an
   `fstat`, a private mapping and the fault of its first page), against
@@ -3145,34 +3145,36 @@ its return, which starts the lanes:
   archive for its 511 objects. Mapping every input whole with
   `MAP_POPULATE` (on the laptop) made opening ten times slower to save the
   1.6 ms that the headers' and symbols' faults cost: the mappings stay lazy.
-- **The symbols** cost 8.4 ns each on the vector path against 13.8 on the
+- **The symbols** cost 8.3 ns each on the vector path against 13.8 on the
   exact one (the dynamic link, by `--linkers`' run). What is left is
   reading 10 MB of symbol table entries and 5 MB of their names from the
   files' pages, whose first touches fault, and writing 19 MB of columns and
   5 MB of names to new memory.
-- **The exchange** is 3.0 ns per record against the exact path's 3.5: the
-  stores of 13 MB of records into new memory, whose first touches it pays.
-  On 8 lanes it takes as long: those 13 MB are seven huge pages, each cleared
-  by the fault that takes it.
+- **The exchange** is 3.7 ns per record against the exact path's 4.1 (3.0
+  and 3.5 in a session of runs hours earlier, by the same code): the stores
+  of 13 MB of records into new memory, whose first touches it pays. On 8
+  lanes it takes nearly as long, 1.24 ms against 1.48: those 13 MB are seven
+  huge pages, each cleared by the fault that takes it.
 - **The resolution** is 12 ns per record, the probes and compares above, and
-  3.6 times faster on 8 lanes. In the members kind the first object refers to
-  every name, so round 0 makes 102,431 entries and looks each name up in the
+  3.5 times faster on 8 lanes. In the members kind the first object refers to
+  every name, so round 0 makes 102,452 entries and looks each name up in the
   archive's index (every other unit's definitions, about 102,000 entries),
   and round 1's 310,000 records find the
-  entries round 0 left cold: 9.0 ms against 5.1 for the same records in one
-  round. That kind is the one wild resolves faster (14.8 ms against 18.2).
+  entries round 0 left cold: 9.4 ms against 5.0 for the same records in one
+  round. That kind is the one wild resolves faster (14.5 ms against 18.4).
 - **The winners** read every round's records again, partition by partition,
   and write each symbol's name id at its place, a store per record over
   1.6 MB, and the names' columns: 4.8 ns per record, 1.5 times faster on 8
   lanes.
-- **The indices** are libc's exports and the archives' indices: 83 µs for
-  the dynamic link against 245 by the exact path, and for the members
+- **The indices** are libc's exports and the archives' indices: 85 µs for
+  the dynamic link against 248 by the exact path, and for the members
   kind's archive, whose index of about 102,000 entries is hashed eight at a
-  time and copied into the index's order, 0.90 ms against 4.2.
+  time and copied into the index's order, 0.90 ms against 4.1.
 
-On 8 lanes the synth-size links take half the time (7.4 to 8.7 ms), and the
-small ones longer than on one lane: 0.29 ms for the dynamic link of one
-worker and 0.63 ms for its static link, against 0.11 and 0.32. Starting seven
+On 8 lanes the synth-size links take half the time (7.6 to 8.9 ms), and the
+small ones longer than on one lane, by an amount that varies from run to
+run: over four runs, 0.23 to 0.53 ms for the dynamic link of one worker and
+0.52 to 1.42 ms for its static link, against 0.11 and 0.32. Starting seven
 threads and the syncs of up to 13 rounds cost more than the work ("Lanes" has
 those costs), so a small link wants one lane: how many lanes a link takes is
 step 8's question, with the exchange's and the winners' first touches.
@@ -3579,8 +3581,8 @@ Where the decisions stand:
 | Reading ELF records (objects, archives, `.dynsym`) | shuffles, compression and scalar joins | AVX-512 with an exact path (done: 2.1 against 22 ns per record; "Step 5's phases, data-parallel") |
 | Copying chunks | bandwidth | `memcpy`; the chunks stay in L2 |
 | Hashing names | arithmetic | vectorized, one name per masked load, several in flight |
-| Reading foreign objects' global symbols (the foreign path's parse) | shuffles and masked loads | AVX-512 with an exact path, eight symbols at a time with their names hashed and copied eight at a time (done: 8.4 against 13.8 ns per symbol for the synth-size link; "Steps 1 to 5, as built") |
-| The foreign path's exchange | stores to every partition | the records built eight at a time by a transpose and stored from the registers, with an exact path; the counts a histogram of the hashes' top bits on both (done: 3.0 against 3.5 ns per record, bound by the records' new memory; a batch stored to memory and copied a record at a time lost to the exact path) |
+| Reading foreign objects' global symbols (the foreign path's parse) | shuffles and masked loads | AVX-512 with an exact path, eight symbols at a time with their names hashed and copied eight at a time (done: 8.3 against 13.8 ns per symbol for the synth-size link; "Steps 1 to 5, as built") |
+| The foreign path's exchange | stores to every partition | the records built eight at a time by a transpose and stored from the registers, with an exact path; the counts a histogram of the hashes' top bits on both (done: 3.7 against 4.1 ns per record, bound by the records' new memory; a batch stored to memory and copied a record at a time lost to the exact path) |
 | Resolving foreign names (a partition's table) | each compare's wait for two names' bytes | scalar probes per record on both paths, each record's name prefetched ahead, and its slot, entry and entry's name where an earlier round made the entry (done: 12 ns per record): grouping a partition's records by name first with a radix sort, to probe each name once, lost (7.7 against 5.3 ms for the synth-size link before the prefetches; "Steps 1 to 5, as built") |
 | Splitting strings at NULs | arithmetic | the lexer's bitmask-to-positions method |
 | Decoding and classifying relocations | shuffles and tables | `vpermt2q` transpose, `vpermb` classification, `vpcompressd` lists |
