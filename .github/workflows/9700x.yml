@@ -8,10 +8,10 @@ on:
       - 'docs/**'
       - '**.md'
   workflow_dispatch:
+  # Every pull request runs the workflow, since its job is a required check: a pull request that changes only
+  # documentation gets the job skipped by `changes`, which counts as passed, rather than no check at all, which blocks
+  # the merge.
   pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
 
 permissions:
   contents: read
@@ -24,9 +24,48 @@ concurrency:
   queue: max
 
 jobs:
+  # Whether a pull request changes anything but documentation (`docs/**` and `*.md`, as `push`'s paths-ignore), on a
+  # GitHub-hosted runner so that it doesn't wait for the 9700X. When this job fails, `test` runs.
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.files.outputs.code }}
+    steps:
+      - id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          COUNT: ${{ github.event.pull_request.changed_files }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The API lists at most 3,000 files of a pull request: past that, take it as changing code.
+          if [ "$COUNT" -ge 3000 ]; then
+              code=true
+          else
+              gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" \
+                  --jq '.[] | .filename, (.previous_filename // empty)' > files
+              test "$(sort -u files | wc -l)" -ge 1
+              if grep -Ev '^docs/|\.md$' files > /dev/null; then
+                  code=true
+              else
+                  code=false
+              fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Changes code: $code"
+
   test:
     name: Build and execute on Ryzen 7 9700X
-    if: github.repository_id == '1421805693'
+    needs: changes
+    # Runs after `changes` unless it found documentation alone; also when `changes` was skipped (not a pull request)
+    # or failed.
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.changes.outputs.code != 'false' }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
