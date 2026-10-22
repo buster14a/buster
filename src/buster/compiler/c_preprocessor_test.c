@@ -3707,7 +3707,7 @@ static bool pp_test_header_expansions(char* text, size_t length, bool comments, 
         length = kept;
     }
     PPSpellings spellings = { 0 };
-    bool valid = pp_text_spellings((const uint8_t*)text, length, 0, false, &spellings);
+    bool valid = pp_text_spellings((const uint8_t*)text, length, 0, 0, &spellings);
     const uint64_t count = valid ? spellings.count : 0;
     result->storage = malloc(2 * (spellings.length + count) + 64);
     result->declarations = malloc((count + 1) * sizeof(char*));
@@ -3933,7 +3933,7 @@ static bool pp_test_buster_run(const char* mode, bool freestanding, const char* 
     PPSpellings mine = { 0 };
     PPSpellings theirs = { 0 };
     result = result && clang->status == PP_CLANG_ACCEPTED && pp_stream_spellings(&pp, &mine) &&
-             pp_text_spellings((const uint8_t*)clang->text, clang->length, pp.split_kinds, pp_dollar_punctuation(&pp.options), &theirs) &&
+             pp_text_spellings((const uint8_t*)clang->text, clang->length, pp.split_kinds, pp_test_lex_flags(&pp), &theirs) &&
              pp_compare_spellings(&pp, &mine, &theirs, name, "clang");
     arena_release(&mine.arena);
     arena_release(&theirs.arena);
