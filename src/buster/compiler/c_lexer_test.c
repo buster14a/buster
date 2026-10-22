@@ -7,7 +7,7 @@
 // that move tricky C across the vectorized path's 64-byte vector and 512-byte chunk boundaries. The compiler runs them
 // as a command:
 //
-//   build/compiler test-lexer [--cplusplus] [--fuzz N] [--seed N]
+//   build/compiler test-lexer [--cplusplus | [--no-digraphs] [--no-line-comments]] [--fuzz N] [--seed N]
 //
 // main.c includes this file after c_lexer.c, String8, BUSTER_ARRAY_LENGTH and BUSTER_COMPILE_TIME_STRING_LENGTH, and
 // calls run_c_lexer_tests for that command. The tests are a port of the snippet and random-input checks of
@@ -34,9 +34,11 @@
 //     chunk boundaries (with closers split across chunks), at every misalignment from a cache line, a spliced closer
 //     and a closer right after a slash among them (see check_comments).
 //
-// --cplusplus tokenizes everything as C++, with boundary_snippet_cpp instead and the fuzz_pieces_cpp pieces too. The
-// results go to stdout, with the first differences of each check. The exit status is 1 if the arguments are invalid
-// or a check fails.
+// --cplusplus tokenizes everything as C++, with boundary_snippet_cpp instead and the fuzz_pieces_cpp pieces too.
+// --no-digraphs and --no-line-comments tokenize without digraphs (C_TOKENIZER_NO_DIGRAPHS) and without "//" comments
+// (C_TOKENIZER_NO_LINE_COMMENTS), as clang's -E lexes c89 with both and C94 with the second: the inputs are the same, and
+// lex otherwise. The results go to stdout, with the first differences of each check. The exit status is 1 if the
+// arguments are invalid or a check fails.
 //
 // Layout, in this order:
 //   - The comparison: TokenArrays, print_token and compare.
@@ -653,7 +655,15 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
     {
         if (strcmp(arguments[i], "--cplusplus") == 0)
         {
-            flags = C_TOKENIZER_CPLUSPLUS;
+            flags |= C_TOKENIZER_CPLUSPLUS;
+        }
+        else if (strcmp(arguments[i], "--no-digraphs") == 0)
+        {
+            flags |= C_TOKENIZER_NO_DIGRAPHS;
+        }
+        else if (strcmp(arguments[i], "--no-line-comments") == 0)
+        {
+            flags |= C_TOKENIZER_NO_LINE_COMMENTS;
         }
         else if (strcmp(arguments[i], "--fuzz") == 0 && i + 1 < argument_count)
         {
@@ -672,10 +682,12 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
             valid_arguments = false;
         }
     }
+    // The modes without digraphs or "//" comments are C's: with them, C++ takes the scalar lexer whole.
+    valid_arguments = valid_arguments && !((flags & C_TOKENIZER_CPLUSPLUS) && (flags & (C_TOKENIZER_NO_DIGRAPHS | C_TOKENIZER_NO_LINE_COMMENTS)));
 
     if (!valid_arguments)
     {
-        fprintf(stderr, "usage: %s test-lexer [--cplusplus] [--fuzz N] [--seed N]\n", program);
+        fprintf(stderr, "usage: %s test-lexer [--cplusplus | [--no-digraphs] [--no-line-comments]] [--fuzz N] [--seed N]\n", program);
     }
     else
     {
