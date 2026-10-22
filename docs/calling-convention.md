@@ -193,7 +193,13 @@ members' own:
   or of its type's bits if fewer, rounded up to bytes (`getIntNType`: 121 to
   128 bits make an `i128`). An array, a complex type, an enum and an `_Atomic`
   type take their element's, underlying type's or value's, never
-  `STORAGE_EMPTY`.
+  `STORAGE_EMPTY`. `STORAGE_INEXACT` marks a record larger than 64 bytes, or
+  with a flexible array member and a size (which gets no storage), and what
+  holds one: its members may be classified after it (see "Levels"), so its
+  alignment may not be LLVM's. An `_Atomic` of a type of no size takes its
+  value's alignment as its size, and is refused for an inexact one. A type of
+  16 bytes or less holds one only through an array of none of them, and
+  passes by that alignment unchecked.
 - **`layout`**, 8 bytes, which only a type of 16 bytes or less gets, since
   only such types read their own and their members' and elements': the scalars
   of the LLVM type, as `GetSSETypeAtOffset` and `GetINTEGERTypeAtOffset` find
@@ -415,10 +421,17 @@ element (an array's), value (an `_Atomic` type's) or members (a record's,
 but a flexible array member, which is no complete type) are classified,
 classified together by `abi_classify`, then the next level, until none is
 left. A record whose row doesn't depend on its members (larger than 64 bytes,
-or with a flexible array member) waits for them too, since one may make its
-copy `LARGER`. Without scratch memory for the lists it classifies a type at a
-time with the twin, in passes over the table, until a pass classifies
-nothing.
+or with a flexible array member) waits for them only where a member can make
+its copy `LARGER`: when the table has a `LARGER` type already, or the call
+classifies an `_Atomic` of a type of no size, the root every `LARGER` type
+holds. Waiting would add a level for every nesting of such records: about
+140 more instructions per type in the benchmark's classification. A flexible
+record of no size always waits, since an `_Atomic` of it in a later call
+takes its alignment as its size. `abi_classify` takes a level whose types'
+bases, elements, values and members are classified, as a caller's own levels
+would have them, and needs no such rule. Without scratch memory for the lists
+`abi_classify_all` classifies a type at a time with the twin, in passes over
+the table, until a pass classifies nothing.
 
 ### Finishing a type
 
@@ -836,7 +849,10 @@ and has a fixture:
   refuses such a struct (`UNSUPPORTED`). It also refuses one holding a type it
   keeps no LLVM size of: an array of them, an `_Atomic` of a `LARGER` struct,
   or a `LARGER` struct, unless the next member leaves that struct's slot
-  room. A union is never larger: `lowerUnion` cuts its storage to its size.
+  room; and an `_Atomic` of a type of no size whose alignment comes from a
+  record larger than 64 bytes or a flexible one with a size, through an array
+  of none of them (`STORAGE_INEXACT`). A union is never larger: `lowerUnion`
+  cuts its storage to its size.
 - **Vectors LLVM breaks up.** An `_Atomic` vector passes as its LLVM type,
   `<N x T>`. `getVectorTypeBreakdown` gives it one vector register when LLVM
   has a vector type of N elements or of the next power of two: 16 bytes
@@ -956,7 +972,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (1,996 checks): about 170 types whose classes, pass bits and
+- **Fixtures** (2,014 checks): about 170 types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -969,17 +985,17 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   byte, not, and unions of a struct of an unnamed bit-field, one `PAIR` under
   an SSE high eightbyte too and refused with an INTEGER high eightbyte under
   another low one) and narrow low parts (`{__bf16, _Alignas(8) char}` and its
-  kin).
-  Then the `_Atomic` types clang's LLVM types decide, with the slots that
-  `-mllvm -stop-after=finalize-isel`'s fixed stack objects show: `_Atomic`s of
-  structs of no size, `LARGER` and `GROWN` ones among them (of a packed one,
-  of a flexible array member's `unsigned _BitInt(127)`), and of aligned
-  typedefs of an empty struct and of a 32-byte one, aligned to 8; packed
-  structs ending in one (17 to 117 bytes to LLVM), structs and a union with
-  room for one, the C layout, and the structs refused (a member after the
-  overrun, a member of no size or a flexible one, a struct ending in one, an
-  `_Atomic` of one); and `_Atomic` vectors in one register (`<8 x i8>`,
-  `<9 x i8>`, `<3 x half>`, `<17 x i8>` with AVX), refused (`<3 x i8>`,
+  kin). Then the `_Atomic` types clang's LLVM types decide, with the slots
+  that `-mllvm -stop-after=finalize-isel`'s fixed stack objects show:
+  `_Atomic`s of structs of no size, `LARGER` and `GROWN` ones among them (of a
+  packed one, of a flexible array member's `unsigned _BitInt(127)`), and of
+  aligned typedefs of an empty struct and of a 32-byte one, aligned to 8;
+  packed structs ending in one (17 to 117 bytes to LLVM), structs and a union
+  with room for one, the C layout, and the structs refused (a member after
+  the overrun, a member of no size or a flexible one, a struct ending in one,
+  an `_Atomic` of one, and an `_Atomic` of a struct of no size aligned by a
+  record larger than 64 bytes); and `_Atomic` vectors in one register (`<8 x
+  i8>`, `<9 x i8>`, `<3 x half>`, `<17 x i8>` with AVX), refused (`<3 x i8>`,
   `<5 x i8>`, `<3 x i16>`, two `__int128`s, `long double`s or `__float128`s,
   a `_BitInt(256)`, `<17 x i8>` without AVX), in two halves (`<1 x
   _BitInt(128)>`) and of bools (10 and 64 in a general register, 65 in
@@ -1003,7 +1019,12 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   on the stack after five `long`s and in rdi and rsi before a `double` in
   xmm0. And `va_arg`'s plans for a `long` aligned to 32, which reads the
   overflow area aligned to 8, and for that union, from two general registers'
-  slots.
+  slots. Last the levels across four calls by each path: a struct of 101 bytes
+  ending in `packed {packed {_Atomic {__int128[0]}}}`, refused once it waits
+  for that member, which it does because an earlier call classified a
+  `LARGER` type; and an `_Atomic` of a flexible struct of no size classified
+  two calls before, aligned to 16 by its flexible array's element two levels
+  deep.
 - **Worlds and the oracle** (77,807 offsets compared, 110,753 checks): random
   worlds of types (scalars, vectors, complex types, `_BitInt`s, `_Atomic` and
   aligned types, structs of arrays of no size and `_Atomic`s of them, any of
@@ -1173,6 +1194,14 @@ for `assign-simple`.
   the module passes it in one ymm or zmm register. LLVM passes it as its
   elements: `<2 x x86_fp80>` in two 16-byte stack slots, `<2 x fp128>` in
   xmm0 and xmm1. Each needs its rule from probes, or `UNSUPPORTED`.
+- **Arrays of none of a large record.** A record larger than 64 bytes may be
+  finished before its members (see "Levels"), so its storage may not be
+  LLVM's, and a record of 16 bytes or less that holds an array of none of
+  them passes by it: `union { struct { long a, b; struct { __int128 x; char
+  c[64]; } z[0]; } s; __int128 i; }` is two `i64`s to clang, an `i128` where
+  the large record's alignment comes out under 16. Its alignment needs
+  working out from the large record's members when the small record is
+  finished, waiting for what that reads.
 - **The finishing step:** `abi_finish` is scalar and shared by both paths,
   and with clang's LLVM types it is most of the vector path's time (see
   "Measurements on the 9700X"). Its work per member (the storage, the

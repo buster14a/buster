@@ -1272,6 +1272,13 @@ static void abi_test_build_atomics(AbiTestBuilder* builder)
     m[0] = abi_test_member(builder, ending);
     abi_test_expectation(builder, "packed {packed {_Atomic {__int128[0]}}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0), BUSTER_ABI_IN_MEMORY,
                          copy | larger | refused, 0, any, none, none);
+    // An _Atomic of a struct of no size aligned by a record larger than 64 bytes (an array of none of them), whose
+    // storage may come before its members' (INEXACT).
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 100));
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {struct {__int128, char[100]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
     abi_test_expectation(builder, "_Atomic packed {_Atomic {__int128[0]}}", type_atomic(table, ending), BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none,
                          none);
     // _Atomic vectors: in one vector register, as LLVM widens them to one it has (16 bytes for <9 x i8>, v8f16 for
@@ -1325,6 +1332,82 @@ static void abi_test_build_atomics(AbiTestBuilder* builder)
                          BUSTER_ABI_RESULT_REGISTERS, rax, rdx);
     abi_test_expectation(builder, "_Atomic bool ext129", type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 129, true)), BUSTER_ABI_IN_MEMORY, value | refused, 0,
                          any, none, none);
+}
+
+// The levels across calls (abi_dependencies_classified): a record larger than 64 bytes waits for its members only
+// where the table can hold a LARGER type, which a call knows from a LARGER type classified before (abi->larger) or an
+// _Atomic of a type of no size among its own; and a flexible record of no size always does, since an _Atomic of it in a
+// later call takes its alignment as its size. Four calls by each path: a struct of an empty struct and a flexible
+// array of a struct two levels deep, aligned to 16; an _Atomic {__int128[0]}; packed {packed {that _Atomic}} and a
+// struct of 101 bytes ending in it, which needs it classified first to be refused; and an _Atomic of the flexible
+// struct, a slot of 16 for its alignment.
+static void abi_test_ordering(AbiTestTally* tally)
+{
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        AbiTestTables tables;
+        if (abi_test_expect(tally, abi_test_tables_open(&tables, 4096), "fixtures", "the tables can't be made"))
+        {
+            TypeTable* table = &tables.types.table;
+            AbiTestBuilder builder = {
+                .table = table,
+                .expectations = 0,
+                .count = 0,
+                .next_name = 20000,
+                .vector_bytes = 16,
+            };
+            const bool started = abi_test_expect(tally, abi_test_tables_start(&tables, 16), "fixtures", "the calling convention's table can't be made");
+            TypeMember m[2];
+            m[0] = abi_test_member(&builder, BUSTER_TYPE_INT128);
+            m[0] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+            const TypeId deep = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+            m[0] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 0, false, 0));
+            m[1] = abi_test_member(&builder, type_incomplete_array(table, deep));
+            const TypeId open = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+            TypeId atomic = 0;
+            for (uint32_t call = 0; started && call < 4; call += 1)
+            {
+                TypeId large = 0;
+                TypeId atomic_open = 0;
+                if (call == 1)
+                {
+                    m[0] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_INT128, 0));
+                    atomic = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+                }
+                else if (call == 2)
+                {
+                    m[0] = abi_test_member(&builder, atomic);
+                    m[0] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0));
+                    m[1] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0));
+                    m[0] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 100));
+                    large = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, true, 0);
+                }
+                else if (call == 3)
+                {
+                    atomic_open = type_atomic(table, open);
+                }
+                if (path == 0)
+                {
+                    abi_classify_all(&tables.abi, table);
+                }
+                else
+                {
+                    abi_classify_all_scalar(&tables.abi, table);
+                }
+                const uint32_t refused = BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_UNSUPPORTED;
+                const uint32_t large_pass = tables.abi.pass[large >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint32_t open_pass = tables.abi.pass[atomic_open >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint32_t open_bytes = tables.abi.stack_bytes[atomic_open >> BUSTER_TYPE_INDEX_SHIFT];
+                char detail[160];
+                snprintf(detail, sizeof(detail), "ordering, call %u (%s): pass %08x, %08x, stack %u", call, path == 0 ? "vector" : "scalar", large_pass, open_pass,
+                         open_bytes);
+                const bool large_right = large == 0 || (large_pass & refused) == refused;
+                const bool open_right = atomic_open == 0 || ((open_pass & refused) == BUSTER_ABI_PASS_LARGER && open_bytes == 16);
+                abi_test_expect(tally, large_right && open_right && abi_is_classified(&tables.abi, open), "fixtures", detail);
+            }
+            abi_test_tables_close(&tables);
+        }
+    }
 }
 
 // The location expected of an argument, in a call fixture.
@@ -1981,6 +2064,7 @@ static bool abi_test_fixtures(void)
             }
         }
     }
+    abi_test_ordering(&tally);
     abi_test_report("fixtures", tally);
     return tally.failures == 0;
 }

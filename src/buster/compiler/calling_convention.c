@@ -372,11 +372,16 @@ struct AbiVaArg
 typedef struct AbiTable AbiTable;
 // AbiTable.storage: clang's LLVM type of each type, as far as passing needs it (abi_storage): the log2 of its alignment
 // in LLVM's layout, whether its storage at offset 0 is an i128 (which makes a record's two INTEGER eightbytes one value
-// that LLVM never splits), and EMPTY: a record clang's layout counts empty (isEmptyRecordForLayout: each member a
-// zero-width bit-field or of such a record's type), which doesn't end a run of bit-fields' room (abi_bit_field_run).
+// that LLVM never splits), EMPTY: a record clang's layout counts empty (isEmptyRecordForLayout: each member a
+// zero-width bit-field or of such a record's type), which doesn't end a run of bit-fields' room (abi_bit_field_run), and
+// INEXACT: a record larger than 64 bytes, or with a flexible array member and a size, which may be finished before its
+// members (abi_dependencies_classified), or what holds one, whose alignment may not be LLVM's. Passing reads only the
+// storage of types of 16 bytes or less, but an _Atomic of a type of no size takes its value's alignment as its size, and
+// refuses an INEXACT one (abi_copy_bytes).
 #define BUSTER_ABI_STORAGE_ALIGNMENT 0x0fu
 #define BUSTER_ABI_STORAGE_I128 0x10u
 #define BUSTER_ABI_STORAGE_EMPTY 0x20u
+#define BUSTER_ABI_STORAGE_INEXACT 0x40u
 
 // AbiTable.layout: the scalars of clang's LLVM type of each type in its first 16 bytes, as GetSSETypeAtOffset and
 // GetINTEGERTypeAtOffset find them (abi_layout): 4 bits for each even offset (bits 0 to 31: the kind of the scalar that
@@ -873,7 +878,7 @@ static AbiClasses abi_row_entry(const AbiTable* abi, const TypeTable* table, uin
 // The alignment of clang's canonical type for an _Atomic one, whose value type has no typedefs either, so that an aligned
 // attribute there doesn't count (getTypeInfo of an _Atomic of the value without ALIGNED): the value's for one of no size
 // or of more than 16 bytes, and otherwise its size rounded up to a power of two, as its width.
-static uint8_t abi_atomic_alignment_log2(const TypeTable* table, uint32_t index)
+__attribute__((cold, noinline)) static uint8_t abi_atomic_alignment_log2(const TypeTable* table, uint32_t index)
 {
     const uint32_t value = abi_resolved_index(table, table->types.base[index]);
     const uint64_t size = table->types.size[value];
@@ -902,12 +907,11 @@ static uint8_t abi_canonical_alignment_log2(const AbiTable* abi, const TypeTable
 // a union iN for N the smaller of its width and its type's bits rounded up to bytes (lowerUnion's getStorageType, an
 // i128 for 121 to 128 bits); in a struct, as aligned as its type, unless its run of bit-fields is wider than an
 // eightbyte (abi_storage takes the run's unit from abi_bit_field_run; clang's smaller units, which this doesn't work
-// out, are integers no wider than an eightbyte). A flexible array member, whose type is never classified, is an array
-// of no elements: its element's storage, never EMPTY. `bytes` is its size there.
-static uint8_t abi_member_storage(const AbiTable* abi, const TypeTable* table, uint32_t member, bool in_union, uint64_t* bytes)
+// out, are integers no wider than an eightbyte). A flexible array member (`open`), whose type is never classified, is
+// an array of no elements: its element's storage, never EMPTY. `bytes` is its size there.
+static uint8_t abi_member_storage(const AbiTable* abi, const TypeTable* table, uint32_t member, bool in_union, bool open, uint64_t* bytes)
 {
     const uint32_t resolved = abi_resolved_index(table, table->members.type[member]);
-    const uint32_t stored = table->types.kind[resolved] == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? abi_resolved_index(table, table->types.base[resolved]) : resolved;
     const bool bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
     const uint32_t width = table->members.bit_width[member];
     const uint64_t type_bits = table->types.size[resolved] * 8;
@@ -915,7 +919,7 @@ static uint8_t abi_member_storage(const AbiTable* abi, const TypeTable* table, u
     const uint64_t bits = ((width < type_bits ? width : type_bits) + 7) & ~(uint64_t)7;
     // iN's alignment and size: those of the smallest of i8, i16, i32, i64 and i128 that holds it.
     const uint8_t integer_log2 = bits <= 8 ? 0 : bits <= 16 ? 1 : bits <= 32 ? 2 : bits <= 64 ? 3 : 4;
-    uint8_t result = stored == resolved ? abi->storage[resolved] : (uint8_t)(abi->storage[stored] & ~BUSTER_ABI_STORAGE_EMPTY);
+    uint8_t result = open ? (uint8_t)(abi->storage[abi_resolved_index(table, table->types.base[resolved])] & ~BUSTER_ABI_STORAGE_EMPTY) : abi->storage[resolved];
     *bytes = table->types.size[resolved];
     if (bit_field && in_union)
     {
@@ -979,6 +983,8 @@ static uint32_t abi_union_storage_member(const AbiTable* abi, const TypeTable* t
     const uint32_t tag = table->types.index[index];
     const uint32_t begin = table->tags.member_begin[tag];
     const uint32_t end = begin + table->tags.member_count[tag];
+    // A flexible array member is the last.
+    const uint32_t open = (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0 ? end - 1 : UINT32_MAX;
     uint32_t result = UINT32_MAX;
     uint8_t largest = 0;
     uint64_t largest_bytes = 0;
@@ -986,7 +992,7 @@ static uint32_t abi_union_storage_member(const AbiTable* abi, const TypeTable* t
     {
         const bool zero_width = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 && table->members.bit_width[member] == 0;
         uint64_t bytes = 0;
-        const uint8_t alignment = abi_member_storage(abi, table, member, true, &bytes) & BUSTER_ABI_STORAGE_ALIGNMENT;
+        const uint8_t alignment = abi_member_storage(abi, table, member, true, member == open, &bytes) & BUSTER_ABI_STORAGE_ALIGNMENT;
         const bool better = !zero_width && (result == UINT32_MAX || alignment > largest || (alignment == largest && bytes > largest_bytes));
         result = better ? member : result;
         largest = better ? alignment : largest;
@@ -1003,8 +1009,9 @@ static uint32_t abi_union_storage_member(const AbiTable* abi, const TypeTable* t
 // storage is its most aligned and then largest member's, the first of equals (lowerUnion), packed if the size isn't a
 // multiple of its alignment; an array's, a complex type's, an enum's and an _Atomic one's are their element's,
 // underlying type's or value's (never EMPTY); any other type is aligned as in C. A record with a flexible array member
-// gets its storage too, though it is MEMORY: an _Atomic of one of no size takes its alignment as its LLVM size
-// (abi_copy_bytes).
+// is MEMORY, its members maybe not classified yet: nothing, and INEXACT, but for one of no size, which waits for them,
+// since an _Atomic of it takes its alignment as its LLVM size (abi_copy_bytes). A record larger than 64 bytes is
+// INEXACT, and so is one holding an INEXACT type.
 static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const uint8_t kind = table->types.kind[index];
@@ -1025,17 +1032,24 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
     {
         result = (uint8_t)(abi->storage[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT] & ~BUSTER_ABI_STORAGE_EMPTY);
     }
+    else if (record && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0 && size != 0)
+    {
+        result = BUSTER_ABI_STORAGE_INEXACT;
+    }
     else if (record)
     {
         const bool in_union = kind == BUSTER_TYPE_KIND_UNION;
         const uint32_t tag = table->types.index[index];
         const uint32_t begin = table->tags.member_begin[tag];
         const uint32_t end = begin + table->tags.member_count[tag];
+        // A flexible array member is the last (a record of no size has one here).
+        const uint32_t open = (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0 ? end - 1 : UINT32_MAX;
         uint8_t largest = 0;
         uint8_t chosen = 0;
         bool found = false;
         bool packed = false;
         bool empty = true;
+        uint8_t inexact = size > BUSTER_ABI_MAX_CLASSIFIED_BYTES ? BUSTER_ABI_STORAGE_INEXACT : 0;
         uint32_t run_end = begin;
         uint8_t run_storage = UINT8_MAX;
         const uint32_t stored = in_union ? abi_union_storage_member(abi, table, index) : UINT32_MAX;
@@ -1044,12 +1058,13 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
             const bool bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
             const bool zero_width = bit_field && table->members.bit_width[member] == 0;
             uint64_t bytes = 0;
-            uint8_t storage = abi_member_storage(abi, table, member, in_union, &bytes);
+            uint8_t storage = abi_member_storage(abi, table, member, in_union, member == open, &bytes);
             // A struct's bit-fields share their run's unit when it is wider than an eightbyte.
             const bool in_run = !in_union && bit_field && !zero_width;
             run_storage = in_run && member >= run_end ? abi_bit_field_run(abi, table, member, end, size, &run_end) : run_storage;
             storage = in_run && run_storage != UINT8_MAX ? run_storage : storage;
             empty = empty && (zero_width || (!bit_field && (storage & BUSTER_ABI_STORAGE_EMPTY) != 0));
+            inexact |= storage & BUSTER_ABI_STORAGE_INEXACT;
             const uint8_t alignment = storage & BUSTER_ABI_STORAGE_ALIGNMENT;
             const uint64_t offset = table->members.offset[member];
             if (member == stored)
@@ -1069,7 +1084,7 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
             }
         }
         packed = packed || (size & ((1ull << largest) - 1)) != 0;
-        result = (uint8_t)((packed ? 0 : largest) | (chosen & BUSTER_ABI_STORAGE_I128) | (empty ? BUSTER_ABI_STORAGE_EMPTY : 0));
+        result = (uint8_t)((packed ? 0 : largest) | (chosen & BUSTER_ABI_STORAGE_I128) | (empty ? BUSTER_ABI_STORAGE_EMPTY : 0) | inexact);
     }
     return result;
 }
@@ -1380,7 +1395,7 @@ static uint32_t abi_value_class(const TypeTable* table, uint32_t index)
 // X86's v8f16): LLVM has no vector type of the next power of two (<4 x i8>, <8 x i8>, <4 x i16>), and passes each
 // element as a value of its own (getVectorTypeBreakdown); and an integer of more than 128 bits, a vector of one _BitInt
 // of more or of more than 128 bools.
-static bool abi_value_splits(const AbiTable* abi, const TypeTable* table, uint32_t index)
+__attribute__((cold, noinline)) static bool abi_value_splits(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const uint32_t value = abi_value_type(table, index);
     const bool vector = table->types.kind[value] == BUSTER_TYPE_KIND_VECTOR || table->types.kind[value] == BUSTER_TYPE_KIND_EXT_VECTOR;
@@ -1654,8 +1669,9 @@ static bool abi_end_memory(const AbiTable* abi, const TypeTable* table, uint32_t
 //     that is such a struct (its slot bounds it, which is enough where the next member leaves room for it), an array of
 //     them or an _Atomic of one.
 //   - A union is never larger: lowerUnion cuts its storage to its size.
-// While the table has classified no LARGER type (abi->larger), no struct holds one, and none is looked at.
-static uint64_t abi_copy_bytes(const AbiTable* abi, const TypeTable* table, uint32_t index)
+// While the table has classified no LARGER type (abi->larger), no struct or array holds one, and abi_finish calls this
+// for an _Atomic type alone, out of line.
+__attribute__((cold, noinline)) static uint64_t abi_copy_bytes(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     const uint8_t kind = table->types.kind[index];
     const uint64_t size = table->types.size[index];
@@ -1664,7 +1680,7 @@ static uint64_t abi_copy_bytes(const AbiTable* abi, const TypeTable* table, uint
     uint64_t result = size;
     if (kind == BUSTER_TYPE_KIND_ATOMIC && table->types.size[abi_resolved_index(table, table->types.base[index])] == 0)
     {
-        result = 1ull << (abi->storage[base] & BUSTER_ABI_STORAGE_ALIGNMENT);
+        result = (abi->storage[base] & BUSTER_ABI_STORAGE_INEXACT) != 0 ? UINT64_MAX : 1ull << (abi->storage[base] & BUSTER_ABI_STORAGE_ALIGNMENT);
     }
     else if (holds && (abi->pass[base] & BUSTER_ABI_PASS_LARGER) != 0)
     {
@@ -1765,14 +1781,19 @@ static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
     // never empty: LLVM gives a byval argument of no size (a struct of a flexible array member alone) 8 bytes (but see
     // EMPTY). A copy larger than 8 bytes of a type of 8 or less, aligned to 8 or less, is an integer of the type's size
     // once clang's count has no general register (GROWN).
-    const uint64_t copy = abi_copy_bytes(abi, table, index);
-    const bool unknown = copy == UINT64_MAX;
-    const uint64_t bytes = unknown ? size : copy;
-    const uint64_t slot = bytes == 0 ? BUSTER_ABI_SLOT_BYTES : (bytes + BUSTER_ABI_SLOT_BYTES - 1) & ~(uint64_t)(BUSTER_ABI_SLOT_BYTES - 1);
-    pass |= copy != size ? BUSTER_ABI_PASS_LARGER : 0;
-    pass |= unknown ? BUSTER_ABI_PASS_UNSUPPORTED : 0;
-    pass |= !unknown && slot > BUSTER_ABI_SLOT_BYTES && size <= BUSTER_ABI_SLOT_BYTES && own_alignment_log2 <= BUSTER_ABI_SLOT_LOG2 ? BUSTER_ABI_PASS_GROWN : 0;
-    abi->larger += copy != size ? 1 : 0;
+    // Only an _Atomic or, once the table has a LARGER type, an array or a struct may be larger to LLVM.
+    const bool grows = kind == BUSTER_TYPE_KIND_ATOMIC || (abi->larger != 0 && (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT));
+    const uint64_t copy = grows ? abi_copy_bytes(abi, table, index) : size;
+    uint64_t slot = size == 0 ? BUSTER_ABI_SLOT_BYTES : (size + BUSTER_ABI_SLOT_BYTES - 1) & ~(uint64_t)(BUSTER_ABI_SLOT_BYTES - 1);
+    if (copy != size)
+    {
+        // Rare: only a table with an _Atomic of a type of no size has one.
+        const bool unknown = copy == UINT64_MAX;
+        slot = unknown ? slot : (copy + BUSTER_ABI_SLOT_BYTES - 1) & ~(uint64_t)(BUSTER_ABI_SLOT_BYTES - 1);
+        pass |= BUSTER_ABI_PASS_LARGER | (unknown ? BUSTER_ABI_PASS_UNSUPPORTED : 0);
+        pass |= !unknown && slot > BUSTER_ABI_SLOT_BYTES && size <= BUSTER_ABI_SLOT_BYTES && own_alignment_log2 <= BUSTER_ABI_SLOT_LOG2 ? BUSTER_ABI_PASS_GROWN : 0;
+        abi->larger += 1;
+    }
     abi->stack_bytes[index] = slot > UINT32_MAX ? UINT32_MAX : (uint32_t)slot;
     abi->pass[index] = pass;
 }
@@ -2244,14 +2265,20 @@ static void abi_classify(AbiTable* abi, const TypeTable* table, const TypeId* ty
     }
 }
 
-// Whether a type can be classified: a complete object type, or void.
-static bool abi_classifiable(const TypeTable* table, uint32_t index)
+// The kind of a type that can be classified (a complete object type, or void), ALIGNED looked through; NONE for another.
+static uint8_t abi_classifiable_kind(const TypeTable* table, uint32_t index)
 {
     const uint32_t resolved = abi_resolved_index(table, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT);
     const uint8_t kind = table->types.kind[resolved];
     const bool object = kind != BUSTER_TYPE_KIND_NONE && kind != BUSTER_TYPE_KIND_FUNCTION && kind != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY &&
                         kind != BUSTER_TYPE_KIND_VARIABLE_ARRAY;
-    return object && (kind == BUSTER_TYPE_KIND_VOID || (table->types.flags[resolved] & BUSTER_TYPE_FLAG_COMPLETE) != 0);
+    return object && (kind == BUSTER_TYPE_KIND_VOID || (table->types.flags[resolved] & BUSTER_TYPE_FLAG_COMPLETE) != 0) ? kind : BUSTER_TYPE_KIND_NONE;
+}
+
+// Whether a type can be classified.
+static bool abi_classifiable(const TypeTable* table, uint32_t index)
+{
+    return abi_classifiable_kind(table, index) != BUSTER_TYPE_KIND_NONE;
 }
 
 static bool abi_is_classified(const AbiTable* abi, TypeId type)
@@ -2259,35 +2286,71 @@ static bool abi_is_classified(const AbiTable* abi, TypeId type)
     return (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
 }
 
+// Whether a record's members are classified, but for a flexible array member, which is no complete type and is never
+// classified, its element (the flexible array member is the last).
+__attribute__((cold, noinline)) static bool abi_members_classified(const AbiTable* abi, const TypeTable* table, uint32_t index)
+{
+    const bool flexible = (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0;
+    const uint32_t tag = table->types.index[index];
+    const uint32_t begin = table->tags.member_begin[tag];
+    const uint32_t fixed = begin + table->tags.member_count[tag] - (flexible ? 1 : 0);
+    bool result = true;
+    for (uint32_t member = begin; result && member < fixed; member += 1)
+    {
+        result = abi_is_classified(abi, table->members.type[member]);
+    }
+    if (result && flexible)
+    {
+        const uint32_t resolved = abi_resolved_index(table, table->members.type[fixed]);
+        result = abi_is_classified(abi, table->types.base[resolved]);
+    }
+    return result;
+}
+
 // Whether what a type's row, storage and copy are made from is classified: an ALIGNED type's base, an array's element,
-// an _Atomic type's value, a record's members. Every record waits for them, the ones whose rows don't depend on them
-// (larger than 64 bytes, or with a flexible array member) too, since a member may make its copy LARGER; for a flexible
-// array member, which is no complete type and is never classified, its element.
-static bool abi_dependencies_classified(const AbiTable* abi, const TypeTable* table, uint32_t index)
+// an _Atomic type's value, a record's members. A record whose row doesn't depend on them (larger than 64 bytes, or with
+// a flexible array member) waits for them only when `all`, for a LARGER member, which makes its copy LARGER
+// (abi_copy_bytes): only a table with an _Atomic of a type of no size, the root of every LARGER type, has one
+// (abi_classify_levels), and waiting would add a level for every nesting of records. Its storage is INEXACT then
+// (abi_storage), but a flexible one's of no size, which always waits, as an _Atomic of it takes its alignment as its
+// size.
+static bool abi_dependencies_classified(const AbiTable* abi, const TypeTable* table, uint32_t index, bool all)
 {
     const uint8_t kind = table->types.kind[index];
+    const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
     bool result = true;
     if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
     {
         result = abi_is_classified(abi, table->types.base[index]);
     }
-    else if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
+    else if (record && table->types.size[index] <= BUSTER_ABI_MAX_CLASSIFIED_BYTES && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) == 0)
     {
         const uint32_t tag = table->types.index[index];
         const uint32_t begin = table->tags.member_begin[tag];
         const uint32_t end = begin + table->tags.member_count[tag];
         for (uint32_t member = begin; result && member < end; member += 1)
         {
-            const TypeId type = table->members.type[member];
-            const bool flexible = table->types.kind[abi_resolved_index(table, type)] == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
-            result = abi_is_classified(abi, flexible ? table->types.base[abi_resolved_index(table, type)] : type);
+            result = abi_is_classified(abi, table->members.type[member]);
         }
+    }
+    else if (record && (all || ((table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0 && table->types.size[index] == 0)))
+    {
+        result = abi_members_classified(abi, table, index);
     }
     return result;
 }
 
+// Whether a type is an _Atomic of a type of no size, which every LARGER type holds (abi_copy_bytes).
+static bool abi_is_larger_root(const TypeTable* table, uint32_t index)
+{
+    return table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC && table->types.size[abi_resolved_index(table, table->types.base[index])] == 0;
+}
+
 // Classifies, a level at a time, every type that is classifiable and not yet classified. Without scratch memory for the
-// levels, a type at a time in passes over the table, by the twin, until a pass classifies nothing.
+// levels, a type at a time in passes over the table, by the twin, until a pass classifies nothing. Every record waits
+// for its members (abi_dependencies_classified's `all`) when the table has a LARGER type or one of these types is an
+// _Atomic of a type of no size: a type classified before can't hold one of these, nor a LARGER type unless the table
+// has one.
 static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool scalar)
 {
     Scratch scratch = scratch_begin(0);
@@ -2295,16 +2358,24 @@ static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool 
     uint32_t* pending = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count);
     TypeId* ready = pending != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeId, count) : 0;
     uint32_t classified = 0;
+    bool all = abi->larger != 0;
     if (ready != 0)
     {
         uint32_t pending_count = 0;
+        bool atomics = false;
         for (uint32_t index = 1; index < count; index += 1)
         {
-            if ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 && abi_classifiable(table, index))
+            const uint8_t kind = (abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 ? abi_classifiable_kind(table, index) : BUSTER_TYPE_KIND_NONE;
+            if (kind != BUSTER_TYPE_KIND_NONE)
             {
                 pending[pending_count] = index;
                 pending_count += 1;
+                atomics |= kind == BUSTER_TYPE_KIND_ATOMIC;
             }
+        }
+        for (uint32_t i = 0; atomics && i < pending_count; i += 1)
+        {
+            all = all || abi_is_larger_root(table, pending[i]);
         }
         bool progress = true;
         while (pending_count != 0 && progress)
@@ -2313,7 +2384,7 @@ static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool 
             uint32_t kept = 0;
             for (uint32_t i = 0; i < pending_count; i += 1)
             {
-                if (abi_dependencies_classified(abi, table, pending[i]))
+                if (abi_dependencies_classified(abi, table, pending[i], all))
                 {
                     ready[ready_count] = (TypeId)pending[i] << BUSTER_TYPE_INDEX_SHIFT;
                     ready_count += 1;
@@ -2339,6 +2410,10 @@ static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool 
     }
     else
     {
+        for (uint32_t index = 1; index < count; index += 1)
+        {
+            all = all || ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 && abi_classifiable(table, index) && abi_is_larger_root(table, index));
+        }
         bool progress = true;
         while (progress)
         {
@@ -2346,7 +2421,7 @@ static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool 
             for (uint32_t index = 1; index < count; index += 1)
             {
                 const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
-                if ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 && abi_classifiable(table, index) && abi_dependencies_classified(abi, table, index))
+                if ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 && abi_classifiable(table, index) && abi_dependencies_classified(abi, table, index, all))
                 {
                     abi_classify_scalar(abi, table, &type, 1);
                     classified += 1;
@@ -2507,9 +2582,12 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
             // With no general register free, clang passes an aggregate of 8 bytes or less, aligned to 8 or less, as an
             // integer of its size (getIndirectResult), MEMORY or not: LLVM gives it a general register if it has one
             // left (after a count of clang's that LLVM's runs behind), else 8 bytes of the stack, as a copy would take
-            // (but a GROWN one's copy takes more); one of no size is an i0, which takes none (EMPTY).
-            const bool small = bytes == BUSTER_ABI_SLOT_BYTES || (pass & BUSTER_ABI_PASS_GROWN) != 0;
-            const bool integer = (pass & BUSTER_ABI_PASS_AGGREGATE) != 0 && small && alignment_log2 == BUSTER_ABI_SLOT_LOG2 && clang_integers == 0;
+            // (a GROWN one's copy takes more: MEMORY, 8 bytes or less in C and aligned to 8 or less, it is never of no
+            // size); one of no size is an i0, which takes none (EMPTY).
+            const bool grown = (pass & BUSTER_ABI_PASS_GROWN) != 0;
+            const bool integer = grown ? clang_integers == 0
+                                       : (pass & BUSTER_ABI_PASS_AGGREGATE) != 0 && bytes == BUSTER_ABI_SLOT_BYTES && alignment_log2 == BUSTER_ABI_SLOT_LOG2 &&
+                                             clang_integers == 0;
             const bool vanishes = integer && (pass & BUSTER_ABI_PASS_EMPTY) != 0;
             const bool in_register = integer && !vanishes && integers < BUSTER_ABI_INTEGER_ARGUMENTS;
             location.kind = vanishes ? BUSTER_ABI_LOCATION_IGNORE : in_register ? BUSTER_ABI_LOCATION_REGISTERS : BUSTER_ABI_LOCATION_STACK;

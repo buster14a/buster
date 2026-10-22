@@ -2405,8 +2405,11 @@ others, its measurements are informational.
   `i128`, which clang counts as two registers with a NO_CLASS or SSE high
   eightbyte, runs of bit-fields where an uncounted `_Atomic int` leaves one
   register, split or whole on the stack, the larger copies' slots, byval or
-  an integer by clang's count, and `_Atomic` bool vectors), and `va_arg`'s
-  plans for an aligned `long` and an `i128` with an SSE high eightbyte;
+  an integer by clang's count, and `_Atomic` bool vectors), `va_arg`'s plans
+  for an aligned `long` and an `i128` with an SSE high eightbyte, and the
+  levels across calls (a record larger than 64 bytes that waits for a
+  `LARGER` member, and a flexible record of no size that an `_Atomic` of it in
+  a later call reads);
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's
