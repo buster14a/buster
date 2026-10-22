@@ -2223,7 +2223,6 @@ static const PPTestOptionSet pp_test_option_sets[] = {
     { { "-fno-zos-extensions", "-fzos-extensions" }, "-fzos-extensions" },
     { { "-ffixed-point" }, "-ffixed-point" },
     { { "-fdefer-ts" }, "-fdefer-ts" },
-    { { "-std=c17", "-fno-raw-string-literals", "-fraw-string-literals" }, "-fraw-string-literals" },
     { { "-fno-directives-only", "-fdirectives-only" }, "-fdirectives-only" },
     { { "-fkeep-system-includes" }, "-fkeep-system-includes" },
     { { "-fminimize-whitespace" }, "-fminimize-whitespace" },
@@ -2246,12 +2245,6 @@ static const PPTestOptionSet pp_test_option_sets[] = {
     // any mode (c89 with them is C94, and C94 without them c89: #288), and raw strings off (buster lexes none), each in
     // c17, where clang's lexes none either (a GNU mode's would differ); and UTF-8 charsets in any case.
     { { "-std=c17", "-fgnu-keywords" }, 0 },
-    { { "-std=c17", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
-    { { "-std=gnu89", "-fraw-string-literals" }, 0 },
-    { { "-std=gnu99", "-fraw-string-literals", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
-    { { "-std=gnu23", "-fno-raw-string-literals" }, 0 },
-    { { "-x", "assembler-with-cpp", "-fno-raw-string-literals" }, 0 },
-    { { "-std=gnu17", "-fno-raw-string-literals", "-fno-asm" }, 0 },
     { { "-std=c17", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
     { { "-std=gnu89", "-fraw-string-literals" }, 0 },
     { { "-std=gnu99", "-fraw-string-literals", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
@@ -2408,7 +2401,7 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
             char* text = pp_test_clang(arguments, n, path, predefines, &length);
             PPOptions with_predefines = options;
             with_predefines.predefines_path = predefines;
-            const bool same = text != 0 && pp_test_file_output(&with_predefines, path, true, text, length, &tokens);
+            const bool same = text != 0 && pp_test_file_output(&with_predefines, path, true, text, length, &tokens, 0);
             free(text);
             if (!same)
             {

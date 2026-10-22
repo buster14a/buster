@@ -1469,6 +1469,7 @@ static uint32_t pp_spelling(Preprocessor* pp, uint8_t kind, uint32_t value, uint
     else
     {
         result = pp_without_splices(pp, kind, pp_location_bytes(pp, location), value - location, buffer, spelling);
+        result = kind == C_TOKEN_UNKNOWN && *spelling == buffer ? pp_trailing_splice(pp, location, value - location, buffer, result) : result;
     }
     return result;
 }
@@ -12372,6 +12373,35 @@ static __attribute__((noinline)) uint32_t pp_print_token_lines(const uint8_t* sp
     return result;
 }
 
+static __attribute__((noinline, cold)) uint32_t pp_print_moves(Preprocessor* pp, PPMarkers* markers, uint32_t token, uint32_t* silent)
+{
+    uint32_t result = BUSTER_PP_NONE;
+    if (pp->output.flags[token] & BUSTER_PP_LINE_SPACE)
+    {
+        const uint32_t place = pp_lexed_start(pp, pp_print_location(pp, markers, token));
+        const char* name;
+        uint32_t length;
+        const bool moves = pp_find_range(pp, place) != markers->range || pp_presumed(pp, place, &name, &length) != markers->line;
+        result = moves ? place : BUSTER_PP_NONE;
+    }
+    while (*silent < pp->silent_pragma_count && pp->silent_pragmas[*silent].token <= token)
+    {
+        if (pp->silent_pragmas[*silent].token == token)
+        {
+            const uint32_t own = pp_lexed_start(pp, pp->output.locations[token]);
+            const uint32_t own_range = pp_find_range(pp, own);
+            const bool made = (pp->output.flags[token] & BUSTER_PP_FROM_MACRO) || own_range == BUSTER_PP_NONE || pp->ranges[own_range].file == BUSTER_PP_NONE;
+            const uint32_t place = made ? pp_lexed_start(pp, pp->silent_pragmas[*silent].location) : own;
+            const char* name;
+            uint32_t length;
+            const bool moves = pp_find_range(pp, place) != markers->range || pp_presumed(pp, place, &name, &length) != markers->line;
+            result = moves ? place : BUSTER_PP_NONE;
+        }
+        *silent += 1;
+    }
+    return result;
+}
+
 static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
 {
     const PPTokens* out = &pp->output;
@@ -12676,7 +12706,9 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                 {
                     uint8_t* spare = arena_push(scratch.arena, (uint64_t)length + 1, 1);
                     result = spare != 0;
+                    const uint32_t raw = length;
                     length = result ? pp_without_splices(pp, kind, spelling, length, spare, &spelling) : 0;
+                    length = result && kind == C_TOKEN_UNKNOWN && spelling == spare ? pp_trailing_splice(pp, location, raw, spare, length) : length;
                 }
             }
             else if (kind == BUSTER_PP_KIND_INTEGER)
