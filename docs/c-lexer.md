@@ -386,3 +386,70 @@ Discarded, measured the same way (C, C++):
 The A/B harness and `trees/` are as in the second round. Also in the harness directory: `rounds.sh N name...` (N
 interleaved runs and their medians), `stat_remote.sh` (dispatch-stall and misprediction counters per variant) and
 `spills_cpp.sh` (the spill profile on the C++ corpus). Build and run each under `exclusive.sh`.
+
+# Numbers without digit separators (#264)
+
+Measured on 2026-10-22 on the same 9700X (Clang 23.1.1, `build.sh`'s build), with the same lock and pinning.
+
+C23 and C++14 have digit separators: `1'000` is one pp-number. C17 and C++11 don't: a `'` ends a number and starts a
+character constant, so clang lexes `1'000` as `1` and the unterminated `'000`. By default the lexer lexes C23's numbers
+(C++14's in C++), and with `C_TOKENIZER_NO_DIGIT_SEPARATORS` C17's (C++11's). The preprocessor asks for that in every
+mode before C23, its default `-std=gnu17` among them. Before the flag it lexed C23's numbers and then read every
+number's bytes for a `'`, and lexed the rest of the file again from each one it found (`docs/c-preprocessor.md`,
+"#109's cost").
+
+## Changes
+
+* **The scalar lexer**, the twin and oracle, takes no `'` into a number with the flag (`lex_numeric_constant`).
+* **The chunk loop takes another property table**, as it is specialized for C++ (`tokenize_c_no_separators` and
+  `tokenize_cpp_no_separators`, which `tokenize_with_flags` picks): `c_char_properties_no_separators`, which is
+  `c_char_properties` without the separator-follower bit. No character follows a separator there, so
+  `apostrophe_separator` and the separator at the next chunk's start are empty, and every other step is the C23 loop's:
+  the two loops compile to the same instructions, in C and in C++ (checked by disassembling both). Each adds its loop
+  to every translation unit that includes the lexer: 18,913 bytes for C and 22,808 for C++ in the 9700X's build.
+* **`benchmark-lexer --no-digit-separators`** passes the flag to both lexers, checks their tokens against each other's
+  and times the flag's loop.
+
+## Results
+
+`benchmark-lexer` on the C library corpus (8,983 files, 93.8 MB), `main` (f8e4834) and this branch with and without
+`--no-digit-separators`, each a process pinned to CPU 2 under the lock (`ab`); the first round, and the second round's
+run of this branch with separators (its other two runs were still queued behind CI jobs when this was written):
+
+| Loop | Cycles/B | Instructions/B | IPC |
+| --- | ---: | ---: | ---: |
+| `main`'s `tokenize_c` | 0.794 | 3.044 | 3.83 |
+| `tokenize_c` | 0.786 (0.800 in round 2) | 3.046 | 3.88 |
+| `tokenize_c_no_separators` | 0.794 | 3.046 | 3.83 |
+
+The two loops run the same instructions, and their times differ by about what placement moves a copy of one loop
+(about 1.5%, `docs/profiling.md`). In the preprocessor, the lex phase is `main`'s again
+(`docs/c-preprocessor.md`, "#264's digit separators").
+
+Discarded: a loop with the separator's code taken out rather than its table. Without `apostrophe_separator`, the
+`'e+` sign check and the separator at the next chunk's start, and with every unescaped `'` a literal's bound, so that
+the delimiter scan no longer waited for the numbers' 512-bit addition, it ran 0.3% fewer instructions per byte but was
+4% slower: 0.821 cycles per byte against the C23 loop's 0.788 on the C library corpus, the same in three rounds (IPC
+3.70 against 3.87). Clang allocated its registers otherwise, with 12 more 64-byte stores to the stack, and the
+preprocessor's lex phase stayed 0.1 ms above main's on `sqlite3.c`.
+
+## Correctness
+
+* `test-lexer` lexes every input of its checks both ways, in both languages. Its new check puts a `'` at every place of
+  17 pp-numbers, before 18 followers, with line splices around it, at the source's start and around the ends of its
+  first vector and chunk (80,946 cases); without separators, a case without a splice must stay on the vectorized path.
+  20 fixtures pin the tokens clang 23.1.3's raw lexer gives in C17, C23, C++11 and C++26.
+* `--fuzz 2000000` with seed 7 in C and seed 99 in C++, both ways: no differences.
+* Mutants, each built at `-O1` and run through `test-lexer` in both languages, all fail: classify ignoring the table,
+  the table keeping the follower bit on digits and on `_` (the numbers check alone catches that one in C, with the
+  random inputs), the scalar lexer ignoring the flag, and C++ dispatching to the loop with separators. The discarded
+  loop's mutants failed too, but for its two equivalent rewrites.
+* AddressSanitizer and UndefinedBehaviorSanitizer: `test-lexer` in both languages.
+* The preprocessor's checks: `docs/c-preprocessor.md` ("Lexing by the language mode").
+
+## Reproduction
+
+`~/buster-fast-bench/separators-264c` on `benchpress`: `bench264c.sh` builds the three trees under the lock and runs
+`ab` over them (`ab-preprocessor.log`, `ab-lexer.log`); the `bins/mine-nosep` script runs this branch's
+`benchmark-lexer` with `--no-digit-separators`, so that `ab` takes it as a tree. `separators-264` has the discarded
+loop's runs.

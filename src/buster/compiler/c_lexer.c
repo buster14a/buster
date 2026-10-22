@@ -24,8 +24,8 @@
 //     checks it calls on rare paths (is_raw_string_quote, is_literal_suffix, contains_trigraph), load_lane, the
 //     masks, State and needs_scalar, property_masks and transpose_property_masks (the GFNI property transposition),
 //     classify (Phase I), scan_lines (the delimiter scan), skip_leading_comments, ChunkTokens and write_chunk
-//     (Phase III), tokenize_chunks (Phase II, with the BUSTER_LEX_CHUNK_BYTES chunk loop), tokenize_c and
-//     tokenize_cpp, c_tokenize_vectorized and c_tokenize.
+//     (Phase III), tokenize_chunks (Phase II, with the BUSTER_LEX_CHUNK_BYTES chunk loop), tokenize_c, tokenize_cpp
+//     and their specializations without digit separators, tokenize_with_flags, c_tokenize_vectorized and c_tokenize.
 //
 // Origin: a single-file version of the C lexer from https://github.com/davidgmbb/Accelerated-Zig-Parser
 // (c/c_tokenizer.h, c/c_tokenizer_tables.h, c/c_tokenizer_unicode.h, c/c_tokenizer_scalar.c and c/c_tokenizer.c at
@@ -40,7 +40,7 @@
 // fewer register spills, and a scan that finds the block comment a chunk starts inside of first (which also covers
 // what the comment-only chunk shortcut did, so that is gone); then C++'s raw string literals checked at literal
 // starts, chunks read in place from the source, the previous chunk's bitstrings carried as their last lanes, and a
-// one-permute byte shift. Measurements: docs/c-lexer.md.
+// one-permute byte shift; then (2026-10-22) C_TOKENIZER_NO_DIGIT_SEPARATORS. Measurements: docs/c-lexer.md.
 //
 // Upstream license (Accelerated-Zig-Parser's LICENSE file, verbatim):
 //
@@ -393,6 +393,9 @@ typedef enum CTokenizerFlags
     // lexer's alone: c_tokenize gives such a source to it, and c_tokenize_vectorized refuses it. 128 keeps it apart from
     // the flags other branches add (#278's 4, #285's 8 and 16, #292's 32 and 64).
     C_TOKENIZER_NO_DOLLARS = 128,
+    // Lex pp-numbers without digit separators, as C17 and C++11 and earlier do: a `'` ends a number, and starts a
+    // character constant (`1'000` is `1` and the unterminated `'000`). Off by default, like C23 and C++14.
+    C_TOKENIZER_NO_DIGIT_SEPARATORS = 4,
 } CTokenizerFlags;
 
 typedef enum CTokenizerError
@@ -475,6 +478,19 @@ static const uint8_t c_char_properties[128] __attribute__((aligned(64))) =
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x80, 0x00, 0x00, 0x11,
     0x00, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+// c_char_properties without BUSTER_LEX_CHAR_SEPARATOR_FOLLOWER (written here, not generated): without digit separators
+// (C_TOKENIZER_NO_DIGIT_SEPARATORS), no character follows one.
+static const uint8_t c_char_properties_no_separators[128] __attribute__((aligned(64))) =
+{
+    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08, 0x04, 0x04, 0x08, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x80, 0x00, 0x00, 0x01,
+    0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 static const uint8_t c_operator_classes[128] __attribute__((aligned(64))) =
 {
@@ -833,6 +849,7 @@ struct ScalarLexer
     bool cplusplus;
     // C_TOKENIZER_NO_DOLLARS: '$' takes no part in identifiers and pp-numbers (false, the default, as clang's C has it).
     bool no_dollars;
+    bool no_digit_separators; // C_TOKENIZER_NO_DIGIT_SEPARATORS: only lex_numeric_constant reads it.
 };
 
 typedef struct TokenOutput TokenOutput;
@@ -1217,7 +1234,7 @@ static uint64_t lex_identifier_continue(const ScalarLexer* lexer, uint64_t posit
 }
 
 // clang's LexNumericConstant: returns the end of the pp-number whose first character (and the digit after a leading
-// '.') end at `position`.
+// '.') end at `position`. A digit separator continues it unless the lexer has none (C17 and C++11 and earlier).
 static uint64_t lex_numeric_constant(const ScalarLexer* lexer, uint64_t position)
 {
     uint64_t p = position;
@@ -1238,7 +1255,7 @@ static uint64_t lex_numeric_constant(const ScalarLexer* lexer, uint64_t position
             p += size;
             continue;
         }
-        if (c == '\'')
+        if (c == '\'' && !lexer->no_digit_separators)
         {
             uint64_t next_size;
             if (is_ascii_identifier_continue(peek_char(lexer, p + size, &next_size)))
@@ -1519,6 +1536,7 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
         .trigraphs = (flags & C_TOKENIZER_TRIGRAPHS) != 0,
         .cplusplus = (flags & C_TOKENIZER_CPLUSPLUS) != 0,
         .no_dollars = (flags & C_TOKENIZER_NO_DOLLARS) != 0,
+        .no_digit_separators = (flags & C_TOKENIZER_NO_DIGIT_SEPARATORS) != 0,
     };
     const ScalarLexer* lexer = &lexer_value;
     TokenOutput output = { .kinds = kinds, .starts = starts, .ends = ends, .count = count, .start_of_line = start_of_line };
@@ -1870,7 +1888,9 @@ static int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t
 // trigraphs (when enabled, for the whole source).
 //
 // C++ (C_TOKENIZER_CPLUSPLUS) is a specialization of the same chunk loop: it adds "<=>", "->*" and ".*", the "<::"
-// rule and user-defined literal suffixes.
+// rule and user-defined literal suffixes. So are numbers without digit separators (C_TOKENIZER_NO_DIGIT_SEPARATORS),
+// in either language, by their property table alone: no character follows a digit separator there, so no '\''
+// continues a pp-number, and every one outside of literals and comments starts a character constant.
 
 // The channels of 2-character punctuators, and those that need the same character twice.
 #define BUSTER_LEX_OP2_CHANNELS (BUSTER_LEX_CHANNEL_EQ | BUSTER_LEX_CHANNEL_SELF | BUSTER_LEX_CHANNEL_SHIFT | BUSTER_LEX_CHANNEL_GT | BUSTER_LEX_CHANNEL_LTDIG | BUSTER_LEX_CHANNEL_HASHDIG)
@@ -2317,11 +2337,13 @@ BUSTER_INLINE void transpose_property_masks(const __m512i rows[BUSTER_LEX_LOOKAH
     *(U64x8*)o[7] = t2_7;
 }
 
-// Phase I for one 64-byte vector: eight packed property masks and the remaining masks in `o[...][lane]`.
-BUSTER_INLINE void classify(__m512i raw, uint64_t o[][BUSTER_LEX_MASK_LANES], unsigned lane, __m512i* properties_out, __m512i* previous_classes, __m512i* previous_pairs, const bool cplusplus)
+// Phase I for one 64-byte vector: eight packed property masks and the remaining masks in `o[...][lane]`. Without
+// digit separators, no character follows one (c_char_properties_no_separators).
+BUSTER_INLINE void classify(__m512i raw, uint64_t o[][BUSTER_LEX_MASK_LANES], unsigned lane, __m512i* properties_out, __m512i* previous_classes, __m512i* previous_pairs, const bool cplusplus,
+                            const bool separators)
 {
     const uint64_t nonascii = _mm512_movepi8_mask(raw);
-    __m512i properties = perm2b(c_char_properties, raw);
+    __m512i properties = perm2b(separators ? c_char_properties : c_char_properties_no_separators, raw);
     __m512i classes = perm2b(c_operator_classes, raw);
     if (BUSTER_UNLIKELY(nonascii != 0))
     {
@@ -2644,9 +2666,12 @@ __attribute__((noinline)) static OutputCursors write_chunk_outlined(const ChunkT
 }
 
 // Tokenizes the source from `begin` (the start of the source, or of a line) to its end, or until a chunk that needs
-// the scalar lexer (see BUSTER_LEX_NEEDS_SCALAR).
-BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* restrict kinds_out,
-                               uint32_t* restrict starts_out, uint32_t* restrict ends_out, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
+// the scalar lexer (see BUSTER_LEX_NEEDS_SCALAR). Without `separators`, Phase I classifies with
+// c_char_properties_no_separators, in which no character follows a digit separator: `apostrophe_separator` is then
+// empty, and every other mask and step is as with them, so the two loops are the same code.
+BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool separators, const uint8_t* source, uint64_t length, uint64_t begin,
+                               uint8_t* restrict kinds_out, uint32_t* restrict starts_out, uint32_t* restrict ends_out, uint64_t* written, uint64_t* restart,
+                               uint64_t* scalar_until)
 {
     const U64x8 zero = {0};
     const U64x8 most_significant = {0, 0, 0, 0, 0, 0, 0, 1ull << 63};
@@ -2701,7 +2726,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
     for (unsigned j = 0; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
     {
         raws[0][j] = load_lane(base, base_offset, begin, length, first_chunk + BUSTER_LEX_VECTOR_BYTES * j);
-        classify(raws[0][j], masks[0], j, &properties[0][j], &previous_classes, &previous_pairs, cplusplus);
+        classify(raws[0][j], masks[0], j, &properties[0][j], &previous_classes, &previous_pairs, cplusplus, separators);
     }
     // The vectors of the chunk being analyzed: in the source itself if they (and the next chunk's first one) are all
     // inside it, else in `raws`, with what is outside of it read as newlines.
@@ -2729,7 +2754,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
                 const __m512i* next_raw = (const __m512i*)(base + chunk + BUSTER_LEX_CHUNK_BYTES);
                 for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
                 {
-                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus);
+                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, separators);
                 }
                 chunk_vectors = next_raw;
             }
@@ -2740,7 +2765,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
                 for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
                 {
                     next_raw[j] = load_lane(base, base_offset, begin, length, chunk + BUSTER_LEX_CHUNK_BYTES + BUSTER_LEX_VECTOR_BYTES * j);
-                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus);
+                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, separators);
                 }
                 chunk_vectors = next_raw;
             }
@@ -2880,7 +2905,8 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
         const U64x8 line_break = newline & ~splice;
 
         // pp-numbers: a digit (or a '.' and a digit) that doesn't continue an identifier, and everything that
-        // continues it: identifier characters, '.', a sign after e/E/p/P and a digit separator.
+        // continues it: identifier characters, '.', a sign after e/E/p/P and a digit separator (none without digit
+        // separators, whose property table has no character that follows one).
         const U64x8 apostrophe_separator = apostrophe & shr_next(separator_follower, BUSTER_LEX_NEXT(M_SEPARATOR_FOLLOWER), 1);
         const U64x8 number_sign = exponent_sign & ~shl_carry(apostrophe, previous_apostrophe, 2); // Not "1'e+".
         const U64x8 number_continue = identifier | dot | number_sign | apostrophe_separator;
@@ -3338,17 +3364,49 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
     return cur_kind - kinds_out;
 }
 
-// The chunk loop, specialized for each language.
+// The chunk loop, specialized for each language, with digit separators and without.
 __attribute__((noinline)) static int64_t tokenize_c(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                     uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+}
+
+__attribute__((noinline)) static int64_t tokenize_c_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+                                                                  uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
+{
+    return tokenize_chunks(false, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 __attribute__((noinline)) static int64_t tokenize_cpp(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                       uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+}
+
+__attribute__((noinline)) static int64_t tokenize_cpp_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+                                                                    uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
+{
+    return tokenize_chunks(true, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+}
+
+// The chunk loop that `flags` (C_TOKENIZER_CPLUSPLUS and C_TOKENIZER_NO_DIGIT_SEPARATORS) ask for.
+static int64_t tokenize_with_flags(uint32_t flags, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
+                                   uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
+{
+    const bool cplusplus = (flags & C_TOKENIZER_CPLUSPLUS) != 0;
+    const bool separators = (flags & C_TOKENIZER_NO_DIGIT_SEPARATORS) == 0;
+    int64_t result;
+    if (cplusplus)
+    {
+        result = separators ? tokenize_cpp(source, length, begin, kinds, starts, ends, written, restart, scalar_until)
+                            : tokenize_cpp_no_separators(source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    }
+    else
+    {
+        result = separators ? tokenize_c(source, length, begin, kinds, starts, ends, written, restart, scalar_until)
+                            : tokenize_c_no_separators(source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    }
+    return result;
 }
 
 static int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
@@ -3372,8 +3430,7 @@ static int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uin
         uint64_t written;
         uint64_t restart;
         uint64_t scalar_until;
-        result = (flags & C_TOKENIZER_CPLUSPLUS) ? tokenize_cpp(source, length, begin, kinds, starts, ends, &written, &restart, &scalar_until)
-                                                 : tokenize_c(source, length, begin, kinds, starts, ends, &written, &restart, &scalar_until);
+        result = tokenize_with_flags(flags, source, length, begin, kinds, starts, ends, &written, &restart, &scalar_until);
     }
     return result;
 }
@@ -3406,10 +3463,7 @@ static int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds
             uint64_t written;
             uint64_t restart;
             uint64_t scalar_until;
-            const int64_t vectorized =
-                (flags & C_TOKENIZER_CPLUSPLUS)
-                    ? tokenize_cpp(source, length, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until)
-                    : tokenize_c(source, length, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until);
+            const int64_t vectorized = tokenize_with_flags(flags, source, length, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until);
             if (vectorized >= 0)
             {
                 result = (int64_t)count + vectorized;

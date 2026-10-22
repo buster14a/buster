@@ -2,9 +2,12 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Clang oracle for the original preprocessor fuzz cases. Ordinary cases share a process; process-global counter cases
-// do not. The lexer classifies a batch's output once before exact identifier markers select its case slices. Rejected
-// batches fall back to individual invocations. Process, file, marker and allocation failures never become rejections.
-// The subprocess boundary is deliberately outside the compiler hot path; benchmark_sample measures this harness cost.
+// do not. Exact marker lines select each case's slice of a batch's output (preprocessor_fuzz_clang_split). In a
+// batch that clang rejects, each error is the case's whose #line file name its location gives, and the others are
+// accepted with their slices; a batch whose errors or markers don't all fit falls back to individual invocations.
+// Process, file, marker and allocation failures never become rejections. preprocessor_fuzz_batch_source builds the
+// text clang reads, which test-preprocessor --fuzz gives the preprocessor too (one case at a time). The subprocess
+// boundary is deliberately outside the compiler hot path; benchmark_sample measures this harness cost.
 
 #include <errno.h>
 #include <poll.h>
@@ -29,6 +32,22 @@ struct PreprocessorFuzzProcess
     String8 diagnostic;
     int exit_code;
     bool valid;
+};
+
+// A token of clang's own, after preprocessing (preprocessor_fuzz_clang_tokens): its kind as clang names it
+// ("identifier", "unknown", "string_literal", ...) and its spelling.
+typedef struct PreprocessorFuzzClangToken PreprocessorFuzzClangToken;
+struct PreprocessorFuzzClangToken
+{
+    String8 kind;
+    String8 spelling;
+};
+
+typedef struct PreprocessorFuzzClangTokens PreprocessorFuzzClangTokens;
+struct PreprocessorFuzzClangTokens
+{
+    PreprocessorFuzzClangToken* tokens;
+    uint64_t count;
 };
 
 static bool preprocessor_fuzz_clang_read(Arena* arena, int descriptor, uint64_t limit, String8* text)
@@ -68,6 +87,8 @@ static bool preprocessor_fuzz_clang_read(Arena* arena, int descriptor, uint64_t 
 static PreprocessorFuzzProcess preprocessor_fuzz_clang_process(Arena* arena, char* const* arguments, String8 input, uint64_t output_limit)
 {
     PreprocessorFuzzProcess result = {0};
+    // A batch of rejected cases gives diagnostics for each (-ferror-limit=0): as much room as its output has.
+    const uint64_t diagnostic_limit = output_limit > BUSTER_PPF_CLANG_DIAGNOSTIC_BYTES ? output_limit : BUSTER_PPF_CLANG_DIAGNOSTIC_BYTES;
     char directory[PATH_MAX];
     char paths[3][PATH_MAX] = {0};
     int descriptors[3] =
@@ -177,7 +198,7 @@ static PreprocessorFuzzProcess preprocessor_fuzz_clang_process(Arena* arena, cha
             const bool timed_out = now.tv_sec > start.tv_sec + BUSTER_PPF_CLANG_TIMEOUT_SECONDS ||
                                    (now.tv_sec == start.tv_sec + BUSTER_PPF_CLANG_TIMEOUT_SECONDS && now.tv_nsec >= start.tv_nsec);
             valid = !timed_out && output_metadata.st_size >= 0 && (uint64_t)output_metadata.st_size <= output_limit &&
-                    diagnostic_metadata.st_size >= 0 && (uint64_t)diagnostic_metadata.st_size <= BUSTER_PPF_CLANG_DIAGNOSTIC_BYTES;
+                    diagnostic_metadata.st_size >= 0 && (uint64_t)diagnostic_metadata.st_size <= diagnostic_limit;
         }
         if (valid)
         {
@@ -210,7 +231,7 @@ static PreprocessorFuzzProcess preprocessor_fuzz_clang_process(Arena* arena, cha
         {
             result.exit_code = WEXITSTATUS(status);
             valid = preprocessor_fuzz_clang_read(arena, descriptors[1], output_limit, &result.output);
-            valid = valid && preprocessor_fuzz_clang_read(arena, descriptors[2], BUSTER_PPF_CLANG_DIAGNOSTIC_BYTES, &result.diagnostic);
+            valid = valid && preprocessor_fuzz_clang_read(arena, descriptors[2], diagnostic_limit, &result.diagnostic);
         }
     }
     if (child_descriptor >= 0)
@@ -284,7 +305,12 @@ static bool preprocessor_fuzz_clang_source_error(String8 diagnostic)
                 driver_error |= !positioned;
             }
         }
-        if (!severity_found)
+        // An error at no location: the frontend's for a source position it couldn't name (clang's driver prefixes its own
+        // with "clang: "), as `__has_include` after an empty argument at a macro's end gives.
+        const bool unplaced = !severity_found && ((end - begin >= 7 && memcmp(diagnostic.pointer + begin, "error: ", 7) == 0) ||
+                                                  (end - begin >= 13 && memcmp(diagnostic.pointer + begin, "fatal error: ", 13) == 0));
+        source_error |= unplaced;
+        if (!severity_found && !unplaced)
         {
             const String8 line =
             {
@@ -334,67 +360,185 @@ static bool preprocessor_fuzz_clang_space(char value)
     return result;
 }
 
-static bool preprocessor_fuzz_clang_split(Arena* arena, Arena* scratch, String8 text, uint64_t count, PreprocessorFuzzOutput* outputs)
+// Whether a byte can be part of an identifier in clang's -P text (a UCN's backslash and UTF-8 bytes too).
+static bool preprocessor_fuzz_clang_identifier_byte(char value)
 {
-    PreprocessorFuzzTokens tokens = {0};
-    const uint64_t limit = count * (BUSTER_PPF_MAX_OUTPUT_BYTES + 128);
-    bool result = preprocessor_fuzz_tokenize_limit(scratch, text, limit, &tokens);
+    return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') || value == '_' || value == '$' || value == '\\' ||
+           (unsigned char)value >= 0x80;
+}
+
+// Splits a batch's text at its markers. Each ends its printed line (the batch puts it on a line of its own, after two
+// newlines; -P starts a line for it, but for what an expansion printed before it, which can put it at a line's end),
+// and is found by its bytes, as a whole identifier outside literals, rather than by lexing the text: a case's output
+// can hold what doesn't lex back, as an unterminated character constant that took the rest of its source line and
+// then ends at a quote further on its printed line, after which a `/*` would take the marker into a comment. Any other
+// marker, or one out of its place, fails the split: the generator keeps the names to the markers.
+static bool preprocessor_fuzz_clang_split(Arena* arena, String8 text, uint64_t count, PreprocessorFuzzOutput* outputs)
+{
+    const String8 prefix = BUSTER_S8(BUSTER_PPF_CLANG_MARKER_PREFIX);
+    bool result = true;
     uint64_t begin = 0;
     uint64_t marker_count = 0;
-    for (uint64_t i = 0; result && i < tokens.count; ++i)
+    uint64_t line = 0;
+    while (result && line < text.length)
     {
-        const uint64_t length = (uint64_t)tokens.ends[i] - tokens.starts[i];
-        const char* spelling = text.pointer + tokens.starts[i];
-        const String8 prefix = BUSTER_S8(BUSTER_PPF_CLANG_MARKER_PREFIX);
-        bool marker = (tokens.kinds[i] & ~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_RAW_IDENTIFIER &&
-                      length > prefix.length && memcmp(spelling, prefix.pointer, prefix.length) == 0;
-        for (uint64_t digit = prefix.length; marker && digit < length; ++digit)
+        uint64_t line_end = line;
+        while (line_end < text.length && text.pointer[line_end] != '\n')
         {
-            marker = spelling[digit] >= '0' && spelling[digit] <= '9';
+            line_end += 1;
         }
-        if (marker)
+        uint64_t last = line_end;
+        while (last > line && preprocessor_fuzz_clang_space(text.pointer[last - 1]))
         {
-            char expected[64];
-            const int expected_length = snprintf(expected, sizeof(expected), BUSTER_PPF_CLANG_MARKER_PREFIX "%llu", (unsigned long long)marker_count);
-            result = marker_count < count && expected_length > 0 && (uint64_t)expected_length == length && memcmp(spelling, expected, length) == 0;
-            if (result)
+            last -= 1;
+        }
+        // The markers on the line: every whole identifier that is the prefix and digits, outside string and character
+        // literals (one runs to its closing quote, or to the line's end).
+        bool ends_with_marker = false;
+        uint64_t marker_start = last;
+        char quote = 0;
+        for (uint64_t at = line; result && at < last; at += 1)
+        {
+            const char value = text.pointer[at];
+            if (quote != 0)
             {
-                uint64_t end = tokens.starts[i];
-                while (begin < end && preprocessor_fuzz_clang_space(text.pointer[begin]))
+                at += value == '\\';
+                quote = value == quote ? 0 : quote;
+            }
+            else if (value == '"' || value == '\'')
+            {
+                quote = value;
+            }
+            else if (value == prefix.pointer[0] && last - at > prefix.length && memcmp(text.pointer + at, prefix.pointer, prefix.length) == 0 &&
+                     (at == line || !preprocessor_fuzz_clang_identifier_byte(text.pointer[at - 1])))
+            {
+                uint64_t end = at + prefix.length;
+                uint64_t number = 0;
+                while (end < last && text.pointer[end] >= '0' && text.pointer[end] <= '9')
                 {
-                    ++begin;
+                    number = number * 10 + (uint64_t)(text.pointer[end] - '0');
+                    end += 1;
                 }
-                while (end > begin && preprocessor_fuzz_clang_space(text.pointer[end - 1]))
+                if (end > at + prefix.length && (end == last || !preprocessor_fuzz_clang_identifier_byte(text.pointer[end])))
                 {
-                    --end;
+                    ends_with_marker = end == last && number == marker_count && marker_count < count;
+                    marker_start = at;
+                    result = ends_with_marker;
                 }
-                const uint64_t bytes = end - begin;
-                char* copy = bytes <= BUSTER_PPF_MAX_OUTPUT_BYTES ? arena_push(arena, bytes + 1, 1) : 0;
-                result = copy != 0;
-                if (result)
-                {
-                    memcpy(copy, text.pointer + begin, bytes);
-                    copy[bytes] = 0;
-                    outputs[marker_count] = (PreprocessorFuzzOutput)
-                    {
-                        .text =
-                        {
-                            .pointer = copy,
-                            .length = bytes,
-                        },
-                        .accepted = true,
-                        .valid = true,
-                    };
-                    ++marker_count;
-                    begin = tokens.ends[i];
-                }
+                at = end - 1;
             }
         }
+        if (result && ends_with_marker)
+        {
+            uint64_t end = marker_start;
+            while (begin < end && preprocessor_fuzz_clang_space(text.pointer[begin]))
+            {
+                ++begin;
+            }
+            while (end > begin && preprocessor_fuzz_clang_space(text.pointer[end - 1]))
+            {
+                --end;
+            }
+            const uint64_t bytes = end - begin;
+            char* copy = bytes <= BUSTER_PPF_MAX_OUTPUT_BYTES ? arena_push(arena, bytes + 1, 1) : 0;
+            result = copy != 0;
+            if (result)
+            {
+                memcpy(copy, text.pointer + begin, bytes);
+                copy[bytes] = 0;
+                outputs[marker_count] = (PreprocessorFuzzOutput)
+                {
+                    .text =
+                    {
+                        .pointer = copy,
+                        .length = bytes,
+                    },
+                    .accepted = true,
+                    .valid = true,
+                };
+                ++marker_count;
+                begin = line_end;
+            }
+        }
+        line = line_end + 1;
     }
     result = result && marker_count == count;
     for (uint64_t i = begin; result && i < text.length; ++i)
     {
         result = preprocessor_fuzz_clang_space(text.pointer[i]);
+    }
+    return result;
+}
+
+// The text a batch of cases is preprocessed as: each case's #line, its source and its marker, into `source` (room for
+// BUSTER_PPF_MAX_CASE_BYTES + 128 bytes per case). Returns false if it doesn't fit.
+static bool preprocessor_fuzz_batch_source(PreprocessorFuzzBuffer* source, const PreprocessorFuzzCase* const* cases, uint64_t count)
+{
+    bool result = source->valid;
+    for (uint64_t i = 0; result && i < count; ++i)
+    {
+        result = preprocessor_fuzz_format(source, "#line 1 \"ppf_%llu.c\"\n", (unsigned long long)cases[i]->id);
+        result = result && preprocessor_fuzz_append(source, cases[i]->source);
+        // Two newlines also terminate a final escaped newline before the marker's own logical line.
+        result = result && preprocessor_fuzz_format(source, "\n\n" BUSTER_PPF_CLANG_MARKER_PREFIX "%llu\n", (unsigned long long)i);
+    }
+    return result;
+}
+
+// Which cases of a rejected batch the errors in clang's diagnostics belong to: an error's location starts with the file
+// name its case's #line gives, "ppf_<id>.c:<line>:<column>: error:". Sets errors[i] for case i. Returns false if an
+// error names no case's file (or has no location), a case shares its id with another, or an error is fatal (after which
+// clang reports nothing more, though it goes on printing), so that the batch must run case by case.
+static bool preprocessor_fuzz_clang_attribute(String8 diagnostic, const PreprocessorFuzzCase* const* cases, uint64_t count, bool* errors)
+{
+    bool result = true;
+    for (uint64_t i = 0; i < count; ++i)
+    {
+        errors[i] = false;
+        for (uint64_t j = 0; result && j < i; ++j)
+        {
+            result = cases[i]->id != cases[j]->id;
+        }
+    }
+    uint64_t begin = 0;
+    while (result && begin < diagnostic.length)
+    {
+        uint64_t end = begin;
+        while (end < diagnostic.length && diagnostic.pointer[end] != '\n')
+        {
+            ++end;
+        }
+        const String8 line =
+        {
+            .pointer = diagnostic.pointer + begin,
+            .length = end - begin,
+        };
+        const bool fatal = preprocessor_fuzz_clang_contains(line, BUSTER_S8(": fatal error:"));
+        const bool error = fatal || preprocessor_fuzz_clang_contains(line, BUSTER_S8(": error:"));
+        // An error at no location names no case.
+        const bool unplaced = (line.length >= 7 && memcmp(line.pointer, "error: ", 7) == 0) || (line.length >= 13 && memcmp(line.pointer, "fatal error: ", 13) == 0);
+        result = !fatal && !unplaced;
+        if (result && error)
+        {
+            // "ppf_", the id's digits, ".c:", then the line's digits and ':'.
+            uint64_t at = 4;
+            uint64_t id = 0;
+            bool named = line.length > 4 && memcmp(line.pointer, "ppf_", 4) == 0;
+            while (named && at < line.length && line.pointer[at] >= '0' && line.pointer[at] <= '9' && id <= (UINT64_MAX - 9) / 10)
+            {
+                id = id * 10 + (uint64_t)(line.pointer[at] - '0');
+                ++at;
+            }
+            named = named && at > 4 && at + 4 <= line.length && memcmp(line.pointer + at, ".c:", 3) == 0 && line.pointer[at + 3] >= '0' && line.pointer[at + 3] <= '9';
+            bool found = false;
+            for (uint64_t i = 0; named && !found && i < count; ++i)
+            {
+                found = cases[i]->id == id;
+                errors[i] |= found;
+            }
+            result = found;
+        }
+        begin = end + (end < diagnostic.length);
     }
     return result;
 }
@@ -409,14 +553,8 @@ static bool preprocessor_fuzz_clang_group(Arena* arena, Arena* scratch, const ch
         .capacity = capacity,
         .valid = true,
     };
-    bool result = source.data != 0;
-    for (uint64_t i = 0; result && i < count; ++i)
-    {
-        result = preprocessor_fuzz_format(&source, "#line 1 \"ppf_%llu.c\"\n", (unsigned long long)cases[i]->id);
-        result = result && preprocessor_fuzz_append(&source, cases[i]->source);
-        // Two newlines also terminate a final escaped newline before the marker's own logical line.
-        result = result && preprocessor_fuzz_format(&source, "\n\n" BUSTER_PPF_CLANG_MARKER_PREFIX "%llu\n", (unsigned long long)i);
-    }
+    source.valid = source.data != 0;
+    bool result = preprocessor_fuzz_batch_source(&source, cases, count);
     *rejected = false;
     if (result)
     {
@@ -431,7 +569,7 @@ static bool preprocessor_fuzz_clang_group(Arena* arena, Arena* scratch, const ch
             c23 ? "-std=c23" : "-std=c17",
             "-fno-color-diagnostics",
             "-fno-caret-diagnostics",
-            "-ferror-limit=1",
+            "-ferror-limit=0",
             "-x",
             "c",
             "-",
@@ -447,7 +585,7 @@ static bool preprocessor_fuzz_clang_group(Arena* arena, Arena* scratch, const ch
         result = process.valid;
         if (result && process.exit_code == 0)
         {
-            result = preprocessor_fuzz_clang_split(arena, scratch, process.output, count, outputs);
+            result = preprocessor_fuzz_clang_split(arena, process.output, count, outputs);
         }
         else if (result)
         {
@@ -463,9 +601,242 @@ static bool preprocessor_fuzz_clang_group(Arena* arena, Arena* scratch, const ch
                     .valid = true,
                 };
             }
+            else if (result)
+            {
+                // Each error is its case's, and every case's slice is between the markers: the rest are accepted.
+                // Otherwise *rejected stays, and the caller runs the cases one at a time.
+                bool errors[BUSTER_PPF_CLANG_BATCH_COUNT];
+                const uint64_t outputs_begin = arena->length;
+                const bool split = count <= BUSTER_PPF_CLANG_BATCH_COUNT && preprocessor_fuzz_clang_attribute(process.diagnostic, cases, count, errors) &&
+                                   preprocessor_fuzz_clang_split(arena, process.output, count, outputs);
+                for (uint64_t i = 0; split && i < count; ++i)
+                {
+                    if (errors[i])
+                    {
+                        outputs[i] = (PreprocessorFuzzOutput)
+                        {
+                            .accepted = false,
+                            .valid = true,
+                        };
+                    }
+                }
+                if (!split)
+                {
+                    arena_pop_to(arena, outputs_begin);
+                }
+                *rejected = !split;
+            }
         }
     }
     arena_pop_to(scratch, scratch_begin);
+    return result;
+}
+
+// One token of clang's -dump-tokens text, its first line `line`: its kind as clang names it, padding, its spelling
+// between quotes, padding, "Loc=<", its location and flags. The spelling is escaped as raw_ostream::write_escaped
+// escapes it (`\\`, `\t`, `\n`, `\"` and three octal digits for any other byte that isn't printable), and ends at the
+// one quote that padding and "Loc=<" follow: a line with no such quote, or more than one, can't be read. An annotation
+// has no spelling. Copies the kind and the unescaped spelling into `arena`, and sets *location_start to where "Loc=<"
+// starts. Returns false if the line can't be read.
+static bool preprocessor_fuzz_clang_dump_token(Arena* arena, String8 line, PreprocessorFuzzClangToken* token, uint64_t* location_start)
+{
+    // A kind is a name: an identifier's, a keyword's spelling, a punctuator's (`l_paren`) or an annotation's.
+    uint64_t kind_end = 0;
+    bool naming = true;
+    while (naming && kind_end < line.length)
+    {
+        const char c = line.pointer[kind_end];
+        naming = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        kind_end += naming;
+    }
+    uint64_t at = kind_end;
+    while (at < line.length && line.pointer[at] == ' ')
+    {
+        at += 1;
+    }
+    const String8 location = BUSTER_S8("Loc=<");
+    const bool spelled = at < line.length && line.pointer[at] == '\'';
+    const bool annotation = !spelled && line.length - at >= location.length && memcmp(line.pointer + at, location.pointer, location.length) == 0;
+    bool result = kind_end != 0 && at > kind_end && (spelled || annotation);
+    // The quote that ends the spelling: padding and "Loc=<" after it.
+    uint64_t close = 0;
+    uint64_t closes = 0;
+    for (uint64_t q = at + 1; result && spelled && q < line.length; q += 1)
+    {
+        uint64_t after = q + 1;
+        while (after < line.length && line.pointer[after] == ' ')
+        {
+            after += 1;
+        }
+        const bool ends = line.pointer[q] == '\'' && after > q + 1 && line.length - after >= location.length && memcmp(line.pointer + after, location.pointer, location.length) == 0;
+        close = ends ? q : close;
+        closes += ends;
+    }
+    result = result && (annotation || closes == 1);
+    const uint64_t escaped = spelled && result ? close - at - 1 : 0;
+    uint64_t after = spelled ? close + 1 : at;
+    while (result && after < line.length && line.pointer[after] == ' ')
+    {
+        after += 1;
+    }
+    *location_start = after;
+    char* kind = result ? arena_push(arena, kind_end, 1) : 0;
+    uint8_t* spelling = kind != 0 ? arena_push(arena, escaped + 1, 1) : 0;
+    result = result && spelling != 0;
+    if (result)
+    {
+        memcpy(kind, line.pointer, kind_end);
+    }
+    uint64_t length = 0;
+    for (uint64_t i = at + 1; result && i < at + 1 + escaped; i += 1)
+    {
+        const char c = line.pointer[i];
+        const char next = i + 1 < at + 1 + escaped ? line.pointer[i + 1] : 0;
+        const bool octal = c == '\\' && i + 3 < at + 1 + escaped && next >= '0' && next <= '3' && line.pointer[i + 2] >= '0' && line.pointer[i + 2] <= '7' &&
+                           line.pointer[i + 3] >= '0' && line.pointer[i + 3] <= '7';
+        if (c != '\\')
+        {
+            spelling[length] = (uint8_t)c;
+        }
+        else if (octal)
+        {
+            spelling[length] = (uint8_t)((next - '0') * 64 + (line.pointer[i + 2] - '0') * 8 + (line.pointer[i + 3] - '0'));
+            i += 3;
+        }
+        else
+        {
+            result = next == '\\' || next == 't' || next == 'n' || next == '"';
+            spelling[length] = next == 't' ? '\t' : next == 'n' ? '\n' : (uint8_t)next;
+            i += 1;
+        }
+        length += 1;
+    }
+    if (result)
+    {
+        *token = (PreprocessorFuzzClangToken){
+            .kind = {
+                .pointer = kind,
+                .length = kind_end,
+            },
+            .spelling = {
+                .pointer = (char*)spelling,
+                .length = length,
+            },
+        };
+    }
+    return result;
+}
+
+// Clang's tokens in its -dump-tokens text `dump`, a line each (preprocessor_fuzz_clang_dump_token), into `arena`: the
+// case's, before the marker preprocessor_fuzz_batch_source writes after it, which must be the last token but the end
+// of file. A token that needs cleaning shows its bytes as written last ([UnClean='...']), unescaped, so that its line
+// splices' newlines go on to more lines; each of those but the last ends in its splice's `\` (or a trigraph's), so
+// the flag ends at the first line that ends in "']". Returns false if the text can't be read.
+static bool preprocessor_fuzz_clang_dump(Arena* arena, String8 dump, PreprocessorFuzzClangTokens* result)
+{
+    const uint64_t saved_length = arena->length;
+    uint64_t lines = 0;
+    for (uint64_t i = 0; i < dump.length; i += 1)
+    {
+        lines += dump.pointer[i] == '\n';
+    }
+    PreprocessorFuzzClangTokens tokens = {
+        .tokens = lines != 0 ? arena_push_array(arena, lines, sizeof(PreprocessorFuzzClangToken), _Alignof(PreprocessorFuzzClangToken)) : 0,
+    };
+    bool success = tokens.tokens != 0 && dump.pointer[dump.length - 1] == '\n';
+    uint64_t begin = 0;
+    while (success && begin < dump.length)
+    {
+        uint64_t end = begin;
+        while (dump.pointer[end] != '\n')
+        {
+            end += 1;
+        }
+        const String8 line = {
+            .pointer = dump.pointer + begin,
+            .length = end - begin,
+        };
+        uint64_t location = 0;
+        success = preprocessor_fuzz_clang_dump_token(arena, line, &tokens.tokens[tokens.count], &location);
+        const String8 flags = {
+            .pointer = line.pointer + location,
+            .length = line.length - location,
+        };
+        bool open = success && preprocessor_fuzz_clang_contains(flags, BUSTER_S8("[UnClean='"));
+        while (open)
+        {
+            open = end - begin < 2 || dump.pointer[end - 2] != '\'' || dump.pointer[end - 1] != ']';
+            begin = end + 1;
+            success = !open || begin < dump.length;
+            end = open && success ? begin : end;
+            while (open && success && dump.pointer[end] != '\n')
+            {
+                end += 1;
+            }
+            open = open && success;
+        }
+        tokens.count += success;
+        begin = end + 1;
+    }
+    const String8 marker = BUSTER_S8(BUSTER_PPF_CLANG_MARKER_PREFIX "0");
+    const PreprocessorFuzzClangToken* last = success && tokens.count >= 2 ? &tokens.tokens[tokens.count - 2] : 0;
+    success = last != 0 && last->spelling.length == marker.length && memcmp(last->spelling.pointer, marker.pointer, marker.length) == 0;
+    success = success && last[1].kind.length == 3 && memcmp(last[1].kind.pointer, "eof", 3) == 0;
+    if (success)
+    {
+        tokens.count -= 2;
+        *result = tokens;
+    }
+    else
+    {
+        arena_pop_to(arena, saved_length);
+    }
+    return success;
+}
+
+// Clang's own tokens for case `test_case` alone, as its -dump-tokens action gives them after preprocessing, with -E's
+// options, into `arena` (preprocessor_fuzz_clang_dump). They show what clang's -E text can't: where a token ends that
+// its text runs on past, as an unterminated literal runs on to its line's end. A pragma's tokens aren't among them.
+// Returns false if clang fails, rejects the case or its text can't be read.
+static bool preprocessor_fuzz_clang_tokens(Arena* arena, const char* clang_path, bool c23, const PreprocessorFuzzCase* test_case, PreprocessorFuzzClangTokens* tokens)
+{
+    Arena scratch = arena_reserve(BUSTER_PPF_CLANG_SCRATCH_BYTES);
+    const uint64_t capacity = BUSTER_PPF_MAX_CASE_BYTES + 128;
+    PreprocessorFuzzBuffer source = {
+        .data = scratch.base != 0 ? arena_push(&scratch, capacity, 1) : 0,
+        .capacity = capacity,
+    };
+    source.valid = source.data != 0;
+    bool result = test_case->source.length <= BUSTER_PPF_MAX_CASE_BYTES && preprocessor_fuzz_batch_source(&source, &test_case, 1);
+    if (result)
+    {
+        char* arguments[] = {
+            (char*)clang_path,
+            "--no-default-config",
+            "-Xclang",
+            "-dump-tokens",
+            "-fsyntax-only",
+            "-w",
+            "-undef",
+            "-nostdinc",
+            c23 ? "-std=c23" : "-std=c17",
+            "-fno-color-diagnostics",
+            "-fno-caret-diagnostics",
+            "-x",
+            "c",
+            "-",
+            0,
+        };
+        const String8 input = {
+            .pointer = source.data,
+            .length = source.length,
+        };
+        // A token's line is tens of bytes: room for a dump of the largest output.
+        const PreprocessorFuzzProcess process = preprocessor_fuzz_clang_process(&scratch, arguments, input, 64 * BUSTER_PPF_MAX_OUTPUT_BYTES);
+        result = process.valid && process.exit_code == 0 && process.output.length == 0 && process.diagnostic.length != 0;
+        result = result && preprocessor_fuzz_clang_dump(arena, process.diagnostic, tokens);
+    }
+    arena_release(&scratch);
     return result;
 }
 
@@ -540,7 +911,7 @@ static bool preprocessor_fuzz_clang(Arena* arena, const char* clang_path, bool c
 static bool preprocessor_fuzz_benchmark_sample(const char* clang_path, bool c23, uint64_t seed, uint64_t count, bool individual, uint64_t* accepted, uint64_t* bytes)
 {
     uint64_t capacity = 0;
-    bool result = accepted != 0 && bytes != 0 && count <= UINT64_MAX / BUSTER_PPF_CONSTRUCT_COUNT &&
+    bool result = accepted != 0 && bytes != 0 && count <= UINT64_MAX / BUSTER_PPF_FAMILY_CYCLE &&
                   !__builtin_mul_overflow(count, BUSTER_PPF_MAX_CASE_BYTES + BUSTER_PPF_MAX_OUTPUT_BYTES + sizeof(PreprocessorFuzzCase) + sizeof(PreprocessorFuzzOutput) + 128, &capacity) &&
                   !__builtin_add_overflow(capacity, 1ull << 20, &capacity);
     Arena arena = result ? arena_reserve(capacity) : (Arena){0};
@@ -552,7 +923,7 @@ static bool preprocessor_fuzz_benchmark_sample(const char* clang_path, bool c23,
     uint64_t output_bytes = 0;
     for (uint64_t i = 0; result && i < count; ++i)
     {
-        result = preprocessor_fuzz_generate(&arena, seed, i * BUSTER_PPF_CONSTRUCT_COUNT, c23, cases + i);
+        result = preprocessor_fuzz_generate(&arena, seed, i * BUSTER_PPF_FAMILY_CYCLE, c23, cases + i);
     }
     if (result)
     {

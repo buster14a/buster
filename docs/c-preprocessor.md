@@ -17,7 +17,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | --- | ---: | ---: |
 | `sqlite3.c` 3.53, with glibc's headers | 1 | 707,153 |
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
-| This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
+| This repository's translation units (at fbddd2e, with `main` at e71d7fd), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,070,090 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
 | The built-in cases (`pp_test_cases`) | 112 | |
 
@@ -101,6 +101,58 @@ straight from the files. `main.c` is mostly expansion: the encoder's form
 tables and the name lists are X-macros, so 100,629 object-like expansions,
 21,730 invocations with 162,318 arguments, and 66,530 pastes make more output
 tokens than there are input tokens.
+
+**#109's cost.** The fixes for what #109's fuzzing found cost more. In an
+A/B on the 9700X against `main` (e71d7fd), with this branch merged into it
+(4c6160f), medians of two interleaved rounds (each round's figures within
+0.4% of the other's):
+
+| Translation unit | `main` | With #109's fixes | Instructions/input token |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 11.21 ms | 11.90 ms | 123.28 → 133.31 |
+| `main.c` (`main`'s) | 25.23 ms | 26.37 ms | 340.41 → 372.80 |
+
+At `4c6160f`, before #264, `sqlite3.c`'s lexing takes 0.36 ms more (the digit
+separators, below) and
+the main loop 0.38 ms more. On `main.c`, the main loop takes 0.79 ms more.
+
+What they pay for, each a difference from clang that the fuzzing found:
+- the spaces in a substitution, which follow clang's `NextTokGetsSpace` item
+  by item, and the checks `## ##` and GNU's comma make at every paste;
+- arguments expanded in the order of their parameters' first uses: a macro
+  without `__VA_OPT__` lists that order when it is compiled, and one with it
+  walks its body;
+- before C23, the search for digit separators, which read every number's
+  bytes (until #264, below), and the prefixes the mode lacks on unknown
+  tokens (`u8''`);
+- a paste's check of its operands for bytes past 0x7F, 64 at a time: an
+  identifier written with UCNs pastes as written.
+
+Their first versions cost 21% more instructions on `main.c` and 7.5% on
+`sqlite3.c` than the branch's base did (on the 7940HS). Listing the arguments'
+order and checking pastes 64 bytes at a time took back more than half of
+`main.c`'s.
+
+**#264's digit separators.** The lexer now ends a number before a `'` itself
+before C23 (`C_TOKENIZER_NO_DIGIT_SEPARATORS`, in "Lexing by the language
+mode" below), and the search is gone. `pp_prepare_options` sets it in
+`PPPrepare.refine_flags`, which the lanes that prepare a cache's files take
+too; the lexer's own default keeps C23's numbers. In an A/B on the 9700X of
+`main` (f8e4834), #109's branch (7d5779b) and #264's merged with it
+(e9f86d6), medians of two interleaved rounds:
+
+| Translation unit | `main` | #109's fixes | With #264 | Lex phase | Instructions/input token |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 11.35 ms | 12.00 ms | 11.71 ms | 2.39 → 2.76 → 2.40 ms | 123.22 → 132.59 → 130.79 |
+| `main.c` (`main`'s) | 26.15 ms | 27.40 ms | 27.27 ms | 2.30 → 2.57 → 2.35 ms | 320.23 → 346.71 → 344.59 |
+
+The lex phase is `main`'s again, within 0.01 ms on `sqlite3.c` and 0.05 ms on
+`main.c`: the chunk loop without separators is the C23 one with another table
+(`docs/c-lexer.md`, "Numbers without digit separators"). The scalar twins'
+lex phase goes from 3.84 to 3.21 ms on `sqlite3.c` and from 3.70 to 2.89 ms on
+`main.c`. What remains above `main`'s (2.43 and 2.36 ms) is their count of the
+prefixes the mode lacks, which tests every token for an unknown one (`u8''`):
+about 12 instructions per token, where the vectorized count takes one.
 
 **Budget.** The front-end plan (#115) proposed 2 ms to preprocess `sqlite3.c`,
 about 16 cycles per output token, next to 2 ms for lexing every input and
@@ -308,8 +360,17 @@ prepared fields when it first enters the file, and keeps its own state about it
 makes its own; with one, the units and lanes that share it read each file once
 (`docs/c-files.md`, #150).
 
-- **Lexing by the language mode.** The lexer has no language mode, so two of
-  clang's rules are applied around it:
+- **Lexing by the language mode.** The lexer has no language mode of its own:
+  the mode's rules reach it as flags, or are applied after it:
+  - Digit separators are C23's. Before it, a `'` ends a pp-number and starts a
+    character constant: clang lexes `1'000` as `1` and the unterminated
+    `'000`. The lexer does that itself with `C_TOKENIZER_NO_DIGIT_SEPARATORS`,
+    which `pp_prepare_options` sets in those modes, in both of its paths (the
+    chunk loop's copy for it classifies with a table in which no character
+    follows a separator, and is otherwise the same code), so files, scratch
+    text and pastes are all lexed so, at no cost. Until #264 a pass after the
+    lexer read every number's bytes for a `'` and lexed the rest of the file
+    again from each one (#109's cost, above).
   - The `u`, `U` and `u8` prefixes are C11's, and `u8` on a character constant
     is C23's (`L` is every mode's). Before those modes, clang lexes `u'a'` as
     the identifier `u` and the constant `'a'`, so a macro named `u` expands
@@ -335,15 +396,40 @@ makes its own; with one, the units and lanes that share it read each file once
 - **Directive tables** (#118). A vectorized scan (`pp_scan_directives_vector`)
   finds every `#` that starts a line (the lexer's start-of-line bit), with its
   kind and the token where its line ends. `pp_finish_directives` pairs the
-  conditionals with an explicit stack: each conditional points to the next
-  directive of its group (`#elif`, `#else` or `#endif`), so skipping a group
-  that isn't taken is a jump. An unterminated group points nowhere, and the
-  error comes when the file ends.
-- **Include guards and `#pragma once`** (#120). A file whose tokens all lie
-  inside `#ifndef X` … `#endif`, or `#if !defined X` / `#if !defined(X)`, has
-  `X` as its guard. An inclusion while `X` is defined reads nothing, as an
-  inclusion after `#pragma once` doesn't: `sqlite3.c` skips 98 inclusions this
-  way, as clang does.
+  conditionals (`pp_pair_conditionals_vector`, or the stack): each conditional
+  points to the next directive of its group (`#elif`, `#else` or `#endif`), so
+  skipping a group that isn't taken is a jump. An unterminated group points
+  nowhere, and the error comes when the file ends.
+- **The structure's notes** (#118). The table also keeps what a skip must
+  still report, since clang reports it while it skips: an `#elif`, `#elifdef`,
+  `#elifndef` or `#else` after its group's `#else`, a group without its
+  `#endif` (when the skip goes to the end of the file, innermost first), and
+  `#elifdef` and `#elifndef`, a C23 extension before C23 (`pp_note_directives`,
+  `pp_report_skipped`). The vectorized pairing tells whether a file has any
+  (a group whose `#else` isn't last or whose answer is missing), and only then
+  are they built: none of the C library corpus's 8,983 files has any, and a
+  skip over a file without notes checks one count. The scalar kernels build
+  them for every file.
+- **Include guards and `#pragma once`** (#120). A file's guard is the one
+  clang's multiple-include optimization finds (`pp_find_guard`). The file is
+  null directives (`#` alone), then `#ifndef X`, with extra tokens or not, or a
+  `#if` whose line is `defined X` or `defined(X)` under an odd number of `!`
+  and any parentheses (`#if ((!(defined(X))))`). The group has no other
+  branch, and only null directives follow its `#endif`'s line. Comments don't
+  count; any other directive or token does. Like clang, the guard skips the
+  file only once an inclusion that took the guard's group has ended
+  (`PPContext.guard_taken`, `PPFileData.guarded`). So a file included from
+  inside itself is entered again (`xmmintrin.h` through `emmintrin.h`), and so
+  is every inclusion while `X` was defined before the first. After
+  `#pragma once` or `#import` no inclusion reads the file. The skips are
+  counted apart (`PPStatistics.skipped_guards` and `skipped_once`):
+  `sqlite3.c` skips 98 inclusions by guards and `main.c` 497, clang's counts
+  exactly. The skip saves little, since entering a guarded file again is
+  already a jump from its `#ifndef` to its `#endif`.
+  `benchmark-preprocessor --guard-cost` measures it against runs that enter
+  the files (`PPOptions.no_guard_skip`). On the 9700X (medians of three runs
+  of 21 passes, CPU 2) it saves 0.2%: `sqlite3.c` takes 13.33 ms against
+  13.36 ms, with 98 skips, and `main.c` 26.45 ms against 26.50 ms, with 512.
 - **Lines.** `pp_line_of` counts newlines (64 bytes at a time, with
   popcounts) from a per-file cursor, because the preprocessor asks about later
   places as it goes (`__LINE__`, diagnostics, line markers). Each file's lines
@@ -1112,7 +1198,8 @@ differ by up to 1% from code placement alone.
 | Piece | Vectorized design | Scalar twin and rare cases | 9700X comparison |
 | --- | --- | --- | --- |
 | Refinement (#116) | Pass A per 64 tokens; pass B batches of 64 identifiers (`docs/c-refinement.md`) | `refine_tokens_scalar`; spliced, UCN and long identifiers | 6.2 times the scalar twin on `sqlite3.c` (4.2 before #116's budget work) |
-| Directive scan (#118) | A compare of 64 kinds with `#` and the start-of-line bit | Token at a time | Part of the directive tables' 1.9% |
+| Directive scan (#118) | A compare of 64 kinds with `#` and the start-of-line bit | Token at a time | Part of the directive tables' 1.9%; 0.62 cycles per token on the C library corpus, against 3.99 |
+| Directive tables (#118) | The scan, the kinds and line ends, the pairing below, and the notes only where the pairing finds a file can have any | The stack, and the notes for every file | 2.31 cycles per token and 51 per directive on the C library corpus (`benchmark-preprocessor --tables`), against 6.50 and 143 |
 | Conditional pairing (#118) | Depth as a prefix sum, pairing as nearest smaller values by pointer jumping, 32 conditionals at a time | The stack; files with a continuation too many | 16% faster on a file of 36,868 conditionals; within noise on `sqlite3.c` |
 | File and buffer runs (#122) | 64 tokens per step: one compare finds the identifiers, whole-vector stores | Token at a time | The scalar twins: 22.8 ms against 12.0 ms in all |
 | Argument scan (#122) | Paren depth as a byte prefix sum; the `)` and the top-level commas from compares | Token at a time, through the contexts below | Equal on `sqlite3.c`; 0.4% faster on `main.c`, 1.5% fewer instructions |
@@ -1121,6 +1208,21 @@ differ by up to 1% from code placement alone.
 | `#if` (#123) | Scalar: the lines are short (below) | Precedence parser with explicit stacks | Under 0.3% of `sqlite3.c`'s time |
 | Keyword pass (#124) | 64 kinds at a time against a table of the language mode's keywords | Token at a time | Not measured on its own |
 | Printer (#124) | Spellings, then spaces for 64 tokens from class tables (`vpermi2b`), then masked 64-byte copies into one buffer | `pp_print_scalar`, through stdio | `-E` on `sqlite3.c` 25.5 to 18.9 ms; `-E -P` on `main.c` 29.3 to 22.1 ms |
+
+**The directive tables alone** (`benchmark-preprocessor --tables`, the 9700X,
+CPU 2, three runs of 21 passes on the C library corpus: 8,983 files, 13,152,141
+tokens, 598,310 directives, one per 22 tokens):
+
+| Kernels | Time | Cycles/token | Cycles/directive | Instructions/token | IPC | The scan, cycles/token |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Vectorized | 5.47–5.55 ms | 2.31–2.34 | 50.7–51.4 | 4.58 | 1.97 | 0.62 |
+| Scalar twins | 15.43–15.50 ms | 6.50–6.53 | 142.9–143.5 | 30.31 | 4.65 | 3.99 |
+
+The scan is a quarter of the vectorized tables; the rest is per directive:
+its kind, its line's end (`pp_next_line`), the pairing and the guard, about
+38 cycles each, at an IPC near 2. The notes cost nothing measurable: the same
+runs' `sqlite3.c` took 13.42 ms against main's 13.40 ms, and `main.c` 26.62
+against 26.60 (medians of five interleaved rounds).
 
 **Conditional pairing.** A conditional's level is the number of groups open
 before it, less one for a continuation (`#elif`, `#else`, `#endif`). The
@@ -1328,6 +1430,10 @@ full-corpus reproduction and frozen CI subset.
   `clang -E`. It must give the same spellings, and its line markers must place
   every token as ours do: on the same presumed line, in the same include stack
   (each file's name as the marker spells it, and its system flags).
+- **Fuzzing.** Then 1,500 generated cases in each of C17 and C23
+  (`c_preprocessor_fuzz.c`, `--fuzz N` for more). Both kernels must agree on
+  each case. With `--clang`, each case must also have clang's acceptance and
+  tokens ([the fuzzing](preprocessor-fuzz.md)).
 - **Timestamps.** `__TIMESTAMP__` in a file and in the header it includes,
   written with modification times of their own, must give each file's time in
   UTC, and `SOURCE_DATE_EPOCH`'s time when that is set, by both kernels and with
@@ -1507,17 +1613,49 @@ spellings alone would miss this change (#272).
   ("The `-f` options").
 - The printer's spacing differs from clang's in places. It puts a space between
   `<` and `>`, where clang doesn't, and it doesn't indent a line's first token
-  to its column. Line markers differ in form but not in what they say: clang
-  marks every file it enters, even one that gives no tokens, and we mark only
-  where a token needs it.
+  to its column. It keeps apart tokens that clang's printer joins into one,
+  such as a number and a UTF-8 identifier. Line markers differ in form but not
+  in what they say: clang marks every file it enters, even one that gives no
+  tokens, and every `#line`, and we mark only where a token needs it.
+  #109's comparison prints our stream with clang's spacing
+  ([the fuzzing](preprocessor-fuzz.md), "Clang's `-P` printer, emulated").
 - Diagnostics include presumed locations, include stacks and macro backtraces
   (#108, above). Source excerpts and carets remain unimplemented.
-- C++ (`-x c++`) and dependency output (`-M`) aren't supported.
-- Stringizing an identifier that pasting made from a UCN gives its UTF-8
-  spelling, where clang keeps the UCN.
-- `defined` that a macro's argument brings into a `#if` line (`ID(defined X)`)
-  is an error here. clang evaluates it in the line, with a warning that it is
-  undefined behavior.
+- C++ (`-x c++`), dependency output (`-M`) aren't supported.
+- `-E`'s line markers for the pragma lines that a `_Pragma` without its `(`
+  reads past (a directive's among a macro's arguments, another `_Pragma`'s):
+  we place them on the `_Pragma`'s line, and clang each on its own. Under
+  `-P` the tokens agree.
+- `-E`'s line markers when an attribute query's operand runs past an
+  included file's end. Clang prints the file's exit before the answer and
+  places the answer on the query's line; we place it in the included file.
+  Under `-P` the tokens agree.
+- A `_Pragma` in a computed `#include`'s line, where clang reads the string
+  of a `_Pragma` written in the line itself as a header name and rejects it,
+  but runs one from a macro. We reject both.
+- Clang's `#pragma clang __debug` commands, a UCN that names a basic
+  character (`\u0041`, which clang rejects in an identifier), and warnings
+  that don't change acceptance (`-Wvariadic-macros`, `-Wexpansion-to-defined`
+  and others). #109's generator writes none of these.
+- After an `#include`'s written header name, clang reads one token expanded
+  before the rest as it is (`CheckEndOfDirective`): `#include "a.h" f(`,
+  with `f` a function-like macro, is an unterminated invocation there, and
+  `#include "a.h" E`, with `E` empty, gives no warning. We warn about extra
+  tokens and expand none. A computed `#include` reads them as clang does.
+- A file that isn't a regular one (`#include "/dev/null"`) can't be included,
+  where clang reads it as empty. #109's generator includes only missing
+  files.
+- `#pragma clang deprecated`, `final` and `restrict_expansion` read their
+  `(`, `,`, `)` and message expanded and only the macro's name as it is
+  (`HandleMacroAnnotationPragma`); we read them all as written, so a `(` or a
+  message from a macro is an error here. #109's generator writes them
+  literally.
+- In `#if`, a character constant's `\N{name}` escape is refused (there is no
+  table of Unicode's names), and `-funsigned-char` doesn't make ordinary
+  character constants unsigned, as it does in clang.
+- `-E -P` keeps no line numbers, so it doesn't move the token after a
+  `_Pragma` that prints nothing to its own line, as clang's printer does when
+  that token is on another line; `-E` with line markers does.
 
 ## Next steps
 
@@ -1564,6 +1702,8 @@ taskset -c 2 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc
     src/buster/compiler/main.c
 ./build/compiler -E [-P] [-dM] [-o file] [options] file.c
 ./build/compiler test-preprocessor --generate-targets   # c_predefines.c's generated tables, from clang
+./build/compiler test-preprocessor --tables src path/to/libc
+taskset -c 2 ./build/compiler benchmark-preprocessor --tables path/to/libc
 ```
 
 On the 9700X, run each one under `EXCLUSIVE_OWNER=<name>
