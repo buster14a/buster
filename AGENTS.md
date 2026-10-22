@@ -266,10 +266,12 @@ designs and the compilers already built this way.
   takes what the vector path leaves to it (the design's "Step 5's phases,
   data-parallel"). `runtime.c` finds the C runtime's files as GCC's driver
   does (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o` and `crtn.o`, and the
-  `libc.so.6` and `libc_nonshared.a` that `libc.so` names) and imports them
-  into a link of their own, with what each name they refer to binds to (the
-  first part of step 5 of the design's plan), each object's records as a
-  piece, and an index and a filter of their global names and libc's;
+  `libc.so.6`, `libc_nonshared.a` and loader that `libc.so` names, the loader
+  as needed) and imports them into a link of their own, with what each name
+  they refer to binds to (the first part of step 5 of the design's plan), each
+  object's records as a piece, and an index and a filter of their global
+  names and the libraries' (the loader's version indices numbered after
+  `libc.so.6`'s);
   `runtime_import_static` does the same for a static executable's runtime
   (`crt1.o`, `crtbeginT.o` and `crtend.o`, and the archives of GCC's group:
   `libgcc.a`, `libgcc_eh.a`, `libatomic.a` where GCC has it, and `libc.a`),
@@ -927,7 +929,17 @@ informational.
   and a fini function must have every class but the C runtime's (`INIT` and
   `FINI`) and every kind its options allow, and a copy of the defaults'
   program with the hexadecimal digits' fixup one byte off must print
-  something else.
+  something else;
+- and two shared libraries, the two sets that call libc as libraries
+  (`LinkProgramOptions.shared`, from seeds of their own; the other checks that
+  take test-link's sets don't): position-independent code whose exports are
+  its functions (the workers, `buster_mix` and the entry,
+  `buster_library_main`, which takes `main`'s arguments), every other global
+  symbol hidden, the thread-locals reached with initial-exec, and each
+  function's FDE at a local symbol at its start. Each is generated and run as
+  the others are, through its entry, and must have no local-exec access, no
+  `PC32`, `PC64` or size of a symbol another object may preempt, its exports
+  exactly its functions, and each FDE at a local symbol.
 
 `--seed N` changes the random records and programs. The programs check is
 what scales: `--functions 1000000` builds three programs of a million workers
@@ -940,7 +952,10 @@ class's section, with a label at each symbol and a `.reloc` for each fixup, so
 GNU as's object of a unit is a reference for the object writer's. To check
 the programs with real toolchains, assemble every unit, then link each
 program, run it and compare what it prints (the `static-*` directories with
-`-static -e _start`, the `libc-*` ones through `cc`):
+`-static -e _start`, the `libc-*` ones through `cc`, and the `shared-*` ones
+with `cc -shared`, each loaded by a program that calls its
+`buster_library_main` with `main`'s arguments, as test-object-writer's
+harness does):
 
 ```sh
 ./build/compiler test-link --print-assembly build/programs
@@ -950,6 +965,9 @@ for d in build/programs/static-*; do
 done
 for d in build/programs/libc-*; do
     cc -o $d/program $d/unit_*.o && $d/program | cmp - $d/expected
+done
+for d in build/programs/shared-*; do
+    cc -shared -o $d/library.so $d/unit_*.o && ./harness $d/library.so | cmp - $d/expected
 done
 ```
 
@@ -967,12 +985,12 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 `./build/compiler test-object-writer [--seed N] [--cross-check] [--keep]` checks
 `object_writer.c`:
 
-- objects: each unit's object of `test-link`'s seven programs (with 500 workers
-  in the one that takes `--functions`), of a link made by hand (gaps between
-  atoms, an atom of no size, weak, hidden and protected symbols, pointers into
-  a string pool, a call to and a pointer to a local IFUNC, units without atoms
-  between and after the others) and of a link without atoms, with and without
-  function sections.
+- objects: each unit's object of `test-link`'s seven programs and two shared
+  libraries (with 500 workers in the one that takes `--functions`), of a link
+  made by hand (gaps between atoms, an atom of no size, weak, hidden and
+  protected symbols, pointers into a string pool, a call to and a pointer to a
+  local IFUNC, units without atoms between and after the others) and of a link
+  without atoms, with and without function sections.
   Each is built twice, the second time over poisoned memory, and must come out
   the same; the test's own ELF reader reads it back and checks the rules every
   object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC`);
@@ -1003,10 +1021,12 @@ segment off its alignment when told where: seed 1's `static-defaults` with
     symbols and relocations, which must be what the test's reader read, field
     by field;
   - GNU ld, lld, mold and wild link each program's objects, without errors or
-    warnings: the static programs with `-static -e _start`, and the ones that
-    call libc through `cc` as a PIE, with `-no-pie` and with `-static`. The
-    executable must exit with status 0 having printed what the program's model
-    predicts. wild links only the programs without `SIZE32` and `SIZE64`, which
+    warnings: the static programs with `-static -e _start`, the ones that
+    call libc through `cc` as a PIE, with `-no-pie` and with `-static`, and
+    the shared libraries through `cc -shared`, each loaded by a harness that
+    `cc` builds, which calls its `buster_library_main` with `main`'s
+    arguments (`dlopen` and `dlsym`). The executable (or the harness) must
+    exit with status 0 having printed what the program's model predicts. wild links only the programs without `SIZE32` and `SIZE64`, which
     wild 0.10 refuses, and among them one of 33,000 functions past
     `SHN_LORESERVE` sections. The same linkers link, the same three ways, a
     program whose `main` calls a local IFUNC directly and through a pointer,
@@ -1115,8 +1135,10 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   `.fini` atoms, crti.o's fragment first, `__dso_handle`, `__TMC_END__`),
   `libc.so.6` with its soname, `write`, `strlen`, `environ` and
   `__errno_location` at `GLIBC_2.2.5`, `__libc_start_main` at `GLIBC_2.34`
-  and `GLIBC_ABI_DT_RELR`, `libc_nonshared.a` with `atexit` in its index, and
-  every reference to each name bound: `main` to the program,
+  and `GLIBC_ABI_DT_RELR`, the loader with its soname, `__tls_get_addr` at
+  `GLIBC_2.3` and `_r_debug` and `__libc_stack_end` at `GLIBC_2.2.5`, its
+  version indices past `libc.so.6`'s, `libc_nonshared.a` with `atexit` in its
+  index, and every reference to each name bound: `main` to the program,
   `__libc_start_main` and `__cxa_finalize` to libc, `__gmon_start__` and the
   `_ITM_` functions to nothing, `__TMC_END__` to `crtendS.o`, and
   `_GLOBAL_OFFSET_TABLE_`, which the crt objects that use the GOT name, to the
@@ -1124,9 +1146,10 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   its own unit and its names' bytes one run, and the global names (binding's
   index of the runtime's names and libc's) must hold each name once, found by
   its bytes and in its filter, each global symbol's its own: `main` defined by
-  none of them, `__libc_start_main` libc.so.6's, `__dso_handle` crtbeginS.o's,
-  `atexit` a member's, and `_GLOBAL_OFFSET_TABLE_` and the init and fini
-  arrays' bounds the linker's, whether or not the runtime refers to them;
+  none of them, `__libc_start_main` libc.so.6's, `_r_debug` the loader's,
+  numbered after `libc.so.6`'s exports, `__dso_handle` crtbeginS.o's, `atexit`
+  a member's, and `_GLOBAL_OFFSET_TABLE_` and the init and fini arrays' bounds
+  the linker's, whether or not the runtime refers to them;
 - the static runtime: `runtime_import_static` on this system's files.
   `crt1.o`, `crtbeginT.o` and `crtend.o` with `_start`, `_init`,
   `__dso_handle` and `__TMC_END__`, and `crt1.o`'s ABI note; the archives in
@@ -1153,14 +1176,15 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   nothing; and with `--cross-check`, every relocation compared with
   readelf's, as the static runtime's are.
 
-`--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
-version, type, binding and size) and references with `readelf -W --dyn-syms`,
-and every relocation of the crt objects and the archives' members, the static
-runtime's among them, with `readelf -W -r`: each one must be a fixup of its
-kind at its offset (a `GOTPCRELX` or `REX_GOTPCRELX` one's by the instruction
-before it, as the test reads it: 379 of `libgcc.a`'s are `GOTPCREL` on the
-9700X, adds of slots), against the symbol (or the section) readelf names, with
-its addend, and there must be no other fixups. `--seed N` changes the programs
+`--cross-check`, which needs `readelf`, compares `libc.so.6`'s and the
+loader's exports (name, version, type, binding and size) and references with
+`readelf -W --dyn-syms`, and every relocation of the crt objects and the
+archives' members, the static runtime's among them, with `readelf -W -r`:
+each one must be a fixup of its kind at its offset (a `GOTPCRELX` or
+`REX_GOTPCRELX` one's by the instruction before it, as the test reads it: 379
+of `libgcc.a`'s are `GOTPCREL` on the 9700X, adds of slots), against the
+symbol (or the section) readelf names, with its addend, and there must be no
+other fixups. `--seed N` changes the programs
 and the random bytes. The default 9700X job runs it with `--cross-check` after
 the object writer's benchmark.
 
@@ -1252,14 +1276,20 @@ exports and members:
   themselves: a weak `_init` that exits with 7 if it runs, against crti.o's;
   `main` returning a weak `data_start` of 7, after Scrt1.o's of 0; a call
   through the GOT to a hidden `puts` (refused); `main` returning whether a
-  weak hidden `puts` isn't 0; and references to the arrays' bounds. Each must
-  bind, or fail to, as the linkers link it;
+  weak hidden `puts` isn't 0; references to the arrays' bounds; and `main`
+  returning `_r_debug`'s `r_version` plus 10 when `__libc_stack_end` isn't 0,
+  which only the loader exports (status 11), with both references strong,
+  both weak and one of each. GNU ld and lld need a library `AS_NEEDED` only
+  for a strong reference, so with weak ones alone the loader isn't needed and
+  both are left to nothing, unversioned, and with a strong one both are
+  imports at the loader's versions. Each must bind, or fail to, as the
+  linkers link it;
 - with `--cross-check`, which needs `ld.lld`, `ld.bfd`, `cc` and `readelf`:
   each bound program written as objects, one per unit, linked by ld.lld and
-  ld.bfd as a PIE with only `libc.so.6` and the loader besides, in GCC's
-  order and with `--eh-frame-hdr` as GCC's driver asks, without errors or
-  warnings, must run and print what its model
-  predicts (the atexit program must exit with 0); and the program's own
+  ld.bfd as a PIE with only `libc.so.6` and, as needed, the loader besides,
+  in GCC's order and with `--eh-frame-hdr` as GCC's driver asks, without
+  errors or warnings, must run and print what its model predicts (the atexit
+  program must exit with 0, the loader's cases with 11); and the program's own
   objects, linked by `cc` with lld, must have in readelf's `.dynsym` the
   imports at their versions and with their types, the weak references with
   default visibility and the exports binding found, and lld's `--why-extract`
@@ -1444,7 +1474,7 @@ the workers of the set named after it (2,000 by default).
 ## Dynamic PIE tests
 
 `./build/compiler test-dynamic [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 0.6 s on the 9700X, and 0.8 s with
+[--cross-check] [--keep]` (about 0.75 s on the 9700X, and 0.93 s with
 `--cross-check`) checks `executable.c`'s dynamic PIEs against this system's
 runtime (`runtime_import`), in a directory of its own under `--directory`
 (`TMPDIR` or `/tmp` by default), which it removes unless `--keep`. Each
@@ -1452,7 +1482,9 @@ program is bound by `bind.c` and written by groups of 1, 2, 3 and 8 lanes,
 each time from zeroed fields over the last file scribbled over and every
 other time over poisoned scratch memory: the files must be byte-identical.
 Each file is read back and checked by the test's own rules: the headers and
-`.dynamic` (lld's tags, `DT_INIT` and `DT_FINI` crti.o's functions);
+`.dynamic` (lld's tags, `DT_INIT` and `DT_FINI` crti.o's functions, and
+`.gnu.version_r`'s entries, as many as its `sh_info`, its chain and
+`DT_VERNEEDNUM` say);
 `.dynsym` (every dynamic symbol once, undefined, an import at its version,
 before the exports, and each export at its address, found through
 `.gnu.hash` as glibc's loader looks it up); `.gnu.hash`'s shape (lld's); and
@@ -1468,7 +1500,10 @@ must have the same relocations in `.rela.dyn` alone and run alike. The checks:
   writer's filter takes for symbols outside the image. Each must run under
   the system's loader, without stand-ins, and print what its model predicts;
 - cases: test-bind's atexit program and linkers' cases, each bound or refused
-  as GNU ld and lld link it, and run with their links' status;
+  as GNU ld and lld link it, and run with their links' status; the loader's
+  cases with `DT_NEEDED` the loader after `libc.so.6` exactly when a strong
+  reference needs it, and `.gnu.version_r` an entry for each library, each
+  import's version in its library's;
 - exports: sixteen functions whose names `libc.so.6` defines too, which
   binding exports and `main` finds with `dlsym` through the executable's
   `.gnu.hash`;
@@ -1499,8 +1534,9 @@ must have the same segments (the program headers' types in order, their flags
 and the `PT_LOAD`s' alignments), the same dynamic symbols (name, binding, type,
 whether defined, version), the same symbols with a GOT slot the loader fills,
 the same `R_X86_64_64`s with their addends, as many RELATIVE pointers outside
-the GOT, the same init and fini arrays' sizes, the same `DT_NEEDED`, `DT_INIT`,
-`DT_FINI`, `DT_GNU_HASH` and `DT_VERNEED`, and `.eh_frame_hdr` tables (lld's
+the GOT, the same init and fini arrays' sizes, the same `DT_NEEDED` libraries
+in order, each with the same needed versions, the same `DT_INIT`, `DT_FINI`,
+`DT_GNU_HASH` and `DT_VERNEED`, and `.eh_frame_hdr` tables (lld's
 with `--eh-frame-hdr`, as GCC's driver asks) that index the same functions with
 the same ranges. And each program runs
 again with a library preloaded, which `cc` builds: its `write` walks the stack
@@ -1689,7 +1725,9 @@ which it removes unless `--keep`:
   both of binding's paths against the imported runtime and against a loaded
   one: the same links and bindings, written as dynamic PIEs, or against the
   static runtime as static executables and against the static PIE's as static
-  PIEs, by 1 and 8 lanes into the same bytes, which run;
+  PIEs, by 1 and 8 lanes into the same bytes, which run; and test-bind's
+  loader case bound both ways too, the loaded runtime's PIE running with its
+  status (11);
 - opening: `runtime_open` in a directory two levels below one that exists,
   which it makes private: imported and written, then loaded; with no
   directory, or without an identity, imported and nothing written; and where
