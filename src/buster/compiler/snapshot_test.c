@@ -361,7 +361,7 @@ static bool snapshot_test_write_link(Link* link, const Bind* bind, const Runtime
     bool written = false;
     if (reset && runtime_kind_is_static(runtime->kind))
     {
-        static_test_restore(link, saved);
+        executable_test_restore(link, saved);
         written = static_test_write_with(&write, link, bind, runtime, snapshot_test_string(path), lanes, result);
     }
     else if (reset)
@@ -389,8 +389,8 @@ static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDir
     snapshot_test_path(path_a, directory->path, "imported");
     snapshot_test_path(path_b, directory->path, "loaded");
     Scratch saved = scratch_begin(0);
-    const uint8_t* saved_a = bound ? static_test_save(&a.program.link, saved.arena) : 0;
-    const uint8_t* saved_b = bound ? static_test_save(&b.program.link, saved.arena) : 0;
+    const uint8_t* saved_a = bound ? executable_test_save(&a.program.link, saved.arena) : 0;
+    const uint8_t* saved_b = bound ? executable_test_save(&b.program.link, saved.arena) : 0;
     snapshot_test_expect(tally, !bound || (saved_a != 0 && saved_b != 0), "room for the atoms' bytes", index);
     const uint32_t lane_counts[] = { 1, 8 };
     for (uint32_t l = 0; bound && saved_a != 0 && saved_b != 0 && l < BUSTER_ARRAY_LENGTH(lane_counts); l += 1)
@@ -437,7 +437,7 @@ static void snapshot_test_loader_case(SnapshotTestTally* tally, const Executable
         char program[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
         snapshot_test_path(program, directory->path, "loader");
         Scratch scratch = scratch_begin(0);
-        const uint8_t* saved = bound ? static_test_save(&b.test.link, scratch.arena) : 0;
+        const uint8_t* saved = bound ? executable_test_save(&b.test.link, scratch.arena) : 0;
         ExecutableResult result;
         const bool written = saved != 0 && snapshot_test_write_link(&b.test.link, &b.test.bind, loaded, saved, program, 1, &result);
         uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];

@@ -341,6 +341,290 @@ static uint64_t asm_test_random(uint64_t* state)
     return *state;
 }
 
+static void asm_test_register_words(AsmTest* test, const uint64_t* words, const uint64_t* lengths)
+{
+    uint64_t descriptions[8];
+    _mm512_storeu_si512(descriptions, asm_word_registers_vector(_mm512_loadu_si512(words), _mm512_loadu_si512(lengths)));
+    for (uint32_t i = 0; i < 8; i += 1)
+    {
+        X86Operand reference = {0};
+        const bool found = asm_register((String8){.pointer = (char*)(words + i), .length = lengths[i]}, &reference);
+        const uint32_t expected = found ? X86_OPERAND_REGISTER | reference.reg << 8 | reference.class << 16 | reference.width << 24 : 0;
+        const bool cached = descriptions[i] & BUSTER_ASM_REGISTER_CACHED;
+        asm_test_check(test, !cached || (descriptions[i] & ~BUSTER_ASM_REGISTER_CACHED) == expected, "packed register spelling agrees with independent scalar grammar", 0);
+        asm_test_check(test, cached, "all bounded register spellings are classified", 0);
+    }
+}
+
+static void asm_test_registers(AsmTest* test)
+{
+    uint64_t words[8];
+    uint64_t lengths[8];
+    // Every two-byte key, including every collision and non-ASCII byte; then every three-letter mixed-case key.
+    for (uint32_t base = 0; base < 65536; base += 8)
+    {
+        for (uint32_t i = 0; i < 8; i += 1)
+        {
+            words[i] = base + i;
+            lengths[i] = 2;
+        }
+        asm_test_register_words(test, words, lengths);
+    }
+    static const char letters[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for (uint32_t base = 0; base < 52 * 52 * 52; base += 8)
+    {
+        for (uint32_t i = 0; i < 8; i += 1)
+        {
+            const uint32_t value = base + i;
+            words[i] = letters[value % 52] | letters[value / 52 % 52] << 8 | letters[value / (52 * 52) % 52] << 16;
+            lengths[i] = 3;
+        }
+        asm_test_register_words(test, words, lengths);
+    }
+    static const char* const prefixes[] =
+    {
+        "r",
+        "xmm",
+        "ymm",
+        "zmm",
+        "k",
+    };
+    static const char* const suffixes[] =
+    {
+        "",
+        "b",
+        "w",
+        "d",
+        "q",
+    };
+    for (uint32_t prefix = 0; prefix < BUSTER_ARRAY_LENGTH(prefixes); prefix += 1)
+    {
+        for (uint32_t suffix = 0; suffix < BUSTER_ARRAY_LENGTH(suffixes); suffix += 1)
+        {
+            for (uint32_t digits = 1; digits <= 6; digits += 1)
+            {
+                for (uint32_t base = 0; base < 136; base += 8)
+                {
+                    for (uint32_t capitals = 0; capitals < 32; capitals += 1)
+                    {
+                        for (uint32_t i = 0; i < 8; i += 1)
+                        {
+                            char text[32];
+                            const uint32_t length = snprintf(text, sizeof(text), "%s%0*u%s", prefixes[prefix], digits, base + i, suffixes[suffix]);
+                            lengths[i] = length < 8 ? length : 8;
+                            words[i] = 0;
+                            for (uint32_t at = 0; at < length && at < 5; at += 1)
+                            {
+                                if ((capitals & (1u << at)) && text[at] >= 'a' && text[at] <= 'z')
+                                {
+                                    text[at] -= 'a' - 'A';
+                                }
+                            }
+                            memcpy(words + i, text, lengths[i]);
+                        }
+                        asm_test_register_words(test, words, lengths);
+                    }
+                }
+            }
+        }
+    }
+    asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\n.quad r000000008,r000000000009,zmm000001,k000003\n"), 1, X86_ARCH_V4);
+}
+
+static void asm_test_register_diagnostics(AsmTest* test)
+{
+    // Exercise every RIP spelling and both operand positions before and after the 16-row batch boundary. A later
+    // bad directive must not hide the earlier invalid operand; both paths must report that operand's exact byte.
+    for (uint32_t leading = 0; leading <= 17; leading += 1)
+    {
+        for (uint32_t capitals = 0; capitals < 8; capitals += 1)
+        {
+            char name[] = "rip";
+            for (uint32_t i = 0; i < 3; i += 1)
+            {
+                if (capitals & (1u << i))
+                {
+                    name[i] -= 'a' - 'A';
+                }
+            }
+            for (uint32_t operand = 0; operand < 2; operand += 1)
+            {
+                for (uint32_t later_error = 0; later_error < 2; later_error += 1)
+                {
+                    char source[512];
+                    uint32_t length = snprintf(source, sizeof(source), ".intel_syntax noprefix\n");
+                    for (uint32_t row = 0; row < leading; row += 1)
+                    {
+                        length += snprintf(source + length, sizeof(source) - length, "mov rax,rbx\n");
+                    }
+                    const uint32_t location = length + (operand == 0 ? 4 : 8);
+                    length += snprintf(source + length, sizeof(source) - length, "mov %s,%s\n%s", operand == 0 ? name : "rax", operand == 1 ? name : "rax", later_error ? ".bad\n" : "");
+                    const AsmResult result = asm_test_pair(test, (String8){.pointer = source, .length = length}, 0, 0);
+                    const bool correct = result.error != 0 && strcmp(result.error, "invalid register operand (AT&T indirect branches require '*')") == 0 && result.location == location;
+                    asm_test_check(test, correct, "standalone RIP keeps its diagnostic before later source errors", result.error);
+                }
+            }
+        }
+    }
+}
+
+static void asm_test_numbers(AsmTest* test)
+{
+    uint64_t words[8];
+    uint64_t lengths[8];
+    uint64_t descriptions[8];
+    uint64_t values[8];
+    // Every possible byte in each digit position at every supported length. Include partial batches and verify
+    // inactive stores, using the scalar number grammar as the oracle for each accepted decimal spelling.
+    for (uint32_t length = 0; length <= 8; length += 1)
+    {
+        for (uint32_t position = 0; position < (length != 0 ? length : 1); position += 1)
+        {
+            for (uint32_t byte = 0; byte < 256; byte += 8)
+            {
+                for (uint32_t count = 0; count <= 8; count += 1)
+                {
+                    for (uint32_t i = 0; i < 8; i += 1)
+                    {
+                        words[i] = 0;
+                        memset(words + i, '1', length);
+                        ((uint8_t*)(words + i))[position] = byte + i;
+                        lengths[i] = length;
+                        descriptions[i] = 0;
+                        values[i] = UINT64_MAX;
+                    }
+                    asm_simple_words_vector(words, lengths, count, descriptions, values);
+                    for (uint32_t i = 0; i < 8; i += 1)
+                    {
+                        if (i < count)
+                        {
+                            const String8 text = {.pointer = (char*)(words + i), .length = length};
+                            __int128 value = 0;
+                            const bool decimal = length != 0 && !(length > 1 && text.pointer[0] == '0') && asm_number(text, &value);
+                            const bool found = descriptions[i] == X86_OPERAND_IMMEDIATE;
+                            asm_test_check(test, found == decimal && (!found || values[i] == value), "bounded decimal reduction agrees with scalar grammar", 0);
+                        }
+                        else
+                        {
+                            asm_test_check(test, descriptions[i] == 0 && values[i] == UINT64_MAX, "partial decimal batch leaves inactive stores untouched", 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void asm_test_matcher(AsmTest* test, uint64_t* random)
+{
+    X86Target target;
+    x86_target_parse("x86-64-v4", 9, &target);
+    x86_match_initialize(test->index, &target);
+    test->architecture = X86_ARCH_V4;
+    static const __int128 values[] =
+    {
+        -129,
+        -128,
+        -1,
+        0,
+        1,
+        127,
+        128,
+        255,
+        256,
+        32767,
+        65535,
+        INT32_MIN,
+        INT32_MAX,
+        UINT32_MAX,
+        INT64_MIN,
+        UINT64_MAX,
+        (__int128)UINT64_MAX + 1,
+        (__int128)INT64_MIN - 1,
+    };
+    for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
+    {
+        const X86FormDescription* form = &x86_form_descriptions[f];
+        uint8_t roles[4];
+        const uint32_t count = x86_match_roles(form->syntax, roles);
+        if (test->index->allowed[f] && x86_match_supported(form) && count <= 4)
+        {
+            const String8 name = {.pointer = (char*)form->mnemonic, .length = strlen(form->mnemonic)};
+            const uint32_t bucket = x86_match_bucket(test->index, name);
+            uint32_t occurrences = 0;
+            for (uint32_t at = test->index->begin[bucket]; at < test->index->begin[bucket + 1]; at += 1)
+            {
+                occurrences += test->index->forms[at] == f;
+            }
+            asm_test_check(test, occurrences == 1, "exact mnemonic index contains every eligible form once", form->mnemonic);
+            for (uint32_t variant = 0; variant < 64; variant += 1)
+            {
+                X86MatchRequest request = {.mnemonic = name, .count = count};
+                request.width = variant % 4 == 0 ? form->operand_bytes : 0;
+                request.broadcast = variant % 3 == 0 && (form->evex & BUSTER_X86_EVEX_BROADCAST) ? 64 / form->disp8_scale : 0;
+                request.rounding = variant % 11 == 0;
+                request.decorations = variant % 7 == 0 ? variant & 0xff : 0;
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    X86Operand* operand = &request.operands[i];
+                    const uint32_t role = roles[i];
+                    const uint16_t descriptor = role == X86_MATCH_RM ? form->rm : role == X86_MATCH_REG ? form->reg : form->vvvv;
+                    const uint64_t bits = asm_test_random(random);
+                    operand->width = form->operand_bytes;
+                    operand->value = values[(variant + i) % BUSTER_ARRAY_LENGTH(values)];
+                    operand->symbolic = variant % 9 == 0;
+                    if (role == X86_MATCH_IMM || role == X86_MATCH_REL || role == X86_MATCH_ONE)
+                    {
+                        operand->kind = X86_OPERAND_IMMEDIATE;
+                    }
+                    else if (role == X86_MATCH_RM && (descriptor & BUSTER_X86_OPERAND_MEMORY) && (variant & 1))
+                    {
+                        operand->kind = X86_OPERAND_MEMORY;
+                        operand->width = variant % 3 == 0 ? 0 : form->operand_bytes;
+                        operand->mode = BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE;
+                        operand->base = bits & 31;
+                        operand->segment = (bits >> 5) % 3;
+                        if (variant & 2)
+                        {
+                            operand->mode |= BUSTER_X86_MODE_INDEX | ((bits >> 10) & 3);
+                            operand->index = (bits >> 12) & 31;
+                        }
+                        if (variant % 5 == 0)
+                        {
+                            operand->mode = BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_RIP;
+                            operand->base = 0;
+                            operand->index = 0;
+                        }
+                    }
+                    else
+                    {
+                        operand->kind = X86_OPERAND_REGISTER;
+                        operand->class = descriptor & BUSTER_X86_OPERAND_CLASS;
+                        operand->reg = bits & 31;
+                        if (role == X86_MATCH_ACC || role == X86_MATCH_CL)
+                        {
+                            operand->class = role == X86_MATCH_CL ? BUSTER_X86_CLASS_GPR8 : form->operand_bytes == 1 ? BUSTER_X86_CLASS_GPR8 : form->operand_bytes == 2 ? BUSTER_X86_CLASS_GPR16 : form->operand_bytes == 4 ? BUSTER_X86_CLASS_GPR32 : BUSTER_X86_CLASS_GPR64;
+                            operand->reg = role == X86_MATCH_CL ? 1 : 0;
+                        }
+                        if (role == X86_MATCH_ACC && variant % 2 == 0)
+                        {
+                            operand->class = variant / 2 % 16;
+                        }
+                        if (operand->class == BUSTER_X86_CLASS_GPR8 && variant % 3 == 0)
+                        {
+                            operand->reg = (bits & 3) + 4 + BUSTER_X86_REGISTER_HIGH_BYTE;
+                        }
+                    }
+                }
+                const X86Match scalar = x86_match(test->index, &request, false);
+                const X86Match vector = x86_match(test->index, &request, true);
+                const bool same = scalar.found == vector.found && scalar.ambiguous == vector.ambiguous && (!scalar.found || (scalar.length == vector.length && memcmp(&scalar.instruction, &vector.instruction, sizeof(X86Instruction)) == 0));
+                asm_test_check(test, same, "catalogue matcher scalar/vector operands and selected bytes", form->mnemonic);
+            }
+        }
+    }
+}
+
 static void asm_test_targets(AsmTest* test)
 {
     // Every syntax-admitted row needs explicit ISA metadata, independently of the index's own filtering.
@@ -809,6 +1093,11 @@ static int run_assembler_tests(int count, char** arguments)
             asm_test_pair(&test, (String8){.pointer = source, .length = length}, 1, 0);
         }
         uint64_t random = seed != 0 ? seed : 1;
+        uint64_t matcher_random = random;
+        asm_test_matcher(&test, &matcher_random);
+        asm_test_registers(&test);
+        asm_test_register_diagnostics(&test);
+        asm_test_numbers(&test);
         asm_test_valid_batches(&test, &random);
         static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz0123456789.,:;[](){}%$@+-*/\\\"# \n\t";
         for (uint32_t i = 0; i < fuzz; i += 1)
