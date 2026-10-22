@@ -444,6 +444,11 @@ designs and the compilers already built this way.
   `./build/compiler test-profile` runs them). `docs/profiling.md` is how the
   lexer and the encoder were measured and profiled on the 9700X, with these
   tools: read it before tuning a stage.
+- `src/buster/compiler/parallel.c` is the runner the 9700X job runs its tests
+  through, `parallel`: a list of commands at once, each one's output printed
+  in the list's order. `parallel_test.c` holds its tests (`main.c` includes
+  both; `./build/compiler test-parallel` runs them); "The parallel runner"
+  below describes both.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -454,6 +459,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-call-graph
 ./build.sh check-call-graph
 ./build/compiler test-profile
+./build/compiler test-parallel
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
 ./build/compiler benchmark-lexer src
@@ -577,8 +583,8 @@ then a summary line, and exits with status 1 on a cycle not in
 can't read. An entry names a component's functions, each as many times as
 the component has a function of that name; add one only for the
 style's "trivial statically bounded recursion", with a comment saying what
-bounds its depth. The list is empty: the tree has no cycle. The 9700X job runs
-`test-call-graph` and the check after the build; the check, which captures the
+bounds its depth. The list is empty: the tree has no cycle. The 9700X job's
+test step runs `test-call-graph` and the check; the check, which captures the
 units' IR at once, takes about 1.8 s.
 
 `./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
@@ -629,7 +635,7 @@ with the scalar lexer token by token on:
 
 `--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces. The
 command prints each check's counts and first differences, and exits with status
-1 if anything fails. The 9700X job runs both modes after the build. On that
+1 if anything fails. The 9700X job's test step runs both modes. On that
 machine, with `build.sh`'s unoptimized build, the C and C++ runs take about
 5.7 s and 6.1 s. For a longer run:
 
@@ -709,7 +715,108 @@ FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]` and `branch-misses BRSTACK [
 ADDRESS] [--disassembly FILE] [--branches N]`; `docs/profiling.md` has the
 perf and objdump commands that make their inputs. Run `ab` itself outside the
 9700X's lock, with `--lock ~/buster-fast-bench/exclusive.sh`, which takes it
-for each run. The 9700X job runs the tests after the call graph check.
+for each run. The 9700X job's test step runs the tests.
+
+## The parallel runner
+
+`./build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [LIST]`
+runs a list of commands at once. LIST (standard input without one) holds them:
+each starts at a heading, a line `== TITLE`, and its script is the lines after
+it, up to the next heading; before the first heading there may be blank lines
+and comments. Each script runs in a bash of its own, as GitHub Actions runs a
+step's `run` (`bash --noprofile --norc -e -o pipefail`), in a process group of
+its own, with standard input from `/dev/null`, its standard output and errors
+into one capture, and no other descriptor. The commands start in the list's
+order, at most `--jobs` at once, unpinned: by default one per core of the CPUs
+the process may run on, 8 on the 9700X, whose 15 CPUs online would put two tests
+on a core's SMT siblings, which slow each other down, as do the lanes' spinning
+waits (the job's tests took 21.3 to 22.4 s with 8 jobs, and 22.9 to 23.3 s with
+15, test-lanes 2.3 to 2.9 s of them rather than 0.2). The report gives each
+one's heading, with its outcome and time, then its output, in the list's order
+as soon as it and every command before it have ended; with `--github`, between
+`::group::` and `::endgroup::`, and an `::error::` annotation for each that
+failed. Then come a summary line and a line naming each command that failed. The
+exit status is 1 if a command failed or couldn't start, a signal stopped the
+run, or the report was lost. The report never holds up the run (#276's review):
+a command's output is read into memory when it ends and its capture closed, so
+that only running commands hold one, and the report goes out only as fast as its
+reader takes it, at most `PIPE_BUF` bytes at a time into a pipe or a terminal
+once `poll` says it has room, while the runner keeps starting commands,
+enforcing their timeouts and taking signals, all from one `poll` on a
+`signalfd`. Whatever a command's shell leaves running in its group is killed
+when the shell ends, and a command still running `--timeout` seconds after it
+started is killed with its group and fails, though its shell may end before the
+runner reaps it. SIGINT, SIGTERM and SIGHUP stop the run: the signal goes on to
+every running command's group (a second one sends SIGKILL), nothing more starts,
+and the report gives what every command wrote; once every command has ended, one
+drops the rest of the report rather than wait for its reader. A report that
+can't be written (EPIPE: `parallel | head`, whether or not SIGPIPE is ignored)
+stops the run, and its commands are killed.
+
+The 9700X job's test step ("Run the tests at once") runs every test through it,
+with `--timeout 180`, before the benchmarks, which run one at a time and pinned.
+A test goes in its list as a heading and the step's commands, the longest
+first, so that they start first; one that needs the machine to itself doesn't
+belong there. On the 9700X its tests took 52.1 s one after another, as the
+job's steps ran them, and take 21.8 s through the runner, the time of the
+longest, `test-calling-convention --cross-check` (18.1 s alone), whose six
+configurations run in turn. To run the list as the job does (on the 9700X,
+under its lock, as one run):
+
+```sh
+sed -n "/<<'TESTS'$/,/^ *TESTS$/{//!{s/^ \{10\}//;p}}" .github/workflows/9700x.yml | ./build/compiler parallel
+```
+
+`./build/compiler test-parallel` (about 7 s) checks it, each report exactly
+as expected with its times written as `*`:
+
+- lists: headings, scripts, blank lines and comments before the first heading,
+  a heading without its space, a last line without a newline and `==` inside a
+  line; then each error at its line: a line before the first heading, a heading
+  without a title, a command without a script (before another heading and at
+  the end), a title that repeats, a NUL byte, and no commands;
+- order: commands that end out of order, printed in the list's order, each with
+  its standard output and errors in the order it wrote them, output that
+  doesn't end in a newline and none at all, an exit status and a signal; then
+  `--github`'s groups and annotations, with a title GitHub must read escaped;
+  and a command's descriptors, without `/proc` (whose PID namespace may not be
+  the shell's): standard input reads nothing though the runner's is a file
+  with a line in it, and no other than the three is open (an external `true`
+  redirected to each from 3 to 63), though the runner has one open without
+  `FD_CLOEXEC`;
+- at once: three commands that each wait for the other two pass with 3 jobs;
+  with one job, four commands' starts and ends in a log come in turn; and eight
+  with 3 jobs are never more than 3 at once, by the runner's times;
+- output: 1 MB from one command, past a pipe's 64 KB;
+- processes: a command past its timeout killed with the process it started,
+  what a command leaves running killed when its shell ends, and a shell that
+  can't start;
+- a slow reader (#276's review): a report whose pipe its reader leaves full for
+  1 s while a command passes its timeout, which must be killed at its deadline
+  and fail, and while a command sends SIGTERM, which must go on to it at once;
+  SIGTERM once every command has ended, which must drop the rest of the report
+  rather than wait for the reader; and 61 commands with room for 32
+  descriptors, 60 of them ending before the first, whose captures must close
+  as they end;
+- signals: SIGTERM from a command stops the run, goes on to the command's
+  group, and what didn't start is reported so; a run stopped while its command
+  passes fails; SIGINT then SIGTERM, from a command that ignores both, kill it;
+  SIGHUP while ignored (as under nohup) doesn't stop the run, and SIGCHLD
+  ignored doesn't keep the runner from its commands; each run leaves the signal
+  mask and the dispositions as they were;
+- the command: its report and exit status for lists on standard input and in a
+  file that pass and fail, a report with no reader (the run stops, and the
+  runner ends at once with its command killed), with SIGPIPE at its default and
+  ignored, a reader that leaves after the first line (the run fails though its
+  command passes), a command that ends past its deadline while the runner is
+  stopped (SIGSTOP), which must fail, a list's error, a list that can't be
+  read, and invalid options;
+- the cores: `--jobs`' default against the distinct physical and core ids that
+  `/proc/cpuinfo` gives the CPUs the process may use.
+
+The runner is test tooling outside the compile path and has no vector path: a
+list is a few dozen commands, and the time goes into them. The 9700X job's
+test step runs its tests too.
 
 ## x86-64 disassembler
 
@@ -923,8 +1030,8 @@ branch short at first, then growing the ones out of range) must give the same
 bytes as `x86_encode_scalar` of the sized records; an object that can't be read,
 or a function left uncompared, fails the check. The files go in a directory
 under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure. `--seed N`
-changes the generated functions. The default 9700X job runs it with
-`--cross-check` after the encoder's benchmark.
+changes the generated functions. The 9700X job's test step runs it with
+`--cross-check`.
 
 ## Branch sizing benchmark
 
@@ -1334,8 +1441,7 @@ each one must be a fixup of its kind at its offset (a `GOTPCRELX` or
 of `libgcc.a`'s are `GOTPCREL` on the 9700X, adds of slots), against the
 symbol (or the section) readelf names, with its addend, and there must be no
 other fixups. `--seed N` changes the programs
-and the random bytes. The default 9700X job runs it with `--cross-check` after
-the object writer's benchmark.
+and the random bytes. The 9700X job's test step runs it with `--cross-check`.
 
 ## Import benchmark
 
@@ -1363,7 +1469,7 @@ Run it under the 9700X's lock with `taskset -c 2`. With `--library
 /usr/lib/libstdc++.so.6 --library /usr/lib/libLLVM.so.23.1 --archive
 /usr/lib/libc.a` it measures the larger files the design's "Step 5's phases,
 data-parallel" has the numbers for. The default 9700X job runs it after the
-import tests, pinned to one allowed CPU; like the others, its measurements are
+tests, pinned to one allowed CPU; like the others, its measurements are
 informational.
 
 ## Bind tests
@@ -1521,8 +1627,8 @@ paths, which must make the same link and binding:
   and whose `--why-extract` the members that joined.
 
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
-removed at the end unless `--keep`. The default 9700X job runs it with
-`--cross-check` after the import benchmark.
+removed at the end unless `--keep`. The 9700X job's test step runs it with
+`--cross-check`.
 
 ## Bind benchmark
 
@@ -1538,7 +1644,7 @@ runtimes' closure (the members the link needs, per member) and `bind_end`,
 each run on the same link put back as it was. The paths must make the same
 links. Run it under the 9700X's lock with `taskset -c 2`; the design's "Step
 5's phases, data-parallel" and "Static links, as built" have the numbers. The
-default 9700X job runs it after the bind tests, pinned to one allowed CPU;
+default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
 
 ## Direct executable tests
@@ -1737,8 +1843,8 @@ location on) must be, row for row, what `objdump -d`'s disassembly of the
 function's pushes and pops gives as GCC's CFI: the CFA 8 bytes further from
 `rsp` after each push and 8 nearer after each pop, a callee-saved register a
 push saves at the CFA less the new offset, and one a pop restores as it was.
-`--seed N` changes the programs. The default 9700X job runs it with
-`--cross-check` after test-executable.
+`--seed N` changes the programs. The 9700X job's test step runs it with
+`--cross-check`.
 
 ## Static executable tests
 
@@ -1861,8 +1967,8 @@ relaxes to local-exec, and in a static executable those that only tests and
 binops with REX read through the GOT, which lld writes with immediates
 without PIC (`static_test_immediate_slots`: 5 of the decimal program's).
 `--seed N` and
-`--functions N` change the generated programs. The default 9700X job runs it
-with `--cross-check` after test-dynamic.
+`--functions N` change the generated programs. The 9700X job's test step runs
+it with `--cross-check`.
 
 ## Direct executable benchmark
 
@@ -1978,8 +2084,8 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
   file;
 - the cache directory: `snapshot_directory` from `XDG_CACHE_HOME` and `HOME`.
 
-`--seed N` and `--functions N` change the programs. The default 9700X job runs
-it after benchmark-executable.
+`--seed N` and `--functions N` change the programs. The 9700X job's test step
+runs it.
 
 ## Snapshot benchmark
 
@@ -2146,7 +2252,7 @@ liveness and interference primitives in `dataflow.c`:
 
 `--seed N` changes the generated inputs (1 by default). The command reports
 the check and failure counts and exits with status 1 on any failure. The
-9700X job runs it after the link tests.
+9700X job's test step runs it.
 
 ## Dataflow benchmark
 
@@ -2198,8 +2304,8 @@ running the corpora remain outside this module's current scope and wait for
 `./build/compiler test-preprocessor-fuzz [--fuzz N] [--seed N] [--clang PATH]
 [--std c17|c23]` checks the independent tooling for #109. It requires Clang 23
 on `PATH`, or the executable selected by `--clang PATH`. The defaults are
-64 generated cases, seed 1, `clang` and C17; the 9700X job runs both C17 and
-C23. The checks cover:
+64 generated cases, seed 1, `clang` and C17; the 9700X job's test step runs
+both C17 and C23. The checks cover:
 
 - deterministic generation, including every one of the 36 construct families
   even when `--fuzz N` is smaller, and repeatability for seeds 1, 7 and 99;
@@ -2285,7 +2391,8 @@ identifier must get the same id and every token the same leading-space bit, on:
 - every `.c` and `.h` file under each path. On the 9700X, `src` and the C
   library corpus (`~/azp-bench/c-tokenizer/corpus/libc`) pass.
 
-`--seed N` picks another random sequence. The 9700X job runs it on `src`.
+`--seed N` picks another random sequence. The 9700X job's test step runs it on
+`src`.
 
 ## Refinement benchmark
 
@@ -2359,8 +2466,8 @@ features:
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
-`docs/c-preprocessor.md` has the configurations. The 9700X job runs the cases
-and the repository's translation units with `--clang`.
+`docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs
+the cases and the repository's translation units with `--clang`.
 
 ## Preprocessor benchmark
 
@@ -2434,8 +2541,8 @@ fails the test.
 `--seed N` changes the spellings, and `--keep` leaves the directory. On the
 9700X, `sqlite3.c`, Lua 5.4.8, musl 1.2.5's 1,357 sources and the C library
 corpus (`--flat`) pass too.
-The 9700X job runs it, on `src` with `--flat`, and on the repository's
-translation units.
+The 9700X job's test step runs it, on `src` with `--flat`, and on the
+repository's translation units.
 
 ## Per-file jobs benchmark
 
@@ -2506,8 +2613,8 @@ the one `--clang` names:
   which `type_print`'s must equal.
 
 The files go in a new directory under `$TMPDIR` (or `/tmp`), removed unless
-`--keep`. `--seed N` changes every random input. The 9700X job runs it after
-the preprocessor's benchmark.
+`--keep`. `--seed N` changes every random input. The 9700X job's test step
+runs it.
 
 ## Type benchmark
 
@@ -2529,7 +2636,7 @@ item (time, cycles, instructions, IPC):
 
 Run it under the 9700X's lock with `taskset -c 2`. `docs/c-types.md` has the
 numbers and the layout designs the vector one was chosen over. The default
-9700X job runs it after the type tests, pinned to one allowed CPU; like the
+9700X job runs it after the tests, pinned to one allowed CPU; like the
 others, its measurements are informational.
 
 ## Calling convention tests
@@ -2584,7 +2691,7 @@ clang would pass as an `i0` becomes a long (its passes crash on them now and
 then), as does an unnamed one clang's `va_arg` reads elsewhere than its call
 puts it; and bytes clang doesn't pass aren't compared. The files go in a new
 directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure.
-The 9700X job runs it with `--cross-check` after the type table's benchmark.
+The 9700X job's test step runs it with `--cross-check`.
 
 ## Calling convention benchmark
 
@@ -2617,6 +2724,6 @@ classification mispredicts 3 to 10 times less often and runs up to 2.3 times
 as fast. `--path` times one path alone, back to back, and `--after-scalar MS`
 runs the twin for MS ms before each sample of the vector path. Run it under
 the 9700X's lock with `taskset -c 2`; `docs/calling-convention.md` has the
-numbers. The default 9700X job runs it after the calling convention's tests,
-pinned to one allowed CPU; like the others, its measurements are
+numbers. The default 9700X job runs it after the tests, pinned to one allowed
+CPU; like the others, its measurements are
 informational.
