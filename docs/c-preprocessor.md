@@ -317,12 +317,20 @@ comparison.
 
 ### Files
 
-Every file is read once per translation unit. It is mapped with `MAP_POPULATE`,
-lexed, refined and given a directive table (`pp_prepare_data`), and it stays
-for the whole translation unit, because macro definitions point into the tokens
-of the file that defines them. Files are found by path (`pp_lookup_path`, a
-table that starts at 1,024 slots and doubles) and shared by device and inode,
-so that two paths to one file are one file.
+Every file is read once per process. It is mapped (with `MAP_POPULATE` when a
+unit or one lane maps it; lanes read the files of up to 16 KB instead), lexed,
+refined and given a directive table (`pp_prepare_into`), and it stays as long as
+the file cache that holds it, because macro definitions point into the tokens of
+the file that defines them. The cache (`FileCache`) keeps a record per file
+identity (device and inode), so that two paths to one file are one file, and a
+path entry per path looked up, with the file there or none, so that a search
+makes no system call for a path the cache knows. A translation unit finds files
+by path in a table of its own (`pp_lookup_path`, which starts at 1,024 slots and
+doubles) and asks the cache the first time; it copies a record's prepared fields
+when it first enters the file, and keeps its own state about it (`#pragma once`,
+the line cursor). Without a cache in `PPOptions.files`, a unit makes its own;
+with one, the units and lanes that share it read each file once
+(`docs/c-files.md`, #150).
 
 - **Lexing by the language mode.** The lexer has no language mode, so two of
   clang's rules are applied around it:
@@ -477,9 +485,18 @@ arenas. Popping a context gives its tokens back when they are on top.
     repeated `-I` would make `#include_next` find the same file again.
   - A header name is read without its line splices, whether it is written out,
     comes from a macro, or is `__has_include`'s operand.
-  - `<...>` is read from the source up to the first `>` on the line, so `//`
-    and `/*...*/` there are part of the name, as in clang: `<a//b.h>` and
-    `<a/*x*/b.h>` (#119). Without a `>` on the line, the line's tokens up to a
+  - `<...>` is read from the source up to the first `>` on the line that no
+    backslash escapes, so `//` and `/*...*/` there are part of the name, as in
+    clang: `<a//b.h>` and `<a/*x*/b.h>` (#119). A backslash takes the
+    character after it into the name, a `>` too, as clang's
+    `LexAngledStringLiteral` reads it: `<a\>b.h>` names `a\>b.h`. The rest of
+    the line is what clang lexes on from the `>`. The file was lexed before the
+    name was known, so where one of its tokens or comments runs past the `>`
+    (a `//` in the name began a comment to the line's end, or the `>` starts a
+    `>>` or a `>=`), the rest of the line is lexed again from there
+    (`pp_header_name_tail`): `#include <a//b.h> x` warns about `x`, and in
+    `#if __has_include(<a//b.h>) && X` the `&& X` counts. Without a `>` on the
+    line, the line's tokens up to a
     `>` make the name, as clang's `LexHeaderName` joins them: a space for each
     one that had whitespace before it, the `>` too. So with a comment that runs
     on to the next line, `<a/*x` then `*/b.h>` names `a b.h`, and `< c.h >`
@@ -494,7 +511,10 @@ arenas. Popping a context gives its tokens back when they are on top.
     to the first `>` on the line, as clang's `LexHeaderName` lexes it from its
     file. So `__has_include(<  x.h>)` names `  x.h`, as `#include <  x.h>`
     does. The same operand from a macro or a macro's argument is joined from
-    its tokens and names ` x.h` (#254's review).
+    its tokens and names ` x.h` (#254's review). When the rest of the line is
+    lexed again from the `>`, its tokens go in as a buffer the main loop reads
+    before the line's own, which are left: `__has_include(<x.h>>)` keeps a `>`
+    in the operand, an error, as clang's does.
   - The checks and their diagnostics go in clang's order
     (`HandleHeaderIncludeOrImport`):
     - an empty name is an error;
@@ -670,7 +690,11 @@ for token as clang does, and compile with clang.
 
 - **The header name** is read as an `#include`'s (`pp_read_header_name`, which
   `pp_include` shares): `<...>` or a string literal as written, or a computed
-  one from the line's expanded tokens.
+  one from the line's expanded tokens. The file was lexed before the name was
+  known, so after a written `<...>` one of its tokens or comments may run past
+  the `>`: in `<a//b.bin> limit(1)`, the `//` began a comment to the line's
+  end. Then the rest of the line is lexed again from the `>`, as clang lexes on
+  after the name (`pp_header_name_tail`, `pp_copy_relexed`).
 - **The parameters** are read expanded, as clang reads them. When a macro's
   name is among them, or the name is computed, the line goes through a capture
   (`BUSTER_PP_CAPTURE_EMBED`, `pp_finish_embed`); otherwise it is read as it is.
@@ -694,8 +718,11 @@ for token as clang does, and compile with clang.
 - **The file** is found as clang's `LookupEmbedFile` finds it (`pp_find_embed`).
   An absolute name is used as it is. A quoted name is looked for in the
   directory of the file the directive is in, then in the working directory,
-  then in the `--embed-dir=` directories; an angled one in those alone. A
-  missing file is fatal, and a device file an error.
+  then in the `--embed-dir=` directories; an angled one in those alone. An
+  empty `--embed-dir=` is the working directory: the name gets no `/` before
+  it. The file is only looked at: `#embed` reads it (through the file cache),
+  and `__has_embed` needs its size alone. A missing file is fatal, and a device
+  file an error.
 - **The data** is one output token, `BUSTER_PP_KIND_EMBED`, as clang's is one
   `annot_embed`. A file of N bytes doesn't become 2N - 1 numbers and commas,
   which would take about 28 bytes of output columns per byte. Its value indexes
@@ -705,8 +732,10 @@ for token as clang does, and compile with clang.
   `limit`, `if_empty`'s tokens come alone. They go in as a buffer whose tokens
   never expand, as clang enters them with macro expansion off, having read them
   expanded.
-- **`__has_embed`** answers as clang 23's does. A `limit` past the bytes left
-  gives 2 (empty), not 1, and a device file's size is 0.
+- **`__has_embed`** answers as clang 23's does, from the file's size without
+  reading it (clang's `LookupEmbedFile` without opening the file), so that a
+  file too big or unreadable for `#embed` is there. A `limit` past the bytes
+  left gives 2 (empty), not 1, and a device file's size is 0.
 - **`-E`** prints the data as clang does: the values, separated by `, `.
   `pp_embed_text_vector` formats 16 bytes per iteration:
   - each value's tens and hundreds by multiplications in 16-bit lanes
@@ -746,12 +775,15 @@ for token as clang does, and compile with clang.
   lexer starts no line there, because the end of the token stream that the
   directive entered passes no line start on. The join holds unless a newline
   outside comments comes before the token, or the token is a directive's `#`.
-  A change of file or of presumed position starts a line in clang's printer
-  (`FileChanged`): an included file entered or left, or a `#line`. An
-  `#embed`'s first tokens after one, with no output since, go at the place the
-  change left the printer: the file's first line, the line after the
-  `#include`, or `#line`'s number. That is where clang prints them, though the
-  `#embed` may be further down (`Preprocessor.file_change_token`).
+  The scans between tokens read comment delimiters as the lexer does, through
+  line splices (`pp_skip_blanks`): `*\` with a `/` on the next line closes a
+  comment. A change of file or of presumed position starts a line in clang's
+  printer (`FileChanged`): an included file entered or left, a `#line`, or
+  `#pragma GCC system_header`. An `#embed`'s first tokens after one, with no
+  output since, go at the place the change left the printer: the file's first
+  line, the line after the `#include` or the pragma, or `#line`'s number. That
+  is where clang prints them, though the `#embed` may be further down
+  (`Preprocessor.file_change_token`).
 
 ### Built-in macros and the predefines
 
@@ -1510,7 +1542,8 @@ cleared once and reused.
   translation unit before the parser reads it. Streaming needs a rule for when
   a block of output is final, since a function-like macro name at the end of an
   expansion can take a `(` from the input after it (#117).
-- **Per-file jobs** cached for the process (#150).
+- **Per-file jobs** cached for the process, which lanes fill ahead of the
+  preprocessor, are `docs/c-files.md`'s (#150).
 
 ## Reproduction
 

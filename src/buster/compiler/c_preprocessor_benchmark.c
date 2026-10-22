@@ -257,10 +257,12 @@ static int pp_benchmark_embed(uint64_t count)
             {
                 const uint64_t step = count - done < BUSTER_PP_EMBED_PRINT_BYTES ? count - done : BUSTER_PP_EMBED_PRINT_BYTES;
                 const uint64_t written = scalar ? pp_embed_text_scalar(bytes + done, step, done != 0, text) : pp_embed_text_vector(bytes + done, step, done != 0, text);
-                // A use of the text the compiler can't drop: its length, and a word of it.
+                // A use of the text the compiler can't drop: its length, and up to a word of it from its middle, never past
+                // `written` (the kernels' slack past it differs).
                 length += written;
-                uint64_t word;
-                memcpy(&word, text + written / 2, sizeof(word));
+                uint64_t word = 0;
+                const uint64_t taken = written < sizeof(word) ? written : sizeof(word);
+                memcpy(&word, text + (written - taken) / 2, taken);
                 digest = digest * 31 + word;
             }
             const uint64_t elapsed[3] = {
