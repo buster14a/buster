@@ -1070,6 +1070,11 @@ static const PPTestCase pp_test_cases[] = {
     { "__LINE__ at a ')' that starts at a line splice", "#define L() __LINE__\nL(\n\\\n)\n#define M __LINE__\nx\n\\\nM\n", 0, "c17", "\n3\nx\n7\n", false, 0 },
     { "#line's number after a _Pragma and an empty macro", "#lin\\\ne _Pragma(\"ppf_lin\\\ne\") 010\n__LINE__\n#define E\n#line E \\\n 30\n__LINE__\n#line E \\\n40\n__LINE__\n",
       0, "c17", "\n#pragma ppf_line\n10\n30\n41\n", false, 1 },
+    { "__LINE__ at a ')' that starts at a trigraph's line splice", "#define L() __LINE__\nL(\n?\?/\n)\n", 0, "c17", "\n3\n", false, 0 },
+    // A line marker's tokens after its digits are read expanded (Preprocessor::HandleDigitDirective's Lex).
+    { "a line marker's name and flags from macros", "#define F \"named.c\"\n# 20 F\n__FILE__ __LINE__\n#define E\n# 30 E\n__LINE__\n", 0, "c17", "\n\"named.c\" 20\n30\n", false, 0 },
+    // A _Pragma's text gets a newline after it (prepare_PragmaString), which splices away a `\` that ends it.
+    { "a _Pragma's text that ends in a backslash", "#define P(x) _Pragma(x)\nP(\"\\\\\")\nx\n", 0, "c17", "\n#pragma\nx\n", false, 0 },
     // Character constants in #if as clang's CharLiteralParser reads them.
     { "character constants' values", "#if 'ab' == 24930 && '\\xff\\x01' == 65281 && '\\377' == -1 && L'\\xffffffff' == -1 && u'\\xffff' == 65535 && U'\\U0010FFFF' == 0x10FFFF && '\\e' == 27 && '\\q' == 'q'\nok\n#endif\n",
       0, "c17", "\nok\n", false, 3 },

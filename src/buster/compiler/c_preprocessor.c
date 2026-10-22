@@ -1102,9 +1102,41 @@ static uint32_t pp_without_splices(const Preprocessor* pp, const uint8_t* bytes,
     return result;
 }
 
+// The spelling of an unknown token at `location` of `length` bytes that ends in a line splice, an unterminated literal's
+// (no other token can): clang's cleaning reads the character after the splice, past the token, which is the newline
+// that ended the literal (Lexer::getSpellingSlow), so its spelling ends with that newline. `spelled` bytes of it are in
+// `buffer`, without the splices (pp_without_splices), which has room for `length`. Returns the length.
+static uint32_t pp_trailing_splice(const Preprocessor* pp, uint32_t location, uint32_t length, uint8_t* buffer, uint32_t spelled)
+{
+    uint32_t result = spelled;
+    const uint32_t range = pp_find_range(pp, location);
+    const PPRange* record = range != BUSTER_PP_NONE ? &pp->ranges[range] : 0;
+    if (record != 0 && record->file != BUSTER_PP_NONE && length >= 2 && location - record->base + length < record->length)
+    {
+        const uint8_t* bytes = record->bytes + (location - record->base);
+        uint32_t p = length;
+        const bool newline = bytes[p - 1] == '\n' || bytes[p - 1] == '\r';
+        p -= newline ? 1 : 0;
+        p -= newline && bytes[p] == '\n' && p >= 1 && bytes[p - 1] == '\r' ? 1 : 0;
+        while (newline && p >= 1 && (bytes[p - 1] == ' ' || bytes[p - 1] == '\t'))
+        {
+            p -= 1;
+        }
+        const bool spliced = newline && p >= 1 && (bytes[p - 1] == '\\' || (pp->options.trigraphs && p >= 3 && bytes[p - 1] == '/' && bytes[p - 2] == '?' && bytes[p - 3] == '?'));
+        const uint8_t next = bytes[length];
+        if (spliced && (next == '\n' || next == '\r') && spelled < length)
+        {
+            buffer[spelled] = next;
+            result = spelled + 1;
+        }
+    }
+    return result;
+}
+
 // A token's spelling: an identifier's (or a keyword's) interned bytes, an integer's digits, or else its bytes in the
-// location space without the line splices in them (or trigraphs, with trigraphs on). `buffer` holds a spelling that
-// needs writing; it needs room for the token's bytes, or 24 for an integer. Returns the length.
+// location space without the line splices in them (or trigraphs, with trigraphs on), an unterminated literal's as clang
+// spells it (pp_trailing_splice). `buffer` holds a spelling that needs writing; it needs room for the token's bytes, or
+// 24 for an integer. Returns the length.
 static uint32_t pp_spelling(Preprocessor* pp, uint8_t kind, uint32_t value, uint32_t location, uint8_t* buffer, const uint8_t** spelling)
 {
     uint32_t result;
@@ -1121,6 +1153,7 @@ static uint32_t pp_spelling(Preprocessor* pp, uint8_t kind, uint32_t value, uint
     else
     {
         result = pp_without_splices(pp, pp_location_bytes(pp, location), value - location, buffer, spelling);
+        result = kind == C_TOKEN_UNKNOWN && *spelling == buffer ? pp_trailing_splice(pp, location, value - location, buffer, result) : result;
     }
     return result;
 }
@@ -5153,6 +5186,9 @@ static bool pp_pragma_string(Preprocessor* pp, PPToken string, uint32_t name_loc
             text[n] = spelling[i];
             n += 1;
         }
+        // Clang lexes the text with a newline after it (prepare_PragmaString), which splices away a `\` that ends it.
+        text[n] = '\n';
+        n += 1;
         const uint32_t location = pp_scratch(pp, text, n);
         const uint32_t begin = pp->arguments.count;
         bool comment = false;
@@ -6676,9 +6712,10 @@ static uint32_t pp_decode_file_name(Preprocessor* pp, const uint8_t* spelling, u
 }
 
 // Where clang's lexer starts a token that starts at `start`: at the first of any line splices right before it (a
-// backslash, blanks, and a newline or CRLF, with nothing between them and the token), since it reads them as part of
-// the token after them. Blanks between the splice and the token are whitespace it skips first.
-static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start)
+// backslash, or with `trigraphs` a ??/, then blanks, and a newline or CRLF, with nothing between them and the token),
+// since it reads them as part of the token after them. Blanks between the splice and the token are whitespace it skips
+// first.
+static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start, bool trigraphs)
 {
     uint32_t result = start;
     bool moved = true;
@@ -6692,8 +6729,10 @@ static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start)
         {
             p -= 1;
         }
-        moved = newline && p >= 1 && bytes[p - 1] == '\\';
-        result = moved ? p - 1 : result;
+        const bool backslash = newline && p >= 1 && bytes[p - 1] == '\\';
+        const bool trigraph = newline && trigraphs && p >= 3 && bytes[p - 1] == '/' && bytes[p - 2] == '?' && bytes[p - 3] == '?';
+        moved = backslash || trigraph;
+        result = backslash ? p - 1 : trigraph ? p - 3 : result;
     }
     return result;
 }
@@ -6703,7 +6742,7 @@ static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location)
 {
     const uint32_t range = pp_find_range(pp, location);
     const PPRange* record = range != BUSTER_PP_NONE ? &pp->ranges[range] : 0;
-    return record != 0 && record->file != BUSTER_PP_NONE ? record->base + pp_start_with_splices(record->bytes, location - record->base) : location;
+    return record != 0 && record->file != BUSTER_PP_NONE ? record->base + pp_start_with_splices(record->bytes, location - record->base, pp->options.trigraphs) : location;
 }
 
 // Adds a line note to a range, from `location` on (PPLineDirective): `name` null keeps the presumed name, the name of
@@ -6864,8 +6903,8 @@ static void pp_finish_line(Preprocessor* pp)
     pp->arguments.count = capture.arguments_begin;
 }
 
-// #line digits ["file"], or a GNU line marker (`# digits "file" flags`), at directive d. #line's line is expanded
-// through a capture, which pp_finish_line takes; a line marker's is read as it is.
+// #line digits ["file"], or a GNU line marker (`# digits "file" flags`), at directive d. #line's line, and a line
+// marker's after its digits, are expanded through a capture, which pp_finish_line takes.
 static void pp_line(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
@@ -6884,9 +6923,15 @@ static void pp_line(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t ki
         .location = location,
         .anchor = BUSTER_PP_NONE,
     };
-    // Among a macro's arguments, clang reads it unexpanded: its macro expansion is off there, and only #if's and #elif's
-    // turn it back on (Preprocessor::EvaluateDirectiveExpression).
-    const bool started = copied && kind == PP_DIRECTIVE_LINE && !pp_collecting(pp) && pp_start_capture(pp, capture, line, pp->arguments.count, location);
+    // A #line's line is read expanded, and so is a line marker's after its digits (Preprocessor::HandleDigitDirective's
+    // Lex), which go first: but not among a macro's arguments, where clang's macro expansion is off, and only #if's and
+    // #elif's turn it back on (Preprocessor::EvaluateDirectiveExpression).
+    const uint32_t expanded = kind == PP_DIRECTIVE_LINE_MARKER ? line + 1 : line;
+    const bool started = copied && expanded < pp->arguments.count && !pp_collecting(pp) && pp_start_capture(pp, capture, expanded, pp->arguments.count, location);
+    if (started && kind == PP_DIRECTIVE_LINE_MARKER)
+    {
+        pp_emit(pp, pp_stack_token(&pp->arguments, line));
+    }
     if (!started)
     {
         pp_apply_line(pp, context, d, &pp->arguments, line, copied ? pp->arguments.count : line, location, BUSTER_PP_NONE);
@@ -10892,7 +10937,7 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
             const uint32_t range = markers ? pp_find_range(pp, place) : BUSTER_PP_NONE;
             if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
             {
-                place = pp->ranges[range].base + pp_start_with_splices(pp->ranges[range].bytes, place - pp->ranges[range].base);
+                place = pp->ranges[range].base + pp_start_with_splices(pp->ranges[range].bytes, place - pp->ranges[range].base, pp->options.trigraphs);
                 uint32_t column;
                 breaks = pp_print_place(pp, &marked, range, place, pp_line_of(pp, range, place, &column), line_start, &result);
                 fwrite(marked.text, 1, marked.length, stream);
@@ -11152,7 +11197,9 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                 {
                     uint8_t* spare = arena_push(scratch.arena, (uint64_t)length + 1, 1);
                     result = spare != 0;
+                    const uint32_t raw = length;
                     length = result ? pp_without_splices(pp, spelling, length, spare, &spelling) : 0;
+                    length = result && kind == C_TOKEN_UNKNOWN && spelling == spare ? pp_trailing_splice(pp, location, raw, spare, length) : length;
                 }
             }
             else if (kind == BUSTER_PP_KIND_INTEGER)
@@ -11220,7 +11267,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                 const uint32_t range = pp_directory_range(pp, directory, place);
                 if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
                 {
-                    place = pp->ranges[range].base + pp_start_with_splices(pp->ranges[range].bytes, place - pp->ranges[range].base);
+                    place = pp->ranges[range].base + pp_start_with_splices(pp->ranges[range].bytes, place - pp->ranges[range].base, pp->options.trigraphs);
                     bool placed = true;
                     breaks = pp_print_place(pp, &marked, range, place, pp_print_line(pp, &lines, range, place), line_start, &placed);
                     // The markers go through the buffer, or past it when they are longer than its room.

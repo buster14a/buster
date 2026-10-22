@@ -341,7 +341,7 @@ static bool pp_fuzz_avoid_concat(Preprocessor* pp, const PPTokens* out, uint32_t
         const uint8_t* token_bytes = pp_fuzz_bytes(pp, out->locations[i], &token_offset, &token_available);
         const bool identifier = previous == C_TOKEN_RAW_IDENTIFIER;
         const uint32_t end = identifier && bytes != 0 ? out->locations[i - 1] + (pp_fuzz_identifier_end(bytes, offset, available, pp->options.trigraphs) - offset) : out->values[i - 1];
-        const uint32_t start = token_bytes != 0 ? out->locations[i] - (token_offset - pp_start_with_splices(token_bytes, token_offset)) : out->locations[i];
+        const uint32_t start = token_bytes != 0 ? out->locations[i] - (token_offset - pp_start_with_splices(token_bytes, token_offset, pp->options.trigraphs)) : out->locations[i];
         result = !(bytes != 0 && token_bytes != 0 && bytes == token_bytes && end == start);
     }
     return result;
@@ -358,7 +358,7 @@ static bool pp_fuzz_leading_space(Preprocessor* pp, const PPTokens* out, uint32_
         uint32_t offset = 0;
         uint32_t available = 0;
         const uint8_t* bytes = pp_fuzz_bytes(pp, out->locations[i], &offset, &available);
-        const uint32_t start = bytes != 0 ? pp_start_with_splices(bytes, offset) : 0;
+        const uint32_t start = bytes != 0 ? pp_start_with_splices(bytes, offset, pp->options.trigraphs) : 0;
         result = bytes == 0 || (start != 0 && bytes[start - 1] != '\n' && bytes[start - 1] != '\r');
     }
     return result;
@@ -663,8 +663,9 @@ static bool pp_fuzz_by_spellings(Preprocessor* pp)
 
 // Whether a stream's -P text can't lex back into it, as clang's text for it can't either: an unterminated literal runs
 // to its line's end, so a token after it on its line lexes into it; a stray `\` that ends a line, or an unterminated
-// literal that ends in one, splices it to the next; and stringizing an unterminated literal leaves its quote in the
-// string (clang escapes only literals' quotes).
+// literal that ends in one, splices it to the next; one that ends in a line splice is spelled with a newline; and
+// stringizing an unterminated literal leaves its quote, or that newline, in the string (clang escapes only literals'
+// quotes).
 // Sets state->unprintable; pp_fuzz counts these cases.
 static bool pp_fuzz_unprintable(Preprocessor* pp, PPFuzzState* state)
 {
@@ -679,7 +680,7 @@ static bool pp_fuzz_unprintable(Preprocessor* pp, PPFuzzState* state)
             bool escaped = false;
             for (uint32_t k = 1; !result && k + 1 < length; k += 1)
             {
-                result = bytes[k] == '"' && !escaped;
+                result = (bytes[k] == '"' && !escaped) || bytes[k] == '\n' || bytes[k] == '\r';
                 escaped = bytes[k] == '\\' && !escaped;
             }
         }
@@ -694,8 +695,10 @@ static bool pp_fuzz_unprintable(Preprocessor* pp, PPFuzzState* state)
             }
             const bool literal = quote < length && (bytes[quote] == '"' || bytes[quote] == '\'');
             const bool next_on_line = i + 1 < out->count && (out->flags[i + 1] & BUSTER_PP_START_OF_LINE) == 0 && out->kinds[i + 1] != BUSTER_PP_KIND_PRAGMA_END;
-            // Its text ends its line with a `\`, a stray one's or an unterminated literal's: it splices the next.
-            result = (literal && next_on_line) || (length != 0 && bytes[length - 1] == '\\' && !next_on_line);
+            // Its text ends its line with a `\`, a stray one's or an unterminated literal's: it splices the next. An
+            // unterminated literal that ends in a line splice is spelled with the newline after it (pp_trailing_splice).
+            const bool spliced = length != 0 && (bytes[length - 1] == '\n' || bytes[length - 1] == '\r');
+            result = (literal && next_on_line) || (length != 0 && bytes[length - 1] == '\\' && !next_on_line) || (literal && spliced);
         }
     }
     state->unprintable = result;

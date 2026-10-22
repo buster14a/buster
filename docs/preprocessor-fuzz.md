@@ -339,9 +339,19 @@ per mode before it was stopped, and the runs that checked the fixes one more:
   changes what follows. A malformed operand is reported once, and recovers as
   clang's does.
 - **Line splices before a token.** Clang's lexer starts a token at a line
-  splice right before it (`pp_lexed_start`). So `__LINE__` at an expansion's
-  end, a `)` or a name after a lone `\` line, gives the splice's line, and so
-  does a `#line`'s number.
+  splice right before it (`pp_lexed_start`), a `??/` one with trigraphs too.
+  So `__LINE__` at an expansion's end, a `)` or a name after a lone `\` line,
+  gives the splice's line, and so does a `#line`'s number.
+- **An unterminated literal that ends in a line splice** is spelled with the
+  newline after it: clang's cleaning reads the character after the splice,
+  past the token (`Lexer::getSpellingSlow`, `pp_trailing_splice`). Stringized,
+  it leaves that newline in the string.
+- **A line marker's name and flags** are read expanded after its digits
+  (`HandleDigitDirective`'s `Lex`): `# 30 E` with `E` empty is a plain
+  `# 30`.
+- **A `_Pragma`'s text** gets a newline after it (`prepare_PragmaString`),
+  which splices away a `\` that ends it: `_Pragma("\\")` is an empty
+  pragma.
 - **`#line`'s note** starts at its number, or at the macro or builtin that
   made it, as clang's `AddLineNote(DigitTok)`, not at the directive's first
   operand. `#line _Pragma("x") 10` and `#line E 10`, with `E` empty, number
