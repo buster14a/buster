@@ -1530,8 +1530,9 @@ static bool link_benchmark_parse_kinds(const char* text, bool* kinds)
         bool found = false;
         for (uint32_t kind = 0; kind < RUNTIME_KINDS; kind += 1)
         {
+            // A kind it links: a shared library's, which has no name, waits for the writer.
             const char* name = link_benchmark_kind_names[kind];
-            const bool named = strlen(name) == length && memcmp(name, cursor, length) == 0;
+            const bool named = name != 0 && strlen(name) == length && memcmp(name, cursor, length) == 0;
             kinds[kind] = kinds[kind] || named;
             found = found || named;
         }

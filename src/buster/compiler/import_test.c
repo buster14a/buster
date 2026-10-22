@@ -41,7 +41,9 @@
 //   - The runtime (runtime_import on this system's files): GCC's installation and the crt objects found and probed;
 //     each crt object imported with what it is for (_start; _init and _fini in .init and .fini atoms; __dso_handle and
 //     __TMC_END__); libc.so.6's soname, its exports at their default versions (write, strlen, environ and
-//     __errno_location at GLIBC_2.2.5, __libc_start_main at GLIBC_2.34) and GLIBC_ABI_DT_RELR; libc_nonshared.a's
+//     __errno_location at GLIBC_2.2.5, __libc_start_main at GLIBC_2.34) and GLIBC_ABI_DT_RELR; the loader's soname
+//     and exports (__tls_get_addr at GLIBC_2.3, _r_debug and __libc_stack_end at GLIBC_2.2.5), its version indices past
+//     libc.so.6's, and its names' exports in the global names the loader's; libc_nonshared.a's
 //     index (atexit); the ABI note; the bindings of every reference to each name: main to the program,
 //     __libc_start_main and __cxa_finalize to libc, __gmon_start__ and the _ITM_ functions to nothing, __TMC_END__ to
 //     crtendS.o, and _GLOBAL_OFFSET_TABLE_ to the linker; the objects' pieces, one after another; and the global names
@@ -60,8 +62,9 @@
 //     crtbeginS.o, crtendS.o and crtn.o, with the same archives; _dl_relocate_static_pie bound to libc.a's
 //     dl-reloc-static-pie.o, which relocates the executable and whose _DYNAMIC is the linker's; and the IRELATIVE
 //     relocations' bounds, which libc.a refers to weakly and a static PIE's linker doesn't define, bound to nothing.
-//   - With --cross-check, which needs readelf: libc.so.6's exports against `readelf -W --dyn-syms` (name, version,
-//     type, binding and size; IFUNC as a function, GNU_UNIQUE as global) and its references, and the relocations of
+//   - With --cross-check, which needs readelf: libc.so.6's and the loader's exports against `readelf -W --dyn-syms`
+//     (name, version, type, binding and size; IFUNC as a function, GNU_UNIQUE as global) and references, and the
+//     relocations of
 //     the crt objects and the archives' members, both static runtimes' among them, against `readelf -W -r`: each one a
 //     fixup of its kind at its offset, against the symbol (or the section) readelf names, with its addend, and no other
 //     fixups.
@@ -2676,6 +2679,14 @@ static String8 import_test_version_name(const ImportLibrary* library, uint16_t i
     return result;
 }
 
+// The name of a version a link's symbol holds (LinkSymbols.version): libc.so.6's or the loader's, whose indices
+// runtime.c numbers apart.
+static __attribute__((unused)) String8 import_test_runtime_version_name(const Runtime* runtime, uint16_t index)
+{
+    const String8 libc = import_test_version_name(&runtime->libc, index);
+    return libc.length != 0 ? libc : import_test_version_name(&runtime->loader, index);
+}
+
 // Whether libc exports `name` at version `version` ("" for unversioned).
 static bool import_test_exported(const ImportLibrary* library, const char* name, const char* version)
 {
@@ -2773,6 +2784,22 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         }
         import_test_expect(&tally, relr, "GLIBC_ABI_DT_RELR defined", 0);
         import_test_expect(&tally, runtime.libc.references.count != 0, "libc.so.6's references", 0);
+        // The loader's exports at their default versions, its version indices moved past libc.so.6's.
+        import_test_expect(&tally, import_equal(runtime.loader.soname, "ld-linux-x86-64.so.2"), "the loader's soname", 0);
+        import_test_expect(&tally, import_test_exported(&runtime.loader, "__tls_get_addr", "GLIBC_2.3") && import_test_exported(&runtime.loader, "_r_debug", "GLIBC_2.2.5") &&
+                                       import_test_exported(&runtime.loader, "__libc_stack_end", "GLIBC_2.2.5"),
+                           "the loader's __tls_get_addr at GLIBC_2.3, _r_debug and __libc_stack_end at GLIBC_2.2.5", 0);
+        uint16_t libc_largest = 0;
+        uint16_t loader_smallest = UINT16_MAX;
+        for (uint32_t v = 0; v < runtime.libc.version_count; v += 1)
+        {
+            libc_largest = runtime.libc.versions[v].index > libc_largest ? runtime.libc.versions[v].index : libc_largest;
+        }
+        for (uint32_t v = 0; v < runtime.loader.version_count; v += 1)
+        {
+            loader_smallest = runtime.loader.versions[v].index < loader_smallest ? runtime.loader.versions[v].index : loader_smallest;
+        }
+        import_test_expect(&tally, runtime.loader.version_count != 0 && loader_smallest > libc_largest, "the loader's version indices past libc.so.6's", loader_smallest);
         // libc_nonshared.a's index.
         bool atexit_indexed = false;
         for (uint32_t s = 0; s < runtime.archives[0].archive.symbol_count; s += 1)
@@ -2885,8 +2912,17 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         const uint32_t dso_name = runtime_find_global_name(global_names, (const uint8_t*)"__dso_handle", 12, link_hash((const uint8_t*)"__dso_handle", 12));
         const uint32_t atexit_name = runtime_find_global_name(global_names, (const uint8_t*)"atexit", 6, link_hash((const uint8_t*)"atexit", 6));
         import_test_expect(&tally, main_name != 0 && global_names->definition[main_name - 1] == 0 && global_names->export[main_name - 1] == 0, "main: defined by none of them", 0);
-        import_test_expect(&tally, start_main != 0 && global_names->definition[start_main - 1] == 0 && global_names->export[start_main - 1] != 0,
-                           "__libc_start_main: libc.so.6's", 0);
+        uint32_t export_index = 0;
+        const bool libc_export = start_main != 0 && global_names->export[start_main - 1] != 0 &&
+                                 runtime_export_library(&runtime, global_names->export[start_main - 1] - 1, &export_index) == &runtime.libc &&
+                                 import_test_name_is(runtime.libc.exports.name[export_index], runtime.libc.exports.length[export_index], "__libc_start_main");
+        import_test_expect(&tally, start_main != 0 && global_names->definition[start_main - 1] == 0 && libc_export, "__libc_start_main: libc.so.6's", 0);
+        // A name only the loader exports: its export, numbered after libc.so.6's.
+        const uint32_t r_debug = runtime_find_global_name(global_names, (const uint8_t*)"_r_debug", 8, link_hash((const uint8_t*)"_r_debug", 8));
+        const bool loader_export = r_debug != 0 && global_names->export[r_debug - 1] > runtime.libc.exports.count &&
+                                   runtime_export_library(&runtime, global_names->export[r_debug - 1] - 1, &export_index) == &runtime.loader &&
+                                   import_test_name_is(runtime.loader.exports.name[export_index], runtime.loader.exports.length[export_index], "_r_debug");
+        import_test_expect(&tally, r_debug != 0 && global_names->definition[r_debug - 1] == 0 && loader_export, "_r_debug: the loader's", 0);
         import_test_expect(&tally, dso_name != 0 && global_names->definition[dso_name - 1] == dso, "__dso_handle: crtbeginS.o's", 0);
         import_test_expect(&tally, atexit_name != 0 && global_names->definition[atexit_name - 1] != 0 &&
                                        link->atoms.unit[link->symbols.atom[global_names->definition[atexit_name - 1]]] >= runtime.member_unit,
@@ -2909,6 +2945,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         import_test_expect(&tally, found >= RUNTIME_OBJECTS + 4, "the files found among the probes", found);
         // The vector paths read libc.so.6, each crt object and each member, as the exact paths do.
         import_test_library_paths(&tally, runtime.libc_bytes, IMPORT_TEST_VECTOR, "libc.so.6", arena);
+        import_test_library_paths(&tally, runtime.loader_bytes, IMPORT_TEST_VECTOR, "the loader", arena);
         import_test_archive_paths(&tally, runtime.archives[0].bytes, IMPORT_TEST_VECTOR, "libc_nonshared.a", arena);
         for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
         {
@@ -3334,13 +3371,13 @@ static uint8_t import_test_readelf_flags(const char* type, const char* binding)
     return known ? (uint8_t)(symbol_type | (weak ? BUSTER_LINK_SYMBOL_WEAK : BUSTER_LINK_SYMBOL_GLOBAL)) : BUSTER_IMPORT_TEST_NONE;
 }
 
-// libc.so.6's exports and references against `readelf -W --dyn-syms`: a defined name at its default version (name@@V,
-// or a bare name) that is global and not hidden is an export, and an undefined global name a reference.
-static void import_test_cross_check_library(ImportTestTally* tally, const Runtime* runtime, Arena* arena)
+// A library's exports and references (libc.so.6's, or the loader's, `what`) against `readelf -W --dyn-syms` of its
+// file: a defined name at its default version (name@@V, or a bare name) that is global and not hidden is an export, and
+// an undefined global name a reference.
+static void import_test_cross_check_library(ImportTestTally* tally, const ImportLibrary* library, String8 path, const char* what, Arena* arena)
 {
-    const ImportLibrary* library = &runtime->libc;
     char command[BUSTER_IMPORT_TEST_COMMAND_BYTES];
-    snprintf(command, sizeof(command), "readelf -W --dyn-syms '%.*s'", (int)runtime->libc_path.length, runtime->libc_path.pointer);
+    snprintf(command, sizeof(command), "readelf -W --dyn-syms '%.*s'", (int)path.length, path.pointer);
     const String8 output = import_test_run(command, arena);
     import_test_expect(tally, output.pointer != 0, "readelf --dyn-syms runs", 0);
     uint32_t exports = 0;
@@ -3381,7 +3418,7 @@ static void import_test_cross_check_library(ImportTestTally* tally, const Runtim
             const bool same = exported && e->size[found] == strtoull(size_text, 0, 0) && e->flags[found] == import_test_readelf_flags(type, binding) && same_version;
             if (!same && exports_match)
             {
-                printf("  runtime: libc.so.6's export %s@@%s differs from readelf's\n", name, version);
+                printf("  runtime: %s's export %s@@%s differs from readelf's\n", what, name, version);
             }
             exports_match = exports_match && same;
             exports += 1;
@@ -3398,9 +3435,9 @@ static void import_test_cross_check_library(ImportTestTally* tally, const Runtim
             references += 1;
         }
     }
-    import_test_expect(tally, exports_match && exports == library->exports.count, "libc.so.6's exports, as readelf lists them", exports);
-    import_test_expect(tally, references_match && references == library->references.count, "libc.so.6's references, as readelf lists them", references);
-    printf("  readelf: %u exports and %u references of libc.so.6\n", exports, references);
+    import_test_expect(tally, exports_match && exports == library->exports.count, "a library's exports, as readelf lists them", exports);
+    import_test_expect(tally, references_match && references == library->references.count, "a library's references, as readelf lists them", references);
+    printf("  readelf: %u exports and %u references of %s\n", exports, references, what);
 }
 
 // The fixup kind of a relocation type's name, or BUSTER_LINK_FIXUP_NONE.
@@ -3623,7 +3660,8 @@ static void import_test_cross_check_relocations(ImportTestTally* tally, const Ru
 static void import_test_cross_check(ImportTestTally* tally, const Runtime* runtime, Arena* arena)
 {
     const uint64_t length = arena->length;
-    import_test_cross_check_library(tally, runtime, arena);
+    import_test_cross_check_library(tally, &runtime->libc, runtime->libc_path, "libc.so.6", arena);
+    import_test_cross_check_library(tally, &runtime->loader, runtime->loader_path, "the loader", arena);
     import_test_cross_check_relocations(tally, runtime, arena);
     arena_pop_to(arena, length);
 }
@@ -3726,6 +3764,72 @@ static bool import_test_edges(uint64_t seed, Arena* arena)
     return result;
 }
 
+// A shared library's runtime (runtime_import_shared): no start object, its unit's piece empty and no ABI note; crti.o,
+// crtbeginS.o, crtendS.o and crtn.o; libc.so.6, the loader and libc_nonshared.a; nothing refers to main, which is no
+// global name; crti.o's _init and crtbeginS.o's __dso_handle; the names the kind's linker defines (_DYNAMIC among them)
+// and no other; and every crt object and member taking the vector path.
+static bool import_test_shared_runtime(Arena* arena)
+{
+    ImportTestTally tally = {
+        .check = "shared runtime",
+    };
+    Runtime runtime;
+    const RuntimeError error = runtime_import_shared(&runtime);
+    import_test_expect(&tally, error == RUNTIME_ERROR_NONE, "runtime_import_shared", (uint64_t)error);
+    if (error == RUNTIME_ERROR_NONE)
+    {
+        const RuntimePiece* start = &runtime.pieces[RUNTIME_OBJECT_START];
+        const bool empty = runtime.object_paths[RUNTIME_OBJECT_START].length == 0 && start->begin.atoms == start->end.atoms &&
+                           start->begin.symbols == start->end.symbols && start->begin.fixups == start->end.fixups && runtime.abi_note.length == 0;
+        import_test_expect(&tally, empty, "no start object: an empty piece, and no ABI note", 0);
+        static const char* const objects[RUNTIME_OBJECTS] = {
+            [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
+            [RUNTIME_OBJECT_BEGIN] = "crtbeginS.o",
+            [RUNTIME_OBJECT_END] = "crtendS.o",
+            [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
+        };
+        for (uint32_t i = RUNTIME_OBJECT_INIT_PROLOGUE; i < RUNTIME_OBJECTS; i += 1)
+        {
+            const String8 path = runtime.object_paths[i];
+            const uint64_t length = strlen(objects[i]);
+            const bool found = path.length > length && memcmp(path.pointer + path.length - length, objects[i], length) == 0 && path.pointer[path.length - length - 1] == '/';
+            import_test_expect(&tally, found, objects[i], i);
+        }
+        import_test_expect(&tally, import_equal(runtime.libc.soname, "libc.so.6") && import_equal(runtime.loader.soname, "ld-linux-x86-64.so.2") && runtime.archive_count == 1,
+                           "libc.so.6, the loader and libc_nonshared.a", runtime.archive_count);
+        const RuntimeNames* names = &runtime.global_names;
+        const Link* link = &runtime.link;
+        const uint32_t main_entry = runtime_find_global_name(names, (const uint8_t*)"main", 4, link_hash((const uint8_t*)"main", 4));
+        bool program = false;
+        for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+        {
+            program = program || runtime.bindings[symbol].kind == RUNTIME_BINDING_PROGRAM;
+        }
+        import_test_expect(&tally, main_entry == 0 && !program, "nothing refers to main", main_entry);
+        const uint32_t init = runtime_find_global_name(names, (const uint8_t*)"_init", 5, link_hash((const uint8_t*)"_init", 5));
+        const uint32_t dso = runtime_find_global_name(names, (const uint8_t*)"__dso_handle", 12, link_hash((const uint8_t*)"__dso_handle", 12));
+        const SymbolId init_symbol = init != 0 ? names->definition[init - 1] : 0;
+        const SymbolId dso_symbol = dso != 0 ? names->definition[dso - 1] : 0;
+        import_test_expect(&tally, init_symbol != 0 && link->atoms.unit[link->symbols.atom[init_symbol]] == RUNTIME_OBJECT_INIT_PROLOGUE, "_init: crti.o's", 0);
+        import_test_expect(&tally, dso_symbol != 0 && link->atoms.unit[link->symbols.atom[dso_symbol]] == RUNTIME_OBJECT_BEGIN, "__dso_handle: crtbeginS.o's", 0);
+        import_test_linker_names(&tally, &runtime);
+        // The vector paths read each crt object and each member, as the exact paths do.
+        for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
+        {
+            if (runtime.object_paths[i].length != 0)
+            {
+                import_test_paths(&tally, runtime.object_bytes[i], IMPORT_TEST_VECTOR, "a crt object", i, arena);
+            }
+        }
+        for (uint32_t m = 0; m < runtime.member_count; m += 1)
+        {
+            import_test_paths(&tally, runtime.members[m].bytes, IMPORT_TEST_VECTOR, "a member", m, arena);
+        }
+        runtime_release(&runtime);
+    }
+    return import_test_report(&tally);
+}
+
 static int run_import_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -3766,6 +3870,7 @@ static int run_import_tests(int argc, char** argv)
         passed = import_test_runtime(cross_check, &arena) && passed;
         passed = import_test_static_runtime(RUNTIME_KIND_STATIC, cross_check, &arena) && passed;
         passed = import_test_static_runtime(RUNTIME_KIND_STATIC_PIE, cross_check, &arena) && passed;
+        passed = import_test_shared_runtime(&arena) && passed;
         arena_release(&arena);
         result = passed ? 0 : 1;
     }
