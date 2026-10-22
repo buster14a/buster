@@ -6,7 +6,7 @@
 // Every sample processes the same original family-0 cases (object macros and a shared generated scaffold);
 // batching and separate processes must accept them
 // all and return equal output byte totals. The self-tests check token identity on the complete generator.
-// The sample implementation lives in preprocessor_fuzz_clang.c, included by main.c. No compiler speed is measured.
+// The sample implementation lives in preprocessor_fuzz_clang.c; main.c includes both. No compiler speed is measured.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -19,9 +19,6 @@
 
 #define BUSTER_PPF_BENCHMARK_PASSES 21
 #define BUSTER_PPF_BENCHMARK_CASES 16
-
-bool preprocessor_fuzz_benchmark_sample(const char* clang_path, bool c23, uint64_t seed, uint64_t count, bool individual, uint64_t* accepted, uint64_t* bytes);
-bool preprocessor_fuzz_benchmark_version(const char* clang_path);
 
 static double preprocessor_fuzz_benchmark_middle(const double* values)
 {
@@ -39,7 +36,7 @@ static double preprocessor_fuzz_benchmark_middle(const double* values)
     return ordered[BUSTER_PPF_BENCHMARK_PASSES / 2];
 }
 
-int run_preprocessor_fuzz_benchmark(int argc, char** argv)
+static int run_preprocessor_fuzz_benchmark(int argc, char** argv)
 {
     const char* clang_path = "clang";
     uint64_t seed = 1;

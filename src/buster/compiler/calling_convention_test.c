@@ -3784,7 +3784,7 @@ static bool abi_test_cross_check(uint64_t seed, uint32_t count, const char* clan
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
-int run_calling_convention_tests(int argc, char** argv)
+static int run_calling_convention_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
     uint64_t count = BUSTER_ABI_TEST_DEFAULT_COUNT;

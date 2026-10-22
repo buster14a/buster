@@ -112,6 +112,12 @@ lists what would close the gap. Since then, #116's budget work has brought
 refinement to 1.67 ms and the whole run to 10.0 ms (measured on 2026-10-22,
 `docs/c-refinement.md`).
 
+**Small files read.** Since #261, a unit reads its files of up to 16 KB rather
+than mapping them ("Files"). Measured on 2026-10-22, that takes 1.9% to 2.3% off
+a run and its release on `sqlite3.c`, `main.c` and musl's units, and 1.2% and
+1.4% off whole `-E` processes on `sqlite3.c` (17.96 to 17.74 ms) and `main.c`
+(37.60 to 37.08 ms).
+
 ## Object-macro eligibility cache experiment (#110)
 
 The cheap first step of [#110](https://github.com/buster14a/buster/issues/110)
@@ -286,19 +292,20 @@ comparison.
 
 ### Files
 
-Every file is read once per process. It is mapped (with `MAP_POPULATE` when a
-unit or one lane maps it; lanes read the files of up to 16 KB instead), lexed,
-refined and given a directive table (`pp_prepare_into`), and it stays as long as
-the file cache that holds it, because macro definitions point into the tokens of
-the file that defines them. The cache (`FileCache`) keeps a record per file
-identity (device and inode), so that two paths to one file are one file, and a
-path entry per path looked up, with the file there or none, so that a search
-makes no system call for a path the cache knows. A translation unit finds files
-by path in a table of its own (`pp_lookup_path`, which starts at 1,024 slots and
-doubles) and asks the cache the first time; it copies a record's prepared fields
-when it first enters the file, and keeps its own state about it (`#pragma once`,
-the line cursor). Without a cache in `PPOptions.files`, a unit makes its own;
-with one, the units and lanes that share it read each file once
+Every file is read once per process: a file of up to 16 KB into an arena of the
+file cache's, by a unit and by the lanes alike, and a larger one mapped (with
+`MAP_POPULATE` when a unit or one lane maps it; "Small files read" below). It is
+lexed, refined and given a directive table (`pp_prepare_into`), and it stays as
+long as the file cache that holds it, because macro definitions point into the
+tokens of the file that defines them. The cache (`FileCache`) keeps a record per
+file identity (device and inode), so that two paths to one file are one file,
+and a path entry per path looked up, with the file there or none, so that a
+search makes no system call for a path the cache knows. A translation unit finds
+files by path in a table of its own (`pp_lookup_path`, which starts at 1,024
+slots and doubles) and asks the cache the first time; it copies a record's
+prepared fields when it first enters the file, and keeps its own state about it
+(`#pragma once`, the line cursor). Without a cache in `PPOptions.files`, a unit
+makes its own; with one, the units and lanes that share it read each file once
 (`docs/c-files.md`, #150).
 
 - **Lexing by the language mode.** The lexer has no language mode, so two of
@@ -346,6 +353,47 @@ with one, the units and lanes that share it read each file once
   token per byte, then trimmed to the tokens it has. Before this, the columns
   of every file shared one arena, and the unused room between them was cleared
   too wherever a huge page held a used byte: 9 bytes per input byte.
+- **Small files read** (#261). A unit reads each file of up to 16 KB that it
+  opens into its lane's bytes arena in the cache
+  (`BUSTER_FILE_CACHE_READ_LIMIT`), as `c_files.c`'s lanes read theirs, and maps
+  the larger ones. A mapping costs an `mmap` and, when the unit is released, an
+  `munmap`; a read costs a copy into the arena, whose pages the kernel clears
+  when they are first touched. `benchmark-preprocessor --read-limit` measured
+  the limits against each other on the 9700X on 2026-10-22, each limit in turn
+  in every pass of one process, pinned to CPU 2. Each figure is in ms, the
+  median of three processes' medians of 21 passes: the run, then the release
+  after it (`pp_release` and `intern_release`), which the run's time leaves out:
+
+  | Files read | `sqlite3.c` | Release | `main.c` | Release | musl's 1,357 units in all | Release |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | None (every file mapped) | 11.40 | 0.66 | 25.54 | 1.02 | 450.3 | 176.8 |
+  | Up to 4 KB | 11.38 | 0.50 | 25.48 | 0.75 | 444.9 | 166.3 |
+  | Up to 16 KB (the default) | 11.35 | 0.45 | 25.45 | 0.60 | 449.3 | 163.6 |
+  | Up to 64 KB | 11.37 | 0.42 | 25.60 | 0.49 | 451.8 | 162.5 |
+  | Up to 256 KB | 11.54 | 0.44 | 26.02 | 0.38 | 452.8 | 164.0 |
+  | Every file | 12.04 | 0.28 | 26.20 | 0.35 | not run | not run |
+
+  With 16 KB, the run and its release take 2.2% less on `sqlite3.c` (12.07 to
+  11.81 ms), 1.9% on `main.c` (26.55 to 26.06) and 2.3% on musl's units (627.1
+  to 612.6). Most of it is the release, which no longer unmaps the small files:
+  `sqlite3.c`'s unit reads 159 of the 175 files it opens, and `main.c`'s unit
+  293 of the 397 it opens. The run gains 0.2% to 0.4%, in its probes: 0.69 to
+  0.66 ms on `sqlite3.c`, 1.55 to 1.47 on `main.c` and 65.2 to 61.9 on musl.
+  Reading larger files loses: `sqlite3.c` itself is 9.5 MB, which a read copies
+  into fresh huge pages where a mapping takes the page cache's own (its probes
+  take 1.40 ms). On musl, 4 KB runs 1.0% faster than 16 KB and releases 1.7%
+  slower, 0.2% less in all: at 16 KB, 228 of the 1,357 units read more than the
+  arena's first 64 KB, which are base pages, and touch a huge page that the
+  kernel clears whole (15 µs; at 4 KB, a unit reads 12 KB on average, and none
+  does). On `sqlite3.c` and `main.c`, 16 KB is 0.8% and 0.7% better than 4 KB.
+
+  As whole `-E` processes (`perf stat -r 21` of `-E -P` into `/dev/null`, pinned
+  to CPU 2, three rounds by turns with `main`'s compiler at 7b1b0ce; the median
+  round's mean), `sqlite3.c` took 17.74 ms against 17.96 (1.2% less), and
+  `main.c` 37.08 ms against 37.60 (1.4%). musl's 1,357 units, a process each,
+  one after another, took 1.914 s either way: the 11 µs a unit saves is within
+  that loop's noise (0.7%), since a unit's run and release are 0.45 ms of each
+  process's 1.41 ms.
 
 ### Macros
 
