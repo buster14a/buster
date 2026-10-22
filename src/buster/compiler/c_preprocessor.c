@@ -4484,15 +4484,16 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
         pp->file_change_location = pp_directive_resume(pp, includer, includer->next_directive - 1);
     }
     // An expansion that ends passes its pending flags on to the context it was read from; an argument's or a line's
-    // barrier doesn't.
+    // barrier doesn't. An artificial source split passes them to its successor, which can reuse this context's slot.
     const uint8_t passed = (uint8_t)((context->pending_flags | context->trailing_flags) & ~((context->trailing_flags & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE : 0));
-    if (context->kind == BUSTER_PP_CONTEXT_BUFFER && !context->barrier && passed != 0 && pp->context_count != 0)
-    {
-        pp->contexts[pp->context_count - 1].pending_flags |= passed;
-    }
+    const bool passes_flags = context->kind == BUSTER_PP_CONTEXT_BUFFER && !context->barrier;
     if (relexed && relex_position != 0)
     {
         pp_continue_relex(pp, relex_file, relex_position, expansion_end);
+    }
+    if (passes_flags && passed != 0 && pp->context_count != 0)
+    {
+        pp->contexts[pp->context_count - 1].pending_flags |= passed;
     }
 }
 
