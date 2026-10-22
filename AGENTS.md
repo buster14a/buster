@@ -2687,9 +2687,10 @@ others, its measurements are informational.
   across calls (a record larger than 64 bytes that waits for a `LARGER`
   member, and records of no size that an `_Atomic` of them in a later call
   reads: a flexible one, and two that hold a struct of 128 bytes by an array
-  of none, which wait for what its alignment reads), and the walk without
-  scratch memory for its stack, after which every type must be classified and
-  an `_Atomic` it aligns be right or refused;
+  of none, which wait for what its alignment reads), the walk without scratch
+  memory for its stack, after which every type must be classified and an
+  `_Atomic` it aligns be right or refused, and the walk over 64 unions of two
+  members of the one before, 2^64 paths, under an alarm;
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's

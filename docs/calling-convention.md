@@ -204,7 +204,10 @@ members' own:
   finished (`abi_wide_alignment`: the record's members' storage alignments, a
   bit-field's run's unit's among them, a larger record walked in turn on an
   explicit stack, or 1 if packed), and waits in the levels until everything
-  the walk reads is classified. `union {struct {long a, b; struct {__int128 x;
+  the walk reads is classified. The walk keeps the records it has finished,
+  a sparse set in scratch memory, and takes each distinct one once, however
+  many paths lead to it: `union W1 {W0 a, b;}`, `union W2 {W1 a, b;}` and so
+  on have 2^n of them. `union {struct {long a, b; struct {__int128 x;
   long y;} z[0];} s; __int128 i;}` passes as two `i64`s (the struct is aligned
   to 16 and comes first) where `union {__int128 i; ...}` passes as one
   `i128`. `STORAGE_INEXACT` also marks a record with a flexible array member
@@ -1070,7 +1073,7 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-- **Fixtures** (2,394 checks): about 180 types whose classes, pass bits and
+- **Fixtures** (2,406 checks): about 180 types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -1155,7 +1158,11 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
   scratch memory for its stack: with the thread's first scratch arena of 64
   bytes and up, every type must be classified all the same, and the `_Atomic`
   that an array of none of a record of 116 bytes aligns must have its 16 bytes
-  or be refused.
+  or be refused. And records that many paths lead to: over a struct of 32
+  bytes aligned to 16, 64 unions of two members of the one before, 2^64 paths,
+  under a 60-second alarm (a walk per path wouldn't end), where by each path
+  every type must be classified, and an `_Atomic` of a struct of no size that
+  an array of none of the last aligns be a `LARGER` copy of 16 bytes.
 - **Worlds and the oracle** (104,651 offsets compared, 159,632 checks): random
   worlds of types (scalars, vectors, complex types, `_BitInt`s, `_Atomic` and
   aligned types, structs of arrays of no size and `_Atomic`s of them, any of

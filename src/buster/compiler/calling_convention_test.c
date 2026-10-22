@@ -15,7 +15,8 @@
 //     (abi_test_fixtures says which; abi_test_build_atomics the LARGER, GROWN and refused _Atomic types and what holds
 //     them), at each target vector width, by the vector path and by the twin; calls whose locations clang and LLVM give
 //     (an UNCOUNTED argument's shift, the LARGER copies' slots and a DEMOTED result among them); the levels across
-//     calls (abi_test_ordering); and the walk without scratch memory for its stack (abi_test_short_scratch).
+//     calls (abi_test_ordering); the walk without scratch memory for its stack (abi_test_short_scratch); and the walk
+//     over records that 2^64 paths lead to, under an alarm (abi_test_shared_records).
 //   - Worlds: random worlds of types (abi_test_world_build: scalars, vectors, complex types, _BitInts, _Atomic and
 //     aligned types, _Atomics of structs of no size, and records and unions of them, small ones mostly, with
 //     bit-fields, arrays, nesting, packing and alignment, and zero-length arrays of large records), classified by the
@@ -54,6 +55,7 @@
 #include <inttypes.h>
 
 // OS-dependent includes
+#include <signal.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -1700,6 +1702,81 @@ static void abi_test_short_scratch(AbiTestTally* tally)
     }
 }
 
+// The unions over each other in abi_test_shared_records.
+#define BUSTER_ABI_TEST_SHARED_LEVELS 64
+
+// What would hang if abi_wide_alignment regressed (abi_test_shared_records) runs under an alarm, whose watchdog ends the
+// test with status 1.
+static void abi_test_watchdog(int signal_number)
+{
+    (void)signal_number;
+    static const char message[] = "test-calling-convention: the shared records' check didn't finish within 60 s (a walk per path)\n";
+    const ssize_t written = write(1, message, sizeof(message) - 1);
+    (void)written;
+    _exit(1);
+}
+
+// Records that many paths lead to (abi_wide_alignment's set of finished records): W0 = {__int128, char[16]}, 32 bytes
+// aligned to 16, and Wn = union {Wn-1 a, b;}, 64 of them, which a walk per path would take 2^64 frames for, under the
+// watchdog's alarm. By each path every type must be classified, and an _Atomic of a struct of no size that an array of
+// none of the last aligns must be a LARGER copy of 16 bytes, as _Atomic {struct {__int128, char[100]}[0]} is.
+static void abi_test_shared_records(AbiTestTally* tally)
+{
+    signal(SIGALRM, abi_test_watchdog);
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        AbiTestTables tables;
+        if (abi_test_expect(tally, abi_test_tables_open(&tables, 4096), "fixtures", "the tables can't be made"))
+        {
+            TypeTable* table = &tables.types.table;
+            AbiTestBuilder builder = {
+                .table = table,
+                .expectations = 0,
+                .count = 0,
+                .next_name = 31000,
+                .vector_bytes = 16,
+            };
+            const bool started = abi_test_tables_start(&tables, 16);
+            TypeMember m[2];
+            m[0] = abi_test_member(&builder, BUSTER_TYPE_INT128);
+            m[1] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 16));
+            TypeId shared = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+            for (uint32_t level = 0; level < BUSTER_ABI_TEST_SHARED_LEVELS; level += 1)
+            {
+                m[0] = abi_test_member(&builder, shared);
+                m[1] = abi_test_member(&builder, shared);
+                shared = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
+            }
+            m[0] = abi_test_member(&builder, type_array(table, shared, 0));
+            const TypeId atomic = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+            alarm(60);
+            if (path == 0)
+            {
+                abi_classify_all(&tables.abi, table);
+            }
+            else
+            {
+                abi_classify_all_scalar(&tables.abi, table);
+            }
+            alarm(0);
+            bool every = true;
+            for (uint32_t index = 1; index < table->types.count; index += 1)
+            {
+                every = every && abi_classifiable(table, index) == ((tables.abi.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0);
+            }
+            const uint32_t pass = tables.abi.pass[atomic >> BUSTER_TYPE_INDEX_SHIFT];
+            const uint32_t bytes = tables.abi.stack_bytes[atomic >> BUSTER_TYPE_INDEX_SHIFT];
+            const bool larger = (pass & (BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_UNSUPPORTED)) == BUSTER_ABI_PASS_LARGER && bytes == 16;
+            char detail[160];
+            snprintf(detail, sizeof(detail), "shared records (%s): every type classified %d, pass %08x, stack %u", path == 0 ? "vector" : "scalar", every, pass,
+                     bytes);
+            abi_test_expect(tally, started && every && larger, "fixtures", detail);
+            abi_test_tables_close(&tables);
+        }
+    }
+    signal(SIGALRM, SIG_DFL);
+}
+
 // The location expected of an argument, in a call fixture.
 typedef struct AbiTestLocation AbiTestLocation;
 struct AbiTestLocation
@@ -2488,6 +2565,7 @@ static bool abi_test_fixtures(void)
     }
     abi_test_ordering(&tally);
     abi_test_short_scratch(&tally);
+    abi_test_shared_records(&tally);
     abi_test_report("fixtures", tally);
     return tally.failures == 0;
 }

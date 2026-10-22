@@ -1014,23 +1014,49 @@ struct AbiWideFrame
     bool inexact;
 };
 
+// A record abi_wide_alignment has finished, with its storage.
+typedef struct AbiWideDone AbiWideDone;
+struct AbiWideDone
+{
+    uint32_t record;
+    uint8_t storage;
+};
+
+// A finished record's storage folded into the frame of the record whose member `holder` holds it: its alignment among
+// the frame's, off it unless in a union, and its INEXACT.
+static void abi_wide_fold(const TypeTable* table, AbiWideFrame* frame, uint32_t holder, uint32_t storage)
+{
+    const uint8_t alignment = (uint8_t)(storage & BUSTER_ABI_STORAGE_ALIGNMENT);
+    const bool in_union = table->types.kind[frame->index] == BUSTER_TYPE_KIND_UNION;
+    frame->largest = alignment > frame->largest ? alignment : frame->largest;
+    frame->packed = frame->packed || (!in_union && ((table->members.offset[holder] >> 3) & ((1ull << alignment) - 1)) != 0);
+    frame->inexact = frame->inexact || (storage & BUSTER_ABI_STORAGE_INEXACT) != 0;
+}
+
 // The storage of clang's LLVM type of a record larger than 16 bytes, which AbiTable.storage doesn't keep (abi_storage's
 // for it, but the i128 and EMPTY): the log2 of its alignment, a struct's members' largest storage alignment (a
 // bit-field's run's unit's past an eightbyte, abi_bit_field_run) and a union's most aligned member's
 // (abi_member_storage's), unless a struct's member is off its own or the size isn't a multiple of it (determinePacked:
 // 1); and INEXACT if a member's storage is. A member that holds such a record by value has its storage, walked in turn
-// on an explicit stack in scratch memory (no record holds itself, so it is no deeper than the table has types). With
+// on an explicit stack in scratch memory (no record holds itself, so it is no deeper than the table has types), once:
+// a record finished in this walk goes in a sparse set (`done[place[r]].record == r` for its index r, and `place` is
+// left uninitialized), whose storage the next record that holds it takes, so that a walk takes each distinct record and
+// its members once, however many paths lead to it (a chain of n unions of two members of the one before has 2^n). With
 // BUSTER_ABI_WIDE_UNREADY if a type whose storage it reads isn't classified yet: a flag in the result rather than through
 // a pointer, which would make its callers take a local's address, and so check a stack protector's canary at every call
-// (abi_dependencies_classified's, once a type, at every level). Without scratch memory for the stack it gives INEXACT,
-// ready, so that what needs the alignment is refused rather than left waiting.
+// (abi_dependencies_classified's, once a type, at every level); a known record's reads are in it already. Without
+// scratch memory for the stack and the set it gives INEXACT, ready, so that what needs the alignment is refused rather
+// than left waiting.
 __attribute__((cold, noinline)) static uint32_t abi_wide_alignment(const AbiTable* abi, const TypeTable* table, uint32_t record)
 {
     Scratch scratch = scratch_begin(0);
     AbiWideFrame* stack = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, AbiWideFrame, table->types.count);
+    uint32_t* place = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, table->types.count);
+    AbiWideDone* done = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, AbiWideDone, table->types.count);
+    uint32_t finished = 0;
     uint32_t depth = 0;
     uint32_t result = BUSTER_ABI_STORAGE_INEXACT;
-    if (stack != 0)
+    if (stack != 0 && place != 0 && done != 0)
     {
         stack[0] = (AbiWideFrame){
             .index = record,
@@ -1058,7 +1084,12 @@ __attribute__((cold, noinline)) static uint32_t abi_wide_alignment(const AbiTabl
             const bool bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
             const uint32_t wide = bit_field ? 0 : abi_wide_record(table, type);
             frame->member += 1;
-            if (wide != 0)
+            const uint32_t seen = wide != 0 ? place[wide] : 0;
+            if (wide != 0 && seen < finished && done[seen].record == wide)
+            {
+                abi_wide_fold(table, frame, member, done[seen].storage);
+            }
+            else if (wide != 0)
             {
                 stack[depth] = (AbiWideFrame){
                     .index = wide,
@@ -1091,20 +1122,21 @@ __attribute__((cold, noinline)) static uint32_t abi_wide_alignment(const AbiTabl
         {
             const uint64_t size = table->types.size[frame->index];
             const uint8_t alignment = frame->packed || (size & ((1ull << frame->largest) - 1)) != 0 ? 0 : frame->largest;
-            const uint32_t holder = frame->holder;
-            const bool inexact = frame->inexact;
+            const uint8_t storage = (uint8_t)(alignment | (frame->inexact ? BUSTER_ABI_STORAGE_INEXACT : 0));
+            place[frame->index] = finished;
+            done[finished] = (AbiWideDone){
+                .record = frame->index,
+                .storage = storage,
+            };
+            finished += 1;
             depth -= 1;
             if (depth == 0)
             {
-                result = alignment | (inexact ? BUSTER_ABI_STORAGE_INEXACT : 0);
+                result = storage;
             }
             else
             {
-                AbiWideFrame* below = &stack[depth - 1];
-                const bool below_union = table->types.kind[below->index] == BUSTER_TYPE_KIND_UNION;
-                below->largest = alignment > below->largest ? alignment : below->largest;
-                below->packed = below->packed || (!below_union && ((table->members.offset[holder] >> 3) & ((1ull << alignment) - 1)) != 0);
-                below->inexact = below->inexact || inexact;
+                abi_wide_fold(table, &stack[depth - 1], frame->holder, storage);
             }
         }
     }
