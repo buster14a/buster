@@ -430,6 +430,28 @@ static bool pp_fuzz_line_start_space(Preprocessor* pp, const PPTokens* out, uint
     return result;
 }
 
+// Whether a string's spelling has a quote or a newline inside it, as stringizing an unterminated literal leaves them
+// (clang escapes only literals' quotes): it lexes as several tokens, the last of which runs on to its line's end.
+static bool pp_fuzz_broken_string(const uint8_t* bytes, uint32_t length)
+{
+    bool result = false;
+    bool escaped = false;
+    for (uint32_t k = 1; !result && k + 1 < length; k += 1)
+    {
+        result = (bytes[k] == '"' && !escaped) || bytes[k] == '\n' || bytes[k] == '\r';
+        escaped = bytes[k] == '\\' && !escaped;
+    }
+    return result;
+}
+
+// Whether a token's printed spelling doesn't lex back into it, so that the comparison takes it whole: an unknown token
+// (an unterminated literal runs on to its line's end, and a `\` before a newline splices it to the next) or a broken
+// string (pp_fuzz_broken_string).
+static bool pp_fuzz_breaks(uint8_t kind, const uint8_t* spelling, uint32_t length)
+{
+    return kind == C_TOKEN_UNKNOWN || (kind == C_TOKEN_STRING_LITERAL && pp_fuzz_broken_string(spelling, length));
+}
+
 // Our stream printed with clang's -E -P spacing, for the comparison with clang's text: clang's text can join two tokens
 // that then lex as one (a number and an identifier that starts with a non-ASCII character, or a `'`; `:` and `:` in
 // C), which our printer never does, so the comparison must see clang's spacing on both sides. A token that starts a
@@ -439,15 +461,23 @@ static bool pp_fuzz_line_start_space(Preprocessor* pp, const PPTokens* out, uint
 // a line at the next token, and its printer moves to that token's line (its own, or its expansion's: PPExpansionStart
 // in Preprocessor.silent_pragmas) only when it is another than the current one (MoveToLine), as after a line splice. A
 // line's first token is indented to its column, as clang's printer indents it (HandleWhitespaceBeforeTok), which keeps
-// it apart from a `\` that ends the line before. `free` the text; null if it can't be made.
-static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length)
+// it apart from a `\` that ends the line before. The ranges of the tokens that don't lex back into themselves
+// (pp_fuzz_breaks) go in *whole, in `arena`, a start and an end each. `free` the text; null if it can't be made.
+static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, uint32_t** whole, uint64_t* whole_count)
 {
     char* result = 0;
     *length = 0;
     FILE* stream = open_memstream(&result, length);
     const PPTokens* out = &pp->output;
+    uint64_t candidates = 0;
+    for (uint32_t i = 0; i < out->count; i += 1)
+    {
+        candidates += out->kinds[i] == C_TOKEN_UNKNOWN || out->kinds[i] == C_TOKEN_STRING_LITERAL;
+    }
+    uint32_t* ranges = candidates != 0 ? arena_push_array(arena, 2 * candidates, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint64_t range_count = 0;
     bool line_start = true;
-    bool valid = true;
+    bool valid = candidates == 0 || ranges != 0;
     uint32_t pragma = BUSTER_PP_PRAGMA_OUTSIDE;
     uint32_t current_line = BUSTER_PP_NONE;
     uint32_t silent = 0;
@@ -528,7 +558,17 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length)
                                : buffer != 0 ? pp_spelling(pp, kind, out->values[i], out->locations[i], buffer, &spelling)
                                              : 0;
             valid = spelling != 0;
+            const bool breaks = valid && pp_fuzz_breaks(kind, spelling, n);
+            const long start = breaks ? ftell(stream) : 0;
             fwrite(spelling != 0 ? spelling : (const uint8_t*)"", 1, n, stream);
+            const long end = breaks ? ftell(stream) : 0;
+            valid = valid && (!breaks || (start >= 0 && end > start && end <= UINT32_MAX && range_count < candidates));
+            if (valid && breaks)
+            {
+                ranges[2 * range_count] = (uint32_t)start;
+                ranges[2 * range_count + 1] = (uint32_t)end;
+                range_count += 1;
+            }
             arena_pop_to(scratch.arena, mark);
             line_start = false;
         }
@@ -544,12 +584,15 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length)
         free(result);
         result = 0;
     }
+    *whole = ranges;
+    *whole_count = valid ? range_count : 0;
     return result;
 }
 
 // A run's result as clang's is given: rejected if it had errors, else its -P text with clang's spacing
-// (pp_fuzz_clang_text) up to its marker, as preprocessor_fuzz_clang_split splits clang's, in `arena`. *lost is set when
-// an accepted run's text doesn't have its marker in place; the output is then the whole text.
+// (pp_fuzz_clang_text) up to its marker, as preprocessor_fuzz_clang_split splits clang's, in `arena`, with the ranges
+// of its tokens that the comparison takes whole. *lost is set when an accepted run's text doesn't have its marker in
+// place; the output is then the whole text.
 static PreprocessorFuzzOutput pp_fuzz_output(Preprocessor* pp, bool accepted, Arena* arena, bool* lost)
 {
     PreprocessorFuzzOutput result = {
@@ -560,7 +603,9 @@ static PreprocessorFuzzOutput pp_fuzz_output(Preprocessor* pp, bool accepted, Ar
     if (accepted)
     {
         size_t length = 0;
-        char* text = pp_fuzz_clang_text(pp, &length);
+        uint32_t* whole = 0;
+        uint64_t whole_count = 0;
+        char* text = pp_fuzz_clang_text(pp, &length, arena, &whole, &whole_count);
         result.valid = text != 0;
         if (result.valid)
         {
@@ -570,7 +615,29 @@ static PreprocessorFuzzOutput pp_fuzz_output(Preprocessor* pp, bool accepted, Ar
             };
             const uint64_t begin = arena->length;
             const bool split = preprocessor_fuzz_clang_split(arena, printed, 1, &result);
-            if (!split)
+            if (split)
+            {
+                // The split's slice starts after the text's first spaces: the ranges inside it, from there.
+                uint64_t offset = 0;
+                while (offset < length && preprocessor_fuzz_clang_space(text[offset]))
+                {
+                    offset += 1;
+                }
+                result.valid = offset + result.text.length <= length && memcmp(text + offset, result.text.pointer, result.text.length) == 0;
+                uint64_t kept = 0;
+                for (uint64_t range = 0; result.valid && range < whole_count; range += 1)
+                {
+                    if (whole[2 * range] >= offset && whole[2 * range + 1] <= offset + result.text.length)
+                    {
+                        whole[2 * kept] = (uint32_t)(whole[2 * range] - offset);
+                        whole[2 * kept + 1] = (uint32_t)(whole[2 * range + 1] - offset);
+                        kept += 1;
+                    }
+                }
+                result.whole = whole;
+                result.whole_count = kept;
+            }
+            else
             {
                 arena_pop_to(arena, begin);
                 *lost = true;
@@ -585,6 +652,8 @@ static PreprocessorFuzzOutput pp_fuzz_output(Preprocessor* pp, bool accepted, Ar
                         .pointer = copy,
                         .length = length,
                     },
+                    .whole = whole,
+                    .whole_count = whole_count,
                     .accepted = true,
                     .valid = copy != 0,
                 };
@@ -596,8 +665,8 @@ static PreprocessorFuzzOutput pp_fuzz_output(Preprocessor* pp, bool accepted, Ar
 }
 
 // Our result against clang's, by tokens: our text has clang's spacing (pp_fuzz_clang_text), so the two lex alike, its
-// joins included. An accepted run whose marker is missing or misplaced differs from clang's, whose text always has it in
-// place.
+// joins included, and clang's follows our tokens that don't lex back into themselves (preprocessor_fuzz_lex_printed).
+// An accepted run whose marker is missing or misplaced differs from clang's, whose text always has it in place.
 static PreprocessorFuzzDifference pp_fuzz_compare(Arena* scratch, PreprocessorFuzzOutput ours, bool lost, PreprocessorFuzzOutput theirs, bool c23)
 {
     const PreprocessorFuzzDifference difference = preprocessor_fuzz_compare_mode(scratch, ours, theirs, c23);
@@ -621,14 +690,7 @@ static bool pp_fuzz_unprintable(Preprocessor* pp, PPFuzzState* state)
     {
         if (out->kinds[i] == C_TOKEN_STRING_LITERAL)
         {
-            const uint8_t* bytes = pp_location_bytes(pp, out->locations[i]);
-            const uint32_t length = out->values[i] - out->locations[i];
-            bool escaped = false;
-            for (uint32_t k = 1; !result && k + 1 < length; k += 1)
-            {
-                result = (bytes[k] == '"' && !escaped) || bytes[k] == '\n' || bytes[k] == '\r';
-                escaped = bytes[k] == '\\' && !escaped;
-            }
+            result = pp_fuzz_broken_string(pp_location_bytes(pp, out->locations[i]), out->values[i] - out->locations[i]);
         }
         else if (out->kinds[i] == C_TOKEN_UNKNOWN)
         {
@@ -951,22 +1013,45 @@ static bool pp_fuzz_check_isolation(void)
 
 // Our text and clang's for a case, which pp_fuzz_compare must find to differ as `difference` says: whitespace between
 // tokens doesn't count, but a literal's contents and two tokens joined into one do (#263's review found a comparison of
-// spellings without whitespace, which took `"a b" 0` for `"ab" 0`).
+// spellings without whitespace, which took `"a b" 0` for `"ab" 0`). A `whole_end` other than 0 makes [whole_start,
+// whole_end) of ours a token that doesn't lex back into itself (PreprocessorFuzzOutput.whole), as pp_fuzz_output gives
+// an unterminated literal's.
 typedef struct PPFuzzComparison PPFuzzComparison;
 struct PPFuzzComparison
 {
     const char* ours;
+    uint32_t whole_start;
+    uint32_t whole_end;
     const char* theirs;
     PreprocessorFuzzDifference difference;
 };
 
 static const PPFuzzComparison pp_fuzz_comparisons[] = {
-    { "\"a b\" 0\n", "\"a b\"\n 0\n", BUSTER_PPF_EQUAL },
-    { "\"a b\" 0\n", "\"ab\" 0\n", BUSTER_PPF_TOKEN_SPELLING },
-    { "'a b' 0\n", "'ab' 0\n", BUSTER_PPF_TOKEN_SPELLING },
-    { "a b\n", "ab\n", BUSTER_PPF_TOKEN_COUNT },
-    { "ab\n", "a\nb\n", BUSTER_PPF_TOKEN_COUNT },
-    { "x\n  y\n", "x y\n", BUSTER_PPF_EQUAL },
+    { "\"a b\" 0\n", 0, 0, "\"a b\"\n 0\n", BUSTER_PPF_EQUAL },
+    { "\"a b\" 0\n", 0, 0, "\"ab\" 0\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "'a b' 0\n", 0, 0, "'ab' 0\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "a b\n", 0, 0, "ab\n", BUSTER_PPF_TOKEN_COUNT },
+    { "ab\n", 0, 0, "a\nb\n", BUSTER_PPF_TOKEN_COUNT },
+    { "x\n  y\n", 0, 0, "x y\n", BUSTER_PPF_EQUAL },
+    // An unterminated literal ends where ours does in both texts: the spaces after it don't count, but its own bytes
+    // do, and so does a `'` after it on its line, which would close a character constant.
+    { "'a  b x\n", 0, 5, "'a  b  x\n", BUSTER_PPF_EQUAL },
+    { "'a  b x\n", 0, 5, "'a  b\nx\n", BUSTER_PPF_EQUAL },
+    { "'a  b x\n", 0, 5, "'a b\nx\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "'a x 'y'\n", 0, 2, "'a  x 'y'\n", BUSTER_PPF_EQUAL },
+    { "'a x 'y'\n", 0, 2, "'a x 'z'\n", BUSTER_PPF_TOKEN_SPELLING },
+    // Without our range, it runs on to its line's end, spaces and all.
+    { "'a x\n", 0, 0, "'a  x\n", BUSTER_PPF_TOKEN_SPELLING },
+    // A string that stringizing an unterminated literal broke (pp_fuzz_broken_string) is whole too.
+    { "\"\"a b\" x\n", 0, 6, "\"\"a b\"  x\n", BUSTER_PPF_EQUAL },
+    { "\"\"a b\" x\n", 0, 6, "\"\"a  b\" x\n", BUSTER_PPF_TOKEN_COUNT },
+    // A comment's `/` and a line splice's `\`, which only tokens printed next to each other make, are tokens.
+    { "/*a b\n", 0, 0, "/*a  b\n", BUSTER_PPF_EQUAL },
+    { "/*a*/b\n", 0, 0, "/*c*/b\n", BUSTER_PPF_TOKEN_SPELLING },
+    { "//a b\n", 0, 0, "//a\nb\n", BUSTER_PPF_EQUAL },
+    { "a \\\nb\n", 0, 0, "a \\\n b\n", BUSTER_PPF_EQUAL },
+    { "a \\\nb\n", 0, 0, "a\nb\n", BUSTER_PPF_TOKEN_COUNT },
+    { "a\\\nb\n", 1, 2, "a\\\n b\n", BUSTER_PPF_EQUAL },
 };
 
 // Runs each pair above through pp_fuzz_compare, in both modes, as accepted outputs. Returns whether every pair gives its
@@ -980,11 +1065,14 @@ static bool pp_fuzz_check_comparison(void)
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_fuzz_comparisons); i += 1)
         {
             const PPFuzzComparison* comparison = &pp_fuzz_comparisons[i];
+            const uint32_t whole[2] = { comparison->whole_start, comparison->whole_end };
             const PreprocessorFuzzOutput ours = {
                 .text = {
                     .pointer = (char*)comparison->ours,
                     .length = strlen(comparison->ours),
                 },
+                .whole = whole,
+                .whole_count = comparison->whole_end != 0,
                 .accepted = true,
                 .valid = true,
             };

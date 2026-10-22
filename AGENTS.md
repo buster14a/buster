@@ -2329,8 +2329,9 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   the fuzz batch: its isolation rules checked on small sources (what a case
   leaves open makes clang read it alone), its comparison on pairs of texts
   (whitespace between tokens doesn't count, a literal's contents and joined
-  tokens do), with `--clang` its emulation of clang's -P printer checked on
-  fixtures of its own, then 1,500 cases of the
+  tokens do, and our tokens that don't lex back, as an unterminated literal,
+  end where ours do in both texts), with `--clang` its emulation of clang's
+  -P printer checked on fixtures of its own, then 1,500 cases of the
   independent harness's generator in each of C17 and C23
   (`c_preprocessor_fuzz.c`), which both kernels must give
   alike (streams, directive tables, diagnostics' counts, history and both
@@ -2358,7 +2359,10 @@ features:
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers;
 - the fuzz batch's cases must give clang's acceptance, and an accepted case's
-  stream, printed with clang's -P spacing, must lex into clang's tokens.
+  stream, printed with clang's -P spacing, must lex into clang's tokens (with
+  a comment's `/` and a line splice's `\` as tokens, which only tokens printed
+  next to each other make, and our tokens that don't lex back whole:
+  `preprocessor_fuzz_lex_printed`).
 
 `sqlite3.c`, musl 1.2.5's 1,357 sources, Lua 5.4.8 and this repository's
 translation units are token-identical; `docs/c-preprocessor.md` has the

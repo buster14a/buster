@@ -109,14 +109,33 @@ give the same token kinds and spellings (`preprocessor_fuzz_compare_mode`).
 Whitespace and line breaks don't count.
 
 Every case is compared by tokens. Where clang's printer joins two tokens,
-our text joins them too (below), so both lex into the same tokens; and an
-unterminated literal, which runs to the end of its line in either text, takes
-the same tokens in both, since the two break lines in the same places. Until
-the review of #263, a stream with an unterminated literal, or with two or
-more tokens on presumed line 1, was compared by its spellings with all
+our text joins them too (below), so both lex into the same tokens. Lexing a
+printed text can also run past its stream's tokens, or lose one, where bytes
+printed next to each other make what neither printer writes. So the two texts
+are lexed as `preprocessor_fuzz_lex_printed` says:
+
+- An unterminated literal runs on to the end of its line, through the
+  printer's spaces and the tokens after it, and a `'` further on can close it.
+  Stringizing one leaves a string whose last quote does the same, and a stray
+  `\` at a line's end splices the next line to it. Our printer notes where
+  each such token of our stream lies in its text (`pp_fuzz_breaks`,
+  `PreprocessorFuzzOutput.whole`), and the lexed token that reaches one ends
+  where it does. Clang's text follows ours: its token at the same index, when
+  it starts with the same bytes, is as long. The literal's own bytes count,
+  as a string's do, and the spaces after it don't.
+- A comment can only be a `/` printed before a `*` or a `/`, and a line
+  splice a `\` before a newline. Their `/` and `\` are tokens, and lexing goes
+  on after them.
+
+Until the review of #263, a stream with an unterminated literal, or with two
+or more tokens on presumed line 1, was compared by its spellings with all
 whitespace removed, which could hide a difference inside a literal or
-between two tokens. Removing it showed no difference that it had hidden
-("Qualification").
+between two tokens. Without that fallback, the qualification found six cases
+whose texts differed only in the printer's spaces and line breaks inside
+what an unterminated literal or comment had taken: the indentation of a
+line, a space after a `(`, a line break where clang's printer starts a new
+line. Elsewhere such whitespace doesn't count, so the emulation doesn't place
+it as clang does. With the rules above, the six agree ("Qualification").
 
 #### Clang's `-P` printer, emulated
 
@@ -202,11 +221,14 @@ Four kinds of case run in a clang process of their own (`isolated`):
 
 Before its cases, the fuzz batch checks these rules on 12 small sources in
 each mode (`pp_fuzz_check_isolation`), a region whose end a line splice takes
-among them, and the comparison on 6 pairs of texts (`pp_fuzz_check_comparison`):
+among them, and the comparison on 20 pairs of texts (`pp_fuzz_check_comparison`):
 whitespace between tokens doesn't count, but a literal's contents and two
 tokens joined into one do, as `"a b" 0` against `"ab" 0` and `a b` against
-`ab`. With `--clang` it then compares the emulation's fixtures with
-clang in each mode (`pp_fuzz_emulation_cases`, `pp_fuzz_check_emulation`):
+`ab`; an unterminated literal and a broken string of ours are whole, the
+spaces after them not counting and their own bytes counting; and a
+comment's `/` and a splice's `\` are tokens. With `--clang` it then compares
+the emulation's fixtures with clang in each mode (`pp_fuzz_emulation_cases`,
+`pp_fuzz_check_emulation`):
 the minimized cases the emulation once printed wrong, and those probing
 around them found, which test-preprocessor's cases can't pin, since they
 compare tokens and line markers, not the `-P` text.
