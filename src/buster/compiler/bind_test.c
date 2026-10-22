@@ -1576,8 +1576,11 @@ static bool bind_test_same_dynamic(const Link* link, const Bind* bind, const Run
         const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
         const bool import = source == BUSTER_LINK_SOURCE_RUNTIME_SHARED;
         // A weak reference to nothing is dynamic only with default visibility: a hidden one is 0 within the executable.
+        // In a shared library, so is a strong one, which binding leaves undefined.
         const bool visible = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT;
-        const bool nowhere = source == BUSTER_LINK_SOURCE_NONE && symbols->atom[symbol] == 0 && name != 0 && weak && visible;
+        const bool global = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
+        const bool nowhere =
+            source == BUSTER_LINK_SOURCE_NONE && symbols->atom[symbol] == 0 && name != 0 && global && (weak || runtime->kind == RUNTIME_KIND_SHARED) && visible;
         bool exported = false;
         for (uint32_t i = 0; i < bind->export_count; i += 1)
         {
@@ -1636,10 +1639,11 @@ static bool bind_test_same_members(String8 text, const Bind* bind, const Runtime
     return result;
 }
 
-// Links the program's own objects by cc with lld, as a PIE, and compares the output's .dynsym and the members lld
-// extracts with what binding found for the same program.
-static void bind_test_against_lld(BindTestTally* tally, const Link* own, uint32_t units, const Link* bound, const Bind* bind, const Runtime* runtime, const char* directory,
-                                  const char* name, bool keep, Arena* arena)
+// Links the program's own objects by cc with lld, as `output` says (-pie, or -shared for a library bound against a shared
+// library's runtime), and compares the output's .dynsym and the members lld extracts with what binding found for the
+// same program.
+static void bind_test_against_lld_as(BindTestTally* tally, const Link* own, uint32_t units, const Link* bound, const Bind* bind, const Runtime* runtime,
+                                     const char* directory, const char* name, const char* output, bool keep, Arena* arena)
 {
     const uint64_t length = arena->length;
     char** paths = BUSTER_ARENA_PUSH_ARRAY(arena, char*, units);
@@ -1669,7 +1673,7 @@ static void bind_test_against_lld(BindTestTally* tally, const Link* own, uint32_
     {
         arguments[count++] = "cc";
         arguments[count++] = "-fuse-ld=lld";
-        arguments[count++] = "-pie";
+        arguments[count++] = (char*)output;
         arguments[count++] = why_option;
         arguments[count++] = "-o";
         arguments[count++] = program_path;
@@ -1706,6 +1710,13 @@ static void bind_test_against_lld(BindTestTally* tally, const Link* own, uint32_
         unlink(error_path);
     }
     arena_pop_to(arena, length);
+}
+
+// bind_test_against_lld_as for a PIE.
+static void bind_test_against_lld(BindTestTally* tally, const Link* own, uint32_t units, const Link* bound, const Bind* bind, const Runtime* runtime, const char* directory,
+                                  const char* name, bool keep, Arena* arena)
+{
+    bind_test_against_lld_as(tally, own, units, bound, bind, runtime, directory, name, "-pie", keep, arena);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3313,6 +3324,441 @@ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Shared libraries
+//
+// A shared library's runtime (runtime_import_shared), against which each link binds by both paths, which must make the
+// same link and binding:
+//   - programs: test-link's two sets that call libc, bound as libraries (bind_test_shared_structure): link_check; no
+//     start object's _start; crti.o's _init and crtbeginS.o's __dso_handle, hidden; and the exports exactly the link's
+//     definitions with default or protected visibility, global or weak, in symbol order, main among them;
+//   - rules, on links made by hand, none with main: a strong reference with default visibility to a name nothing
+//     defines stays undefined (source NONE), and a hidden one is an error naming it; definitions with default,
+//     protected and hidden visibility and a weak one, all but the hidden one exports; and references to __tls_get_addr
+//     and puts, imports of the loader's at GLIBC_2.3 and of libc.so.6's at GLIBC_2.2.5;
+//   - with --cross-check: C libraries that cc compiles with -fPIC (exports of every visibility; imports from libc.so.6
+//     and the loader, general-dynamic TLS, and undefined and weak references; atexit), each imported, bound and checked
+//     as the programs are, then linked by cc -shared with GNU ld, which must link it, and with lld, whose .dynsym must
+//     have the imports at their versions, the undefined and weak references and the exports binding found, and whose
+//     --why-extract the members that joined.
+
+// Whether a symbol of a link bound against a shared library's runtime is an export: global or weak, with default or
+// protected visibility, and defined in an atom or absolutely.
+static bool bind_test_shared_exported(const Link* link, SymbolId symbol)
+{
+    const uint8_t flags = link->symbols.flags[symbol];
+    const uint8_t visibility = flags & BUSTER_LINK_SYMBOL_VISIBILITY;
+    const bool global = (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
+    const bool visible = visibility == BUSTER_LINK_SYMBOL_DEFAULT || visibility == BUSTER_LINK_SYMBOL_PROTECTED;
+    const bool defined = link->symbols.atom[symbol] != 0 || link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
+    return global && visible && defined;
+}
+
+// Whether `symbol` is one of the binding's exports.
+static bool bind_test_is_export(const Bind* bind, SymbolId symbol)
+{
+    bool result = false;
+    for (uint32_t e = 0; e < bind->export_count; e += 1)
+    {
+        result = result || bind->exports[e] == symbol;
+    }
+    return result;
+}
+
+// A link bound against a shared library's runtime (see the section's comment).
+static void bind_test_shared_structure(BindTestTally* tally, Link* link, const Bind* bind)
+{
+    bind_test_expect(tally, link_check(link) == LINK_ERROR_NONE, "link_check", 0);
+    const SymbolId start = bind_test_global(link, "_start");
+    bind_test_expect(tally, start == 0 || link->symbols.atom[start] == 0, "no _start: no start object", start);
+    static const char* const hidden[] = {
+        "_init",
+        "_fini",
+        "__dso_handle",
+    };
+    for (uint32_t h = 0; h < BUSTER_ARRAY_LENGTH(hidden); h += 1)
+    {
+        const SymbolId symbol = bind_test_global(link, hidden[h]);
+        bind_test_expect(tally,
+                         symbol != 0 && link->symbols.atom[symbol] != 0 && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_HIDDEN &&
+                             !bind_test_is_export(bind, symbol),
+                         "crti.o's _init and _fini and crtbeginS.o's __dso_handle, hidden", h);
+    }
+    // The exports, in symbol order: each a definition of the program's or absolute.
+    uint32_t expected = 0;
+    bool same = true;
+    for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+    {
+        if (bind_test_shared_exported(link, symbol))
+        {
+            const uint8_t source = link->symbols.source[symbol];
+            same = same && expected < bind->export_count && bind->exports[expected] == symbol &&
+                   (source == BUSTER_LINK_SOURCE_PROGRAM || source == BUSTER_LINK_SOURCE_ABSOLUTE);
+            expected += 1;
+        }
+    }
+    bind_test_expect(tally, same && expected == bind->export_count, "the exports: every definition with default or protected visibility", expected);
+    const SymbolId main = bind_test_global(link, "main");
+    bind_test_expect(tally, main == 0 || link->symbols.atom[main] == 0 || bind_test_is_export(bind, main), "main exported", main);
+}
+
+static bool bind_test_shared_programs(const Runtime* runtime, uint64_t seed)
+{
+    BindTestTally tally = {
+        .check = "shared programs",
+    };
+    LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
+    link_test_program_options(options, seed, 1);
+    for (uint32_t i = 0; i < BUSTER_LINK_TEST_PROGRAMS; i += 1)
+    {
+        if (options[i].libc)
+        {
+            BindTestProgram vector;
+            BindTestProgram exact;
+            const bool vector_bound = bind_test_program(&vector, runtime, options[i], BIND_PATH_VECTOR);
+            const bool exact_bound = bind_test_program(&exact, runtime, options[i], BIND_PATH_EXACT);
+            bind_test_expect(&tally, vector_bound && exact_bound, link_test_program_names[i], vector.bind.error);
+            bind_test_expect(&tally, bind_test_same_links(&vector.program.link, &exact.program.link) && bind_test_same_binds(&vector.bind, &exact.bind),
+                             "the paths' links and bindings the same", i);
+            if (vector_bound)
+            {
+                bind_test_shared_structure(&tally, &vector.program.link, &vector.bind);
+                printf("  %s: %u atoms, %u symbols, %u imports, %u exports\n", link_test_program_names[i], vector.program.link.atoms.count - 1,
+                       vector.program.link.symbols.count - 1, vector.bind.import_count, vector.bind.export_count);
+            }
+            bind_test_release(&vector);
+            bind_test_release(&exact);
+        }
+    }
+    return bind_test_report(&tally);
+}
+
+typedef enum BindTestSharedRule
+{
+    BIND_TEST_SHARED_NOWHERE,
+    BIND_TEST_SHARED_HIDDEN_NOWHERE,
+    BIND_TEST_SHARED_VISIBILITY,
+    BIND_TEST_SHARED_IMPORTS,
+    BIND_TEST_SHARED_RULES,
+} BindTestSharedRule;
+
+static const char* const bind_test_shared_rule_names[BIND_TEST_SHARED_RULES] = {
+    [BIND_TEST_SHARED_NOWHERE] = "a strong reference with default visibility to a name nothing defines",
+    [BIND_TEST_SHARED_HIDDEN_NOWHERE] = "a hidden reference to a name nothing defines",
+    [BIND_TEST_SHARED_VISIBILITY] = "definitions with default, protected and hidden visibility, and a weak one",
+    [BIND_TEST_SHARED_IMPORTS] = "references to __tls_get_addr and puts",
+};
+
+// The most symbols a shared rule's link names.
+#define BUSTER_BIND_TEST_SHARED_SYMBOLS 4
+
+// Builds the rule's link, without main, and binds it by `path`: `symbols` gets the rule's symbols.
+static void bind_test_shared_rule_link(BindTestLink* test, const Runtime* runtime, BindTestSharedRule rule, BindPath path, SymbolId* symbols)
+{
+    static const char* const definitions[BUSTER_BIND_TEST_SHARED_SYMBOLS] = {
+        "buster_default",
+        "buster_protected",
+        "buster_hidden",
+        "buster_weak",
+    };
+    static const uint8_t definition_flags[BUSTER_BIND_TEST_SHARED_SYMBOLS] = {
+        BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION,
+        BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_PROTECTED,
+        BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_HIDDEN,
+        BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_FUNCTION,
+    };
+    const uint8_t strong = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE;
+    bool result = bind_test_link_begin(test, runtime, bind_test_room(runtime));
+    memset(symbols, 0, BUSTER_BIND_TEST_SHARED_SYMBOLS * sizeof(SymbolId));
+    if (result && rule == BIND_TEST_SHARED_NOWHERE)
+    {
+        symbols[0] = bind_test_symbol(test, "buster_shared_nowhere", strong, BUSTER_LINK_SOURCE_NONE);
+    }
+    else if (result && rule == BIND_TEST_SHARED_HIDDEN_NOWHERE)
+    {
+        symbols[0] = bind_test_symbol(test, "buster_shared_hidden", strong | BUSTER_LINK_SYMBOL_HIDDEN, BUSTER_LINK_SOURCE_NONE);
+    }
+    else if (result && rule == BIND_TEST_SHARED_VISIBILITY)
+    {
+        for (uint32_t i = 0; result && i < BUSTER_BIND_TEST_SHARED_SYMBOLS; i += 1)
+        {
+            symbols[i] = bind_test_symbol(test, definitions[i], definition_flags[i], BUSTER_LINK_SOURCE_PROGRAM);
+            result = symbols[i] != 0 && bind_test_define(test, symbols[i]);
+        }
+    }
+    else if (result)
+    {
+        symbols[0] = bind_test_symbol(test, "__tls_get_addr", strong, BUSTER_LINK_SOURCE_NONE);
+        symbols[1] = bind_test_symbol(test, "puts", strong, BUSTER_LINK_SOURCE_NONE);
+    }
+    result = result && symbols[0] != 0 && bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena);
+    if (result)
+    {
+        bind_end(&test->bind, &test->link);
+    }
+}
+
+static bool bind_test_shared_rules(const Runtime* runtime)
+{
+    BindTestTally tally = {
+        .check = "shared rules",
+    };
+    for (uint32_t r = 0; r < BIND_TEST_SHARED_RULES; r += 1)
+    {
+        const BindTestSharedRule rule = (BindTestSharedRule)r;
+        const char* what = bind_test_shared_rule_names[r];
+        BindTestLink vector;
+        BindTestLink exact;
+        SymbolId symbols[BUSTER_BIND_TEST_SHARED_SYMBOLS];
+        SymbolId exact_symbols[BUSTER_BIND_TEST_SHARED_SYMBOLS];
+        bind_test_shared_rule_link(&vector, runtime, rule, BIND_PATH_VECTOR, symbols);
+        bind_test_shared_rule_link(&exact, runtime, rule, BIND_PATH_EXACT, exact_symbols);
+        const LinkSymbols* columns = &vector.link.symbols;
+        const bool bound = vector.bind.error == BIND_ERROR_NONE;
+        bind_test_expect(&tally, bind_test_same_links(&vector.link, &exact.link) && bind_test_same_binds(&vector.bind, &exact.bind), what, r);
+        bool holds = false;
+        if (rule == BIND_TEST_SHARED_NOWHERE)
+        {
+            bool imported = false;
+            for (uint32_t i = 0; i < vector.bind.import_count; i += 1)
+            {
+                imported = imported || vector.bind.imports[i] == symbols[0];
+            }
+            holds = bound && columns->source[symbols[0]] == BUSTER_LINK_SOURCE_NONE && columns->atom[symbols[0]] == 0 && !imported &&
+                    !bind_test_is_export(&vector.bind, symbols[0]);
+        }
+        else if (rule == BIND_TEST_SHARED_HIDDEN_NOWHERE)
+        {
+            holds = vector.bind.error == BIND_ERROR_UNDEFINED && vector.bind.name == columns->name[symbols[0]];
+        }
+        else if (rule == BIND_TEST_SHARED_VISIBILITY)
+        {
+            holds = bound && vector.bind.export_count == 3 && vector.bind.exports[0] == symbols[0] && vector.bind.exports[1] == symbols[1] &&
+                    vector.bind.exports[2] == symbols[3];
+        }
+        else
+        {
+            const uint16_t tls = columns->version[symbols[0]];
+            const uint16_t puts = columns->version[symbols[1]];
+            holds = bound && columns->source[symbols[0]] == BUSTER_LINK_SOURCE_RUNTIME_SHARED && columns->source[symbols[1]] == BUSTER_LINK_SOURCE_RUNTIME_SHARED &&
+                    import_equal(import_test_version_name(&runtime->loader, tls), "GLIBC_2.3") && import_equal(import_test_version_name(&runtime->libc, puts), "GLIBC_2.2.5");
+        }
+        bind_test_expect(&tally, holds, what, vector.bind.error);
+        if (bound)
+        {
+            bind_test_shared_structure(&tally, &vector.link, &vector.bind);
+        }
+        bind_test_link_end(&vector);
+        bind_test_link_end(&exact);
+    }
+    return bind_test_report(&tally);
+}
+
+// The C libraries the cross-check compiles with -fPIC: each one's name, source and an option for cc.
+static const BindTestStaticSource bind_test_shared_sources[] = {
+    {
+        .name = "exports",
+        .source = "int buster_counter = 1;\n"
+                  "int buster_get(void) { return buster_counter; }\n"
+                  "__attribute__((visibility(\"hidden\"))) int buster_hidden(void) { return 2; }\n"
+                  "__attribute__((visibility(\"protected\"))) int buster_protected(void) { return buster_hidden(); }\n"
+                  "__attribute__((weak)) int buster_weak(void) { return 3; }\n"
+                  "static int buster_local(void) { return 4; }\n"
+                  "int (*buster_pointer)(void) = buster_local;\n",
+    },
+    {
+        .name = "imports",
+        .source = "#include <link.h>\n"
+                  "#include <stdio.h>\n"
+                  "#include <string.h>\n"
+                  "extern char** environ;\n"
+                  "extern void* __libc_stack_end;\n"
+                  "extern int buster_elsewhere(int);\n"
+                  "extern int buster_maybe __attribute__((weak));\n"
+                  "__thread int buster_thread;\n"
+                  "int buster_library(const char* text)\n"
+                  "{\n"
+                  "    puts(text);\n"
+                  "    return (int)strlen(text) + (environ != 0) + _r_debug.r_version + (__libc_stack_end != 0) + buster_elsewhere(buster_thread) +\n"
+                  "           (&buster_maybe != 0);\n"
+                  "}\n",
+        // The general-dynamic accesses, through __tls_get_addr, rather than TLS descriptors.
+        .option = "-mtls-dialect=gnu",
+    },
+    {
+        .name = "atexit",
+        .source = "#include <stdlib.h>\n"
+                  "static void buster_handler(void) {}\n"
+                  "int buster_register(void) { return atexit(buster_handler); }\n",
+    },
+};
+
+// Links `object` by cc -shared with the linker `fuse`, into `library`, with `why` if it isn't 0: cc's status.
+static int bind_test_shared_link(const char* fuse, const char* why, const char* object, const char* library, const char* out, const char* err)
+{
+    char* arguments[8];
+    uint32_t count = 0;
+    arguments[count++] = "cc";
+    arguments[count++] = (char*)fuse;
+    arguments[count++] = "-shared";
+    arguments[count] = (char*)why;
+    count += why != 0 ? 1 : 0;
+    arguments[count++] = "-o";
+    arguments[count++] = (char*)library;
+    arguments[count++] = (char*)object;
+    arguments[count] = 0;
+    return object_test_run(arguments, out, err);
+}
+
+// What one library's link must have besides the structure: its references and members bound as GNU ld and lld bind
+// them (see the section's comment).
+static bool bind_test_shared_library_holds(const Link* link, const Bind* bind, const Runtime* runtime, const char* name)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    bool result = true;
+    if (strcmp(name, "exports") == 0)
+    {
+        static const char* const exported[] = {
+            "buster_counter",
+            "buster_get",
+            "buster_protected",
+            "buster_weak",
+            "buster_pointer",
+        };
+        for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(exported); e += 1)
+        {
+            result = result && bind_test_is_export(bind, bind_test_global(link, exported[e]));
+        }
+        const SymbolId hidden = bind_test_global(link, "buster_hidden");
+        result = result && hidden != 0 && !bind_test_is_export(bind, hidden) && bind->export_count == BUSTER_ARRAY_LENGTH(exported);
+    }
+    else if (strcmp(name, "imports") == 0)
+    {
+        const SymbolId elsewhere = bind_test_global(link, "buster_elsewhere");
+        const SymbolId maybe = bind_test_global(link, "buster_maybe");
+        const SymbolId tls = bind_test_global(link, "__tls_get_addr");
+        const SymbolId r_debug = bind_test_global(link, "_r_debug");
+        const SymbolId environ_symbol = bind_test_global(link, "environ");
+        result = elsewhere != 0 && symbols->source[elsewhere] == BUSTER_LINK_SOURCE_NONE &&
+                 (symbols->flags[elsewhere] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL && maybe != 0 &&
+                 symbols->source[maybe] == BUSTER_LINK_SOURCE_NONE && (symbols->flags[maybe] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK && tls != 0 &&
+                 symbols->source[tls] == BUSTER_LINK_SOURCE_RUNTIME_SHARED && import_equal(import_test_version_name(&runtime->loader, symbols->version[tls]), "GLIBC_2.3") &&
+                 r_debug != 0 && import_test_version_name(&runtime->loader, symbols->version[r_debug]).length != 0 && environ_symbol != 0 &&
+                 import_test_version_name(&runtime->libc, symbols->version[environ_symbol]).length != 0 && bind_test_is_export(bind, bind_test_global(link, "buster_thread"));
+    }
+    else
+    {
+        const SymbolId atexit = bind_test_global(link, "atexit");
+        const SymbolId cxa_atexit = bind_test_global(link, "__cxa_atexit");
+        result = atexit != 0 && symbols->atom[atexit] != 0 && !bind_test_is_export(bind, atexit) && cxa_atexit != 0 &&
+                 symbols->source[cxa_atexit] == BUSTER_LINK_SOURCE_RUNTIME_SHARED;
+    }
+    return result;
+}
+
+static bool bind_test_shared_compiled(const Runtime* runtime, const char* directory, bool keep, Arena* arena)
+{
+    BindTestTally tally = {
+        .check = "shared compiled libraries",
+    };
+    BindTestDynamic* entries = BUSTER_ARENA_PUSH_ARRAY(arena, BindTestDynamic, BUSTER_BIND_TEST_DYNAMIC);
+    for (uint32_t s = 0; entries != 0 && s < BUSTER_ARRAY_LENGTH(bind_test_shared_sources); s += 1)
+    {
+        const BindTestStaticSource* library = &bind_test_shared_sources[s];
+        const uint64_t length = arena->length;
+        char source_path[BUSTER_BIND_TEST_PATH_BYTES];
+        char object_path[BUSTER_BIND_TEST_PATH_BYTES];
+        char bfd_path[BUSTER_BIND_TEST_PATH_BYTES];
+        char lld_path[BUSTER_BIND_TEST_PATH_BYTES];
+        char why_path[BUSTER_BIND_TEST_PATH_BYTES];
+        char why_option[BUSTER_BIND_TEST_PATH_BYTES + 32];
+        char out[BUSTER_BIND_TEST_PATH_BYTES];
+        char err[BUSTER_BIND_TEST_PATH_BYTES];
+        snprintf(source_path, sizeof(source_path), "%s/shared-%s.c", directory, library->name);
+        snprintf(object_path, sizeof(object_path), "%s/shared-%s.o", directory, library->name);
+        snprintf(bfd_path, sizeof(bfd_path), "%s/shared-%s-bfd.so", directory, library->name);
+        snprintf(lld_path, sizeof(lld_path), "%s/shared-%s-lld.so", directory, library->name);
+        snprintf(why_path, sizeof(why_path), "%s/shared-%s.why", directory, library->name);
+        snprintf(why_option, sizeof(why_option), "-Wl,--why-extract=%s", why_path);
+        snprintf(out, sizeof(out), "%s/shared-%s.out", directory, library->name);
+        snprintf(err, sizeof(err), "%s/shared-%s.err", directory, library->name);
+        FILE* file = fopen(source_path, "w");
+        const bool written = file != 0 && fputs(library->source, file) >= 0;
+        if (file != 0)
+        {
+            fclose(file);
+        }
+        // cc, -O2, -fPIC, -c, -o, the object, the source, the option and the null after them.
+        char* compile[9];
+        uint32_t used = 0;
+        compile[used++] = "cc";
+        compile[used++] = "-O2";
+        compile[used++] = "-fPIC";
+        compile[used++] = "-c";
+        compile[used++] = "-o";
+        compile[used++] = object_path;
+        compile[used++] = source_path;
+        compile[used] = (char*)library->option;
+        used += library->option != 0 ? 1 : 0;
+        compile[used] = 0;
+        const bool compiled = written && object_test_run(compile, out, err) == 0;
+        bind_test_expect(&tally, compiled, library->name, s);
+        const String8 object = compiled ? object_test_read_file(arena, object_path) : (String8){ 0 };
+        BindTestLink vector;
+        BindTestLink exact;
+        const bool vector_imported = object.pointer != 0 && bind_test_static_import(&vector, runtime, object);
+        const bool exact_imported = object.pointer != 0 && bind_test_static_import(&exact, runtime, object);
+        bind_test_expect(&tally, vector_imported && exact_imported, "the object imported", s);
+        const bool vector_bound = vector_imported && bind_begin(&vector.bind, &vector.link, runtime, BIND_PATH_VECTOR, &vector.bytes, 1, &vector.arena) &&
+                                  bind_end(&vector.bind, &vector.link);
+        const bool exact_bound = exact_imported && bind_begin(&exact.bind, &exact.link, runtime, BIND_PATH_EXACT, &exact.bytes, 1, &exact.arena) &&
+                                 bind_end(&exact.bind, &exact.link);
+        bind_test_expect(&tally, vector_bound && exact_bound, "bound by both paths", vector.bind.error);
+        if (vector_bound && exact_bound)
+        {
+            bind_test_expect(&tally, bind_test_same_links(&vector.link, &exact.link) && bind_test_same_binds(&vector.bind, &exact.bind), "the paths' links the same", s);
+            bind_test_shared_structure(&tally, &vector.link, &vector.bind);
+            bind_test_expect(&tally, bind_test_shared_library_holds(&vector.link, &vector.bind, runtime, library->name), library->name, s);
+            bind_test_expect(&tally, bind_test_shared_link("-fuse-ld=bfd", 0, object_path, bfd_path, out, err) == 0, "linked by cc -shared with GNU ld", s);
+            const int status = bind_test_shared_link("-fuse-ld=lld", why_option, object_path, lld_path, out, err);
+            bind_test_expect(&tally, status == 0, "linked by cc -shared with lld", (uint64_t)status);
+            char* readelf[] = {
+                "readelf",
+                "-W",
+                "--dyn-syms",
+                lld_path,
+                0,
+            };
+            const int read_status = status == 0 ? object_test_run(readelf, out, err) : -1;
+            const String8 text = read_status == 0 ? object_test_read_file(arena, out) : (String8){ 0 };
+            const uint32_t entry_count = text.pointer != 0 ? bind_test_read_dynamic(text, entries) : UINT32_MAX;
+            bind_test_expect(&tally, bind_test_same_dynamic(&vector.link, &vector.bind, runtime, entries, entry_count), "lld's .dynsym: the imports, references and exports",
+                             entry_count);
+            const String8 why = status == 0 ? object_test_read_file(arena, why_path) : (String8){ 0 };
+            bind_test_expect(&tally, bind_test_same_members(why, &vector.bind, runtime), "the members lld extracts", s);
+            printf("  %s: %u imports, %u exports, %u .dynsym entries of lld's\n", library->name, vector.bind.import_count, vector.bind.export_count,
+                   entry_count != UINT32_MAX ? entry_count : 0);
+        }
+        if (object.pointer != 0)
+        {
+            bind_test_link_end(&vector);
+            bind_test_link_end(&exact);
+        }
+        if (!keep)
+        {
+            unlink(source_path);
+            unlink(object_path);
+            unlink(bfd_path);
+            unlink(lld_path);
+            unlink(why_path);
+            unlink(out);
+            unlink(err);
+        }
+        arena_pop_to(arena, length);
+    }
+    return bind_test_report(&tally);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // run_bind_tests
 
 static int run_bind_tests(int argc, char** argv)
@@ -3404,6 +3850,21 @@ static int run_bind_tests(int argc, char** argv)
             passed = bind_test_static_compiled(&static_pie_runtime, directory, keep, &arena) && passed;
         }
         runtime_release(&static_pie_runtime);
+        // A shared library's runtime: the dynamic PIE's without its start object.
+        Runtime shared_runtime;
+        const RuntimeError shared_imported = runtime_import_shared(&shared_runtime);
+        printf("%s", shared_imported != RUNTIME_ERROR_NONE ? "shared programs: the shared library's runtime didn't import\n" : "");
+        passed = shared_imported == RUNTIME_ERROR_NONE && passed;
+        if (shared_imported == RUNTIME_ERROR_NONE)
+        {
+            passed = bind_test_shared_programs(&shared_runtime, seed) && passed;
+            passed = bind_test_shared_rules(&shared_runtime) && passed;
+        }
+        if (shared_imported == RUNTIME_ERROR_NONE && cross_check)
+        {
+            passed = bind_test_shared_compiled(&shared_runtime, directory, keep, &arena) && passed;
+        }
+        runtime_release(&shared_runtime);
         if (keep)
         {
             printf("the files are in %s\n", directory);
