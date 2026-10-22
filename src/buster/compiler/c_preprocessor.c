@@ -2341,127 +2341,6 @@ static bool pp_directive_table(bool vectorized, Arena* arena, PPFileData* data)
     return result;
 }
 
-// Compares a directive's unrefined spelling after translation phases 1 and 2.
-static bool pp_raw_directive_is(const PPFileData* data, uint32_t token, uint32_t flags, const char* name)
-{
-    const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = (flags & C_TOKENIZER_TRIGRAPHS) != 0 };
-    uint64_t position = data->starts[token];
-    uint32_t letter = 0;
-    bool result = true;
-    while (result && position < data->values[token] && name[letter] != 0)
-    {
-        uint64_t size;
-        uint64_t start;
-        result = get_char(&lexer, position, &size, &start) == name[letter];
-        position += size != 0 ? size : 1;
-        letter += 1;
-    }
-    return result && position == data->values[token] && name[letter] == 0;
-}
-
-// A raw prefix after phases 1 and 2; its body still remains opaque to the lexer.
-static bool pp_raw_token_prefix(const PPFileData* data, uint32_t token, uint32_t flags)
-{
-    const uint8_t* bytes = data->bytes + data->starts[token];
-    const uint32_t length = data->values[token] - data->starts[token];
-    if (memchr(bytes, '\n', length) == 0 && memchr(bytes, '\r', length) == 0)
-    {
-        return false;
-    }
-    const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = (flags & C_TOKENIZER_TRIGRAPHS) != 0 };
-    uint64_t position = data->starts[token];
-    uint8_t prefix[4] = { 0 };
-    uint32_t count = 0;
-    while (count < sizeof(prefix) && position < data->values[token])
-    {
-        uint64_t size;
-        uint64_t start;
-        prefix[count] = (uint8_t)get_char(&lexer, position, &size, &start);
-        position += size != 0 ? size : 1;
-        count += 1;
-    }
-    const bool one = prefix[0] == 'R' && prefix[1] == '"';
-    const bool two = (prefix[0] == 'L' || prefix[0] == 'u' || prefix[0] == 'U') && prefix[1] == 'R' && prefix[2] == '"';
-    const bool three = prefix[0] == 'u' && prefix[1] == '8' && prefix[2] == 'R' && prefix[3] == '"';
-    return one || two || three;
-}
-
-// Raw-looking bytes in a direct header name or #warning/#error message are read
-// as that directive's text, not as a C raw string. Find the source boundary the
-// context owns; zero means that the token is an ordinary C raw literal.
-static uint32_t pp_raw_opaque_stop(const PPFileData* data, uint32_t first, uint32_t token, uint32_t flags)
-{
-    uint32_t result = 0;
-    if ((data->kinds[first] & 0x7F) == C_TOKEN_HASH && first + 1 < token && (data->kinds[first + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER)
-    {
-        const bool text = pp_raw_directive_is(data, first + 1, flags, "warning") || pp_raw_directive_is(data, first + 1, flags, "error");
-        const bool header = first + 2 < token && (data->kinds[first + 2] & 0x7F) == C_TOKEN_LESS &&
-                            (pp_raw_directive_is(data, first + 1, flags, "include") || pp_raw_directive_is(data, first + 1, flags, "include_next") ||
-                             pp_raw_directive_is(data, first + 1, flags, "import"));
-        if (text || header)
-        {
-            const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = (flags & C_TOKENIZER_TRIGRAPHS) != 0 };
-            uint64_t position = text ? data->starts[token] : (uint64_t)data->starts[first + 2] + 1;
-            bool ended = false;
-            bool escaped = false;
-            while (!ended && position < data->values[token])
-            {
-                uint64_t size;
-                uint64_t start;
-                const int32_t c = get_char(&lexer, position, &size, &start);
-                position += size != 0 ? size : 1;
-                const bool newline = c == '\n' || c == '\r';
-                ended = newline || (header && c == '>' && !escaped);
-                escaped = c == '\\' && !escaped;
-                result = ended ? (uint32_t)(text || newline ? start : position) : 0;
-            }
-            result = result > data->starts[token] && result < data->values[token] ? result : 0;
-        }
-    }
-    return result;
-}
-
-// Repair only direct opaque contexts before refinement and directive indexing. A vector kind filter leaves normal
-// files on the common path. On the first confirmed context, scalar-lex the whole file once with directive text's raw
-// recognition disabled. This restores later source without repeated suffix lexings (quadratic for repeated headers).
-// The original one-token-per-byte capacity also bounds the replacement columns.
-static int64_t pp_repair_opaque_raw(const PPPrepare* prepare, PPFileData* data, uint32_t count)
-{
-    bool repair = false;
-    uint32_t first = 0;
-    for (uint32_t checked = 0; !repair && checked < count; checked += 64)
-    {
-        const uint32_t available = count - checked < 64 ? count - checked : 64;
-        const __mmask64 active = _bzhi_u64(~0ull, available);
-        const __m512i original = _mm512_maskz_loadu_epi8(active, data->kinds + checked);
-        const uint64_t lines = _mm512_movepi8_mask(original) & active;
-        const __m512i kinds = original & _mm512_set1_epi8(0x7F);
-        uint64_t candidates = active & (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)) |
-                              (_mm512_cmpge_epu8_mask(kinds, _mm512_set1_epi8(C_TOKEN_STRING_LITERAL)) &
-                               _mm512_cmple_epu8_mask(kinds, _mm512_set1_epi8(C_TOKEN_UTF32_STRING_LITERAL))));
-        while (!repair && candidates != 0)
-        {
-            const uint32_t lane = (uint32_t)__builtin_ctzll(candidates);
-            const uint32_t token = checked + lane;
-            const uint64_t before = lines & _bzhi_u64(~0ull, lane + 1);
-            const uint32_t line = before != 0 ? checked + 63 - (uint32_t)__builtin_clzll(before) : first;
-            candidates &= candidates - 1;
-            repair = pp_raw_token_prefix(data, token, prepare->refine_flags) && pp_raw_opaque_stop(data, line, token, prepare->refine_flags) != 0;
-        }
-        first = lines != 0 ? checked + 63 - (uint32_t)__builtin_clzll(lines) : first;
-    }
-    int64_t result = count;
-    if (repair)
-    {
-        const uint64_t begin = data->length >= 3 && data->bytes[0] == 0xEF && data->bytes[1] == 0xBB && data->bytes[2] == 0xBF ? 3 : 0;
-        uint64_t resume;
-        result = (int64_t)c_tokenize_scalar_context(data->bytes, data->length, begin, true, UINT64_MAX, data->kinds, data->starts, data->values,
-                                                   0, pp_lex_flags(prepare), &resume, true);
-        result = result > 0 ? pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds, data->starts, data->values, (uint32_t)result, false) : result;
-    }
-    return result;
-}
-
 // What preparing a file came to (pp_prepare_into).
 typedef enum PPPrepareStatus
 {
@@ -2495,7 +2374,6 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
     }
     const bool lexed = count >= 0;
     count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds, data->starts, data->values, (uint32_t)count, prepare->vectorized) : count;
-    count = count > 0 && (prepare->refine_flags & C_TOKENIZER_RAW_STRINGS) != 0 ? pp_repair_opaque_raw(prepare, data, (uint32_t)count) : count;
     if (ticks != 0)
     {
         const uint64_t now = __rdtsc();
