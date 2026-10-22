@@ -1118,7 +1118,7 @@ static void files_advance(FilesRun* run, FilesLane* mine)
                 search->path = (uint32_t)(entry - cache->paths);
                 search->found_in = directory;
             }
-            else if (candidate == PP_CANDIDATE_SKIP || entry->probe.error != 0)
+            else if (candidate == PP_CANDIDATE_SKIP || (entry->probe.error != 0 && !pp_include_error_absent(entry->probe.error)))
             {
                 search->done = true;
             }
