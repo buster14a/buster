@@ -2536,7 +2536,7 @@ others, its measurements are informational.
 
 `./build/compiler test-calling-convention [--seed N] [--count N]
 [--cross-check] [--signatures N] [--clang PATH] [--gcc PATH] [--keep]`
-(about 0.05 s on the 9700X, and 18 s with `--cross-check`) checks
+(about 0.05 s on the 9700X, and 4.8 s with `--cross-check`) checks
 `calling_convention.c`, by its vector paths and their twins at 16-, 32- and
 64-byte vectors:
 
@@ -2577,7 +2577,10 @@ result's bytes, a C callee and a C caller of ours) and as our side, a caller
 and a callee per signature as `X86Instruction` records through `x86_encode`,
 `link_add_code_fixups` and the object writer. The compiler's driver links them
 and the program runs: each side checks every argument, result, hidden pointer,
-`al` and `va_arg` value against the bytes, both ways. GCC's worlds leave out
+`al` and `va_arg` value against the bytes, both ways. The six runs (clang's,
+then GCC's, each at 16, 32 and 64 bytes) go at once, a child process each, and
+the test prints their lines in that order; a run that fails keeps its files.
+GCC's worlds leave out
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
 own bugs among them, and `docs/calling-convention.md` lists them); an argument
 clang would pass as an `i0` becomes a long (its passes crash on them now and
