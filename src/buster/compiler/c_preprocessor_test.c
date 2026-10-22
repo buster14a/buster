@@ -828,6 +828,17 @@ static const PPTestFile pp_test_files_raw_header[] = {
     { 0, 0 },
 };
 
+// Runtime header queries may get their identity through a macro. Raw-looking header bytes remain header bytes;
+// earlier and later macro definitions keep the prepared view that supplied their token indexes.
+static const PPTestFile pp_test_files_raw_query[] = {
+    { "R\"(x", "header\n" },
+    { "raw-view.h", "#ifndef RAW_REENTER\n#define RAW_REENTER\n#define RAW_BEFORE 11\n#if RAW_QUERY(<R\"(x>) // )\"\nouter\n#endif\n#define RAW_AFTER 22\n#include \"raw-view.h\"\nRAW_BEFORE RAW_AFTER\n#else\n#if RAW_QUERY(<R\"(x>) // )\"\ninner\n#endif\n#endif\n" },
+    { "raw-once.h", "#if RAW_QUERY(<R\"(x>)\nonce\n#endif\n#pragma once\n" },
+    { "raw-import.h", "#if RAW_QUERY(<R\"(x>)\nimported\n#endif\n" },
+    { "raw-guard.h", "#ifndef RAW_GUARD\n#define RAW_GUARD\n#if RAW_QUERY(<R\"(x>) // )\"\nguarded\n#endif\n#endif\n" },
+    { 0, 0 },
+};
+
 // #embed's resources: text, bytes of every kind (a zero, 255, the edges of one, two and three digits), every value in
 // turn, nothing, and headers that end with an #embed, with and without a newline after it.
 // #252's review's #embed files: a resource in a directory of its own, for a name with "//" (and one whose name starts
@@ -1079,6 +1090,20 @@ static const PPTestCase pp_test_cases[] = {
     { "line breaks in an unknown token and in a raw string literal", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", 0, "gnu17", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\nR\"x\ny\" z\nw\nR\"(a\nb)\" c\n\nd\n" },
     { "invalid raw delimiter keeps its line splice", "R\"a\\\nb\" c\n", 0, "gnu17", "R\"a\\\nb\" c\n", false, 0, 0, 0,
       "# 1 \"%d/case.c\"\nR\"a\\\nb\" c\n" },
+    { "a macro-named raw header query restores later source", "#define RAW_QUERY __has_include\n#define RAW_BEFORE 11\n#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n#define RAW_AFTER 22\nRAW_BEFORE RAW_AFTER\n",
+      0, "gnu17", "hit 11 22", false, 0, "-I%d", pp_test_files_raw_query },
+    { "successive raw header queries in one condition", "#define RAW_QUERY __has_include\n#if RAW_QUERY(<R\"(x>) && RAW_QUERY(<R\"(x>)\ntwo\n#endif\nafter\n",
+      0, "gnu17", "two after", false, 0, "-I%d", pp_test_files_raw_query },
+    { "a raw header query with a splice", "#define RAW_QUERY __has_include\n#if RAW_QUERY(<R\\\n\"(x>)\nspliced\n#endif\nafter\n",
+      0, "gnu17", "spliced after", false, 0, "-I%d", pp_test_files_raw_query },
+    { "a macro-named raw embed query restores later source", "#define RAW_QUERY __has_embed\n#if RAW_QUERY(<R\"(x>) == 1\nresource\n#endif\nafter\n",
+      0, "gnu23", "resource after", false, 0, "--embed-dir=%d", pp_test_files_raw_query },
+    { "a multiline raw macro argument remains opaque", "#define DROP(x) 1\n#if DROP(R\"(a\nb)\")\nkept\n#endif\nafter\n",
+      0, "gnu17", "kept after", false, 0, 0, 0 },
+    { "raw query private views preserve recursive macro snapshots", "#define RAW_QUERY __has_include\n#include \"raw-view.h\"\nRAW_BEFORE RAW_AFTER\n",
+      0, "gnu17", "outer inner 11 22 11 22", false, 0, "-I%d", pp_test_files_raw_query },
+    { "raw query private views retain once, import and guard identity", "#define RAW_QUERY __has_include\n#include \"raw-once.h\"\n#include \"raw-once.h\"\n#import \"raw-import.h\"\n#import \"raw-import.h\"\n#include \"raw-guard.h\"\n#include \"raw-guard.h\"\nafter\n",
+      0, "gnu17", "once imported guarded after", false, 0, "-I%d", pp_test_files_raw_query },
     // c89 lexes neither digraphs nor "//" comments, as clang's -E has it: "%:define" is no directive, a digraph is two
     // punctuators ("<%=" is '<' and "%=", and "<::>" '<', "::" and '>'), and "//" two slashes, of which the second starts
     // a block comment before a '*'. Pasting a digraph's characters or "//" forms no token (#288).
@@ -2877,6 +2902,150 @@ static void pp_test_release_stderr(int saved, FILE* caught, char* messages, size
     }
 }
 
+// The private query view is per inclusion, while cache records and once/guard identity remain canonical. Compare
+// a fresh unit-owned cache with a cold and warm shared cache, and retain the shared columns' fingerprints across units.
+static bool pp_test_raw_query_views(const char* directory)
+{
+    const PPTestCase test = {
+        .name = "raw query private-view lifetime",
+        .source = "#define RAW_QUERY __has_include\n#include \"raw-view.h\"\n#include \"raw-once.h\"\n#include \"raw-once.h\"\n#import \"raw-import.h\"\n#import \"raw-import.h\"\n#include \"raw-guard.h\"\n#include \"raw-guard.h\"\nRAW_BEFORE RAW_AFTER\n",
+        .standard = "gnu17",
+        .expected = "outer inner 11 22 once imported guarded 11 22",
+        .options = "-I%d",
+        .files = pp_test_files_raw_query,
+    };
+    char path[4096];
+    bool result = pp_test_write_case(&test, directory, path, sizeof(path));
+    char text[16384];
+    char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
+    const int count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
+    Arena arena = arena_reserve(1ull << 20);
+    PPOptions options;
+    const char* input;
+    const char* output;
+    bool markers;
+    result = result && pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
+    options.timing = true;
+    static InternTable table;
+    static Preprocessor run;
+    static FileCache cache;
+    for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
+    {
+        options.scalar = kernel != 0;
+        uint64_t hashes[16] = { 0 };
+        uint32_t records = 0;
+        bool cached = false;
+        for (uint32_t pass = 0; result && pass < 3; pass += 1)
+        {
+            if (pass == 0)
+            {
+                options.files = 0;
+                result = pp_test_run(&run, &table, &options, path);
+            }
+            else
+            {
+                if (pass == 1)
+                {
+                    cached = intern_initialize(&table) && file_cache_initialize(&cache, &table, pp_prepare_options(&options));
+                }
+                options.files = &cache;
+                result = cached && pp_initialize(&run, &options, &table) && pp_run(&run, path);
+            }
+            PPSpellings ours = { 0 };
+            PPSpellings expected = { 0 };
+            result = result && pp_stream_spellings(&run, &ours) &&
+                     pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), run.split_kinds, pp_test_lex_flags(&run), &expected) &&
+                     pp_compare_spellings(&run, &ours, &expected, test.name, "wanted");
+            result = result && run.statistics.skipped_once != 0 && run.statistics.skipped_guards != 0;
+            uint32_t views = 0;
+            for (uint32_t d = 0; d < run.data_count; d += 1)
+            {
+                views += run.datas[d].lexical_bytes != 0;
+            }
+            result = result && views >= 4;
+            if (pass != 0)
+            {
+                result = result && cache.record_count <= BUSTER_ARRAY_LENGTH(hashes) && (pass == 1 || records == cache.record_count);
+                records = cache.record_count;
+                for (uint32_t r = 0; result && r < records; r += 1)
+                {
+                    const PPFileData* data = &cache.records[r];
+                    const uint64_t hash = intern_hash_bytes(data->kinds, data->token_count) ^
+                                          intern_hash_bytes((const uint8_t*)data->starts, (uint64_t)data->token_count * sizeof(uint32_t)) ^
+                                          intern_hash_bytes((const uint8_t*)data->values, (uint64_t)data->token_count * sizeof(uint32_t));
+                    result = data->lexical_bytes == 0 && (pass == 1 || hash == hashes[r]);
+                    hashes[r] = hash;
+                }
+            }
+            arena_release(&ours.arena);
+            arena_release(&expected.arena);
+            pp_release(&run);
+            if (pass == 0)
+            {
+                intern_release(&table);
+            }
+        }
+        if (cached)
+        {
+            file_cache_release(&cache);
+            intern_release(&table);
+        }
+    }
+    arena_release(&arena);
+    pp_test_remove_case(&test, directory);
+    printf("raw query private views: %s (fresh, cold shared and warm shared caches, both kernels)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
+// Capacity is a Buster resource bound, separate from the Clang-equivalence cases. Eight confirmed repairs succeed;
+// a ninth reports the capacity and leaves the run failed/fatal, rather than returning a successful truncated stream.
+static bool pp_test_raw_query_capacity(const char* directory)
+{
+    char source[2048];
+    uint32_t length = (uint32_t)snprintf(source, sizeof(source), "#define RAW_QUERY __has_include\n");
+    for (uint32_t i = 0; i <= BUSTER_PP_MAX_RAW_QUERY_REPAIRS; i += 1)
+    {
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n");
+    }
+    snprintf(source + length, sizeof(source) - length, "tail\n");
+    PPTestCase test = { .name = "raw query capacity", .source = source, .standard = "gnu17", .options = "-I%d", .files = pp_test_files_raw_query };
+    char path[4096];
+    bool result = pp_test_write_case(&test, directory, path, sizeof(path));
+    char text[16384];
+    char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
+    const int count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
+    Arena arena = arena_reserve(1ull << 20);
+    PPOptions options;
+    const char* input;
+    const char* output;
+    bool markers;
+    result = result && pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
+    static InternTable table;
+    static Preprocessor run;
+    for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
+    {
+        options.scalar = kernel != 0;
+        FILE* caught = 0;
+        const int saved = pp_test_catch_stderr(&caught);
+        const bool ran = saved >= 0 && pp_test_run(&run, &table, &options, path);
+        char messages[2048];
+        pp_test_release_stderr(saved, caught, messages, sizeof(messages));
+        uint32_t views = 0;
+        for (uint32_t d = 0; d < run.data_count; d += 1)
+        {
+            views += run.datas[d].lexical_bytes != 0;
+        }
+        result = saved >= 0 && !ran && run.fatal && run.errors == 1 && views == BUSTER_PP_MAX_RAW_QUERY_REPAIRS &&
+                 strstr(messages, "raw header query recovery capacity exceeded (8 repairs per inclusion)") != 0;
+        pp_release(&run);
+        intern_release(&table);
+    }
+    arena_release(&arena);
+    pp_test_remove_case(&test, directory);
+    printf("raw query recovery capacity: %s (ninth repair fails, both kernels)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
 // An option set of #281's families, or one beside them (%d stands for the test's directory): `refused` is in the message
 // of the option pp_parse_options must refuse, or null for a set it must take without a message.
 typedef struct PPTestOptionSet PPTestOptionSet;
@@ -3653,6 +3822,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);
+        passed_all &= pp_test_raw_query_views(directory);
+        passed_all &= pp_test_raw_query_capacity(directory);
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {

@@ -133,6 +133,8 @@ _Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_vector looks
 #define BUSTER_PP_MAX_STACK_TOKENS (1u << 26)
 #define BUSTER_PP_MAX_CONTEXTS (1u << 20)
 #define BUSTER_PP_MAX_INCLUDE_DEPTH 200
+// A confirmed header query may need a private lexical view; bound full-file repairs per inclusion.
+#define BUSTER_PP_MAX_RAW_QUERY_REPAIRS 8
 #define BUSTER_PP_MAX_PARAMETERS 4096
 // Token arrays get whole-vector stores past their last token.
 #define BUSTER_PP_TOKEN_SLACK 64
@@ -384,6 +386,8 @@ struct PPFileData
     int64_t modified;
     bool has_modified;
     const uint8_t* bytes;
+    // Only a private contextual view: bytes used to prepare it, with confirmed header interiors masked.
+    const uint8_t* lexical_bytes;
     uint32_t length;
     // The bytes are a mapping of the file, which the record's cache unmaps (file_cache_release), not arena memory.
     bool mapped;
@@ -751,6 +755,7 @@ struct PPContext
     // A file: this inclusion took the group of the file's include guard (its #ifndef was true). Only such an inclusion
     // tells clang the guard (its multiple-include optimization), and from its end on the guard skips the file.
     bool guard_taken;
+    uint8_t raw_query_repairs;
     // A source piece of a condition lexed again after a raw header: continue at this byte when it ends. A piece ends
     // after each '(' so a header query can read its operand raw before the ordinary lexer sees comments in its name.
     bool relexed;
@@ -767,6 +772,8 @@ struct PPContext
     // inclusion's, not the file's: one file can be found through two entries of the search list (-iquote d and -I d).
     uint32_t search_index;
     uint32_t file;
+    // This inclusion's prepared view; the file's canonical data keeps cache and once/guard state.
+    uint32_t data;
     uint32_t range;
     uint32_t next_directive;
     uint32_t conditional_base;
@@ -3651,7 +3658,7 @@ static uint32_t pp_line_end_location(const Preprocessor* pp, const PPFileData* d
 // #line).
 static uint32_t pp_directive_resume(const Preprocessor* pp, const PPContext* context, uint32_t d)
 {
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t base = pp->ranges[context->range].base;
     const uint32_t end = pp_line_end_location(pp, data, base, data->directive_end[d] - 1) - base;
     const uint32_t crlf = end + 1 < data->length && data->bytes[end] == '\r' && data->bytes[end + 1] == '\n';
@@ -4387,7 +4394,7 @@ static PPToken pp_context_token(const Preprocessor* pp, const PPContext* context
     PPToken result;
     if (context->kind == BUSTER_PP_CONTEXT_FILE)
     {
-        const PPFileData* data = &pp->datas[pp->files[context->file].data];
+        const PPFileData* data = &pp->datas[context->data];
         result = pp_file_token(data, pp->ranges[context->range].base, position);
     }
     else
@@ -4743,7 +4750,7 @@ static bool pp_next_is_lparen(const Preprocessor* pp)
         const uint32_t position = context->position + (c == pp->context_count);
         if (context->kind == BUSTER_PP_CONTEXT_FILE)
         {
-            const PPFileData* data = &pp->datas[pp->files[context->file].data];
+            const PPFileData* data = &pp->datas[context->data];
             result = position < pp_run_limit(data, context) && (data->kinds[position] & 0x7F) == C_TOKEN_L_PAREN;
             done = true;
         }
@@ -4776,7 +4783,7 @@ static bool pp_read_token(Preprocessor* pp, PPToken* token, uint32_t* expansion_
         PPContext* context = &pp->contexts[pp->context_count - 1];
         if (context->kind == BUSTER_PP_CONTEXT_FILE)
         {
-            const PPFileData* data = &pp->datas[pp->files[context->file].data];
+            const PPFileData* data = &pp->datas[context->data];
             if (context->position < pp_run_limit(data, context))
             {
                 *token = pp_file_token(data, pp->ranges[context->range].base, context->position);
@@ -5973,7 +5980,7 @@ static bool pp_collect_arguments(Preprocessor* pp, PPInvocation* invocation, boo
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
     const bool file = context->kind == BUSTER_PP_CONTEXT_FILE;
-    const PPFileData* data = file ? &pp->datas[pp->files[context->file].data] : 0;
+    const PPFileData* data = file ? &pp->datas[context->data] : 0;
     const uint8_t* kinds = file ? data->kinds : context->tokens->kinds;
     const uint32_t limit = file ? pp_run_limit(data, context) : context->end;
     const uint32_t open = context->position;
@@ -6237,6 +6244,110 @@ static const char* pp_embedded_directive_name(uint8_t kind)
 
 static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end, PPTokens* into);
 
+// Did the ordinary lexer read the token before byte `stop` as a raw string that runs past it? Only that rare case
+// can hide source after a confirmed header name. Read just its prefix through phases 1 and 2, including a spliced R.
+static bool pp_query_raw_overlap(const Preprocessor* pp, const PPFileData* data, uint32_t first, uint32_t stop)
+{
+    uint32_t low = 0;
+    uint32_t high = data->token_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = data->starts[middle] < stop;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    const uint32_t token = low != 0 ? low - 1 : 0;
+    const uint8_t kind = low != 0 ? data->kinds[token] & 0x7F : 0;
+    const bool candidate = low != 0 && data->starts[token] > first &&
+                           (kind == C_TOKEN_UNKNOWN || pp_is_string_literal(kind)) && pp_file_token_end(pp, data, token) > stop;
+    bool result = false;
+    if (candidate)
+    {
+        const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+        uint64_t at = data->starts[token];
+        int32_t previous = 0;
+        bool quoted = false;
+        for (uint32_t i = 0; !quoted && i < 4; i += 1)
+        {
+            uint64_t size;
+            uint64_t start;
+            const int32_t c = get_char(&lexer, at, &size, &start);
+            result = c == '"' && previous == 'R';
+            quoted = c == '"';
+            at += size;
+            previous = c;
+        }
+    }
+    return result;
+}
+
+// A query has proved that [first, stop) is a source header name, after macro expansion identified its builtin. A raw
+// string lexed inside that name may have swallowed later lines and their directives. Prepare a private view for this
+// inclusion with only that header's interior hidden from the ordinary lexer. Source bytes and offsets stay original;
+// earlier macro definitions keep their old data indexes, as do other inclusions and the immutable shared cache.
+// Each view retains the previous masks. At most eight full-file preparations per inclusion bound work and storage;
+// exceeding that capacity is a fatal error, never a successful truncated stream. Ordinary multiline raw arguments
+// have no confirmed header context and never enter this path.
+static bool pp_recover_query_raw(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t first, uint32_t stop)
+{
+    PPContext* file = &pp->contexts[file_context];
+    const PPFileData* data = &pp->datas[file->data];
+    const bool overlap = (pp->refine_flags & C_TOKENIZER_RAW_STRINGS) && pp_query_raw_overlap(pp, data, first, stop);
+    bool result = true;
+    if (overlap && file->raw_query_repairs >= BUSTER_PP_MAX_RAW_QUERY_REPAIRS)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + first, "raw header query recovery capacity exceeded (%u repairs per inclusion)", BUSTER_PP_MAX_RAW_QUERY_REPAIRS);
+        result = false;
+    }
+    else if (overlap)
+    {
+        uint8_t* lexical = pp->data_count < BUSTER_PP_MAX_FILES ? arena_push(&pp->arena, data->length, 1) : 0;
+        result = lexical != 0;
+        if (result)
+        {
+            memcpy(lexical, data->lexical_bytes != 0 ? data->lexical_bytes : data->bytes, data->length);
+            const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+            uint64_t p = first + 1;
+            while (p < stop - 1)
+            {
+                uint64_t size;
+                uint64_t at;
+                get_char(&lexer, p, &size, &at);
+                // get_char skips physical line splices before `at`: leave those bytes intact, so the same logical
+                // line and all original source offsets survive. Only the returned character's bytes become spaces.
+                const uint64_t end = p + size < stop - 1 ? p + size : stop - 1;
+                memset(lexical + at, ' ', at < end ? end - at : 0);
+                p += size;
+            }
+            PPFileData recovered = *data;
+            recovered.bytes = lexical;
+            recovered.lexical_bytes = lexical;
+            recovered.mapped = false;
+            recovered.prepared = false;
+            recovered.unterminated_comment = 0;
+            const PPPrepare prepare = pp_prepare_config(pp);
+            result = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, &recovered, 0) == PP_PREPARE_DONE;
+            if (result)
+            {
+                recovered.bytes = data->bytes;
+                pp->datas[pp->data_count] = recovered;
+                file->data = pp->data_count;
+                pp->data_count += 1;
+                file->raw_query_repairs += 1;
+                file->end = recovered.token_count;
+                file->position = recovered.directive_end[directive];
+                file->next_directive = directive + 1;
+            }
+        }
+        if (!result)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + first, "out of memory recovering a raw header query");
+        }
+    }
+    return result;
+}
+
 // An include-like builtin's '(' (__has_include's, __has_include_next's or __has_embed's) was just read from its #if or
 // #elif line itself, the barrier of the line's capture: a '<' next is a header name as the line writes it, read as
 // #include reads one (pp_scan_header_name), where clang's LexHeaderName lexes one from its file, and not joined from
@@ -6256,7 +6367,7 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
     if (header && context->relexed && context->position == context->end && context->relex_position != 0)
     {
         const PPContext* file = &pp->contexts[context->relex_file];
-        const PPFileData* data = &pp->datas[pp->files[file->file].data];
+        const PPFileData* data = &pp->datas[file->data];
         const uint32_t base = pp->ranges[file->range].base;
         const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
         const uint32_t first = (uint32_t)pp_skip_blanks(&lexer, context->relex_position);
@@ -6266,7 +6377,7 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
         uint32_t length;
         bool whole;
         const uint32_t stop = c == '<' ? pp_scan_header_bytes(pp->refine_flags, data, first, data->length, 0, 0, &length, &whole) : 0;
-        if (stop != 0)
+        if (stop != 0 && line != 0 && pp_recover_query_raw(pp, context->relex_file, line->directive, first, stop))
         {
             const PPToken token = { .kind = C_TOKEN_LESS, .value = base + stop, .location = base + first };
             context->relex_position = stop;
@@ -6278,7 +6389,7 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
     {
         // The barrier holds the line's tokens from the one after the directive's name (pp_start_condition).
         PPContext* file = &pp->contexts[line->context];
-        const PPFileData* data = &pp->datas[pp->files[file->file].data];
+        const PPFileData* data = &pp->datas[file->data];
         const uint32_t base = pp->ranges[file->range].base;
         const uint32_t first = data->directive_hash[line->directive] + 2 + (context->position - line->arguments_begin);
         const uint32_t end = data->directive_end[line->directive];
@@ -6286,7 +6397,7 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
         uint32_t length;
         bool whole;
         const uint32_t stop = first < end && base + data->starts[first] == token.location ? pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole) : 0;
-        if (stop != 0)
+        if (stop != 0 && pp_recover_query_raw(pp, line->context, line->directive, data->starts[first], stop))
         {
             uint32_t relex;
             const uint32_t after = pp_header_name_tail(pp, data, first, end, stop, &relex);
@@ -6317,7 +6428,7 @@ static void pp_collect_step(Preprocessor* pp)
     bool unterminated = false;
     if (context->kind == BUSTER_PP_CONTEXT_FILE)
     {
-        const PPFileData* data = &pp->datas[pp->files[context->file].data];
+        const PPFileData* data = &pp->datas[context->data];
         const uint32_t base = pp->ranges[context->range].base;
         const uint32_t limit = pp_run_limit(data, context);
         if (context->position < limit)
@@ -7322,7 +7433,7 @@ static void pp_stream_unexpanded(Preprocessor* pp)
     bool available = false;
     if (context->kind == BUSTER_PP_CONTEXT_FILE)
     {
-        const PPFileData* data = &pp->datas[pp->files[context->file].data];
+        const PPFileData* data = &pp->datas[context->data];
         available = context->position < pp_run_limit(data, context);
         token = available ? pp_file_token(data, pp->ranges[context->range].base, context->position) : token;
     }
@@ -7539,7 +7650,7 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             // preprocessor made.
             char text[32];
             const PPContext* file_context = pp_current_file_context(pp);
-            const PPFileData* data = file_context != 0 ? &pp->datas[pp->files[file_context->file].data] : 0;
+            const PPFileData* data = file_context != 0 ? &pp->datas[file_context->data] : 0;
             if (pp->has_epoch)
             {
                 snprintf(text, sizeof(text), "%s", pp->timestamp);
@@ -7729,7 +7840,7 @@ BUSTER_INLINE uint32_t pp_step_limit(const Preprocessor* pp, uint32_t position, 
 
 static void pp_step_file(Preprocessor* pp, PPContext* context)
 {
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t limit = pp_run_limit(data, context);
     if (context->position < limit)
     {
@@ -7937,7 +8048,7 @@ static void pp_run_contexts(Preprocessor* pp, uint32_t stop_depth)
 // Copies a file's tokens [begin, end) to pp->arguments, as buffers hold them, for expanding a directive's line.
 static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end)
 {
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t base = pp->ranges[context->range].base;
     bool result = pp_room(pp, &pp->arguments, end - begin);
     for (uint32_t t = begin; result && t < end; t += 1)
@@ -7956,7 +8067,7 @@ static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t be
 // if they don't fit.
 static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end, PPTokens* into)
 {
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t base = pp->ranges[context->range].base;
     const uint8_t* bytes = data->bytes + begin;
     const uint32_t length = end - begin;
@@ -8002,7 +8113,7 @@ static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t
 static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end)
 {
     PPContext* file = &pp->contexts[file_context];
-    const PPFileData* data = &pp->datas[pp->files[file->file].data];
+    const PPFileData* data = &pp->datas[file->data];
     const uint32_t remaining = data->length - begin;
     uint32_t window = remaining < 128 ? remaining : 128;
     uint32_t end = begin;
@@ -8111,6 +8222,7 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
             const uint8_t includer = parent == BUSTER_PP_NONE ? BUSTER_PP_USER_FILE : note != BUSTER_PP_NONE ? pp->line_directives[note].system : pp->ranges[parent].system;
             pp->ranges[range].system = pp->files[file].system > includer ? pp->files[file].system : includer;
             context->file = file;
+            context->data = pp->files[file].data;
             context->search_index = search_index;
             context->range = range;
             context->end = data->token_count;
@@ -8253,7 +8365,7 @@ static uint32_t pp_skip_relexed_group(Preprocessor* pp, const PPContext* context
 // Skip to the next branch of d's group, reporting the skipped directives' structural diagnostics.
 static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
 {
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t next = context->hidden_directives ? pp_skip_relexed_group(pp, context, data) : data->directive_next[d];
     if (next == BUSTER_PP_NONE)
     {
@@ -8281,7 +8393,7 @@ static void pp_apply_condition(Preprocessor* pp, PPContext* context, uint32_t d,
 {
     if (kind == PP_DIRECTIVE_IF || kind == PP_DIRECTIVE_IFDEF || kind == PP_DIRECTIVE_IFNDEF)
     {
-        const PPFileData* data = &pp->datas[pp->files[context->file].data];
+        const PPFileData* data = &pp->datas[context->data];
         context->guard_taken |= d == data->guard_opener && data->guard != 0 && taken;
         const uint32_t name = pp_token_location(pp, context, data, data->directive_hash[d] + 1);
         if (pp->conditional_count < BUSTER_PP_MAX_CONTEXTS)
@@ -8368,7 +8480,7 @@ static void pp_report_macro_name(Preprocessor* pp, const PPFileData* data, uint3
 // extra tokens at the first of them, where clang reports them, and in clang's order.
 static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind)
 {
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t hash = data->directive_hash[d];
     const uint32_t end = data->directive_end[d];
     const uint32_t base = pp->ranges[context->range].base;
@@ -8617,7 +8729,7 @@ static void pp_finish_include(Preprocessor* pp)
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
     const PPTokens* tokens = &pp->captures;
     PPContext* context = &pp->contexts[capture.context];
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t line_end = pp_line_end_location(pp, data, pp->ranges[context->range].base, data->directive_end[capture.directive] - 1);
     uint8_t name[PATH_MAX];
     uint32_t length = 0;
@@ -8715,7 +8827,7 @@ static bool pp_read_header_name(Preprocessor* pp, const PPFileData* data, uint32
 // that one too long for a path is clang's error about the path (pp_find_include).
 static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind)
 {
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t hash = data->directive_hash[d];
     const uint32_t end = data->directive_end[d];
     const uint32_t base = pp->ranges[context->range].base;
@@ -8946,7 +9058,7 @@ static bool pp_line_value(Preprocessor* pp, const PPTokens* tokens, uint32_t i, 
 // without it; a #line keeps what the file is, and tokens after its name are a warning.
 static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, const PPTokens* tokens, uint32_t begin, uint32_t stop, uint32_t location, uint32_t anchor)
 {
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     uint64_t number = 0;
     const bool marker = data->directive_kind[d] == PP_DIRECTIVE_LINE_MARKER;
     bool valid = begin < stop && pp_line_value(pp, tokens, begin, marker, &number);
@@ -9047,7 +9159,7 @@ static void pp_finish_line(Preprocessor* pp)
 // marker's after its digits, are expanded through a capture, which pp_finish_line takes.
 static void pp_line(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind)
 {
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t hash = data->directive_hash[d];
     const uint32_t end = data->directive_end[d];
     const uint32_t location = pp->ranges[context->range].base + data->starts[hash];
@@ -9722,7 +9834,7 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
             if (file != BUSTER_PP_NONE && file != pp->main_file && context != 0)
             {
                 pp->files[file].system = BUSTER_PP_SYSTEM_FILE;
-                const PPFileData* data = &pp->datas[pp->files[file].data];
+                const PPFileData* data = &pp->datas[context->data];
                 const PPRange* range = &pp->ranges[context->range];
                 // A change of file for clang's printer too (FileChanged with SystemHeaderPragma), which starts a line
                 // where the directive's line ends: the note starts there, before blanks and lines without tokens, so that
@@ -9897,8 +10009,8 @@ static void pp_embed(Preprocessor* pp, PPContext* context, uint32_t d);
 static void pp_directive(Preprocessor* pp, PPContext* context)
 {
     const uint32_t d = context->next_directive;
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
-    const uint32_t data_index = pp->files[context->file].data;
+    const PPFileData* data = &pp->datas[context->data];
+    const uint32_t data_index = context->data;
     const uint32_t hash = data->directive_hash[d];
     const uint32_t end = data->directive_end[d];
     const uint8_t kind = data->directive_kind[d];
@@ -11314,7 +11426,7 @@ static bool pp_embed_push(Preprocessor* pp, const PPTokens* tokens, uint32_t beg
 static void pp_embed_line(Preprocessor* pp, PPContext* context, uint32_t d, const PPTokens* tokens, uint32_t begin, uint32_t end, bool literal, uint8_t* name,
                           uint32_t length, bool angled, uint32_t relexed_end)
 {
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t base = pp->ranges[context->range].base;
     const uint32_t hash = data->directive_hash[d];
     const uint32_t line_end = pp_line_end_location(pp, data, base, data->directive_end[d] - 1);
@@ -11416,7 +11528,7 @@ static void pp_finish_embed(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
     PPContext* context = &pp->contexts[capture.context];
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t hash = data->directive_hash[capture.directive];
     uint8_t name[PATH_MAX];
     uint32_t length = 0;
@@ -11442,7 +11554,7 @@ static void pp_finish_embed(Preprocessor* pp)
 // clang warns about.
 static void pp_embed(Preprocessor* pp, PPContext* context, uint32_t d)
 {
-    const PPFileData* data = &pp->datas[pp->files[context->file].data];
+    const PPFileData* data = &pp->datas[context->data];
     const uint32_t hash = data->directive_hash[d];
     const uint32_t end = data->directive_end[d];
     const uint32_t base = pp->ranges[context->range].base;
