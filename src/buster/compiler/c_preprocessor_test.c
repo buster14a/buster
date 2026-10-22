@@ -4562,8 +4562,8 @@ static uint32_t pp_test_header_files(const char* directory)
 
 // benchmark-preprocessor's clang run (pp_clang_preprocess) of a command longer than its first fixed array held (#255's
 // review: past 244 arguments the rest were dropped, and clang read -E as an -isystem's value, and linked): 300 -D
-// options and --buster-headers' search after them. clang's text must have the last -D's macro defined and <cpuid.h>
-// found through the links. Returns whether it does.
+// options and --buster-headers' search after them. The buster-only valueless options must not reach clang. clang's
+// text must have the last -D's macro defined and <cpuid.h> found through the links. Returns whether it does.
 static bool pp_test_clang_command(const char* directory)
 {
     char path[4096];
@@ -4574,9 +4574,11 @@ static bool pp_test_clang_command(const char* directory)
     snprintf(source, sizeof(source), "#if __has_include(<cpuid.h>) && defined(BUSTER_TEST_%u)\nlinks_and_definitions BUSTER_TEST_%u\n#endif\n",
              BUSTER_PP_TEST_COMMAND_DEFINITIONS - 1, BUSTER_PP_TEST_COMMAND_DEFINITIONS - 1);
     static char definitions[BUSTER_PP_TEST_COMMAND_DEFINITIONS][32];
-    char* passed[BUSTER_PP_TEST_COMMAND_DEFINITIONS + 2];
+    char* passed[BUSTER_PP_TEST_COMMAND_DEFINITIONS + 4];
     int count = 0;
     passed[count++] = "--buster-headers";
+    passed[count++] = "--scalar";
+    passed[count++] = "--clang-features";
     for (uint32_t i = 0; i < BUSTER_PP_TEST_COMMAND_DEFINITIONS; i += 1)
     {
         snprintf(definitions[i], sizeof(definitions[i]), "-DBUSTER_TEST_%u=%u", i, i);
