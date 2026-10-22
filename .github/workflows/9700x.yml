@@ -264,6 +264,10 @@ jobs:
           # in another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and
           # locations, each id spelled the same. Its forms with paths (the translation units, src flat) do the same.
           ./build/compiler test-files
+          == Test the x86 semantics
+          # The effects table is checked by executing every covered form; --cross-check also assembles the chosen forms
+          # with GNU as and compares the bytes.
+          ./build/compiler test-x86-semantics --cross-check
           == Test the lanes
           ./build/compiler test-lanes
           == Test the direct path's executables
@@ -339,6 +343,11 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-branch-sizing
+
+      - name: Benchmark the x86 semantics
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-x86-semantics
 
       - name: Benchmark the lanes
         # It pins each lane to an allowed CPU of its own.
