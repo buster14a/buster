@@ -394,6 +394,10 @@ typedef enum CTokenizerFlags
     C_TOKENIZER_RAW_STRINGS = 8,
     // With C_TOKENIZER_RAW_STRINGS, their u8R, uR and UR forms too, which need C11's u8, u and U prefixes.
     C_TOKENIZER_UTF_RAW_STRINGS = 16,
+    // '$' is punctuation (an unknown token) rather than an identifier and pp-number character, as with clang's
+    // -fno-dollars-in-identifiers and in assembler-with-cpp. Only the scalar lexer has it: a source with a '$' is lexed
+    // by it whole, as with trigraphs.
+    C_TOKENIZER_DOLLAR_PUNCTUATION = 32,
 } CTokenizerFlags;
 
 typedef enum CTokenizerError
@@ -836,6 +840,9 @@ struct ScalarLexer
     // uR and UR where the u8, u and U prefixes have them (C++, and C_TOKENIZER_UTF_RAW_STRINGS).
     bool raw_strings;
     bool utf_raw_strings;
+    // '$' is punctuation rather than an identifier and pp-number character (C_TOKENIZER_DOLLAR_PUNCTUATION), as without
+    // clang's DollarIdents.
+    bool dollar_punctuation;
 };
 
 typedef struct TokenOutput TokenOutput;
@@ -1207,7 +1214,7 @@ static uint64_t lex_identifier_continue(const ScalarLexer* lexer, uint64_t posit
     {
         uint64_t size;
         int32_t c = peek_char(lexer, p, &size);
-        if (is_ascii_identifier_continue(c) || c == '$')
+        if (is_ascii_identifier_continue(c) || (c == '$' && !lexer->dollar_punctuation))
         {
             p += size;
         }
@@ -1229,7 +1236,7 @@ static uint64_t lex_numeric_constant(const ScalarLexer* lexer, uint64_t position
         uint64_t size;
         int32_t c = peek_char(lexer, p, &size);
         int32_t previous = 0;
-        while (is_ascii_identifier_continue(c) || c == '.' || c == '$')
+        while (is_ascii_identifier_continue(c) || c == '.' || (c == '$' && !lexer->dollar_punctuation))
         {
             p += size;
             previous = c;
@@ -1297,7 +1304,7 @@ static uint64_t lex_ud_suffix(const ScalarLexer* lexer, uint64_t position, bool 
             {
                 uint64_t next_size;
                 int32_t next = peek_char(lexer, q, &next_size);
-                if (!is_ascii_identifier_continue(next) && next != '$')
+                if (!is_ascii_identifier_continue(next) && !(next == '$' && !lexer->dollar_punctuation))
                 {
                     is_suffix = is_standard_suffix(suffix, length);
                     break;
@@ -1322,7 +1329,7 @@ static uint64_t lex_ud_suffix(const ScalarLexer* lexer, uint64_t position, bool 
         for (;;)
         {
             c = peek_char(lexer, p, &size);
-            if (is_ascii_identifier_continue(c) || c == '$')
+            if (is_ascii_identifier_continue(c) || (c == '$' && !lexer->dollar_punctuation))
             {
                 p += size;
             }
@@ -1524,6 +1531,7 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
         .raw_strings = (flags & (C_TOKENIZER_CPLUSPLUS | C_TOKENIZER_RAW_STRINGS)) != 0,
         .utf_raw_strings = (flags & C_TOKENIZER_CPLUSPLUS) != 0 || (flags & (C_TOKENIZER_RAW_STRINGS | C_TOKENIZER_UTF_RAW_STRINGS)) ==
                                                                      (C_TOKENIZER_RAW_STRINGS | C_TOKENIZER_UTF_RAW_STRINGS),
+        .dollar_punctuation = (flags & C_TOKENIZER_DOLLAR_PUNCTUATION) != 0,
     };
     const ScalarLexer* lexer = &lexer_value;
     TokenOutput output = { .kinds = kinds, .starts = starts, .ends = ends, .count = count, .start_of_line = start_of_line };
@@ -1811,7 +1819,7 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
                 break;
             }
             default:
-                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$')
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || (c == '$' && !lexer->dollar_punctuation))
                 {
                     kind = C_TOKEN_RAW_IDENTIFIER;
                     p = lex_identifier_continue(lexer, p);
@@ -3187,8 +3195,8 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool raw_strin
         U64x8 unknown_starts = zero;
         uint64_t next_suppressed_starts = 0;
         uint64_t next_suppressed_ends = 0;
-        // The quotes in the next chunk's first bytes that an identifier ending this chunk can be the prefix of: an L, u8,
-        // u or U literal's, and a u8R, uR or UR raw string literal's (three bytes on).
+        // The quotes in the next chunk's first bytes that an identifier ending this chunk can be the prefix of: an L,
+        // u8, u or U literal's, and a u8R, uR or UR raw string literal's (three bytes on).
         const uint64_t next_quotes = (BUSTER_LEX_NEXT(M_QUOTE) | BUSTER_LEX_NEXT(M_APOSTROPHE)) & (raw_strings ? 7 : 3);
         if (BUSTER_UNLIKELY(!is_zero(literal_starts & shl_carry(identifier_token, previous_identifier_token, 1)) | ((bit_511(identifier_token) & (uint64_t)(next_quotes != 0)) != 0)))
         {
@@ -3384,7 +3392,7 @@ static int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uin
     {
         result = 0;
     }
-    else if ((flags & C_TOKENIZER_TRIGRAPHS) && contains_trigraph(source, length))
+    else if (((flags & C_TOKENIZER_TRIGRAPHS) && contains_trigraph(source, length)) || ((flags & C_TOKENIZER_DOLLAR_PUNCTUATION) && memchr(source, '$', length) != 0))
     {
         result = C_TOKENIZER_ERROR_NEEDS_SCALAR;
     }
@@ -3410,7 +3418,7 @@ static int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds
     {
         result = 0;
     }
-    else if ((flags & C_TOKENIZER_TRIGRAPHS) && contains_trigraph(source, length))
+    else if (((flags & C_TOKENIZER_TRIGRAPHS) && contains_trigraph(source, length)) || ((flags & C_TOKENIZER_DOLLAR_PUNCTUATION) && memchr(source, '$', length) != 0))
     {
         result = c_tokenize_scalar(source, length, kinds, starts, ends, flags);
     }

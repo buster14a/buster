@@ -120,27 +120,35 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
     return result;
 }
 
-// Lexes a text as the language mode does: c_tokenize, then the prefixed literals the mode doesn't have split, by `split`
-// (pp_split_kinds), and '$' split out where it is punctuation (`dollars`, pp_dollar_punctuation). Returns the count, or
-// -1.
-static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
+// The lexer's flags for a text that a run printed, or that clang printed with the run's options: its raw string
+// literals' (pp_raw_strings). Its trigraphs are replaced already, but in raw string literals, which keep them.
+static uint32_t pp_test_lex_flags(const Preprocessor* pp)
 {
-    int64_t result = c_tokenize(text, length, kinds, starts, ends, 0);
+    return pp->refine_flags & (C_TOKENIZER_RAW_STRINGS | C_TOKENIZER_UTF_RAW_STRINGS);
+}
+
+// Lexes a text as the language mode does: c_tokenize with `flags` (pp_test_lex_flags) and, where '$' is punctuation
+// (`dollars`, pp_dollar_punctuation), with C_TOKENIZER_DOLLAR_PUNCTUATION (the scalar lexer's, not the preprocessor's
+// adapter, pp_split_dollars), then the prefixed literals the mode doesn't have split, by `split` (pp_split_kinds).
+// Returns the count, or -1.
+static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, uint32_t flags, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
+{
+    int64_t result = c_tokenize(text, length, kinds, starts, ends, flags | (dollars ? C_TOKENIZER_DOLLAR_PUNCTUATION : 0));
     const uint32_t splits = result > 0 ? pp_count_splits_scalar(kinds, (uint32_t)result, split) : 0;
     result = splits != 0 ? pp_split_prefixes(text, kinds, starts, ends, (uint32_t)result, splits, split) : result;
-    result = result > 0 && dollars ? pp_split_dollars(0, text, kinds, starts, ends, (uint32_t)result) : result;
     return result;
 }
 
-// The spellings of a text's tokens, as the language mode lexes them (`split` and `dollars`, as pp_test_lex takes them).
-static bool pp_text_spellings(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, PPSpellings* spellings)
+// The spellings of a text's tokens, as the language mode lexes them (`split`, `dollars` and `flags`, as pp_test_lex
+// takes them).
+static bool pp_text_spellings(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, uint32_t flags, PPSpellings* spellings)
 {
     const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(length);
     Arena arena = arena_reserve(capacity * 9 + 256);
     uint8_t* kinds = arena_push(&arena, capacity, 64);
     uint32_t* starts = arena_push_array(&arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(&arena, capacity, sizeof(uint32_t), 64);
-    const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? pp_test_lex(text, length, split, dollars, kinds, starts, ends) : -1;
+    const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? pp_test_lex(text, length, split, dollars, flags, kinds, starts, ends) : -1;
     bool result = count >= 0 && pp_spellings_initialize(spellings, (uint64_t)count + 1, length + 64);
     for (int64_t i = 0; result && i < count; i += 1)
     {
@@ -318,7 +326,7 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
         free(scalar_text);
     }
     PPSpellings printed = { 0 };
-    result = result && pp_text_spellings((const uint8_t*)text, length, pp->split_kinds, pp_dollar_punctuation(&pp->options), &printed);
+    result = result && pp_text_spellings((const uint8_t*)text, length, pp->split_kinds, pp_dollar_punctuation(&pp->options), pp_test_lex_flags(pp), &printed);
     if (result)
     {
         char label[256];
@@ -530,7 +538,7 @@ static bool pp_marker_line(const uint8_t* text, uint64_t at, uint64_t end, uint3
     return result;
 }
 
-static bool pp_placed_tokens(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, PPPlaced* placed)
+static bool pp_placed_tokens(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, uint32_t flags, PPPlaced* placed)
 {
     uint64_t line_count = 1;
     for (uint64_t i = 0; i < length; i += 1)
@@ -596,7 +604,7 @@ static bool pp_placed_tokens(const uint8_t* text, uint64_t length, uint64_t spli
             at = end + 1;
         }
         line_starts[line_count] = UINT64_MAX;
-        const int64_t count = pp_test_lex(blank, length, split, dollars, kinds, starts, ends);
+        const int64_t count = pp_test_lex(blank, length, split, dollars, flags, kinds, starts, ends);
         result = count >= 0 && pp_spellings_initialize(&placed->spellings, (uint64_t)count + 1, length + 64);
         placed->lines = result ? arena_push_array(&placed->arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
         placed->states = result ? arena_push_array(&placed->arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
@@ -697,7 +705,7 @@ static bool pp_test_placed(Preprocessor* pp, const PPPlaced* theirs, const char*
     size_t length = 0;
     char* text = pp_test_print(pp, true, true, &length);
     PPPlaced ours = { 0 };
-    const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, pp_dollar_punctuation(&pp->options), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
+    const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, pp_dollar_punctuation(&pp->options), pp_test_lex_flags(pp), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
     pp_placed_release(&ours);
     free(text);
     return result;
@@ -753,6 +761,12 @@ static const PPTestFile pp_test_files_stack[] = {
     { "b.h", "b_token\n" },
     { "sys/s.h", "sys_first\n\n\n\n\n\n\n\n\n\n\nsys_far\n" },
     { "p.h", "user_before\n#pragma GCC system_header\nuser_after\n" },
+    { 0, 0 },
+};
+
+// A file whose name is what a header name taken from the raw string literal R"(other.h)" would be.
+static const PPTestFile pp_test_files_raw_header[] = {
+    { "\"(other.h)", "found_by_a_raw_string\n" },
     { 0, 0 },
 };
 
@@ -881,6 +895,28 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "yes\n", false, 0, "-fsigned-char -fno-signed-char", 0 },
     { "signed char in #if", "#if '\\xff' == -1 && 'a' - 'b' < 0 && '\\377\\377' == 65535 && '\\377abc' < 0 && 'abcde' == 0x62636465\nyes\n#endif\n",
       0, "c17", "yes\n", false, 0, "-funsigned-char -fno-unsigned-char", 0 },
+    // Raw string literals (#285): R and LR ones in GNU modes from C99 on, u8R, uR and UR ones from C11 (whose prefixes
+    // they need), in any mode with -fraw-string-literals and in none with -fno-raw-string-literals, in skipped groups
+    // too; their spellings as written after the opening quote (line splices and trigraphs kept), pasted, stringized
+    // (line breaks as \n), as _Pragma's operand (the body) and #line's and a line marker's file name (the body);
+    // neither a header name nor (from a string) __has_warning's name, but its body; after '$' where '$' is punctuation;
+    // and -E's lines, which count the line breaks in an unknown token (a raw string literal's invalid delimiter: clang
+    // also reports an error, which buster doesn't yet) and in no other.
+    { "raw string literals in a GNU mode", "#define R RR\n#define LR LRR\n#define u8R u8RR\n#define uR uRR\n#define UR URR\nR\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" R(h) xR\"(i)\" 1R\"(j)\"\nafter\n", 0, "gnu17", "R\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" RR(h) xR\"(i)\" 1R\"(j)\"\nafter\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\n\n\n\n\n\nR\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" RR(h) xR \"(i)\" 1R\"(j)\"\n\nafter\n" },
+    { "raw string literals in gnu99", "#define uR uRR\n#define UR URR\n#define u8R u8RR\nR\"(a)\" LR\"(b)\" uR\"(c)\" UR\"(d)\" u8R\"(e)\"\n", 0, "gnu99", "R\"(a)\" LR\"(b)\" uRR \"(c)\" URR \"(d)\" u8RR \"(e)\"\n", false, 0, 0, 0 },
+    { "no raw string literals in an ISO mode", "#define R RR\n#define LR LRR\nR\"(a)\" LR\"(b)\"\n", 0, "c17", "RR \"(a)\" LRR \"(b)\"\n", false, 0, 0, 0 },
+    { "-fraw-string-literals in an ISO mode", "#define R RR\nR\"(a)\" u8R\"(b)\" R\"(?\?=)\" ?\?=\n", 0, "c17", "R\"(a)\" u8R\"(b)\" R\"(?\?=)\" #\n", false, 0, "-fraw-string-literals", 0 },
+    { "-fno-raw-string-literals in a GNU mode", "#define R RR\nR\"(a)\"\n", 0, "gnu17", "RR \"(a)\"\n", false, 0, "-fno-raw-string-literals", 0 },
+    { "raw string literals over lines and directives", "#if 0\nR\"(\n#endif\n)\"\n#endif\nR\"(\n#define X 1\n)\" X\nafter\n", 0, "gnu17", "R\"(\n#define X 1\n)\" X\nafter\n", false, 0, 0, 0 },
+    { "raw string literals keep their splices and trigraphs", "a R\"(x\\\ny?\?=)\" b ?\?=\nL\\\nR\"(z\\\nw)\" c\n", 0, "c17", "a R\"(x\\\ny?\?=)\" b #\nLR\"(z\\\nw)\" c\n", false, 0, "-fraw-string-literals", 0 },
+    { "raw string literals pasted and stringized", "#define CAT(a,b) a##b\n#define S(x) #x\nCAT(R,\"(x)\") CAT(L,R\"(y)\") CAT(u8,R\"(z)\") S(R\"(a\nb)\") S(R\"x(e\"f\\)x\") S(LR\"(\\\n)\")\n", 0, "gnu17", "R\"(x)\" LR\"(y)\" u8R\"(z)\" \"R\\\"(a\\nb)\\\"\" \"R\\\"x(e\\\"f\\\\)x\\\"\" \"LR\\\"(\\\\\\n)\\\"\"\n", false, 0, 0, 0 },
+    { "raw string literals in _Pragma, #line and a line marker", "_Pragma(R\"(omp parallel for)\")\n_Pragma(LR\"x(message(\"ab\"))x\")\n#line 7 R\"(f\\g.c)\"\n__FILE__ __LINE__\n# 9 R\"(h\"i.c)\"\n__FILE__\n", 0, "gnu17", "#pragma omp parallel for\n#pragma message(\"ab\")\n\"f\\\\g.c\" 7\n\"h\\\"i.c\"\n", false, 0, 0, 0 },
+    { "raw string literals in __has_warning", "#if __has_warning(R\"(-Wmisleading-indentation)\") && __has_warning(\"-Wmisleading\" R\"(-indentation)\")\nyes\n#endif\n", 0, "gnu17", "yes\n", false, 0, 0, 0 },
+    { "a raw string literal isn't a header name", "#if __has_include(R\"(other.h)\")\nfound\n#else\nnot\n#endif\n", 0, "gnu17", "not\n", true, 0, 0, pp_test_files_raw_header },
+    { "a raw string literal isn't an #include's header name", "#include R\"(other.h)\"\n", "x\n", "gnu17", "", true, 0, 0, 0 },
+    { "raw string literals after '$' as punctuation", "#define R RR\n$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" 1$e+R\"(e)\" $u8R\"(f)\" $xR\"(g)\"\n", 0, "gnu17", "$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" 1$e+R\"(e)\" $u8R\"(f)\" $xR\"(g)\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
+    { "raw string literals after '$' in assembly", "#define R RR\n$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" $xR\"(g)\"\n", 0, "gnu17", "$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" $xR\"(g)\"\n", false, 0, "-x assembler-with-cpp", 0 },
+    { "line breaks in an unknown token and in a raw string literal", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", 0, "gnu17", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\nR\"x\ny\" z\nw\nR\"(a\nb)\" c\n\nd\n" },
     { "true in C99", "#if true\nyes\n#else\nno\n#endif\n",
       0, "c99", "no\n", false, 0, 0, 0 },
     // Where clang and GCC differ, clang's answer: a #line continued on the next line counts from the line of its # (GCC
@@ -1192,7 +1228,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     {
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
-        result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), &expected) &&
+        result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), pp_test_lex_flags(&runs[0]), &expected) &&
                  pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name) &&
                  (test->markers == 0 || pp_test_markers(&runs[0], test, directory));
         if (result && with_clang)
@@ -1200,7 +1236,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
-            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), &theirs) &&
+            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), pp_test_lex_flags(&runs[0]), &theirs) &&
                      pp_compare_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
             pp_placed_release(&theirs);
             free(clang_text);
@@ -1237,7 +1273,7 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
     if (result && with_clang)
     {
         PPPlaced theirs = { 0 };
-        result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
+        result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), pp_test_lex_flags(&runs[0]), &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
                  pp_test_placed(&runs[0], &theirs, path);
         pp_placed_release(&theirs);
     }
@@ -1706,7 +1742,6 @@ static const PPTestOptionSet pp_test_option_sets[] = {
     { { "-fdefer-ts" }, "-fdefer-ts" },
     { { "-fdigraphs", "-fno-digraphs" }, "-fno-digraphs" },
     { { "-std=c89", "-fdigraphs" }, "-fdigraphs" },
-    { { "-std=c17", "-fno-raw-string-literals", "-fraw-string-literals" }, "-fraw-string-literals" },
     { { "-fno-short-wchar", "-fshort-wchar" }, "-fshort-wchar" },
     { { "-fno-directives-only", "-fdirectives-only" }, "-fdirectives-only" },
     { { "-fkeep-system-includes" }, "-fkeep-system-includes" },
@@ -1726,10 +1761,15 @@ static const PPTestOptionSet pp_test_option_sets[] = {
     { { "-ffile-prefix-map=%d=/remapped" }, "-ffile-prefix-map=" },
     { { "-fexec-charset=UTF-8", "-fexec-charset=latin1" }, "-fexec-charset=latin1" },
     { { "-finput-charset=UTF8" }, "-finput-charset=UTF8" },
-    // Taken: the modeled families, each refused family turned off again, -fzvector in assembly, digraphs where the mode
-    // has them, and raw strings off (buster lexes none), each in c17, where clang's lexes none either (a GNU mode's
-    // would differ); and UTF-8 charsets in any case.
+    // Taken: the modeled families, each refused family turned off again, -fzvector in assembly and digraphs where the
+    // mode has them, each in c17; raw strings on and off in the modes that have them and don't, and in gnu89 and gnu99,
+    // which have only R and LR ones (c89's would differ in its digraphs); and UTF-8 charsets in any case.
     { { "-std=c17", "-fgnu-keywords" }, 0 },
+    { { "-std=c17", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
+    { { "-std=gnu89", "-fraw-string-literals" }, 0 },
+    { { "-std=gnu99", "-fraw-string-literals", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
+    { { "-std=gnu23", "-fno-raw-string-literals" }, 0 },
+    { { "-x", "assembler-with-cpp", "-fno-raw-string-literals" }, 0 },
     { { "-std=gnu17", "-fno-raw-string-literals", "-fno-asm" }, 0 },
     { { "-std=c17", "-fno-dollars-in-identifiers" }, 0 },
     { { "-std=c17", "-fno-signed-char" }, 0 },
@@ -1769,7 +1809,8 @@ static const char pp_test_option_probe[] =
     "__is_identifier(_Accum) __is_identifier(_Defer) __is_identifier(asm) __is_identifier(typeof)\n"
     "#define bb BB\naa$bb 1$bb\n"
     "%:define DIGRAPH __STDC_VERSION__\nDIGRAPH <: :>\n"
-    "#define R RR\nR\"x(raw)x\"\n"
+    "#define R RR\n#define LR LRR\n#define uR uRR\n#define UR URR\n#define u8R u8RR\n"
+    "R\"x(raw)x\" LR\"(l)\" uR\"(u)\" UR\"(U)\" u8R\"(8)\"\n"
     "#if (L'\\0' - 1) < 0\nwide_signed\n#endif\n"
     "#if '\\xff' < 0\nchar_signed\n#endif\n"
     "__FILE__ __MODULE__\n";
@@ -1946,14 +1987,14 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
         result = result && pp_same_streams(&preprocessors[0], &preprocessors[1], test.name) && pp_stream_spellings(&preprocessors[0], &ours) &&
-                 pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), preprocessors[0].split_kinds, pp_dollar_punctuation(&preprocessors[0].options), &expected) &&
+                 pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), preprocessors[0].split_kinds, pp_dollar_punctuation(&preprocessors[0].options), pp_test_lex_flags(&preprocessors[0]), &expected) &&
                  pp_compare_spellings(&preprocessors[0], &ours, &expected, test.name, "wanted");
         if (result && with_clang)
         {
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
-            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, preprocessors[0].split_kinds, pp_dollar_punctuation(&preprocessors[0].options), &theirs) &&
+            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, preprocessors[0].split_kinds, pp_dollar_punctuation(&preprocessors[0].options), pp_test_lex_flags(&preprocessors[0]), &theirs) &&
                      pp_compare_spellings(&preprocessors[0], &ours, &theirs.spellings, test.name, "clang");
             pp_placed_release(&theirs);
             free(clang_text);
