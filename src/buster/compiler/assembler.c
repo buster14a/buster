@@ -20,7 +20,7 @@ struct AsmToken
     uint32_t start;
     uint32_t end;
     uint32_t kind;
-    uint32_t reserved;
+    uint32_t reserved; // Zero after lexing; the vector parser caches bounded register classification here.
 };
 
 typedef struct AsmExpr AsmExpr;
@@ -856,6 +856,8 @@ static __int128 asm_absolute(AsmParser* parser, uint32_t end)
     return expression.value;
 }
 
+#include "assembler_words.c"
+
 static bool asm_register(String8 name, X86Operand* operand)
 {
     static const char* const names[4][8] =
@@ -941,12 +943,31 @@ static bool asm_register(String8 name, X86Operand* operand)
     return found;
 }
 
+static bool asm_token_register(const AsmParser* parser, uint32_t at, X86Operand* operand)
+{
+    const uint32_t cached = parser->tokens[at].reserved;
+    bool found;
+    if (parser->options.vectorized && (cached & BUSTER_ASM_REGISTER_CACHED))
+    {
+        found = (cached & 255) == X86_OPERAND_REGISTER;
+        if (found)
+        {
+            *operand = (X86Operand){.kind = X86_OPERAND_REGISTER, .reg = cached >> 8 & 255, .class = cached >> 16 & 255, .width = cached >> 24 & 127};
+        }
+    }
+    else
+    {
+        found = asm_register(asm_token_text(parser, at), operand);
+    }
+    return found;
+}
+
 static bool asm_read_register(AsmParser* parser, uint32_t end, X86Operand* operand)
 {
     uint32_t at = parser->at;
     const bool prefix = at < end && parser->tokens[at].kind == '%';
     at += prefix;
-    const bool found = prefix == parser->prefix && at < end && parser->tokens[at].kind == BUSTER_ASM_WORD && asm_register(asm_token_text(parser, at), operand);
+    const bool found = prefix == parser->prefix && at < end && parser->tokens[at].kind == BUSTER_ASM_WORD && asm_token_register(parser, at, operand);
     if (found)
     {
         parser->at = at + 1;
@@ -1208,7 +1229,7 @@ static void asm_decorations(AsmParser* parser, uint32_t end, X86MatchRequest* re
         asm_take(parser, '%');
         const String8 text = asm_token_text(parser, parser->at);
         X86Operand mask;
-        if (asm_register(text, &mask) && mask.class == BUSTER_X86_CLASS_OPMASK && mask.reg != 0 && (request->decorations & 7) == 0)
+        if (asm_token_register(parser, parser->at, &mask) && mask.class == BUSTER_X86_CLASS_OPMASK && mask.reg != 0 && (request->decorations & 7) == 0)
         {
             if (operand != (parser->options.intel ? 0u : request->count - 1))
             {
@@ -1294,11 +1315,8 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         if (!parser->options.intel && !known && name->length > 1)
         {
             // Strip integer suffixes only when the full mnemonic has no catalogue candidate.
-            const uint32_t bucket = x86_match_hash(*name);
-            for (uint32_t i = parser->index->begin[bucket]; i < parser->index->begin[bucket + 1]; i += 1)
-            {
-                known |= x86_match_name(*name, x86_form_descriptions[parser->index->forms[i]].mnemonic);
-            }
+            const uint32_t bucket = x86_match_bucket(parser->index, *name);
+            known = parser->index->names[bucket].pointer != 0;
             if (!known)
             {
                 const char suffix = name->pointer[name->length - 1];
@@ -1684,96 +1702,27 @@ static void asm_directive(AsmParser* parser, uint32_t end)
     }
 }
 
-// Eight bounded spellings in lanes. Register lookup compares packed keys, and decimal conversion multiplies all
-// active lanes together. The uncommon spellings (long names, hexadecimal, expressions, addresses/decorations) go to
-// the exact grammar. No scalar asm_register/asm_number call is made for a successful batch.
+// Eight bounded spellings in lanes. Register descriptions come from the token cache. Decimal conversion reduces
+// digit pairs and quartets, then combines eight digits without an eight-step multiply dependency. Uncommon
+// spellings (long names, hexadecimal, expressions, addresses/decorations) go to the exact grammar.
 static void asm_simple_words_vector(const uint64_t* keys, const uint64_t* lengths, uint32_t count, uint64_t* descriptors, uint64_t* values)
 {
-    static const struct
-    {
-        char name[8];
-        uint8_t reg;
-        uint8_t class;
-        uint8_t width;
-    } registers[] =
-        {
-            {"rax", 0, 4, 8},
-            {"rcx", 1, 4, 8},
-            {"rdx", 2, 4, 8},
-            {"rbx", 3, 4, 8},
-            {"rsp", 4, 4, 8},
-            {"rbp", 5, 4, 8},
-            {"rsi", 6, 4, 8},
-            {"rdi", 7, 4, 8},
-            {"eax", 0, 3, 4},
-            {"ecx", 1, 3, 4},
-            {"edx", 2, 3, 4},
-            {"ebx", 3, 3, 4},
-            {"esp", 4, 3, 4},
-            {"ebp", 5, 3, 4},
-            {"esi", 6, 3, 4},
-            {"edi", 7, 3, 4},
-            {"ax", 0, 2, 2},
-            {"cx", 1, 2, 2},
-            {"dx", 2, 2, 2},
-            {"bx", 3, 2, 2},
-            {"sp", 4, 2, 2},
-            {"bp", 5, 2, 2},
-            {"si", 6, 2, 2},
-            {"di", 7, 2, 2},
-            {"al", 0, 1, 1},
-            {"cl", 1, 1, 1},
-            {"dl", 2, 1, 1},
-            {"bl", 3, 1, 1},
-            {"spl", 4, 1, 1},
-            {"bpl", 5, 1, 1},
-            {"sil", 6, 1, 1},
-            {"dil", 7, 1, 1},
-            {"ah", 68, 1, 1},
-            {"ch", 69, 1, 1},
-            {"dh", 70, 1, 1},
-            {"bh", 71, 1, 1},
-            {"r8", 8, 4, 8},
-            {"r9", 9, 4, 8},
-            {"r10", 10, 4, 8},
-            {"r11", 11, 4, 8},
-            {"r12", 12, 4, 8},
-            {"r13", 13, 4, 8},
-            {"r14", 14, 4, 8},
-            {"r15", 15, 4, 8},
-            {"r8d", 8, 3, 4},
-            {"r9d", 9, 3, 4},
-            {"r10d", 10, 3, 4},
-            {"r11d", 11, 3, 4},
-            {"r12d", 12, 3, 4},
-            {"r13d", 13, 3, 4},
-            {"r14d", 14, 3, 4},
-            {"r15d", 15, 3, 4},
-    };
     for (uint32_t first = 0; first < count; first += 8)
     {
         const uint32_t left = count - first;
         const __mmask8 valid = left >= 8 ? 255 : (1u << left) - 1;
         const __m512i words = _mm512_maskz_loadu_epi64(valid, keys + first);
         const __m512i sizes = _mm512_maskz_loadu_epi64(valid, lengths + first);
-        __m512i descriptions = _mm512_setzero_si512();
-        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(registers); r += 1)
-        {
-            uint64_t key;
-            memcpy(&key, registers[r].name, sizeof(key));
-            const uint64_t descriptor = X86_OPERAND_REGISTER | (uint64_t)registers[r].reg << 8 | (uint64_t)registers[r].class << 16 | (uint64_t)registers[r].width << 24;
-            descriptions = _mm512_mask_mov_epi64(descriptions, _mm512_cmpeq_epi64_mask(words, _mm512_set1_epi64(key)), _mm512_set1_epi64(descriptor));
-        }
+        __m512i descriptions = _mm512_maskz_loadu_epi64(valid, descriptors + first);
         __mmask8 decimal = valid & _mm512_cmpgt_epi64_mask(sizes, _mm512_setzero_si512());
-        __m512i numbers = _mm512_setzero_si512();
-        for (uint32_t digit = 0; digit < 8; digit += 1)
-        {
-            const __mmask8 active = _mm512_cmpgt_epi64_mask(sizes, _mm512_set1_epi64(digit));
-            const __m512i bytes = _mm512_and_epi64(_mm512_srlv_epi64(words, _mm512_set1_epi64(digit * 8)), _mm512_set1_epi64(255));
-            const __m512i number = _mm512_sub_epi64(bytes, _mm512_set1_epi64('0'));
-            decimal &= ~active | _mm512_cmple_epu64_mask(number, _mm512_set1_epi64(9));
-            numbers = _mm512_mask_mov_epi64(numbers, active, _mm512_add_epi64(_mm512_mullo_epi64(numbers, _mm512_set1_epi64(10)), number));
-        }
+        const __m512i shift = _mm512_slli_epi64(_mm512_sub_epi64(_mm512_set1_epi64(8), sizes), 3);
+        // Move the spelling to the high end of its qword; shifting supplies zero-valued leading digits and
+        // discards every byte past the bounded spelling. Byte subtraction never borrows between digits.
+        const __m512i digits = _mm512_sllv_epi64(_mm512_sub_epi8(words, _mm512_set1_epi8('0')), shift);
+        decimal &= _mm512_cmpeq_epi64_mask(digits, _mm512_min_epu8(digits, _mm512_set1_epi8(9)));
+        const __m512i pairs = _mm512_maddubs_epi16(digits, _mm512_set1_epi16(0x010a));
+        const __m512i quartets = _mm512_madd_epi16(pairs, _mm512_set1_epi32(0x00010064));
+        const __m512i numbers = _mm512_add_epi64(_mm512_mul_epu32(quartets, _mm512_set1_epi64(10000)), _mm512_srli_epi64(quartets, 32));
         // Leading-zero integers use GAS's octal rule and take the grammar instead of this decimal kernel.
         decimal &= ~(_mm512_cmpgt_epi64_mask(sizes, _mm512_set1_epi64(1)) & _mm512_cmpeq_epi64_mask(_mm512_and_epi64(words, _mm512_set1_epi64(255)), _mm512_set1_epi64('0')));
         descriptions = _mm512_mask_mov_epi64(descriptions, decimal, _mm512_set1_epi64(X86_OPERAND_IMMEDIATE));
@@ -1825,6 +1774,7 @@ static bool asm_parse_vector_batch(AsmParser* parser)
                 {
                     memcpy(&keys[words], text.pointer, text.length);
                     lengths[words] = text.length;
+                    descriptors[words] = parser->tokens[at].reserved & ~BUSTER_ASM_REGISTER_CACHED;
                     negative[words++] = sign;
                     at += 1;
                     operands += 1;
@@ -1861,12 +1811,8 @@ static bool asm_parse_vector_batch(AsmParser* parser)
         }
         const String8 mnemonic = asm_token_text(parser, row_begin[row]);
         // Canonical names only: aliases, branch symbols, width suffixes and other grammar keep their exact path.
-        const uint32_t bucket = x86_match_hash(mnemonic);
-        bool named = false;
-        for (uint32_t candidate = parser->index->begin[bucket]; candidate < parser->index->begin[bucket + 1]; candidate += 1)
-        {
-            named |= x86_match_name(mnemonic, x86_form_descriptions[parser->index->forms[candidate]].mnemonic);
-        }
+        const uint32_t bucket = x86_match_bucket(parser->index, mnemonic);
+        const bool named = parser->index->names[bucket].pointer != 0;
         supported &= named && !x86_match_name(mnemonic, "sal");
         if (!supported || parser->instruction_count >= parser->instruction_capacity || parser->section == BUSTER_LINK_CLASS_BSS)
         {
@@ -2640,6 +2586,10 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
     if (parser.result.error == 0)
     {
         parser.capacity = parser.token_count + 4;
+        if (options.vectorized)
+        {
+            asm_cache_registers(&parser);
+        }
         uint32_t slots = 16;
         while (slots < parser.capacity * 2)
         {
