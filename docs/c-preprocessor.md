@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 190 | |
+| The built-in cases (`pp_test_cases`) | 194 | |
 | #109's generated cases, against `clang -E -P` ([the fuzzing](preprocessor-fuzz.md)) | 40,000,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
@@ -882,7 +882,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 190 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 194 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -967,7 +967,9 @@ full-corpus reproduction and frozen CI subset.
     - line splices (a trigraph's too) before a `)` and a `#line`'s number;
     - a line marker's tokens read expanded, and a `_Pragma`'s text that ends
       in a backslash;
-    - `#line` and `#ident` among a macro's arguments, read unexpanded;
+    - `#line` and `#ident` among a macro's arguments, read unexpanded, and
+      the parts of `#ident`, `#line`, a computed `#include`, `push_macro`
+      and `pop_macro` that clang reads unexpanded;
     - character constants in `#if`, and a prefix before an empty one;
     - the line after a `_Pragma` that prints nothing, and lines among a
       macro's arguments, which `-E` moves to their expansion's line;
@@ -1148,6 +1150,19 @@ cleared once and reused.
   character (`\u0041`, which clang rejects in an identifier), and warnings
   that don't change acceptance (`-Wvariadic-macros`, `-Wexpansion-to-defined`
   and others). #109's generator writes none of these.
+- After an `#include`'s written header name, clang reads one token expanded
+  before the rest as it is (`CheckEndOfDirective`): `#include "a.h" f(`,
+  with `f` a function-like macro, is an unterminated invocation there, and
+  `#include "a.h" E`, with `E` empty, gives no warning. We warn about extra
+  tokens and expand none. A computed `#include` reads them as clang does.
+- A file that isn't a regular one (`#include "/dev/null"`) can't be included,
+  where clang reads it as empty. #109's generator includes only missing
+  files.
+- `#pragma clang deprecated`, `final` and `restrict_expansion` read their
+  `(`, `,`, `)` and message expanded and only the macro's name as it is
+  (`HandleMacroAnnotationPragma`); we read them all as written, so a `(` or a
+  message from a macro is an error here. #109's generator writes them
+  literally.
 - In `#if`, a character constant's `\N{name}` escape is refused (there is no
   table of Unicode's names), and `-funsigned-char` doesn't make ordinary
   character constants unsigned, as it does in clang.

@@ -647,6 +647,14 @@ struct PPCapture
     // top, or 0. A _Pragma's line in a directive's goes there (pp_emit_pragma_start), as clang places it at its
     // expansion in the line.
     uint32_t name_location;
+    // A directive's line that clang reads expanded only in part: how many tokens (outside pragma lines) it reads
+    // expanded before it reads the rest as it is and drops it (pp_check_limit), BUSTER_PP_NONE while a computed
+    // #include's '<' waits for its '>', or 0 for the whole line; and how far pp_check_limit has counted them: up to
+    // index `counted_to` of pp->captures, `counted` of them, the last in pragma state `counted_state`.
+    uint32_t limit;
+    uint32_t counted_to;
+    uint32_t counted;
+    uint8_t counted_state;
 };
 
 // The regions #pragma clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage open (pp_pragma_region), as
@@ -844,6 +852,8 @@ struct Preprocessor
     // The open streams (BUSTER_PP_CAPTURE_STREAM), which the main loop checks after each step (of a token at a time
     // while one is open: pp_step_limit), and how many pragma lines were emitted (PPCapture.pragma_mark).
     uint32_t stream_count;
+    // The open captures with a limit (PPCapture.limit), which the main loop checks after each step (pp_check_limit).
+    uint32_t limit_count;
     uint32_t pragma_lines;
     // Built-in state: __COUNTER__, the inclusion depth, the main file, and the spellings "0", "1" and "#".
     uint32_t counter;
@@ -4247,10 +4257,14 @@ static bool pp_start_capture(Preprocessor* pp, PPCapture capture, uint32_t begin
     {
         capture.begin = pp->captures.count;
         capture.pragma_mark = pp->pragma_lines;
+        capture.counted_to = capture.begin;
+        capture.counted = 0;
+        capture.counted_state = BUSTER_PP_PRAGMA_OUTSIDE;
         pp->capture_frames[pp->capture_count] = capture;
         pp->capture_count += 1;
         result = pp_push_buffer(pp, &pp->arguments, begin, end, 0, expansion_end, true, false) != 0;
         pp->capture_count -= !result;
+        pp->limit_count += result && capture.limit != 0;
     }
     else
     {
@@ -6060,10 +6074,11 @@ static void pp_expand_current(Preprocessor* pp)
 
 // The end of the run a step of the main loop copies from `position` (up to `limit`): one token while a stream is open,
 // so that a stream ends at the token that closes it, before any token after it is read: a _Pragma's pragma runs before
-// them, as clang's does (it can change what they expand to).
+// them, as clang's does (it can change what they expand to). So too while a capture with a limit is open, which ends at
+// its last token, before the next one expands (pp_check_limit).
 BUSTER_INLINE uint32_t pp_step_limit(const Preprocessor* pp, uint32_t position, uint32_t limit)
 {
-    return pp->stream_count != 0 && limit - position > 1 ? position + 1 : limit;
+    return (pp->stream_count | pp->limit_count) != 0 && limit - position > 1 ? position + 1 : limit;
 }
 
 static void pp_step_file(Preprocessor* pp, PPContext* context)
@@ -6142,6 +6157,7 @@ static void pp_finish_capture(Preprocessor* pp)
     {
         pp_lift_pragma_lines(pp);
     }
+    pp->limit_count -= pp->capture_frames[pp->capture_count - 1].limit != 0;
     switch (pp->capture_frames[pp->capture_count - 1].kind)
     {
         case BUSTER_PP_CAPTURE_ARGUMENT:
@@ -6162,6 +6178,63 @@ static void pp_finish_capture(Preprocessor* pp)
         case BUSTER_PP_CAPTURE_PRAGMA:
             pp_finish_pragma(pp);
             break;
+    }
+}
+
+// The top capture, when it has a limit (PPCapture.limit), counts its new tokens outside pragma lines. Once it has its
+// limit's, clang has read what the directive takes from the line expanded, and reads the rest as it is and drops it
+// (Preprocessor::CheckEndOfDirective and DiscardUntilEndOfDirective): so the tokens after them go, but the line's next
+// token, as it is, which tells the directive that some came after; the contexts down to the line's barrier are popped
+// (their macros enabled again), and the capture's continuation runs. Tokens past the limit were read in a run that names
+// no macro, which reading them as they are gives too. A computed #include's limit is its header name, a string literal
+// or '<' to the first '>' (Preprocessor::LexHeaderName), and one token more.
+static __attribute__((noinline, cold)) void pp_check_limit(Preprocessor* pp)
+{
+    PPCapture* capture = &pp->capture_frames[pp->capture_count - 1];
+    PPTokens* tokens = &pp->captures;
+    uint32_t keep = BUSTER_PP_NONE;
+    uint32_t i = capture->counted_to;
+    // A step reads a token at a time (pp_step_limit), so no invocation collects past the last token: but if one did,
+    // its tokens would be counted when it ends.
+    while (capture->limit != 0 && !pp_collecting(pp) && keep == BUSTER_PP_NONE && i < tokens->count)
+    {
+        const uint8_t kind = tokens->kinds[i];
+        capture->counted_state = (uint8_t)pp_pragma_state(pp, capture->counted_state, kind, tokens->locations[i]);
+        const bool outside = capture->counted_state == BUSTER_PP_PRAGMA_OUTSIDE && kind != BUSTER_PP_KIND_PRAGMA_END;
+        capture->counted += outside;
+        if (outside && capture->kind == BUSTER_PP_CAPTURE_INCLUDE)
+        {
+            const bool opens = capture->counted == 1 && kind == C_TOKEN_LESS;
+            const bool closes = capture->limit == BUSTER_PP_NONE && kind == C_TOKEN_GREATER;
+            capture->limit = opens ? BUSTER_PP_NONE : closes ? capture->counted + 1 : capture->limit;
+        }
+        i += 1;
+        keep = outside && capture->counted == capture->limit ? i : BUSTER_PP_NONE;
+    }
+    capture->counted_to = i;
+    if (keep != BUSTER_PP_NONE)
+    {
+        // The next token: the first past the limit, or the first left in the contexts down to the barrier.
+        bool found = keep < tokens->count;
+        tokens->count = found ? keep + 1 : keep;
+        bool below = false;
+        for (uint32_t c = pp->context_count; !found && !below; c -= 1)
+        {
+            const PPContext* context = &pp->contexts[c - 1];
+            found = context->position < context->end;
+            if (found)
+            {
+                pp_emit(pp, pp_context_token(pp, context, context->position));
+            }
+            below = context->barrier;
+        }
+        bool popped = false;
+        while (!popped)
+        {
+            popped = pp->contexts[pp->context_count - 1].barrier;
+            pp_pop_context(pp);
+        }
+        pp_finish_capture(pp);
     }
 }
 
@@ -6199,6 +6272,10 @@ static void pp_run_contexts(Preprocessor* pp, uint32_t stop_depth)
         if (pp->stream_count != 0)
         {
             pp_stream_check(pp);
+        }
+        if (pp->limit_count != 0)
+        {
+            pp_check_limit(pp);
         }
     }
 }
@@ -6619,7 +6696,8 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     }
     else if (first < end)
     {
-        // A computed include: the line expanded, then a string literal or <...> from its tokens.
+        // A computed include: the line expanded, then a string literal or <...> from its tokens, and one token more,
+        // after which clang reads the line as it is (pp_check_limit).
         const uint32_t line = pp->arguments.count;
         const PPCapture capture = {
             .kind = BUSTER_PP_CAPTURE_INCLUDE,
@@ -6628,6 +6706,7 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
             .context = (uint32_t)(context - pp->contexts),
             .directive_kind = kind,
             .location = location,
+            .limit = 2,
         };
         started = pp_copy_line(pp, context, first, end) && pp_start_capture(pp, capture, line, pp->arguments.count, location);
         pp->arguments.count = started ? pp->arguments.count : line;
@@ -6918,6 +6997,8 @@ static void pp_line(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t ki
     const uint32_t first = kind == PP_DIRECTIVE_LINE_MARKER ? hash + 1 : hash + 2;
     const uint32_t line = pp->arguments.count;
     const bool copied = first < end && pp_copy_line(pp, context, first, end);
+    // A #line reads its number, its name and one token more expanded (Preprocessor::HandleLineDirective), and the rest as
+    // it is (pp_check_limit); a line marker reads its flags expanded.
     const PPCapture capture = {
         .kind = BUSTER_PP_CAPTURE_LINE,
         .arguments_begin = line,
@@ -6926,6 +7007,7 @@ static void pp_line(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t ki
         .directive_kind = kind,
         .location = location,
         .anchor = BUSTER_PP_NONE,
+        .limit = kind == PP_DIRECTIVE_LINE ? 3 : 0,
     };
     // A #line's line is read expanded, and so is a line marker's after its digits (Preprocessor::HandleDigitDirective's
     // Lex), which go first: but not among a macro's arguments, where clang's macro expansion is off, and only #if's and
@@ -7678,7 +7760,9 @@ static bool pp_pragma(Preprocessor* pp, uint32_t begin, uint32_t end, uint32_t l
     const bool expanded = kind == PP_PRAGMA_MESSAGE || kind == PP_PRAGMA_WARNING || kind == PP_PRAGMA_ERROR || kind == PP_PRAGMA_PUSH_MACRO || kind == PP_PRAGMA_POP_MACRO ||
                           kind == PP_PRAGMA_OMP || kind == PP_PRAGMA_IDENT;
     bool started = false;
-    // Not among a macro's arguments (or a builtin's operand), where clang's macro expansion is off (as for #line).
+    // Not among a macro's arguments (or a builtin's operand), where clang's macro expansion is off (as for #line). An
+    // #ident reads its string expanded (Preprocessor::HandleIdentSCCSDirective), and push_macro and pop_macro their '(',
+    // string and ')' (ParsePragmaPushOrPopMacro); clang reads the rest of their lines as it is (pp_check_limit).
     if (expanded && !pp_collecting(pp) && pp_needs_expansion(pp, tokens, operands, end))
     {
         const PPCapture capture = {
@@ -7689,6 +7773,7 @@ static bool pp_pragma(Preprocessor* pp, uint32_t begin, uint32_t end, uint32_t l
             .directive_kind = (uint8_t)kind,
             .flags = from_operator,
             .location = location,
+            .limit = kind == PP_PRAGMA_IDENT ? 1 : kind == PP_PRAGMA_PUSH_MACRO || kind == PP_PRAGMA_POP_MACRO ? 3 : 0,
         };
         started = pp_start_capture(pp, capture, operands, end, location);
     }

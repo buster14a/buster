@@ -330,8 +330,8 @@ to 30 with 1,000,000 cases per mode each, 130 cases differed from clang (70
 in C17, 60 in C23), one's `-P` text didn't lex back into its stream and two
 had no result; six of its 300 workers crashed (the attribute query below).
 Locally, seed 11 was stopped after its first six differences. The runs that
-checked the fixes (seeds 3 to 7, 200,000 to 500,000 cases per mode) found
-eight more. They come down to these fixes, each with a case in
+checked the fixes (seeds 3 to 8, 200,000 to 500,000 cases per mode) found
+ten more. They come down to these fixes, each with a case in
 test-preprocessor, and to the harness changes after them:
 
 - **`__VA_OPT__` in a macro without parameters** is a token. Clang
@@ -407,6 +407,15 @@ test-preprocessor, and to the harness changes after them:
   `#define e a ( e` and `#define a(...) __VA_ARGS__`, `e )` is `e`. The `)`
   comes after `e`'s expansion has ended, which enabled `e` again before the
   argument expands.
+- **Directives that read only part of their line expanded.** `#ident`
+  reads its string expanded and the rest of its line as it is
+  (`HandleIdentSCCSDirective`, `CheckEndOfDirective`), so a macro that gives
+  `"s" c(` there is no unterminated invocation, and a `_Pragma` or a
+  `__COUNTER__` after the string never runs. So do `#line` after its number,
+  name and one token more, a computed `#include` after its header name and
+  one token more, and `push_macro` and `pop_macro` after their `)`. A capture
+  with a limit stops at its last token, a token at a time, and drops the
+  rest of the line (`pp_check_limit`).
 - **A line among a macro's arguments** that the emulation kept on the line
   before starts its own in clang when the expansion's line is another one
   (above): `L\`, then `h(`, `U` and `"#")` on lines of their own, printed
@@ -447,6 +456,12 @@ the following, which are listed in
 - `-E -P`, without line markers, keeps no line numbers, so it doesn't move the
   token after a `_Pragma` that prints nothing to its own line. Only a `\`
   that ends the text before it shows that.
+- After an `#include`'s written header name, clang reads one token expanded;
+  we expand none. And a file that isn't a regular one, as `/dev/null`, can't
+  be included. The generator includes only missing files.
+- `#pragma clang deprecated`, `final` and `restrict_expansion` with a `(` or
+  a message from a macro, which clang expands; the generator writes them
+  literally.
 
 ## Qualification
 

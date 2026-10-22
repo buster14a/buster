@@ -1111,6 +1111,15 @@ static const PPTestCase pp_test_cases[] = {
     // moves to the expansion's line when that is another one: the name's, after a line splice.
     { "line markers: a line among a macro's arguments", "#define h(...) __VA_ARGS__\nL\\\n h(\nU\n\"#\")\nx\\\n  h(7\n  y\nz)\n", 0, "c17", "L U \"#\" x 7 y z", false, 0, 0, 0,
       "# 1 \"%d/case.c\"\n\nL U\n\"#\"\n\n\nx 7\ny z\n" },
+    // Directives that read only part of their line expanded, and the rest as it is (Preprocessor::CheckEndOfDirective):
+    // #ident its string, #line its number, its name and one token more, a computed #include its header name and one token
+    // more, and push_macro and pop_macro their '(', string and ')'. What comes after never expands.
+    { "#ident's string read expanded, and the rest as it is", "#define c(x) x\n#define d(e) e\n#define h d(\"s\") c(\n#ident h\n#ident \"t\" _Pragma(\"message(\\\"m\\\")\")\n#ident \"u\" __COUNTER__\n__COUNTER__\n",
+      0, "c17", "\n#ident \"s\"\n#ident \"t\"\n#ident \"u\"\n0\n", false, 3 },
+    { "#line's operands read expanded, and the rest as it is", "#define c(x) x\n#line 10 \"f.c\" x c(\n__LINE__\n#line 20 \"g.c\" x __COUNTER__\n__COUNTER__ __LINE__\n", 0, "c17", "\n10\n0 20\n", false, 2 },
+    { "a computed #include's name read expanded, and the rest as it is", "#define c(x) x\n#define H \"other.h\"\n#include H x c(\nafter\n", "in_other\n", "c17", "\nin_other\nafter\n", false, 1 },
+    { "push_macro's and pop_macro's operands read expanded, and the rest as it is", "#define c(x) x\n#define m 1\n#pragma push_macro(\"m\") x c(\n#undef m\n#define m 2\n#pragma pop_macro(\"m\") y c(\nm\n",
+      0, "c17", "\n1\n", false, 0 },
     {
         .name = "builtin and feature names are raw, attribute names may expand",
         .source = "#define BUILTIN_NAME __builtin_expect\n#define FEATURE_NAME c_atomic\n#define ATTRIBUTE_NAME __const__\n"
