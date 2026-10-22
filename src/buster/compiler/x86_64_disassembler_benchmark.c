@@ -81,12 +81,14 @@ static uint64_t x86_decode_benchmark_pass(const uint8_t* source, uint32_t size, 
             // Retain every published record store even in the decode-only phase.
             __asm__ volatile("" : : "r"(decoded) : "memory");
             checksum += result.consumed + result.count + result.status;
-            if (phase == 2)
+            if (phase == 2 || phase == 3)
             {
                 for (uint64_t i = 0; i < result.count; i += 1)
                 {
                     char text[512];
-                    const int64_t length = x86_disassembly_format(&decoded[i], text, sizeof(text));
+                    const int64_t length = phase == 3 ? x86_disassembly_listing(&decoded[i], source, 0, text, sizeof(text), variant == 0) : variant == 0 ? x86_disassembly_format_scalar(&decoded[i], text, sizeof(text)) : x86_disassembly_format(&decoded[i], text, sizeof(text));
+                    // The full rendered text is observable, including bytes beyond the checksum's first byte.
+                    __asm__ volatile("" : : "r"(text) : "memory");
                     checksum += (uint64_t)length + (uint8_t)text[0];
                 }
             }
@@ -187,7 +189,7 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
         else if (strcmp(argv[i], "--phase") == 0 && i + 1 < argc)
         {
             i += 1;
-            only_phase = strcmp(argv[i], "decode") == 0 ? 0 : strcmp(argv[i], "classify") == 0 ? 1 : strcmp(argv[i], "format") == 0 ? 2 : -1;
+            only_phase = strcmp(argv[i], "decode") == 0 ? 0 : strcmp(argv[i], "classify") == 0 ? 1 : strcmp(argv[i], "format") == 0 ? 2 : strcmp(argv[i], "listing") == 0 ? 3 : -1;
             valid = valid && only_phase >= 0;
         }
         else if (strcmp(argv[i], "--iterations") == 0 && i + 1 < argc)
@@ -223,6 +225,10 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
     X86Decoded* reference = malloc((uint64_t)capacity * sizeof(*reference));
     valid = valid && bytes != 0 && decoded != 0 && reference != 0;
     const uint64_t initialization_start = x86_decode_benchmark_time();
+    valid = valid && (x86_encoder_initialized || x86_encoder_initialize());
+    const uint64_t normal_initialized = x86_decode_benchmark_time();
+    valid = valid && (x86_encoder_initialized_address32 || x86_encoder_initialize_address32());
+    const uint64_t addresses_initialized = x86_decode_benchmark_time();
     valid = valid && x86_disassembler_initialize();
     const uint64_t initialization_ns = x86_decode_benchmark_time() - initialization_start;
     uint32_t size = 0;
@@ -260,10 +266,12 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
         const int cycles = x86_decode_benchmark_counter(PERF_COUNT_HW_CPU_CYCLES);
         const int instructions = x86_decode_benchmark_counter(PERF_COUNT_HW_INSTRUCTIONS);
         printf("disassembler stream=%s bytes=%u instructions=%llu passes=21 after-scalar=%ums fixed-iterations=%u\n", file != 0 ? file : vectors ? "synthetic-vector" : "synthetic-compiler", size, (unsigned long long)result.count, after_scalar, iterations);
-        const uint64_t table_bytes = sizeof(x86_decode_buckets) + sizeof(x86_decode_keys) + sizeof(x86_decode_masks) + sizeof(x86_decode_forms) +
-                                     sizeof(x86_decode_length_table) + sizeof(x86_decode_checks) + sizeof(x86_decode_simple);
-        printf("initialization=%.3fms (includes encoder validation templates) decoder-tables=%llu bytes entries=%u\n", initialization_ns / 1000000.0, (unsigned long long)table_bytes, x86_decode_entry_count);
-        for (uint32_t phase = only_phase < 0 ? 0 : (uint32_t)only_phase; phase < (only_phase < 0 ? 3 : (uint32_t)only_phase + 1); phase += 1)
+        const uint64_t table_bytes = sizeof(x86_decode_buckets) + x86_decode_storage_bytes + sizeof(x86_decode_indices) + (uint64_t)x86_decode_index_count * sizeof(*x86_decode_index_rows) +
+                                     sizeof(x86_decode_length_table) + sizeof(x86_decode_checks) + sizeof(x86_decode_simple) + sizeof(x86_disassembly_plans) + sizeof(x86_disassembly_registers);
+        printf("initialization=%.3fms (encoder64=%.3fms address32=%.3fms decoder+format=%.3fms) decoder-tables=%llu bytes entries=%u index-cells=%u\n", initialization_ns / 1000000.0,
+               (normal_initialized - initialization_start) / 1000000.0, (addresses_initialized - normal_initialized) / 1000000.0, (initialization_ns - (addresses_initialized - initialization_start)) / 1000000.0,
+               (unsigned long long)table_bytes, x86_decode_entry_count, x86_decode_index_count);
+        for (uint32_t phase = only_phase < 0 ? 0 : (uint32_t)only_phase; phase < (only_phase < 0 ? 4 : (uint32_t)only_phase + 1); phase += 1)
         {
             double samples[4][3][BUSTER_X86_DECODE_BENCH_PASSES];
             uint32_t repeats = iterations != 0 ? iterations : 1;
@@ -319,7 +327,7 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
                     const double ns = samples[variant][0][10];
                     const double cy = samples[variant][1][10];
                     const double ins = samples[variant][2][10];
-                    printf("%-13s %-7s ns/%s=%.3f [%.3f,%.3f] cycles=%.3f instructions=%.3f IPC=%.3f\n", phase == 0 ? "decode" : phase == 1 ? "classify" : "decode+format", variant == 3 ? "compact" : variant == 2 ? "batched" : variant == 1 ? "avx512" : "scalar", phase == 1 ? "byte" : "insn", ns, samples[variant][0][0], samples[variant][0][20], cy, ins, cy != 0 ? ins / cy : 0);
+                    printf("%-13s %-7s ns/%s=%.3f [%.3f,%.3f] cycles=%.3f instructions=%.3f IPC=%.3f\n", phase == 0 ? "decode" : phase == 1 ? "classify" : phase == 2 ? "decode+format" : "decode+listing", variant == 3 ? "compact" : variant == 2 ? "batched" : variant == 1 ? "avx512" : "scalar", phase == 1 ? "byte" : "insn", ns, samples[variant][0][0], samples[variant][0][20], cy, ins, cy != 0 ? ins / cy : 0);
                 }
             }
         }

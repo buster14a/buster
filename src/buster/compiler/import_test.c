@@ -47,16 +47,22 @@
 //     crtendS.o, and _GLOBAL_OFFSET_TABLE_ to the linker; the objects' pieces, one after another; and the global names
 //     binding looks a program's up in, each once, found by its bytes, each global symbol's its own, with each name the
 //     linker defines among them as the linker's.
-//   - The static runtime (runtime_import_static, import_test_static_runtime): crt1.o, crtbeginT.o and crtend.o with
-//     what they are for and crt1.o's ABI note; the archives in GCC's group order, each one's members one after another;
-//     the bindings of main, __libc_start_main, __gmon_start__, __TMC_END__, _GLOBAL_OFFSET_TABLE_ and the IRELATIVE
-//     relocations' bounds, and none to a shared library; memcpy an IFUNC, _nl_current_LC_CTYPE_used absolute, and
-//     libgcc.a's priorities; each object's COMDAT groups as its ImportObject has them, numbered alike by signature;
-//     each piece's strong references against a scan of its symbols, with the member each loads, and each global name's
-//     defining member; link_check on the whole runtime; and every crt object and member taking the vector path.
+//   - The static runtime (runtime_import_static, import_test_static_runtime): crt1.o, crti.o, crtbeginT.o, crtend.o
+//     and crtn.o, with what they are for and crt1.o's ABI note; the archives in GCC's group order, each one's members
+//     one after another; the bindings of main, __libc_start_main, __gmon_start__, __TMC_END__, _GLOBAL_OFFSET_TABLE_,
+//     the IRELATIVE relocations' bounds (the linker's) and _dl_relocate_static_pie (crt1.o's empty one), and none to a
+//     shared library; the names the kind's linker defines among the global names, and no other
+//     (import_test_linker_names); memcpy an IFUNC, _nl_current_LC_CTYPE_used absolute, and libgcc.a's priorities;
+//     each object's COMDAT groups as its ImportObject has them, numbered alike by signature; each piece's strong
+//     references against a scan of its symbols, with the member each loads, and each global name's defining member;
+//     link_check on the whole runtime; and every crt object and member taking the vector path.
+//   - The static PIE's runtime (runtime_import_static_pie), checked as the static runtime is: rcrt1.o, crti.o,
+//     crtbeginS.o, crtendS.o and crtn.o, with the same archives; _dl_relocate_static_pie bound to libc.a's
+//     dl-reloc-static-pie.o, which relocates the executable and whose _DYNAMIC is the linker's; and the IRELATIVE
+//     relocations' bounds, which libc.a refers to weakly and a static PIE's linker doesn't define, bound to nothing.
 //   - With --cross-check, which needs readelf: libc.so.6's exports against `readelf -W --dyn-syms` (name, version,
 //     type, binding and size; IFUNC as a function, GNU_UNIQUE as global) and its references, and the relocations of
-//     the crt objects and the archives' members, the static runtime's among them, against `readelf -W -r`: each one a
+//     the crt objects and the archives' members, both static runtimes' among them, against `readelf -W -r`: each one a
 //     fixup of its kind at its offset, against the symbol (or the section) readelf names, with its addend, and no other
 //     fixups.
 // Throughout, each object, archive and library is also read by its reader's vector path, its exact path and the reader
@@ -67,7 +73,7 @@
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, the paths' comparisons, the round trips, files made by hand, objects, archives,
-// shared libraries, linker scripts, page edges, the runtime (discovery and the static runtime among it), the
+// shared libraries, linker scripts, page edges, the runtime (discovery and the static runtimes among it), the
 // cross-check, and run_import_tests.
 
 #include <stdint.h>
@@ -2682,6 +2688,31 @@ static void import_test_cross_check(ImportTestTally* tally, const Runtime* runti
 static bool import_test_names(const Link* link, String8 bytes, const ImportObject* object, SymbolId symbol, const char* name);
 static void import_test_cross_check_relocations(ImportTestTally* tally, const Runtime* runtime, Arena* arena);
 
+// The names the linker of the runtime's kind defines among its global names, each marked the linker's, whether or not
+// the runtime refers to it, and no other name marked: by runtime_linker_names' kinds, for a static PIE _DYNAMIC but not
+// the IRELATIVE relocations' bounds, which a static executable's linker defines.
+static void import_test_linker_names(ImportTestTally* tally, const Runtime* runtime)
+{
+    const RuntimeNames* global_names = &runtime->global_names;
+    uint32_t linker_found = 0;
+    uint32_t linker_marked = 0;
+    uint32_t linker_count = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
+    {
+        const uint8_t* bytes = (const uint8_t*)runtime_linker_names[i].name;
+        const uint32_t length = (uint32_t)strlen(runtime_linker_names[i].name);
+        const uint32_t entry = runtime_find_global_name(global_names, bytes, length, link_hash(bytes, length));
+        const bool defined = (runtime_linker_names[i].kinds & BUSTER_RUNTIME_KIND_BIT(runtime->kind)) != 0;
+        linker_count += defined ? 1 : 0;
+        linker_found += defined && entry != 0 && global_names->linker[entry - 1] ? 1 : 0;
+    }
+    for (uint32_t e = 0; e < global_names->count; e += 1)
+    {
+        linker_marked += global_names->linker[e] ? 1 : 0;
+    }
+    import_test_expect(tally, linker_found == linker_count && linker_marked == linker_found, "the names the kind's linker defines, the linker's, and no other", linker_found);
+}
+
 static bool import_test_runtime(bool cross_check, Arena* arena)
 {
     ImportTestTally tally = {
@@ -2862,24 +2893,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
                            "atexit: a member's", 0);
         // Each name the linker defines, whether or not the runtime refers to it (only _GLOBAL_OFFSET_TABLE_ does), and no
         // other name.
-        uint32_t linker_found = 0;
-        uint32_t linker_marked = 0;
-        uint32_t linker_count = 0;
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
-        {
-            const uint8_t* bytes = (const uint8_t*)runtime_linker_names[i].name;
-            const uint32_t length = (uint32_t)strlen(runtime_linker_names[i].name);
-            const uint32_t entry = runtime_find_global_name(global_names, bytes, length, link_hash(bytes, length));
-            const bool defined = (runtime_linker_names[i].kinds & BUSTER_RUNTIME_KIND_BIT(runtime.kind)) != 0;
-            linker_count += defined ? 1 : 0;
-            linker_found += defined && entry != 0 && global_names->linker[entry - 1] ? 1 : 0;
-        }
-        for (uint32_t e = 0; e < global_names->count; e += 1)
-        {
-            linker_marked += global_names->linker[e] ? 1 : 0;
-        }
-        import_test_expect(&tally, linker_found == linker_count && linker_marked == linker_found,
-                           "_GLOBAL_OFFSET_TABLE_, _DYNAMIC and the arrays' bounds: the linker's", linker_found);
+        import_test_linker_names(&tally, &runtime);
         uint32_t referenced = 0;
         for (uint32_t e = 0; e < global_names->count; e += 1)
         {
@@ -2936,22 +2950,57 @@ static bool import_test_path_is(String8 path, const char* name)
     return path.length > length && path.pointer[path.length - length - 1] == '/' && memcmp(path.pointer + path.length - length, name, length) == 0;
 }
 
-// The static runtime (runtime_import_static on this system's files): what each crt object is for; the archives of
-// GCC's group, in its order, every member imported by both paths; the bindings of a few names; an IFUNC, an absolute
-// symbol, the priorities and the COMDAT groups libc.a and libgcc.a bring; each piece's references and groups as a scan of
-// its records finds them, each group's signature number equal exactly to those of the groups of the same signature; each
-// global name's definition and member; and with --cross-check, every relocation against readelf's.
-static bool import_test_static_runtime(bool cross_check, Arena* arena)
+// The crt objects of each static kind's runtime (import_test_static_runtime), by RuntimeObject.
+static const char* const import_test_static_objects[RUNTIME_KINDS][RUNTIME_OBJECTS] = {
+    [RUNTIME_KIND_STATIC] = {
+        [RUNTIME_OBJECT_START] = "crt1.o",
+        [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
+        [RUNTIME_OBJECT_BEGIN] = "crtbeginT.o",
+        [RUNTIME_OBJECT_END] = "crtend.o",
+        [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
+    },
+    [RUNTIME_KIND_STATIC_PIE] = {
+        [RUNTIME_OBJECT_START] = "rcrt1.o",
+        [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
+        [RUNTIME_OBJECT_BEGIN] = "crtbeginS.o",
+        [RUNTIME_OBJECT_END] = "crtendS.o",
+        [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
+    },
+};
+
+// The piece of the member of libc.a (the runtime's last archive) named `name`, or UINT32_MAX.
+static uint32_t import_test_libc_member(const Runtime* runtime, const char* name)
 {
+    const RuntimeArchive* libc = &runtime->archives[runtime->archive_count - 1];
+    uint32_t result = UINT32_MAX;
+    for (uint32_t m = libc->first_member; result == UINT32_MAX && m < libc->first_member + libc->archive.member_count; m += 1)
+    {
+        result = import_equal(runtime->members[m].name, name) ? RUNTIME_OBJECTS + m : UINT32_MAX;
+    }
+    return result;
+}
+
+// A static kind's runtime (runtime_import_static, or for RUNTIME_KIND_STATIC_PIE runtime_import_static_pie, on this
+// system's files): what each crt object is for; the archives of GCC's group, in its order, every member imported by
+// both paths; the bindings of a few names, as the kind binds them; the names the kind's linker defines among the global
+// names (import_test_linker_names); an IFUNC, an absolute symbol, the priorities and the COMDAT groups libc.a and
+// libgcc.a bring; each piece's references and groups as a scan of its records finds them, each group's signature number
+// equal exactly to those of the groups of the same signature; each global name's definition and member; and with
+// --cross-check, every relocation against readelf's.
+static bool import_test_static_runtime(RuntimeKind kind, bool cross_check, Arena* arena)
+{
+    const bool pie = kind == RUNTIME_KIND_STATIC_PIE;
+    const char* const* objects = import_test_static_objects[kind];
+    const char* const entry = pie ? "runtime_import_static_pie" : "runtime_import_static";
     ImportTestTally tally = {
-        .check = "static runtime",
+        .check = pie ? "static PIE runtime" : "static runtime",
     };
     Runtime runtime;
-    const RuntimeError error = runtime_import_static(&runtime);
-    import_test_expect(&tally, error == RUNTIME_ERROR_NONE, "runtime_import_static", (uint64_t)error);
+    const RuntimeError error = pie ? runtime_import_static_pie(&runtime) : runtime_import_static(&runtime);
+    import_test_expect(&tally, error == RUNTIME_ERROR_NONE && runtime.kind == kind, entry, (uint64_t)error);
     if (error != RUNTIME_ERROR_NONE)
     {
-        printf("  runtime_import_static failed: error %d, %s, import error %s at offset %llu (section %u, symbol %u, relocation %u, type %u), errno %d\n", (int)error,
+        printf("  %s failed: error %d, %s, import error %s at offset %llu (section %u, symbol %u, relocation %u, type %u), errno %d\n", entry, (int)error,
                runtime.failed_file, import_test_errors[runtime.import.error], (unsigned long long)runtime.import.offset, runtime.import.section, runtime.import.symbol,
                runtime.import.relocation, runtime.import.type, runtime.system_error);
     }
@@ -2968,16 +3017,26 @@ static bool import_test_static_runtime(bool cross_check, Arena* arena)
         const SymbolId init = import_test_runtime_symbol(&runtime, "_init", true);
         const SymbolId dso = import_test_runtime_symbol(&runtime, "__dso_handle", true);
         const SymbolId tmc = import_test_runtime_symbol(&runtime, "__TMC_END__", true);
-        import_test_expect(&tally, import_test_path_is(runtime.object_paths[RUNTIME_OBJECT_START], "crt1.o") && import_test_path_is(runtime.object_paths[RUNTIME_OBJECT_BEGIN], "crtbeginT.o") &&
-                                       import_test_path_is(runtime.object_paths[RUNTIME_OBJECT_END], "crtend.o"),
-                           "crt1.o, crtbeginT.o and crtend.o", 0);
+        char what[256];
+        bool found_objects = true;
+        for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
+        {
+            found_objects = found_objects && import_test_path_is(runtime.object_paths[i], objects[i]);
+        }
+        snprintf(what, sizeof(what), "%s, %s, %s, %s and %s", objects[RUNTIME_OBJECT_START], objects[RUNTIME_OBJECT_INIT_PROLOGUE], objects[RUNTIME_OBJECT_BEGIN],
+                 objects[RUNTIME_OBJECT_END], objects[RUNTIME_OBJECT_INIT_EPILOGUE]);
+        import_test_expect(&tally, found_objects, what, 0);
+        snprintf(what, sizeof(what), "_start in %s's .text", objects[RUNTIME_OBJECT_START]);
         import_test_expect(&tally, start != 0 && link->atoms.unit[link->symbols.atom[start]] == RUNTIME_OBJECT_START && link->atoms.class[link->symbols.atom[start]] == BUSTER_LINK_CLASS_TEXT,
-                           "_start in crt1.o's .text", 0);
+                           what, 0);
         import_test_expect(&tally, init != 0 && link->atoms.unit[link->symbols.atom[init]] == RUNTIME_OBJECT_INIT_PROLOGUE && link->atoms.class[link->symbols.atom[init]] == BUSTER_LINK_CLASS_INIT,
                            "_init in crti.o's .init", 0);
-        import_test_expect(&tally, dso != 0 && link->atoms.unit[link->symbols.atom[dso]] == RUNTIME_OBJECT_BEGIN, "__dso_handle in crtbeginT.o", 0);
-        import_test_expect(&tally, tmc != 0 && link->atoms.unit[link->symbols.atom[tmc]] == RUNTIME_OBJECT_END, "__TMC_END__ in crtend.o", 0);
-        import_test_expect(&tally, runtime.abi_note.length >= 16, "crt1.o's ABI note", runtime.abi_note.length);
+        snprintf(what, sizeof(what), "__dso_handle in %s", objects[RUNTIME_OBJECT_BEGIN]);
+        import_test_expect(&tally, dso != 0 && link->atoms.unit[link->symbols.atom[dso]] == RUNTIME_OBJECT_BEGIN, what, 0);
+        snprintf(what, sizeof(what), "__TMC_END__ in %s", objects[RUNTIME_OBJECT_END]);
+        import_test_expect(&tally, tmc != 0 && link->atoms.unit[link->symbols.atom[tmc]] == RUNTIME_OBJECT_END, what, 0);
+        snprintf(what, sizeof(what), "%s's ABI note", objects[RUNTIME_OBJECT_START]);
+        import_test_expect(&tally, runtime.abi_note.length >= 16, what, runtime.abi_note.length);
         // GCC's group, in its order, with each archive's members one after another.
         const uint32_t last = runtime.archive_count - 1;
         bool archived = runtime.archive_count >= 3 && import_test_path_is(runtime.archives[0].path, "libgcc.a") && import_test_path_is(runtime.archives[1].path, "libgcc_eh.a") &&
@@ -2990,7 +3049,12 @@ static bool import_test_static_runtime(bool cross_check, Arena* arena)
         }
         import_test_expect(&tally, archived && members == runtime.member_count && runtime.member_unit == RUNTIME_OBJECTS, "libgcc.a, libgcc_eh.a, libatomic.a if GCC has it, and libc.a",
                            runtime.archive_count);
-        // The bindings: a libc.a member's, the linker's, the program's, nothing, and no shared library's.
+        // The bindings: a libc.a member's, a crt object's, the linker's, the program's, nothing, and no shared library's.
+        // A static PIE's linker doesn't define the IRELATIVE relocations' bounds (its IFUNCs' relocations are in
+        // .rela.dyn, which its startup applies with the others), so libc.a's weak references to them bind to nothing;
+        // and rcrt1.o doesn't define _dl_relocate_static_pie, as crt1.o does (an empty one), so libc.a's member that
+        // relocates the executable defines it, whose _DYNAMIC is the linker's. RUNTIME_BINDING_NONE: not checked (a
+        // static executable's _DYNAMIC, which only that member refers to, and which never joins one).
         const char* const binding_names[] = {
             "main",
             "__libc_start_main",
@@ -2999,35 +3063,60 @@ static bool import_test_static_runtime(bool cross_check, Arena* arena)
             "_GLOBAL_OFFSET_TABLE_",
             "__rela_iplt_start",
             "__rela_iplt_end",
+            "_dl_relocate_static_pie",
+            "_DYNAMIC",
         };
-        const RuntimeBindingKind binding_kinds[] = {
-            RUNTIME_BINDING_PROGRAM,
-            RUNTIME_BINDING_RUNTIME,
-            RUNTIME_BINDING_NOWHERE,
-            RUNTIME_BINDING_RUNTIME,
-            RUNTIME_BINDING_LINKER,
-            RUNTIME_BINDING_LINKER,
-            RUNTIME_BINDING_LINKER,
+        const RuntimeBindingKind binding_kinds[2][BUSTER_ARRAY_LENGTH(binding_names)] = {
+            {
+                RUNTIME_BINDING_PROGRAM,
+                RUNTIME_BINDING_RUNTIME,
+                RUNTIME_BINDING_NOWHERE,
+                RUNTIME_BINDING_RUNTIME,
+                RUNTIME_BINDING_LINKER,
+                RUNTIME_BINDING_LINKER,
+                RUNTIME_BINDING_LINKER,
+                RUNTIME_BINDING_RUNTIME,
+                RUNTIME_BINDING_NONE,
+            },
+            {
+                RUNTIME_BINDING_PROGRAM,
+                RUNTIME_BINDING_RUNTIME,
+                RUNTIME_BINDING_NOWHERE,
+                RUNTIME_BINDING_RUNTIME,
+                RUNTIME_BINDING_LINKER,
+                RUNTIME_BINDING_NOWHERE,
+                RUNTIME_BINDING_NOWHERE,
+                RUNTIME_BINDING_RUNTIME,
+                RUNTIME_BINDING_LINKER,
+            },
         };
         const uint32_t libc_first = runtime.archives[last].first_member;
+        // The piece whose definition of _dl_relocate_static_pie the references bind to: crt1.o's, or a static PIE's
+        // dl-reloc-static-pie.o, libc.a's.
+        const uint32_t relocator = pie ? import_test_libc_member(&runtime, "dl-reloc-static-pie.o") : RUNTIME_OBJECT_START;
         for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(binding_names); b += 1)
         {
+            const RuntimeBindingKind expected = binding_kinds[pie ? 1 : 0][b];
             const uint64_t length = strlen(binding_names[b]);
             uint32_t references = 0;
             bool bound = true;
-            for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+            for (SymbolId symbol = 1; expected != RUNTIME_BINDING_NONE && symbol < link->symbols.count; symbol += 1)
             {
                 const NameId name = link->symbols.name[symbol];
                 const bool reference = name != 0 && link->symbols.atom[symbol] == 0 && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE &&
                                        link->names.length[name] == length && memcmp(link->names.bytes[name], binding_names[b], length) == 0;
                 const RuntimeBinding binding = runtime.bindings[symbol];
                 const uint32_t piece = binding.symbol != 0 ? import_test_symbol_piece(&runtime, binding.symbol) : 0;
-                // __libc_start_main is a member of libc.a's, __TMC_END__ crtend.o's.
-                const bool where = b == 1 ? piece >= RUNTIME_OBJECTS + libc_first : b == 3 ? binding.symbol == tmc : true;
+                // __libc_start_main is a member of libc.a's, __TMC_END__ crtend.o's (or crtendS.o's), and
+                // _dl_relocate_static_pie the relocator's.
+                const bool where = b == 1 ? piece >= RUNTIME_OBJECTS + libc_first : b == 3 ? binding.symbol == tmc : b == 7 ? piece == relocator : true;
                 references += reference ? 1 : 0;
-                bound = bound && (!reference || (binding.kind == binding_kinds[b] && where));
+                bound = bound && (!reference || (binding.kind == expected && where));
             }
-            import_test_expect(&tally, references != 0 && bound, binding_names[b], references);
+            if (expected != RUNTIME_BINDING_NONE)
+            {
+                import_test_expect(&tally, references != 0 && bound, binding_names[b], references);
+            }
         }
         bool shared = false;
         for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
@@ -3035,6 +3124,7 @@ static bool import_test_static_runtime(bool cross_check, Arena* arena)
             shared = shared || runtime.bindings[symbol].kind == RUNTIME_BINDING_SHARED;
         }
         import_test_expect(&tally, !shared, "no name bound to a shared library", 0);
+        import_test_linker_names(&tally, &runtime);
         // An IFUNC, an absolute symbol and the priorities.
         const SymbolId memcpy_symbol = import_test_runtime_symbol(&runtime, "memcpy", true);
         import_test_expect(&tally, memcpy_symbol != 0 && (link->symbols.flags[memcpy_symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_IFUNC &&
@@ -3674,7 +3764,8 @@ static int run_import_tests(int argc, char** argv)
         passed = import_test_edges(seed, &arena) && passed;
         passed = import_test_discovery() && passed;
         passed = import_test_runtime(cross_check, &arena) && passed;
-        passed = import_test_static_runtime(cross_check, &arena) && passed;
+        passed = import_test_static_runtime(RUNTIME_KIND_STATIC, cross_check, &arena) && passed;
+        passed = import_test_static_runtime(RUNTIME_KIND_STATIC_PIE, cross_check, &arena) && passed;
         arena_release(&arena);
         result = passed ? 0 : 1;
     }

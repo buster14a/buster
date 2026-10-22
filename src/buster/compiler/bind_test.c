@@ -51,8 +51,9 @@
 //     indices in the group's order until a pass loads nothing, rather than reading binding's references. Then
 //     link_check; one symbol per global name and none of a shared library; every fixup's target defined, absolute,
 //     the static linker's, a weak reference to nothing, or __tls_get_addr, left to the relaxation; main the program's,
-//     __libc_start_main a member's, _init crti.o's and __dso_handle crtbeginT.o's; each joined object's atoms, in
-//     link order, but those of a COMDAT group whose signature an object before it has; and their priorities.
+//     __libc_start_main a member's, _init crti.o's, __dso_handle crtbeginT.o's and _dl_relocate_static_pie crt1.o's
+//     (an empty one); each joined object's atoms, in link order, but those of a COMDAT group whose signature an object
+//     before it has; and their priorities.
 //   - Static rules, on links made by hand: a strong reference to a name nothing defines (an error naming it); strong
 //     and weak references to __tls_get_addr (left undefined); the static linker's names (the linker's); weak and
 //     strong references to puts (the weak one binds to its member only if the closure loads it for another reason);
@@ -66,11 +67,17 @@
 //     model predicts. And five C programs that cc compiles (hello, stdio, threads, jumps and weak-puts), each
 //     imported as the program, bound and checked as the static programs are, and linked by both linkers, with the
 //     same members, to run with the program's status.
+// Then the static programs, and with --cross-check the C programs (compiled with -fPIE), against this system's static
+// PIE's runtime (runtime_import_static_pie), by both paths, which must make the same link and join the same members,
+// checked as against the static runtime: the members the oracle loads, in which rcrt1.o, which doesn't define
+// _dl_relocate_static_pie, makes libc.a's dl-reloc-static-pie.o join; _dl_relocate_static_pie that member's, its
+// _DYNAMIC the linker's, and __dso_handle crtbeginS.o's; and with --cross-check, each linked by cc -static-pie with GNU
+// ld and with lld, which must load the same members and run as the model predicts or with the program's status.
 // The objects and programs go in a new directory under $TMPDIR (or /tmp), removed at the end unless --keep. The exit
 // status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, the programs and their comparisons, the programs' checks, the names, links made by
-// hand, the rules, the atexit program, the cross-check, the linkers' cases, the checks, the static runtime, and
+// hand, the rules, the atexit program, the cross-check, the linkers' cases, the checks, the static runtimes, and
 // run_bind_tests.
 
 #include <stdint.h>
@@ -1303,7 +1310,8 @@ static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, Bi
     program->bound = built && (!bound || bind_end(&test->bind, &test->link)) && link_check(&test->link) == LINK_ERROR_NONE;
 }
 
-// The index of libc_nonshared.a's member named `name`, or the member count.
+// The index of the runtime's first member named `name` (libc_nonshared.a's, or the static runtimes' archives'), or the
+// member count.
 static uint32_t bind_test_member(const Runtime* runtime, const char* name)
 {
     uint32_t result = runtime->member_count;
@@ -2176,7 +2184,11 @@ static bool bind_test_atexit_cross_check(const Runtime* runtime, const char* dir
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The static runtime
+// The static runtimes
+//
+// A static executable's runtime (runtime_import_static) and a static PIE's (runtime_import_static_pie), which share
+// libc.a and the rest of GCC's group: the programs' checks below take either, by its kind, and the rules are the static
+// executable's (bind_test_static_rules).
 
 // Whether bit `index` of a set is set, and setting it.
 static bool bind_test_has(const uint64_t* bits, uint32_t index)
@@ -2214,12 +2226,13 @@ static void bind_test_static_note(const Runtime* runtime, const Link* link, Symb
     }
 }
 
-// The members GNU ld loads for `program`, a link not bound, from the static runtime (the closure's oracle, which reads
+// The members GNU ld loads for `program`, a link not bound, from a static runtime (the closure's oracle, which reads
 // the archives' symbol indices rather than binding's references and members): the indices scanned in the group's
 // order, again and again until a whole pass loads nothing, each entry whose name the link refers to strongly and
 // nothing in it defines loading its member, whose definitions and strong references then count too, as GNU ld's
-// elf_link_add_archive_symbols scans. The link is the program, crt1.o, crti.o and crtbeginT.o, and the linker's names.
-// A bit per member in `loaded`.
+// elf_link_add_archive_symbols scans. The link is the program, the crt objects before it (crt1.o, crti.o and
+// crtbeginT.o, or a static PIE's rcrt1.o, crti.o and crtbeginS.o) and the names the kind's linker defines. A bit per
+// member in `loaded`.
 static void bind_test_static_expected(const Runtime* runtime, const Link* program, uint64_t* loaded, Arena* arena)
 {
     const RuntimeNames* names = &runtime->global_names;
@@ -2309,27 +2322,30 @@ static bool bind_test_unique_globals(const Link* link, Arena* arena)
     return result;
 }
 
-// What a fixup's target can be in a link bound against the static runtime: defined in an atom, absolute, a name the
-// static linker defines, a weak reference to nothing, or __tls_get_addr, left to the relaxation.
-static bool bind_test_static_bound(const Link* link, SymbolId symbol)
+// What a fixup's target can be in a link bound against a static runtime of `kind`: defined in an atom, absolute, a name
+// the kind's linker defines, a weak reference to nothing, or __tls_get_addr, left to the relaxation.
+static bool bind_test_static_bound(const Link* link, RuntimeKind kind, SymbolId symbol)
 {
     const LinkSymbols* symbols = &link->symbols;
     const uint8_t source = symbols->source[symbol];
     const NameId name = symbols->name[symbol];
     const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
-    const bool linker = source == BUSTER_LINK_SOURCE_LINKER && name != 0 && runtime_linker_name(RUNTIME_KIND_STATIC, link->names.bytes[name], link->names.length[name]);
+    const bool linker = source == BUSTER_LINK_SOURCE_LINKER && name != 0 && runtime_linker_name(kind, link->names.bytes[name], link->names.length[name]);
     const bool relaxed = source == BUSTER_LINK_SOURCE_NONE && name != 0 && bind_relaxed_name(link, name);
     return symbols->atom[symbol] != 0 || source == BUSTER_LINK_SOURCE_ABSOLUTE || linker || (source == BUSTER_LINK_SOURCE_NONE && weak) || relaxed;
 }
 
-// Checks a link bound against the static runtime, whose program's units come before `unit_base`: the members the
-// oracle (`expected`) loads joined, and no others; link_check; one symbol per global name, and none of a shared
-// library's; every fixup's target bound (bind_test_static_bound); main the program's, and __libc_start_main, _init and
-// __dso_handle bound as GNU ld binds them; each joined object's atoms but those of the COMDAT groups of a signature
-// that an object before it in link order has (the program has none), and their priorities.
+// Checks a link bound against a static runtime (a static executable's or a static PIE's), whose program's units come
+// before `unit_base`: the members the oracle (`expected`) loads joined, and no others; link_check; one symbol per
+// global name, and none of a shared library's; every fixup's target bound (bind_test_static_bound); main the
+// program's, and __libc_start_main, _init, __dso_handle and _dl_relocate_static_pie bound as GNU ld binds them (the
+// last crt1.o's empty one, or for a static PIE the member that relocates the executable, dl-reloc-static-pie.o, whose
+// _DYNAMIC is the linker's); each joined object's atoms but those of the COMDAT groups of a signature that an object
+// before it in link order has (the program has none), and their priorities.
 static void bind_test_static_structure(BindTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, const uint64_t* expected, uint32_t unit_base,
                                        uint32_t program_priorities, Arena* arena)
 {
+    const bool pie = runtime->kind == RUNTIME_KIND_STATIC_PIE;
     const LinkSymbols* symbols = &link->symbols;
     const uint32_t words = (runtime->member_count + 63) / 64;
     bool members = true;
@@ -2349,7 +2365,7 @@ static void bind_test_static_structure(BindTestTally* tally, Link* link, const B
     uint64_t unbound = 0;
     for (FixupId fixup = 1; fixup < link->fixups.count; fixup += 1)
     {
-        unbound += bind_test_static_bound(link, link->fixups.target[fixup]) ? 0 : 1;
+        unbound += bind_test_static_bound(link, runtime->kind, link->fixups.target[fixup]) ? 0 : 1;
     }
     bind_test_expect(tally, unbound == 0, "every fixup's target bound", unbound);
     const SymbolId main_symbol = bind_test_global(link, "main");
@@ -2363,9 +2379,24 @@ static void bind_test_static_structure(BindTestTally* tally, Link* link, const B
     const SymbolId init = bind_test_global(link, "_init");
     bind_test_expect(tally, init != 0 && symbols->atom[init] != 0 && link->atoms.unit[symbols->atom[init]] == unit_base + RUNTIME_OBJECT_INIT_PROLOGUE, "_init, crti.o's", init);
     const SymbolId dso = bind_test_global(link, "__dso_handle");
-    bind_test_expect(tally, dso == 0 || (symbols->atom[dso] != 0 && link->atoms.unit[symbols->atom[dso]] == unit_base + RUNTIME_OBJECT_BEGIN), "__dso_handle, crtbeginT.o's", dso);
-    // Each joined object's atoms, in link order: crt1.o, crti.o and crtbeginT.o, the members in archive order, crtend.o
-    // and crtn.o.
+    bind_test_expect(tally, dso == 0 || (symbols->atom[dso] != 0 && link->atoms.unit[symbols->atom[dso]] == unit_base + RUNTIME_OBJECT_BEGIN),
+                     pie ? "__dso_handle, crtbeginS.o's" : "__dso_handle, crtbeginT.o's", dso);
+    // _dl_relocate_static_pie, which __libc_start_main's member calls: crt1.o's empty one, or for a static PIE, whose
+    // rcrt1.o has none, the definition of libc.a's member that relocates it, which joins.
+    const SymbolId relocate = bind_test_global(link, "_dl_relocate_static_pie");
+    const AtomId relocate_atom = relocate != 0 ? symbols->atom[relocate] : 0;
+    const uint32_t relocator = bind_test_member(runtime, "dl-reloc-static-pie.o");
+    const uint32_t relocate_unit = pie ? unit_base + runtime->member_unit + relocator : unit_base + RUNTIME_OBJECT_START;
+    bind_test_expect(tally, relocate_atom != 0 && link->atoms.unit[relocate_atom] == relocate_unit && (!pie || relocator < runtime->member_count),
+                     pie ? "_dl_relocate_static_pie, dl-reloc-static-pie.o's" : "_dl_relocate_static_pie, crt1.o's", relocate);
+    if (pie)
+    {
+        const SymbolId dynamic = bind_test_global(link, "_DYNAMIC");
+        bind_test_expect(tally, dynamic != 0 && symbols->atom[dynamic] == 0 && symbols->source[dynamic] == BUSTER_LINK_SOURCE_LINKER, "_DYNAMIC, the linker's", dynamic);
+    }
+    // Each joined object's atoms, in link order: the crt objects before the program (crt1.o, crti.o and crtbeginT.o, or
+    // rcrt1.o, crti.o and crtbeginS.o), the members in archive order, and those after it (crtend.o or crtendS.o, and
+    // crtn.o).
     const uint64_t length = arena->length;
     const uint32_t piece_count = RUNTIME_OBJECTS + runtime->member_count;
     uint32_t* atoms = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)piece_count + 1);
@@ -2526,11 +2557,13 @@ static bool bind_test_same_static_members(String8 text, const Bind* bind, const 
     return result && listed == joined;
 }
 
-// Links the objects at `paths` with `cc -static` by GNU ld (with --trace twice) and by lld (with --why-extract): each must
-// link, load the members that joined and no others, and run with `status`, or print `output` if it isn't 0.
+// Links the objects at `paths` with `cc -static`, or against a static PIE's runtime `cc -static-pie`, by GNU ld (with
+// --trace twice) and by lld (with --why-extract): each must link, load the members that joined and no others, and run
+// with `status`, or print `output` if it isn't 0.
 static void bind_test_static_linkers(BindTestTally* tally, const Bind* bind, const Runtime* runtime, char** paths, uint32_t count, const char* directory, const char* name,
                                      const char* extra, int status, const uint8_t* output, uint64_t output_bytes, bool keep, Arena* arena)
 {
+    const bool pie = runtime->kind == RUNTIME_KIND_STATIC_PIE;
     const uint64_t length = arena->length;
     for (uint32_t linker = 0; linker < 2; linker += 1)
     {
@@ -2548,7 +2581,7 @@ static void bind_test_static_linkers(BindTestTally* tally, const Bind* bind, con
         char* arguments[BUSTER_BIND_TEST_PATH_BYTES];
         uint32_t used = 0;
         arguments[used++] = "cc";
-        arguments[used++] = "-static";
+        arguments[used++] = pie ? "-static-pie" : "-static";
         arguments[used++] = lld ? "-fuse-ld=lld" : "-Wl,--trace,--trace";
         arguments[used++] = lld ? option : "-o";
         arguments[used++] = lld ? "-o" : program;
@@ -2563,7 +2596,17 @@ static void bind_test_static_linkers(BindTestTally* tally, const Bind* bind, con
         arguments[used] = 0;
         // GNU ld's trace goes to standard output.
         const int linked = object_test_run(arguments, lld ? out : listing, err);
-        bind_test_expect(tally, linked == 0, lld ? "lld links it with -static" : "GNU ld links it with -static", (uint64_t)linked);
+        const char* const linked_names[2][2] = {
+            {
+                "GNU ld links it with -static",
+                "lld links it with -static",
+            },
+            {
+                "GNU ld links it with -static-pie",
+                "lld links it with -static-pie",
+            },
+        };
+        bind_test_expect(tally, linked == 0, linked_names[pie ? 1 : 0][linker], (uint64_t)linked);
         const String8 members = linked == 0 ? object_test_read_file(arena, listing) : (String8){ 0 };
         bind_test_expect(tally, bind_test_same_static_members(members, bind, runtime, arena), lld ? "lld's members" : "GNU ld's members", 0);
         char* run[] = { program, 0 };
@@ -2582,13 +2625,15 @@ static void bind_test_static_linkers(BindTestTally* tally, const Bind* bind, con
     }
 }
 
-// test-link's sets that call libc, bound against the static runtime by both paths: the same links and members, which
-// must be the oracle's, checked as bind_test_static_structure does; with the cross-check, the program's own objects
-// linked by GNU ld and lld with -static, which must load the same members and run as the model predicts.
+// test-link's sets that call libc, bound against a static runtime (a static executable's or a static PIE's) by both
+// paths: the same links and members, which must be the oracle's, checked as bind_test_static_structure does; with the
+// cross-check, the program's own objects linked by GNU ld and lld with -static (or -static-pie), which must load the
+// same members and run as the model predicts.
 static bool bind_test_static_programs(const Runtime* runtime, uint64_t seed, bool cross_check, const char* directory, bool keep, Arena* arena)
 {
+    const bool pie = runtime->kind == RUNTIME_KIND_STATIC_PIE;
     BindTestTally tally = {
-        .check = "static programs",
+        .check = pie ? "static PIE programs" : "static programs",
     };
     LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
     link_test_program_options(options, seed, 1);
@@ -2630,7 +2675,7 @@ static bool bind_test_static_programs(const Runtime* runtime, uint64_t seed, boo
                     paths[unit] = path_bytes + (uint64_t)unit * BUSTER_BIND_TEST_PATH_BYTES;
                 }
                 char name[BUSTER_BIND_TEST_PATH_BYTES];
-                snprintf(name, sizeof(name), "static-%s", link_test_program_directories[i]);
+                snprintf(name, sizeof(name), "%s-%s", pie ? "static-pie" : "static", link_test_program_directories[i]);
                 written = written && bind_test_write_objects(&own.link, options[i].units, directory, name, paths, arena);
                 bind_test_expect(&tally, written, "the program's objects written", i);
                 if (written)
@@ -2746,10 +2791,16 @@ static const BindTestStaticSource bind_test_static_sources[] = {
     },
 };
 
+// The C programs of bind_test_static_sources, each compiled by cc (with -fPIE for a static PIE's runtime), imported as
+// the program, bound by both paths against a static runtime (a static executable's or a static PIE's) and checked as
+// bind_test_static_structure does, with the members the oracle loads; then linked by GNU ld and lld with -static (or
+// -static-pie), which must load the same members and run with the program's status.
 static bool bind_test_static_compiled(const Runtime* runtime, const char* directory, bool keep, Arena* arena)
 {
+    const bool pie = runtime->kind == RUNTIME_KIND_STATIC_PIE;
+    const char* const prefix = pie ? "static-pie" : "static";
     BindTestTally tally = {
-        .check = "static compiled programs",
+        .check = pie ? "static PIE compiled programs" : "static compiled programs",
     };
     const uint32_t words = (runtime->member_count + 63) / 64;
     uint64_t* expected = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
@@ -2757,21 +2808,36 @@ static bool bind_test_static_compiled(const Runtime* runtime, const char* direct
     {
         const BindTestStaticSource* program = &bind_test_static_sources[s];
         const uint64_t length = arena->length;
+        char name[BUSTER_BIND_TEST_PATH_BYTES];
         char source_path[BUSTER_BIND_TEST_PATH_BYTES];
         char object_path[BUSTER_BIND_TEST_PATH_BYTES];
         char out[BUSTER_BIND_TEST_PATH_BYTES];
         char err[BUSTER_BIND_TEST_PATH_BYTES];
-        snprintf(source_path, sizeof(source_path), "%s/static-%s.c", directory, program->name);
-        snprintf(object_path, sizeof(object_path), "%s/static-%s.o", directory, program->name);
-        snprintf(out, sizeof(out), "%s/static-%s.cc.out", directory, program->name);
-        snprintf(err, sizeof(err), "%s/static-%s.cc.err", directory, program->name);
+        snprintf(name, sizeof(name), "%s-%s", prefix, program->name);
+        snprintf(source_path, sizeof(source_path), "%s/%s.c", directory, name);
+        snprintf(object_path, sizeof(object_path), "%s/%s.o", directory, name);
+        snprintf(out, sizeof(out), "%s/%s.cc.out", directory, name);
+        snprintf(err, sizeof(err), "%s/%s.cc.err", directory, name);
         FILE* file = fopen(source_path, "w");
         const bool written = file != 0 && fputs(program->source, file) >= 0;
         if (file != 0)
         {
             fclose(file);
         }
-        char* compile[] = { "cc", "-O2", "-c", "-o", object_path, source_path, (char*)program->option, 0 };
+        // cc, -O2, -fPIE, -c, -o, the object, the source, the option and the null after them.
+        char* compile[9];
+        uint32_t used = 0;
+        compile[used++] = "cc";
+        compile[used++] = "-O2";
+        compile[used] = "-fPIE";
+        used += pie ? 1 : 0;
+        compile[used++] = "-c";
+        compile[used++] = "-o";
+        compile[used++] = object_path;
+        compile[used++] = source_path;
+        compile[used] = (char*)program->option;
+        used += program->option != 0 ? 1 : 0;
+        compile[used] = 0;
         const bool compiled = written && object_test_run(compile, out, err) == 0;
         bind_test_expect(&tally, compiled, program->name, s);
         const String8 object = compiled ? object_test_read_file(arena, object_path) : (String8){ 0 };
@@ -2807,7 +2873,7 @@ static bool bind_test_static_compiled(const Runtime* runtime, const char* direct
             printf("  %s: %u members joined; %u atoms, %u symbols, %u fixups\n", program->name, joined, vector.link.atoms.count - 1, vector.link.symbols.count - 1,
                    vector.link.fixups.count - 1);
             char* paths[] = { object_path };
-            bind_test_static_linkers(&tally, &vector.bind, runtime, paths, 1, directory, program->name, program->option, status, 0, 0, keep, arena);
+            bind_test_static_linkers(&tally, &vector.bind, runtime, paths, 1, directory, name, program->option, status, 0, 0, keep, arena);
         }
         // bind_test_static_import made both links, whether or not they imported.
         if (object.pointer != 0)
@@ -2827,11 +2893,15 @@ static bool bind_test_static_compiled(const Runtime* runtime, const char* direct
     return bind_test_report(&tally);
 }
 
-// The rules a static runtime adds, on links made by hand, each bound by both paths, which must make the same link:
+// The rules a static runtime adds, on links made by hand, each bound by both paths, which must make the same link, against
+// a static executable's runtime and a static PIE's (whose start object, crt1.o's here, is rcrt1.o):
 //   - a strong reference to a name nothing defines: an error naming it;
 //   - strong and weak references to __tls_get_addr: bound, the strong one left undefined for the relaxation;
-//   - references to the static linker's names (__ehdr_start, __rela_iplt_start and __rela_iplt_end, _end, etext): the
-//     linker's;
+//   - references to the kind's linker's names (__ehdr_start, _end and etext, with a static executable's IRELATIVE
+//     relocations' bounds, __rela_iplt_start and __rela_iplt_end, or a static PIE's _DYNAMIC and
+//     __preinit_array_start): the linker's;
+//   - a strong reference to a name only the other kind's linker defines (a static executable's _DYNAMIC, a static
+//     PIE's __rela_iplt_start, as GNU ld's and lld's leave them): an error naming it;
 //   - a weak reference to puts: bound to puts's member's definition if the closure loads it for another reason (GNU
 //     ld's archive scan, bind_test_static_expected, says), and otherwise to nothing, without the member; and a strong
 //     one, which loads it;
@@ -2847,6 +2917,7 @@ typedef enum BindTestStaticRule
     BIND_TEST_STATIC_NOWHERE,
     BIND_TEST_STATIC_TLS_GET_ADDR,
     BIND_TEST_STATIC_LINKER_NAMES,
+    BIND_TEST_STATIC_OTHER_KIND,
     BIND_TEST_STATIC_WEAK_PUTS,
     BIND_TEST_STATIC_STRONG_PUTS,
     BIND_TEST_STATIC_WEAK_START_MAIN,
@@ -2865,6 +2936,7 @@ static const char* const bind_test_static_rule_names[BIND_TEST_STATIC_RULES] = {
     [BIND_TEST_STATIC_NOWHERE] = "a strong reference to a name nothing defines",
     [BIND_TEST_STATIC_TLS_GET_ADDR] = "strong and weak references to __tls_get_addr",
     [BIND_TEST_STATIC_LINKER_NAMES] = "references to the static linker's names",
+    [BIND_TEST_STATIC_OTHER_KIND] = "a strong reference to a name only the other static kind's linker defines",
     [BIND_TEST_STATIC_WEAK_PUTS] = "a weak reference to puts",
     [BIND_TEST_STATIC_STRONG_PUTS] = "a strong reference to puts",
     [BIND_TEST_STATIC_WEAK_START_MAIN] = "a weak definition of __libc_start_main",
@@ -2874,12 +2946,29 @@ static const char* const bind_test_static_rule_names[BIND_TEST_STATIC_RULES] = {
     [BIND_TEST_STATIC_BLOCKED_MANY] = "weak definitions of 24 names that the members refer to",
 };
 
-static const char* const bind_test_static_linker_names[] = {
-    "__ehdr_start",
+// The kind's linker's names the rule refers to, a static executable's first, then a static PIE's.
+#define BUSTER_BIND_TEST_STATIC_LINKER_NAMES 5
+static const char* const bind_test_static_linker_names[2][BUSTER_BIND_TEST_STATIC_LINKER_NAMES] = {
+    {
+        "__ehdr_start",
+        "__rela_iplt_start",
+        "__rela_iplt_end",
+        "_end",
+        "etext",
+    },
+    {
+        "__ehdr_start",
+        "_DYNAMIC",
+        "__preinit_array_start",
+        "_end",
+        "etext",
+    },
+};
+
+// A name only the other static kind's linker defines, a static executable's first.
+static const char* const bind_test_static_other_kind_names[2] = {
+    "_DYNAMIC",
     "__rela_iplt_start",
-    "__rela_iplt_end",
-    "_end",
-    "etext",
 };
 
 // The first global symbol of a member that is absolute, or 0.
@@ -2903,10 +2992,15 @@ static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtim
     result = main != 0 && bind_test_define(test, main);
     const uint8_t strong = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE;
     const uint8_t weak = BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_NOTYPE;
-    memset(symbols, 0, BUSTER_ARRAY_LENGTH(bind_test_static_linker_names) * sizeof(SymbolId));
+    const bool pie = runtime->kind == RUNTIME_KIND_STATIC_PIE;
+    memset(symbols, 0, BUSTER_BIND_TEST_STATIC_LINKER_NAMES * sizeof(SymbolId));
     if (result && rule == BIND_TEST_STATIC_NOWHERE)
     {
         symbols[0] = bind_test_symbol(test, "buster_static_nowhere", strong, BUSTER_LINK_SOURCE_NONE);
+    }
+    else if (result && rule == BIND_TEST_STATIC_OTHER_KIND)
+    {
+        symbols[0] = bind_test_symbol(test, bind_test_static_other_kind_names[pie], strong, BUSTER_LINK_SOURCE_NONE);
     }
     else if (result && rule == BIND_TEST_STATIC_TLS_GET_ADDR)
     {
@@ -2914,9 +3008,9 @@ static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtim
     }
     else if (result && rule == BIND_TEST_STATIC_LINKER_NAMES)
     {
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bind_test_static_linker_names); i += 1)
+        for (uint32_t i = 0; i < BUSTER_BIND_TEST_STATIC_LINKER_NAMES; i += 1)
         {
-            symbols[i] = bind_test_symbol(test, bind_test_static_linker_names[i], strong, BUSTER_LINK_SOURCE_NONE);
+            symbols[i] = bind_test_symbol(test, bind_test_static_linker_names[pie][i], strong, BUSTER_LINK_SOURCE_NONE);
         }
     }
     else if (result && (rule == BIND_TEST_STATIC_WEAK_PUTS || rule == BIND_TEST_STATIC_STRONG_PUTS))
@@ -2991,7 +3085,7 @@ static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtim
 static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
 {
     BindTestTally tally = {
-        .check = "static rules",
+        .check = runtime->kind == RUNTIME_KIND_STATIC_PIE ? "static PIE rules" : "static rules",
     };
     const uint32_t words = (runtime->member_count + 63) / 64;
     uint64_t* expected = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
@@ -3003,8 +3097,8 @@ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
         const char* what = bind_test_static_rule_names[r];
         BindTestLink vector;
         BindTestLink exact;
-        SymbolId symbols[BUSTER_ARRAY_LENGTH(bind_test_static_linker_names)];
-        SymbolId exact_symbols[BUSTER_ARRAY_LENGTH(bind_test_static_linker_names)];
+        SymbolId symbols[BUSTER_BIND_TEST_STATIC_LINKER_NAMES];
+        SymbolId exact_symbols[BUSTER_BIND_TEST_STATIC_LINKER_NAMES];
         bind_test_static_rule_link(&vector, runtime, rule, BIND_PATH_VECTOR, expected, arena, symbols);
         bind_test_static_rule_link(&exact, runtime, rule, BIND_PATH_EXACT, exact_expected, arena, exact_symbols);
         const Link* link = &vector.link;
@@ -3017,7 +3111,7 @@ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
             members = members && vector.bind.members_joined[w] == expected[w];
         }
         bool holds = false;
-        if (rule == BIND_TEST_STATIC_NOWHERE)
+        if (rule == BIND_TEST_STATIC_NOWHERE || rule == BIND_TEST_STATIC_OTHER_KIND)
         {
             holds = vector.bind.error == BIND_ERROR_UNDEFINED && symbol != 0 && vector.bind.name == columns->name[symbol];
         }
@@ -3029,7 +3123,7 @@ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
         else if (rule == BIND_TEST_STATIC_LINKER_NAMES)
         {
             holds = vector.bind.error == BIND_ERROR_NONE && members;
-            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bind_test_static_linker_names); i += 1)
+            for (uint32_t i = 0; i < BUSTER_BIND_TEST_STATIC_LINKER_NAMES; i += 1)
             {
                 holds = holds && symbols[i] != 0 && columns->source[symbols[i]] == BUSTER_LINK_SOURCE_LINKER && columns->atom[symbols[i]] == 0;
             }
@@ -3152,6 +3246,21 @@ static int run_bind_tests(int argc, char** argv)
             passed = bind_test_static_compiled(&static_runtime, directory, keep, &arena) && passed;
         }
         runtime_release(&static_runtime);
+        // The static PIE's runtime: the same archives behind rcrt1.o, crtbeginS.o and crtendS.o.
+        Runtime static_pie_runtime;
+        const RuntimeError static_pie_imported = runtime_import_static_pie(&static_pie_runtime);
+        printf("%s", static_pie_imported != RUNTIME_ERROR_NONE ? "static PIE programs: the static PIE's runtime didn't import\n" : "");
+        passed = static_pie_imported == RUNTIME_ERROR_NONE && passed;
+        if (static_pie_imported == RUNTIME_ERROR_NONE)
+        {
+            passed = bind_test_static_programs(&static_pie_runtime, seed, cross_check, directory, keep, &arena) && passed;
+            passed = bind_test_static_rules(&static_pie_runtime, &arena) && passed;
+        }
+        if (static_pie_imported == RUNTIME_ERROR_NONE && cross_check)
+        {
+            passed = bind_test_static_compiled(&static_pie_runtime, directory, keep, &arena) && passed;
+        }
+        runtime_release(&static_pie_runtime);
         if (keep)
         {
             printf("the files are in %s\n", directory);
