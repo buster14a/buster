@@ -2366,7 +2366,7 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
             char* text = pp_test_clang(arguments, n, path, predefines, &length);
             PPOptions with_predefines = options;
             with_predefines.predefines_path = predefines;
-            const bool same = text != 0 && pp_test_file_output(&with_predefines, path, true, text, length, &tokens);
+            const bool same = text != 0 && pp_test_file_output(&with_predefines, path, true, text, length, &tokens, 0);
             free(text);
             if (!same)
             {
