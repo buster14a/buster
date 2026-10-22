@@ -3015,13 +3015,7 @@ static bool pp_test_raw_query_views(const char* directory)
 // a ninth reports the capacity and leaves the run failed/fatal, rather than returning a successful truncated stream.
 static bool pp_test_raw_query_capacity(const char* directory)
 {
-    char source[2048];
-    uint32_t length = (uint32_t)snprintf(source, sizeof(source), "#define RAW_QUERY __has_include\n");
-    for (uint32_t i = 0; i <= BUSTER_PP_MAX_RAW_QUERY_REPAIRS; i += 1)
-    {
-        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n");
-    }
-    snprintf(source + length, sizeof(source) - length, "tail\n");
+    char source[2048] = { 0 };
     PPTestCase test = { .name = "raw query capacity", .source = source, .standard = "gnu17", .options = "-I%d", .files = pp_test_files_raw_query };
     char path[4096];
     bool result = pp_test_write_case(&test, directory, path, sizeof(path));
@@ -3036,27 +3030,48 @@ static bool pp_test_raw_query_capacity(const char* directory)
     result = result && pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
     static InternTable table;
     static Preprocessor run;
-    for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
+    for (uint32_t repairs = BUSTER_PP_MAX_RAW_QUERY_REPAIRS; result && repairs <= BUSTER_PP_MAX_RAW_QUERY_REPAIRS + 1; repairs += 1)
     {
-        options.scalar = kernel != 0;
-        FILE* caught = 0;
-        const int saved = pp_test_catch_stderr(&caught);
-        const bool ran = saved >= 0 && pp_test_run(&run, &table, &options, path);
-        char messages[2048];
-        pp_test_release_stderr(saved, caught, messages, sizeof(messages));
-        uint32_t views = 0;
-        for (uint32_t d = 0; d < run.data_count; d += 1)
+        uint32_t length = (uint32_t)snprintf(source, sizeof(source), "#define RAW_QUERY __has_include\n");
+        for (uint32_t i = 0; i < repairs; i += 1)
         {
-            views += run.datas[d].lexical_bytes != 0;
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n");
         }
-        result = saved >= 0 && !ran && run.fatal && run.errors == 1 && views == BUSTER_PP_MAX_RAW_QUERY_REPAIRS &&
-                 strstr(messages, "raw header query recovery capacity exceeded (8 repairs per inclusion)") != 0;
-        pp_release(&run);
-        intern_release(&table);
+        snprintf(source + length, sizeof(source) - length, "tail\n");
+        result = pp_test_write_file(path, source);
+        for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
+        {
+            options.scalar = kernel != 0;
+            FILE* caught = 0;
+            const int saved = pp_test_catch_stderr(&caught);
+            const bool ran = saved >= 0 && pp_test_run(&run, &table, &options, path);
+            char messages[2048];
+            pp_test_release_stderr(saved, caught, messages, sizeof(messages));
+            uint32_t views = 0;
+            for (uint32_t d = 0; d < run.data_count; d += 1)
+            {
+                views += run.datas[d].lexical_bytes != 0;
+            }
+            const bool exceeded = repairs > BUSTER_PP_MAX_RAW_QUERY_REPAIRS;
+            result = saved >= 0 && ran != exceeded && run.fatal == exceeded && run.errors == (uint32_t)exceeded && views == BUSTER_PP_MAX_RAW_QUERY_REPAIRS;
+            if (exceeded)
+            {
+                result = result && strstr(messages, "raw header query recovery capacity exceeded (8 repairs per inclusion)") != 0;
+            }
+            else
+            {
+                const uint32_t last = run.output.count != 0 ? run.output.count - 1 : 0;
+                const IdentId name = run.output.count != 0 ? run.output.values[last] : 0;
+                result = result && messages[0] == 0 && run.output.count == repairs + 1 && run.output.kinds[last] == C_TOKEN_RAW_IDENTIFIER &&
+                         intern_length(&table, name) == 4 && memcmp(intern_bytes(&table, name), "tail", 4) == 0;
+            }
+            pp_release(&run);
+            intern_release(&table);
+        }
     }
     arena_release(&arena);
     pp_test_remove_case(&test, directory);
-    printf("raw query recovery capacity: %s (ninth repair fails, both kernels)\n", result ? "pass" : "FAIL");
+    printf("raw query recovery capacity: %s (eight succeed, ninth fails, both kernels)\n", result ? "pass" : "FAIL");
     return result;
 }
 
