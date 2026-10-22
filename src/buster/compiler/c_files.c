@@ -83,7 +83,7 @@
 // arena rather than maps: each mapping holds the process's memory map lock, on which lanes that map at once queue (14%
 // of the samples of 8 lanes preparing the C library corpus), and its pages fault in as the lexer reads them, while a
 // small file's copy costs little. On the 9700X, reading files of up to 16 KB made the C library corpus 8% faster on 8
-// lanes and 7% on one, and musl's walk 21% to 26%, against up to 4% slower for this repository's walk on 4 to 8 lanes
+// lanes and 7% on one, and musl's walk 21% to 26%, against up to 5% slower for this repository's walk on 4 to 8 lanes
 // (docs/c-files.md, "Where the time goes").
 #define BUSTER_FILES_BYTES FILE_CACHE_MAP
 #define BUSTER_FILES_READ_LIMIT (16u << 10)
