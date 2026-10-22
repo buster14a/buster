@@ -645,7 +645,7 @@ static bool pp_fuzz_has_unterminated(const Preprocessor* pp)
 }
 
 // Whether two or more of a stream's tokens are placed on presumed line 1 (by their expansions' places, as -E places
-// them). Then a token that started a line in its source but is printed on that line after another (from a macro's
+// them, where clang's lexer starts them). Then a token that started a line in its source but is printed on that line after another (from a macro's
 // arguments) is the file's first one to clang's printer (PrintPPOutputPPCallbacks::MoveToLine's IsFirstInFile), which
 // indents it by its column in place of a space, and that can join it to the token before.
 static bool pp_fuzz_line_one(Preprocessor* pp)
@@ -659,7 +659,8 @@ static bool pp_fuzz_line_one(Preprocessor* pp)
         {
             at += 1;
         }
-        const uint32_t location = (out->flags[i] & BUSTER_PP_FROM_MACRO) && at != 0 ? pp->expansion_starts[at - 1].location : out->locations[i];
+        // Where clang's lexer starts it, at a line splice right before it (pp_lexed_start).
+        const uint32_t location = pp_lexed_start(pp, (out->flags[i] & BUSTER_PP_FROM_MACRO) && at != 0 ? pp->expansion_starts[at - 1].location : out->locations[i]);
         const uint32_t range = out->kinds[i] != BUSTER_PP_KIND_PRAGMA_END ? pp_find_range(pp, location) : BUSTER_PP_NONE;
         const char* name = 0;
         uint32_t length = 0;
@@ -1197,11 +1198,18 @@ static const char* const pp_fuzz_emulation_cases[] = {
     "#define e(...) __VA_ARGS__\n#define P(a, b) a ## b\ne(u8\nP(,\"\"))\n",
     "#define e(...) __VA_ARGS__\n#define c(d, ...) #d\ne(u8\n  c())\n",
     "#define e(...) __VA_ARGS__\n#define c(d, ...) #d\ne(u8\n/**/c())\n",
-    // An empty expansion's name passes its space on to a token that starts the next line, as clang ORs them: a space
-    // before either gives one.
+    // An empty expansion's name passes its space on to a token that starts the next line among a macro's arguments,
+    // as clang ORs them: a space before either gives one.
     "#define e(...) __VA_ARGS__\n#define E\ne(u8 E\n\"\")\n",
     "#define e(...) __VA_ARGS__\n#define E\ne(u8\nE\n\"\")\n",
     "#define e(...) __VA_ARGS__\n#define E\ne(u8\n E\n\"\")\n",
+    // In a file, only to the next token on the same line: clang's lexer clears the space at a newline, so after a `\`
+    // that ends its line, the next line's token stays in column 1 (seed 62's case 47024, C17).
+    "#define E\nu8 E\"\"\n",
+    "#define e(...)\na\\ \n\\ e(\n)\nc\n",
+    // A name at presumed line 1 from a line splice right before it, which clang's token starts at: its argument's line
+    // there is the file's first to clang's printer, which joins `.5_z` and `4ll` (seed 65's case 702022, C17).
+    "#define h(c, d) d\n# 1\n\\\nh((\n),.5_z\n4ll)\n",
 };
 
 // Each source of pp_fuzz_emulation_cases against clang, alone, in both modes (pp_fuzz_clang_difference). Returns
