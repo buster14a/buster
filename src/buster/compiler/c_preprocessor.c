@@ -8441,9 +8441,9 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
         }
     }
     pp->diagnostic_origin = saved_origin;
-    if (file == BUSTER_PP_NONE || (kind == PP_DIRECTIVE_IMPORT && pp->datas[pp->files[file].data].prepared && pp->datas[pp->files[file].data].once))
+    if (file == BUSTER_PP_NONE)
     {
-        // Not found, or already imported.
+        // Not found. pp_enter_file handles an already imported file like #pragma once, counting its skipped inclusion.
     }
     else
     {
