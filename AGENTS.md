@@ -869,9 +869,11 @@ and a fault names the record. The checks:
     to bit 511, flags, and the memory around its operand and below the stack;
   - a narrower write keeps or zeroes the rest as its record says;
   - defined flags and results don't change when everything it doesn't read
-    changes;
+    changes, every register compared whole (vector ones to bit 511);
   - a destination that only merges doesn't read the bytes it defines;
-  - every write changes something in some run.
+  - every write shows a change in some run: one that no run showed gets up
+    to 256 more runs, with register operands, and one that never shows is
+    listed as missing coverage, not failed.
 - cmov and setcc of all 16 conditions on all 64 combinations of the status
   flags, against a model of the conditions;
 - fixtures:

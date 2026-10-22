@@ -43,6 +43,8 @@
 #define BUSTER_X86_SEMANTICS_TEST_OPERAND 1024
 #define BUSTER_X86_SEMANTICS_TEST_STACK_TOP (BUSTER_X86_SEMANTICS_TEST_PAGE + 2048)
 #define BUSTER_X86_SEMANTICS_TEST_RUNS 12
+// A write the runs didn't show gets up to this many more, until it shows (x86_semantics_check_table).
+#define BUSTER_X86_SEMANTICS_TEST_WITNESS_RUNS 256
 #define BUSTER_X86_SEMANTICS_TEST_RFLAGS_BASE 0x202ull
 
 #define BUSTER_X86_SEMANTICS_TEST_NAME(name, ...) #name,
@@ -691,9 +693,15 @@ static bool x86_semantics_check_resolved(void)
         },
         {
             .record = { .form = X86_FORM_PXOR_X_XM128, .reg = 3, .rm = 3 },
-            .reads = 0,
+            .reads = BUSTER_X86_RESOURCE_VECTOR(3),
             .writes = BUSTER_X86_RESOURCE_VECTOR(3),
-            .what = "pxor xmm3, xmm3",
+            .what = "pxor xmm3, xmm3: a zero idiom of the low 128 bits, but ZMM3's upper bits pass through",
+        },
+        {
+            .record = { .form = X86_FORM_MOVAPS_X_XM, .reg = 3, .rm = 4 },
+            .reads = BUSTER_X86_RESOURCE_VECTOR(3) | BUSTER_X86_RESOURCE_VECTOR(4),
+            .writes = BUSTER_X86_RESOURCE_VECTOR(3),
+            .what = "movaps xmm3, xmm4: keeps ZMM3's bits above 127, so reads it",
         },
         {
             .record = { .form = X86_FORM_SHL_RM64_IMM8, .rm = X86_REGISTER_RDX, .immediate = 0 },
@@ -751,9 +759,9 @@ static bool x86_semantics_check_resolved(void)
         },
         {
             .record = { .form = X86_FORM_MOVSS_X_XM32, .reg = 1, .mode = BUSTER_X86_MEMORY_RIP },
-            .reads = memory,
+            .reads = memory | BUSTER_X86_RESOURCE_VECTOR(1),
             .writes = BUSTER_X86_RESOURCE_VECTOR(1),
-            .what = "movss xmm1, [rip + x]: zeroes the rest",
+            .what = "movss xmm1, [rip + x]: zeroes the rest of XMM1, and keeps ZMM1's bits above 127",
         },
         {
             .record = { .form = X86_FORM_ADDSD_X_XM64, .reg = 4, .rm = 5 },
@@ -977,12 +985,6 @@ static void x86_semantics_fix_division(uint64_t* state, X86SemanticsMachine* mac
     }
 }
 
-// Whether two states have the same register and the same vector register's XMM part.
-static bool x86_semantics_same_xmm(const X86SemanticsState* a, const X86SemanticsState* b, uint32_t v)
-{
-    return memcmp(a->vector[v], b->vector[v], 16) == 0;
-}
-
 static bool x86_semantics_zero_bytes(const uint8_t* bytes, uint32_t from, uint32_t to)
 {
     bool result = true;
@@ -1193,8 +1195,9 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
         }
         for (uint32_t v = 0; v < 16; v += 1)
         {
+            // The whole register, bits 511 to 128 included: an unread register is changed whole.
             const bool written = (writes & BUSTER_X86_RESOURCE_VECTOR(v)) != 0;
-            x86_semantics_expect(tally, !written || x86_semantics_same_xmm(&second_output, &output, v), "%s wrote XMM%u from something it doesn't read",
+            x86_semantics_expect(tally, !written || memcmp(second_output.vector[v], output.vector[v], 64) == 0, "%s wrote ZMM%u from something it doesn't read",
                                  x86_semantics_test_case, v);
         }
         const uint8_t defined_difference = (x86_semantics_flags(second_output.flags) ^ x86_semantics_flags(output.flags)) & flags_written;
@@ -1256,7 +1259,11 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
 }
 
 // Every covered form but those that branch, call, return or trap, from BUSTER_X86_SEMANTICS_TEST_RUNS random states,
-// with register and memory operands in turn.
+// with register and memory operands in turn. A write that no run showed (a byte rotated by 8, a value that is its own
+// result, a condition that didn't hold) gets up to BUSTER_X86_SEMANTICS_TEST_WITNESS_RUNS more runs, with register
+// operands, until it shows; one that never does is listed as missing coverage, not failed: the runs' other checks fail a
+// write the table lacks (a register changed that it doesn't write), and one it claims and the form never makes is only
+// conservative.
 static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t seed, uint32_t runs)
 {
     X86SemanticsTally tally = {
@@ -1265,6 +1272,8 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
     uint64_t state = seed * 0x9E3779B97F4A7C15ull + 11;
     uint32_t forms = 0;
     uint32_t skipped = 0;
+    uint32_t witness_runs = 0;
+    uint32_t never_shown = 0;
     for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
     {
         const X86Effects* effects = x86_effects(form);
@@ -1280,16 +1289,28 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
                 const X86Instruction record = x86_semantics_random_record(&state, form, (run & 1) != 0);
                 x86_semantics_check_run(&tally, machine, &state, &record, &changes);
             }
-            // A conditional write may not happen in any run: x86_semantics_check_conditions runs cmov and setcc on every flag.
-            const bool conditional = (effects->properties & BUSTER_X86_EFFECT_CONDITIONAL) != 0;
-            x86_semantics_expect(&tally, conditional || changes.roles_written == changes.roles_changed, "%s: an operand it writes (roles %#x) never changed (only %#x)",
-                                 x86_semantics_test_name(form), changes.roles_written, changes.roles_changed);
-            x86_semantics_expect(&tally, changes.implicit_written == changes.implicit_changed, "%s: an implicit register it writes (%#x) never changed (only %#x)",
-                                 x86_semantics_test_name(form), changes.implicit_written, changes.implicit_changed);
+            uint32_t extra = 0;
+            bool unshown = (changes.roles_written & ~changes.roles_changed) != 0 || (changes.implicit_written & ~changes.implicit_changed) != 0;
+            while (unshown && extra < BUSTER_X86_SEMANTICS_TEST_WITNESS_RUNS)
+            {
+                const X86Instruction record = x86_semantics_random_record(&state, form, false);
+                x86_semantics_check_run(&tally, machine, &state, &record, &changes);
+                extra += 1;
+                unshown = (changes.roles_written & ~changes.roles_changed) != 0 || (changes.implicit_written & ~changes.implicit_changed) != 0;
+            }
+            if (unshown)
+            {
+                printf("    effects: %s: writes never shown in %u runs (operands %#x, implicit registers %#x): missing coverage\n", x86_semantics_test_name(form),
+                       runs + extra, changes.roles_written & ~changes.roles_changed, changes.implicit_written & ~changes.implicit_changed);
+            }
+            witness_runs += extra;
+            never_shown += unshown;
             forms += 1;
         }
     }
-    printf("effects: %u covered forms executed %u times each, %u that branch, call, return or trap left to the fixtures\n", forms, runs, skipped);
+    printf("effects: %u covered forms executed %u times each and %u more until every write showed (%u forms with one that never did), %u that branch, call, "
+           "return or trap left to the fixtures\n",
+           forms, runs, witness_runs, never_shown, skipped);
     return x86_semantics_report(&tally);
 }
 

@@ -121,7 +121,8 @@
 //   - FAULT: can fault without a memory operand: a divide error (div, idiv), #UD (ud2), #BP (int3). (Any memory access
 //     can fault too.)
 //   - ZERO_IDIOM: with the same register in reg and rm, the result is zero whatever the register held, so it reads
-//     nothing (xor, sub and their vector kin; only where the write leaves no old bits).
+//     nothing of what it writes (xor, sub and their vector kin; for a general register only where the write leaves no
+//     old bits). A legacy SSE one keeps its register's bits above 127 (KEEP_UPPER), which its resolved effects read.
 //   - KEEP_UPPER: a legacy SSE form: a vector register it writes keeps its bits above 127.
 //   - MXCSR: reads MXCSR's controls (rounding, DAZ and FTZ).
 //   - FP_EXCEPTION: may raise floating-point exceptions (setting MXCSR's status flags, or trapping if unmasked).
@@ -737,7 +738,8 @@ static __attribute__((unused)) bool x86_flags_substitutable(const X86Effects* or
 // Operand-resolved effects
 
 // The resources a record reads or writes, as one 64-bit set: the general registers (RAX = bit 0 ... R15 = bit 15), the
-// vector registers (XMM0, YMM0 or ZMM0 = bit 16 ... 31 = bit 47), the flags (BUSTER_X86_FLAG_*'s bits from bit 48: CF
+// vector registers (each the whole register, ZMM0 to ZMM31 with their XMM and YMM parts: bit 16 ... bit 47; a legacy SSE
+// write keeps bits 511 to 128, so it reads its register too), the flags (BUSTER_X86_FLAG_*'s bits from bit 48: CF
 // to OF, then DF), MXCSR's controls (read), memory (any byte: alias analysis is the consumer's), and in the write set,
 // control (the record can leave the block: a branch, call, return or trap) and a call (whose callee clobbers what the
 // calling convention says, #137). An uncovered form reads and writes every resource.
@@ -745,6 +747,7 @@ static __attribute__((unused)) bool x86_flags_substitutable(const X86Effects* or
 #define BUSTER_X86_RESOURCE_GPRS 0xffffull
 #define BUSTER_X86_RESOURCE_VECTOR_SHIFT 16
 #define BUSTER_X86_RESOURCE_VECTOR(number) (1ull << (BUSTER_X86_RESOURCE_VECTOR_SHIFT + (number)))
+#define BUSTER_X86_RESOURCE_VECTORS (0xffffffffull << BUSTER_X86_RESOURCE_VECTOR_SHIFT)
 #define BUSTER_X86_RESOURCE_FLAGS_SHIFT 48
 #define BUSTER_X86_RESOURCE_FLAGS ((uint64_t)BUSTER_X86_FLAGS_ALL << BUSTER_X86_RESOURCE_FLAGS_SHIFT)
 #define BUSTER_X86_RESOURCE_STATUS ((uint64_t)BUSTER_X86_FLAGS_STATUS << BUSTER_X86_RESOURCE_FLAGS_SHIFT)
@@ -764,8 +767,9 @@ static uint64_t x86_register_resource(uint8_t value, bool vector)
 
 // What one record reads and writes (BUSTER_X86_RESOURCE_*), its operands resolved: a register operand's register; a
 // memory operand's base and index (read, as lea's are) and the memory read or written; a narrower write's register (which
-// keeps the rest, so it is read); a zero idiom's register not read; a shift's flags by its immediate count
-// (x86_instruction_flags); the stack and fences as memory; control.
+// keeps the rest, so it is read), and a legacy SSE write's vector register (which keeps its bits above 127); a zero
+// idiom's register not read (but a legacy SSE one's, whose upper bits still pass through); a shift's flags by its
+// immediate count (x86_instruction_flags); the stack and fences as memory; control.
 static __attribute__((unused)) void x86_instruction_effects_scalar(const X86Instruction* instruction, uint64_t* reads, uint64_t* writes)
 {
     const X86Effects* effects = x86_effects(instruction->form);
@@ -811,6 +815,9 @@ static __attribute__((unused)) void x86_instruction_effects_scalar(const X86Inst
             const uint32_t bits = x86_effects_role(effects, BUSTER_X86_ROLE_REG);
             read &= ~x86_register_resource(instruction->reg, (bits & BUSTER_X86_ROLE_VECTOR) != 0);
         }
+        // A legacy SSE write keeps its vector register's bits above 127, so the form reads every vector register it writes,
+        // a zero idiom's too (only explicit operands write vector registers).
+        read |= (effects->properties & BUSTER_X86_EFFECT_KEEP_UPPER) ? write & BUSTER_X86_RESOURCE_VECTORS : 0;
         read |= (effects->memory & (BUSTER_X86_MEMORY_EFFECT_STACK_READ | BUSTER_X86_MEMORY_EFFECT_FENCE)) ? BUSTER_X86_RESOURCE_MEMORY : 0;
         write |= (effects->memory & (BUSTER_X86_MEMORY_EFFECT_STACK_WRITE | BUSTER_X86_MEMORY_EFFECT_FENCE)) ? BUSTER_X86_RESOURCE_MEMORY : 0;
         const uint32_t control = x86_effects_control(effects);
@@ -933,6 +940,10 @@ static __attribute__((unused)) void x86_instructions_effects(const X86Instructio
         write = _mm512_mask_or_epi64(write, reg_writes, write, reg_resource);
         read = _mm512_mask_or_epi64(read, rm_reads & ~memory & ~idiom, read, rm_resource);
         write = _mm512_mask_or_epi64(write, rm_writes & ~memory, write, rm_resource);
+        // A legacy SSE form reads every vector register it writes (which keeps its bits above 127), a zero idiom's too.
+        // That's write & vectors, joined to the reads with the memory operand's registers below, off read's chain.
+        const __mmask8 keeps_upper = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_KEEP_UPPER));
+        const __m512i kept = _mm512_maskz_and_epi64(keeps_upper, write, _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_VECTORS));
 
         // A memory operand: its base and index when it's accessed or its address taken, and the memory read or written.
         const __mmask8 address = _mm512_test_epi64_mask(memory_effects, _mm512_set1_epi64(BUSTER_X86_MEMORY_EFFECT_ADDRESS));
@@ -941,7 +952,8 @@ static __attribute__((unused)) void x86_instructions_effects(const X86Instructio
                                                               _mm512_and_si512(rm, _mm512_set1_epi64(15)));
         const __m512i index_resource = _mm512_maskz_sllv_epi64(_mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_INDEX)), one,
                                                                _mm512_and_si512(index, _mm512_set1_epi64(15)));
-        read = _mm512_mask_or_epi64(read, accessed, read, _mm512_or_si512(base_resource, index_resource));
+        // read | address registers | kept: 0xfe.
+        read = _mm512_ternarylogic_epi64(read, _mm512_maskz_or_epi64(accessed, base_resource, index_resource), kept, 0xfe);
         const __m512i memory_resource = _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_MEMORY);
         read = _mm512_mask_or_epi64(read, memory & _mm512_test_epi64_mask(role_rm, read_bit) & ~address, read, memory_resource);
         write = _mm512_mask_or_epi64(write, memory & rm_writes, write, memory_resource);

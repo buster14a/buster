@@ -68,7 +68,8 @@ address.
   `MERGE`. That is the false dependency #172 wants to break, but not a tie.
 
 Legacy SSE forms also keep a vector register's bits above 127
-(`BUSTER_X86_EFFECT_KEEP_UPPER`).
+(`BUSTER_X86_EFFECT_KEEP_UPPER`). A write of an XMM register is then a partial
+write of its ZMM register, which the resolved effects below count as a read.
 
 **Implicit registers** are general-register masks besides the explicit
 operands, for the fixed registers #140 pre-colors:
@@ -111,8 +112,10 @@ leaves undefined those it may change.
 
 - `FAULT`: div's divide error, ud2's and int3's traps;
 - `ZERO_IDIOM`: xor, sub and their vector kin with reg and rm the same register
-  read nothing. This is kept only where the write leaves no old bits, so
-  `xor al, al` reads RAX;
+  read nothing of what they write. A general register's is kept only where the
+  write leaves no old bits, so `xor al, al` reads RAX; a legacy SSE one's
+  (`pxor xmm3, xmm3`) keeps its register's bits above 127, so its resolved
+  effects still read the register;
 - `MXCSR`: reads the rounding, DAZ and FTZ controls;
 - `FP_EXCEPTION`: may raise floating-point exceptions;
 - `ZERO_SOURCE`: bsf and bsr keep or leave undefined their destination for a
@@ -147,10 +150,14 @@ record:
   vector registers, the flags, MXCSR, memory, control and call. This is what
   #172's dependency graph and #140's checks compare, 16 records at a time. The
   operands resolve as follows:
-  - a register operand is its register;
+  - a register operand is its register: a vector one the whole ZMM register,
+    its XMM and YMM parts included;
   - a memory operand reads its base and index, and lea's do too;
-  - a narrower write reads its register;
-  - a zero idiom's register isn't read;
+  - a narrower write reads its register, and so does a legacy SSE write: it
+    keeps its register's bits 511 to 128, which stay live through it;
+  - a zero idiom's register isn't read, but a legacy SSE one's is, for those
+    upper bits (its low 128 bits still depend on nothing, which
+    `BUSTER_X86_EFFECT_ZERO_IDIOM` says);
   - the stack and fences are memory.
 
 Memory is one resource: alias analysis is the consumer's. A form's memory read
@@ -325,9 +332,14 @@ run checks that:
 - a narrower write keeps or zeroes the rest as its record says, and legacy SSE
   keeps the upper lanes;
 - defined flags and results don't change when everything the form doesn't read
-  changes;
+  changes, every register and vector register compared whole;
 - a destination that only merges doesn't read the bytes it defines;
-- every write changes something in some run.
+- every write shows a change in some run. A run can't always show one: a byte
+  rotated by 8, a value that is its own result, a condition that didn't hold.
+  So a write no run showed gets up to 256 more runs, with register operands,
+  until it does, and one that never does is listed as missing coverage, not
+  failed. A write the table lacks still fails, as a register changed that the
+  form doesn't write.
 
 **The fixtures:**
 
