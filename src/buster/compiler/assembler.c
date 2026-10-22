@@ -694,7 +694,7 @@ static uint32_t asm_precedence(uint16_t op)
                                                                                          : 0;
 }
 
-static bool asm_register(String8 name, X86Operand* operand);
+static bool asm_register(String8 spelling, X86Operand* operand);
 
 static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
 {
@@ -866,8 +866,17 @@ static __int128 asm_absolute(AsmParser* parser, uint32_t end)
     return expression.value;
 }
 
-static bool asm_register(String8 name, X86Operand* operand)
+// A register's name as GNU as reads it: in any case (RAX is rax), with canonical numbers (r8 and xmm0, but r08, xmm00
+// and k00 are symbols). No name is longer than five bytes (xmm31), so a longer spelling is never a register.
+static bool asm_register(String8 spelling, X86Operand* operand)
 {
+    char lower[5];
+    for (uint32_t i = 0; i < spelling.length && i < sizeof(lower); i += 1)
+    {
+        const char byte = spelling.pointer[i];
+        lower[i] = byte >= 'A' && byte <= 'Z' ? byte + ('a' - 'A') : byte;
+    }
+    const String8 name = {.pointer = lower, .length = spelling.length <= sizeof(lower) ? spelling.length : 0};
     static const char* const names[4][8] =
         {
             {"al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil"},
@@ -934,7 +943,7 @@ static bool asm_register(String8 name, X86Operand* operand)
                 class = width == 1 ? BUSTER_X86_CLASS_GPR8 : width == 2 ? BUSTER_X86_CLASS_GPR16
                                                                         : BUSTER_X86_CLASS_GPR32;
             }
-            found = at > start && at == name.length && reg < (class == BUSTER_X86_CLASS_OPMASK ? 8u : class <= BUSTER_X86_CLASS_GPR64 ? 16u
+            found = at > start && at == name.length && (name.pointer[start] != '0' || at == start + 1) && reg < (class == BUSTER_X86_CLASS_OPMASK ? 8u : class <= BUSTER_X86_CLASS_GPR64 ? 16u
                                                                                                                                       : 32u);
             found &= class > BUSTER_X86_CLASS_GPR64 || (reg >= 8 && width != 0);
             if (found)

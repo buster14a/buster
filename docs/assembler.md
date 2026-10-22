@@ -64,7 +64,9 @@ also exposes this preprocessing mode.
 
 ## Supported input
 
-Mnemonics and registers use lowercase. GPRs of 8/16/32/64 bits (including
+Mnemonics use lowercase. Register names are read as GNU as reads them: in any
+case (`RAX` is `rax`), and with canonical numbers only (`r08`, `xmm00` and
+`k00` are symbol names). GPRs of 8/16/32/64 bits (including
 high-byte registers), XMM/YMM/ZMM and mask registers have explicit classes.
 The frontend checks the encoder's high-byte/REX, address and decoration rules
 before trusted encoding. Addressing is 64-bit base plus index times 1/2/4/8

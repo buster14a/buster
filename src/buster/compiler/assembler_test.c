@@ -752,6 +752,8 @@ static int run_assembler_tests(int count, char** arguments)
                 ".intel_syntax noprefix\nmov eax,dword ptr eax\n",
                 ".intel_syntax noprefix\ncall qword ptr rax\n",
                 ".intel_syntax noprefix\nmov eax,fs:rax\n",
+                ".intel_syntax noprefix\n.quad RAX\n",
+                ".intel_syntax noprefix\nvaddps zmm1{k01},zmm2,zmm3\n",
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bad); i += 1)
         {
@@ -771,6 +773,8 @@ static int run_assembler_tests(int count, char** arguments)
                 ".intel_syntax prefix\nf: mov %eax,dword ptr [%rdi+4*%rsi]\n",
                 ".intel_syntax noprefix\nf: mov eax,[rax + +rsi]\nmov eax,[rax + +rsi*4]\nmov eax,[+rsi]\nmov eax,[rax + rsi + +8]\n",
                 "f: .quad rsi\nmovq rax,%rcx\n.intel_syntax prefix\nmov %eax,dword ptr rsi\n",
+                ".intel_syntax noprefix\nf: mov rax,r08\nmov rax,xmm00\nmov rcx,r08d\n.quad r08, k00, xmm00\n",
+                ".intel_syntax noprefix\nf: mov rax,RAX\nmov eax,[RSI]\nadd rax,R8\nmov rax,Rax\nmov ecx,R10D\n.att_syntax prefix\nmovq %RAX,%RCX\n",
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(reviewed); i += 1)
         {
@@ -786,6 +790,8 @@ static int run_assembler_tests(int count, char** arguments)
         asm_test_bytes(&test, "nop\n.p2align 2\nret\n", 1, after_instruction, sizeof(after_instruction), "code padding is GNU as's NOPs");
         static const uint8_t after_data[] = {0x01, 0x90, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0xc3};
         asm_test_bytes(&test, ".byte 1\n.p2align 3\nret\n", 1, after_data, sizeof(after_data), "code padding after data starts with a nop");
+        static const uint8_t zero_padded[] = {7, 0, 0, 0, 0, 0, 0, 0};
+        asm_test_bytes(&test, ".intel_syntax noprefix\n.equ r08,7\n.data\n.quad r08\n", 2, zero_padded, sizeof(zero_padded), "a zero-padded register number is a symbol's name, as in GNU as");
         static const uint8_t plus_register[] = {0x8b, 0x04, 0x30};
         asm_test_bytes(&test, ".intel_syntax noprefix\n.equ rsi,8\nmov eax,[rax + +rsi]\n", 1, plus_register, sizeof(plus_register), "a register after a unary plus is the register, not a symbol of its name");
         const AsmResult pushed = asm_test_pair(&test, BUSTER_S8("push $external\n"), 1, 0);
