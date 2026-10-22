@@ -7801,10 +7801,6 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             }
             else
             {
-                if (hash + 2 < end)
-                {
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #else directive");
-                }
                 if (group->seen_else)
                 {
                     pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#else after #else");
@@ -7835,10 +7831,6 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             }
             else
             {
-                if (hash + 2 < end)
-                {
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #endif directive");
-                }
                 pp->conditional_count -= 1;
             }
             break;
