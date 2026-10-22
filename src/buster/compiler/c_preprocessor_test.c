@@ -1060,7 +1060,7 @@ static const PPTestCase pp_test_cases[] = {
       "-undef -x assembler-with-cpp" },
     { "feature answers' spelling", "__has_c_attribute(nodiscard) __has_c_attribute(deprecated) __has_c_attribute(fallthrough) __has_c_attribute(maybe_unused)\n__has_c_attribute(gnu::packed) __has_attribute(cold) __has_attribute(__nonnull__) __has_builtin(__builtin_expect) __has_feature(c_atomic) __has_extension(c_atomic)\n__has_cpp_attribute(nodiscard) __has_declspec_attribute(dllexport)\n#if __has_embed(\"/dev/null\") == 2\nempty\n#endif\n", 0, "c23", "202003L 201904L 201910L 202106L\n1 1 1 1 1 1\n__has_cpp_attribute(nodiscard) 0\nempty\n", false, 0 },
     { "__has_warning", "__has_warning(\"-Wall\") __has_warning(\"-Wunused-macros\") __has_warning(\"-Wppf-none\") __has_warning(\"-W\" \"shadow\") __has_warning(\"-Rpass\")\n", 0, "c17", "1 1 0 1 0\n", false, 0 },
-    { "__VA_OPT__ without variadic parameters", "#define F(a) [__VA_OPT__(x a) a]\nF(1)\n", 0, "c23", "\n[ 1]\n", false, 0 },
+    { "__VA_OPT__ without variadic parameters", "#define F(a) [__VA_OPT__(x a) a]\nF(1)\n", 0, "c23", "\n[ 1]\n", false, 1 },
     { "a stringized trailing backslash", "#define S(x) #x\nS(\\) S(a \\) S(\\\\)\n", 0, "c17", "\n\"\" \"a \" \"\\\\\"\n", false, 2 },
     { "an unterminated comment", "a\n/* b\nc\n", 0, "c17", "a\n", true, 0 },
     { "a comma in #if", "#if 1, 2\nyes\n#endif\n#if (1, 2)\nparenthesized\n#endif\n#if 0 ? 1, 2 : 3\nconditional\n#endif\n", 0, "c17", "", true, 0 },
@@ -1150,7 +1150,7 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "\n\",u\"\n\", u\"\n", false, 0 },
     // The campaigns' differences (docs/preprocessor-fuzz.md): a function-like macro without parameters substitutes
     // nothing, so its __VA_OPT__ and a # before it stay tokens (TokenLexer::Init).
-    { "__VA_OPT__ in a macro without parameters", "#define Z() a ## __VA_OPT__(b) # __VA_OPT__(c)\nZ()\n#define Y() __VA_OPT__ ( )\nY()\n", 0, "c23", "\na__VA_OPT__(b) # __VA_OPT__(c)\n__VA_OPT__ ( )\n", false, 0 },
+    { "__VA_OPT__ in a macro without parameters", "#define Z() a ## __VA_OPT__(b) # __VA_OPT__(c)\nZ()\n#define Y() __VA_OPT__ ( )\nY()\n", 0, "c23", "\na__VA_OPT__(b) # __VA_OPT__(c)\n__VA_OPT__ ( )\n", false, 3 },
     // A token right after a line splice starts at the splice for clang's lexer: an expansion's ')' or name there gives
     // __LINE__ the splice's line, and so does a #line's number.
     { "__LINE__ at a ')' that starts at a line splice", "#define L() __LINE__\nL(\n\\\n)\n#define M __LINE__\nx\n\\\nM\n", 0, "c17", "\n3\nx\n7\n", false, 0 },
