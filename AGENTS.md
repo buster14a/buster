@@ -473,8 +473,9 @@ designs and the compilers already built this way.
   it; `./build/compiler test-refinement` runs them) and `c_refine_benchmark.c`
   provides `benchmark-refinement`.
 - `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
-  unit's token stream from its files' refined tokens, and `./build/compiler -E`
-  (as `clang -E`, with `-dM`). `docs/c-preprocessor.md` explains the design, the `clang -E`
+  unit's token stream from its files' refined tokens (C23's `#embed` among its
+  directives), and `./build/compiler -E` (as `clang -E`, with `-dM` and `--embed-dir=`).
+  `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
   `c_preprocessor_fuzz.c` its differential fuzzing (#109; `main.c` includes
@@ -575,8 +576,9 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-preprocessor --clang
 ./build/compiler test-preprocessor --tables src
 ./build/compiler benchmark-preprocessor --tables src
-./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
-./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+./build/compiler -E -march=native -Isrc -fwrapv -funsigned-char -o build/main.i src/buster/compiler/main.c
+./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+./build/compiler benchmark-preprocessor --embed 16777216
 ./build/compiler test-files
 ./build/compiler test-files --flat src
 ./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
@@ -2746,7 +2748,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 `./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
 [options] [file...]`, or `test-preprocessor --tables path...`:
 
-- without files, the 211 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 224 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2757,7 +2759,8 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   - directives and builtins that nest through the main loop's frames;
   - #193's review fixes, line markers among them;
   - each difference from clang that #109's fuzzing found, minimized, and the
-    ones probing around it found.
+    ones probing around it found;
+  - `#embed`: its data, parameters, errors and files, and where `-E` prints it.
 
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
@@ -2765,7 +2768,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `SOURCE_DATE_EPOCH`'s when it is set; and the `-m` options buster refuses
   though clang takes them (another target's, which clang ignores with a
   warning, and those that change the target) must be refused, and each `-m`
-  flag that changes no macro taken; the expansion history's checks; and
+  flag that changes no macro taken; the expansion history's checks; #embed's vector/scalar text and lookup checks; and
   the fuzz batch: its isolation rules checked on small sources (what a case
   leaves open makes clang read it alone), its comparison on pairs of texts
   (whitespace between tokens doesn't count, a literal's contents and joined
@@ -2947,6 +2950,13 @@ reports the medians per input token and per directive, IPC, and the scan's
 share. Run it under the 9700X's lock with `taskset -c 2`;
 `docs/c-preprocessor.md` has the numbers for the C library corpus. The default
 9700X job runs it on `src`, pinned to one allowed CPU.
+
+`./build/compiler benchmark-preprocessor --embed N` measures instead the text
+`-E` prints for an `#embed`'s N bytes (random, from a fixed seed), by
+`pp_embed_text_vector` and its scalar twin in the printers' pieces, 21 passes
+after a warm-up: medians per input byte, and the text's throughput. The two
+texts must be the same. Run it pinned to one CPU; `docs/c-preprocessor.md` has
+the 9700X's numbers.
 
 ## Per-file jobs tests
 

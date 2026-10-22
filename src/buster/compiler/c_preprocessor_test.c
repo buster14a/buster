@@ -96,12 +96,13 @@ static void pp_spellings_add(PPSpellings* spellings, const uint8_t* bytes, uint3
 }
 
 // The spellings of a preprocessor's output stream (without the pragmas' end markers), as -E spells them: a pragma
-// line's identifiers as written (pp_spelled_as_written).
+// line's identifiers as written (pp_spelled_as_written), and an #embed's data as its values and the commas between them.
 static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
 {
     const PPTokens* out = &pp->output;
     Scratch scratch = scratch_begin(0);
     uint64_t bytes = 0;
+    uint64_t embedded = 0;
     uint32_t pragma = BUSTER_PP_PRAGMA_OUTSIDE;
     bool result = true;
     for (uint32_t i = 0; result && i < out->count; i += 1)
@@ -109,21 +110,42 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
         const uint8_t kind = out->kinds[i];
         const uint64_t mark = scratch.arena->length;
         const uint8_t* written = 0;
+        uint32_t data = 0;
+        if (kind == BUSTER_PP_KIND_EMBED)
+        {
+            pp_embed_bytes(pp, out->values[i], &data);
+            embedded += 2 * (uint64_t)data;
+        }
         bytes += pp_spelled_as_written(pragma, kind) ? pp_written_spelling(pp, out->values[i], out->locations[i], scratch.arena, &written)
                  : kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END) ? intern_length(pp->table, out->values[i])
-                 : kind == BUSTER_PP_KIND_PRAGMA_END ? 0 : kind == BUSTER_PP_KIND_INTEGER ? 24 : out->values[i] - out->locations[i];
+                 : kind == BUSTER_PP_KIND_PRAGMA_END ? 0 : kind == BUSTER_PP_KIND_INTEGER ? 24 : kind == BUSTER_PP_KIND_EMBED ? 4 * (uint64_t)data : out->values[i] - out->locations[i];
         result = !pp_spelled_as_written(pragma, kind) || written != 0;
         arena_pop_to(scratch.arena, mark);
         pragma = pp_pragma_state(pp, pragma, kind, out->locations[i]);
     }
-    result = result && pp_spellings_initialize(spellings, (uint64_t)out->count + 1, bytes + 64);
+    result = result && pp_spellings_initialize(spellings, (uint64_t)out->count + embedded + 1, bytes + 64);
     uint8_t* buffer = arena_push(scratch.arena, bytes + 64, 1);
     result = result && buffer != 0;
     pragma = BUSTER_PP_PRAGMA_OUTSIDE;
     for (uint32_t i = 0; result && i < out->count; i += 1)
     {
         const uint8_t kind = out->kinds[i];
-        if (kind != BUSTER_PP_KIND_PRAGMA_END)
+        if (kind == BUSTER_PP_KIND_EMBED)
+        {
+            uint32_t length;
+            const uint8_t* data = pp_embed_bytes(pp, out->values[i], &length);
+            for (uint32_t b = 0; b < length; b += 1)
+            {
+                char digits[4];
+                const int written = snprintf(digits, sizeof(digits), "%u", data[b]);
+                if (b != 0)
+                {
+                    pp_spellings_add(spellings, (const uint8_t*)",", 1, out->locations[i], C_TOKEN_COMMA);
+                }
+                pp_spellings_add(spellings, (const uint8_t*)digits, (uint32_t)written, out->locations[i], C_TOKEN_NUMERIC_CONSTANT);
+            }
+        }
+        else if (kind != BUSTER_PP_KIND_PRAGMA_END)
         {
             const uint64_t mark = scratch.arena->length;
             const uint8_t* spelling = 0;
@@ -736,6 +758,8 @@ struct PPTestFile
 {
     const char* path;
     const char* text;
+    // The text's length, for one with zero bytes in it (an #embed's resource); 0 for strlen's.
+    uint32_t length;
 };
 
 typedef struct PPTestCase PPTestCase;
@@ -759,6 +783,8 @@ struct PPTestCase
     const PPTestFile* files;
     // The text -E prints with line markers (compared byte for byte, %d for the directory), or null.
     const char* markers;
+    // The errors each run must give, for a case that fails; 0 doesn't count them.
+    uint32_t errors;
 };
 
 static const PPTestFile pp_test_files_include_next[] = {
@@ -777,6 +803,52 @@ static const PPTestFile pp_test_files_stack[] = {
     { "b.h", "b_token\n" },
     { "sys/s.h", "sys_first\n\n\n\n\n\n\n\n\n\n\nsys_far\n" },
     { "p.h", "user_before\n#pragma GCC system_header\nuser_after\n" },
+    { 0, 0 },
+};
+
+// #embed's resources: text, bytes of every kind (a zero, 255, the edges of one, two and three digits), every value in
+// turn, nothing, and headers that end with an #embed, with and without a newline after it.
+// #252's review's #embed files: a resource in a directory of its own, for a name with "//" (and one whose name starts
+// with '*', for "/*"), and a header that becomes a system header before it embeds one.
+static const PPTestFile pp_test_files_embed_review[] = {
+    { "dir/bytes.bin", "A\n" },
+    { "dir/*x.bin", "B\n" },
+    { "hi.txt", "Hi!\n" },
+    { "sys.h", "unsigned char a[] = {\n#pragma GCC system_header\n#embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
+    { "sys_indent.h", "unsigned char b[] = {\n#pragma GCC system_header\n  #embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
+    { "sys_blank.h", "unsigned char c[] = {\n#pragma GCC system_header\n\n#embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
+    { 0, 0 },
+};
+
+static const PPTestFile pp_test_files_embed[] = {
+    { "hi.txt", "Hi!\n" },
+    { "bin.dat", "\x00\xff\x7f\x80\x09\x0a\x63\x64", 8 },
+    {
+        "bytes.dat",
+        "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
+        "\x20\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f"
+        "\x40\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x5b\x5c\x5d\x5e\x5f"
+        "\x60\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a\x7b\x7c\x7d\x7e\x7f"
+        "\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f"
+        "\xa0\xa1\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xab\xac\xad\xae\xaf\xb0\xb1\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xbb\xbc\xbd\xbe\xbf"
+        "\xc0\xc1\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xcb\xcc\xcd\xce\xcf\xd0\xd1\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xdb\xdc\xdd\xde\xdf"
+        "\xe0\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xeb\xec\xed\xee\xef\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xfb\xfc\xfd\xfe\xff",
+        256,
+    },
+    { "empty.txt", "" },
+    { "embedlast.h", "a\n#embed \"hi.txt\" limit(1)\n" },
+    { "embedlast_nonl.h", "a\n#embed \"hi.txt\" limit(1)" },
+    { "tail.h", "x\n" },
+    { 0, 0 },
+};
+
+// --embed-dir's resource, and headers in a directory of their own that embed one beside them, first thing and after
+// blank lines and a comment.
+static const PPTestFile pp_test_files_embed_directories[] = {
+    { "dir/x.bin", "ED" },
+    { "sub/inc.h", "#embed \"y.bin\"\n" },
+    { "sub/late.h", "\n// first\n#embed \"y.bin\"\n" },
+    { "sub/y.bin", "Y" },
     { 0, 0 },
 };
 
@@ -1189,6 +1261,280 @@ static const PPTestCase pp_test_cases[] = {
         .standard = "gnu17",
         .expected = "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint after = 503;\n",
     },
+    // #embed (C23 6.10.3), as clang 23 has it: the data, one token that -E prints as its values; the parameters, read
+    // expanded, with clang's errors; the files found as clang finds them; and where -E prints it all: no token of an
+    // #embed starts a line, a line starts at a file change before them, and the next token of the file joins their line
+    // when no newline outside comments is between them.
+    {
+        .name = "#embed: data, limit, clang::offset, prefix, suffix and if_empty",
+        .source = "int a[] = {\n#embed \"hi.txt\"\n};\nint b[] = {\n#embed \"bin.dat\"\n};\nint c[] = { 1,\n"
+                  "#embed \"hi.txt\" limit(2) prefix(0,) suffix(,9)\n};\nint d[] = {\n"
+                  "#embed \"empty.txt\" if_empty(42) prefix(7,)\n};\n#define LIM 1\nint e[] = {\n"
+                  "#embed \"bin.dat\" limit(LIM+1) clang::offset(1)\n};\nint f[] = {\n"
+                  "#embed \"hi.txt\" __limit__(3) __suffix__(;)\n};\nint g[] = {\n"
+                  "#embed \"hi.txt\" limit(0) if_empty(0) clang::offset(9)\n#embed \"hi.txt\" clang::offset(4)\n"
+                  "#embed \"hi.txt\" clang::offset(18446744073709551615u) limit(-1u)\n};\nx\n",
+        .standard = "c23",
+        .expected = "int a[] = {72, 105, 33, 10 }; int b[] = {0, 255, 127, 128, 9, 10, 99, 100 }; int c[] = { 1,0,72, "
+                    "105 ,9}; int d[] = {42}; int e[] = {255, 127 }; int f[] = {72, 105, 33 ;}; int g[] = {0 }; x",
+        .files = pp_test_files_embed,
+    },
+    {
+        .name = "#embed: every byte's value, in pieces of every length",
+        .source = "#embed \"bytes.dat\"\nx\n#embed \"bytes.dat\" clang::offset(250)\ny\n"
+                  "#embed \"bytes.dat\" limit(17) clang::offset(7)\nz\n",
+        .standard = "c23",
+        .expected = "0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, "
+                    "27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, "
+                    "51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, "
+                    "75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, "
+                    "99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, "
+                    "118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, "
+                    "137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, "
+                    "156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, "
+                    "175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, "
+                    "194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, "
+                    "213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, "
+                    "232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, "
+                    "251, 252, 253, 254, 255 x 250, 251, 252, 253, 254, 255 y 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, "
+                    "18, 19, 20, 21, 22, 23 z",
+        .files = pp_test_files_embed,
+    },
+    {
+        .name = "#embed: the next token joins the data's line",
+        .source = "#define E\na1\n#embed \"hi.txt\" limit(1)\nb1 b2\na2\n#embed \"hi.txt\" limit(1)\n   b3\na3\n"
+                  "#embed \"hi.txt\" limit(1)\n\nb4\na5\n#embed \"hi.txt\" limit(1)\n/* c\n*/ b5\na6\n"
+                  "#embed \"hi.txt\" limit(1) // c\nb6\na7\n#embed \"hi.txt\" limit(1)\n#define Q\nb7\na8\n"
+                  "#embed \"hi.txt\" limit(1)\nE b8\na9\n#embed \"empty.txt\"\nb9\na10\n"
+                  "#embed \"empty.txt\" if_empty(z)\nb10\na11\n#include \"embedlast.h\"\nb11\na12\n"
+                  "#include \"embedlast_nonl.h\"\nb12\na13\n#embed \"hi.txt\" limit(1)\nE\nb13\n",
+        .standard = "c23",
+        .expected = "a1 72 b1 b2\na2 72 b3\na3 72\nb4\na5 72 b5\na6 72 b6\na7 72\nb7\na8 72 b8\na9\nb9\na10 z b10\n"
+                    "a11\na 72\nb11\na12\na 72\nb12\na13 72\nb13\n",
+        .files = pp_test_files_embed,
+    },
+    {
+        .name = "#embed: a file change before it starts a line",
+        .source = "first\n#include \"tail.h\"\n\n#embed \"hi.txt\" limit(1)\nz\n#line 50\n\n"
+                  "#embed \"hi.txt\" limit(2)\nw\n",
+        .standard = "c23",
+        .expected = "first x 72 z 72, 105 w",
+        .files = pp_test_files_embed,
+    },
+    {
+        .name = "#embed: computed names and macros among the parameters",
+        .source = "#define F \"hi.txt\"\n#define P prefix(1,) limit(2)\n#define N 3\n#define L limit\n#define E\n"
+                  "#embed F limit(N - 2)\n#embed \"hi.txt\" P\n#embed \"hi.txt\" L(1) suffix(N)\n"
+                  "#embed E \"hi.txt\" E limit(1)\nx\n",
+        .standard = "c23",
+        .expected = "72 1,72, 105 72 3 72 x",
+        .files = pp_test_files_embed,
+    },
+    {
+        .name = "#embed: --embed-dir, angled names and the including file's directory",
+        .source = "#embed <x.bin>\n#embed \"x.bin\"\na\n#include \"sub/inc.h\"\nb\n#include \"sub/late.h\"\nc\n"
+                  "#if __has_embed(<x.bin>) == 1 && __has_embed(\"x.bin\") == 1 && __has_embed(\"y.bin\") == 0\nfound\n"
+                  "#endif\n",
+        .standard = "c23",
+        .expected = "69, 68 69, 68 a\n89\nb\n89\nc\nfound\n",
+        .options = "--embed-dir=%d/dir",
+        .files = pp_test_files_embed_directories,
+    },
+    {
+        .name = "#embed before C23, an extension",
+        .source = "#embed \"hi.txt\" clang::offset(2)\nx\n",
+        .standard = "c17",
+        .expected = "33, 10 x",
+        .warnings = 1,
+        .files = pp_test_files_embed,
+    },
+    {
+        .name = "#embed: the parameters' errors drop the directive",
+        .source = "a\n#embed \"hi.txt\" limit(defined(X))\nb\n#embed \"hi.txt\" prefix(a] suffix(b)\nc\n"
+                  "#embed \"hi.txt\" prefix((a)\nd\n#embed \"hi.txt\" 1\ne\n#embed \"hi.txt\" clang::\nf\n"
+                  "#embed \"hi.txt\" limit(1)x\ng\n#embed \"hi.txt\" limit(1 2)\nh\n#embed \"hi.txt\" limit()\ni\n"
+                  "#embed \"hi.txt\" prefix(a{b)c})\nj\n#embed \"hi.txt\" limit(-1)\nk\n#embed \"hi.txt\" int\nl\n"
+                  "#embed\nm\n#embed \"/dev/null\"\nn\n#embed \"hi.txt\" clang::offset(1) clang::offset(2)\no\n"
+                  "#embed \"hi.txt\" prefix(((a)b)c)\np\n#embed \"\"\nq\n#embed \"hi.txt\" limit(1 +)\nr\n"
+                  "#embed \"hi.txt\" limit((1)\ns\n#embed \"hi.txt\" prefix({) limit(1)\nt\n",
+        .standard = "c23",
+        .expected = "a b c d e f g h i j k l m n 33, 10 o p q r s{72 t",
+        .fails = true,
+        .files = pp_test_files_embed,
+    },
+    {
+        .name = "#embed: a file that isn't there",
+        .source = "#embed \"missing.txt\"\nx\n",
+        .standard = "c23",
+        .expected = "",
+        .fails = true,
+        .files = pp_test_files_embed,
+    },
+    {
+        .name = "#embed: an angled name without --embed-dir",
+        .source = "#embed <hi.txt>\nx\n",
+        .standard = "c23",
+        .expected = "",
+        .fails = true,
+        .files = pp_test_files_embed,
+    },
+    {
+        .name = "#embed in a skipped group",
+        .source = "#if 0\n#embed \"missing.txt\"\n#embed\n#endif\nok\n",
+        .standard = "c23",
+        .expected = "ok",
+    },
+    // #252's review, against clang 23: an #embed's parameters past an angled name in which "//" began a comment for the
+    // file's tokens, so that the line is lexed again from the '>', and the errors of a token the name's
+    // '>' starts; an #embed after #pragma GCC system_header, which starts its line where the system header's line marker
+    // puts it; and comment delimiters that a line splice splits, after an #embed and in a #line's comment.
+    {
+        .name = "#252's review: an #embed's parameters past an angled name with \"//\"",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(0) if_empty(42)\n};\nint b[] = {\n#embed <dir//bytes.bin> limit(1)\n};\n"
+                  "int c[] = {\n#embed <dir//bytes.bin> clang::offset(1)\n};\nint d[] = {\n#embed <dir//bytes.bin> /* c */ limit(1) /* d */\n};\n"
+                  "int e[] = {\n#embed <dir/\\\n/bytes.bin> limit(1)\n};\nx\n",
+        .standard = "c23",
+        .expected = "int a[] = {42}; int b[] = {65 }; int c[] = {10 }; int d[] = {65 }; int e[] = {65 }; x",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's review: a token an #embed name's '>' starts",
+        .source = "int a[] = {\n#embed <dir/bytes.bin>> limit(1)\n};\nint b[] = {\n#embed <dir/bytes.bin>= limit(1)\n};\nx\n",
+        .standard = "c23",
+        .expected = "int a[] = { }; int b[] = { }; x",
+        .fails = true,
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's review: an #embed after #pragma GCC system_header",
+        .source = "#include \"sys.h\"\nint after;\n",
+        .standard = "c23",
+        .expected = "unsigned char a[] = { 72, 300 }; int after;",
+        .files = pp_test_files_embed_review,
+        .markers = "# 1 \"%d/case.c\"\n# 1 \"%d/sys.h\" 1\nunsigned char a[] = {\n# 3 \"%d/sys.h\" 3\n72, 300 };\n# 2 \"%d/case.c\" 2\nint after;\n",
+    },
+    // #252's second review, against clang 23: the line lexed again past a "//" name runs on through a block comment's
+    // newlines, as clang's does, and the file goes on after it (a #define in that comment is none, and the next token
+    // joins the data's line); a gap of line splices alone in it isn't a space (STR(a\ +b) is "a+b"); and the system
+    // header's note starts where the printer resumes after #pragma GCC system_header, before an #embed indented or after
+    // a blank line.
+    {
+        .name = "#252's second review: an #embed's line past a \"//\" name, through a block comment's newlines",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) /* comment\n*/ suffix(,42)\n};\nint b[] = {\n#embed <dir//bytes.bin> prefix(1 /* c\n */ ,) limit(1)\n};\n"
+                  "int c[] = {\n#embed <dir//bytes.bin> limit(1) /* c\n#define X 1\n*/\n};\nX\n#define STR(x) #x\nint d[] = {\n"
+                  "#embed <dir//bytes.bin> prefix(STR(a\\\n+b),) limit(1)\n};\nend\n",
+        .standard = "c23",
+        .expected = "int a[] = {65 ,42}; int b[] = {1 ,65 }; int c[] = {65 }; X int d[] = {\"a+b\",65 }; end",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's second review: an #embed after #pragma GCC system_header, indented or after a blank line",
+        .source = "#include \"sys_indent.h\"\n#include \"sys_blank.h\"\nint after;\n",
+        .standard = "c23",
+        .expected = "unsigned char b[] = { 72, 300 }; unsigned char c[] = { 72, 300 }; int after;",
+        .files = pp_test_files_embed_review,
+        .markers = "# 1 \"%d/case.c\"\n# 1 \"%d/sys_indent.h\" 1\nunsigned char b[] = {\n# 3 \"%d/sys_indent.h\" 3\n72, 300 };\n# 2 \"%d/case.c\" 2\n"
+                   "# 1 \"%d/sys_blank.h\" 1\nunsigned char c[] = {\n# 3 \"%d/sys_blank.h\" 3\n72, 300 };\n# 3 \"%d/case.c\" 2\nint after;\n",
+    },
+    {
+        .name = "#252's review: comment delimiters a line splice splits, after an #embed and in a #line's comment",
+        .source = "int a[] = {\n#embed \"hi.txt\" limit(1)\n/* comment *\\\n/\n\n};\nint b[] = {\n#embed \"hi.txt\" limit(1)\n/\\\n* comment */\n\n};\n"
+                  "int c[] = {\n#embed \"hi.txt\" limit(1)\n/\\\n* comment\n*/ };\n#line 100 /* x *\\\n/\n#embed \"hi.txt\" limit(1)\nint z;\n",
+        .standard = "c23",
+        .expected = "int a[] = {72 }; int b[] = {72 }; int c[] = {72 }; 72 int z;",
+        .files = pp_test_files_embed_review,
+    },
+    // #252's third review, against clang 23, on lines lexed again past a name with "//" (or "/*"): a block comment right
+    // after the name carries the line on (the file's tokens had nothing past the name to differ); directives that a
+    // comment in such a line hides, which the file's conditional pairing counted (an #endif there leaves the #else, #elif
+    // and #elifdef after it to a count of the nesting, through #if, #ifdef, #ifndef and #elifndef); poisoned names in it,
+    // each an error once, and none in its comments, where the file's tokens may have them; an unterminated block comment
+    // at its end (clang's error); comments that end and begin again on its lines, each piece lexed once; and the file's
+    // next token, which joins the data's line from where the line lexed again ends (`// */` is in its comment).
+    {
+        .name = "#252's third review: a block comment right after an #embed's \"//\" name",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> /* comment\n*/\n};\nint b[] = {\n#embed <dir//bytes.bin> /* c\n*/ limit(1)\n};\n"
+                  "int c[] = {\n#embed <dir//bytes.bin> /* c */ /* d\n*/ limit(1) /* e\n*/\n};\nafter\n",
+        .standard = "c23",
+        .expected = "int a[] = {65, 10 }; int b[] = {65 }; int c[] = {65 }; after",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: directives hidden in an #embed's line lexed again",
+        .source = "#if 1\n#embed <dir//bytes.bin> limit(1) /* comment\n#endif\n*/\n#else\nbad\n#endif\ngood\n"
+                  "#ifdef __STDC__\n#embed <dir//bytes.bin> limit(1) /* comment\n#endif\n*/\n#elifdef __STDC__\nbad\n#else\n#ifndef X\nbad\n"
+                  "#elifndef Y\nbad\n#else\nbad\n#endif\n#if 1\n#endif\nbad\n#endif\ngood2\n",
+        .standard = "c23",
+        .expected = "65 good 65 good2",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: poisoned names in an #embed's line lexed again",
+        .source = "#pragma GCC poison bad\nint a[] = {\n#embed <dir//bytes.bin> limit(1) prefix(bad,)\n};\nint b[] = {\n"
+                  "#embed <dir/bytes.bin>> limit(1) > bad\n};\nint c[] = {\n#embed <dir/bytes.bin> limit(1) prefix(bad,)\n};\nx\n",
+        .standard = "c23",
+        .expected = "int a[] = {bad,65 }; int b[] = { }; int c[] = {bad,65 }; x",
+        .fails = true,
+        .errors = 4,
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: poisoned names in comments of an #embed's line lexed again",
+        .source = "#pragma GCC poison bad\nint a[] = {\n#embed <dir/*x.bin> limit(1) /*/ > bad */\n};\nint b[] = {\n"
+                  "#embed <dir//bytes.bin> limit(1) /* bad\n*/\n};\nx\n",
+        .standard = "c23",
+        .expected = "int a[] = {66 }; int b[] = {65 }; x",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: an unterminated block comment in an #embed's line lexed again",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) /* unclosed\n};\n",
+        .standard = "c23",
+        .expected = "int a[] = {65",
+        .fails = true,
+        .errors = 1,
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: comments that end and begin again in an #embed's line lexed again",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) prefix(/*\n*/1,/*\n*/2, /* x */ /*\n\n*/3,) /* y */ /*\n*/ suffix(,/*\n\n*/4)\n};\nend\n",
+        .standard = "c23",
+        .expected = "int a[] = {1,2,3,65,4}; end",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+    },
+    {
+        .name = "#252's third review: the token after an #embed's line lexed again",
+        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) /* comment\n// */\n, __builtin_LINE()\n};\nint b[] = {\n"
+                  "#embed <dir//bytes.bin> limit(1) /* comment\n// */\n\n, 3\n};\n",
+        .standard = "c23",
+        .expected = "int a[] = {65 , __builtin_LINE() }; int b[] = {65 , 3 };",
+        .options = "--embed-dir=%d",
+        .files = pp_test_files_embed_review,
+        .markers = "# 1 \"%d/case.c\"\nint a[] = {65 , __builtin_LINE()\n\n\n\n};\nint b[] = {65\n\n\n\n, 3\n};\n",
+    },
+    {
+        .name = "__has_embed: clang's limit and clang::offset",
+        .source = "#if __has_embed(\"hi.txt\") == 1 && __has_embed(\"hi.txt\" limit(4)) == 1 && __has_embed(\"hi.txt\" "
+                  "limit(5)) == 2 && __has_embed(\"hi.txt\" limit(100)) == 2\nlimits\n#endif\n"
+                  "#if __has_embed(\"hi.txt\" clang::offset(3)) == 1 && __has_embed(\"hi.txt\" clang::offset(4)) == 2 &"
+                  "& __has_embed(\"hi.txt\" clang::offset(9)) == 2 && __has_embed(\"empty.txt\") == 2\noffsets\n"
+                  "#endif\n"
+                  "#if __has_embed(<hi.txt>) == 0 && __has_embed(\"hi.txt\" foo) == 0 && __has_embed(\"hi.txt\" foo(1))"
+                  " == 0 && __has_embed(\"hi.txt\" __if_empty__(x)) == 1 && __has_embed(\"hi.txt\" clang::offset(1) lim"
+                  "it(3)) == 1 && __has_embed(\"hi.txt\" clang::offset(1) limit(4)) == 2\nothers\n#endif\n",
+        .standard = "c23",
+        .expected = "limits offsets others",
+        .files = pp_test_files_embed,
+    },
     {
         .name = "-municode's UNICODE is <command line>'s first macro, before -D and -U",
         .source = "UNICODE\n",
@@ -1206,16 +1552,23 @@ static const PPTestCase pp_test_cases[] = {
     },
 };
 
-// Writes a text to a file; returns whether it could.
-static bool pp_test_write_file(const char* path, const char* text)
+// Writes `length` bytes of `text` to a file, or all of it up to its zero byte when `length` is 0; returns whether it could.
+static bool pp_test_write_bytes(const char* path, const char* text, uint32_t length)
 {
     FILE* file = fopen(path, "w");
-    const bool result = file != 0 && fputs(text, file) >= 0;
+    const size_t size = length != 0 ? length : strlen(text);
+    const bool result = file != 0 && fwrite(text, 1, size, file) == size;
     if (file != 0)
     {
         fclose(file);
     }
     return result;
+}
+
+// Writes a text to a file; returns whether it could.
+static bool pp_test_write_file(const char* path, const char* text)
+{
+    return pp_test_write_bytes(path, text, 0);
 }
 
 // Writes a case's files into its directory (other.h, and the others with their directories); returns the main file's
@@ -1239,7 +1592,7 @@ static bool pp_test_write_case(const PPTestCase* test, const char* directory, ch
             mkdir(other, 0700);
         }
         snprintf(other, sizeof(other), "%s/%s", directory, test->files[i].path);
-        result = pp_test_write_file(other, test->files[i].text);
+        result = pp_test_write_bytes(other, test->files[i].text, test->files[i].length);
     }
     return result;
 }
@@ -1389,6 +1742,11 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
                 printf("%s: %u warnings (%s kernels), not %u\n", test->name, runs[k].warnings, k == 0 ? "vectorized" : "scalar", test->warnings);
                 result = false;
             }
+            if (test->errors != 0 && runs[k].errors != test->errors)
+            {
+                printf("%s: %u errors (%s kernels), not %u\n", test->name, runs[k].errors, k == 0 ? "vectorized" : "scalar", test->errors);
+                result = false;
+            }
         }
     }
     if (result && (!test->fails || test->expected[0] != 0))
@@ -1419,6 +1777,64 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     arena_release(&arena);
     pp_test_remove_case(test, directory);
     return result;
+}
+
+// #embed's lookups that the cases can't set up (#252's review): an empty --embed-dir= is the working directory, with no
+// '/' put before the name (clang's LookupEmbedFile), from the case's directory as the working directory; and __has_embed
+// answers from a file's size without reading it, as clang's EvaluateHasEmbed does (LookupEmbedFile without opening the
+// file), also for a sparse file of 5 GiB, past what #embed reads, and one it may not read. Both cases run as the others
+// do (pp_test_case), with clang too under --clang; the run's working directory is restored after.
+static bool pp_test_embed_lookups(const char* directory, bool with_clang)
+{
+    static const PPTestFile files[] = {
+        { "bytes.bin", "XY" },
+        { 0, 0 },
+    };
+    const PPTestCase cases[] = {
+        {
+            .name = "#252's review: an empty --embed-dir= is the working directory",
+            .source = "#embed <bytes.bin>\nx\n",
+            .standard = "c23",
+            .expected = "88, 89 x",
+            .options = "--embed-dir=",
+            .files = files,
+        },
+        {
+            .name = "#252's review: __has_embed of files it only looks at",
+            .source = "#if __has_embed(\"big.bin\") == 1 && __has_embed(\"big.bin\" limit(1)) == 1\nbig\n#endif\n"
+                      "#if __has_embed(\"locked.bin\") == 1 && __has_embed(\"locked.bin\" clang::offset(2)) == 2\nlocked\n#endif\n",
+            .standard = "c23",
+            .expected = "big locked",
+        },
+    };
+    char big[4096];
+    char locked[4096];
+    snprintf(big, sizeof(big), "%s/big.bin", directory);
+    snprintf(locked, sizeof(locked), "%s/locked.bin", directory);
+    const int big_fd = open(big, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    bool result = big_fd >= 0 && ftruncate(big_fd, 5ll << 30) == 0;
+    if (big_fd >= 0)
+    {
+        close(big_fd);
+    }
+    result = result && pp_test_write_file(locked, "AB") && chmod(locked, 0) == 0;
+    const int saved = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    result = result && saved >= 0 && chdir(directory) == 0;
+    uint32_t failures = 0;
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        failures += !pp_test_case(&cases[i], directory, with_clang);
+    }
+    const bool back = saved >= 0 && fchdir(saved) == 0;
+    if (saved >= 0)
+    {
+        close(saved);
+    }
+    unlink(big);
+    unlink(locked);
+    printf("embed lookups: %u of %lu fail%s\n", result ? failures : (uint32_t)BUSTER_ARRAY_LENGTH(cases), (unsigned long)BUSTER_ARRAY_LENGTH(cases),
+           result ? "" : " (the files or the working directory couldn't be set up)");
+    return result && back && failures == 0;
 }
 
 // c_predefines_test.c's: drops the -dM lines of clang's patch release's version macros and of __BUSTER__.
@@ -2263,6 +2679,60 @@ struct PPFuzzOptions
     uint32_t jobs;
 };
 
+// The text of an #embed's data: pp_embed_text_vector must write pp_embed_text_scalar's bytes, which must be the values
+// in decimal separated by ", " (from snprintf), for every count to 300 of random bytes and of every value in turn, with
+// and without a separator first; and at the end of a readable page before a PROT_NONE one, where a read past the bytes
+// faults. The output has the vector kernel's 64 bytes of slack.
+static bool pp_test_embed_text(uint64_t seed)
+{
+    const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, 2 * page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool result = mapping != MAP_FAILED && mprotect(mapping + page_bytes, page_bytes, PROT_NONE) == 0;
+    static uint8_t vector[5 * 300 + 64];
+    static uint8_t scalar[5 * 300 + 64];
+    static char reference[5 * 300 + 64];
+    uint32_t checks = 0;
+    uint32_t failures = 0;
+    uint64_t state = seed;
+    for (uint32_t pattern = 0; result && pattern < 2; pattern += 1)
+    {
+        for (uint32_t count = 0; count <= 300; count += 1)
+        {
+            uint8_t* bytes = mapping + page_bytes - count;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                state = state * 6364136223846793005ull + 1442695040888963407ull;
+                bytes[i] = pattern == 0 ? (uint8_t)(state >> 56) : (uint8_t)(i + count);
+            }
+            for (uint32_t separated = 0; separated < 2; separated += 1)
+            {
+                const uint64_t vector_length = pp_embed_text_vector(bytes, count, separated != 0, vector);
+                const uint64_t scalar_length = pp_embed_text_scalar(bytes, count, separated != 0, scalar);
+                uint64_t reference_length = 0;
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    reference_length += (uint64_t)snprintf(reference + reference_length, sizeof(reference) - reference_length, "%s%u", separated || i != 0 ? ", " : "", bytes[i]);
+                }
+                const bool same = vector_length == scalar_length && scalar_length == reference_length && memcmp(vector, scalar, scalar_length) == 0 &&
+                                  memcmp(scalar, reference, reference_length) == 0;
+                if (!same && failures < 5)
+                {
+                    printf("embed text: %u bytes (%s, %s): vector %.*s\n  scalar %.*s\n  wanted %.*s\n", count, pattern == 0 ? "random" : "in turn",
+                           separated ? "separated" : "first", (int)vector_length, (const char*)vector, (int)scalar_length, (const char*)scalar, (int)reference_length, reference);
+                }
+                failures += !same;
+                checks += 1;
+            }
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 2 * page_bytes);
+    }
+    printf("embed text: %u checks, %u failures\n", checks, failures);
+    return result && failures == 0;
+}
+
 static bool pp_fuzz(const PPFuzzOptions* options);
 static bool pp_fuzz_print_case(const PPFuzzOptions* options, uint64_t id);
 
@@ -2488,6 +2958,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= predefines_test_target();
         passed_all &= predefines_test_refused();
         passed_all &= pp_test_history(directory, with_clang);
+        passed_all &= pp_test_embed_text(fuzz.seed);
+        passed_all &= pp_test_embed_lookups(directory, with_clang);
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);

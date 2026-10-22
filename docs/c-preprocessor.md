@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units (at fbddd2e, with `main` at e71d7fd), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,070,090 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 211 | |
+| The built-in cases (`pp_test_cases`) | 224 | |
 | #109's generated cases in C17 and C23, against `clang -E -P`: the last campaign's and those after it, but for 4 that #247 fixes ([the fuzzing](preprocessor-fuzz.md), "Qualification") | 42,800,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
@@ -647,6 +647,123 @@ arenas. Popping a context gives its tokens back when they are on top.
     - a forced include's root is the `<built-in>` file that holds the
       `-include` lines.
 
+### `#embed`
+
+`#embed` (C23 6.10.3) works as clang 23's does (#117).
+
+- **The header name** is read as an `#include`'s (`pp_read_header_name`, which
+  `pp_include` shares): `<...>` or a string literal as written, or a computed
+  one from the line's expanded tokens. The file was lexed before the name was
+  known, so after a written `<...>` one of its tokens or comments may run past
+  the `>`: in `<a//b.bin> limit(1)`, the `//` began a comment to the line's
+  end. Then the rest of the line is lexed again from the `>`, as clang lexes on
+  after the name (`pp_header_name_tail`, `pp_copy_relexed`). That is when the
+  first token clang lexes past the `>` isn't the file's next one, or, with
+  none of the file's tokens past the name on its line, when the two lines end
+  at different newlines: a block comment right after the name carries clang's
+  on. The line lexed again runs to its first newline outside a block comment,
+  which carries the line on past its newlines (`pp_relex_end`, which lexes
+  each piece of the line once, from where the comment before it ended), with
+  no space where only a line splice was. An unterminated block comment at its
+  end is clang's error. Its poisoned names are errors, once: `pp_directive`
+  leaves the line past an angled name to `pp_embed`, which checks the line
+  lexed again, or else the file's tokens past the name. The file goes on after
+  that line, past what its own tokens held there, a directive in the comment
+  among them (`pp_resume_after`). The file's conditional pairing counted such
+  a directive, so a context that hid one counts the nesting again when it
+  skips a group (`pp_skip_group`).
+- **The parameters** are read expanded, as clang reads them. When a macro's
+  name is among them, or the name is computed, the line goes through a capture
+  (`BUSTER_PP_CAPTURE_EMBED`, `pp_finish_embed`); otherwise it is read as it is.
+  `pp_embed_parameters` follows clang's `LexEmbedParameters`, which
+  `__has_embed` shares:
+  - A name is an identifier that isn't a keyword, or `scope::name`. `__` around
+    the whole spelling doesn't change it: `__limit__` is `limit`, and
+    `__clang::offset__` is `clang::offset`.
+  - `limit` and `clang::offset` take a `#if` expression, which must be at least
+    0 and can't contain `defined`. Clang's ends at a `)` that closes no `(` of
+    its own.
+  - `prefix`, `suffix` and `if_empty` take tokens whose closing brackets must
+    match. They end at a `)` unless a `(` came since the last `)`: clang keeps a
+    flag there, not a depth, so `prefix(((a)b)c)` ends after `b`, and
+    `prefix({)` is accepted.
+  - An unknown parameter is an error, and for `__has_embed` an answer of 0. One
+    given twice is an error, and its later value counts.
+
+  Each error has clang's message at clang's column. A fixture checks all 18
+  kinds, and that the line is dropped and the run goes on.
+- **The file** is found as clang's `LookupEmbedFile` finds it (`pp_find_embed`).
+  An absolute name is used as it is. A quoted name is looked for in the
+  directory of the file the directive is in, then in the working directory,
+  then in the `--embed-dir=` directories; an angled one in those alone. An
+  empty `--embed-dir=` is the working directory: the name gets no `/` before
+  it. The file is only looked at: `#embed` reads it (through the file cache),
+  and `__has_embed` needs its size alone. A missing file is fatal, and a device
+  file an error.
+- **The data** is one output token, `BUSTER_PP_KIND_EMBED`, as clang's is one
+  `annot_embed`. A file of N bytes doesn't become 2N - 1 numbers and commas,
+  which would take about 28 bytes of output columns per byte. Its value indexes
+  `Preprocessor.embeds` (`PPEmbed`: the file's data, an offset and a length),
+  and its location is the directive's `#`. It comes after `prefix`'s tokens and
+  before `suffix`'s. When no bytes are left after `clang::offset` and then
+  `limit`, `if_empty`'s tokens come alone. They go in as a buffer whose tokens
+  never expand, as clang enters them with macro expansion off, having read them
+  expanded.
+- **`__has_embed`** answers as clang 23's does, from the file's size without
+  reading it (clang's `LookupEmbedFile` without opening the file), so that a
+  file too big or unreadable for `#embed` is there. A `limit` past the bytes
+  left gives 2 (empty), not 1, and a device file's size is 0.
+- **`-E`** prints the data as clang does: the values, separated by `, `.
+  `pp_embed_text_vector` formats 16 bytes per iteration:
+  - each value's tens and hundreds by multiplications in 16-bit lanes
+    (`v * 205 >> 11` is `v / 10` below 1029);
+  - a leading zero as a zero byte;
+  - each byte's `, ` and three digits put in an 8-byte slot by one `vpermb`
+    per 8 bytes;
+  - the slots' nonzero bytes packed by `vpcompressb`, and stored whole.
+
+  `pp_embed_text_scalar`, its twin, formats a byte at a time.
+  `test-preprocessor` checks both against `snprintf` on every count to 300,
+  random and every value in turn, at the end of a readable page before a
+  `PROT_NONE` one. `benchmark-preprocessor --embed N` times them (see below).
+  The text is the only part of `#embed` that grows with the file. The rest is
+  scalar: reading the parameters, looking up the file and the join's scan of the
+  bytes after the line. It costs a line's worth of work once per directive.
+
+  On the 9700X (CPU 2, `benchmark-preprocessor --embed 16777216`, 16 MB of
+  random bytes, medians of 21 passes):
+
+  | kernel | cycles/byte | ns/byte | instructions/byte | IPC | text, GB/s |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | `pp_embed_text_vector` | 1.12 | 0.202 | 3.70 | 3.31 | 22.7 |
+  | `pp_embed_text_scalar` | 17.6 | 3.167 | 30.7 | 1.75 | 1.44 |
+
+  The vector kernel is 15.7 times as fast. On 4 KB formatted again and again,
+  the scalar twin reads 6.8 cycles a byte, since the predictor learns its
+  branches on the digit counts, as it can't on a real file's bytes; the vector
+  kernel reads 1.13 there too. What `#embed` adds to the main loop costs
+  nothing measurable: the pending join and the file-change records. On
+  `main.c`, the vectorized kernels take 29.5 and 29.7 ms (428.1 instructions
+  per input token), against 30.1 and 29.7 ms (429.3) on #109's branch before
+  it.
+- **Where `-E` prints it.** No token of an `#embed` starts a line, so the data
+  goes on the line of the output before it. After its tokens, the file's next
+  token joins their line too (`pp_embed_joins`, `BUSTER_PP_JOIN_LINE`),
+  counted from the line's end as clang lexes it. Clang's
+  lexer starts no line there, because the end of the token stream that the
+  directive entered passes no line start on. The join holds unless a newline
+  outside comments comes before the token, or the token is a directive's `#`.
+  The scans between tokens read comment delimiters as the lexer does, through
+  line splices (`pp_skip_blanks`): `*\` with a `/` on the next line closes a
+  comment. A change of file or of presumed position starts a line in clang's
+  printer (`FileChanged`): an included file entered or left, a `#line`, or
+  `#pragma GCC system_header`. An `#embed`'s first tokens after one, with no
+  output since, go at the place the change left the printer: the file's first
+  line, the line after the `#include` or the pragma, or `#line`'s number. That
+  is where clang prints them, though the `#embed` may be further down
+  (`Preprocessor.file_change_token`). So the pragma's note of a system header
+  starts there, at the line after it, before blanks and lines without tokens.
+
 ### Built-in macros and the predefines
 
 `__FILE__`, `__LINE__`, `__COUNTER__`, `__INCLUDE_LEVEL__`, `__BASE_FILE__`,
@@ -933,7 +1050,9 @@ against the generated tables (each name a feature, with `x86_target.c`'s macro).
 
 A token in a buffer or the output has four parts:
 
-- a kind: `C_TOKEN_*`, or a keyword's kind in the final output;
+- a kind: `C_TOKEN_*`, or a keyword's kind in the final output, or one of the
+  output's own: `BUSTER_PP_KIND_PRAGMA_END` after a pragma's tokens, and
+  `BUSTER_PP_KIND_EMBED` for an `#embed`'s data;
 - flags: `BUSTER_PP_SPACE`, `BUSTER_PP_START_OF_LINE`, `BUSTER_PP_NO_EXPAND`
   and `BUSTER_PP_FROM_MACRO`;
 - a value: an identifier's `IdentId`, else the location of its end;
@@ -1299,7 +1418,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 211 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 224 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -1628,7 +1747,20 @@ spellings alone would miss this change (#272).
 
 ## Not yet
 
-- `#embed` is an error (C23); `__has_embed` is answered.
+- `#embed`'s line is expanded whole before its parameters are read, where clang
+  expands it as it reads each one. The difference shows in one corner:
+  `__has_include` and `__has_embed` inside `limit(...)` or `clang::offset(...)`
+  are errors here, and clang evaluates them there as in `#if` (but not in
+  `prefix(...)`). `-dE` (printing the directive rather than its data) isn't
+  supported. A FIFO or a socket that `#embed` names is reported as a device
+  file, where clang would read it.
+- Individual feature switches (`-m*`, other than the supported `-march=` and
+  `-mtune=`) are rejected. Other options such as `-funsigned-char` still need
+  `--predefines` for their macro effects. The target-builtin query table remains
+  a bounded subset; see [the target contract](x86-target.md).
+- The feature tests (`__has_attribute` and the others) always answer from
+  clang's table, which #117 and #125 keep for the oracle's mode. Outside it, they
+  are to answer what the compiler implements (#123, #148).
 - The printer's spacing differs from clang's in places. It puts a space between
   `<` and `>`, where clang doesn't, and it doesn't indent a line's first token
   to its column. It keeps apart tokens that clang's printer joins into one,
@@ -1704,10 +1836,9 @@ spellings alone would miss this change (#272).
   translation unit before the parser reads it. Streaming needs a rule for when
   a block of output is final, since a function-like macro name at the end of an
   expansion can take a `(` from the input after it (#117).
-- **The rest of C23** (`#embed`), and the compiler's own headers (#117's open
-  question; this version uses clang's resource directory). Per-file jobs cached
-  for the process, which lanes fill ahead of the preprocessor, are
-  `docs/c-files.md`'s (#150).
+- **The compiler's own headers** (#117's open question; this version uses
+  clang's resource directory). Per-file jobs cached for the process, which lanes
+  fill ahead of the preprocessor, are `docs/c-files.md`'s (#150).
 
 ## Reproduction
 
