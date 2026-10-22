@@ -10177,6 +10177,8 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
     const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
     if ((!text || pp_recover_diagnostic_line(pp, context, directive)) && pp_recover_direct_header_comment(pp, context, directive))
     {
+        // Recovery resumes a capture after its directive; this caller still has to dispatch that directive itself.
+        context->next_directive = directive;
         pp_prepared_directive(pp, context);
     }
 }
