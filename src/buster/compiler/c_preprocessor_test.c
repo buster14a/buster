@@ -286,6 +286,8 @@ static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* o
 {
     PPOptions with_starts = *options;
     with_starts.expansion_starts = true;
+    // The statistics too: the files' checks compare the inclusions skipped by guards with clang's.
+    with_starts.timing = true;
     bool result = intern_initialize(table) && pp_initialize(pp, &with_starts, table);
     if (result)
     {
@@ -1584,8 +1586,11 @@ static bool pp_test_assembly_printing(const char* directory)
     return failures == 0;
 }
 
-// One accepted file, by both kernels, and (when supplied) against Clang's already-collected output.
-static bool pp_test_file_output(const PPOptions* base, const char* path, bool with_clang, const char* text, size_t length, uint64_t* tokens)
+static int64_t pp_directive_test_clang_guards(char** arguments, int argument_count, const char* path);
+
+// One accepted file, by both kernels, and (when supplied) against Clang's already-collected output. Adds to *guards
+// (if it isn't null) the inclusions the run skipped by their guards, which pp_test_file compares with clang's (#120).
+static bool pp_test_file_output(const PPOptions* base, const char* path, bool with_clang, const char* text, size_t length, uint64_t* tokens, uint64_t* guards)
 {
     PPOptions options = *base;
     static InternTable tables[2];
@@ -1607,6 +1612,10 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
                  pp_test_placed(&runs[0], &theirs, path);
         pp_placed_release(&theirs);
     }
+    if (guards != 0)
+    {
+        *guards += runs[0].statistics.skipped_guards;
+    }
     arena_release(&ours.arena);
     for (uint32_t k = 0; k < 2; k += 1)
     {
@@ -1616,6 +1625,8 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
     return result;
 }
 
+// One file, by both kernels, and with --clang against clang with the same options: the tokens, their places, and the
+// inclusions skipped by their guards (#120), as many as clang's multiple-include optimization skips.
 static bool pp_test_file(int argument_count, char** arguments, const PPOptions* base, const char* path, bool with_clang, const char* directory, uint64_t* tokens)
 {
     PPOptions options = *base;
@@ -1624,7 +1635,14 @@ static bool pp_test_file(int argument_count, char** arguments, const PPOptions* 
     size_t length = 0;
     char* text = with_clang ? pp_test_clang(arguments, argument_count, path, predefines, &length) : 0;
     options.predefines_path = with_clang ? predefines : options.predefines_path;
-    bool result = (!with_clang || text != 0) && pp_test_file_output(&options, path, with_clang, text, length, tokens);
+    uint64_t guards = 0;
+    bool result = (!with_clang || text != 0) && pp_test_file_output(&options, path, with_clang, text, length, tokens, &guards);
+    const int64_t clang_guards = result && with_clang ? pp_directive_test_clang_guards(arguments, argument_count, path) : -1;
+    if (result && with_clang && clang_guards != (int64_t)guards)
+    {
+        printf("%s: %lu inclusions skipped by their guards, clang %ld\n", path, (unsigned long)guards, (long)clang_guards);
+        result = false;
+    }
     // Then, with our own predefines, the macros at the file's end against clang's.
     result = result && (!with_clang || pp_test_macros(argument_count, arguments, base, path));
     free(text);
@@ -2306,6 +2324,7 @@ static bool predefines_test_target(void);
 static bool predefines_test_refused(void);
 
 #include "c_preprocessor_history_test.c"
+#include "c_preprocessor_directives_test.c"
 #include "c_preprocessor_order_test.c"
 
 static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
@@ -2332,17 +2351,21 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     uint64_t printed_case = 0;
     // The arguments without ours, for clang and pp_parse_options; the files are those that don't start with '-' and
     // aren't an option's value.
+    bool tables = false;
+    uint64_t count = BUSTER_PP_DIRECTIVE_TEST_SOURCES;
     char** passed = calloc((size_t)argument_count + 1, sizeof(char*));
+    char** clang_passed = calloc((size_t)argument_count + 1, sizeof(char*));
     char** files = calloc((size_t)argument_count + 1, sizeof(char*));
     int passed_count = 0;
+    int clang_passed_count = 0;
     int file_count = 0;
-    for (int i = 0; passed != 0 && files != 0 && i < argument_count; i += 1)
+    for (int i = 0; passed != 0 && clang_passed != 0 && files != 0 && i < argument_count; i += 1)
     {
         const char* argument = arguments[i];
         const char* next = i + 1 < argument_count ? arguments[i + 1] : 0;
-        const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
-                                 strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
-                                 strcmp(argument, "-target") == 0;
+        const bool ours = pp_own_option_with_value(argument);
+        const bool takes_value = ours || strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
+                                 strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-target") == 0;
         uint64_t number = 0;
         if (strcmp(argument, "--id-order") == 0 && i + 1 < argument_count)
         {
@@ -2390,13 +2413,30 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         {
             generate_targets = true;
         }
+        else if (strcmp(argument, "--tables") == 0)
+        {
+            tables = true;
+        }
+        else if (strcmp(argument, "--count") == 0 && i + 1 < argument_count)
+        {
+            i += 1;
+            count = strtoull(arguments[i], 0, 10);
+        }
         else if (argument[0] == '-')
         {
             passed[passed_count++] = arguments[i];
+            if (!ours)
+            {
+                clang_passed[clang_passed_count++] = arguments[i];
+            }
             if (takes_value && i + 1 < argument_count)
             {
                 i += 1;
                 passed[passed_count++] = arguments[i];
+                if (!ours)
+                {
+                    clang_passed[clang_passed_count++] = arguments[i];
+                }
             }
         }
         else
@@ -2412,7 +2452,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     char directory[4096];
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
-    const bool created = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    const bool created = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && clang_passed != 0 && files != 0 && mkdtemp(directory) != 0;
     bool passed_all = created;
     if (passed_all && generate_targets)
     {
@@ -2433,6 +2473,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= predefines_test_target();
         passed_all &= predefines_test_refused();
         passed_all &= pp_test_history(directory, with_clang);
+        passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);
         if (with_clang)
@@ -2448,6 +2489,10 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             fflush(stdout);
             passed_all &= pp_fuzz(&fuzz);
         }
+    }
+    else if (passed_all && tables)
+    {
+        passed_all = pp_directive_test_paths(files, file_count);
     }
     else if (passed_all)
     {
@@ -2468,7 +2513,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         uint64_t tokens = 0;
         for (int i = 0; passed_all && i < file_count; i += 1)
         {
-            failures += !pp_test_file(passed_count, passed, &options, files[i], with_clang, directory, &tokens);
+            failures += !pp_test_file(clang_passed_count, clang_passed, &options, files[i], with_clang, directory, &tokens);
         }
         printf("files: %u of %d differ (%lu tokens)\n", failures, file_count, (unsigned long)tokens);
         passed_all = passed_all && failures == 0;
@@ -2492,6 +2537,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         rmdir(directory);
     }
     free(passed);
+    free(clang_passed);
     free(files);
     return passed_all ? 0 : 1;
 }
