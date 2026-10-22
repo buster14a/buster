@@ -2529,7 +2529,8 @@ others, its measurements are informational.
   (scalars, vectors, complex types, `_BitInt`s, records with unaligned and
   zero-size members, bit-fields, flexible array members, `_Atomic` and
   `nullptr_t` members, `i128` storage, which LLVM never splits, runs of
-  bit-fields that are an `i128` and that aren't, and the narrow low parts
+  bit-fields that are an `i128` and that aren't, unions whose storage member
+  a zero-length array of a larger record decides, and the narrow low parts
   clang widens into a general register), and calls whose locations clang and
   LLVM give (an `UNCOUNTED` argument that splits the next record, an
   `__int128` without two registers left, a hidden pointer, a record of a
@@ -2541,7 +2542,10 @@ others, its measurements are informational.
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's
-  `classify` transcribed with an explicit stack of frames;
+  `classify` transcribed with an explicit stack of frames; then classified
+  again by the twin, every type at once, into the same table (zero-length
+  arrays of large records among the types, which wait in the levels for the
+  types their alignment reads);
 - assignment: random calls over a world's types, named and variadic, by both
   paths, which must give the same locations and totals, also with the columns
   ending at a `PROT_NONE` page; and calls of 65,542 `long`s and of 32,767 and
@@ -2564,7 +2568,9 @@ what GCC lays out or passes otherwise than clang (the test names each, GCC's
 own bugs among them, and `docs/calling-convention.md` lists them); an argument
 clang would pass as an `i0` becomes a long (its passes crash on them now and
 then), as does an unnamed one clang's `va_arg` reads elsewhere than its call
-puts it; and bytes clang doesn't pass aren't compared. The files go in a new
+puts it; clang's signatures pass no type holding an array of records of no
+size, on which clang 23 crashes after a `float`, a `half` or a `bfloat`; and
+bytes clang doesn't pass aren't compared. The files go in a new
 directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure.
 The 9700X job runs it with `--cross-check` after the type table's benchmark.
 
@@ -2574,10 +2580,10 @@ The 9700X job runs it with `--cross-check` after the type table's benchmark.
 [--only classification|assignment] [--path vector|scalar] [--after-scalar
 MS]` (about 1 s on the 9700X) checks that each vector path of
 `calling_convention.c` agrees with its twin (the classification's rows, pass
-bits, stack bytes, alignments and results; the assignment's locations and
-calls), then reports 21 interleaved-pass medians per item (time, cycles,
-instructions, IPC, branch mispredictions and the throttle, PMCx1A0's umask
-0x08, #199):
+bits, stack bytes, alignments, storage, layouts and results; the
+assignment's locations and calls), then reports 21 interleaved-pass medians
+per item (time, cycles, instructions, IPC, branch mispredictions and the
+throttle, PMCx1A0's umask 0x08, #199):
 
 - classification: a table of `--count` types (32,768), records and unions of
   0 to 8 members mostly, with the pointers, arrays, vectors and aligned
