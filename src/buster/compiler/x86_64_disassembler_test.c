@@ -124,10 +124,14 @@ static bool x86_decode_test_mnemonic(const char* expected, int32_t immediate, co
             }
         }
     }
-    if ((strcmp(expected, "pclmulqdq") == 0 || strcmp(expected, "vpclmulqdq") == 0) && (immediate == 0 || immediate == 1 || immediate == 16 || immediate == 17))
+    if ((strcmp(expected, "pclmulqdq") == 0 || strcmp(expected, "vpclmulqdq") == 0) && (immediate == 0 || immediate == 1 || immediate == 2 || immediate == 3 || immediate == 16 || immediate == 17))
     {
         static const char* const halves[4] = {"lqlq", "hqlq", "lqhq", "hqhq"};
-        snprintf(predicate[0], sizeof(predicate[0]), "%spclmul%sdq", expected[0] == 'v' ? "v" : "", halves[(immediate & 1) + ((immediate >> 3) & 2)]);
+        // GNU objdump also displays 02/03 as the high-second-source aliases (observed in 2.47), although the
+        // architectural selector is bit 4. This is a display-only allowance: GNU-as roundtrip still checks the
+        // exact immediate byte, and our formatter retains the explicit immediate rather than that lossy alias.
+        const uint32_t half = immediate == 2 || immediate == 3 ? (uint32_t)immediate : (immediate & 1) + ((immediate >> 3) & 2);
+        snprintf(predicate[0], sizeof(predicate[0]), "%spclmul%sdq", expected[0] == 'v' ? "v" : "", halves[half]);
     }
     bool match = false;
     for (uint32_t alias = 0; alias <= BUSTER_ARRAY_LENGTH(aliases) + 2 && !match; alias += 1)
@@ -158,8 +162,19 @@ static bool x86_decode_test_mnemonic(const char* expected, int32_t immediate, co
     return match;
 }
 
-static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char* raw)
+static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char* raw, bool catalogue)
 {
+    if (catalogue)
+    {
+        count = 0;
+        for (uint32_t row = 1; row < X86_FORM_COUNT; row += 1)
+        {
+            if (x86_decode_form_supported(row))
+            {
+                count += 1 + !x86_form_is_bound_memory(row);
+            }
+        }
+    }
     char directory[] = "/tmp/buster-disassembler-XXXXXX";
     bool valid = mkdtemp(directory) != 0;
     char binary[256];
@@ -174,7 +189,8 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
     snprintf(object, sizeof(object), "%s/decoded.o", directory);
     snprintf(assembled, sizeof(assembled), "%s/decoded.bin", directory);
     snprintf(log, sizeof(log), "%s/tools.txt", directory);
-    uint32_t capacity = count * 15 + 64;
+    const uint32_t generated_count = count;
+    uint32_t capacity = count * 16 + 64;
     struct stat info;
     if (raw != 0)
     {
@@ -183,7 +199,7 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
         count = capacity;
     }
     uint8_t* bytes = malloc(capacity);
-    X86Decoded* expected = calloc(count, sizeof(*expected));
+    X86Decoded* expected = calloc(raw != 0 ? count : count * 2, sizeof(*expected));
     valid = valid && bytes != 0 && expected != 0;
     uint32_t size = 0;
     if (valid && raw != 0)
@@ -213,20 +229,55 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
             fprintf(stderr, "raw oracle coverage/equivalence failed at %llu/%u bytes, status=%u\n", (unsigned long long)reference.consumed, size, reference.status);
         }
     }
-    for (uint32_t i = 0; valid && raw == 0 && i < count; i += 1)
+    uint32_t catalogue_cursor = 2;
+    uint32_t published = 0;
+    for (uint32_t i = 0; valid && raw == 0 && i < generated_count; i += 1)
     {
         x86_test_mode = (i & 1) ? X86_ENCODER_MODE_ADDRESS32 : X86_ENCODER_MODE_64;
-        uint16_t form = x86_random_form(state, false);
-        while (!x86_decode_form_supported(form) || (x86_test_mode == X86_ENCODER_MODE_ADDRESS32 && x86_form_is_bound_memory(form)))
+        uint16_t form = 0;
+        if (catalogue)
+        {
+            // Every admitted row at both address sizes, independent of the random stream's distribution.
+            while (form == 0)
+            {
+                const uint16_t candidate = (uint16_t)(catalogue_cursor >> 1);
+                const bool address32 = (catalogue_cursor & 1) != 0;
+                catalogue_cursor += 1;
+                if (x86_decode_form_supported(candidate) && !(address32 && x86_form_is_bound_memory(candidate)))
+                {
+                    form = candidate;
+                    x86_test_mode = address32 ? X86_ENCODER_MODE_ADDRESS32 : X86_ENCODER_MODE_64;
+                }
+            }
+        }
+        else
         {
             form = x86_random_form(state, false);
+            while (!x86_decode_form_supported(form) || (x86_test_mode == X86_ENCODER_MODE_ADDRESS32 && x86_form_is_bound_memory(form)))
+            {
+                form = x86_random_form(state, false);
+            }
         }
         const X86Instruction instruction = x86_random_instruction(state, form, true);
         const uint32_t length = encode_one(&instruction, bytes + size, x86_test_mode);
-        expected[i].instruction = instruction;
-        expected[i].offset = size;
-        expected[i].length = (uint8_t)length;
+        expected[published].instruction = instruction;
+        expected[published].offset = size;
+        expected[published].length = (uint8_t)length;
+        published += 1;
         size += length;
+        if (form == X86_FORM_FWAIT)
+        {
+            // GNU objdump folds repeated FWAITs into a following waiting-x87 instruction. Isolate the
+            // standalone row from the next generated row, so every catalogue boundary is independently known.
+            expected[published] = (X86Decoded){.instruction = {.form = X86_FORM_NOP}, .offset = size, .length = 1};
+            bytes[size] = 0x90;
+            size += 1;
+            published += 1;
+        }
+    }
+    if (raw == 0)
+    {
+        count = published;
     }
     FILE* output = valid ? fopen(binary, "wb") : 0;
     valid = valid && output != 0 && fwrite(bytes, 1, size, output) == size;
@@ -360,7 +411,7 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
     free(expected);
     free(bytes);
     x86_test_mode = X86_ENCODER_MODE_64;
-    printf("disassembler GNU objdump oracle (%s): %u/%u instructions, %s\n", raw != 0 ? raw : "generated, operands reassembled", seen, count, valid ? "passed" : "FAILED");
+    printf("disassembler GNU objdump oracle (%s): %u/%u instructions, %s\n", raw != 0 ? raw : catalogue ? "catalogue, operands reassembled" : "generated, operands reassembled", seen, count, valid ? "passed" : "FAILED");
     return valid;
 }
 
@@ -380,9 +431,24 @@ static bool x86_decode_test_equal(const uint8_t* bytes, uint32_t size, bool verb
     for (uint64_t i = 0; i < a.count && result; i += 1)
     {
         const X86Decoded* decoded = &vectorized[i];
+        char text[512] = {0};
+        char reference[512] = {0};
+        const int64_t text_length = x86_disassembly_format(decoded, text, sizeof(text));
+        const int64_t reference_length = x86_disassembly_format_scalar(decoded, reference, sizeof(reference));
+        result = text_length == reference_length && text_length >= 0 && memcmp(text, reference, (uint64_t)text_length + 1) == 0;
+        if (!result && verbose)
+        {
+            fprintf(stderr, "formatter twins disagree: row=%u fast=%s scalar=%s\n", decoded->instruction.form, text, reference);
+        }
+        if (result)
+        {
+            const int64_t listing_length = x86_disassembly_listing(decoded, bytes, 0xfedcba98u, text, sizeof(text), false);
+            const int64_t scalar_length = x86_disassembly_listing(decoded, bytes, 0xfedcba98u, reference, sizeof(reference), true);
+            result = listing_length == scalar_length && listing_length >= 0 && memcmp(text, reference, (uint64_t)listing_length + 1) == 0;
+        }
         uint8_t encoded[32];
         const X86EncoderMode mode = decoded->address32 ? X86_ENCODER_MODE_ADDRESS32 : X86_ENCODER_MODE_64;
-        result = instruction_is_valid(&decoded->instruction, mode);
+        result = result && instruction_is_valid(&decoded->instruction, mode);
         const uint32_t length = result ? encode_one(&decoded->instruction, encoded, mode) : 0;
         X86Decoded roundtrip[16];
         const X86DecodeResult again = x86_disassemble(encoded, length, roundtrip, BUSTER_ARRAY_LENGTH(roundtrip));
@@ -459,6 +525,198 @@ static uint64_t x86_decode_test_simple(uint64_t seed)
     return failures;
 }
 
+static uint64_t x86_decode_test_format_bounds(uint64_t* state)
+{
+    const long page = sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, (uint64_t)page * 3, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool mapped = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_READ | PROT_WRITE) == 0;
+    uint64_t failures = !mapped;
+    uint64_t checked = 0;
+    if (mapped)
+    {
+        for (uint32_t address32 = 0; address32 < 2; address32 += 1)
+        {
+            x86_test_mode = address32 ? X86_ENCODER_MODE_ADDRESS32 : X86_ENCODER_MODE_64;
+            for (uint32_t row = 1; row < X86_FORM_COUNT; row += 1)
+            {
+                if (x86_decode_form_supported(row) && !(address32 && x86_form_is_bound_memory(row)))
+                {
+                    const X86Instruction instruction = x86_random_instruction(state, (uint16_t)row, false);
+                    uint8_t bytes[32];
+                    const uint32_t size = encode_one(&instruction, bytes, x86_test_mode);
+                    X86Decoded decoded[16] = {0};
+                    const X86DecodeResult result = x86_disassemble_scalar(bytes, size, decoded, BUSTER_ARRAY_LENGTH(decoded));
+                    char reference[512];
+                    const int64_t length = result.status == X86_DECODE_OK && result.count == 1 ? x86_disassembly_format_scalar(decoded, reference, sizeof(reference)) : -1;
+                    const X86DisassemblyPlan* plan = &x86_disassembly_plans[x86_form_description(decoded[0].instruction.form) - x86_form_descriptions];
+                    const uint32_t bound = plan->bound;
+                    failures += length < 0 || bound == 0 || bound > sizeof(reference) || (uint64_t)length + 8 > bound;
+                    if (length >= 0 && bound <= sizeof(reference))
+                    {
+                        for (uint32_t style = 0; style < 2; style += 1)
+                        {
+                            const int64_t expected_length = style == 0 ? length : x86_disassembly_listing(decoded, bytes, 0xfedcba98u, reference, sizeof(reference), true);
+                            failures += expected_length < 0;
+                            for (uint32_t capacity = 0; capacity <= bound + 8 + style * 56; capacity += 1)
+                            {
+                                char* output = (char*)mapping + 2 * page - capacity;
+                                output[-1] = (char)0xa5;
+                                const int64_t actual = style == 0 ? x86_disassembly_format(decoded, output, capacity) : x86_disassembly_listing(decoded, bytes, 0xfedcba98u, output, capacity, false);
+                                const bool same = capacity <= (uint64_t)expected_length ? actual == -1 : actual == expected_length && memcmp(output, reference, (uint64_t)expected_length + 1) == 0;
+                                failures += !same || (uint8_t)output[-1] != 0xa5;
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        munmap(mapping, (uint64_t)page * 3);
+    }
+    else if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, (uint64_t)page * 3);
+    }
+    x86_test_mode = X86_ENCODER_MODE_64;
+    printf("disassembler formatter bounds: %llu guarded capacities, failures=%llu\n", (unsigned long long)checked, (unsigned long long)failures);
+    return failures;
+}
+
+static bool x86_decode_test_same_file(const char* left, const char* right)
+{
+    FILE* a = fopen(left, "rb");
+    FILE* b = fopen(right, "rb");
+    bool valid = a != 0 && b != 0;
+    uint8_t bytes_a[4096];
+    uint8_t bytes_b[4096];
+    while (valid)
+    {
+        const uint64_t size_a = fread(bytes_a, 1, sizeof(bytes_a), a);
+        const uint64_t size_b = fread(bytes_b, 1, sizeof(bytes_b), b);
+        valid = size_a == size_b && memcmp(bytes_a, bytes_b, size_a) == 0 && !ferror(a) && !ferror(b);
+        if (size_a == 0 || size_b == 0)
+        {
+            break;
+        }
+    }
+    if (a != 0)
+    {
+        fclose(a);
+    }
+    if (b != 0)
+    {
+        fclose(b);
+    }
+    return valid;
+}
+
+static uint64_t x86_decode_test_cli(void)
+{
+    char directory[] = "/tmp/buster-disassembler-cli-XXXXXX";
+    bool valid = mkdtemp(directory) != 0;
+    char binary[256];
+    char expected[256];
+    char actual[256];
+    snprintf(binary, sizeof(binary), "%s/input.bin", directory);
+    snprintf(expected, sizeof(expected), "%s/expected.txt", directory);
+    snprintf(actual, sizeof(actual), "%s/actual.txt", directory);
+    // 3,073 instructions cross both the 1,024-record decode chunks and the text buffer's flush boundary.
+    static const uint8_t pattern[] = {0x90, 0x48, 0x89, 0xc8, 0x48, 0x83, 0xc0, 0x01, 0x75, 0xf8, 0xc5, 0xf8, 0x77, 0xc3};
+    uint8_t bytes[sizeof(pattern) * 512 + 1];
+    for (uint32_t i = 0; i < 512; i += 1)
+    {
+        memcpy(bytes + i * sizeof(pattern), pattern, sizeof(pattern));
+    }
+    bytes[sizeof(bytes) - 1] = 0x90;
+    X86Decoded* decoded = malloc(sizeof(bytes) * sizeof(*decoded));
+    valid = valid && decoded != 0;
+    uint64_t failures = !valid;
+    uint64_t checked = 0;
+    const uint32_t sizes[] = {0, 1, sizeof(bytes)};
+    for (uint32_t sample = 0; valid && sample < BUSTER_ARRAY_LENGTH(sizes); sample += 1)
+    {
+        const uint32_t size = sizes[sample];
+        FILE* input = fopen(binary, "wb");
+        valid = input != 0 && fwrite(bytes, 1, size, input) == size;
+        if (input != 0)
+        {
+            valid = fclose(input) == 0 && valid;
+        }
+        const X86DecodeResult result = x86_disassemble_scalar(bytes, size, decoded, sizeof(bytes));
+        valid = valid && result.status == X86_DECODE_OK && result.consumed == size;
+        for (uint32_t assembly = 0; valid && assembly < 2; assembly += 1)
+        {
+            FILE* reference = fopen(expected, "wb");
+            valid = reference != 0;
+            if (valid && assembly)
+            {
+                valid = fprintf(reference, ".intel_syntax noprefix\n.arch .mpx\n.arch .amx_transpose\n.arch .amx_tf32\n.text\n") >= 0;
+            }
+            for (uint32_t i = 0; valid && i < result.count; i += 1)
+            {
+                // Retain the original scalar command's formatting as an independent whole-file reference.
+                if (!assembly)
+                {
+                    valid = fprintf(reference, "%08x  ", decoded[i].offset) >= 0;
+                    for (uint32_t j = 0; j < 15; j += 1)
+                    {
+                        valid = (j < decoded[i].length ? fprintf(reference, "%02x ", bytes[decoded[i].offset + j]) : fprintf(reference, "   ")) >= 0 && valid;
+                    }
+                    valid = fprintf(reference, " ") >= 0 && valid;
+                }
+                char text[512];
+                valid = x86_disassembly_format_scalar(decoded + i, text, sizeof(text)) >= 0 && valid;
+                if (valid)
+                {
+                    valid = fprintf(reference, "%s\n", text) >= 0;
+                }
+            }
+            if (reference != 0)
+            {
+                valid = fclose(reference) == 0 && valid;
+            }
+            for (uint32_t scalar = 0; valid && scalar < 2; scalar += 1)
+            {
+                char* arguments[6] = {"/proc/self/exe", "disassemble"};
+                uint32_t count = 2;
+                if (assembly)
+                {
+                    arguments[count++] = "--assembly";
+                }
+                if (scalar)
+                {
+                    arguments[count++] = "--scalar";
+                }
+                arguments[count] = binary;
+                const bool same = x86_decode_test_process(arguments, actual) && x86_decode_test_same_file(expected, actual);
+                failures += !same;
+                checked += 1;
+                // Empty listing writes nothing. Every other case must catch even a delayed stdio flush error.
+                if (size != 0 || assembly)
+                {
+                    failures += x86_decode_test_process(arguments, "/dev/full");
+                    checked += 1;
+                }
+            }
+        }
+        failures += !valid;
+    }
+    free(decoded);
+    if (failures == 0)
+    {
+        unlink(binary);
+        unlink(expected);
+        unlink(actual);
+        rmdir(directory);
+    }
+    else
+    {
+        fprintf(stderr, "disassembler CLI diagnostics retained in %s\n", directory);
+    }
+    printf("disassembler CLI: %llu output/status checks, failures=%llu\n", (unsigned long long)checked, (unsigned long long)failures);
+    return failures;
+}
+
 static uint64_t x86_decode_test_fixtures(void)
 {
     // Hand-written bytes and semantic operands, independent of the form table and encoder. Include deliberately
@@ -499,6 +757,7 @@ static uint64_t x86_decode_test_fixtures(void)
         {{0x41, 0x90}, 2, 0, 8, 0, 0, 0, 0, 0, 0, "xchg", 0, 4},
         {{0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0, 0, 0, 0, 0}, 15, 0, 0, 0, 0, BUSTER_X86_MEMORY_BASE_INDEX(0), 0, 0, 0, "nop", 0, 2},
         {{0x62, 0xf1, 0x7c, 0x48, 0xc2, 0xca, 1}, 7, 1, 2, 0, 0, 0, 0, 0, 0, "vcmpps", 1, 64},
+        {{0x66, 0x44, 0x0f, 0x3a, 0x44, 0xd9, 0x02}, 7, 11, 1, 0, 0, 0, 0, 0, 0, "pclmulqdq", 2, 16},
     };
     uint64_t failures = 0;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
@@ -591,6 +850,12 @@ static uint64_t x86_decode_test_fixtures(void)
         }
     }
     uint8_t nops[128];
+    static const uint8_t waits[] = {0x9b, 0x9b, 0xdb, 0xe3};
+    X86Decoded waiting[4];
+    const X86DecodeResult wait_result = x86_disassemble(waits, sizeof(waits), waiting, BUSTER_ARRAY_LENGTH(waiting));
+    failures += wait_result.status != X86_DECODE_OK || wait_result.count != 2 || wait_result.consumed != sizeof(waits) ||
+                waiting[0].length != 1 || waiting[0].instruction.form != X86_FORM_FWAIT || waiting[1].length != 3 || waiting[1].instruction.form != X86_FORM_FINIT;
+    failures += !x86_decode_test_equal(waits, sizeof(waits), true);
     memset(nops, 0x90, sizeof(nops));
     const long page = sysconf(_SC_PAGESIZE);
     uint8_t* mapping = mmap(0, (uint64_t)page * 3, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -681,6 +946,8 @@ static int run_x86_disassembler_tests(int argc, char** argv)
         uint64_t state = seed;
         failures += x86_decode_test_fixtures();
         failures += x86_decode_test_simple(seed);
+        failures += x86_decode_test_format_bounds(&state);
+        failures += x86_decode_test_cli();
         uint8_t bytes[128];
         for (uint32_t byte = 0; byte < 256; byte += 1)
         {
@@ -794,11 +1061,12 @@ static int run_x86_disassembler_tests(int argc, char** argv)
         x86_test_mode = X86_ENCODER_MODE_64;
         if (oracle)
         {
-            failures += !x86_decode_test_objdump(&state, 10000, 0);
+            failures += !x86_decode_test_objdump(&state, 0, 0, true);
+            failures += !x86_decode_test_objdump(&state, 10000, 0, false);
         }
         if (raw != 0)
         {
-            failures += !x86_decode_test_objdump(&state, 0, raw);
+            failures += !x86_decode_test_objdump(&state, 0, raw, false);
         }
         printf("disassembler: checked=%llu random-bytes=%llu guarded=516 failures=%llu\n", (unsigned long long)checked, (unsigned long long)count, (unsigned long long)failures);
     }

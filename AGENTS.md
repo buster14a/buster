@@ -100,7 +100,8 @@ old `buster14a/buster` links now address this compiler.
 Local checkout directories, `~/buster-fast-bench/`, the shared host lock,
 `~/llm-memory/projects/buster-fast/` and its memory symlinks retain their existing
 names. The repository-local `buster-fast-9700x` concurrency key is also retained.
-These are operational resources, not canonical repository URLs; do not rename
+Queues use that prefix per PR/ref; the runner hooks serialize every CI job with
+the shared host lock. These are operational resources, not canonical repository URLs; do not rename
 them by replacing text. Source paths, executable names and object-file metadata
 are unchanged by the repository rename.
 
@@ -2026,9 +2027,18 @@ informational.
 
 ## Preprocessor tests
 
+`./build/compiler test-preprocessor --compare-clang [--clang PATH] [options]
+corpus...` is #125's real-source oracle. It accepts directories or
+`--files-from LIST --root DIR`, compares lexical kinds, spellings and locations,
+and reports every Clang rejection as an explicit skip. Process/configuration
+failures fail the run. `--report NEW.tsv` records every file's result and skip
+reason. `c_preprocessor_oracle.c` implements this interface;
+[the frozen oracle guide](docs/preprocessor-oracle.md) records the pinned
+headers/corpora, manifest identities, CI subset and on-demand commands.
+
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 88 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 92 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The

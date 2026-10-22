@@ -287,6 +287,7 @@ int run_refinement_benchmark(int argc, char** argv);
 // The preprocessor (c_preprocessor.c) and its tests, for the -E and test-preprocessor commands.
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_preprocessor_test.c"
+#include "buster/compiler/c_preprocessor_oracle.c"
 #include "buster/compiler/x86_target_forms.c"
 #include "buster/compiler/x86_target_test.c"
 int run_preprocessor_benchmark(int argc, char** argv);

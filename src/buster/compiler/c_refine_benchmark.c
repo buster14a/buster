@@ -585,7 +585,7 @@ int run_refinement_benchmark(int argc, char** argv)
             {
                 only |= (uint32_t)(strcmp(argv[i], refine_implementation_name(implementation)) == 0) << implementation;
             }
-            valid = only != 0;
+            valid = valid && only != 0;
         }
         else if (strcmp(argv[i], "--cplusplus") == 0)
         {
