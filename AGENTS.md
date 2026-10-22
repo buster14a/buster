@@ -2396,8 +2396,11 @@ others, its measurements are informational.
   bit-fields that are an `i128` and that aren't, and the narrow low parts
   clang widens into a general register; and the `_Atomic` types whose LLVM
   types decide: of types of no size, which LLVM makes larger (to 32 KB, and
-  refused past the alignment the module keeps), as the records ending in
-  one, with their slots, the records it lays out otherwise than C, and
+  refused past the alignment the module keeps or for a run of bit-fields
+  whose unit it doesn't work out) or doesn't (one aligned by
+  `_BitInt(129)`s, which LLVM stores as arrays of their bytes), as the
+  records ending in one, with their slots, the records it lays out otherwise
+  than C, and
   vectors LLVM keeps whole, splits or, of bools, passes as integers), and
   calls whose locations clang and LLVM give (an `UNCOUNTED` argument that
   splits the next record, an `__int128` without two registers left, a hidden

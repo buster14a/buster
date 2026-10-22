@@ -1145,7 +1145,9 @@ static uint32_t abi_test_other_values(uint32_t kind)
 // -stop-after=finalize-isel's fixed stack objects). An _Atomic of a type of no size is {T, [1 x i8]}, as large as T is
 // aligned in LLVM (LARGER): 16 bytes for _Atomic(struct { __int128 x[0]; }), of 1, and for one of a packed T, aligned
 // to 1, while clang has a general register free, an i8's 8 once it has none (GROWN); 32 KB for one aligned by a vector of
-// 32 KB, and one by a vector of 64 KB, past what the storage holds, refused. A packed struct ending in one is
+// 32 KB, and one by a vector of 64 KB, past what the storage holds, refused, as is one aligned by a run of bit-fields of
+// an eightbyte or less, whose unit the module doesn't work out; and 1 byte for one of a _BitInt(129), an array of its
+// bytes in memory. A packed struct ending in one is
 // those bytes and an i8 (packed {that _Atomic} 17, a slot of 24); one with a member after the overrun is laid out
 // otherwise than C, and refused; one with room for it is the C layout, and so is a union. An _Atomic vector LLVM splits
 // into its elements (<5 x i8> into five i8s, <2 x i128> into four i64s) is refused too; one of bools is the integer of
@@ -1301,6 +1303,37 @@ static void abi_test_build_atomics(AbiTestBuilder* builder)
     m[0] = abi_test_member(builder, a64k);
     abi_test_expectation(builder, "packed {_Atomic {float vector(65536)[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0),
                          BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+    // clang's unit for a run of bit-fields of an eightbyte or less, which the module doesn't work out (INEXACT): an
+    // _Atomic of a struct of none of {unsigned __int128 : 8, char[20]}, which LLVM stores as {i8, [20 x i8], [11 x i8]},
+    // aligned to 1 rather than 16, is refused. A _BitInt wider than 128 bits is an integer of its size in memory where
+    // that is a multiple of 16 bytes, and otherwise an array of its bytes: _Atomics of structs of none of _BitInt(129),
+    // of {_BitInt(129), char[4]} and of union {_BitInt(129), long} are 1, 1 and 8 bytes to LLVM, and of _BitInt(256) 16.
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 8, true);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 20));
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {{unsigned __int128 : 8, char[20]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+    const TypeId bit_int_129 = type_bit_int(table, 129, false);
+    m[0] = abi_test_member(builder, type_array(table, bit_int_129, 0));
+    abi_test_expectation(builder, "_Atomic {_BitInt(129)[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy, larger | grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
+    m[0] = abi_test_member(builder, bit_int_129);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 4));
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {{_BitInt(129), char[4]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy, larger | grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
+    m[0] = abi_test_member(builder, bit_int_129);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {union {_BitInt(129), long}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger, grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
+    m[0] = abi_test_member(builder, type_array(table, type_bit_int(table, 256, false), 0));
+    abi_test_expectation(builder, "_Atomic {_BitInt(256)[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | grown, refused, hidden, none, none);
+    abi_test_slot(builder, 16);
     // _Atomic vectors: in one vector register, as LLVM widens them to one it has (16 bytes for <9 x i8>, v8f16 for
     // <3 x half>), or split into their elements as no class says; a <1 x _BitInt(128)> in two halves.
     const uint32_t vector = abi_test_value(BUSTER_ABI_VALUE_VECTOR);
@@ -1460,7 +1493,8 @@ static bool abi_test_same_location(AbiLocation got, AbiTestLocation expected)
 // counts as two general registers too: on the stack after five longs, and in rdi and rsi before a double in xmm0. A
 // vector of 4,096 bools, which isn't _Atomic, returns through the hidden pointer LLVM demotes it to, in rdi (one of
 // 1,024 too, checked at 16 bytes); _Atomic {float vector(32768)[0]} is a copy of 32 KB, aligned to 32 KB, and a packed
-// struct of it one of 32 KB and a byte, or an i8 once clang has no general register.
+// struct of it one of 32 KB and a byte, or an i8 once clang has no general register; and _Atomic {{_BitInt(129),
+// char[4]}[0]} is 1 byte to LLVM, an 8-byte slot before seven longs, the last of them at 8.
 static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t vector_bytes, bool vector)
 {
     TypeTable* table = &tables->types.table;
@@ -1527,6 +1561,10 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     const TypeId atomic_32k = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
     m[0] = abi_test_member(&builder, atomic_32k);
     const TypeId ending_32k = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0);
+    m[0] = abi_test_member(&builder, type_bit_int(table, 129, false));
+    m[1] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 4));
+    m[0] = abi_test_member(&builder, type_array(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+    const TypeId atomic_bytes = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
     if (vector)
     {
         abi_classify_all(&tables->abi, table);
@@ -1741,7 +1779,16 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         L,
         ending_32k,
         L,
-        // 176: long, a vector of 1,024 bools as the result (checked at 16 bytes)
+        // 176: _Atomic {{_BitInt(129), char[4]}[0]}, long x7
+        atomic_bytes,
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        // 184: long, a vector of 1,024 bools as the result (checked at 16 bytes)
         L,
     };
     const AbiTestLocation expected[] = {
@@ -1937,7 +1984,16 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
-        // 176: as 151.
+        // 176: 1 byte to LLVM (the _BitInt an array of its bytes, aligned to 1), an 8-byte slot, the last long at 8.
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
+        // 184: as 151.
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
     };
     const uint32_t counts[] = {
@@ -1964,6 +2020,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         7,
         3,
         1,
+        8,
         8,
         8,
         8,
@@ -1996,6 +2053,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         8,
         8,
         8,
+        8,
         1,
     };
     const TypeId results[] = {
@@ -2025,9 +2083,11 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         BUSTER_TYPE_VOID,
         BUSTER_TYPE_VOID,
         BUSTER_TYPE_VOID,
+        BUSTER_TYPE_LONG,
         bools1024,
     };
     const uint8_t variadic[] = {
+        0,
         0,
         0,
         0,
@@ -2112,10 +2172,11 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     abi_test_expect(tally, calls[23].stack_bytes == 32776 && calls[23].stack_alignment_log2 == 15 && calls[23].integer_registers == 6, "fixtures", "call 23's totals");
     abi_test_expect(tally, calls[24].stack_bytes == 32784 && calls[24].integer_registers == 6, "fixtures", "call 24's totals");
     abi_test_expect(tally, calls[25].stack_bytes == 16 && calls[25].integer_registers == 6, "fixtures", "call 25's totals");
+    abi_test_expect(tally, calls[26].stack_bytes == 16 && calls[26].integer_registers == 6, "fixtures", "call 26's totals");
     if (vector_bytes == 16)
     {
-        const bool demoted_1024 = calls[26].result.kind == BUSTER_ABI_RESULT_MEMORY && (calls[26].result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
-        abi_test_expect(tally, demoted_1024 && calls[26].integer_registers == 2, "fixtures", "call 26's demoted result");
+        const bool demoted_1024 = calls[27].result.kind == BUSTER_ABI_RESULT_MEMORY && (calls[27].result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
+        abi_test_expect(tally, demoted_1024 && calls[27].integer_registers == 2, "fixtures", "call 27's demoted result");
     }
     // va_arg aligns the overflow area as the canonical type is aligned (EmitVAArg): long aligned(32) reads from 8.
     const AbiVaArg plan = abi_va_arg(&tables->abi, table, aligned_long);
