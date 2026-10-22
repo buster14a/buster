@@ -138,9 +138,9 @@ static String8 executable_test_path(const ExecutableTestDirectory* directory, co
     return result;
 }
 
-// Runs the executable at `path` without arguments, in `environment`: what it writes to standard output, and how it
-// ended.
-static bool executable_test_run_with(const char* path, char** environment, uint8_t* output, uint64_t* output_length, int* status)
+// Runs the executable `arguments` name first with them (a null-terminated list), in `environment`: what it writes to
+// standard output, and how it ended.
+static bool executable_test_run_arguments(char** arguments, char** environment, uint8_t* output, uint64_t* output_length, int* status)
 {
     int ends[2];
     bool result = pipe(ends) == 0;
@@ -157,8 +157,7 @@ static bool executable_test_run_with(const char* path, char** environment, uint8
             close(ends[0]);
             close(ends[1]);
             alarm(BUSTER_EXECUTABLE_TEST_RUN_SECONDS);
-            char* arguments[] = { (char*)path, 0 };
-            execve(path, arguments, environment);
+            execve(arguments[0], arguments, environment);
             _exit(127);
         }
         close(ends[1]);
@@ -173,6 +172,14 @@ static bool executable_test_run_with(const char* path, char** environment, uint8
         result = result && waitpid(child, status, 0) == child;
     }
     return result;
+}
+
+// Runs the executable at `path` without arguments, in `environment`: what it writes to standard output, and how it
+// ended.
+static bool executable_test_run_with(const char* path, char** environment, uint8_t* output, uint64_t* output_length, int* status)
+{
+    char* arguments[] = { (char*)path, 0 };
+    return executable_test_run_arguments(arguments, environment, output, output_length, status);
 }
 
 // Runs the executable at `path` without arguments, in an environment of its own: what it writes to standard output, and
@@ -1981,12 +1988,65 @@ static uint32_t executable_test_closes_written(int watch)
     return result;
 }
 
+// A shared library's first publication is staged beside an absent destination. A failed link or close must remove
+// only that temporary, even if another writer created the destination after executable_open saw nothing there.
+static void executable_test_first_publication(ExecutableTestTally* tally, const ExecutableTestDirectory* directory, Arena* arena)
+{
+    char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, "first-publication", path_bytes);
+    static char marker[] = "another writer's completed output\n";
+    static const char partial[] = "the failed library's partial output\n";
+    const String8 expected = {
+        .pointer = marker,
+        .length = sizeof(marker) - 1,
+    };
+    for (uint32_t close_failure = 0; close_failure < 2; close_failure += 1)
+    {
+        unlink(path.pointer);
+        ExecutableFile file = { 0 };
+        ExecutableResult result = { 0 };
+        const bool opened = executable_open(&file, path, true, &result);
+        struct stat status;
+        const bool staged = opened && file.write == EXECUTABLE_WRITE_CREATED && file.temporary && lstat(path.pointer, &status) != 0 && errno == ENOENT &&
+                            stat(file.written_path, &status) == 0 && S_ISREG(status.st_mode);
+        executable_test_expect(tally, staged, "the first publication is not visible before close", close_failure);
+        const int concurrent = staged ? open(path.pointer, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644) : -1;
+        struct stat concurrent_status;
+        const bool created = concurrent >= 0 && write(concurrent, marker, sizeof(marker) - 1) == sizeof(marker) - 1 && fstat(concurrent, &concurrent_status) == 0;
+        if (concurrent >= 0)
+        {
+            close(concurrent);
+        }
+        const bool filled = opened && write(file.descriptor, partial, sizeof(partial) - 1) == sizeof(partial) - 1;
+        // With keep false, the link failed before close. Otherwise close the real descriptor first so that close
+        // itself fails with EBADF: neither path may rename the partial output or unlink the concurrent destination.
+        const bool invalidated = close_failure == 0 || (opened && close(file.descriptor) == 0);
+        const bool kept = opened && executable_close(&file, sizeof(partial) - 1, close_failure != 0, &result);
+        const bool failed = close_failure == 0 ? result.error == EXECUTABLE_ERROR_NONE
+                                              : result.error == EXECUTABLE_ERROR_FILE && strcmp(result.call, "close") == 0 && result.system_error == EBADF;
+        const bool retained = created && stat(path.pointer, &status) == 0 && status.st_dev == concurrent_status.st_dev && status.st_ino == concurrent_status.st_ino &&
+                              executable_test_same_file(arena, path.pointer, expected);
+        executable_test_expect(tally, opened && filled && invalidated && !kept && failed && retained, "a failed first publication leaves the concurrent output", close_failure);
+        executable_test_expect(tally, opened && access(file.written_path, F_OK) != 0 && !executable_test_leftover(directory->path, BUSTER_EXECUTABLE_TEMPORARY_PREFIX),
+                               "a failed first publication removes its temporary", close_failure);
+        if (opened)
+        {
+            unlink(file.written_path);
+        }
+    }
+    if (!directory->keep)
+    {
+        unlink(path.pointer);
+    }
+}
+
 static bool executable_test_files(const ExecutableTestDirectory* directory, uint64_t seed)
 {
     ExecutableTestTally tally = {
         .check = "files",
     };
     Scratch scratch = scratch_begin(0);
+    executable_test_first_publication(&tally, directory, scratch.arena);
     const mode_t mask = umask(0);
     umask(mask);
     LinkProgramOptions large_options = link_program_default_options();
