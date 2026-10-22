@@ -264,8 +264,9 @@ struct ProfileSample
     // Its sym and symoff fields, `NAME+0xOFFSET`, after it: empty for another field, as `[unknown]`.
     String8 symbol;
     uint64_t offset;
-    // Its dsoff field, `(PATH+0xOFFSET)` last on the line: the offset in the file, which is the address objdump gives
-    // when the executable segment's address is its offset (as in GNU ld's and lld's executables).
+    // Its dsoff field, `(PATH+0xOFFSET)` last on the line: the file and the offset in it, which the file's LOAD segments
+    // map to the addresses objdump gives (equal in GNU ld's executables, not in lld's).
+    String8 file;
     uint64_t file_offset;
     bool has_ip;
     bool has_file_offset;
@@ -317,6 +318,13 @@ static ProfileSample profile_sample(String8 line)
     at = plus + 1;
     result.has_file_offset = trimmed.length != 0 && trimmed.pointer[trimmed.length - 1] == ')' && plus < trimmed.length &&
                              profile_hex(trimmed, &at, &result.file_offset) && at == trimmed.length - 1;
+    uint64_t open = plus < trimmed.length ? plus : 0;
+    while (open > 0 && trimmed.pointer[open] != '(')
+    {
+        open -= 1;
+    }
+    result.has_file_offset = result.has_file_offset && trimmed.pointer[open] == '(';
+    result.file = result.has_file_offset ? profile_slice(trimmed, open + 1, plus) : (String8){ 0 };
     return result;
 }
 
@@ -342,6 +350,15 @@ struct ProfileSymbol
     uint64_t first;
 };
 
+// A LOAD segment of objdump -p's program headers: `size` bytes of the file from `offset` at `address`.
+typedef struct ProfileSegment ProfileSegment;
+struct ProfileSegment
+{
+    uint64_t offset;
+    uint64_t address;
+    uint64_t size;
+};
+
 typedef struct ProfileDisassembly ProfileDisassembly;
 struct ProfileDisassembly
 {
@@ -349,6 +366,10 @@ struct ProfileDisassembly
     uint64_t count;
     ProfileSymbol* symbols;
     uint64_t symbol_count;
+    // The file objdump read (its first line, `FILE:     file format elf64-x86-64`), and its LOAD segments (-p).
+    String8 file;
+    ProfileSegment* segments;
+    uint64_t segment_count;
     // Every instruction is under a symbol, and their addresses increase.
     bool valid;
     // The arena was too small.
@@ -370,11 +391,38 @@ static ProfileDisassembly profile_disassembly_read(Arena* arena, String8 text)
     }
     result.instructions = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileInstruction, lines);
     result.symbols = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileSymbol, lines);
-    result.full = lines != 0 && (result.instructions == 0 || result.symbols == 0);
+    result.segments = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileSegment, lines);
+    result.full = lines != 0 && (result.instructions == 0 || result.symbols == 0 || result.segments == 0);
+    // A LOAD line's `filesz` is on the line after it.
+    bool segment_pending = false;
     position = 0;
     while (!result.full && position < text.length)
     {
         const String8 line = profile_line(text, &position);
+        const String8 trimmed = profile_trim(line);
+        const uint64_t format = profile_find(line, profile_string(":     file format "));
+        if (result.file.length == 0 && format != line.length && format != 0)
+        {
+            result.file = profile_slice(line, 0, format);
+        }
+        uint64_t at = profile_find(trimmed, profile_string("filesz ")) + 7;
+        if (segment_pending && at <= trimmed.length && profile_hex(trimmed, &at, &result.segments[result.segment_count].size))
+        {
+            result.segment_count += 1;
+        }
+        segment_pending = false;
+        if (profile_starts_with(trimmed, profile_string("LOAD off ")))
+        {
+            const uint64_t address_at = profile_find(trimmed, profile_string("vaddr "));
+            uint64_t offset_at = 9;
+            while (offset_at < trimmed.length && profile_is_blank(trimmed.pointer[offset_at]))
+            {
+                offset_at += 1;
+            }
+            uint64_t vaddr_at = address_at + 6;
+            segment_pending = address_at != trimmed.length && profile_hex(trimmed, &offset_at, &result.segments[result.segment_count].offset) &&
+                              profile_hex(trimmed, &vaddr_at, &result.segments[result.segment_count].address);
+        }
         uint64_t i = 0;
         while (i < line.length && profile_is_blank(line.pointer[i]))
         {
@@ -416,6 +464,47 @@ static ProfileDisassembly profile_disassembly_read(Arena* arena, String8 text)
     return result;
 }
 
+// The path's last part.
+static String8 profile_basename(String8 path)
+{
+    uint64_t start = 0;
+    for (uint64_t i = 0; i < path.length; i += 1)
+    {
+        start = path.pointer[i] == '/' ? i + 1 : start;
+    }
+    return profile_slice(path, start, path.length);
+}
+
+// Whether a sample is in the disassembly's file (by name: perf gives the path it was run from), and its address there,
+// through the LOAD segment that maps its offset in the file. A shared library's offsets are its own, whatever they
+// coincide with.
+static bool profile_same_file(const ProfileDisassembly* disassembly, const ProfileSample* sample)
+{
+    return sample->has_file_offset && profile_equal(profile_basename(sample->file), profile_basename(disassembly->file));
+}
+
+static bool profile_sample_address(const ProfileDisassembly* disassembly, const ProfileSample* sample, uint64_t* address)
+{
+    bool result = false;
+    const bool same_file = profile_same_file(disassembly, sample);
+    for (uint64_t i = 0; same_file && i < disassembly->segment_count; i += 1)
+    {
+        const ProfileSegment* segment = &disassembly->segments[i];
+        if (!result && sample->file_offset >= segment->offset && sample->file_offset - segment->offset < segment->size)
+        {
+            *address = sample->file_offset - segment->offset + segment->address;
+            result = true;
+        }
+    }
+    return result;
+}
+
+// Whether the disassembly names its file and has its LOAD segments, which profile_sample_address needs.
+static bool profile_has_image(const ProfileDisassembly* disassembly)
+{
+    return disassembly->file.length != 0 && disassembly->segment_count != 0;
+}
+
 // The index of the last instruction at or before `address` among instructions[first, end), or `end` if there is none.
 static uint64_t profile_instruction_at(const ProfileDisassembly* disassembly, uint64_t first, uint64_t end, uint64_t address)
 {
@@ -436,22 +525,35 @@ static uint64_t profile_instruction_at(const ProfileDisassembly* disassembly, ui
     return low > first ? low - 1 : end;
 }
 
-// The end of symbol `symbol`'s instructions.
-static uint64_t profile_symbol_end(const ProfileDisassembly* disassembly, uint64_t symbol)
+// The last symbol of `symbol`'s function: label-spills' labels after it are inside it.
+static uint64_t profile_symbol_last(const ProfileDisassembly* disassembly, uint64_t symbol)
 {
-    return symbol + 1 < disassembly->symbol_count ? disassembly->symbols[symbol + 1].first : disassembly->count;
+    uint64_t last = symbol;
+    while (last + 1 < disassembly->symbol_count && profile_starts_with(disassembly->symbols[last + 1].name, profile_string(BUSTER_PROFILE_SPILL_LABEL)))
+    {
+        last += 1;
+    }
+    return last;
 }
 
-// Whether `address` is in symbol `symbol`: from its address to the next symbol's, or for the last symbol to the end of
-// its last instruction, which is at most 15 bytes long.
+// The end of symbol `symbol`'s instructions, with its labels'.
+static uint64_t profile_symbol_end(const ProfileDisassembly* disassembly, uint64_t symbol)
+{
+    const uint64_t last = profile_symbol_last(disassembly, symbol);
+    return last + 1 < disassembly->symbol_count ? disassembly->symbols[last + 1].first : disassembly->count;
+}
+
+// Whether `address` is in symbol `symbol`'s function: from its address to the next symbol's that isn't one of its
+// labels, or for the last symbol to the end of its last instruction, which is at most 15 bytes long.
 static bool profile_symbol_contains(const ProfileDisassembly* disassembly, uint64_t symbol, uint64_t address)
 {
+    const uint64_t last = profile_symbol_last(disassembly, symbol);
     const uint64_t end = profile_symbol_end(disassembly, symbol);
     const uint64_t first = disassembly->symbols[symbol].first;
     uint64_t limit = disassembly->symbols[symbol].address;
-    if (symbol + 1 < disassembly->symbol_count)
+    if (last + 1 < disassembly->symbol_count)
     {
-        limit = disassembly->symbols[symbol + 1].address;
+        limit = disassembly->symbols[last + 1].address;
     }
     else if (end != first)
     {
@@ -530,28 +632,29 @@ static bool profile_hot_loops(Arena* arena, ProfileReport* report, String8 funct
             copy_count += 1;
         }
     }
-    // Each sample's copy, by its offset in the file. Without it, a sample of a copy the disassembly doesn't have
-    // (objdump --disassemble=NAME prints one) would count at the same offset in another.
+    // Each sample's copy, by its address: its offset in the file, through the file's segments. Names aren't identities
+    // (a copy the disassembly doesn't have, as objdump --disassemble=NAME may print one, or a shared library's function
+    // of the name).
     uint64_t without_offset = 0;
     uint64_t outside = 0;
     uint64_t position = 0;
     while (copy_samples != 0 && copy_count != 0 && position < samples_text.length)
     {
         const ProfileSample sample = profile_sample(profile_line(samples_text, &position));
+        uint64_t address = 0;
+        const bool here = profile_sample_address(&disassembly, &sample, &address);
         uint64_t copy = copy_count;
-        for (uint64_t c = 0; sample.has_file_offset && c < copy_count; c += 1)
+        for (uint64_t c = 0; here && c < copy_count; c += 1)
         {
-            copy = profile_symbol_contains(&disassembly, copies[c], sample.file_offset) ? c : copy;
+            copy = profile_symbol_contains(&disassembly, copies[c], address) ? c : copy;
         }
-        if (profile_equal(sample.symbol, function))
+        if (copy != copy_count)
         {
-            without_offset += !sample.has_file_offset;
-            outside += sample.has_file_offset && copy == copy_count;
-            if (copy != copy_count)
-            {
-                copy_samples[copy] += 1;
-            }
+            copy_samples[copy] += 1;
         }
+        const bool named = profile_equal(sample.symbol, function);
+        without_offset += named && !sample.has_file_offset;
+        outside += named && profile_same_file(&disassembly, &sample) && copy == copy_count;
     }
     uint64_t busiest = 0;
     uint64_t all = 0;
@@ -571,6 +674,10 @@ static bool profile_hot_loops(Arena* arena, ProfileReport* report, String8 funct
     else if (copy_count == 0)
     {
         profile_print(report, "hot-loops: %.*s isn't in the disassembly\n", (int)function.length, function.pointer);
+    }
+    else if (!profile_has_image(&disassembly))
+    {
+        profile_print(report, "hot-loops: the disassembly has no file name or LOAD segments (objdump -d -p)\n");
     }
     else if (without_offset != 0)
     {
@@ -599,8 +706,10 @@ static bool profile_hot_loops(Arena* arena, ProfileReport* report, String8 funct
             while (position < samples_text.length)
             {
                 const ProfileSample sample = profile_sample(profile_line(samples_text, &position));
-                const uint64_t index = profile_instruction_at(&disassembly, first, end, sample.file_offset);
-                const bool counted = profile_equal(sample.symbol, function) && index != end && profile_symbol_contains(&disassembly, symbol, sample.file_offset);
+                uint64_t address = 0;
+                const bool here = profile_sample_address(&disassembly, &sample, &address);
+                const uint64_t index = here ? profile_instruction_at(&disassembly, first, end, address) : end;
+                const bool counted = index != end && profile_symbol_contains(&disassembly, symbol, address);
                 if (counted)
                 {
                     counts[index - first] += 1;
@@ -644,7 +753,7 @@ static bool profile_hot_loops(Arena* arena, ProfileReport* report, String8 funct
             }
             if (outside != 0)
             {
-                profile_print(report, ", %llu samples at file offsets outside its copies", (unsigned long long)outside);
+                profile_print(report, ", %llu samples named %.*s outside its copies", (unsigned long long)outside, (int)function.length, function.pointer);
             }
             profile_print(report, "\nloops by samples:\n");
             // The top loop_count, by selection: each round takes the most sampled loop not reported yet.
@@ -1018,7 +1127,8 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
         for (uint64_t i = 0; start != UINT64_MAX && i < disassembly.symbol_count; i += 1)
         {
             const ProfileSymbol* symbol = &disassembly.symbols[i];
-            const bool own = profile_equal(symbol->name, function) || profile_starts_with(symbol->name, label);
+            // Only its labels: a later function of the same name (another unit's static one) is another function.
+            const bool own = profile_starts_with(symbol->name, label);
             end = !own && symbol->address > start && symbol->address < end ? symbol->address : end;
         }
         if (end == UINT64_MAX && start != UINT64_MAX && disassembly.count != 0)
@@ -1056,6 +1166,10 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
         {
             profile_print(report, "spill-report: no %.*s in the disassembly before %.*s0\n", (int)function.length, function.pointer, (int)label.length, label.pointer);
         }
+        else if (!profile_has_image(&disassembly))
+        {
+            profile_print(report, "spill-report: the disassembly has no file name or LOAD segments (objdump -d -p)\n");
+        }
         else
         {
             // Samples in the copy, by their offsets in the file, and at each label's address: the instruction after it.
@@ -1069,7 +1183,9 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
                 const ProfileSample sample = profile_sample(profile_line(samples_text, &position));
                 const bool named = sample.symbol.length != 0;
                 without_offset += named && !sample.has_file_offset;
-                const bool in_copy = sample.has_file_offset && sample.file_offset >= start && sample.file_offset < end;
+                uint64_t address = 0;
+                const bool here = profile_sample_address(&disassembly, &sample, &address);
+                const bool in_copy = here && address >= start && address < end;
                 total += in_copy;
                 // The label at or before the sample, by binary search.
                 uint64_t low = 0;
@@ -1077,10 +1193,10 @@ static bool profile_spill_report(Arena* arena, ProfileReport* report, String8 fu
                 while (in_copy && low < high)
                 {
                     const uint64_t middle = low + (high - low) / 2;
-                    low = addresses[middle] <= sample.file_offset ? middle + 1 : low;
-                    high = addresses[middle] <= sample.file_offset ? high : middle;
+                    low = addresses[middle] <= address ? middle + 1 : low;
+                    high = addresses[middle] <= address ? high : middle;
                 }
-                if (in_copy && low != 0 && addresses[low - 1] == sample.file_offset)
+                if (in_copy && low != 0 && addresses[low - 1] == address)
                 {
                     spills[low - 1].samples += 1;
                     at_reloads += spills[low - 1].reload;

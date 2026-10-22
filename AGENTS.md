@@ -609,17 +609,21 @@ runs on texts in objdump's, clang's and perf script's formats, and its report
 must be exactly the expected one:
 
 - `hot-loops`: a loop nested in another, an indirect jump, two copies of the
-  function (the busiest one taken by the samples' file offsets), samples of
-  another function, of a name that only starts with the function's, past the
-  last instruction and before the first symbol; samples without file offsets,
-  a missing function and disassembly out of order (errors);
+  function (the busiest one taken by the samples' addresses: their offsets in
+  the file through its LOAD segments), samples of another function and of
+  another file, of a name that only starts with the function's, past the last
+  instruction and before the first symbol, and an lld executable, whose
+  offsets aren't its addresses; samples without file offsets, a disassembly
+  without objdump -p's headers, a missing function and disassembly out of
+  order (errors);
 - `label-spills` and `spill-report`: spills, reloads and folded reloads
   labeled with the tag in order in the function and in no other (not source
   paths or other comments that hold the words), and nothing else changed;
   their samples by stack slot and source location, the labeled copy found by
   address, without the samples of a static function of the same name in
-  another unit, of the function's static local (`f.counter`) or of another
-  tag; labels out of order or of another tag, missing from the disassembly
+  another unit (after it too), of the function's static local (`f.counter`),
+  of another tag or of a shared library at the same offsets, and in an lld
+  executable; labels out of order or of another tag, missing from the disassembly
   or in it twice, samples without file offsets, and an invalid tag (errors);
   and clang's assembly of a program whose static function `function` (also
   an assembler keyword) prints `__func__`, labeled, assembled and run, which

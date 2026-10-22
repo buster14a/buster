@@ -33,12 +33,19 @@
 #include <string.h>
 #include <stdio.h>
 
+// objdump -p's lines for a file `bin` whose LOAD segment maps the file at its own addresses, as GNU ld's do.
+#define BUSTER_PROFILE_TEST_IMAGE                                                                          \
+    "bin:     file format elf64-x86-64\n"                                                               \
+    "\n"                                                                                                \
+    "Program Header:\n"                                                                                 \
+    "    LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**12\n" \
+    "         filesz 0x0000000000100000 memsz 0x0000000000100000 flags r-x\n"                           \
+    "\n"
+
 // The branches of branch-misses' growth check: more than the table's first capacity holds.
 #define BUSTER_PROFILE_TEST_BRANCHES 10000
 
-static const char profile_test_disassembly[] = "\n"
-                                               "bin:     file format elf64-x86-64\n"
-                                               "\n"
+static const char profile_test_disassembly[] = "\n" BUSTER_PROFILE_TEST_IMAGE
                                                "\n"
                                                "Disassembly of section .text:\n"
                                                "\n"
@@ -63,28 +70,28 @@ static const char profile_test_disassembly[] = "\n"
                                                "    2000:\tpush   %rbp\n"
                                                "    2001:\tret\n";
 
-static const char profile_test_samples[] = "    401016 f+0x6 (/bin/x+0x1016)\n"
-                                           "    401016 f+0x6 (/bin/x+0x1016)\n"
-                                           "    401016 f+0x6 (/bin/x+0x1016)\n"
-                                           "    401019 f+0x9 (/bin/x+0x1019)\n"
-                                           "    40101a f+0xa (/bin/x+0x101a)\n"
-                                           "    401019 f+0x9 (/bin/x+0x1019)\n"
-                                           "    401019 f+0x9 (/bin/x+0x1019)\n"
-                                           "    401023 f+0x13 (/bin/x+0x1023)\n"
-                                           "    401023 f+0x13 (/bin/x+0x1023)\n"
-                                           "    401023 f+0x13 (/bin/x+0x1023)\n"
-                                           "    401025 f+0x15 (/bin/x+0x1025)\n"
-                                           "    401025 f+0x15 (/bin/x+0x1025)\n"
-                                           "    401010 f+0x0 (/bin/x+0x1010)\n"
-                                           "    401032 f+0x22 (/bin/x+0x1032)\n"
-                                           "    401000 other+0x0 (/bin/x+0x1000)\n"
-                                           "    402000 f+0x0 (/bin/x+0x2000)\n"
-                                           "    402001 f+0x1 (/bin/x+0x2001)\n"
-                                           "    400050 f+0x0 (/bin/x+0x50)\n"
+static const char profile_test_samples[] = "    401016 f+0x6 (/t/bin+0x1016)\n"
+                                           "    401016 f+0x6 (/t/bin+0x1016)\n"
+                                           "    401016 f+0x6 (/t/bin+0x1016)\n"
+                                           "    401019 f+0x9 (/t/bin+0x1019)\n"
+                                           "    40101a f+0xa (/t/bin+0x101a)\n"
+                                           "    401019 f+0x9 (/t/bin+0x1019)\n"
+                                           "    401019 f+0x9 (/t/bin+0x1019)\n"
+                                           "    401023 f+0x13 (/t/bin+0x1023)\n"
+                                           "    401023 f+0x13 (/t/bin+0x1023)\n"
+                                           "    401023 f+0x13 (/t/bin+0x1023)\n"
+                                           "    401025 f+0x15 (/t/bin+0x1025)\n"
+                                           "    401025 f+0x15 (/t/bin+0x1025)\n"
+                                           "    401010 f+0x0 (/t/bin+0x1010)\n"
+                                           "    401032 f+0x22 (/t/bin+0x1032)\n"
+                                           "    401000 other+0x0 (/t/bin+0x1000)\n"
+                                           "    402000 f+0x0 (/t/bin+0x2000)\n"
+                                           "    402001 f+0x1 (/t/bin+0x2001)\n"
+                                           "    400050 f+0x0 (/t/bin+0x50)\n"
                                            "    402000 ff+0x6\n"
                                            "    7f0000 [unknown]\n";
 
-static const char profile_test_hot_loops[] = "hot-loops: 14 samples in f (12 instructions, 2 loops), the copy at 1010, the busiest of 2 (2 samples in the others), 1 samples at file offsets outside its copies\n"
+static const char profile_test_hot_loops[] = "hot-loops: 14 samples in f (12 instructions, 2 loops), the copy at 1010, the busiest of 2 (2 samples in the others), 1 samples named f outside its copies\n"
                                              "loops by samples:\n"
                                              "  1014-1027: 7 instructions, 1 stack references, 85.7% of the samples\n"
                                              "  1016-1023: 4 instructions, 1 stack references, 71.4% of the samples\n"
@@ -153,6 +160,10 @@ static const char profile_test_labeled[] = "\t.file\t0 \"/src\" \"ReduceSpills.c
 
 static const char profile_test_spill_disassembly[] = "\n"
                                                      "program:     file format elf64-x86-64\n"
+                                                    "\n"
+                                                    "Program Header:\n"
+                                                    "    LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**12\n"
+                                                    "         filesz 0x0000000000100000 memsz 0x0000000000100000 flags r-x\n"
                                                      "\n"
                                                      "Disassembly of section .text:\n"
                                                      "\n"
@@ -187,27 +198,30 @@ static const char profile_test_spill_disassembly[] = "\n"
                                                      "    5010:\tmov    %rsi,0x40(%rsp)\n"
                                                      "    5015:\tret\n";
 
-static const char profile_test_spill_samples[] = " 401000 f+0x0 (/x+0x1000)\n"
-                                                 " 401010 buster_spill.a.0+0x0 (/x+0x1010)\n"
-                                                 " 401010 buster_spill.a.0+0x0 (/x+0x1010)\n"
-                                                 " 401020 buster_spill.a.1+0x0 (/x+0x1020)\n"
-                                                 " 401020 buster_spill.a.1+0x0 (/x+0x1020)\n"
-                                                 " 401020 buster_spill.a.1+0x0 (/x+0x1020)\n"
-                                                 " 401020 buster_spill.a.1+0x0 (/x+0x1020)\n"
-                                                 " 401020 buster_spill.a.1+0x0 (/x+0x1020)\n"
-                                                 " 401024 buster_spill.a.1+0x4 (/x+0x1024)\n"
-                                                 " 401024 buster_spill.a.1+0x4 (/x+0x1024)\n"
-                                                 " 401024 buster_spill.a.1+0x4 (/x+0x1024)\n"
-                                                 " 401030 buster_spill.a.2+0x0 (/x+0x1030)\n"
-                                                 " 401030 buster_spill.a.2+0x0 (/x+0x1030)\n"
-                                                 " 401030 buster_spill.a.2+0x0 (/x+0x1030)\n"
-                                                 " 401030 buster_spill.a.2+0x0 (/x+0x1030)\n"
-                                                 " 401040 buster_spill.a.3+0x0 (/x+0x1040)\n"
-                                                 " 401060 f2+0x0 (/x+0x1060)\n"
-                                                 " 403000 f+0x0 (/x+0x3000)\n"
-                                                 " 403000 f+0x0 (/x+0x3000)\n"
-                                                 " 405000 f+0x0 (/x+0x5000)\n"
-                                                 " 405010 buster_spill.b.0+0x0 (/x+0x5010)\n"
+static const char profile_test_spill_samples[] = " 401000 f+0x0 (/p/program+0x1000)\n"
+                                                 " 401010 buster_spill.a.0+0x0 (/p/program+0x1010)\n"
+                                                 " 401010 buster_spill.a.0+0x0 (/p/program+0x1010)\n"
+                                                 " 401020 buster_spill.a.1+0x0 (/p/program+0x1020)\n"
+                                                 " 401020 buster_spill.a.1+0x0 (/p/program+0x1020)\n"
+                                                 " 401020 buster_spill.a.1+0x0 (/p/program+0x1020)\n"
+                                                 " 401020 buster_spill.a.1+0x0 (/p/program+0x1020)\n"
+                                                 " 401020 buster_spill.a.1+0x0 (/p/program+0x1020)\n"
+                                                 " 401024 buster_spill.a.1+0x4 (/p/program+0x1024)\n"
+                                                 " 401024 buster_spill.a.1+0x4 (/p/program+0x1024)\n"
+                                                 " 401024 buster_spill.a.1+0x4 (/p/program+0x1024)\n"
+                                                 " 401030 buster_spill.a.2+0x0 (/p/program+0x1030)\n"
+                                                 " 401030 buster_spill.a.2+0x0 (/p/program+0x1030)\n"
+                                                 " 401030 buster_spill.a.2+0x0 (/p/program+0x1030)\n"
+                                                 " 401030 buster_spill.a.2+0x0 (/p/program+0x1030)\n"
+                                                 " 401040 buster_spill.a.3+0x0 (/p/program+0x1040)\n"
+                                                 " 401060 f2+0x0 (/p/program+0x1060)\n"
+                                                 " 403000 f+0x0 (/p/program+0x3000)\n"
+                                                 " 403000 f+0x0 (/p/program+0x3000)\n"
+                                                 " 405000 f+0x0 (/p/program+0x5000)\n"
+                                                 " 405010 buster_spill.b.0+0x0 (/p/program+0x5010)\n"
+                                                 " 7f001010 library_work+0x0 (/l/libnoise.so+0x1010)\n"
+                                                 " 7f001010 library_work+0x0 (/l/libnoise.so+0x1010)\n"
+                                                 " 7f001020 library_work+0x10 (/l/libnoise.so+0x1020)\n"
                                                  " 7f0000 [unknown]\n";
 
 static const char profile_test_spill_report[] = "spill-report: 16 samples in f at 1000, 12 (75.00%) at its 4 spills and reloads: 7 spills, 5 reloads, in 2 slots\n"
@@ -270,7 +284,7 @@ static void profile_test_text_tools(ProfileTest* test)
 
     ok = profile_hot_loops(&test->arena, &test->report, profile_test_string("f"), disassembly, samples, 1);
     profile_test_check(test, "hot-loops --loops 1", ok, true, profile_report_text(&test->report),
-                       "hot-loops: 14 samples in f (12 instructions, 2 loops), the copy at 1010, the busiest of 2 (2 samples in the others), 1 samples at file offsets outside its copies\n"
+                       "hot-loops: 14 samples in f (12 instructions, 2 loops), the copy at 1010, the busiest of 2 (2 samples in the others), 1 samples named f outside its copies\n"
                        "loops by samples:\n"
                        "  1014-1027: 7 instructions, 1 stack references, 85.7% of the samples\n"
                        "the smallest loop with half the samples:\n"
@@ -288,17 +302,17 @@ static void profile_test_text_tools(ProfileTest* test)
                        "hot-loops: 2 samples of f have no offset in the file (perf script's dsoff field)\n");
 
     // Past the last symbol's last instruction, which is at most 15 bytes long.
-    ok = profile_hot_loops(&test->arena, &test->report, profile_test_string("f"), profile_test_string("0000000000001000 <f>:\n    1000:\tjmp    1000 <f>\n"),
-                           profile_test_string("401000 f+0x0 (/bin/x+0x1000)\n40100e f+0xe (/bin/x+0x100e)\n40100f f+0xf (/bin/x+0x100f)\n"), 6);
+    ok = profile_hot_loops(&test->arena, &test->report, profile_test_string("f"), profile_test_string(BUSTER_PROFILE_TEST_IMAGE "0000000000001000 <f>:\n    1000:\tjmp    1000 <f>\n"),
+                           profile_test_string("401000 f+0x0 (/t/bin+0x1000)\n40100e f+0xe (/t/bin+0x100e)\n40100f f+0xf (/t/bin+0x100f)\n"), 6);
     profile_test_check(test, "hot-loops past the last instruction", ok, true, profile_report_text(&test->report),
-                       "hot-loops: 2 samples in f (1 instructions, 1 loops), 1 samples at file offsets outside its copies\n"
+                       "hot-loops: 2 samples in f (1 instructions, 1 loops), 1 samples named f outside its copies\n"
                        "loops by samples:\n"
                        "  1000-1000: 1 instructions, 0 stack references, 100.0% of the samples\n"
                        "the smallest loop with half the samples:\n"
                        "  1000-1000: 1 instructions, 0 stack references, 100.0% of the samples\n"
                        "         2  1000  jmp    1000 <f>\n");
 
-    ok = profile_hot_loops(&test->arena, &test->report, profile_test_string("other"), disassembly, profile_test_string("1 other+0x0 (/bin/x+0x1000)\n"), 6);
+    ok = profile_hot_loops(&test->arena, &test->report, profile_test_string("other"), disassembly, profile_test_string("1 other+0x0 (/t/bin+0x1000)\n1 other+0x0 (/t/libother.so+0x1000)\n"), 6);
     profile_test_check(test, "hot-loops without loops", ok, true, profile_report_text(&test->report),
                        "hot-loops: 1 samples in other (1 instructions, 0 loops)\nloops by samples:\nno loop has half the samples\n");
 
@@ -331,15 +345,59 @@ static void profile_test_text_tools(ProfileTest* test)
 
     // #236's reviews: no sample before the first label, and another copy's before it in address order.
     ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), spill_labeled, spill_disassembly,
-                              profile_test_string("403004 f+0x4 (/x+0x3004)\n403008 f+0x8 (/x+0x3008)\n401010 buster_spill.a.0+0x0 (/x+0x1010)\n"), 1);
+                              profile_test_string("403004 f+0x4 (/p/program+0x3004)\n403008 f+0x8 (/p/program+0x3008)\n401010 buster_spill.a.0+0x0 (/p/program+0x1010)\n"), 1);
     profile_test_check(test, "spill-report beside another copy", ok, true, profile_report_text(&test->report),
                        "spill-report: 1 samples in f at 1000, 1 (100.00%) at its 4 spills and reloads: 1 spills, 0 reloads, in 2 slots\n"
                        "gpr  64(%rsp)     spills      1 reloads      0  | hottest spill 1 at ReduceSpills.c:10:3\n");
     ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), spill_labeled, spill_disassembly,
-                              profile_test_string("405000 f+0x0 (/x+0x5000)\n405010 buster_spill.b.0+0x0 (/x+0x5010)\n405010 buster_spill.b.0+0x0 (/x+0x5010)\n"), 1);
+                              profile_test_string("405000 f+0x0 (/p/program+0x5000)\n405010 buster_spill.b.0+0x0 (/p/program+0x5010)\n405010 buster_spill.b.0+0x0 (/p/program+0x5010)\n"), 1);
     profile_test_check(test, "spill-report with another variant's samples", ok, true, profile_report_text(&test->report),
                        "spill-report: 0 samples in f at 1000, 0 (0.00%) at its 4 spills and reloads: 0 spills, 0 reloads, in 2 slots\n"
                        "gpr  64(%rsp)     spills      0 reloads      0\n");
+
+    // #236's fourth review: a later function of the same name (another unit's static f) ends the copy.
+    const String8 adjacent_labeled = profile_test_string("f:\nbuster_spill.a.0:\n\tmovq\t%rsi, 64(%rsp)  # 8-byte Spill\n\tret\n.Lfunc_end0:\n");
+    const String8 adjacent = profile_test_string(BUSTER_PROFILE_TEST_IMAGE "0000000000001140 <f>:\n    1140:\tpush   %rbp\n"
+                                                 "0000000000001141 <buster_spill.a.0>:\n    1141:\tmov    %rsi,0x40(%rsp)\n    1146:\tret\n"
+                                                 "0000000000001160 <f>:\n    1160:\tret\n0000000000001170 <external>:\n    1170:\tret\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), adjacent_labeled, adjacent,
+                              profile_test_string("401141 buster_spill.a.0+0x0 (/t/bin+0x1141)\n401160 f+0x0 (/t/bin+0x1160)\n401160 f+0x0 (/t/bin+0x1160)\n401160 f+0x0 (/t/bin+0x1160)\n"), 24);
+    profile_test_check(test, "spill-report beside an adjacent copy", ok, true, profile_report_text(&test->report),
+                       "spill-report: 1 samples in f at 1140, 1 (100.00%) at its 1 spills and reloads: 1 spills, 0 reloads, in 1 slots\n"
+                       "gpr  64(%rsp)     spills      1 reloads      0  | hottest spill 1 at -\n");
+
+    // An lld executable: its executable segment at file offset 0x6c0 and address 0x16c0.
+    const String8 lld = profile_test_string("lld_prog:     file format elf64-x86-64\n\nProgram Header:\n"
+                                            "    LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**12\n"
+                                            "         filesz 0x0000000000000658 memsz 0x0000000000000658 flags r--\n"
+                                            "    LOAD off    0x00000000000006c0 vaddr 0x00000000000016c0 paddr 0x00000000000016c0 align 2**12\n"
+                                            "         filesz 0x0000000000001000 memsz 0x0000000000001000 flags r-x\n\n"
+                                            "00000000000017e0 <f>:\n    17e0:\tdec    %ecx\n"
+                                            "00000000000017f0 <buster_spill.a.0>:\n    17f0:\tmov    %rsi,0x40(%rsp)\n    17f5:\tjne    17e0 <f>\n    17f7:\tret\n");
+    const String8 lld_samples = profile_test_string("5557e0 f+0x0 (/b/lld_prog+0x7e0)\n5557f0 buster_spill.a.0+0x0 (/b/lld_prog+0x7f0)\n5557f5 buster_spill.a.0+0x5 (/b/lld_prog+0x7f5)\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), adjacent_labeled, lld, lld_samples, 24);
+    profile_test_check(test, "spill-report of an lld executable", ok, true, profile_report_text(&test->report),
+                       "spill-report: 3 samples in f at 17e0, 1 (33.33%) at its 1 spills and reloads: 1 spills, 0 reloads, in 1 slots\n"
+                       "gpr  64(%rsp)     spills      1 reloads      0  | hottest spill 1 at -\n");
+    ok = profile_hot_loops(&test->arena, &test->report, profile_test_string("f"), lld, lld_samples, 6);
+    profile_test_check(test, "hot-loops of an lld executable", ok, true, profile_report_text(&test->report),
+                       "hot-loops: 3 samples in f (4 instructions, 1 loops)\n"
+                       "loops by samples:\n"
+                       "  17e0-17f5: 3 instructions, 1 stack references, 100.0% of the samples\n"
+                       "the smallest loop with half the samples:\n"
+                       "  17e0-17f5: 3 instructions, 1 stack references, 100.0% of the samples\n"
+                       "         1  17e0  dec    %ecx\n"
+                       "         1  17f0  mov    %rsi,0x40(%rsp)\n"
+                       "         1  17f5  jne    17e0 <f>\n");
+
+    // Without objdump -p's lines, offsets in the file can't be addresses.
+    const String8 bare = profile_test_string("0000000000001140 <f>:\n    1140:\tpush   %rbp\n0000000000001141 <buster_spill.a.0>:\n    1141:\tret\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), adjacent_labeled, bare, profile_test_string(""), 24);
+    profile_test_check(test, "spill-report without program headers", ok, false, profile_report_text(&test->report),
+                       "spill-report: the disassembly has no file name or LOAD segments (objdump -d -p)\n");
+    ok = profile_hot_loops(&test->arena, &test->report, profile_test_string("f"), bare, profile_test_string(""), 6);
+    profile_test_check(test, "hot-loops without program headers", ok, false, profile_report_text(&test->report),
+                       "hot-loops: the disassembly has no file name or LOAD segments (objdump -d -p)\n");
 
     // Errors: samples without file offsets, labels the disassembly lacks or has twice, no copy before them, labels out
     // of order or of another tag, and a label last.

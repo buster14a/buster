@@ -90,7 +90,7 @@ fixup interface's latency problems apart. Once its mispredictions were gone, the
 ```sh
 perf record -o hot.data -e cycles:u -c 100003 -- taskset -c 2 ./build/compiler benchmark-x86-encoder --only x86_encode_64
 perf script -i hot.data -F ip,sym,symoff,dsoff > hot.txt
-objdump -d --no-show-raw-insn build/compiler > compiler.dis
+objdump -d -p --no-show-raw-insn build/compiler > compiler.dis
 ./build/compiler hot-loops x86_encode_64 compiler.dis hot.txt
 ```
 
@@ -98,7 +98,9 @@ objdump -d --no-show-raw-insn build/compiler > compiler.dis
 with at least half of them, instruction by instruction with its samples: enclosing loops tie with the hot one, and the
 one to read is the innermost. A static function has a copy in every translation unit that includes its file (the
 lexer's `tokenize_c` has four), and `objdump --disassemble=NAME` (binutils 2.47) prints only one, so give it the whole
-file's disassembly: the samples' file offsets (`dsoff`) say which copy each is in, and it takes the busiest.
+file's disassembly, with its program headers (`-p`): each sample's file and offset in it (`dsoff`), through the file's
+LOAD segments (offsets and addresses differ in lld's executables), give its address, which says which copy it is in,
+and it takes the busiest. Samples of other files (shared libraries, whose offsets are their own) don't count.
 `--loops N` sets how many loops it ranks. The encoder's rounds read the loop this way to count its instructions and stack
 references, and found that clang had stopped unrolling it.
 
@@ -132,7 +134,7 @@ refuses two labeled variants of one tag:
 ./build.sh lexer-variant k1=k1_labeled.s
 perf record -e ibs_op/cnt_ctl=1/ -c 100003 -o spills.data -- taskset -c 2 ./build/compiler benchmark-lexer ~/azp-bench/c-tokenizer/corpus/libc
 perf script -i spills.data -F ip,sym,symoff,dsoff > spills.txt
-objdump -d --no-show-raw-insn build/compiler > compiler.dis
+objdump -d -p --no-show-raw-insn build/compiler > compiler.dis
 ./build/compiler spill-report tokenize_c k1_labeled.s compiler.dis spills.txt
 ```
 
