@@ -11,14 +11,21 @@
 // run_calling_convention_tests. The checks, in this order:
 //   - Merge: clang's merge and post-merge, written again here as clang writes them, against the module's on every pair
 //     of classes and both kinds of size.
-//   - Fixtures: types whose classes, passing and results clang's IR shows (abi_test_fixtures says which), at each target
-//     vector width, by the vector path and by the twin; and calls whose locations clang and LLVM give (an UNCOUNTED
-//     argument's shift among them).
+//   - Fixtures: types whose classes, passing, slots and results clang's IR and LLVM's fixed stack objects show
+//     (abi_test_fixtures says which; abi_test_build_atomics the LARGER, GROWN and refused _Atomic types and what holds
+//     them; abi_test_build_split_vectors the vectors LLVM breaks up or packs that aren't _Atomic, and records of them),
+//     at each target vector width, by the vector path and by the twin; calls whose locations clang and LLVM give (an
+//     UNCOUNTED argument's shift, the LARGER copies' slots, a SMALLER one's and a DEMOTED result among them); the
+//     levels across calls (abi_test_ordering); the walk without scratch memory for its stack (abi_test_short_scratch);
+//     and the walk over records that 2^64 paths lead to, under an alarm (abi_test_shared_records).
 //   - Worlds: random worlds of types (abi_test_world_build: scalars, vectors, complex types, _BitInts, _Atomic and
-//     aligned types, and records and unions of them, small ones mostly, with bit-fields, arrays, nesting, packing and
-//     alignment), classified by the vector path in one table and by the twin in another, which must end up identical,
-//     and each type at each offset it can be at against the oracle: clang's classify transcribed as clang has it, its
-//     recursion over members as a stack of frames, from the type table alone (no rows).
+//     aligned types, _Atomics of structs of no size, and records and unions of them, small ones mostly, with
+//     bit-fields, arrays, nesting, packing and alignment, and zero-length arrays of large records), classified by the
+//     vector path in one table and by the twin in another, which must end up identical, and each type at each offset it
+//     can be at against the oracle: clang's classify transcribed as clang has it, its recursion over members as a stack
+//     of frames, from the type table alone (no rows). Then the twin classifies every type again at once, which must
+//     leave its table as it was: the paths share the levels, and in the rootless world (AbiTestWorld.rootless), whose
+//     levels only the waits order, this shows a type the levels took before what it reads.
 //   - Assignment: random calls over a world's types, named and variadic, with results in memory and in registers,
 //     assigned by the vector path and by the twin, which must agree on every location and total; calls around the
 //     vector path's most arguments (abi_test_long_calls); and the vector path with its argument and location columns
@@ -30,9 +37,16 @@
 //     bytes, a C callee and a C caller of ours) and as our side (a caller of the C callee and a callee: X86Instruction
 //     records through x86_encode, link_add_code_fixups and the object writer), linked by the compiler's driver and run:
 //     each side checks every argument, result, hidden pointer, al and va_arg value against the bytes. GCC's worlds
-//     leave out what GCC lays out or passes otherwise (each named where it is left out, GCC's own bugs among them); an
-//     argument clang would pass as an i0 becomes a long, as does an unnamed one clang's va_arg reads elsewhere than its
-//     call puts it (abi_test_va_disagreement); and bytes clang doesn't pass aren't checked (abi_test_mask_unpassed).
+//     leave out what GCC lays out or passes otherwise (each named where it is left out, GCC's own bugs among them), and
+//     clang's a type in registers that holds an array of elements of no size, which crashes it now and then
+//     (abi_test_empty_arrays), one with an SSE low eightbyte and bit-fields in an INTEGER high one, whose access units
+//     the module doesn't work out yet (abi_test_bit_field_bytes), an _Atomic vector of bools, whose atomic loads crash
+//     it, a record SSE, SSEUP of a size other than 16, 32 or 64 and one SSE, SSE that holds a __float128, which the
+//     module doesn't model yet either, and a union of a vector LLVM packs into fewer bits than its bytes, whose copies
+//     lose the other members' bits (abi_test_holds); an argument clang would pass as an i0 becomes a long, as does an
+//     unnamed one clang's va_arg reads elsewhere than its call puts it (abi_test_va_disagreement); bytes clang doesn't
+//     pass aren't checked (abi_test_mask_unpassed); and the C side copies a SMALLER type's LLVM bytes, which are all
+//     clang's objects of it hold (abi_test_c_size).
 // The exit status is 1 if the arguments are invalid or a check fails.
 // With --cross-check, bounded child processes also check capture ownership with closed standard descriptors and
 // descriptor exhaustion, before running the ordinary six configurations.
@@ -225,7 +239,10 @@ static uint32_t abi_test_resolve(const TypeTable* table, uint32_t index)
     return result;
 }
 
-// What clang's getTypeAlign gives a field's canonical type: ALIGNED looked through, arrays' elements too.
+// What clang's getTypeAlign gives a field's canonical type: ALIGNED looked through, arrays' elements too, and an _Atomic
+// type's from its canonical value, without the typedefs (getTypeInfo's AtomicType case): the value's alignment if it has
+// no size or more than 16 bytes, and otherwise its size rounded up to a power of two. An aligned(16) typedef of an empty
+// struct makes an _Atomic aligned to 16 in C, and to 1 canonically.
 static uint64_t abi_test_canonical_alignment(const TypeTable* table, TypeId type)
 {
     uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
@@ -236,7 +253,23 @@ static uint64_t abi_test_canonical_alignment(const TypeTable* table, TypeId type
             index = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
         }
     }
-    return 1ull << table->types.alignment_log2[index];
+    uint64_t result = 1ull << table->types.alignment_log2[index];
+    if (table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC)
+    {
+        uint32_t value = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
+        for (uint32_t i = 0; i < 64 && table->types.kind[value] == BUSTER_TYPE_KIND_ALIGNED; i += 1)
+        {
+            value = table->types.base[value] >> BUSTER_TYPE_INDEX_SHIFT;
+        }
+        const uint64_t size = table->types.size[value];
+        uint64_t width = 1;
+        while (width < size)
+        {
+            width *= 2;
+        }
+        result = size == 0 || size > 16 ? 1ull << table->types.alignment_log2[value] : width;
+    }
+    return result;
 }
 
 static bool abi_test_is_aggregate_kind(uint8_t kind)
@@ -580,7 +613,9 @@ static AbiClasses abi_test_classify(const TypeTable* table, uint32_t vector_byte
 #define BUSTER_ABI_TEST_XMM(n) (BUSTER_ABI_REGISTER_VECTOR | (n))
 #define BUSTER_ABI_TEST_ST(n) (BUSTER_ABI_REGISTER_X87 | (n))
 #define BUSTER_ABI_TEST_NONE BUSTER_ABI_REGISTER_NONE
-#define BUSTER_ABI_TEST_FIXTURES 192
+#define BUSTER_ABI_TEST_FIXTURES 256
+// A result kind the fixture doesn't check: an UNSUPPORTED type's, which the code generator refuses.
+#define BUSTER_ABI_TEST_RESULT_ANY 0xff
 
 typedef struct AbiTestExpectation AbiTestExpectation;
 struct AbiTestExpectation
@@ -594,6 +629,13 @@ struct AbiTestExpectation
     uint32_t clear;
     uint8_t result_kind;
     uint8_t result[2];
+    // With detail, the result's flags, the bytes each of its registers holds and its third register must be these too.
+    bool detail;
+    uint8_t result_flags;
+    uint8_t part_bytes;
+    uint8_t third;
+    // The stack slot's bytes it must have, or 0 for any.
+    uint32_t stack_bytes;
 };
 
 typedef struct AbiTestBuilder AbiTestBuilder;
@@ -623,8 +665,35 @@ static void abi_test_expectation(AbiTestBuilder* builder, const char* name, Type
                 first,
                 second,
             },
+            .detail = false,
+            .result_flags = 0,
+            .part_bytes = 0,
+            .third = BUSTER_ABI_TEST_NONE,
+            .stack_bytes = 0,
         };
         builder->count += 1;
+    }
+}
+
+// The last expectation's stack slot.
+static void abi_test_slot(AbiTestBuilder* builder, uint32_t stack_bytes)
+{
+    if (builder->count != 0 && builder->count <= BUSTER_ABI_TEST_FIXTURES)
+    {
+        builder->expectations[builder->count - 1].stack_bytes = stack_bytes;
+    }
+}
+
+// The last expectation's result in detail: its flags, the bytes each register holds and its third register.
+static void abi_test_result_detail(AbiTestBuilder* builder, uint8_t flags, uint8_t part_bytes, uint8_t third)
+{
+    if (builder->count != 0 && builder->count <= BUSTER_ABI_TEST_FIXTURES)
+    {
+        AbiTestExpectation* expectation = &builder->expectations[builder->count - 1];
+        expectation->detail = true;
+        expectation->result_flags = flags;
+        expectation->part_bytes = part_bytes;
+        expectation->third = third;
     }
 }
 
@@ -787,6 +856,301 @@ static void abi_test_build_vectors(AbiTestBuilder* builder)
     }
 }
 
+// A vector in memory as an argument: a byval copy of `slot` bytes (SMALLER when that is less than the C type's),
+// aligned to 2^alignment_log2, MEMORY's result or the registers given, and not refused.
+static void abi_test_vector_copy(AbiTestBuilder* builder, const char* name, TypeId type, uint32_t slot, uint32_t alignment_log2, uint8_t first, uint8_t second)
+{
+    const uint32_t alignment = alignment_log2 << BUSTER_ABI_PASS_ALIGNMENT_SHIFT;
+    const uint32_t smaller = slot < type_size(builder->table, type) ? BUSTER_ABI_PASS_SMALLER : 0;
+    const uint8_t kind = first == BUSTER_ABI_TEST_NONE ? BUSTER_ABI_RESULT_MEMORY : BUSTER_ABI_RESULT_REGISTERS;
+    abi_test_expectation(builder, name, type, BUSTER_ABI_IN_MEMORY, BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_AGGREGATE | alignment | smaller,
+                         BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_UNCOUNTED | (BUSTER_ABI_PASS_ALIGNMENT & ~alignment) | (BUSTER_ABI_PASS_SMALLER & ~smaller), kind,
+                         first, second);
+    abi_test_slot(builder, slot);
+}
+
+// A vector clang passes as its LLVM type and LLVM breaks up, refused: in one vector register by its classes, a wide one
+// past 16 bytes.
+static void abi_test_vector_refused(AbiTestBuilder* builder, const char* name, TypeId type, uint8_t result_kind, uint8_t first, uint8_t second)
+{
+    const uint32_t wide = type_size(builder->table, type) > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_PASS_WIDE : 0;
+    abi_test_expectation(builder, name, type, BUSTER_ABI_TEST_VECTOR, BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_UNSUPPORTED | wide, BUSTER_ABI_PASS_MEMORY | (BUSTER_ABI_PASS_WIDE & ~wide),
+                         result_kind, first, second);
+}
+
+// Vectors LLVM breaks up that aren't _Atomic ones (abi_vector_llvm), as clang 23's IR and LLVM's registers and fixed stack
+// objects give them at -march=x86-64, x86-64-v3 and x86-64-v4. Bools are an integer of their bits in memory: an i8 leaf
+// for 8 of them, so that {__bf16, __bf16, _Alignas(8) bool ext8} widens its low part into rdi, which ext9's i9 doesn't, and
+// an i128 for 128, which makes a union of it and a long one PAIR; from 16 bytes up LLVM passes each element as a value of
+// its own (refused, and so is a record of one such member, but not a union of it and another vector), copies 48 bytes
+// of 257 and 80 of 513, and returns them through a hidden pointer. _BitInt(4)s are packed in memory and a byte each in a
+// register; long doubles are packed in memory and f80s on the stack (st0, and st1 10 bytes on, as results); __float128s an
+// xmm register each; _BitInt(256)s i64s; and a vector in memory whose length isn't a power of two is returned an element
+// at a time: three longs in rax, rdx and rcx, three doubles in xmm0, xmm1 and st0, five floats or doubles through a
+// hidden pointer.
+static void abi_test_build_split_vectors(AbiTestBuilder* builder)
+{
+    TypeTable* table = builder->table;
+    const uint32_t wide = builder->vector_bytes;
+    const uint8_t rax = BUSTER_ABI_RAX;
+    const uint8_t rdx = BUSTER_ABI_RDX;
+    const uint8_t none = BUSTER_ABI_TEST_NONE;
+    const uint8_t any = BUSTER_ABI_TEST_RESULT_ANY;
+    const uint8_t hidden = BUSTER_ABI_RESULT_MEMORY;
+    const uint8_t demoted = BUSTER_ABI_FLAG_DEMOTED;
+    const uint8_t st0 = BUSTER_ABI_TEST_ST(0);
+    const uint8_t st1 = BUSTER_ABI_TEST_ST(1);
+    const uint8_t xmm0 = BUSTER_ABI_TEST_XMM(0);
+    const uint8_t xmm1 = BUSTER_ABI_TEST_XMM(1);
+    const uint32_t refused = BUSTER_ABI_PASS_UNSUPPORTED;
+    // Bools.
+    const TypeId bits8 = type_vector(table, BUSTER_TYPE_BOOL, 8, true);
+    const TypeId bits9 = type_vector(table, BUSTER_TYPE_BOOL, 9, true);
+    const TypeId bits65 = type_vector(table, BUSTER_TYPE_BOOL, 65, true);
+    const TypeId bits100 = type_vector(table, BUSTER_TYPE_BOOL, 100, true);
+    const TypeId bits128 = type_vector(table, BUSTER_TYPE_BOOL, 128, true);
+    const TypeId bits256 = type_vector(table, BUSTER_TYPE_BOOL, 256, true);
+    abi_test_in_registers(builder, "bool ext8", bits8, BUSTER_ABI_TEST_INTEGER_ONLY, BUSTER_ABI_PASS_LOW_INTEGER, refused | BUSTER_ABI_PASS_SIGN | BUSTER_ABI_PASS_ZERO, rax, none);
+    abi_test_in_registers(builder, "bool ext64", type_vector(table, BUSTER_TYPE_BOOL, 64, true), BUSTER_ABI_TEST_SSE_ONLY, BUSTER_ABI_PASS_LOW_SSE, refused, xmm0, none);
+    abi_test_vector_refused(builder, "bool ext65", bits65, hidden, none, none);
+    abi_test_result_detail(builder, demoted, 0, none);
+    const TypeId bits129 = type_vector(table, BUSTER_TYPE_BOOL, 129, true);
+    const TypeId bits257 = type_vector(table, BUSTER_TYPE_BOOL, 257, true);
+    if (wide >= 32)
+    {
+        abi_test_vector_refused(builder, "bool ext129", bits129, hidden, none, none);
+    }
+    else
+    {
+        abi_test_vector_copy(builder, "bool ext129", bits129, 32, 5, none, none);
+    }
+    abi_test_result_detail(builder, demoted, 0, none);
+    if (wide == 64)
+    {
+        abi_test_vector_refused(builder, "bool ext257", bits257, hidden, none, none);
+    }
+    else
+    {
+        abi_test_vector_copy(builder, "bool ext257", bits257, 48, 6, none, none);
+    }
+    abi_test_result_detail(builder, demoted, 0, none);
+    abi_test_vector_copy(builder, "bool ext513", type_vector(table, BUSTER_TYPE_BOOL, 513, true), 80, 7, none, none);
+    abi_test_result_detail(builder, demoted, 0, none);
+    TypeMember m[3];
+    m[0] = abi_test_member(builder, bits128);
+    const TypeId bits128_struct = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+    abi_test_vector_refused(builder, "struct {bool ext128}", bits128_struct, hidden, none, none);
+    abi_test_result_detail(builder, demoted, 0, none);
+    abi_test_vector_refused(builder, "union {bool ext128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 1, false, 0), hidden, none, none);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_INT, 0));
+    abi_test_vector_refused(builder, "struct {bool ext128, int[0]}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), hidden, none, none);
+    m[1] = abi_test_member(builder, abi_test_vector(builder, BUSTER_TYPE_FLOAT, 16));
+    abi_test_in_registers(builder, "union {bool ext128, float x4}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_TEST_VECTOR,
+                          BUSTER_ABI_PASS_VECTOR, refused, xmm0, none);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    abi_test_in_registers(builder, "union {bool ext128, long}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_CLASSES(BUSTER_ABI_INTEGER, BUSTER_ABI_SSE), BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_HIGH_INTEGER,
+                          refused | BUSTER_ABI_PASS_HIGH_SSE, rax, rdx);
+    m[0] = abi_test_member(builder, bits100);
+    abi_test_in_registers(builder, "union {bool ext100, long}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_CLASSES(BUSTER_ABI_INTEGER, BUSTER_ABI_SSE), BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_HIGH_SSE, refused | BUSTER_ABI_PASS_PAIR,
+                          rax, xmm0);
+    m[0] = abi_test_member(builder, type_array(table, bits65, 1));
+    abi_test_vector_refused(builder, "struct {bool ext65[1]}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), hidden, none, none);
+    m[0] = abi_test_member(builder, bits128_struct);
+    abi_test_vector_refused(builder, "struct {struct {bool ext128}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), hidden, none, none);
+    abi_test_result_detail(builder, demoted, 0, none);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_BF16);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_BF16);
+    m[2] = abi_test_member(builder, bits8);
+    m[2].alignment_log2 = 4;
+    abi_test_in_registers(builder, "{__bf16, __bf16, _Alignas(8) bool ext8}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0),
+                          BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_INTEGER), BUSTER_ABI_PASS_LOW_GENERAL | BUSTER_ABI_PASS_HIGH_INTEGER, refused, rax, rdx);
+    m[2] = abi_test_member(builder, bits9);
+    m[2].alignment_log2 = 4;
+    abi_test_in_registers(builder, "{__bf16, __bf16, _Alignas(8) bool ext9}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0),
+                          BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_INTEGER), BUSTER_ABI_PASS_LOW_SSE | BUSTER_ABI_PASS_HIGH_INTEGER, refused | BUSTER_ABI_PASS_LOW_GENERAL,
+                          xmm0, rax);
+    m[0] = abi_test_member(builder, bits256);
+    const TypeId bits256_struct = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 20));
+    const TypeId bits256_union = abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
+    if (wide >= 32)
+    {
+        abi_test_vector_refused(builder, "struct {bool ext256}", bits256_struct, any, none, none);
+        // The array of 20 chars has no class, but it isn't empty: clang passes the union as <4 x double>.
+        abi_test_in_registers(builder, "union {bool ext256, char[20]}", bits256_union, BUSTER_ABI_TEST_VECTOR, BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE, refused,
+                              xmm0, none);
+    }
+    else
+    {
+        abi_test_in_memory(builder, "struct {bool ext256}", bits256_struct);
+        abi_test_in_memory(builder, "union {bool ext256, char[20]}", bits256_union);
+    }
+    // An enum backed by bool retains vector storage, unlike an actual builtin-bool vector.
+    builder->next_name += 1;
+    const TypeId bool_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, builder->next_name);
+    type_enum_complete(table, bool_enum, BUSTER_TYPE_BOOL, 0);
+    const TypeId enum1 = type_vector(table, bool_enum, 1, true);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_BF16);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_BF16);
+    m[2] = abi_test_member(builder, enum1);
+    m[2].alignment_log2 = 4;
+    abi_test_in_registers(builder, "struct {__bf16, __bf16, _Alignas(8) enum : bool ext1}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0),
+                          BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_INTEGER), BUSTER_ABI_PASS_LOW_SSE | BUSTER_ABI_PASS_HIGH_INTEGER,
+                          refused | BUSTER_ABI_PASS_LOW_GENERAL, xmm0, rax);
+    abi_test_in_registers(builder, "enum : bool ext8", type_vector(table, bool_enum, 8, true), BUSTER_ABI_TEST_SSE_ONLY,
+                          BUSTER_ABI_PASS_LOW_SSE | BUSTER_ABI_PASS_SMALLER, refused, xmm0, none);
+    abi_test_vector_refused(builder, "enum : bool ext16", type_vector(table, bool_enum, 16, true), any, none, none);
+    abi_test_vector_copy(builder, "enum : bool ext65", type_vector(table, bool_enum, 65, true), 16, 7, none, none);
+    abi_test_result_detail(builder, demoted, 0, none);
+    // Packed vector alignments past 2^15 do not fit the storage column. Preserve INEXACT rather than wrapping into I128.
+    const TypeId wide_packed[] = {
+        type_vector(table, BUSTER_TYPE_LONG_DOUBLE, 4096, true),
+        type_vector(table, type_bit_int(table, 4, true), 131072, true),
+    };
+    const char* wide_names[] = {
+        "_Atomic {long double ext4096[0]}",
+        "_Atomic {unsigned _BitInt(4) ext131072[0]}",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(wide_packed); i += 1)
+    {
+        m[0] = abi_test_member(builder, type_array(table, wide_packed[i], 0));
+        const TypeId atomic = type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+        abi_test_expectation(builder, wide_names[i], atomic, BUSTER_ABI_IN_MEMORY,
+                             BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_AGGREGATE | BUSTER_ABI_PASS_LARGER | refused, 0, any, none, none);
+    }
+    // Long doubles.
+    const TypeId long_double1 = abi_test_vector(builder, BUSTER_TYPE_LONG_DOUBLE, 16);
+    const TypeId long_double2 = abi_test_vector(builder, BUSTER_TYPE_LONG_DOUBLE, 32);
+    const TypeId long_double3 = type_vector(table, BUSTER_TYPE_LONG_DOUBLE, 3, true);
+    const TypeId long_double4 = abi_test_vector(builder, BUSTER_TYPE_LONG_DOUBLE, 64);
+    abi_test_vector_refused(builder, "long double x1", long_double1, BUSTER_ABI_RESULT_REGISTERS, st0, none);
+    abi_test_result_detail(builder, 0, 16, none);
+    if (wide >= 32)
+    {
+        abi_test_vector_refused(builder, "long double x2", long_double2, BUSTER_ABI_RESULT_REGISTERS, st0, st1);
+    }
+    else
+    {
+        abi_test_vector_copy(builder, "long double x2", long_double2, 32, 5, st0, st1);
+    }
+    abi_test_result_detail(builder, 0, 10, none);
+    if (wide == 64)
+    {
+        abi_test_vector_refused(builder, "long double ext3", long_double3, hidden, none, none);
+        abi_test_result_detail(builder, demoted, 0, none);
+        abi_test_vector_refused(builder, "long double x4", long_double4, hidden, none, none);
+    }
+    else
+    {
+        abi_test_vector_copy(builder, "long double ext3", long_double3, 32, 6, none, none);
+        abi_test_result_detail(builder, demoted, 0, none);
+        abi_test_vector_copy(builder, "long double x4", long_double4, 64, 6, none, none);
+    }
+    abi_test_result_detail(builder, demoted, 0, none);
+    m[0] = abi_test_member(builder, long_double1);
+    abi_test_vector_refused(builder, "struct {long double x1}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), BUSTER_ABI_RESULT_REGISTERS, st0, none);
+    abi_test_result_detail(builder, 0, 16, none);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_DOUBLE);
+    abi_test_in_registers(builder, "union {long double x1, double}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_TEST_VECTOR,
+                          BUSTER_ABI_PASS_VECTOR, refused, xmm0, none);
+    // __float128s.
+    const TypeId quad2 = abi_test_vector(builder, BUSTER_TYPE_FLOAT128, 32);
+    const TypeId quad4 = abi_test_vector(builder, BUSTER_TYPE_FLOAT128, 64);
+    abi_test_in_registers(builder, "__float128 x1", abi_test_vector(builder, BUSTER_TYPE_FLOAT128, 16), BUSTER_ABI_TEST_VECTOR, BUSTER_ABI_PASS_VECTOR, refused, xmm0, none);
+    abi_test_result_detail(builder, 0, 16, none);
+    if (wide >= 32)
+    {
+        abi_test_vector_refused(builder, "__float128 x2", quad2, BUSTER_ABI_RESULT_REGISTERS, xmm0, xmm1);
+    }
+    else
+    {
+        abi_test_vector_copy(builder, "__float128 x2", quad2, 32, 5, xmm0, xmm1);
+    }
+    abi_test_result_detail(builder, 0, 16, none);
+    if (wide == 64)
+    {
+        abi_test_vector_refused(builder, "__float128 x4", quad4, hidden, none, none);
+    }
+    else
+    {
+        abi_test_vector_copy(builder, "__float128 x4", quad4, 64, 6, none, none);
+    }
+    abi_test_result_detail(builder, demoted, 0, none);
+    // _BitInts.
+    const TypeId wide1 = type_vector(table, type_bit_int(table, 256, false), 1, true);
+    const TypeId bit_int128_2 = type_vector(table, type_bit_int(table, 128, false), 2, true);
+    const TypeId bit_int128_4 = type_vector(table, type_bit_int(table, 128, false), 4, true);
+    const TypeId narrow32 = type_vector(table, type_bit_int(table, 4, true), 32, true);
+    // _BitInt(128)s in a vector register (as <2N x i64>), refused for the <N x i128> clang passes once it has no vector
+    // register left, whose i64s LLVM puts in general registers; a struct of one is a copy then, and passes.
+    const TypeId bit_int128_1 = type_vector(table, type_bit_int(table, 128, false), 1, true);
+    abi_test_vector_refused(builder, "_BitInt(128) ext1", bit_int128_1, BUSTER_ABI_RESULT_REGISTERS, xmm0, none);
+    abi_test_result_detail(builder, 0, 16, none);
+    m[0] = abi_test_member(builder, bit_int128_1);
+    abi_test_in_registers(builder, "struct {_BitInt(128) ext1}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), BUSTER_ABI_TEST_VECTOR,
+                          BUSTER_ABI_PASS_VECTOR, refused, xmm0, none);
+    if (wide >= 32)
+    {
+        abi_test_vector_refused(builder, "_BitInt(256) ext1", wide1, hidden, none, none);
+        abi_test_result_detail(builder, demoted, 0, none);
+        abi_test_vector_refused(builder, "_BitInt(128) ext2", bit_int128_2, BUSTER_ABI_RESULT_REGISTERS, xmm0, none);
+        abi_test_vector_refused(builder, "unsigned _BitInt(4) ext32", narrow32, any, none, none);
+    }
+    else
+    {
+        abi_test_vector_copy(builder, "_BitInt(256) ext1", wide1, 32, 5, none, none);
+        abi_test_result_detail(builder, demoted, 0, none);
+        abi_test_vector_copy(builder, "_BitInt(128) ext2", bit_int128_2, 32, 5, none, none);
+        abi_test_result_detail(builder, demoted, 0, none);
+        abi_test_vector_copy(builder, "unsigned _BitInt(4) ext32", narrow32, 16, 5, none, none);
+        abi_test_result_detail(builder, demoted, 0, none);
+    }
+    if (wide == 64)
+    {
+        abi_test_vector_refused(builder, "_BitInt(128) ext4", bit_int128_4, BUSTER_ABI_RESULT_REGISTERS, xmm0, none);
+    }
+    else
+    {
+        abi_test_vector_copy(builder, "_BitInt(128) ext4", bit_int128_4, 64, 6, none, none);
+        abi_test_result_detail(builder, demoted, 0, none);
+    }
+    // clang's object of it is 4 bytes, of 8 in C.
+    abi_test_in_registers(builder, "unsigned _BitInt(4) ext8", type_vector(table, type_bit_int(table, 4, true), 8, true), BUSTER_ABI_TEST_SSE_ONLY,
+                          BUSTER_ABI_PASS_LOW_SSE | BUSTER_ABI_PASS_SMALLER, refused, xmm0, none);
+    abi_test_vector_refused(builder, "unsigned _BitInt(4) ext16", type_vector(table, type_bit_int(table, 4, true), 16, true), any, none, none);
+    // Lengths that aren't a power of two, in memory.
+    const TypeId float5 = type_vector(table, BUSTER_TYPE_FLOAT, 5, true);
+    const TypeId long3 = type_vector(table, BUSTER_TYPE_LONG, 3, true);
+    const TypeId double3 = type_vector(table, BUSTER_TYPE_DOUBLE, 3, true);
+    const TypeId double5 = type_vector(table, BUSTER_TYPE_DOUBLE, 5, true);
+    if (wide >= 32)
+    {
+        abi_test_in_registers(builder, "float ext5", float5, BUSTER_ABI_TEST_VECTOR, BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE, refused, xmm0, none);
+        abi_test_in_registers(builder, "long ext3", long3, BUSTER_ABI_TEST_VECTOR, BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE, refused, xmm0, none);
+        abi_test_in_registers(builder, "double ext3", double3, BUSTER_ABI_TEST_VECTOR, BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE, refused, xmm0, none);
+    }
+    else
+    {
+        abi_test_vector_copy(builder, "float ext5", float5, 32, 5, none, none);
+        abi_test_result_detail(builder, demoted, 0, none);
+        abi_test_vector_copy(builder, "long ext3", long3, 32, 5, rax, rdx);
+        abi_test_result_detail(builder, 0, 8, BUSTER_ABI_RCX);
+        abi_test_vector_copy(builder, "double ext3", double3, 32, 5, xmm0, xmm1);
+        abi_test_result_detail(builder, 0, 8, st0);
+    }
+    if (wide == 64)
+    {
+        abi_test_in_registers(builder, "double ext5", double5, BUSTER_ABI_TEST_VECTOR, BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE, refused, xmm0, none);
+    }
+    else
+    {
+        abi_test_vector_copy(builder, "double ext5", double5, 64, 6, none, none);
+        abi_test_result_detail(builder, demoted, 0, none);
+    }
+}
+
 static void abi_test_build_records(AbiTestBuilder* builder)
 {
     TypeTable* table = builder->table;
@@ -943,6 +1307,127 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
     abi_test_in_registers(builder, "union {aligned(16) {long, long}, __int128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
                           BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    // clang keeps a zero-length array in its type of a record ([0 x %struct.big]), aligned as its element however large:
+    // {long, long, {__int128, long}[0]} is aligned to 16 there, ties with an __int128, and the first of the two is the
+    // union's storage (two i64s, or one i128).
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    const TypeId big = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[2] = abi_test_member(builder, type_array(table, big, 0));
+    const TypeId tail = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0);
+    m[0] = abi_test_member(builder, tail);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{long, long, {__int128, long}[0]}, __int128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, 0, BUSTER_ABI_PASS_PAIR, rax, rdx);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    m[1] = abi_test_member(builder, tail);
+    abi_test_in_registers(builder, "union {__int128, {long, long, {__int128, long}[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    // The same with a record larger than 64 bytes in the array, {__int128, char[64]}, whose row doesn't depend on its
+    // members: its alignment in LLVM's type comes from them all the same (abi_wide_alignment).
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 64));
+    const TypeId big80 = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[2] = abi_test_member(builder, type_array(table, big80, 0));
+    const TypeId tail80 = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0);
+    m[0] = abi_test_member(builder, tail80);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{long, long, {__int128, char[64]}[0]}, __int128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, 0, BUSTER_ABI_PASS_PAIR, rax, rdx);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    m[1] = abi_test_member(builder, tail80);
+    abi_test_in_registers(builder, "union {__int128, {long, long, {__int128, char[64]}[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    // Each of abi_wide_alignment's rules alone, a record larger than 16 bytes that LLVM aligns to 1, so that the __int128 is
+    // the union's storage (one i128, as clang 23 passes each): a member off its own alignment (packed {char, long double,
+    // char[15]}, 32 bytes), a record off its own (packed {char, {__int128, long}, char[15]}, 48 bytes), a size its
+    // alignment doesn't divide (packed {long double, char}, 17 bytes), and a union's members (union {__int128 x : 8,
+    // char[24]}, whose bit-field is an i8).
+    m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG_DOUBLE);
+    m[2] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 15));
+    const TypeId off_member = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, true, 0);
+    m[1] = abi_test_member(builder, big);
+    const TypeId off_record = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, true, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG_DOUBLE);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    const TypeId off_size = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, true, 0);
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_INT128, 8, true);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 24));
+    const TypeId bits_union = abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
+    const TypeId walked[4] = {
+        off_member,
+        off_record,
+        off_size,
+        bits_union,
+    };
+    const char* const walked_names[4] = {
+        "union {{long, long, packed {char, long double, char[15]}[0]}, __int128}",
+        "union {{long, long, packed {char, {__int128, long}, char[15]}[0]}, __int128}",
+        "union {{long, long, packed {long double, char}[0]}, __int128}",
+        "union {{long, long, union {__int128 x : 8, char[24]}[0]}, __int128}",
+    };
+    for (uint32_t w = 0; w < 4; w += 1)
+    {
+        m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+        m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+        m[2] = abi_test_member(builder, type_array(table, walked[w], 0));
+        m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0));
+        m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+        abi_test_in_registers(builder, walked_names[w], abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS,
+                              BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    }
+    // The same with the large record inside another ({char, {__int128, long}}, aligned to 16 too), and with a packed one
+    // in the array, aligned to 1 in LLVM's type (a long double off its own): the __int128 is then the most aligned.
+    m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    m[1] = abi_test_member(builder, big);
+    const TypeId nested = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[2] = abi_test_member(builder, type_array(table, nested, 0));
+    m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0));
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{long, long, {char, {__int128, long}}[0]}, __int128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, 0, BUSTER_ABI_PASS_PAIR, rax, rdx);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG_DOUBLE);
+    m[2] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    const TypeId packed_big = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, true, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[2] = abi_test_member(builder, type_array(table, packed_big, 0));
+    m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0));
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{long, long, packed {char, long double, long}[0]}, __int128}",
+                          abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    // A run of bit-fields in the large record is its unit there (abi_bit_field_run): an array of bytes, aligned to 1,
+    // where its 16 bytes don't fit before a char, which leaves {unsigned __int128 : 65, char, long} aligned to 8 in
+    // LLVM's type and the __int128 the most aligned; an i128 where they fit, a tie the struct wins.
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 65, true);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    m[2] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    const TypeId run_big = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[2] = abi_test_member(builder, type_array(table, run_big, 0));
+    m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0));
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{long, long, {unsigned __int128 : 65, char, long}[0]}, __int128}",
+                          abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 65, true);
+    m[1] = abi_test_member(builder, longs);
+    const TypeId fitting_big = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[2] = abi_test_member(builder, type_array(table, fitting_big, 0));
+    m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0));
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{long, long, {unsigned __int128 : 65, long[2]}[0]}, __int128}",
+                          abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS, 0, BUSTER_ABI_PASS_PAIR, rax, rdx);
     // A union stores a bit-field of 121 to 128 bits as an i128 (getIntNType rounds to bytes), unnamed though it is: one
     // i128 with a high eightbyte NO_CLASS, which clang counts as two registers; 120 bits are an i120, an i64 to pass.
     m[0] = abi_test_member(builder, type_bit_int(table, 32, true));
@@ -952,6 +1437,53 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     m[1] = abi_test_bits(builder, type_bit_int(table, 128, true), 120, false);
     abi_test_in_registers(builder, "union {unsigned _BitInt(32), unsigned _BitInt(128) : 120}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
                           BUSTER_ABI_TEST_INTEGER_ONLY, 0, BUSTER_ABI_PASS_PAIR, rax, BUSTER_ABI_TEST_NONE);
+    // The i128 an INTEGER low eightbyte reads is the whole value whatever the high eightbyte is, SSE too: a union of a
+    // struct of an unnamed bit-field (no class, an i128 to LLVM) and {long, double}, or a vector and a packed bit-field,
+    // stored as the struct (lowerUnion's first of the most aligned; with the vector first, {i64, double}). An INTEGER high
+    // eightbyte reads it from offset 8: {i64, i128} after an SSE low one, and an i128 alone (refused). Two SSE eightbytes
+    // are two doubles.
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 125, false);
+    const TypeId unnamed_i128 = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+    const TypeId bytes16 = abi_test_vector(builder, BUSTER_TYPE_UCHAR, 16);
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_CHAR, 6, true);
+    const TypeId packed_bits = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0);
+    const AbiClasses integer_sse = BUSTER_ABI_CLASSES(BUSTER_ABI_INTEGER, BUSTER_ABI_SSE);
+    const uint32_t i128_pair = BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_HIGH_INTEGER;
+    const uint32_t not_pair = BUSTER_ABI_PASS_HIGH_SSE | BUSTER_ABI_PASS_UNSUPPORTED;
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_DOUBLE);
+    m[1] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0));
+    m[0] = abi_test_member(builder, unnamed_i128);
+    abi_test_in_registers(builder, "union {struct {unsigned __int128 : 125}, {long, double}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          integer_sse, i128_pair, not_pair, rax, rdx);
+    m[0] = abi_test_member(builder, unnamed_i128);
+    m[1] = abi_test_member(builder, bytes16);
+    m[2] = abi_test_member(builder, packed_bits);
+    abi_test_in_registers(builder, "union {struct {unsigned __int128 : 125}, char vector(16), packed {char : 6}}",
+                          abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 3, false, 0), integer_sse, i128_pair, not_pair, rax, rdx);
+    m[0] = abi_test_member(builder, bytes16);
+    m[1] = abi_test_member(builder, unnamed_i128);
+    abi_test_in_registers(builder, "union {char vector(16), struct {unsigned __int128 : 125}, packed {char : 6}}",
+                          abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 3, false, 0), integer_sse, BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_HIGH_SSE,
+                          BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_HIGH_INTEGER | BUSTER_ABI_PASS_UNSUPPORTED, rax, BUSTER_ABI_TEST_XMM(0));
+    m[0] = abi_test_member(builder, BUSTER_TYPE_DOUBLE);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0));
+    m[0] = abi_test_member(builder, unnamed_i128);
+    abi_test_expectation(builder, "union {struct {unsigned __int128 : 125}, {double, long}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                         BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_INTEGER), BUSTER_ABI_PASS_UNSUPPORTED, BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_PAIR,
+                         BUSTER_ABI_TEST_RESULT_ANY, BUSTER_ABI_TEST_NONE, BUSTER_ABI_TEST_NONE);
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_LONG, 64, false);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0));
+    m[0] = abi_test_member(builder, unnamed_i128);
+    abi_test_expectation(builder, "union {struct {unsigned __int128 : 125}, {long : 64, long}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                         BUSTER_ABI_CLASSES(BUSTER_ABI_NO_CLASS, BUSTER_ABI_INTEGER), BUSTER_ABI_PASS_UNSUPPORTED, BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_PAIR,
+                         BUSTER_ABI_TEST_RESULT_ANY, BUSTER_ABI_TEST_NONE, BUSTER_ABI_TEST_NONE);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_DOUBLE, 2));
+    abi_test_in_registers(builder, "union {struct {unsigned __int128 : 125}, double[2]}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_SSE), BUSTER_ABI_PASS_LOW_SSE | BUSTER_ABI_PASS_HIGH_SSE,
+                          BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_UNSUPPORTED, BUSTER_ABI_TEST_XMM(0), BUSTER_ABI_TEST_XMM(1));
     // A struct's run of bit-fields past an eightbyte is an i128 only where 16 bytes fit before the next member with
     // storage, or the struct's end (accumulateBitFields): packed, or followed by a char or an array of no elements, it
     // is an array of bytes (an i64 and an i8, or two i64s); an empty struct after it takes no room, and a bit-field that
@@ -1075,6 +1607,571 @@ static void abi_test_build_records(AbiTestBuilder* builder)
                           BUSTER_ABI_TEST_NONE);
 }
 
+// The pass bits of an UNCOUNTED value of a kind, and the VALUE bits that must be clear for it.
+static uint32_t abi_test_value(uint32_t kind)
+{
+    return BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_UNCOUNTED | kind << BUSTER_ABI_PASS_VALUE_SHIFT;
+}
+
+static uint32_t abi_test_other_values(uint32_t kind)
+{
+    return BUSTER_ABI_PASS_VALUE & ~(kind << BUSTER_ABI_PASS_VALUE_SHIFT);
+}
+
+// clang's LLVM types for _Atomic types and what holds them, which the byval slots after five and six longs show (-mllvm
+// -stop-after=finalize-isel's fixed stack objects). An _Atomic of a type of no size is {T, [1 x i8]}, as large as T is
+// aligned in LLVM (LARGER): 16 bytes for _Atomic(struct { __int128 x[0]; }), of 1, and for one of a packed T, aligned
+// to 1, while clang has a general register free, an i8's 8 once it has none (GROWN); 32 KB for one aligned by a vector of
+// 32 KB, and one by a vector of 64 KB, past what the storage holds, refused, as is one aligned by a run of bit-fields of
+// an eightbyte or less, whose unit the module doesn't work out; and 1 byte for one of a _BitInt(129), an array of its
+// bytes in memory. A packed struct ending in one is
+// those bytes and an i8 (packed {that _Atomic} 17, a slot of 24); one with a member after the overrun is laid out
+// otherwise than C, and refused; one with room for it is the C layout, and so is a union. An _Atomic vector LLVM splits
+// into its elements (<5 x i8> into five i8s, <2 x i128> into four i64s) is refused too; one of bools is the integer of
+// its bits clang stores it as: a general register, two halves past 64 and an i128 at 128.
+static void abi_test_build_atomics(AbiTestBuilder* builder)
+{
+    TypeTable* table = builder->table;
+    const uint8_t rax = BUSTER_ABI_RAX;
+    const uint8_t rdx = BUSTER_ABI_RDX;
+    const uint8_t none = BUSTER_ABI_TEST_NONE;
+    const uint32_t copy = BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_AGGREGATE;
+    const uint32_t larger = BUSTER_ABI_PASS_LARGER;
+    const uint32_t grown = BUSTER_ABI_PASS_GROWN;
+    const uint32_t refused = BUSTER_ABI_PASS_UNSUPPORTED;
+    const uint32_t value = BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_UNCOUNTED;
+    const uint8_t any = BUSTER_ABI_TEST_RESULT_ANY;
+    const uint8_t hidden = BUSTER_ABI_RESULT_MEMORY;
+    TypeMember m[3];
+    m[0] = abi_test_member(builder, type_array(table, BUSTER_TYPE_INT128, 0));
+    const TypeId z16 = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+    const TypeId z16_packed = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0);
+    m[0] = abi_test_member(builder, type_array(table, BUSTER_TYPE_LONG, 0));
+    const TypeId z8 = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+    m[0] = abi_test_member(builder, type_array(table, BUSTER_TYPE_INT, 0));
+    const TypeId z4 = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+    const TypeId a16 = type_atomic(table, z16);
+    const TypeId a8 = type_atomic(table, z8);
+    abi_test_expectation(builder, "_Atomic {__int128[0]}", a16, BUSTER_ABI_IN_MEMORY, copy | larger | 4u << BUSTER_ABI_PASS_ALIGNMENT_SHIFT, grown | refused, hidden, none,
+                         none);
+    abi_test_slot(builder, 16);
+    abi_test_expectation(builder, "_Atomic packed {__int128[0]}", type_atomic(table, z16_packed), BUSTER_ABI_IN_MEMORY, copy | larger | grown, refused, hidden, none,
+                         none);
+    abi_test_slot(builder, 16);
+    abi_test_expectation(builder, "_Atomic {long[0]}", a8, BUSTER_ABI_IN_MEMORY, copy | larger, grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
+    // A flexible array member's element aligns its struct of no size in LLVM: an _Atomic of one of unsigned _BitInt(127)
+    // (an i128 to LLVM, aligned to 8 in C) is 16 bytes, and GROWN.
+    m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 0, false, 0));
+    m[1] = abi_test_member(builder, type_incomplete_array(table, type_bit_int(table, 127, true)));
+    abi_test_expectation(builder, "_Atomic {struct {}, unsigned _BitInt(127)[]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | grown, refused, hidden, none, none);
+    abi_test_slot(builder, 16);
+    // clang's canonical _Atomic type has no typedef in its value: an aligned(64) one counts neither for one of no size,
+    // nor for one of more than 16 bytes, whose byval slots are aligned to 8 (the first an i8 once clang has no general
+    // register).
+    const uint32_t eight = 3u << BUSTER_ABI_PASS_ALIGNMENT_SHIFT;
+    const uint32_t not_eight = BUSTER_ABI_PASS_ALIGNMENT & ~eight;
+    abi_test_expectation(builder, "_Atomic {} aligned(64)", type_atomic(table, type_aligned(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 0, false, 0), 6)),
+                         BUSTER_ABI_IN_MEMORY, copy | eight, larger | grown | refused | not_eight, hidden, none, none);
+    abi_test_slot(builder, 8);
+    m[0] = abi_test_member(builder, type_array(table, BUSTER_TYPE_LONG, 4));
+    abi_test_expectation(builder, "_Atomic {long[4]} aligned(64)", type_atomic(table, type_aligned(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), 6)),
+                         BUSTER_ABI_IN_MEMORY, copy | eight, larger | grown | refused | not_eight, hidden, none, none);
+    abi_test_slot(builder, 32);
+    // Packed structs ending in one, which runs past their end.
+    m[0] = abi_test_member(builder, a16);
+    const TypeId ending = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0);
+    abi_test_expectation(builder, "packed {_Atomic {__int128[0]}}", ending, BUSTER_ABI_IN_MEMORY, copy | larger | grown, refused, hidden, none, none);
+    abi_test_slot(builder, 24);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    m[1] = abi_test_member(builder, a16);
+    abi_test_expectation(builder, "packed {char, _Atomic {__int128[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, true, 0), BUSTER_ABI_IN_MEMORY,
+                         copy | larger | grown, refused, hidden, none, none);
+    abi_test_slot(builder, 24);
+    m[0] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 9));
+    abi_test_expectation(builder, "packed {char[9], _Atomic {__int128[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, true, 0), BUSTER_ABI_IN_MEMORY,
+                         copy | larger, grown | refused, hidden, none, none);
+    abi_test_slot(builder, 32);
+    m[0] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 100));
+    abi_test_expectation(builder, "packed {char[100], _Atomic {__int128[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, true, 0), BUSTER_ABI_IN_MEMORY,
+                         copy | larger, grown | refused, hidden, none, none);
+    abi_test_slot(builder, 120);
+    m[0] = abi_test_member(builder, a8);
+    abi_test_expectation(builder, "packed {_Atomic {long[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0), BUSTER_ABI_IN_MEMORY,
+                         copy | larger | grown, refused, hidden, none, none);
+    abi_test_slot(builder, 16);
+    m[0] = abi_test_member(builder, type_atomic(table, z4));
+    abi_test_expectation(builder, "packed {_Atomic {int[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0), BUSTER_ABI_IN_MEMORY, copy | larger,
+                         grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
+    // Room for it: the C layout.
+    m[0] = abi_test_member(builder, a16);
+    abi_test_expectation(builder, "{_Atomic {__int128[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), BUSTER_ABI_IN_MEMORY, copy,
+                         larger | grown | refused, hidden, none, none);
+    abi_test_slot(builder, 16);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    m[1] = abi_test_member(builder, a16);
+    abi_test_expectation(builder, "{char, _Atomic {__int128[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), BUSTER_ABI_IN_MEMORY, copy,
+                         larger | grown | refused, hidden, none, none);
+    abi_test_slot(builder, 32);
+    m[0] = abi_test_member(builder, a16);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    m[2] = abi_test_member(builder, type_incomplete_array(table, BUSTER_TYPE_LONG));
+    abi_test_expectation(builder, "{_Atomic {__int128[0]}, __int128, long[]}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0), BUSTER_ABI_IN_MEMORY,
+                         copy, larger | grown | refused, hidden, none, none);
+    abi_test_slot(builder, 32);
+    m[0] = abi_test_member(builder, ending);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1].alignment_log2 = 6;
+    abi_test_expectation(builder, "{packed {_Atomic {__int128[0]}}, _Alignas(32) long}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0),
+                         BUSTER_ABI_IN_MEMORY, copy, larger | grown | refused, hidden, none, none);
+    abi_test_slot(builder, 64);
+    m[0] = abi_test_member(builder, a16);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    abi_test_expectation(builder, "union {_Atomic {__int128[0]}, char}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_IN_MEMORY, copy,
+                         larger | grown | refused, hidden, none, none);
+    abi_test_slot(builder, 16);
+    // A member after an overrun, which clang moves (64 bytes for the first, 18 for the second, 32 for the next two), and
+    // records holding a type whose LLVM size the module doesn't keep.
+    m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    m[1] = abi_test_member(builder, a16);
+    m[2] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    abi_test_expectation(builder, "{char, _Atomic {__int128[0]}, char}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0), BUSTER_ABI_IN_MEMORY,
+                         copy | larger | refused, 0, any, none, none);
+    m[0] = abi_test_member(builder, a16);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    abi_test_expectation(builder, "packed {_Atomic {__int128[0]}, char}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, true, 0), BUSTER_ABI_IN_MEMORY,
+                         copy | larger | refused, 0, any, none, none);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 0));
+    abi_test_expectation(builder, "{_Atomic {__int128[0]}, char[0]}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), BUSTER_ABI_IN_MEMORY,
+                         copy | larger | refused, 0, any, none, none);
+    m[1] = abi_test_member(builder, type_incomplete_array(table, BUSTER_TYPE_INT));
+    abi_test_expectation(builder, "{_Atomic {__int128[0]}, int[]}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), BUSTER_ABI_IN_MEMORY,
+                         copy | larger | refused, 0, any, none, none);
+    m[0] = abi_test_member(builder, ending);
+    abi_test_expectation(builder, "packed {packed {_Atomic {__int128[0]}}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0), BUSTER_ABI_IN_MEMORY,
+                         copy | larger | refused, 0, any, none, none);
+    // An _Atomic of a struct of no size aligned by a record larger than 64 bytes, an array of none of them, whose LLVM
+    // alignment abi_wide_alignment walks: 16 bytes, as {__int128[0]}'s.
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 100));
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {struct {__int128, char[100]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | 4u << BUSTER_ABI_PASS_ALIGNMENT_SHIFT, grown | refused, hidden, none, none);
+    abi_test_slot(builder, 16);
+    // And by a record with a flexible array member and a size, whose storage the module doesn't keep (INEXACT): an
+    // array of none of them in a struct and in a union, and in a record larger than 16 bytes, which the walk takes.
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT);
+    m[1] = abi_test_member(builder, type_incomplete_array(table, BUSTER_TYPE_LONG));
+    const TypeId open_sized = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+    m[0] = abi_test_member(builder, type_array(table, open_sized, 0));
+    abi_test_expectation(builder, "_Atomic {struct {int, long[]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+    abi_test_expectation(builder, "_Atomic union {struct {int, long[]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+    m[0] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 20));
+    m[1] = abi_test_member(builder, open_sized);
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {struct {char[20], struct {int, long[]}}[0]}",
+                         type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)), BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any,
+                         none, none);
+    // An _Atomic's canonical type drops its value's typedefs: of an aligned(16) typedef of an empty struct, it is aligned
+    // to 16 in C and to 1 canonically, by which clang checks a member's offset. A union of an empty struct and an array of
+    // none of them (through an aligned(1) typedef) at offset 1 passes as an i8.
+    const TypeId empty16 = type_aligned(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 0, false, 0), 4);
+    m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 0, false, 0));
+    m[1] = abi_test_member(builder, type_array(table, type_aligned(table, type_atomic(table, empty16), 0), 0));
+    m[1] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0));
+    m[0] = abi_test_member(builder, BUSTER_TYPE_CHAR);
+    abi_test_in_registers(builder, "{char, union {struct {}, _Atomic {} aligned(16) aligned(1)[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGER_ONLY, 0, 0, rax, none);
+    abi_test_expectation(builder, "_Atomic packed {_Atomic {__int128[0]}}", type_atomic(table, ending), BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none,
+                         none);
+    // An _Atomic of a struct of no size aligned by a vector of 32 KB, the most the storage holds (LLVM aligns a vector
+    // as large as itself): 32 KB to LLVM, and 32 KB and a byte for a packed struct ending in it. One of 64 KB, which the
+    // storage doesn't hold (INEXACT), is refused, and so is the packed struct ending in it.
+    const uint32_t aligned_32k = 15u << BUSTER_ABI_PASS_ALIGNMENT_SHIFT;
+    m[0] = abi_test_member(builder, type_array(table, abi_test_vector(builder, BUSTER_TYPE_FLOAT, 32768), 0));
+    const TypeId a32k = type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+    m[0] = abi_test_member(builder, type_array(table, abi_test_vector(builder, BUSTER_TYPE_FLOAT, 65536), 0));
+    const TypeId a64k = type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+    abi_test_expectation(builder, "_Atomic {float vector(32768)[0]}", a32k, BUSTER_ABI_IN_MEMORY, copy | larger | aligned_32k,
+                         grown | refused | (BUSTER_ABI_PASS_ALIGNMENT & ~aligned_32k), hidden, none, none);
+    abi_test_slot(builder, 32768);
+    abi_test_expectation(builder, "_Atomic {float vector(65536)[0]}", a64k, BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+    m[0] = abi_test_member(builder, a32k);
+    abi_test_expectation(builder, "packed {_Atomic {float vector(32768)[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | grown, refused, hidden, none, none);
+    abi_test_slot(builder, 32776);
+    m[0] = abi_test_member(builder, a64k);
+    abi_test_expectation(builder, "packed {_Atomic {float vector(65536)[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+    // The same through a record larger than 16 bytes that holds the vector, whose alignment abi_wide_alignment walks
+    // (byval({ %struct.s, [1 x i8] }) align 32768, and the 64 KB one INEXACT from its member).
+    m[0] = abi_test_member(builder, abi_test_vector(builder, BUSTER_TYPE_FLOAT, 32768));
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {{float vector(32768)}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | aligned_32k, grown | refused | (BUSTER_ABI_PASS_ALIGNMENT & ~aligned_32k), hidden, none, none);
+    abi_test_slot(builder, 32768);
+    m[0] = abi_test_member(builder, abi_test_vector(builder, BUSTER_TYPE_FLOAT, 65536));
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {{float vector(65536)}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+    // clang's unit for a run of bit-fields of an eightbyte or less, which the module doesn't work out (INEXACT): an
+    // _Atomic of a struct of none of {unsigned __int128 : 8, char[20]}, which LLVM stores as {i8, [20 x i8], [11 x i8]},
+    // aligned to 1 rather than 16, is refused. A _BitInt wider than 128 bits is an integer of its size in memory where
+    // that is a multiple of 16 bytes, and otherwise an array of its bytes: _Atomics of structs of none of _BitInt(129),
+    // of {_BitInt(129), char[4]} and of union {_BitInt(129), long} are 1, 1 and 8 bytes to LLVM, and of _BitInt(256) 16.
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 8, true);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 20));
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {{unsigned __int128 : 8, char[20]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 1, true);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_UCHAR);
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {{unsigned __int128 : 1, unsigned char}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+    const TypeId bit_int_129 = type_bit_int(table, 129, false);
+    m[0] = abi_test_member(builder, type_array(table, bit_int_129, 0));
+    abi_test_expectation(builder, "_Atomic {_BitInt(129)[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy, larger | grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
+    m[0] = abi_test_member(builder, bit_int_129);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 4));
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {{_BitInt(129), char[4]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy, larger | grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
+    m[0] = abi_test_member(builder, bit_int_129);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), 0));
+    abi_test_expectation(builder, "_Atomic {union {_BitInt(129), long}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger, grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
+    m[0] = abi_test_member(builder, type_array(table, type_bit_int(table, 256, false), 0));
+    abi_test_expectation(builder, "_Atomic {_BitInt(256)[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
+                         BUSTER_ABI_IN_MEMORY, copy | larger | grown, refused, hidden, none, none);
+    abi_test_slot(builder, 16);
+    // _Atomic vectors: in one vector register, as LLVM widens them to one it has (16 bytes for <9 x i8>, v8f16 for
+    // <3 x half>), or split into their elements as no class says; a <1 x _BitInt(128)> in two halves.
+    const uint32_t vector = abi_test_value(BUSTER_ABI_VALUE_VECTOR);
+    const uint32_t not_vector = refused | abi_test_other_values(BUSTER_ABI_VALUE_VECTOR);
+    abi_test_expectation(builder, "_Atomic char ext8", type_atomic(table, type_vector(table, BUSTER_TYPE_CHAR, 8, true)), BUSTER_ABI_IN_MEMORY, vector, not_vector,
+                         BUSTER_ABI_RESULT_REGISTERS, BUSTER_ABI_TEST_XMM(0), none);
+    abi_test_expectation(builder, "_Atomic char ext9", type_atomic(table, type_vector(table, BUSTER_TYPE_CHAR, 9, true)), BUSTER_ABI_IN_MEMORY, vector, not_vector,
+                         BUSTER_ABI_RESULT_REGISTERS, BUSTER_ABI_TEST_XMM(0), none);
+    abi_test_expectation(builder, "_Atomic _Float16 ext3", type_atomic(table, type_vector(table, BUSTER_TYPE_FLOAT16, 3, true)), BUSTER_ABI_IN_MEMORY, vector,
+                         not_vector, BUSTER_ABI_RESULT_REGISTERS, BUSTER_ABI_TEST_XMM(0), none);
+    abi_test_expectation(builder, "_Atomic char ext3", type_atomic(table, type_vector(table, BUSTER_TYPE_CHAR, 3, true)), BUSTER_ABI_IN_MEMORY, value | refused, 0, any,
+                         none, none);
+    abi_test_expectation(builder, "_Atomic char ext5", type_atomic(table, type_vector(table, BUSTER_TYPE_CHAR, 5, true)), BUSTER_ABI_IN_MEMORY, value | refused, 0, any,
+                         none, none);
+    abi_test_expectation(builder, "_Atomic short ext3", type_atomic(table, type_vector(table, BUSTER_TYPE_SHORT, 3, true)), BUSTER_ABI_IN_MEMORY, value | refused, 0, any,
+                         none, none);
+    abi_test_expectation(builder, "_Atomic __int128 x2", type_atomic(table, abi_test_vector(builder, BUSTER_TYPE_INT128, 32)), BUSTER_ABI_IN_MEMORY, value | refused, 0,
+                         any, none, none);
+    abi_test_expectation(builder, "_Atomic long double ext2", type_atomic(table, type_vector(table, BUSTER_TYPE_LONG_DOUBLE, 2, true)), BUSTER_ABI_IN_MEMORY,
+                         BUSTER_ABI_PASS_MEMORY | refused, 0, any, none, none);
+    abi_test_expectation(builder, "_Atomic __float128 ext2", type_atomic(table, type_vector(table, BUSTER_TYPE_FLOAT128, 2, true)), BUSTER_ABI_IN_MEMORY, value | refused,
+                         0, any, none, none);
+    abi_test_expectation(builder, "_Atomic _BitInt(256) ext1", type_atomic(table, type_vector(table, type_bit_int(table, 256, false), 1, true)), BUSTER_ABI_IN_MEMORY,
+                         value | refused, 0, any, none, none);
+    abi_test_expectation(builder, "_Atomic _BitInt(128) ext1", type_atomic(table, type_vector(table, type_bit_int(table, 128, false), 1, true)), BUSTER_ABI_IN_MEMORY,
+                         abi_test_value(BUSTER_ABI_VALUE_HALVES), refused | abi_test_other_values(BUSTER_ABI_VALUE_HALVES), BUSTER_ABI_RESULT_REGISTERS, rax, rdx);
+    // _BitInt(4)s, packed in memory: <8 x i4> is promoted to 16-bit elements in xmm0, and <1 x i4> is an integer.
+    abi_test_expectation(builder, "_Atomic unsigned _BitInt(4) ext8", type_atomic(table, type_vector(table, type_bit_int(table, 4, true), 8, true)),
+                         BUSTER_ABI_IN_MEMORY, value | refused, 0, any, none, none);
+    abi_test_expectation(builder, "_Atomic unsigned _BitInt(4) ext1", type_atomic(table, type_vector(table, type_bit_int(table, 4, true), 1, true)),
+                         BUSTER_ABI_IN_MEMORY, abi_test_value(BUSTER_ABI_VALUE_GENERAL), refused | abi_test_other_values(BUSTER_ABI_VALUE_GENERAL),
+                         BUSTER_ABI_RESULT_REGISTERS, rax, none);
+    const TypeId char17 = type_atomic(table, type_vector(table, BUSTER_TYPE_CHAR, 17, true));
+    if (builder->vector_bytes >= 32)
+    {
+        abi_test_expectation(builder, "_Atomic char ext17", char17, BUSTER_ABI_IN_MEMORY, vector, not_vector, BUSTER_ABI_RESULT_REGISTERS, BUSTER_ABI_TEST_XMM(0), none);
+    }
+    else
+    {
+        abi_test_expectation(builder, "_Atomic char ext17", char17, BUSTER_ABI_IN_MEMORY, value | refused, 0, any, none, none);
+    }
+    // _Atomic vectors of bools: i10 in a general register (ax as a result), i65 in two halves, i128 one PAIR, past that
+    // more parts.
+    const uint32_t general = abi_test_value(BUSTER_ABI_VALUE_GENERAL);
+    const uint32_t not_general = refused | abi_test_other_values(BUSTER_ABI_VALUE_GENERAL);
+    abi_test_expectation(builder, "_Atomic bool ext10", type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 10, true)), BUSTER_ABI_IN_MEMORY, general,
+                         not_general | BUSTER_ABI_PASS_SIGN | BUSTER_ABI_PASS_ZERO, BUSTER_ABI_RESULT_REGISTERS, rax, none);
+    abi_test_slot(builder, 8);
+    abi_test_expectation(builder, "_Atomic bool ext64", type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 64, true)), BUSTER_ABI_IN_MEMORY, general, not_general,
+                         BUSTER_ABI_RESULT_REGISTERS, rax, none);
+    abi_test_expectation(builder, "_Atomic bool ext65", type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 65, true)), BUSTER_ABI_IN_MEMORY,
+                         abi_test_value(BUSTER_ABI_VALUE_HALVES), refused | abi_test_other_values(BUSTER_ABI_VALUE_HALVES), BUSTER_ABI_RESULT_REGISTERS, rax, rdx);
+    abi_test_expectation(builder, "_Atomic bool ext128", type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 128, true)), BUSTER_ABI_IN_MEMORY,
+                         abi_test_value(BUSTER_ABI_VALUE_PAIR) | 4u << BUSTER_ABI_PASS_ALIGNMENT_SHIFT, refused | abi_test_other_values(BUSTER_ABI_VALUE_PAIR),
+                         BUSTER_ABI_RESULT_REGISTERS, rax, rdx);
+    abi_test_expectation(builder, "_Atomic bool ext129", type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 129, true)), BUSTER_ABI_IN_MEMORY, value | refused, 0,
+                         any, none, none);
+    // _Atomic vectors of an enum of bool, <N x i1> rather than an integer (abi_is_bool_vector): 8 in an xmm register, 32
+    // in a ymm one with 32-byte registers, and 10 and 64, which X86 breaks into their elements or into two halves,
+    // refused.
+    builder->next_name += 1;
+    const TypeId bool_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, builder->next_name);
+    abi_test_expectation(builder, "enum : bool", type_enum_complete(table, bool_enum, BUSTER_TYPE_BOOL, 0) ? bool_enum : 0, BUSTER_ABI_TEST_INTEGER_ONLY, 0, 0,
+                         BUSTER_ABI_RESULT_REGISTERS, rax, none);
+    abi_test_expectation(builder, "_Atomic enum : bool ext8", type_atomic(table, type_vector(table, bool_enum, 8, true)), BUSTER_ABI_IN_MEMORY, vector, not_vector,
+                         BUSTER_ABI_RESULT_REGISTERS, BUSTER_ABI_TEST_XMM(0), none);
+    abi_test_expectation(builder, "_Atomic enum : bool ext10", type_atomic(table, type_vector(table, bool_enum, 10, true)), BUSTER_ABI_IN_MEMORY, value | refused, 0,
+                         any, none, none);
+    const TypeId bools32 = type_atomic(table, type_vector(table, bool_enum, 32, true));
+    if (builder->vector_bytes >= 32)
+    {
+        abi_test_expectation(builder, "_Atomic enum : bool ext32", bools32, BUSTER_ABI_IN_MEMORY, vector, not_vector, BUSTER_ABI_RESULT_REGISTERS, BUSTER_ABI_TEST_XMM(0),
+                             none);
+    }
+    else
+    {
+        abi_test_expectation(builder, "_Atomic enum : bool ext32", bools32, BUSTER_ABI_IN_MEMORY, value | refused, 0, any, none, none);
+    }
+    abi_test_expectation(builder, "_Atomic enum : bool ext64", type_atomic(table, type_vector(table, bool_enum, 64, true)), BUSTER_ABI_IN_MEMORY, value | refused, 0,
+                         any, none, none);
+}
+
+// The levels across calls (abi_dependencies_classified): a record larger than 64 bytes waits for its members only
+// where the table can hold a LARGER type, which a call knows from a LARGER type classified before (abi->larger) or an
+// _Atomic of a type of no size among its own; and a flexible record of no size always does, since an _Atomic of it in a
+// later call takes its alignment as its size. Four calls by each path: a struct of an empty struct and a flexible
+// array of a struct two levels deep, aligned to 16, and one whose flexible array's element is a struct of 128 bytes
+// holding that struct, which doesn't wait for it, and a struct of a zero-length array of that one, while each of no size
+// waits for what abi_wide_alignment reads of it; an _Atomic {__int128[0]}; packed {packed {that _Atomic}} and a struct of
+// 101 bytes ending in it, which needs it classified first to be refused; and _Atomics of the structs of no size, a slot
+// of 16 for their alignment.
+static void abi_test_ordering(AbiTestTally* tally)
+{
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        AbiTestTables tables;
+        if (abi_test_expect(tally, abi_test_tables_open(&tables, 4096), "fixtures", "the tables can't be made"))
+        {
+            TypeTable* table = &tables.types.table;
+            AbiTestBuilder builder = {
+                .table = table,
+                .expectations = 0,
+                .count = 0,
+                .next_name = 20000,
+                .vector_bytes = 16,
+            };
+            const bool started = abi_test_expect(tally, abi_test_tables_start(&tables, 16), "fixtures", "the calling convention's table can't be made");
+            TypeMember m[2];
+            m[0] = abi_test_member(&builder, BUSTER_TYPE_INT128);
+            m[0] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+            const TypeId deep = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+            m[0] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 0, false, 0));
+            m[1] = abi_test_member(&builder, type_incomplete_array(table, deep));
+            const TypeId open = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+            m[0] = abi_test_member(&builder, deep);
+            m[1] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 100));
+            const TypeId wide = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+            m[0] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 0, false, 0));
+            m[1] = abi_test_member(&builder, type_incomplete_array(table, wide));
+            const TypeId open_wide = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+            m[0] = abi_test_member(&builder, type_array(table, wide, 0));
+            const TypeId zero_wide = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+            TypeId atomic = 0;
+            for (uint32_t call = 0; started && call < 4; call += 1)
+            {
+                TypeId large = 0;
+                TypeId atomic_open = 0;
+                TypeId atomic_wide = 0;
+                TypeId atomic_zero = 0;
+                if (call == 1)
+                {
+                    m[0] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_INT128, 0));
+                    atomic = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+                }
+                else if (call == 2)
+                {
+                    m[0] = abi_test_member(&builder, atomic);
+                    m[0] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0));
+                    m[1] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0));
+                    m[0] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 100));
+                    large = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, true, 0);
+                }
+                else if (call == 3)
+                {
+                    atomic_open = type_atomic(table, open);
+                    atomic_wide = type_atomic(table, open_wide);
+                    atomic_zero = type_atomic(table, zero_wide);
+                }
+                if (path == 0)
+                {
+                    abi_classify_all(&tables.abi, table);
+                }
+                else
+                {
+                    abi_classify_all_scalar(&tables.abi, table);
+                }
+                const uint32_t refused = BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_UNSUPPORTED;
+                const uint32_t large_pass = tables.abi.pass[large >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint32_t open_pass = tables.abi.pass[atomic_open >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint32_t open_bytes = tables.abi.stack_bytes[atomic_open >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint32_t wide_pass = tables.abi.pass[atomic_wide >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint32_t wide_bytes = tables.abi.stack_bytes[atomic_wide >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint32_t zero_pass = tables.abi.pass[atomic_zero >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint32_t zero_bytes = tables.abi.stack_bytes[atomic_zero >> BUSTER_TYPE_INDEX_SHIFT];
+                char detail[160];
+                snprintf(detail, sizeof(detail), "ordering, call %u (%s): pass %08x, %08x, %08x, %08x, stack %u, %u, %u", call, path == 0 ? "vector" : "scalar",
+                         large_pass, open_pass, wide_pass, zero_pass, open_bytes, wide_bytes, zero_bytes);
+                const bool large_right = large == 0 || (large_pass & refused) == refused;
+                const bool open_right = atomic_open == 0 || ((open_pass & refused) == BUSTER_ABI_PASS_LARGER && open_bytes == 16);
+                const bool wide_right = atomic_wide == 0 || ((wide_pass & refused) == BUSTER_ABI_PASS_LARGER && wide_bytes == 16);
+                const bool zero_right = atomic_zero == 0 || ((zero_pass & refused) == BUSTER_ABI_PASS_LARGER && zero_bytes == 16);
+                const bool classified = abi_is_classified(&tables.abi, open) && abi_is_classified(&tables.abi, open_wide) && abi_is_classified(&tables.abi, zero_wide);
+                abi_test_expect(tally, large_right && open_right && wide_right && zero_right && classified, "fixtures", detail);
+            }
+            abi_test_tables_close(&tables);
+        }
+    }
+}
+
+// The walk without scratch memory for its stack (abi_wide_alignment): with the thread's first scratch arena replaced by
+// one of `room` bytes, from 64 up, 512 more at a time, until both paths' walks have room, every classifiable type must be
+// classified all the same (none waiting forever), and an _Atomic of a struct of no size that an array of none of a
+// record larger than 64 bytes aligns must have its 16 bytes or be refused (UNSUPPORTED), never a slot of another size;
+// and some room must give each.
+static void abi_test_short_scratch(AbiTestTally* tally)
+{
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        bool walked = false;
+        bool refused = false;
+        for (uint64_t room = 64; !walked && room <= (1u << 20); room += 512)
+        {
+            AbiTestTables tables;
+            if (abi_test_expect(tally, abi_test_tables_open(&tables, 4096), "fixtures", "the tables can't be made"))
+            {
+                TypeTable* table = &tables.types.table;
+                AbiTestBuilder builder = {
+                    .table = table,
+                    .expectations = 0,
+                    .count = 0,
+                    .next_name = 30000,
+                    .vector_bytes = 16,
+                };
+                const bool started = abi_test_tables_start(&tables, 16);
+                TypeMember m[2];
+                m[0] = abi_test_member(&builder, BUSTER_TYPE_INT128);
+                m[1] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 100));
+                m[0] = abi_test_member(&builder, type_array(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+                const TypeId atomic = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+                const Arena saved = thread_context.scratch[0];
+                thread_context.scratch[0] = arena_reserve(room);
+                if (path == 0)
+                {
+                    abi_classify_all(&tables.abi, table);
+                }
+                else
+                {
+                    abi_classify_all_scalar(&tables.abi, table);
+                }
+                arena_release(&thread_context.scratch[0]);
+                thread_context.scratch[0] = saved;
+                bool every = true;
+                for (uint32_t index = 1; index < table->types.count; index += 1)
+                {
+                    every = every && abi_classifiable(table, index) == ((tables.abi.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0);
+                }
+                const uint32_t pass = tables.abi.pass[atomic >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint32_t bytes = tables.abi.stack_bytes[atomic >> BUSTER_TYPE_INDEX_SHIFT];
+                const bool exact = (pass & (BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_UNSUPPORTED)) == BUSTER_ABI_PASS_LARGER && bytes == 16;
+                const bool unsupported = (pass & BUSTER_ABI_PASS_UNSUPPORTED) != 0;
+                walked = exact;
+                refused = refused || unsupported;
+                char detail[160];
+                snprintf(detail, sizeof(detail), "short scratch, %" PRIu64 " bytes (%s): every type classified %d, pass %08x, stack %u", room,
+                         path == 0 ? "vector" : "scalar", every, pass, bytes);
+                abi_test_expect(tally, started && every && (exact || unsupported), "fixtures", detail);
+                abi_test_tables_close(&tables);
+            }
+        }
+        abi_test_expect(tally, walked && refused, "fixtures", path == 0 ? "short scratch (vector): no room gave both" : "short scratch (scalar): no room gave both");
+    }
+}
+
+// The unions over each other in abi_test_shared_records.
+#define BUSTER_ABI_TEST_SHARED_LEVELS 64
+
+// What would hang if abi_wide_alignment regressed (abi_test_shared_records) runs under an alarm, whose watchdog ends the
+// test with status 1.
+static void abi_test_watchdog(int signal_number)
+{
+    (void)signal_number;
+    static const char message[] = "test-calling-convention: the shared records' check didn't finish within 60 s (a walk per path)\n";
+    const ssize_t written = write(1, message, sizeof(message) - 1);
+    (void)written;
+    _exit(1);
+}
+
+// Records that many paths lead to (abi_wide_alignment's set of finished records): W0 = {__int128, char[16]}, 32 bytes
+// aligned to 16, and Wn = union {Wn-1 a, b;}, 64 of them, which a walk per path would take 2^64 frames for, under the
+// watchdog's alarm. By each path every type must be classified, and an _Atomic of a struct of no size that an array of
+// none of the last aligns must be a LARGER copy of 16 bytes, as _Atomic {struct {__int128, char[100]}[0]} is.
+static void abi_test_shared_records(AbiTestTally* tally)
+{
+    signal(SIGALRM, abi_test_watchdog);
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        AbiTestTables tables;
+        if (abi_test_expect(tally, abi_test_tables_open(&tables, 4096), "fixtures", "the tables can't be made"))
+        {
+            TypeTable* table = &tables.types.table;
+            AbiTestBuilder builder = {
+                .table = table,
+                .expectations = 0,
+                .count = 0,
+                .next_name = 31000,
+                .vector_bytes = 16,
+            };
+            const bool started = abi_test_tables_start(&tables, 16);
+            TypeMember m[2];
+            m[0] = abi_test_member(&builder, BUSTER_TYPE_INT128);
+            m[1] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 16));
+            TypeId shared = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+            for (uint32_t level = 0; level < BUSTER_ABI_TEST_SHARED_LEVELS; level += 1)
+            {
+                m[0] = abi_test_member(&builder, shared);
+                m[1] = abi_test_member(&builder, shared);
+                shared = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
+            }
+            m[0] = abi_test_member(&builder, type_array(table, shared, 0));
+            const TypeId atomic = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+            alarm(60);
+            if (path == 0)
+            {
+                abi_classify_all(&tables.abi, table);
+            }
+            else
+            {
+                abi_classify_all_scalar(&tables.abi, table);
+            }
+            alarm(0);
+            bool every = true;
+            for (uint32_t index = 1; index < table->types.count; index += 1)
+            {
+                every = every && abi_classifiable(table, index) == ((tables.abi.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0);
+            }
+            const uint32_t pass = tables.abi.pass[atomic >> BUSTER_TYPE_INDEX_SHIFT];
+            const uint32_t bytes = tables.abi.stack_bytes[atomic >> BUSTER_TYPE_INDEX_SHIFT];
+            const bool larger = (pass & (BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_UNSUPPORTED)) == BUSTER_ABI_PASS_LARGER && bytes == 16;
+            char detail[160];
+            snprintf(detail, sizeof(detail), "shared records (%s): every type classified %d, pass %08x, stack %u", path == 0 ? "vector" : "scalar", every, pass,
+                     bytes);
+            abi_test_expect(tally, started && every && larger, "fixtures", detail);
+            abi_test_tables_close(&tables);
+        }
+    }
+    signal(SIGALRM, SIG_DFL);
+}
+
 // The location expected of an argument, in a call fixture.
 typedef struct AbiTestLocation AbiTestLocation;
 struct AbiTestLocation
@@ -1096,9 +2193,21 @@ static bool abi_test_same_location(AbiLocation got, AbiTestLocation expected)
 // f(long x5, __int128, long) puts the __int128 on the stack and the long in r9; a result in memory shifts the general
 // registers by one; a struct of a flexible array member alone takes an 8-byte slot while a general register is free,
 // and none after (clang's i0); {__bf16, _Alignas(8) char} takes two general registers (LOW_GENERAL); a union stored
-// as an i128, which clang counts as two registers, goes on the stack after five longs, the long after it in r9; and
-// after an uncounted _Atomic int and four longs, packed {unsigned __int128 : 65} (an i64 and an i8) splits between r9
-// and the stack, while {unsigned __int128 : 60, unsigned __int128 : 10} (one i128) goes on the stack, the long in r9.
+// as an i128, which clang counts as two registers, goes on the stack after five longs, the long after it in r9; after
+// an uncounted _Atomic int and four longs, packed {unsigned __int128 : 65} (an i64 and an i8) splits between r9 and
+// the stack, while {unsigned __int128 : 60, unsigned __int128 : 10} (one i128) goes on the stack, the long in r9. And
+// the LARGER copies (16 bytes for _Atomic(struct { __int128 x[0]; }), 17 and 26 for packed structs ending in one, a
+// GROWN one's 8 once clang has no general register), and _Atomic bool vectors (an i10 in r9, uncounted; an i65's
+// halves split; an i128 whole on the stack); and a union stored as an i128 with an SSE high eightbyte, which clang
+// counts as two general registers too: on the stack after five longs, and in rdi and rsi before a double in xmm0. A
+// vector of 4,096 bools, which isn't _Atomic, returns through the hidden pointer LLVM demotes it to, in rdi (one of
+// 1,024 too); _Atomic {float vector(32768)[0]} is a copy of 32 KB, aligned to 32 KB, and a packed
+// struct of it one of 32 KB and a byte, or an i8 once clang has no general register. And a result of two __int128s in a
+// vector, which LLVM demotes to a hidden pointer clang doesn't count (DEMOTED), so that after it and five longs a
+// struct aligned to 16, which clang counts in a register, is an i64 at stack 0 and the long after it at 8. And a vector
+// of 513 bools, which LLVM copies in 80 bytes (an i513, of 128 in C), the long after it at 80, and returns through a
+// hidden pointer that clang doesn't count, the sixth long on the stack.
+// The inherited atomic _BitInt copies and enum-vector calls are checked alongside these vectors.
 static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t vector_bytes, bool vector)
 {
     TypeTable* table = &tables->types.table;
@@ -1141,6 +2250,43 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     const TypeId run = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
     const TypeId atomic_int = type_atomic(table, BUSTER_TYPE_INT);
     const TypeId aligned_long = type_aligned(table, BUSTER_TYPE_LONG, 5);
+    m[0] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_INT128, 0));
+    const TypeId atomic_zero = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+    const TypeId atomic_packed_zero = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0));
+    m[0] = abi_test_member(&builder, atomic_zero);
+    const TypeId ending = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0);
+    m[0] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 9));
+    m[1] = abi_test_member(&builder, atomic_zero);
+    const TypeId ending_late = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, true, 0);
+    const TypeId bits10 = type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 10, true));
+    const TypeId bits65 = type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 65, true));
+    const TypeId bits128 = type_atomic(table, type_vector(table, BUSTER_TYPE_BOOL, 128, true));
+    m[0] = abi_test_bits(&builder, BUSTER_TYPE_UINT128, 125, false);
+    const TypeId unnamed_i128 = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+    m[0] = abi_test_member(&builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(&builder, BUSTER_TYPE_DOUBLE);
+    m[1] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0));
+    m[0] = abi_test_member(&builder, unnamed_i128);
+    const TypeId sse_pair = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
+    const TypeId bools4096 = type_vector(table, BUSTER_TYPE_BOOL, 4096, true);
+    const TypeId bools1024 = type_vector(table, BUSTER_TYPE_BOOL, 1024, true);
+    m[0] = abi_test_member(&builder, type_array(table, abi_test_vector(&builder, BUSTER_TYPE_FLOAT, 32768), 0));
+    const TypeId atomic_32k = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+    m[0] = abi_test_member(&builder, atomic_32k);
+    const TypeId ending_32k = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0);
+    const TypeId int128_pair = abi_test_vector(&builder, BUSTER_TYPE_INT128, 32);
+    m[0] = abi_test_member(&builder, BUSTER_TYPE_LONG);
+    const TypeId aligned16 = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 5);
+    const TypeId bits513 = type_vector(table, BUSTER_TYPE_BOOL, 513, true);
+    m[0] = abi_test_member(&builder, type_bit_int(table, 129, false));
+    m[1] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 4));
+    m[0] = abi_test_member(&builder, type_array(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
+    const TypeId atomic_bytes = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
+    builder.next_name += 1;
+    const TypeId bool_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, builder.next_name);
+    const TypeId enum_bits = type_enum_complete(table, bool_enum, BUSTER_TYPE_BOOL, 0) ? type_atomic(table, type_vector(table, bool_enum, 8, true)) : 0;
+    m[0] = abi_test_member(&builder, type_array(table, type_bit_int(table, 129, true), 0));
+    const TypeId atomic_unsigned_bytes = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
     if (vector)
     {
         abi_classify_all(&tables->abi, table);
@@ -1236,6 +2382,172 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         L,
         run,
         L,
+        // 72: long x6, _Atomic {__int128[0]}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        atomic_zero,
+        L,
+        // 80: long x5, _Atomic packed {__int128[0]}, long, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        atomic_packed_zero,
+        L,
+        L,
+        // 88: long x6, _Atomic packed {__int128[0]}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        atomic_packed_zero,
+        L,
+        // 96: long x5, packed {_Atomic {__int128[0]}}, long, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        ending,
+        L,
+        L,
+        // 104: long x6, packed {_Atomic {__int128[0]}}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        ending,
+        L,
+        // 112: long x6, packed {char[9], _Atomic {__int128[0]}}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        ending_late,
+        L,
+        // 120: long x5, _Atomic bool ext10, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        bits10,
+        L,
+        // 127: long x5, _Atomic bool ext65, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        bits65,
+        L,
+        // 134: long x5, _Atomic bool ext128, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        bits128,
+        L,
+        // 141: long x5, union {struct {unsigned __int128 : 125}, {long, double}}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        sse_pair,
+        L,
+        // 148: the union, double, long
+        sse_pair,
+        D,
+        L,
+        // 151: long, a vector of 4,096 bools as the result
+        L,
+        // 152: long x6, _Atomic {float vector(32768)[0]}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        atomic_32k,
+        L,
+        // 160: long x5, packed {_Atomic {float vector(32768)[0]}}, long, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        ending_32k,
+        L,
+        L,
+        // 168: long x6, packed {_Atomic {float vector(32768)[0]}}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        ending_32k,
+        L,
+        // 176: _Atomic {{_BitInt(129), char[4]}[0]}, long x7
+        atomic_bytes,
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        // 184: _Atomic of a vector of 8 of an enum of bool, long
+        enum_bits,
+        L,
+        // 186: long x5, _Atomic {unsigned _BitInt(129)[0]}, long, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        atomic_unsigned_bytes,
+        L,
+        L,
+        // 194: a DEMOTED result; long x5, struct aligned(16) {long}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        aligned16,
+        L,
+        // 201: long, a vector of 1,024 bools as the result
+        L,
+        // 202: long x6, bool ext513, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        bits513,
+        L,
+        // 210: a result of bool ext513; long x6
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
     };
     const AbiTestLocation expected[] = {
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
@@ -1310,6 +2622,173 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        // 72: a 16-byte slot for the _Atomic of a byte, aligned to 16.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 16 },
+        // 80: GROWN with a general register free in clang's count: a byval of 16, r9 left for the long after.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 16 },
+        // 88: and with none, an i8 in 8 bytes.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
+        // 96: a packed struct ending in one, 17 bytes to LLVM: a slot of 24.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 24 },
+        // 104: an i8 once clang has no general register.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
+        // 112: 26 bytes to LLVM, a type of 10, always a byval: a slot of 32.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 32 },
+        // 120: an i10 in r9, uncounted, so the long clang meant for a register goes to the stack.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        // 127: an i65's halves in r9 and on the stack.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_SPLIT, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
+        // 134: an i128 on the stack whole, the long after it in r9.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        // 141: an i128 with an SSE high eightbyte, which clang counts as two general registers: a copy on the stack
+        // after five longs, the long after it in r9.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        // 148: in rdi and rsi and no vector register: the double in xmm0, the long in rdx.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, BUSTER_ABI_RSI, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_TEST_XMM(0), none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        // 151: the hidden pointer LLVM demotes the result to in rdi, the long in rsi.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        // 152: a copy of 32 KB aligned to 32 KB, the long after it at 32 KB.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 32768 },
+        // 160: 32 KB and a byte, a slot of 32,776, r9 left for the long after.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 32776 },
+        // 168: and with none, an i8 in 8 bytes.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
+        // 176: 1 byte to LLVM (the _BitInt an array of its bytes, aligned to 1), an 8-byte slot, the last long at 8.
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
+        // 184: <8 x i1>, no integer: in xmm0, the long in rdi.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_TEST_XMM(0), none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        // 186: 1 byte to LLVM, an 8-byte slot, r9 left for the long after it, the last at 8.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
+        // 194: the hidden result in rdi; the struct an i64 at stack 0 and the following long at 8.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
+        // 201: as 151.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        // 184: an 80-byte copy, aligned to 128, the long after it at 80.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 80 },
+        // 192: the hidden pointer in rdi, which clang doesn't count: the sixth long it meant for r9 on the stack.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
     };
     const uint32_t counts[] = {
         7,
@@ -1323,6 +2802,28 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         7,
         7,
         7,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        7,
+        7,
+        7,
+        7,
+        3,
+        1,
+        8,
+        8,
+        8,
+        8,
+        2,
+        8,
+        7,
+        1,
+        8,
+        6,
     };
     const uint32_t named[] = {
         7,
@@ -1336,6 +2837,28 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         7,
         7,
         7,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        7,
+        7,
+        7,
+        7,
+        3,
+        1,
+        8,
+        8,
+        8,
+        8,
+        2,
+        8,
+        7,
+        1,
+        8,
+        6,
     };
     const TypeId results[] = {
         BUSTER_TYPE_VOID,
@@ -1349,8 +2872,52 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         BUSTER_TYPE_VOID,
         BUSTER_TYPE_VOID,
         BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        bools4096,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_VOID,
+        BUSTER_TYPE_LONG,
+        BUSTER_TYPE_LONG,
+        BUSTER_TYPE_LONG,
+        int128_pair,
+        bools1024,
+        BUSTER_TYPE_VOID,
+        bits513,
     };
     const uint8_t variadic[] = {
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
         0,
         0,
         0,
@@ -1383,7 +2950,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         abi_assign_scalar(&tables->abi, signatures, locations, calls);
     }
     char detail[160];
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(arguments); i += 1)
+    const uint32_t checked = BUSTER_ARRAY_LENGTH(arguments);
+    for (uint32_t i = 0; i < checked; i += 1)
     {
         snprintf(detail, sizeof(detail), "argument %u (%s, %u bytes): kind %u, registers %02x %02x, flags %u, offset %u", i, vector ? "vector" : "scalar", vector_bytes,
                  locations[i].kind, locations[i].registers[0], locations[i].registers[1], locations[i].flags, locations[i].stack_offset);
@@ -1400,10 +2968,179 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     abi_test_expect(tally, calls[8].stack_bytes == 16 && calls[8].integer_registers == 6, "fixtures", "call 8's totals");
     abi_test_expect(tally, calls[9].stack_bytes == 16 && calls[9].integer_registers == 6, "fixtures", "call 9's totals");
     abi_test_expect(tally, calls[10].stack_bytes == 16 && calls[10].stack_alignment_log2 == 4 && calls[10].integer_registers == 6, "fixtures", "call 10's totals");
+    abi_test_expect(tally, calls[11].stack_bytes == 24 && calls[11].stack_alignment_log2 == 4 && calls[11].integer_registers == 6, "fixtures", "call 11's totals");
+    abi_test_expect(tally, calls[12].stack_bytes == 24 && calls[12].integer_registers == 6, "fixtures", "call 12's totals");
+    abi_test_expect(tally, calls[13].stack_bytes == 16 && calls[13].integer_registers == 6, "fixtures", "call 13's totals");
+    abi_test_expect(tally, calls[14].stack_bytes == 32 && calls[14].integer_registers == 6, "fixtures", "call 14's totals");
+    abi_test_expect(tally, calls[15].stack_bytes == 16 && calls[15].integer_registers == 6, "fixtures", "call 15's totals");
+    abi_test_expect(tally, calls[16].stack_bytes == 40 && calls[16].integer_registers == 6, "fixtures", "call 16's totals");
+    abi_test_expect(tally, calls[17].stack_bytes == 8 && calls[17].integer_registers == 6, "fixtures", "call 17's totals");
+    abi_test_expect(tally, calls[18].stack_bytes == 16 && calls[18].integer_registers == 6, "fixtures", "call 18's totals");
+    abi_test_expect(tally, calls[19].stack_bytes == 16 && calls[19].stack_alignment_log2 == 4 && calls[19].integer_registers == 6, "fixtures", "call 19's totals");
+    abi_test_expect(tally, calls[20].stack_bytes == 16 && calls[20].integer_registers == 6 && calls[20].vector_registers == 0, "fixtures", "call 20's totals");
+    abi_test_expect(tally, calls[21].stack_bytes == 0 && calls[21].integer_registers == 3 && calls[21].vector_registers == 1, "fixtures", "call 21's totals");
+    const bool demoted = calls[22].result.kind == BUSTER_ABI_RESULT_MEMORY && (calls[22].result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
+    abi_test_expect(tally, demoted && calls[22].integer_registers == 2 && calls[22].stack_bytes == 0, "fixtures", "call 22's demoted result");
+    abi_test_expect(tally, calls[23].stack_bytes == 32776 && calls[23].stack_alignment_log2 == 15 && calls[23].integer_registers == 6, "fixtures", "call 23's totals");
+    abi_test_expect(tally, calls[24].stack_bytes == 32784 && calls[24].integer_registers == 6, "fixtures", "call 24's totals");
+    abi_test_expect(tally, calls[25].stack_bytes == 16 && calls[25].integer_registers == 6, "fixtures", "call 25's totals");
+    abi_test_expect(tally, calls[26].stack_bytes == 16 && calls[26].integer_registers == 6, "fixtures", "call 26's totals");
+    abi_test_expect(tally, calls[27].stack_bytes == 0 && calls[27].integer_registers == 1 && calls[27].vector_registers == 1, "fixtures", "call 27's totals");
+    abi_test_expect(tally, calls[28].stack_bytes == 16 && calls[28].integer_registers == 6, "fixtures", "call 28's totals");
+    const bool demoted_pair = calls[29].result.kind == BUSTER_ABI_RESULT_MEMORY && (calls[29].result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
+    abi_test_expect(tally, demoted_pair && calls[29].stack_bytes == 16 && calls[29].integer_registers == 6, "fixtures", "call 29's totals");
+    const bool demoted_1024 = calls[30].result.kind == BUSTER_ABI_RESULT_MEMORY && (calls[30].result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
+    abi_test_expect(tally, demoted_1024 && calls[30].integer_registers == 2, "fixtures", "call 30's demoted result");
+    abi_test_expect(tally, calls[31].stack_bytes == 88 && calls[31].stack_alignment_log2 == 7 && calls[31].integer_registers == 6, "fixtures", "call 31's totals");
+    abi_test_expect(tally,
+                    calls[32].result.kind == BUSTER_ABI_RESULT_MEMORY && (calls[32].result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0 && calls[32].integer_registers == 6 &&
+                        calls[32].stack_bytes == 8,
+                    "fixtures", "call 32's hidden pointer");
     // va_arg aligns the overflow area as the canonical type is aligned (EmitVAArg): long aligned(32) reads from 8.
     const AbiVaArg plan = abi_va_arg(&tables->abi, table, aligned_long);
     abi_test_expect(tally, plan.kind == BUSTER_ABI_LOCATION_REGISTERS && plan.overflow_alignment_log2 == 3 && plan.stack_bytes == 8, "fixtures",
                     "va_arg of long aligned(32)");
+    // And the union of calls 20 and 21 from two general registers' slots, as its calls pass it.
+    const AbiVaArg pair_plan = abi_va_arg(&tables->abi, table, sse_pair);
+    abi_test_expect(tally, pair_plan.kind == BUSTER_ABI_LOCATION_REGISTERS && pair_plan.integer_registers == 2 && pair_plan.vector_registers == 0, "fixtures",
+                    "va_arg of an i128 with an SSE high eightbyte");
+}
+
+// Short atomic vectors use 128-bit legalized register types, including a single half. Once eight vector registers
+// are occupied, two take 16-byte slots and the next integer starts at 32. Single ordinary elements and builtin bool
+// vectors use scalar 8-byte slots: controls against widening the memory representation instead of the register type.
+static void abi_test_atomic_vector_overflow(AbiTestTally* tally, AbiTestTables* tables, uint32_t vector_bytes, bool vector)
+{
+    TypeTable* table = &tables->types.table;
+    const TypeId bool_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 30000);
+    abi_test_expect(tally, type_enum_complete(table, bool_enum, BUSTER_TYPE_BOOL, 0), "fixtures", "overflow enum completion");
+    const TypeId elements[] = {
+        BUSTER_TYPE_FLOAT16,
+        BUSTER_TYPE_BF16,
+        bool_enum,
+        BUSTER_TYPE_CHAR,
+        BUSTER_TYPE_SHORT,
+        BUSTER_TYPE_FLOAT,
+        BUSTER_TYPE_BOOL,
+    };
+    const uint32_t lengths[][4] = {
+        {
+            1,
+            2,
+            3,
+            4,
+        },
+        {
+            1,
+            2,
+            3,
+            4,
+        },
+        {
+            1,
+            2,
+            4,
+            8,
+        },
+        {
+            1,
+            2,
+            4,
+            8,
+        },
+        {
+            1,
+            2,
+            4,
+            8,
+        },
+        {
+            1,
+            2,
+            3,
+            4,
+        },
+        {
+            1,
+            2,
+            4,
+            8,
+        },
+    };
+    TypeId atomics[BUSTER_ARRAY_LENGTH(elements)][BUSTER_ARRAY_LENGTH(lengths[0])];
+    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(elements); e += 1)
+    {
+        for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(lengths[e]); n += 1)
+        {
+            atomics[e][n] = type_atomic(table, type_vector(table, elements[e], lengths[e][n], true));
+        }
+    }
+    if (vector)
+    {
+        abi_classify_all(&tables->abi, table);
+    }
+    else
+    {
+        abi_classify_all_scalar(&tables->abi, table);
+    }
+    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(elements); e += 1)
+    {
+        for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(lengths[e]); n += 1)
+        {
+            TypeId arguments[17];
+            for (uint32_t a = 0; a < 14; a += 1)
+            {
+                arguments[a] = a < 8 ? BUSTER_TYPE_DOUBLE : BUSTER_TYPE_LONG;
+            }
+            arguments[14] = atomics[e][n];
+            arguments[15] = atomics[e][n];
+            arguments[16] = BUSTER_TYPE_LONG;
+            const uint32_t counts[] = {
+                BUSTER_ARRAY_LENGTH(arguments),
+            };
+            const TypeId results[] = {
+                BUSTER_TYPE_VOID,
+            };
+            const uint8_t variadic[] = {
+                0,
+            };
+            const AbiSignatures signatures = {
+                .results = results,
+                .counts = counts,
+                .named = counts,
+                .variadic = variadic,
+                .count = 1,
+                .arguments = arguments,
+            };
+            AbiLocation locations[BUSTER_ARRAY_LENGTH(arguments)];
+            AbiCall calls[1];
+            if (vector)
+            {
+                abi_assign(&tables->abi, signatures, locations, calls);
+            }
+            else
+            {
+                abi_assign_scalar(&tables->abi, signatures, locations, calls);
+            }
+            const uint32_t index = atomics[e][n] >> BUSTER_TYPE_INDEX_SHIFT;
+            const uint32_t pass = tables->abi.pass[index];
+            const uint32_t slot = e < 2 || (e != 6 && lengths[e][n] > 1) ? 16 : 8;
+            const uint32_t alignment = slot == 16 ? 4 : 3;
+            const bool supported = (pass & BUSTER_ABI_PASS_UNSUPPORTED) == 0 && tables->abi.stack_bytes[index] == slot &&
+                                   ((pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT) == alignment;
+            const bool slots = locations[14].kind == BUSTER_ABI_LOCATION_STACK && locations[14].stack_offset == 0 &&
+                               locations[15].kind == BUSTER_ABI_LOCATION_STACK && locations[15].stack_offset == slot &&
+                               locations[16].kind == BUSTER_ABI_LOCATION_STACK && locations[16].stack_offset == slot * 2;
+            const bool totals = calls[0].stack_bytes == slot * 2 + 8 && calls[0].stack_alignment_log2 == BUSTER_ABI_STACK_ALIGNMENT_LOG2 && calls[0].integer_registers == 6 && calls[0].vector_registers == 8;
+            char detail[256];
+            snprintf(detail, sizeof(detail),
+                     "atomic vector overflow: element %u, length %u, %u-byte vectors, %s: slot %u, alignment %u; offsets %u/%u/%u; call %u bytes, alignment %u, registers %u/%u",
+                     e, lengths[e][n], vector_bytes, vector ? "vector" : "scalar", tables->abi.stack_bytes[index],
+                     (pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT, locations[14].stack_offset, locations[15].stack_offset,
+                     locations[16].stack_offset, calls[0].stack_bytes, calls[0].stack_alignment_log2, calls[0].integer_registers, calls[0].vector_registers);
+            abi_test_expect(tally, supported && slots && totals, "fixtures", detail);
+        }
+    }
 }
 
 static bool abi_test_fixtures(void)
@@ -1432,7 +3169,10 @@ static bool abi_test_fixtures(void)
                 };
                 abi_test_build_scalars(&builder);
                 abi_test_build_vectors(&builder);
+                abi_test_build_split_vectors(&builder);
                 abi_test_build_records(&builder);
+                abi_test_build_atomics(&builder);
+                abi_test_expect(&tally, builder.count < BUSTER_ABI_TEST_FIXTURES, "fixtures", "more fixtures than BUSTER_ABI_TEST_FIXTURES holds");
                 abi_test_expect(&tally, abi_test_tables_start(&tables, widths[w]), "fixtures", "the calling convention's table can't be made");
                 if (path == 0)
                 {
@@ -1449,18 +3189,28 @@ static bool abi_test_fixtures(void)
                     const uint32_t pass = tables.abi.pass[index];
                     const AbiReturn result = tables.abi.results[index];
                     const bool classified = e.type != 0 && (pass & BUSTER_ABI_PASS_CLASSIFIED) != 0;
+                    const bool same_result = e.result_kind == BUSTER_ABI_TEST_RESULT_ANY ||
+                                             (result.kind == e.result_kind && (e.result_kind != BUSTER_ABI_RESULT_REGISTERS ||
+                                                                               (result.registers[0] == e.result[0] && result.registers[1] == e.result[1])));
+                    const bool same_detail = !e.detail || (result.flags == e.result_flags && result.part_bytes == e.part_bytes && result.registers[2] == e.third);
                     const bool same = classified && abi_classes(&tables.abi, e.type, true) == e.named && abi_classes(&tables.abi, e.type, false) == e.unnamed &&
-                                      (pass & e.set) == e.set && (pass & e.clear) == 0 && result.kind == e.result_kind &&
-                                      (e.result_kind != BUSTER_ABI_RESULT_REGISTERS || (result.registers[0] == e.result[0] && result.registers[1] == e.result[1]));
-                    snprintf(detail, sizeof(detail), "%s (%u bytes, %s): classes %02x/%02x, pass %08x, result %u (%02x %02x)", e.name, widths[w], path == 0 ? "vector" : "scalar",
-                             abi_classes(&tables.abi, e.type, true), abi_classes(&tables.abi, e.type, false), pass, result.kind, result.registers[0], result.registers[1]);
+                                      (pass & e.set) == e.set && (pass & e.clear) == 0 && same_result && same_detail &&
+                                      (e.stack_bytes == 0 || tables.abi.stack_bytes[index] == e.stack_bytes);
+                    snprintf(detail, sizeof(detail), "%s (%u bytes, %s): classes %02x/%02x, pass %08x, stack %u, result %u (%02x %02x %02x, flags %02x, part %u)",
+                             e.name, widths[w], path == 0 ? "vector" : "scalar", abi_classes(&tables.abi, e.type, true), abi_classes(&tables.abi, e.type, false), pass,
+                             classified ? tables.abi.stack_bytes[index] : 0, result.kind, result.registers[0], result.registers[1], result.registers[2], result.flags,
+                             result.part_bytes);
                     abi_test_expect(&tally, same, "fixtures", detail);
                 }
                 abi_test_calls(&tally, &tables, widths[w], path == 0);
+                abi_test_atomic_vector_overflow(&tally, &tables, widths[w], path == 0);
                 abi_test_tables_close(&tables);
             }
         }
     }
+    abi_test_ordering(&tally);
+    abi_test_short_scratch(&tally);
+    abi_test_shared_records(&tally);
     abi_test_report("fixtures", tally);
     return tally.failures == 0;
 }
@@ -1493,6 +3243,9 @@ struct AbiTestWorld
     uint32_t other_count;
     uint32_t capacity;
     bool gcc;
+    // A clang world without _Atomics of types of no size, the roots of every LARGER type, so that the levels don't make
+    // every record wait for its members (abi_classify_levels' `all`) and only their own waits keep them right.
+    bool rootless;
 };
 
 static void abi_test_world_add(AbiTestWorld* world, TypeId type)
@@ -1642,11 +3395,14 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
         }
         else if (pick < 5)
         {
-            const TypeId element = abi_test_world_pick(world, random, true);
+            // Now and then an array of no elements of any type, a large record among them, which clang keeps in its LLVM
+            // type aligned as the record (abi_wide_alignment, which the levels wait for). GCC refuses an array of length
+            // 0 before a struct's last member.
+            const bool any = !world->gcc && type_test_below(random, 4) == 0;
+            const TypeId element = abi_test_world_pick(world, random, !any);
             const uint64_t element_size = type_size(table, element);
-            // GCC refuses an array of length 0 before a struct's last member.
             const uint64_t lengths = element_size == 0 ? 3 : element_size <= 4 ? 5 : 3;
-            const uint64_t length = world->gcc ? 1 + type_test_below(random, lengths - 1) : type_test_below(random, lengths);
+            const uint64_t length = any ? 0 : world->gcc ? 1 + type_test_below(random, lengths - 1) : type_test_below(random, lengths);
             // GCC refuses an array whose element's size isn't a multiple of its alignment.
             const bool divisible = element_size % type_alignment(table, element) == 0;
             const TypeId array = !world->gcc || divisible ? type_array(table, type_unqualified(element), length) : 0;
@@ -1814,6 +3570,97 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         abi_test_world_add(world, type_atomic(table, BUSTER_TYPE_DOUBLE));
         abi_test_world_add(world, type_atomic(table, BUSTER_TYPE_INT128));
         abi_test_world_add(world, type_atomic(table, BUSTER_TYPE_LONG_DOUBLE));
+        // Vectors LLVM breaks up or lays out otherwise than C (abi_vector_llvm): of bools, narrow _BitInts and long
+        // doubles, which clang's LLVM type packs in memory, of __float128s and of _BitInts of 128 bits and more, and of
+        // lengths that aren't a power of two past 16 bytes. The signatures pass none of those it refuses, but records hold
+        // them (the _Atomic ones of bools, which clang passes as integers, crash its atomic loads at most widths: the
+        // fixtures check those).
+        const uint32_t bool_lengths[] = {
+            8,
+            9,
+            16,
+            33,
+            64,
+            65,
+            100,
+            128,
+            129,
+            200,
+            257,
+            384,
+            513,
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bool_lengths); i += 1)
+        {
+            abi_test_world_add(world, type_vector(table, BUSTER_TYPE_BOOL, bool_lengths[i], true));
+        }
+        for (uint64_t bytes = 16; bytes <= 64; bytes *= 2)
+        {
+            abi_test_world_add(world, type_vector_size(table, BUSTER_TYPE_LONG_DOUBLE, bytes));
+            abi_test_world_add(world, type_vector_size(table, BUSTER_TYPE_FLOAT128, bytes));
+        }
+        abi_test_world_add(world, type_vector(table, BUSTER_TYPE_LONG_DOUBLE, 3, true));
+        abi_test_world_add(world, type_vector(table, BUSTER_TYPE_FLOAT128, 3, true));
+        const uint32_t bit_int_vectors[][2] = {
+            { 128, 1 },
+            { 128, 2 },
+            { 128, 4 },
+            { 256, 1 },
+            { 256, 2 },
+            { 512, 1 },
+            { 4, 8 },
+            { 4, 16 },
+            { 4, 32 },
+            { 4, 64 },
+            { 2, 64 },
+            { 1, 128 },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bit_int_vectors); i += 1)
+        {
+            abi_test_world_add(world, type_vector(table, type_bit_int(table, bit_int_vectors[i][0], true), bit_int_vectors[i][1], true));
+        }
+        const uint32_t odd_vectors[][2] = {
+            { BUSTER_TYPE_FLOAT, 5 },
+            { BUSTER_TYPE_FLOAT, 6 },
+            { BUSTER_TYPE_FLOAT, 9 },
+            { BUSTER_TYPE_DOUBLE, 3 },
+            { BUSTER_TYPE_DOUBLE, 5 },
+            { BUSTER_TYPE_LONG, 3 },
+            { BUSTER_TYPE_LONG, 5 },
+            { BUSTER_TYPE_INT, 5 },
+            { BUSTER_TYPE_SHORT, 9 },
+            { BUSTER_TYPE_CHAR, 17 },
+            { BUSTER_TYPE_FLOAT16, 9 },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(odd_vectors); i += 1)
+        {
+            abi_test_world_add(world, type_vector(table, odd_vectors[i][0], odd_vectors[i][1], true));
+        }
+        // Structs of an array of no size, and _Atomics of them, which LLVM makes as large as it aligns them (LARGER):
+        // the records made later hold them, and a packed one that ends in one is larger to LLVM too.
+        const TypeId zero_elements[3] = {
+            BUSTER_TYPE_INT128,
+            BUSTER_TYPE_LONG,
+            BUSTER_TYPE_INT128,
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(zero_elements); i += 1)
+        {
+            TypeMember member = type_test_member(type_test_new_name(&world->types), type_array(table, zero_elements[i], 0), BUSTER_TYPE_NOT_BIT_FIELD);
+            const TypeRecordAttributes attributes = {
+                .packed = i == 2,
+                .pack_log2 = 0,
+                .alignment_log2 = 0,
+            };
+            const TypeId zero = type_tag(table, BUSTER_TYPE_KIND_STRUCT, type_test_new_name(&world->types));
+            const bool completed = zero != 0 && type_complete_record(table, zero, &member, 1, attributes);
+            if (completed)
+            {
+                type_test_world_completed(&world->types, zero);
+                abi_test_world_add(world, zero);
+                abi_test_world_add(world, world->rootless ? 0 : type_atomic(table, zero));
+            }
+            table->last_error = TYPE_ERROR_NONE;
+        }
     }
     abi_test_world_add(world, type_pointer(table, BUSTER_TYPE_VOID));
     abi_test_world_add(world, type_pointer(table, BUSTER_TYPE_DOUBLE));
@@ -1835,12 +3682,12 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         }
         else if (pick < 13 && !world->gcc)
         {
-            // Not of a type of no size: clang's LLVM type for _Atomic(struct { __int128 x[0]; }) is 16 bytes ({ T, [1 x
-            // i8] }, aligned as the i128) though the C type is 1, and a byval of a packed record of one takes LLVM's.
-            // Nor of an ext_vector_type: LLVM passes an _Atomic <5 x i8> as five i8s, a general register each.
+            // Of a type of no size too, whose LLVM type is larger (LARGER: _Atomic(struct { __int128 x[0]; }) is 16 bytes
+            // to LLVM), and of an ext_vector_type, which LLVM may split into its elements (UNSUPPORTED: an _Atomic <5 x
+            // i8> is five i8s, a general register each).
             const TypeId base = abi_test_world_pick(world, &random, true);
-            const bool atomic_ok = type_size(table, base) != 0 && type_kind(table, type_strip_aligned(table, base)) != BUSTER_TYPE_KIND_EXT_VECTOR;
-            abi_test_world_add(world, atomic_ok ? type_atomic(table, type_unqualified(base)) : 0);
+            const bool root = table->types.size[abi_resolved_index(table, base)] == 0;
+            abi_test_world_add(world, world->rootless && root ? 0 : type_atomic(table, type_unqualified(base)));
             table->last_error = TYPE_ERROR_NONE;
         }
         else if (pick < 14)
@@ -1920,19 +3767,21 @@ static void abi_test_dump(const TypeTable* table, const AbiTable* abi, uint32_t 
 }
 
 // Every classifiable type, by the vector path and by the twin, at each vector width: identical tables, and every type at
-// every offset it can be at the oracle's classes.
+// every offset it can be at the oracle's classes. Three clang worlds, at 16, 32 and 64 bytes, a GCC one at 16, and a
+// rootless clang one at 32 (AbiTestWorld.rootless), whose levels only the waits keep right.
 static bool abi_test_worlds(uint64_t seed, uint32_t count)
 {
     AbiTestTally tally = { 0 };
     uint64_t compared = 0;
     AbiTestFrame* frames = malloc(sizeof(AbiTestFrame) * BUSTER_ABI_TEST_FRAMES);
     char detail[256];
-    for (uint32_t round = 0; frames != 0 && round < 4; round += 1)
+    for (uint32_t round = 0; frames != 0 && round < 5; round += 1)
     {
         AbiTestWorld world;
         if (abi_test_expect(&tally, abi_test_world_open(&world, count * 8 + 4096), "worlds", "the world can't be made"))
         {
             world.gcc = round == 3;
+            world.rootless = round == 4;
             abi_test_world_build(&world, seed + round, count);
             type_test_spell_world(&world.types);
             const TypeTable* table = &world.types.test.table;
@@ -1953,12 +3802,14 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                     const bool same = memcmp(vector.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, scalar.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES,
                                              BUSTER_ABI_ROW_BYTES) == 0 &&
                                       vector.pass[index] == scalar.pass[index] && vector.stack_bytes[index] == scalar.stack_bytes[index] &&
-                                      vector.alignment_log2[index] == scalar.alignment_log2[index] &&
-                                      memcmp(&vector.results[index], &scalar.results[index], sizeof(AbiReturn)) == 0;
-                    snprintf(detail, sizeof(detail), "type %u (kind %u): the vector path and the twin differ: pass %08x/%08x, stack %u/%u, alignment %u/%u, row[0] %02x/%02x",
+                                      vector.alignment_log2[index] == scalar.alignment_log2[index] && vector.storage[index] == scalar.storage[index] &&
+                                      vector.layout[index] == scalar.layout[index] && memcmp(&vector.results[index], &scalar.results[index], sizeof(AbiReturn)) == 0;
+                    snprintf(detail, sizeof(detail),
+                             "type %u (kind %u): the vector path and the twin differ: pass %08x/%08x, stack %u/%u, alignment %u/%u, storage %02x/%02x, layout %012" PRIx64
+                             "/%012" PRIx64 ", row[0] %02x/%02x",
                              index, table->types.kind[index], vector.pass[index], scalar.pass[index], vector.stack_bytes[index], scalar.stack_bytes[index],
-                             vector.alignment_log2[index], scalar.alignment_log2[index], vector.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES],
-                             scalar.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES]);
+                             vector.alignment_log2[index], scalar.alignment_log2[index], vector.storage[index], scalar.storage[index], vector.layout[index],
+                             scalar.layout[index], vector.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES], scalar.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES]);
                     if (classified && !same && tally.failures < BUSTER_ABI_TEST_REPORTED)
                     {
                         abi_test_dump(table, &vector, index);
@@ -2008,6 +3859,32 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                         abi_test_expect(&tally, abi_classes(&vector, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT, false) == unnamed, "worlds", detail);
                     }
                 }
+                // The twin's table classified again, every type at once with all it reads classified, must not change: the
+                // levels take a type only when what it reads is classified (a zero-length array of a large record waits
+                // for every type abi_wide_alignment reads), and the paths share them. Only the rootless world shows a
+                // missing wait: in the others every record waits for its members anyway.
+                TypeId* again = malloc(sizeof(TypeId) * table->types.count);
+                uint32_t again_count = 0;
+                for (uint32_t index = 1; again != 0 && index < table->types.count; index += 1)
+                {
+                    again[again_count] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+                    again_count += (scalar.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0 ? 1 : 0;
+                }
+                abi_classify_scalar(&scalar, table, again, again_count);
+                abi_test_expect(&tally, again != 0, "worlds", "no memory to classify again");
+                for (uint32_t index = 1; again != 0 && index < table->types.count; index += 1)
+                {
+                    const bool same = memcmp(vector.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, scalar.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES,
+                                             BUSTER_ABI_ROW_BYTES) == 0 &&
+                                      vector.pass[index] == scalar.pass[index] && vector.stack_bytes[index] == scalar.stack_bytes[index] &&
+                                      vector.alignment_log2[index] == scalar.alignment_log2[index] && vector.storage[index] == scalar.storage[index] &&
+                                      vector.layout[index] == scalar.layout[index] && memcmp(&vector.results[index], &scalar.results[index], sizeof(AbiReturn)) == 0;
+                    snprintf(detail, sizeof(detail), "type %u (kind %u) classified again: pass %08x/%08x, storage %02x/%02x, layout %012" PRIx64 "/%012" PRIx64,
+                             index, table->types.kind[index], vector.pass[index], scalar.pass[index], vector.storage[index], scalar.storage[index], vector.layout[index],
+                             scalar.layout[index]);
+                    abi_test_expect(&tally, same, "worlds", detail);
+                }
+                free(again);
             }
             arena_release(&vector_arena);
             arena_release(&scalar_arena);
@@ -2350,6 +4227,127 @@ static void abi_test_finite(const TypeTable* table, uint32_t index, uint8_t* byt
     }
 }
 
+// The bits clang's LLVM type gives each element of a vector whose elements it packs in memory (a bool's 1, a _BitInt
+// narrower than 8 bits its width, a long double's x86_fp80 80, 10 bytes apart where C has 16), or 0 for none.
+static uint64_t abi_test_packed_bits(const TypeTable* table, uint32_t vector)
+{
+    const uint32_t element = abi_resolved_index(table, table->types.base[vector]);
+    const uint8_t kind = table->types.kind[element];
+    const uint8_t code = table->types.code[element];
+    uint64_t result = 0;
+    if (kind == BUSTER_TYPE_KIND_INTEGER && code == BUSTER_TYPE_CODE_BOOL)
+    {
+        result = 1;
+    }
+    else if (kind == BUSTER_TYPE_KIND_BIT_INT && table->types.extent[element] < 8)
+    {
+        result = table->types.extent[element];
+    }
+    else if (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE)
+    {
+        result = 80;
+    }
+    return result;
+}
+
+// The bytes clang's objects of a type take, its LLVM type's: fewer than sizeof says for a vector of packed elements (an
+// integer of a vector of bools' bits, at least 8, aligned as LLVM aligns integers, to 16 past 64 bits; the elements of
+// the others packed, their bytes rounded up to a power of two), the C size otherwise.
+static uint64_t abi_test_llvm_bytes(const TypeTable* table, TypeId type)
+{
+    const uint32_t index = abi_resolved_index(table, type);
+    const uint8_t kind = table->types.kind[index];
+    const uint64_t count = table->types.extent[index];
+    const uint64_t bits = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ? abi_test_packed_bits(table, index) : 0;
+    uint64_t result = table->types.size[index];
+    if (bits == 1)
+    {
+        const uint64_t width = count < 8 ? 8 : count;
+        const uint64_t alignment = width <= 8 ? 1 : width <= 16 ? 2 : width <= 32 ? 4 : width <= 64 ? 8 : 16;
+        result = ((width + 7) / 8 + alignment - 1) / alignment * alignment;
+    }
+    else if (bits != 0)
+    {
+        const uint64_t bytes = (count * bits + 7) / 8;
+        result = 1;
+        while (result < bytes)
+        {
+            result *= 2;
+        }
+    }
+    return result;
+}
+
+// Per type, what it holds, in itself or in its members, elements, base or value, that clang 23 passes or copies
+// otherwise than the module says (bits):
+//   - HOLDS_QUAD: a __float128. A record SSE, SSE whose LLVM type starts with one, 16 bytes, gets it from
+//     GetSSETypeAtOffset as its low part, which GetX86_64ByValArgumentPair widens to an i64 (docs/calling-convention.md,
+//     "Next steps"). A vector of them is no fp128 to getFPTypeAtOffset, and holds none.
+//   - HOLDS_PACKS: a vector whose LLVM type packs it into fewer bits than its bytes (of bools other than a multiple of 8
+//     that fills its bytes, of narrow _BitInts or of long doubles: abi_test_packed_bits).
+//   - HOLDS_UNION_PACKS: a union that holds such a vector. As the union's LLVM type, which takes its most aligned member
+//     (lowerUnion), the vector makes clang's copies of the union lose the other members' bits past its own.
+// Worked out in passes over the table until one changes nothing; 0 without the memory.
+#define BUSTER_ABI_TEST_HOLDS_QUAD 1u
+#define BUSTER_ABI_TEST_HOLDS_PACKS 2u
+#define BUSTER_ABI_TEST_HOLDS_UNION_PACKS 4u
+
+static uint8_t* abi_test_holds(const TypeTable* table)
+{
+    uint8_t* holds = calloc(table->types.count, 1);
+    bool changed = holds != 0;
+    while (changed)
+    {
+        changed = false;
+        for (uint32_t index = 1; index < table->types.count; index += 1)
+        {
+            const uint8_t kind = table->types.kind[index];
+            uint8_t value = holds[index];
+            if (kind == BUSTER_TYPE_KIND_FLOATING && table->types.code[index] == BUSTER_TYPE_CODE_FLOAT128)
+            {
+                value |= BUSTER_ABI_TEST_HOLDS_QUAD;
+            }
+            else if (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
+            {
+                const uint64_t bits = abi_test_packed_bits(table, index);
+                const uint64_t count = table->types.extent[index];
+                const uint64_t llvm_bits = bits == 1 ? (count < 8 ? 8 : count) : count * bits;
+                value |= bits != 0 && llvm_bits < table->types.size[index] * 8 ? BUSTER_ABI_TEST_HOLDS_PACKS : 0;
+            }
+            else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC)
+            {
+                value |= holds[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
+            }
+            else if ((kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && type_is_complete(table, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT))
+            {
+                const uint32_t tag = table->types.index[index];
+                const uint32_t begin = table->tags.member_begin[tag];
+                const uint32_t end = begin + table->tags.member_count[tag];
+                for (uint32_t member = begin; member < end; member += 1)
+                {
+                    const uint8_t member_holds = holds[table->members.type[member] >> BUSTER_TYPE_INDEX_SHIFT];
+                    value |= member_holds;
+                    value |= kind == BUSTER_TYPE_KIND_UNION && (member_holds & BUSTER_ABI_TEST_HOLDS_PACKS) != 0 ? BUSTER_ABI_TEST_HOLDS_UNION_PACKS : 0;
+                }
+            }
+            changed = changed || value != holds[index];
+            holds[index] = value;
+        }
+    }
+    return holds;
+}
+
+// A normal x87 value at `bytes`: the explicit integer bit set, the exponent neither 0 nor all ones, so that loads and
+// stores through x87's registers keep it.
+static void abi_test_x87(uint8_t* bytes, uint8_t* mask, uint64_t* random)
+{
+    const uint64_t mantissa = type_test_random(random) | 1ull << 63;
+    const uint16_t exponent = (uint16_t)(1 + type_test_below(random, 0x7ffe)) | (uint16_t)((type_test_random(random) & 1) << 15);
+    memcpy(bytes, &mantissa, 8);
+    memcpy(bytes + 8, &exponent, 2);
+    memset(mask, 0xff, 10);
+}
+
 static void abi_test_fill(const TypeTable* table, TypeId type, uint8_t* bytes, uint8_t* mask, uint64_t* random, AbiTestFillItem* stack)
 {
     const uint64_t size = table->types.size[abi_resolved_index(table, type)];
@@ -2384,12 +4382,18 @@ static void abi_test_fill(const TypeTable* table, TypeId type, uint8_t* bytes, u
         }
         else if (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE)
         {
-            // A normal x87 value: the explicit integer bit set, the exponent neither 0 nor all ones.
-            const uint64_t mantissa = type_test_random(random) | 1ull << 63;
-            const uint16_t exponent = (uint16_t)(1 + type_test_below(random, 0x7ffe)) | (uint16_t)((type_test_random(random) & 1) << 15);
-            memcpy(b, &mantissa, 8);
-            memcpy(b + 8, &exponent, 2);
-            memset(m, 0xff, 10);
+            abi_test_x87(b, m, random);
+        }
+        else if ((kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && abi_test_packed_bits(table, index) == 80)
+        {
+            for (uint64_t i = 0; i < table->types.extent[index]; i += 1)
+            {
+                abi_test_x87(b + 10 * i, m + 10 * i, random);
+            }
+        }
+        else if ((kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && abi_test_packed_bits(table, index) != 0)
+        {
+            abi_test_random_bits(b, m, 0, table->types.extent[index] * abi_test_packed_bits(table, index), random);
         }
         else if (kind == BUSTER_TYPE_KIND_NULLPTR)
         {
@@ -2555,7 +4559,14 @@ static bool abi_test_unnamed_ok(const AbiTable* abi, const TypeTable* table, Typ
     // eightbyte in a general register, which its va_arg reads from the save area's vector part.
     const bool empty = table->types.size[index] == 0;
     const bool low_general = (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_LOW_GENERAL) != 0;
-    return !promoted && !scalar_memory && !wide_without_vector && !empty && !low_general;
+    // And a WIDE vector of _BitInt(128)s as its value, i64s in general registers, which its va_arg reads from the stack;
+    // and a SMALLER one's LLVM bytes, where its va_arg skips the C size.
+    const bool vector = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+    const uint32_t element = vector ? abi_resolved_index(table, table->types.base[index]) : 0;
+    const bool wide_values = vector && (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_WIDE) != 0 &&
+                             table->types.kind[element] == BUSTER_TYPE_KIND_BIT_INT && table->types.size[element] == BUSTER_ABI_REGISTER_BYTES;
+    const bool smaller = (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_SMALLER) != 0;
+    return !promoted && !scalar_memory && !wide_without_vector && !empty && !low_general && !wide_values && !smaller;
 }
 
 // Whether GCC passes a type otherwise than clang as a result: a vector that is MEMORY by its size, which clang returns
@@ -2612,6 +4623,103 @@ static bool abi_test_gcc_unnamed_differs(const AbiTable* abi, const TypeTable* t
     return ((pass & BUSTER_ABI_PASS_WIDE) != 0 && (pass & BUSTER_ABI_PASS_AGGREGATE) != 0) || raised;
 }
 
+// Per type, whether it holds, in itself or in its members, elements, base or value, an array of elements of no size:
+// clang 23's getFPTypeAtOffset and GetINTEGERTypeAtOffset divide an offset by such an array's element's LLVM size, 0,
+// where they look into it for a type passed in registers, and crash (SIGFPE) now and then, as GetSSETypeAtOffset does
+// after the float in `struct { long l; _Float16 h; struct {} e[1]; }`; so clang's signatures don't pass one in
+// registers. Worked out in passes over the table until one changes nothing; 0 without the memory.
+static uint8_t* abi_test_empty_arrays(const TypeTable* table)
+{
+    uint8_t* holds = calloc(table->types.count, 1);
+    bool changed = holds != 0;
+    while (changed)
+    {
+        changed = false;
+        for (uint32_t index = 1; index < table->types.count; index += 1)
+        {
+            const uint8_t kind = table->types.kind[index];
+            uint8_t value = holds[index];
+            if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC)
+            {
+                const bool empty = table->types.size[abi_resolved_index(table, table->types.base[index])] == 0;
+                value |= holds[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT] | (type_kind_is_array(kind) && empty ? 1 : 0);
+            }
+            else if ((kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && type_is_complete(table, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT))
+            {
+                const uint32_t tag = table->types.index[index];
+                const uint32_t begin = table->tags.member_begin[tag];
+                const uint32_t end = begin + table->tags.member_count[tag];
+                for (uint32_t member = begin; member < end; member += 1)
+                {
+                    value |= holds[table->members.type[member] >> BUSTER_TYPE_INDEX_SHIFT];
+                }
+            }
+            changed = changed || value != holds[index];
+            holds[index] = value;
+        }
+    }
+    return holds;
+}
+
+// Per type, which of its first 16 bytes hold bit-fields, in itself or in its members, elements, base or value: a bit per
+// byte. clang makes access units of a run of bit-fields (CGRecordLowering::accumulateBitFields), which the module doesn't
+// work out yet (it takes the run as its first bit-field's type: see "Next steps" in docs/calling-convention.md), and a
+// unit in an INTEGER high eightbyte decides, by its alignment, whether a narrow SSE low eightbyte widens to an i64 in a
+// general register (LOW_GENERAL): struct { _Complex _Float16 h; _Complex long z[0]; _BitInt(8) a : 3; unsigned char
+// b : 8; } is (i64, i16) to clang, and the module passes its low part in xmm0. So clang's signatures don't pass a type
+// with an SSE low eightbyte and bit-fields in an INTEGER high one. Worked out in passes over the table until one changes
+// nothing; 0 without the memory.
+static uint16_t* abi_test_bit_field_bytes(const TypeTable* table)
+{
+    uint16_t* bytes = calloc(table->types.count, sizeof(uint16_t));
+    bool changed = bytes != 0;
+    while (changed)
+    {
+        changed = false;
+        for (uint32_t index = 1; index < table->types.count; index += 1)
+        {
+            const uint8_t kind = table->types.kind[index];
+            uint16_t value = bytes[index];
+            if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC)
+            {
+                value |= bytes[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
+            }
+            else if (kind == BUSTER_TYPE_KIND_ARRAY)
+            {
+                const uint32_t element = bytes[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint64_t element_size = table->types.size[abi_resolved_index(table, table->types.base[index])];
+                for (uint64_t i = 0; element != 0 && element_size != 0 && i < table->types.extent[index] && i * element_size < 16; i += 1)
+                {
+                    value |= (uint16_t)(element << (i * element_size));
+                }
+            }
+            else if ((kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && type_is_complete(table, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT))
+            {
+                const uint32_t tag = table->types.index[index];
+                const uint32_t begin = table->tags.member_begin[tag];
+                const uint32_t end = begin + table->tags.member_count[tag];
+                for (uint32_t member = begin; member < end; member += 1)
+                {
+                    const uint64_t offset = table->members.offset[member];
+                    const uint64_t width = table->members.bit_width[member];
+                    if ((table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0)
+                    {
+                        const uint32_t member_bytes = bytes[table->members.type[member] >> BUSTER_TYPE_INDEX_SHIFT];
+                        value |= (offset >> 3) < 16 ? (uint16_t)(member_bytes << (offset >> 3)) : 0;
+                    }
+                    for (uint64_t byte = offset >> 3; width != 0 && byte <= (offset + width - 1) >> 3 && byte < 16; byte += 1)
+                    {
+                        value |= (uint16_t)(1u << byte);
+                    }
+                }
+            }
+            changed = changed || value != bytes[index];
+            bytes[index] = value;
+        }
+    }
+    return bytes;
+}
+
 static uint64_t abi_test_round(uint64_t value, uint64_t alignment)
 {
     return (value + alignment - 1) / alignment * alignment;
@@ -2619,18 +4727,48 @@ static uint64_t abi_test_round(uint64_t value, uint64_t alignment)
 
 // What clang passes of a value in registers: no byte of an eightbyte that is NO_CLASS, padding or the part of a scalar
 // past the eightbyte it starts in, which clang classifies by its start alone (an 8-byte enum at offset 4 of a record
-// passes its low half). Clears those bytes' mask.
-static void abi_test_mask_unpassed(const AbiTable* abi, const TypeTable* table, TypeId type, uint8_t* mask)
+// passes its low half); and of an SSE eightbyte, only its type's bytes (GetSSETypeAtOffset over its LLVM type, as
+// abi_sse_part reads the module's layout), but for a low one GetX86_64ByValArgumentPair widens to 8 bytes, as it does
+// one before a high part that doesn't start at 8 by its alignment. `union { struct { char
+// __attribute__((vector_size(16))) z[0]; _Complex float c; float f; } s; long __attribute__((vector_size(16))) w; }` is
+// stored as its struct, which the array aligns to 16 in LLVM, and passes as (<2 x float>, float): none of the vector's
+// bytes 12 to 15 (GCC passes the eightbyte whole: `clang` says whose). Clears those bytes' mask. Our side passes and
+// stores every byte of its registers' eightbytes, so the mask never hides a register the module gives wrongly.
+static void abi_test_mask_unpassed(const AbiTable* abi, const TypeTable* table, TypeId type, uint8_t* mask, bool clang)
 {
-    const uint8_t classes = abi->rows[(uint64_t)(type >> BUSTER_TYPE_INDEX_SHIFT) * BUSTER_ABI_ROW_BYTES];
+    const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+    const uint8_t classes = abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES];
+    const uint8_t low = classes & 7;
+    const uint8_t high = classes >> 4;
     const uint64_t size = table->types.size[abi_resolved_index(table, type)];
-    if ((classes & 7) == BUSTER_ABI_NO_CLASS)
+    const uint64_t low_end = size < 8 ? size : 8;
+    const uint64_t high_end = size < 16 ? size : 16;
+    if (low == BUSTER_ABI_NO_CLASS)
     {
-        memset(mask, 0, size < 8 ? size : 8);
+        memset(mask, 0, low_end);
     }
-    if ((classes >> 4) == BUSTER_ABI_NO_CLASS && size > 8)
+    if (high == BUSTER_ABI_NO_CLASS && size > 8)
     {
-        memset(mask + 8, 0, (size < 16 ? size : 16) - 8);
+        memset(mask + 8, 0, high_end - 8);
+    }
+    if (clang && (low == BUSTER_ABI_SSE || high == BUSTER_ABI_SSE) && size <= 16)
+    {
+        const uint64_t layout = abi->layout[index];
+        bool narrow = false;
+        const uint64_t low_bytes = low == BUSTER_ABI_SSE ? 1ull << abi_sse_part(layout, 0, size, &narrow) : 8;
+        const uint32_t high_alignment_log2 = high == BUSTER_ABI_SSE ? abi_sse_part(layout, 8, size, &narrow) : high == BUSTER_ABI_INTEGER ? abi_integer_part(layout, size) : 3;
+        const uint64_t high_alignment = 1ull << high_alignment_log2;
+        const bool paired = size > 8 && (high == BUSTER_ABI_SSE || high == BUSTER_ABI_INTEGER) && low != BUSTER_ABI_NO_CLASS;
+        const bool widened = paired && (low_bytes + high_alignment - 1) / high_alignment * high_alignment != 8;
+        const uint64_t low_passed = widened ? 8 : low_bytes;
+        if (low == BUSTER_ABI_SSE && low_passed < low_end)
+        {
+            memset(mask + low_passed, 0, low_end - low_passed);
+        }
+        if (high == BUSTER_ABI_SSE && 8 + high_alignment < high_end)
+        {
+            memset(mask + 8 + high_alignment, 0, high_end - 8 - high_alignment);
+        }
     }
 }
 
@@ -2875,12 +5013,12 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
                 const uint8_t kind = cross->locations[i].kind;
                 if (kind == BUSTER_ABI_LOCATION_REGISTERS || kind == BUSTER_ABI_LOCATION_SPLIT)
                 {
-                    abi_test_mask_unpassed(cross->abi, table, cross->arguments[i], cross->data_mask + cross->data_begin[n] + cross->offsets[i]);
+                    abi_test_mask_unpassed(cross->abi, table, cross->arguments[i], cross->data_mask + cross->data_begin[n] + cross->offsets[i], !cross->gcc);
                 }
             }
             if (cross->calls[n].result.kind == BUSTER_ABI_RESULT_REGISTERS)
             {
-                abi_test_mask_unpassed(cross->abi, table, signature->result, cross->result_mask + cross->result_begin[n]);
+                abi_test_mask_unpassed(cross->abi, table, signature->result, cross->result_mask + cross->result_begin[n], !cross->gcc);
             }
         }
     }
@@ -2957,8 +5095,24 @@ static bool abi_test_variadic(const AbiTestSignature* signature)
 
 // The C file: the world's types, every signature's bytes, its C callee (which our caller calls) and C caller (which
 // calls our callee), and main, which runs them all and prints how many checks failed.
+// The bytes the C side copies and checks of its variable of a type: sizeof's, but for a SMALLER type clang's object's,
+// which a copy of sizeof bytes would run past.
+static void abi_test_c_size(const AbiTestCross* cross, TypeId type, const char* variable, char* buffer, uint64_t capacity)
+{
+    if ((cross->abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_SMALLER) != 0)
+    {
+        snprintf(buffer, capacity, "%" PRIu64, abi_test_llvm_bytes(&cross->world->types.test.table, type));
+    }
+    else
+    {
+        snprintf(buffer, capacity, "sizeof(%s)", variable);
+    }
+}
+
 static void abi_test_write_c(AbiTestCross* cross, TypeTestText* text, bool* variadic_empty)
 {
+    char size[64];
+    char variable[32];
     AbiTestWorld* world = cross->world;
     const TypeTable* table = &world->types.test.table;
     type_test_format(text, "#include <stdarg.h>\n#include <stdio.h>\n#include <string.h>\n");
@@ -3017,8 +5171,9 @@ static void abi_test_write_c(AbiTestCross* cross, TypeTestText* text, bool* vari
         for (uint32_t a = 0; a < signature->named; a += 1)
         {
             const uint32_t offset = cross->offsets[signature->first + a];
+            abi_test_c_size(cross, cross->arguments[signature->first + a], "c", size, sizeof(size));
             type_test_format(text, "    {\n        %sc = a%u;\n", abi_test_c_name(world, cross->arguments[signature->first + a]), a);
-            type_test_format(text, "        abi_check(&c, abi_args_%u + %u, abi_mask_args_%u + %u, sizeof(c), %u, %u, \"A\");\n    }\n", n, offset, n, offset, n, a);
+            type_test_format(text, "        abi_check(&c, abi_args_%u + %u, abi_mask_args_%u + %u, %s, %u, %u, \"A\");\n    }\n", n, offset, n, offset, size, n, a);
         }
         if (abi_test_variadic(signature))
         {
@@ -3036,14 +5191,16 @@ static void abi_test_write_c(AbiTestCross* cross, TypeTestText* text, bool* vari
             {
                 const uint32_t offset = cross->offsets[signature->first + a];
                 const char* type = abi_test_c_name(world, cross->arguments[signature->first + a]);
+                abi_test_c_size(cross, cross->arguments[signature->first + a], "v", size, sizeof(size));
                 type_test_format(text, "    {\n        %sv = va_arg(ap, %s);\n", type, type);
-                type_test_format(text, "        abi_check(&v, abi_args_%u + %u, abi_mask_args_%u + %u, sizeof(v), %u, %u, \"A va_arg\");\n    }\n", n, offset, n, offset, n, a);
+                type_test_format(text, "        abi_check(&v, abi_args_%u + %u, abi_mask_args_%u + %u, %s, %u, %u, \"A va_arg\");\n    }\n", n, offset, n, offset, size, n, a);
             }
             type_test_format(text, "    va_end(ap);\n");
         }
         if (has_result)
         {
-            type_test_format(text, "    %sr;\n    memcpy(&r, abi_ret_%u, sizeof(r));\n    return r;\n", result, n);
+            abi_test_c_size(cross, signature->result, "r", size, sizeof(size));
+            type_test_format(text, "    %sr;\n    memcpy(&r, abi_ret_%u, %s);\n    return r;\n", result, n, size);
         }
         type_test_format(text, "}\n");
         // Our callee, and the C caller of it.
@@ -3064,7 +5221,9 @@ static void abi_test_write_c(AbiTestCross* cross, TypeTestText* text, bool* vari
             }
             else
             {
-                type_test_format(text, "    %sa%u;\n    memcpy(&a%u, abi_args_%u + %u, sizeof(a%u));\n", name, a, a, n, offset, a);
+                snprintf(variable, sizeof(variable), "a%u", a);
+                abi_test_c_size(cross, type, variable, size, sizeof(size));
+                type_test_format(text, "    %sa%u;\n    memcpy(&a%u, abi_args_%u + %u, %s);\n", name, a, a, n, offset, size);
             }
         }
         type_test_format(text, "    abi_al_%u = 0xff;\n    ", n);
@@ -3080,7 +5239,8 @@ static void abi_test_write_c(AbiTestCross* cross, TypeTestText* text, bool* vari
         type_test_format(text, ");\n");
         if (has_result)
         {
-            type_test_format(text, "    abi_check(&r, abi_ret_%u, abi_mask_ret_%u, sizeof(r), %u, -1, \"B result\");\n", n, n, n);
+            abi_test_c_size(cross, signature->result, "r", size, sizeof(size));
+            type_test_format(text, "    abi_check(&r, abi_ret_%u, abi_mask_ret_%u, %s, %u, -1, \"B result\");\n", n, n, size, n);
         }
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
@@ -3204,6 +5364,15 @@ static uint32_t abi_test_store_form(uint8_t reg, uint32_t bytes)
         result = bytes <= 8 ? X86_FORM_MOVQ_XM64_X : bytes == 16 ? X86_FORM_MOVDQU_XM_X : bytes == 32 ? X86_FORM_VMOVDQU_YM256_Y : X86_FORM_VMOVDQU64_ZM512_Z;
     }
     return result;
+}
+
+// The bytes a copy of a stack argument moves: its slot's, but a LARGER type's own, rounded up to 8: the rest of its slot,
+// which clang's larger LLVM type takes, is padding, and a GROWN one passed as an integer has 8 bytes.
+static uint32_t abi_test_copied_bytes(const AbiTable* abi, const TypeTable* table, TypeId type)
+{
+    const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+    const uint64_t size = table->types.size[abi_resolved_index(table, type)];
+    return (abi->pass[index] & BUSTER_ABI_PASS_LARGER) != 0 ? (uint32_t)((size + 7) & ~(uint64_t)7) : abi->stack_bytes[index];
 }
 
 // A value's parts in registers or 8-byte stack slots: which register (NONE for the slot of a SPLIT one), where in the
@@ -3345,7 +5514,7 @@ static void abi_test_emit_caller(AbiTestCross* cross, uint32_t n, AbiTestSymbols
         {
             abi_test_rip(code, X86_FORM_LEA_R64_M, X86_REGISTER_RSI, symbols.args, offsets[a]);
             abi_test_add(code, link_program_memory(X86_FORM_LEA_R64_M, X86_REGISTER_RDI, X86_REGISTER_RSP, (int32_t)location.stack_offset));
-            abi_test_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RCX, (int32_t)cross->abi->stack_bytes[type >> BUSTER_TYPE_INDEX_SHIFT]));
+            abi_test_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RCX, (int32_t)abi_test_copied_bytes(cross->abi, table, type)));
             abi_test_add(code, link_program_bare(X86_FORM_REP_MOVS_B));
         }
         for (uint32_t p = 0; p < count; p += 1)
@@ -3389,8 +5558,8 @@ static void abi_test_emit_caller(AbiTestCross* cross, uint32_t n, AbiTestSymbols
             const uint32_t offset = high + p * call.result.part_bytes;
             if ((reg & BUSTER_ABI_REGISTER_X87) != 0)
             {
-                // st0 each time: the store pops st1 into st0.
-                abi_test_rip(code, X86_FORM_FSTP_M80, 0, symbols.result, p * 16);
+                // st0 each time: the store pops st1 into st0. An x87 register holds a double for a part of 8 bytes.
+                abi_test_rip(code, call.result.part_bytes == 8 ? X86_FORM_FSTP_M64 : X86_FORM_FSTP_M80, 0, symbols.result, offset);
             }
             else
             {
@@ -3446,7 +5615,7 @@ static void abi_test_emit_callee(AbiTestCross* cross, uint32_t n, AbiTestSymbols
         {
             abi_test_add(code, link_program_memory(X86_FORM_LEA_R64_M, X86_REGISTER_RSI, X86_REGISTER_RSP, slot));
             abi_test_rip(code, X86_FORM_LEA_R64_M, X86_REGISTER_RDI, symbols.capture, offsets[a]);
-            abi_test_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RCX, (int32_t)cross->abi->stack_bytes[type >> BUSTER_TYPE_INDEX_SHIFT]));
+            abi_test_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RCX, (int32_t)abi_test_copied_bytes(cross->abi, table, type)));
             abi_test_add(code, link_program_bare(X86_FORM_REP_MOVS_B));
         }
         for (uint32_t p = 0; p < count; p += 1)
@@ -3460,7 +5629,10 @@ static void abi_test_emit_callee(AbiTestCross* cross, uint32_t n, AbiTestSymbols
     }
     if (call.result.kind == BUSTER_ABI_RESULT_MEMORY)
     {
-        const uint64_t size = table->types.size[abi_resolved_index(table, signature->result)];
+        // A SMALLER type's LLVM bytes: clang's object behind the hidden pointer is no larger.
+        const uint32_t result_index = signature->result >> BUSTER_TYPE_INDEX_SHIFT;
+        const bool smaller = (cross->abi->pass[result_index] & BUSTER_ABI_PASS_SMALLER) != 0;
+        const uint64_t size = smaller ? cross->abi->stack_bytes[result_index] : table->types.size[abi_resolved_index(table, signature->result)];
         abi_test_rip(code, X86_FORM_LEA_R64_M, X86_REGISTER_RSI, symbols.ret, 0);
         abi_test_add(code, link_program_registers(X86_FORM_MOV_R64_RM64, X86_REGISTER_RDI, X86_REGISTER_R11));
         abi_test_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RCX, (int32_t)size));
@@ -3484,7 +5656,7 @@ static void abi_test_emit_callee(AbiTestCross* cross, uint32_t n, AbiTestSymbols
             const uint8_t reg = call.result.registers[p];
             if ((reg & BUSTER_ABI_REGISTER_X87) != 0)
             {
-                abi_test_rip(code, X86_FORM_FLD_M80, 0, symbols.ret, p * 16);
+                abi_test_rip(code, call.result.part_bytes == 8 ? X86_FORM_FLD_M64 : X86_FORM_FLD_M80, 0, symbols.ret, high + p * call.result.part_bytes);
             }
             else
             {
@@ -3638,7 +5810,10 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
         const bool memory = frames != 0 && stack != 0 && types != 0 && unnamed_types != 0 && cross.signatures != 0 && cross.arguments != 0 && cross.offsets != 0 &&
                             cross.locations != 0 && cross.calls != 0 && cross.data != 0 && cross.data_mask != 0 && cross.data_begin != 0 && cross.results != 0 &&
                             cross.result_mask != 0 && cross.result_begin != 0 && code != 0;
-        if (abi_test_expect(tally, memory && abi_initialize(&abi, &arena, table, vector_bytes), "cross-check", "no memory"))
+        uint8_t* empty_arrays = memory ? abi_test_empty_arrays(table) : 0;
+        uint16_t* bit_field_bytes = memory ? abi_test_bit_field_bytes(table) : 0;
+        uint8_t* holds = memory ? abi_test_holds(table) : 0;
+        if (abi_test_expect(tally, empty_arrays != 0 && bit_field_bytes != 0 && holds != 0 && abi_initialize(&abi, &arena, table, vector_bytes), "cross-check", "no memory"))
         {
             abi_classify_all(&abi, table);
             uint32_t type_count = 0;
@@ -3659,7 +5834,31 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 // GCC passes a LOW_GENERAL type's low eightbyte in a vector register, as the psABI says.
                 const bool low_general = (abi.pass[index] & BUSTER_ABI_PASS_LOW_GENERAL) != 0;
                 const bool gcc_differs = gcc && (abi_test_gcc_enum_differs(&world, type) || (wide_aggregate && !abi_test_single_vector(table, type)) || low_general);
-                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !atomic_result && !gcc_differs)
+                // clang crashes on some types passed in registers that hold an array of elements of no size.
+                const bool in_registers = (abi.pass[index] & (BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_IGNORE)) == 0;
+                const bool clang_crashes = !gcc && in_registers && empty_arrays[index] != 0;
+                // clang's access units of bit-fields, which the module doesn't work out, decide whether a narrow SSE low
+                // eightbyte widens (abi_test_bit_field_bytes).
+                const AbiClasses classes = abi_classes(&abi, type, true);
+                const bool unit_decides = !gcc && (classes & 7) == BUSTER_ABI_SSE && (classes >> 4) == BUSTER_ABI_INTEGER && (bit_field_bytes[index] & 0xff00u) != 0;
+                // A record SSE, SSEUP of a size that isn't a vector register's, which clang passes as <size / 8 x double>
+                // (a union of a 16-byte vector and a longer array): not modeled yet (docs/calling-convention.md, "Next
+                // steps").
+                const uint64_t resolved_size = table->types.size[abi_resolved_index(table, type)];
+                const uint8_t resolved_kind = table->types.kind[abi_resolved_index(table, type)];
+                const bool odd_vector_record = (resolved_kind == BUSTER_TYPE_KIND_STRUCT || resolved_kind == BUSTER_TYPE_KIND_UNION) &&
+                                               (abi.pass[index] & BUSTER_ABI_PASS_VECTOR) != 0 && resolved_size != 16 && resolved_size != 32 && resolved_size != 64;
+                // clang's atomic loads of an _Atomic vector of bools crash its instruction selection (an aligned typedef
+                // of one's too, which the check above lets through).
+                const uint32_t atomic_value = resolved_kind == BUSTER_TYPE_KIND_ATOMIC ? abi_resolved_index(table, table->types.base[abi_resolved_index(table, type)]) : 0;
+                const bool atomic_bits = atomic_value != 0 && table->types.kind[atomic_value] == BUSTER_TYPE_KIND_EXT_VECTOR &&
+                                         abi_test_packed_bits(table, atomic_value) == 1;
+                // A record SSE, SSE whose LLVM type may start with a __float128, and a union of a vector LLVM packs into
+                // fewer bits than its bytes (abi_test_holds).
+                const bool quad_pair = !gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_QUAD) != 0 && classes == BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_SSE);
+                const bool union_packs = !gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_UNION_PACKS) != 0;
+                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !atomic_result && !gcc_differs &&
+                    !clang_crashes && !unit_decides && !odd_vector_record && !atomic_bits && !quad_pair && !union_packs)
                 {
                     types[type_count] = type;
                     type_count += 1;
@@ -3748,6 +5947,9 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
         free(stack);
         free(types);
         free(unnamed_types);
+        free(empty_arrays);
+        free(bit_field_bytes);
+        free(holds);
         free(cross.signatures);
         free(cross.arguments);
         free(cross.offsets);

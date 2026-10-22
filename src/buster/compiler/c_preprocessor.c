@@ -83,6 +83,7 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <dirent.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <immintrin.h>
 #include "buster/compiler/x86_target.c"
@@ -133,7 +134,7 @@ _Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_vector looks
 #define BUSTER_PP_MAX_STACK_TOKENS (1u << 26)
 #define BUSTER_PP_MAX_CONTEXTS (1u << 20)
 #define BUSTER_PP_MAX_INCLUDE_DEPTH 200
-// A confirmed header query may need a private lexical view; bound full-file repairs per inclusion.
+// Confirmed opaque spans can require private lexical views; bound full-file repairs per inclusion.
 #define BUSTER_PP_MAX_QUERY_REPAIRS 8
 #define BUSTER_PP_MAX_DIRECT_REPAIRS 64
 #define BUSTER_PP_MAX_PARAMETERS 4096
@@ -387,7 +388,7 @@ struct PPFileData
     int64_t modified;
     bool has_modified;
     const uint8_t* bytes;
-    // Only a private contextual view: bytes used to prepare it, with confirmed header interiors masked.
+    // Only a private contextual view: preparation bytes with confirmed opaque spans masked.
     const uint8_t* lexical_bytes;
     uint32_t length;
     // The bytes are a mapping of the file, which the record's cache unmaps (file_cache_release), not arena memory.
@@ -447,8 +448,7 @@ struct PPFile
     // The length of the directory part (before the last '/'), or BUSTER_PP_NONE if there is none.
     uint32_t directory_length;
     uint32_t data;
-    // Why the path couldn't be opened (an errno), when that isn't that no file is there, else 0: the include search
-    // reports it, as clang does (pp_find_include).
+    // Why it has no data: an errno value, or -1 for a file that is neither regular nor a directory (0 when it has data).
     int error;
     // BUSTER_PP_USER_FILE, BUSTER_PP_SYSTEM_FILE or BUSTER_PP_EXTERN_C_FILE: how its inclusions start.
     uint8_t system;
@@ -481,7 +481,8 @@ struct FileCacheCounts
 
 // What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
 // modification time, and either the record that already had that identity when it looked (BUSTER_PP_NONE if none) or
-// its bytes, which the probe mapped (`mapped`) or read into an arena.
+// its bytes, which the probe mapped (`mapped`) or read into an arena; or why no file can be read there, an errno value
+// or -1 for one that is neither a regular file nor a directory.
 typedef struct FileProbe FileProbe;
 struct FileProbe
 {
@@ -491,7 +492,6 @@ struct FileProbe
     const uint8_t* bytes;
     uint32_t length;
     uint32_t record;
-    // Why the path couldn't be opened (an errno), when that isn't that no file is there, else 0.
     int error;
     bool found;
     bool mapped;
@@ -757,8 +757,6 @@ struct PPContext
     // A file: this inclusion took the group of the file's include guard (its #ifndef was true). Only such an inclusion
     // tells clang the guard (its multiple-include optimization), and from its end on the guard skips the file.
     bool guard_taken;
-    uint8_t opaque_query_repairs;
-    uint8_t opaque_direct_repairs;
     // A source piece of a condition lexed again after a raw header: continue at this byte when it ends. A piece ends
     // after each '(' so a header query can read its operand raw before the ordinary lexer sees comments in its name.
     bool relexed;
@@ -766,6 +764,8 @@ struct PPContext
     uint32_t relex_file;
     // This inclusion has read the file's trailing unterminated comment, actively or while skipping a group.
     bool comment_read;
+    uint8_t opaque_query_repairs;
+    uint8_t opaque_direct_repairs;
     // The macro to enable again when the context is popped.
     PPMacroId macro;
     uint32_t position;
@@ -777,7 +777,7 @@ struct PPContext
     // inclusion's, not the file's: one file can be found through two entries of the search list (-iquote d and -I d).
     uint32_t search_index;
     uint32_t file;
-    // This inclusion's prepared view; the file's canonical data keeps cache and once/guard state.
+    // This inclusion's prepared view; canonical file data retains shared cache and once/guard state.
     uint32_t data;
     uint32_t range;
     uint32_t next_directive;
@@ -1177,13 +1177,16 @@ struct Preprocessor
 // ---------------------------------------------------------------------------------------------------------------------
 // Token stacks
 
+// Reserves the columns in turn, until one can't be (pp_tokens_release releases those that were).
 static bool pp_tokens_reserve(PPTokens* tokens, uint32_t capacity)
 {
     const uint64_t slots = (uint64_t)capacity + BUSTER_PP_TOKEN_SLACK;
-    tokens->arenas[0] = arena_reserve(slots);
-    tokens->arenas[1] = arena_reserve(slots);
-    tokens->arenas[2] = arena_reserve(slots * sizeof(uint32_t));
-    tokens->arenas[3] = arena_reserve(slots * sizeof(uint32_t));
+    bool reserved = true;
+    for (uint32_t i = 0; reserved && i < 4; i += 1)
+    {
+        tokens->arenas[i] = arena_reserve(i < 2 ? slots : slots * sizeof(uint32_t));
+        reserved = tokens->arenas[i].base != 0;
+    }
     tokens->kinds = arena_push(&tokens->arenas[0], slots, 64);
     tokens->flags = arena_push(&tokens->arenas[1], slots, 64);
     tokens->values = arena_push_array(&tokens->arenas[2], slots, sizeof(uint32_t), 64);
@@ -1244,7 +1247,7 @@ static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, 
     pp->fatal |= severity == PP_SEVERITY_FATAL;
 }
 
-static void* pp_array(Preprocessor* pp, uint64_t count, uint64_t size);
+static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
 
 #include "c_preprocessor_history.c"
 
@@ -2570,11 +2573,16 @@ static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, Inte
     cache->prepare = prepare;
     cache->table = table;
     cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
-    cache->arrays[0] = arena_reserve((uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData) + 64);
-    cache->arrays[1] = arena_reserve(2ull * BUSTER_PP_MAX_FILES * sizeof(uint32_t) + 64);
-    cache->arrays[2] = arena_reserve((uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath) + 64);
-    cache->arrays[3] = arena_reserve(2ull * BUSTER_FILE_CACHE_MAX_PATHS * sizeof(uint32_t) + 64);
-    cache->path_arena = arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES);
+    // Reserved in turn until one can't be (file_cache_release releases those that were).
+    const uint64_t sizes[] = { (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData) + 64, 2ull * BUSTER_PP_MAX_FILES * sizeof(uint32_t) + 64,
+                               (uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath) + 64, 2ull * BUSTER_FILE_CACHE_MAX_PATHS * sizeof(uint32_t) + 64 };
+    bool reserved = true;
+    for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
+    {
+        cache->arrays[i] = arena_reserve(sizes[i]);
+        reserved = cache->arrays[i].base != 0;
+    }
+    cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
     cache->records = arena_push_array(&cache->arrays[0], BUSTER_PP_MAX_FILES, sizeof(PPFileData), 64);
     cache->identity_slots = arena_push_array(&cache->arrays[1], 2ull * BUSTER_PP_MAX_FILES, sizeof(uint32_t), 64);
     cache->paths = arena_push_array(&cache->arrays[2], BUSTER_FILE_CACHE_MAX_PATHS, sizeof(FileCachePath), 64);
@@ -2627,12 +2635,19 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
     FileCacheArenas* result = &cache->lanes[lane];
     if (result->arena.base == 0)
     {
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(result->columns); i += 1)
+        // Reserved in turn until one can't be, and then none of them, so that a lane short of address space fails to
+        // prepare, as a reservation that fails stops a run, rather than going on without the arena it lacked.
+        Arena* arenas[] = { &result->columns[0], &result->columns[1], &result->columns[2], &result->arena, &result->bytes };
+        bool reserved = true;
+        for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
         {
-            result->columns[i] = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+            *arenas[i] = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+            reserved = arenas[i]->base != 0;
         }
-        result->arena = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
-        result->bytes = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+        for (uint32_t i = 0; !reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
+        {
+            arena_release(arenas[i]);
+        }
     }
     return result;
 }
@@ -2750,10 +2765,14 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
     // no unit reaches. A FIFO, a device or a directory then isn't a regular file, and is none. O_NONBLOCK changes
     // nothing for a regular file, and O_NOCTTY keeps a terminal from becoming the process's controlling one.
     const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
-    probe->error = fd < 0 && errno != ENOENT && errno != ENOTDIR && errno != EISDIR && errno != EINVAL ? errno : 0;
+    int error = fd >= 0 ? 0 : errno;
     counts->opens += 1;
     struct stat stats;
-    if (fd >= 0 && fstat(fd, &stats) == 0 && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
+    const bool stated = fd >= 0 && fstat(fd, &stats) == 0;
+    error = fd >= 0 && !stated ? errno : error;
+    error = stated && !S_ISREG(stats.st_mode) ? (S_ISDIR(stats.st_mode) ? EISDIR : -1) : error;
+    error = stated && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK ? EFBIG : error;
+    if (stated && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
     {
         probe->device = (uint64_t)stats.st_dev;
         probe->inode = (uint64_t)stats.st_ino;
@@ -2765,6 +2784,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
         if (probe->record == BUSTER_PP_NONE && probe->length != 0 && !read)
         {
             void* mapped = mmap(0, probe->length, PROT_READ, MAP_PRIVATE | (how == FILE_CACHE_MAP_POPULATED ? MAP_POPULATE : 0), fd, 0);
+            error = mapped != MAP_FAILED ? 0 : errno;
             bytes = mapped != MAP_FAILED ? mapped : 0;
             probe->mapped = bytes != 0;
             counts->maps += 1;
@@ -2779,6 +2799,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
                 got = pread(fd, buffer + done, probe->length - done, (off_t)done);
                 done += got > 0 ? (uint64_t)got : 0;
             }
+            error = buffer == 0 ? ENOMEM : done == probe->length ? 0 : got < 0 ? errno : EIO;
             if (buffer != 0 && done == probe->length)
             {
                 memset(buffer + done, 0, 64);
@@ -2789,6 +2810,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
         probe->bytes = bytes;
         probe->found = bytes != 0;
     }
+    probe->error = probe->found ? 0 : error;
     if (fd >= 0)
     {
         close(fd);
@@ -2860,16 +2882,16 @@ static void file_cache_identify(FileCache* cache, FileCachePath* entry)
 }
 
 // The record of the file at `path` (`length` bytes, NUL-terminated), probing the file system only the first time the
-// cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full. A file of up to
-// the cache's read limit is read into the calling lane's bytes arena, which the cache keeps as long as its records, and
-// a larger one is mapped with MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation,
-// which needs the lane's other arenas, says why it fails). `*error` gets the probe's error (FileProbe.error). One lane
-// at a time.
+// cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full, with why in
+// `*error` (the probe's errno value or -1, or EMFILE for a full cache). A file of up to the cache's read limit is read
+// into the calling lane's bytes arena, which the cache keeps as long as its records, and a larger one is mapped with
+// MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation, which needs the lane's other
+// arenas, says why it fails). One lane at a time.
 static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, FileCacheCounts* counts, int* error)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
     FileCachePath* entry = file_cache_find_path(cache, path, length, hash);
-    *error = entry != 0 ? entry->probe.error : 0;
+    int unheld = 0;
     if (entry == 0)
     {
         Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
@@ -2885,8 +2907,11 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
         {
             munmap((void*)probe.bytes, probe.length);
         }
+        unheld = probe.found ? EMFILE : probe.error;
     }
-    return entry != 0 ? entry->record : BUSTER_PP_NONE;
+    const uint32_t result = entry != 0 ? entry->record : BUSTER_PP_NONE;
+    *error = result != BUSTER_PP_NONE ? 0 : entry == 0 ? unheld : entry->probe.found ? EMFILE : entry->probe.error;
+    return result;
 }
 
 // Prepares record `record` (pp_prepare_into) unless it is prepared, into lane `lane`'s arenas and with the cache's intern
@@ -3076,6 +3101,7 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
             const uint64_t start = pp->options.timing ? __rdtsc() : 0;
             const uint32_t record = file_cache_lookup_path(pp->cache, copy, length, &pp->probes, &error);
             const uint32_t data = record != BUSTER_PP_NONE ? pp_data_of_record(pp, record) : BUSTER_PP_NONE;
+            error = record != BUSTER_PP_NONE && data == BUSTER_PP_NONE ? EMFILE : error;
             pp->ticks[PP_PHASE_READ] += pp->options.timing ? __rdtsc() - start : 0;
             result = pp->file_count;
             pp->files[result] = (PPFile){
@@ -3226,7 +3252,8 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
             *found_in = result != BUSTER_PP_NONE ? directory : BUSTER_PP_NONE;
             error = file != BUSTER_PP_NONE ? pp->files[file].error : 0;
         }
-        failed = error != 0 && report != BUSTER_PP_NONE;
+        const bool absent = error == ENOENT || error == ENOTDIR || error == EISDIR || error == EINVAL || error == -1;
+        failed = error != 0 && !absent && report != BUSTER_PP_NONE;
         if (failed)
         {
             // The place as clang names it: the directory (the includer's, or a search directory), a '/' and the name, or
@@ -3912,7 +3939,13 @@ static bool pp_language_defined(const Preprocessor* pp, const PPMacro* macro)
 {
     const uint8_t* name = intern_bytes(pp->table, macro->name);
     const bool stdc = intern_length(pp->table, macro->name) >= 6 && memcmp(name, "__STDC", 6) == 0;
-    return (macro->flags & BUSTER_PP_MACRO_BUILTIN) != 0 || (stdc && macro->data == pp->predefines_data);
+    bool result = (macro->flags & BUSTER_PP_MACRO_BUILTIN) != 0;
+    if (!result && stdc)
+    {
+        const uint32_t range = pp_find_range(pp, macro->location);
+        result = range != BUSTER_PP_NONE && pp->files[pp->ranges[range].file].data == pp->predefines_data;
+    }
+    return result;
 }
 
 // The parameter list of a function-like macro being defined, from its '(' at `open`, as clang reads it
@@ -4485,6 +4518,17 @@ static void pp_read_file_comment(Preprocessor* pp, PPContext* context, bool dire
             pp_diagnose(pp, PP_SEVERITY_ERROR, pp->ranges[context->range].base + data->unterminated_comment - 1, "unterminated /* comment");
             pp->unterminated += 1;
         }
+    }
+}
+
+// A recognized directive reads a trailing comment on its own line actively. Conditions do this after source header
+// queries have restored any opaque names, before their expression is evaluated; a body comment is left to the file.
+static void pp_read_directive_comment(Preprocessor* pp, PPContext* context, uint32_t directive)
+{
+    const PPFileData* data = &pp->datas[context->data];
+    if (data->unterminated_comment != 0 && !data->unterminated_comment_starts_line && data->directive_end[directive] == data->token_count)
+    {
+        pp_read_file_comment(pp, context, true);
     }
 }
 
@@ -6321,7 +6365,8 @@ static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint
     bool result = true;
     if (*repairs >= capacity)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "%s recovery capacity exceeded (%u repairs per inclusion)", query ? "header query" : "opaque directive", capacity);
+        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "%s recovery capacity exceeded (%u repairs per inclusion)",
+                    query ? "header query" : "opaque directive", capacity);
         result = false;
     }
     else
@@ -6331,18 +6376,17 @@ static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint
         if (result)
         {
             memcpy(lexical, data->lexical_bytes != 0 ? data->lexical_bytes : data->bytes, data->length);
-            const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+            const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = pp->options.trigraphs };
             uint64_t p = begin;
             while (p < stop)
             {
                 uint64_t size;
                 uint64_t at;
                 get_char(&lexer, p, &size, &at);
-                // get_char skips physical line splices before `at`: leave those bytes intact, so the same logical
-                // line and all original source offsets survive. Only the returned character's bytes become spaces.
+                // Leave physical splices before `at` intact, preserving logical lines and original source offsets.
                 const uint64_t end = p + size < stop ? p + size : stop;
                 memset(lexical + at, ' ', at < end ? end - at : 0);
-                p += size;
+                p += size != 0 ? size : 1;
             }
             PPFileData recovered = *data;
             recovered.bytes = lexical;
@@ -6363,6 +6407,7 @@ static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint
                 file->end = recovered.token_count;
                 file->position = recovered.directive_end[directive];
                 file->next_directive = directive + 1;
+                file->comment_read = false;
             }
         }
         if (!result)
@@ -8293,16 +8338,81 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
     }
 }
 
-// The bytes of a file's line from token `begin` to the end of token `end - 1` (for #error and #warning).
-static void pp_line_text(const Preprocessor* pp, const PPFileData* data, uint32_t begin, uint32_t end, const uint8_t** text, uint32_t* length)
+// The executing directive or expanded query has proved [begin, stop) opaque to ordinary C lexing. Prepare a
+// private view for this inclusion with only that span masked. Original source bytes/offsets, old macro data indexes,
+// other inclusions and shared cache records stay unchanged. Previous masks are retained. Callers invoke this only
+// for an exceptional lexical overlap, and reload their data afterward: position moves to the rebuilt directive end.
+// Separate per-inclusion budgets of 64 direct repairs and 8 queries bound full-file copy/preparation work and retained
+// storage by O((64 + 8) * N). Capacity/allocation exhaustion is fatal, never a successful truncated stream.
+
+// Only active diagnostic directives read their message opaquely. Detect a token or comment that ordinary lexing
+// carried past its logical newline, or an unterminated comment on it, then restore the following source. A token's
+// interior is skipped here, so a comment marker inside a quoted message doesn't consume the rare-repair budget.
+static bool pp_recover_diagnostic_line(Preprocessor* pp, PPContext* context, uint32_t directive)
 {
-    *text = (const uint8_t*)"";
-    *length = 0;
-    if (begin < end)
+    const PPFileData* data = &pp->datas[context->data];
+    const uint32_t name = data->directive_hash[directive] + 1;
+    const uint32_t begin = pp_file_token_end(pp, data, name);
+    const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = pp->options.trigraphs };
+    const uint32_t stop = (uint32_t)skip_line_comment(&lexer, begin);
+    bool overlap = data->unterminated_comment > begin && data->unterminated_comment - 1 < stop;
+    uint32_t token = name + 1;
+    uint64_t position = begin;
+    while (!overlap && position < stop)
     {
-        *text = data->bytes + data->starts[begin];
-        *length = pp_file_token_end(pp, data, end - 1) - data->starts[begin];
+        if (token < data->token_count && data->starts[token] <= position)
+        {
+            position = pp_file_token_end(pp, data, token);
+            overlap = position > stop;
+            token += 1;
+        }
+        else
+        {
+            uint64_t size;
+            uint64_t at;
+            const int32_t c = get_char(&lexer, position, &size, &at);
+            position += size != 0 ? size : 1;
+            uint64_t next_size;
+            const int32_t next = c == '/' ? peek_char(&lexer, position, &next_size) : 0;
+            if (c == '/' && next == '*')
+            {
+                const bool closed = skip_block_comment(&lexer, position + next_size, &position);
+                overlap = !closed || position > stop;
+            }
+            else if (c == '/' && next == '/')
+            {
+                position = skip_line_comment(&lexer, position + next_size);
+            }
+        }
     }
+    return !overlap || pp_recover_opaque_span(pp, (uint32_t)(context - pp->contexts), directive, begin, stop, false);
+}
+
+// #error and #warning read text, not tokens: retain comments, quote characters and trailing blanks, removing only
+// translation phases 1 and 2 and the leading blanks after the directive name, as clang does.
+static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_t name, uint32_t location, PPSeverity severity)
+{
+    const uint32_t begin = pp_file_token_end(pp, data, name);
+    const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = pp->options.trigraphs };
+    const uint32_t end = (uint32_t)skip_line_comment(&lexer, begin);
+    Scratch scratch = scratch_begin(0);
+    uint8_t* buffer = arena_push(scratch.arena, (uint64_t)(end - begin) + 1, 1);
+    if (buffer != 0)
+    {
+        const uint8_t* text;
+        const uint32_t length = pp_remove_splices(data->bytes + begin, end - begin, pp->refine_flags, C_TOKEN_RAW_IDENTIFIER, buffer, &text);
+        uint32_t first = 0;
+        while (first < length && (text[first] == ' ' || text[first] == '\t' || text[first] == '\v' || text[first] == '\f'))
+        {
+            first += 1;
+        }
+        pp_diagnose(pp, severity, location, "%.*s", (int)(length - first), (const char*)text + first);
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, location, "out of memory reading diagnostic text");
+    }
+    scratch_end(scratch);
 }
 
 static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location);
@@ -8476,6 +8586,7 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     bool started = false;
     if (begin == end)
     {
+        pp_read_directive_comment(pp, context, d);
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#if with no expression");
     }
     else if (pp_copy_line(pp, context, begin, end))
@@ -8492,6 +8603,7 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     }
     if (!started)
     {
+        pp_read_directive_comment(pp, context, d);
         pp->arguments.count = line;
         pp_apply_condition(pp, context, d, kind, false);
     }
@@ -8501,6 +8613,7 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
 static void pp_finish_condition(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
+    pp_read_directive_comment(pp, &pp->contexts[capture.context], capture.directive);
     const bool taken = pp_evaluate(pp, &pp->captures, capture.begin, pp->captures.count, capture.location);
     if (pp->options.timing)
     {
@@ -8733,9 +8846,9 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
         }
     }
     pp->diagnostic_origin = saved_origin;
-    if (file == BUSTER_PP_NONE || (kind == PP_DIRECTIVE_IMPORT && pp->datas[pp->files[file].data].prepared && pp->datas[pp->files[file].data].once))
+    if (file == BUSTER_PP_NONE)
     {
-        // Not found, or already imported.
+        // Not found. pp_enter_file handles an already imported file like #pragma once, counting its skipped inclusion.
     }
     else
     {
@@ -10058,15 +10171,11 @@ static void pp_finish_pragma(Preprocessor* pp)
 
 static void pp_embed(Preprocessor* pp, PPContext* context, uint32_t d);
 
-// Runs directive `context->next_directive` of a file context; the context goes on after its line unless a conditional
-// skipped elsewhere.
-static void pp_directive(Preprocessor* pp, PPContext* context)
+// Runs a directive after its active opaque context has been recovered, if needed. The context goes on after its line
+// unless a conditional skipped elsewhere.
+static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
 {
     const uint32_t d = context->next_directive;
-    if (!pp_recover_direct_raw(pp, context, d))
-    {
-        return;
-    }
     const PPFileData* data = &pp->datas[context->data];
     const uint32_t data_index = context->data;
     const uint32_t hash = data->directive_hash[d];
@@ -10074,10 +10183,11 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
     const uint8_t kind = data->directive_kind[d];
     const uint32_t base = pp->ranges[context->range].base;
     const uint32_t location = base + data->starts[hash];
-    if (data->unterminated_comment != 0 && !data->unterminated_comment_starts_line && end == data->token_count)
+    const PPConditional* group = pp->conditional_count > context->conditional_base ? &pp->conditionals[pp->conditional_count - 1] : 0;
+    const bool condition = kind == PP_DIRECTIVE_IF || (kind == PP_DIRECTIVE_ELIF && group != 0 && !group->seen_else && !group->taken);
+    if (!condition)
     {
-        // A comment on this directive's line is read before the directive changes which group is active.
-        pp_read_file_comment(pp, context, true);
+        pp_read_directive_comment(pp, context, d);
     }
     context->position = end;
     context->next_directive = d + 1;
@@ -10154,10 +10264,8 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
         case PP_DIRECTIVE_ERROR:
         case PP_DIRECTIVE_WARNING:
         {
-            const uint8_t* text;
-            uint32_t length;
-            pp_line_text(pp, data, hash + 2, end, &text, &length);
-            pp_diagnose(pp, kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, location, "%.*s", (int)length, (const char*)text);
+            pp_diagnostic_text(pp, data, hash + 1, pp_token_location(pp, context, data, hash + 1),
+                               kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING);
             break;
         }
         case PP_DIRECTIVE_PRAGMA:
@@ -10179,6 +10287,20 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
                 pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid preprocessing directive");
             }
             break;
+    }
+}
+
+// Only a directive the main loop is executing can establish an active opaque message. Skipped lines retain their
+// original lexing; a recovery failure is fatal and never dispatches the incomplete prepared directive.
+static void pp_directive(Preprocessor* pp, PPContext* context)
+{
+    const uint32_t directive = context->next_directive;
+    const PPFileData* data = &pp->datas[context->data];
+    const uint8_t kind = data->directive_kind[directive];
+    const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
+    if ((!text || pp_recover_diagnostic_line(pp, context, directive)) && pp_recover_direct_raw(pp, context, directive))
+    {
+        pp_prepared_directive(pp, context);
     }
 }
 
@@ -12839,16 +12961,19 @@ static void pp_dedupe_directories(Preprocessor* pp)
 }
 
 // An array of `count` records of `size` bytes, in an arena of its own (address space, touched as it is used).
-static void* pp_array(Preprocessor* pp, uint64_t count, uint64_t size)
+// An array of its own of `count` entries of `size` bytes, while `*reserved` (which becomes false if it can't be): the
+// reservations stop at the first that fails.
+static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size)
 {
     void* result = 0;
-    if (pp->array_count < BUSTER_PP_ARRAYS)
+    if (*reserved && pp->array_count < BUSTER_PP_ARRAYS)
     {
         Arena* arena = &pp->arrays[pp->array_count];
         *arena = arena_reserve(count * size + 64);
         result = arena_push_array(arena, count, size, 64);
         pp->array_count += 1;
     }
+    *reserved = result != 0;
     return result;
 }
 
@@ -12863,44 +12988,50 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->vectorized = prepare.vectorized;
     pp->refine_flags = prepare.refine_flags;
     pp->split_kinds = prepare.split_kinds;
+    // The memory, reserved in turn until a reservation fails (pp_release releases what was).
     pp->arena = arena_reserve(BUSTER_PP_ARENA_BYTES);
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
+    bool result = pp->arena.base != 0;
+    for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {
         pp->columns[i] = arena_reserve(BUSTER_PP_ARENA_BYTES);
+        result = pp->columns[i].base != 0;
     }
-    pp->scratch[0] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
-    pp->scratch[1] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
+    for (uint32_t i = 0; result && i < 2; i += 1)
+    {
+        pp->scratch[i] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
+        result = pp->scratch[i].base != 0;
+    }
     pp->scratch_range[0] = BUSTER_PP_NONE;
     pp->scratch_range[1] = BUSTER_PP_NONE;
-    bool result = pp_tokens_reserve(&pp->output, BUSTER_PP_MAX_OUTPUT_TOKENS) && pp_tokens_reserve(&pp->arguments, BUSTER_PP_MAX_STACK_TOKENS) &&
-                  pp_tokens_reserve(&pp->captures, BUSTER_PP_MAX_STACK_TOKENS) && pp_tokens_reserve(&pp->expansions, BUSTER_PP_MAX_STACK_TOKENS);
-    pp->ranges = pp_array(pp, BUSTER_PP_MAX_RANGES, sizeof(PPRange));
-    pp->datas = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(PPFileData));
-    pp->record_data = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
-    pp->files = pp_array(pp, BUSTER_PP_MAX_FILES, sizeof(PPFile));
-    pp->file_slots = pp_array(pp, BUSTER_PP_FILE_SLOTS, sizeof(uint32_t));
+    result = result && pp_tokens_reserve(&pp->output, BUSTER_PP_MAX_OUTPUT_TOKENS) && pp_tokens_reserve(&pp->arguments, BUSTER_PP_MAX_STACK_TOKENS) &&
+             pp_tokens_reserve(&pp->captures, BUSTER_PP_MAX_STACK_TOKENS) && pp_tokens_reserve(&pp->expansions, BUSTER_PP_MAX_STACK_TOKENS);
+    pp->ranges = pp_array(pp, &result, BUSTER_PP_MAX_RANGES, sizeof(PPRange));
+    pp->datas = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(PPFileData));
+    pp->record_data = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
+    pp->files = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(PPFile));
+    pp->file_slots = pp_array(pp, &result, BUSTER_PP_FILE_SLOTS, sizeof(uint32_t));
     pp->file_slot_mask = BUSTER_PP_INITIAL_FILE_SLOTS - 1;
-    pp->directories = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(char*));
-    pp->directory_lengths = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(uint32_t));
-    pp->directory_system = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(uint8_t));
-    pp->line_directives = pp_array(pp, BUSTER_PP_MAX_LINE_DIRECTIVES, sizeof(PPLineDirective));
-    pp->expansion_starts = pp_array(pp, (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPExpansionStart));
-    pp->silent_pragmas = pp_array(pp, BUSTER_PP_MAX_SILENT_PRAGMAS, sizeof(PPExpansionStart));
-    pp->embeds = pp_array(pp, BUSTER_PP_MAX_EMBEDS, sizeof(PPEmbed));
-    pp->macro_of = pp_array(pp, BUSTER_INTERN_MAX_IDS, sizeof(PPMacroId));
-    pp->is_macro = pp_array(pp, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
-    pp->poisoned = pp_array(pp, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
-    pp->macros = pp_array(pp, BUSTER_PP_MAX_MACROS, sizeof(PPMacro));
-    pp->items = pp_array(pp, BUSTER_PP_MAX_ITEMS, sizeof(PPItem));
-    pp->parameters = pp_array(pp, BUSTER_PP_MAX_ITEMS, sizeof(IdentId));
-    pp->pushed_names = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(IdentId));
-    pp->pushed_macros = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(PPMacroId));
-    pp->contexts = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPContext));
-    pp->conditionals = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPConditional));
-    pp->invocations = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPInvocation));
-    pp->argument_records = pp_array(pp, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
-    pp->capture_frames = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
-    if (!options->no_history)
+    pp->directories = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(char*));
+    pp->directory_lengths = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(uint32_t));
+    pp->directory_system = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(uint8_t));
+    pp->line_directives = pp_array(pp, &result, BUSTER_PP_MAX_LINE_DIRECTIVES, sizeof(PPLineDirective));
+    pp->expansion_starts = pp_array(pp, &result, (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPExpansionStart));
+    pp->silent_pragmas = pp_array(pp, &result, BUSTER_PP_MAX_SILENT_PRAGMAS, sizeof(PPExpansionStart));
+    pp->embeds = pp_array(pp, &result, BUSTER_PP_MAX_EMBEDS, sizeof(PPEmbed));
+    pp->macro_of = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS, sizeof(PPMacroId));
+    pp->is_macro = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
+    pp->poisoned = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
+    pp->macros = pp_array(pp, &result, BUSTER_PP_MAX_MACROS, sizeof(PPMacro));
+    pp->items = pp_array(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(PPItem));
+    pp->parameters = pp_array(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(IdentId));
+    pp->pushed_names = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(IdentId));
+    pp->pushed_macros = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(PPMacroId));
+    pp->contexts = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPContext));
+    pp->conditionals = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPConditional));
+    pp->invocations = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPInvocation));
+    pp->argument_records = pp_array(pp, &result, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
+    pp->capture_frames = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
+    if (result && !options->no_history)
     {
         // Five retained tables and three temporary columns share base pages for their first few records. Only a
         // table that outgrows its slice reserves a large arena, avoiding eight mappings/advice calls on small units.
@@ -12933,10 +13064,6 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         fprintf(stderr, "error: the file cache was made for another language mode or intern table\n");
         result = false;
     }
-    result = result && pp->ranges != 0 && pp->datas != 0 && pp->record_data != 0 && pp->files != 0 && pp->file_slots != 0 && pp->directories != 0 && pp->directory_lengths != 0 &&
-             pp->directory_system != 0 && pp->line_directives != 0 && pp->expansion_starts != 0 && pp->silent_pragmas != 0 && pp->embeds != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->poisoned != 0 && pp->macros != 0 && pp->items != 0 &&
-             pp->parameters != 0 && pp->pushed_names != 0 && pp->pushed_macros != 0 && pp->contexts != 0 && pp->conditionals != 0 && pp->invocations != 0 &&
-             pp->argument_records != 0 && pp->capture_frames != 0 && pp->scratch[0].base != 0 && pp->scratch[1].base != 0;
     if (result)
     {
         // Macro 0 is none; location 0 is none.
@@ -13093,6 +13220,13 @@ static void pp_release(Preprocessor* pp)
 
 static void pp_resolve_keywords(Preprocessor* pp);
 
+// Why the file of record `file` (BUSTER_PP_NONE if its record couldn't be made) has no data, for a message.
+static const char* pp_read_error(const Preprocessor* pp, uint32_t file)
+{
+    const int error = file != BUSTER_PP_NONE ? pp->files[file].error : ENOMEM;
+    return error > 0 ? strerror(error) : "not a regular file";
+}
+
 // Runs what comes before the main file: the predefines (or PPOptions.predefines_path's), then the command line's -D,
 // -U and -include. Returns false if the predefines can't be read.
 static bool pp_run_prelude(Preprocessor* pp)
@@ -13111,7 +13245,7 @@ static bool pp_run_prelude(Preprocessor* pp)
         }
         else
         {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the predefines file %s", pp->options.predefines_path);
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the predefines file '%s': %s", pp->options.predefines_path, pp_read_error(pp, file));
         }
     }
     else
@@ -13206,7 +13340,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     {
         if (!pp->fatal)
         {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "no such file: '%s'", main_path);
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read '%s': %s", main_path, pp_read_error(pp, file));
         }
         pp_resolve_keywords(pp);
         result = false;
@@ -14900,10 +15034,14 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     PPOptions options;
     const char* input;
     const char* output;
-    bool markers;
-    const bool parsed = pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
+    bool markers = true;
+    const bool parsed = arena.base != 0 && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
     options.expansion_starts = markers;
-    if (!parsed)
+    if (arena.base == 0)
+    {
+        fprintf(stderr, "fatal error: can't reserve memory\n");
+    }
+    else if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
                         "[-include file] [--embed-dir=dir] [-dM] [-std=...] [-ansi] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-march=cpu] [-m[no-]feature] [-O...] [-f...] "
@@ -14918,7 +15056,7 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
             // A failure pp_initialize reported (a location space too small for its first spellings) or memory.
             if (!pp.fatal)
             {
-                fprintf(stderr, "can't reserve memory\n");
+                fprintf(stderr, "fatal error: can't reserve memory\n");
             }
         }
         else
@@ -14935,9 +15073,10 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
                 fprintf(stderr, "can't write %s\n", output);
             }
             result = preprocessed && printed ? 0 : 1;
-            pp_release(&pp);
-            intern_release(&table);
         }
+        // What a failed reservation left reserved too.
+        pp_release(&pp);
+        intern_release(&table);
     }
     arena_release(&arena);
     return result;
