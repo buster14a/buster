@@ -1590,12 +1590,13 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
         // needs room for a token per byte, but a file has about one per six: with the columns of every file in one
         // arena, the room between them would be cleared too wherever a huge page holds a used byte, which for sqlite3.c
         // and its headers was 9 bytes per input byte. The leading-space words, whose count is now known, need no room
-        // of their own: a word past the last token's, for pp_store_file_tokens.
+        // of their own: a word past the last token's, for pp_store_file_tokens. They go after the kinds, where the
+        // lexer's writes have most likely touched their page already (refinement then needn't fault a fresh one in).
         const uint64_t kept = (uint64_t)count + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
         arena_pop_to(&columns[0], (uint64_t)(data->kinds - columns[0].base) + kept);
         arena_pop_to(&columns[1], (uint64_t)((uint8_t*)data->starts - columns[1].base) + kept * sizeof(uint32_t));
         arena_pop_to(&columns[2], (uint64_t)((uint8_t*)data->values - columns[2].base) + kept * sizeof(uint32_t));
-        data->space = arena_push_array(&pp->arena, (uint64_t)count / 64 + 2, sizeof(uint64_t), 64);
+        data->space = arena_push_array(&columns[0], (uint64_t)count / 64 + 2, sizeof(uint64_t), 64);
         result = data->space != 0;
         if (result && pp->vectorized)
         {
@@ -8137,8 +8138,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     const uint32_t* out_locations = pp->output.locations;
     const uint32_t count = pp->output.count;
     const uint8_t* records = pp->table->records;
-    const uint32_t* record_of = pp->table->record_of;
-    const uint32_t* length_of = pp->table->length_of;
+    const InternSpan* spans = pp->table->spans;
     const bool trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
     Scratch scratch = scratch_begin(0);
     const uint32_t* directory = pp_build_directory(pp, scratch.arena);
@@ -8189,8 +8189,8 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
             uint32_t length = 0;
             if (kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT))
             {
-                spelling = records + record_of[value];
-                length = length_of[value];
+                spelling = records + spans[value].offset;
+                length = spans[value].length;
             }
             else if (kind != BUSTER_PP_KIND_PRAGMA_END && kind != BUSTER_PP_KIND_INTEGER)
             {

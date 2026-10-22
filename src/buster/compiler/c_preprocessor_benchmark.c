@@ -12,8 +12,8 @@
 // and preprocessor, so that every file it includes is read, lexed, refined and given its directive table, as a
 // compile of one translation unit does. After a warm-up pass come BUSTER_PP_BENCHMARK_PASSES passes; it reports the
 // medians of wall time and of user-space cycles and instructions (perf_event_open; zero when unavailable), per input
-// token (the tokens of every file the runs prepared) and per output token, the share of the time each phase took
-// (PPPhase: reading, lexing, refining and directive tables; the rest is the main loop with its directives), and what
+// token (the tokens of every file the runs prepared) and per output token, each phase's share of the time and its median
+// time (PPPhase: reading, lexing, refining and directive tables; the rest is the main loop with its directives), and what
 // a run did (PPStatistics). With --clang it also times `clang -E -P` with the same options (but --predefines, which is
 // ours) writing to /dev/null, a process per file, the median of as many runs, for scale. --only runs one
 // implementation (for profiles). Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments
@@ -371,6 +371,15 @@ int run_preprocessor_benchmark(int argc, char** argv)
                        median_instructions / (double)input_tokens, median_cycles != 0 ? median_instructions / median_cycles : 0.0);
                 uint64_t total = 0;
                 uint64_t medians[PP_PHASE_COUNT + 1];
+                // The phases are timed with the time stamp counter: its ticks per nanosecond, over the passes' whole runs.
+                uint64_t run_ticks = 0;
+                uint64_t run_nanoseconds = 0;
+                for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
+                {
+                    run_ticks += samples[implementation][pass].ticks[PP_PHASE_COUNT];
+                    run_nanoseconds += samples[implementation][pass].nanoseconds;
+                }
+                const double milliseconds_per_tick = run_ticks != 0 ? (double)run_nanoseconds / (double)run_ticks / 1e6 : 0.0;
                 for (uint32_t phase = 0; phase <= PP_PHASE_COUNT; phase += 1)
                 {
                     pp_benchmark_sort(phases[phase], BUSTER_PP_BENCHMARK_PASSES);
@@ -381,6 +390,11 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 for (uint32_t phase = 0; phase <= PP_PHASE_COUNT; phase += 1)
                 {
                     printf("  %s %.1f%%", phase_names[phase], total != 0 ? 100.0 * (double)medians[phase] / (double)total : 0.0);
+                }
+                printf("\n             ");
+                for (uint32_t phase = 0; phase <= PP_PHASE_COUNT; phase += 1)
+                {
+                    printf("  %s %.3f ms", phase_names[phase], (double)medians[phase] * milliseconds_per_tick);
                 }
                 printf("\n");
                 const PPBenchmarkSample* memory = &samples[implementation][0];

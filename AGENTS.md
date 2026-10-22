@@ -1960,7 +1960,8 @@ interning (`RefineVariant`), with `refine_tokens_scalar` and with an oracle of
 its own (splices and UCNs removed in plain passes, and a different table): every
 identifier must get the same id and every token the same leading-space bit, on:
 
-- the hash's three forms on spellings of 0 to 200 bytes;
+- the hash's four forms on spellings of 0 to 200 bytes (the one that hashes
+  four spellings at once, up to 32 bytes, with their first lanes);
 - 88,064 structured spellings that must all hash differently: repeated and
   swapped 64-byte chunks and 16-byte lanes, and #192's review's 32-byte
   identifiers with paired changes in two lanes;
@@ -1969,7 +1970,7 @@ identifier must get the same id and every token the same leading-space bit, on:
 - the predefined names, every name's keyword answer in each of the ten modes
   from `c89` to `gnu23`, and 24 spellings chosen apart from the predefined names
   with clang's answer (17 keywords, 7 not);
-- 300,000 random spellings that grow the table seven times;
+- 300,000 random spellings that grow the table three times;
 - 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
   and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64
   misalignments from a cache line;
@@ -1989,17 +1990,24 @@ identifier must get the same id and every token the same leading-space bit, on:
 
 ## Refinement benchmark
 
-`./build/compiler benchmark-refinement [--cplusplus] [--trigraphs] [--only NAME]
-path...` lexes every `.c` and `.h` file once, checks every implementation
-against `refine_tokens_scalar`, and reports the share of identifiers the table
-finds and how often the vectorized path takes a scalar one. Then come 21
-interleaved passes, each from a table reset to the predefined names, with the
-medians per token and per identifier (time, cycles, instructions, IPC) of the
-variants (`refine_tokens_16`, `_32`, `_64` and `_fused`; `refine_tokens` is the
-64 one), the scalar path, `c_tokenize` and `c_tokenize` then refinement per file.
-`docs/c-refinement.md` has the numbers for `sqlite3.c`, the C library corpus and
-`src`. Run it pinned to one CPU; the default 9700X job runs it on `src`, and like
-the others its measurements are informational.
+`./build/compiler benchmark-refinement [--cplusplus] [--trigraphs]
+[--after-scalar MS] [--only NAME] path...` lexes every `.c` and `.h` file once,
+checks every implementation against `refine_tokens_scalar`, and reports the
+share of identifiers the table finds and how often the vectorized path takes a
+scalar one. Then come 21 interleaved passes, each from a table reset to the
+predefined names, with the medians per token and per identifier (time, cycles,
+instructions, IPC) of the variants (`refine_tokens_16`, `_32`, `_64` and
+`_fused`; `refine_tokens` is the 64 one), the scalar path, `c_tokenize` and
+`c_tokenize` then refinement per file. `--only NAME` runs one of them, its
+passes back to back, and `--after-scalar MS` runs the scalar path over the
+corpus for MS ms (100 to 300) before each timed pass of a vectorized one: the
+state after lighter code, in which Zen 5's power cap slows a heavy AVX-512 loop
+(#199, as the encoder's benchmark does). The columns, table and source stay in
+the caches from pass to pass, unlike the preprocessor's, whose refine phase is
+what #115's budget measures. `docs/c-refinement.md` has the numbers for
+`sqlite3.c`, the C library corpus and `src`. Run it pinned to one CPU; the
+default 9700X job runs it on `src`, and like the others its measurements are
+informational.
 
 ## Preprocessor tests
 
@@ -2061,8 +2069,8 @@ and the repository's translation units with `--clang`.
 [options] file...` preprocesses each file from nothing per run (a new intern
 table and preprocessor), with the vectorized kernels and their scalar twins, 21
 passes after a warm-up, and reports the medians of time, cycles and instructions
-per input token and per output token, IPC, each phase's share (read, lex,
-refine, directive tables, main loop) and what a run did (directives, runs,
+per input token and per output token, IPC, each phase's share and time (read,
+lex, refine, directive tables, main loop) and what a run did (directives, runs,
 expansions, invocations, pastes, and the `#if` lines and their lengths).
 `--clang` also times `clang -E -P` with the same options, a process per file.
 `-march` selects the shared target's predefines. `--predefines FILE` can replace
