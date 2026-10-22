@@ -1996,13 +1996,15 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
     ObjectTestTally tally = {
         .check = "objects",
     };
-    LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
-    link_test_program_options(options, seed, BUSTER_OBJECT_TEST_FUNCTIONS);
-    for (uint32_t i = 0; i < BUSTER_LINK_TEST_PROGRAMS; i += 1)
+    LinkProgramOptions options[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* names[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* directories[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    link_test_all_options(options, names, directories, seed, BUSTER_OBJECT_TEST_FUNCTIONS);
+    for (uint32_t i = 0; i < BUSTER_LINK_TEST_ALL_PROGRAMS; i += 1)
     {
         LinkProgram program;
         const bool generated = link_program_generate(&program, options[i]);
-        object_test_expect(&tally, generated, link_test_program_names[i], i);
+        object_test_expect(&tally, generated, names[i], i);
         const uint64_t length = arena->length;
         ObjectUnits units;
         ObjectSymbols symbols;
@@ -2020,7 +2022,7 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
             }
             printf("  %s%s: %u objects, %llu bytes, %llu sections, %llu symbols, %llu relocations (%llu through section symbols; %llu TPOFF32, %llu GOTTPOFF, "
                    "%llu GOTPCRELX, %llu REX_GOTPCRELX, %llu GOTPCREL, %llu PLT32, %llu PC32, %llu 64, %llu PC64, %llu 32, %llu 32S, %llu SIZE32, %llu SIZE64)\n",
-                   link_test_program_names[i], sections == 1 ? ", function sections" : "", units.count, (unsigned long long)counts.bytes, (unsigned long long)counts.sections,
+                   names[i], sections == 1 ? ", function sections" : "", units.count, (unsigned long long)counts.bytes, (unsigned long long)counts.sections,
                    (unsigned long long)counts.symbols, (unsigned long long)counts.relocations, (unsigned long long)counts.section_symbol_relocations,
                    (unsigned long long)counts.by_type[R_X86_64_TPOFF32], (unsigned long long)counts.by_type[R_X86_64_GOTTPOFF],
                    (unsigned long long)counts.by_type[R_X86_64_GOTPCRELX], (unsigned long long)counts.by_type[R_X86_64_REX_GOTPCRELX],
@@ -2028,8 +2030,10 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
                    (unsigned long long)counts.by_type[R_X86_64_PC32], (unsigned long long)counts.by_type[R_X86_64_64], (unsigned long long)counts.by_type[R_X86_64_PC64],
                    (unsigned long long)counts.by_type[R_X86_64_32], (unsigned long long)counts.by_type[R_X86_64_32S], (unsigned long long)counts.by_type[R_X86_64_SIZE32],
                    (unsigned long long)counts.by_type[R_X86_64_SIZE64]);
-            // Every program has local-exec TLS and calls through the GOT, and every type but those its options leave out.
-            object_test_expect(&tally, counts.by_type[R_X86_64_TPOFF32] != 0 && counts.by_type[R_X86_64_GOTPCRELX] != 0 && counts.by_type[R_X86_64_GOTTPOFF] != 0 &&
+            // Every program has local-exec TLS (a shared library none) and calls through the GOT, and every type but those
+            // its options leave out.
+            const bool local_exec = options[i].shared ? counts.by_type[R_X86_64_TPOFF32] == 0 : counts.by_type[R_X86_64_TPOFF32] != 0;
+            object_test_expect(&tally, local_exec && counts.by_type[R_X86_64_GOTPCRELX] != 0 && counts.by_type[R_X86_64_GOTTPOFF] != 0 &&
                                            counts.by_type[R_X86_64_REX_GOTPCRELX] != 0 && counts.by_type[R_X86_64_GOTPCREL] != 0 && counts.by_type[R_X86_64_PLT32] != 0 &&
                                            counts.by_type[R_X86_64_PC32] != 0 && counts.by_type[R_X86_64_64] != 0 && counts.by_type[R_X86_64_PC64] != 0 &&
                                            (!options[i].absolute || (counts.by_type[R_X86_64_32] != 0 && counts.by_type[R_X86_64_32S] != 0)) &&
@@ -2473,9 +2477,11 @@ static ObjectTestExpected object_test_program_expected(const LinkProgram* progra
 }
 
 // Writes a program's objects to `directory`, lists each with readelf and llvm-readobj, and links them with each linker
-// that `linkers` names (a bit per linker of object_test_linkers) into a program that must do what `expected` says.
-static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* link, uint32_t unit_count, ObjectTestExpected expected, bool libc, ObjectOptions options,
-                                            const char* directory, const char* name, uint32_t linkers, bool keep, Arena* arena)
+// that `linkers` names (a bit per linker of object_test_linkers) into a program that must do what `expected` says. With
+// `harness`, the program is a shared library (LinkProgramOptions.shared): linked by cc -shared, and run by the harness,
+// which loads it and calls its entry (object_test_harness).
+static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* link, uint32_t unit_count, ObjectTestExpected expected, bool libc, const char* harness,
+                                            ObjectOptions options, const char* directory, const char* name, uint32_t linkers, bool keep, Arena* arena)
 {
     static const char* const object_test_linkers[] = {
         "ld.bfd",
@@ -2535,7 +2541,7 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
     snprintf(program_path, sizeof(program_path), "%s/%s", directory, name);
     char** arguments = allocated ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)count + 8) : 0;
     uint32_t linked = 0;
-    const uint32_t ways = libc ? BUSTER_ARRAY_LENGTH(object_test_libc_ways) : 1;
+    const uint32_t ways = libc && harness == 0 ? BUSTER_ARRAY_LENGTH(object_test_libc_ways) : 1;
     for (uint32_t l = 0; arguments != 0 && l < BUSTER_ARRAY_LENGTH(object_test_linkers); l += 1)
     {
         for (uint32_t way = 0; (linkers & (1u << l)) != 0 && way < ways; way += 1)
@@ -2545,7 +2551,7 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
             {
                 arguments[argument++] = "cc";
                 arguments[argument++] = (char*)object_test_fuse_ld[l];
-                arguments[argument++] = (char*)object_test_libc_ways[way];
+                arguments[argument++] = harness != 0 ? "-shared" : (char*)object_test_libc_ways[way];
             }
             else
             {
@@ -2562,7 +2568,8 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
             }
             arguments[argument] = 0;
             char linked_by[64];
-            snprintf(linked_by, sizeof(linked_by), "%s%s%s", object_test_linkers[l], libc ? " through cc " : "", libc ? object_test_libc_ways[way] : "");
+            snprintf(linked_by, sizeof(linked_by), "%s%s%s", object_test_linkers[l], libc ? " through cc " : "",
+                     harness != 0 ? "-shared" : libc ? object_test_libc_ways[way] : "");
             unlink(program_path);
             const int link_status = object_test_run(arguments, output_path, error_path);
             const uint64_t before = arena->length;
@@ -2575,7 +2582,8 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
             }
             object_test_expect(tally, link_clean, "a link without errors or warnings", l);
             char* run_arguments[] = { program_path, 0 };
-            const int run_status = link_status == 0 ? object_test_run(run_arguments, output_path, error_path) : -1;
+            char* load_arguments[] = { (char*)harness, program_path, 0 };
+            const int run_status = link_status == 0 ? object_test_run(harness != 0 ? load_arguments : run_arguments, output_path, error_path) : -1;
             const String8 output = link_status == 0 ? object_test_read_file(arena, output_path) : (String8){ 0 };
             const bool ran = run_status == expected.status && output.pointer != 0 && output.length == expected.length &&
                              (expected.length == 0 || memcmp(output.pointer, expected.output, expected.length) == 0);
@@ -2920,18 +2928,70 @@ static bool object_test_against_as(ObjectTestTally* tally, const LinkProgram* pr
 #define BUSTER_OBJECT_TEST_ALL_LINKERS 0xfu
 #define BUSTER_OBJECT_TEST_WILD 0x8u
 
+// What runs a shared library of test-link's (LinkProgramOptions.shared): a program that cc builds into `path`, which
+// loads the library its first argument names (dlopen) and calls its buster_library_main with main's arguments,
+// returning its status (99 if it can't). Whether cc built it.
+static bool object_test_harness(const char* directory, char* path, uint64_t capacity, bool keep)
+{
+    static const char source[] = "#include <dlfcn.h>\n"
+                                 "#include <stdio.h>\n"
+                                 "int main(int argc, char** argv, char** envp)\n"
+                                 "{\n"
+                                 "    int result = 99;\n"
+                                 "    void* library = argc >= 2 ? dlopen(argv[1], RTLD_NOW) : 0;\n"
+                                 "    int (*entry)(int, char**, char**) = library != 0 ? (int (*)(int, char**, char**))dlsym(library, \"buster_library_main\") : 0;\n"
+                                 "    if (entry != 0)\n"
+                                 "    {\n"
+                                 "        result = entry(argc, argv, envp);\n"
+                                 "    }\n"
+                                 "    else\n"
+                                 "    {\n"
+                                 "        fprintf(stderr, \"%s\\n\", dlerror());\n"
+                                 "    }\n"
+                                 "    return result;\n"
+                                 "}\n";
+    char source_path[BUSTER_OBJECT_TEST_PATH_BYTES];
+    char output_path[BUSTER_OBJECT_TEST_PATH_BYTES];
+    char error_path[BUSTER_OBJECT_TEST_PATH_BYTES];
+    snprintf(source_path, sizeof(source_path), "%s/harness.c", directory);
+    snprintf(output_path, sizeof(output_path), "%s/harness.out", directory);
+    snprintf(error_path, sizeof(error_path), "%s/harness.err", directory);
+    snprintf(path, capacity, "%s/harness", directory);
+    FILE* file = fopen(source_path, "w");
+    const bool written = file != 0 && fputs(source, file) >= 0;
+    if (file != 0)
+    {
+        fclose(file);
+    }
+    char* arguments[] = { "cc", "-O1", "-o", path, source_path, 0 };
+    const bool built = written && object_test_run(arguments, output_path, error_path) == 0;
+    if (!keep)
+    {
+        unlink(source_path);
+        unlink(output_path);
+        unlink(error_path);
+    }
+    return built;
+}
+
 static bool object_test_cross_check(uint64_t seed, const char* directory, bool keep, Arena* arena)
 {
     ObjectTestTally tally = {
         .check = "cross-check",
     };
-    LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
-    link_test_program_options(options, seed, BUSTER_OBJECT_TEST_FUNCTIONS);
-    for (uint32_t i = 0; i < BUSTER_LINK_TEST_PROGRAMS; i += 1)
+    char harness[BUSTER_OBJECT_TEST_PATH_BYTES];
+    const bool harnessed = object_test_harness(directory, harness, sizeof(harness), keep);
+    object_test_expect(&tally, harnessed, "the harness that loads a shared library, built by cc", 0);
+    // test-link's sets, then the shared libraries', linked -shared and run by the harness.
+    LinkProgramOptions options[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* names[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* directories[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    link_test_all_options(options, names, directories, seed, BUSTER_OBJECT_TEST_FUNCTIONS);
+    for (uint32_t i = 0; i < BUSTER_LINK_TEST_ALL_PROGRAMS; i += 1)
     {
         LinkProgram program;
-        const bool generated = link_program_generate(&program, options[i]);
-        object_test_expect(&tally, generated, link_test_program_names[i], i);
+        const bool generated = link_program_generate(&program, options[i]) && (!options[i].shared || harnessed);
+        object_test_expect(&tally, generated, names[i], i);
         // wild 0.10 doesn't link SIZE32 and SIZE64, so it links only the programs without them.
         const uint32_t linkers = options[i].sizes ? BUSTER_OBJECT_TEST_ALL_LINKERS & ~BUSTER_OBJECT_TEST_WILD : BUSTER_OBJECT_TEST_ALL_LINKERS;
         for (uint32_t sections = 0; generated && sections < 2; sections += 1)
@@ -2940,15 +3000,19 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
                 .function_sections = sections == 1,
             };
             char file[64];
-            snprintf(file, sizeof(file), "%s%s", link_test_program_directories[i], sections == 1 ? "-sections" : "");
-            object_test_cross_check_program(&tally, &program.link, options[i].units, object_test_program_expected(&program), options[i].libc, object_options, directory,
-                                            file, linkers, keep, arena);
+            snprintf(file, sizeof(file), "%s%s", directories[i], sections == 1 ? "-sections" : "");
+            object_test_cross_check_program(&tally, &program.link, options[i].units, object_test_program_expected(&program), options[i].libc,
+                                            options[i].shared ? harness : 0, object_options, directory, file, linkers, keep, arena);
         }
         if (generated)
         {
-            object_test_against_as(&tally, &program, directory, link_test_program_directories[i], keep, arena);
-            link_program_release(&program);
+            object_test_against_as(&tally, &program, directory, directories[i], keep, arena);
         }
+        link_program_release(&program);
+    }
+    if (harnessed && !keep)
+    {
+        unlink(harness);
     }
     // Past SHN_LORESERVE sections, without sizes so that wild links it too.
     LinkProgramOptions many = link_program_default_options();
@@ -2965,7 +3029,7 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
         const ObjectOptions object_options = {
             .function_sections = true,
         };
-        object_test_cross_check_program(&tally, &program.link, many.units, object_test_program_expected(&program), false, object_options, directory, "many-sections",
+        object_test_cross_check_program(&tally, &program.link, many.units, object_test_program_expected(&program), false, 0, object_options, directory, "many-sections",
                                         BUSTER_OBJECT_TEST_ALL_LINKERS, keep, arena);
         link_program_release(&program);
     }
@@ -2980,7 +3044,7 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
         const ObjectOptions object_options = {
             .function_sections = sections == 1,
         };
-        object_test_cross_check_program(&tally, &hand, BUSTER_OBJECT_TEST_HAND_UNITS, nothing, false, object_options, directory,
+        object_test_cross_check_program(&tally, &hand, BUSTER_OBJECT_TEST_HAND_UNITS, nothing, false, 0, object_options, directory,
                                         sections == 1 ? "by-hand-sections" : "by-hand", 0, keep, arena);
     }
     arena_pop_to(arena, length);
@@ -2998,7 +3062,7 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
         const ObjectOptions object_options = {
             .function_sections = sections == 1,
         };
-        object_test_cross_check_program(&tally, &ifunc, 1, ifunc_expected, true, object_options, directory, sections == 1 ? "ifunc-sections" : "ifunc",
+        object_test_cross_check_program(&tally, &ifunc, 1, ifunc_expected, true, 0, object_options, directory, sections == 1 ? "ifunc-sections" : "ifunc",
                                         BUSTER_OBJECT_TEST_ALL_LINKERS, keep, arena);
     }
     arena_pop_to(arena, length);
