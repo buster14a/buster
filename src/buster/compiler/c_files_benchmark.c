@@ -119,6 +119,7 @@ struct FilesBenchmarkCounts
     uint64_t opens;
     uint64_t maps;
     uint64_t reads;
+    uint64_t kept;
 };
 
 // A run's times: its ticks and those until its roots were prepared, each phase's on the slowest lane, and the busiest and
@@ -155,7 +156,7 @@ static void files_benchmark_lane(void* argument)
 // One run from nothing on `lanes` lanes (pinned to `cpus`): its times in `sample` and what it did in `counts`. Leaves
 // the cache and its table filled when `keep` (for files_benchmark_unused), else releases them.
 static bool files_benchmark_run(const PPOptions* options, const char* const* roots, uint32_t root_count, bool follow, FileCacheBytes bytes, uint32_t read_limit,
-                                uint64_t lane_bytes, uint32_t lanes, const uint32_t* cpus, uint64_t spin_ticks, FilesBenchmarkSample* sample, FilesBenchmarkCounts* counts,
+                                bool defer, uint32_t defer_above, uint64_t load_batch, bool close_later, uint64_t lane_bytes, uint32_t lanes, const uint32_t* cpus, uint64_t spin_ticks, FilesBenchmarkSample* sample, FilesBenchmarkCounts* counts,
                                 InternTable* table, FileCache* cache, bool keep)
 {
     static Preprocessor search;
@@ -166,6 +167,10 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
     result = result && pp_initialize(&search, &with, table) && files_run_initialize(&benchmark.run, cache, &search, roots, root_count, follow, lanes);
     benchmark.run.bytes = bytes;
     benchmark.run.read_limit = read_limit;
+    benchmark.run.defer = defer;
+    benchmark.run.load_batch = load_batch;
+    benchmark.run.close_later = close_later;
+    benchmark.run.defer_above = defer_above;
     benchmark.run.lane_bytes = lane_bytes;
     benchmark.spin_ticks = spin_ticks;
     benchmark.ticks = 0;
@@ -175,7 +180,7 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
         .roots = benchmark.run.roots_prepared > benchmark.start ? benchmark.run.roots_prepared - benchmark.start : 0,
         .busy_least = UINT64_MAX,
     };
-    *counts = (FilesBenchmarkCounts){ .rounds = benchmark.run.rounds, .waves = benchmark.run.waves, .candidates = benchmark.run.candidates_exchanged };
+    *counts = (FilesBenchmarkCounts){ .rounds = benchmark.run.rounds, .waves = benchmark.run.waves, .candidates = benchmark.run.candidates_exchanged, .kept = benchmark.run.kept };
     for (uint32_t l = 0; result && l < lanes; l += 1)
     {
         const FilesLane* lane = &benchmark.run.lanes[l];
@@ -354,6 +359,10 @@ int run_files_benchmark(int argc, char** argv)
     FileCacheBytes bytes = BUSTER_FILES_BYTES;
     uint64_t lane_bytes = BUSTER_FILES_LANE_BYTES;
     uint32_t read_limit = BUSTER_FILES_READ_LIMIT;
+    bool defer = true;
+    uint64_t load_batch = BUSTER_FILES_LOAD_BATCH;
+    bool close_later = false;
+    uint32_t defer_above = BUSTER_FILES_DEFER_ABOVE;
     char** passed = calloc((size_t)argc + 2, sizeof(char*));
     int passed_count = 0;
     FilesSources sources = { 0 };
@@ -400,6 +409,26 @@ int run_files_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--read-limit") == 0 && next != 0)
         {
             read_limit = (uint32_t)strtoul(next, 0, 10);
+            i += 1;
+        }
+        else if (strcmp(argument, "--defer-above") == 0 && next != 0)
+        {
+            defer_above = (uint32_t)strtoul(next, 0, 10);
+            i += 1;
+        }
+        else if (strcmp(argument, "--close-later") == 0)
+        {
+            close_later = true;
+        }
+        else if (strcmp(argument, "--load-batch") == 0 && next != 0)
+        {
+            load_batch = strtoull(next, 0, 10);
+            i += 1;
+        }
+        else if (strcmp(argument, "--defer") == 0 && next != 0)
+        {
+            defer = strcmp(next, "on") == 0;
+            valid = strcmp(next, "on") == 0 || strcmp(next, "off") == 0;
             i += 1;
         }
         else if (strcmp(argument, "--bytes") == 0 && next != 0)
@@ -480,10 +509,10 @@ int run_files_benchmark(int argc, char** argv)
     for (uint32_t l = 0; result && l < lane_count; l += 1)
     {
         // A warm-up run, then the measured ones.
-        result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, read_limit, lane_bytes, lanes[l], cpus, spin_ticks, &samples[0], &counts, &table, &cache, false);
+        result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, read_limit, defer, defer_above, load_batch, close_later, lane_bytes, lanes[l], cpus, spin_ticks, &samples[0], &counts, &table, &cache, false);
         for (uint32_t r = 0; result && r < runs; r += 1)
         {
-            result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, read_limit, lane_bytes, lanes[l], cpus, spin_ticks, &samples[r], &counts, &table, &cache, false);
+            result = files_benchmark_run(&options, sources.paths, sources.count, !flat, bytes, read_limit, defer, defer_above, load_batch, close_later, lane_bytes, lanes[l], cpus, spin_ticks, &samples[r], &counts, &table, &cache, false);
         }
         if (result)
         {
@@ -529,15 +558,16 @@ int run_files_benchmark(int argc, char** argv)
     }
     if (result)
     {
-        printf("a run: %u rounds, %u waves; %lu files, %lu bytes, %lu tokens; %u shared ids; %lu candidates exchanged, %lu opens, %lu mappings and %lu reads (on %u "
-               "lanes)\n",
+        printf("a run: %u rounds, %u waves; %lu files, %lu bytes, %lu tokens; %u shared ids; %lu candidates exchanged, %lu opens, %lu mappings and %lu reads, %lu "
+               "files read by the lane that prepared them (on %u lanes)\n",
                counts.rounds, counts.waves, (unsigned long)counts.files, (unsigned long)counts.bytes, (unsigned long)counts.tokens, counts.ids,
-               (unsigned long)counts.candidates, (unsigned long)counts.opens, (unsigned long)counts.maps, (unsigned long)counts.reads, lanes[lane_count - 1]);
+               (unsigned long)counts.candidates, (unsigned long)counts.opens, (unsigned long)counts.maps, (unsigned long)counts.reads, (unsigned long)counts.kept,
+               lanes[lane_count - 1]);
     }
     if (result && !flat)
     {
         FilesBenchmarkSample sample;
-        result = files_benchmark_run(&options, sources.paths, sources.count, true, bytes, read_limit, lane_bytes, 1, cpus, 0, &sample, &counts, &table, &cache, true) &&
+        result = files_benchmark_run(&options, sources.paths, sources.count, true, bytes, read_limit, defer, defer_above, load_batch, close_later, lane_bytes, 1, cpus, 0, &sample, &counts, &table, &cache, true) &&
                  files_benchmark_unused(&options, sources.paths, sources.count, &table, &cache);
         file_cache_release(&cache);
         intern_release(&table);

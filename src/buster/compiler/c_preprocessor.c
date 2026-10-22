@@ -288,6 +288,8 @@ struct PPFileData
     uint32_t length;
     // The bytes are a mapping of the file, which the record's cache unmaps (file_cache_release), not arena memory.
     bool mapped;
+    // A cache record whose bytes are still unread (null): the descriptor its probe left open for them (file_cache_load).
+    int32_t descriptor;
     // A translation unit's copy: the file cache's record it copies, or BUSTER_PP_NONE for a file the unit made (the
     // predefines, the command line), which isn't in the cache.
     uint32_t record;
@@ -357,7 +359,8 @@ struct FileCacheCounts
 
 // What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
 // modification time, and either the record that already had that identity when it looked (BUSTER_PP_NONE if none) or
-// its bytes, which the probe mapped (`mapped`) or read into an arena.
+// its bytes, which the probe mapped (`mapped`) or read into an arena, or left unread with the file open (`descriptor`,
+// else -1).
 typedef struct FileProbe FileProbe;
 struct FileProbe
 {
@@ -367,13 +370,14 @@ struct FileProbe
     const uint8_t* bytes;
     uint32_t length;
     uint32_t record;
+    int32_t descriptor;
     bool found;
     bool mapped;
 };
 
 // How a probe gets a file's bytes: mapped with MAP_POPULATE (a translation unit's, and one lane's), mapped without it
 // (the mapping holds the process's memory map lock for less time, and its pages are faulted in as they are first read),
-// or read into an arena. A lane reads small files whatever this says (file_cache_probe's `read_limit`).
+// or read into an arena; a lane reads small files whatever this says (file_cache_probe's `read_limit`).
 typedef enum FileCacheBytes
 {
     FILE_CACHE_MAP_POPULATED,
@@ -1710,6 +1714,8 @@ typedef enum PPPrepareStatus
     PP_PREPARE_NO_COLUMNS,
     // No room for the rest, or the intern table is full.
     PP_PREPARE_NO_MEMORY,
+    // The file's bytes can't be read (c_files.c reads a file's bytes as it prepares it: file_cache_load).
+    PP_PREPARE_UNREADABLE,
 } PPPrepareStatus;
 
 // Lexes, refines and indexes a file's bytes, `data`: its tokens, values (its identifiers interned in `table`),
@@ -1952,8 +1958,22 @@ static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, Inte
     return cache->records != 0 && cache->identity_slots != 0 && cache->paths != 0 && cache->path_slots != 0 && cache->path_arena.base != 0;
 }
 
-// Unmaps the records' files, and the files of paths whose probe mapped one that no record took, and releases the
-// cache's memory.
+// Closes the file a record's probe kept open: a record whose bytes are then still unread is none, as for a probe that
+// couldn't read them. Returns whether it closed one.
+static bool file_cache_close(FileCache* cache, uint32_t record)
+{
+    PPFileData* data = &cache->records[record];
+    const bool result = data->descriptor >= 0;
+    if (result)
+    {
+        close(data->descriptor);
+        data->descriptor = -1;
+    }
+    return result;
+}
+
+// Unmaps the records' files and closes those still open, does the same for the files of paths whose probe mapped or kept
+// one that no record took, and releases the cache's memory.
 static __attribute__((unused)) void file_cache_release(FileCache* cache)
 {
     for (uint32_t r = 0; r < cache->record_count; r += 1)
@@ -1962,12 +1982,17 @@ static __attribute__((unused)) void file_cache_release(FileCache* cache)
         {
             munmap((void*)cache->records[r].bytes, cache->records[r].length);
         }
+        file_cache_close(cache, r);
     }
     for (uint32_t p = 0; p < cache->path_count; p += 1)
     {
         if (cache->paths[p].probe.mapped)
         {
             munmap((void*)cache->paths[p].probe.bytes, cache->paths[p].probe.length);
+        }
+        if (cache->paths[p].probe.descriptor >= 0)
+        {
+            close(cache->paths[p].probe.descriptor);
         }
     }
     for (uint32_t lane = 0; lane < BUSTER_LANE_MAX_COUNT; lane += 1)
@@ -2040,8 +2065,9 @@ static void file_cache_place_identity(FileCache* cache, uint32_t record)
     cache->identity_slots[slot] = record + 1;
 }
 
-// A new record for the file a probe mapped (whose identity no record has): the cache now owns its bytes. Returns the
-// record's index, or BUSTER_PP_NONE (having unmapped the bytes) if the cache has as many records as it can hold.
+// A new record for the file a probe found (whose identity no record has): the cache now owns its bytes, or the
+// descriptor they are to be read from. Returns the record's index, or BUSTER_PP_NONE (having unmapped the bytes or
+// closed the descriptor) if the cache has as many records as it can hold.
 static uint32_t file_cache_add_record(FileCache* cache, const FileProbe* probe)
 {
     uint32_t result = BUSTER_PP_NONE;
@@ -2056,6 +2082,7 @@ static uint32_t file_cache_add_record(FileCache* cache, const FileProbe* probe)
             .bytes = probe->bytes,
             .length = probe->length,
             .mapped = probe->mapped,
+            .descriptor = probe->descriptor,
             .record = result,
         };
         cache->record_count += 1;
@@ -2079,6 +2106,10 @@ static uint32_t file_cache_add_record(FileCache* cache, const FileProbe* probe)
     {
         munmap((void*)probe->bytes, probe->length);
     }
+    else if (probe->descriptor >= 0)
+    {
+        close(probe->descriptor);
+    }
     return result;
 }
 
@@ -2100,18 +2131,57 @@ static FileCachePath* file_cache_find_path(FileCache* cache, const char* path, u
     return result;
 }
 
-// Probes the file system for a regular file at `path` (NUL-terminated): opens it and reads its identity, and unless a
-// record already has that identity, gets its bytes as `how` says. A mapping is read-only: the page cache's pages, which
-// costs neither a copy nor clearing new pages, but each mapping holds the process's memory map lock, on which lanes that
-// map at once queue. A file of up to `read_limit` bytes, or any with FILE_CACHE_READ, is read into `bytes_arena`
-// instead (unless it is null), followed by 64 zero bytes. A file too big for 32-bit positions, or that can't be mapped
-// or read whole, is none. The probe reads the identity table only, so lanes probe at once while no lane adds records;
-// the system calls go to `counts`.
-static void file_cache_probe(const FileCache* cache, const char* path, FileCacheBytes how, uint32_t read_limit, Arena* bytes_arena, FileProbe* probe,
-                             FileCacheCounts* counts)
+// The bytes of an empty file.
+static const uint8_t file_cache_empty[1] = { 0 };
+
+// The bytes of the regular file of `length` bytes open as `descriptor`, as `how` says. A mapping is read-only: the page cache's pages, which costs neither a copy nor
+// clearing new pages, but each mapping holds the process's memory map lock, on which lanes that map at once queue. A file
+// of up to `read_limit` bytes, or any with FILE_CACHE_READ, is read into `bytes_arena` instead (unless it is null),
+// followed by 64 zero bytes. Returns 0 if they can't be mapped or read whole; `*mapped` says whether they are a mapping,
+// and the system calls go to `counts`.
+static const uint8_t* file_cache_read(int descriptor, uint32_t length, FileCacheBytes how, uint32_t read_limit, Arena* bytes_arena, bool* mapped, FileCacheCounts* counts)
 {
-    static const uint8_t empty[1] = { 0 };
-    *probe = (FileProbe){ .record = BUSTER_PP_NONE };
+    const uint8_t* result = file_cache_empty;
+    const bool read = bytes_arena != 0 && (how == FILE_CACHE_READ || length <= read_limit);
+    *mapped = false;
+    if (length != 0 && !read)
+    {
+        void* mapping = mmap(0, length, PROT_READ, MAP_PRIVATE | (how == FILE_CACHE_MAP_POPULATED ? MAP_POPULATE : 0), descriptor, 0);
+        result = mapping != MAP_FAILED ? mapping : 0;
+        *mapped = result != 0;
+        counts->maps += 1;
+    }
+    else if (length != 0)
+    {
+        uint8_t* buffer = arena_push(bytes_arena, (uint64_t)length + 64, 64);
+        uint64_t done = 0;
+        int64_t got = 1;
+        while (buffer != 0 && done < length && got > 0)
+        {
+            got = pread(descriptor, buffer + done, length - done, (off_t)done);
+            done += got > 0 ? (uint64_t)got : 0;
+        }
+        if (buffer != 0 && done == length)
+        {
+            memset(buffer + done, 0, 64);
+        }
+        result = buffer != 0 && done == length ? buffer : 0;
+        counts->reads += 1;
+    }
+    return result;
+}
+
+// Probes the file system for a regular file at `path` (NUL-terminated): opens it and reads its identity, and unless a
+// record already has that identity, gets its bytes as `how` says (file_cache_read), or for a file of more than
+// `defer_above` bytes leaves them unread and keeps the file open, for whoever prepares the file to read
+// (file_cache_read_record): c_files.c's lanes probe a round's paths, and the lane that prepares a file then lexes bytes
+// in its own caches rather than those of the lane that probed it. A file too big for 32-bit positions, or that can't be
+// mapped or read whole, is none. The probe reads the identity table only, so lanes probe at once while no lane adds
+// records; the system calls go to `counts`.
+static void file_cache_probe(const FileCache* cache, const char* path, FileCacheBytes how, uint32_t read_limit, uint32_t defer_above, Arena* bytes_arena,
+                             FileProbe* probe, FileCacheCounts* counts)
+{
+    *probe = (FileProbe){ .record = BUSTER_PP_NONE, .descriptor = -1 };
     // Without blocking: opening a FIFO waits for a writer otherwise, also for the walk's speculative probes of includes
     // no unit reaches. A FIFO, a device or a directory then isn't a regular file, and is none. O_NONBLOCK changes
     // nothing for a regular file, and O_NOCTTY keeps a terminal from becoming the process's controlling one.
@@ -2125,39 +2195,43 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
         probe->modified = (int64_t)stats.st_mtime;
         probe->length = (uint32_t)stats.st_size;
         probe->record = file_cache_find_identity(cache, probe->device, probe->inode);
-        const uint8_t* bytes = empty;
-        const bool read = bytes_arena != 0 && (how == FILE_CACHE_READ || probe->length <= read_limit);
-        if (probe->record == BUSTER_PP_NONE && probe->length != 0 && !read)
-        {
-            void* mapped = mmap(0, probe->length, PROT_READ, MAP_PRIVATE | (how == FILE_CACHE_MAP_POPULATED ? MAP_POPULATE : 0), fd, 0);
-            bytes = mapped != MAP_FAILED ? mapped : 0;
-            probe->mapped = bytes != 0;
-            counts->maps += 1;
-        }
-        else if (probe->record == BUSTER_PP_NONE && probe->length != 0)
-        {
-            uint8_t* buffer = arena_push(bytes_arena, (uint64_t)probe->length + 64, 64);
-            uint64_t done = 0;
-            int64_t got = 1;
-            while (buffer != 0 && done < probe->length && got > 0)
-            {
-                got = pread(fd, buffer + done, probe->length - done, (off_t)done);
-                done += got > 0 ? (uint64_t)got : 0;
-            }
-            if (buffer != 0 && done == probe->length)
-            {
-                memset(buffer + done, 0, 64);
-            }
-            bytes = buffer != 0 && done == probe->length ? buffer : 0;
-            counts->reads += 1;
-        }
-        probe->bytes = bytes;
-        probe->found = bytes != 0;
+        // A file a record already has needs no bytes, and an empty one has them all.
+        const bool unread = probe->record == BUSTER_PP_NONE && probe->length != 0;
+        const bool deferred = unread && probe->length > defer_above;
+        bool mapped = false;
+        probe->descriptor = deferred ? fd : -1;
+        probe->bytes = unread && !deferred ? file_cache_read(fd, probe->length, how, read_limit, bytes_arena, &mapped, counts) : unread ? 0 : file_cache_empty;
+        probe->mapped = mapped;
+        probe->found = probe->bytes != 0 || probe->descriptor >= 0;
     }
-    if (fd >= 0)
+    if (fd >= 0 && probe->descriptor < 0)
     {
         close(fd);
     }
+}
+
+// Reads the bytes of record `record` if its probe left them unread (file_cache_probe's `defer_above`), as `how`, `read_limit` and
+// `bytes_arena` say (file_cache_read), from its descriptor, which stays open until file_cache_close. Returns whether the
+// record has its bytes. Lanes read different records at once.
+static bool file_cache_read_record(FileCache* cache, uint32_t record, FileCacheBytes how, uint32_t read_limit, Arena* bytes_arena, FileCacheCounts* counts)
+{
+    PPFileData* data = &cache->records[record];
+    if (data->bytes == 0 && data->descriptor >= 0)
+    {
+        bool mapped = false;
+        data->bytes = file_cache_read(data->descriptor, data->length, how, read_limit, bytes_arena, &mapped, counts);
+        data->mapped = mapped;
+    }
+    return data->bytes != 0;
+}
+
+// Reads the bytes of record `record` if its probe left them unread (file_cache_read_record), and closes its file.
+// Returns whether the record has its bytes: a file whose bytes can't be read is none.
+static bool file_cache_load(FileCache* cache, uint32_t record, FileCacheBytes how, uint32_t read_limit, Arena* bytes_arena, FileCacheCounts* counts)
+{
+    const bool result = file_cache_read_record(cache, record, how, read_limit, bytes_arena, counts);
+    file_cache_close(cache, record);
+    return result;
 }
 
 // Adds a path the cache never looked up, with `hash` (intern_hash_bytes's) and what its probe found: its record is
@@ -2204,7 +2278,8 @@ static FileCachePath* file_cache_add_path(FileCache* cache, const char* path, ui
 }
 
 // Gives a path whose probe found a file its record: the record that has the file's identity (unmapping the probe's
-// bytes, if it mapped them, since another path's probe mapped the same file first), or a new one.
+// bytes, if it mapped them, or closing the file it kept, since another path's probe found the same file first), or a
+// new one.
 static void file_cache_identify(FileCache* cache, FileCachePath* entry)
 {
     if (entry->record == BUSTER_FILE_CACHE_PENDING)
@@ -2215,18 +2290,23 @@ static void file_cache_identify(FileCache* cache, FileCachePath* entry)
         {
             munmap((void*)probe->bytes, probe->length);
         }
+        else if (record != BUSTER_PP_NONE && probe->descriptor >= 0)
+        {
+            close(probe->descriptor);
+        }
         else if (record == BUSTER_PP_NONE)
         {
             record = file_cache_add_record(cache, probe);
         }
         entry->record = record;
         entry->probe.mapped = false;
+        entry->probe.descriptor = -1;
     }
 }
 
 // The record of the file at `path` (`length` bytes, NUL-terminated), probing the file system only the first time the
-// cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full. One lane at a
-// time.
+// cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full. A record whose
+// bytes c_files.c's walk left unread (a walk that stopped early) is read now. One lane at a time.
 static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, FileCacheCounts* counts)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
@@ -2234,7 +2314,7 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
     if (entry == 0)
     {
         FileProbe probe;
-        file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, 0, 0, &probe, counts);
+        file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, 0, UINT32_MAX, 0, &probe, counts);
         entry = file_cache_add_path(cache, path, length, hash, &probe);
         if (entry != 0)
         {
@@ -2245,7 +2325,8 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
             munmap((void*)probe.bytes, probe.length);
         }
     }
-    return entry != 0 ? entry->record : BUSTER_PP_NONE;
+    const uint32_t record = entry != 0 ? entry->record : BUSTER_PP_NONE;
+    return record != BUSTER_PP_NONE && file_cache_load(cache, record, FILE_CACHE_MAP_POPULATED, 0, 0, counts) ? record : BUSTER_PP_NONE;
 }
 
 // Prepares record `record` (pp_prepare_into) unless it is prepared, into lane `lane`'s arenas and with the cache's intern

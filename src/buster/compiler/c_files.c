@@ -61,6 +61,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <dirent.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <immintrin.h>
 
@@ -91,6 +92,11 @@
 // (docs/c-files.md, "Where the time goes").
 #define BUSTER_FILES_BYTES FILE_CACHE_MAP
 #define BUSTER_FILES_READ_LIMIT (16u << 10)
+// The descriptors the walk leaves to the rest of the process when it keeps files open for the lanes that prepare them,
+// and the bytes a lane reads ahead of the file it prepares.
+#define BUSTER_FILES_DESCRIPTOR_RESERVE 256
+#define BUSTER_FILES_LOAD_BATCH 0
+#define BUSTER_FILES_DEFER_ABOVE 0
 // Most files a round can have, and items, requests and paths a walk can have.
 #define BUSTER_FILES_MAX_FILES (1u << 20)
 #define BUSTER_FILES_MAX_ITEMS (1u << 22)
@@ -204,12 +210,13 @@ struct FilesLane
     Arena names;
     Arena request_list;
     Arena path_list;
-    // The TSC ticks of each phase (and when the current one started), the records it prepared and their tokens, and its
-    // system calls.
+    // The TSC ticks of each phase (and when the current one started), the records it prepared and their tokens, the
+    // files it closed that probes kept open, and its system calls.
     uint64_t ticks[FILES_PHASE_COUNT];
     uint64_t tick;
     uint64_t prepared;
     uint64_t tokens;
+    uint64_t closed;
     FileCacheCounts counts;
 };
 
@@ -277,6 +284,22 @@ struct FilesRun
     // read into a lane's arena rather than mapped, whatever the lane count: BUSTER_FILES_READ_LIMIT.
     FileCacheBytes bytes;
     uint32_t read_limit;
+    // Whether probes leave a file's bytes unread for the lane that prepares it (FILE_CACHE_DEFER), as long as the files
+    // they keep open stay within `descriptor_limit`: a wave defers only if every probe of it could keep one. `kept` counts
+    // the records that took a probe's descriptor (FilesLane.closed, those the lanes closed), and `wave_defer` is lane 0's
+    // word on the wave. With `close_later`, the lane that reads a file leaves it open, and every lane closes a share of
+    // the round's files after the round (files_close).
+    bool defer;
+    bool wave_defer;
+    bool close_later;
+    // The largest file a deferring wave's probes still read themselves: BUSTER_FILES_DEFER_ABOVE.
+    uint32_t defer_above;
+    uint64_t descriptor_limit;
+    uint64_t kept;
+    // The bytes a lane reads ahead of the file it prepares (files_load): BUSTER_FILES_LOAD_BATCH.
+    uint64_t load_batch;
+    // The cache's first record that the run made.
+    uint32_t first_record;
     // The lanes' state, by lane index.
     FilesLane* lanes;
     uint32_t lane_count;
@@ -682,6 +705,39 @@ static uint64_t files_broadcast(FilesLane* mine, FilesPhase phase, uint64_t valu
     return result;
 }
 
+// Reads the round's files from `*next` on (before `end`) whose probes left their bytes unread (file_cache_load), on the
+// lane that prepares them, so that it lexes bytes in its own caches: a small file into the lane's arena, and a larger one
+// mapped, with MAP_POPULATE if the lane prepares the round `alone` (no other lane maps at once). It reads files until
+// they come to run->load_batch bytes, at least one, so that their system calls run together; each file's status says
+// whether it has its bytes (PP_PREPARE_DONE so far).
+static void files_load(FilesRun* run, FilesLane* mine, uint32_t lane, uint64_t* next, uint64_t end, bool alone)
+{
+    FileCache* cache = run->cache;
+    const uint64_t first = *next;
+    uint64_t bytes = 0;
+    while (*next < end && (*next == first || bytes < run->load_batch))
+    {
+        const uint32_t record = run->records[*next];
+        bytes += cache->records[record].length;
+        const bool loaded = file_cache_read_record(cache, record, alone ? FILE_CACHE_MAP_POPULATED : run->bytes, run->read_limit, &cache->lanes[lane].bytes, &mine->counts);
+        mine->closed += (!run->close_later || !loaded) && file_cache_close(cache, record);
+        run->file_status[*next] = (uint8_t)(loaded ? PP_PREPARE_DONE : PP_PREPARE_UNREADABLE);
+        *next += 1;
+    }
+}
+
+// After a round, with run->close_later: this lane's share of the round's files that probes kept open and lanes read,
+// closed. A file no lane read (a round that failed) stays open for the walk's end to read.
+static void files_close(FilesRun* run, FilesLane* mine)
+{
+    const Range64 files = lane_range(run->close_later ? run->record_count : 0);
+    for (uint64_t file = files.begin; file < files.end; file += 1)
+    {
+        const uint32_t record = run->records[file];
+        mine->closed += run->cache->records[record].bytes != 0 && file_cache_close(run->cache, record);
+    }
+}
+
 // Prepares the round's records (run->records, none prepared yet, in order) on every lane of the group, which all call it.
 // The lanes that work on it are one per run->lane_bytes of its bytes, up to all of them, but never more than its files:
 // one works alone on lane 0, one file after another straight into the shared table; several take rule 1's parts of the
@@ -699,10 +755,16 @@ static void files_prepare(FilesRun* run)
     if (lanes <= 1)
     {
         FileCacheArenas* arenas = file_cache_arenas(cache, lane);
+        uint64_t loaded = 0;
         for (uint32_t file = 0; lane == 0 && file < run->record_count; file += 1)
         {
             PPFileData* data = &cache->records[run->records[file]];
-            run->file_status[file] = (uint8_t)pp_prepare_into(&cache->prepare, cache->table, arenas->columns, &arenas->arena, data, 0);
+            if (file == loaded)
+            {
+                files_load(run, mine, lane, &loaded, run->record_count, true);
+            }
+            const bool readable = run->file_status[file] == PP_PREPARE_DONE;
+            run->file_status[file] = (uint8_t)(readable ? pp_prepare_into(&cache->prepare, cache->table, arenas->columns, &arenas->arena, data, 0) : run->file_status[file]);
             mine->prepared += run->file_status[file] == PP_PREPARE_DONE;
             mine->tokens += run->file_status[file] == PP_PREPARE_DONE ? data->token_count : 0;
         }
@@ -743,11 +805,17 @@ static void files_prepare(FilesRun* run)
             const bool failed = __atomic_load_n(&run->failed, __ATOMIC_RELAXED);
             const uint64_t first_file = split ? range.begin : run->boundaries[part];
             const uint64_t last_file = failed ? first_file : split ? range.end : run->boundaries[part + 1];
+            uint64_t loaded = first_file;
             for (uint64_t file = first_file; file < last_file; file += 1)
             {
                 PPFileData* data = &cache->records[run->records[file]];
                 const IdentId first = mine->table.count;
-                run->file_status[file] = (uint8_t)pp_prepare_into(&cache->prepare, &mine->table, arenas->columns, &arenas->arena, data, 0);
+                if (file == loaded)
+                {
+                    files_load(run, mine, lane, &loaded, last_file, false);
+                }
+                const bool readable = run->file_status[file] == PP_PREPARE_DONE;
+                run->file_status[file] = (uint8_t)(readable ? pp_prepare_into(&cache->prepare, &mine->table, arenas->columns, &arenas->arena, data, 0) : run->file_status[file]);
                 run->file_first[file] = first;
                 run->file_end[file] = mine->table.count;
                 for (IdentId id = first; id < mine->table.count; id += 1)
@@ -1172,21 +1240,29 @@ static void files_collect_probes(FilesRun* run)
     }
 }
 
-// On one lane: the wave's probed paths added to the cache, in order, each with its file's record (file_cache_identify).
+// On one lane: the wave's probed paths added to the cache, in order, each with its file's record (file_cache_identify),
+// counting the records that took a probe's descriptor.
 static void files_add_probes(FilesRun* run)
 {
     FileCache* cache = run->cache;
     for (uint32_t p = 0; p < run->probe_count; p += 1)
     {
         const FilesPath* path = &run->probes[p];
-        FileCachePath* entry = file_cache_add_path(cache, path->path, path->length, path->hash, &run->found[p]);
+        const FileProbe* found = &run->found[p];
+        FileCachePath* entry = file_cache_add_path(cache, path->path, path->length, path->hash, found);
+        const uint32_t records = cache->record_count;
         if (entry != 0)
         {
             file_cache_identify(cache, entry);
+            run->kept += found->descriptor >= 0 && cache->record_count > records;
         }
-        else if (run->found[p].mapped)
+        else if (found->mapped)
         {
-            munmap((void*)run->found[p].bytes, run->found[p].length);
+            munmap((void*)found->bytes, found->length);
+        }
+        else if (found->descriptor >= 0)
+        {
+            close(found->descriptor);
         }
         files_fail(run, entry == 0);
     }
@@ -1208,16 +1284,26 @@ static void files_search(FilesRun* run)
         {
             files_collect_probes(run);
             run->waves += 1;
+            // The files the walk keeps open: those records took, less those the lanes closed.
+            uint64_t closed = 0;
+            for (uint32_t l = 0; l < run->lane_count; l += 1)
+            {
+                closed += run->lanes[l].closed;
+            }
+            const uint64_t open = run->kept > closed ? run->kept - closed : 0;
+            run->wave_defer = run->defer && open + run->probe_count <= run->descriptor_limit;
             files_tick(mine, FILES_PHASE_ALONE);
         }
         probes = (uint32_t)files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && !run->failed ? run->probe_count : 0);
-        // How the lanes get the files' bytes (file_cache_probe): files of up to run->read_limit bytes read, and larger
-        // ones mapped, with MAP_POPULATE on one lane, and as run->bytes says on more.
+        // How the lanes get the files' bytes (file_cache_probe): left for the lanes that prepare them if the wave defers,
+        // else files of up to run->read_limit bytes read, and larger ones mapped, with MAP_POPULATE on one lane, and as
+        // run->bytes says on more.
         const Range64 range = lane_range(probes);
         const FileCacheBytes how = run->lane_count > 1 ? run->bytes : FILE_CACHE_MAP_POPULATED;
+        const uint32_t defer_above = run->wave_defer ? run->defer_above : UINT32_MAX;
         for (uint64_t p = range.begin; p < range.end; p += 1)
         {
-            file_cache_probe(run->cache, run->probes[p].path, how, run->read_limit, &run->cache->lanes[lane].bytes, &run->found[p], &mine->counts);
+            file_cache_probe(run->cache, run->probes[p].path, how, run->read_limit, defer_above, &run->cache->lanes[lane].bytes, &run->found[p], &mine->counts);
         }
         files_sync(mine, FILES_PHASE_SEARCH);
         if (lane == 0 && probes != 0)
@@ -1458,6 +1544,7 @@ static void files_run_ahead(FilesRun* run)
         if (run->record_count != 0)
         {
             files_prepare(run);
+            files_close(run, mine);
         }
         if (lane == 0 && run->roots_prepared == 0)
         {
@@ -1479,6 +1566,12 @@ static void files_run_ahead(FilesRun* run)
             files_tick(mine, FILES_PHASE_ALONE);
         }
         more = files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && !run->failed && run->item_count > run->round_items) != 0;
+    }
+    // A walk that stopped early may have kept files open that no lane read: lane 0 reads them, mapped as a unit maps a
+    // file, so that no file stays open past the walk.
+    for (uint32_t record = run->first_record; lane == 0 && run->failed && record < run->cache->record_count; record += 1)
+    {
+        file_cache_load(run->cache, record, FILE_CACHE_MAP_POPULATED, 0, 0, &mine->counts);
     }
 }
 
@@ -1505,9 +1598,17 @@ static __attribute__((unused)) bool files_run_initialize(FilesRun* run, FileCach
         .split_bytes = BUSTER_FILES_SPLIT_BYTES,
         .bytes = BUSTER_FILES_BYTES,
         .read_limit = BUSTER_FILES_READ_LIMIT,
+        .defer = true,
+        .load_batch = BUSTER_FILES_LOAD_BATCH,
+        .defer_above = BUSTER_FILES_DEFER_ABOVE,
+        .first_record = cache->record_count,
         .lane_count = lane_count,
         .partition_count = BUSTER_FILES_PARTITIONS_PER_LANE * lane_count,
     };
+    // The files the walk may keep open: the process's limit, but for BUSTER_FILES_DESCRIPTOR_RESERVE of them.
+    struct rlimit limit;
+    const uint64_t descriptors = getrlimit(RLIMIT_NOFILE, &limit) == 0 ? (uint64_t)limit.rlim_cur : 0;
+    run->descriptor_limit = descriptors > BUSTER_FILES_DESCRIPTOR_RESERVE ? descriptors - BUSTER_FILES_DESCRIPTOR_RESERVE : 0;
     run->arena = arena_reserve(BUSTER_FILES_ARENA_BYTES);
     run->files = arena_reserve(BUSTER_FILES_ARENA_BYTES);
     run->round = arena_reserve(BUSTER_FILES_ARENA_BYTES);

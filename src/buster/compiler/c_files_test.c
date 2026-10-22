@@ -45,6 +45,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
@@ -85,6 +86,10 @@ struct FilesTestRun
     uint64_t candidates;
     uint64_t shared_found;
     uint64_t stderr_bytes;
+    // The files the lanes that prepared them read, and how many more files the process had open after the walks than
+    // before (none: the walk keeps no file open past its end).
+    uint64_t kept;
+    int64_t descriptors;
     bool failed;
     FilesTestUnit* units;
     uint32_t unit_count;
@@ -106,6 +111,10 @@ struct FilesTestWork
     bool thresholds;
     uint64_t lane_bytes;
     uint64_t split_bytes;
+    // Probes that read the files' bytes themselves (FilesRun.defer false), and the files the walk may keep open (its
+    // descriptor_limit; 0 for the process's).
+    bool reads;
+    uint64_t descriptors;
     const char* const* units;
     uint32_t unit_count;
 };
@@ -157,6 +166,23 @@ static uint64_t files_test_quiet_end(int saved, const char* path)
     return result;
 }
 
+// The files this process has open.
+static int64_t files_test_descriptors(void)
+{
+    int64_t result = 0;
+    DIR* directory = opendir("/proc/self/fd");
+    for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
+    {
+        result += entry->d_name[0] != '.';
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+    // Less the directory's own.
+    return result - 1;
+}
+
 static void files_test_release_run(FilesTestRun* run)
 {
     for (uint32_t u = 0; run->units != 0 && u < run->unit_count; u += 1)
@@ -186,13 +212,17 @@ static bool files_test_run(const FilesTestWork* work, uint32_t lanes, const char
         const uint32_t begin = r == 0 ? 0 : work->split;
         const uint32_t end = runs == 2 && r == 0 ? work->split : work->root_count;
         FilesRun files;
+        const int64_t descriptors = files_test_descriptors();
         result = files_run_initialize(&files, &run->cache, &search, work->roots + begin, end - begin, work->follow, lanes);
         files.lane_bytes = work->thresholds ? work->lane_bytes : files.lane_bytes;
         files.split_bytes = work->thresholds ? work->split_bytes : files.split_bytes;
+        files.defer = !work->reads;
+        files.descriptor_limit = work->descriptors != 0 ? work->descriptors : files.descriptor_limit;
         char path[4200];
         const int saved = files_test_quiet_begin(directory, path, sizeof(path));
         result = result && lane_run(lanes, files_run_lane, &files, 0);
         run->stderr_bytes += files_test_quiet_end(saved, path);
+        run->kept += files.kept;
         run->rounds += files.rounds;
         run->requests += files.requests_read;
         run->searches += files.searches_made;
@@ -201,6 +231,7 @@ static bool files_test_run(const FilesTestWork* work, uint32_t lanes, const char
         run->shared_found += files.shared_found;
         run->failed |= files.failed;
         files_run_release(&files);
+        run->descriptors += files_test_descriptors() - descriptors;
     }
     pp_release(&search);
     run->prepared = run->cache.prepared_records;
@@ -371,17 +402,21 @@ static bool files_test_work(const FilesTestWork* work, const uint32_t* lanes, ui
             printf("%s: %u lanes: %lu candidates exchanged, %lu found in the shared table\n", work->name, lanes[l], (unsigned long)other.candidates,
                    (unsigned long)other.shared_found);
         }
-        result = result && other.stderr_bytes == 0 && !other.failed;
-        if (other.stderr_bytes != 0 || other.failed)
+        result = result && other.stderr_bytes == 0 && !other.failed && other.descriptors == 0;
+        if (other.stderr_bytes != 0 || other.failed || other.descriptors != 0)
         {
-            printf("%s: on %u lanes the walk %s\n", work->name, lanes[l], other.failed ? "ran out of memory" : "wrote to stderr");
+            printf("%s: on %u lanes the walk %s\n", work->name, lanes[l], other.failed ? "ran out of memory" : other.stderr_bytes != 0 ? "wrote to stderr" : "left files open");
         }
         files_test_release_run(&other);
     }
-    result = result && reference->stderr_bytes == 0 && !reference->failed && files_test_alone(work, reference);
+    result = result && reference->stderr_bytes == 0 && !reference->failed && reference->descriptors == 0 && files_test_alone(work, reference);
     if (reference->stderr_bytes != 0)
     {
         printf("%s: the walk wrote %lu bytes to stderr\n", work->name, (unsigned long)reference->stderr_bytes);
+    }
+    if (reference->descriptors != 0)
+    {
+        printf("%s: the walk left %ld files open\n", work->name, (long)reference->descriptors);
     }
     return result;
 }
@@ -551,6 +586,35 @@ static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32
             printf("%s: 13 files prepared once each in 4 rounds, the same on every lane count; 1 unused, 2 not found, no diagnostic\n", work.name);
         }
     }
+    // The bytes read by the lane that prepares each file (the reference), by the probes, and by the probes of waves
+    // that 4 files kept open can't hold: the same, on every lane count.
+    if (result && vectorized && !split)
+    {
+        FilesTestWork reads = work;
+        reads.name = "tree, read by the probes";
+        reads.reads = true;
+        FilesTestWork few = work;
+        few.name = "tree, 4 files open";
+        few.descriptors = 4;
+        FilesTestRun read_reference = { 0 };
+        FilesTestRun few_reference = { 0 };
+        result = files_test_work(&reads, lanes, lane_count, directory, &read_reference) && files_test_same(&reads, &reference, &read_reference) &&
+                 files_test_work(&few, lanes, lane_count, directory, &few_reference) && files_test_same(&few, &reference, &few_reference);
+        const bool kept = reference.kept == 13 && read_reference.kept == 0 && few_reference.kept != 0 && few_reference.kept < 13;
+        if (result && !kept)
+        {
+            printf("tree: %lu files read by the lane that prepared them (13), %lu with probes that read (0), %lu with 4 kept open (1 to 12)\n",
+                   (unsigned long)reference.kept, (unsigned long)read_reference.kept, (unsigned long)few_reference.kept);
+        }
+        else if (result)
+        {
+            printf("tree: the same with the bytes read by the lane that prepares each file, by the probes, and by both (%lu files, with 4 kept open)\n",
+                   (unsigned long)few_reference.kept);
+        }
+        result = result && kept;
+        files_test_release_run(&read_reference);
+        files_test_release_run(&few_reference);
+    }
     files_test_release_run(&reference);
     return result;
 }
@@ -661,6 +725,82 @@ static bool files_test_contexts(const char* directory, const uint32_t* lanes, ui
     {
         snprintf(path, sizeof(path), "%s/%s", directory, directories[i]);
         rmdir(path);
+    }
+    return result;
+}
+
+// The unread files' check, on the cache's own functions: probes that leave their files' bytes unread (`defer_above` 0)
+// for a file and a hard link to it, whose path then gets the first's record and closes its file; a unit's lookup,
+// which reads the bytes it finds unread; a file that shrank after its probe, whose bytes can't be read whole, which is
+// then none; and a cache released with a file still unread. No file may stay open.
+static bool files_test_unread(const char* directory)
+{
+    static const char* const names[] = { "unread.h", "unread_link.h", "shrunk.h", "left.h" };
+    static const char text[] = "#define UNREAD 1\n";
+    char paths[4][4200];
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%s", directory, names[i]);
+    }
+    bool result = files_test_write(paths[0], text) && link(paths[0], paths[1]) == 0 && files_test_write(paths[2], "#define SHRUNK 2\n") &&
+                  files_test_write(paths[3], "#define LEFT 3\n");
+    const int64_t descriptors = files_test_descriptors();
+    InternTable table;
+    FileCache cache;
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true } };
+    result = result && intern_initialize(&table) && file_cache_initialize(&cache, &table, pp_prepare_options(&options));
+    FileCacheCounts counts = { 0 };
+    FileProbe probes[4];
+    uint32_t records[4] = { BUSTER_PP_NONE, BUSTER_PP_NONE, BUSTER_PP_NONE, BUSTER_PP_NONE };
+    bool kept = result;
+    for (uint32_t i = 0; result && i < 4; i += 1)
+    {
+        file_cache_probe(&cache, paths[i], FILE_CACHE_MAP, BUSTER_FILES_READ_LIMIT, 0, &file_cache_arenas(&cache, 0)->bytes, &probes[i], &counts);
+        kept = kept && probes[i].found && probes[i].bytes == 0 && probes[i].descriptor >= 0;
+    }
+    for (uint32_t i = 0; result && i < 4; i += 1)
+    {
+        const uint32_t length = (uint32_t)strlen(paths[i]);
+        FileCachePath* entry = file_cache_add_path(&cache, paths[i], length, intern_hash_bytes((const uint8_t*)paths[i], length), &probes[i]);
+        result = entry != 0;
+        if (result)
+        {
+            file_cache_identify(&cache, entry);
+            records[i] = entry->record;
+        }
+    }
+    const bool identified = result && cache.record_count == 3 && records[1] == records[0] && records[2] != records[0] && records[3] != records[2] &&
+                            cache.records[records[0]].bytes == 0 && cache.records[records[0]].descriptor >= 0;
+    // The unit's lookup reads unread.h's bytes, through its hard link's path.
+    const uint32_t found = result ? file_cache_lookup_path(&cache, paths[1], (uint32_t)strlen(paths[1]), &counts) : BUSTER_PP_NONE;
+    const PPFileData* record = found == records[0] && identified ? &cache.records[found] : 0;
+    const bool read = record != 0 && record->bytes != 0 && record->descriptor < 0 && record->length == sizeof(text) - 1 && memcmp(record->bytes, text, record->length) == 0;
+    // shrunk.h shrinks: read into an arena, it has fewer bytes than its probe saw, and is then none to the unit too.
+    const bool shrunk = identified && truncate(paths[2], 4) == 0 &&
+                        !file_cache_load(&cache, records[2], FILE_CACHE_READ, 0, &file_cache_arenas(&cache, 0)->bytes, &counts) &&
+                        cache.records[records[2]].descriptor < 0 && file_cache_lookup_path(&cache, paths[2], (uint32_t)strlen(paths[2]), &counts) == BUSTER_PP_NONE;
+    // left.h stays unread, and the release closes it.
+    const bool left = identified && cache.records[records[3]].bytes == 0 && cache.records[records[3]].descriptor >= 0;
+    if (cache.records != 0)
+    {
+        file_cache_release(&cache);
+    }
+    intern_release(&table);
+    const int64_t open = files_test_descriptors() - descriptors;
+    result = result && kept && identified && read && shrunk && left && open == 0;
+    if (!result)
+    {
+        printf("unread files: kept open by the probes %s, identified %s, read by the lookup %s, the shrunk file none %s, one left unread %s, %ld files left "
+               "open (0)\n",
+               kept ? "yes" : "no", identified ? "yes" : "no", read ? "yes" : "no", shrunk ? "yes" : "no", left ? "yes" : "no", (long)open);
+    }
+    else
+    {
+        printf("unread files: kept open by the probes, read by a unit's lookup, none if they shrank, and closed by the release\n");
+    }
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        unlink(paths[i]);
     }
     return result;
 }
@@ -831,17 +971,20 @@ static bool files_test_memory(const char* directory, uint64_t seed)
     }
     uint32_t runs = 0;
     uint32_t failed = 0;
+    int64_t left_open = 0;
     for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(lane_counts); c += 1)
     {
         const uint32_t lanes = lane_counts[c];
         // Way 0: the round's arena, from 64 bytes to 32 KB, half again each time (the walk's arrays, then the merge's,
         // fail at some of them); ways 1 and 2: the first or the last lane's scratch memory, from 8 bytes to 512, four
-        // times as much each time (a file's line words, then a partition's table of first occurrences, fail).
-        for (uint32_t way = 0; result && way < 3; way += 1)
+        // times as much each time (a file's line words, then a partition's table of first occurrences, fail); way 3:
+        // the round's files and their arrays (FilesRun.files), from 64 bytes to 1 KB, twice as much each time (the next
+        // round's lists fail after its probes kept its files open, which the walk must then read).
+        for (uint32_t way = 0; result && way < 4; way += 1)
         {
-            const uint64_t first = way == 0 ? 64 : 8;
-            const uint64_t last = way == 0 ? 32768 : 512;
-            for (uint64_t size = first; result && size <= last; size += way == 0 ? size / 2 : 3 * size)
+            const uint64_t first = way == 0 || way == 3 ? 64 : 8;
+            const uint64_t last = way == 0 ? 32768 : way == 3 ? 1024 : 512;
+            for (uint64_t size = first; result && size <= last; size += way == 0 ? size / 2 : way == 3 ? size : 3 * size)
             {
                 static Preprocessor search;
                 InternTable table;
@@ -851,6 +994,7 @@ static bool files_test_memory(const char* directory, uint64_t seed)
                 options.files = &cache;
                 result = result && pp_initialize(&search, &options, &table);
                 FilesRun files;
+                const int64_t descriptors = files_test_descriptors();
                 result = result && files_run_initialize(&files, &cache, &search, units, BUSTER_FILES_TEST_MEMORY_FILES, true, lanes);
                 if (result)
                 {
@@ -861,6 +1005,11 @@ static bool files_test_memory(const char* directory, uint64_t seed)
                         arena_release(&files.round);
                         files.round = arena_reserve(size);
                     }
+                    else if (way == 3)
+                    {
+                        arena_release(&files.files);
+                        files.files = arena_reserve(size);
+                    }
                     FilesTestShort test = { .run = &files, .lane = way == 1 ? 0 : way == 2 ? lanes - 1 : BUSTER_PP_NONE, .scratch = size };
                     alarm(60);
                     result = lane_run(lanes, files_test_short_lane, &test, 0);
@@ -868,6 +1017,7 @@ static bool files_test_memory(const char* directory, uint64_t seed)
                     failed += files.failed;
                     runs += 1;
                     files_run_release(&files);
+                    left_open += files_test_descriptors() - descriptors;
                 }
                 pp_release(&search);
                 // Each unit with what the run left in the cache, against the unit alone.
@@ -882,23 +1032,29 @@ static bool files_test_memory(const char* directory, uint64_t seed)
                 if (!result)
                 {
                     printf("memory: on %u lanes, with %lu bytes of %s\n", lanes, (unsigned long)size,
-                           way == 0 ? "the round's arena" : way == 1 ? "lane 0's scratch memory" : "the last lane's scratch memory");
+                           way == 0 ? "the round's arena" : way == 1 ? "lane 0's scratch memory" : way == 2 ? "the last lane's scratch memory" : "the round's files");
                 }
                 file_cache_release(&cache);
                 intern_release(&table);
             }
         }
     }
-    // The sizes must reach both: runs that fail, and runs with room enough.
+    // The sizes must reach both: runs that fail, and runs with room enough. No run may leave a file open.
     const bool both = failed != 0 && failed < runs;
     if (result && !both)
     {
         printf("memory: %u of %u runs failed: the sizes don't reach both outcomes\n", failed, runs);
     }
-    result = result && both;
+    if (result && left_open != 0)
+    {
+        printf("memory: the runs left %ld files open\n", (long)left_open);
+    }
+    result = result && both && left_open == 0;
     if (result)
     {
-        printf("memory: %u runs short of the round's arena or a lane's scratch memory, %u of them failed; every unit as alone\n", runs, failed);
+        printf("memory: %u runs short of the round's arena, a lane's scratch memory or the round's files, %u of them failed, none leaving a file open; every "
+               "unit as alone\n",
+               runs, failed);
     }
     for (uint32_t f = 0; f < BUSTER_FILES_TEST_MEMORY_FILES; f += 1)
     {
@@ -1185,6 +1341,7 @@ static int run_files_tests(int argument_count, char** arguments)
         signal(SIGALRM, files_test_watchdog);
         passed_all &= files_test_contexts(directory, lanes, lane_count);
         passed_all &= files_test_special(directory, lanes, lane_count);
+        passed_all &= files_test_unread(directory);
         passed_all &= files_test_memory(directory, seed);
         signal(SIGALRM, SIG_DFL);
     }
