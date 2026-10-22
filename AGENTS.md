@@ -614,13 +614,16 @@ must be exactly the expected one:
   last instruction and before the first symbol; samples without file offsets,
   a missing function and disassembly out of order (errors);
 - `label-spills` and `spill-report`: spills, reloads and folded reloads
-  labeled in order in the function and in no other (not source paths or
-  other comments that hold the words), a static function renamed with the
-  tag in the assembler's text and not in strings or comments, a global one
-  not; their samples by stack slot and source location, without other copies'
-  and other tags' samples; labels out of order or of another tag, and an
-  invalid tag (errors); and clang's assembly of a program that prints
-  `__func__`, labeled, assembled and run, which must print the same;
+  labeled with the tag in order in the function and in no other (not source
+  paths or other comments that hold the words), and nothing else changed;
+  their samples by stack slot and source location, the labeled copy found by
+  address, without the samples of a static function of the same name in
+  another unit, of the function's static local (`f.counter`) or of another
+  tag; labels out of order or of another tag, missing from the disassembly
+  or in it twice, samples without file offsets, and an invalid tag (errors);
+  and clang's assembly of a program whose static function `function` (also
+  an assembler keyword) prints `__func__`, labeled, assembled and run, which
+  must print the same;
 - `branch-misses`: records mispredicted, predicted and neither, fields that
   aren't records, the load bias and the disassembly's instructions, and
   10,000 branches, which grow its table;
@@ -630,7 +633,7 @@ must be exactly the expected one:
 The commands are `ab [--rounds N] [--cpu N] [--lock PATH] TREE... --
 ARGUMENT... [-- ARGUMENT...]...`, `hot-loops FUNCTION DISASSEMBLY SAMPLES
 [--loops N]`, `label-spills FUNCTION TAG INPUT.s OUTPUT.s`, `spill-report
-FUNCTION LABELED.s SAMPLES [--slots N]` and `branch-misses BRSTACK [--bias
+FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]` and `branch-misses BRSTACK [--bias
 ADDRESS] [--disassembly FILE] [--branches N]`; `docs/profiling.md` has the
 perf and objdump commands that make their inputs. Run `ab` itself outside the
 9700X's lock, with `--lock ~/buster-fast-bench/exclusive.sh`, which takes it

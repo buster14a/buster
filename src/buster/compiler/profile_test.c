@@ -105,7 +105,7 @@ static const char profile_test_assembly[] = "\t.file\t0 \"/src\" \"ReduceSpills.
                                             "\t.loc\t0 12 5                          # ReduceSpills.c:12:5\n"
                                             "\tvaddps\t-128(%rsp), %zmm1, %zmm1         # 64-byte Folded Reload\n"
                                             "\tmovq\t%rax, %rbx                      # Reload the count from Spill.c\n"
-                                            "\tleaq\t.L__func__.f(%rip), %rdi        # f's name\n"
+                                            "\tleaq\tf.counter(%rip), %rdi           # f's static local\n"
                                             "\tmovq\t64(%rsp), %rax                  # 8-byte Reload\n"
                                             "\tret\n"
                                             ".Lfunc_end0:\n"
@@ -117,14 +117,14 @@ static const char profile_test_assembly[] = "\t.file\t0 \"/src\" \"ReduceSpills.
                                             "g:\n"
                                             "\tmovq\t%rsi, 64(%rsp)                  # 8-byte Spill\n"
                                             "\tret\n"
-                                            ".L__func__.f:\n"
-                                            "\t.asciz\t\"f\"                            # f, as __func__ has it\n"
-                                            "\t.ascii\t\"f \\\"f\\\" f#\"\n";
+                                            "f.counter:\n"
+                                            "\t.long\t1\n"
+                                            "\t.asciz\t\"f\"\n";
 
 static const char profile_test_labeled[] = "\t.file\t0 \"/src\" \"ReduceSpills.c\"\n"
                                            "\t.text\n"
-                                           "\t.type\tf.a,@function\n"
-                                           "f.a:                                      # @f\n"
+                                           "\t.type\tf,@function\n"
+                                           "f:                                      # @f\n"
                                            "\t.loc\t0 10 3 prologue_end            # ReduceSpills.c:10:3\n"
                                            "buster_spill.a.0:\n"
                                            "\tmovq\t%rsi, 64(%rsp)                  # 8-byte Spill\n"
@@ -134,48 +134,83 @@ static const char profile_test_labeled[] = "\t.file\t0 \"/src\" \"ReduceSpills.c
                                            "buster_spill.a.2:\n"
                                            "\tvaddps\t-128(%rsp), %zmm1, %zmm1         # 64-byte Folded Reload\n"
                                            "\tmovq\t%rax, %rbx                      # Reload the count from Spill.c\n"
-                                           "\tleaq\t.L__func__.f(%rip), %rdi        # f's name\n"
+                                           "\tleaq\tf.counter(%rip), %rdi           # f's static local\n"
                                            "buster_spill.a.3:\n"
                                            "\tmovq\t64(%rsp), %rax                  # 8-byte Reload\n"
                                            "\tret\n"
                                            ".Lfunc_end0:\n"
-                                           "\t.size\tf.a, .Lfunc_end0-f.a\n"
+                                           "\t.size\tf, .Lfunc_end0-f\n"
                                            "f2:                                     # @f2\n"
                                            "\tmovq\t%rsi, 64(%rsp)                  # 8-byte Spill\n"
-                                           "\tcall\tf.a\n"
+                                           "\tcall\tf\n"
                                            ".Lfunc_end1:\n"
                                            "g:\n"
                                            "\tmovq\t%rsi, 64(%rsp)                  # 8-byte Spill\n"
                                            "\tret\n"
-                                           ".L__func__.f:\n"
-                                           "\t.asciz\t\"f\"                            # f, as __func__ has it\n"
-                                           "\t.ascii\t\"f \\\"f\\\" f#\"\n";
+                                           "f.counter:\n"
+                                           "\t.long\t1\n"
+                                           "\t.asciz\t\"f\"\n";
 
-static const char profile_test_spill_samples[] = " 401000 f.a+0x0\n"
-                                                 " 300004 f+0x4\n"
-                                                 " 500010 f+0x10\n"
-                                                 " 401010 buster_spill.a.0+0x0\n"
-                                                 " 401010 buster_spill.a.0+0x0\n"
-                                                 " 401020 buster_spill.a.1+0x0\n"
-                                                 " 401020 buster_spill.a.1+0x0\n"
-                                                 " 401020 buster_spill.a.1+0x0\n"
-                                                 " 401020 buster_spill.a.1+0x0\n"
-                                                 " 401020 buster_spill.a.1+0x0\n"
-                                                 " 401024 buster_spill.a.1+0x4\n"
-                                                 " 401024 buster_spill.a.1+0x4\n"
-                                                 " 401024 buster_spill.a.1+0x4\n"
-                                                 " 401030 buster_spill.a.2+0x0\n"
-                                                 " 401030 buster_spill.a.2+0x0\n"
-                                                 " 401030 buster_spill.a.2+0x0\n"
-                                                 " 401030 buster_spill.a.2+0x0\n"
-                                                 " 401040 buster_spill.a.3+0x0\n"
-                                                 " 401050 buster_spill.a.9+0x0\n"
-                                                 " 401060 g+0x0\n"
-                                                 " 501000 f.b+0x0\n"
-                                                 " 501010 buster_spill.b.0+0x0\n"
-                                                 " 401060 g+0x0\n";
+static const char profile_test_spill_disassembly[] = "\n"
+                                                     "program:     file format elf64-x86-64\n"
+                                                     "\n"
+                                                     "Disassembly of section .text:\n"
+                                                     "\n"
+                                                     "0000000000001000 <f>:\n"
+                                                     "    1000:\tpush   %rbp\n"
+                                                     "\n"
+                                                     "0000000000001010 <buster_spill.a.0>:\n"
+                                                     "    1010:\tmov    %rsi,0x40(%rsp)\n"
+                                                     "\n"
+                                                     "0000000000001020 <buster_spill.a.1>:\n"
+                                                     "    1020:\tvmovups %zmm0,-0x80(%rsp)\n"
+                                                     "    1024:\tnop\n"
+                                                     "\n"
+                                                     "0000000000001030 <buster_spill.a.2>:\n"
+                                                     "    1030:\tvaddps -0x80(%rsp),%zmm1,%zmm1\n"
+                                                     "    1036:\tmov    %rax,%rbx\n"
+                                                     "\n"
+                                                     "0000000000001040 <buster_spill.a.3>:\n"
+                                                     "    1040:\tmov    0x40(%rsp),%rax\n"
+                                                     "    1045:\tret\n"
+                                                     "\n"
+                                                     "0000000000001060 <f2>:\n"
+                                                     "    1060:\tret\n"
+                                                     "\n"
+                                                     "0000000000003000 <f>:\n"
+                                                     "    3000:\tret\n"
+                                                     "\n"
+                                                     "0000000000005000 <f>:\n"
+                                                     "    5000:\tpush   %rbp\n"
+                                                     "\n"
+                                                     "0000000000005010 <buster_spill.b.0>:\n"
+                                                     "    5010:\tmov    %rsi,0x40(%rsp)\n"
+                                                     "    5015:\tret\n";
 
-static const char profile_test_spill_report[] = "spill-report: 16 samples in f, 12 (75.00%) at its 4 spills and reloads: 7 spills, 5 reloads, in 2 slots\n"
+static const char profile_test_spill_samples[] = " 401000 f+0x0 (/x+0x1000)\n"
+                                                 " 401010 buster_spill.a.0+0x0 (/x+0x1010)\n"
+                                                 " 401010 buster_spill.a.0+0x0 (/x+0x1010)\n"
+                                                 " 401020 buster_spill.a.1+0x0 (/x+0x1020)\n"
+                                                 " 401020 buster_spill.a.1+0x0 (/x+0x1020)\n"
+                                                 " 401020 buster_spill.a.1+0x0 (/x+0x1020)\n"
+                                                 " 401020 buster_spill.a.1+0x0 (/x+0x1020)\n"
+                                                 " 401020 buster_spill.a.1+0x0 (/x+0x1020)\n"
+                                                 " 401024 buster_spill.a.1+0x4 (/x+0x1024)\n"
+                                                 " 401024 buster_spill.a.1+0x4 (/x+0x1024)\n"
+                                                 " 401024 buster_spill.a.1+0x4 (/x+0x1024)\n"
+                                                 " 401030 buster_spill.a.2+0x0 (/x+0x1030)\n"
+                                                 " 401030 buster_spill.a.2+0x0 (/x+0x1030)\n"
+                                                 " 401030 buster_spill.a.2+0x0 (/x+0x1030)\n"
+                                                 " 401030 buster_spill.a.2+0x0 (/x+0x1030)\n"
+                                                 " 401040 buster_spill.a.3+0x0 (/x+0x1040)\n"
+                                                 " 401060 f2+0x0 (/x+0x1060)\n"
+                                                 " 403000 f+0x0 (/x+0x3000)\n"
+                                                 " 403000 f+0x0 (/x+0x3000)\n"
+                                                 " 405000 f+0x0 (/x+0x5000)\n"
+                                                 " 405010 buster_spill.b.0+0x0 (/x+0x5010)\n"
+                                                 " 7f0000 [unknown]\n";
+
+static const char profile_test_spill_report[] = "spill-report: 16 samples in f at 1000, 12 (75.00%) at its 4 spills and reloads: 7 spills, 5 reloads, in 2 slots\n"
                                                 "zmm  -128(%rsp)   spills      5 reloads      4  | hottest spill 5 at ReduceSpills.c:10:3  | hottest reload 4 at ReduceSpills.c:12:5\n"
                                                 "gpr  64(%rsp)     spills      2 reloads      1  | hottest spill 2 at ReduceSpills.c:10:3  | hottest reload 1 at ReduceSpills.c:12:5\n";
 
@@ -277,72 +312,66 @@ static void profile_test_text_tools(ProfileTest* test)
 
     ProfileReport labeled = { .arena = arena_reserve(BUSTER_PROFILE_REPORT_CAPACITY) };
     ok = profile_label_spills(&labeled, &test->report, profile_test_string("f"), profile_test_string("a"), profile_test_string(profile_test_assembly));
-    profile_test_check(test, "label-spills", ok, true, profile_report_text(&test->report), "label-spills: 4 spills and reloads labeled in f, renamed f.a\n");
+    profile_test_check(test, "label-spills", ok, true, profile_report_text(&test->report), "label-spills: 4 spills and reloads labeled in f\n");
     profile_test_check(test, "label-spills' output", ok, true, profile_report_text(&labeled), profile_test_labeled);
     labeled.arena.length = 0;
     ok = profile_label_spills(&labeled, &test->report, profile_test_string("h"), profile_test_string("a"), profile_test_string(profile_test_assembly));
     profile_test_check(test, "label-spills of a missing function", ok, false, profile_report_text(&test->report), "label-spills: h isn't in the assembly\n");
     profile_test_check(test, "label-spills' output of a missing function", ok, false, profile_report_text(&labeled), "");
+    ok = profile_label_spills(&labeled, &test->report, profile_test_string("f"), profile_test_string("a.b"), profile_test_string(profile_test_assembly));
+    profile_test_check(test, "label-spills with an invalid tag", ok, false, profile_report_text(&test->report), "label-spills: the tag a.b isn't letters, digits and '_'\n");
     arena_release(&labeled.arena);
 
-    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), profile_test_string(profile_test_labeled), profile_test_string(profile_test_spill_samples), 24);
+    // The labeled copy at 1000, beside a static f of another unit (3000) and variant b's labeled copy (5000), whose
+    // samples don't count; f.counter, a static local's label, isn't the function.
+    const String8 spill_labeled = profile_test_string(profile_test_labeled);
+    const String8 spill_disassembly = profile_test_string(profile_test_spill_disassembly);
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), spill_labeled, spill_disassembly, profile_test_string(profile_test_spill_samples), 24);
     profile_test_check(test, "spill-report", ok, true, profile_report_text(&test->report), profile_test_spill_report);
 
-    // #236's review: samples of another copy of a static function, before the labeled copy's first label in address
-    // order, and none of the labeled copy's own before its first label, mustn't count.
-    ProfileReport small = { .arena = arena_reserve(BUSTER_PROFILE_REPORT_CAPACITY) };
-    ok = profile_label_spills(&small, &test->report, profile_test_string("e"), profile_test_string("a"), profile_test_string("e:\n\tmovq\t%rsi, 64(%rsp)  # 8-byte Spill\n\tret\n.Lfunc_end0:\n"));
-    profile_test_check(test, "label-spills of one spill", ok, true, profile_report_text(&test->report), "label-spills: 1 spills and reloads labeled in e, renamed e.a\n");
-    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("e"), profile_report_text(&small),
-                              profile_test_string("300004 e+0x4\n300008 e+0x8\n30000c e+0xc\n401010 buster_spill.a.0+0x0\n"), 24);
+    // #236's reviews: no sample before the first label, and another copy's before it in address order.
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), spill_labeled, spill_disassembly,
+                              profile_test_string("403004 f+0x4 (/x+0x3004)\n403008 f+0x8 (/x+0x3008)\n401010 buster_spill.a.0+0x0 (/x+0x1010)\n"), 1);
     profile_test_check(test, "spill-report beside another copy", ok, true, profile_report_text(&test->report),
-                       "spill-report: 1 samples in e, 1 (100.00%) at its 1 spills and reloads: 1 spills, 0 reloads, in 1 slots\n"
-                       "gpr  64(%rsp)     spills      1 reloads      0  | hottest spill 1 at -\n");
-
-    // A global function keeps its name, which other translation units may use.
-    small.arena.length = 0;
-    ok = profile_label_spills(&small, &test->report, profile_test_string("h"), profile_test_string("a"), profile_test_string("\t.globl\th                               # -- Begin function h\nh:\n\tmovq\t%rsi, 64(%rsp)  # 8-byte Spill\n.Lfunc_end0:\n"));
-    profile_test_check(test, "label-spills of a global function", ok, true, profile_report_text(&test->report), "label-spills: 1 spills and reloads labeled in h\n");
-    profile_test_check(test, "label-spills' output of a global function", ok, true, profile_report_text(&small),
-                       "\t.globl\th                               # -- Begin function h\nh:\nbuster_spill.a.0:\n\tmovq\t%rsi, 64(%rsp)  # 8-byte Spill\n.Lfunc_end0:\n");
-    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("h"), profile_report_text(&small), profile_test_string("1 h+0x0\n2 buster_spill.a.0+0x0\n"), 24);
-    profile_test_check(test, "spill-report of a global function", ok, true, profile_report_text(&test->report),
-                       "spill-report: 2 samples in h, 1 (50.00%) at its 1 spills and reloads: 1 spills, 0 reloads, in 1 slots\n"
-                       "gpr  64(%rsp)     spills      1 reloads      0  | hottest spill 1 at -\n");
-
-    // #236's second review: another labeled variant (tag b) linked beside this one (tag a) has its own names, whose
-    // samples aren't this one's.
-    small.arena.length = 0;
-    ok = profile_label_spills(&small, &test->report, profile_test_string("e"), profile_test_string("a"), profile_test_string("e:\n\tmovq\t%rsi, 64(%rsp)  # 8-byte Spill\n\tret\n.Lfunc_end0:\n"));
-    profile_test_check(test, "label-spills of variant a", ok, true, profile_report_text(&test->report), "label-spills: 1 spills and reloads labeled in e, renamed e.a\n");
-    const String8 samples_b = profile_test_string("1bdb0 e.b+0x0\n1bdf0 buster_spill.b.0+0x0\n1bdf0 buster_spill.b.0+0x0\n1bdf0 buster_spill.b.0+0x0\n");
-    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("e"), profile_report_text(&small), samples_b, 24);
-    profile_test_check(test, "spill-report of variant a with variant b's samples", ok, true, profile_report_text(&test->report),
-                       "spill-report: 0 samples in e, 0 (0.00%) at its 1 spills and reloads: 0 spills, 0 reloads, in 1 slots\n"
+                       "spill-report: 1 samples in f at 1000, 1 (100.00%) at its 4 spills and reloads: 1 spills, 0 reloads, in 2 slots\n"
+                       "gpr  64(%rsp)     spills      1 reloads      0  | hottest spill 1 at ReduceSpills.c:10:3\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), spill_labeled, spill_disassembly,
+                              profile_test_string("405000 f+0x0 (/x+0x5000)\n405010 buster_spill.b.0+0x0 (/x+0x5010)\n405010 buster_spill.b.0+0x0 (/x+0x5010)\n"), 1);
+    profile_test_check(test, "spill-report with another variant's samples", ok, true, profile_report_text(&test->report),
+                       "spill-report: 0 samples in f at 1000, 0 (0.00%) at its 4 spills and reloads: 0 spills, 0 reloads, in 2 slots\n"
                        "gpr  64(%rsp)     spills      0 reloads      0\n");
-    small.arena.length = 0;
-    ok = profile_label_spills(&small, &test->report, profile_test_string("e"), profile_test_string("b"), profile_test_string("e:\n\tmovq\t%rsi, 64(%rsp)  # 8-byte Spill\n\tret\n.Lfunc_end0:\n"));
-    profile_test_check(test, "label-spills of variant b", ok, true, profile_report_text(&test->report), "label-spills: 1 spills and reloads labeled in e, renamed e.b\n");
-    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("e"), profile_report_text(&small), samples_b, 24);
-    profile_test_check(test, "spill-report of variant b", ok, true, profile_report_text(&test->report),
-                       "spill-report: 4 samples in e, 3 (75.00%) at its 1 spills and reloads: 3 spills, 0 reloads, in 1 slots\n"
-                       "gpr  64(%rsp)     spills      3 reloads      0  | hottest spill 3 at -\n");
-    small.arena.length = 0;
-    ok = profile_label_spills(&small, &test->report, profile_test_string("e"), profile_test_string("a.b"), profile_test_string("e:\n\tret\n"));
-    profile_test_check(test, "label-spills with an invalid tag", ok, false, profile_report_text(&test->report),
-                       "label-spills: the tag a.b isn't letters, digits and '_'\n");
-    arena_release(&small.arena);
 
-    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), profile_test_string("f:\nbuster_spill.a.0:\n\tret\nbuster_spill.b.1:\n\tret\n"),
-                              profile_test_string(""), 24);
-    profile_test_check(test, "spill-report with another tag's label", ok, false, profile_report_text(&test->report),
-                       "spill-report: the labels aren't label-spills' (numbered from 0 in order, each before an instruction)\n");
-
-    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), profile_test_string("f:\nbuster_spill.a.1:\n\tret\n"), profile_test_string(""), 24);
+    // Errors: samples without file offsets, labels the disassembly lacks or has twice, no copy before them, labels out
+    // of order or of another tag, and a label last.
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), spill_labeled, spill_disassembly, profile_test_string("401010 buster_spill.a.0+0x0\n"), 24);
+    profile_test_check(test, "spill-report without file offsets", ok, false, profile_report_text(&test->report),
+                       "spill-report: 1 samples have no offset in the file (perf script's dsoff field)\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), spill_labeled,
+                              profile_test_string("0000000000001000 <f>:\n    1000:\tret\n0000000000001010 <buster_spill.a.0>:\n    1010:\tret\n"), profile_test_string(""), 24);
+    profile_test_check(test, "spill-report with labels missing", ok, false, profile_report_text(&test->report),
+                       "spill-report: the disassembly has 1 of the 4 labels buster_spill.a.0 to buster_spill.a.3, 0 more than once\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("e"), profile_test_string("e:\nbuster_spill.a.0:\n\tret\n"),
+                              profile_test_string("0000000000001000 <e>:\n    1000:\tret\n0000000000001010 <buster_spill.a.0>:\n    1010:\tret\n"
+                                                  "0000000000002010 <buster_spill.a.0>:\n    2010:\tret\n"), profile_test_string(""), 24);
+    profile_test_check(test, "spill-report with a label twice", ok, false, profile_report_text(&test->report),
+                       "spill-report: the disassembly has 1 of the 1 labels buster_spill.a.0 to buster_spill.a.0, 1 more than once\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("e"), profile_test_string("e:\nbuster_spill.a.0:\n\tret\nbuster_spill.a.1:\n\tret\n"),
+                              profile_test_string("0000000000001000 <e>:\n    1000:\tret\n0000000000001010 <buster_spill.a.1>:\n    1010:\tret\n"
+                                                  "0000000000001020 <buster_spill.a.0>:\n    1020:\tret\n"), profile_test_string(""), 24);
+    profile_test_check(test, "spill-report with labels out of address order", ok, false, profile_report_text(&test->report),
+                       "spill-report: the labels are out of address order in the disassembly\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("e"), profile_test_string("e:\nbuster_spill.a.0:\n\tret\n"),
+                              profile_test_string("0000000000001000 <buster_spill.a.0>:\n    1000:\tret\n0000000000002000 <e>:\n    2000:\tret\n"), profile_test_string(""), 24);
+    profile_test_check(test, "spill-report without a copy before its labels", ok, false, profile_report_text(&test->report),
+                       "spill-report: no e in the disassembly before buster_spill.a.0\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), profile_test_string("f:\nbuster_spill.a.1:\n\tret\n"), spill_disassembly, profile_test_string(""), 24);
     profile_test_check(test, "spill-report out of order", ok, false, profile_report_text(&test->report),
                        "spill-report: the labels aren't label-spills' (numbered from 0 in order, each before an instruction)\n");
-
-    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), profile_test_string("f:\nbuster_spill.a.0:\n"), profile_test_string(""), 24);
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), profile_test_string("f:\nbuster_spill.a.0:\n\tret\nbuster_spill.b.1:\n\tret\n"),
+                              spill_disassembly, profile_test_string(""), 24);
+    profile_test_check(test, "spill-report with another tag's label", ok, false, profile_report_text(&test->report),
+                       "spill-report: the labels aren't label-spills' (numbered from 0 in order, each before an instruction)\n");
+    ok = profile_spill_report(&test->arena, &test->report, profile_test_string("f"), profile_test_string("f:\nbuster_spill.a.0:\n"), spill_disassembly, profile_test_string(""), 24);
     profile_test_check(test, "spill-report with a label last", ok, false, profile_report_text(&test->report),
                        "spill-report: the labels aren't label-spills' (numbered from 0 in order, each before an instruction)\n");
 
@@ -502,17 +531,18 @@ static bool profile_test_command(char* const* argv, const char* output)
     return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-// #236's second review: clang's assembly of a program that prints __func__ of a static function with spills, labeled,
-// assembled and run, must print what the program did: the rename mustn't reach the string. Needs clang on PATH.
+// #236's reviews: clang's assembly of a program whose static function `function` (an assembler keyword too) has spills
+// and prints __func__, labeled, must be the assembly with the labels' lines alone added, and assembled and run must
+// print what the program did. Needs clang on PATH.
 static void profile_test_program(ProfileTest* test)
 {
     static const char source[] = "#include <stdio.h>\n"
-                                 "static __attribute__((noinline)) float f(float a)\n"
+                                 "static __attribute__((noinline)) float function(float a)\n"
                                  "{\n"
                                  "    puts(__func__);\n"
                                  "    return a;\n"
                                  "}\n"
-                                 "float (*volatile selected)(float) = f;\n"
+                                 "float (*volatile selected)(float) = function;\n"
                                  "int main(int argc, char **argv)\n"
                                  "{\n"
                                  "    (void)argv;\n"
@@ -533,10 +563,22 @@ static void profile_test_program(ProfileTest* test)
     ok = ok && profile_test_command(compile, "/dev/null");
     const String8 assembly = ok ? profile_read_file(&test->arena, paths[1]) : (String8){ 0 };
     ProfileReport labeled = { .arena = arena_reserve(BUSTER_PROFILE_REPORT_CAPACITY) };
-    ok = ok && assembly.pointer != 0 && profile_label_spills(&labeled, &test->report, profile_test_string("f"), profile_test_string("a"), assembly);
-    // The function must have spills to label, and its name must be in a string.
+    ok = ok && assembly.pointer != 0 && profile_label_spills(&labeled, &test->report, profile_test_string("function"), profile_test_string("a"), assembly);
+    // The function must have spills to label, and the output must be the input with the labels' lines alone added.
     const String8 text = profile_report_text(&labeled);
-    ok = ok && profile_find(text, profile_string("buster_spill.a.0:")) != text.length && profile_find(text, profile_string("\"f\"")) != text.length;
+    ok = ok && profile_find(text, profile_string("buster_spill.a.0:")) != text.length;
+    uint64_t at = 0;
+    uint64_t input_at = 0;
+    while (ok && at < text.length)
+    {
+        const String8 line = profile_line(text, &at);
+        if (!profile_starts_with(line, profile_string("buster_spill.a.")))
+        {
+            const String8 input_line = profile_line(assembly, &input_at);
+            ok = profile_equal(line, input_line);
+        }
+    }
+    ok = ok && input_at == assembly.length;
     ok = ok && profile_write_file(paths[2], text);
     char* link_original[] = { "clang", paths[1], "-o", paths[3], 0 };
     char* link_labeled[] = { "clang", paths[2], "-o", paths[4], 0 };
@@ -546,12 +588,12 @@ static void profile_test_program(ProfileTest* test)
     ok = ok && profile_test_command(run_original, paths[5]) && profile_test_command(run_labeled, paths[6]);
     const String8 printed = ok ? profile_read_file(&test->arena, paths[5]) : (String8){ 0 };
     const String8 printed_labeled = ok ? profile_read_file(&test->arena, paths[6]) : (String8){ 0 };
-    ok = ok && printed.pointer != 0 && printed_labeled.pointer != 0 && profile_equal(printed, profile_test_string("f\n")) && profile_equal(printed_labeled, printed);
+    ok = ok && printed.pointer != 0 && printed_labeled.pointer != 0 && profile_equal(printed, profile_test_string("function\n")) && profile_equal(printed_labeled, printed);
     test->cases += 1;
     if (!ok)
     {
         test->failures += 1;
-        printf("  a labeled program: FAILED (clang's assembly of a program printing __func__, labeled, didn't build and print \"f\"; files in %s)\n", directory);
+        printf("  a labeled program: FAILED (clang's assembly of a program printing __func__, labeled, didn't build and print \"function\"; files in %s)\n", directory);
     }
     else
     {
