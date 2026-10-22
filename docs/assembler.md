@@ -27,7 +27,8 @@ data. The tests also import an assembled `_start` object into Buster's own
 linker, write its executable and run it.
 
 `compiler -c input.s -o output.o` is an alias for `assemble`. Without `-o`,
-the output is the input's basename with `.o` in the current directory.
+the output is the input's basename with `.o` in the current directory. The
+input is read to its end, so a pipe or `/dev/stdin` works too.
 Default input syntax is AT&T; `--intel` selects Intel without register
 prefixes. `.intel_syntax noprefix` and `.att_syntax prefix` switch syntax in
 the source. The `prefix`/`noprefix` arguments control register spelling.
@@ -51,8 +52,10 @@ An uppercase `.S` extension enables the shared preprocessor's explicit assembly
 mode before assembly, using the same target for feature macros and form
 eligibility. `-I`, `-D`, `-U`, `-include` and the preprocessor's include
 directory options are available. It defines `__ASSEMBLER__`, expands `$MACRO`
-as an immediate, and accepts unknown `#` lines as assembly comments. Literals
-remain opaque. Includes, conditionals, function macros, stringizing and token
+as an immediate, and accepts unknown `#` lines as assembly comments. As with
+GCC and Clang, a paste that doesn't form one token leaves both tokens without
+an error, so `$ ## x` gives `$` and the expanded `x`, and `% ## x` a register.
+Literals remain opaque. Includes, conditionals, function macros, stringizing and token
 pasting use the existing engine; C preprocessing keeps its existing behavior.
 The adapter uses both existing vector/scalar kernels and printers. A bounded
 in-memory stream carries line markers to assembly diagnostics; no subprocess
@@ -61,16 +64,28 @@ also exposes this preprocessing mode.
 
 ## Supported input
 
-Mnemonics and registers use lowercase. GPRs of 8/16/32/64 bits (including
+Mnemonics use lowercase. Register names are read as GNU as reads them: in any
+case (`RAX` is `rax`), and with canonical numbers only (`r08`, `xmm00` and
+`k00` are symbol names). GPRs of 8/16/32/64 bits (including
 high-byte registers), XMM/YMM/ZMM and mask registers have explicit classes.
 The frontend checks the encoder's high-byte/REX, address and decoration rules
 before trusted encoding. Addressing is 64-bit base plus index times 1/2/4/8
 plus a signed 32-bit displacement, RIP relative, or absolute displacement;
-FS and GS overrides are supported. Intel memory can specify `byte` through
-`zmmword ptr`. Ambiguous memory width is an error. Intel `offset symbol`
-requests an immediate address; a bare symbol in an ordinary operand denotes
-memory. AT&T uses `%register`, `$immediate`, displacement/base/index/scale,
-and `*` for indirect calls/jumps. Integer width suffixes are checked.
+FS and GS overrides are supported. An Intel scale can come before or after its
+index (`4*rsi`, as LLVM writes it, or `rsi*4`), and a term can carry a sign
+(`[rax + -8]`); a register term takes only unary pluses (`[rax + +rsi]`). As in
+GNU as, without register prefixes a register's name is never a symbol: in an
+expression (`.quad rsi`, `dword ptr eax`, `[rax + -rsi]`) it is refused as an
+invalid use of a register, and so is a parenthesized one (`(rsi)`), which GNU
+as reads as the register. Intel memory can specify `byte` through `zmmword ptr`.
+Ambiguous memory width is an error. Intel `offset symbol` requests an
+immediate address; a bare symbol in an ordinary operand denotes memory, and in
+a branch its destination, unless a width asks for memory: `call qword ptr
+callback` calls through the pointer at `callback`. AT&T uses `%register`,
+`$immediate`, displacement/base/index/scale, and `*` for indirect calls/jumps.
+Integer width suffixes are checked; LEA's sizes only its destination, and a
+complete alias (`jnb`, `jnl`, `sal`) is never read as a suffix. `pushw` covers
+the 16-bit register and memory forms as well as immediates.
 
 The admitted families are:
 
@@ -114,13 +129,17 @@ Directives:
 | Symbols | `.globl`/`.global`, `.local`, `.weak`, `.type` (`function/object/notype`), `.size` |
 | Constants | `.equ`, `.set` (absolute and defined before use; `.set` may reassign) |
 | Data | `.byte`, `.word`, `.long`, `.quad`, `.ascii`, `.asciz`/`.string`, `.zero` |
-| Alignment | `.balign` with power-of-two alignment, `.p2align`; optional byte fill and maximum skip |
+| Alignment | `.balign` with power-of-two alignment, `.p2align`; optional byte fill and maximum skip (0 is none) |
 
 Section flags/types, when supplied, must match the canonical section. `.bss`
 accepts only zero fill. Exported absolute symbols and forward constants are
 diagnosed; the shared object writer currently lacks the former's unit ownership.
 The writer automatically emits a non-executable-stack note.
-Default text alignment uses single-byte NOPs; other sections use zeros.
+Code alignment without a fill, or with `0x90`, pads with GNU as's NOPs: a
+one-byte nop first when the section's last statement was data, a jump over the
+rest past seven NOPs' worth, then the remainder's NOP and 11-byte ones. Other
+fills, and other sections, use the fill byte (zero by default). `.` in a data
+directive is the address of its own datum.
 Direct branches require label or symbol targets. Absolute numeric destinations
 are diagnosed because the shared writer has no absolute-symbol relocation;
 they are never interpreted as relative instruction displacements.
@@ -195,7 +214,11 @@ scalar/vector token streams, diagnostics and byte-identical ELF output, valid
 batches of 0..65 instructions at all 64 source misalignments, malformed text
 and binary bytes, and both ends of protected pages for lengths 0..1099.
 Fixtures cover immediate/operand boundaries, section changes, expressions,
-labels, relocation addends, branch growth across data/alignment and failures.
+labels, relocation addends, branch growth across data/alignment and failures,
+the defects of #235, and code padding of every length to 135 bytes after an
+instruction and after data, which the cross-check compares with GNU as byte
+for byte when GNU as pads as binutils 2.47 does (2.42 orders its long NOPs
+differently; the test says so and keeps its known-byte padding checks).
 The cross-check compares section bytes/properties, symbols and relocations
 with GNU as using the existing object comparator, and links/runs the examples.
 Different ELF file layouts and automatic stack notes are normalized. Existing
@@ -203,7 +226,9 @@ independent encoder/GNU-as tests remain required.
 The `.S` fixtures compare both complete driver paths, independently preprocess
 with Clang's assembler-with-preprocessor mode, compare objects with GNU as,
 and check included-source diagnostics and preservation of existing output
-when assembly fails.
+when assembly fails. Without external tools, the test also preprocesses pastes
+and 20,000 pp-numbers that `$` splits into five tokens each through both
+kernels, and reads assembly from a pipe.
 
 ```sh
 ./build/compiler benchmark-assembler --external

@@ -237,18 +237,23 @@ static void snapshot_test_same_runtime(SnapshotTestTally* tally, const Runtime* 
         found = runtime_find_global_name(b, runtime_global_name(a, e), a->length[e], a->hash[e]) == e + 1;
     }
     snapshot_test_expect(tally, found, "each global name found in the loaded runtime", index);
-    const ImportLibrary* x = &imported->libc;
-    const ImportLibrary* y = &loaded->libc;
-    bool versions = x->version_count == y->version_count && snapshot_test_same_string(x->soname, y->soname);
-    for (uint32_t v = 0; versions && v < x->version_count; v += 1)
+    // libc.so.6's, then the loader's.
+    for (uint32_t library = 0; library < 2; library += 1)
     {
-        versions = snapshot_test_same_string(x->versions[v].name, y->versions[v].name) && x->versions[v].hash == y->versions[v].hash &&
-                   x->versions[v].index == y->versions[v].index && x->versions[v].base == y->versions[v].base;
+        const ImportLibrary* x = library == 0 ? &imported->libc : &imported->loader;
+        const ImportLibrary* y = library == 0 ? &loaded->libc : &loaded->loader;
+        bool versions = x->version_count == y->version_count && snapshot_test_same_string(x->soname, y->soname);
+        for (uint32_t v = 0; versions && v < x->version_count; v += 1)
+        {
+            versions = snapshot_test_same_string(x->versions[v].name, y->versions[v].name) && x->versions[v].hash == y->versions[v].hash &&
+                       x->versions[v].index == y->versions[v].index && x->versions[v].base == y->versions[v].base;
+        }
+        snapshot_test_expect(tally, versions, library == 0 ? "libc.so.6's soname and versions" : "the loader's soname and versions", index);
+        snapshot_test_expect(tally,
+                             x->exports.count == y->exports.count && snapshot_test_same_column(x->exports.version, y->exports.version, x->exports.count * sizeof(uint16_t)) &&
+                                 snapshot_test_same_column(x->exports.flags, y->exports.flags, x->exports.count),
+                             library == 0 ? "libc.so.6's exports' versions and types" : "the loader's exports' versions and types", index);
     }
-    snapshot_test_expect(tally, versions, "libc.so.6's soname and versions", index);
-    snapshot_test_expect(tally, x->exports.count == y->exports.count && snapshot_test_same_column(x->exports.version, y->exports.version, x->exports.count * sizeof(uint16_t)) &&
-                                    snapshot_test_same_column(x->exports.flags, y->exports.flags, x->exports.count),
-                         "libc.so.6's exports' versions and types", index);
     bool paths = snapshot_test_same_string(imported->gcc_directory, loaded->gcc_directory) && snapshot_test_same_string(imported->gcc_versions, loaded->gcc_versions) &&
                  snapshot_test_same_string(imported->libc_script, loaded->libc_script) && snapshot_test_same_string(imported->libc_path, loaded->libc_path) &&
                  snapshot_test_same_string(imported->loader_path, loaded->loader_path) && snapshot_test_same_string(imported->abi_note, loaded->abi_note);
@@ -414,6 +419,43 @@ static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDir
     bind_test_release(&b);
 }
 
+// test-bind's loader case (main reads _r_debug and __libc_stack_end, which only the loader exports) bound against a
+// dynamic PIE's imported runtime and its loaded one by both paths: the same links and bindings, and the loaded
+// runtime's executable runs with the case's status.
+static void snapshot_test_loader_case(SnapshotTestTally* tally, const ExecutableTestDirectory* directory, const Runtime* imported, const Runtime* loaded)
+{
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        const BindPath bind_path = path == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT;
+        BindTestCaseProgram a;
+        BindTestCaseProgram b;
+        bind_test_case_program(&a, imported, BIND_TEST_CASE_LOADER, bind_path, true);
+        bind_test_case_program(&b, loaded, BIND_TEST_CASE_LOADER, bind_path, true);
+        const bool bound = a.bound && b.bound;
+        snapshot_test_expect(tally, bound && bind_test_same_links(&a.test.link, &b.test.link) && bind_test_same_binds(&a.test.bind, &b.test.bind),
+                             "the loader's case: the same link and binding", path);
+        char program[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        snapshot_test_path(program, directory->path, "loader");
+        Scratch scratch = scratch_begin(0);
+        const uint8_t* saved = bound ? static_test_save(&b.test.link, scratch.arena) : 0;
+        ExecutableResult result;
+        const bool written = saved != 0 && snapshot_test_write_link(&b.test.link, &b.test.bind, loaded, saved, program, 1, &result);
+        uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
+        uint64_t length = 0;
+        int status = -1;
+        const bool ran = written && executable_test_run(program, output, &length, &status);
+        snapshot_test_expect(tally, ran && WIFEXITED(status) && WEXITSTATUS(status) == bind_test_cases[BIND_TEST_CASE_LOADER].status,
+                             "the loader's case runs with its status", path);
+        scratch_end(scratch);
+        if (!directory->keep)
+        {
+            unlink(program);
+        }
+        bind_test_link_end(&a.test);
+        bind_test_link_end(&b.test);
+    }
+}
+
 // The links of programs bound against the imported runtime and against its snapshot loaded, as the check `check`, in a
 // directory of its own, `name`.
 static bool snapshot_test_links(const ExecutableTestDirectory* directory, const Runtime* imported, const RuntimeProbe* compiler, uint64_t seed, uint32_t functions,
@@ -442,6 +484,10 @@ static bool snapshot_test_links(const ExecutableTestDirectory* directory, const 
             snapshot_test_link(&tally, directory, imported, &loaded, options[i], path == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT, name, (uint64_t)i * 2 + path);
             linked += 1;
         }
+    }
+    if (status == SNAPSHOT_STATUS_LOADED && imported->kind == RUNTIME_KIND_DYNAMIC)
+    {
+        snapshot_test_loader_case(&tally, directory, imported, &loaded);
     }
     printf("  %u programs bound and written against both runtimes\n", linked / 2);
     if (status == SNAPSHOT_STATUS_LOADED)
@@ -1234,21 +1280,25 @@ static bool snapshot_test_kinds(const ExecutableTestDirectory* directory, const 
     {
         snapshot_test_path(paths[kind], place, snapshot_name((RuntimeKind)kind));
     }
-    const RuntimeKind statics[] = {
+    // The kinds whose entry points open them here; the dynamic PIE's after them.
+    const RuntimeKind others[] = {
         RUNTIME_KIND_STATIC,
         RUNTIME_KIND_STATIC_PIE,
+        RUNTIME_KIND_SHARED,
     };
-    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(statics); s += 1)
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(others); s += 1)
     {
-        const RuntimeKind kind = statics[s];
+        const RuntimeKind kind = others[s];
         for (uint32_t round = 0; round < 2; round += 1)
         {
             // The entry points, which take this executable's identity (`compiler`) themselves.
             Runtime runtime;
-            const SnapshotResult result = kind == RUNTIME_KIND_STATIC ? runtime_open_static(&runtime, place) : runtime_open_static_pie(&runtime, place);
+            const SnapshotResult result = kind == RUNTIME_KIND_STATIC       ? runtime_open_static(&runtime, place)
+                                          : kind == RUNTIME_KIND_STATIC_PIE ? runtime_open_static_pie(&runtime, place)
+                                                                            : runtime_open_shared(&runtime, place);
             const SnapshotStatus expected = round == 0 ? SNAPSHOT_STATUS_MISSING : SNAPSHOT_STATUS_LOADED;
             snapshot_test_expect(&tally, result.status == expected && result.error == RUNTIME_ERROR_NONE && (round == 1 || result.written),
-                                 round == 0 ? "a static kind's runtime imported, and written" : "loaded, the second time", s * 2 + round);
+                                 round == 0 ? "a kind's runtime imported, and written" : "loaded, the second time", s * 2 + round);
             if (result.error == RUNTIME_ERROR_NONE)
             {
                 snapshot_test_expect(&tally, runtime.kind == kind, "the kind's runtime", s * 2 + round);
@@ -1273,7 +1323,7 @@ static bool snapshot_test_kinds(const ExecutableTestDirectory* directory, const 
     {
         every = every && access(paths[kind], F_OK) == 0;
     }
-    snapshot_test_expect(&tally, every, "the three snapshots, and no other file", 0);
+    snapshot_test_expect(&tally, every, "a snapshot of each kind, and no other file", 0);
     // Each kind's snapshot loaded as each other kind: stale.
     for (uint32_t written = 0; written < RUNTIME_KINDS; written += 1)
     {
@@ -1296,6 +1346,7 @@ static bool snapshot_test_kinds(const ExecutableTestDirectory* directory, const 
         RUNTIME_KIND_DYNAMIC,
         RUNTIME_KIND_STATIC,
         RUNTIME_KIND_STATIC_PIE,
+        RUNTIME_KIND_SHARED,
     };
     for (uint32_t way = 0; way < RUNTIME_KINDS; way += 1)
     {
@@ -1516,18 +1567,24 @@ static int run_snapshot_tests(int argc, char** argv)
     else
     {
         bool passed = snapshot_test_round_trip(&directory, &runtime, &compiler, "round trip", "round-trip");
-        // A static executable's runtime, whose snapshot has the archives' members, references and groups, and a static
-        // PIE's, with the same archives behind its own crt objects.
+        // A static executable's runtime, whose snapshot has the archives' members, references and groups, a static
+        // PIE's, with the same archives behind its own crt objects, and a shared library's, a dynamic PIE's without its
+        // start object.
         Runtime static_runtime;
         Runtime static_pie_runtime;
+        Runtime shared_runtime;
         const RuntimeError static_imported = runtime_import_static(&static_runtime);
         const RuntimeError static_pie_imported = runtime_import_static_pie(&static_pie_runtime);
+        const RuntimeError shared_imported = runtime_import_shared(&shared_runtime);
         const bool statics = static_imported == RUNTIME_ERROR_NONE;
         const bool static_pies = static_pie_imported == RUNTIME_ERROR_NONE;
+        const bool shareds = shared_imported == RUNTIME_ERROR_NONE;
         printf("%s", !statics ? "static round trip: the static runtime didn't import\n" : "");
         printf("%s", !static_pies ? "static PIE round trip: the static PIE's runtime didn't import\n" : "");
+        printf("%s", !shareds ? "shared round trip: the shared library's runtime didn't import\n" : "");
         passed = statics && snapshot_test_round_trip(&directory, &static_runtime, &compiler, "static round trip", "static-round-trip") && passed;
         passed = static_pies && snapshot_test_round_trip(&directory, &static_pie_runtime, &compiler, "static PIE round trip", "static-pie-round-trip") && passed;
+        passed = shareds && snapshot_test_round_trip(&directory, &shared_runtime, &compiler, "shared round trip", "shared-round-trip") && passed;
         passed = snapshot_test_links(&directory, &runtime, &compiler, seed, (uint32_t)functions, "links", "links") && passed;
         passed = statics && snapshot_test_links(&directory, &static_runtime, &compiler, seed, (uint32_t)functions, "static links", "static-links") && passed;
         passed = static_pies && snapshot_test_links(&directory, &static_pie_runtime, &compiler, seed, (uint32_t)functions, "static PIE links", "static-pie-links") && passed;
@@ -1536,8 +1593,9 @@ static int run_snapshot_tests(int argc, char** argv)
             [RUNTIME_KIND_DYNAMIC] = &runtime,
             [RUNTIME_KIND_STATIC] = &static_runtime,
             [RUNTIME_KIND_STATIC_PIE] = &static_pie_runtime,
+            [RUNTIME_KIND_SHARED] = &shared_runtime,
         };
-        passed = statics && static_pies && snapshot_test_kinds(&directory, runtimes, &compiler) && passed;
+        passed = statics && static_pies && shareds && snapshot_test_kinds(&directory, runtimes, &compiler) && passed;
         passed = snapshot_test_staleness(&directory, &runtime, &compiler) && passed;
         passed = snapshot_test_invalid(&directory, &runtime, &compiler, "invalid files", "invalid") && passed;
         passed = static_pies && snapshot_test_invalid(&directory, &static_pie_runtime, &compiler, "static PIE invalid files", "static-pie-invalid") && passed;
@@ -1553,6 +1611,10 @@ static int run_snapshot_tests(int argc, char** argv)
         if (static_pies)
         {
             runtime_release(&static_pie_runtime);
+        }
+        if (shareds)
+        {
+            runtime_release(&shared_runtime);
         }
         result = passed ? 0 : 1;
         if (keep)
