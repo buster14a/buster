@@ -126,6 +126,7 @@ static const char* const bind_test_errors[] = {
     [BIND_ERROR_SYMBOLS] = "symbols",
     [BIND_ERROR_FULL] = "full",
     [BIND_ERROR_DISCARDED] = "discarded",
+    [BIND_ERROR_SNAPSHOT] = "snapshot",
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1308,7 +1309,7 @@ static uint32_t bind_test_member(const Runtime* runtime, const char* name)
     uint32_t result = runtime->member_count;
     for (uint32_t m = 0; m < runtime->member_count; m += 1)
     {
-        result = result == runtime->member_count && import_equal(runtime->members[m].name, name) ? m : result;
+        result = result == runtime->member_count && import_equal(runtime_member_name(runtime, m), name) ? m : result;
     }
     return result;
 }
@@ -1609,7 +1610,8 @@ static bool bind_test_same_members(String8 text, const Bind* bind, const Runtime
     for (uint32_t m = 0; result && m < runtime->member_count; m += 1)
     {
         char needle[512];
-        snprintf(needle, sizeof(needle), "libc_nonshared.a(%.*s)", (int)runtime->members[m].name.length, runtime->members[m].name.pointer);
+        const String8 member = runtime_member_name(runtime, m);
+        snprintf(needle, sizeof(needle), "libc_nonshared.a(%.*s)", (int)member.length, member.pointer);
         if (strstr(text.pointer, needle) != 0)
         {
             extracted[m / 64] |= 1ull << (m % 64);
@@ -2430,7 +2432,8 @@ static void bind_test_member_key(char* key, uint64_t capacity, const Runtime* ru
     {
         base -= 1;
     }
-    snprintf(key, capacity, "%.*s(%.*s)", (int)(path.length - base), path.pointer + base, (int)runtime->members[member].name.length, runtime->members[member].name.pointer);
+    const String8 name = runtime_member_name(runtime, member);
+    snprintf(key, capacity, "%.*s(%.*s)", (int)(path.length - base), path.pointer + base, (int)name.length, name.pointer);
 }
 
 // The member a line of a linker's list names, as "libc.a(printf.o)" in `key`: lld's --why-extract has

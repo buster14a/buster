@@ -603,6 +603,21 @@ static uint8_t import_fixup_kind(uint32_t type)
     return result;
 }
 
+// The kind of a fixup that R_X86_64_GOTPCRELX or R_X86_64_REX_GOTPCRELX names (CALL_GOT or LOAD_GOT), from its
+// instruction, the bytes of its atom before its field at `offset`: those kinds are the instructions a linker may
+// rewrite (link.c), call or jmp [rip + slot] (ff 15, ff 25) and mov r64, [rip + slot] (REX.W 8b with a RIP-relative
+// ModRM), whose field ends the instruction (an addend of -4). GNU as marks test, binops (libgcc.a's decimal floating
+// point adds slots so) and a mov without REX.W with them too, and those read the slot as GOTPCREL does, which no linker
+// rewrites in a PIE. Every other kind is its own.
+static uint8_t import_got_kind(uint8_t kind, const uint8_t* bytes, uint64_t offset, int64_t addend)
+{
+    const bool call = kind == BUSTER_LINK_FIXUP_CALL_GOT && bytes != 0 && offset >= 2 && bytes[offset - 2] == 0xff && (bytes[offset - 1] == 0x15 || bytes[offset - 1] == 0x25);
+    const bool load = kind == BUSTER_LINK_FIXUP_LOAD_GOT && bytes != 0 && offset >= 3 && (bytes[offset - 3] & 0xf8) == 0x48 && bytes[offset - 2] == 0x8b &&
+                      (bytes[offset - 1] & 0xc7) == 0x05;
+    const bool got = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT;
+    return got && !((call || load) && addend == -4) ? BUSTER_LINK_FIXUP_GOTPCREL : kind;
+}
+
 // An object's symbol table: its entries, its string table, and its extended section indices (SHT_SYMTAB_SHNDX) when
 // it has them.
 typedef struct ImportSymbols ImportSymbols;
@@ -920,7 +935,9 @@ static ImportResult import_relocations(Link* link, const ImportElf* elf, const I
                 memcpy(&relocation, entries.pointer + (uint64_t)sorted[i] * sizeof(Elf64_Rela), sizeof(relocation));
                 const uint64_t symbol = ELF64_R_SYM(relocation.r_info);
                 const uint32_t type = (uint32_t)ELF64_R_TYPE(relocation.r_info);
-                const uint8_t kind = import_fixup_kind(type);
+                // The field's bytes are the atom's when link_add_fixup takes it: within its size, at most 2^32.
+                const bool within = relocation.r_offset <= link->atoms.size[atom];
+                const uint8_t kind = import_got_kind(import_fixup_kind(type), within ? link->atoms.bytes[atom] : 0, relocation.r_offset, relocation.r_addend);
                 const SymbolId target = symbol < symbols->count ? object->symbols[symbol] : 0;
                 const uint64_t entry_offset = header.sh_offset + (uint64_t)sorted[i] * sizeof(Elf64_Rela);
                 if (type == R_X86_64_NONE)
@@ -1936,6 +1953,23 @@ static bool import_vector_relocations(Link* link, const ImportElf* elf, const Im
         }
         // The atom's fixups: none before these, and bytes for them to patch.
         result = result && missing == 0 && (pass.next == begin || (atoms->bytes[atom] != 0 && atoms->fixup_count[atom] == 0));
+        // The GOT kinds' instructions (import_got_kind): compares of 64 kinds at a time find them, a few in a hundred
+        // fixups, and each is checked by its bytes. Every field is within the atom once nothing failed.
+        for (FixupId group = begin; result && group < pass.next; group += 64)
+        {
+            const uint64_t left = pass.next - group;
+            const __mmask64 valid = left >= 64 ? ~0ull : (1ull << left) - 1;
+            const __m512i loaded = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, fixups->kind + group), _mm512_set1_epi8(BUSTER_LINK_FIXUP_KIND));
+            const uint64_t got = _mm512_mask_cmpeq_epi8_mask(valid, loaded, _mm512_set1_epi8(BUSTER_LINK_FIXUP_CALL_GOT)) |
+                                 _mm512_mask_cmpeq_epi8_mask(valid, loaded, _mm512_set1_epi8(BUSTER_LINK_FIXUP_LOAD_GOT));
+            for (uint64_t found = got; found != 0; found &= found - 1)
+            {
+                const FixupId f = group + (FixupId)__builtin_ctzll(found);
+                const uint8_t wide = fixups->kind[f] & BUSTER_LINK_FIXUP_WIDE;
+                const int64_t addend = wide != 0 ? fixups->wide_addends[(uint32_t)fixups->addend[f]] : fixups->addend[f];
+                fixups->kind[f] = (uint8_t)(import_got_kind(fixups->kind[f] & BUSTER_LINK_FIXUP_KIND, atoms->bytes[atom], fixups->offset[f], addend) | wide);
+            }
+        }
         if (result && pass.next != begin)
         {
             atoms->fixup_begin[atom] = begin;

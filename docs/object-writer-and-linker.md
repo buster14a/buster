@@ -8,9 +8,9 @@ machine code and data into files:
   other compilers' objects, archives and shared libraries.
 
 The lane base layer, the encoder's fixups, the representation, the object
-writer, the direct path's executables (static ones without libc, and dynamic
-PIEs against glibc) and the import, binding and snapshot of the C runtime they
-need are implemented (`src/buster/compiler/lane.c`, `x86_64_encoder.c`,
+writer, the direct path's executables (static ones without libc and with it,
+and dynamic PIEs against glibc) and the import, binding and snapshot of the C
+runtime they need are implemented (`src/buster/compiler/lane.c`, `x86_64_encoder.c`,
 `link.c`, `object_writer.c`, `import.c`, `runtime.c`, `bind.c`,
 `executable.c`, `dynamic.c` and `snapshot.c`, with generated test programs in
 `link_program.c`), and `benchmark-link` measures the whole link against the
@@ -84,7 +84,10 @@ programs by each linker, as the appendix measured them ("The whole link"):
 
 On these programs mold, wild and lld take what they took on hello world, tcc
 and synth, within 5% with their own threads. The writer's phases are in "The
-first executables", "The dynamic PIE" and "The unwind tables".
+first executables", "The dynamic PIE" and "The unwind tables". Linked with
+`-static`, the same programs take 0.29, 0.36 and 7.7 ms, against mold's 8.7,
+10.0 and 41.7 ms with its threads and wild's 4.0 and 25.9 ms at the two larger
+sizes ("The whole link").
 
 Orders of magnitude are there for programs up to a few megabytes, where
 fixed costs dominate. For a 46 MB output both sides spend their time in the
@@ -481,8 +484,8 @@ relocation, and an executable's patch kernel derives its arithmetic from it:
 | Kind | Where | Relocation in an object | Value in an executable |
 | --- | --- | --- | --- |
 | `CALL` | a branch's rel32: `call`, `jmp` or `jcc` | `R_X86_64_PLT32` | S + A − P |
-| `CALL_GOT` | `call` or `jmp [rip + slot]` (`ff 15`, `ff 25`) | `R_X86_64_GOTPCRELX` | G + A − P |
-| `LOAD_GOT` | `mov r64, [rip + slot]` | `R_X86_64_REX_GOTPCRELX`: loading a pointer has REX.W | G + A − P, or, when S turns out to be local, S + A − P with `mov` rewritten to `lea` |
+| `CALL_GOT` | `call` or `jmp [rip + slot]` (`ff 15`, `ff 25`) | `R_X86_64_GOTPCRELX` | G + A − P, or in a static PIE, when S is the image's and not an IFUNC, S + A − P with `call` rewritten to `addr32 call` and `jmp` to `jmp` and a `nop` |
+| `LOAD_GOT` | `mov r64, [rip + slot]` | `R_X86_64_REX_GOTPCRELX`: loading a pointer has REX.W | G + A − P, or in a static PIE, when S is the image's and not an IFUNC, S + A − P with `mov` rewritten to `lea` |
 | `GOTPCREL` | any other instruction that reads the slot (`push [rip + slot]`) | `R_X86_64_GOTPCREL` | G + A − P, never rewritten |
 | `PC32` | any other RIP-relative operand or rel32, or 4 bytes of data | `R_X86_64_PC32` | S + A − P, checked to fit in int32 |
 | `TPOFF32` | a 32-bit displacement or immediate: `fs:[x@tpoff]` (local-exec), `[rax + x@tpoff]` | `R_X86_64_TPOFF32` | S's offset from the end of the TLS block + A |
@@ -496,7 +499,12 @@ G is the address of S's GOT slot. A linker that relaxes `CALL_GOT`,
 `LOAD_GOT` or `GOTTPOFF` rewrites the instruction's bytes before the field,
 from what its relocation type says they are, so those kinds go only on those
 instructions, without a segment override; any other read of a slot is
-`GOTPCREL`, which linkers leave alone.
+`GOTPCREL`, which linkers leave alone. GNU as marks `test`, binops and a `mov`
+without REX.W with `GOTPCRELX` and `REX_GOTPCRELX` too, so the import reads
+the bytes before each such relocation's field and gives it `CALL_GOT` or
+`LOAD_GOT` only on those instructions with the addend -4, and `GOTPCREL`
+otherwise: 379 of the static runtime's on the 9700X, `libgcc.a`'s adds of
+slots.
 
 **Wide addends.** Any kind can carry a 64-bit addend: a bit in `kind` sends
 the patch to a side table that holds it. Initializers like
@@ -753,35 +761,68 @@ version and for the snapshot's layout: a rebuild of the compiler changes it,
 so a snapshot is only ever read by the executable that wrote it, with the same
 struct layouts. The absent candidates are checked so that a library newly
 placed earlier in the search path is noticed. The options that change the
-runtime (`-static`, `-pie`, `-nostdlib`, the search paths) will each get a
-snapshot of their own.
+runtime get a snapshot of their own: `-static` has one; `-pie`, `-nostdlib`
+and the search paths will.
 
-**As built** (`snapshot.c`: `runtime_open`, with `test-snapshot` and
-`benchmark-snapshot`). The snapshot is `runtime.snapshot` in
-`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster` without it, made private
-(mode 0700) when it is missing.
+**As built** (`snapshot.c`: `runtime_open` and `runtime_open_static`, with
+`test-snapshot` and `benchmark-snapshot`). The snapshots are
+`runtime.snapshot` (a dynamic PIE's runtime) and `runtime-static.snapshot` (a
+static executable's) in `$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster`
+without it, made private (mode 0700) when it is missing. Each holds its
+kind, which the loader checks: the other kind's file at its name is stale.
 
 - **The file** is the runtime's records as the compiler lays them out in
-  memory: a header (the counts, the paths and each region's place), the
-  records that hold pointers from the second page, the strings they point
-  into, then the columns, each at a multiple of 64 bytes. It is 192 KB on the
-  9700X: 2,673 global names with their index and filter, and 2,630 exports.
-  The "few tens of kilobytes" this section first expected were the exports'
-  columns alone. Its versions 2 and 3 added what a static runtime's closure
-  reads (each member's references, with the member each loads, and its COMDAT
-  groups, the global names' members, the archives), which took the dynamic
-  runtime's from 185 KB.
+  memory, each region at a multiple of 64 bytes, in two parts:
+  - **the directory,** what every link reads: a header (the counts, the paths
+    and each region's place), then from the second page the probes,
+    `libc.so.6`'s versions, the members, the strings, the pieces (the crt
+    objects and the members, each a range of every table's records), each
+    piece's hash, the global names with their index and filter, the exports,
+    and the pieces' references and COMDAT groups;
+  - **the pieces' records,** of which a link reads those of the pieces it
+    joins: the link's columns, the bindings and the symbols' global names,
+    then the data, the names run and each piece's atoms' bytes.
+
+  The dynamic runtime's is 197 KB on the 9700X: 2,673 global names with their
+  index and filter, and 2,630 exports. The "few tens of kilobytes" this
+  section first expected were the exports' columns alone. The static
+  runtime's is 8.6 MB, 5 MB of it the members' bytes.
 - **Loading** maps it privately. The runtime's columns point into the mapping
   and are used where they are, which is why the global names hold their bytes
-  as offsets into one string pool rather than as pointers. Only the probes,
-  libc.so.6's versions, `libc_nonshared.a`'s members and the link's names' and
-  atoms' bytes hold pointers, stored as offsets plus 1 (0 for none) and
-  rebased where they are, which copies their page alone.
-- **It is trusted only whole:** its magic, version and size must be right,
-  its 128-bit hash (the build ID's chunk hash, over the file with the hash's
-  field as zeros) must be its bytes', the executable that wrote it must be
-  this one, and every probe must be as it was. A torn, truncated or corrupt
-  file is rebuilt rather than trusted, so the writer needs no `fsync`.
+  as offsets into one string pool rather than as pointers. The probes and
+  `libc.so.6`'s versions hold pointers stored as offsets plus 1 (0 for none),
+  rebased where they are, which copies their page alone. The members' names
+  and the link's names' and atoms' bytes hold such offsets too, but stay as
+  they are: the runtime's deltas make them pointers where binding reads them
+  (`runtime_name_bytes`, `runtime_atom_bytes` and `runtime_member_name`), so
+  loading writes none of those columns' pages.
+- **It is trusted a piece at a time:**
+  - the directory, whole, when it loads: its magic, version and size must be
+    right, its 128-bit hash (the build ID's chunk hash, over the file up to
+    the pieces' records with the hash's field as zeros) must be its bytes',
+    the executable that wrote it must be this one, its kind the one asked for,
+    and every probe as it was;
+  - each piece when binding first reads it (`runtime_piece_current`, in
+    `bind_join`, and in `bind_begin` for `crtend.o`'s and `crtn.o`'s, whose
+    symbols binding reads before they join): its records must hash as the
+    directory says.
+
+  A link thus reads only what this executable wrote, and checks only what it
+  reads. A torn, truncated or corrupt file is rebuilt rather than trusted, so
+  the writer needs no `fsync`:
+  - a damaged directory makes the file invalid;
+  - a damaged piece fails the link that joins it (`BIND_ERROR_SNAPSHOT`),
+    whose caller discards the file (`snapshot_discard`) and opens the runtime
+    again.
+
+  The piece hash takes what binding reads, 26 slices of the piece's columns
+  and data, each a 64-byte block at a time, through masked loads, into eight
+  accumulators that rotate after every block. Each block is two AES rounds,
+  as the chunk hash takes them. The chunk hash's stream with a carry would
+  copy every slice's tail. The columns nothing reads of a loaded runtime are
+  in no piece's hash: the atoms' addresses, the symbols' GOT slots, dynamic
+  indices, versions and references (the linker's, which the runtime leaves
+  0), and the bindings, which only the import uses.
 - **A stale or missing snapshot** is rebuilt by the import (the same code as a
   link without a snapshot), written into a new file under a random name beside
   it and renamed into place. A process that has the old one mapped keeps it
@@ -792,36 +833,54 @@ snapshot of their own.
 
 On the 9700X (`benchmark-snapshot`, one CPU, medians of 41 runs, on tmpfs; on
 btrfs, the cache directory's file system there, within 0.4 µs but for the
-write):
+write), in µs, with a program of one worker bound against each:
 
-| Step | µs |
-| --- | ---: |
-| `runtime_import` and `runtime_release`, without a snapshot | 146 |
-| `runtime_open` from the snapshot | 9.1–9.5 |
-| — the compiler's identity: `stat` of `/proc/self/exe` | 0.5 |
-| — `open`, `fstat`, `mmap` and `close` | 1.0–1.1 |
-| — the header and the hash, which reads all 192 KB | 2.7–3.1 |
-| — the columns pointed into the mapping, the records rebased | 0.6–0.7 |
-| — the 19 probes' `stat` | 4.1 |
-| `runtime_release` of a loaded runtime (`munmap`) | 1.9–2.3 |
-| `snapshot_write`, on tmpfs / btrfs | 47 / 390–410 |
-| the 192 KB read with `pread` into new memory instead | 20–22 |
-| mapped without the hash, then 12 lookups | 7.7–8.1 |
-| binding one worker against the imported / the loaded runtime | 2.6 / 2.6 |
+| Step | Dynamic | Static |
+| --- | ---: | ---: |
+| `runtime_import` (`_static`) and `runtime_release`, without a snapshot | 147 | 1,894 |
+| `runtime_open` from the snapshot | 9.6 | 22.8 |
+| — the compiler's identity: `stat` of `/proc/self/exe` | 0.5 | 0.6 |
+| — `open`, `fstat`, `mmap` and `close` | 1.0 | 1.2 |
+| — the header and the directory's hash | 3.3 | 15.5 |
+| — the columns pointed into the mapping, the probes and versions rebased | 0.6 | 0.8 |
+| — the probes' `stat` (19 and 20) | 4.1 | 4.6 |
+| `runtime_release` of a loaded runtime (`munmap`) | 1.9 | 6.3 |
+| `snapshot_write` (tmpfs) | 48 | 1,543 |
+| the file read with `pread` into new memory instead | 22 | 241 |
+| mapped without the hash, then 12 lookups | 7.8 | 13.0 |
+| mapped and hashed whole, as format 3 checked it | 4.2 | 155 |
+| binding, against the imported runtime | 2.7 | 138 |
+| binding, against one loaded afresh, as a link binds | 2.9 | 221 |
+| binding, against one loaded and warm | 3.0 | 165 |
+| — the checks of the pieces it read (5 and 447), warm | 0.2 | 41 |
 
-- **Mapped, not read.** `pread` puts the 192 KB into new anonymous pages,
-  whose first touches make it cost 20 µs; mapping the page cache's own pages
-  costs 1 µs, and their first reads under the hash 2 µs more.
-- **The hash costs 1.3 µs** over a mapping read only where a hello world's
-  binding reads it. It is what lets the loader trust the file without checking
-  each record: what the hash passes is what this executable wrote.
-- **The probes are the largest part:** 19 `stat` calls at 0.215 µs. Eight are
-  absent candidates in directories the 9700X doesn't have (Debian's multiarch
-  ones). A probe of each directory instead would leave 13, about 2.8 µs, since
-  a directory's times change when a file is added to it; it is left for later.
-  `statx` costs 0.24 µs a call, more than `stat`.
-- **Binding is as fast against a loaded runtime as against an imported one:**
-  the hash has already read the columns it reads.
+- **Mapped, not read.** `pread` puts the file into new anonymous pages, whose
+  first touches make it cost 22 µs for the dynamic runtime's 197 KB; mapping
+  the page cache's own pages costs 1 µs, and their first reads under the hash
+  2 µs more.
+- **The static runtime is checked by the piece.** Format 3 hashed the whole
+  file before trusting any of it, 155 µs of the static runtime's 209 µs load,
+  where a hello world's link reads 447 of its 2,622 pieces. Format 4 hashes
+  the directory, about 0.9 MB, in 15.5 µs, and binding checks the pieces it
+  joins, 41 µs warm. The pages the hash used to fault in, binding faults in
+  now, about 40 µs more against a fresh mapping than a warm one.
+  - Load, binding of one worker and release, in a harness that times all
+    three on the 9700X: 385 µs warm and 678 cold (L3 evicted) with format 3;
+    284 and 449 with format 4.
+  - Hashing all 32 of the piece's columns took a fifth longer (50 µs), and
+    faulted in pages binding never reads.
+  - One AES round a block instead of two saves 1.5 µs; two plain sums a
+    block, 4 µs. Most of the check's cost is per slice, not per block.
+  - `MAP_POPULATE` makes the load 750 µs: a private writable mapping is
+    populated by write faults, which copy every page.
+- **The probes are the largest part of a dynamic link's load:** 19 `stat`
+  calls at 0.215 µs. Eight are absent candidates in directories the 9700X
+  doesn't have (Debian's multiarch ones). A probe of each directory instead
+  would leave 13, about 2.8 µs, since a directory's times change when a file
+  is added to it; it is left for later. `statx` costs 0.24 µs a call, more
+  than `stat`.
+- **Binding the dynamic runtime is as fast loaded as imported:** the directory
+  hash has already read what it reads, and its pieces are a few crt objects.
 
 **Finding and importing the files** (`runtime.c`, with the readers of
 `import.c`). GCC's installation is the highest version under
@@ -866,7 +925,9 @@ crtbeginT.o` before the program's objects and `crtend.o crtn.o` after them,
 with `--start-group -lgcc -lgcc_eh -latomic_asneeded -lc --end-group` between
 (GCC 16 installs `libatomic_asneeded.a` as a link to `libatomic.a`; GCC 13
 links neither). `-static-pie` takes `rcrt1.o`, `crtbeginS.o` and
-`crtendS.o` instead, with `-static -pie --no-dynamic-linker -z text`. The
+`crtendS.o` instead, with `-static -pie --no-dynamic-linker -z text`: the
+static PIE's runtime (`runtime_import_static_pie`, step 6's fifth part) is
+the same archives with those crt objects, in a snapshot of its own. The
 search finds the crt objects as for a dynamic PIE, and each archive where
 `-L` finds it: GCC's installation, then the library directories. The import
 makes the crt objects units 0 to 4 and each archive's members, in the
@@ -908,13 +969,17 @@ The runtime refers, without defining them, to `main`, to `__tls_get_addr`
 (from those 25 PIC members on the 9700X) and to `_DYNAMIC`, from
 `dl-reloc-static-pie.o`, which a link without `-static-pie` never loads:
 `crt1.o` defines `_dl_relocate_static_pie`, the one name it would be loaded
-for. For binding's closure, the global names say which member defines each
+for. `rcrt1.o` doesn't, so a static PIE's closure loads it, and the linker
+defines `_DYNAMIC` for the PIEs. A static PIE's linker doesn't define the
+IRELATIVE relocations' bounds, which GNU ld and lld leave undefined in a PIE:
+`libc.a`'s references to them are weak, and its IRELATIVE relocations are in
+`.rela.dyn`. For binding's closure, the global names say which member defines each
 name, and each member's strong references to names are listed; on both
 systems every name but two is defined by at most one member, and those two
 (`DW.ref.__gcc_personality_v0` in 52 members on the 9700X and
 `_.stapsdt.base` in 27) are weak definitions in COMDAT groups. The snapshot
-holds the static runtime as it holds the dynamic one (8.6 MB on the 9700X); a
-link of `-static` doesn't open one yet.
+holds the static runtime as it holds the dynamic one, in a file of its own
+(8.6 MB on the 9700X), which `runtime_open_static` opens ("As built", above).
 
 **Static links, as built** (`bind.c`, the second part of step 6). Binding
 against the static runtime is binding against the dynamic one with the
@@ -1259,9 +1324,11 @@ four `vpmulld` of its bytes widened to dwords by a vector of powers of 33
 right-aligned to its length, and a reduction.
 
 The snapshot (part 4) holds the runtime's columns as they are, written without
-a record at a time and mapped back rather than read, the link's columns of
-pointers rebased eight at a time, and validated by one `stat` per probe (19
-here, 0.215 µs each, faster than `statx`): "The runtime snapshot".
+a record at a time and mapped back rather than read. The link's columns of
+pointers stay offsets, which binding adds a delta to where it reads them. It
+is validated by one `stat` per probe (19 here, 0.215 µs each, faster than
+`statx`), its directory by a hash, and each piece by a hash of its own when
+binding first reads it: "The runtime snapshot".
 
 #### Layout
 
@@ -1960,6 +2027,107 @@ The programs join 442 of the static runtime's members: 2,323 atoms and
 - **The largest program costs 8% more than its PIE** on one lane: the sort,
   and the chunks' 700 KB more of libc.
 
+#### The static PIE
+
+Step 6's fifth part, its first half: `executable_write` writes a static PIE
+when `ExecutableOptions` has both `dynamic` and `runtime`
+(`dynamic_static_pie_inputs` in `dynamic.c`), from a link bound against the
+static PIE's runtime (`runtime_import_static_pie`: `rcrt1.o`, `crti.o`,
+`crtbeginS.o`, `crtendS.o` and `crtn.o` around the static executable's
+archives). It is a PIE without dynamic symbols that `libc.a`'s startup
+relocates itself: `rcrt1.o` leaves `_dl_relocate_static_pie` to `libc.a`'s
+member, which finds `.dynamic` through `_DYNAMIC` and applies its relocations
+before the program reads a relocated address. `test-static` runs every
+program as a static PIE as well, and with `--cross-check` against lld's.
+
+- **The file** is the dynamic PIE's at base 0 (`ET_DYN`, `DF_1_PIE`) without
+  `.interp`, `PT_INTERP`, `DT_NEEDED` or versions: lld's sections, program
+  headers and `.dynamic` tags. `.dynsym` holds the null symbol alone and
+  `.gnu.hash` no symbol, as lld writes them; glibc's self-relocation reads
+  `DT_SYMTAB`'s first entry for its IRELATIVE relocations' symbol. The R
+  segment has `rcrt1.o`'s ABI note, the RX segment `.init`, `.fini` and the
+  IFUNCs' stubs in `.iplt`, and RELRO `.dynamic` and `.got`.
+- **Relocation classes:** RELATIVE or NONE, since no symbol is dynamic. A
+  weak reference to nothing is address 0, as GNU ld and lld leave it in a
+  static PIE, so a `PC32` or `PC64` to one is refused, and so are text
+  relocations, an `ABS32` to the image and a `CALL`, `PC32` or `PC64` to an
+  absolute symbol, as in a dynamic PIE.
+- **IFUNCs:** as the static executable's, stubs in `.iplt` that stand for
+  their addresses everywhere, their slots and the GOT slots of IFUNCs without
+  stubs filled by IRELATIVE relocations, which go last in `.rela.dyn`; a GOT
+  slot that holds a stub's address is RELATIVE. lld's static PIE keeps the
+  same pointer equality; GNU ld's gives a pointer in `.data` the IFUNC's
+  implementation where a `lea` gives its `.iplt` entry, and `test-static`'s
+  IFUNC program sees them differ there.
+- **GOT relaxation, which a static PIE needs.** `rcrt1.o`'s `_start` calls
+  `__libc_start_main` through its GOT slot (`call [rip + slot]`), and
+  `libc.a`'s code before the self-relocation reads others: the slots hold no
+  run-time addresses yet (0, in `.rela.dyn`'s form). GNU ld's and lld's static
+  PIEs of hello world linked with `--no-relax` fault there. So a `CALL_GOT`
+  or `LOAD_GOT` with the addend -4 to a symbol of the image's that isn't an
+  IFUNC is relaxed as both linkers relax it: `call [rip + slot]` to
+  `addr32 call` (`67 e8`), `jmp [rip + slot]` to `jmp` and a `nop`,
+  `mov r64, [rip + slot]` to `lea`, and its target gets no slot unless
+  another reference reads one. The import gives those kinds only those
+  instructions ("Fixups from the encoder"), so the patch rewrites only what
+  it may, and the rewrite takes its own forms too, so that a link written
+  again over its relaxed bytes comes out the same (`test-static` writes each
+  static PIE so once more). A chunk boundary never splits the two bytes
+  before such a field either. The generated program of one worker has 155 GOT
+  slots as a static executable and 62 as a static PIE.
+- **RELR**, when `libc.a`'s startup takes `DT_RELR`: glibc's
+  `_dl_relocate_static_pie` applies it from 2.36 on, before `DT_RELA`, and an
+  older one would leave its relocations undone. `libc.a` has no version
+  definitions to say so, as `libc.so.6`'s `GLIBC_ABI_DT_RELR` does for a
+  dynamic PIE, so the writer takes `arc4random`, which glibc added in that
+  release, as the sign (`dynamic_static_relr`). `cc -static-pie` writes RELA
+  unless given `-z pack-relative-relocs`; both linkers' RELR static PIEs run
+  on the 9700X. The program of 180,000 workers had 183,839 RELATIVE
+  relocations in `.rela.dyn` (4.4 MB) without RELR, a 49.8 MB file whose
+  write took 12.3 ms on one lane; with RELR, a 45.4 MB file.
+
+Against lld's static PIE of each compiled program (`--cross-check`, lld given
+`-z pack-relative-relocs` as ours has RELR), the IRELATIVE relocations are as
+many and the RELATIVE ones outside the GOT the same (1,099 for hello world);
+ours have 6 more in the GOT, the slots of IFUNCs that only calls give stubs,
+which lld points at the stubs' IRELATIVE slots. That would take the slots
+from the static executable too, and is left for later.
+
+`benchmark-executable` writes the generated programs as static PIEs
+(`--only static-pie`). Medians in µs on the 9700X, the output on tmpfs, in
+place / as a new file, against the static executables of the same session:
+
+| Program | static, 1 lane | static PIE, 1 lane | static, 8 lanes | static PIE, 8 lanes |
+| --- | ---: | ---: | ---: | ---: |
+| 1 worker | 101 / 133 | 108 / 138 | 55 / 113 | 58 / 117 |
+| 64 workers | 102 / 133 | 111 / 140 | 54 / 115 | 56 / 118 |
+| 2,000 workers | 180 / 225 | 184 / 232 | 76 / 179 | 78 / 183 |
+| 180,000 workers | 10,500 / 12,140 | 10,550 / 12,140 | 6,610 / 8,580 | 6,500 / 8,750 |
+
+- **A static PIE costs 0.5% to 9% more than a static executable on one
+  lane,** 7 to 9 µs for the small programs: one worker's count takes 21.3 µs
+  against 16.5 (its symbols' classes, the written atoms' relocations and the
+  targets' checks for both kinds) and its dynamic phase 6.5 against 4.1
+  (`.dynamic`, `.dynsym`, `.relr.dyn`); 180,000 workers' count 1,564 against
+  1,332, and its symbols' phase 234 against 326 (69 GOT slots to fill, not
+  116,498).
+- **The count took 2.6 ms at first** for 180,000 workers on one lane, where
+  the static executable's takes 1.33 and the dynamic PIE's 1.38. Without RELR,
+  the written atoms' relocations went one fixup at a time (the dense atoms'
+  path is RELR's): RELR took the count to 2.20 ms, and the dynamic phase from
+  558 µs to 185. The relaxation looked up each candidate's target in the
+  bitset of relaxable symbols, 361,309 of the program's 541,519 reads of a
+  slot: marking the candidates in a bitset of their own, which the reduction
+  ANDs with the relaxable symbols a word at a time, took it to 2.01 ms
+  (gathers of the bitset's words took it to 2.40: each costs about 13 cycles
+  whatever its mask). And the PIE's filter of the symbols outside the image,
+  by one hash, had 55 of them in a static PIE where a dynamic one has 10, and
+  a 33rd of the targets hit their bits (49,000 of 1.6 million, mostly the
+  image's symbols): testing the targets against the IFUNCs' filter of two
+  hashes, with the symbols outside the image added to it, for both checks at
+  once took it to 1.56 ms. Each hit's check also ends at its bit in the
+  RELATIVE bitset now, before reading the symbol's columns, in both PIEs.
+
 #### The unwind tables
 
 Step 5 compares the direct path with linkers on outputs of the same features,
@@ -2184,6 +2352,38 @@ have the benchmark's peak resident set as its own, which Linux carries over to
 the new program at `exec` from the memory it was spawned from. So the counted
 run goes through a helper, the same executable run again, whose peak a program
 that does nothing measures: 57 page faults and 7.3 MB, below every linker's.
+
+**Static executables.** The same programs linked with `-static` (`--kinds`):
+the direct path opens the static runtime's snapshot (`runtime_open_static`),
+binds against it, and writes with `dynamic_static_inputs`; the linkers take
+the appendix's `-static` command. Medians on the 9700X in µs, one lane:
+
+| | 1 worker | 2,000 workers | 102,400 workers |
+| --- | ---: | ---: | ---: |
+| **Direct path, 1 lane** | **287** | **358** | **7,737** |
+| `runtime_open_static` | 22.3 | 22.6 | 25.3 |
+| `bind_begin` | 14.0 | 15.7 | 102 |
+| `bind_end` and `dynamic_static_inputs` | 128 | 129 | 388 |
+| `executable_write` | 123 | 191 | 7,222 |
+| One `pwrite` of the output | 18.7 | 31.7 | 2,894 |
+| GNU ld | 12,830 | 16,210 | 307,000 |
+| lld, its threads / 1 | 8,690 / 6,620 | 9,470 / 8,180 | 53,800 / 98,200 |
+| mold, its threads / 1 | 8,690 / 6,040 | 10,010 / 7,510 | 41,700 / 100,400 |
+| wild, its threads / 1 | — | 4,040 / 5,050 | 25,900 / 103,300 |
+
+- **A static hello world's link takes 0.29 ms,** where the appendix's C hello
+  world took 3.92 ms with wild and 8.55 with mold. The output is 730 KB:
+  `libc.a`'s 442 members that join, and the atoms' bytes binding copies.
+- **Binding is most of it:** `bind_end` joins those members, checking each
+  piece of the snapshot as it first reads it ("The runtime snapshot").
+- **wild links no static executable of the 1-worker program.** wild 0.10
+  starts a static executable's TLS segment at `.tdata`'s alignment past a
+  multiple of the segment's when `.tbss` is more aligned, as this program's
+  is (a 16-byte thread-local in `.tbss`). glibc's static startup takes the
+  image to start on the alignment, and `malloc` then faults. A C program with
+  a 16-aligned zero thread-local beside an 8-aligned one shows it, and GNU
+  ld, lld and mold start the segment aligned. The benchmark doesn't run wild
+  on such a program.
 
 #### Synthetic sections
 
@@ -3004,6 +3204,7 @@ Where the decisions stand:
 | A static link's closure over the archives' members (binding) | each member's references | rounds over a bitset of the members, references 16 at a time compressed onto a list that is marked after the round: marked per batch, each waited for its masked store (done: 1.43 against 2.44 µs, 3.24 against 5.51 ns per member; "Static links, as built") |
 | A static executable's IFUNCs and stubs (the writer's count) | the fixups' targets, against tens of IFUNCs | a filter by two hashes in four registers, 16 targets at a time: one hash took a 46th of them for IFUNCs (done: count 1,309 against 1,588 µs for 2.35 million fixups; "The static executable with libc") |
 | Relaxing general- and local-dynamic TLS accesses | a compare and a copy per access | scalar, in the patch's path for the other kinds: the most a test program has is 47 accesses, whose five atoms' patching takes 0.89 µs of a 125 µs write |
+| A static PIE's loads and calls through the GOT that relax (the count, and the patch) | which of a link's reads of slots may relax, and which targets need a slot | compares of 64 kinds and addends find the candidates, marked in a bitset of their own that the reduction ANDs with the relaxable symbols 64 at a time; each is rewritten in the patch's path for the other kinds, a byte or two (done: the count 2.01 against 2.40 ms with gathers of the bitset's words for 180,000 workers; "The static PIE") |
 | Ordering prioritized init and fini arrays | a few entries | scalar on lane 0, a stable radix sort: six entries take 0.24 µs of a 99.5 µs write |
 
 So on the direct path, most of the output is produced by a vector kernel that
@@ -3095,6 +3296,16 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
   access, the prioritized arrays' order and the linker's names; with
   `--cross-check`, they must run as lld's links do too, with as many
   IRELATIVE relocations, the same TLS alignment and the same arrays' sizes.
+  It writes them as static PIEs too, which must run as `cc -static-pie`'s
+  links do (or be refused as those are), and checks their `.dynamic`, every
+  RELATIVE relocation in `.rela.dyn` and `.relr.dyn`, every relaxed load and
+  call against the instruction it was, and a write over the relaxed bytes.
+- **The runtime snapshot:** `test-snapshot` loads each kind's runtime back
+  from its snapshot and compares it with the import, binds and writes the same
+  programs against both into the same bytes, and checks staleness, damage and
+  concurrency. A damaged directory must make the file invalid. A byte changed
+  in a piece's records must leave every piece current but that one, fail a
+  binding that reads it, and let one that doesn't bind as before.
 - **Lane counts:** each phase with 1, 2, 3 and 8 lanes, outputs compared byte
   for byte. `test-executable` writes every program so, each time from zeroed
   fields over the last file scribbled over, so that a lane that skipped a
@@ -3218,8 +3429,15 @@ and with this document updated with what was measured:
    `.iplt` and IRELATIVE relocations, the general- and local-dynamic TLS
    accesses relaxed, and the prioritized arrays: "The static executable with
    libc"). The `__start_` and `__stop_` symbols wait for foreign inputs (step
-   7): neither system's static runtime refers to one. Next, the snapshot's
-   static part and `benchmark-link`'s `-static` rows.
+   7): neither system's static runtime refers to one.
+   The fourth part is done: the static runtime's snapshot (`runtime_open_static`,
+   format 4's directory and pieces checked as binding reads them,
+   `test-snapshot` and `benchmark-snapshot`'s static rows: "The runtime
+   snapshot") and `benchmark-link`'s `-static` rows ("The whole link").
+   The fifth part's first half is done: the static PIE (the static PIE's
+   runtime, `runtime_import_static_pie`; `executable.c`'s static PIE with GOT
+   relaxation and RELR, `dynamic_static_pie_inputs`, and `test-static` and
+   `benchmark-executable`'s static PIEs: "The static PIE"). Next, `-shared`.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
    and the exchange. Done when the differential tests against lld and mold
    pass on a corpus.
