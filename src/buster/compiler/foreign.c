@@ -81,7 +81,7 @@
 //     foreign_exchange.
 //   - Resolution and archive members: the tables (foreign_entry, foreign_group_entry), foreign_touch, foreign_fold,
 //     foreign_resolve_records, foreign_probe_archives, foreign_probe_libraries, foreign_member_defines_data,
-//     foreign_needed_library, foreign_decide, foreign_resolve and foreign_load.
+//     foreign_needed_library, foreign_common_member, foreign_decide, foreign_resolve and foreign_load.
 //   - COMDAT groups and the winners: foreign_groups, foreign_win and foreign_winners.
 //   - Running: foreign_lane_main, foreign_run, foreign_release and the accessors.
 
@@ -2773,7 +2773,7 @@ static bool foreign_resolve_records(Foreign* foreign, ForeignRound* round, uint3
 // definition: its first member by position. A member after every definition can't load for the name, and definitions
 // only come earlier as rounds go, so the archives past the bound never will matter, and the entry is probed for good.
 // An archive under --whole-archive has no index to look in: its members are all loaded.
-static void foreign_probe_archives(const Foreign* foreign, ForeignEntry* entry, uint64_t bound)
+__attribute__((cold, noinline)) static void foreign_probe_archives(const Foreign* foreign, ForeignEntry* entry, uint64_t bound)
 {
     for (uint32_t a = 0; entry->owner_archive == 0 && a < foreign->archive_count && foreign_position(foreign->archives[a].input, 1) < bound; a += 1)
     {
@@ -2798,7 +2798,7 @@ static void foreign_probe_archives(const Foreign* foreign, ForeignEntry* entry, 
 // Looks a name up in the shared libraries' exports, in link order, those before `bound`: the first that exports it is
 // the first of all, which the entry keeps. Once one does, or every library has been looked in, what the entry knows is
 // final; a lookup stopped at the bound tells only that no library before it exports the name.
-static void foreign_probe_libraries(const Foreign* foreign, ForeignEntry* entry, uint64_t bound)
+__attribute__((cold, noinline)) static void foreign_probe_libraries(const Foreign* foreign, ForeignEntry* entry, uint64_t bound)
 {
     uint32_t l = 0;
     bool found = false;
@@ -2824,7 +2824,7 @@ static void foreign_probe_libraries(const Foreign* foreign, ForeignEntry* entry,
 // function or an IFUNC, not common, and not in a reserved section but SHN_ABS. The member isn't loaded: its header and
 // symbol table are read here into locals, a symbol at a time, on both paths, since the rule is rare. A member that
 // doesn't read doesn't define it.
-static bool foreign_member_defines_data(const Foreign* foreign, const ForeignArchive* archive, uint32_t member, const ForeignEntry* entry)
+__attribute__((cold, noinline)) static bool foreign_member_defines_data(const Foreign* foreign, const ForeignArchive* archive, uint32_t member, const ForeignEntry* entry)
 {
     const ForeignInput* input = &foreign->inputs[archive->input];
     ImportMember header = archive->members[member];
@@ -2907,7 +2907,7 @@ static uint64_t foreign_shared_position(const Foreign* foreign, const ForeignEnt
 // which the reference binds to (GNU ld has dropped one under --as-needed that wasn't needed when it came). UINT32_MAX
 // for none. lld counts a library's references whether or not it is needed, and loads members for those of one that
 // isn't (documented in the tests).
-static uint32_t foreign_needed_library(const Foreign* foreign, const ForeignEntry* entry, uint64_t bound)
+__attribute__((cold, noinline)) static uint32_t foreign_needed_library(const Foreign* foreign, const ForeignEntry* entry, uint64_t bound)
 {
     uint32_t result = UINT32_MAX;
     bool binds = false;
@@ -2920,6 +2920,35 @@ static uint32_t foreign_needed_library(const Foreign* foreign, const ForeignEntr
         result = binds && !needed ? l : result;
     }
     return result;
+}
+
+// GNU ld's common rule, for a name whose common symbol has no strong definition: the first member after its earliest
+// common symbol, in index order, that defines the name as global data loads. Out of foreign_decide's loop, as the
+// probes are: a decision rarely takes them, and inlined they slowed every other's.
+__attribute__((cold, noinline)) static void foreign_common_member(const Foreign* foreign, ForeignEntry* entry, ForeignLane* lane)
+{
+    entry->flags |= BUSTER_FOREIGN_ENTRY_DATA_PROBED;
+    bool found = false;
+    for (uint32_t a = 0; !found && a < foreign->archive_count; a += 1)
+    {
+        const ForeignArchive* archive = &foreign->archives[a];
+        uint32_t begin = 0;
+        uint32_t end = 0;
+        import_index_bucket(&archive->lookup, entry->hash, &begin, &end);
+        // The bucket's entries are in index order.
+        for (uint32_t place = begin; !found && place < end; place += 1)
+        {
+            const uint32_t member = archive->lookup_members[place];
+            const bool same = archive->lookup.hash[place] == entry->hash && archive->lookup_lengths[place] == entry->length &&
+                              import_same_bytes(archive->lookup_names[place], entry->name, entry->length);
+            const bool after = foreign_position(archive->input, member + 1) > entry->common;
+            found = same && after && !foreign_member_loaded(archive, member) && foreign_member_defines_data(foreign, archive, member, entry);
+            if (found)
+            {
+                foreign_need(lane, a, member);
+            }
+        }
+    }
 }
 
 // What an entry the round touched loads (see the section's comment): its first member, and by GNU ld's common rule the
@@ -2970,28 +2999,7 @@ static void foreign_decide(const Foreign* foreign, ForeignEntry* entry, ForeignL
     const bool common_rule = (entry->flags & BUSTER_FOREIGN_ENTRY_COMMON) != 0 && (entry->flags & (BUSTER_FOREIGN_ENTRY_STRONG_DEFINED | BUSTER_FOREIGN_ENTRY_DATA_PROBED)) == 0;
     if (common_rule)
     {
-        entry->flags |= BUSTER_FOREIGN_ENTRY_DATA_PROBED;
-        bool found = false;
-        for (uint32_t a = 0; !found && a < foreign->archive_count; a += 1)
-        {
-            const ForeignArchive* archive = &foreign->archives[a];
-            uint32_t begin = 0;
-            uint32_t end = 0;
-            import_index_bucket(&archive->lookup, entry->hash, &begin, &end);
-            // The bucket's entries are in index order.
-            for (uint32_t place = begin; !found && place < end; place += 1)
-            {
-                const uint32_t member = archive->lookup_members[place];
-                const bool same = archive->lookup.hash[place] == entry->hash && archive->lookup_lengths[place] == entry->length &&
-                                  import_same_bytes(archive->lookup_names[place], entry->name, entry->length);
-                const bool after = foreign_position(archive->input, member + 1) > entry->common;
-                found = same && after && !foreign_member_loaded(archive, member) && foreign_member_defines_data(foreign, archive, member, entry);
-                if (found)
-                {
-                    foreign_need(lane, a, member);
-                }
-            }
-        }
+        foreign_common_member(foreign, entry, lane);
     }
 }
 
