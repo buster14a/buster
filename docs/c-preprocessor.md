@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 110 | |
+| The built-in cases (`pp_test_cases`) | 112 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -731,7 +731,7 @@ for one of them wins. An unknown host is x86-64, as in clang's driver.
 
 The options that would make clang predefine or compile something buster doesn't
 follow are refused by name: `-m32`, `-mx32`, `-m16`, `-miamcu`, `-mcpu=`, `-mkernel`,
-`-fapple-kext`, `-fms-compatibility`, `-ffixed-point`, `-fdefer-ts`,
+`-fapple-kext`,
 `-foffload-via-llvm`, the profile-using and pointer-field-protection options,
 and the CUDA, HIP, SYCL and pointer-authentication ones. So are a `--target`
 other than x86-64 Linux with glibc (`x86_64` or `amd64`, any vendor or none,
@@ -758,7 +758,9 @@ cc1 read it (cc1 reads a number in any radix: `0x10`, or `010` in octal),
 other options (`Options.td`'s `Alias`) are read as those options
 (`predefines_alias`, before anything else reads the argument), so the last of
 either spelling wins: `-m[no-]pascal-strings` as `-f[no-]pascal-strings`,
-`-m[no-]zvector` and `-m[no-]unsafe-fp-atomics` as their `-f` options,
+`-m[no-]zvector` and `-m[no-]unsafe-fp-atomics` as their `-f` options
+(`-mzvector` is refused outside assembly, like `-fzvector`, even before
+`-mno-zvector`),
 `-mno-fp-ret-in-387` as `-mno-x87`, and `-mips1` to `-mips64r6` as
 `-march=mips1` and so on (an unknown CPU, unless a later `-march` wins).
 `-msse4`, `-m80387`, `-mapxf` and `-mpure-code` keep branches of their own.
@@ -814,8 +816,8 @@ against the generated tables (each name a feature, with `x86_target.c`'s macro).
 
 ### The `-f` options
 
-Most `-f` options change only macros, which the built-in predefines don't follow
-yet (`--predefines` gives clang's), or nothing `-E` shows. #281 has the audit
+Most `-f` options change only macros, which `predefines_option` models as
+described above, or nothing `-E` shows. #281 has the audit
 of clang 23.1.3's 1,246 `-f` options that found the others: each was run through
 `clang -E` on a probe in `gnu17`, `c17`, `c89` and `assembler-with-cpp`, and its
 output compared with the run without it. Those come in families of an option
@@ -847,11 +849,15 @@ decides after every argument:
     the mode doesn't have are split after that.
   - Character constants in `#if` follow the last of `-funsigned-char` and
     `-fno-signed-char` (unsigned) and `-fsigned-char` and `-fno-unsigned-char`
-    (signed, the default). With unsigned char, `'\xff'` is 255 and an ordinary
+    (signed, the default), from `predefines_option`'s `char_unsigned`. With unsigned char, `'\xff'` is 255 and an ordinary
     character constant is an unsigned value, so `'a' - 'b' > 0`, as in clang's
     `#if`. A multi-character constant is its bytes' concatenation as an int, as
     clang has it: its first byte isn't sign-extended (`'\377\377'` is 65535),
     and the int is, unless char is unsigned (`'\377abc' < 0`).
+  - Wide character constants follow `predefines_option`'s `short_wchar`:
+    `-fshort-wchar` makes them 16-bit unsigned values in `#if`, so
+    `(L'\0' - 1) > 0` and `L'\xffff' - 65536 > 0`. A later
+    `-fno-short-wchar` restores the default 32-bit signed values.
 - **Refused**, with an error that names the option, where the family's last
   option turns it on (its `-fno-` form, alone or last, is taken):
   - keyword sets buster doesn't have: `-fms-extensions` and `-fms-compatibility`
@@ -862,8 +868,6 @@ decides after every argument:
   - lexing buster doesn't do: `-fno-digraphs`, `-fdigraphs` in `c89` (which
     clang makes C94, with `__STDC_VERSION__` `199409L`), and
     `-fraw-string-literals`;
-  - `-fshort-wchar`, whose 16-bit unsigned `wchar_t` changes wide character
-    constants in `#if`;
   - `-E`'s other modes (`-fdirectives-only`, `-fkeep-system-includes`,
     `-fminimize-whitespace`, `-fuse-line-directives`, `-frewrite-includes` and
     `-frewrite-imports`) and modules (`-fmodules` and
@@ -1232,7 +1236,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 110 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 112 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -1359,7 +1363,7 @@ full-corpus reproduction and frozen CI subset.
     keyword.
   - In each mode, `__has_feature` and `__has_extension` of every name in clang
     23's `Features.def` (251) must give clang's answers.
-- **`-f` options** (#281, `pp_test_option_refusals`). Each of 60 option sets
+- **`-f` options** (#281, `pp_test_option_refusals`). Each of 63 option sets
   must be refused, with a message naming the option, or taken without one: every
   refused family where its last option turns it on, after its `-fno-` form, and
   turned off again; `-fzvector` before `-fno-zvector` and in assembly; digraphs

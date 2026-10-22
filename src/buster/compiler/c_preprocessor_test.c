@@ -892,6 +892,10 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "yes\n", false, 0, "-fsigned-char -fno-signed-char", 0 },
     { "signed char in #if", "#if '\\xff' == -1 && 'a' - 'b' < 0 && '\\377\\377' == 65535 && '\\377abc' < 0 && 'abcde' == 0x62636465\nyes\n#endif\n",
       0, "c17", "yes\n", false, 0, "-funsigned-char -fno-unsigned-char", 0 },
+    { "short wchar in #if", "#if (L'\\0' - 1) > 0 && L'\\xffff' - 65536 > 0\nyes\n#endif\n",
+      0, "c17", "yes\n", false, 0, "-fno-short-wchar -fshort-wchar", 0 },
+    { "default wchar after short wchar in #if", "#if (L'\\0' - 1) < 0 && L'\\xffff' - 65536 < 0\nyes\n#endif\n",
+      0, "c17", "yes\n", false, 0, "-fshort-wchar -fno-short-wchar", 0 },
     { "true in C99", "#if true\nyes\n#else\nno\n#endif\n",
       0, "c99", "no\n", false, 0, 0, 0 },
     // Where clang and GCC differ, clang's answer: a #line continued on the next line counts from the line of its # (GCC
