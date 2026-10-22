@@ -422,6 +422,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
 ./build/compiler test-preprocessor --clang
+./build/compiler test-preprocessor --tables src
+./build/compiler benchmark-preprocessor --tables src
 clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
 ./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
@@ -1976,7 +1978,8 @@ the others its measurements are informational.
 
 ## Preprocessor tests
 
-`./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
+`./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
+[options] [file...]`, or `test-preprocessor --tables path...`:
 
 - without files, the 88 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
@@ -1992,9 +1995,23 @@ the others its measurements are informational.
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
   modification times of their own must give each file's time (in UTC), and
-  `SOURCE_DATE_EPOCH`'s when it is set;
+  `SOURCE_DATE_EPOCH`'s when it is set. Then the directive tables (#118,
+  `c_preprocessor_directives_test.c`): 2,000 random sources (`--count N`,
+  `--seed N`) of directives, `%:`, `#` alone, line markers, unknown names,
+  `#`s inside lines, literals and comments and after line splices, and
+  conditionals nested to many levels, balanced and not, and nests past the
+  vectorized pairing's depth limit, each prepared by both kernels, whose tables
+  (directives, line ends, kinds, pairing, notes and include guard) must be the
+  oracle's: a walk of the tokens one at a time, of the test's own. And 17
+  fixtures of a file's conditional structure (`#else` and `#elif` after
+  `#else`, a directive without `#if`, groups left open, in skipped groups and in
+  an included file, extra tokens, `#elifdef` before C23), whose diagnostics
+  both kernels must give alike;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
-  `-ffreestanding`, ...), by both kernels, which must agree.
+  `-ffreestanding`, ...), by both kernels, which must agree;
+- with `--tables`, the directive tables of every `.c` and `.h` file under each
+  path, by both kernels, against the oracle (about 0.02 s for `src`, 0.6 s for
+  the C library corpus).
 
 In both, the vectorized printer's text must be the scalar printer's byte for
 byte, with line markers and without, and must lex back into the stream's
@@ -2014,10 +2031,11 @@ features:
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
   must give clang's answer;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
-  23's `Features.def` must give clang's answers. `sqlite3.c`, musl 1.2.5's 1,357 sources,
+  23's `Features.def` must give clang's answers;
+- the structure fixtures' diagnostics must be clang's, byte for byte. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
 `docs/c-preprocessor.md` has the configurations. The 9700X job runs the cases
-and the repository's translation units with `--clang`.
+and the repository's translation units with `--clang`, and `--tables src`.
 
 ## Preprocessor benchmark
 
@@ -2034,6 +2052,15 @@ them with `clang -dM -E` output (the benchmark leaves this option out of clang's
 command line), as the smoke commands above do for `main.c`. The default 9700X
 job runs that one, pinned to one allowed CPU; like the others, its measurements
 are informational.
+
+`./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
+path...` times the directive tables alone (#118): every `.c` and `.h` file under
+the paths is read and prepared once, then each of 21 passes after a warm-up
+builds every file's table by each kernel, whose tables must be the same, and it
+reports the medians per input token and per directive, IPC, and the scan's
+share. Run it under the 9700X's lock with `taskset -c 2`;
+`docs/c-preprocessor.md` has the numbers for the C library corpus. The default
+9700X job runs it on `src`, pinned to one allowed CPU.
 
 ## Type tests
 

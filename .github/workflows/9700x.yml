@@ -217,6 +217,7 @@ jobs:
         run: |
           ./build/compiler test-preprocessor --clang
           ./build/compiler test-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          ./build/compiler test-preprocessor --tables src
 
       - name: Benchmark the preprocessor on main.c
         # --predefines also supplies the macro effects of flags such as -funsigned-char.
@@ -224,6 +225,11 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+
+      - name: Benchmark the directive tables on the repository sources
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --tables src
 
       - name: Test the C type table
         # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a

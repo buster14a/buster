@@ -318,10 +318,20 @@ so that two paths to one file are one file.
 - **Directive tables** (#118). A vectorized scan (`pp_scan_directives_vector`)
   finds every `#` that starts a line (the lexer's start-of-line bit), with its
   kind and the token where its line ends. `pp_finish_directives` pairs the
-  conditionals with an explicit stack: each conditional points to the next
-  directive of its group (`#elif`, `#else` or `#endif`), so skipping a group
-  that isn't taken is a jump. An unterminated group points nowhere, and the
-  error comes when the file ends.
+  conditionals (`pp_pair_conditionals_vector`, or the stack): each conditional
+  points to the next directive of its group (`#elif`, `#else` or `#endif`), so
+  skipping a group that isn't taken is a jump. An unterminated group points
+  nowhere, and the error comes when the file ends.
+- **The structure's notes** (#118). The table also keeps what a skip must
+  still report, since clang reports it while it skips: an `#elif`, `#elifdef`,
+  `#elifndef` or `#else` after its group's `#else`, a group without its
+  `#endif` (when the skip goes to the end of the file, innermost first), and
+  `#elifdef` and `#elifndef`, a C23 extension before C23 (`pp_note_directives`,
+  `pp_report_skipped`). The vectorized pairing tells whether a file has any
+  (a group whose `#else` isn't last or whose answer is missing), and only then
+  are they built: none of the C library corpus's 8,983 files has any, and a
+  skip over a file without notes checks one count. The scalar kernels build
+  them for every file.
 - **Include guards and `#pragma once`** (#120). A file whose tokens all lie
   inside `#ifndef X` … `#endif`, or `#if !defined X` / `#if !defined(X)`, has
   `X` as its guard. An inclusion while `X` is defined reads nothing, as an
@@ -428,6 +438,17 @@ arenas. Popping a context gives its tokens back when they are on top.
   `pp_evaluate` with an explicit stack, over C23's integer constants: binary,
   digit separators, `true` and `false` in C23 mode, and character constants
   with clang's values.
+- **The conditionals' structure** is reported as clang reports it: `#else` and
+  `#elif` after `#else`, a directive without `#if` and a group left open, also
+  where a skip passes over them (the notes above), and in an included file as
+  unterminated there, the includer's `#endif` then without `#if`. Each is at
+  the directive's name, where clang's lexer starts it (a line splice right
+  before it included: `pp_token_location`), `#elifdef` and `#elifndef` are
+  named as such, before C23 with the C23 extension warning, and the extra
+  tokens of `#else`, `#endif` and `#elifdef` come in clang's order: before the
+  structure in a group it reads, after it where it enters an `#else` from a
+  skip, and not at all where it skips past a taken group (`PPConditional`'s
+  `skipping`).
 - **Includes** (#119) are searched as clang searches them. A quoted name looks
   in the includer's directory, then the `-iquote` directories. Both forms then
   look in `-I`, `-isystem`, clang's resource directory (the highest version
@@ -757,7 +778,8 @@ differ by up to 1% from code placement alone.
 | Piece | Vectorized design | Scalar twin and rare cases | 9700X comparison |
 | --- | --- | --- | --- |
 | Refinement (#116) | Pass A per 64 tokens; pass B batches of 64 identifiers (`docs/c-refinement.md`) | `refine_tokens_scalar`; spliced, UCN and long identifiers | 4.2 times the scalar twin on `sqlite3.c` |
-| Directive scan (#118) | A compare of 64 kinds with `#` and the start-of-line bit | Token at a time | Part of the directive tables' 1.9% |
+| Directive scan (#118) | A compare of 64 kinds with `#` and the start-of-line bit | Token at a time | Part of the directive tables' 1.9%; 0.62 cycles per token on the C library corpus, against 3.99 |
+| Directive tables (#118) | The scan, the kinds and line ends, the pairing below, and the notes only where the pairing finds a file can have any | The stack, and the notes for every file | 2.31 cycles per token and 51 per directive on the C library corpus (`benchmark-preprocessor --tables`), against 6.50 and 143 |
 | Conditional pairing (#118) | Depth as a prefix sum, pairing as nearest smaller values by pointer jumping, 32 conditionals at a time | The stack; files with a continuation too many | 16% faster on a file of 36,868 conditionals; within noise on `sqlite3.c` |
 | File and buffer runs (#122) | 64 tokens per step: one compare finds the identifiers, whole-vector stores | Token at a time | The scalar twins: 22.8 ms against 12.0 ms in all |
 | Argument scan (#122) | Paren depth as a byte prefix sum; the `)` and the top-level commas from compares | Token at a time, through the contexts below | Equal on `sqlite3.c`; 0.4% faster on `main.c`, 1.5% fewer instructions |
@@ -766,6 +788,21 @@ differ by up to 1% from code placement alone.
 | `#if` (#123) | Scalar: the lines are short (below) | Precedence parser with explicit stacks | Under 0.3% of `sqlite3.c`'s time |
 | Keyword pass (#124) | 64 kinds at a time against a table of the language mode's keywords | Token at a time | Not measured on its own |
 | Printer (#124) | Spellings, then spaces for 64 tokens from class tables (`vpermi2b`), then masked 64-byte copies into one buffer | `pp_print_scalar`, through stdio | `-E` on `sqlite3.c` 25.5 to 18.9 ms; `-E -P` on `main.c` 29.3 to 22.1 ms |
+
+**The directive tables alone** (`benchmark-preprocessor --tables`, the 9700X,
+CPU 2, three runs of 21 passes on the C library corpus: 8,983 files, 13,152,141
+tokens, 598,310 directives, one per 22 tokens):
+
+| Kernels | Time | Cycles/token | Cycles/directive | Instructions/token | IPC | The scan, cycles/token |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Vectorized | 5.47–5.55 ms | 2.31–2.34 | 50.7–51.4 | 4.58 | 1.97 | 0.62 |
+| Scalar twins | 15.43–15.50 ms | 6.50–6.53 | 142.9–143.5 | 30.31 | 4.65 | 3.99 |
+
+The scan is a quarter of the vectorized tables; the rest is per directive:
+its kind, its line's end (`pp_next_line`), the pairing and the guard, about
+38 cycles each, at an IPC near 2. The notes cost nothing measurable: the same
+runs' `sqlite3.c` took 13.42 ms against main's 13.40 ms, and `main.c` 26.62
+against 26.60 (medians of five interleaved rounds).
 
 **Conditional pairing.** A conditional's level is the number of groups open
 before it, less one for a continuation (`#elif`, `#else`, `#endif`). The
@@ -979,6 +1016,20 @@ the mispredictions it saves.
     companions, and the ARM keyword attributes.
   - In each mode, `__has_feature` and `__has_extension` of every name in clang
     23's `Features.def` (251) must give clang's answers.
+- **Directive tables and structure** (#118, `c_preprocessor_directives_test.c`).
+  2,000 random sources (`--count`, `--seed`) and nests past the vectorized
+  pairing's depth limit are prepared by both kernels, whose tables must be an
+  oracle's: a walk of the tokens one at a time, of the test's own, that finds
+  each directive and its line's end, classifies it by its name's spelling,
+  pairs the conditionals with a stack and finds the notes and the include
+  guard. The sources mix every directive name, `%:`, `#` alone, line markers,
+  unknown names, `#`s inside lines, in literals and comments and after line
+  splices, CRLF lines, unterminated comments, and conditionals nested to 64
+  levels, balanced and not. With `--tables PATH...`, every `.c` and `.h` file
+  under the paths is checked the same way: this repository's sources and the
+  C library corpus (8,983 files, 598,310 directives) agree. Then 17 fixtures
+  of the conditionals' structure must give the same diagnostics by both
+  kernels, and under `--clang` clang's, byte for byte, columns included.
 - **Files.** With files, each is preprocessed with the options, by both
   kernels, and compared. With `--clang`, our side reads clang's own predefines
   for the same options (`clang -dM -E`, through `--predefines`), so both start
@@ -1145,6 +1196,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char \
     --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler -E [-P] [-o file] [options] file.c
+./build/compiler test-preprocessor --tables src path/to/libc
+taskset -c 2 ./build/compiler benchmark-preprocessor --tables path/to/libc
 ```
 
 On the 9700X, run each one under `EXCLUSIVE_OWNER=<name>
