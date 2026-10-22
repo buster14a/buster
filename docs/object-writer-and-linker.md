@@ -2347,6 +2347,119 @@ copying its code as a compiler's link does:
   decimal program's; and in a static executable, the non-PIC immediates for
   `test` and binops through the GOT, 5 slots in the decimal program.
 
+#### The shared library
+
+`executable_write` writes a shared library when `ExecutableDynamic.shared` is
+set. Binding uses `runtime_open_shared` and `dynamic_shared_inputs`: the C
+runtime's shared-library inputs without a start object, ABI note or interpreter.
+`ExecutableDynamic.soname`, when present, becomes `DT_SONAME`. The file is
+ET_DYN, keeps PT_PHDR, has no PT_INTERP, and uses entry zero unless the link
+explicitly provides one. Its dynamic table has DT_FLAGS, without a PIE's
+DT_FLAGS_1 or DT_DEBUG.
+
+A regular shared-library output is always written to a new file in its
+directory and renamed into place. It never overwrites the previous inode:
+processes can map a library without ETXTBSY protecting its file. Existing
+mappings keep the old library's bytes while new opens see the replacement.
+Special output files retain the writer's sequential-output rules.
+
+**Preemption.** A global or weak definition with default visibility is dynamic
+and preemptible, like an undefined default-visibility reference left for the
+loader by `-z undefs`. A protected or local definition remains in the image.
+Preemptible symbols never participate in GOT relaxation. Their GOT slots use
+R_X86_64_GLOB_DAT, pointer fields use R_X86_64_64, and direct calls go through a
+non-lazy stub, `jmp [rip + slot]`, with a GLOB_DAT slot. This is lld's `.plt.got`
+rule rather than its lazy PLT. Other direct references to such symbols are
+refused, since no permitted relocation can preserve their meaning in the
+read-only image.
+
+**Thread-local storage.** Initial-exec references to preemptible TLS use
+R_X86_64_TPOFF64 against that dynamic symbol. The library's own non-preemptible
+TLS uses a TPOFF64 slot against symbol zero, with its offset within PT_TLS as
+the addend. Either initial-exec form sets DF_STATIC_TLS. Local-exec TPOFF32 is
+refused, as lld refuses it in a shared library. General- and local-dynamic
+TLSGD/TLSLD/DTPOFF32 accesses are also refused for now; the next part of #85
+must retain `__tls_get_addr` calls and emit DTPMOD64/DTPOFF64 GOT pairs instead
+of applying an executable's local-exec relaxation.
+
+**Exports across lanes.** Each lane hashes and counts its exports; layout
+prefixes the bucket counts in bucket order and then lane order; the dynamic
+phase fills each lane's disjoint names, symbols and hash chains. Bloom words
+and bucket ranges are reduced without concurrent writes to a shared word.
+The result is byte-identical at every lane count. Absolute-field classification
+uses the relative and dynamic bitsets, with an exact scalar twin. Direct-fixup
+filter hits retain the per-symbol check, including absolute-call refusal.
+
+**Rejected direct-check experiment.** The 16-lane gathered/compressed check
+from `dc0fa91`, corrected for absolute calls at `c42af0b`, was compared with
+the prior per-hit check on identical frozen source and inputs. Seven alternating
+processes per build on CPU 2 measured the 180,000-worker shared library:
+
+| Old in-place file-policy row | Per-hit check | Corrected 16-lane check |
+| --- | ---: | ---: |
+| Count phase, median | 4.190 ms | 5.521 ms |
+| Count phase, process range | 4.188–4.207 ms | 5.513–5.536 ms |
+| Whole write, median | 17.251 ms | 18.581 ms |
+
+The count cost rose 31.8%, and the whole write 7.7%, beyond process spread.
+The new-file row also lost, and the eight-lane results gave no compensating
+win. The direct-check experiment was removed; its absolute-call regression
+remains. These are historical measurements before the required always-rename
+file policy; they are not the final writer's timings.
+
+**Checks and measurement.** `test-dynamic` writes generated and compiled
+libraries on 1, 2, 3 and 8 lanes and through the exact paths, requires identical
+bytes, checks their ELF and TLS rules, and loads and runs them with the
+generated `dlopen` harness. Compiled fixtures check executable definitions
+preempting library calls, addresses, data and tables. The lld cross-check links
+the same objects with `-shared` and accounts for the lazy/non-lazy slot
+difference. Refusal cases cover local-exec TLS, text relocations and a direct
+address of a preemptible function; general-dynamic compiled TLS is an explicit
+current refusal. `benchmark-executable --only shared` measures the writer by
+phase; `benchmark-link --kinds shared` includes runtime opening and binding,
+compares GNU ld, lld, mold and wild, and runs every resulting library through
+the harness.
+
+At source `8002d88`, on the locked 9700X with Clang 23.1.1, the complete
+`test-executable`, `test-dynamic --cross-check` and `test-static --cross-check`
+commands took 0.226, 1.540 and 3.171 s, respectively, on CPUs 0–7. All checks
+passed, including 8 absolute-call refusals, 37 mapped-library replacement
+checks and 6 failed-first-publication cleanup checks. These are whole-command
+costs; queue waiting is excluded.
+
+The final scalar direct-hit check and atomic publication policy measured as
+follows for 180,000 workers, 185,452 atoms, 2,342,790 fixups and 63,181,112
+output bytes. Each entry is the median of three separately locked process
+medians (11 writes after warmup per process), with their min–max. One lane
+uses CPU 2; eight lanes use CPUs 0–7. Times are milliseconds.
+
+| Lanes | Publication | Count | Whole write |
+| ---: | --- | ---: | ---: |
+| 1 | Replace | 4.221 (4.213–4.251) | 21.651 (21.547–21.721) |
+| 1 | New file | 4.209 (4.206–4.248) | 19.591 (19.519–19.725) |
+| 8 | Replace | 1.498 (1.479–1.511) | 15.993 (15.395–16.131) |
+| 8 | New file | 1.504 (1.504–1.509) | 13.149 (13.097–13.165) |
+
+Both rows stage and rename. Replacing the old file also releases its inode;
+the finish medians are 1.706 ms with one lane and 2.908 ms with eight. These
+measurements describe the final writer, without a claim that the required
+file-policy change is a throughput improvement.
+
+The default shared-link benchmark also passed, including loading and running
+each result. Its whole command took 43.058 s. The direct path uses CPU 2;
+external linkers use their default threads on 15 online CPUs, or the explicit
+one-thread CPU 2 configuration. Each size shares the binder snapshot/input.
+Small cases use 41 linker runs, large cases 11 except GNU ld's 5. Times below
+are milliseconds: direct total includes opening the binder input and writer
+begin/end; external entries include the linker subprocess and produce
+different ELF layouts and file sizes.
+
+| Workers / filler | Direct total | Direct write | GNU ld 1 | lld default / 1 | mold default / 1 | wild default / 1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 / 8 | 0.018 | 0.007 | 5.357 | 5.532 / 4.439 | 5.514 / 2.430 | 2.545 / 1.350 |
+| 2,000 / 8 | 0.192 | 0.177 | 9.957 | 7.020 / 5.869 | 6.964 / 3.717 | 2.984 / 2.892 |
+| 102,400 / 64 | 15.115 | 14.852 | 438.187 | 69.563 / 129.929 | 46.835 / 116.810 | 30.672 / 126.615 |
+
 #### The unwind tables
 
 Step 5 compares the direct path with linkers on outputs of the same features,
@@ -3970,7 +4083,10 @@ and with this document updated with what was measured:
    needed as `libc.so`'s script says ("The runtime snapshot", "The dynamic
    PIE"), and a shared library's runtime (`runtime_import_shared`,
    `runtime_open_shared`) and binding (`bind_shared_exports`: "Shared
-   libraries, as built so far"). Next, its writer.
+   libraries, as built so far"). The writer is now implemented for preemption,
+   exported definitions and initial-exec TLS, with generated and compiled
+   libraries checked against lld and run through `dlopen` ("The shared
+   library"). General- and local-dynamic TLS in libraries remain the next part.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
    and the exchange. Done when the differential tests against lld and mold
    pass on a corpus.

@@ -339,17 +339,25 @@ designs and the compilers already built this way.
   static executable with the C runtime (step 6's third part), with its
   IFUNCs' stubs and IRELATIVE relocations, its general- and local-dynamic
   TLS accesses relaxed to local-exec and its init and fini arrays' priorities,
-  or as a static PIE (step 6's fifth part): the PIE's layout and RELATIVE
+  as a static PIE (step 6's fifth part): the PIE's layout and RELATIVE
   relocations without dynamic symbols, and the static runtime's IFUNCs with
   their IRELATIVE relocations last in `.rela.dyn`. Every kind's loads and
   calls through the GOT of the image's symbols are relaxed, as GNU ld and lld
   relax them, and an IFUNC whose stub only calls reach reads the stub's slot
   through the GOT, as lld's does; all from vector passes with exact twins.
+  It also writes shared libraries (`ExecutableDynamic.shared`, with optional
+  `soname`): default-visibility global and weak definitions are preemptible,
+  calls use non-lazy GOT stubs, and initial-exec TLS uses TPOFF64 slots.
+  Regular shared-library outputs use a new file and rename, preserving any
+  old inode that a process still maps.
+  Local-exec and general/local-dynamic TLS accesses in shared libraries are
+  refused; their implementations remain a later part of #85.
   `dynamic.c` gives it what a PIE needs from the C runtime and from
   binding (`dynamic_inputs`), what a static executable with the C runtime
   needs (`dynamic_static_inputs`) and what a static PIE needs
-  (`dynamic_static_pie_inputs`). `executable_test.c` holds the static
-  executables' tests without libc (`./build/compiler test-executable` runs
+  (`dynamic_static_pie_inputs`), and what a shared library needs without a
+  start object or interpreter (`dynamic_shared_inputs`). `executable_test.c`
+  holds the static executables' tests without libc (`./build/compiler test-executable` runs
   them), `dynamic_test.c` the PIEs' (`./build/compiler test-dynamic`) and
   `static_test.c` those with libc and the static PIEs' (`./build/compiler
   test-static`); `main.c` includes all three, and `executable_benchmark.c`
@@ -1926,11 +1934,11 @@ like the others, its measurements are informational.
 `--seed N` changes the programs and the random inputs, and `--functions N`
 the workers of the set named after it (2,000 by default).
 
-## Dynamic PIE tests
+## Dynamic PIE and shared library tests
 
 `./build/compiler test-dynamic [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 0.75 s on the 9700X, and 0.93 s with
-`--cross-check`) checks `executable.c`'s dynamic PIEs against this system's
+[--cross-check] [--keep]` (about 1.54 s with `--cross-check` on the 9700X)
+checks `executable.c`'s dynamic PIEs against this system's
 runtime (`runtime_import`), in a directory of its own under `--directory`
 (`TMPDIR` or `/tmp` by default), which it removes unless `--keep`. Each
 program is bound by `bind.c` and written by groups of 1, 2, 3 and 8 lanes,
@@ -2013,6 +2021,22 @@ function's pushes and pops gives as GCC's CFI: the CFA 8 bytes further from
 push saves at the CFA less the new offset, and one a pop restores as it was.
 `--seed N` changes the programs. The 9700X job's test step runs it with
 `--cross-check`.
+
+The same command also writes generated and compiled shared libraries against
+`runtime_import_shared`. Every library is byte-identical on 1, 2, 3 and 8 lanes
+and through the exact twins, then loads with `dlopen` and runs through the
+generated harness. The file checks require ET_DYN without PT_INTERP, SONAME,
+the library's exported symbols and initial-exec TLS, and the corresponding
+dynamic relocations. Compiled fixtures verify that the executable's definitions
+preempt the library's calls, data and pointer tables. With `--cross-check`, lld
+links the same objects with `-shared`; the comparison accounts for its lazy PLT
+slots and our non-lazy GLOB_DAT slots. Local-exec TLS, text relocations, a direct
+address of a preemptible function, and currently general/local-dynamic TLS are
+refused. See "The shared library" in the linker design for the supported scope.
+Mapped-file checks hold the old library's descriptor and shared mapping across
+replacement on every lane count; its inode and bytes must survive while new
+opens find the new library. File-cleanup checks also preserve a concurrently
+created destination when a first publication fails.
 
 ## Static executable tests
 
@@ -2141,7 +2165,7 @@ it with `--cross-check`.
 ## Direct executable benchmark
 
 `./build/compiler benchmark-executable [--directory PATH] [--functions LIST]
-[--lanes N] [--seed N] [--only kernels|hash|links|dynamic|static|static-pie]`
+[--lanes N] [--seed N] [--only kernels|hash|links|dynamic|static|static-pie|shared]`
 (about 4 s) reports medians of:
 
 - the patch kernel and the variants it was chosen over (a branch on the kind,
@@ -2168,15 +2192,19 @@ it with `--cross-check`.
   with their stubs, IRELATIVE relocations and GOT slots (`--only static`);
 - and bound against the static PIE's runtime and written as static PIEs,
   with their stubs, relocations (RELATIVE among them) and GOT slots
-  (`--only static-pie`).
+  (`--only static-pie`);
+- bound against the shared-library runtime and written as libraries, including
+  exports, preemptible calls and initial-exec TLS (`--only shared`).
 
-Every write after a case's first goes over the last one's bytes, whose loads
-and calls through the GOT it relaxed already. Run it under the 9700X's lock
+Executable writes after a case's first reuse the last one's file, whose loads
+and calls through the GOT the writer relaxed already. Shared-library writes
+replace their file each time. Run it under the 9700X's lock
 with `taskset -c 2` for one lane, or with `taskset -c 0-7` for 8 (one CPU per
 core), since the lanes' threads keep the affinity they start with.
 `docs/object-writer-and-linker.md` ("Patching and writing", "The first
 executables", "The dynamic PIE", "The static executable with libc", "The
-static PIE" and "GOT relaxation in every executable") has the numbers.
+static PIE", "GOT relaxation in every executable" and "The shared library") has
+the numbers.
 The default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
 
@@ -2284,9 +2312,9 @@ the others, its measurements are informational.
 [--directory PATH] [--cache PATH] [--cpus LIST] [--linkers LIST] [--runs N]
 [--only direct|linkers] [--kinds LIST] [--keep]` (about 122 s on the 9700X)
 links generated programs that call libc, without `SIZE32` and `SIZE64`, as
-dynamic PIEs, static executables and static PIEs (`--kinds`, a list of
-`dynamic`, `static` and `static-pie`, every kind by default), by the direct
-path and by each linker, and reports medians:
+dynamic PIEs, static executables, static PIEs and shared libraries (`--kinds`, a
+list of `dynamic`, `static`, `static-pie` and `shared`, every kind by default),
+by the direct path and by each linker, and reports medians:
 
 - the programs: one worker and 2,000 workers (about hello world's and tcc's
   outputs), and one of synth's shape, 102,400 workers in 512 units with up to
