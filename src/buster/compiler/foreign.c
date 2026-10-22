@@ -2546,9 +2546,12 @@ static void foreign_fold(Foreign* foreign, ForeignRound* round, ForeignTable* ta
 }
 
 // How many records ahead the resolution fetches what a record's probe and compare read: its name, which is read once,
-// from wherever its object's copies are (a partition's records come from every object); and the slot its hash names
-// first, the entry that slot holds and that entry's name, in three stages. A later round's records find the entries an
-// earlier round made, which are cold by then, and most probes end at their first slot.
+// from wherever its object's copies are (a partition's records come from every object); and in a partition whose table
+// held names before the round, the slot the record's hash names first, the entry that slot holds and that entry's name,
+// in three stages. A later round's records find the entries an earlier round made, which are cold by then, and most
+// probes end at their first slot; a first round's find the entries its records just made, still in cache, where the
+// stages only cost (on the 9700X, 5.8 against 4.9 ms for the synth-size link, and 9.5 against 10.4 ms for its members
+// kind, whose second round finds the first's entries).
 #define BUSTER_FOREIGN_PREFETCH_NAME 16
 #define BUSTER_FOREIGN_PREFETCH_SLOT 24
 #define BUSTER_FOREIGN_PREFETCH_ENTRY 16
@@ -2562,18 +2565,19 @@ static void foreign_fold(Foreign* foreign, ForeignRound* round, ForeignTable* ta
 static bool foreign_resolve_records(Foreign* foreign, ForeignRound* round, uint32_t index, ForeignTable* table, ForeignRecord* records, uint64_t count, Arena* arena)
 {
     bool result = true;
+    // Names from earlier rounds, whose entries are cold; a table with no room yet has no slots.
+    const bool earlier = table->count != 0;
     for (uint64_t i = 0; result && i < count; i += 1)
     {
         if (i + BUSTER_FOREIGN_PREFETCH_NAME < count)
         {
             _mm_prefetch((const char*)records[i + BUSTER_FOREIGN_PREFETCH_NAME].name, _MM_HINT_T0);
         }
-        // A table with no room yet has no slots.
-        if (i + BUSTER_FOREIGN_PREFETCH_SLOT < count && table->slots != 0)
+        if (earlier && i + BUSTER_FOREIGN_PREFETCH_SLOT < count)
         {
             _mm_prefetch((const char*)(table->slots + ((uint32_t)records[i + BUSTER_FOREIGN_PREFETCH_SLOT].hash & table->slot_mask)), _MM_HINT_T0);
         }
-        if (i + BUSTER_FOREIGN_PREFETCH_ENTRY < count && table->slots != 0)
+        if (earlier && i + BUSTER_FOREIGN_PREFETCH_ENTRY < count)
         {
             const uint32_t slot = table->slots[(uint32_t)records[i + BUSTER_FOREIGN_PREFETCH_ENTRY].hash & table->slot_mask];
             if (slot != 0)
@@ -2581,7 +2585,7 @@ static bool foreign_resolve_records(Foreign* foreign, ForeignRound* round, uint3
                 _mm_prefetch((const char*)(table->entries + slot - 1), _MM_HINT_T0);
             }
         }
-        if (i + BUSTER_FOREIGN_PREFETCH_ENTRY_NAME < count && table->slots != 0)
+        if (earlier && i + BUSTER_FOREIGN_PREFETCH_ENTRY_NAME < count)
         {
             const uint32_t slot = table->slots[(uint32_t)records[i + BUSTER_FOREIGN_PREFETCH_ENTRY_NAME].hash & table->slot_mask];
             if (slot != 0)
