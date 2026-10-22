@@ -211,7 +211,7 @@ static bool static_test_lanes(StaticTestTally* tally, Link* link, const Bind* bi
         const bool permuted = w == 0 || link_test_permute_names(link, id_order + w, arena);
         static_test_expect(tally, permuted, "permuted NameIds", lanes);
         const bool exact = w >= BUSTER_ARRAY_LENGTH(static_test_lane_counts);
-        ExecutableResult written;
+        ExecutableResult written = { 0 };
         DynamicTestWrite write = {
             .exact = exact,
             .poison = w % 2 == 1,

@@ -118,7 +118,12 @@ static void pp_order_lane(void* argument)
         const char* path;
         const char* output;
         bool markers;
-        Preprocessor* pp = calloc(1, sizeof(Preprocessor));
+        // Preprocessor has 64-byte alignment; ordinary malloc/calloc does not promise that alignment.
+        Preprocessor* pp = BUSTER_ARENA_PUSH_ARRAY(&options_arena, Preprocessor, 1);
+        if (pp != 0)
+        {
+            *pp = (Preprocessor){ 0 };
+        }
         InternTable table = { 0 };
         FILE* diagnostics = open_memstream(&out->diagnostics, &out->diagnostic_length);
         out->ready = pp != 0 && diagnostics != 0 && options_arena.base != 0 &&
@@ -164,7 +169,6 @@ static void pp_order_lane(void* argument)
         {
             pp_release(pp);
         }
-        free(pp);
         intern_release(&table);
         arena_release(&options_arena);
     }

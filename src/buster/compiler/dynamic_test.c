@@ -173,7 +173,7 @@ static bool dynamic_test_lanes(DynamicTestTally* tally, Link* link, const Bind* 
         const uint32_t lanes = dynamic_test_lane_counts[l];
         const bool permuted = l == 0 || link_test_permute_names(link, id_order + l, arena);
         dynamic_test_expect(tally, permuted, "permuted NameIds", lanes);
-        ExecutableResult written;
+        ExecutableResult written = { 0 };
         // Every other write over poisoned scratch memory: the files must still be the same.
         DynamicTestWrite write = {
             .poison = l % 2 == 1,
