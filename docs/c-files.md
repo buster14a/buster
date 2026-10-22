@@ -497,9 +497,6 @@ lanes. `--read-limit N` sets the largest file the lanes read rather than map
   alone, is 8% slower on 8 lanes than on one. Reading each file on the lane
   that prepares it, once the round is known, would keep it in that lane's
   caches.
-- **A unit alone.** A translation unit with a cache of its own still maps every
-  file with `MAP_POPULATE`; reading the small ones made musl's walk 21% faster
-  on one lane, and would help a unit alone too.
 - **Searching earlier.** A file's literal includes need its kinds, starts and
   bytes, not its refined values: its searches could start while it is refined.
 - **`__has_include`.** A unit still probes the paths its `__has_include`

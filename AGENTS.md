@@ -2350,12 +2350,16 @@ and the repository's translation units with `--clang`.
 ## Preprocessor benchmark
 
 `./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
-[options] file...` preprocesses each file from nothing per run (a new intern
-table and preprocessor), with the vectorized kernels and their scalar twins, 21
-passes after a warm-up, and reports the medians of time, cycles and instructions
-per input token and per output token, IPC, each phase's share and time (read,
-lex, refine, directive tables, main loop) and what a run did (directives, runs,
+[--read-limit N,...] [options] file...` preprocesses each file from nothing per
+run (a new intern table and preprocessor), with the vectorized kernels and their
+scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
+and instructions per input token and per output token, IPC, each phase's share
+and time (read, lex, refine, directive tables, main loop), the release after the
+run (the files' mappings among it), and what a run did (directives, runs,
 expansions, invocations, pastes, and the `#if` lines and their lengths).
+`--read-limit` gives a list of the largest files a run reads rather than maps
+(16 KB by default; 0 maps every file), each run in turn in every pass, which
+must all give the same output.
 `--clang` also times `clang -E -P` with the same options, a process per file.
 `-march` selects the shared target's predefines. `--predefines FILE` can replace
 them with `clang -dM -E` output (the benchmark leaves this option out of clang's
