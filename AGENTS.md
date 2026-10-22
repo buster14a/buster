@@ -516,7 +516,7 @@ there at a time, so everything takes one lock:
   waits sees them in `/var/lib/buster-9700x/owner`.
 - The runner's job hooks take the same lock for every CI job, and CI goes
   first: `exclusive.sh` doesn't take the lock while a CI job waits for it or
-  for 10 s after one ends (the runner's next job starts waiting about 2 s
+  for 20 s after one ends (the runner's next job starts waiting about 8 s
   later), and gives it back if it got it then. While CI jobs queue, a session's
   run waits for all of them. A CI job's owner lines give its workflow, job, PR
   number and title (or a push's first line), the run's link and the PR's.
