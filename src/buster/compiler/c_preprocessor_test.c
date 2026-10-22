@@ -24,10 +24,10 @@
 // With files, each is preprocessed with the options (-I, -isystem, -D, -std=, -ffreestanding, ... as for -E) by both
 // kernels, which must agree, and with --clang compared with `clang -E` and the same options, spellings and line
 // markers: our side then reads clang's own predefines (`clang -dM -E` with the options, as --predefines), so that both
-// start from the same macros, and clang gets --buster-headers as the search it makes (pp_clang_arguments, whose links'
-// names in its text become those of the files they lead to). The first difference is printed with the tokens around
-// it (pp_test_files). In both, the vectorized printer's text must be the scalar printer's byte for byte, with line
-// markers and without, and must lex back into the stream's tokens.
+// start from the same macros, and clang gets ours' search for --buster-headers (pp_clang_arguments, whose links' names
+// in its text, as clang escapes them, become those of the files they lead to). The first difference is printed with
+// the tokens around it (pp_test_files). In both, the vectorized printer's text must be the scalar printer's byte for
+// byte, with line markers and without, and must lex back into the stream's tokens.
 //
 // main.c includes this file after c_preprocessor.c. Layout: the token spellings of a stream and of a text, the
 // comparison, clang's side (pp_test_clang), the line markers' places (PPPlaced), the cases, the files, the predefines,
@@ -1993,42 +1993,90 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
     return result;
 }
 
+// `bytes` (`length` of them) as clang writes a file's name in a line marker (raw_ostream::write_escaped, as
+// pp_print_marker_line writes it: \\, \", \t, \n, and a byte outside ' ' to '~' as three octal digits), into `out` (room
+// for 4 times the length). Returns the escaped length.
+static size_t pp_test_escaped_name(const char* bytes, size_t length, char* out)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < length; i += 1)
+    {
+        const uint8_t c = (uint8_t)bytes[i];
+        const char escape = c == '\\' ? '\\' : c == '"' ? '"' : c == '\t' ? 't' : c == '\n' ? 'n' : 0;
+        if (escape != 0)
+        {
+            out[n] = '\\';
+            out[n + 1] = escape;
+            n += 2;
+        }
+        else if (c >= ' ' && c <= '~')
+        {
+            out[n] = (char)c;
+            n += 1;
+        }
+        else
+        {
+            out[n] = '\\';
+            out[n + 1] = (char)('0' + (c >> 6));
+            out[n + 2] = (char)('0' + ((c >> 3) & 7));
+            out[n + 3] = (char)('0' + (c & 7));
+            n += 4;
+        }
+    }
+    return n;
+}
+
+// `*text` (`*length` bytes) with each `from` (`from_length` bytes, not 0) in it replaced by `to`. Returns whether it
+// could; `*text` is then a new text.
+static bool pp_test_replace(char** text, size_t* length, const char* from, size_t from_length, const char* to, size_t to_length)
+{
+    const char* end = *text + *length;
+    size_t count = 0;
+    for (const char* at = memmem(*text, *length, from, from_length); at != 0; at = memmem(at + from_length, (size_t)(end - at) - from_length, from, from_length))
+    {
+        count += 1;
+    }
+    char* replaced = malloc(*length + count * to_length + 1);
+    const bool result = replaced != 0;
+    const char* rest = *text;
+    size_t written = 0;
+    for (const char* at = result ? memmem(rest, *length, from, from_length) : 0; at != 0; at = memmem(rest, (size_t)(end - rest), from, from_length))
+    {
+        memcpy(replaced + written, rest, (size_t)(at - rest));
+        written += (size_t)(at - rest);
+        memcpy(replaced + written, to, to_length);
+        written += to_length;
+        rest = at + from_length;
+    }
+    if (result)
+    {
+        memcpy(replaced + written, rest, (size_t)(end - rest));
+        written += (size_t)(end - rest);
+        replaced[written] = 0;
+        free(*text);
+        *text = replaced;
+        *length = written;
+    }
+    return result;
+}
+
 // clang's text (`*text`, `*length` bytes) with the files it found through pp_clang_arguments' links (in `links`) named as
-// the files they lead to, in clang's resource directory, where ours finds them with --buster-headers: in the line
-// markers, and in what __FILE__ gives. Returns whether it could; `*text` is then a new text.
+// the files they lead to, in clang's resource directory, where ours finds them with --buster-headers: in its line
+// markers, which escape the names (pp_test_escaped_name), as the links' directory is under $TMPDIR, whose name can hold
+// any byte (#255's review). None of clang 23's headers uses __FILE__, the other place its text would name one. Returns
+// whether it could; `*text` is then a new text.
 static bool pp_test_resource_names(char** text, size_t* length, const char* links)
 {
     char resource[PATH_MAX];
     const bool found = pp_clang_resource_directory(resource, sizeof(resource));
-    const size_t from = strlen(links);
-    const size_t to = found ? strlen(resource) : 0;
-    const char* end = *text + *length;
-    size_t count = 0;
-    for (const char* at = found ? memmem(*text, *length, links, from) : 0; at != 0; at = memmem(at + from, (size_t)(end - at) - from, links, from))
-    {
-        count += 1;
-    }
-    char* renamed = found ? malloc(*length + count * to + 1) : 0;
-    const bool result = renamed != 0;
-    const char* rest = *text;
-    size_t written = 0;
-    for (const char* at = result ? memmem(rest, *length, links, from) : 0; at != 0; at = memmem(rest, (size_t)(end - rest), links, from))
-    {
-        memcpy(renamed + written, rest, (size_t)(at - rest));
-        written += (size_t)(at - rest);
-        memcpy(renamed + written, resource, to);
-        written += to;
-        rest = at + from;
-    }
-    if (result)
-    {
-        memcpy(renamed + written, rest, (size_t)(end - rest));
-        written += (size_t)(end - rest);
-        renamed[written] = 0;
-        free(*text);
-        *text = renamed;
-        *length = written;
-    }
+    const size_t links_length = strlen(links);
+    const size_t resource_length = found ? strlen(resource) : 0;
+    char* names = found && links_length != 0 ? malloc(4 * (links_length + resource_length)) : 0;
+    char* to = names != 0 ? names + 4 * links_length : 0;
+    const size_t from_length = names != 0 ? pp_test_escaped_name(links, links_length, names) : 0;
+    const size_t to_length = names != 0 ? pp_test_escaped_name(resource, resource_length, to) : 0;
+    const bool result = names != 0 && pp_test_replace(text, length, names, from_length, to, to_length);
+    free(names);
     return result;
 }
 
@@ -2050,8 +2098,8 @@ static bool pp_test_file(int argument_count, char** arguments, const char* links
 }
 
 // test-preprocessor's files: each of `files` (`file_count` of them) with the options `passed` (`passed_count`), by both
-// kernels, and with `with_clang` against clang with the same options (pp_test_file), but --buster-headers, which clang
-// gets as the search it makes (pp_clang_arguments, with its links in `directory`). Adds the files' output tokens to
+// kernels, and with `with_clang` against clang with the same options (pp_test_file), but --buster-headers, for which
+// clang gets ours' search (pp_clang_arguments, with its links in `directory`). Adds the files' output tokens to
 // `*tokens`. Returns how many differ: all of them if the options can't be read or clang's search can't be made.
 static uint32_t pp_test_files(int passed_count, char** passed, int file_count, char** files, bool with_clang, const char* directory, uint64_t* tokens)
 {
@@ -2062,20 +2110,20 @@ static uint32_t pp_test_files(int passed_count, char** passed, int file_count, c
     bool markers;
     // pp_parse_options wants one input: give it the first file, and use its options for every file.
     char** with_input = calloc((size_t)passed_count + 2, sizeof(char*));
-    char** clang = calloc((size_t)passed_count + BUSTER_PP_CLANG_SEARCH_ARGUMENTS + 1, sizeof(char*));
     char ours[PATH_MAX];
     char links[4200];
     snprintf(links, sizeof(links), "%s/clang-search-XXXXXX", directory);
     bool linked = false;
-    bool ready = with_input != 0 && clang != 0 && file_count != 0;
+    int clang_count = 0;
+    bool ready = with_input != 0 && file_count != 0;
     if (ready)
     {
         memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
         with_input[passed_count] = files[0];
     }
     ready = ready && pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers);
-    const int clang_count = ready && with_clang ? pp_clang_arguments(passed_count, passed, clang, ours, links, &linked) : 0;
-    ready = ready && clang_count >= 0;
+    char** clang = ready && with_clang ? pp_clang_arguments(&options, passed_count, passed, ours, links, &linked, &clang_count) : 0;
+    ready = ready && (!with_clang || clang != 0);
     uint32_t result = ready ? 0 : (uint32_t)file_count;
     for (int i = 0; ready && i < file_count; i += 1)
     {
@@ -2954,6 +3002,20 @@ static bool pp_test_buster_run(const char* mode, bool freestanding, const char* 
     return result;
 }
 
+// --buster-headers' search as clang's arguments for a unit with no directories of its own, written at `arguments`:
+// -nobuiltininc, then -isystem buster's directory `ours` and -isystem the links' directory `links`
+// (pp_clang_fallback_links), where ours searches buster's directory and clang's resource directory after it, as
+// pp_clang_arguments gives it then. Returns how many it wrote.
+static int pp_test_buster_search(char** arguments, const char* ours, const char* links)
+{
+    arguments[0] = "-nobuiltininc";
+    arguments[1] = "-isystem";
+    arguments[2] = (char*)ours;
+    arguments[3] = "-isystem";
+    arguments[4] = (char*)links;
+    return 5;
+}
+
 // buster's headers, in the order pp_test_headers checks them.
 static const char* const pp_test_header_names[] = { "stddef", "stdarg", "limits", "stdint", "float", "stdbool", "stdalign", "stdnoreturn", "iso646", "stdckdint", "stdatomic" };
 
@@ -2970,7 +3032,7 @@ static const char* const pp_test_clang_headers[] = { "immintrin", "x86intrin", "
 // one mode, hosted or `freestanding`: two units, the others first and then buster's 11, and buster's first, each
 // followed by `checks` (the mode's check lines, whose #include lines then include nothing). clang preprocesses each
 // with its own headers, and with buster's in the search --buster-headers makes (-nobuiltininc -isystem `ours` -isystem
-// `links`: pp_clang_search), both with -Wsystem-headers, and:
+// `links`: pp_test_buster_search), both with -Wsystem-headers, and:
 // - with buster's, clang warns about nothing in the headers (with its own, glibc's C23 widths in <limits.h> and the
 //   line comments of <stdckdint.h> in strict C89 give warnings), and gives the unit itself the same diagnostics;
 // - each compared macro expands to the same tokens with either. The declarations aren't compared: clang's freestanding
@@ -2996,7 +3058,7 @@ static uint32_t pp_test_header_orders(const char* directory, const char* ours, c
         theirs[their_count++] = "-ffreestanding";
         mine[my_count++] = "-ffreestanding";
     }
-    my_count += pp_clang_search(mine + my_count, ours, links);
+    my_count += pp_test_buster_search(mine + my_count, ours, links);
     theirs[their_count++] = "-Wsystem-headers";
     mine[my_count++] = "-Wsystem-headers";
     theirs[their_count++] = "-P";
@@ -3088,7 +3150,7 @@ static uint32_t pp_test_header_options(const char* directory, const char* ours, 
         }
         else
         {
-            count += pp_clang_search(arguments + count, ours, links);
+            count += pp_test_buster_search(arguments + count, ours, links);
         }
         arguments[count++] = "-P";
         PPClangOutput clang_text = written ? pp_test_clang_process("clang", arguments, count, path, false) : (PPClangOutput){ 0 };
@@ -3156,15 +3218,105 @@ static bool pp_test_header_beside(void)
     return result;
 }
 
+// clang's resource directory and buster's directory given again (#255's review), each as -I, -isystem and -idirafter,
+// and the resource directory also through a symbolic link, with a trailing slash and with /./: ours keeps them or drops
+// them for its own as pp_dedupe_directories decides, by the directories' identity, and clang must get the search it
+// kept (pp_clang_arguments). A unit of <stdint.h> and <stdatomic.h> (and hosted, clang's <inttypes.h>, whose
+// #include_next goes on past the directory it is found in) must compare in each, hosted, and freestanding with -I as
+// well. Returns how many of the runs differ, adding the runs to `*count`.
+static uint32_t pp_test_header_duplicates(const char* directory, uint32_t* count, uint64_t* tokens)
+{
+    char resource[PATH_MAX];
+    char ours[PATH_MAX];
+    char slash[PATH_MAX + 2];
+    char dot[PATH_MAX + 4];
+    char link[4200];
+    char unit[4200];
+    snprintf(link, sizeof(link), "%s/resource-link", directory);
+    snprintf(unit, sizeof(unit), "%s/header-duplicates.c", directory);
+    const bool found = pp_clang_resource_directory(resource, sizeof(resource)) && pp_buster_headers_directory(ours, sizeof(ours));
+    const char* last = found ? strrchr(resource, '/') : 0;
+    const bool written = last != 0 && symlink(resource, link) == 0 &&
+                         pp_test_write_file(unit, "#include <stdint.h>\n#include <stdatomic.h>\n#if __STDC_HOSTED__\n#include <inttypes.h>\n#endif\n"
+                                                  "INT8_MAX ATOMIC_INT_LOCK_FREE\n");
+    snprintf(slash, sizeof(slash), "%s/", found ? resource : "");
+    snprintf(dot, sizeof(dot), "%.*s/.%s", (int)(last != 0 ? last - resource : 0), resource, last != 0 ? last : "");
+    const struct
+    {
+        const char* option;
+        const char* path;
+        bool freestanding;
+    } cases[] = {
+        { "-I", resource, false },
+        { "-I", resource, true },
+        { "-I", slash, false },
+        { "-I", dot, false },
+        { "-I", link, false },
+        { "-isystem", resource, false },
+        { "-isystem", dot, false },
+        { "-isystem", link, false },
+        { "-idirafter", resource, false },
+        { "-idirafter", link, false },
+        { "-I", ours, false },
+        { "-isystem", ours, false },
+        { "-idirafter", ours, false },
+    };
+    uint32_t result = 0;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        char* passed[4] = { "--buster-headers", (char*)cases[c].option, (char*)cases[c].path, "-ffreestanding" };
+        char* files[1] = { unit };
+        const uint32_t differ = written ? pp_test_files(cases[c].freestanding ? 4 : 3, passed, 1, files, true, directory, tokens) : 1;
+        if (differ != 0)
+        {
+            printf("headers: %s %s%s with --buster-headers differs from clang\n", cases[c].option, cases[c].path, cases[c].freestanding ? " -ffreestanding" : "");
+        }
+        result += differ;
+        *count += 1;
+    }
+    unlink(unit);
+    unlink(link);
+    return result;
+}
+
+// clang's links in a directory whose name clang escapes in its line markers, as $TMPDIR can give it (#255's review): with
+// a quote, a backslash or a byte past ASCII in it, the unit at `unit` must compare as under any other name. Returns how
+// many of the runs differ, adding the runs to `*count`.
+static uint32_t pp_test_header_escapes(const char* directory, const char* unit, uint32_t* count, uint64_t* tokens)
+{
+    static const char* const names[] = { "quote\"d", "back\\slash", "caf\xc3\xa9" };
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        char escaped[4200];
+        char predefines[4300];
+        snprintf(escaped, sizeof(escaped), "%s/%s", directory, names[i]);
+        snprintf(predefines, sizeof(predefines), "%s/predefines.h", escaped);
+        char* passed[1] = { "--buster-headers" };
+        char* files[1] = { (char*)unit };
+        const uint32_t differ = mkdir(escaped, 0700) == 0 ? pp_test_files(1, passed, 1, files, true, escaped, tokens) : 1;
+        if (differ != 0)
+        {
+            printf("headers: the unit with clang's links under %s differs from clang\n", escaped);
+        }
+        unlink(predefines);
+        rmdir(escaped);
+        result += differ;
+        *count += 1;
+    }
+    return result;
+}
+
 // test-preprocessor's files with --buster-headers (pp_test_files), against clang searched as the flag searches
-// (pp_clang_arguments, #255's review). A unit includes clang's <inttypes.h>, whose #include_next reaches the C library's,
-// which includes buster's <stdint.h>; then more of buster's headers, clang's <cpuid.h> and a line of their macros. Its
-// <limits.h> is an -isystem directory's, which buster's directory must follow though the flag comes first: it gives a
-// token, whose include stack shows which came first, and includes buster's next. clang's line markers name the files
-// it finds through the links, and they must be named as ours names them (pp_test_resource_names). Then which headers
-// __has_include finds, with the flag alone, with -nobuiltininc and with -nostdinc, which leave buster's search out of
-// clang's arguments. Every run has an -iquote whose value spells -nostdinc: a directory's name (there is none), not the
-// option. Returns how many files differ.
+// (pp_clang_arguments, #255's reviews). A unit includes clang's <inttypes.h>, whose #include_next reaches the C
+// library's, which includes buster's <stdint.h>; then more of buster's headers, clang's <cpuid.h> and a line of their
+// macros. Its <limits.h> is an -isystem directory's, which buster's directory must follow though the flag comes first:
+// it gives a token, whose include stack shows which came first, and includes buster's next. clang's line markers name
+// the files it finds through the links, and they must be named as ours names them (pp_test_resource_names), also under
+// names clang escapes (pp_test_header_escapes). Then which headers __has_include finds, with the flag alone, with
+// -nobuiltininc and with -nostdinc, which leave buster's search out of clang's arguments. Every such run has an -iquote
+// whose value spells -nostdinc: a directory's name (there is none), not the option. Last, the directories ours drops as
+// repeated (pp_test_header_duplicates). Returns how many files differ.
 static uint32_t pp_test_header_files(const char* directory)
 {
     static const char* const options[] = { 0, "-nobuiltininc", "-nostdinc" };
@@ -3198,13 +3350,76 @@ static uint32_t pp_test_header_files(const char* directory)
         result += written ? pp_test_files(options[o] != 0 ? 6 : 5, passed, file_count, files, true, directory, &tokens) : (uint32_t)file_count;
         count += (uint32_t)file_count;
     }
+    const uint32_t escapes = written ? pp_test_header_escapes(directory, unit, &count, &tokens) : 0;
+    const uint32_t duplicates = pp_test_header_duplicates(directory, &count, &tokens);
+    result += escapes + duplicates;
     unlink(unit);
     unlink(queries);
     unlink(limits);
     rmdir(system);
     printf("headers: %u of %u files differ from clang with --buster-headers, as test-preprocessor compares files (%lu tokens): buster's and clang's headers after an "
-           "-isystem directory's, and __has_include with the flag alone, with -nobuiltininc and with -nostdinc\n",
-           result, count, (unsigned long)tokens);
+           "-isystem directory's, and under links whose names clang escapes (%u differ); __has_include with the flag alone, with -nobuiltininc and with -nostdinc; "
+           "and clang's resource directory and buster's given again in 13 ways (%u differ)\n",
+           result, count, (unsigned long)tokens, escapes, duplicates);
+    return result;
+}
+
+#define BUSTER_PP_TEST_COMMAND_DEFINITIONS 300
+
+// benchmark-preprocessor's clang run (pp_clang_preprocess) of a command longer than its first fixed array held (#255's
+// review: past 244 arguments the rest were dropped, and clang read -E as an -isystem's value, and linked): 300 -D
+// options and --buster-headers' search after them. clang's text must have the last -D's macro defined and <cpuid.h>
+// found through the links. Returns whether it does.
+static bool pp_test_clang_command(const char* directory)
+{
+    char path[4096];
+    char output[4096];
+    char source[256];
+    snprintf(path, sizeof(path), "%s/clang-command.c", directory);
+    snprintf(output, sizeof(output), "%s/clang-command.i", directory);
+    snprintf(source, sizeof(source), "#if __has_include(<cpuid.h>) && defined(BUSTER_TEST_%u)\nlinks_and_definitions BUSTER_TEST_%u\n#endif\n",
+             BUSTER_PP_TEST_COMMAND_DEFINITIONS - 1, BUSTER_PP_TEST_COMMAND_DEFINITIONS - 1);
+    static char definitions[BUSTER_PP_TEST_COMMAND_DEFINITIONS][32];
+    char* passed[BUSTER_PP_TEST_COMMAND_DEFINITIONS + 2];
+    int count = 0;
+    passed[count++] = "--buster-headers";
+    for (uint32_t i = 0; i < BUSTER_PP_TEST_COMMAND_DEFINITIONS; i += 1)
+    {
+        snprintf(definitions[i], sizeof(definitions[i]), "-DBUSTER_TEST_%u=%u", i, i);
+        passed[count++] = definitions[i];
+    }
+    passed[count] = path;
+    Arena arena = arena_reserve(1ull << 20);
+    PPOptions options;
+    const char* input;
+    const char* written_to;
+    bool markers;
+    char ours[PATH_MAX];
+    char links[4200];
+    snprintf(links, sizeof(links), "%s/clang-command-XXXXXX", directory);
+    bool linked = false;
+    int clang_count = 0;
+    bool result = pp_test_write_file(path, source) && pp_parse_options(count + 1, passed, &options, &arena, &input, &written_to, &markers);
+    char** clang = result ? pp_clang_arguments(&options, count, passed, ours, links, &linked, &clang_count) : 0;
+    result = clang != 0 && pp_clang_preprocess(clang_count, clang, output, path);
+    FILE* file = result ? fopen(output, "r") : 0;
+    char text[256] = { 0 };
+    char expected[64];
+    snprintf(expected, sizeof(expected), "links_and_definitions %u", BUSTER_PP_TEST_COMMAND_DEFINITIONS - 1);
+    result = file != 0 && fread(text, 1, sizeof(text) - 1, file) != 0 && strstr(text, expected) != 0;
+    if (file != 0)
+    {
+        fclose(file);
+    }
+    printf("clang command: %d arguments to clang, %s\n", clang_count, result ? "all of them read" : "not all of them read");
+    if (linked)
+    {
+        pp_clang_remove_links(links);
+    }
+    free(clang);
+    unlink(output);
+    unlink(path);
+    arena_release(&arena);
     return result;
 }
 
@@ -3224,8 +3439,9 @@ static uint32_t pp_test_header_files(const char* directory)
 // tokens with ours, for every header in each mode, with no warnings from them; the headers must work among the C
 // library's and clang's other ones, which --buster-headers finds in clang's resource directory after buster's
 // (pp_test_header_orders); -nobuiltininc and -nostdinc must leave out both (pp_test_header_options); a quoted name
-// beside one of clang's headers must come from buster's when buster's has it (pp_test_header_beside); and
-// test-preprocessor's files must compare with clang under --buster-headers (pp_test_header_files).
+// beside one of clang's headers must come from buster's when buster's has it (pp_test_header_beside);
+// test-preprocessor's files must compare with clang under --buster-headers (pp_test_header_files); and clang's command
+// for the benchmark must have every argument (pp_test_clang_command).
 static bool pp_test_headers(const char* directory)
 {
     static const char* const modes[] = { "-std=c89", "-std=c99", "-std=c11", "-std=c17", "-std=c23", "-std=gnu89", "-std=gnu17", "-std=gnu23" };
@@ -3390,6 +3606,7 @@ static bool pp_test_headers(const char* directory)
     const uint32_t option_failures = result ? pp_test_header_options(directory, ours, links) : 0;
     const bool beside = result && pp_test_header_beside();
     const uint32_t file_failures = result ? pp_test_header_files(directory) : 0;
+    const bool command = result && pp_test_clang_command(directory);
     unlink(path);
     unlink(empty);
     pp_clang_remove_links(links);
@@ -3398,7 +3615,7 @@ static bool pp_test_headers(const char* directory)
            "quoted names beside clang's headers are found %s\n",
            failures, sets, our_failures, (unsigned long)(2 * BUSTER_ARRAY_LENGTH(modes)), order_failures, (unsigned long)(4 * BUSTER_ARRAY_LENGTH(modes)), option_failures,
            beside ? "where they should be" : "elsewhere");
-    return result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0;
+    return result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
 }
 
 static bool pp_fuzz(const PPFuzzOptions* options);

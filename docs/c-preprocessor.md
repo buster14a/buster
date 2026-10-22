@@ -728,8 +728,16 @@ must work in that mode too (#255's review): a unit that includes clang's
 stack shows that it comes before buster's; and `__has_include` of buster's,
 clang's and glibc's headers with the flag alone, with `-nobuiltininc` and with
 `-nostdinc`. Each run has an `-iquote` whose value spells `-nostdinc`, which
-must stay a directory's name. `benchmark-preprocessor --clang` times clang with
-the same search, and fails rather than report a time when a clang run fails.
+must stay a directory's name. The unit compares too with clang's links in
+directories whose names clang escapes in its line markers (a quote, a
+backslash, a byte past ASCII), as `$TMPDIR` can give them, and a unit of
+`<stdint.h>`, `<stdatomic.h>` and `<inttypes.h>` with clang's resource
+directory and buster's given again, 13 ways: as `-I`, `-isystem` and
+`-idirafter`, through a symbolic link, with a trailing slash and with `/./`,
+freestanding too. `benchmark-preprocessor --clang` times clang with the same
+search, in a command that holds every argument (`pp_clang_preprocess`, checked
+with 300 `-D` options), and fails rather than report a time when a clang run
+fails.
 
 With these headers, `sqlite3.c` (also in C23) and Lua 5.4.8 preprocess token
 for token as clang does, and compile with clang.
@@ -1396,14 +1404,20 @@ full-corpus reproduction and frozen CI subset.
 - **Files.** With files, each is preprocessed with the options, by both
   kernels, and compared. With `--clang`, our side reads clang's own predefines
   for the same options (`clang -dM -E`, through `--predefines`), so both start
-  from the same macros. clang has no `--buster-headers`, so it gets the search
-  the flag makes, as the header checks give it (`pp_clang_arguments`):
-  `-nobuiltininc`, then `-isystem src/buster/include` and `-isystem` a
-  directory of links to clang's resource headers but buster's names, after
-  every other `-isystem` as ours searches them, and nothing with `-nostdinc` or
-  `-nobuiltininc`, which leave out both. The files clang finds through the
-  links are compared under their names in clang's resource directory, where
-  ours finds them. clang's `-E` text, without its line markers' lines, is
+  from the same macros. clang has no `--buster-headers`, so it gets ours'
+  whole search instead of the directories' options (`pp_clang_arguments`):
+  after `-nobuiltininc`, each directory ours keeps, with its option (`-iquote`,
+  `-I`, `-isystem` or `-idirafter`), and in clang's resource directory's place
+  a directory of links to its headers but buster's names; clang adds the
+  standard directories after them, as ours has them. So clang searches what
+  `pp_dedupe_directories` kept, which its links would otherwise hide from it:
+  the resource directory given again as `-I` or `-idirafter` is dropped for the
+  system one, and as `-isystem` keeps its place, where clang's headers are
+  found and the links are left out (#255's review). With `-nostdinc` or
+  `-nobuiltininc`, which leave out both, nothing is translated. The files clang
+  finds through the links are compared under their names in clang's resource
+  directory, where ours finds them, as clang escapes them in its line markers.
+  clang's `-E` text, without its line markers' lines, is
   lexed with `c_tokenize` and compared with our stream's spellings, token for
   token. Then the places its markers give the tokens are compared with ours.
   The first difference is printed with the tokens around it.

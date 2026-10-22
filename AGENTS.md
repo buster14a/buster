@@ -2392,13 +2392,15 @@ options, token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
 prints the first difference with the tokens around it. For files, our side
 reads clang's own predefines for the options through `--predefines`, and clang
-gets `--buster-headers`, which it hasn't, as the search the flag makes
-(`pp_clang_arguments`): `-nobuiltininc`, then `-isystem` buster's directory and
-`-isystem` a directory of links to clang's other resource headers, after every
-other `-isystem`, or nothing with `-nostdinc` or `-nobuiltininc`; the files it
-finds through the links are compared under their names in clang's resource
-directory, as ours names them. Without files, `--clang` also checks the
-built-in predefines, the keywords and the features:
+gets `--buster-headers`, which it hasn't, as ours' whole search
+(`pp_clang_arguments`): after `-nobuiltininc`, each directory ours keeps, by
+identity and a system directory over a user's (`pp_dedupe_directories`), with
+its option, and in clang's resource directory's place a directory of links to
+its headers but buster's; or nothing with `-nostdinc` or `-nobuiltininc`. The
+files it finds through the links are compared under their names in clang's
+resource directory, escaped as clang writes them, as ours names them. Without
+files, `--clang` also checks the built-in predefines, the keywords and the
+features:
 - in 22 option sets (the ten modes from `c89` to `gnu23`, `-ffreestanding`,
   `-O2`, the six ISA profiles and independent tuning), `pp_predefines` must give `clang -dM -E` line for line, but for
   the patch release's three macros;
@@ -2422,11 +2424,16 @@ built-in predefines, the keywords and the features:
   with no warnings from the headers; `-nobuiltininc` and `-nostdinc` must
   leave out buster's headers and clang's after them alike; a quoted name
   beside one of clang's headers must come from buster's when buster's has it;
-  and the files' comparison with `--buster-headers` must agree with clang on a
+  the files' comparison with `--buster-headers` must agree with clang on a
   unit of buster's and clang's headers (`<inttypes.h>`, which reaches buster's
   `<stdint.h>` through glibc's) and an `-isystem` directory's `<limits.h>`
-  given after the flag, and on `__has_include` with the flag alone, with
-  `-nobuiltininc` and with `-nostdinc`;
+  given after the flag, also with clang's links in directories whose names it
+  escapes (a quote, a backslash, a byte past ASCII), on `__has_include` with
+  the flag alone, with `-nobuiltininc` and with `-nostdinc`, and with clang's
+  resource directory and buster's given again as `-I`, `-isystem` and
+  `-idirafter` (13 ways, through a symbolic link, a trailing slash and `/./`
+  too); and the benchmark's clang command, with 300 `-D` options and the
+  search, must reach clang whole;
 - the fuzz batch's cases must give clang's acceptance, and an accepted case's
   stream, printed with clang's -P spacing, must lex into clang's tokens (with
   a comment's `/` and a line splice's `\` as tokens, which only tokens printed
@@ -2476,10 +2483,11 @@ expansions, invocations, pastes, and the `#if` lines and their lengths).
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.
-`--clang` also times `clang -E -P` with the same options, a process per file,
-with `--buster-headers` as the search it makes, as the tests give it; a clang
-run that fails fails the benchmark, which then reports no timing. `-march`
-selects the shared target's predefines. `--predefines FILE` can replace
+`--clang` also times `clang -E -P` with the same options, a process per file
+(`pp_clang_preprocess`, whose command holds every argument), with
+`--buster-headers` as ours' search, as the tests give it; a clang run that
+fails fails the benchmark, which then reports no timing. `-march` selects the
+shared target's predefines. `--predefines FILE` can replace
 them with `clang -dM -E` output (the benchmark leaves this option out of clang's
 command line), as the smoke commands above do for `main.c`. The default 9700X
 job runs that one, pinned to one allowed CPU; like the others, its measurements
