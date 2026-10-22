@@ -2530,30 +2530,39 @@ others, its measurements are informational.
   zero-size members, bit-fields, flexible array members, `_Atomic` and
   `nullptr_t` members, `i128` storage, which LLVM never splits, whatever the
   high eightbyte under an INTEGER low one and refused under another, runs of
-  bit-fields that are an `i128` and that aren't, unions whose storage member
-  a zero-length array of a larger record decides, and the narrow low parts
-  clang widens into a general register; structs' bit-fields in clang's access
-  units, each with its LLVM type as the module keeps it (runs merged up to an
-  `i32`, arrays of bytes, merging stopped before a member, a zero-width
-  bit-field between units, units off their alignment that pack their struct,
-  unions whose storage member a unit's alignment decides, and the narrow low
-  parts the units widen or don't); and the `_Atomic` types whose LLVM
-  types decide: of types of no size, which LLVM makes larger, as the records
-  ending in one, with their slots, the records it lays out otherwise than C,
-  and vectors LLVM keeps whole, splits or, of bools, passes as integers), and
-  calls whose locations clang and LLVM give (an `UNCOUNTED` argument that
-  splits the next record, an `__int128` without two registers left, a hidden
-  pointer, a record of a flexible array member alone as an `i0`, a struct
-  whose narrow low part takes a general register, unions stored as an
-  `i128`, which clang counts as two registers with a NO_CLASS or SSE high
-  eightbyte, runs of bit-fields where an uncounted `_Atomic int` leaves one
-  register, split or whole on the stack, the larger copies' slots, byval or
-  an integer by clang's count, and `_Atomic` bool vectors), `va_arg`'s plans
-  for an aligned `long` and an `i128` with an SSE high eightbyte, and the
-  levels across calls (a record larger than 64 bytes that waits for a
-  `LARGER` member, and records of no size that an `_Atomic` of them in a
-  later call reads: a flexible one, and two that hold a struct of 128 bytes
-  by an array of none, which wait for what its alignment reads);
+  bit-fields that are an `i128` and that aren't, unions whose storage member a
+  zero-length array of a larger record decides, and the narrow low parts clang
+  widens into a general register; structs' bit-fields in clang's access units,
+  each with its LLVM type as the module keeps it (runs merged up to an `i32`,
+  arrays of bytes, merging stopped before a member or at a struct's end, a
+  zero-width bit-field between units, units off their alignment that pack
+  their struct, unions whose storage member a unit's alignment decides, and
+  the narrow low parts the units widen or don't); and the `_Atomic` types
+  whose LLVM types decide: of types of no size, which LLVM makes larger, as
+  the records ending in one, with their slots, the records it lays out
+  otherwise than C, and vectors LLVM keeps whole, splits or, of bools, passes
+  as integers; and the vectors that aren't `_Atomic` which LLVM breaks up or
+  packs: of bools, with their integer storage and layout, refused from 16
+  bytes up where clang passes them as `<N x i1>`, with the records of one, and
+  smaller copies past 128 (`SMALLER`), of `_BitInt`s narrower than a byte, of
+  long doubles (refused in registers, st0 and st1 as results), of
+  `__float128`s, of `_BitInt`s of 128 bits and more, and of lengths that
+  aren't a power of two in memory, returned in rax, rdx and rcx, in xmm0, xmm1
+  and st0, or through a hidden pointer), and calls whose locations clang and
+  LLVM give (an `UNCOUNTED` argument that splits the next record, an
+  `__int128` without two registers left, a hidden pointer, a record of a
+  flexible array member alone as an `i0`, a struct whose narrow low part takes
+  a general register, unions stored as an `i128`, which clang counts as two
+  registers with a NO_CLASS or SSE high eightbyte, runs of bit-fields where an
+  uncounted `_Atomic int` leaves one register, split or whole on the stack,
+  the larger copies' slots, byval or an integer by clang's count, `_Atomic`
+  bool vectors, and 513 bools, an 80-byte copy, and as a result a hidden
+  pointer clang doesn't count), `va_arg`'s plans for an aligned `long` and an
+  `i128` with an SSE high eightbyte, and the levels across calls (a record
+  larger than 64 bytes that waits for a `LARGER` member, and records of no
+  size that an `_Atomic` of them in a later call reads: a flexible one, and
+  two that hold a struct of 128 bytes by an array of none, which wait for what
+  its alignment reads);
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   both paths into tables that must be identical, and every type at every
   offset it can be at compared with an oracle of the test's own, clang's
@@ -2582,12 +2591,17 @@ and the program runs: each side checks every argument, result, hidden pointer,
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
 own bugs among them, and `docs/calling-convention.md` lists them), and clang's
 a type in registers that holds an array of elements of no size, on which clang
-23 crashes now and then; an argument clang would pass as an `i0` becomes a
-long (its passes crash on them now and then), as does an unnamed one clang's
-`va_arg` reads elsewhere than its call puts it; and bytes clang doesn't pass
-aren't compared. The files go in a new directory under `$TMPDIR` (or `/tmp`),
-removed unless `--keep` or a failure. The 9700X job runs it with
-`--cross-check` after the type table's benchmark.
+23 crashes now and then, an aligned typedef of an `_Atomic` vector of bools,
+whose atomic loads crash it, a record SSE, SSEUP of a size other than 16, 32
+or 64 bytes and one SSE, SSE that holds a `__float128`, which the module
+doesn't model yet, and a union of a vector LLVM packs into fewer bits than its
+bytes, whose copies lose the other members' bits; an argument clang would pass
+as an `i0` becomes a long (its passes crash on them now and then), as does an
+unnamed one clang's `va_arg` reads elsewhere than its call puts it; bytes
+clang doesn't pass aren't compared; and the C side copies a `SMALLER` type's
+LLVM bytes, all that clang's objects of it hold. The files go in a new
+directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure.
+The 9700X job runs it with `--cross-check` after the type table's benchmark.
 
 ## Calling convention benchmark
 
