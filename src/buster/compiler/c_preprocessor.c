@@ -3185,6 +3185,13 @@ static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* n
     return result;
 }
 
+// An include candidate without a regular file is absent; other errors stop the search. The file walk uses the same
+// boundary as the preprocessor, since cached probes retain their original error.
+static bool pp_include_error_absent(int error)
+{
+    return error == ENOENT || error == ENOTDIR || error == EISDIR || error == EINVAL || error == -1;
+}
+
 // Finds the file an include names, looking at each of its search's candidates in turn (pp_include_candidate) until a
 // file is at one. Returns the PPFile, or BUSTER_PP_NONE if no file has the name; `*found_in` gets the search directory
 // it was found in, or BUSTER_PP_NONE (the includer's directory, or an absolute path). A place the search can't look in,
@@ -3233,8 +3240,7 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
             *found_in = result != BUSTER_PP_NONE ? directory : BUSTER_PP_NONE;
             error = file != BUSTER_PP_NONE ? pp->files[file].error : 0;
         }
-        const bool absent = error == ENOENT || error == ENOTDIR || error == EISDIR || error == EINVAL || error == -1;
-        failed = error != 0 && !absent && report != BUSTER_PP_NONE;
+        failed = error != 0 && !pp_include_error_absent(error) && report != BUSTER_PP_NONE;
         if (failed)
         {
             // The place as clang names it: the directory, a '/' and the name, or an absolute name alone.
@@ -15146,7 +15152,7 @@ static bool pp_option_takes_value(const char* argument)
 
 // clang's arguments for ours: `arguments` (`count` of them), from which `options` were read, in a new array with a null
 // at its end (one block, with the names it holds, for free), and their count in `*clang_count`; null if it can't be
-// made. Our own value-options are left out; any other option's value is copied as it is, whatever it spells. With
+// made. Our own options are left out; any other option's value is copied as it is, whatever it spells. With
 // --buster-headers, and without -nostdinc or
 // -nobuiltininc (which leave out buster's headers and clang's alike), clang gets ours' search instead of the
 // directories' options, from a preprocessor initialized with `options`: each directory pp_dedupe_directories keeps
@@ -15186,7 +15192,8 @@ static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* option
         // With ours' search, the directories' options are in it.
         const bool directory = search && (strncmp(argument, "-I", 2) == 0 || strcmp(argument, "-isystem") == 0 || strcmp(argument, "-iquote") == 0 ||
                                           strcmp(argument, "-idirafter") == 0);
-        if (!directory && !pp_own_option_with_value(argument) && strcmp(argument, "--buster-headers") != 0)
+        if (!directory && !pp_own_option_with_value(argument) && strcmp(argument, "--buster-headers") != 0 && strcmp(argument, "--scalar") != 0 &&
+            strcmp(argument, "--clang-features") != 0)
         {
             result[n] = arguments[i];
             n += 1;
