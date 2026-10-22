@@ -483,9 +483,18 @@ arenas. Popping a context gives its tokens back when they are on top.
     repeated `-I` would make `#include_next` find the same file again.
   - A header name is read without its line splices, whether it is written out,
     comes from a macro, or is `__has_include`'s operand.
-  - `<...>` is read from the source up to the first `>` on the line, so `//`
-    and `/*...*/` there are part of the name, as in clang: `<a//b.h>` and
-    `<a/*x*/b.h>` (#119). Without a `>` on the line, the line's tokens up to a
+  - `<...>` is read from the source up to the first `>` on the line that no
+    backslash escapes, so `//` and `/*...*/` there are part of the name, as in
+    clang: `<a//b.h>` and `<a/*x*/b.h>` (#119). A backslash takes the
+    character after it into the name, a `>` too, as clang's
+    `LexAngledStringLiteral` reads it: `<a\>b.h>` names `a\>b.h`. The rest of
+    the line is what clang lexes on from the `>`. The file was lexed before the
+    name was known, so where one of its tokens or comments runs past the `>`
+    (a `//` in the name began a comment to the line's end, or the `>` starts a
+    `>>` or a `>=`), the rest of the line is lexed again from there
+    (`pp_header_name_tail`): `#include <a//b.h> x` warns about `x`, and in
+    `#if __has_include(<a//b.h>) && X` the `&& X` counts. Without a `>` on the
+    line, the line's tokens up to a
     `>` make the name, as clang's `LexHeaderName` joins them: a space for each
     one that had whitespace before it, the `>` too. So with a comment that runs
     on to the next line, `<a/*x` then `*/b.h>` names `a b.h`, and `< c.h >`
@@ -500,7 +509,10 @@ arenas. Popping a context gives its tokens back when they are on top.
     to the first `>` on the line, as clang's `LexHeaderName` lexes it from its
     file. So `__has_include(<  x.h>)` names `  x.h`, as `#include <  x.h>`
     does. The same operand from a macro or a macro's argument is joined from
-    its tokens and names ` x.h` (#254's review).
+    its tokens and names ` x.h` (#254's review). When the rest of the line is
+    lexed again from the `>`, its tokens go in as a buffer the main loop reads
+    before the line's own, which are left: `__has_include(<x.h>>)` keeps a `>`
+    in the operand, an error, as clang's does.
   - The checks and their diagnostics go in clang's order
     (`HandleHeaderIncludeOrImport`):
     - an empty name is an error;

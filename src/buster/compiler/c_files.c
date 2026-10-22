@@ -891,8 +891,8 @@ static void files_read_requests(FilesRun* run, FilesLane* mine)
                 uint8_t name[PATH_MAX];
                 uint32_t length = 0;
                 bool angled = false;
-                uint32_t after = 0;
-                const PPHeaderForm form = pp_literal_header_name(data, d, cache->prepare.refine_flags, name, sizeof(name), &length, &angled, &after, &mine->names);
+                uint32_t stop = 0;
+                const PPHeaderForm form = pp_literal_header_name(data, d, cache->prepare.refine_flags, name, sizeof(name), &length, &angled, &stop, &mine->names);
                 uint8_t* bytes = form == PP_HEADER_LITERAL ? arena_push(&mine->names, length + 1, 1) : 0;
                 FilesRequest* request = bytes != 0 ? arena_push_array(&mine->request_list, 1, sizeof(FilesRequest), _Alignof(FilesRequest)) : 0;
                 files_fail(run, form == PP_HEADER_LITERAL && request == 0);

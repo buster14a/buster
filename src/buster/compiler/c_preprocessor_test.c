@@ -877,6 +877,14 @@ static const PPTestFile pp_test_files_includes[] = {
     { 0, 0 },
 };
 
+// #254's second review's headers: a name with a backslash before a '>', and one reached through "//".
+static const PPTestFile pp_test_files_header_tails[] = {
+    { "a\\>b.h", "int escaped;\n" },
+    { "x.h", "int x_h;\n" },
+    { "dir/x.h", "int dir_x;\n" },
+    { 0, 0 },
+};
+
 // 4,096 'A's: an identifier, and a header name too long for any path (#254's review).
 #define BUSTER_PP_TEST_A64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 #define BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64
@@ -1573,6 +1581,40 @@ static const PPTestCase pp_test_cases[] = {
         .expected = "raw hi embed two_spaces",
         .options = "-I%d/two --embed-dir=%d/two",
         .files = pp_test_files_includes,
+    },
+    // #254's second review, against clang 23: a backslash in a header name written out takes the character after it into
+    // the name, a '>' too, as clang's LexAngledStringLiteral reads it; and the rest of the line past such a name is what
+    // clang lexes on from its '>', where the file's tokens ran past it: a "//" in the name began a comment there (the
+    // #if line's `&& 0` and `|| defined(NOPE)` count, an #include's `junk` is a warning and __has_embed's parameters are
+    // read), or a token the '>' starts ("x.h>>", "x.h>=", "x.h>>=") stays in the operand, an error.
+    {
+        .name = "#254's second review: a backslash in a header name written out escapes its '>'",
+        .source = "#if __has_include(<a\\>b.h>) && __has_include(\"a\\>b.h\")\nyes\n#endif\n#include <a\\>b.h>\nend\n",
+        .standard = "c17",
+        .expected = "yes int escaped; end",
+        .options = "-I%d",
+        .files = pp_test_files_header_tails,
+    },
+    {
+        .name = "#254's second review: the rest of a line past a header name with \"//\"",
+        .source = "#if __has_include(<dir//x.h>) && 1\nyes2\n#endif\n#if __has_include(<dir//x.h>) && 0\nno3\n#endif\n"
+                  "#if __has_include(<dir//x.h>) || defined(NOPE)\nyes4\n#endif\n#if __has_embed(<dir//x.h> limit(1)) == 1\nyes5\n#endif\n"
+                  "#if __has_embed(<dir//x.h> limit(0)) == 2\nyes6\n#endif\n#include <dir//x.h> junk\nend\n",
+        .standard = "c23",
+        .expected = "yes2 yes4 yes5 yes6 int dir_x; end",
+        .warnings = 1,
+        .options = "-I%d --embed-dir=%d",
+        .files = pp_test_files_header_tails,
+    },
+    {
+        .name = "#254's second review: a token a header query's '>' starts stays in its operand",
+        .source = "#if __has_include(<x.h>>)\nwrong1\n#endif\n#if __has_include(<x.h>=)\nwrong2\n#endif\n#if __has_include(<x.h>>=)\nwrong3\n#endif\n"
+                  "#if __has_include(<a\\\\>b.h>)\nwrong4\n#endif\nend\n",
+        .standard = "c17",
+        .expected = "end",
+        .fails = true,
+        .options = "-I%d",
+        .files = pp_test_files_header_tails,
     },
     {
         .name = "#254's review: a header refused at the depth limit is included",

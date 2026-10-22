@@ -3014,10 +3014,12 @@ typedef enum PPHeaderForm
     PP_HEADER_INVALID,
 } PPHeaderForm;
 
-// Token `first` of a directive's line [.., end), a '<', read as clang reads a header name from its file: up to the first
-// '>' on the line, through the scalar lexer's characters, which skip line splices (translation phase 2 removed them).
-// Writes the name's bytes to `name` as far as `capacity` holds them (`*length` of them; `*whole` says whether that is
-// all of them). Returns the offset past the '>', or 0 if the line has none.
+// Token `first` of a directive's line [.., end), a '<', read as clang reads a header name from its file
+// (Lexer::LexAngledStringLiteral): up to the first '>' on the line that no backslash escapes, through the scalar lexer's
+// characters, which skip line splices (translation phase 2 removed them). A backslash takes the character after it into
+// the name, a '>' too: `<a\>b.h>` names `a\>b.h`. Writes the name's bytes to `name` as far as `capacity` holds them
+// (`*length` of them; `*whole` says whether that is all of them). Returns the offset past the '>', or 0 if the line has
+// none.
 static uint32_t pp_scan_header_name(uint32_t refine_flags, const PPFileData* data, uint32_t first, uint32_t end, uint8_t* name, uint32_t capacity,
                                     uint32_t* length, bool* whole)
 {
@@ -3031,6 +3033,7 @@ static uint32_t pp_scan_header_name(uint32_t refine_flags, const PPFileData* dat
     uint64_t p = data->starts[first] + 1;
     bool closed = false;
     bool line_ended = false;
+    bool escaped = false;
     *length = 0;
     *whole = true;
     while (!closed && !line_ended && p < line_end)
@@ -3038,7 +3041,7 @@ static uint32_t pp_scan_header_name(uint32_t refine_flags, const PPFileData* dat
         uint64_t size;
         uint64_t char_start;
         const int32_t c = get_char(&lexer, p, &size, &char_start);
-        closed = c == '>';
+        closed = c == '>' && !escaped;
         line_ended = c == '\n' || c == '\r' || c == BUSTER_LEX_END_OF_FILE;
         const bool kept = !closed && !line_ended;
         const bool fits = *length < capacity;
@@ -3048,6 +3051,7 @@ static uint32_t pp_scan_header_name(uint32_t refine_flags, const PPFileData* dat
             *length += 1;
         }
         *whole = *whole && (fits || !kept);
+        escaped = c == '\\' && !escaped;
         p += size != 0 ? size : 1;
     }
     return closed ? (uint32_t)p : 0;
@@ -3056,13 +3060,14 @@ static uint32_t pp_scan_header_name(uint32_t refine_flags, const PPFileData* dat
 // The header name of directive d, an #include, #include_next or #import of a prepared file: `<...>` read from the
 // source, up to the '>' on the line (pp_scan_header_name), or a string literal, both without line splices (translation
 // phase 2 removed them). For a literal form, writes the name to `name` (`capacity` bytes) and its length, whether it is
-// angled, and the first token after it on the line (`*after`, the line's end if none), which clang warns about and reads
-// as it is (CheckEndOfDirective). Without its '>' on the line, a '<' is a computed name: clang's LexHeaderName joins the
-// line's tokens up to a '>', so that with a comment that runs on to the next line, `<a/*x` then `*/b.h>` is `a b.h`.
-// With it, the name is written out, never a computed one, whose identifiers would expand. `scratch` holds the string
-// literal's spelling while its splices are removed (room for the token's bytes).
+// angled, and where it ends in the file (`*stop`: past its '>' or the string literal; else 0), from which clang lexes
+// the line's next token, a warning (CheckEndOfDirective). Without its '>' on the line, a '<' is a computed name: clang's
+// LexHeaderName joins the
+// tokens up to a '>', so that with a comment that runs on to the next line, `<a/*x` then `*/b.h>` is `a b.h`. With it,
+// the name is written out, never a computed one, whose identifiers would expand. `scratch` holds the string literal's
+// spelling while its splices are removed (room for the token's bytes).
 static PPHeaderForm pp_literal_header_name(const PPFileData* data, uint32_t d, uint32_t refine_flags, uint8_t* name, uint32_t capacity, uint32_t* length, bool* angled,
-                                           uint32_t* after, Arena* scratch)
+                                           uint32_t* stop, Arena* scratch)
 {
     const uint32_t hash = data->directive_hash[d];
     const uint32_t end = data->directive_end[d];
@@ -3070,32 +3075,25 @@ static PPHeaderForm pp_literal_header_name(const PPFileData* data, uint32_t d, u
     PPHeaderForm result = PP_HEADER_INVALID;
     *length = 0;
     *angled = false;
-    *after = end;
+    *stop = 0;
     if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_LESS)
     {
         // The lexer doesn't make header names: read <...> from the source.
         bool whole;
-        const uint32_t stop = pp_scan_header_name(refine_flags, data, first, end, name, capacity, length, &whole);
-        result = stop == 0 ? PP_HEADER_COMPUTED : whole ? PP_HEADER_LITERAL : PP_HEADER_INVALID;
+        *stop = pp_scan_header_name(refine_flags, data, first, end, name, capacity, length, &whole);
+        result = *stop == 0 ? PP_HEADER_COMPUTED : whole ? PP_HEADER_LITERAL : PP_HEADER_INVALID;
         *angled = result == PP_HEADER_LITERAL;
-        // The first token at or after the '>''s end.
-        uint32_t next = stop != 0 ? first + 1 : end;
-        while (next < end && data->starts[next] < stop)
-        {
-            next += 1;
-        }
-        *after = next;
     }
     else if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_STRING_LITERAL)
     {
-        *after = first + 1;
         // The string literal without its line splices.
         const uint32_t start = data->starts[first];
-        const uint32_t stop = data->values[first];
+        const uint32_t stop_byte = data->values[first];
+        *stop = stop_byte;
         const uint64_t mark = scratch->length;
-        uint8_t* buffer = arena_push(scratch, (uint64_t)(stop - start) + 1, 1);
+        uint8_t* buffer = arena_push(scratch, (uint64_t)(stop_byte - start) + 1, 1);
         const uint8_t* spelling = 0;
-        const uint32_t spelled = buffer != 0 ? pp_remove_splices(data->bytes + start, stop - start, refine_flags, buffer, &spelling) : 0;
+        const uint32_t spelled = buffer != 0 ? pp_remove_splices(data->bytes + start, stop_byte - start, refine_flags, buffer, &spelling) : 0;
         if (spelled >= 2 && spelled - 2 < capacity && spelling[0] == '"')
         {
             *length = spelled - 2;
@@ -5793,12 +5791,18 @@ static const char* pp_embedded_directive_name(uint8_t kind)
     return result;
 }
 
+static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end, PPTokens* into);
+
 // An include-like builtin's '(' (__has_include's, __has_include_next's or __has_embed's) was just read from its #if or
 // #elif line itself, the barrier of the line's capture: a '<' next is a header name as the line writes it, read as
 // #include reads one (pp_scan_header_name), where clang's LexHeaderName lexes one from its file, and not joined from
 // tokens as one a macro or an argument gives (pp_header_name): `__has_include(<  x.h>)` names "  x.h". The operand takes
 // the '<' alone, spanning the name to its '>' (pp_written_angled), and the line's tokens inside the name are skipped.
-// Without a '>' on the line, nothing changes. Returns what collecting the '<' did, or PP_COLLECTED_MORE.
+// When the line's tokens past the '>' aren't those clang lexes on from it (pp_header_name_tail: a token or a comment
+// of the file's ran past it, as in `<x.h>>` or `<a//b.h>`), the rest of the line is lexed again from the '>', into a
+// buffer the main loop reads next, and the barrier's own tokens are left: `<x.h>>` leaves a '>' in the operand, an
+// error, and `<a//b.h>) && X` keeps its `&& X`. Without a '>' on the line, nothing changes. Returns what collecting the
+// '<' did, or PP_COLLECTED_MORE.
 static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* invocation, PPContext* context)
 {
     PPCollected result = PP_COLLECTED_MORE;
@@ -5820,14 +5824,17 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
         const uint32_t stop = first < end && base + data->starts[first] == token.location ? pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole) : 0;
         if (stop != 0)
         {
-            uint32_t after = first + 1;
-            while (after < end && data->starts[after] < stop)
-            {
-                after += 1;
-            }
+            uint32_t relex;
+            const uint32_t after = pp_header_name_tail(pp->refine_flags, data, first, end, stop, &relex);
             token.value = base + stop;
-            context->position += after - first;
-            result = pp_collect_token(pp, invocation, token, pp_expansion_end(context, token));
+            const uint32_t expansion_end = pp_expansion_end(context, token);
+            context->position = relex != stop ? context->end : context->position + (after - first);
+            result = pp_collect_token(pp, invocation, token, expansion_end);
+            const uint32_t start = pp->expansions.count;
+            if (relex != stop && pp_copy_relexed(pp, file, stop, relex, &pp->expansions) && pp->expansions.count != start)
+            {
+                result = pp_push_buffer(pp, &pp->expansions, start, pp->expansions.count, 0, context->expansion_end, false, true) != 0 ? result : PP_COLLECTED_INVALID;
+            }
         }
     }
     return result;
@@ -7448,11 +7455,11 @@ static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t be
     return result;
 }
 
-// Lexes bytes [begin, end) of the context's file again and appends their tokens to pp->arguments as pp_copy_line copies
-// a line's: the rest of a line past a header name read from it, where the file's tokens aren't those clang lexes
+// Lexes bytes [begin, end) of the context's file again and appends their tokens to `into` as pp_copy_line copies a
+// line's: the rest of a line past a header name read from it, where the file's tokens aren't those clang lexes
 // (pp_header_name_tail). An unterminated block comment at their end is left out, as the line ends there. Returns false
 // if they don't fit.
-static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end)
+static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end, PPTokens* into)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
     const uint32_t base = pp->ranges[context->range].base;
@@ -7467,16 +7474,16 @@ static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t
     const PPPrepare mode = pp_prepare_config(pp);
     count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, count, false) : count;
     count -= count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
-    bool result = count >= 0 && pp_room(pp, &pp->arguments, (uint32_t)count);
+    bool result = count >= 0 && pp_room(pp, into, (uint32_t)count);
     for (uint32_t i = 0; result && i < (uint32_t)count; i += 1)
     {
         const uint8_t kind = kinds[i] & 0x7F;
         const uint32_t value = kind == C_TOKEN_RAW_IDENTIFIER ? refine_intern_identifier(pp->table, bytes, length, starts[i], ends[i] - starts[i], pp->refine_flags)
                                                               : base + begin + ends[i];
         const bool space = starts[i] != (i == 0 ? 0 : ends[i - 1]);
-        pp_tokens_set(&pp->arguments, pp->arguments.count, kind, space ? BUSTER_PP_SPACE : 0, value, base + begin + starts[i]);
-        pp_history_fill(pp, &pp->arguments, pp->arguments.count, pp->arguments.count + 1, 0);
-        pp->arguments.count += 1;
+        pp_tokens_set(into, into->count, kind, space ? BUSTER_PP_SPACE : 0, value, base + begin + starts[i]);
+        pp_history_fill(pp, into, into->count, into->count + 1, 0);
+        into->count += 1;
     }
     scratch_end(scratch);
     return result;
@@ -7985,8 +7992,8 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     uint32_t length = 0;
     bool angled = false;
     bool started = false;
-    uint32_t after = end;
-    const PPHeaderForm form = pp_literal_header_name(data, d, pp->refine_flags, name, name != 0 ? room : 0, &length, &angled, &after, scratch.arena);
+    uint32_t stop = 0;
+    const PPHeaderForm form = pp_literal_header_name(data, d, pp->refine_flags, name, name != 0 ? room : 0, &length, &angled, &stop, scratch.arena);
     // Where clang reports the name: its token, or the line's end without one.
     const uint32_t name_location = first < end ? base + data->starts[first] : pp_line_end_location(pp, data, base, end - 1);
     if (form == PP_HEADER_COMPUTED)
@@ -8012,9 +8019,13 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     }
     else if (form == PP_HEADER_LITERAL)
     {
-        if (after < end)
+        // A token after the name, where clang lexes on from it (pp_skip_blanks, past what the file's tokens may hold as
+        // a comment begun in the name: `<a//b.h> x`), is a warning at it.
+        const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+        const uint64_t next = pp_skip_blanks(&lexer, stop);
+        if (next < data->length && data->bytes[next] != '\n' && data->bytes[next] != '\r')
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, base + data->starts[after], "extra tokens at end of #%s directive", pp_include_name(kind));
+            pp_diagnose(pp, PP_SEVERITY_WARNING, base + (uint32_t)next, "extra tokens at end of #%s directive", pp_include_name(kind));
         }
         pp_include_file(pp, context, kind, name, length, angled, location, name_location, 0);
     }
@@ -10678,7 +10689,7 @@ static void pp_embed(Preprocessor* pp, PPContext* context, uint32_t d)
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, base + data->starts[hash + 2], "expected \"FILENAME\" or <FILENAME>");
     }
-    else if (relex_begin != relex_end ? pp_copy_relexed(pp, context, relex_begin, relex_end) : pp_copy_line(pp, context, literal ? after : hash + 2, end))
+    else if (relex_begin != relex_end ? pp_copy_relexed(pp, context, relex_begin, relex_end, &pp->arguments) : pp_copy_line(pp, context, literal ? after : hash + 2, end))
     {
         bool expands = !literal;
         for (uint32_t i = line; i < pp->arguments.count; i += 1)
