@@ -1238,6 +1238,8 @@ static bool pp_test_assembly_printing(const char* directory)
         const char* source;
         const char* expected;
         bool assembly;
+        // An option after the mode's, or null: where '$' is punctuation follows -f[no-]dollars-in-identifiers (#281).
+        const char* option;
     } cases[] = {
         {
             "assembly immediates and dollar symbols",
@@ -1269,6 +1271,20 @@ static bool pp_test_assembly_printing(const char* directory)
             "$ foo\n$ 7\nfoo $\n1 $\n$ $\n",
             false,
         },
+        {
+            "C with '$' as punctuation prints it as assembly",
+            adjacency,
+            "$foo\n$7\nfoo$\n1$\n$$\n",
+            false,
+            "-fno-dollars-in-identifiers",
+        },
+        {
+            "assembly with '$' in identifiers separates it as C",
+            adjacency,
+            "$ foo\n$ 7\nfoo $\n1 $\n$ $\n",
+            true,
+            "-fdollars-in-identifiers",
+        },
     };
     // Put '$' before, at and after each side of a 64-token boundary, including a partial final chunk.
     static const uint32_t padding[] = { 0, 62, 63, 64, 126, 127, 128 };
@@ -1286,13 +1302,15 @@ static bool pp_test_assembly_printing(const char* directory)
         const char* source = boundary ? padded : cases[i].source;
         const char* expected = boundary ? padded : cases[i].expected;
         const bool assembly = boundary || cases[i].assembly;
-        char* arguments[] = { "-std=gnu17", "-x", assembly ? "assembler-with-cpp" : "c", path };
+        const char* option = boundary ? 0 : cases[i].option;
+        char* arguments[] = { "-std=gnu17", "-x", assembly ? "assembler-with-cpp" : "c", option != 0 ? (char*)option : path, path };
         Arena arena = arena_reserve(1ull << 20);
         PPOptions options;
         const char* input;
         const char* output;
         bool markers;
-        bool passed = pp_test_write_file(path, source) && pp_parse_options(BUSTER_ARRAY_LENGTH(arguments), arguments, &options, &arena, &input, &output, &markers);
+        const int argument_count = (int)BUSTER_ARRAY_LENGTH(arguments) - (option == 0);
+        bool passed = pp_test_write_file(path, source) && pp_parse_options(argument_count, arguments, &options, &arena, &input, &output, &markers);
         static InternTable tables[2];
         static Preprocessor runs[2];
         bool ran[2] = { false, false };

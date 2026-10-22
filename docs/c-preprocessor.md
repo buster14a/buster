@@ -1237,11 +1237,14 @@ numbers so that macros beside it still expand. Both printers use that same
 boundary: `$VALUE` can print as `$4`, and `foo$bar` stays a single GNU as
 symbol in the printed text. Whitespace and comments that separate tokens in
 the input still produce spaces. C mode retains its identifier-separation rules.
+The boundary is `pp_dollar_punctuation`'s, so C with
+`-fno-dollars-in-identifiers` prints `$` as assembly does, and assembly with
+`-fdollars-in-identifiers` as C does ("The `-f` options").
 
 The vector printer clears `$`'s entry in both byte-class tables once per
 call, and applies the same classification to the token carried between
-64-token chunks. Its scalar twin uses the language mode in its word-character
-test. `test-preprocessor` checks exact output bytes, including assembly macro
+64-token chunks. Its scalar twin's word-character test takes the same
+boundary. `test-preprocessor` checks exact output bytes, including assembly macro
 arguments, explicit whitespace, and the chunk boundary; comparing token
 spellings alone would miss this change (#272).
 
