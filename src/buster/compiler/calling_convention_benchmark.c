@@ -1285,9 +1285,10 @@ struct AbiBenchmarkDeferred
 // registers and stack slots count every argument that needs a register as using it, so a call goes to the twin when an
 // argument is UNCOUNTED, doesn't fit (the sum of a class it needs past the registers) while a register it needs is
 // still free (inexact), goes to the stack at an offset its alignment doesn't divide or aligned to more than 32 bits hold
-// (padded), is a named WIDE vector of a variadic call, is of no size on the stack (EMPTY, which may take no slot), or
-// has a LOW_GENERAL low eightbyte, or when the call's result is a vector demoted to a hidden pointer, which clang doesn't
-// count, or the call has more arguments than its 16-bit register sums can count (BUSTER_ABI_COUNTED_ARGUMENTS).
+// (padded), is a named WIDE vector of a variadic call, is on the stack with a slot that depends on clang's count (EMPTY,
+// which may take none, or GROWN), or has a LOW_GENERAL low eightbyte, or when the call's result is a vector demoted to a
+// hidden pointer, which clang doesn't count, or the call has more arguments than its 16-bit register sums can count
+// (BUSTER_ABI_COUNTED_ARGUMENTS).
 static AbiBenchmarkDeferred abi_benchmark_deferred(const AbiTable* abi, AbiSignatures signatures)
 {
     AbiBenchmarkDeferred result = { 0 };
@@ -1329,7 +1330,7 @@ static AbiBenchmarkDeferred abi_benchmark_deferred(const AbiTable* abi, AbiSigna
             inexact = inexact || (spills && ((need_integers != 0 && integers < BUSTER_ABI_INTEGER_ARGUMENTS) || (need_vectors != 0 && vectors < BUSTER_ABI_VECTOR_ARGUMENTS)));
             padded = padded || (on_stack && ((stack & (alignment - 1)) != 0 || alignment_log2 > 31));
             wide_named = wide_named || (wide && variadic && !unnamed);
-            empty = empty || (on_stack && (pass & BUSTER_ABI_PASS_EMPTY) != 0);
+            empty = empty || (on_stack && (pass & (BUSTER_ABI_PASS_EMPTY | BUSTER_ABI_PASS_GROWN)) != 0);
             general_low = general_low || (pass & BUSTER_ABI_PASS_LOW_GENERAL) != 0;
             integers += need_integers;
             vectors += need_vectors;
