@@ -12,11 +12,14 @@
 // directive tables must be the same (pp_same_directive_tables), whose tokens' spellings must be the expected ones, and
 // which must give the expected number of warnings. A case can name more files and options for both sides (%d stands
 // for its directory), and the text -E prints with line markers. Then __TIMESTAMP__ must be each file's modification
-// time (pp_test_timestamps). With --clang, each case is also preprocessed by `clang -E`: it must give the same
+// time (pp_test_timestamps), and the -f options of #281's families must be refused or taken as clang's -E needs
+// (pp_test_option_refusals). With --clang, each case is also preprocessed by `clang -E`: it must give the same
 // spellings, and its line markers must put every token where ours do (pp_compare_placed). More checks compare what the
 // cases can't, since the files' runs read clang's predefines: our built-in predefines with `clang -dM -E` in 22 option
-// sets (pp_test_predefines), and in each language mode __is_identifier of every predefined name (pp_test_keywords)
-// and the feature queries of every feature name (pp_test_features) with clang's.
+// sets (pp_test_predefines), and in each language mode and -f option set of the keywords (pp_test_keyword_sets)
+// __is_identifier of every predefined name (pp_test_keywords), and in each language mode the feature queries of every
+// feature name (pp_test_features), with clang's; and each refused option set must change clang's -E, and each taken one
+// give clang's tokens (pp_test_option_refusals).
 //
 // After the cases comes the fuzz batch (c_preprocessor_fuzz.c, #109): --fuzz generated cases in each mode (1,500 by
 // default, 0 for none), from --seed, by both kernels, which must agree, and with --clang against clang too.
@@ -32,7 +35,7 @@
 //
 // main.c includes this file after c_preprocessor.c. Layout: the token spellings of a stream and of a text, the
 // comparison, clang's side (pp_test_clang), the line markers' places (PPPlaced), the cases, the files, the predefines,
-// keywords, features and timestamps checks, and run_preprocessor_tests.
+// keywords, features, -f option sets and timestamps checks, and run_preprocessor_tests.
 
 #include <errno.h>
 #include <stdint.h>
@@ -168,24 +171,26 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
     return result;
 }
 
-// Lexes a text as the language mode does (`split`, pp_split_kinds, which is nonzero exactly before C23): c_tokenize,
-// without digit separators before C23 as pp_prepare_options has it, then pp_lex_mode's scalar path. Returns the count,
-// or -1.
-static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
+// Lexes a text as the language mode does: c_tokenize, with '$' as punctuation where it is (`dollars`,
+// pp_dollar_punctuation: C_TOKENIZER_NO_DOLLARS, the scalar lexer's, not the stream's pp_split_dollars), then the
+// prefixed literals the mode doesn't have split, by `split` (pp_split_kinds). Returns the count, or -1.
+static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
 {
-    const int64_t count = c_tokenize(text, length, kinds, starts, ends, split != 0 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0);
-    return pp_lex_mode(text, kinds, starts, ends, count, split, false);
+    int64_t result = c_tokenize(text, length, kinds, starts, ends, (dollars ? C_TOKENIZER_NO_DOLLARS : 0) | (split != 0 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0));
+    const uint32_t splits = result > 0 ? pp_count_splits_scalar(text, kinds, starts, ends, (uint32_t)result, split) : 0;
+    result = splits != 0 ? pp_split_prefixes(text, kinds, starts, ends, (uint32_t)result, splits, split) : result;
+    return result;
 }
 
-// The spellings of a text's tokens, as the language mode lexes them (`split`, pp_split_kinds).
-static bool pp_text_spellings(const uint8_t* text, uint64_t length, uint64_t split, PPSpellings* spellings)
+// The spellings of a text's tokens, as the language mode lexes them (`split` and `dollars`, as pp_test_lex takes them).
+static bool pp_text_spellings(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, PPSpellings* spellings)
 {
     const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(length);
     Arena arena = arena_reserve(capacity * 9 + 256);
     uint8_t* kinds = arena_push(&arena, capacity, 64);
     uint32_t* starts = arena_push_array(&arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(&arena, capacity, sizeof(uint32_t), 64);
-    const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? pp_test_lex(text, length, split, kinds, starts, ends) : -1;
+    const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? pp_test_lex(text, length, split, dollars, kinds, starts, ends) : -1;
     bool result = count >= 0 && pp_spellings_initialize(spellings, (uint64_t)count + 1, length + 64);
     for (int64_t i = 0; result && i < count; i += 1)
     {
@@ -365,7 +370,7 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
         free(scalar_text);
     }
     PPSpellings printed = { 0 };
-    result = result && pp_text_spellings((const uint8_t*)text, length, pp->split_kinds, &printed);
+    result = result && pp_text_spellings((const uint8_t*)text, length, pp->split_kinds, pp_dollar_punctuation(&pp->options), &printed);
     if (result)
     {
         char label[256];
@@ -577,7 +582,7 @@ static bool pp_marker_line(const uint8_t* text, uint64_t at, uint64_t end, uint3
     return result;
 }
 
-static bool pp_placed_tokens(const uint8_t* text, uint64_t length, uint64_t split, PPPlaced* placed)
+static bool pp_placed_tokens(const uint8_t* text, uint64_t length, uint64_t split, bool dollars, PPPlaced* placed)
 {
     uint64_t line_count = 1;
     for (uint64_t i = 0; i < length; i += 1)
@@ -643,7 +648,7 @@ static bool pp_placed_tokens(const uint8_t* text, uint64_t length, uint64_t spli
             at = end + 1;
         }
         line_starts[line_count] = UINT64_MAX;
-        const int64_t count = pp_test_lex(blank, length, split, kinds, starts, ends);
+        const int64_t count = pp_test_lex(blank, length, split, dollars, kinds, starts, ends);
         result = count >= 0 && pp_spellings_initialize(&placed->spellings, (uint64_t)count + 1, length + 64);
         placed->lines = result ? arena_push_array(&placed->arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
         placed->states = result ? arena_push_array(&placed->arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
@@ -744,7 +749,7 @@ static bool pp_test_placed(Preprocessor* pp, const PPPlaced* theirs, const char*
     size_t length = 0;
     char* text = pp_test_print(pp, true, true, &length);
     PPPlaced ours = { 0 };
-    const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, &ours) && pp_compare_placed(&ours, theirs, name, "clang");
+    const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, pp_dollar_punctuation(&pp->options), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
     pp_placed_release(&ours);
     free(text);
     return result;
@@ -1012,6 +1017,38 @@ static const PPTestCase pp_test_cases[] = {
       0, "gnu17", "1 0 1 0 0 1 0 1 0 0\n", false, 0, 0, 0 },
     { "__is_identifier in C23", "__is_identifier(bool) __is_identifier(typeof) __is_identifier(asm) __is_identifier(restrict) __is_identifier(inline)\n",
       0, "c23", "0 0 1 0 0\n", false, 0, 0, 0 },
+    // GNU's keywords follow the last -f[no-]gnu-keywords, or else the last of GCC's -f[no-]asm, or else the mode (#281).
+    { "-fno-gnu-keywords", "__is_identifier(asm) __is_identifier(typeof) __is_identifier(inline)\n", 0, "gnu89", "1 1 1\n", false, 0, "-fno-gnu-keywords", 0 },
+    { "-fasm in c89", "__is_identifier(asm) __is_identifier(typeof) __is_identifier(inline)\n", 0, "c89", "0 0 0\n", false, 0, "-fasm", 0 },
+    { "-fgnu-keywords before -fno-asm", "__is_identifier(asm) __is_identifier(typeof)\n", 0, "c17", "0 0\n", false, 0, "-fgnu-keywords -fno-asm", 0 },
+    { "-fno-gnu-keywords in C23", "__is_identifier(asm) __is_identifier(typeof)\n", 0, "c23", "1 0\n", false, 0, "-fasm -fno-gnu-keywords", 0 },
+    // '$' is punctuation in C with -fno-dollars-in-identifiers, as in assembly, which -fdollars-in-identifiers gives
+    // identifiers with '$' (#281).
+    { "-fno-dollars-in-identifiers", "#define bb BB\n#define S(x) #x\naa$bb 1$bb $bb S(aa$bb) S($ bb$) S(caf\\u00e9$bb)\n", 0, "c17",
+      "aa $ BB 1 $ BB $ BB \"aa$bb\" \"$ bb$\" \"caf\\u00e9$bb\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
+    { "pasting '$' as punctuation", "#define cat(a, b) a ## b\ncat(x, $)\n", 0, "c17", "x $\n", true, 0, "-fdollars-in-identifiers -fno-dollars-in-identifiers", 0 },
+    { "-fdollars-in-identifiers in assembly", "#define bb BB\naa$bb $bb\n", 0, "gnu17", "aa$bb $bb\n", false, 0, "-x assembler-with-cpp -fdollars-in-identifiers", 0 },
+    // What follows a '$' joins the tokens after it as clang lexes them (#283's review): a literal's prefix (u8'x' only
+    // from C23), and a pp-number's continuation; and a quote C23's digit separators free, which takes the rest of the line.
+    { "'$' before prefixed literals and pp-numbers", "#define L changed\n#define u changed\n#define U changed\n#define u8 changed\n#define e changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\"x\") S($u\"x\") S($U'x') S($u8\"x\") S(a$L\"x\") S($u8'x') S($1.e) S(x$1.5) S(1$e+5)\n", 0, "c17",
+      "\"$L\\\"x\\\"\" \"$u\\\"x\\\"\" \"$U'x'\" \"$u8\\\"x\\\"\" \"a$L\\\"x\\\"\" \"$changed'x'\" \"$1.e\" \"x$1.5\" \"1$changed+5\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
+    { "'$' before prefixed literals in C23", "#define L changed\n#define u changed\n#define U changed\n#define u8 changed\n#define e changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\"x\") S($u\"x\") S($U'x') S($u8\"x\") S(a$L\"x\") S($u8'x') S($1.e) S(x$1.5) S(1$e+5)\n", 0, "c23",
+      "\"$L\\\"x\\\"\" \"$u\\\"x\\\"\" \"$U'x'\" \"$u8\\\"x\\\"\" \"a$L\\\"x\\\"\" \"$u8'x'\" \"$1.e\" \"x$1.5\" \"1$changed+5\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
+    { "'$' before prefixed literals in assembly", "#define L changed\n#define u changed\n#define U changed\n#define u8 changed\n#define e changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\"x\") S($u\"x\") S($U'x') S($u8\"x\") S(a$L\"x\") S($u8'x') S($1.e) S(x$1.5) S(1$e+5)\n", 0, "gnu17",
+      "\"$L\\\"x\\\"\" \"$u\\\"x\\\"\" \"$U'x'\" \"$u8\\\"x\\\"\" \"a$L\\\"x\\\"\" \"$changed'x'\" \"$1.e\" \"x$1.5\" \"1$changed+5\"\n", false, 0, "-x assembler-with-cpp", 0 },
+    { "'$' before a prefixed literal across a line splice", "#define L changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\\\n\"y\") $L\\\n\"z\"\n", 0, "c17", "\"$L\\\"y\\\"\" $ L\"z\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
+    { "'$' before a prefixed literal across a line splice in assembly", "#define L changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\\\n\"y\") $L\\\n\"z\"\n", 0, "gnu17", "\"$L\\\"y\\\"\" $ L\"z\"\n", false, 0, "-x assembler-with-cpp", 0 },
+    { "a quote after '$' that a digit separator frees", "#define x X\n$1'2' + x\nnext x\n", 0, "c23", "$ 1'2 ' + x\nnext X\n", false, 0, "-fno-dollars-in-identifiers", 0 },
+    // Character constants in #if are unsigned with -funsigned-char (or -fno-signed-char), and a multi-character one's
+    // first byte isn't sign-extended (#281).
+    { "-funsigned-char in #if", "#if '\\xff' == 255 && 'a' - 'b' > 0 && -'\\x01' > 0 && '\\377\\377' == 65535 && '\\377abc' > 0\nyes\n#endif\n",
+      0, "c17", "yes\n", false, 1, "-fsigned-char -fno-signed-char", 0 },
+    { "signed char in #if", "#if '\\xff' == -1 && 'a' - 'b' < 0 && '\\377\\377' == 65535 && '\\377abc' < 0 && 'abcde' == 0x62636465\nyes\n#endif\n",
+      0, "c17", "yes\n", false, 3, "-funsigned-char -fno-unsigned-char", 0 },
+    { "short wchar in #if", "#if (L'\\0' - 1) > 0 && L'\\xffff' - 65536 > 0\nyes\n#endif\n",
+      0, "c17", "yes\n", false, 0, "-fno-short-wchar -fshort-wchar", 0 },
+    { "default wchar after short wchar in #if", "#if (L'\\0' - 1) < 0 && L'\\xffff' - 65536 < 0\nyes\n#endif\n",
+      0, "c17", "yes\n", false, 0, "-fshort-wchar -fno-short-wchar", 0 },
     { "true in C99", "#if true\nyes\n#else\nno\n#endif\n",
       0, "c99", "no\n", false, 0, 0, 0 },
     // Where clang and GCC differ, clang's answer: a #line continued on the next line counts from the line of its # (GCC
@@ -1712,6 +1749,15 @@ static const PPTestCase pp_test_cases[] = {
         .options = "-I%d/two --embed-dir=%d/two",
         .files = pp_test_files_includes,
     },
+    {
+        .name = "header-query continuation retains dollar punctuation and wide literal prefixes",
+        .source = "#define L changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\n"
+                  "#if __has_include(<dir//x.h>) && _Pragma(S(ppf $L\"x\")) 1\nyes\n#endif\n",
+        .standard = "c17",
+        .expected = "#pragma ppf $L\"x\"\nyes\n",
+        .options = "-fno-dollars-in-identifiers -I%d",
+        .files = pp_test_files_header_tails,
+    },
     // #254's second review, against clang 23: a backslash in a header name written out takes the character after it into
     // the name, a '>' too, as clang's LexAngledStringLiteral reads it; and the rest of the line past such a name is what
     // clang lexes on from its '>', where the file's tokens ran past it: a "//" in the name began a comment there (the
@@ -2057,7 +2103,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     {
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
-        result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), runs[0].split_kinds, &expected) &&
+        result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), &expected) &&
                  pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name) &&
                  (test->markers == 0 || pp_test_markers(&runs[0], test, directory));
         if (result && with_clang)
@@ -2065,7 +2111,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
-            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, &theirs) &&
+            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), &theirs) &&
                      pp_compare_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
             pp_placed_release(&theirs);
             free(clang_text);
@@ -2215,6 +2261,8 @@ static bool pp_test_assembly_printing(const char* directory)
         const char* source;
         const char* expected;
         bool assembly;
+        // An option after the mode's, or null: where '$' is punctuation follows -f[no-]dollars-in-identifiers (#281).
+        const char* option;
     } cases[] = {
         {
             "assembly immediates and dollar symbols",
@@ -2247,6 +2295,27 @@ static bool pp_test_assembly_printing(const char* directory)
             false,
         },
         {
+            "C with '$' as punctuation prints it as assembly",
+            adjacency,
+            "$foo\n$7\nfoo$\n1$\n$$\n",
+            false,
+            "-fno-dollars-in-identifiers",
+        },
+        {
+            "assembly with '$' in identifiers separates it as C",
+            adjacency,
+            "$ foo\n$ 7\nfoo $\n1 $\n$ $\n",
+            true,
+            "-fdollars-in-identifiers",
+        },
+        {
+            "C pragma identifiers stop at dollar punctuation",
+            "#pragma ppf a$b\n",
+            "#pragma ppf a$b\n",
+            false,
+            "-fno-dollars-in-identifiers",
+        },
+        {
             "assembly pragma identifiers stop at dollar punctuation",
             "#pragma ppf a$b\n",
             "#pragma ppf a$b\n",
@@ -2269,13 +2338,15 @@ static bool pp_test_assembly_printing(const char* directory)
         const char* source = boundary ? padded : cases[i].source;
         const char* expected = boundary ? padded : cases[i].expected;
         const bool assembly = boundary || cases[i].assembly;
-        char* arguments[] = { "-std=gnu17", "-x", assembly ? "assembler-with-cpp" : "c", path };
+        const char* option = boundary ? 0 : cases[i].option;
+        char* arguments[] = { "-std=gnu17", "-x", assembly ? "assembler-with-cpp" : "c", option != 0 ? (char*)option : path, path };
         Arena arena = arena_reserve(1ull << 20);
         PPOptions options;
         const char* input;
         const char* output;
         bool markers;
-        bool passed = pp_test_write_file(path, source) && pp_parse_options(BUSTER_ARRAY_LENGTH(arguments), arguments, &options, &arena, &input, &output, &markers);
+        const int argument_count = (int)BUSTER_ARRAY_LENGTH(arguments) - (option == 0);
+        bool passed = pp_test_write_file(path, source) && pp_parse_options(argument_count, arguments, &options, &arena, &input, &output, &markers);
         static InternTable tables[2];
         static Preprocessor runs[2];
         bool ran[2] = { false, false };
@@ -2343,7 +2414,7 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
     if (result && with_clang)
     {
         PPPlaced theirs = { 0 };
-        result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, runs[0].split_kinds, &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
+        result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
                  pp_test_placed(&runs[0], &theirs, path);
         pp_placed_release(&theirs);
     }
@@ -2768,27 +2839,74 @@ static void pp_test_write_names(FILE* file, const char* names, const char* first
     }
 }
 
-// A file preprocessed in each language mode, by both kernels and with clang's predefines for the mode, must give
-// clang's tokens. Returns how many modes differ.
-static uint32_t pp_test_modes(const char* directory, const char* path, const char* label)
+#define BUSTER_PP_TEST_SET_ARGUMENTS 4
+
+// The language modes, as sets of options (null after the last).
+static const char* const pp_test_mode_sets[][BUSTER_PP_TEST_SET_ARGUMENTS] = {
+    { "-std=c89" }, { "-std=gnu89" }, { "-std=c99" }, { "-std=gnu99" }, { "-std=c11" }, { "-std=gnu11" }, { "-std=c17" }, { "-std=gnu17" }, { "-std=c23" }, { "-std=gnu23" },
+};
+
+// The -f options that change clang's keywords, and those beside them that leave them (#281): GNU's keywords turned on in
+// modes without them and off in modes with them; -f[no-]gnu-keywords beside GCC's -f[no-]asm in both orders (it wins:
+// clang's driver passes it after them), and each in both orders; each family buster refuses turned off again, which it
+// takes, and -fno-zvector and -fchar8_t, which clang ignores in C.
+static const char* const pp_test_keyword_sets[][BUSTER_PP_TEST_SET_ARGUMENTS] = {
+    { "-std=c89", "-fgnu-keywords" },
+    { "-std=gnu89", "-fno-gnu-keywords" },
+    { "-std=c17", "-fgnu-keywords" },
+    { "-std=gnu17", "-fno-gnu-keywords" },
+    { "-std=c23", "-fgnu-keywords" },
+    { "-std=gnu23", "-fno-gnu-keywords" },
+    { "-std=c89", "-fasm" },
+    { "-std=gnu89", "-fno-asm" },
+    { "-std=c17", "-fasm", "-fno-gnu-keywords" },
+    { "-std=c17", "-fno-gnu-keywords", "-fasm" },
+    { "-std=gnu17", "-fgnu-keywords", "-fno-asm" },
+    { "-std=gnu17", "-fno-asm", "-fgnu-keywords" },
+    { "-std=c17", "-fno-asm", "-fasm" },
+    { "-std=gnu17", "-fasm", "-fno-asm" },
+    { "-std=c17", "-fno-gnu-keywords", "-fgnu-keywords" },
+    { "-std=gnu17", "-fgnu-keywords", "-fno-gnu-keywords" },
+    { "-fms-extensions", "-fno-ms-extensions" },
+    { "-fno-ms-compatibility" },
+    { "-fborland-extensions", "-fno-borland-extensions" },
+    { "-fdeclspec", "-fno-declspec" },
+    { "-fno-zvector" },
+    { "-fzos-extensions", "-fno-zos-extensions" },
+    { "-ffixed-point", "-fno-fixed-point" },
+    { "-fdefer-ts", "-fno-defer-ts" },
+    { "-fchar8_t" },
+};
+
+// A file preprocessed with each of `count` sets of options, by both kernels and with clang's predefines for the set,
+// must give clang's tokens. Returns how many sets differ.
+static uint32_t pp_test_sets(const char* directory, const char* path, const char* label, const char* const (*sets)[BUSTER_PP_TEST_SET_ARGUMENTS], uint32_t count)
 {
-    static const char* const modes[] = { "-std=c89", "-std=gnu89", "-std=c99", "-std=gnu99", "-std=c11", "-std=gnu11", "-std=c17", "-std=gnu17", "-std=c23", "-std=gnu23" };
     uint32_t result = 0;
-    for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+    for (uint32_t m = 0; m < count; m += 1)
     {
-        char* arguments[2] = { (char*)modes[m], (char*)path };
+        char* arguments[BUSTER_PP_TEST_SET_ARGUMENTS + 1];
+        int n = 0;
+        char shown[512];
+        uint32_t used = 0;
+        for (; n < BUSTER_PP_TEST_SET_ARGUMENTS && sets[m][n] != 0; n += 1)
+        {
+            arguments[n] = (char*)sets[m][n];
+            used += (uint32_t)snprintf(shown + used, sizeof(shown) - used, "%s%s", n != 0 ? " " : "", sets[m][n]);
+        }
+        arguments[n] = (char*)path;
         Arena arena = arena_reserve(1ull << 20);
         PPOptions options;
         const char* input;
         const char* output;
         bool markers;
         uint64_t tokens = 0;
-        bool passed = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers);
+        bool passed = pp_parse_options(n + 1, arguments, &options, &arena, &input, &output, &markers);
         options.clang_features = true;
-        passed = passed && pp_test_file(1, arguments, 0, &options, path, true, directory, &tokens);
+        passed = passed && pp_test_file(n, arguments, 0, &options, path, true, directory, &tokens);
         if (!passed)
         {
-            printf("%s: the answers differ from clang's with %s\n", label, modes[m]);
+            printf("%s: the answers differ from clang's with %s\n", label, shown);
         }
         result += !passed;
         arena_release(&arena);
@@ -2796,8 +2914,14 @@ static uint32_t pp_test_modes(const char* directory, const char* path, const cha
     return result;
 }
 
-// __is_identifier of every predefined name and of clang's keyword candidates, in each language mode, must be clang's: 0
-// exactly for the mode's keywords.
+// pp_test_sets in each language mode.
+static uint32_t pp_test_modes(const char* directory, const char* path, const char* label)
+{
+    return pp_test_sets(directory, path, label, pp_test_mode_sets, BUSTER_ARRAY_LENGTH(pp_test_mode_sets));
+}
+
+// __is_identifier of every predefined name and of clang's keyword candidates, in each language mode and with each of
+// pp_test_keyword_sets, must be clang's: 0 exactly for the mode's keywords.
 static bool pp_test_keywords(const char* directory)
 {
     char path[4096];
@@ -2825,9 +2949,11 @@ static bool pp_test_keywords(const char* directory)
         count += *at == ' ';
     }
     const uint32_t failures = result ? pp_test_modes(directory, path, "keywords") : 1;
+    const uint32_t set_failures = result ? pp_test_sets(directory, path, "keywords", pp_test_keyword_sets, BUSTER_ARRAY_LENGTH(pp_test_keyword_sets)) : 1;
     unlink(path);
-    printf("keywords: %u of 10 modes differ from clang's __is_identifier (%u names)\n", failures, count);
-    return result && failures == 0;
+    printf("keywords: %u of 10 modes and %u of %lu -f option sets differ from clang's __is_identifier (%u names)\n", failures, set_failures,
+           (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_keyword_sets), count);
+    return result && failures == 0 && set_failures == 0;
 }
 
 // __has_feature and __has_extension of every feature name, in each language mode, must be clang's: the standard
@@ -2853,6 +2979,261 @@ static bool pp_test_features(const char* directory)
     unlink(path);
     printf("features: %u of 10 modes differ from clang's __has_feature and __has_extension (%u names)\n", failures, count);
     return result && failures == 0;
+}
+
+// Sends this process's standard error to a temporary file until pp_test_release_stderr, so that refused option sets'
+// messages (and the oracle's about clang's) stay out of the log. Returns the descriptor to restore, or -1.
+static int pp_test_catch_stderr(FILE** caught)
+{
+    *caught = tmpfile();
+    fflush(stderr);
+    int result = *caught != 0 ? dup(STDERR_FILENO) : -1;
+    if (result >= 0 && dup2(fileno(*caught), STDERR_FILENO) < 0)
+    {
+        close(result);
+        result = -1;
+    }
+    return result;
+}
+
+// Restores standard error, and puts what was written to it since pp_test_catch_stderr in `messages` (`capacity` bytes,
+// the last a NUL).
+static void pp_test_release_stderr(int saved, FILE* caught, char* messages, size_t capacity)
+{
+    fflush(stderr);
+    messages[0] = 0;
+    if (saved >= 0)
+    {
+        dup2(saved, STDERR_FILENO);
+        close(saved);
+        rewind(caught);
+        messages[fread(messages, 1, capacity - 1, caught)] = 0;
+    }
+    if (caught != 0)
+    {
+        fclose(caught);
+    }
+}
+
+// An option set of #281's families, or one beside them (%d stands for the test's directory): `refused` is in the message
+// of the option pp_parse_options must refuse, or null for a set it must take without a message.
+typedef struct PPTestOptionSet PPTestOptionSet;
+struct PPTestOptionSet
+{
+    const char* arguments[BUSTER_PP_TEST_SET_ARGUMENTS];
+    const char* refused;
+};
+
+static const PPTestOptionSet pp_test_option_sets[] = {
+    // Refused: each family buster doesn't follow, where its last option turns it on; -fzvector whatever follows it (clang's
+    // driver ignores -fno-zvector); -fno-digraphs, and -fdigraphs in c89 (C94); and the options without a -fno- form.
+    { { "-fms-extensions" }, "-fms-extensions" },
+    { { "-fno-ms-extensions", "-fms-extensions" }, "-fms-extensions" },
+    { { "-fms-compatibility" }, "-fms-compatibility" },
+    { { "-fborland-extensions" }, "-fborland-extensions" },
+    { { "-fno-declspec", "-fdeclspec" }, "-fdeclspec" },
+    { { "-fzvector" }, "-fzvector" },
+    { { "-fzvector", "-fno-zvector" }, "-fzvector" },
+    // clang's -mzvector is -fzvector (predefines_alias), and -mno-zvector is -fno-zvector.
+    { { "-mzvector" }, "-fzvector" },
+    { { "-mzvector", "-mno-zvector" }, "-fzvector" },
+    { { "-fno-zos-extensions", "-fzos-extensions" }, "-fzos-extensions" },
+    { { "-ffixed-point" }, "-ffixed-point" },
+    { { "-fdefer-ts" }, "-fdefer-ts" },
+    { { "-fdigraphs", "-fno-digraphs" }, "-fno-digraphs" },
+    { { "-std=c89", "-fdigraphs" }, "-fdigraphs" },
+    { { "-std=c17", "-fno-raw-string-literals", "-fraw-string-literals" }, "-fraw-string-literals" },
+    { { "-fno-directives-only", "-fdirectives-only" }, "-fdirectives-only" },
+    { { "-fkeep-system-includes" }, "-fkeep-system-includes" },
+    { { "-fminimize-whitespace" }, "-fminimize-whitespace" },
+    { { "-fuse-line-directives" }, "-fuse-line-directives" },
+    { { "-frewrite-includes" }, "-frewrite-includes" },
+    { { "-frewrite-imports" }, "-frewrite-imports" },
+    // clang fails without the module it would otherwise build into its cache, so that nothing is written.
+    { { "-fno-implicit-modules", "-fno-modules", "-fmodules" }, "-fmodules" },
+    { { "-fimplicit-module-maps" }, "-fimplicit-module-maps" },
+    { { "-fbuiltin-module-map" }, "-fbuiltin-module-map" },
+    { { "-fmodule-name=probe" }, "-fmodule-name=probe" },
+    { { "-fmodule-map-file=%d/missing.modulemap" }, "-fmodule-map-file=" },
+    { { "-fdriver-only" }, "-fdriver-only" },
+    { { "-fproc-stat-report" }, "-fproc-stat-report" },
+    { { "-fmacro-prefix-map=%d=/remapped" }, "-fmacro-prefix-map=" },
+    { { "-ffile-prefix-map=%d=/remapped" }, "-ffile-prefix-map=" },
+    { { "-fexec-charset=UTF-8", "-fexec-charset=latin1" }, "-fexec-charset=latin1" },
+    { { "-finput-charset=UTF8" }, "-finput-charset=UTF8" },
+    // Taken: the modeled families, each refused family turned off again, -fzvector in assembly, digraphs where the mode
+    // has them, and raw strings off (buster lexes none), each in c17, where clang's lexes none either (a GNU mode's
+    // would differ); and UTF-8 charsets in any case.
+    { { "-std=c17", "-fgnu-keywords" }, 0 },
+    { { "-std=gnu17", "-fno-raw-string-literals", "-fno-asm" }, 0 },
+    { { "-std=c17", "-fno-dollars-in-identifiers" }, 0 },
+    { { "-std=c17", "-fno-signed-char" }, 0 },
+    { { "-std=c17", "-funsigned-char", "-fno-unsigned-char" }, 0 },
+    { { "-std=c17", "-fms-extensions", "-fno-ms-extensions" }, 0 },
+    { { "-std=c17", "-fms-compatibility", "-fno-ms-compatibility" }, 0 },
+    { { "-std=c17", "-fborland-extensions", "-fno-borland-extensions" }, 0 },
+    { { "-std=c17", "-fdeclspec", "-fno-declspec" }, 0 },
+    { { "-std=c17", "-fno-zvector" }, 0 },
+    { { "-std=c17", "-mno-zvector" }, 0 },
+    { { "-std=c17", "-x", "assembler-with-cpp", "-fzvector" }, 0 },
+    { { "-std=c17", "-fzos-extensions", "-fno-zos-extensions" }, 0 },
+    { { "-std=c17", "-ffixed-point", "-fno-fixed-point" }, 0 },
+    { { "-std=c17", "-fdefer-ts", "-fno-defer-ts" }, 0 },
+    { { "-std=c17", "-fno-digraphs", "-fdigraphs" }, 0 },
+    { { "-std=gnu89", "-fno-raw-string-literals", "-fdigraphs" }, 0 },
+    { { "-std=gnu17", "-fraw-string-literals", "-fno-raw-string-literals" }, 0 },
+    { { "-std=c17", "-fshort-wchar", "-fno-short-wchar" }, 0 },
+    // -fshort-wchar is predefines_option's, which #if's wide character constants follow.
+    { { "-std=c17", "-fno-short-wchar", "-fshort-wchar" }, 0 },
+    { { "-std=c17", "-fdirectives-only", "-fno-directives-only" }, 0 },
+    { { "-std=c17", "-fkeep-system-includes", "-fno-keep-system-includes" }, 0 },
+    { { "-std=c17", "-fminimize-whitespace", "-fno-minimize-whitespace" }, 0 },
+    { { "-std=c17", "-fuse-line-directives", "-fno-use-line-directives" }, 0 },
+    { { "-std=c17", "-frewrite-includes", "-fno-rewrite-includes" }, 0 },
+    { { "-std=c17", "-frewrite-imports", "-fno-rewrite-imports" }, 0 },
+    { { "-std=c17", "-fmodules", "-fno-modules" }, 0 },
+    { { "-std=c17", "-fimplicit-module-maps", "-fno-implicit-module-maps" }, 0 },
+    { { "-std=c17", "-fmodules-driver" }, 0 },
+    { { "-std=c17", "-fexec-charset=latin1", "-fexec-charset=UTF-8" }, 0 },
+    { { "-std=c17", "-finput-charset=Utf-8" }, 0 },
+};
+
+// What the families change in clang's -E: the names that are keywords under them, '$', digraphs and __STDC_VERSION__
+// (C94's with -fdigraphs in c89), raw strings, character constants' signs, __FILE__ (remapped) and __MODULE__ (named), and
+// a system header for the output modes and the modules.
+static const char pp_test_option_probe[] =
+    "#include <stddef.h>\n"
+    "__is_identifier(__int64) __is_identifier(_pascal) __is_identifier(__declspec) __is_identifier(__vector) __is_identifier(__ptr32)\n"
+    "__is_identifier(_Accum) __is_identifier(_Defer) __is_identifier(asm) __is_identifier(typeof)\n"
+    "#define bb BB\naa$bb 1$bb\n"
+    "%:define DIGRAPH __STDC_VERSION__\nDIGRAPH <: :>\n"
+    "#define R RR\nR\"x(raw)x\"\n"
+    "#if (L'\\0' - 1) < 0\nwide_signed\n#endif\n"
+    "#if '\\xff' < 0\nchar_signed\n#endif\n"
+    "__FILE__ __MODULE__\n";
+
+// pp_test_option_sets: each set refused or taken as it says. With --clang, clang's -E of pp_test_option_probe must
+// change with each refused set (from the set's -std= alone, or from no options), which is why buster refuses it, and
+// each taken set must give clang's tokens, by both kernels.
+static bool pp_test_option_refusals(const char* directory, bool with_clang)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/options.c", directory);
+    bool result = pp_test_write_file(path, pp_test_option_probe);
+    uint32_t wrong = 0;
+    uint32_t unchanged = 0;
+    uint32_t different = 0;
+    uint32_t refused_count = 0;
+    // clang's -E of the probe with each base a refused set is compared with (its -std=, or none: "" here), run once each.
+    const char* base_keys[4] = { 0 };
+    PPClangOutput bases[4];
+    memset(bases, 0, sizeof(bases));
+    uint32_t base_count = 0;
+    for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(pp_test_option_sets); s += 1)
+    {
+        const PPTestOptionSet* set = &pp_test_option_sets[s];
+        char text[16384];
+        char* arguments[BUSTER_PP_TEST_SET_ARGUMENTS + 1];
+        char shown[1024];
+        uint32_t used = 0;
+        uint32_t shown_used = 0;
+        int n = 0;
+        for (; n < BUSTER_PP_TEST_SET_ARGUMENTS && set->arguments[n] != 0; n += 1)
+        {
+            // The argument with %d replaced by the directory.
+            arguments[n] = text + used;
+            for (const char* at = set->arguments[n]; *at != 0 && used + 4200 < sizeof(text); at += 1)
+            {
+                const bool directory_here = at[0] == '%' && at[1] == 'd';
+                used += directory_here ? (uint32_t)snprintf(text + used, sizeof(text) - used, "%s", directory) : (uint32_t)snprintf(text + used, sizeof(text) - used, "%c", *at);
+                at += directory_here;
+            }
+            used += 1;
+            shown_used += (uint32_t)snprintf(shown + shown_used, sizeof(shown) - shown_used, "%s%s", n != 0 ? " " : "", set->arguments[n]);
+        }
+        arguments[n] = path;
+        Arena arena = arena_reserve(1ull << 20);
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        char messages[4096];
+        FILE* caught;
+        const int saved = pp_test_catch_stderr(&caught);
+        const bool taken = pp_parse_options(n + 1, arguments, &options, &arena, &input, &output, &markers);
+        pp_test_release_stderr(saved, caught, messages, sizeof(messages));
+        const bool right = set->refused != 0 ? !taken && strstr(messages, set->refused) != 0 : taken && messages[0] == 0;
+        if (!right)
+        {
+            printf("option sets: %s is %s (%s)\n", shown, taken ? "taken" : "refused", messages[0] != 0 ? messages : "no message");
+        }
+        wrong += !right;
+        refused_count += set->refused != 0;
+        if (with_clang && right && set->refused != 0)
+        {
+            // clang's -E with the set, and with its -std= alone or nothing: with the oracle's own messages caught.
+            const int base = strncmp(arguments[0], "-std=", 5) == 0;
+            const char* key = base != 0 ? set->arguments[0] : "";
+            uint32_t b = 0;
+            while (b < base_count && strcmp(base_keys[b], key) != 0)
+            {
+                b += 1;
+            }
+            const int keep = pp_test_catch_stderr(&caught);
+            PPClangOutput with = pp_test_clang_process("clang", arguments, n, path, false);
+            if (b == base_count && b < BUSTER_ARRAY_LENGTH(bases))
+            {
+                base_keys[b] = key;
+                bases[b] = pp_test_clang_process("clang", arguments, base, path, false);
+                base_count += 1;
+            }
+            pp_test_release_stderr(keep, caught, messages, sizeof(messages));
+            const PPClangOutput* without = b < base_count ? &bases[b] : 0;
+            const bool changed = without != 0 && (with.status != without->status || with.length != without->length ||
+                                                  (with.length != 0 && memcmp(with.text, without->text, with.length) != 0));
+            if (!changed)
+            {
+                printf("option sets: clang's -E doesn't change with %s, which buster refuses\n", shown);
+            }
+            unchanged += !changed;
+            free(with.text);
+            free(with.diagnostics);
+        }
+        else if (with_clang && right)
+        {
+            // The tokens alone, from clang's predefines, not pp_test_file's -dM too: clang's -dM leaves out every macro
+            // defined after an unknown token (the probe's '$' as punctuation), and its -x c would override a set's -x.
+            uint64_t tokens = 0;
+            char predefines[4096];
+            snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
+            size_t length = 0;
+            char* text = pp_test_clang(arguments, n, path, predefines, &length);
+            PPOptions with_predefines = options;
+            with_predefines.predefines_path = predefines;
+            const bool same = text != 0 && pp_test_file_output(&with_predefines, path, true, text, length, &tokens, 0);
+            free(text);
+            if (!same)
+            {
+                printf("option sets: buster's tokens with %s differ from clang's\n", shown);
+            }
+            different += !same;
+        }
+        arena_release(&arena);
+    }
+    for (uint32_t b = 0; b < base_count; b += 1)
+    {
+        free(bases[b].text);
+        free(bases[b].diagnostics);
+    }
+    unlink(path);
+    printf("option sets: %u of %lu refused or taken wrongly", wrong, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_option_sets));
+    if (with_clang)
+    {
+        printf(", %u of %u refused ones change nothing in clang's -E and %u of %lu taken ones differ from clang's", unchanged, refused_count, different,
+               (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_option_sets) - refused_count);
+    }
+    printf("\n");
+    return result && wrong == 0 && unchanged == 0 && different == 0;
 }
 
 // One option set (words separated by spaces) for `path`, against clang with the same options: the queries in the
@@ -3053,14 +3434,14 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
         result = result && pp_same_streams(&preprocessors[0], &preprocessors[1], test.name) && pp_stream_spellings(&preprocessors[0], &ours) &&
-                 pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), preprocessors[0].split_kinds, &expected) &&
+                 pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), preprocessors[0].split_kinds, pp_dollar_punctuation(&preprocessors[0].options), &expected) &&
                  pp_compare_spellings(&preprocessors[0], &ours, &expected, test.name, "wanted");
         if (result && with_clang)
         {
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
-            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, preprocessors[0].split_kinds, &theirs) &&
+            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, preprocessors[0].split_kinds, pp_dollar_punctuation(&preprocessors[0].options), &theirs) &&
                      pp_compare_spellings(&preprocessors[0], &ours, &theirs.spellings, test.name, "clang");
             pp_placed_release(&theirs);
             free(clang_text);
@@ -3297,7 +3678,7 @@ static bool pp_test_header_expansions(char* text, size_t length, bool comments, 
         length = kept;
     }
     PPSpellings spellings = { 0 };
-    bool valid = pp_text_spellings((const uint8_t*)text, length, 0, &spellings);
+    bool valid = pp_text_spellings((const uint8_t*)text, length, 0, false, &spellings);
     const uint64_t count = valid ? spellings.count : 0;
     result->storage = malloc(2 * (spellings.length + count) + 64);
     result->declarations = malloc((count + 1) * sizeof(char*));
@@ -3523,7 +3904,8 @@ static bool pp_test_buster_run(const char* mode, bool freestanding, const char* 
     PPSpellings mine = { 0 };
     PPSpellings theirs = { 0 };
     result = result && clang->status == PP_CLANG_ACCEPTED && pp_stream_spellings(&pp, &mine) &&
-             pp_text_spellings((const uint8_t*)clang->text, clang->length, pp.split_kinds, &theirs) && pp_compare_spellings(&pp, &mine, &theirs, name, "clang");
+             pp_text_spellings((const uint8_t*)clang->text, clang->length, pp.split_kinds, pp_dollar_punctuation(&pp.options), &theirs) &&
+             pp_compare_spellings(&pp, &mine, &theirs, name, "clang");
     arena_release(&mine.arena);
     arena_release(&theirs.arena);
     pp_release(&pp);
@@ -4199,7 +4581,7 @@ static bool pp_test_implemented_features(const char* directory)
         PPSpellings ours = { 0 };
         PPSpellings wanted = { 0 };
         passed = passed && pp_test_run(&pp, &table, &options, path) && pp_stream_spellings(&pp, &ours) &&
-                 pp_text_spellings((const uint8_t*)expected[clang], strlen(expected[clang]), pp.split_kinds, &wanted) &&
+                 pp_text_spellings((const uint8_t*)expected[clang], strlen(expected[clang]), pp.split_kinds, pp_dollar_punctuation(&pp.options), &wanted) &&
                  pp_compare_spellings(&pp, &ours, &wanted, clang == 1 ? "clang's feature answers" : "implemented feature answers", "wanted");
         pp_release(&pp);
         intern_release(&table);
@@ -4380,6 +4762,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);
+        passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);

@@ -841,7 +841,7 @@ static PreprocessorFuzzDifference pp_fuzz_kernels(PPFuzzState* state, const char
         PPSpellings printed = { 0 };
         size_t length = 0;
         char* text = pp_test_print(&runs[0], true, false, &length);
-        const bool lexed = text != 0 && pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)text, length, runs[0].split_kinds, &printed);
+        const bool lexed = text != 0 && pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)text, length, runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), &printed);
         char label[160];
         snprintf(label, sizeof(label), "%s (printed)", name);
         result = lexed && pp_compare_spellings(&runs[0], &ours, &printed, label, "-E") ? BUSTER_PPF_EQUAL : BUSTER_PPF_KERNEL_PRINTED;

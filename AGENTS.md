@@ -500,7 +500,12 @@ designs and the compilers already built this way.
   as clang does (`-march`, the `-m` feature flags, `-march=native` from CPUID,
   `-O`, `-f...`, `-g`), from tables generated from clang 23; `c_predefines_test.c`
   checks them against clang under `test-preprocessor --clang` and regenerates the
-  tables (`test-preprocessor --generate-targets`).
+  tables (`test-preprocessor --generate-targets`). Of the `-f` options that
+  change clang's keywords, lexing or `-E` output (#281), `-E` models GNU's
+  keywords (`-f[no-]gnu-keywords`, `-f[no-]asm`), `$` in identifiers, and char's
+  signedness and `wchar_t`'s width in `#if` (from `c_predefines.c`'s options),
+  and refuses the others where their last option turns them on
+  (`pp_take_family`, `pp_settle_families`).
 - `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
   records macro expansion history in cold records and compressed output runs;
   `pp_diagnose_output` renders a diagnostic for an output-token index.
@@ -2725,8 +2730,9 @@ identifier must get the same id and every token the same leading-space bit, on:
 - about 14,800 spellings where the same bit flipped in two lanes must change
   the hash;
 - the predefined names, every name's keyword answer in each of the ten modes
-  from `c89` to `gnu23`, and 24 spellings chosen apart from the predefined names
-  with clang's answer (17 keywords, 7 not);
+  from `c89` to `gnu23` and in five of them with `-fgnu-keywords` or
+  `-fno-gnu-keywords` (#281), and 24 spellings chosen apart from the predefined
+  names with clang's answer (17 keywords, 7 not);
 - 300,000 random spellings that grow the table three times;
 - 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
   and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64
@@ -2783,7 +2789,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 `./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
 [options] [file...]`, or `test-preprocessor --tables path...`:
 
-- without files, the 259 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 277 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -2793,6 +2799,9 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   - inputs past the vectorized kernels' limits;
   - directives and builtins that nest through the main loop's frames;
   - #193's review fixes, line markers among them;
+  - the `-f` options it models (#281): GNU's keywords, `$` (what follows it
+    joining the tokens after it, as clang lexes them), char's signedness and
+    `-f[no-]short-wchar`'s width and signedness in `#if`;
   - each difference from clang that #109's fuzzing found, minimized, and the
     ones probing around it found;
   - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
@@ -2808,10 +2817,14 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   A case can also give extra files and options for both sides, and the exact
   text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
   modification times of their own must give each file's time (in UTC), and
-  `SOURCE_DATE_EPOCH`'s when it is set; and the `-m` options buster refuses
+  `SOURCE_DATE_EPOCH`'s when it is set; the `-m` options buster refuses
   though clang takes them (another target's, which clang ignores with a
   warning, and those that change the target) must be refused, and each `-m`
-  flag that changes no macro taken; the expansion history's checks; #embed's vector/scalar text and lookup checks; and
+  flag that changes no macro taken; and each of `pp_test_option_sets` must be
+  refused, its message naming the option, or taken without one: the `-f`
+  options that change clang's keywords, lexing or `-E` output, which
+  `pp_parse_options` models or refuses where their family's last option turns
+  them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks; and
   the fuzz batch: its isolation rules checked on small sources (what a case
   leaves open makes clang read it alone), its comparison on pairs of texts
   (whitespace between tokens doesn't count, a literal's contents and joined
@@ -2900,7 +2913,12 @@ features:
   `-ffp-eval-method=` and without SSE;
 - in each mode, `__is_identifier` of every predefined name, and of clang's
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
-  must give clang's answer;
+  must give clang's answer, and so must it in 25 sets of `-f` options
+  (`pp_test_keyword_sets`: GNU's keywords on and off, in each order of
+  `-f[no-]gnu-keywords` and `-f[no-]asm`, and the refused families turned off
+  again);
+- each refused option set must change clang's `-E` of a probe (from the set's
+  `-std=` alone, or no options), and each taken one must give clang's tokens;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers, including 45 sanitizer option sets and target queries;
 - buster's own headers (`src/buster/include`) against clang's, for each header,
@@ -3085,6 +3103,8 @@ the guard spelled the same, and the walk must do what it did:
   which the walk must take once (an alias of a file in the same context, by
   its directory's device and inode, isn't walked again), and one header in two
   directories (a hard link) whose own `local.h` differ, walked in both;
+- dollars: a cache filled with `$` as punctuation (`-fno-dollars-in-identifiers`,
+  #281), whose unit must split `aa$bb` into three tokens on every lane count;
 - special paths: a FIFO that an `#include` under `#if 0` names (the walk's
   probe mustn't block) and an active one names (an error, as alone), and a
   quoted name of 2,400 bytes in a directory of 2,539, three requests of which

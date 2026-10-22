@@ -282,10 +282,10 @@
 // -dump-raw-tokens`), or in C++26 mode with `C_TOKENIZER_CPLUSPLUS` (`clang -cc1 -x c++ -std=c++26
 // -dump-raw-tokens`): line splices anywhere, digraphs, UCNs and UTF-8 identifiers, digit separators, unterminated
 // literals and stray characters, and in C++ raw string literals, user-defined literal suffixes (which are part of
-// the literal's token), `<=>`, `->*`, `.*` and the `<::` rule. With `C_TOKENIZER_NO_DIGIT_SEPARATORS`, numbers are
-// lexed as `-std=c17` (or `-std=c++11`) lexes them. Common code takes the vectorized path; the rare lines it can't
-// handle exactly (e.g. a line splice in the middle of a token, a non-ASCII identifier or a raw string literal) are
-// tokenized by a scalar lexer.
+// the literal's token), `<=>`, `->*`, `.*` and the `<::` rule. Common code takes the vectorized path; the rare
+// lines it can't handle exactly (e.g. a line splice in the middle of a token, a non-ASCII identifier or a raw string
+// literal) are tokenized by a scalar lexer. With `C_TOKENIZER_NO_DOLLARS` the scalar lexer takes the whole source and
+// lexes `$` as punctuation, as `-fno-dollars-in-identifiers` and `-x assembler-with-cpp` have it.
 //
 // Differences from the raw lexer's output, by design:
 //   - Whitespace and comments aren't tokens. An unterminated block comment is a `C_TOKEN_UNKNOWN` token, as in clang.
@@ -388,6 +388,11 @@ typedef enum CTokenizerFlags
     C_TOKENIZER_TRIGRAPHS = 1,
     // Tokenize C++ (C++26) instead of C.
     C_TOKENIZER_CPLUSPLUS = 2,
+    // '$' is punctuation (a C_TOKEN_UNKNOWN token of its own) rather than an identifier and pp-number character, as
+    // clang has it with -fno-dollars-in-identifiers and for assembler-with-cpp (its DollarIdents off). The scalar
+    // lexer's alone: c_tokenize gives such a source to it, and c_tokenize_vectorized refuses it. 128 keeps it apart from
+    // the flags other branches add (#278's 4, #285's 8 and 16, #292's 32 and 64).
+    C_TOKENIZER_NO_DOLLARS = 128,
     // Lex pp-numbers without digit separators, as C17 and C++11 and earlier do: a `'` ends a number, and starts a
     // character constant (`1'000` is `1` and the unterminated `'000`). Off by default, like C23 and C++14.
     C_TOKENIZER_NO_DIGIT_SEPARATORS = 4,
@@ -396,7 +401,7 @@ typedef enum CTokenizerFlags
 typedef enum CTokenizerError
 {
     C_TOKENIZER_ERROR_FILE_TOO_BIG = -1, // Token positions are 32-bit.
-    C_TOKENIZER_ERROR_NEEDS_SCALAR = -2, // Only from c_tokenize_vectorized.
+    C_TOKENIZER_ERROR_NEEDS_SCALAR = -2, // Only from c_tokenize_vectorized (and always with C_TOKENIZER_NO_DOLLARS).
 } CTokenizerError;
 
 // The spare entries past the last token that the vectorized path's whole-vector stores of kinds, starts and ends may
@@ -842,6 +847,8 @@ struct ScalarLexer
     uint64_t length;
     bool trigraphs;
     bool cplusplus;
+    // C_TOKENIZER_NO_DOLLARS: '$' takes no part in identifiers and pp-numbers (false, the default, as clang's C has it).
+    bool no_dollars;
     bool no_digit_separators; // C_TOKENIZER_NO_DIGIT_SEPARATORS: only lex_numeric_constant reads it.
 };
 
@@ -1214,7 +1221,7 @@ static uint64_t lex_identifier_continue(const ScalarLexer* lexer, uint64_t posit
     {
         uint64_t size;
         int32_t c = peek_char(lexer, p, &size);
-        if (is_ascii_identifier_continue(c) || c == '$')
+        if (is_ascii_identifier_continue(c) || (c == '$' && !lexer->no_dollars))
         {
             p += size;
         }
@@ -1236,7 +1243,7 @@ static uint64_t lex_numeric_constant(const ScalarLexer* lexer, uint64_t position
         uint64_t size;
         int32_t c = peek_char(lexer, p, &size);
         int32_t previous = 0;
-        while (is_ascii_identifier_continue(c) || c == '.' || c == '$')
+        while (is_ascii_identifier_continue(c) || c == '.' || (c == '$' && !lexer->no_dollars))
         {
             p += size;
             previous = c;
@@ -1304,7 +1311,7 @@ static uint64_t lex_ud_suffix(const ScalarLexer* lexer, uint64_t position, bool 
             {
                 uint64_t next_size;
                 int32_t next = peek_char(lexer, q, &next_size);
-                if (!is_ascii_identifier_continue(next) && next != '$')
+                if (!is_ascii_identifier_continue(next) && (next != '$' || lexer->no_dollars))
                 {
                     is_suffix = is_standard_suffix(suffix, length);
                     break;
@@ -1329,7 +1336,7 @@ static uint64_t lex_ud_suffix(const ScalarLexer* lexer, uint64_t position, bool 
         for (;;)
         {
             c = peek_char(lexer, p, &size);
-            if (is_ascii_identifier_continue(c) || c == '$')
+            if (is_ascii_identifier_continue(c) || (c == '$' && !lexer->no_dollars))
             {
                 p += size;
             }
@@ -1528,6 +1535,7 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
         .length = length,
         .trigraphs = (flags & C_TOKENIZER_TRIGRAPHS) != 0,
         .cplusplus = (flags & C_TOKENIZER_CPLUSPLUS) != 0,
+        .no_dollars = (flags & C_TOKENIZER_NO_DOLLARS) != 0,
         .no_digit_separators = (flags & C_TOKENIZER_NO_DIGIT_SEPARATORS) != 0,
     };
     const ScalarLexer* lexer = &lexer_value;
@@ -1815,7 +1823,7 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
                 break;
             }
             default:
-                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$')
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || (c == '$' && !lexer->no_dollars))
                 {
                     kind = C_TOKEN_RAW_IDENTIFIER;
                     p = lex_identifier_continue(lexer, p);
@@ -3412,7 +3420,7 @@ static int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uin
     {
         result = 0;
     }
-    else if ((flags & C_TOKENIZER_TRIGRAPHS) && contains_trigraph(source, length))
+    else if (((flags & C_TOKENIZER_TRIGRAPHS) && contains_trigraph(source, length)) || (flags & C_TOKENIZER_NO_DOLLARS))
     {
         result = C_TOKENIZER_ERROR_NEEDS_SCALAR;
     }
@@ -3438,7 +3446,7 @@ static int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds
     {
         result = 0;
     }
-    else if ((flags & C_TOKENIZER_TRIGRAPHS) && contains_trigraph(source, length))
+    else if (((flags & C_TOKENIZER_TRIGRAPHS) && contains_trigraph(source, length)) || (flags & C_TOKENIZER_NO_DOLLARS))
     {
         result = c_tokenize_scalar(source, length, kinds, starts, ends, flags);
     }

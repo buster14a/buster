@@ -69,7 +69,8 @@
 //   - Directives: pp_directive and the handlers (pp_condition, pp_include, pp_line, pp_pragma).
 //   - #if expressions (pp_evaluate), and the feature tables the __has_* builtins read (pp_feature).
 //   - The predefines, pp_initialize, pp_release and pp_run.
-//   - Output: pp_resolve_keywords and pp_print, and the -E command (pp_parse_options).
+//   - Output: pp_resolve_keywords and pp_print, and the -E command (pp_parse_options, with pp_take_family and
+//     pp_settle_families for the -f options that change clang's keywords, lexing or -E output).
 //   - clang's arguments for ours (pp_clang_arguments), and a clang run (pp_clang_preprocess), for the commands that run
 //     clang with them.
 
@@ -196,6 +197,15 @@ typedef enum PPPhase
 // Every file a preprocessor reads, and what is prepared from it, shared by the translation units that use it ("Files").
 typedef struct FileCache FileCache;
 
+// Whether '$' is an identifier character, clang's DollarIdents: as the mode has it (C's identifiers and pp-numbers take
+// it, and in assembly it is punctuation), unless -fdollars-in-identifiers or -fno-dollars-in-identifiers set it.
+typedef enum PPDollars
+{
+    PP_DOLLARS_MODE,
+    PP_DOLLARS_IDENTIFIER,
+    PP_DOLLARS_PUNCTUATION,
+} PPDollars;
+
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
@@ -220,8 +230,11 @@ struct PPOptions
     // --buster-headers: buster's own headers (src/buster/include, found from the executable) in place of clang's
     // resource directory.
     bool buster_headers;
-    // Opt-in assembler-with-cpp input: '$' is punctuation, and unknown # lines are assembly comments.
+    // Opt-in assembler-with-cpp input: '$' is punctuation (unless `dollars` says otherwise), and unknown # lines are
+    // assembly comments.
     bool assembly;
+    // A PPDollars, zero for the mode's (pp_dollar_punctuation).
+    uint8_t dollars;
     // -iquote, -I and -isystem directories, and -idirafter ones after the standard directories.
     const char* const* quote_directories;
     uint32_t quote_directory_count;
@@ -272,6 +285,13 @@ struct PPOptions
     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
     FILE* diagnostics;
 };
+
+// Is '$' punctuation with these options (PPDollars)? The lexer takes it into identifiers and pp-numbers, and
+// pp_split_dollars splits it out of them where it isn't.
+static bool pp_dollar_punctuation(const PPOptions* options)
+{
+    return options->dollars == PP_DOLLARS_PUNCTUATION || (options->dollars == PP_DOLLARS_MODE && options->assembly);
+}
 
 // A column array of tokens: an output stream, or a stack of buffers.
 typedef struct PPTokens PPTokens;
@@ -500,15 +520,15 @@ struct FileCacheArenas
     Arena bytes;
 };
 
-// How files are prepared: the lexer's and refinement's flags (trigraphs, and no digit separators before C23), the
-// literal prefixes the language mode splits (pp_split_kinds), whether '$' is punctuation (assembly), and whether by the
-// vectorized kernels or by their scalar twins, which prepare the same records.
+// How files are prepared: the lexer's and refinement's flags (trigraphs), the literal prefixes the language mode splits
+// (pp_split_kinds), whether '$' is punctuation (pp_dollar_punctuation), and whether by the vectorized kernels or by their
+// scalar twins, which prepare the same records.
 typedef struct PPPrepare PPPrepare;
 struct PPPrepare
 {
     uint32_t refine_flags;
     uint64_t split_kinds;
-    bool assembly;
+    bool dollar_punctuation;
     bool vectorized;
 };
 
@@ -1474,11 +1494,11 @@ static uint32_t pp_spelling(Preprocessor* pp, uint8_t kind, uint32_t value, uint
     return result;
 }
 
-// Recover a refined identifier's end, respecting the assembly adapter's '$' boundary.
+// Recover a refined identifier's end, respecting the '$' boundary of pp_split_dollars where '$' is punctuation.
 static uint32_t pp_identifier_end(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint32_t start)
 {
     uint32_t result = refine_identifier_end(bytes, length, start, pp->refine_flags);
-    if (pp->options.assembly)
+    if (pp_dollar_punctuation(&pp->options))
     {
         const uint8_t* dollar = memchr(bytes + start, '$', result - start);
         result = dollar != 0 ? (uint32_t)(dollar - bytes) : result;
@@ -2108,71 +2128,80 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
     return count + splits;
 }
 
-// C's GNU identifier grammar includes '$'. Assembly instead needs $MACRO to expand MACRO. Only tokens containing
-// '$' take this adapter; literals stay opaque. Re-lex the intervening slices with the shared lexer, including line
-// splices and numeric local references. Scratch columns leave the original columns intact on allocation failure.
-// A slice can lex into several tokens (the pp-number 1$e+5 into 1, $, e, + and 5), at most one per byte: the bytes of
-// the tokens that contain '$' bound the columns, not their dollars.
-static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count)
+// Does token `i` hold a '$' that the vectorized lexer took into it (an identifier or a pp-number)?
+static bool pp_holds_dollar(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t i)
+{
+    const uint8_t kind = kinds[i] & 0x7F;
+    return (kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT) && memchr(bytes + starts[i], '$', ends[i] - starts[i]) != 0;
+}
+
+// The last token of the run token `i` starts: the tokens after it with nothing between them but line splices.
+static uint32_t pp_run_end(uint32_t refine_flags, const uint8_t* bytes, uint32_t length, const uint32_t* starts, const uint32_t* ends, uint32_t count, uint32_t i)
+{
+    uint32_t result = i;
+    while (result + 1 < count && (ends[result] == starts[result + 1] || refine_gap_is_splices(bytes, length, ends[result], starts[result + 1], refine_flags)))
+    {
+        result += 1;
+    }
+    return result;
+}
+
+// C's GNU identifier grammar includes '$'. Assembly instead needs $MACRO to expand MACRO, and so does C with
+// -fno-dollars-in-identifiers (pp_dollar_punctuation): there '$' is punctuation, as C_TOKENIZER_NO_DOLLARS lexes it.
+// The vectorized lexer takes '$' into identifiers and pp-numbers, so each run of tokens with nothing but line splices
+// between them that holds such a token is lexed again that way: what follows a '$' can then join the tokens after it,
+// as in clang ($L"x" is $ and a wide string literal, x$1.5 is x, $ and 1.5). Whitespace bounds the runs, and both
+// lexings start and end tokens there alike, but for a literal a run's end cuts: a quote that C23's digit separators
+// free ($1'2' is $, 1'2 and an unterminated character constant that takes the rest of the line). A run that ends in
+// an unknown token of more than a '$' sends the whole file to C_TOKENIZER_NO_DOLLARS instead. Literals stay opaque.
+// Scratch columns leave the original columns intact on allocation failure. A run can lex into more tokens, at most one
+// per byte: the runs' bytes bound the columns. `bytes` are the whole file's, of `length` bytes.
+static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count)
 {
     // Most sources have no '$' at all, which one scan of their extent finds.
     const bool dollars = count != 0 && memchr(bytes + starts[0], '$', ends[count - 1] - starts[0]) != 0;
-    uint64_t split_bytes = 0;
+    uint64_t run_bytes = 0;
     for (uint32_t i = 0; dollars && i < count; i += 1)
     {
-        const uint8_t kind = kinds[i] & 0x7F;
-        if ((kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT) && memchr(bytes + starts[i], '$', ends[i] - starts[i]) != 0)
+        if (pp_holds_dollar(bytes, kinds, starts, ends, i))
         {
-            split_bytes += ends[i] - starts[i];
+            const uint32_t last = pp_run_end(refine_flags, bytes, length, starts, ends, count, i);
+            run_bytes += ends[last] - starts[i];
+            i = last;
         }
     }
     int64_t result = count;
-    if (split_bytes != 0)
+    if (run_bytes != 0)
     {
         Scratch scratch = scratch_begin(0);
-        const uint64_t capacity = (uint64_t)count + split_bytes + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
+        const uint64_t capacity = (uint64_t)count + run_bytes + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
         uint8_t* split_kinds = arena_push(scratch.arena, capacity, 64);
         uint32_t* split_starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
         uint32_t* split_ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
         result = split_kinds != 0 && split_starts != 0 && split_ends != 0 ? 0 : -1;
-        for (uint32_t i = 0; result >= 0 && i < count; i += 1)
+        bool whole = false;
+        for (uint32_t i = 0; result >= 0 && !whole && i < count; i += 1)
         {
-            const uint8_t kind = kinds[i] & 0x7F;
-            const bool word = kind == C_TOKEN_RAW_IDENTIFIER || kind == C_TOKEN_NUMERIC_CONSTANT;
-            if (word && memchr(bytes + starts[i], '$', ends[i] - starts[i]) != 0)
+            if (pp_holds_dollar(bytes, kinds, starts, ends, i))
             {
-                const uint32_t first = (uint32_t)result;
-                for (uint32_t at = starts[i]; result >= 0 && at < ends[i];)
+                const uint32_t last = pp_run_end(refine_flags, bytes, length, starts, ends, count, i);
+                const uint32_t begin = starts[i];
+                const int64_t added = c_tokenize_scalar(bytes + begin, ends[last] - begin, split_kinds + result, split_starts + result, split_ends + result,
+                                                        refine_flags | C_TOKENIZER_NO_DOLLARS);
+                for (int64_t n = 0; n < added; n += 1)
                 {
-                    if (bytes[at] == '$')
-                    {
-                        split_kinds[result] = C_TOKEN_UNKNOWN;
-                        split_starts[result] = at;
-                        split_ends[result] = at + 1;
-                        result += 1;
-                        at += 1;
-                    }
-                    else
-                    {
-                        const uint32_t begin = at;
-                        while (at < ends[i] && bytes[at] != '$')
-                        {
-                            at += 1;
-                        }
-                        const int64_t added = c_tokenize_scalar(bytes + begin, at - begin, split_kinds + result, split_starts + result, split_ends + result, refine_flags);
-                        for (int64_t n = 0; n < added; n += 1)
-                        {
-                            split_kinds[result + n] &= 0x7F;
-                            split_starts[result + n] += begin;
-                            split_ends[result + n] += begin;
-                        }
-                        result = added >= 0 ? result + added : -1;
-                    }
+                    split_kinds[result + n] &= 0x7F;
+                    split_starts[result + n] += begin;
+                    split_ends[result + n] += begin;
                 }
-                if (result > first)
+                if (added > 0)
                 {
-                    split_kinds[first] |= kinds[i] & BUSTER_C_TOKEN_START_OF_LINE;
+                    const int64_t final = result + added - 1;
+                    split_kinds[result] |= kinds[i] & BUSTER_C_TOKEN_START_OF_LINE;
+                    whole = split_kinds[final] == C_TOKEN_UNKNOWN && (split_ends[final] - split_starts[final] > 1 || bytes[split_starts[final]] != '$');
                 }
+                result = added >= 0 ? result + added : -1;
+                i = last;
             }
             else
             {
@@ -2182,7 +2211,11 @@ static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uin
                 result += 1;
             }
         }
-        if (result >= 0)
+        if (result >= 0 && whole)
+        {
+            result = c_tokenize_scalar(bytes, length, kinds, starts, ends, refine_flags | C_TOKENIZER_NO_DOLLARS);
+        }
+        else if (result >= 0)
         {
             memcpy(kinds, split_kinds, result);
             memcpy(starts, split_starts, (uint64_t)result * sizeof(uint32_t));
@@ -2193,33 +2226,25 @@ static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uin
     return result;
 }
 
-// Splits the literal prefixes that a mode before C23 doesn't have off `count` freshly lexed tokens (`split`,
-// pp_split_kinds; nonzero just before C23): clang lexes such a literal as its prefix, an identifier, and the literal
-// without it (pp_split_prefixes). The lexer has lexed the numbers as the mode does already: before C23 it has no digit
-// separators (C_TOKENIZER_NO_DIGIT_SEPARATORS in the mode's flags), so a number ends before a `'`, which starts a
-// character constant (`1'000` is 1 and the unterminated '000). The arrays have room for a token per byte. Returns the new
-// count.
-static int64_t pp_lex_mode(const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, uint64_t split, bool vectorized)
+// The lexer's flags for a mode: refinement's (trigraphs), and C_TOKENIZER_NO_DOLLARS where '$' is punctuation.
+static uint32_t pp_lex_flags(const PPPrepare* mode)
 {
-    int64_t result = count;
-    if (split != 0 && result > 0)
-    {
-        const uint32_t n = (uint32_t)result;
-        const uint32_t splits = vectorized ? pp_count_splits_vector(bytes, kinds, starts, ends, n, split) : pp_count_splits_scalar(bytes, kinds, starts, ends, n, split);
-        result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, n, splits, split) : result;
-    }
-    return result;
+    return mode->refine_flags | (mode->dollar_punctuation ? C_TOKENIZER_NO_DOLLARS : 0);
 }
 
-// A file's (or a scratch text's) tokens, freshly lexed with the mode's flags, as the language mode has them: without the
-// literal prefixes it lacks (pp_lex_mode), then with assembly's '$' punctuation (pp_split_dollars). Returns the new
-// count, or -1 if an allocation fails.
-static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, int64_t count, bool vectorized)
+// Splits, among `count` freshly lexed tokens of `length` bytes, '$' out of the identifiers and pp-numbers that the
+// vectorized lexer gave it to, where it is punctuation (pp_split_dollars: the scalar lexer, pp_lex_flags, lexes it so
+// itself, so `vectorized` says which made them), then the prefixed literals that `mode`'s language doesn't have (a
+// scan of the kinds, and the rare split: pp_split_prefixes), the literals pp_split_dollars makes among them. Returns
+// the new count, or -1 on allocation failure.
+static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, bool vectorized)
 {
-    int64_t result = pp_lex_mode(bytes, kinds, starts, ends, count, mode->split_kinds, vectorized);
-    if (mode->assembly && result > 0)
+    int64_t result = mode->dollar_punctuation && vectorized ? pp_split_dollars(mode->refine_flags, bytes, length, kinds, starts, ends, count) : count;
+    if (result > 0 && mode->split_kinds != 0)
     {
-        result = pp_split_dollars(mode->refine_flags, bytes, kinds, starts, ends, (uint32_t)result);
+        const uint32_t splits = vectorized ? pp_count_splits_vector(bytes, kinds, starts, ends, (uint32_t)result, mode->split_kinds)
+                                          : pp_count_splits_scalar(bytes, kinds, starts, ends, (uint32_t)result, mode->split_kinds);
+        result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, (uint32_t)result, splits, mode->split_kinds) : result;
     }
     return result;
 }
@@ -2294,11 +2319,12 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
     int64_t count = -1;
     if (pushed)
     {
-        count = prepare->assembly && !prepare->vectorized ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags)
-                                                           : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags);
+        // The scalar kernels lex '$' as punctuation themselves, the twin of the vectorized lexer and pp_split_dollars.
+        count = prepare->dollar_punctuation && !prepare->vectorized ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, pp_lex_flags(prepare))
+                                                                    : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags);
     }
     const bool lexed = count >= 0;
-    count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->kinds, data->starts, data->values, count, prepare->vectorized) : count;
+    count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds, data->starts, data->values, (uint32_t)count, prepare->vectorized) : count;
     if (ticks != 0)
     {
         const uint64_t now = __rdtsc();
@@ -2858,7 +2884,7 @@ static PPPrepare pp_prepare_options(const PPOptions* options)
     return (PPPrepare){
         .refine_flags = (options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0) | (options->language.standard < 2023 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0),
         .split_kinds = pp_split_kinds(options->language),
-        .assembly = options->assembly,
+        .dollar_punctuation = pp_dollar_punctuation(options),
         .vectorized = !options->scalar,
     };
 }
@@ -2869,7 +2895,7 @@ static PPPrepare pp_prepare_config(const Preprocessor* pp)
     return (PPPrepare){
         .refine_flags = pp->refine_flags,
         .split_kinds = pp->split_kinds,
-        .assembly = pp->options.assembly,
+        .dollar_punctuation = pp_dollar_punctuation(&pp->options),
         .vectorized = pp->vectorized,
     };
 }
@@ -4930,9 +4956,9 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
     uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
     const PPPrepare mode = pp_prepare_config(pp);
-    count = count > 0 ? pp_lex_for_mode(&mode, bytes, kinds, starts, ends, count, false) : count;
+    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp_lex_flags(&mode)) : -1;
+    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, (uint32_t)count, false) : count;
     *comment = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
     count -= *comment;
     uint32_t result = count >= 0 && pp_room(pp, into, (uint32_t)count) ? (uint32_t)count : BUSTER_PP_NONE;
@@ -5043,13 +5069,12 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
             uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-            int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, pp->refine_flags) : -1;
-            // As the mode lexes it (its flags, then pp_lex_for_mode): a digit separator or a prefix it doesn't have makes
-            // two tokens, and in assembly '$' is punctuation (pp_split_dollars), so `$ ## x` gives two tokens. A '/' and a
-            // '*' make no token, but an unterminated comment.
-            const PPPrepare mode = pp_prepare_config(pp);
-            count = count > 0 ? pp_lex_for_mode(&mode, joined, kinds, starts, ends, count, false) : count;
-            valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_is_unterminated_comment(joined, kinds[0], 0);
+            // Where '$' is punctuation (pp_dollar_punctuation), `$ ## x` gives two tokens.
+            const uint32_t flags = pp->refine_flags | (pp_dollar_punctuation(&pp->options) ? C_TOKENIZER_NO_DOLLARS : 0);
+            const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, flags) : -1;
+            // A prefixed literal the mode doesn't have lexes as two tokens (pp_split_kinds).
+            valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_splits_kind(pp->split_kinds, kinds[0]) &&
+                    !pp_splits_unknown(joined, starts[0], ends[0], pp->split_kinds) && !pp_is_unterminated_comment(joined, kinds[0], 0);
             kind = valid ? kinds[0] & 0x7F : kind;
         }
         if (valid)
@@ -8054,9 +8079,9 @@ static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t
     uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
     uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
     const PPPrepare mode = pp_prepare_config(pp);
-    count = count > 0 ? pp_lex_for_mode(&mode, bytes, kinds, starts, ends, count, false) : count;
+    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp_lex_flags(&mode)) : -1;
+    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, (uint32_t)count, false) : count;
     // An unterminated block comment at their end runs to the file's end (pp_relex_end), which clang's lexer reports where
     // it starts: the file's tokens, which read it as part of a line comment, didn't.
     const bool unterminated = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
@@ -8092,6 +8117,7 @@ static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t 
 {
     PPContext* file = &pp->contexts[file_context];
     const PPFileData* data = &pp->datas[file->data];
+    const PPPrepare mode = pp_prepare_config(pp);
     const uint32_t remaining = data->length - begin;
     uint32_t window = remaining < 128 ? remaining : 128;
     uint32_t end = begin;
@@ -8107,7 +8133,7 @@ static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t 
         uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
         valid = kinds != 0 && starts != 0 && ends != 0;
         uint64_t resume = window;
-        const uint64_t count = valid ? c_tokenize_scalar_range(data->bytes + begin, window, 0, false, 0, kinds, starts, ends, 0, pp->refine_flags, &resume) : 0;
+        const uint64_t count = valid ? c_tokenize_scalar_range(data->bytes + begin, window, 0, false, 0, kinds, starts, ends, 0, pp_lex_flags(&mode), &resume) : 0;
         uint32_t paren = 0;
         while (paren < count && (kinds[paren] & 0x7F) != C_TOKEN_L_PAREN)
         {
@@ -10728,8 +10754,10 @@ static uint32_t pp_parse_escape(Preprocessor* pp, const uint8_t* spelling, uint3
 static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* spelling, uint32_t length, uint32_t location, PPValue* value)
 {
     const bool ordinary = kind == C_TOKEN_CHAR_CONSTANT;
-    const uint32_t largest = kind == C_TOKEN_WIDE_CHAR_CONSTANT ? 0xFFFFFFFFu : kind == C_TOKEN_UTF16_CHAR_CONSTANT ? 0xFFFFu : kind == C_TOKEN_UTF32_CHAR_CONSTANT ? 0x10FFFFu : 0x7Fu;
-    const uint32_t width = kind == C_TOKEN_WIDE_CHAR_CONSTANT || kind == C_TOKEN_UTF32_CHAR_CONSTANT ? 32 : kind == C_TOKEN_UTF16_CHAR_CONSTANT ? 16 : 8;
+    const uint32_t largest = kind == C_TOKEN_WIDE_CHAR_CONSTANT ? (pp->options.predefines.short_wchar ? 0xFFFFu : 0xFFFFFFFFu)
+                            : kind == C_TOKEN_UTF16_CHAR_CONSTANT ? 0xFFFFu : kind == C_TOKEN_UTF32_CHAR_CONSTANT ? 0x10FFFFu : 0x7Fu;
+    const uint32_t width = kind == C_TOKEN_WIDE_CHAR_CONSTANT ? (pp->options.predefines.short_wchar ? 16 : 32)
+                          : kind == C_TOKEN_UTF32_CHAR_CONSTANT ? 32 : kind == C_TOKEN_UTF16_CHAR_CONSTANT ? 16 : 8;
     uint32_t i = 0;
     while (i < length && spelling[i] != '\'')
     {
@@ -10821,7 +10849,8 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
     switch (kind)
     {
         case C_TOKEN_CHAR_CONSTANT:
-            bits = characters.count > 1 ? (int64_t)(int32_t)characters.packed : (int64_t)(int8_t)(uint8_t)characters.last;
+            bits = characters.count > 1 ? (pp->options.predefines.char_unsigned ? (int64_t)characters.packed : (int64_t)(int32_t)characters.packed)
+                                       : pp->options.predefines.char_unsigned ? (int64_t)(uint8_t)characters.last : (int64_t)(int8_t)(uint8_t)characters.last;
             break;
         case C_TOKEN_UTF8_CHAR_CONSTANT:
             bits = (uint8_t)characters.last;
@@ -10833,11 +10862,13 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
             bits = characters.last;
             break;
         default:
-            bits = (int64_t)(int32_t)characters.last;
+            bits = pp->options.predefines.short_wchar ? (int64_t)(uint16_t)characters.last : (int64_t)(int32_t)characters.last;
             break;
     }
     // UTF-8, UTF-16 and UTF-32 character constants are unsigned in C (unsigned char, char16_t, char32_t), as in clang.
-    const bool is_unsigned = kind == C_TOKEN_UTF8_CHAR_CONSTANT || kind == C_TOKEN_UTF16_CHAR_CONSTANT || kind == C_TOKEN_UTF32_CHAR_CONSTANT;
+    const bool is_unsigned = kind == C_TOKEN_UTF8_CHAR_CONSTANT || kind == C_TOKEN_UTF16_CHAR_CONSTANT || kind == C_TOKEN_UTF32_CHAR_CONSTANT ||
+                             (kind == C_TOKEN_CHAR_CONSTANT && pp->options.predefines.char_unsigned) ||
+                             (kind == C_TOKEN_WIDE_CHAR_CONSTANT && pp->options.predefines.short_wchar);
     *value = (PPValue){ .bits = (uint64_t)bits, .is_unsigned = is_unsigned };
     return !error;
 }
@@ -13014,7 +13045,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         result = result && pp->cache != 0 && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
     }
     else if (pp->cache->table != table || pp->cache->prepare.refine_flags != pp->refine_flags || pp->cache->prepare.split_kinds != pp->split_kinds ||
-             pp->cache->prepare.assembly != (bool)options->assembly)
+             pp->cache->prepare.dollar_punctuation != pp_dollar_punctuation(options))
     {
         fprintf(stderr, "error: the file cache was made for another language mode or intern table\n");
         result = false;
@@ -13417,25 +13448,26 @@ static bool pp_punctuation_joins(uint8_t before, uint8_t after)
     return before != 0 && after != 0 && strchr(joining, before) != 0 && strchr(joining, after) != 0;
 }
 
-static bool pp_word_character(uint8_t c, bool assembly)
+// Can `c` go on an identifier or a pp-number? '$' can unless it is punctuation (pp_dollar_punctuation).
+static bool pp_word_character(uint8_t c, bool dollar_punctuation)
 {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || (c == '$' && !assembly) || c >= 0x80 || c == '\\';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || (c == '$' && !dollar_punctuation) || c >= 0x80 || c == '\\';
 }
 
 // Would printing `after` right after `before` (their last and first characters) lex differently? Then a space goes
 // between them. It errs towards a space: -E's output only has to lex into the same tokens.
-static bool pp_needs_separation(uint8_t before_last, uint8_t before_kind, uint8_t after_first, bool assembly)
+static bool pp_needs_separation(uint8_t before_last, uint8_t before_kind, uint8_t after_first, bool dollar_punctuation)
 {
     bool result = false;
     if (before_kind == C_TOKEN_NUMERIC_CONSTANT)
     {
         // A pp-number goes on with word characters, '.', a digit separator and an exponent's sign.
-        result = pp_word_character(after_first, assembly) || after_first == '.' || after_first == '\'' || after_first == '+' || after_first == '-';
+        result = pp_word_character(after_first, dollar_punctuation) || after_first == '.' || after_first == '\'' || after_first == '+' || after_first == '-';
     }
-    else if (pp_word_character(before_last, assembly))
+    else if (pp_word_character(before_last, dollar_punctuation))
     {
         // An identifier goes on with word characters, and a prefix makes a literal with a quote.
-        result = pp_word_character(after_first, assembly) || after_first == '"' || after_first == '\'';
+        result = pp_word_character(after_first, dollar_punctuation) || after_first == '"' || after_first == '\'';
     }
     else if (before_last == '.')
     {
@@ -14046,7 +14078,7 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
         result = result && spelling != 0;
         if (result)
         {
-            if (!line_start && length != 0 && ((flags & BUSTER_PP_SPACE) || pp_needs_separation(previous_last, previous_kind, spelling[0], pp->options.assembly)))
+            if (!line_start && length != 0 && ((flags & BUSTER_PP_SPACE) || pp_needs_separation(previous_last, previous_kind, spelling[0], pp_dollar_punctuation(&pp->options))))
             {
                 fputc(' ', stream);
             }
@@ -14205,11 +14237,12 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     // The last character and kind of the token before the chunk, for its first token's space.
     uint8_t previous_last = 0;
     uint8_t previous_kind = 0;
-    // Whether the chunk starts inside a pragma line (after its '#'), and with its name (its '#' ended the last chunk).
+    // Where '$' is punctuation (assembly, -fno-dollars-in-identifiers: pp_dollar_punctuation), it is split from names
+    // and numbers. Classify it as punctuation once for all chunks; source spaces stay.
+    const bool dollar_punctuation = pp_dollar_punctuation(&pp->options);
+    const __mmask64 word_classes = ~((uint64_t)dollar_punctuation << '$');
     uint64_t pragma_inside = 0;
     uint64_t pragma_name = 0;
-    // Assembly splits '$' from names and numbers. Classify it as punctuation once for all chunks; source spaces stay.
-    const __mmask64 word_classes = ~((uint64_t)pp->options.assembly << '$');
     const __m512i after_low = _mm512_maskz_loadu_epi8(word_classes, pp_after_classes);
     const __m512i after_high = _mm512_load_si512(pp_after_classes + 64);
     const __m512i before_low = _mm512_maskz_loadu_epi8(word_classes, pp_before_classes);
@@ -14322,7 +14355,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
         // class of the token before the chunk.
         const uint8_t carried = previous_kind == C_TOKEN_NUMERIC_CONSTANT || previous_kind == BUSTER_PP_KIND_EMBED ? BUSTER_PP_BEFORE_NUMBER
                                 : previous_last >= 0x80 ? BUSTER_PP_BEFORE_WORD
-                                : pp->options.assembly && previous_last == '$' ? 0 : pp_before_classes[previous_last];
+                                : dollar_punctuation && previous_last == '$' ? 0 : pp_before_classes[previous_last];
         before = _mm512_mask_permutexvar_epi8(_mm512_set1_epi8((char)carried), ~1ull, previous_lanes, before);
         const __m512i pair = _mm512_add_epi8(_mm512_slli_epi16(before, 3), after);
         const uint64_t joins = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(pair, separation), _mm512_set1_epi8(1));
@@ -14598,6 +14631,171 @@ static bool pp_parse_standard(const char* value, CLanguage* language)
     return result;
 }
 
+// The -f options that change what clang's -E gives other than its macros, in families of an option and its -fno- form,
+// of which clang's driver reads only the last: the keyword sets (TokenKinds.def's KEYGNU, KEYMS, KEYBORLAND,
+// KEYZVECTOR, KEYZOS, KEYFIXEDPOINT and KEYDEFERTS, and __declspec), the lexing of '$', digraphs and raw strings, -E's
+// own modes, and modules. pp_take_family records each family's last option, and pp_settle_families models GNU's
+// keywords and '$', and refuses the other families where their last option turns them on. Issue #281 has the audit of
+// clang 23.1.3's -f options that found them: every other one changes only macros (predefines_option), or nothing that
+// -E gives, but char's signedness and wchar_t's width, which predefines_option reads and #if follows
+// (pp_parse_character).
+typedef enum PPFamily
+{
+    PP_FAMILY_GNU_KEYWORDS,
+    PP_FAMILY_ASM,
+    PP_FAMILY_DOLLARS,
+    PP_FAMILY_DIGRAPHS,
+    PP_FAMILY_RAW_STRINGS,
+    PP_FAMILY_MS_EXTENSIONS,
+    PP_FAMILY_MS_COMPATIBILITY,
+    PP_FAMILY_BORLAND,
+    PP_FAMILY_DECLSPEC,
+    PP_FAMILY_ZVECTOR,
+    PP_FAMILY_ZOS,
+    PP_FAMILY_FIXED_POINT,
+    PP_FAMILY_DEFER_TS,
+    PP_FAMILY_DIRECTIVES_ONLY,
+    PP_FAMILY_KEEP_SYSTEM_INCLUDES,
+    PP_FAMILY_MINIMIZE_WHITESPACE,
+    PP_FAMILY_LINE_DIRECTIVES,
+    PP_FAMILY_REWRITE_INCLUDES,
+    PP_FAMILY_REWRITE_IMPORTS,
+    PP_FAMILY_MODULES,
+    PP_FAMILY_IMPLICIT_MODULE_MAPS,
+    PP_FAMILY_COUNT,
+} PPFamily;
+
+#define BUSTER_PP_KEYWORDS_REFUSED(whose) whose ", which buster doesn't follow"
+#define BUSTER_PP_OUTPUT_REFUSED "it changes what clang -E prints, which buster doesn't follow"
+#define BUSTER_PP_MODULES_REFUSED "clang's modules, which buster doesn't have"
+
+// Each family's option, its -fno- form (none for -fzvector's: clang's driver never passes -fno-zvector on, and warns
+// that it is unused), and why buster refuses the option, null where pp_settle_families models the family or decides.
+static const struct
+{
+    const char* on;
+    const char* off;
+    const char* refused;
+} pp_families[PP_FAMILY_COUNT] = {
+    [PP_FAMILY_GNU_KEYWORDS] = { "-fgnu-keywords", "-fno-gnu-keywords", 0 },
+    [PP_FAMILY_ASM] = { "-fasm", "-fno-asm", 0 },
+    [PP_FAMILY_DOLLARS] = { "-fdollars-in-identifiers", "-fno-dollars-in-identifiers", 0 },
+    [PP_FAMILY_DIGRAPHS] = { "-fdigraphs", "-fno-digraphs", 0 },
+    [PP_FAMILY_RAW_STRINGS] = { "-fraw-string-literals", "-fno-raw-string-literals", "C's raw string literals, which buster doesn't lex" },
+    [PP_FAMILY_MS_EXTENSIONS] = { "-fms-extensions", "-fno-ms-extensions", BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
+    [PP_FAMILY_MS_COMPATIBILITY] = { "-fms-compatibility", "-fno-ms-compatibility", BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
+    [PP_FAMILY_BORLAND] = { "-fborland-extensions", "-fno-borland-extensions", BUSTER_PP_KEYWORDS_REFUSED("Borland's keywords and __declspec") },
+    [PP_FAMILY_DECLSPEC] = { "-fdeclspec", "-fno-declspec", BUSTER_PP_KEYWORDS_REFUSED("the __declspec keyword and __has_declspec_attribute") },
+    [PP_FAMILY_ZVECTOR] = { "-fzvector", 0, BUSTER_PP_KEYWORDS_REFUSED("System z's vector keywords") },
+    [PP_FAMILY_ZOS] = { "-fzos-extensions", "-fno-zos-extensions", BUSTER_PP_KEYWORDS_REFUSED("z/OS's __ptr32 keyword") },
+    [PP_FAMILY_FIXED_POINT] = { "-ffixed-point", "-fno-fixed-point", BUSTER_PP_KEYWORDS_REFUSED("the fixed-point keywords and macros") },
+    [PP_FAMILY_DEFER_TS] = { "-fdefer-ts", "-fno-defer-ts", BUSTER_PP_KEYWORDS_REFUSED("the _Defer keyword") },
+    [PP_FAMILY_DIRECTIVES_ONLY] = { "-fdirectives-only", "-fno-directives-only", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_KEEP_SYSTEM_INCLUDES] = { "-fkeep-system-includes", "-fno-keep-system-includes", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_MINIMIZE_WHITESPACE] = { "-fminimize-whitespace", "-fno-minimize-whitespace", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_LINE_DIRECTIVES] = { "-fuse-line-directives", "-fno-use-line-directives", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_REWRITE_INCLUDES] = { "-frewrite-includes", "-fno-rewrite-includes", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_REWRITE_IMPORTS] = { "-frewrite-imports", "-fno-rewrite-imports", BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_MODULES] = { "-fmodules", "-fno-modules", BUSTER_PP_MODULES_REFUSED },
+    [PP_FAMILY_IMPLICIT_MODULE_MAPS] = { "-fimplicit-module-maps", "-fno-implicit-module-maps", BUSTER_PP_MODULES_REFUSED },
+};
+
+// What pp_take_family records for pp_settle_families: each family's last option (1 for its option, 0 for its -fno- form,
+// -1 for neither), and the last -fexec-charset= and -finput-charset=.
+typedef struct PPFamilies PPFamilies;
+struct PPFamilies
+{
+    int8_t last[PP_FAMILY_COUNT];
+    const char* charsets[2];
+};
+
+// Takes an argument that is a family's option (PPFamily), or -fexec-charset= or -finput-charset=, or one that buster
+// refuses wherever it comes, as it changes clang's -E with no -fno- form: modules', and __FILE__'s remapping (by prefix,
+// which takes the value too). `refused` is set for those. Returns false for any other argument.
+static bool pp_take_family(PPFamilies* families, const char* argument, bool* refused)
+{
+    static const struct
+    {
+        const char* prefix;
+        const char* refused;
+    } refusals[] = {
+        { "-fbuiltin-module-map", BUSTER_PP_MODULES_REFUSED },
+        { "-fmodule-name=", BUSTER_PP_MODULES_REFUSED },
+        { "-fmodule-map-file=", BUSTER_PP_MODULES_REFUSED },
+        { "-fdriver-only", "it stops clang before it preprocesses" },
+        { "-fproc-stat-report", "clang's process statistics, which buster doesn't report" },
+        { "-fmacro-prefix-map=", "a remapping of __FILE__ and __BASE_FILE__, which buster doesn't follow" },
+        { "-ffile-prefix-map=", "a remapping of __FILE__ and __BASE_FILE__, which buster doesn't follow" },
+    };
+    bool result = false;
+    for (uint32_t f = 0; !result && f < PP_FAMILY_COUNT; f += 1)
+    {
+        const bool on = strcmp(argument, pp_families[f].on) == 0;
+        const bool off = pp_families[f].off != 0 && strcmp(argument, pp_families[f].off) == 0;
+        families->last[f] = on ? 1 : off ? 0 : families->last[f];
+        result = on || off;
+    }
+    for (uint32_t c = 0; !result && c < BUSTER_ARRAY_LENGTH(families->charsets); c += 1)
+    {
+        const char* const prefix = c == 0 ? "-fexec-charset=" : "-finput-charset=";
+        result = strncmp(argument, prefix, strlen(prefix)) == 0;
+        families->charsets[c] = result ? argument : families->charsets[c];
+    }
+    for (uint32_t r = 0; !result && r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
+    {
+        result = strncmp(argument, refusals[r].prefix, strlen(refusals[r].prefix)) == 0;
+        if (result)
+        {
+            fprintf(stderr, "error: unsupported option '%s' (%s)\n", argument, refusals[r].refused);
+            *refused = true;
+        }
+    }
+    return result;
+}
+
+// Settles the families pp_take_family recorded, after every argument, as clang's driver does. GNU's keywords follow the
+// last -f[no-]gnu-keywords, or else the last of GCC's -f[no-]asm (which the driver passes on before them), or else the
+// mode; '$' follows its last option. The refusals: a family buster doesn't follow whose last option turns
+// it on, but -fzvector in assembly, where clang ignores it; -fno-digraphs, and -fdigraphs in c89, which clang makes C94
+// (__STDC_VERSION__ 199409L); and a last -fexec-charset= or -finput-charset= other than UTF-8 in any case, which clang's
+// driver refuses too. Returns false after a refusal.
+static bool pp_settle_families(const PPFamilies* families, PPOptions* options)
+{
+    bool result = true;
+    const int8_t* last = families->last;
+    const int8_t gnu = last[PP_FAMILY_GNU_KEYWORDS] >= 0 ? last[PP_FAMILY_GNU_KEYWORDS] : last[PP_FAMILY_ASM];
+    options->language.gnu_keywords = (uint8_t)(gnu < 0 ? C_GNU_KEYWORDS_MODE : gnu != 0 ? C_GNU_KEYWORDS_ON : C_GNU_KEYWORDS_OFF);
+    options->dollars = (uint8_t)(last[PP_FAMILY_DOLLARS] < 0 ? PP_DOLLARS_MODE : last[PP_FAMILY_DOLLARS] != 0 ? PP_DOLLARS_IDENTIFIER : PP_DOLLARS_PUNCTUATION);
+    const bool c89 = options->language.standard == 1989 && !options->language.gnu;
+    for (uint32_t f = 0; f < PP_FAMILY_COUNT; f += 1)
+    {
+        const bool digraphs = f == PP_FAMILY_DIGRAPHS && (last[f] == 0 || (last[f] == 1 && c89));
+        const bool refuse = digraphs || (pp_families[f].refused != 0 && last[f] == 1 && !(f == PP_FAMILY_ZVECTOR && options->assembly));
+        if (refuse)
+        {
+            const char* why = !digraphs ? pp_families[f].refused : last[f] == 0 ? "C without digraphs, which buster doesn't lex" : "C94 with -std=c89, which buster doesn't have";
+            fprintf(stderr, "error: unsupported option '%s' (%s)\n", last[f] != 0 ? pp_families[f].on : pp_families[f].off, why);
+        }
+        result &= !refuse;
+    }
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(families->charsets); c += 1)
+    {
+        const char* charset = families->charsets[c];
+        const char* value = charset != 0 ? strchr(charset, '=') + 1 : "utf-8";
+        bool utf8 = strlen(value) == 5;
+        for (uint32_t i = 0; utf8 && i < 5; i += 1)
+        {
+            utf8 = (value[i] >= 'A' && value[i] <= 'Z' ? value[i] | 0x20 : value[i]) == "utf-8"[i];
+        }
+        if (!utf8)
+        {
+            fprintf(stderr, "error: invalid value '%s' in '%s'\n", value, charset);
+        }
+        result &= utf8;
+    }
+    return result;
+}
+
 // Is `argument` one of our options that clang doesn't have and that take the next argument as their value
 // (--predefines FILE, --location-limit N)? The commands that split -E's options from their files take the value with
 // the option, and those that give the options to clang too (test-preprocessor's files and --compare-clang,
@@ -14627,6 +14825,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     int trigraphs = -1;
     // The last -std= or -ansi, the only one clang's driver reads.
     const char* standard = 0;
+    // The -f options that change clang's keywords, lexing or -E output (pp_settle_families reads them after the loop).
+    PPFamilies families = { .charsets = { 0, 0 } };
+    memset(families.last, -1, sizeof(families.last));
+    bool refused = false;
     result = quote != 0 && include != 0 && system != 0 && after != 0 && macros != 0 && includes != 0 && embeds != 0;
     result = result && predefines_options_initialize(&options->predefines, arena, (uint32_t)count);
     for (int i = 0; result && i < count; i += 1)
@@ -14701,6 +14903,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
             fprintf(stderr, "error: unknown or unsupported option '%s' for x86-64 Linux\n", argument);
             result = false;
         }
+        else if (pp_take_family(&families, argument, &refused))
+        {
+            result = !refused;
+        }
         else if (strncmp(argument, "--embed-dir=", 12) == 0)
         {
             embeds[options->embed_directory_count] = argument + 12;
@@ -14709,7 +14915,8 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0)
         {
             // The other code generation and warning options: none changes what -E gives (predefines_option takes the
-            // ones that do, and refuses those buster doesn't follow).
+            // ones that change macros, and refuses those buster doesn't follow, and pp_take_family those that change
+            // clang's keywords, lexing or -E output).
         }
         else if (strncmp(argument, "-std=", 5) == 0 || strcmp(argument, "-ansi") == 0)
         {
@@ -14801,6 +15008,8 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     options->trigraphs = trigraphs >= 0 ? trigraphs != 0 : !options->language.gnu && options->language.standard < 2023;
     options->macros = macros;
     options->includes = includes;
+    // The -f families, after the language mode (pp_settle_families).
+    result = result && pp_settle_families(&families, options);
     options->embed_directories = embeds;
     // What clang's driver decides from the whole command line (the sanitizers, -flto and -fvisibility='s values), and the
     // generated code's instruction set, from the target options as clang resolves them; each reports what doesn't

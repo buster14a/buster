@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units (at fbddd2e, with `main` at e71d7fd), with `-march=native` (AVX-512 intrinsic headers) | 19 | 12,070,090 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 259 | |
+| The built-in cases (`pp_test_cases`) | 277 | |
 | #109's generated cases in C17 and C23, against `clang -E -P`: the last campaign's and those after it, but for 4 that #247 fixes ([the fuzzing](preprocessor-fuzz.md), "Qualification") | 42,800,000 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
@@ -572,38 +572,7 @@ arenas. Popping a context gives its tokens back when they are on top.
   error, as in clang, while `#if 0 && (1/0)` is not. They are then evaluated by
   `pp_evaluate` with an explicit stack, over C23's integer constants: binary,
   digit separators, `true` and `false` in C23 mode, and character constants
-  with clang's values.
-- **The conditionals' structure** is reported as clang reports it: `#else` and
-  `#elif` after `#else`, a directive without `#if` and a group left open, also
-  where a skip passes over them (the notes above), and in an included file as
-  unterminated there, the includer's `#endif` then without `#if`. Each is at
-  the directive's name, where clang's lexer starts it (a line splice right
-  before it included: `pp_token_location`), `#elifdef` and `#elifndef` are
-  named as such, before C23 with the C23 extension warning, and the extra
-  tokens of `#else`, `#endif` and `#elifdef` come in clang's order: before the
-  structure in a group it reads, after it where it enters an `#else` from a
-  skip, and not at all where it skips past a taken group (`PPConditional`'s
-  `skipping`).
-- **Definitions** (#121) are checked as clang checks them, in its order, and
-  each error is reported in its words and at its place (`pp_define`,
-  `pp_define_parameters`, `pp_check_replacement_list`):
-  - the parameter list as clang reads it: expected identifier, expected
-    comma, invalid token, missing `)`, a duplicate parameter by name, and
-    `__VA_ARGS__` allowed as a name;
-  - `##` at the start of the list, then `#` without a parameter and
-    `__VA_OPT__`'s errors (missing `(`, nested, `##` at either end of its
-    argument, left open), then `##` at the end. An unterminated `__VA_OPT__`
-    names the list's last token as clang does (`'+'`, `int`, `identifier`,
-    `<numeric_constant>`), with a note at its `(`;
-  - warnings for:
-    - an object-like macro's name without whitespace after it (C99's, or
-      C90's two);
-    - `__VA_OPT__` outside a variadic macro;
-    - redefining or undefining a builtin, `__STDC_*` from the predefines
-      among them (`pp_language_defined`);
-    - `#undef`'s extra tokens;
-    - a redefinition, with a note at the previous definition;
-  - a missing name, at the line's end (`pp_line_end_location`).
+  with clang's values (unsigned with `-funsigned-char`: "The `-f` options").
 - **Includes** (#119) are searched as clang searches them. A quoted name looks
   in the includer's directory, then the `-iquote` directories. Both forms then
   look in `-I`, `-isystem`, clang's resource directory (the highest version
@@ -979,8 +948,9 @@ for token as clang does, and compile with clang.
 as clang's is.
 
 `__is_identifier(x)` is 1 when `x` is an identifier that isn't a keyword in the
-language mode (`c_name_is_keyword`), as clang answers. Its operand isn't
-expanded, so a macro's name is an identifier.
+language mode (`c_name_is_keyword`, with GNU's keywords as the `-f` options
+below set them), as clang answers. Its operand isn't expanded, so a macro's name
+is an identifier.
 
 The feature queries about the compiler have two sets of answers (the owner's
 decisions in #154 and on #117's configuration):
@@ -1168,7 +1138,7 @@ for one of them wins. An unknown host is x86-64, as in clang's driver.
 
 The options that would make clang predefine or compile something buster doesn't
 follow are refused by name: `-m32`, `-mx32`, `-m16`, `-miamcu`, `-mcpu=`, `-mkernel`,
-`-fapple-kext`, `-fms-compatibility`, `-ffixed-point`, `-fdefer-ts`,
+`-fapple-kext`,
 `-foffload-via-llvm`, the profile-using and pointer-field-protection options,
 and the CUDA, HIP, SYCL and pointer-authentication ones. So are a `--target`
 other than x86-64 Linux with glibc (`x86_64` or `amd64`, any vendor or none,
@@ -1195,7 +1165,9 @@ cc1 read it (cc1 reads a number in any radix: `0x10`, or `010` in octal),
 other options (`Options.td`'s `Alias`) are read as those options
 (`predefines_alias`, before anything else reads the argument), so the last of
 either spelling wins: `-m[no-]pascal-strings` as `-f[no-]pascal-strings`,
-`-m[no-]zvector` and `-m[no-]unsafe-fp-atomics` as their `-f` options,
+`-m[no-]zvector` and `-m[no-]unsafe-fp-atomics` as their `-f` options
+(`-mzvector` is refused outside assembly, like `-fzvector`, even before
+`-mno-zvector`),
 `-mno-fp-ret-in-387` as `-mno-x87`, and `-mips1` to `-mips64r6` as
 `-march=mips1` and so on (an unknown CPU, unless a later `-march` wins).
 `-msse4`, `-m80387`, `-mapxf` and `-mpure-code` keep branches of their own.
@@ -1248,6 +1220,74 @@ where `-march` names one of its six (`native`'s from CPUID), and the profile's
 architecture (`X86_ARCH_OTHER` for clang's other CPUs). The assembler's forms
 and `__has_builtin`'s target builtins follow it, and the test checks the map
 against the generated tables (each name a feature, with `x86_target.c`'s macro).
+
+### The `-f` options
+
+Most `-f` options change only macros, which `predefines_option` models as
+described above, or nothing `-E` shows. #281 has the audit
+of clang 23.1.3's 1,246 `-f` options that found the others: each was run through
+`clang -E` on a probe in `gnu17`, `c17`, `c89` and `assembler-with-cpp`, and its
+output compared with the run without it. Those come in families of an option
+and its `-fno-` form, of which clang's driver reads only the last.
+`pp_take_family` records each family's last option, and `pp_settle_families`
+decides after every argument:
+
+- **Modeled.**
+  - GNU's keywords (`asm`, `typeof`, and `inline` before C99: TokenKinds.def's
+    `KEYGNU`), which GNU modes have, follow the last `-fgnu-keywords` or
+    `-fno-gnu-keywords`, or else the last of GCC's `-fasm` and `-fno-asm`.
+    clang's driver passes those on as `-f[no-]gnu-keywords` before the explicit
+    one, so `-fno-gnu-keywords -fasm` turns them off. `CLanguage.gnu_keywords`
+    holds the choice (`c_language_gnu_keywords`), which `__is_identifier` and the
+    output's keyword kinds read. C23 keeps `typeof` without them.
+  - `$` in identifiers and pp-numbers: `-fno-dollars-in-identifiers` makes it
+    punctuation in C, as it is in assembly, and `-fdollars-in-identifiers` gives
+    assembly's identifiers it back (`pp_dollar_punctuation`, which the file
+    cache and pasting follow). The scalar lexer lexes `$` as punctuation itself
+    (`C_TOKENIZER_NO_DOLLARS`), which the scalar kernels and pastes use. The
+    vectorized lexer takes it into identifiers and pp-numbers, so
+    `pp_split_dollars` lexes again, with the scalar lexer, each run of tokens
+    that holds one (tokens with nothing but line splices between them): what
+    follows a `$` then joins the tokens after it as in clang (`$L"x"` is `$` and
+    a wide string literal, and `x$1.5` is `x`, `$` and `1.5`). A run that ends in
+    an unknown token other than `$` (an unterminated literal: C23's digit
+    separators can free a quote, as in `$1'2'`) has the whole file lexed so
+    instead, since the literal takes the rest of the line. The literal prefixes
+    the mode doesn't have are split after that.
+  - Character constants in `#if` follow the last of `-funsigned-char` and
+    `-fno-signed-char` (unsigned) and `-fsigned-char` and `-fno-unsigned-char`
+    (signed, the default), from `predefines_option`'s `char_unsigned`. With unsigned char, `'\xff'` is 255 and an ordinary
+    character constant is an unsigned value, so `'a' - 'b' > 0`, as in clang's
+    `#if`. A multi-character constant is its bytes' concatenation as an int, as
+    clang has it: its first byte isn't sign-extended (`'\377\377'` is 65535),
+    and the int is, unless char is unsigned (`'\377abc' < 0`).
+  - Wide character constants follow `predefines_option`'s `short_wchar`:
+    `-fshort-wchar` makes them 16-bit unsigned values in `#if`, so
+    `(L'\0' - 1) > 0` and `L'\xffff' - 65536 > 0`. A later
+    `-fno-short-wchar` restores the default 32-bit signed values.
+- **Refused**, with an error that names the option, where the family's last
+  option turns it on (its `-fno-` form, alone or last, is taken):
+  - keyword sets buster doesn't have: `-fms-extensions` and `-fms-compatibility`
+    (which also change lexing, pasting, pragmas and includes),
+    `-fborland-extensions`, `-fdeclspec`, `-fzos-extensions`, `-ffixed-point`,
+    `-fdefer-ts`, and `-fzvector` whatever follows it (clang's driver never
+    passes `-fno-zvector` on), but in assembly, where clang ignores it;
+  - lexing buster doesn't do: `-fno-digraphs`, `-fdigraphs` in `c89` (which
+    clang makes C94, with `__STDC_VERSION__` `199409L`), and
+    `-fraw-string-literals`;
+  - `-E`'s other modes (`-fdirectives-only`, `-fkeep-system-includes`,
+    `-fminimize-whitespace`, `-fuse-line-directives`, `-frewrite-includes` and
+    `-frewrite-imports`) and modules (`-fmodules` and
+    `-fimplicit-module-maps`); and, wherever they come, `-fbuiltin-module-map`,
+    `-fmodule-name=`, `-fmodule-map-file=`, `-fdriver-only`,
+    `-fproc-stat-report[=]`, and `__FILE__`'s remappings `-fmacro-prefix-map=`
+    and `-ffile-prefix-map=`;
+  - a last `-fexec-charset=` or `-finput-charset=` other than UTF-8 in any case,
+    which clang refuses too.
+
+The feature queries that some of the other options change (`-fblocks`,
+`-fno-builtin`, `-fno-gnu-inline-asm`, `-fxray-instrument`, `-fenable-matrix`
+and others) answer from clang's default table ("Not yet").
 
 ### Tokens, locations and the output
 
@@ -1624,7 +1664,7 @@ full-corpus reproduction and frozen CI subset.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 259 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 277 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -1697,36 +1737,14 @@ full-corpus reproduction and frozen CI subset.
     literal (with `u`, `U` and `u8`, and a trigraph splice), and a trigraph a
     stringized argument spells, which stays, beside one a paste forms, which is
     replaced;
-  - a case for each difference from clang that #109's fuzzing found
-    (minimized) and for each that probing around one found:
-    - the order arguments expand in;
-    - `_Pragma` in arguments and in directives' lines;
-    - GCC poison;
-    - `## ##` and GNU's comma, before `__VA_OPT__` past empty arguments too;
-    - substitution spacing around `__VA_OPT__`, its content's pastes left to
-      right, and `__VA_OPT__` in a macro without parameters;
-    - `_Pragma`'s operand, read expanded a token at a time;
-    - line splices (a trigraph's too) before a `)` and a `#line`'s number;
-    - a line marker's tokens read expanded, and a `_Pragma`'s text that ends
-      in a backslash;
-    - `#line` and `#ident` among a macro's arguments, read unexpanded, and
-      the parts of `#ident`, `#line`, a computed `#include`, `push_macro`
-      and `pop_macro` that clang reads unexpanded;
-    - a pragma line among a macro's arguments while a `_Pragma` waits for its
-      `(`;
-    - character constants in `#if`, and a prefix before an empty one;
-    - the line after a `_Pragma` that prints nothing, and lines among a
-      macro's arguments, which `-E` moves to their expansion's line;
-    - a disabled macro's name among the arguments its expansion gives;
-    - the attribute queries' operands, one at the file's end among them;
-    - `#line` and line markers;
-    - extra tokens after directives;
-    - every pragma clang handles;
-    - `__has_warning`, `__has_embed` and the target queries;
-    - `-undef`;
-    - UCN spellings;
-    - lexing by the mode
-    ([the fuzzing](preprocessor-fuzz.md) lists them).
+  - the `-f` options buster models (#281): GNU's keywords off in `gnu89`, on in
+    `c89` with `-fasm`, and `-f[no-]gnu-keywords` against a later `-f[no-]asm`;
+    `$` as punctuation in C, in a paste too and stringized (beside an
+    identifier written with a UCN), and in assembly's identifiers; what follows a
+    `$` joining the tokens after it, in C, C23 and assembly (#283's review):
+    prefixed literals (`u8'x'` from C23 only), one across a line splice,
+    pp-numbers, and a quote a digit separator frees; and character constants in
+    `#if` with unsigned and signed char, multi-character ones among them.
 
   A case can name more files, and options for both sides (`-I`, `-include`,
   with `%d` for its directory), and the text `-E` prints with line markers. A
@@ -1770,9 +1788,21 @@ full-corpus reproduction and frozen CI subset.
     must that of 568 candidates chosen apart from them, so that a keyword
     missing from our names fails too. The candidates are every spelling of a
     keyword, alias or type trait in clang 23's `TokenKinds.def` and its
-    companions, and the ARM keyword attributes.
+    companions, and the ARM keyword attributes. The same holds in 25 sets of `-f`
+    options (`pp_test_keyword_sets`): GNU's keywords turned on and off, in both
+    orders of `-f[no-]gnu-keywords` against GCC's `-f[no-]asm` and of each
+    against itself, and each refused family turned off again, which changes no
+    keyword.
   - In each mode, `__has_feature` and `__has_extension` of every name in clang
     23's `Features.def` (251) must give clang's answers.
+- **`-f` options** (#281, `pp_test_option_refusals`). Each of 63 option sets
+  must be refused, with a message naming the option, or taken without one: every
+  refused family where its last option turns it on, after its `-fno-` form, and
+  turned off again; `-fzvector` before `-fno-zvector` and in assembly; digraphs
+  off, and on in `c89`; the charsets in either case. With `--clang`, clang's `-E`
+  of a probe must change with each refused set, from the set's `-std=` alone or
+  no options, which is why it is refused; and each taken set must give clang's
+  tokens, by both kernels.
 - **Directive tables and structure** (#118, `c_preprocessor_directives_test.c`).
   2,000 random sources (`--count`, `--seed`) and nests past the vectorized
   pairing's depth limit are prepared by both kernels, whose tables must be an
@@ -1956,16 +1986,27 @@ numbers so that macros beside it still expand. Both printers use that same
 boundary: `$VALUE` can print as `$4`, and `foo$bar` stays a single GNU as
 symbol in the printed text. Whitespace and comments that separate tokens in
 the input still produce spaces. C mode retains its identifier-separation rules.
+The boundary is `pp_dollar_punctuation`'s, so C with
+`-fno-dollars-in-identifiers` prints `$` as assembly does, and assembly with
+`-fdollars-in-identifiers` as C does ("The `-f` options").
 
 The vector printer clears `$`'s entry in both byte-class tables once per
 call, and applies the same classification to the token carried between
-64-token chunks. Its scalar twin uses the language mode in its word-character
-test. `test-preprocessor` checks exact output bytes, including assembly macro
+64-token chunks. Its scalar twin's word-character test takes the same
+boundary. `test-preprocessor` checks exact output bytes, including assembly macro
 arguments, explicit whitespace, and the chunk boundary; comparing token
 spellings alone would miss this change (#272).
 
 ## Not yet
 
+- In the oracle's mode (`--clang-features`), the feature queries give clang's
+  answers without options, but for the sanitizers': `-fblocks`, `-fno-builtin`,
+  `-fno-gnu-inline-asm` and the other options that change clang's answers
+  (#281's item 5) don't change ours.
+- `-std=c89` lexes digraphs and `//` comments, neither of which clang's c89
+  has, and the GNU modes lex no raw string literals (`R"x(...)x"`), which
+  clang's do. The `-f` options that would change these are refused
+  ("The `-f` options").
 - `#embed`'s line is expanded whole before its parameters are read, where clang
   expands it as it reads each one. The difference shows in one corner:
   `__has_include` and `__has_embed` inside `limit(...)` or `clang::offset(...)`

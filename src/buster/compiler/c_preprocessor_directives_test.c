@@ -1089,7 +1089,7 @@ static bool pp_directive_test_guard(const PPDirectiveTestGuard* fixture, const c
         PPSpellings ours = { 0 };
         PPSpellings theirs = { 0 };
         result = pp_directive_test_command(argv, &text, 0) == 0 && text != 0 && pp_stream_spellings(&runs[0], &ours) &&
-                 pp_text_spellings((const uint8_t*)text, strlen(text), runs[0].split_kinds, &theirs) &&
+                 pp_text_spellings((const uint8_t*)text, strlen(text), runs[0].split_kinds, pp_dollar_punctuation(&runs[0].options), &theirs) &&
                  pp_compare_spellings(&runs[0], &ours, &theirs, fixture->name, "clang");
         const int64_t clang_guards = result ? pp_directive_test_clang_guards(0, 0, path) : -1;
         if (result && clang_guards != fixture->guards)
