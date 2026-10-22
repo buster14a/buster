@@ -199,7 +199,9 @@ designs and the compilers already built this way.
   default. `docs/c-lexer.md` records the GFNI classifier, the leading-comment
   skip, branch-free chunk state, the pipelined write-out, table-driven
   punctuator kinds, the delimiter scan, chunks read in place, the raw string
-  check and their 9700X measurements.
+  check and their 9700X measurements. `c_lexer_variant.c` is one variant of the
+  lexer as a translation unit of its own, which `./build.sh lexer-variant`
+  compiles in for `benchmark-lexer` to compare (see "Lexer benchmarks").
 - `src/buster/compiler/preprocessor_fuzz.c` provides bounded output comparison
   and the minimizer for the independent preprocessor test harness.
   `preprocessor_fuzz_generate.c` generates cases, `preprocessor_fuzz_clang.c`
@@ -410,6 +412,13 @@ designs and the compilers already built this way.
   measurements. `c_files_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-files` runs them) and `c_files_benchmark.c` provides
   `benchmark-files`.
+- `src/buster/compiler/profile.c` is the profiling tools: `ab` (builds of
+  several trees run in turn, under the 9700X's lock) and the reports of perf's
+  and objdump's text, `hot-loops`, `label-spills`, `spill-report` and
+  `branch-misses`. `profile_test.c` holds their tests (`main.c` includes both;
+  `./build/compiler test-profile` runs them). `docs/profiling.md` is how the
+  lexer and the encoder were measured and profiled on the 9700X, with these
+  tools: read it before tuning a stage.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -419,6 +428,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler
 ./build/compiler test-call-graph
 ./build.sh check-call-graph
+./build/compiler test-profile
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
 ./build/compiler benchmark-lexer src
@@ -613,6 +623,61 @@ selects C++ source/header extensions. The default 9700X job runs
 `benchmark-lexer src` after the tests, pinned to one allowed CPU. Measurements
 are informational: correctness failures fail CI, but throughput values are not
 yet compared against a performance baseline. Keep just one compiler executable.
+
+`./build.sh lexer-variant NAME=SOURCE...` builds `build/compiler` with other
+lexers in it, each SOURCE a copy of `c_lexer.c` (or its assembly, from
+`./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s`), as
+`c_lexer_variant_NAME`. `benchmark-lexer` then also compares each with
+`c_tokenize` on every file (a difference fails it), times them in an order
+that rotates by pass, and prints each one's change from `c_tokenize`.
+Where its code lands moves a variant by up to about 1.5% even when its code
+is `c_tokenize`'s (a copy of it as a variant is the comparison's control), and
+builds in separate processes differ by about 2%: `docs/profiling.md`
+("Comparing two versions") has how to use both.
+
+## Profiling tools
+
+`./build/compiler test-profile` (about 10 ms) checks `profile.c`. Each tool
+runs on texts in objdump's, clang's and perf script's formats, and its report
+must be exactly the expected one:
+
+- `hot-loops`: a loop nested in another, an indirect jump, two copies of the
+  function (the busiest one taken by the samples' addresses: their offsets in
+  the file through its LOAD segments), samples of another function and of
+  another file, of a name that only starts with the function's, past the last
+  instruction and before the first symbol, and an lld executable, whose
+  offsets aren't its addresses; samples without file offsets, a disassembly
+  without objdump -p's headers, a missing function and disassembly out of
+  order (errors);
+- `label-spills` and `spill-report`: spills, reloads and folded reloads
+  labeled with the tag in order in the function and in no other (not source
+  paths or other comments that hold the words), and nothing else changed;
+  their samples by stack slot and source location, the labeled copy found by
+  address, without the samples of a static function of the same name in
+  another unit (after it too), of the function's static local (`f.counter`),
+  of another tag, of a shared library at the same offsets or of another
+  tree's file of the same name, and in an lld executable; a label at the
+  function's address, from the symbol table (`objdump -t`); labels out of order or of another tag, missing from the disassembly
+  or in it twice, samples without file offsets, and an invalid tag (errors);
+  and clang's assembly of a program whose static function `function` (also
+  an assembler keyword) prints `__func__`, labeled, assembled and run, which
+  must print the same;
+  and one whose first instruction is a spill, labeled, linked and
+  disassembled, whose report must find its labels (clang and objdump);
+- `branch-misses`: records mispredicted, predicted and neither, fields that
+  aren't records, the load bias and the disassembly's instructions, and
+  10,000 branches, which grow its table;
+- `ab`: the rotating order, and runs that succeed, fail and can't start, with
+  two argument lists, and through a lock (`env`) pinned to an allowed CPU.
+
+The commands are `ab [--rounds N] [--cpu N] [--lock PATH] TREE... --
+ARGUMENT... [-- ARGUMENT...]...`, `hot-loops FUNCTION DISASSEMBLY SAMPLES
+[--loops N]`, `label-spills FUNCTION TAG INPUT.s OUTPUT.s`, `spill-report
+FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]` and `branch-misses BRSTACK [--bias
+ADDRESS] [--disassembly FILE] [--branches N]`; `docs/profiling.md` has the
+perf and objdump commands that make their inputs. Run `ab` itself outside the
+9700X's lock, with `--lock ~/buster-fast-bench/exclusive.sh`, which takes it
+for each run. The 9700X job runs the tests after the call graph check.
 
 ## x86-64 disassembler
 

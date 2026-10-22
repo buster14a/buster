@@ -373,6 +373,11 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/call_graph.c"
 #include "buster/compiler/call_graph_test.c"
 
+// The profiling tools (ab, and the reports of perf's and objdump's text: hot-loops, label-spills, spill-report and
+// branch-misses) and their tests, for the test-profile command.
+#include "buster/compiler/profile.c"
+#include "buster/compiler/profile_test.c"
+
 int main(int argc, char** argv)
 {
     int result = 0;
@@ -575,6 +580,15 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "test-call-graph") == 0)
     {
         result = run_call_graph_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && (strcmp(argv[1], "ab") == 0 || strcmp(argv[1], "hot-loops") == 0 || strcmp(argv[1], "label-spills") == 0 ||
+                           strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0))
+    {
+        result = run_profile_command(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-profile") == 0)
+    {
+        result = run_profile_tests(argc - 2, argv + 2);
     }
     else
     {
