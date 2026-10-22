@@ -1301,27 +1301,50 @@ and two that run the twin for 100 ms before each sample of the vector path
 
 | Case | Path | ns | cycles | instructions | IPC | alone | after 100 ms |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| classify-all, 16 B | vector | 56.55 [55.81–56.75] | 313.5 | 803 | 2.56 | 56.42 | 55.98 |
-|  | scalar | 77.45 [76.76–78.37] | 429.2 | 1,519 | 3.54 | 76.75 | 76.84 |
-| classify-all, 32 B | vector | 62.17 [61.36–62.54] | 344.5 | 841 | 2.44 | 61.52 | 61.45 |
-|  | scalar | 78.28 [77.87–79.07] | 434.1 | 1,524 | 3.51 | 77.15 | 77.56 |
-| classify-all, 64 B | vector | 66.37 [65.73–68.06] | 367.8 | 899 | 2.44 | 65.78 | 66.45 |
-|  | scalar | 78.30 [78.06–79.68] | 434.0 | 1,527 | 3.52 | 77.25 | 77.86 |
-| batches of 1 | vector | 50.07 [49.77–52.88] | 277.6 | 964 | 3.47 | 49.57 | 51.58 |
-|  | scalar | 63.94 [63.83–64.18] | 354.2 | 1,459 | 4.12 | 63.13 | 63.66 |
-| batches of 4 | vector | 50.16 [50.11–52.36] | 277.9 | 840 | 3.02 | 49.53 | 51.30 |
-|  | scalar | 65.55 [65.54–65.97] | 363.3 | 1,437 | 3.96 | 64.17 | 65.40 |
-| batches of 16 | vector | 46.36 [46.35–47.50] | 257.0 | 764 | 2.97 | 45.61 | 47.05 |
-|  | scalar | 64.15 [63.95–64.19] | 355.6 | 1,429 | 4.02 | 62.52 | 63.97 |
-| assign | vector | 4.81 [4.81–4.81] | 26.7 | 55 | 2.05 | 4.75 | 4.81 |
-|  | scalar | 7.40 [7.40–7.40] | 41.1 | 146 | 3.55 | 7.35 | 7.41 |
-| assign-simple | vector | 4.07 [4.07–4.08] | 22.6 | 48 | 2.11 | 4.05 | 4.08 |
-|  | scalar | 6.87 [6.87–6.88] | 38.1 | 149 | 3.91 | 6.84 | 6.88 |
+| classify-all, 16 B | vector | 39.38 [39.04–39.56] | 218.4 | 607 | 2.78 | 39.12 | 39.44 |
+|  | scalar | 67.72 [67.31–67.81] | 375.6 | 1,379 | 3.67 | 67.33 | 67.48 |
+| classify-all, 32 B | vector | 43.68 [43.24–43.78] | 242.1 | 648 | 2.68 | 43.36 | 43.65 |
+|  | scalar | 68.57 [67.98–68.96] | 380.0 | 1,384 | 3.64 | 68.07 | 68.28 |
+| classify-all, 64 B | vector | 46.86 [46.39–47.02] | 259.9 | 710 | 2.73 | 46.55 | 46.82 |
+|  | scalar | 68.92 [68.53–69.18] | 381.9 | 1,387 | 3.63 | 68.47 | 68.72 |
+| batches of 1 | vector | 31.40 [31.31–31.53] | 173.7 | 724 | 4.17 | 30.89 | 31.65 |
+|  | scalar | 53.54 [53.36–53.87] | 296.6 | 1,309 | 4.41 | 53.34 | 53.20 |
+| batches of 4 | vector | 30.55 [30.17–30.56] | 169.2 | 612 | 3.61 | 29.41 | 30.58 |
+|  | scalar | 55.17 [54.55–55.28] | 305.9 | 1,287 | 4.21 | 54.48 | 54.28 |
+| batches of 16 | vector | 28.38 [28.32–28.52] | 157.3 | 548 | 3.48 | 27.66 | 28.50 |
+|  | scalar | 53.92 [53.18–53.98] | 298.9 | 1,279 | 4.28 | 53.01 | 53.50 |
+| assign | vector | 3.28 [3.27–3.28] | 18.2 | 46 | 2.54 | 3.15 | 3.29 |
+|  | scalar | 7.47 [7.46–7.50] | 41.4 | 149 | 3.59 | 7.46 | 7.49 |
+| assign-simple | vector | 2.84 [2.83–2.84] | 15.7 | 39 | 2.48 | 2.81 | 2.84 |
+|  | scalar | 6.94 [6.90–6.94] | 38.4 | 152 | 3.96 | 6.94 | 6.92 |
 
-The twin's time over the vector path's, default state: 1.37, 1.26 and 1.18 for
-`classify-all` at 16, 32 and 64 bytes; 1.28, 1.31 and 1.38 for batches of 1, 4
-and 16 types (1.00, 2.76 and 8.17 types per call); 1.54 for `assign` and 1.69
+The twin's time over the vector path's, default state: 1.72, 1.57 and 1.47 for
+`classify-all` at 16, 32 and 64 bytes; 1.71, 1.81 and 1.90 for batches of 1, 4
+and 16 types (1.00, 2.76 and 8.17 types per call); 2.28 for `assign` and 2.44
 for `assign-simple`.
+
+Against main with #267's `_Atomic` rules, before the members' parts and the
+assignment's marks, three processes of each by turns, the vector paths in ns
+per type or argument, with their instructions and mispredictions:
+
+| Case | before | after | | instructions | mispredictions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| classify-all, 16 B | 59.58 | 39.38 | 1.51× | 932 → 607 | 4.72 → 2.86 |
+| classify-all, 32 B | 65.01 | 43.68 | 1.49× | 969 → 648 | 5.23 → 3.34 |
+| classify-all, 64 B | 69.66 | 46.86 | 1.49× | 1,027 → 710 | 5.47 → 3.45 |
+| batches of 1 | 54.45 | 31.40 | 1.73× | 1,084 → 724 | 3.27 → 1.48 |
+| batches of 4 | 53.05 | 30.55 | 1.74× | 960 → 612 | 4.17 → 1.90 |
+| batches of 16 | 49.36 | 28.38 | 1.74× | 884 → 548 | 4.15 → 2.08 |
+| assign | 4.99 | 3.28 | 1.52× | 56 → 46 | 0.37 → 0.03 |
+| assign-simple | 4.26 | 2.84 | 1.50× | 48 → 39 | 0.31 → 0.01 |
+
+No row's ranges overlap. Where the code lands moves these rows by a few
+percent, so the same three processes of each ran again with every function
+aligned to 64 bytes in both builds (`-falign-functions=64`): 1.55 and 1.56 for
+`classify-all`, 1.69 to 1.73 for the batches, 1.48 for `assign` and 1.45 for
+`assign-simple`. The twin is 16% faster for `classify-all` and 20 to 21% for
+the batches (19% and 22 to 23% aligned), as it no longer works out the storage
+of records larger than 16 bytes, and as fast as before for the assignment.
 
 - **The classification's table:** 32,756 types to classify, 26,779 of them
   records (4,383 unions) with 107,818 members, in 13 levels of nesting; 18,045
@@ -1329,29 +1352,58 @@ for `assign-simple`.
   predictor learns the table from one run to the next, and both paths look
   1.4 to 2.3 times as fast as they are; from 16,384 types on the costs stay
   within about 10%, hence the default of 32,768.
-- **Where the classification's time goes:** in the finishing step both paths
-  share (`abi_finish`, 60% of the vector path's instructions in a profile)
-  and the level scans; the fold's merges are a few percent. clang's LLVM
-  types (`storage` and `layout`) cost both paths about 400 instructions per
-  type: before them, `classify-all` at 16 bytes took 396 instructions per
-  type on the vector path and 1,097 on the twin (34.75 and 57.07 ns, 1.64
-  apart). Working out layouts only for types of 16 bytes or less, the only
-  ones read, took 280 of those instructions off both paths.
+- **Where the classification's time goes:** in a profile of the vector
+  classification (`perf record` of `--only classification --path vector`),
+  the finishing step both paths share, `abi_finish_passing`, takes 43% of the
+  cycles, 94% of them at the instruction where `abi_result`'s branches on the
+  classes join; the levels' scans 18%; the pre-pass's entries and parts 17%;
+  the merges and the post-merge 5%; and the rest of `abi_classify_vector`,
+  its sort and dispatch, 5%.
+- **What lost, measured and dropped:**
+  - The members' parts reduced in the fold, from a second 64-byte block per
+    step, ORed (with a masked `vpmaxuq` for a union's storage words) beside
+    the merges, rather than as the pre-pass writes the entries: 1.7% to 6.9%
+    slower, three processes of each by turns before #267's rules
+    (`classify-all` 38.97 against 38.25 ns at 16 bytes, batches of 16 29.72
+    against 27.66), with 559 instructions and 3.03 mispredictions per type
+    against 551 and 2.91.
+  - Every record's exact storage, those larger than 64 bytes waiting in the
+    levels for their members: 110 more instructions and 2 more mispredictions
+    per type on the laptop's counts, the levels taking 13 rounds where they
+    take 7. `abi_wide_alignment` works out only what an array of no elements
+    needs.
+  - At the work both paths share, on the laptop's counts: a table of the
+    folded aggregates' pass bits and results by their classes (554 → 547
+    instructions per type, as many mispredictions); each pending record's
+    scan of its members resumed where it stopped (no change); levels from
+    lists of dependents, Kahn's way (835 instructions and 8.7 mispredictions
+    per type, from a loop of random length per type); and `abi_result`'s
+    `AbiReturn` kept out of memory, two ways (no change: the cost is the
+    mispredicted branches, not a store waiting to forward).
+  - Merging #267's rules first made `abi_dependencies_classified` too large
+    for clang to inline into the levels' loop, and its walk's readiness came
+    back through a local's address, which gave it a stack protector's
+    canary: 656 instructions per type in `classify-all` at 16 bytes and 41.03
+    ns. With the rare waits out of line (`abi_wide_classified`,
+    `abi_members_classified`) and the readiness a flag in the walk's result,
+    it inlines again: 607 and 39.38.
 - **The assignment:** the vector path leaves 567 of the 32,768 calls (1.7%,
   with 5.2% of the arguments) to the twin: 219 for a register its sums count
   as used though it is free, 364 for padding on the stack and 18 for an
-  `EMPTY` argument there; `assign-simple` leaves none. With its fit testing
-  both classes for every argument, as it did first, it left 23% of the
-  arguments, and was 1.12 times the twin.
-- **The power cap (#199):** the throttle takes 0.02 to 0.06 of the vector
-  paths' dispatch slots per cycle, less than the dataflow solver loses on its
-  large CFGs alone and uncapped (0.11 a cycle, from `docs/dataflow.md`'s
-  table), against its 1.9 after scalar code. These are short AVX-512 phases,
-  too light to need a state of their own: the clock is 5.54 GHz in every
-  state, and the states' medians agree within 3%. Of the two processes after
-  the twin, one ran the batches as the default state does and the other 6%
-  slower, at the same clock and with 0.05 of the slots a cycle withheld,
-  too few to account for it.
+  `EMPTY` or `GROWN` argument there; `assign-simple` leaves none. In a
+  profile of the vector assignment, its loop over the arguments takes 58% of
+  the cycles (the segmented prefix sums 20 of them), the setup's pass over the
+  calls 15%, the last pass over the calls 8% and the twin, for the deferred
+  calls, 6%; before the marks, the setup's loops over each call's arguments
+  took about 30% of the vector path's time, mostly at their mispredicted
+  exits.
+- **The power cap (#199):** the throttle takes 0.056 to 0.062 of the vector
+  classification's dispatch slots per cycle in `classify-all`, 0.010 to 0.024
+  in the batches and 0.009 to 0.010 in the assignment, in every state. These
+  are short AVX-512 phases, too light to need a state of their own: after 100
+  ms of the twin each vector row is within 1% of its default state, as are the
+  base's; alone, the vector paths are up to 4% faster (the batches of 4 and
+  `assign`), and the twin as fast. The clock is 5.55 GHz throughout.
 
 ## Next steps
 
@@ -1366,23 +1418,23 @@ for `assign-simple`.
   the module passes it in one ymm or zmm register. LLVM passes it as its
   elements: `<2 x x86_fp80>` in two 16-byte stack slots, `<2 x fp128>` in
   xmm0 and xmm1. Each needs its rule from probes, or `UNSUPPORTED`.
-- **Arrays of none of a large record.** A record larger than 64 bytes may be
-  finished before its members (see "Levels"), so its storage may not be
-  LLVM's, and a record of 16 bytes or less that holds an array of none of
-  them passes by it: `union { struct { long a, b; struct { __int128 x; char
-  c[64]; } z[0]; } s; __int128 i; }` is two `i64`s to clang, an `i128` where
-  the large record's alignment comes out under 16. Its alignment needs
-  working out from the large record's members when the small record is
-  finished, waiting for what that reads.
-- **The finishing step:** `abi_finish` is scalar and shared by both paths,
-  and with clang's LLVM types it is most of the vector path's time (see
-  "Measurements on the 9700X"). Its work per member (the storage, the
-  layout) is a reduction over the members, like the fold's merge, and could
-  move into the fold.
-- **The assignment's setup:** its loops over each call's arguments (the lane
-  flags and call numbers), whose trip counts are random, take about 30% of
-  the vector path's time in a profile of the benchmark, mostly at their
-  mispredicted exits; the same columns could come from the counts' prefix
-  sums without a loop per call.
+- **The finishing step's branches.** `abi_finish_passing`, which both paths
+  share, is now the largest part of the vector classification's time: 43% of
+  its cycles in a profile of the benchmark, 94% of them at the instruction
+  where `abi_result`'s branches on the classes join (keeping the result out
+  of memory changed nothing on the laptop, so it isn't a store waiting to be
+  forwarded). Pass bits and results without those branches, from a table
+  indexed by the classes and the type's kind or from the fold's vectors four
+  types at a time, are the next try.
+- **The levels.** Their scans (`abi_classify_levels` asking
+  `abi_dependencies_classified` about every pending type, a pass per level)
+  take 18% of the vector classification's cycles and branch on what each type
+  waits for. Each type's level is the longest path below it in the graph of
+  what it waits for, which pointer jumping or a pass in a topological order
+  could give for every type at once.
+- **Flexible records with a size** keep no storage (`STORAGE_INEXACT`), so
+  an `_Atomic` of a record of no size that holds an array of none of them is
+  refused. `abi_wide_alignment` could walk them as it walks large records,
+  with the levels waiting for what it reads.
 - **Plain `char`:** `abi_extension` takes it as signed, as x86-64 has it;
   `-funsigned-char` would need a setting the type table doesn't have yet.
