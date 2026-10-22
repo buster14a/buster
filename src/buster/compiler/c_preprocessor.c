@@ -14622,8 +14622,8 @@ static bool pp_clang_fallback_links(const char* ours, char* links)
 // Is `argument` an option whose value is the next argument (pp_parse_options)?
 static bool pp_option_takes_value(const char* argument)
 {
-    static const char* const options[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter", "--predefines" };
-    bool result = false;
+    static const char* const options[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter", "-target" };
+    bool result = pp_own_option_with_value(argument);
     for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(options); i += 1)
     {
         result = strcmp(argument, options[i]) == 0;
@@ -14633,7 +14633,8 @@ static bool pp_option_takes_value(const char* argument)
 
 // clang's arguments for ours: `arguments` (`count` of them), from which `options` were read, in a new array with a null
 // at its end (one block, with the names it holds, for free), and their count in `*clang_count`; null if it can't be
-// made. An option's value is copied as it is, whatever it spells. With --buster-headers, and without -nostdinc or
+// made. Our own value-options are left out; any other option's value is copied as it is, whatever it spells. With
+// --buster-headers, and without -nostdinc or
 // -nobuiltininc (which leave out buster's headers and clang's alike), clang gets ours' search instead of the
 // directories' options, from a preprocessor initialized with `options`: each directory pp_dedupe_directories keeps
 // (whose decisions, by identity and a system directory over a user's, clang's links would hide from it) with its
@@ -14672,7 +14673,7 @@ static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* option
         // With ours' search, the directories' options are in it.
         const bool directory = search && (strncmp(argument, "-I", 2) == 0 || strcmp(argument, "-isystem") == 0 || strcmp(argument, "-iquote") == 0 ||
                                           strcmp(argument, "-idirafter") == 0);
-        if (!directory && strcmp(argument, "--buster-headers") != 0)
+        if (!directory && !pp_own_option_with_value(argument) && strcmp(argument, "--buster-headers") != 0)
         {
             result[n] = arguments[i];
             n += 1;

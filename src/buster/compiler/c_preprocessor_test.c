@@ -3462,7 +3462,10 @@ static bool pp_test_buster_run(const char* mode, bool freestanding, const char* 
     bool markers;
     static InternTable table;
     static Preprocessor pp;
-    bool result = pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers) && pp_test_run(&pp, &table, &options, path);
+    bool result = pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
+    // This compares clang's preprocessing of the headers, including their feature-query branches.
+    options.clang_features = true;
+    result = result && pp_test_run(&pp, &table, &options, path);
     if (result && pp.warnings > clang_warnings)
     {
         printf("%s: our preprocessor warns %u times, clang %u times in the unit\n", name, pp.warnings, clang_warnings);
