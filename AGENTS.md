@@ -2370,7 +2370,7 @@ are informational.
 ## Per-file jobs tests
 
 `./build/compiler test-files [--lanes LIST] [--seed N] [--id-order N] [--keep]
-[--flat] [options] [path...]` (about 0.3 s without paths) checks `c_files.c`.
+[--flat] [options] [path...]` (about 0.7 s without paths) checks `c_files.c`.
 Every check fills a file cache on each lane count of `--lanes` (1, 2, 3 and 8),
 each time with a new intern table and cache, and must give the first lane
 count's results byte for byte: the shared table's ids and spellings, every
@@ -2439,8 +2439,9 @@ The checks that would hang if they regressed run under a 60-second alarm, which
 fails the test.
 
 `--seed N` changes the spellings, `--id-order N` the ids' order, and `--keep`
-leaves the directory. On the 9700X, `sqlite3.c`, Lua 5.4.8, musl 1.2.5's 1,357
-sources and the C library corpus (`--flat`) pass too.
+leaves the directory. On the 9700X, `sqlite3.c`, musl 1.2.5's 1,357 sources and
+the C library corpus (`--flat`) pass too, and Lua 5.4.8 did before the ids'
+order and the units' `-E` text and diagnostics were checked.
 The 9700X job runs it, on `src` with `--flat`, and on the repository's
 translation units.
 

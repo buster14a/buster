@@ -20,16 +20,19 @@ directive table and guard, what the walk did, and each translation unit's
 output stream (kinds, flags, values and locations), `-E` text and diagnostics
 when it preprocesses with the cache. Each unit's spellings and diagnostics are
 also those it gives with a cache of its own, as the preprocessor runs alone. On
-the 9700X and locally this holds for the test's tree and generated spellings,
-`sqlite3.c`, Lua 5.4.8's 34 units, musl 1.2.5's 1,357 units (on the 9700X),
-this repository's 20 units, and, prepared without their includes, the C library
-corpus (8,983 files).
+the 9700X this holds for the test's tree and generated spellings, `sqlite3.c`,
+musl 1.2.5's 1,357 units, this repository's 22 units, and, prepared without
+their includes, the C library corpus (8,983 files). Lua 5.4.8's 34 units passed
+too before the units' `-E` text and diagnostics were compared.
 
 **The same output whatever the ids.** Ids are opaque (#153): nothing a unit
 prints, or a record holds, may depend on the order the shared table hands them
 out in. `test-files` runs every check again with the table primed before the
 walk, so that it gives its names other ids, on every lane count: every unit's
-`-E` text, diagnostics and locations, and every record, spelled the same.
+`-E` text, diagnostics and locations, and every record, spelled the same. On
+the 9700X this holds for the same inputs, where every name but at most one in
+each run changes ids (597,429 of the C library corpus's 597,430, 41,698 of
+`sqlite3.c`'s 41,699 and 15,330 of musl's 15,331).
 
 **Speed**, measured on 2026-10-22 on the 9700X (clang 23.1.1, `build.sh`'s
 `-O3 -march=native`), under the `exclusive.sh` lock, lane i on CPU i, by
@@ -360,7 +363,7 @@ unless said otherwise, medians of 7 to 21 runs):
 ## Correctness
 
 `./build/compiler test-files [--lanes LIST] [--seed N] [--id-order N] [--keep]
-[--flat] [options] [path...]` (about 0.3 s without paths on the 9700X) runs
+[--flat] [options] [path...]` (about 0.7 s without paths on the 9700X) runs
 every check on each lane count of `--lanes` (1, 2, 3 and 8), each time with a
 new intern table and cache, and compares the results with the first lane
 count's, byte for byte, as "Results" says, and every unit with itself run

@@ -103,10 +103,11 @@ they do not stand in for an unimplemented C literal-pooling frontend.
   another order, so that the merge finds those and numbers the rest after them.
   Every translation unit's `-E` bytes, with and without markers, diagnostic
   bytes, errors, warnings and stream locations must equal the first run's, each
-  id in its stream and in every cached file's tokens spelled the same; the
-  first run's names must all be there, with changed IDs. This covers the tree,
-  the generated spellings, and the repository's units and `--flat src` in the
-  workflow.
+  ID in its stream and in every cached file's tokens spelled the same. The
+  first run's names must all be there, and both those primed and those the walk
+  adds must have changed IDs. This covers the tree, the generated spellings,
+  the contexts and special paths, and in the workflow the repository's units
+  and `--flat src`.
 
 The four output test commands, `test-preprocessor` and `test-files` accept
 `--id-order N` (default 153) to choose another permutation, independently of
