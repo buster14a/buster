@@ -28,7 +28,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/x86_64_encoder_benchmark.c`, `src/buster/compiler/x86_64_disassembler_benchmark.c`, `src/buster/compiler/object_writer_benchmark.c`, `src/buster/compiler/lane_benchmark.c` | Original benchmark bodies under Default; shared counter/timing/sort helpers adapted through the lexer benchmark retain MIT. |
 | `src/buster/compiler/x86_64_encoder.c`, `src/buster/compiler/x86_64_encoder_test.c` | Original encoder, handwritten form families and tests; Default. Tool-oracle and catalogue distinctions below. |
 | `src/buster/compiler/x86_target.c`, `src/buster/compiler/x86_target_forms.c`, `src/buster/compiler/x86_target_test.c`, `docs/x86-target.md` | Original target policy, form requirement rows, tests, benchmark and documentation; Default. CPUID fields and psABI levels are architectural facts. Macro/profile and builtin-query data were checked against Clang 23.1.3; the live tests rerun Clang as an external oracle. LLVM's target parser, target macro and host-detection sources were consulted for behavior, not copied. The existing encoder's original form-family macros are reused. Sources and reproduction are recorded in `docs/x86-target.md`. |
-| `src/buster/compiler/x86_64_disassembler.c`, `src/buster/compiler/x86_64_disassembler_cli.c`, `src/buster/compiler/x86_64_disassembler_test.c`, `examples/disassembler/corpus.c`, `docs/x86-64-disassembler.md` | Original decoder, bounded formatter/command, tests, C corpus and documentation; Default. Decoder indices are built from this repository's encoder catalogue, and generated test operands use its existing generator. Independent raw-byte fixtures are handwritten. GNU as/objdump and Clang run externally as oracles for locally authored inputs; no implementation or external test corpus is imported. uops.info and ISA manuals supply design measurements and instruction facts, not copied implementation. |
+| `src/buster/compiler/x86_64_disassembler.c`, `src/buster/compiler/x86_64_disassembly.c`, `src/buster/compiler/x86_64_disassembler_cli.c`, `src/buster/compiler/x86_64_disassembler_test.c`, `examples/disassembler/corpus.c`, `docs/x86-64-disassembler.md` | Original decoder, bounded formatter/command, tests, C corpus and documentation; Default. Decoder indices are built from this repository's encoder catalogue, and generated test operands use its existing generator. Independent raw-byte fixtures are handwritten. GNU as/objdump and Clang run externally as oracles for locally authored inputs; no implementation or external test corpus is imported. uops.info and ISA manuals supply design measurements and instruction facts, not copied implementation. |
 | `src/buster/compiler/main.c`, `src/buster/compiler/main_test.c`, `src/buster/compiler/lane_test.c` | Original integration, input handling, loader regressions and lane tests; Default. The loader fixtures and address-space-limit checks are written for this project; no external fixtures or implementation are imported. |
 | `src/buster/compiler/dataflow.c`, `src/buster/compiler/dataflow_program.c`, `src/buster/compiler/dataflow_test.c`, `src/buster/compiler/dataflow_benchmark.c`, `docs/dataflow.md` | Original liveness/interference kernels, synthetic CFG generator, tests, benchmark and documentation; Default, with the public-domain SplitMix64 seed-mixing reference below. No external corpus is incorporated. |
 | `src/buster/compiler/preprocessor_fuzz*.c`, `docs/preprocessor-fuzz.md` | Original independent test harness, generator, comparator, minimizer, tests and benchmark helpers; Default. Generated test programs are produced by this repository's C generator from a recorded seed, case ID and language mode. Clang 23 is an external oracle; no compiler implementation or external test fixtures are imported. |
@@ -261,6 +261,15 @@ compiler's own. LLVM's terms are retained in [LICENSES/LLVM.txt](LICENSES/LLVM.t
 
 SQLite, musl, Lua and the system's headers are test oracle inputs only (the
 tests read them where they are installed): none of their code is included.
+
+The `ext_vector_type` attribute-table entry was added for the frozen #125
+corpus after querying Clang 23.1.1 (the recorded 9700X reference) in C99,
+GNU17 and C23, and Clang 23.1.3 (local package `clang 23.1.3-5`) in GNU17.
+Only the attribute name was read from the corpus. The original regression
+inputs and queries are described in `docs/preprocessor-oracle.md`; the entry
+retains the existing LLVM terms. The pragma-printer correction follows
+observable Clang 23.1.1 behavior, with its source references recorded there;
+no Clang or corpus implementation is copied.
 
 ## Review limits and distribution
 

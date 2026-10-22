@@ -1,0 +1,2 @@
+accepted.input
+rejected.input

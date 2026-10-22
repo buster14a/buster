@@ -360,9 +360,10 @@ struct ExecutableOptions
     String8 path;
     // The entry point: a symbol defined in a TEXT atom (_start).
     SymbolId entry;
-    // For a dynamic PIE, what it has besides; 0 for a static executable.
+    // For a PIE, what it has besides; 0 for a static executable.
     const ExecutableDynamic* dynamic;
-    // For a static executable that links the C runtime, what it has besides; 0 for one without, and for a dynamic PIE.
+    // For the static runtime, what it has besides: a static executable's that links the C runtime, or with `dynamic`
+    // a static PIE's (dynamic.c's dynamic_static_pie_inputs fills both); 0 for one without, and for a dynamic PIE.
     const ExecutableRuntime* runtime;
     // For the tests: a dynamic PIE's passes by their exact twins, scalar, which must write the same file.
     bool exact;
