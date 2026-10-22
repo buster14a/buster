@@ -412,19 +412,21 @@ number's bytes for a `'`, and lexed the rest of the file again from each one it 
 
 ## Results
 
-`benchmark-lexer` on the C library corpus (8,983 files, 93.8 MB), `main` (f8e4834) and this branch with and without
-`--no-digit-separators`, each a process pinned to CPU 2 under the lock (`ab`); the first round, and the second round's
-run of this branch with separators (its other two runs were still queued behind CI jobs when this was written):
+`benchmark-lexer` on the frozen C library corpus (8,983 files, 93.8 MB), `main` (f8e4834) and candidate
+(e9f86d6) with and without `--no-digit-separators`: two interleaved rounds, each process pinned to CPU 2 under the
+9700X lock (`ab`), completed 2026-10-22. Each result is its process's median of 21 interleaved passes.
 
-| Loop | Cycles/B | Instructions/B | IPC |
+| Loop | Round 1 cycles/B | Round 2 cycles/B | Instructions/B |
 | --- | ---: | ---: | ---: |
-| `main`'s `tokenize_c` | 0.794 | 3.044 | 3.83 |
-| `tokenize_c` | 0.786 (0.800 in round 2) | 3.046 | 3.88 |
-| `tokenize_c_no_separators` | 0.794 | 3.046 | 3.83 |
+| `main`'s `tokenize_c` | 0.794 | 0.806 | 3.044 |
+| `tokenize_c` | 0.786 | 0.800 | 3.046 |
+| `tokenize_c_no_separators` | 0.794 | 0.802 | 3.046 |
 
-The two loops run the same instructions, and their times differ by about what placement moves a copy of one loop
-(about 1.5%, `docs/profiling.md`). In the preprocessor, the lex phase is `main`'s again
-(`docs/c-preprocessor.md`, "#264's digit separators").
+The separator and no-separator loops run the same instructions. The no-separator copy equals `main` in round 1 and
+is 0.5% faster in round 2, within the observed placement and run spread; this is no evidence of a separate speedup.
+In the preprocessor, the lex phase is `main`'s again (`docs/c-preprocessor.md`, "#264's digit separators"). The frozen
+candidate's lexer and benchmark source blobs (04cac7b and 38b8449) are unchanged by the takeover's parent/main merges;
+those later revisions still require their own exact hosted correctness qualification.
 
 Discarded: a loop with the separator's code taken out rather than its table. Without `apostrophe_separator`, the
 `'e+` sign check and the separator at the next chunk's start, and with every unescaped `'` a literal's bound, so that
