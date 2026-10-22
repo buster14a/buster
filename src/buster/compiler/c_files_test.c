@@ -1017,13 +1017,16 @@ static bool files_test_unread(const char* directory)
     const bool identified = result && cache.record_count == 3 && records[1] == records[0] && records[2] != records[0] && records[3] != records[2] &&
                             cache.records[records[0]].bytes == 0 && cache.records[records[0]].descriptor >= 0;
     // The unit's lookup reads unread.h's bytes, through its hard link's path.
-    const uint32_t found = result ? file_cache_lookup_path(&cache, paths[1], (uint32_t)strlen(paths[1]), &counts) : BUSTER_PP_NONE;
+    int error = 0;
+    const uint32_t found = result ? file_cache_lookup_path(&cache, paths[1], (uint32_t)strlen(paths[1]), &counts, &error) : BUSTER_PP_NONE;
     const PPFileData* record = found == records[0] && identified ? &cache.records[found] : 0;
-    const bool read = record != 0 && record->bytes != 0 && record->descriptor < 0 && record->length == sizeof(text) - 1 && memcmp(record->bytes, text, record->length) == 0;
+    const bool read = record != 0 && record->bytes != 0 && record->descriptor < 0 && error == 0 && record->length == sizeof(text) - 1 &&
+                      memcmp(record->bytes, text, record->length) == 0;
     // shrunk.h shrinks: read into an arena, it has fewer bytes than its probe saw, and is then none to the unit too.
     const bool shrunk = identified && truncate(paths[2], 4) == 0 &&
                         !file_cache_load(&cache, records[2], FILE_CACHE_READ, 0, &file_cache_arenas(&cache, 0)->bytes, &counts) &&
-                        cache.records[records[2]].descriptor < 0 && file_cache_lookup_path(&cache, paths[2], (uint32_t)strlen(paths[2]), &counts) == BUSTER_PP_NONE;
+                        cache.records[records[2]].descriptor < 0 && file_cache_lookup_path(&cache, paths[2], (uint32_t)strlen(paths[2]), &counts, &error) == BUSTER_PP_NONE &&
+                        error == EIO;
     // left.h stays unread, and the release closes it.
     const bool left = identified && cache.records[records[3]].bytes == 0 && cache.records[records[3]].descriptor >= 0;
     if (cache.records != 0)
@@ -1097,7 +1100,8 @@ static bool files_test_descriptor_pressure(const char* directory)
     FileCacheCounts counts = { 0 };
     for (uint32_t f = 0; result && supported && f < BUSTER_ARRAY_LENGTH(roots); f += 1)
     {
-        readable += file_cache_lookup_path(&run.cache, roots[f], (uint32_t)strlen(roots[f]), &counts) != BUSTER_PP_NONE;
+        int error = 0;
+        readable += file_cache_lookup_path(&run.cache, roots[f], (uint32_t)strlen(roots[f]), &counts, &error) != BUSTER_PP_NONE && error == 0;
     }
     result = result && (!supported || (run.cache.record_count == BUSTER_ARRAY_LENGTH(roots) && run.prepared == BUSTER_ARRAY_LENGTH(roots) &&
              readable == BUSTER_ARRAY_LENGTH(roots) && run.absent == 0 && !run.failed && run.descriptors == 0 && run.stderr_bytes == 0));
@@ -1688,7 +1692,7 @@ static int run_files_tests(int argument_count, char** arguments)
         const char* argument = arguments[i];
         const bool takes_value = strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 || strcmp(argument, "-U") == 0 || strcmp(argument, "-isystem") == 0 ||
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
-                                 strcmp(argument, "--predefines") == 0 || strcmp(argument, "-x") == 0 || strcmp(argument, "-target") == 0;
+                                 pp_own_option_with_value(argument) || strcmp(argument, "-x") == 0 || strcmp(argument, "-target") == 0;
         if (strcmp(argument, "--lanes") == 0 && i + 1 < argument_count)
         {
             lane_count = files_test_lanes(arguments[i + 1], lanes);
