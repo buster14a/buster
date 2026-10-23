@@ -349,3 +349,69 @@ batch size and prefetch distance around this improved path. It also combines
 the wider-prefix table with the hot-source path, with the extra table setup
 still charged. Production refinement and preparation remain unchanged while
 that qualification runs.
+
+## Seventh screen: bounded-window parameters
+
+All seven new variants passed the full target seed-116 suite. The
+[raw build, test and comparison output](screen-seventh-9700x.txt) records
+72 successful preprocessing processes and six setup-control processes. The
+[summary](screen-seventh-9700x.tsv), [build command](seventh-build.sh) and
+[orchestration](seventh-run.sh) retain the same frozen b1cb4be source and
+per-process locking. `tune` supplies the parameterized original-table path;
+`prefix28hot` supplies the larger-table alternative.
+
+| SQLite 3.53.4 | Refine range, ms | Lex median, ms | Whole-run range, ms |
+| --- | ---: | ---: | ---: |
+| 256 KiB window control | 1.544–1.547 | 2.409 | 11.623–11.643 |
+| 64 KiB windows | 1.535–1.542 | 2.464 | 11.637–11.767 |
+| 128 KiB windows | 1.535–1.543 | 2.418 | 11.583–11.693 |
+| 512-token blocks | 1.589–1.593 | 2.409 | 11.654–11.789 |
+| 2,048-token blocks | 1.544–1.545 | 2.412 | 11.599–11.648 |
+| 32-identifier batches | 1.711–1.713 | 2.415 | 11.863–11.922 |
+| One-batch prefetch distance | 1.571–1.579 | 2.416 | 11.655–11.704 |
+| Wider prefixes, 256 KiB windows | 1.468–1.472 | 2.411 | 11.629–11.648 |
+
+The 128 KiB original-table variant is still above 1.5 ms before the historical
+approximately 0.03 ms arena charge. Its SQLite 3.53.2 range is 1.531–1.549 ms;
+main.c's whole-run range is 36.444–36.757 ms. The 64 KiB window's additional
+lexing cost must also be charged, and its whole-run result is worse.
+
+The apparent 1.47 ms wider-prefix result does not satisfy the budget: fresh
+setup costs about 0.132 ms versus 0.069–0.071 ms for the original table. With
+that extra 0.062 ms and the historical charge, it costs about 1.56 ms. Its
+main.c whole-run range also regresses to 36.810–37.054 ms. No performance
+candidate is selected. A fresh profile of the 128 KiB path and a smaller
+intern-span representation are the next bounded checks.
+
+## Eighth screen: record prefetch and compact spans
+
+The [36-process target comparison](screen-eighth-9700x.txt),
+[summary](screen-eighth-9700x.tsv), [earlier build](build-eighth-9700x.txt),
+[orchestration](eighth-run.sh) and [fresh cycle profile](profile-eighth-9700x.txt)
+retain the frozen source, 21-pass processes and ordinary per-run locking.
+Both new variants pass the full target seed-116 suite. `earlyrecords` moves
+record prefetches immediately after each four bucket probes. `span32` stores
+only record offsets, deriving lengths from the next offset and an end sentinel;
+ordinary and parallel bulk insertion preserve contiguous records in ID order.
+Its [shared-file checks](span32-shared-local.txt),
+[guarded preparation checks](span32-prepare-local.txt) and
+[sanitizer run](span32-sanitizers-local.txt) also pass locally.
+
+| SQLite 3.53.4 | Refine range, ms | Whole-run range, ms |
+| --- | ---: | ---: |
+| 256 KiB window control | 1.538–1.551 | 11.580–11.674 |
+| 128 KiB window control | 1.530–1.542 | 11.565–11.769 |
+| Earlier record prefetch, 256 KiB | 1.540–1.547 | 11.628–11.646 |
+| Compact spans, 128 KiB | 1.544–1.554 | 11.614–11.683 |
+
+Neither candidate improves the required result. Compact spans also increase
+main.c's whole-run median from 36.646 ms to 37.084 ms. Both are rejected.
+The cycle profile remains diagnostic: profiling perturbs timings, and cycle
+samples can skid. Most refinement samples remain in pass B's hashing/probing;
+the source scan and token-column passes are smaller contributors.
+
+Additional local-only patches retain negative experiments: `gatherprobe`
+probes eight buckets with vector gathers; `noscan`, `gapgather` and `gapinline`
+replace the source scan with gap checks; `compact75`/`compact87` start the
+original layout with fewer buckets and higher occupancy. They passed the local
+refinement suite but regressed diagnostic timings and have no target result.
