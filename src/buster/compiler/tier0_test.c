@@ -1683,12 +1683,14 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
 // A copy's scratch register, its stacks' first free one (an XMM one from 16 bytes, a general one below), must be in
 // the frame's clobbers after either selection, so that no local makes it its home; past the tables, the function is
 // refused as too deep. On copies above every count of integer and floating values, of each size class, with both
-// paths' code compared.
+// paths' code compared. The values are then folded in postorder, each consumer's last operand the entry before it:
+// the doubles summed onto a zero pushed above them, the sum converted, and the integers summed onto that. The zero
+// takes one more floating depth, so that 16 doubles are too deep whatever the copy.
 static void tier0_test_copies(Tier0TestTally* tally)
 {
     enum
     {
-        capacity = 64,
+        capacity = 96,
     };
     uint8_t kinds[capacity];
     uint8_t classes[capacity];
@@ -1705,7 +1707,7 @@ static void tier0_test_copies(Tier0TestTally* tally)
         {
             for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
             {
-                // The values, the copy between the objects, then the values discarded, the last pushed first.
+                // The values, the copy between the objects, then the values folded and the sum discarded.
                 uint32_t count = 0;
                 for (uint32_t k = 0; k < integers + floatings; k += 1)
                 {
@@ -1725,10 +1727,26 @@ static void tier0_test_copies(Tier0TestTally* tally)
                 values[count + 2] = sizes[s];
                 const uint32_t copy = count + 2;
                 count += 3;
-                for (uint32_t k = integers + floatings; k > 0; k -= 1)
+                const uint32_t folds = floatings != 0 ? floatings + 2 : integers != 0 ? 1 : 0;
+                for (uint32_t k = 0; k < folds; k += 1)
+                {
+                    // A zero (a double's, past doubles), the doubles' sums, and their sum converted to an integer.
+                    kinds[count] = k == 0 ? BUSTER_TYPED_CONST : k + 1 == folds && floatings != 0 ? BUSTER_TYPED_CONVERT : BUSTER_TYPED_ADD;
+                    classes[count] = floatings != 0 && k + 1 < folds ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_I64;
+                    values[count] = 0;
+                    count += 1;
+                }
+                for (uint32_t k = 0; k < integers; k += 1)
+                {
+                    kinds[count] = BUSTER_TYPED_ADD;
+                    classes[count] = BUSTER_TYPED_CLASS_I64;
+                    values[count] = 0;
+                    count += 1;
+                }
+                if (integers + floatings != 0)
                 {
                     kinds[count] = BUSTER_TYPED_DISCARD;
-                    classes[count] = k - 1 < integers ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_F64;
+                    classes[count] = BUSTER_TYPED_CLASS_I64;
                     values[count] = 0;
                     count += 1;
                 }
@@ -1767,7 +1785,7 @@ static void tier0_test_copies(Tier0TestTally* tally)
                 const bool wide = sizes[s] >= 16;
                 const uint32_t depth = ready ? entries.depths[copy] : 0;
                 const uint32_t floating = ready ? entries.floating_depths[copy] : 0;
-                const bool too_deep = wide ? floating >= BUSTER_TIER0_FLOATING_DEPTHS : depth >= BUSTER_TIER0_INTEGER_DEPTHS;
+                const bool too_deep = floatings >= BUSTER_TIER0_FLOATING_DEPTHS || (wide ? floating >= BUSTER_TIER0_FLOATING_DEPTHS : depth >= BUSTER_TIER0_INTEGER_DEPTHS);
                 const uint32_t scratch = too_deep ? 0 : wide ? 1u << BUSTER_TIER0_XMM(floating) : 1u << tier0_integer_depths[depth];
                 bool counted = ready;
                 for (uint32_t path = 0; path < 2 && ready; path += 1)
@@ -2078,6 +2096,263 @@ static void tier0_test_variadic_calls(Tier0TestTally* tally, const Tier0Tables* 
     }
 }
 
+// An entry's last operand must have the class of the entry before it, which both paths read for it (in postorder,
+// that entry is the operand), so that tier0_validate must refuse each stream below whose operand has another class,
+// at that entry, and take the others: the same in postorder, a store that pushes before its consumer, DUP, values
+// left under a store of their class (an increment's old value, as #357's producer leaves it), and calls, which read
+// their own arguments' classes. Locals: 0 an I64, 1 a U64 (an indirect call's callee), 2 and 3 objects of 16 bytes;
+// call 0 is direct, of one I64, and call 1 indirect, of none.
+typedef struct Tier0TestEntry Tier0TestEntry;
+struct Tier0TestEntry
+{
+    uint8_t kind;
+    uint8_t class;
+    uint64_t value;
+};
+
+typedef struct Tier0TestOperands Tier0TestOperands;
+struct Tier0TestOperands
+{
+    const char* name;
+    // The entry tier0_validate must refuse, or UINT32_MAX for a stream in postorder.
+    uint32_t broken;
+    uint32_t count;
+    Tier0TestEntry entries[10];
+};
+
+#define BUSTER_TIER0_TEST_ONE 0x3ff0000000000000ull
+#define BUSTER_TIER0_TEST_TWO 0x4000000000000000ull
+
+static const Tier0TestOperands tier0_test_operand_fixtures[] = {
+    { "a binary operation after a SET_LOCAL of another class", 4, 7, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_TEST_ONE },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_TEST_TWO },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_F64, 0 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_F64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "the binary operation in postorder", UINT32_MAX, 7, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_TEST_ONE },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_TEST_TWO },
+        { BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_F64, 0 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_F64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "a compare after a SET_LOCAL of another class", 4, 7, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_TEST_ONE },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_TEST_TWO },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I32, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "a DISCARD after a COPY", 4, 6, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 5 },
+        { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2 },
+        { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 3 },
+        { BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, 16 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "the DISCARD in postorder", UINT32_MAX, 6, {
+        { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2 },
+        { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 3 },
+        { BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, 16 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 5 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "a CONVERT after a SET of another class", 4, 7, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 3 },
+        { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 9 },
+        { BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "the CONVERT in postorder", UINT32_MAX, 7, {
+        { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 9 },
+        { BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 3 },
+        { BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "a SET's value under a SET_LOCAL of its class", UINT32_MAX, 6, {
+        { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 9 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "a COPY's source after a SET_LOCAL of another class", 4, 6, {
+        { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2 },
+        { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 3 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, 16 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "a call's last argument under a SET_LOCAL", UINT32_MAX, 6, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 4 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "the call in postorder", UINT32_MAX, 6, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 4 },
+        { BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "an indirect call's callee under a SET_LOCAL", UINT32_MAX, 6, {
+        { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_I64, 1 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "the indirect call in postorder", UINT32_MAX, 6, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1 },
+        { BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_I64, 1 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "a returned value under a SET_LOCAL of its class", UINT32_MAX, 4, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 1 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_I64, 0 } } },
+    { "a returned value after a SET_LOCAL of another class", 3, 4, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_TEST_ONE },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_F64, 0 } } },
+    { "a returned value from under a call of nothing", 3, 4, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 5 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 4 },
+        { BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_I64, 0 } } },
+    { "the value from under the call in postorder", UINT32_MAX, 6, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 5 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 4 },
+        { BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, 0 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_I64, 0 } } },
+    { "the returned value in postorder", UINT32_MAX, 4, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 1 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_I64, 0 } } },
+    { "a branch's condition after a SET_LOCAL of another class", 3, 5, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 4 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "the branch in postorder", UINT32_MAX, 5, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1 },
+        { BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 4 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "an arm's value after a SET_LOCAL of another class", 5, 9, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1 },
+        { BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 6 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_TEST_ONE },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CLASS_F64, 7 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_TEST_TWO },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_F64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "the arm in postorder", UINT32_MAX, 9, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1 },
+        { BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 6 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 7 },
+        { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_TEST_ONE },
+        { BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CLASS_F64, 7 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_TEST_TWO },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_F64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "a store that pushes before its consumer", UINT32_MAX, 4, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 1 },
+        { BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "DUP before its consumer", UINT32_MAX, 5, {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 1 },
+        { BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+    { "an increment's old value under a SET_GLOBAL of its class", UINT32_MAX, 7, {
+        { BUSTER_TYPED_GLOBAL, BUSTER_TYPED_CLASS_I32, 1 },
+        { BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_I32, 0 },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1 },
+        { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_I32, 0 },
+        { BUSTER_TYPED_SET_GLOBAL, BUSTER_TYPED_CLASS_I32, 1 },
+        { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I32, 0 },
+        { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } } },
+};
+
+static void tier0_test_operands(Tier0TestTally* tally)
+{
+    static const uint8_t local_classes[4] = { BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID };
+    static const uint8_t local_flags[4] = { 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
+    static const uint32_t local_sizes[4] = { 0, 0, 16, 16 };
+    static const uint8_t local_alignments[4] = { 0, 0, 3, 3 };
+    static const SymbolId targets[2] = { 1, 0 };
+    static const uint32_t call_first[2] = { 0, 1 };
+    static const uint32_t call_counts[2] = { 1, 0 };
+    static const uint8_t call_variadic[2] = { 0, 0 };
+    static const uint8_t argument_classes[1] = { BUSTER_TYPED_CLASS_I64 };
+    static const AbiCall calls[2];
+    static const AbiLocation argument_locations[1];
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(tier0_test_operand_fixtures); c += 1)
+    {
+        const Tier0TestOperands* fixture = &tier0_test_operand_fixtures[c];
+        uint8_t kinds[10];
+        uint8_t classes[10];
+        uint64_t values[10];
+        for (uint32_t e = 0; e < fixture->count; e += 1)
+        {
+            kinds[e] = fixture->entries[e].kind;
+            classes[e] = fixture->entries[e].class;
+            values[e] = fixture->entries[e].value;
+        }
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = fixture->count;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_sizes = local_sizes;
+        function.local_alignments = local_alignments;
+        function.local_count = 4;
+        function.call_targets = targets;
+        function.call_first = call_first;
+        function.call_argument_counts = call_counts;
+        function.call_variadic = call_variadic;
+        function.calls = calls;
+        function.argument_locations = argument_locations;
+        function.argument_classes = argument_classes;
+        function.call_count = 2;
+        function.argument_count = 1;
+        const Tier0Check check = tier0_validate(&function);
+        const bool broken = fixture->broken != UINT32_MAX;
+        const bool refused = check.error != TIER0_OK && check.node == fixture->broken && check.rule != 0 && strstr(check.rule, "the entry before it") != 0;
+        tier0_test_expect(tally, broken ? refused : check.error == TIER0_OK, "operands", "%s: tier0_validate says %s at %u (%s)", fixture->name,
+                          check.error == TIER0_OK ? "valid" : "invalid", check.node, check.rule != 0 ? check.rule : "");
+    }
+}
+
 static int run_tier0_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -2162,6 +2437,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_errors(&tally);
                 tier0_test_report("errors", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_operands(&tally);
+                tier0_test_report("operands", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

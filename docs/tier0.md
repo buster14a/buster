@@ -66,7 +66,11 @@ Beside them are three tables:
 The ABI's locations come from `abi_assign`, which the front end runs once per unit over every signature. Calls are
 vectorized across the unit that way, and Tier 0 needs no type table.
 
-**Expressions** are in postorder, so each entry's last operand is the entry before it. The kinds are:
+**Expressions** are in postorder, so each entry's last operand is the entry before it, and both paths read that
+operand's class from the entry before (its stack, and the entry's template key and variant). `tier0_validate` refuses
+an entry whose last operand has another class. A value left under a store of its class, as an increment's `DUP` leaves
+the old one under its `SET`, has it too, and is compiled right. A call reads its arguments' classes from the calls
+table. The kinds are:
 
 - leaves: `CONST`, `LOCAL`, `LOCAL_ADDRESS`, `GLOBAL`, `GLOBAL_ADDRESS`, `DUP`;
 - unary: `NEG`, `NOT`, `CONVERT`, `LOAD`;
@@ -370,7 +374,15 @@ Before the programs, checks of their own:
   - `tier0_validate` must refuse a copy of no bytes or past 256, of a class, or from or to a constant, and take 256.
   - a copy of 1, 3, 8, 15, 16, 40 and 256 bytes above every count of 0 to 13 integer and 0 to 16 floating values.
     Both selections must count its scratch register among the frame's clobbers, or refuse the function as too deep
-    where its stack has none left, and both paths must compile it alike.
+    where its stack has none left, and both paths must compile it alike. The values are then folded in postorder, the
+    doubles onto a zero pushed above them, which takes one more floating depth: 16 doubles are too deep whatever the
+    copy.
+- **operands:** `tier0_validate` must refuse each of nine streams at the entry whose last operand has another class
+  than the entry before it (a binary operation, a compare and a `CONVERT` after a store of another class, a `DISCARD`
+  after a `COPY`, a `COPY`'s source, a returned value, one from under a call that returns nothing, a branch's
+  condition and an arm's value), and take 16 others:
+  their versions in postorder, a store that pushes, `DUP`, values left under a store of their class (an increment's
+  old value), and calls, whatever is under their arguments.
 - **variadic calls** (#363's review): two callers call a probe through a pointer, variadically, with six integers and
   three doubles past a named first one. The probe, records of the test's own, stores what it sees: the argument
   registers, rax, r11 and the vector registers. Its al must be 3, r11 its own address and the arguments the call's:
@@ -475,6 +487,27 @@ the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` m
     changes no value.
   - and absorbed lanes looking their value up as a local, past 32 locals (on main): the errors check's 40 locals,
     whose stray gather faults.
+  - and on the operands' classes:
+    - the rule left out: the operands check's nine refused streams taken;
+    - the class compared with the entry's own, not the entry before's: 120 failed checks, the generated programs'
+      streams refused among them.
+- **Every stream source against the operands' rule:** a scratch build validated every function each compile path
+  took, besides the validations the sources make, and printed every refusal. The sources were:
+  - the generator's programs, with and without the cross-check;
+  - `test-tier0`'s own streams;
+  - #356's variadic frames;
+  - the builtin lowering's recipes and helpers, the atomic RMW helpers' on the 9700X (their oracles need its Clang);
+  - the unwind tests and benchmarks;
+  - `benchmark-backend`;
+  - #357's producer (`test-checker`) and #322's adapter, on #357's branch.
+
+  Two tests' own streams broke the rule, and are rewritten in postorder here:
+  - the copies check's;
+  - one of the atomic RMW helpers' callers, which returned a value from under a call that returns nothing. It compiled
+    right only because the return was the stream's last entry, the stack effect it was given being one short.
+
+  A strict postorder rule (the entry before must push) would also have refused 110 of #357's streams, where a
+  post-increment's old value is left under a store of its class, which both paths compile right.
 
 ## Measurements
 
