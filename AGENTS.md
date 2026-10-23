@@ -327,7 +327,7 @@ designs and the compilers already built this way.
   provides `benchmark-dataflow`.
   `docs/dataflow.md` records the contracts and 9700X measurements.
 - `src/buster/compiler/ssa.c` promotes eligible locals over a completed CFG:
-  pruned frontier bitsets and segmented SIMD renaming, with a nonrecursive
+  shared dominance/frontier analysis and segmented SIMD renaming, with a nonrecursive
   predecessor-reading scalar twin and redundant-phi SCC cleanup. `test-ssa`
   checks both against an all-in-memory path interpreter and the SSA verifier;
   `benchmark-ssa [--only scalar|vector] [--after-scalar MS]` measures synthetic
