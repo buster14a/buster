@@ -1,0 +1,199 @@
+--- a/buster/compiler/c_preprocessor.c
++++ b/buster/compiler/c_preprocessor.c
+@@ -216,8 +216,10 @@
+ } PPRawStrings;
+ 
+ typedef struct PPOptions PPOptions;
++typedef struct PPReplayCache PPReplayCache;
+ struct PPOptions
+ {
++    PPReplayCache* replay;
+     // The file cache to read files through, made with file_cache_initialize for the same language mode and intern
+     // table; or null, for a cache of the translation unit's own.
+     FileCache* files;
+@@ -1015,6 +1017,8 @@
+ struct Preprocessor
+ {
+     PPOptions options;
++    bool replay_recording;
++    uint32_t replay_command_data;
+     InternTable* table;
+     bool vectorized;
+     uint32_t refine_flags;
+@@ -1194,6 +1198,15 @@
+ // ---------------------------------------------------------------------------------------------------------------------
+ // Token stacks
+ 
++static void pp_replay_read(const Preprocessor* pp, IdentId name);
++static void pp_replay_write(Preprocessor* pp, IdentId name, PPMacroId id);
++static void pp_replay_forbid(Preprocessor* pp);
++static void pp_replay_enter(Preprocessor* pp, uint32_t file);
++static void pp_replay_scratch(Preprocessor* pp, uint32_t location, uint32_t length, bool clean);
++static void pp_replay_begin(Preprocessor* pp, PPContext* context);
++static void pp_replay_finish(Preprocessor* pp, PPContext* context);
++static bool pp_replay_try(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index);
++
+ // Reserves the columns in turn, until one can't be (pp_tokens_release releases those that were).
+ static bool pp_tokens_reserve(PPTokens* tokens, uint32_t capacity)
+ {
+@@ -1371,6 +1384,7 @@
+         result = range->base + *used;
+         *used += length + 1;
+     }
++    pp_replay_scratch(pp, result, length, clean);
+     return result;
+ }
+ 
+@@ -3441,6 +3455,10 @@
+ 
+ BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
+ {
++    if (pp->replay_recording)
++    {
++        pp_replay_read(pp, id);
++    }
+     return (pp->is_macro[id / 64] >> (id % 64)) & 1;
+ }
+ 
+@@ -3449,6 +3467,10 @@
+ // Sets `name`'s macro (0 for none: a poisoned name then gets its own record back, as pp_poison makes it).
+ static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
+ {
++    if (pp->replay_recording)
++    {
++        pp_replay_write(pp, name, macro);
++    }
+     const bool poisoned = macro == 0 && pp->poison_count != 0 && ((pp->poisoned[name / 64] >> (name % 64)) & 1);
+     const PPMacroId id = poisoned ? pp_new_macro(pp, name) : macro;
+     if (poisoned && id != 0)
+@@ -4654,6 +4676,14 @@
+ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
+ {
+     PPContext* context = &pp->contexts[pp->context_count - 1];
++    if (probe_enabled && context->kind == BUSTER_PP_CONTEXT_FILE && pp->ranges[context->range].parent != BUSTER_PP_NONE)
++    {
++        probe_depth -= 1;
++        if (probe_depth == 0)
++        {
++            probe_ticks += __rdtsc() - probe_start;
++        }
++    }
+     const bool relexed = context->relexed;
+     const uint32_t relex_position = context->relex_position;
+     const uint32_t relex_file = context->relex_file;
+@@ -4678,6 +4708,7 @@
+         pp->include_depth -= pp->include_depth != 0;
+         pp_end_regions(pp, context->file == pp->main_file);
+         pp->datas[pp->files[context->file].data].guarded |= context->guard_taken;
++        pp_replay_finish(pp, context);
+     }
+     pp->context_count -= 1;
+     if (context->kind == BUSTER_PP_CONTEXT_FILE && pp->context_count != 0 && pp->contexts[pp->context_count - 1].kind == BUSTER_PP_CONTEXT_FILE)
+@@ -6493,6 +6524,7 @@
+ // storage by O((64 + 8) * N). Capacity/allocation exhaustion is fatal, never a successful truncated stream.
+ static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t begin, uint32_t stop, bool query)
+ {
++    pp_replay_forbid(pp);
+     PPContext* file = &pp->contexts[file_context];
+     const PPFileData* data = &pp->datas[file->data];
+     uint8_t* repairs = query ? &file->opaque_query_repairs : &file->opaque_direct_repairs;
+@@ -7852,6 +7884,17 @@
+ // pp_expansion_end, for __LINE__ and __FILE__ in a token a macro made).
+ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint32_t expansion_end)
+ {
++    const uint8_t replay_builtin = pp->macros[id].builtin;
++    if (replay_builtin != PP_BUILTIN_DEFINED && replay_builtin != PP_BUILTIN_FLT_EVAL_METHOD &&
++        !(replay_builtin >= PP_BUILTIN_HAS_ATTRIBUTE && replay_builtin <= PP_BUILTIN_HAS_WARNING) &&
++        !(replay_builtin >= PP_BUILTIN_IS_IDENTIFIER && replay_builtin <= PP_BUILTIN_BUILDING_MODULE))
++    {
++        if (pp->options.replay != 0 && pp->options.replay != 0)
++        {
++            probe_builtin[pp->macros[id].builtin] += 1;
++        }
++        pp_replay_forbid(pp);
++    }
+     const uint32_t saved_history = pp->history_current;
+     const uint32_t saved_origin = pp->diagnostic_origin;
+     pp->history_current = pp_history_expansion(pp, id, name.location, name.origin);
+@@ -8464,6 +8507,7 @@
+ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index, uint32_t name_location,
+                           uint32_t name_origin)
+ {
++    pp_replay_enter(pp, file);
+     PPFileData* data = &pp->datas[pp->files[file].data];
+     const bool guarded = data->guarded && data->guard != 0 && !pp->options.no_guard_skip && pp_is_defined(pp, data->guard);
+     const bool skipped = data->prepared && (data->once || guarded);
+@@ -8487,6 +8531,10 @@
+     }
+     else if (data->prepared || pp_prepare_data(pp, data, pp->files[file].path))
+     {
++        if (pp_replay_try(pp, file, parent, include_location, search_index))
++        {
++            return;
++        }
+         const uint32_t range = pp_add_range(pp, data->length, file, data->bytes, parent, include_location);
+         PPContext* context = range != BUSTER_PP_NONE ? pp_push_context(pp, BUSTER_PP_CONTEXT_FILE) : 0;
+         if (context != 0)
+@@ -8503,6 +8551,16 @@
+             pp->file_change_token = pp->output.count;
+             pp->file_change_location = pp->ranges[range].base;
+             pp->include_depth += pp->context_count > 1;
++            pp_replay_begin(pp, context);
++            if (probe_enabled && parent != BUSTER_PP_NONE)
++            {
++                if (probe_depth == 0)
++                {
++                    probe_start = __rdtsc();
++                    probe_headers += 1;
++                }
++                probe_depth += 1;
++            }
+         }
+     }
+ }
+@@ -9495,6 +9553,7 @@
+ // marker's after its digits, are expanded through a capture, which pp_finish_line takes.
+ static void pp_line(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind)
+ {
++    pp_replay_forbid(pp);
+     const PPFileData* data = &pp->datas[context->data];
+     const uint32_t hash = data->directive_hash[d];
+     const uint32_t end = data->directive_end[d];
+@@ -10261,6 +10320,7 @@
+ // gives them back.
+ static bool pp_pragma(Preprocessor* pp, uint32_t begin, uint32_t end, uint32_t location, bool from_operator, bool ident, uint32_t restore)
+ {
++    pp_replay_forbid(pp);
+     const PPTokens* tokens = &pp->arguments;
+     uint32_t operands = begin;
+     const PPPragmaKind kind = ident ? PP_PRAGMA_IDENT : pp_pragma_kind(pp, tokens, begin, end, &operands);
+@@ -13187,6 +13247,7 @@
+     pp->diagnostic_include_range = BUSTER_PP_NONE;
+     pp->fallback_directory = BUSTER_PP_NONE;
+     pp->predefines_data = BUSTER_PP_NONE;
++    pp->replay_command_data = BUSTER_PP_NONE;
+     pp->options = *options;
+     pp->table = table;
+     const PPPrepare prepare = pp_prepare_options(options);
+@@ -13417,6 +13478,7 @@
+ 
+ static void pp_release(Preprocessor* pp)
+ {
++    pp_replay_forbid(pp);
+     pp_tokens_release(&pp->output);
+     pp_tokens_release(&pp->arguments);
+     pp_tokens_release(&pp->captures);
+@@ -13521,6 +13583,7 @@
+         const uint32_t file = pp_virtual_file(pp, "<command line>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
+         if (file != BUSTER_PP_NONE)
+         {
++            pp->replay_command_data = pp->files[file].data;
+             pp_run_file(pp, file);
+         }
+         // The -include lines, in a file of their own named as clang's: its forced includes are in its <built-in> buffer,
+@@ -15539,3 +15602,5 @@
+     free(command);
+     return result;
+ }
++
++#include "c_preprocessor_replay.c"
