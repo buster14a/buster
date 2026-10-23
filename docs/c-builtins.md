@@ -258,3 +258,31 @@ are GCC's [bit operation builtins](https://gcc.gnu.org/onlinedocs/gcc/Bit-Operat
 and [integer overflow builtins](https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html),
 checked against Clang itself. No implementation or generated table from those
 projects was imported. The builtin spellings are the identifiers named in #148.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[The module boundary](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_builtin.c#L4)
+is descriptor lookup → `cbuiltin_fold`/`cbuiltin_fold_scalar` → folded value,
+overflow and status columns. At this pin, tests/benchmarks supply the inputs;
+ordinary checker calls do not establish full builtin source integration.
+
+Inputs are counted u32 IDs/type descriptors and u64 integer operands; outputs
+are u64 value and u32 overflow/status. Natural alignment suffices, no padding
+is required, and input/output columns do not overlap. Zero count permits null
+columns. Eight-lane kernels write status for every logical item, including
+undefined, unsupported and invalid types. Each independent constant call is
+ready only after the source checker has validated and converted its arguments.
+The overflow store and evaluation ordering belong to the eventual consumer;
+a folded boolean alone is not its complete behavior.
+
+Retain builtin ID at binding instead of repeating spelling lookup in later
+passes. This is an integration obligation, not evidence that the current
+source binder does so. Compare producer argument packing and result/store
+materialization together; a packed fold benchmark cannot prove this useful
+for sparse source calls. Disposition: retain the bounded module, with guarded
+and external-Clang checks in `test-builtins`. [#148](https://github.com/buster14a/buster/issues/148) owns binding/checking,
+selector/feature-table agreement and actual-source throughput, memory and
+fallback qualification. Do not advertise an unsupported builtin solely because
+its isolated fold kernel exists.

@@ -176,3 +176,23 @@ clang -march=native -dM -E -x c /dev/null
 The live tests construct their own `__has_builtin` inputs from the recorded
 name table. Clang is an external oracle; no implementation or external test
 corpus is vendored.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[The form table producer and readers](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/x86_target_forms.c#L351)
+are `x86_target_forms`/scalar → one byte per `X86_FORM_COUNT` entry →
+`x86_target_form_allowed` and `x86_target_validate`. The selected generated ISA
+is independent of the host's AVX-512 capability. Unknown requirement rows fail
+closed; encoder support alone does not make a form legal for a target.
+
+Build the table once for an unchanged target, retain it through all selecting
+consumers, and do not rebuild it per instruction. The complete table extent,
+not a caller-chosen short slice, is the output capacity. The record validator
+consumes a counted instruction array; scalar/vector table construction must
+agree, including final partial groups. Initialization/ownership is external.
+Disposition: retain the shared eligibility table and baseline default.
+`test-x86-target` validates policy and compiler predefines; [#180](https://github.com/buster14a/buster/issues/180)/[#141](https://github.com/buster14a/buster/issues/141) own
+integration of all real selectors and corpus ISA checks. Table-construction
+ns/table is not a measured selection or whole-compiler saving.
