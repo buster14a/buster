@@ -298,6 +298,9 @@ jobs:
           # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
           # --cross-check also runs them beside clang -O0's builds of the same programs as C.
           ./build/compiler test-tier0 --cross-check
+          == Test the IR and typed-stream lowering
+          ./build/compiler test-ir
+          ./build/compiler test-ir-lowering
           == Test the lanes
           ./build/compiler test-lanes
           == Test the direct path's executables
@@ -629,3 +632,13 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-backend
+
+      - name: Benchmark the IR verifier and derived arrays
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir
+
+      - name: Benchmark typed-stream lowering through IR verification
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-lowering
