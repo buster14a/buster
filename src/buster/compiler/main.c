@@ -269,6 +269,9 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_gvn_test.c"
 #include "buster/compiler/ir_optimize_licm.c"
 #include "buster/compiler/ir_optimize_licm_test.c"
+#include "buster/compiler/ir_optimize_sroa.c"
+#include "buster/compiler/ir_optimize_sroa_test.c"
+#include "buster/compiler/ir_optimize_passes_benchmark.c"
 
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
 // check-call-graph and test-call-graph commands.
@@ -613,6 +616,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-licm") == 0)
     {
         result = run_ir_licm_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-sroa") == 0)
+    {
+        result = run_ir_sroa_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-optimize-passes") == 0)
+    {
+        result = run_ir_optimize_passes_benchmark(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-optimize") == 0)
     {

@@ -152,26 +152,42 @@ revision validation must be recorded separately.
 
 ## Remaining issue scope and acceptance
 
-The SCCP/dead-code/CFG group is implemented against #131, but does not complete
-#139. The following scope remains tracked:
+The SCCP/dead-code/CFG group and the following separate slices are implemented
+against the shared IR, with local verifier and independent execution checks:
+
+- [Value numbering](ir-value-numbering.md) uses congruence partition
+  refinement, dominance-qualified substitution and an independent scoped
+  scalar expression table. Cyclic congruences are compared semantically.
+- [Loop-invariant motion](ir-loop-motion.md) consumes #174's loops and
+  dominance, with exact vector/worklist output and conservative total-operation
+  motion into existing dedicated preheaders.
+- [Private-field scalar replacement](ir-scalar-replacement.md) splits
+  nonescaping, disjoint constant-offset fields. Tests compose its output with
+  both upstream #134 promotion paths, including conditional stores and loops.
+- The [additional pass-cost harness](ir-optimization-measurements.md) measures
+  complete GVN, LICM and field-splitting calls on frozen inputs. Its local
+  sanitizer smoke checks provide no target performance claim.
+
+These slices do not complete #139. The following work remains tracked:
 
 - Floating numeric evaluation needs an explicit environment contract.
 - CFG cleanup still needs nonempty single-predecessor merging and metadata
   compaction where measurements justify its cost.
-- Value numbering through partition refinement, with dominance-qualified
-  replacement and a scoped scalar hash-table comparison.
-- Small-aggregate scalar replacement, feeding #134's promotion interface.
-- Loop-invariant motion using #174's loops and dominance information, with
-  safe preheaders and operation-specific speculation rules.
 - Translation-unit inlining ordered by call-graph components, with recursive
-  components left alone and bounded code growth.
+  components left alone and bounded code growth, remains a separate slice.
+- The aggregate-size limit, motion profitability, pass order and repetitions
+  require measurement. Conservative operation and alias exclusions are
+  documented by each implemented stage.
+- Complete pipeline integration, corpus and randomized-IR qualification,
+  all-pass and individual-pass differential tests, and 9700X compile-time
+  and emitted-program runtime acceptance remain pending.
 
 Each transformation requires before/after verifier checks and independent
 execution comparisons. Every function of the source corpora and randomized
 IR must exercise the sweep and scalar paths; #142 must compare passes both on
-and individually off. Complete compiler consumers, source lowering and those
-corpus tests are separate dependencies. Local diagnostic tests do not satisfy
-9700X acceptance.
+and individually off. Those checks must use the complete source-lowering
+and compiler-consumer pipeline. Local diagnostic tests do not satisfy 9700X
+acceptance.
 
 The required measurements are full pass time, including operand preparation,
 analysis, remapping, allocation and verifier costs where enabled, plus emitted

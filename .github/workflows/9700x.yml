@@ -305,6 +305,7 @@ jobs:
           ./build/compiler test-ir-optimize
           ./build/compiler test-ir-gvn
           ./build/compiler test-ir-licm
+          ./build/compiler test-ir-sroa
           == Test experimental Tier 1 scheduling and model coverage
           ./build/compiler test-tier1-schedule
           # This bounded smoke also executes original and reordered machine code against its independent reference.
