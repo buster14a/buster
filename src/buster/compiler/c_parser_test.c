@@ -304,6 +304,12 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "[[deprecated]] int x; int y [[maybe_unused]];\n", "", 0 },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
     { "int x = (int){1}; int a[3] = { [1 ... 2] = 0 };\n", "", 0 },
+    // GNU's single array designator may omit '=', including a range, a prefix operand and a braced initializer.
+    { "int a[] = { [0] 1, [3] 4, [4] -1, [5] (int)2 };\n", "", 0 },
+    { "int a[2] = { [0 ... 1] +1 }; int b[1][2] = { [0] { 1, 2 } };\n", "", "c17" },
+    // GNU's old-style field designator uses ':' in place of '.member =', including a typedef-shadowing member.
+    { "struct p { int x, y; }; struct p q = { y: 2, x: 1 };\n", "", 0 },
+    { "typedef int T; struct p { int T, x; }; struct p q = { T: 1, x: 2 };\n", "", "c17" },
     { "void f(int x) { asm volatile (\"\" : [r] \"=r\" (x) : \"r\" (x) : \"memory\"); }\n", "", 0 },
     { "int f(a, b) int a; char b; { return a + b; }\n", "", 0 },
     { "int x = 1 ? : 2;\n", "", 0 },
@@ -412,6 +418,10 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void (f(void)) {}\nint (*g(void))[3] { return 0; }\n", "", 0 },
     { "int (q)(int x) { return x; }\nint *(r)(void) { return 0; }\n", "", 0 },
     { "int (*p)(int) { return 0; }\n", "1:14: expected ';' after top level declarator", 0 },
+    // A function's typedef declaration cannot carry a body, even though the declarator is a function's.
+    { "typedef int f(int x) { return x; }\n", "1:1: function definition declared 'typedef'", 0 },
+    { "typedef int f(int x) { return x; }\nint g(void) { return f(1); }\n", "1:1: function definition declared 'typedef'", 0 },
+    { "int typedef f(void) { return 0; }\n", "1:5: function definition declared 'typedef'", 0 },
     { "int f(int a), g(int b) { return b; }\n", "1:23: expected ';' after top level declarator", 0 },
     { "int (*f(void)) x\n", "1:16: expected function body after function declarator", 0 },
     // The end of an identifier is where its spelling ends: a UCN and a line splice make it longer than its bytes.
@@ -444,6 +454,10 @@ static const ParseTestSnippet parse_test_snippets[] =
     // An initializer's designators take `.`, never `->`.
     { "struct S { int a; } s = { ->a = 1 };\n", "1:27: expected expression", 0 },
     { "struct S { struct { int b; } a; } s = { .a->b = 1 };\n", "1:43: expected '=' or another designator", 0 },
+    // Only a single array subscript allows GNU's missing '='; field and chained designators still require it.
+    { "struct S { int a; } s = { .a 1 };\n", "1:30: expected '=' or another designator", 0 },
+    { "int a[1][2] = { [0][1] 1 };\n", "1:24: expected '=' or another designator", 0 },
+    { "struct S { int a[1]; } s = { .a[0] 1 };\n", "1:36: expected '=' or another designator", 0 },
     // K&R definitions: the name's own identifier list, through the declarator's groups, in C17 and before.
     { "int (f(x)) int x; { return x; }\nint (*g(y)) int y; { return 0; }\n", "", 0 },
     { "int f(x) int x; 5\n", "1:17: expected function body after function declarator", 0 },
