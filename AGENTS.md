@@ -160,6 +160,12 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `ExecutableOptions.symbols` provides optional regular symbol output without
+  DWARF. `test-executable` covers the attachment and unchanged-destination
+  refusal; `test-debug --cross-check` covers the debug-only consumers. The
+  [symbol-output contract](docs/executable-symbols.md) records producer
+  ownership, supported definitions and pending parallel/performance gates.
+
 - `src/buster/compiler/c_gnu.c` retains bounded GNU attribute groups/arguments
   and declarator asm labels when `ParseOptions.extension_metadata` is enabled.
   `test-gnu --clang` checks exact records, scalar/vector agreement and guarded
