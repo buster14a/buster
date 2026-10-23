@@ -177,6 +177,8 @@ jobs:
           ./build/compiler test-gnu --clang
           == Test scoped name-resolution kernels
           ./build/compiler test-bindings
+          == Test deferred-body source-position environments
+          ./build/compiler test-environments
           == Test C-source binding identities and scope semantics
           ./build/compiler test-parser-bindings --clang
           == Compare source binding columns on main.c
@@ -672,6 +674,20 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-types
+
+      - name: Benchmark source-position environments
+        # Synthetic environment handoff only; actual deferred checker/corpus acceptance stays with #113.
+        # The runner hook already holds the 9700X lock. Isolate both vector states in independent processes.
+        # This step also checks every benchmark result against its scalar twin.
+        run: |
+          taskset -c 2 ./build/compiler benchmark-environments
+          for sample in 1 2 3; do
+            echo "Environment observation process $sample"
+            taskset -c 2 ./build/compiler benchmark-environments --only full-vector
+            taskset -c 2 ./build/compiler benchmark-environments --only full-vector --after-scalar 100
+            taskset -c 2 ./build/compiler benchmark-environments --only types-vector
+            taskset -c 2 ./build/compiler benchmark-environments --only types-vector --after-scalar 100
+          done
 
       - name: Benchmark the calling convention
         run: |
