@@ -118,7 +118,7 @@ static void check_test_body_binding_exit_points(CheckTest* test)
         check_test_expect(test, built, "body early/late/omitted restore trace construction");
         if (built)
         {
-            const CBodyRange body =
+            CBodyRange body =
             {
                 .begin = 2,
                 .end = 8,
