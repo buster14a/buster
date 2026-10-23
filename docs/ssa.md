@@ -238,6 +238,7 @@ and lane waits were not executed there.
 ```sh
 ./build/compiler benchmark-ssa
 ./build/compiler benchmark-ssa --only scalar
+./build/compiler benchmark-ssa --only vector
 ./build/compiler benchmark-ssa --only vector --after-scalar 200
 ```
 
@@ -259,6 +260,11 @@ benchmark.
 Run target measurements through the shared 9700X lock, pinned to one permitted
 CPU, with the ownership variables from AGENTS.md. CI includes `test-ssa`,
 `test-ssa-ir` and the synthetic benchmark in its existing 9700X job.
+The workflow runs the normal interleaved benchmark, then three separate
+processes per mode: scalar alone, vector alone, and vector samples immediately
+after 200 ms of scalar work. This follows the coding style's requirement to
+measure both sustained execution and the transition from lighter work. Interpret
+the isolated and conditioned modes separately from the interleaved medians.
 
 The construction core passed the complete protected
 [9700X workflow](https://github.com/buster14a/buster/actions/runs/39933567015)

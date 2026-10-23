@@ -531,6 +531,13 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ssa
+          # Compare isolated execution and vector samples after warm scalar work across separate processes.
+          for repetition in 1 2 3; do
+              echo "SSA repetition $repetition"
+              taskset -c "$cpu" ./build/compiler benchmark-ssa --only scalar
+              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector
+              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector --after-scalar 200
+          done
 
       - name: Benchmark the preprocessor fuzz harness
         run: |
