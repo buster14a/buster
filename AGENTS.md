@@ -248,7 +248,7 @@ designs and the compilers already built this way.
   with exit status 0 for a unit without errors and 1 otherwise. Nothing is
   written yet. With no file it prints its usage and exits with status 1. It
   includes most of the compiler and all of its tests, and `build.sh` compiles
-  it as eight translation units: `main.c` itself, the driver's unit, and each
+  it as ten translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
@@ -3427,6 +3427,18 @@ file, for perf. Run it under the 9700X's lock with `taskset -c 2`;
 `docs/c-parser.md` has the numbers for `sqlite3.c`, the libc corpus and `main.c`.
 The default 9700X job runs it on `main.c`, pinned to one allowed CPU; like the
 others, its measurements are informational.
+
+## Fragment experiment tests
+
+The test-only expression-fragment experiment is described in
+[docs/c-parser-fragments.md](docs/c-parser-fragments.md).
+`./build/compiler test-fragment-interleave [--seed N]` compares scalar and
+AVX-512 byte routing, including exhaustive short masks and exact protected-page
+boundaries. `./build/compiler test-fragments` checks the scalar recognizer's
+experimental sink, compiled separately in `main_unit_fragments.c`; production
+parser units have no fragment sink. These checks do not establish semantic or
+SSA IR identity. The complete #107 comparison still requires the shared
+semantic consumer and its actual output.
 
 ## Scoped binding kernels
 
