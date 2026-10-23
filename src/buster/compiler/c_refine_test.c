@@ -1304,6 +1304,116 @@ static bool refine_test_initialize_variants(RefineTestState* state)
     return result;
 }
 
+// Every combination of matching prefix dwords in a four-slot bucket, including multiple candidates and no match.
+// The expected first candidate comes from the input pattern, independently of the probe's mask arithmetic.
+static bool refine_check_probe(void)
+{
+    const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, 2 * page_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool result = mapping != MAP_FAILED && mprotect(mapping, page_bytes, PROT_READ | PROT_WRITE) == 0;
+    uint64_t failures = 0;
+    uint64_t checked = 0;
+    if (result)
+    {
+        uint32_t* bucket = (uint32_t*)(mapping + page_bytes - BUSTER_INTERN_BUCKET_BYTES);
+        const uint32_t prefix[4] = {
+            0x64636261,
+            0x68676665,
+            0x6c6b6a69,
+            UINT32_MAX,
+        };
+        const __m128i key = _mm_loadu_si128((const __m128i*)prefix);
+        for (uint32_t high = 0; high < 2; high += 1)
+        {
+            for (uint32_t pattern = 0; pattern < 4096; pattern += 1)
+            {
+                IdentId expected = 0;
+                for (uint32_t slot = 0; slot < BUSTER_INTERN_BUCKET_SLOTS; slot += 1)
+                {
+                    const uint32_t matches = (pattern >> (3 * slot)) & 7;
+                    for (uint32_t word = 0; word < 3; word += 1)
+                    {
+                        bucket[4 * slot + word] = prefix[word] ^ (uint32_t)(((matches >> word) & 1) == 0);
+                    }
+                    const IdentId id = high != 0 ? BUSTER_INTERN_MAX_IDS - 4 + slot : slot + 1;
+                    bucket[4 * slot + 3] = id;
+                    if (expected == 0 && matches == 7)
+                    {
+                        expected = id;
+                    }
+                }
+                failures += refine_probe((const uint8_t*)bucket, key) != expected;
+                checked += 1;
+            }
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 2 * page_bytes);
+    }
+    printf("probe: %lu failures in %lu guarded bucket patterns\n", (unsigned long)failures, (unsigned long)checked);
+    return result && failures == 0;
+}
+
+// Make growth happen at and around the pipelined batch boundaries, with names repeated from the preceding batch
+// and many longer names sharing a prefix. A prefetched batch must be refreshed if the preceding inserts grew it.
+static bool refine_check_batch_growth(void)
+{
+    static const uint32_t remaining[] = {
+        1,
+        4,
+        15,
+        16,
+        31,
+        32,
+        63,
+        64,
+    };
+    static uint8_t source[128000];
+    uint64_t failures = 0;
+    for (uint32_t case_index = 0; case_index < BUSTER_ARRAY_LENGTH(remaining); case_index += 1)
+    {
+        RefineTestState state = { 0 };
+        bool passed = intern_initialize_with(&state.scalar_table, 256) && refine_oracle_initialize(&state.oracle);
+        for (uint32_t variant = 0; passed && variant < REFINE_VARIANT_COUNT; variant += 1)
+        {
+            passed = intern_initialize_with(&state.variant_tables[variant], 256);
+        }
+        if (passed)
+        {
+            const uint32_t padding = state.scalar_table.capacity - state.scalar_table.count - remaining[case_index];
+            uint64_t length = 0;
+            for (uint32_t i = 0; i < padding; i += 1)
+            {
+                length += (uint32_t)snprintf((char*)source + length, sizeof(source) - length, "pad%06u ", i);
+            }
+            passed = refine_test_compare(&state, source, length, 0, "growth preparation");
+            length = 0;
+            for (uint32_t i = 0; i < 1025; i += 1)
+            {
+                length += (uint32_t)snprintf((char*)source + length, sizeof(source) - length, "a%08u common_prefix_long_%08u a%08u\n", i, i, i >= 64 ? i - 64 : 0);
+            }
+            passed &= refine_test_compare(&state, source, length, 0, "pipelined growth");
+            passed &= refine_test_compare(&state, source, length, 0, "pipelined growth repeated");
+            passed &= state.scalar_table.bucket_mask > 255;
+            for (uint32_t variant = 0; variant < REFINE_VARIANT_COUNT; variant += 1)
+            {
+                passed &= state.variant_tables[variant].bucket_mask == state.scalar_table.bucket_mask;
+            }
+        }
+        failures += !passed;
+        intern_release(&state.scalar_table);
+        for (uint32_t variant = 0; variant < REFINE_VARIANT_COUNT; variant += 1)
+        {
+            intern_release(&state.variant_tables[variant]);
+        }
+        arena_release(&state.oracle.arena);
+        arena_release(&state.arena);
+    }
+    printf("batch growth: %lu failures in %lu boundary cases\n", (unsigned long)failures, (unsigned long)BUSTER_ARRAY_LENGTH(remaining));
+    return failures == 0;
+}
+
 static bool refine_test_parse_u64(const char* text, uint64_t* value)
 {
     uint64_t number = 0;
@@ -1363,11 +1473,13 @@ static int run_refinement_tests(int argument_count, char** arguments)
     }
     else
     {
-        bool passed = refine_check_hash(&random);
+        bool passed = refine_check_probe();
+        passed &= refine_check_hash(&random);
         passed &= refine_check_long_hashes(&random);
         passed &= refine_check_aligned_flips(&random);
         passed &= refine_check_names(&state.scalar_table);
         passed &= refine_check_table(&random);
+        passed &= refine_check_batch_growth();
         passed &= refine_check_fixtures(&state);
         passed &= refine_check_spellings(&state, random % 64);
         passed &= refine_check_random(&state, &random, count);

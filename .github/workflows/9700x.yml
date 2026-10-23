@@ -131,6 +131,48 @@ jobs:
           test -x build/compiler
           test "$(find build -type f -executable | wc -l)" -eq 1
 
+      - name: Qualify the draft refinement budget candidates
+        # Temporary #116 experiment. The normal runner hooks hold the host lock for this whole CI job.
+        # Remove this branch-only step before merging the selected implementation.
+        if: github.head_ref == 'codex/116-refinement-budget'
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          evidence=docs/measurements/refinement-budget-2026-10-23
+          inputs=/var/lib/buster-9700x/refine116-inputs.Ad1OBe
+          mkdir -p build/refine116
+          cat <<CHECKSUMS | sha256sum -c -
+          b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189  $inputs/sqlite-3.53.4.c
+          0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d  $inputs/sqlite-3.53.2.c
+          d9bcc9e2c979d19eea5ed611e8fa971a2af357494c9526fd27d125751e3d9f95  src/buster/compiler/c_refine.c
+          CHECKSUMS
+          git rev-parse HEAD
+          date -u
+          uname -srvmo
+          cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor /sys/devices/system/cpu/cpu10/online
+          executables=()
+          for variant in base compress batch4 fused4 bitmap short16 outline combined; do
+              overlay="build/refine116/$variant"
+              mkdir -p "$overlay/buster/compiler"
+              cp src/buster/compiler/c_refine.c "$overlay/buster/compiler/c_refine.c"
+              if [ "$variant" != base ]; then
+                  patch --fuzz=0 "$overlay/buster/compiler/c_refine.c" "$evidence/candidates/$variant.patch"
+              fi
+              sha256sum "$overlay/buster/compiler/c_refine.c"
+              clang -O3 -g -march=native -I"$overlay" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
+                  "$evidence/preprocessor-main.c" -o "build/refine116/pp-$variant"
+              clang -O3 -g -march=native -I"$overlay" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
+                  "$evidence/refinement-test-main.c" -o "build/refine116/test-$variant"
+              taskset -c 2 "build/refine116/test-$variant" --count 2000 --seed 42 src "$inputs/sqlite-3.53.4.c"
+              executables+=("build/refine116/pp-$variant")
+          done
+          sha256sum build/refine116/pp-*
+          ./build/compiler ab --rounds 3 --cpu 2 "${executables[@]}" \
+              -- --only vectorized "$inputs/sqlite-3.53.4.c" \
+              -- --only vectorized "$inputs/sqlite-3.53.2.c" \
+              -- --only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c \
+              | tee build/refine116/screen.txt
+
       - name: Write clang's predefines for the compiler's flags
         # For the steps that preprocess the compiler's own translation units: --predefines supplies the macro effects of
         # flags such as -funsigned-char.
