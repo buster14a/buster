@@ -1,0 +1,9 @@
+binary_sha256: 48e7f97e6fcd963c4396cc496c13a9cdc6338b41294d799cd912ff09eb256dff
+cwd: /workspace/scratch/61c60105fb18/buster
+command: SOURCE_DATE_EPOCH=1792454400 PATH=/workspace/scratch/61c60105fb18/cloud-bin:$PATH ./build.sh check-call-graph
+exit_code: 0
+
+allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_conditional -> main_unit_frontend.ll:preprocessor_fuzz_random_group -> main_unit_frontend.ll:preprocessor_fuzz_random_statement -> main_unit_frontend.ll:preprocessor_fuzz_random_conditional
+allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_expression -> main_unit_frontend.ll:preprocessor_fuzz_random_expression
+allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_invocation -> main_unit_frontend.ll:preprocessor_fuzz_random_argument -> main_unit_frontend.ll:preprocessor_fuzz_random_invocation
+call graph: 30 translation units, 15309 functions, 83588 calls between them, 0 cycles, 3 allowed
