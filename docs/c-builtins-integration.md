@@ -335,6 +335,12 @@ and are absent from the ordinary 3,775-record catalogue. A catalogue miss is
 not a general `__has_builtin` answer. Header/language restrictions and custom
 rules remain consumer obligations.
 
+`builtin_intrinsic_own_main_lookup` exposes that frozen subset, including its
+two explicit gap rows. `builtin_intrinsic_own_main_x86_in_scope` accepts exactly
+the 1,457 recorded x86/x86-64 members. Neither a name prefix nor membership in
+the complete installed catalogue attests the audited operand-constraint scope.
+Membership also does not replace successful ordinary prototype checking.
+
 `c_builtin_intrinsic_types.c` decodes bounded Clang 23.1.1 descriptors through
 the existing Linux/x86-64 LP64 type factories. It retains exact integer
 identities, fixed vector element/lane types, parameter adjustment and a
@@ -375,6 +381,18 @@ evaluating it. Nontemporal stores retain explicit initialization policy and
 conversions. Floating arithmetic/conversions retain environment and exception
 obligations. Missing vector constant and complex memory representations stay
 explicit; the module provides no numerical fold or runtime implementation.
+
+An optional bounded shuffle-index witness distinguishes strict C ICE from a
+GNU source extension. It contains one byte per scalar index, excluding the
+first two vector arguments; its exact count is checked before access. A GNU
+witness requires `allow_gnu_index_ice`. Null/zero preserves the original strict
+local-ICE fallback. Source witnesses preserve payload, type, effect, fault and
+range checks, and the producer retains the extension diagnostics. In
+particular, a source-certified GNU fold must not retain a stale runtime shift
+fault in its supplied value. Ordinary C complex-scalar initialization of a
+vector nontemporal destination is rejected; matching complex memory types
+retain their explicit payload gap. System-macro-specific conversion exceptions
+are not attested by this ordinary source contract.
 
 ## Validation commands
 

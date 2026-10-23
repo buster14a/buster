@@ -29,7 +29,7 @@
     "binary_sha256": "bebe0ac35ed9c2c3e86015dd12865aa2cb99921cd7ae8ef8242a06b4de1eeac6",
     "build_arguments": "clang -std=c17 -O2 -march=native -Wall -Wextra -Werror -pedantic clang_builtin_metadata.c -o clang_builtin_metadata",
     "base_arguments": "--builtins /usr/include/clang/Basic/Builtins.inc --x86 /usr/include/clang/Basic/BuiltinsX86.inc --x86-64 /usr/include/clang/Basic/BuiltinsX86_64.inc --version /usr/include/clang/Basic/Version.inc",
-    "host_policy": "Each build and each generation invocation ran under its own ordinary exclusive.sh lock; both generation exits were zero."
+    "host_policy": "Each build and each generation invocation ran under its own ordinary exclusive.sh lock; all three generation exits were zero."
   },
   "outputs": [
     {
@@ -46,6 +46,15 @@
       "name_filter": "own-main.names.txt",
       "name_filter_sha256": "60e91257bf6370569f2f1f7df385275e3bea6f8890fb6c2b335e001b51917c2b",
       "scope": "1457 ia32 spellings and 49 others from the frozen own-main identifier inventory; bit_cast and va_list are explicit non-prototype gap rows."
+    },
+    {
+      "path": "../../src/buster/compiler/generated/clang_builtin_own_main_23_1_1.inc",
+      "additional_arguments": "--names own-main.names.txt --format c",
+      "rows": 1506,
+      "sha256": "9b05b55119d480c3b256922cdb04687c726d19ff61907e9345dc21da831d0985",
+      "name_filter": "own-main.names.txt",
+      "name_filter_sha256": "60e91257bf6370569f2f1f7df385275e3bea6f8890fb6c2b335e001b51917c2b",
+      "scope": "The same frozen 1506-row inventory in C record format supplies exact audited membership, including 1457 x86/x86_64 records and the two explicit gap rows. No ordinary prototype or source capability is implied."
     }
   ],
   "qualification_limit": "Metadata is not implementation, ordinary typing of custom signatures, source ICE acceptance, complete target-feature closure, source dispatch or runtime support. Handwritten Sema constraints remain a separate audited scope."
