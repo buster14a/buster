@@ -214,6 +214,15 @@ designs and the compilers already built this way.
   the API and the checking, C selector, feature-query and corpus integration
   still required before #148 can close.
 
+- The companion [builtin integration guide](docs/c-builtins-integration.md)
+  records the shared capability catalog, typed integer/varargs/misc actions and
+  existing-stream runtime expansion. `test-check-builtins`,
+  `test-check-varargs`, `test-check-builtins-misc`, `test-builtin-lowering` and
+  `test-builtin-varargs` distinguish semantic constraints from emitted execution.
+  Source hooks belong to the active #133 owner. Incoming variadic frame setup,
+  full Tier 1 coverage and corpus acceptance remain separate requirements.
+  Every build/test/measurement uses the approved 9700X lock per run.
+
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
   observation table and scalar/AVX-512 cost-column lookups. `test-x86-zen5`
   checks unknowns, guard-page tails and generated microbenchmark loops;
@@ -2632,10 +2641,10 @@ child that dies before its message or its exit.
 Run it under the 9700X's lock without `taskset`, and with `--directory` on each
 file system to measure. `docs/object-writer-and-linker.md` ("The floors") has
 the original numbers; [linker scaling](docs/linker-scaling.md) records the
-frozen lane sweep, independently controlled write factors, and filesystem
-limits from #87. The default 9700X job runs it after benchmark-link, where that
-runs the linkers' side (the machine's floors don't depend on a pull request
-either); like the others, its measurements are informational.
+frozen physical-core and SMT lane sweeps, independently controlled write
+factors, and filesystem limits from #87. The default 9700X job runs it after
+benchmark-link, where that runs the linkers' side (the machine's floors don't
+depend on a pull request either); like the others, its measurements are informational.
 
 ## Foreign tests
 
@@ -3193,16 +3202,38 @@ changes; `docs/c-preprocessor.md` ("The predefined macros") has the procedure.
 
 ## Preprocessor benchmark
 
+The exact commands, pinned inputs and raw reports for the #117 acceptance
+refresh are in `docs/measurements/preprocessor-117-2026-10-23/README.md`.
+Its invocation scripts take a separate normal shared-host lock for each command.
+
 `./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
 [--read-limit N,...] [options] file...` preprocesses each file from nothing per
 run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
-and time (read, lex, refine, directive tables, main loop), the release after the
+and time (read, lex, refine, directive tables, main loop/setup), the release after the
 run (the files' mappings among it), `-E -P`'s throughput with its printing
 (input bytes and output tokens per second, #124) and what a run did
 (directives, runs, expansions, invocations, pastes, the `#if` lines and their
 lengths, and the inclusions skipped by guards and by `#pragma once`).
+It also reports explicit file-probe `open`/`fstat` attempts, including failed
+opens and uncached aliases, the subset made by include searches, and the
+`stat` attempts for embed lookup and search-directory setup. Repeated cached
+include hits and misses make no file-probe calls. These are the preprocessor's
+explicit calls, excluding the benchmark harness and libc's directory
+enumeration internals. Include lookup time includes path construction, cache
+lookup and first byte acquisition; embed lookup time includes its search and
+`stat` calls. Both are inclusive intervals that overlap the phase breakdown;
+never add them to it or subtract them again. Preparation and execution of the
+found header are outside include lookup. The main-loop remainder also contains
+initialization, as it did before this label made that boundary explicit.
+The final-output copy shares count file runs, buffer runs and direct
+object-like copies only when they write to the final stream; intermediate
+captures do not enter the numerator. Their denominator is the final output's
+tokens, including pragma records and one record per embed resource. The
+remaining tokens are emitted individually or lifted from captured pragmas.
+The older per-pass run totals still include intermediate captures and must
+not be divided by the final output count to claim a share of that output.
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.
@@ -3487,6 +3518,17 @@ and the combined parser/adapter/consumer path. Run benchmarks on the locked
 opt-in adapter, the declaration-token columns, corpus provenance and the
 explicit cost of its scalar grammar replay. The syntax-only driver does not
 request these columns.
+
+## Selective lowering
+
+`./build/compiler test-lowering --clang` compares selective function/object
+emission planning with an independent graph oracle and Clang object symbols
+on original, manually modeled C fixtures. `benchmark-lowering` measures
+synthetic graph preparation and vector/scalar selection; use the shared 9700X
+lock and pin timings to CPU 2. [The lowering guide](docs/c-lowering.md) records
+the semantic producer contract and the source/checker/backend integration
+still required for #129. These commands do not establish corpus lowering or
+whole-compiler savings.
 
 ## Type tests
 
