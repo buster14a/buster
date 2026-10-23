@@ -2911,7 +2911,8 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   - each difference from clang that #109's fuzzing found, minimized, and the
     ones probing around it found;
   - raw-string errors in active text, definitions and unused macro arguments,
-    suppressed in skipped text and opaque headers/messages; exact Clang
+    suppressed in excluded group bodies and opaque headers/messages (an
+    untaken `#elif` line still diagnoses); exact Clang
     diagnostic/location comparisons; contextual recovery beyond 8/64/256
     repairs with earlier macro snapshots retained, and failure injection for
     allocation, data-index exhaustion and an unchanged recovery mask (#285);

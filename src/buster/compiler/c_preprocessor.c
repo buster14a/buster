@@ -4696,7 +4696,8 @@ static void pp_end_regions(Preprocessor* pp, bool main_file)
 static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end);
 
 // Read only the exceptional errors in this consumed file-token range. Macro definitions diagnose once when read,
-// never each time expanded. Skipped groups never call this; header queries defer it until their opaque spans are known.
+// never each time expanded. Excluded group bodies never call this; directive lines still do. Header queries defer
+// it until their opaque spans are known.
 static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end)
 {
     const PPFileData* data = &pp->datas[context->data];

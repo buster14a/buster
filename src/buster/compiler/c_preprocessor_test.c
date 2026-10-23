@@ -354,7 +354,31 @@ static char* pp_test_print(Preprocessor* pp, bool vector, bool markers, size_t* 
     return result;
 }
 
-// The text -E prints for a run, which must lex into the stream's spellings; the vectorized printer's must be the scalar
+// An unterminated raw token runs to EOF when printed text is lexed again, taking the printer's final newline into
+// its spelling. Use the stream's known last-token boundary only when every original byte matches and EXACTLY one
+// final newline follows. Internal whitespace, missing/changed bytes and extra trailing text must still fail. Restore
+// the comparison view afterward so line-marker comparisons retain the complete printed token on both sides.
+static bool pp_compare_printed_spellings(Preprocessor* pp, const PPSpellings* ours, PPSpellings* theirs, const char* name, const char* their_name)
+{
+    const uint64_t last = ours->count != 0 ? ours->count - 1 : 0;
+    const uint32_t length = ours->count != 0 ? ours->lengths[last] : 0;
+    const bool tail = ours->count != 0 && ours->count == theirs->count && ours->kinds[last] == C_TOKEN_UNKNOWN && theirs->kinds[last] == C_TOKEN_UNKNOWN &&
+                      pp_raw_string_start(ours->bytes + ours->offsets[last], length) && theirs->lengths[last] == (uint64_t)length + 1 &&
+                      memcmp(ours->bytes + ours->offsets[last], theirs->bytes + theirs->offsets[last], length) == 0 &&
+                      theirs->bytes[theirs->offsets[last] + length] == '\n';
+    if (tail)
+    {
+        theirs->lengths[last] -= 1;
+    }
+    const bool result = pp_compare_spellings(pp, ours, theirs, name, their_name);
+    if (tail)
+    {
+        theirs->lengths[last] += 1;
+    }
+    return result;
+}
+
+// The text -E prints for a run, which must lex into the stream's spellings (with the EOF boundary above); the vectorized printer's must be the scalar
 // printer's byte for byte, with line markers and without.
 static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const char* name)
 {
@@ -386,7 +410,7 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
     {
         char label[256];
         snprintf(label, sizeof(label), "%s (printed)", name);
-        result = pp_compare_spellings(pp, ours, &printed, label, "-E");
+        result = pp_compare_printed_spellings(pp, ours, &printed, label, "-E");
     }
     arena_release(&printed.arena);
     free(text);
@@ -1086,8 +1110,7 @@ static const PPTestCase pp_test_cases[] = {
     // too; their spellings as written after the opening quote (line splices and trigraphs kept), pasted, stringized
     // (line breaks as \n), as _Pragma's operand (the body) and #line's and a line marker's file name (the body);
     // neither a header name nor (from a string) __has_warning's name, but its body; after '$' where '$' is punctuation;
-    // and -E's lines, which count the line breaks in an unknown token (a raw string literal's invalid delimiter: clang
-    // also reports an error, which buster doesn't yet) and in no other.
+    // and -E's lines, which count the line breaks in an unknown token (including an invalid raw delimiter) and in no other.
     { "raw string literals in a GNU mode", "#define R RR\n#define LR LRR\n#define u8R u8RR\n#define uR uRR\n#define UR URR\nR\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" R(h) xR\"(i)\" 1R\"(j)\"\nafter\n", 0, "gnu17", "R\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" RR(h) xR\"(i)\" 1R\"(j)\"\nafter\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\n\n\n\n\n\nR\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" RR(h) xR \"(i)\" 1R\"(j)\"\n\nafter\n" },
     { "raw string literals in gnu99", "#define uR uRR\n#define UR URR\n#define u8R u8RR\nR\"(a)\" LR\"(b)\" uR\"(c)\" UR\"(d)\" u8R\"(e)\"\n", 0, "gnu99", "R\"(a)\" LR\"(b)\" uRR \"(c)\" URR \"(d)\" u8RR \"(e)\"\n", false, 0, 0, 0 },
     { "no raw string literals in an ISO mode", "#define R RR\n#define LR LRR\nR\"(a)\" LR\"(b)\"\n", 0, "c17", "RR \"(a)\" LRR \"(b)\"\n", false, 0, 0, 0 },
@@ -2231,7 +2254,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
             result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) &&
-                     pp_compare_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
+                     pp_compare_printed_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
             pp_placed_release(&theirs);
             free(clang_text);
         }

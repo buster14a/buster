@@ -531,8 +531,9 @@ through translation phases 1/2, then checks the original delimiter bytes for
 an invalid character, newline or excess length. A valid delimiter on an
 unknown raw token means its body is unterminated. The preprocessor keeps
 only these exceptional records, and reports them when their active source
-context is known. Opaque headers/messages and skipped text suppress them;
-macro definitions diagnose once when read. Guard-page tests cover every
+context is known. Opaque headers/messages and excluded group bodies suppress them;
+an untaken `#elif` directive's own line is still diagnosed.
+Macro definitions diagnose once when read. Guard-page tests cover every
 truncation of the diagnostic fixtures, all raw-prefix modes and physical
 offsets after a spliced prefix. These changes leave the vector chunk loop
 and tokenizer output unchanged.

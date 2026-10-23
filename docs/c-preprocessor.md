@@ -1950,8 +1950,9 @@ full-corpus reproduction and frozen CI subset.
   physical source positions. Preparation records only exceptional unknown
   tokens; emission waits until active source or a directive consumes them.
   Definitions diagnose once, including an unused definition, and unused
-  macro arguments still diagnose. Skipped text and confirmed opaque header
-  names/messages suppress these errors. Scalar/vector checks compare the
+  macro arguments still diagnose. Excluded group bodies and confirmed opaque
+  header names/messages suppress these errors. An untaken `#elif` directive's
+  own line is still lexed and diagnosed, as Clang does. Scalar/vector checks compare the
   records; diagnostic fixtures compare text and locations against Clang.
 - **Definitions** (#121). Ten fixtures of `#define`'s and `#undef`'s
   constraints and of redefinitions (the groups above, C90's and C99's
