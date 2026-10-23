@@ -16,10 +16,14 @@ They contain declarations, scope restoration, shadowing and arithmetic in the
 checker's supported subset. They are synthetic source workloads; they do not
 establish SQLite, libc or c-testsuite coverage.
 
-Build this identical harness against pre-handoff head
-`6a2b4837e72b0f50ba998573d2fc32e8da3a9550` and the candidate. Copy this harness
-into the same relative directory in the baseline snapshot; keep its existing
-checker measurement helper unchanged. Take the normal shared 9700X lock for
+Build this identical harness against the baseline and candidate with the same
+main changes. The baseline is merge tree
+`2eada6eb5b62ed32242608cfd5e5c5750d9a06b4`, produced by `git merge-tree
+--write-tree 6a2b4837e72b0f50ba998573d2fc32e8da3a9550
+42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`: the pre-handoff head plus main's
+Tier 1 frame work. Archive that tree into the baseline snapshot. Copy this
+harness into its same relative directory; keep its existing checker
+measurement helper unchanged. Take the normal shared 9700X lock for
 each build and invocation. For the candidate, add
 `-DBUSTER_MEASURE_ENVIRONMENT`; omit that definition for the baseline:
 

@@ -220,6 +220,15 @@ test commands and the call-graph gate passed too: 32 translation units,
 16,644 functions, zero unapproved cycles and three allowed components.
 Separate sanitizer validation remains pending.
 
+The subsequent [combined-checker CI run
+39942018790](https://github.com/buster14a/buster/actions/runs/39942018790)
+also passed for head `6a2b4837e72b0f50ba998573d2fc32e8da3a9550`. It tested merge
+`85435508bd8bd168363f1c75d86d80a99a2b1485` with main
+`5d78cc2b1e6b608c6ce04b6147ef0ba7f3f86d4f`: 420,202 environment checks,
+67,719 checker checks, and the 34-unit / 18,102-function call-graph gate with
+zero unapproved cycles. The production publication code described above was
+added afterward and needs separate qualification.
+
 The first benchmark process interleaved all paths over 16,380 declarations,
 4,096 names and 65,536 queries, with a warmup and 21 measured passes:
 
