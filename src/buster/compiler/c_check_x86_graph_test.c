@@ -53,7 +53,7 @@ static void check_test_x86_graph_oracles(CheckTest* test, const char* clang)
     rmdir(directory);
 }
 
-static void check_test_x86_graph(CheckTest* test, TypeTable* table, const char* clang)
+static __attribute__((noinline)) void check_test_x86_graph(CheckTest* test, TypeTable* table, const char* clang)
 {
     Arena storage = arena_reserve(65536);
     Arena output = arena_reserve(131072);

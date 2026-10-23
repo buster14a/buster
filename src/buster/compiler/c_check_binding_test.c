@@ -523,7 +523,7 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
     check_test_types_close(&types);
 }
 
-static void check_test_bindings(CheckTest* test)
+static __attribute__((noinline)) void check_test_bindings(CheckTest* test)
 {
     check_test_binding_source(test, "", "x", 0, 0, true, false);
     const uint32_t shadow[] = {

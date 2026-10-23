@@ -226,7 +226,7 @@ static void check_test_special_graph_history(CheckTest* test, TypeTable* table, 
     arena_pop_to(storage, storage_mark);
 }
 
-static void check_test_special_graph(CheckTest* test, TypeTable* table, const char* clang)
+static __attribute__((noinline)) void check_test_special_graph(CheckTest* test, TypeTable* table, const char* clang)
 {
     Arena storage = arena_reserve(UINT64_C(1) << 20);
     Arena output = arena_reserve(UINT64_C(1) << 20);

@@ -880,7 +880,7 @@ static void check_test_void_return_conversion(CheckTest* test, TypeTable* table)
                       "GNU return conversion accepts exact void expressions while preserving effects and rejecting integer returns");
 }
 
-static void check_test_actions_extra(CheckTest* test, TypeTable* table, const char* clang)
+static __attribute__((noinline)) void check_test_actions_extra(CheckTest* test, TypeTable* table, const char* clang)
 {
     check_test_void_return_conversion(test, table);
     check_test_string_literals(test, clang);

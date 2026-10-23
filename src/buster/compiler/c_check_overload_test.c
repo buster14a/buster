@@ -475,7 +475,7 @@ static void check_test_overload_arguments(CheckTest* test, TypeTable* table)
     arena_release(&scratch);
 }
 
-static void check_test_overload_sources(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_overload_sources(CheckTest* test, const char* clang)
 {
     const CheckSourceFixture fixtures[] = {
         { .name = "overload tgmath selection and unavailable fallback", .source = "#define O __attribute__((overloadable))\nstatic void choose(...) O __attribute__((unavailable)); static int choose(int x) O{return x;} static double choose(double x) O{return x;} _Static_assert(_Generic(choose(3),int:1,default:0),\"int\"); _Static_assert(_Generic(choose(3.0),double:1,default:0),\"double\"); int run(void){return choose(7);}\n" },
@@ -538,7 +538,7 @@ static void check_test_overload_sources(CheckTest* test, const char* clang)
     rmdir(directory);
 }
 
-static void check_test_overloads(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_overloads(CheckTest* test, const char* clang)
 {
     CheckTestTypes types = { 0 };
     const bool ready = check_test_types_open(&types);

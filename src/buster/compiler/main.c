@@ -18,6 +18,8 @@
 #define BUSTER_UNIT_TYPES 7
 #define BUSTER_UNIT_BACKEND 8
 #define BUSTER_UNIT_FRAGMENTS 9
+#define BUSTER_UNIT_CHECKER 10
+#define BUSTER_UNIT_CHECK_BUILTINS 11
 #ifndef BUSTER_UNIT
 #define BUSTER_UNIT BUSTER_UNIT_DRIVER
 #endif
@@ -452,6 +454,8 @@ int main_unit_link(int argc, char** argv, bool* found);
 int main_unit_executable(int argc, char** argv, bool* found);
 int main_unit_dynamic(int argc, char** argv, bool* found);
 int main_unit_types(int argc, char** argv, bool* found);
+int main_unit_checker(int argc, char** argv, bool* found);
+int main_unit_check_builtins(int argc, char** argv, bool* found);
 int main_unit_backend(int argc, char** argv, bool* found);
 int run_source_check_command(int count, char** arguments);
 
@@ -807,7 +811,7 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_files_benchmark(argc - 1, argv + 1);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "check") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
         result = run_check_command(argc - 2, argv + 2);
     }
@@ -815,79 +819,79 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_parse_command(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
     {
         result = run_checker_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-checker-asm") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-asm") == 0)
     {
         result = run_checker_asm_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-checker-driver") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-driver") == 0)
     {
         result = run_checker_driver_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins") == 0)
     {
         result = run_check_builtin_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-varargs") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-varargs") == 0)
     {
         result = run_check_varargs_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-misc") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-misc") == 0)
     {
         result = run_check_builtin_misc_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-query") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-query") == 0)
     {
         result = run_check_builtin_query_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-bit-cast") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-bit-cast") == 0)
     {
         result = run_check_builtin_bit_cast_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-float") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-float") == 0)
     {
         result = run_check_builtin_float_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-types") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-types") == 0)
     {
         result = run_builtin_intrinsic_type_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-features") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-features") == 0)
     {
         result = run_builtin_intrinsic_features_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-x86") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-x86") == 0)
     {
         result = run_check_builtin_x86_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-inventory") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-inventory") == 0)
     {
         result = run_builtin_intrinsic_inventory_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-catalog") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-catalog") == 0)
     {
         result = test_builtin_intrinsic_catalog(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-vector") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-vector") == 0)
     {
         result = run_check_builtin_vector_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-math") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-math") == 0)
     {
         result = run_check_builtin_math_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-atomic") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-atomic") == 0)
     {
         result = run_check_builtin_atomic_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-typed-overflow") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-typed-overflow") == 0)
     {
         result = run_check_builtin_typed_overflow_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-rounds") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-rounds") == 0)
     {
         result = run_check_builtin_rounds_tests(argc - 2, argv + 2);
     }
@@ -931,11 +935,11 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_c_environment_benchmark(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-checker-corpus") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-corpus") == 0)
     {
         result = run_checker_corpus(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "benchmark-checker-source") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-source") == 0)
     {
         result = run_checker_source_benchmark(argc - 2, argv + 2);
     }
@@ -959,7 +963,7 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_builtin_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-atomic-rmw") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-atomic-rmw") == 0)
     {
         result = run_check_builtin_atomic_rmw_tests(argc - 2, argv + 2);
     }
@@ -1159,7 +1163,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {
-        // Semantic checking and object emission share the same typed source stream in the types unit.
+        // Semantic checking and object emission share the same typed source stream in the checker's unit.
         result = run_source_check_command(argc - 1, argv + 1);
     }
     else
@@ -1197,6 +1201,14 @@ int main(int argc, char** argv)
     if (!found)
     {
         result = main_unit_types(argc, argv, &found);
+    }
+    if (!found)
+    {
+        result = main_unit_checker(argc, argv, &found);
+    }
+    if (!found)
+    {
+        result = main_unit_check_builtins(argc, argv, &found);
     }
     if (!found)
     {
@@ -1243,12 +1255,22 @@ int main_unit_dynamic(int argc, char** argv, bool* found)
     return main_command(argc, argv, found);
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_TYPES
+int main_unit_types(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_CHECKER
 int run_source_check_command(int count, char** arguments)
 {
     return run_check_command(count, arguments);
 }
 
-int main_unit_types(int argc, char** argv, bool* found)
+int main_unit_checker(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_CHECK_BUILTINS
+int main_unit_check_builtins(int argc, char** argv, bool* found)
 {
     return main_command(argc, argv, found);
 }

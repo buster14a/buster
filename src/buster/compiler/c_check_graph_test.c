@@ -409,7 +409,7 @@ static void check_test_graph_updates(CheckTest* test, TypeTable* table, Arena* s
     arena_pop_to(storage, storage_mark);
 }
 
-static void check_test_graph_regressions(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
+static __attribute__((noinline)) void check_test_graph_regressions(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
 {
     check_test_graph_partial_allocations(test, table, storage);
     check_test_graph_argument_guards(test, table, storage, output, scratch);

@@ -144,7 +144,7 @@ static void check_test_fp_graph(CheckTest* test, TypeTable* table)
     arena_release(&storage);
 }
 
-static void check_test_fp_actions(CheckTest* test, TypeTable* table)
+static __attribute__((noinline)) void check_test_fp_actions(CheckTest* test, TypeTable* table)
 {
     check_test_fp_action_values(test, table);
     check_test_fp_graph(test, table);

@@ -119,7 +119,7 @@ static void check_test_query_conversion_proofs(CheckTest* test, TypeTable* table
     }
 }
 
-static void check_test_query_runtime(CheckTest* test, TypeTable* table, const char* clang)
+static __attribute__((noinline)) void check_test_query_runtime(CheckTest* test, TypeTable* table, const char* clang)
 {
     check_test_query_conversion_proofs(test, table);
     const CheckQueryFixture fixtures[] = {

@@ -214,7 +214,7 @@ static void check_test_diagnostic_sources(CheckTest* test)
                       "fatal promotion participates in the same earliest-error selection");
 }
 
-static void check_test_diagnostic_policy(CheckTest* test)
+static __attribute__((noinline)) void check_test_diagnostic_policy(CheckTest* test)
 {
     check_test_diagnostic_replay(test);
     check_test_diagnostic_sources(test);

@@ -56,6 +56,7 @@ jobs:
       ir: ${{ steps.files.outputs.ir }}
       ir_lowering: ${{ steps.files.outputs.ir_lowering }}
       ir_optimize: ${{ steps.files.outputs.ir_optimize }}
+      checker: ${{ steps.files.outputs.checker }}
     steps:
       - id: files
         env:
@@ -66,7 +67,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          modules=(zen5 ssa parser_bindings environments ir ir_lowering ir_optimize)
+          modules=(zen5 ssa parser_bindings environments ir ir_lowering ir_optimize checker)
           # The sources each module's conditioned benchmark samples measure, under src/buster/compiler/.
           declare -A sources=(
               [zen5]='x86_zen5[a-z_]*'
@@ -76,6 +77,7 @@ jobs:
               [ir]='ir|ir_validate|ir_benchmark'
               [ir_lowering]='ir|ir_validate|ir_lower|ir_lower_benchmark'
               [ir_optimize]='ir|ir_validate|ir_optimize[a-z_]*'
+              [checker]='c_check[a-z_]*'
           )
           declare -A measure
           # The API lists at most 3,000 files of a pull request: past that, take it as changing code and the harnesses.
@@ -471,14 +473,21 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-lexer src
 
       - name: Measure the Zen 5 instruction cases
-        # The job hook holds the shared lock. Preserve three separate processes, with each process interleaving
-        # its experiments. These observations are informational; counter/protocol failures still fail the step.
+        # The job hook holds the shared lock. Each process interleaves its experiments, in three separate processes
+        # where `changes` doesn't rule out the next step. These observations are informational; counter/protocol
+        # failures still fail the step.
         run: |
-          cpu=2
           sha256sum build/compiler src/buster/compiler/x86_zen5.c src/buster/compiler/x86_zen5_measure.c
-          for sample in 1 2 3; do
+          echo "Zen 5 observation process 1"
+          taskset -c 2 ./build/compiler measure-x86-zen5 --passes 11 --iterations 20000
+
+      - name: Measure the Zen 5 instruction cases in two more processes
+        # Where `changes` doesn't rule it out (the module's sources): with the process above, three.
+        if: needs.changes.outputs.zen5 != 'false'
+        run: |
+          for sample in 2 3; do
             echo "Zen 5 observation process $sample"
-            taskset -c "$cpu" ./build/compiler measure-x86-zen5 --passes 11 --iterations 20000
+            taskset -c 2 ./build/compiler measure-x86-zen5 --passes 11 --iterations 20000
           done
 
       - name: Benchmark Zen 5 cost lookup
@@ -861,6 +870,15 @@ jobs:
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
           taskset -c 2 ./build/compiler benchmark-checker-source "${source[@]}"
+
+      - name: Benchmark typed checking on frozen SQLite bodies in isolation and after scalar work
+        # Where `changes` doesn't rule it out (the checker's sources, c_check*.c).
+        if: needs.changes.outputs.checker != 'false'
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
           taskset -c 2 ./build/compiler benchmark-checker-source --only scalar "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
