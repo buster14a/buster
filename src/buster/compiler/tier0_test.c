@@ -345,7 +345,8 @@ struct Tier0TestFrame
 #define BUSTER_TIER0_TEST_STEPS 200000000ull
 
 // Runs the program's entry (its last function) on three arguments over the globals at `globals` (the data layout's),
-// and returns its result; `fault` is set on a division the generator should have made safe, or past the step budget.
+// and returns its result; `fault` is set on a division the generator should have made safe, past the step budget, or
+// on an indirect call that reaches a function of another type.
 static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Functions* functions, const Tier0TestData* data, uint8_t* globals,
                                      const uint64_t* inputs, bool* fault)
 {
@@ -489,12 +490,19 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             if (f->call_targets[value] == 0)
             {
                 // An indirect call's callee, under its arguments: a function's tagged index, the one the pointer holds
-                // when the call runs, of the type of the one the generator chose (as many parameters, at least).
+                // when the call runs. Its type must be the call's, checked here apart from the generator's choice of
+                // candidates: its result's class the call's, and each parameter's class its argument's.
                 top -= 1;
                 const uint64_t address = stack[top];
                 const uint32_t held = (uint32_t)(address & 0xffff);
                 const bool function_held = (address & ~0xffffull) == BUSTER_TIER0_TEST_FUNCTION_TAG && held < program->function_count;
-                *fault |= !function_held || program->functions[function_held ? held : callee].parameter_count != arguments;
+                const Tier0GeneratedFunction* target = &program->functions[function_held ? held : callee];
+                bool typed = function_held && target->parameter_count == arguments && target->result_class == class;
+                for (uint32_t a = 0; a < arguments && typed; a += 1)
+                {
+                    typed = program->local_classes[target->first_local + a] == f->argument_classes[f->call_first[value] + a];
+                }
+                *fault |= !typed;
                 callee = function_held ? held : callee;
             }
             frames[depth] = (Tier0TestFrame){ callee, 0, locals, callee_objects, top };
@@ -800,7 +808,9 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
                     bool fault = false;
                     const uint64_t expected = tier0_test_interpret(program, functions, &data, globals, inputs[r], &fault);
                     const uint64_t hash = tier0_test_hash(globals, data.size);
-                    ok = tier0_test_expect(tally, !fault, "runs", "seed %" PRIu64 " input %u: the interpreter faulted", program_seed, r);
+                    ok = tier0_test_expect(tally, !fault, "runs",
+                                           "seed %" PRIu64 " input %u: the interpreter faulted (a division, its steps, or an indirect call of another type)",
+                                           program_seed, r);
                     ok = ok && tier0_test_expect(tally, native[r].result == expected && native[r].globals == hash, "runs",
                                                  "seed %" PRIu64 " input %u: %016" PRIx64 " (globals %016" PRIx64 "), the interpreter %016" PRIx64 " (%016" PRIx64 ")",
                                                  program_seed, r, native[r].result, native[r].globals, expected, hash);

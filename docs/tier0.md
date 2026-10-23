@@ -377,7 +377,9 @@ Before the programs, checks of their own:
   - four functions in ten take an earlier function's type, so that a type has several functions;
   - statements give a pointer one function of its type or another by a condition (`p = c ? f : g`), so that a call
     through it reaches whichever it holds when it runs;
-  - the interpreter calls the function an address names, and a call's work budget is its costliest candidate's.
+  - the interpreter calls the function an address names, once its tag and its type are checked against the call's (its
+    result's class and each parameter's, apart from the generator's choice of candidates), and a call's work budget is
+    its costliest candidate's.
 
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
@@ -418,7 +420,10 @@ a NaN's sign and payload to the implementation, and clang folds a constant 0.0 /
     - the callee's register one depth off: the paths disagree and runs crash;
     - its move left out of the vector path's count: 767; the call's depths, the emitter's: 767;
     - the callee left out of the effects: 713; or of the validator: 764 (valid streams refused);
-    - the interpreter calling the generator's own choice, not the function the pointer holds: 29 programs' runs.
+    - the interpreter calling the generator's own choice, not the function the pointer holds: 29 programs' runs;
+    - the generator's candidates of one arity but other parameters' or result's classes: 3 and 6 programs, whose
+      calls the interpreter refuses. Checking the arity alone, as it did, the first passed and the second crashed
+      the test.
 
     Counting the callee as a live depth in selection gives a frame one slot larger, which no check sees, as it
     changes no value.
