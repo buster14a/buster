@@ -389,8 +389,18 @@ designs and the compilers already built this way.
   with nonallocated debug sections and a regular function symbol table.
   `test-debug --cross-check` checks original fixtures with readelf, GDB and
   perf; `benchmark-debug` measures validation through address finalization.
-  [The debug guide](docs/debug.md) records the contract and the Tier 0 frame
-  events, source-row production and streaming integration still pending.
+  [The debug guide](docs/debug.md) records the contract and the source-row
+  production and streaming integration still pending.
+- `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
+  from valid Tier 0 records after branch sizing; `unwind.c` emits original
+  CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
+  the producer unchanged and does not repeat generic instruction validation.
+  `test-unwind --cross-check` checks independent frame-state oracles, protected
+  tails and actual Tier 0 code with native GDB/perf consumers. `benchmark-unwind`
+  charges analysis/emission to the existing Tier 0, sizing and encoding chain,
+  including per-function arena cleanup. [The unwind guide](docs/unwind.md)
+  records the trusted private-slot contract, Link fixups and pending target-host
+  qualification. Use the shared 9700X lock per command and CPU 2 for timing.
 - `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
   part, and step 6's for the other kinds): what `runtime_import` (or
   `runtime_import_static`, `runtime_import_static_pie` or
