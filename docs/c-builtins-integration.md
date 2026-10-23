@@ -316,12 +316,38 @@ No helper calls a math symbol that could recurse when the source defines it.
 The helper body requires normal branch sizing and unknown-effect call
 semantics. These adapters do not establish source or Tier1 acceptance.
 
+## Intrinsic checking contracts
+
+The later maintainer decision in #156 includes target intrinsics in #148's
+scope. Metadata recognition, prototype checking, special operand constraints,
+source constant evaluation, target-feature eligibility and runtime emission
+are distinct requirements. None alone grants a preprocessor capability.
+
+`c_builtin_intrinsic_types.c` decodes bounded Clang 23.1.1 descriptors through
+the existing Linux/x86-64 LP64 type factories. It retains exact integer
+identities, fixed vector element/lane types, parameter adjustment and a
+64-argument ICE bitmap. Custom `t` signatures return `CUSTOM`; `T` additionally
+marks a decoded signature as ignored for ordinary call checking. Missing
+context and unrepresented forms return `UNSUPPORTED`. Malformed input and
+factory exhaustion publish no partial prototype. Earlier interned subtypes
+can remain in the monotonic type table after a later failure.
+
+`c_builtin_intrinsic_features.c` evaluates the exact comma/pipe/parenthesis
+grammar against a caller-supplied, complete and already closed target-feature
+table. It distinguishes missing features, unknown atoms, invalid syntax and
+insufficient nesting storage. Every alternative is validated, even after a
+true alternative. CPU defaults and per-function target-attribute closure
+remain producer obligations. These modules do not implement instructions or
+establish source constant-expression acceptance.
+
 ## Validation commands
 
 On the approved 9700X, through a separate shared-host lock for each command:
 
 ```sh
 ./build/compiler test-builtins
+./build/compiler test-builtin-intrinsic-types
+./build/compiler test-builtin-intrinsic-features
 ./build/compiler test-check-builtins
 ./build/compiler test-builtin-lowering
 ./build/compiler test-check-varargs
