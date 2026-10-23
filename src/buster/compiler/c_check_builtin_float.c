@@ -112,6 +112,10 @@ static CheckValue check_builtin_float_argument(TypeTable* table, const CheckBuil
             const CheckAction action = {
                 .operands = { value },
                 .node = input->node,
+                .tag_completions = input->tag_completions,
+                .tag_completion_count = input->tag_completion_count,
+                .source_position = input->source_position,
+                .extensions = input->extensions,
             };
             value = check_action_operand(table, &action, &converted, 0);
             if (converted.diagnostic != CHECK_DIAG_NONE)
@@ -297,7 +301,18 @@ static void check_builtin_float_nan_argument(TypeTable* table, const CheckBuilti
     }
     else
     {
-        bool compatible = check_action_assignable(table, parameter, value, &output->action);
+        const CheckAction context = {
+            .node = input->node,
+            .tag_completions = input->tag_completions,
+            .tag_completion_count = input->tag_completion_count,
+            .source_position = input->source_position,
+            .extensions = input->extensions,
+        };
+        bool compatible = check_action_assignable(table, parameter, value, &context, &output->action);
+        if ((output->action.warnings & CHECK_WARNING_DISCARDED_QUALIFIERS) != 0)
+        {
+            output->warnings |= BUSTER_CHECK_BUILTIN_FLOAT_WARN_QUALIFIERS;
+        }
         const TypeId source = type_unqualified(type_strip_aligned(table, value->type));
         if (!compatible && check_action_kind(table, source) == BUSTER_TYPE_KIND_POINTER)
         {

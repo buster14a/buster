@@ -287,6 +287,8 @@ struct PPOptions
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;
+    // Semantic consumers expand pack operands at their original source point. The default -E stream keeps them raw.
+    bool semantic_pragmas;
     // Replace trigraphs (translation phase 1): clang's default in the ISO modes before C23, and -trigraphs,
     // -ftrigraphs or -fno-trigraphs.
     bool trigraphs;
@@ -7541,7 +7543,16 @@ static bool pp_expanding_argument(const Preprocessor* pp)
 // expanded) and its ')'.
 static void pp_defer_pragma(Preprocessor* pp, uint32_t name_location, uint8_t name_flags, PPToken open, PPToken string, PPToken close)
 {
-    pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = name_flags, .value = C_NAME_PRAGMA_OPERATOR, .location = name_location });
+    // The operator will be expanded again after substitution. Preserve its incoming origin, rather than the
+    // temporary builtin expansion, so a macro-body operator still diagnoses the original argument invocation.
+    pp_emit(pp, (PPToken)
+    {
+        .kind = C_TOKEN_RAW_IDENTIFIER,
+        .flags = name_flags,
+        .value = C_NAME_PRAGMA_OPERATOR,
+        .location = name_location,
+        .origin = pp->diagnostic_origin,
+    });
     pp_emit(pp, open);
     pp_emit(pp, string);
     pp_emit(pp, close);
@@ -9825,6 +9836,7 @@ typedef enum PPPragmaKind
     PP_PRAGMA_DEPENDENCY,
     PP_PRAGMA_DIAGNOSTIC,
     PP_PRAGMA_OMP, // Printed expanded (-E's printer expands it, as OpenMP says).
+    PP_PRAGMA_PACK, // Expanded only for an opted-in semantic consumer; ordinary -E retains raw operands.
     PP_PRAGMA_IDENT, // #ident and #sccs: not pragmas, but read and printed alike.
     PP_PRAGMA_REGION, // clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage: begin and end.
     PP_PRAGMA_MACRO_NOTE, // clang deprecated, final and restrict_expansion, of a macro: not printed.
@@ -9869,6 +9881,10 @@ static PPPragmaKind pp_pragma_kind(const Preprocessor* pp, const PPTokens* token
     else if (pp_token_is_name(pp, tokens, begin, end, "omp"))
     {
         result = PP_PRAGMA_OMP;
+    }
+    else if (pp->options.semantic_pragmas && pp_token_is_name(pp, tokens, begin, end, "pack"))
+    {
+        result = PP_PRAGMA_PACK;
     }
     else if (space && second != 0)
     {
@@ -10448,6 +10464,7 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
             pp_pragma_diagnostic(pp, tokens, names_begin, begin, end, location, from_operator);
         } break;
         case PP_PRAGMA_OMP:
+        case PP_PRAGMA_PACK:
         {
             pp_emit_pragma_start(pp, C_NAME_PRAGMA, location, from_operator);
             pp_emit_pragma_token(pp, pp_stack_token(names, names_begin), true);
@@ -10494,7 +10511,7 @@ static bool pp_pragma(Preprocessor* pp, uint32_t begin, uint32_t end, uint32_t l
         pp_check_poison_range(pp, 0, 0, tokens, begin, kind == PP_PRAGMA_POISON ? operands : end, kind == PP_PRAGMA_DEPENDENCY ? operands : BUSTER_PP_NONE, false);
     }
     const bool expanded = kind == PP_PRAGMA_MESSAGE || kind == PP_PRAGMA_WARNING || kind == PP_PRAGMA_ERROR || kind == PP_PRAGMA_PUSH_MACRO || kind == PP_PRAGMA_POP_MACRO ||
-                          kind == PP_PRAGMA_OMP || kind == PP_PRAGMA_IDENT;
+                          kind == PP_PRAGMA_OMP || kind == PP_PRAGMA_PACK || kind == PP_PRAGMA_IDENT;
     bool started = false;
     // Not among a macro's arguments (or a builtin's operand), where clang's macro expansion is off (as for #line). An
     // #ident reads its string expanded (Preprocessor::HandleIdentSCCSDirective), and push_macro and pop_macro their '(',
