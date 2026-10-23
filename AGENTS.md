@@ -163,8 +163,10 @@ designs and the compilers already built this way.
 - Tier 1 selection publishes effective uses for `tier1_liveness.c`; the native
   consumer connects required locations, allocation, frames and spill/remat
   records. Bounded direct scalar calls preserve live caller registers and
-  publish symbolic CALL references; indirect/variadic/wide-ABI calls still
-  refuse explicitly. Run `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`
+  publish symbolic CALL references. Byte/word memory and integer conversions
+  use canonical 32-bit storage; terminal chains retain explicit traps or empty
+  self-loops. General CFG/phis and indirect/variadic/wide-ABI calls still refuse
+  explicitly. Run `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`
   and `test-tier1-pipeline --cross-check` for bounded typed-stream/native
   validation. `test-tier1-model` checks the emitted-case measurement reader;
   `measure-tier1-model --manifest PATH --verify` constructs its eligible

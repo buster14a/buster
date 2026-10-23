@@ -77,8 +77,11 @@ the remaining transformation and measurement scope.
 The [selection](tier1-selection.md), [selected-use liveness](tier1-liveness.md),
 [allocation](tier1-allocation.md) and [frame](tier1-frame.md) modules are
 connected by a native function consumer. Its fragment path supports 32/64-bit
-scalar values in straight-line block chains, with actual spill stores,
-reloads, constant rematerialization and stack probes. General CFG fragment
+scalar values in straight-line block chains, plus byte/word memory and integer
+conversions with canonical 32-bit storage. It emits actual spill stores,
+reloads, constant rematerialization and stack probes. A chain may end in a
+return, explicit unreachable, or an empty self-loop sink retaining its actual
+branch. General CFG fragment
 reconciliation, phis, indirect/variadic/wide-ABI calls and floating-point emission remain outside this
 bounded consumer. The selector's uniform-register API has its own broader
 branch subset and explicitly refuses unsupported allocations.
@@ -90,14 +93,21 @@ ordinary symbolic CALL references. Independent hostile helpers test clobbers,
 return widths, memory effects and frame safety. Full builtin/source acceptance
 requires integrating the source owner's exact helper and checked-call path.
 
-`test-tier1-pipeline --cross-check` starts with six original typed-stream
+`test-tier1-pipeline --cross-check` starts with eight original typed-stream
 fixtures and runs ABI assignment, lowering, SSA promotion, optimization,
 selection, liveness, allocation, frame emission, branch sizing and encoding.
 It freezes interpreter expectations before compilation and also compares
-Clang-built C formulas. A complete cross-check expects 768 native results,
-384 Clang results, eight emitted direct calls and eight explicit unsupported
+Clang-built C formulas. A complete cross-check expects 1,024 native results,
+512 Clang results, eight emitted direct calls and eight explicit unsupported
 refusals. These are bounded integration fixtures, described in
 the [pipeline guide](tier1-pipeline.md), not a source-corpus campaign.
+Source byte loops still need a CFG/phi consumer. Source floating-point helper
+adapters additionally need addressable frame locals, stack addresses, FP value
+transport/conversions and their ABI. Raw integer-bit helper-call acceptance
+does not establish those producer paths.
+The frozen source overflow fixture also retains an address-taken byte local;
+narrow memory/conversion support alone does not provide its `IR_STACK_ADDR`
+frame object.
 
 The [emitted-case harness](tier1-model-measurements.md) accepts only complete
 selector manifests, retains exact operand distinctions and refuses experiments

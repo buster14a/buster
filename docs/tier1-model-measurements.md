@@ -71,6 +71,23 @@ Future producer coverage must be added to the actual planner fixtures and
 given a new manifest identity. These counts cannot establish whole-emitter or
 corpus coverage.
 
+## Narrow-integer and terminal inventory
+
+The expanded selector fixtures have manifest SHA-256
+`985ba95bea59881b622954bf6622b02804f11337bb202bd4db42ee629d9f0042`,
+FNV-1a `87ca02ce9d2a4d3c`, and 1,823,025 bytes. There are 3,849 actual
+plan records; expansion and wrapper counts remain 9,358 and 8,940. The new
+plan cases exercise byte/word memory, canonical integer conversions and
+explicit unreachable. They do not add measured model observations.
+
+The inventory contains 594 normalized cases: 577 eligible cases/3,349 records
+and 17 refused cases/500 records. Construction verification passes all 577
+eligible cases. Unknown model IDs remain on 586 cases/3,687 records. GPR
+latency is missing on 3,695 records; throughput and retired macro-ops on 3,687.
+All 3,849 records still lack flag latency, load increments, executed micro-ops
+and pipe assignments. These are fixture construction and coverage counts,
+not target timing or complete-emitter acceptance.
+
 ## Experiments and limits
 
 The safe first slice admits 32/64-bit register arithmetic, moves, comparisons/tests that

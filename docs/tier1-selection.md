@@ -15,16 +15,20 @@ compiler.
 
 ## Supported slice
 
-The current body emitter handles 32-bit and 64-bit integer values, pointers and
-the canonical `i1` values produced by comparisons. The supported patterns are:
+The current body emitter handles 32-bit and 64-bit integer values, pointers,
+canonical `i1` comparisons, and bounded byte/word value transport. The supported
+patterns are:
 
-- Constants, register copies, 64-to-32 truncation, 32-to-64 zero extension,
-  bit-preserving 64-bit pointer/integer conversions, negation and complement.
-- Add, subtract, multiply, and/or/xor; immediate forms; shifts by a constant
+- Constants, register copies, truncation to 8/16/32 bits, zero extension from
+  8/16/32 bits or canonical `i1`, and sign extension from 8/16/32 bits to a
+  wider supported integer type. Pointer/integer conversions preserve 64 bits.
+- 32/64-bit negation, complement, add, subtract, multiply, and/or/xor;
+  immediate forms; shifts by a constant
   strictly below the operand width; multiplication by powers of two and by
   3, 5 or 9; add/shift and three-operand addition through `lea`.
 - Explicit `IR_ADDRESS` base + index × scale + signed disp32, loads and stores,
-  and folding those addresses into memory operands. Larger displacements
+  and folding those addresses into memory operands. Byte/word loads zero-extend
+  into registers, while stores write exactly one/two bytes. Larger displacements
   return an unsupported result until materialization is implemented.
 - A nonvolatile load with exactly one use immediately followed by its arithmetic
   consumer can become that consumer's memory operand. No store, volatile
@@ -32,7 +36,15 @@ the canonical `i1` values produced by comparisons. The supported patterns are:
   a separate access; a store retains its original order and access width.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
-  `cmov`, unconditional branches and returns.
+  `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.
+
+`I8` and `I16` values occupy canonical zero-extended 32-bit registers and
+four-byte spill slots. Their logical memory widths remain one/two bytes.
+Signed extension interprets the source sign bit, then normalizes a narrow
+destination again; for example, `I8(-1)` to `I16` has register bits `0xffff`.
+Narrow arithmetic/comparisons and byte/word parameter, return and call ABI
+forms remain unsupported. `i1` memory and signed-extension forms are also
+declined explicitly.
 
 Comparisons used by a branch alone do not produce `setcc`. Their comparison and
 conditional jump are consecutive records. A comparison producing a value uses
@@ -174,10 +186,13 @@ KEEP_POINTER, NO_RED_ZONE and PROBE_STACK policies. The default mask is availabl
 through `tier1_liveness_register_mask()`; an explicit subset can test pressure.
 
 The supported control flow is a straight-line physical chain. Every block
-before the last must unconditionally branch to the immediately following block;
-the last returns. Such identity jumps emit no record. This admits the typed
-lowerer's parameter preheader followed by its body, while general joins,
-backedges and phi moves still need an explicit edge-location consumer.
+before the last must unconditionally branch to the immediately following block.
+The last returns, ends in `IR_UNREACHABLE`, or contains exactly one branch to
+itself. Forward identity jumps emit no record. The empty terminal sink emits
+a real self-jump targeting its block after the prologue; a preceding call is
+not assumed to terminate. Terminal paths emit no return epilogue. This admits
+the typed lowerer's parameter preheader and terminal suffix while general
+joins, nonempty backedges and phi moves still need an edge-location consumer.
 
 Direct nonvariadic calls support up to six `I32`, `I64` or pointer arguments
 and a void, `I32`, `I64` or pointer result. The call pattern keeps the symbol
@@ -212,7 +227,9 @@ instruction ends. The references retain instruction indices, not guessed byte
 offsets. The older frameless `tier1_select_emit` API still rejects call plans.
 
 Indirect and variadic calls, stack arguments, floating-point and aggregate
-arguments/results, and terminal-call CFGs are outside this bounded path.
+arguments/results, and general terminal-call CFGs are outside this bounded path.
+The supported empty terminal sink does not establish acceptance of source
+functions with conditional branches or unreachable continuation blocks.
 Unsupported calls and allocation/target/capacity errors publish no partial
 result. Correct execution of these component fixtures does not establish
 atomic-builtin, full-source ABI or corpus acceptance.
@@ -284,7 +301,11 @@ registers. Both paths run against an independent integer oracle with stored
 values and with rematerialized constants, fixed/red-zone/frame-pointer frames,
 and stack probes. Independent allocation verification checks the produced
 fragments. Failures cover target denial, scratch-register conflicts, capacity,
-unsupported frame policies and CFG backedges. Empty input is accepted.
+unsupported frame policies and general CFG backedges. Narrow-value fixtures
+check canonical upper bits, exact byte/word accesses beside guard pages,
+sign boundaries, real spills and rematerialization. Terminal fixtures check
+explicit traps and empty self-loop sinks in bounded child processes, including
+a returning helper whose sink must remain a loop. Empty input is accepted.
 The separate pipeline tests cover upstream typed-stream lowering and SSA
 promotion; neither test suite is the pending full C-program differential corpus.
 

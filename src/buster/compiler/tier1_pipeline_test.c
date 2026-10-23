@@ -7,7 +7,7 @@
 // The existing typed interpreter supplies expected return bits independently of lowering, selection and allocation.
 // Optional Clang -O0/-O2 oracles compile separately written C formulas, never the emitted machine or optimized IR.
 //
-// Only defined unsigned straight-line programs and bounded direct local calls execute. Branches, joins, loops and
+// Defined integer straight-line programs and bounded direct local calls execute. Branches, joins, loops and
 // floating point traverse the upstream stages and must stop explicitly before native execution. These fixtures do not qualify a
 // source corpus. Native calls and external tools run in bounded child processes; all temporary files use TMPDIR.
 
@@ -24,7 +24,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BUSTER_TIER1_PIPELINE_CASES 6
+#define BUSTER_TIER1_PIPELINE_CASES 8
 #define BUSTER_TIER1_PIPELINE_CALL_CASES 2
 #define BUSTER_TIER1_PIPELINE_FUNCTIONS 2
 #define BUSTER_TIER1_PIPELINE_INPUTS 32
@@ -285,6 +285,99 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
         tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
     }
+    else if (shape == 10)
+    {
+        // The U64 butterfly and final U16 result follow cbuiltin_lower_unary's BSWAP16 recipe at cebc0bb.
+        // This is a typed-stream fixture: the source producer is neither invoked nor replaced here.
+        program->local_count = 7;
+        fixture->local_classes[3] = BUSTER_TYPED_CLASS_U16;
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U16, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U16, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U16, 3);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, UINT16_MAX);
+        tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_U64, 6);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        const uint64_t masks[] = {
+            UINT64_C(0x00ff00ff00ff00ff),
+            UINT64_C(0x0000ffff0000ffff),
+            UINT64_C(0x00000000ffffffff),
+        };
+        for (uint32_t stage = 0; stage < BUSTER_ARRAY_LENGTH(masks); stage += 1)
+        {
+            const uint32_t shift = 8u << stage;
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+            tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, shift);
+            tier0_emit(program, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 5);
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 5);
+            tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, masks[stage]);
+            tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 5);
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+            tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, masks[stage]);
+            tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+            tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, shift);
+            tier0_emit(program, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 5);
+            tier0_emit(program, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        }
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 48);
+        tier0_emit(program, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U16, 0);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    else if (shape == 11)
+    {
+        program->local_count = 7;
+        fixture->local_classes[3] = BUSTER_TYPED_CLASS_I8;
+        fixture->local_classes[4] = BUSTER_TYPED_CLASS_I16;
+        fixture->local_classes[5] = BUSTER_TYPED_CLASS_I16;
+        fixture->local_classes[6] = BUSTER_TYPED_CLASS_I32;
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I8, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I8, 3);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I8, 3);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I16, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I16, 4);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I16, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I16, 5);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, 6);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I16, 4);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I16, 5);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, 6);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I8, 3);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+        tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 17);
+        tier0_emit(program, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+    }
     else
     {
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
@@ -433,6 +526,45 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
         }
     }
     tier1_pipeline_expect(test, scratch->length == 0, "upstream stages return scratch");
+    return ok;
+}
+
+static bool tier1_pipeline_narrow_handoff(Tier1PipelineTest* test, uint32_t shape, const IrFunction* function)
+{
+    uint32_t trunc8 = 0;
+    uint32_t trunc16 = 0;
+    uint32_t trunc32 = 0;
+    uint32_t zext16_64 = 0;
+    uint32_t sext8_16 = 0;
+    uint32_t sext8_64 = 0;
+    uint32_t sext16_64 = 0;
+    uint32_t sext32_64 = 0;
+    for (uint32_t i = 0; i < function->instruction_count; i += 1)
+    {
+        const uint8_t op = function->op[i];
+        if (op == IR_TRUNC || op == IR_ZEXT || op == IR_SEXT)
+        {
+            const uint8_t from = function->type[function->a[i]];
+            const uint8_t to = function->type[i];
+            trunc8 += op == IR_TRUNC && from == IR_I64 && to == IR_I8;
+            trunc16 += op == IR_TRUNC && from == IR_I64 && to == IR_I16;
+            trunc32 += op == IR_TRUNC && from == IR_I64 && to == IR_I32;
+            zext16_64 += op == IR_ZEXT && from == IR_I16 && to == IR_I64;
+            sext8_16 += op == IR_SEXT && from == IR_I8 && to == IR_I16;
+            sext8_64 += op == IR_SEXT && from == IR_I8 && to == IR_I64;
+            sext16_64 += op == IR_SEXT && from == IR_I16 && to == IR_I64;
+            sext32_64 += op == IR_SEXT && from == IR_I32 && to == IR_I64;
+        }
+    }
+    bool ok = tier1_pipeline_expect(test, function->result_type == IR_I64 && function->parameter_count == 3 && function->parameter_types[0] == IR_I64 && function->parameter_types[1] == IR_I64 && function->parameter_types[2] == IR_I64, "narrow primitive fixtures retain only U64 parameters and return ABI");
+    if (shape == 10)
+    {
+        ok = tier1_pipeline_expect(test, trunc16 >= 2 && zext16_64 >= 2, "nonconstant BSWAP16 input and result narrowing/widening reach selection") && ok;
+    }
+    else
+    {
+        ok = tier1_pipeline_expect(test, trunc8 != 0 && trunc16 != 0 && trunc32 != 0 && sext8_16 != 0 && sext8_64 != 0 && sext16_64 >= 2 && sext32_64 != 0, "nonconstant signed narrow locals and intermediate widening reach selection") && ok;
+    }
     return ok;
 }
 
@@ -799,6 +931,8 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
         3,
         7,
         9,
+        10,
+        11,
     };
     for (uint32_t fixture_index = 0; fixture_index < BUSTER_TIER1_PIPELINE_CASES; fixture_index += 1)
     {
@@ -832,6 +966,10 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                     IrDominance dominance;
                     ok = tier1_pipeline_upstream(test, &fixture.program, f, &functions, &function, &dominance);
                     ok = tier1_pipeline_expect(test, tier1_pipeline_unchanged(&fixture, &original), "lowering, promotion and optimization preserve the frozen typed fixture") && ok;
+                    if (ok && (shape == 10 || shape == 11))
+                    {
+                        ok = tier1_pipeline_narrow_handoff(test, shape, &function);
+                    }
                     Tier1SelectPlan plan;
                     uint32_t node = BUSTER_IR_NONE;
                     if (ok)
@@ -968,6 +1106,7 @@ static bool tier1_pipeline_oracle_source(const Tier1PipelineTest* test, const ch
     if (ok)
     {
         // Separate source formulas intentionally know nothing about SSA IDs, selected patterns or allocations.
+        // Signed narrow inputs are reconstructed with in-range arithmetic before casting, without host truncation.
         fputs("#include <stdint.h>\n#include <stdio.h>\n#include <inttypes.h>\n"
               "static uint64_t constant(unsigned i) { return UINT64_C(0x9e3779b97f4a7c15) + (uint64_t)i * UINT64_C(0xd1b54a32d192ed03); }\n"
               "static __attribute__((noinline)) uint64_t helper_constant(void) { return 7; }\n"
@@ -979,7 +1118,9 @@ static bool tier1_pipeline_oracle_source(const Tier1PipelineTest* test, const ch
               "    else if (shape == 2) { uint64_t local[16]; for (unsigned i = 0; i < 16; ++i) local[i] = constant(i); result = (a ^ b) + c; for (unsigned i = 0; i < 16; ++i) { if (i % 2 == 0) result += local[i]; else result ^= local[i]; } }\n"
               "    else if (shape == 3) { uint32_t local = (uint32_t)a + (uint32_t)b; result = (uint64_t)(uint32_t)((local >> 11) + (local ^ UINT32_C(0x92d68ca7))) ^ c; }\n"
               "    else if (shape == 4) { result = helper_constant(); }\n"
-              "    else { uint64_t live = a ^ b; uint64_t called = helper_arguments(c, a, b); result = (called + live) ^ c; }\n"
+              "    else if (shape == 5) { uint64_t live = a ^ b; uint64_t called = helper_arguments(c, a, b); result = (called + live) ^ c; }\n"
+              "    else if (shape == 6) { uint64_t low = a % UINT64_C(65536); uint64_t swapped = (low % 256) * 256 + low / 256; result = (swapped + b) ^ c; }\n"
+              "    else { int8_t small = (int8_t)((int)(a & 255) - ((a & 128) != 0 ? 256 : 0)); int16_t via = small; int16_t medium = (int16_t)((int32_t)(b & 65535) - ((b & 32768) != 0 ? 65536 : 0)); int32_t wide = (int32_t)((int64_t)(c & UINT32_MAX) - ((c & UINT64_C(0x80000000)) != 0 ? INT64_C(0x100000000) : 0)); result = (((uint64_t)(int64_t)via + (uint64_t)(int64_t)medium) ^ (uint64_t)(int64_t)wide) + ((uint64_t)(int64_t)small << 17); }\n"
               "    return result;\n}\n"
               "static const uint64_t inputs[][3] = {\n", file);
         for (uint32_t input = 0; input < BUSTER_TIER1_PIPELINE_INPUTS; input += 1)
@@ -1028,7 +1169,7 @@ static void tier1_pipeline_clang(Tier1PipelineTest* test, const char* clang)
             0,
         };
         const Tier1PipelineProcess compiled = tier1_pipeline_process(compile, 0, 30000);
-        ok = tier1_pipeline_expect(test, tier1_pipeline_process_ok(&compiled), "Clang compiles the independent unsigned C formulas and reaps its descendants");
+        ok = tier1_pipeline_expect(test, tier1_pipeline_process_ok(&compiled), "Clang compiles the independent integer C formulas and reaps its descendants");
         if (ok)
         {
             char* const execute[] = {
@@ -1156,6 +1297,24 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
                 test.inputs[input][0] = boundaries[input];
                 test.inputs[input][1] = boundaries[BUSTER_ARRAY_LENGTH(boundaries) - 1 - input];
                 test.inputs[input][2] = boundaries[(input + 3) % BUSTER_ARRAY_LENGTH(boundaries)];
+            }
+            const uint64_t narrow_boundaries[] = {
+                UINT64_C(0x7f),
+                UINT64_C(0x80),
+                UINT64_C(0xff),
+                UINT64_C(0x7fff),
+                UINT64_C(0x8000),
+                UINT64_C(0xffff),
+                UINT64_C(0x7fffffff),
+                UINT64_C(0x80000000),
+            };
+            _Static_assert(BUSTER_ARRAY_LENGTH(boundaries) + BUSTER_ARRAY_LENGTH(narrow_boundaries) <= BUSTER_TIER1_PIPELINE_INPUTS, "boundary inputs fit the fixture table");
+            for (uint32_t input = 0; input < BUSTER_ARRAY_LENGTH(narrow_boundaries); input += 1)
+            {
+                const uint32_t row = BUSTER_ARRAY_LENGTH(boundaries) + input;
+                test.inputs[row][0] = UINT64_C(0xa5a55a5a00000000) | narrow_boundaries[input];
+                test.inputs[row][1] = UINT64_C(0x5a5aa5a500000000) | narrow_boundaries[BUSTER_ARRAY_LENGTH(narrow_boundaries) - 1 - input];
+                test.inputs[row][2] = UINT64_C(0xfedcba9800000000) | narrow_boundaries[(input + 3) % BUSTER_ARRAY_LENGTH(narrow_boundaries)];
             }
             tier1_pipeline_mutation_regression(&test);
             tier1_pipeline_deadline_regression(&test);

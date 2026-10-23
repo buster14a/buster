@@ -60,6 +60,10 @@ typedef enum Tier1SelectRule
     TIER1_RULE_JUMP,
     TIER1_RULE_RETURN,
     TIER1_RULE_CALL,
+    TIER1_RULE_TRUNCATE,
+    TIER1_RULE_ZERO_EXTEND,
+    TIER1_RULE_SIGN_EXTEND,
+    TIER1_RULE_UNREACHABLE,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -168,6 +172,7 @@ struct Tier1SelectHoles
     uint64_t immediate;
     X86Instruction memory;
     uint8_t width;
+    uint8_t source_width;
     uint8_t destination;
     uint8_t left;
     uint8_t right;
@@ -251,6 +256,25 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             result.records[result.count++] = tier1_select_move(width, destination, holes->left);
         }
         break;
+    case TIER1_RULE_TRUNCATE:
+    case TIER1_RULE_ZERO_EXTEND:
+    {
+        const uint32_t source_width = holes->rule == TIER1_RULE_TRUNCATE ? width : holes->source_width;
+        const uint16_t form = source_width == 1 ? X86_FORM_MOVZX_R32_RM8 : source_width == 2 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOV_R32_RM32;
+        result.records[result.count++] = tier1_select_register_record(form, destination, holes->left);
+        break;
+    }
+    case TIER1_RULE_SIGN_EXTEND:
+    {
+        const uint16_t form = holes->source_width == 4 ? X86_FORM_MOVSXD_R64_RM32 : holes->source_width == 2 ? (width == 8 ? X86_FORM_MOVSX_R64_RM16 : X86_FORM_MOVSX_R32_RM16) : (width == 8 ? X86_FORM_MOVSX_R64_RM8 : X86_FORM_MOVSX_R32_RM8);
+        result.records[result.count++] = tier1_select_register_record(form, destination, holes->left);
+        if (width == 2)
+        {
+            // I8 -> I16 has sixteen significant bits. Clear the rest of its canonical 32-bit storage value.
+            result.records[result.count++] = tier1_select_register_record(X86_FORM_MOVZX_R32_RM16, destination, destination);
+        }
+        break;
+    }
     case TIER1_RULE_UNARY:
         if (destination != holes->left)
         {
@@ -326,7 +350,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         X86Instruction record = holes->memory;
         record.reg = destination;
-        record.form = width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+        record.form = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
         result.records[result.count++] = record;
         break;
     }
@@ -356,7 +380,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         X86Instruction record = holes->memory;
         record.reg = holes->right;
-        record.form = width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32;
+        record.form = width == 1 ? X86_FORM_MOV_RM8_R8 : width == 2 ? X86_FORM_MOV_RM16_R16 : width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32;
         result.records[result.count++] = record;
         break;
     }
@@ -400,6 +424,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         }
         result.records[result.count++] = (X86Instruction){ .form = X86_FORM_RET };
         break;
+    case TIER1_RULE_UNREACHABLE:
+        result.records[result.count++] = (X86Instruction){ .form = X86_FORM_UD2 };
+        break;
     default:
         result.records[result.count++] = (X86Instruction){0};
         break;
@@ -415,7 +442,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 // all fields of one selected pattern. `values` preserve operand roles, including absent slots, while the effective-use
 // CSR is the compact, directly consumable liveness handoff. CALL uses none of the three ordinary value slots: its
 // ordered argument slice, including duplicates, is in the effective-use CSR, immediate is its symbol ID, and width
-// is the result width (zero for void). The original function remains immutable through emission.
+// is the result width (zero for void). Memory/conversion patterns keep logical byte widths, while the allocator and
+// frame consumer use tier1_select_width's 4-byte canonical storage for I8/I16. Conversion source_width is the source's
+// logical byte width, except canonical I1 zero-extension reads its 32-bit storage. The original function stays immutable.
 typedef struct Tier1SelectPattern Tier1SelectPattern;
 struct Tier1SelectPattern
 {
@@ -426,6 +455,7 @@ struct Tier1SelectPattern
     uint8_t rule;
     uint8_t operation;
     uint8_t width;
+    uint8_t source_width;
     uint8_t condition;
     uint8_t scale;
     uint8_t fold_count;
@@ -481,7 +511,13 @@ struct Tier1SelectForest
 
 static uint32_t tier1_select_width(uint32_t type)
 {
-    return type == IR_I32 || type == IR_I1 ? 4 : type == IR_I64 || type == IR_PTR ? 8 : 0;
+    // Narrow SSA values occupy a zero-extended 32-bit register/spill slot; signedness is explicit in IR_SEXT.
+    return type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 ? 4 : type == IR_I64 || type == IR_PTR ? 8 : 0;
+}
+
+static uint32_t tier1_select_memory_width(uint32_t type)
+{
+    return type == IR_I8 ? 1 : type == IR_I16 ? 2 : type == IR_I32 ? 4 : type == IR_I64 || type == IR_PTR ? 8 : 0;
 }
 
 // This selection boundary intentionally excludes extension/truncation ABI rules for narrow integers, floating-point
@@ -638,7 +674,8 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
     if (op == IR_CONST && width != 0)
     {
         base.rule = TIER1_RULE_CONSTANT;
-        base.immediate = function->constants[a].low;
+        const uint32_t bits = ir_type_bits[type];
+        base.immediate = function->constants[a].low & (bits < 64 ? (UINT64_C(1) << bits) - 1 : UINT64_MAX);
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
@@ -647,12 +684,22 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.rule = TIER1_RULE_LEAF;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if ((op == IR_COPY && width != 0) || (op == IR_INTTOPTR && function->type[a] == IR_I64) || (op == IR_PTRTOINT && type == IR_I64) || (op == IR_BITCAST && width != 0 && tier1_select_width(function->type[a]) == width) || (op == IR_TRUNC && type == IR_I32 && function->type[a] == IR_I64) || (op == IR_ZEXT && type == IR_I64 && function->type[a] == IR_I32))
+    else if ((op == IR_COPY && width != 0) || (op == IR_INTTOPTR && function->type[a] == IR_I64) || (op == IR_PTRTOINT && type == IR_I64) || (op == IR_BITCAST && width != 0 && tier1_select_width(function->type[a]) == width && ir_type_bits[function->type[a]] == ir_type_bits[type]))
     {
         base.rule = TIER1_RULE_COPY;
         base.values[0] = a;
-        base.width = op == IR_ZEXT ? 4 : (uint8_t)width;
         base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if ((op == IR_TRUNC && (type == IR_I8 || type == IR_I16 || type == IR_I32) && tier1_select_memory_width(function->type[a]) != 0 && function->type[a] != IR_PTR) ||
+             (op == IR_ZEXT && (type == IR_I8 || type == IR_I16 || integer) && (function->type[a] == IR_I1 || function->type[a] == IR_I8 || function->type[a] == IR_I16 || function->type[a] == IR_I32)) ||
+             (op == IR_SEXT && (type == IR_I16 || integer) && (function->type[a] == IR_I8 || function->type[a] == IR_I16 || function->type[a] == IR_I32)))
+    {
+        base.rule = op == IR_TRUNC ? TIER1_RULE_TRUNCATE : op == IR_ZEXT ? TIER1_RULE_ZERO_EXTEND : TIER1_RULE_SIGN_EXTEND;
+        base.values[0] = a;
+        base.width = (uint8_t)tier1_select_memory_width(type);
+        base.source_width = function->type[a] == IR_I1 ? 4 : (uint8_t)tier1_select_memory_width(function->type[a]);
+        base.intrinsic_cost = op == IR_SEXT && type == IR_I16 ? 2 : 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if ((op == IR_NEG || op == IR_NOT) && integer)
@@ -786,13 +833,13 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
     }
-    else if ((op == IR_LOAD && (integer || type == IR_PTR)) || (op == IR_STORE && (function->type[b] == IR_I32 || function->type[b] == IR_I64 || function->type[b] == IR_PTR)))
+    else if ((op == IR_LOAD && tier1_select_memory_width(type) != 0) || (op == IR_STORE && tier1_select_memory_width(function->type[b]) != 0))
     {
         const bool store = op == IR_STORE;
         base.rule = store ? TIER1_RULE_STORE : TIER1_RULE_LOAD;
         base.values[0] = a;
         base.values[2] = store ? b : BUSTER_IR_NONE;
-        base.width = store ? (uint8_t)tier1_select_width(function->type[b]) : (uint8_t)width;
+        base.width = (uint8_t)tier1_select_memory_width(store ? function->type[b] : type);
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
         Tier1SelectPattern folded = base;
@@ -871,12 +918,18 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.intrinsic_cost = (uint8_t)(1 + function->calls[b].argument_count + (type != IR_VOID));
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_RET && (a == BUSTER_IR_NONE || tier1_select_width(function->type[a]) != 0))
+    else if (op == IR_RET && (a == BUSTER_IR_NONE || function->type[a] == IR_I1 || function->type[a] == IR_I32 || function->type[a] == IR_I64 || function->type[a] == IR_PTR))
     {
         base.rule = TIER1_RULE_RETURN;
         base.values[0] = a;
         base.width = a == BUSTER_IR_NONE ? 0 : (uint8_t)tier1_select_width(function->type[a]);
         base.intrinsic_cost = a == BUSTER_IR_NONE ? 1 : 2;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_UNREACHABLE)
+    {
+        base.rule = TIER1_RULE_UNREACHABLE;
+        base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     return candidates;
@@ -1195,6 +1248,7 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         .operation = (X86Operation)pattern->operation,
         .immediate = pattern->immediate,
         .width = pattern->width,
+        .source_width = pattern->source_width,
         .destination = plan->function->type[node] == IR_VOID ? 0 : registers[node],
         .left = pattern->values[0] == BUSTER_IR_NONE ? 0 : registers[pattern->values[0]],
         .right = pattern->values[1] == BUSTER_IR_NONE ? 0 : registers[pattern->values[1]],
