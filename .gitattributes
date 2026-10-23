@@ -1,0 +1,3 @@
+# Preserve byte-exact oracle outputs, including empty macro bodies and TSV fields.
+docs/measurements/parser-c-testsuite-2026-10-23/predefines.h whitespace=-blank-at-eol
+docs/measurements/parser-c-testsuite-2026-10-23/c-testsuite-preprocessor.tsv whitespace=-blank-at-eol

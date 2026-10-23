@@ -1,0 +1,98 @@
+[
+  {
+    "sequence": 1,
+    "ms": 0,
+    "rep": 1,
+    "variant": "baseline",
+    "tree": "build3",
+    "order": "nomerge-exact,merge-exact,nomerge-vector,merge-vector"
+  },
+  {
+    "sequence": 2,
+    "ms": 0,
+    "rep": 1,
+    "variant": "candidate",
+    "tree": "apply1",
+    "order": "nomerge-exact,merge-exact,nomerge-vector,merge-vector"
+  },
+  {
+    "sequence": 3,
+    "ms": 0,
+    "rep": 2,
+    "variant": "candidate",
+    "tree": "apply1",
+    "order": "merge-vector,nomerge-vector,merge-exact,nomerge-exact"
+  },
+  {
+    "sequence": 4,
+    "ms": 0,
+    "rep": 2,
+    "variant": "baseline",
+    "tree": "build3",
+    "order": "merge-vector,nomerge-vector,merge-exact,nomerge-exact"
+  },
+  {
+    "sequence": 5,
+    "ms": 0,
+    "rep": 3,
+    "variant": "baseline",
+    "tree": "build3",
+    "order": "nomerge-exact,merge-exact,nomerge-vector,merge-vector"
+  },
+  {
+    "sequence": 6,
+    "ms": 0,
+    "rep": 3,
+    "variant": "candidate",
+    "tree": "apply1",
+    "order": "nomerge-exact,merge-exact,nomerge-vector,merge-vector"
+  },
+  {
+    "sequence": 7,
+    "ms": 100,
+    "rep": 1,
+    "variant": "candidate",
+    "tree": "apply1",
+    "order": "nomerge-exact,merge-exact,nomerge-vector,merge-vector"
+  },
+  {
+    "sequence": 8,
+    "ms": 100,
+    "rep": 1,
+    "variant": "baseline",
+    "tree": "build3",
+    "order": "nomerge-exact,merge-exact,nomerge-vector,merge-vector"
+  },
+  {
+    "sequence": 9,
+    "ms": 100,
+    "rep": 2,
+    "variant": "baseline",
+    "tree": "build3",
+    "order": "merge-vector,nomerge-vector,merge-exact,nomerge-exact"
+  },
+  {
+    "sequence": 10,
+    "ms": 100,
+    "rep": 2,
+    "variant": "candidate",
+    "tree": "apply1",
+    "order": "merge-vector,nomerge-vector,merge-exact,nomerge-exact"
+  },
+  {
+    "sequence": 11,
+    "ms": 100,
+    "rep": 3,
+    "variant": "candidate",
+    "tree": "apply1",
+    "order": "nomerge-exact,merge-exact,nomerge-vector,merge-vector"
+  },
+  {
+    "sequence": 12,
+    "ms": 100,
+    "rep": 3,
+    "variant": "baseline",
+    "tree": "build3",
+    "order": "nomerge-exact,merge-exact,nomerge-vector,merge-vector"
+  }
+]

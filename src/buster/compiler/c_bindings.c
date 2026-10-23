@@ -96,7 +96,7 @@ struct CBindingReplay
     uint32_t capacity;
 };
 
-static bool c_bindings_initialize(CBindings* bindings, Arena* arena, uint32_t names, uint32_t capacity)
+static __attribute__((unused)) bool c_bindings_initialize(CBindings* bindings, Arena* arena, uint32_t names, uint32_t capacity)
 {
     const uint64_t mark = arena->length;
     *bindings = (CBindings){ .name_capacity = names, .capacity = capacity };
@@ -125,7 +125,7 @@ static bool c_bindings_initialize(CBindings* bindings, Arena* arena, uint32_t na
     return valid;
 }
 
-static void c_bindings_reset(CBindings* bindings)
+static __attribute__((unused)) void c_bindings_reset(CBindings* bindings)
 {
     while (bindings->active_count != 0)
     {
@@ -136,7 +136,7 @@ static void c_bindings_reset(CBindings* bindings)
     bindings->valid = bindings->heads != 0;
 }
 
-static uint32_t c_bindings_mark(const CBindings* bindings)
+static __attribute__((unused)) uint32_t c_bindings_mark(const CBindings* bindings)
 {
     return bindings->active_count;
 }
@@ -492,7 +492,7 @@ static bool c_bindings_scan(const CBindings* bindings, const uint64_t* keys, uin
     return valid;
 }
 
-static bool c_bindings_batch(const CBindings* bindings, uint32_t* results, Arena* scratch, CBindingStatistics* statistics)
+static __attribute__((unused)) bool c_bindings_batch(const CBindings* bindings, uint32_t* results, Arena* scratch, CBindingStatistics* statistics)
 {
     const uint64_t mark = scratch->length;
     uint64_t* keys = 0;

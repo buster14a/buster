@@ -53,6 +53,7 @@ typedef struct CheckInput CheckInput;
 struct CheckInput
 {
     CheckGraph graph;
+    CheckEnvironment environment;
     CheckInputReport* reports;
     uint32_t report_count;
     uint32_t report_capacity;
@@ -1079,7 +1080,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             reader->output->resource |= !valid && reader->types->last_error == TYPE_ERROR_FULL;
             if (valid)
             {
-                reader->tag_completions[reader->types->types.index[type_index(frame->type)]] = i;
+                reader->tag_completions[reader->types->types.index[type_index(frame->type)]] = i + 1;
             }
             reader->ignored[i] = true;
             reader->tag_ends[frame->token] = i + 1;
@@ -2015,7 +2016,7 @@ static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* p
         .arena = arena,
         .scratch = scratch,
     };
-    bool valid = parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE && (parser->postorder != 0 || count == 0) && count < UINT32_MAX / 4;
+    bool valid = arena != scratch && parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE && (parser->postorder != 0 || count == 0) && count < UINT32_MAX / 4;
     input->report_capacity = count + 1;
     input->reports = valid ? arena_push_array(arena, input->report_capacity, sizeof(CheckInputReport), 4) : 0;
     input->declarations = input->reports != 0 ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
@@ -2104,7 +2105,7 @@ static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* p
         memset(reader.linked_declarations, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
         memset(reader.linked_types, 0, (uint64_t)pp->table->count * sizeof(TypeId));
         memset(reader.tag_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
-        memset(reader.tag_completions, 0, (uint64_t)types->tags.capacity * sizeof(uint32_t));
+        memset(reader.tag_completions, 0xff, (uint64_t)types->tags.capacity * sizeof(uint32_t));
         memset(reader.initializers, 0, (uint64_t)count + 1);
         memset(reader.static_initializers, 0, (uint64_t)count + 1);
         for (uint32_t i = 0; i <= count; i += 1)
@@ -2171,6 +2172,11 @@ static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* p
             }
         }
         valid = !input->resource && input->report_count == 0 && reader.bindings.valid;
+        if (valid)
+        {
+            valid = check_environment_publish(&input->environment, parser, &reader.bindings, input->declared_types, types, reader.tag_completions, arena, scratch);
+            input->resource |= !valid;
+        }
     }
     else
     {
