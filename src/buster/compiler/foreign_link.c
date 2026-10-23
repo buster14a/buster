@@ -55,6 +55,7 @@ struct ForeignLink
 
 static __attribute__((unused)) ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena);
 static __attribute__((unused)) ForeignLinkResult foreign_link_build_dynamic(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, String8 interpreter);
+static __attribute__((unused)) ForeignLinkResult foreign_link_build_for_gc(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter);
 
 static bool foreign_link_add_capacity(LinkCapacity* total, LinkCapacity added)
 {
@@ -361,7 +362,7 @@ static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign*
     return required;
 }
 
-static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* foreign, const uint8_t* required, RuntimeKind kind)
+static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* foreign, const uint8_t* required, RuntimeKind kind, bool defer_undefined)
 {
     ForeignLinkResult result = { 0 };
     Link* link = &output->link;
@@ -452,7 +453,7 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
             }
             else if (strong)
             {
-                result.error = FOREIGN_LINK_ERROR_UNDEFINED;
+                result.error = defer_undefined ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_UNDEFINED;
             }
             // A weak reference to an unneeded --as-needed DSO remains unversioned and undefined, retaining its type.
         }
@@ -462,7 +463,7 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
         }
         else if (resolution == FOREIGN_RESOLUTION_UNDEFINED && required[name] != 0)
         {
-            result.error = FOREIGN_LINK_ERROR_UNDEFINED;
+            result.error = defer_undefined ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_UNDEFINED;
         }
         else
         {
@@ -674,12 +675,13 @@ static ForeignLinkError foreign_link_dynamic_finish(ForeignLink* output, const F
     return result;
 }
 
-static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter)
+static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter, bool defer_undefined)
 {
     *output = (ForeignLink){ 0 };
     ForeignLinkResult result = { 0 };
     LinkCapacity capacity = { 0 };
-    if (!foreign->started || foreign->failure.error != FOREIGN_ERROR_NONE || (kind == RUNTIME_KIND_DYNAMIC && (interpreter.pointer == 0 || interpreter.length == 0)))
+    if (!foreign->started || foreign->failure.error != FOREIGN_ERROR_NONE || (kind != RUNTIME_KIND_STATIC && kind != RUNTIME_KIND_DYNAMIC) ||
+        (kind == RUNTIME_KIND_DYNAMIC && (interpreter.pointer == 0 || interpreter.length == 0)))
     {
         result.error = FOREIGN_LINK_ERROR_INPUT;
     }
@@ -744,7 +746,7 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
         const uint8_t* required = foreign_link_undefined(output, foreign, kind, scratch.arena);
         if (required != 0)
         {
-            result = foreign_link_names(output, foreign, required, kind);
+            result = foreign_link_names(output, foreign, required, kind, defer_undefined);
         }
         else
         {
@@ -800,10 +802,17 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
 
 static ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena)
 {
-    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_STATIC, (String8){ 0 });
+    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_STATIC, (String8){ 0 }, false);
 }
 
 static ForeignLinkResult foreign_link_build_dynamic(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, String8 interpreter)
 {
-    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_DYNAMIC, interpreter);
+    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_DYNAMIC, interpreter, false);
+}
+
+// Reachability, including FDE/CIE dependencies, decides which unresolved references remain errors. Preserve those
+// names as GLOBAL/NONE until foreign_gc_link diagnoses the surviving closure; ordinary producers remain eager.
+static ForeignLinkResult foreign_link_build_for_gc(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter)
+{
+    return foreign_link_build_mode(output, foreign, arena, name_arena, kind, interpreter, true);
 }

@@ -2841,6 +2841,8 @@ static bool foreign_test_extended(const char* directory, Arena* arena)
 #include "buster/compiler/foreign_stack_test.c"
 #include "buster/compiler/foreign_unwind_test.c"
 #include "buster/compiler/foreign_unwind_runtime_test.c"
+#include "buster/compiler/foreign_gc_test.c"
+#include "buster/compiler/foreign_gc_link_test.c"
 #include "buster/compiler/foreign_strings_test.c"
 #include "buster/compiler/foreign_strings_output_test.c"
 #include "buster/compiler/foreign_strings_benchmark.c"
@@ -2921,6 +2923,8 @@ static int run_foreign_tests(int argc, char** argv)
         passed = foreign_stack_test(directory, &arena) && passed;
         passed = foreign_unwind_test() && passed;
         passed = foreign_unwind_runtime_test(directory, &arena, cross_check, &system) && passed;
+        passed = foreign_gc_test() && passed;
+        passed = foreign_gc_link_test(directory, &arena, cross_check) && passed;
         passed = foreign_strings_test(seed) && passed;
         passed = foreign_strings_output_test(directory, &arena, cross_check) && passed;
         if (!keep)

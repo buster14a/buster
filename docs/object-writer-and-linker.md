@@ -3369,6 +3369,88 @@ reservations and RSS. These are synthetic phase measurements, not complete
 foreign-link throughput, corpus acceptance or evidence that the wider linker
 performance target has been reached.
 
+#### Foreign section garbage collection
+
+`foreign_gc_mark` traverses an unlaid-out `Link` and returns stable maps for
+its live atoms, symbols and fixups. The caller supplies the entry, exported
+or forced symbols and explicitly retained atoms. Init/fini fragments and
+arrays are implicit roots. Defined symbols survive with their atoms;
+atomless symbols survive only when rooted or referenced by a live fixup.
+The pass does not modify the input or its borrowed bytes. Map entry zero
+and every discarded entry are zero; retained IDs follow original order.
+
+Root classification, frontier seeding and map emission have scalar and
+AVX-512 paths. Two atom queues and mark-before-append bound the irregular
+walk to one visit per atom. Target lookup and live-bit updates remain
+scalar. This is a single-lane closure, not the planned per-lane frontier
+exchange; representative scaling and complete-link measurements remain
+separate acceptance work.
+
+`foreign_gc_link` adds the foreign producer's ownership rules. It creates
+temporary graph nodes for FDEs and CIEs, with code-to-FDE and FDE-to-CIE
+dependencies. Personality and LSDA relocations then participate in the same
+closure as ordinary references. An explicit reference to an entire unwind
+atom conservatively retains all its records. Merely retaining a CIE does
+not retain every FDE that uses it. The adapter also adds dynamic exports,
+init/fini entry points, command-line `-u` names and `SHF_GNU_RETAIN` sections
+to the roots.
+
+After marking, the adapter replays the original unwind records with dead
+code sections removed and composes those offsets with prior COMDAT
+pruning. It builds a fresh compact `ForeignLink`, copying retained section
+bytes and the name table, and remaps the original object section/symbol
+maps, resolved names and dynamic imports/exports. Library/version strings
+and original foreign input metadata remain borrowed: the `Foreign`, input
+conversion and both output arenas must outlive writing. Input and output
+must be distinct. Failure restores both arena lengths and leaves the
+output unchanged.
+
+Use `foreign_link_build_for_gc` when dead strong references need deferred
+diagnostics. That explicit producer keeps unresolved references until
+reachability determines whether they survive; validated ordinary unlaid-out
+conversion is also accepted, but reports those references eagerly. The final compact
+link rejects surviving strong undefined references. Unsupported unwind
+formats, references into discarded unwind records and nonzero addends
+into changed unwind fragments are refused. Collection runs before terminal
+string or CIE pooling; a pooled terminal link is not an input to this pass.
+
+`test-foreign --cross-check` compares both marker paths with an independent
+reachability model over chains, branches, cycles, duplicate targets,
+guarded tails and failure cases. Foreign adapter fixtures test ordinary
+and unwind closure, COMDAT composition, forced/retained roots, external
+map remapping, rollback, dead versus surviving undefined references, and
+written executable behavior against GNU ld and lld. The callable adapter
+is opt-in; command-driver integration is a separate slice.
+
+`benchmark-foreign-gc --counts 8,1024 --runs 21` creates original static
+ET_REL leaf objects with one CIE/FDE each, then compares GC on/off with the
+exact and vector paths. The mixed-dead entry calls alternating leaves; the
+all-live control calls every leaf. An untimed replay checks original ELF
+identities, stable maps, every retained unwind offset and serialized FDE
+addresses/ranges. Every timed output executes and matches complete reference
+bytes outside timing. The all-live byte reference is shared across GC on/off
+as well as both paths; the mixed-dead references are separate by GC state.
+
+Each sample reserves fresh link/name arenas, opens/resolves the frozen
+objects, converts, optionally collects, writes/closes and releases the
+per-link arenas and mappings before its total clock stops. Generated files,
+commands and thread-local scratch caches persist. Generation, output unlink,
+optional scalar conditioning and validation are excluded. This measures
+warm-file fresh links, not cold I/O or compilation. Phase medians need not
+sum to the total median. The report includes wall min/median/max, reference
+TSC ticks, input/output bytes and rates, logical code/CFI bytes, live counts
+and retained arena lengths. Those lengths exclude mapped input files,
+generated fixtures and transient scratch; they are not peak RSS.
+
+Variants rotate by default. `--order` selects their order, `--schedule blocked`
+groups samples, `--only mixed|all` selects a control, and `--after-scalar MS`
+adds excluded conditioning. Run each independently started process under the
+shared 9700X lock on CPU 2, alternating orders and comparing process medians
+against spread before making performance claims. This single-lane static
+fixture supplies no dynamic, COMDAT, personality/LSDA, corpus or scaling
+performance evidence. Its first build, oracle run and measurements are still
+pending; source review alone is not validation.
+
 #### Steps 1 to 5, as built
 
 `foreign.c` (the first part of step 7) resolves a command line on a group of
