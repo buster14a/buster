@@ -603,7 +603,9 @@ designs and the compilers already built this way.
   records by expanding a template per entry, with each value's register its
   depth on an integer and a floating value stack, after fusing leaves,
   addresses, compares and x = x op v into their consumers' instructions; locals
-  get registers or frame slots; calls, and division and shifts at depths where
+  get registers or frame slots, and objects (local arrays, structs and unions,
+  from optional size and alignment columns) places of their own in the frame,
+  reached through their addresses; calls, and division and shifts at depths where
   their fixed registers are taken, are emitted entry by entry. The output is
   the records with #144's branch columns and `LinkReference`s. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
@@ -3767,19 +3769,25 @@ informational.
 2.9 s with `--cross-check`) checks `tier0.c` on programs from
 `tier0_generate.c`, `--count` (300) of each of four shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
-address-taken locals); and larger. Their calls pass up to 12 arguments, past
-the argument registers, and their pointer arithmetic has element sizes for each
-of its templates, past imul's imm32 too. Before them it checks the call
-emitter's move resolver on 20,000 random sets of moves (paths and cycles of
-every length) run on a register file, the vector path's application of chosen
-forms against the scalar path's on random records, and that both paths refuse
-unsupported entries and expressions past the depths alike. Every function must pass `tier0_validate`,
+address-taken locals, objects); and larger. Their calls pass up to 12
+arguments, past the argument registers, and their pointer arithmetic has
+element sizes for each of its templates, past imul's imm32 too. Their objects
+are local arrays and structs, some `_Alignas(16)`, read, written and pointed
+into, each address's remainder by its alignment a value. Before them it checks
+the call emitter's move resolver on 20,000 random sets of moves (paths and
+cycles of every length) run on a register file, the vector path's application
+of chosen forms against the scalar path's on random records, that both paths
+refuse unsupported entries and expressions past the depths alike, and the
+objects: `tier0_validate` refusing each break of their rules, and 2,000 random
+frames of objects and values whose places both paths must give alike, aligned,
+inside the frame and apart. Every function must pass `tier0_validate`,
 both paths must compile it to the same records, branch columns and references,
 and the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`. Each program is then sized, encoded, loaded into
-fresh pages and run in a child process on eight inputs, and its result and
-every global's bytes must equal what the test's interpreter of the typed stream
-gives (the interpreter converts floating values to integers as cvttsd2si does).
+fresh pages and run in a child process on eight inputs (stopped by an alarm
+after 10 s), and its result and every global's bytes must equal what the test's
+interpreter of the typed stream gives (the interpreter converts floating values
+to integers as cvttsd2si does).
 
 With `--cross-check`, which needs clang (`--clang PATH`) and `size`, each of
 `--cross-count` (60) programs of the larger shape, keeping to what C defines,

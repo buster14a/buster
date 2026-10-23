@@ -324,19 +324,22 @@ static uint64_t tier0_test_compare(uint32_t kind, uint32_t class, uint64_t a, ui
     return holds ? 1 : 0;
 }
 
-// A frame of the interpreter: the function, where it is, its locals' slots and its stack's base.
+// A frame of the interpreter: the function, where it is, its locals' slots, its objects' memory and its stack's base.
 typedef struct Tier0TestFrame Tier0TestFrame;
 struct Tier0TestFrame
 {
     uint32_t function;
     uint32_t entry;
     uint64_t* locals;
+    uint8_t* objects;
     uint32_t stack_base;
 };
 
 #define BUSTER_TIER0_TEST_FRAMES 256
 #define BUSTER_TIER0_TEST_STACK 4096
 #define BUSTER_TIER0_TEST_SLOTS (BUSTER_TIER0_TEST_FRAMES * BUSTER_TIER0_GENERATE_MAX_LOCALS)
+// A frame's objects' bytes, each object at a multiple of 16 (the generator's take a few hundred at most).
+#define BUSTER_TIER0_TEST_OBJECT_BYTES 2048
 #define BUSTER_TIER0_TEST_STEPS 200000000ull
 
 // Runs the program's entry (its last function) on three arguments over the globals at `globals` (the data layout's),
@@ -347,18 +350,34 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
     static Tier0TestFrame frames[BUSTER_TIER0_TEST_FRAMES];
     static uint64_t stack[BUSTER_TIER0_TEST_STACK];
     static uint64_t slots[BUSTER_TIER0_TEST_SLOTS];
+    static uint8_t objects[BUSTER_TIER0_TEST_FRAMES * BUSTER_TIER0_TEST_OBJECT_BYTES] __attribute__((aligned(64)));
+    // Each object's offset in its frame's memory, by the program's local index.
+    static uint32_t object_offsets[BUSTER_TIER0_GENERATE_MAX_FUNCTIONS * BUSTER_TIER0_GENERATE_MAX_LOCALS];
     uint32_t depth = 1;
     uint32_t top = 0;
     uint64_t result = 0;
     uint64_t steps = 0;
     const uint32_t entry = program->function_count - 1;
-    frames[0] = (Tier0TestFrame){ entry, 0, slots, 0 };
+    *fault = false;
+    for (uint32_t f = 0; f < program->function_count; f += 1)
+    {
+        const Tier0GeneratedFunction* function = &program->functions[f];
+        uint32_t offset = 0;
+        for (uint32_t l = 0; l < function->local_count; l += 1)
+        {
+            const uint32_t size = program->local_sizes[function->first_local + l];
+            object_offsets[function->first_local + l] = offset;
+            offset += (size + 15) & ~15u;
+        }
+        *fault |= offset > BUSTER_TIER0_TEST_OBJECT_BYTES;
+    }
+    frames[0] = (Tier0TestFrame){ entry, 0, slots, objects, 0 };
     memset(slots, 0, sizeof(uint64_t) * BUSTER_TIER0_GENERATE_MAX_LOCALS);
+    memset(objects, 0, BUSTER_TIER0_TEST_OBJECT_BYTES);
     for (uint32_t p = 0; p < 3 && p < functions->functions[entry].parameter_count; p += 1)
     {
         slots[p] = inputs[p];
     }
-    *fault = false;
     while (depth != 0 && !*fault)
     {
         Tier0TestFrame* frame = &frames[depth - 1];
@@ -386,7 +405,8 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             stack[top++] = tier0_test_load(class, (uint64_t)(uintptr_t)&frame->locals[value]);
             break;
         case BUSTER_TYPED_LOCAL_ADDRESS:
-            stack[top++] = (uint64_t)(uintptr_t)&frame->locals[value];
+            stack[top++] = tier0_is_object(f, value) ? (uint64_t)(uintptr_t)(frame->objects + object_offsets[program->functions[frame->function].first_local + value])
+                                                     : (uint64_t)(uintptr_t)&frame->locals[value];
             break;
         case BUSTER_TYPED_GLOBAL:
             stack[top++] = tier0_test_load(class, (uint64_t)(uintptr_t)(globals + data->offsets[value - 1]));
@@ -454,13 +474,15 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
                 break;
             }
             uint64_t* locals = frame->locals + BUSTER_TIER0_GENERATE_MAX_LOCALS;
+            uint8_t* callee_objects = frame->objects + BUSTER_TIER0_TEST_OBJECT_BYTES;
             memset(locals, 0, sizeof(uint64_t) * BUSTER_TIER0_GENERATE_MAX_LOCALS);
+            memset(callee_objects, 0, BUSTER_TIER0_TEST_OBJECT_BYTES);
             top -= arguments;
             for (uint32_t a = 0; a < arguments; a += 1)
             {
                 locals[a] = stack[top + a];
             }
-            frames[depth] = (Tier0TestFrame){ callee, 0, locals, top };
+            frames[depth] = (Tier0TestFrame){ callee, 0, locals, callee_objects, top };
             depth += 1;
             break;
         }
@@ -630,6 +652,7 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
 
 #define BUSTER_TIER0_TEST_INPUTS 8
 #define BUSTER_TIER0_TEST_PAGE 4096u
+#define BUSTER_TIER0_TEST_RUN_SECONDS 10
 
 typedef struct Tier0TestOutcome Tier0TestOutcome;
 struct Tier0TestOutcome
@@ -665,6 +688,9 @@ static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* cod
     const pid_t child = result ? fork() : -1;
     if (child == 0)
     {
+        // A program runs for milliseconds; code that loops (a frame laid out wrong can overwrite a loop's counter) is
+        // stopped by the alarm, a failure like a crash.
+        alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
         uint8_t* region = mmap(0, code_pages + data_pages, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (region == MAP_FAILED)
         {
@@ -1301,6 +1327,209 @@ static void tier0_test_errors(Tier0TestTally* tally)
     arena_release(&arena);
 }
 
+// The objects (Tier0Function.local_sizes): the validator's rules, each broken one way on a function that keeps them; then
+// random frames of objects and value locals, compiled by both paths, which must agree: each LOCAL_ADDRESS's lea gives
+// its local's place, which must be a multiple of the object's alignment, inside the frame, and overlap no other local's
+// bytes, and a frame with an object aligned to 16 must leave rsp a multiple of 16 below the pushes and the return
+// address.
+static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
+{
+    enum
+    {
+        locals_capacity = 24,
+        capacity = 2 * locals_capacity + 1,
+    };
+    uint8_t kinds[capacity];
+    uint8_t classes[capacity];
+    uint64_t values[capacity];
+    uint8_t local_classes[locals_capacity];
+    uint8_t local_flags[locals_capacity];
+    uint32_t local_sizes[locals_capacity];
+    uint8_t local_alignments[locals_capacity];
+    const AbiLocation in_rdi = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RDI } };
+    Arena arena = arena_reserve(1ull << 28);
+    // The rules: an object of 24 bytes aligned to 8, its address stored through, then each way to break them.
+    for (uint32_t way = 0; way < 9; way += 1)
+    {
+        local_classes[0] = BUSTER_TYPED_CLASS_VOID;
+        local_flags[0] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+        local_sizes[0] = 24;
+        local_alignments[0] = 3;
+        local_classes[1] = BUSTER_TYPED_CLASS_VOID;
+        local_flags[1] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+        local_sizes[1] = 16;
+        local_alignments[1] = 4;
+        kinds[0] = BUSTER_TYPED_LOCAL_ADDRESS;
+        classes[0] = BUSTER_TYPED_CLASS_U64;
+        values[0] = 0;
+        kinds[1] = BUSTER_TYPED_CONST;
+        classes[1] = BUSTER_TYPED_CLASS_I32;
+        values[1] = 7;
+        kinds[2] = BUSTER_TYPED_SET;
+        classes[2] = BUSTER_TYPED_CLASS_I32;
+        values[2] = 0;
+        kinds[3] = BUSTER_TYPED_RETURN;
+        classes[3] = BUSTER_TYPED_CLASS_VOID;
+        values[3] = 0;
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = 4;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_sizes = local_sizes;
+        function.local_alignments = local_alignments;
+        function.local_count = 2;
+        static const char* const ways[9] = {
+            "kept",
+            "a class",
+            "not address-taken",
+            "a parameter",
+            "aligned to 32",
+            "sizes without alignments",
+            "read as a value",
+            "past BUSTER_TIER0_MAX_OBJECT_BYTES",
+            "BUSTER_TIER0_MAX_OBJECT_BYTES exactly",
+        };
+        switch (way)
+        {
+        case 1:
+            local_classes[0] = BUSTER_TYPED_CLASS_U64;
+            break;
+        case 2:
+            // The other object is the one stored through, so that LOCAL_ADDRESS's own rule doesn't refuse it first.
+            local_flags[0] = 0;
+            values[0] = 1;
+            break;
+        case 3:
+            function.parameter_count = 1;
+            function.parameters = &in_rdi;
+            break;
+        case 4:
+            local_alignments[0] = 5;
+            break;
+        case 5:
+            function.local_alignments = 0;
+            break;
+        case 6:
+            // LOCAL of the object, then a DISCARD that a VOID breaks too, but later: the object's rule must be first.
+            kinds[0] = BUSTER_TYPED_LOCAL;
+            classes[0] = BUSTER_TYPED_CLASS_VOID;
+            kinds[1] = BUSTER_TYPED_DISCARD;
+            classes[1] = BUSTER_TYPED_CLASS_VOID;
+            kinds[2] = BUSTER_TYPED_RETURN;
+            classes[2] = BUSTER_TYPED_CLASS_VOID;
+            function.count = 3;
+            break;
+        case 7:
+            local_sizes[0] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
+            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2 + 1;
+            break;
+        case 8:
+            local_sizes[0] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
+            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
+            break;
+        default:
+            break;
+        }
+        const bool valid = way == 0 || way == 8;
+        const Tier0Check check = tier0_validate(&function);
+        tier0_test_expect(tally, (check.error == TIER0_OK) == valid && (valid || check.node == 0), "objects", "an object %s: tier0_validate says %s at %u (%s)",
+                          ways[way], check.error == TIER0_OK ? "valid" : "invalid", check.node, check.rule != 0 ? check.rule : "");
+        if (valid)
+        {
+            const uint64_t mark = arena.length;
+            const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+            const Tier0Code vector = tier0_compile(&function, &arena);
+            tier0_test_expect(tally, scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "objects",
+                              "an object %s: the paths' errors %d and %d, or their code differs", ways[way], scalar.error, vector.error);
+            arena_pop_to(&arena, mark);
+        }
+    }
+    // Random frames: up to 24 locals, objects of 1 to 300 bytes at every alignment to 16, and 8-byte values, some
+    // address-taken, all of them address-taken ones read by a LOCAL_ADDRESS each, its lea's displacement its place.
+    uint64_t random = seed ^ 0x6f626a656374ull;
+    for (uint32_t round = 0; round < 2000; round += 1)
+    {
+        const uint32_t locals = 1 + tier0_generate_below(&random, locals_capacity);
+        uint32_t count = 0;
+        bool sixteen = false;
+        for (uint32_t l = 0; l < locals; l += 1)
+        {
+            const bool object = tier0_generate_chance(&random, 60);
+            local_sizes[l] = object ? 1 + tier0_generate_below(&random, 300) : 0;
+            local_alignments[l] = object ? (uint8_t)tier0_generate_below(&random, BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 + 1) : 0;
+            local_classes[l] = object ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_I64;
+            local_flags[l] = object || tier0_generate_chance(&random, 50) ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0;
+            sixteen |= object && local_alignments[l] == 4;
+            if (local_flags[l] != 0)
+            {
+                kinds[count] = BUSTER_TYPED_LOCAL_ADDRESS;
+                classes[count] = BUSTER_TYPED_CLASS_U64;
+                values[count] = l;
+                kinds[count + 1] = BUSTER_TYPED_DISCARD;
+                classes[count + 1] = BUSTER_TYPED_CLASS_U64;
+                values[count + 1] = 0;
+                count += 2;
+            }
+        }
+        kinds[count] = BUSTER_TYPED_RETURN;
+        classes[count] = BUSTER_TYPED_CLASS_VOID;
+        values[count] = 0;
+        count += 1;
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = count;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_sizes = local_sizes;
+        function.local_alignments = local_alignments;
+        function.local_count = locals;
+        const uint64_t mark = arena.length;
+        const Tier0Check check = tier0_validate(&function);
+        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+        const Tier0Code vector = tier0_compile(&function, &arena);
+        bool laid = check.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector);
+        // The prologue is the frame's sub alone (nothing is pushed), then a lea per address-taken local, in order.
+        const uint32_t size = laid && scalar.count != 0 && (scalar.records[0].form & ~BUSTER_X86_FORM_FIXUP) != X86_FORM_RET ? (uint32_t)scalar.records[0].immediate : 0;
+        const uint32_t first = size != 0 ? 1 : 0;
+        uint32_t places[locals_capacity];
+        uint32_t lea = first;
+        for (uint32_t l = 0; l < locals && laid; l += 1)
+        {
+            if (local_flags[l] != 0)
+            {
+                const X86Instruction* record = &scalar.records[lea];
+                laid &= lea < scalar.count && record->form == X86_FORM_LEA_R64_M && record->rm == X86_REGISTER_RSP && record->displacement >= 0;
+                places[l] = laid ? (uint32_t)record->displacement : 0;
+                lea += 1;
+            }
+        }
+        for (uint32_t l = 0; l < locals && laid; l += 1)
+        {
+            if (local_flags[l] != 0)
+            {
+                const uint32_t bytes = local_sizes[l] != 0 ? local_sizes[l] : 8;
+                laid &= places[l] % (1u << local_alignments[l]) == 0 && places[l] + bytes <= size;
+                for (uint32_t other = 0; other < l; other += 1)
+                {
+                    const uint32_t other_bytes = local_sizes[other] != 0 ? local_sizes[other] : 8;
+                    laid &= local_flags[other] == 0 || places[l] + bytes <= places[other] || places[other] + other_bytes <= places[l];
+                }
+            }
+        }
+        laid &= !sixteen || (size + 8) % 16 == 0;
+        tier0_test_expect(tally, laid, "objects", "round %u: %u locals, a frame of %u bytes: the paths disagree, or a local is misplaced", round, locals, size);
+        arena_pop_to(&arena, mark);
+    }
+    arena_release(&arena);
+}
+
 static int run_tier0_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -1363,8 +1592,8 @@ static int run_tier0_tests(int argc, char** argv)
             static const Tier0ProgramOptions shapes[4] = {
                 { .functions = 1, .statements = 6, .expression_nodes = 6, .calls = false, .loops = false, .floating = false, .pointers = false },
                 { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false },
-                { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true },
-                { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true },
+                { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true },
+                { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true },
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
             {
@@ -1385,6 +1614,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_errors(&tally);
                 tier0_test_report("errors", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_objects(&tally, seed);
+                tier0_test_report("objects", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

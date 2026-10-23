@@ -15,6 +15,7 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Both paths:**
   - `tier0_compile`, the vector path;
   - `tier0_compile_scalar`, its twin and oracle.
+- **Objects in the frame:** local arrays, structs and unions at their alignments, to 16.
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -43,7 +44,18 @@ exact rules):
 
 Beside them are three tables:
 
-- **Locals,** parameters first, each with a class and flags (`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`).
+- **Locals,** parameters first, each with a class and flags (`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`). Two optional columns
+  make some of them **objects** in the frame: arrays, structs and unions.
+  - `local_sizes`: an object's size in bytes, 0 for a value's local.
+  - `local_alignments`: its alignment's log2, at most 4 (16 bytes).
+
+  An object:
+  - is a local of class VOID with `ADDRESS_TAKEN`, and not a parameter;
+  - is reached only through `LOCAL_ADDRESS`: its elements and members are loads and stores through that address
+    (`PTR_ADD`, `LOAD`, `SET`), as a front end lowers `a[i]` and `s.m`;
+  - with the others, takes at most `BUSTER_TIER0_MAX_OBJECT_BYTES` (1 GB), so that every frame displacement fits a disp32.
+
+  A function without objects leaves both columns 0.
 - **The parameters' locations** at entry, and the result's.
 - **Calls:** each call's callee `SymbolId`, its arguments' classes and locations, whether it is variadic, and its
   `AbiCall`.
@@ -159,6 +171,11 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
 5. Address-taken locals and the rest get 8-byte frame slots, rsp-relative (no frame pointer). A stack parameter keeps
    its incoming slot, unless it took a register, which the prologue loads from that slot. No home is a register a
    parameter arrives in, so the prologue's moves and loads never overwrite one another's sources.
+6. Objects come after the slots, in the locals' order:
+   - each at a multiple of its alignment, taking its size rounded up to 8;
+   - with an object aligned to 16, the frame keeps rsp a multiple of 16, as a function that calls does.
+
+   The vector path finds the objects 16 locals at a time as a mask of nonzero sizes, as it finds the slots.
 
 This is what beats clang -O0, which loads and stores every local at every use. The counting loop for `s += i` compiles
 to `xor edx, edx; xor ecx, ecx; mov eax, ecx; cmp eax, edi; jge; add edx, ecx; inc ecx; jmp`.
@@ -265,10 +282,11 @@ of integers, integers and calls, everything, and larger, 300 each by default. Ea
 1. Every function must pass `tier0_validate`.
 2. Both paths must compile it to the same records, branch columns and references.
 3. The records must pass `x86_validate` and the branch columns `branch_sizing_validate`.
-4. They are sized and encoded, loaded into fresh pages and run in a child process on eight inputs. The result and every
-   global's bytes must equal what the test's interpreter of the typed stream gives.
+4. They are sized and encoded, loaded into fresh pages and run in a child process on eight inputs, which an alarm stops
+   after 10 s (a frame laid out wrong can make code loop). The result and every global's bytes must equal what the
+   test's interpreter of the typed stream gives.
 
-Before the programs, two checks of their own:
+Before the programs, checks of their own:
 
 - **moves:** 20,000 random sets of argument moves, resolved by the call emitter's resolver and run on a register file:
   every destination must get its source's value, every other register keep its own, and the records be as many as
@@ -280,6 +298,14 @@ Before the programs, two checks of their own:
 - **errors:** both paths must refuse the same streams alike: a conversion from U64 to a floating class at 200
   places among 64-entry blocks, before another (the first entry reported), and 14 to 17 values on the integer
   stack at once, past the 15 depths from 17 on (the last constant is the first add's immediate).
+- **objects:**
+  - `tier0_validate` must refuse each break of an object's rules at its locals: a class, no `ADDRESS_TAKEN`, a
+    parameter, aligned to 32, sizes without alignments, a `LOCAL` of it, and past `BUSTER_TIER0_MAX_OBJECT_BYTES`.
+    It must take exactly the limit.
+  - 2,000 random frames, each of up to 24 locals: objects of 1 to 300 bytes at every alignment to 16, and 8-byte
+    values, some address-taken. Both paths compile them, and must agree. Each local's place, from its
+    `LOCAL_ADDRESS`'s `lea`, must be a multiple of its alignment, inside the frame and apart from every other local's
+    bytes. Under an object aligned to 16, rsp must be a multiple of 16.
 
 **The generator** (`tier0_generate.c`) writes each program both as typed streams and as C. Its programs have:
 
@@ -289,7 +315,14 @@ Before the programs, two checks of their own:
 - if and else, counted while, for and do loops with break and continue, early returns;
 - expressions of every operation over every class, with conversions, `?:`, `&&` and `||` as values, and compares;
 - pointer arithmetic as a U64 value, with element sizes for each of its templates: 1 to 8, imul's imm32, and sizes past
-  it to 2^64 − 8.
+  it to 2^64 − 8;
+- with the `objects` option (the shapes everything and larger), up to three objects a function:
+  - local arrays of 2 to 16 elements and structs of 2 to 5 members laid out as C lays them out, some `_Alignas(16)`;
+  - elements and members read, written (an element also by `+=`) and pointed into;
+  - each object's address modulo its alignment as a value (`(unsigned long)&v & 15`), 0 wherever the object is placed
+    right.
+
+  A program without objects is the one the same seed gave before they existed.
 
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
@@ -319,7 +352,13 @@ a NaN's sign and payload to the implementation, and clang folds a constant 0.0 /
   - a call's argument registers one depth off in its count: 551; a stack parameter's load left out of the prologue's
     count: 161, or given a frame slot: 565;
   - a chosen form's destination not taken twice: 800; an imm16 written as an imm32: 390;
-  - a cycle's `xchg` not passing its value on, which only the moves test reaches: 189 of its rounds.
+  - a cycle's `xchg` not passing its value on, which only the moves test reaches: 189 of its rounds;
+  - and on the objects, 300 programs per shape:
+    - objects not aligned: 968 of the objects test's checks and 27 programs' runs (an address modulo 16 that is 8);
+    - the frame not kept a multiple of 16 for them: 697 and 2;
+    - objects overlapping: the objects test, and runs that crash, loop until the alarm, or differ;
+    - the vector path giving objects slots too, or the scalar path: 1,951 and 599 (the paths disagree);
+    - each rule of the validator's for objects left out: its break taken.
 
 ## Measurements
 
@@ -376,7 +415,8 @@ path's 11.1.
   them to the scalar path, with frame slots.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
   - conversions between U64 and floating values;
-  - aggregates and struct copies;
+  - aggregate values: struct copies, and aggregates passed and returned by value (the objects they live in are done);
+  - objects aligned past 16, which need a frame pointer;
   - bit-fields;
   - `va_arg`, a variadic function's prologue, `long double` and `_Complex`;
   - variable-length arrays, inline assembly, `setjmp` and atomics;
@@ -397,7 +437,8 @@ path's 11.1.
 - **Real corpora:** with #133, the vector and scalar paths on every function of the corpora; contract 6 measured on
   them; c-testsuite (#145); `sqlite3.c` and `speedtest1` (#146); #144's benchmark rows for real functions; the whole
   compile against tcc.
-- **Unwind tables (#88)** for the prologue and the epilogue, which follow fixed templates.
+- **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
+  records, the fixed prologue and epilogue (`docs/unwind.md`).
 
 ## Boundary audit #298
 

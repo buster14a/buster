@@ -6,6 +6,7 @@
 // #133 will hand Tier 0) and as C (what clang compiles for the cross-check), so that the two can be run and compared.
 //
 // A function has parameters and locals of every class, address-taken locals and pointers to them and to global arrays,
+// with the `objects` option local arrays and structs (frame objects, some aligned to 16) and pointers into them,
 // and statements: assignments (also compound, x op= v, and through pointers and array elements), increments, calls,
 // if and else, counted loops (while, for and do) with break and continue, and early returns. Expressions are trees of
 // every operation of the stream over every class, with conversions, ?:, && and || as values, and compares. Everything
@@ -42,11 +43,17 @@
 #define BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS 16
 #define BUSTER_TIER0_GENERATE_EXPRESSION_NODES 128
 #define BUSTER_TIER0_GENERATE_NESTING 4
+// A function's objects (local arrays and structs), at most, and a struct's members; and a pointer local's target that
+// is object o's element or member `part`, among the targets past the locals.
+#define BUSTER_TIER0_GENERATE_MAX_OBJECTS 3
+#define BUSTER_TIER0_GENERATE_MAX_MEMBERS 5
+#define BUSTER_TIER0_GENERATE_OBJECT_TARGET(o, part) (BUSTER_TIER0_GENERATE_MAX_LOCALS + (o) * 256u + (part))
 // The work a call of a function may cost, at most (statements run, as the generator counts them).
 #define BUSTER_TIER0_GENERATE_WORK 20000
 
 // What a program may hold, as options: how many functions (the entry among them), statements per function, the
-// largest expression, and whether to use calls, loops, floating values and pointers.
+// largest expression, and whether to use calls, loops, floating values, pointers and objects (local arrays and
+// structs, in the frame). A program without objects is the same as before they existed, seed for seed.
 typedef struct Tier0ProgramOptions Tier0ProgramOptions;
 struct Tier0ProgramOptions
 {
@@ -61,6 +68,7 @@ struct Tier0ProgramOptions
     // long, so that it is in range (clang folds an out-of-range constant conversion its own way; cvttsd2si, Tier 0's
     // and the tests' interpreter's, gives the indefinite integer).
     bool defined;
+    bool objects;
 };
 
 typedef struct Tier0GeneratedFunction Tier0GeneratedFunction;
@@ -78,7 +86,8 @@ struct Tier0GeneratedFunction
 };
 
 // A program: its functions' streams, locals and calls in shared columns (each function's a range of them), its globals
-// (a class, an element count, 1 or BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS, and their initial values) and its C text.
+// (a class, an element count, 1 or BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS, and their initial values) and its C text. An
+// object local has class VOID and its size and alignment's log2 in `local_sizes` and `local_alignments` (0 for a value).
 typedef struct Tier0Program Tier0Program;
 struct Tier0Program
 {
@@ -89,6 +98,8 @@ struct Tier0Program
     uint32_t entry_capacity;
     uint8_t* local_classes;
     uint8_t* local_flags;
+    uint32_t* local_sizes;
+    uint8_t* local_alignments;
     uint32_t local_count;
     uint32_t local_capacity;
     uint32_t* call_callees;
@@ -286,6 +297,11 @@ static void tier0_text_constant(Tier0Program* program, uint32_t class, uint64_t 
 #define BUSTER_TIER0_EXPRESSION_TERNARY 10
 #define BUSTER_TIER0_EXPRESSION_AND 11
 #define BUSTER_TIER0_EXPRESSION_OR 12
+// An element of a local array (value: the object), child 0 its index (an I32), masked to the array; a struct's member
+// (value: the object times 256 plus the member); and an object's address modulo its alignment, 0 (value: the object).
+#define BUSTER_TIER0_EXPRESSION_OBJECT_ELEMENT 13
+#define BUSTER_TIER0_EXPRESSION_MEMBER 14
+#define BUSTER_TIER0_EXPRESSION_ALIGNMENT 15
 
 typedef struct Tier0Expression Tier0Expression;
 struct Tier0Expression
@@ -298,17 +314,36 @@ struct Tier0Expression
     uint64_t value;
 };
 
-// What a function's expressions can read: its locals by class (pointer locals and their pointees apart), and the
-// program's globals.
+// An object of a function: a local array (`elements` of class classes[0], a power of two) or a struct (`members`, at
+// their offsets), and its alignment in bytes (`aligned` when it is _Alignas(16) in C: an array's declaration's, or a
+// struct's member's).
+typedef struct Tier0Object Tier0Object;
+struct Tier0Object
+{
+    uint32_t local;
+    uint32_t elements;
+    uint32_t members;
+    uint8_t classes[BUSTER_TIER0_GENERATE_MAX_MEMBERS];
+    bool aligned[BUSTER_TIER0_GENERATE_MAX_MEMBERS];
+    uint32_t offsets[BUSTER_TIER0_GENERATE_MAX_MEMBERS];
+    uint32_t alignment;
+    uint32_t size;
+};
+
+// What a function's expressions can read: its locals by class (pointer locals and their pointees apart), its objects,
+// and the program's globals.
 typedef struct Tier0Scope Tier0Scope;
 struct Tier0Scope
 {
     uint32_t locals[BUSTER_TYPED_CLASSES][BUSTER_TIER0_GENERATE_MAX_LOCALS];
     uint32_t local_counts[BUSTER_TYPED_CLASSES];
-    // Pointer locals (U64) and the class each points to (an address-taken local's or a global array's element's).
+    // Pointer locals (U64) and the class each points to (an address-taken local's, a global array's element's or an
+    // object's element's or member's).
     uint32_t pointers[BUSTER_TIER0_GENERATE_MAX_LOCALS];
     uint8_t pointees[BUSTER_TIER0_GENERATE_MAX_LOCALS];
     uint32_t pointer_count;
+    Tier0Object objects[BUSTER_TIER0_GENERATE_MAX_OBJECTS];
+    uint32_t object_count;
     // The function's local indices are relative to its first; first_local makes them the program's.
     uint32_t first_local;
 };
@@ -404,6 +439,50 @@ static void tier0_generate_leaf(const Tier0Program* program, const Tier0Scope* s
     {
         node->kind = BUSTER_TIER0_EXPRESSION_DEREFERENCE;
         node->value = pointers[tier0_generate_below(state, pointer_count)];
+    }
+    else if (choice >= 8 && scope->object_count != 0 && tier0_generate_chance(state, 60))
+    {
+        // An object's element or member of the class, or for a U64 an object's address modulo its alignment: each
+        // candidate as the object times 256 plus the member, an element as member 255 and the address as 254.
+        uint32_t candidates[BUSTER_TIER0_GENERATE_MAX_OBJECTS * (BUSTER_TIER0_GENERATE_MAX_MEMBERS + 2)];
+        uint32_t candidate_count = 0;
+        const bool index_room = grow && tree->count < BUSTER_TIER0_GENERATE_EXPRESSION_NODES;
+        for (uint32_t o = 0; o < scope->object_count; o += 1)
+        {
+            const Tier0Object* object = &scope->objects[o];
+            for (uint32_t m = 0; m < object->members; m += 1)
+            {
+                candidates[candidate_count] = o << 8 | m;
+                candidate_count += object->classes[m] == class ? 1 : 0;
+            }
+            candidates[candidate_count] = o << 8 | 255;
+            candidate_count += object->elements != 0 && object->classes[0] == class && index_room ? 1 : 0;
+            candidates[candidate_count] = o << 8 | 254;
+            candidate_count += class == BUSTER_TYPED_CLASS_U64 ? 1 : 0;
+        }
+        if (candidate_count != 0)
+        {
+            // The node's value says all its emission and its C need: the local, and an array's element count, a
+            // member's offset and number, or the alignment.
+            const uint32_t candidate = candidates[tier0_generate_below(state, candidate_count)];
+            const uint32_t part = candidate & 0xff;
+            const Tier0Object* object = &scope->objects[candidate >> 8];
+            node->kind = part == 255 ? BUSTER_TIER0_EXPRESSION_OBJECT_ELEMENT : part == 254 ? BUSTER_TIER0_EXPRESSION_ALIGNMENT : BUSTER_TIER0_EXPRESSION_MEMBER;
+            node->value = part == 255   ? object->local | (uint64_t)object->elements << 32
+                          : part == 254 ? object->local | (uint64_t)object->alignment << 32
+                                        : object->local | (uint64_t)object->offsets[part] << 16 | (uint64_t)part << 32;
+            if (part == 255)
+            {
+                node->count = 1;
+                const uint32_t index = tree->count;
+                tree->count += 1;
+                memset(&tree->nodes[index], 0, sizeof(tree->nodes[index]));
+                node->children[0] = index;
+                const uint32_t room = (work[*work_count] >> 8 & 0xff) > 1 ? (work[*work_count] >> 8 & 0xff) - 1 : 1;
+                work[*work_count] = index << 16 | room << 8 | BUSTER_TYPED_CLASS_I32;
+                *work_count += 1;
+            }
+        }
     }
 }
 
@@ -610,18 +689,27 @@ static void tier0_emit_expression(Tier0Program* program, const Tier0GeneratedFun
                 pushed = true;
             }
         }
-        else if (node->kind == BUSTER_TIER0_EXPRESSION_ELEMENT)
+        else if (node->kind == BUSTER_TIER0_EXPRESSION_ELEMENT || node->kind == BUSTER_TIER0_EXPRESSION_OBJECT_ELEMENT)
         {
+            const bool object = node->kind == BUSTER_TIER0_EXPRESSION_OBJECT_ELEMENT;
             if (phase == 0)
             {
-                tier0_emit(program, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, node->value + 1);
+                if (object)
+                {
+                    tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, (uint32_t)node->value);
+                }
+                else
+                {
+                    tier0_emit(program, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, node->value + 1);
+                }
                 stack[depth] = (Tier0Walk){ node->children[0], 0, UINT32_MAX, UINT32_MAX };
                 depth += 1;
                 pushed = true;
             }
             else
             {
-                tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS - 1);
+                const uint64_t elements = object ? node->value >> 32 : BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS;
+                tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, elements - 1);
                 tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
                 tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
                 tier0_emit(program, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, tier0_class_bytes(class));
@@ -651,6 +739,24 @@ static void tier0_emit_expression(Tier0Program* program, const Tier0GeneratedFun
             case BUSTER_TIER0_EXPRESSION_DEREFERENCE:
                 tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, node->value);
                 tier0_emit(program, BUSTER_TYPED_LOAD, class, 0);
+                break;
+            case BUSTER_TIER0_EXPRESSION_MEMBER:
+            {
+                // The object's address plus the member's offset (as a front end lowers s.m), loaded.
+                const uint64_t offset = node->value >> 16 & 0xffff;
+                tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, node->value & 0xffff);
+                if (offset != 0)
+                {
+                    tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, offset);
+                    tier0_emit(program, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+                }
+                tier0_emit(program, BUSTER_TYPED_LOAD, class, 0);
+                break;
+            }
+            case BUSTER_TIER0_EXPRESSION_ALIGNMENT:
+                tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, node->value & 0xffff);
+                tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, (node->value >> 32) - 1);
+                tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
                 break;
             case BUSTER_TIER0_EXPRESSION_UNARY:
                 tier0_emit(program, node->operation, class, 0);
@@ -735,6 +841,22 @@ static void tier0_print_expression(Tier0Program* program, const char* prefix, co
             {
                 tier0_text(program, ") & %u]", BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS - 1);
             }
+            break;
+        case BUSTER_TIER0_EXPRESSION_OBJECT_ELEMENT:
+            if (first)
+            {
+                tier0_text(program, "v%u[(", (uint32_t)node->value);
+            }
+            else
+            {
+                tier0_text(program, ") & %u]", (uint32_t)(node->value >> 32) - 1);
+            }
+            break;
+        case BUSTER_TIER0_EXPRESSION_MEMBER:
+            tier0_text(program, "v%u.m%u", (uint32_t)(node->value & 0xffff), (uint32_t)(node->value >> 32));
+            break;
+        case BUSTER_TIER0_EXPRESSION_ALIGNMENT:
+            tier0_text(program, "((unsigned long)&v%u & %uul)", (uint32_t)(node->value & 0xffff), (uint32_t)(node->value >> 32) - 1);
             break;
         case BUSTER_TIER0_EXPRESSION_UNARY:
             if (first)
@@ -933,6 +1055,8 @@ static uint32_t tier0_generate_local(Tier0Program* program, Tier0FunctionState* 
     {
         program->local_classes[program->local_count] = (uint8_t)class;
         program->local_flags[program->local_count] = flags;
+        program->local_sizes[program->local_count] = 0;
+        program->local_alignments[program->local_count] = 0;
         program->local_count += 1;
         index = state->function->local_count;
         state->function->local_count += 1;
@@ -950,6 +1074,94 @@ static void tier0_scope_add(Tier0Scope* scope, uint32_t local, uint32_t class)
     {
         scope->locals[class][scope->local_counts[class]] = local;
         scope->local_counts[class] += 1;
+    }
+}
+
+// A new object of the current function (which has fewer than BUSTER_TIER0_GENERATE_MAX_OBJECTS): a local array of 2 to
+// 16 elements of a class, or a struct of 2 to 5 members laid out as C lays them out, each now and then aligned to 16
+// (an array's declaration, a struct's member). Its local is of class VOID, address-taken, with its size and alignment.
+// Returns false when the columns are full.
+static bool tier0_generate_object(Tier0Program* program, Tier0FunctionState* state, uint64_t* random, bool floating)
+{
+    Tier0Object object;
+    memset(&object, 0, sizeof(object));
+    const bool array = tier0_generate_chance(random, 55);
+    if (array)
+    {
+        object.elements = 2u << tier0_generate_below(random, 4);
+        object.members = 0;
+        object.classes[0] = (uint8_t)tier0_generate_class(random, floating);
+        object.aligned[0] = tier0_generate_chance(random, 30);
+        object.alignment = object.aligned[0] ? 16 : tier0_class_bytes(object.classes[0]);
+        object.size = object.elements * tier0_class_bytes(object.classes[0]);
+    }
+    else
+    {
+        object.members = 2 + tier0_generate_below(random, BUSTER_TIER0_GENERATE_MAX_MEMBERS - 1);
+        object.alignment = 1;
+        uint32_t offset = 0;
+        for (uint32_t m = 0; m < object.members; m += 1)
+        {
+            object.classes[m] = (uint8_t)tier0_generate_class(random, floating);
+            object.aligned[m] = tier0_generate_chance(random, 15);
+            const uint32_t alignment = object.aligned[m] ? 16 : tier0_class_bytes(object.classes[m]);
+            offset = (offset + alignment - 1) & ~(alignment - 1);
+            object.offsets[m] = offset;
+            offset += tier0_class_bytes(object.classes[m]);
+            object.alignment = alignment > object.alignment ? alignment : object.alignment;
+        }
+        object.size = (offset + object.alignment - 1) & ~(object.alignment - 1);
+    }
+    const uint32_t local = tier0_generate_local(program, state, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN);
+    const bool made = local != UINT32_MAX;
+    if (made)
+    {
+        const uint32_t program_local = state->function->first_local + local;
+        program->local_sizes[program_local] = object.size;
+        program->local_alignments[program_local] = (uint8_t)__builtin_ctz(object.alignment);
+        object.local = local;
+        state->scope.objects[state->scope.object_count] = object;
+        state->scope.object_count += 1;
+    }
+    return made;
+}
+
+// An object's declaration, as C.
+static void tier0_declare_object(Tier0Program* program, const Tier0Object* object)
+{
+    if (object->elements != 0)
+    {
+        tier0_text(program, "    %s%s v%u[%u];\n", object->aligned[0] ? "_Alignas(16) " : "", tier0_c_type(object->classes[0]), object->local, object->elements);
+    }
+    else
+    {
+        tier0_text(program, "    struct {");
+        for (uint32_t m = 0; m < object->members; m += 1)
+        {
+            tier0_text(program, " %s%s m%u;", object->aligned[m] ? "_Alignas(16) " : "", tier0_c_type(object->classes[m]), m);
+        }
+        tier0_text(program, " } v%u;\n", object->local);
+    }
+}
+
+// An object's element (a constant index) or member: its address into the stream (LOCAL_ADDRESS, and the offset as a
+// front end lowers it: an index times the element's size, a member's offset in bytes), and the lvalue as C.
+static void tier0_object_address(Tier0Program* program, const Tier0Object* object, uint32_t part)
+{
+    tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object->local);
+    const uint64_t index = object->elements != 0 ? part : object->offsets[part];
+    if (index != 0)
+    {
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, index);
+        tier0_emit(program, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, object->elements != 0 ? tier0_class_bytes(object->classes[0]) : 1);
+    }
+    if (object->elements != 0)
+    {
+        tier0_text(program, "v%u[%u]", object->local, part);
+    }
+    else
+    {
+        tier0_text(program, "v%u.m%u", object->local, part);
     }
 }
 
@@ -1300,6 +1512,46 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
         tier0_text(program, ";\n");
         tier0_emit(program, BUSTER_TYPED_SET, class, 0);
     }
+    else if (choice < 54 && state->scope.object_count != 0)
+    {
+        // An object's element (plainly or op=, the address computed once) or member.
+        const Tier0Object* object = &state->scope.objects[tier0_generate_below(random, state->scope.object_count)];
+        tier0_indent(program, state);
+        if (object->elements != 0)
+        {
+            const uint32_t class = object->classes[0];
+            const bool compound = tier0_is_arithmetic(class) && tier0_generate_chance(random, 40);
+            tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object->local);
+            tier0_text(program, "v%u[(", object->local);
+            tier0_generate_value_of(program, function, &state->scope, random, BUSTER_TYPED_CLASS_I32, budget / 2 + 1, options->floating, prefix, 1);
+            tier0_text(program, ") & %u] %s ", object->elements - 1, compound ? "+=" : "=");
+            tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, object->elements - 1);
+            tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
+            tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+            tier0_emit(program, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, tier0_class_bytes(class));
+            if (compound)
+            {
+                tier0_emit(program, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
+                tier0_emit(program, BUSTER_TYPED_LOAD, class, 0);
+            }
+            tier0_generate_value_of(program, function, &state->scope, random, class, budget, options->floating, prefix, compound ? 2 : 1);
+            if (compound)
+            {
+                tier0_emit(program, BUSTER_TYPED_ADD, class, 0);
+            }
+            tier0_emit(program, BUSTER_TYPED_SET, class, 0);
+        }
+        else
+        {
+            const uint32_t member = tier0_generate_below(random, object->members);
+            const uint32_t class = object->classes[member];
+            tier0_object_address(program, object, member);
+            tier0_text(program, " = ");
+            tier0_generate_value_of(program, function, &state->scope, random, class, budget, options->floating, prefix, 1);
+            tier0_emit(program, BUSTER_TYPED_SET, class, 0);
+        }
+        tier0_text(program, ";\n");
+    }
     else if (choice < 58 && program->global_count != 0)
     {
         // A global, or an array's element (plainly or op=, the address computed once).
@@ -1458,6 +1710,14 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
             }
         }
     }
+    // The objects.
+    const uint32_t objects = options->objects ? tier0_generate_below(random, BUSTER_TIER0_GENERATE_MAX_OBJECTS + 1) : 0;
+    for (uint32_t o = 0; o < objects; o += 1)
+    {
+        tier0_generate_object(program, &state, random, options->floating);
+    }
+    // A pointer's target: an address-taken local (its index), a global array's element (UINT32_MAX less the global),
+    // or an object's element or member (BUSTER_TIER0_GENERATE_OBJECT_TARGET).
     uint32_t pointers = 0;
     uint32_t pointer_targets[BUSTER_TIER0_GENERATE_MAX_LOCALS];
     for (uint32_t t = 0; t < taken_count; t += 1)
@@ -1488,6 +1748,22 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
             }
         }
     }
+    for (uint32_t o = 0; o < state.scope.object_count && options->pointers; o += 1)
+    {
+        if (tier0_generate_chance(random, 40))
+        {
+            const Tier0Object* object = &state.scope.objects[o];
+            const uint32_t part = tier0_generate_below(random, object->elements != 0 ? object->elements : object->members);
+            const uint32_t pointer = tier0_generate_local(program, &state, BUSTER_TYPED_CLASS_U64, 0);
+            if (pointer != UINT32_MAX)
+            {
+                state.scope.pointers[state.scope.pointer_count] = pointer;
+                state.scope.pointees[state.scope.pointer_count] = object->classes[object->elements != 0 ? 0 : part];
+                pointer_targets[state.scope.pointer_count] = BUSTER_TIER0_GENERATE_OBJECT_TARGET(o, part);
+                state.scope.pointer_count += 1;
+            }
+        }
+    }
     // The header and the declarations.
     if (entry)
     {
@@ -1510,9 +1786,21 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
     }
     for (uint32_t l = function->parameter_count; l < function->local_count; l += 1)
     {
-        tier0_text(program, "    %s v%u;\n", tier0_c_type(program->local_classes[function->first_local + l]), l);
+        uint32_t object = UINT32_MAX;
+        for (uint32_t o = 0; o < state.scope.object_count; o += 1)
+        {
+            object = state.scope.objects[o].local == l ? o : object;
+        }
+        if (object != UINT32_MAX)
+        {
+            tier0_declare_object(program, &state.scope.objects[object]);
+        }
+        else
+        {
+            tier0_text(program, "    %s v%u;\n", tier0_c_type(program->local_classes[function->first_local + l]), l);
+        }
     }
-    // The first values: constants, then the pointers' targets.
+    // The first values: constants (every element and member of the objects too), then the pointers' targets.
     for (uint32_t l = function->parameter_count; l < declared; l += 1)
     {
         const uint32_t class = program->local_classes[function->first_local + l];
@@ -1521,9 +1809,26 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
         {
             pointer |= state.scope.pointers[p] == l;
         }
-        if (!pointer)
+        if (!pointer && class != BUSTER_TYPED_CLASS_VOID)
         {
             tier0_set_constant(program, &state, l, class, tier0_generate_value(random, class));
+        }
+    }
+    for (uint32_t o = 0; o < state.scope.object_count; o += 1)
+    {
+        const Tier0Object* object = &state.scope.objects[o];
+        const uint32_t parts = object->elements != 0 ? object->elements : object->members;
+        for (uint32_t part = 0; part < parts; part += 1)
+        {
+            const uint32_t class = object->classes[object->elements != 0 ? 0 : part];
+            const uint64_t value = tier0_generate_value(random, class);
+            tier0_text(program, "    ");
+            tier0_object_address(program, object, part);
+            tier0_text(program, " = ");
+            tier0_text_constant(program, class, value);
+            tier0_text(program, ";\n");
+            tier0_emit(program, BUSTER_TYPED_CONST, class, value);
+            tier0_emit(program, BUSTER_TYPED_SET, class, 0);
         }
     }
     for (uint32_t p = 0; p < state.scope.pointer_count; p += 1)
@@ -1534,6 +1839,13 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
         {
             tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, target);
             tier0_text(program, "    v%u = (unsigned long)&v%u;\n", pointer, target);
+        }
+        else if (target < BUSTER_TIER0_GENERATE_OBJECT_TARGET(BUSTER_TIER0_GENERATE_MAX_OBJECTS, 0))
+        {
+            const uint32_t at = target - BUSTER_TIER0_GENERATE_OBJECT_TARGET(0, 0);
+            tier0_text(program, "    v%u = (unsigned long)&", pointer);
+            tier0_object_address(program, &state.scope.objects[at >> 8], at & 0xff);
+            tier0_text(program, ";\n");
         }
         else
         {
@@ -1672,6 +1984,8 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
     program->values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, program->entry_capacity);
     program->local_classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->local_capacity);
     program->local_flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->local_capacity);
+    program->local_sizes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, program->local_capacity);
+    program->local_alignments = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->local_capacity);
     program->call_callees = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, program->call_capacity);
     program->call_first = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, program->call_capacity);
     program->call_argument_counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, program->call_capacity);
@@ -1679,8 +1993,8 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
     program->global_values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_TIER0_GENERATE_MAX_GLOBALS * BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS);
     program->text = BUSTER_ARENA_PUSH_ARRAY(arena, char, program->text_capacity);
     bool result = program->kinds != 0 && program->classes != 0 && program->values != 0 && program->local_classes != 0 && program->local_flags != 0 &&
-                  program->call_callees != 0 && program->call_first != 0 && program->call_argument_counts != 0 && program->argument_classes != 0 &&
-                  program->global_values != 0 && program->text != 0;
+                  program->local_sizes != 0 && program->local_alignments != 0 && program->call_callees != 0 && program->call_first != 0 &&
+                  program->call_argument_counts != 0 && program->argument_classes != 0 && program->global_values != 0 && program->text != 0;
     if (result)
     {
         program->text[0] = 0;
@@ -1859,6 +2173,14 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
             t->count = function->entry_count;
             t->local_classes = program->local_classes + function->first_local;
             t->local_flags = program->local_flags + function->first_local;
+            // The objects' columns for a function that has objects, as a front end would leave them out otherwise.
+            bool objects = false;
+            for (uint32_t l = 0; l < function->local_count; l += 1)
+            {
+                objects |= program->local_sizes[function->first_local + l] != 0;
+            }
+            t->local_sizes = objects ? program->local_sizes + function->first_local : 0;
+            t->local_alignments = objects ? program->local_alignments + function->first_local : 0;
             t->local_count = function->local_count;
             t->parameter_count = function->parameter_count;
             t->parameters = locations + parameter;
