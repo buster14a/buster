@@ -257,6 +257,21 @@ goes to the twin, and the twin's frames carry from block to block. The check
 tables are built from the twin's own functions (`parse_check_vector_init`), so
 the two can't disagree on a rule.
 
+The class refinement now groups virtual kinds with identical results for all
+seven refining roles. There are 28 distinct eight-byte rows (slot zero is
+unused), addressed through a 128-byte kind-to-row map. A 256-byte joint table
+replaces the former seven 128-byte lookups and their seven compare/blends on
+every block. The typed and name-dependent refinements still follow it. The
+initializer asserts the 32-row limit before filling the compact table.
+
+This reduces the static tables by 640 bytes. It retains K6's existing
+64-token input contract, scalar rules, inactive-lane handling and frame handoff;
+it introduces no per-token metadata or extra pass. `test-parser` exhaustively
+compares every role and virtual kind (including unused kind slots), with both
+typed states and alternating typed lanes, against the scalar classifier.
+The existing whole-kernel checks still exercise guarded tails and
+transitions between vector and scalar blocks.
+
 A function's body is checked apart (`parse_check_body`, the same in both): its
 declaration is read back from the `{` to the item before it, and a declarator
 group or a comma at the body's depth flags it, as the tables can't tell what the
@@ -508,6 +523,52 @@ kernels it had:
 dispatch slots backend-bound: each block's fixed point of group types and its
 three nearest-smaller searches, as K4's blocks were before the spike's
 follow-ups. Its twin costs 46 to 54 cycles a token.
+
+### Cloud K6 refinement experiment (2026-10-23)
+
+The joint class table was checked against `1f1e116` on an AVX-512 cloud AMD
+EPYC 9V74, with Ubuntu Clang 18.1.3 and the repository's `-O3 -march=native
+-fwrapv -funsigned-char -fno-strict-aliasing` flags, plus `-mmwaitx` for the
+cloud build. These are exploratory measurements on a different processor;
+9700X sustained and after-scalar measurements remain pending.
+
+Both versions read the same frozen `main.c` and included sources, preprocessed
+once by Clang 18 with `-E -P -march=native -mmwaitx -I<source>/src`. The resulting
+input has 2,155,660 parser tokens and SHA-256
+`24bbf3dd765eb8e1d84a9d9ba23304b6d1846b902214c6e28c0f2cb85d706270`.
+The existing `benchmark-parser` harness ran pinned to CPU 2, one invocation at
+a time. Three processes per version used `--only vector-k6 --passes 7
+--repeat 8 -nostdinc` for K6. Two complete paired results were retained for the
+whole vector path with `--only vector --passes 11 -nostdinc`; the incomplete
+third invocation is excluded. The K6 row shows the median of three medians and
+their range, and the whole-path rows show each complete process's median, in
+nanoseconds per token; hardware counters were unavailable. The
+[K6 raw output and reproduction commands](measurements/simd-301-2026-10-23/parser-k6.txt)
+and [whole-path raw output](measurements/simd-301-2026-10-23/parser-whole.txt)
+retain the experiment's individual results.
+
+| Path | Baseline | Joint class table |
+| --- | ---: | ---: |
+| K6, median (range) | 3.228 (3.211–3.804) | 3.050 (3.039–3.202) |
+| Whole vector path, process 1 | 11.044 | 10.833 |
+| Whole vector path, process 2 | 10.455 | 10.391 |
+
+The K6 median is 5.5% lower. The whole-path ranges overlap, so this does not
+establish a whole-parser throughput gain. Each run checked the vector outcome
+and tree against the scalar parser; all kept the same fallback of 55 top-level
+declarations and 31,386 tokens. Assembly inspection of the untyped refinement
+found three table permutations in place of seven and two blends in place of
+seven. A separate experiment packing `ends` into 32 columns did not improve
+the combined variant consistently and was removed. Replacing the byte-search
+saturating arithmetic with masked compares produced identical assembly and
+was also discarded.
+
+Seven fresh syntax-driver processes per version also accepted the same input
+without diagnostics; all 14 exit statuses were zero. Their elapsed times varied
+widely (baseline 0.231–0.299 s, joint table 0.248–0.357 s), with mixed paired
+direction, so these runs establish no end-to-end timing effect. The
+[driver raw output and commands](measurements/simd-301-2026-10-23/parser-driver.txt)
+isolate the parser change over the same frozen source as the kernel runs.
 
 ## What's left
 
