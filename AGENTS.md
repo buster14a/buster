@@ -455,6 +455,16 @@ designs and the compilers already built this way.
   `foreign_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-foreign` runs them) and `foreign_benchmark.c`
   provides `benchmark-foreign`.
+- `ImportObject.executable_stack_section` preserves the first exact
+  `.note.GNU-stack` section requesting `SHF_EXECINSTR` in the existing scalar
+  and vector section passes. Foreign conversion refuses a selected requesting
+  object before the NX-only executable writer is reached; unextracted archive
+  members do not contribute. `test-import` covers metadata and retry parity;
+  `foreign_stack_test.c`, included by `test-foreign`, covers original
+  direct/archive/COMDAT selection and diagnostics at 1/2/3/8 lanes. The linker
+  guide's "Explicit executable-stack requests in foreign objects" records
+  the conservative grouped/excluded-marker policy and the boundaries of these
+  producer tests.
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_measure`'s offsets and rounds over the branches alone
