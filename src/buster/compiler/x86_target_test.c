@@ -62,6 +62,7 @@ static bool x86_target_test_forms(void)
         { X86_FORM_ADD_RM64_R64, 0 },
         { X86_FORM_ADDSD_X_XM64, 0 },
         { X86_FORM_FNSTCW_M16, 0 },
+        { X86_FORM_STMXCSR_M32, 0 },
         { X86_FORM_POPCNT_R64_RM64, 1 },
         { X86_FORM_LAHF, 1 },
         { X86_FORM_PSHUFB_X_XM128, 1 },
@@ -103,6 +104,14 @@ static bool x86_target_test_forms(void)
         // The baseline control-word read stays available at all profiles, including detected native.
         passed &= scalar[X86_FORM_FNSTCW_M16] != 0 && vector[X86_FORM_FNSTCW_M16] != 0;
         passed &= x86_target_validate(vector, &rounds_control, 1) == 1;
+        const X86Instruction sse_control =
+        {
+            .rm = X86_REGISTER_RSP,
+            .mode = BUSTER_X86_MEMORY_BASE,
+            .form = X86_FORM_STMXCSR_M32,
+        };
+        passed &= scalar[X86_FORM_STMXCSR_M32] != 0 && vector[X86_FORM_STMXCSR_M32] != 0;
+        passed &= x86_target_validate(vector, &sse_control, 1) == 1;
         for (uint32_t c = 0; p < 5 && c < sizeof(cases) / sizeof(cases[0]); c += 1)
         {
             if ((scalar[cases[c].form] != 0) != (p >= cases[c].first))

@@ -295,6 +295,27 @@ FNSTCW memory form is admitted to baseline generated-code profiles. Native
 fixtures use both encoders and real Tier 0 CALLs, including all sixteen pairs
 of deliberately divergent x87/MXCSR rounding modes against Clang's query.
 
+The frozen WASI math source additionally requires float/double `sqrt`,
+`copysign`, `ceil`, `floor`, `trunc`, `nearbyint` and `rint`. The separate
+`c_check_builtin_math.c` action applies their declared prototypes and retains
+converted operands. Only `copysign` folds in Clang's source evaluator;
+the other operations remain runtime actions even for literal operands.
+Effectful `copysign` calls carry no operation constant payload. Nonidentity
+conversions under unrepresented nondefault FP settings retain an explicit
+conversion requirement instead of a guessed default-rounding fold.
+
+`c_builtin_math_helpers.c` transports raw F32/F64 bits through U64 parameters
+and results; numeric integer/FP conversion is forbidden at that boundary.
+Original baseline leaves use integer IEEE rounding, current MXCSR control
+reads and scalar FP instructions for square root, NaN quieting and `rint`'s
+inexact exception. They preserve controls and existing status flags;
+`nearbyint` creates no inexact exception. `sqrt` also takes the current
+thread's genuine writable `int32` errno address and uses the Linux SysV
+`EDOM` value. The producer owns that address and all preceding conversions.
+No helper calls a math symbol that could recurse when the source defines it.
+The helper body requires normal branch sizing and unknown-effect call
+semantics. These adapters do not establish source or Tier1 acceptance.
+
 ## Validation commands
 
 On the approved 9700X, through a separate shared-host lock for each command:
@@ -316,6 +337,8 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-check-builtins-typed-overflow
 ./build/compiler test-check-builtins-rounds
 ./build/compiler test-builtin-rounds-helper
+./build/compiler test-check-builtins-math
+./build/compiler test-builtin-math-helpers
 ```
 
 The tests distinguish typed constraints and fold metadata from native execution

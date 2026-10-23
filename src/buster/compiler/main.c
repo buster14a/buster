@@ -298,6 +298,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_builtin_atomic_helpers_test.c"
 #include "buster/compiler/c_builtin_rounds_helper.c"
 #include "buster/compiler/c_builtin_rounds_helper_test.c"
+#include "buster/compiler/c_builtin_math_helpers.c"
+#include "buster/compiler/c_builtin_math_helpers_test.c"
 #include "buster/compiler/c_builtin_varargs_lower.c"
 #include "buster/compiler/c_builtin_varargs_lower_test.c"
 #include "buster/compiler/c_builtin_lower_benchmark.c"
@@ -706,6 +708,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-rounds-helper") == 0)
     {
         result = run_builtin_rounds_helper_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-math-helpers") == 0)
+    {
+        result = run_builtin_math_helper_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-builtin-lowering") == 0)
     {
