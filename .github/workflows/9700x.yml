@@ -301,6 +301,10 @@ jobs:
           == Test the IR and typed-stream lowering
           ./build/compiler test-ir
           ./build/compiler test-ir-lowering
+          == Test experimental Tier 1 scheduling and model coverage
+          ./build/compiler test-tier1-schedule
+          # This bounded smoke also executes original and reordered machine code against its independent reference.
+          ./build/compiler benchmark-tier1-schedule --blocks 4 --records 64
           == Test the lanes
           ./build/compiler test-lanes
           == Test the direct path's executables
