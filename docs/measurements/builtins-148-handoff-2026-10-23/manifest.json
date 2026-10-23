@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "purpose": "Frozen handoff evidence only. This branch is not an integration candidate. No new build, test, benchmark or CI launch was performed to publish this directory.",
+  "session": "01a1688f-ed5e-7902-a993-6b10772bae9e",
+  "repository_id": 1421805693,
+  "repository": "buster14a/buster",
+  "recorded_utc": "2026-10-23T17:22:00Z",
+  "host": {
+    "name": "benchpress",
+    "cpu": "AMD Ryzen 7 9700X",
+    "clang_package": "23.1.1-1",
+    "clang_executable": "/usr/bin/clang",
+    "clang_sha256": "939a882527432ec23b094c289e7f170bf2d6ec282e74dde75e31b08602fa3eae",
+    "policy": "Every build and run requires its own ordinary exclusive.sh invocation; CI always goes first. No lock reservation remains."
+  },
+  "results": [
+    {
+      "name": "Actual Tier1 atomic/fence/rounding helper consumers",
+      "source": "helper-tier1-148.c",
+      "source_sha256": "2dfda2fa7f5d3f2ce2c52a7310ac09e15fd537ddb6f60da8912a3764f3d73b49",
+      "composition": "19b9454dc0e4fde5596a16efc917f17fa4ce190a",
+      "receipt": "helper-tier1-primitives-run.log",
+      "receipt_sha256": "b8b0df8b96eef92b86b45132163de4e10a951a389f445464f8a47733a091c3b5",
+      "status": "passed",
+      "checks": 2826,
+      "failures": 0,
+      "native_calls": 1216,
+      "resolved_calls": 54
+    },
+    {
+      "name": "Actual Tier1 fourteen math helper consumers",
+      "source": "helper-tier1-math-148.c",
+      "source_sha256": "48ade9ea02d52111cfca3a68a585a6e14436fad4fd661780d0595b1b949b06f4",
+      "composition": "22c92dd44476c4e51f371ad29fd9ec06fcf84953",
+      "receipt": "helper-tier1-math-run.log",
+      "receipt_sha256": "c26077e82ca94cee017cff65a60e0e2efaa2227bdbbd1bd238f6c06e7541fb1a",
+      "status": "passed",
+      "checks": 25965,
+      "failures": 0,
+      "native_calls": 9008,
+      "resolved_calls": 112,
+      "binary_sha256": "2d84a9ec8b71b46b55397508e421d91d1ddd5206ec9c5bff0268e456a62ad25d"
+    },
+    {
+      "name": "Exact Clang constant_p floating-environment observations",
+      "source": "fenv-query-148.c",
+      "source_sha256": "cae6a6f41c9c4195c8cac068077965e34aee1ed2dea1ad3d1ac16581e4485360",
+      "receipt": "fenv-query-148.run.log",
+      "receipt_sha256": "ff539be9b65ffb7781889073b58c23b8b393b7004f09fe3db8f9f08f9b983654",
+      "binary_sha256": "941748a427363f963e46bc1e16fc9692f59f2cb61e6eafd5d7a99c45ed361b5b",
+      "status": "observed",
+      "native_observations": 105,
+      "scope": "ON functions at four matched rounding controls; OFF only at default controls. CW and MXCSR restored in child; no full x87 environment preservation claim. Parent unchanged by fork."
+    },
+    {
+      "name": "Actual Tier1 scalar atomic RMW consumers",
+      "source": "helper-tier1-atomic-rmw-148.c",
+      "source_sha256": "e2126feb93975027eeb9ba9c81db9e07993b355c61402b667c2ec0f857d676e5",
+      "composition": "201b6891c861babe33096f0d6a9009c97511ded4",
+      "leaf_revision": "c47c23293d0e1a307dee34a8a69119d58e692fb7",
+      "backend_revision": "73e95edbb2d6acf7645c2d15c7f8bc584333f273",
+      "status": "corrected source built; corrected runtime acceptance NOT executed",
+      "binary_sha256": "be96a85f1eb57906ae6aa4b8adab7560ab0051924c38b225a21f425f3f05fa4a",
+      "build_receipt": "atomic-rmw-corrected-build.log",
+      "build_receipt_sha256": "bf3ec43dcefce84a390e678c2e41efaf817aef23f9f0263d68e55b2bf0eaca42",
+      "canceled_wait_receipt": "atomic-rmw-corrected-canceled-wait.log",
+      "canceled_wait_sha256": "d4568612e50ee8547b48c98856217797ee2f89a45325d3555e6c2dacdef31c45",
+      "planned_combinations": 140,
+      "planned_native_calls": 4800,
+      "planned_resolved_calls": 1120,
+      "earlier_failure": {
+        "receipt": "atomic-rmw-old-producer-failure.log",
+        "sha256": "8b8a23e3efa6479d86f54d330a0056db5a635d468b977b7773404c0a3f38de3d",
+        "checks": 1154,
+        "failures": 3,
+        "native_calls": 0,
+        "resolved_calls": 56,
+        "cause": "Harness register_mask omitted R9 while the sixth CAS argument was pinned to R9. Corrected source includes R9; no backend or leaf change was made."
+      },
+      "run_state": "Stopped only this session's ordinary lock waiter at handoff before acquisition. No runtime acceptance, success count or memory-model proof is claimed."
+    }
+  ],
+  "variadic_manual_build": {
+    "revision": "4dc26e390ff87f9b2ee687bf0948000bf31dd603",
+    "status": "Stopped this session's ordinary waiter before acquisition; no build or native run occurred through that request.",
+    "receipt": "variadic-frame-canceled-build-wait.log",
+    "receipt_sha256": "093abe786cfa2186a057b3dccf39dbcf39765453b20ac557c64113f391ba6093",
+    "github_ci": "https://github.com/buster14a/buster/actions/runs/39992302299"
+  },
+  "reproduction": "Use each source header's command against its exact composition, not this handoff branch's checkout indiscriminately. Both accepted Tier1 source compositions are retained on codex/148-tier1-math-acceptance; atomic composition is the parent of this handoff artifact commit. Clone/checkout the named composition separately, compile the standalone source with that checkout's src on the include path, and invoke build and executable under separate approved-host locks.",
+  "acceptance_boundaries": "These are actual helper-consumer observations, not full C-source dispatch, whole-corpus, general Tier1, or protected-main qualification. Native helper execution does not alone certify memory ordering. Current PR and issue handoff comments record integration status.",
+  "raw_records": "Logs retain original bytes, including lock-wait text and whitespace. They must not be formatted or treated as acceptance merely because a file exists."
+}

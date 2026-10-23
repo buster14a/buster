@@ -1,0 +1,20 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T16:25:13+00:00 CI job of buster14a/buster (run 39986598739, worker 4086382)
+  title: 9700X test / test: Add exact Clang intrinsic metadata and operand checking (#347)
+  link: https://github.com/buster14a/buster/actions/runs/39986598739/attempts/1
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T16:31:56+00:00 CI job of buster14a/buster (run 39987234725, worker 4146145)
+  title: 9700X test / test: #352: Add scalar atomic read-modify-write checking and baseline helpers
+  link: https://github.com/buster14a/buster/actions/runs/39987234725/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/352
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T16:35:09+00:00 CI job of buster14a/buster (run 39987555038, worker 4184631)
+  title: 9700X test / test: #353: Preserve runtime effects independently of constant-query answers
+  link: https://github.com/buster14a/buster/actions/runs/39987555038/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/353
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T16:38:24+00:00 CI job of buster14a/buster (run 39987659877, worker 29181)
+  title: 9700X test / test: #354: Emit narrow integer primitives and faithful terminal endings
+  link: https://github.com/buster14a/buster/actions/runs/39987659877/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/354
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T16:42:29+00:00 CI job of buster14a/buster (run 39987942674, worker 62937)
+  title: 9700X test / test: Merge pull request #349 from buster14a/codex/linker-foreign-unwind-86
+  link: https://github.com/buster14a/buster/actions/runs/39987942674/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 
