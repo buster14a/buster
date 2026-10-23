@@ -285,3 +285,44 @@ including variadic and over-aligned functions, frame-size comparisons against
 `clang -O2` on the corpora, and controlled `speedtest1`/corpus runtime evidence
 for slot sharing and frame-pointer omission. Prologue-plan simulation and
 bounded native-helper execution do not satisfy those full-program requirements.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). Sources:
+[planner](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/tier1_frame.c#L4)
+and [native record consumer](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/tier1_frame_emit.c#L4).
+Both exist; the full source-local/allocator producer remains an integration.
+
+The real dependency is **potential objects/calls → frame requirements →
+allocator register reservations → actual spills/callee-save usage → frame
+plan → native prologue/epilogue records**. `tier1_frame_requirements` therefore
+precedes allocation, although final `tier1_frame_plan` follows it. A late
+change needing more reserved registers requires an explicit allocation retry.
+The native companion emits records and branch columns; final-PC unwind/debug
+production for [#88](https://github.com/buster14a/buster/issues/88) is still missing.
+
+The planner borrows u32 start/end/size/alignment columns and an optional compact
+index list with separate selected count and column count. Retaining value-wide
+conservative lifetime bounds at the interval producer avoids gathering/copying
+fragment rows into a second table. Duplicate indices are invalid. Intervals are
+half-open and nonempty; escaping address-taken locals require a safe scope
+lifetime. Natural alignment and exact logical extents suffice, with no padding.
+Arenas and new output/scratch are disjoint from live inputs; retained output
+prefixes may hold inputs. Failure preserves result and arena lengths.
+
+One function is the semantic batch: independent chunks would miss cross-chunk
+interference. Internal class/event sorting puts ends before starts at ties,
+then color/layout phases produce object-to-slot/offset columns and explicit
+steps. Scalar/vector colors may differ but must preserve interference, class
+slot counts and frame sizes. Register/stack limits and all displacement bounds
+are checked; partial-vector tails never create objects.
+
+Disposition: retain explicit preallocation requirements and direct indexed
+spills. `test-tier1-frame` includes independent layout/pressure checks, guarded
+tails, failure rollback and input reorderings; `test-tier1-frame-execution`
+executes actual ABI preservation, alignment, variadic saves and page probes.
+Preparation/sort/color/layout benchmark rows are synthetic. [#177](https://github.com/buster14a/buster/issues/177)/[#140](https://github.com/buster14a/buster/issues/140)/[#133](https://github.com/buster14a/buster/issues/133)/[#88](https://github.com/buster14a/buster/issues/88)
+retain actual interval production, full function emission, source/frame events
+and whole allocation + frame + code/runtime/memory evidence. Do not call frame
+metadata alone an unwind implementation.

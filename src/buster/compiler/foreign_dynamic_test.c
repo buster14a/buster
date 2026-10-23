@@ -36,7 +36,7 @@ static const ForeignDynamicTestSource foreign_dynamic_test_sources[] = {
     },
     {
         .file = "fd_unused.c",
-        .text = "int never_needed(void) { return 101; }\n",
+        .text = "int never_needed(void) { return 101; } int discarded_only_missing(void) { return 99; }\n",
         .library = "libfd-unused.so",
     },
     {
@@ -76,6 +76,13 @@ static const ForeignDynamicTestSource foreign_dynamic_test_sources[] = {
     {
         .file = "fd_archive.c",
         .text = "int archive_value(void) { return 42; }\n",
+    },
+    {
+        .file = "fd_comdat.s",
+        .text =
+            ".text\n.globl _start\n.type _start,@function\n_start:\ncall chosen\ncmp $23,%eax\njne .Lfail\n"
+            "mov $42,%edi\njmp .Lexit\n.Lfail:\nmov $101,%edi\n.Lexit:\nmov $60,%eax\nsyscall\n"
+            ".size _start,.-_start\n.section .note.GNU-stack,\"\",@progbits\n",
     },
     {
         .file = "fd_weak.s",
@@ -254,7 +261,7 @@ static void foreign_dynamic_test_structure(ForeignTestTally* tally, const Foreig
     {
         foreign_test_expect(tally, libc, "archive program needs libc", 0);
     }
-    else
+    else if (fixture == 4)
     {
         Elf64_Sym symbol = { 0 };
         const uint32_t index = foreign_dynamic_test_symbol(&image, "alpha", &symbol);
@@ -267,6 +274,13 @@ static void foreign_dynamic_test_structure(ForeignTestTally* tally, const Foreig
         foreign_test_expect(tally, foreign_dynamic_test_relocation(&image, "alpha", R_X86_64_GLOB_DAT), "weak DSO function has a symbolic GOT relocation", 0);
         foreign_test_expect(tally, !dynamic_test_tag(&image, DT_INIT, &callback) && !dynamic_test_tag(&image, DT_FINI, &callback) &&
                             converted->dynamic.init == 0 && converted->dynamic.fini == 0, "undefined weak init and fini do not become loader callbacks", 0);
+    }
+    else
+    {
+        Elf64_Sym symbol = { 0 };
+        foreign_test_expect(tally, count == 0 && described && versions[0] == 0 && converted->dynamic.version_count == 0 &&
+                            foreign_dynamic_test_symbol(&image, "discarded_only_missing", &symbol) == 0,
+                            "discarded COMDAT reference imports neither symbol nor earlier as-needed DSO", 0);
     }
     foreign_test_expect(tally, converted->dynamic.interpreter.length != 0, "dynamic handoff preserves interpreter", 0);
 }
@@ -387,7 +401,13 @@ static void foreign_dynamic_test_case(ForeignTestTally* tally, const char* direc
             "fd_back_main.o",
             "fd_archive_main.o",
             "fd_weak.o",
+            "fd_comdat.o",
         };
+        if (fixture == 5)
+        {
+            foreign_test_add(line, (char*)"--as-needed", true, true);
+            foreign_test_add(line, foreign_test_path(directory, "libfd-unused.so", arena), true, true);
+        }
         foreign_test_add(line, foreign_test_path(directory, objects[fixture], arena), true, true);
         if (fixture <= 1 || fixture == 4)
         {
@@ -404,12 +424,17 @@ static void foreign_dynamic_test_case(ForeignTestTally* tally, const char* direc
         {
             foreign_test_add(line, foreign_test_path(directory, "libfd-back.so", arena), true, true);
         }
-        else
+        else if (fixture == 3)
         {
             const char* members[] = {
                 "fd_archive.o",
             };
             foreign_test_add(line, foreign_test_archive(directory, "fd_members.a", members, BUSTER_ARRAY_LENGTH(members), false, arena), true, true);
+        }
+        else
+        {
+            foreign_test_add(line, foreign_test_path(directory, "fl_first.o", arena), true, true);
+            foreign_test_add(line, foreign_test_path(directory, "fl_loser.o", arena), true, true);
         }
         if (c_runtime)
         {
@@ -457,6 +482,13 @@ static void foreign_dynamic_test_case(ForeignTestTally* tally, const char* direc
                                            (converted.link.symbols.flags[symbol] & (BUSTER_LINK_SYMBOL_TYPE | BUSTER_LINK_SYMBOL_BINDING)) == (BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_WEAK);
                         foreign_test_expect(tally, name != 0 && foreign.names.resolution[name - 1] == FOREIGN_RESOLUTION_SHARED && typed,
                                             "unneeded weak DSO import keeps its function type without a version", detail);
+                    }
+                    else if (fixture == 5)
+                    {
+                        const uint32_t name = foreign_test_name(&foreign, "discarded_only_missing");
+                        foreign_test_expect(tally, name != 0 && foreign.names.resolution[name - 1] == FOREIGN_RESOLUTION_SHARED &&
+                                            (foreign.names.flags[name - 1] & BUSTER_FOREIGN_NAME_REFERENCED) != 0 && converted.names[name - 1] == 0,
+                                            "discarded reference does not import an unneeded DSO name", detail);
                     }
                     ExecutableTestWrite write = {
                         .link = &converted.link,
@@ -517,7 +549,7 @@ static bool foreign_dynamic_test(const char* directory, Arena* arena, bool cross
     foreign_test_expect(&tally, found, "find system dynamic loader", 0);
     if (found && foreign_dynamic_test_compile(directory, &tally))
     {
-        for (uint32_t fixture = 0; fixture < 5; fixture += 1)
+        for (uint32_t fixture = 0; fixture < 6; fixture += 1)
         {
             foreign_dynamic_test_case(&tally, directory, arena, cross_check, system, runtime.loader_path, fixture);
         }
