@@ -346,6 +346,23 @@ jobs:
           if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/no-such-input.c; then exit 1; fi
           == Test integer builtin actions against Clang
           ./build/compiler test-builtins
+          ./build/compiler test-check-builtins
+          ./build/compiler test-builtin-lowering
+          ./build/compiler test-check-varargs
+          ./build/compiler test-builtin-varargs
+          ./build/compiler test-check-builtins-misc
+          ./build/compiler test-check-builtins-float
+          ./build/compiler test-check-builtins-query
+          ./build/compiler test-builtin-misc-lowering
+          ./build/compiler test-builtin-float-lowering
+          ./build/compiler test-builtin-terminal-helpers
+          ./build/compiler test-builtin-atomic-helpers
+          ./build/compiler test-check-builtins-atomic
+          ./build/compiler test-check-builtins-typed-overflow
+          ./build/compiler test-check-builtins-rounds
+          ./build/compiler test-check-builtins-math
+          ./build/compiler test-builtin-math-helpers
+          ./build/compiler test-builtin-rounds-helper
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
           == Test the per-file jobs on the repository's sources, flat
