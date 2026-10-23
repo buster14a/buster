@@ -320,6 +320,12 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int x = sizeof(int) + _Alignof(int) + __builtin_offsetof(struct { int a; }, a);\n", "", 0 },
     { "int x = _Generic(1, int: 2, default: 3);\n", "", 0 },
     { "static_assert(1); auto x = 1; constexpr int y = 2; bool b = true; void *p = nullptr;\n", "", "c23" },
+    // An unnamed bit-field starts with ':', including after a comma on the preceding line.
+    { "struct S { unsigned char :1,\n :1,x:1,y:5; };\n", "", 0 },
+    { "struct S { unsigned x:1,\n :1,y:1; };\n", "", 0 },
+    { "union U { unsigned x,\n :3; };\n", "", 0 },
+    { "typedef unsigned T; struct S { T :2,\n :3,x:1; };\n", "", 0 },
+    { "struct S { unsigned :1,\n :1 ? 2 : 3,x:4; };\n", "", 0 },
     // GNU's reserved spellings remain keywords in strict C; plain asm and (before C23) typeof do not.
     { "__extension__ typedef __signed__ __int128 Wide;\n__inline __const int *aliases(__const__ int *__restrict p, __volatile__ int *__restrict__ q) { return p; }\n__inline__ int widths(void) { return __alignof__(Wide) + __alignof(__signed int); }\n", "", "c17" },
     { "int asm, typeof; int f(void) { asm = typeof + 1; return asm; }\n", "", "c17" },
@@ -338,6 +344,12 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "__typeof__(int x;\n", "1:16: expected ')'", 0 },
     { "__typeof__(({ int x = 1; x; })) y;\n", "1:12: statement expression not allowed at file scope", 0 },
     // Invalid code, with clang 23's first error.
+    { "struct S { unsigned :1,\n :; };\n", "2:3: expected expression", 0 },
+    { "int x,\n:1;\n", "1:6: expected ';' at end of declaration", 0 },
+    { "struct S {\n  int x;\n  int broken =\n};\n", "3:13: expected ';' at end of declaration list", 0 },
+    { "struct T { int member = 1; };\n", "1:22: expected ';' at end of declaration list", 0 },
+    { "union U { int (*callback)(void) = 0; };\n", "1:32: expected ';' at end of declaration list", 0 },
+    { "struct V { int x:3 = 1; };\n", "1:19: expected ';' at end of declaration list", 0 },
     { "int x y;\n", "1:6: expected ';' after top level declarator", 0 },
     { "void f(int a) { a + ; }\n", "1:21: expected expression", 0 },
     { "int f(void) { return 1 }\n", "1:23: expected ';' after return statement", 0 },
@@ -518,6 +530,31 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "(x);\n", "", "c89" },
     { "(\"x\");\n", "1:2: expected identifier or '('", 0 },
     { "static (x);\n", "1:9: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    // Clang finishes the declarator before diagnosing its missing return/type specifier.
+    { "f(A,\n12);\n", "2:1: expected identifier", 0 },
+    { "typedef BOOLEAN\n(NTAPI *Fn)(int);\n", "2:2: unknown type name 'NTAPI'", 0, true },
+    { "f(a)\nextern int x;\n", "2:1: invalid storage class specifier in function declarator", 0 },
+    { "f(void);\n", "1:1: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "f(a) int a; {return a;}\n", "1:1: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    // The primary diagnostic belongs to the invocation; macro spelling remains available as an expansion note.
+    { "#define TYPE Missing\nTYPE x;\n", "2:1: unknown type name 'Missing'", 0, true },
+    { "#define TYPE Missing\n#define OUTER TYPE\nOUTER x;\n", "3:1: unknown type name 'Missing'", 0, true },
+    // Missing separators follow the outer invocation's physical end, including substituted arguments and splices.
+    { "#define END return 1\nint f(void){ END }\n", "2:17: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\nint f(void){ RET(2) }\n", "2:20: expected ';' after return statement", 0 },
+    { "#define ID(x) x\nint f(void){ ID(return 3) }\n", "2:26: expected ';' after return statement", 0 },
+    { "#define INNER return 4\n#define OUTER INNER\nint f(void){ OUTER }\n", "3:19: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\n#define ALIAS RET\nint f(void){ ALIAS(5) }\n", "3:22: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\n#define WRAP(x) RET(x)\nint f(void){ WRAP(6) }\n", "3:21: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\n#define ID(x) x\nint f(void){ ID(RET(7)) }\n", "3:24: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\n#define CAT(a,b) a##b\n#define VALUE8 8\nint f(void){ RET(CAT(VALUE,8)) }\n", "4:31: expected ';' after return statement", 0 },
+    { "#define END return 1\nint f(void){ EN\\\nD }\n", "3:2: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\nint f(void){ RET\\\n(9) }\n", "3:4: expected ';' after return statement", 0 },
+    // Inside an unfinished expansion, the next token remains the primary location, including argument spelling.
+    { "#define M return 1 return 2;\nint f(void){ M }\n", "2:14: expected ';' after return statement", 0 },
+    { "#define D int x=1 int y=2;\nint f(void){ D return 0; }\n", "2:14: expected ';' at end of declaration", 0 },
+    { "#define E(a) a int y=2;\nint f(void){ E(int x=1) return 0; }\n", "2:14: expected ';' at end of declaration", 0 },
+    { "#define A(x) x\nint f(void){ A(return 1 return 2;) }\n", "2:25: expected ';' after return statement", 0 },
     // A _Static_assert's message is string literals.
     { "_Static_assert(1, \"x\" \"y\" \"z\");\n", "", 0 },
     { "_Static_assert(1, \"x\" + 1);\n", "1:23: expected ')'", 0 },

@@ -1,0 +1,35 @@
+function (i64, i64) -> i64 {
+b0:
+  %0 = param.i64 0
+  %1 = param.i64 1
+  %2 = const.i64 0x00000000000000000000000000000003
+  %3 = undef.i64
+  %4 = copy.i64 %0
+  %5 = add.i64 %0, %1
+  %6 = sub.i64 %5, %1
+  %7 = mul.i64 %6, %2
+  %8 = sdiv.i64 %7, %2
+  %9 = udiv.i64 %7, %2
+  %10 = srem.i64 %8, %2
+  %11 = urem.i64 %9, %2
+  %12 = and.i64 %10, %11
+  %13 = or.i64 %12, %0
+  %14 = xor.i64 %13, %1
+  %15 = shl.i64 %14, %2
+  %16 = lshr.i64 %15, %2
+  %17 = ashr.i64 %16, %2
+  %18 = neg.i64 %17
+  %19 = not.i64 %18
+  %20 = icmp.i1 %0, %1 eq
+  %21 = icmp.i1 %0, %1 ne
+  %22 = icmp.i1 %0, %1 lt
+  %23 = icmp.i1 %0, %1 le
+  %24 = icmp.i1 %0, %1 gt
+  %25 = icmp.i1 %0, %1 ge
+  %26 = icmp.i1 %0, %1 ult
+  %27 = icmp.i1 %0, %1 ule
+  %28 = icmp.i1 %0, %1 ugt
+  %29 = icmp.i1 %0, %1 uge
+  %30 = select.i64 %20, %19, %4
+  %31 = ret.void %30
+}

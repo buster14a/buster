@@ -5635,6 +5635,125 @@ static bool predefines_test_refused(void);
 #include "c_preprocessor_directives_test.c"
 #include "c_preprocessor_order_test.c"
 #include "c_preprocessor_batch_test.c"
+#include "c_preprocessor_semantic_test.c"
+
+// A semantic consumer diagnoses an original pragma operand after preprocessing has discarded its temporary
+// buffers. Test that boundary directly, including argument prescan and distinct presumed definition/use files.
+static bool pp_test_pragma_origins(const char* directory, bool with_clang)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        uint32_t line;
+    } fixtures[] =
+    {
+        {
+            "physical directive",
+            "#line 41 \"pragma-origin-input.c\"\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\n"
+            "#pragma STDC FENV_ACCESS MAYBE\nint value;\n",
+            42,
+        },
+        {
+            "direct operator",
+            "#line 41 \"pragma-origin-input.c\"\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\n"
+            "_Pragma(\"STDC FENV_ACCESS MAYBE\")\nint value;\n",
+            42,
+        },
+        {
+            "macro body operator",
+            "#line 11 \"pragma-origin-definition.h\"\n#define CHECK_PRAGMA _Pragma(\"STDC FENV_ACCESS MAYBE\")\n"
+            "#line 41 \"pragma-origin-input.c\"\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\nCHECK_PRAGMA\nint value;\n",
+            42,
+        },
+        {
+            "forwarded argument operator",
+            "#line 11 \"pragma-origin-definition.h\"\n#define CHECK_PRAGMA _Pragma(\"STDC FENV_ACCESS MAYBE\")\n#define FORWARD(x) x\n"
+            "#line 41 \"pragma-origin-input.c\"\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\nFORWARD(CHECK_PRAGMA)\nint value;\n",
+            42,
+        },
+        {
+            "multiline forwarded argument operator",
+            "#line 11 \"pragma-origin-definition.h\"\n#define CHECK_PRAGMA _Pragma(\"STDC FENV_ACCESS MAYBE\")\n#define FORWARD(x) x\n"
+            "#line 41 \"pragma-origin-input.c\"\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\nFORWARD(\nCHECK_PRAGMA\n)\nint value;\n",
+            43,
+        },
+    };
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/pragma-origin.c", directory);
+    uint32_t failures = 0;
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
+    {
+        bool passed = pp_test_write_file(path, fixtures[fixture].source);
+        static Preprocessor runs[2];
+        static InternTable tables[2];
+        char* diagnostics[2] = { 0 };
+        for (uint32_t mode = 0; passed && mode < 2; mode += 1)
+        {
+            size_t length = 0;
+            FILE* stream = open_memstream(diagnostics + mode, &length);
+            const PPOptions options =
+            {
+                .language = { .standard = 2017, .gnu = true },
+                .scalar = mode != 0,
+                .semantic_pragmas = true,
+                .diagnostics = stream,
+            };
+            bool valid = stream != NULL && intern_initialize(tables + mode) && pp_initialize(runs + mode, &options, tables + mode) &&
+                         pp_run(runs + mode, path);
+            uint32_t diagnosed = 0;
+            for (uint32_t token = 0; valid && token < runs[mode].output.count; token += 1)
+            {
+                if (pp_token_is_name(runs + mode, &runs[mode].output, token, runs[mode].output.count, "MAYBE"))
+                {
+                    pp_diagnose_output(runs + mode, PP_SEVERITY_ERROR, token, "expected 'ON' or 'OFF' or 'DEFAULT' in pragma");
+                    diagnosed += 1;
+                }
+            }
+            if (stream != NULL)
+            {
+                valid = fclose(stream) == 0 && valid;
+            }
+            char file[512] = { 0 };
+            uint32_t line = 0;
+            uint32_t column = 0;
+            valid = valid && diagnosed == 1 && diagnostics[mode] != NULL &&
+                    sscanf(diagnostics[mode], "%511[^:]:%u:%u:", file, &line, &column) == 3 &&
+                    strcmp(file, "pragma-origin-input.c") == 0 && line == fixtures[fixture].line && column != 0;
+            passed &= valid;
+        }
+        passed = passed && pp_same_streams(runs, runs + 1, fixtures[fixture].name) && strcmp(diagnostics[0], diagnostics[1]) == 0;
+        for (uint32_t token = 0; passed && token < runs[0].output.count; token += 1)
+        {
+            passed = pp_history_at(runs, token) == pp_history_at(runs + 1, token);
+        }
+        char* oracle = passed && with_clang ? pp_test_clang_diagnostics(path, directory, true) : NULL;
+        if (passed && with_clang)
+        {
+            char file[512] = { 0 };
+            uint32_t line = 0;
+            uint32_t column = 0;
+            passed = oracle != NULL && sscanf(oracle, "%511[^:]:%u:%u:", file, &line, &column) == 3 &&
+                     strcmp(file, "pragma-origin-input.c") == 0 && line == fixtures[fixture].line && column != 0;
+        }
+        if (!passed)
+        {
+            printf("pragma origin %s differs: %s\n", fixtures[fixture].name, diagnostics[0] != NULL ? diagnostics[0] : "unavailable");
+        }
+        failures += !passed;
+        free(oracle);
+        for (uint32_t mode = 0; mode < 2; mode += 1)
+        {
+            free(diagnostics[mode]);
+            pp_release(runs + mode);
+            intern_release(tables + mode);
+        }
+    }
+    unlink(path);
+    printf("pragma origins: %u of %zu fail (scalar/vector%s)\n", failures, BUSTER_ARRAY_LENGTH(fixtures), with_clang ? ", Clang first file/line" : "");
+    const bool result = failures == 0;
+    return result;
+}
 
 static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
 {
@@ -5778,11 +5897,13 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
         passed_all = failures == 0;
         passed_all &= pp_test_macro_batches(directory, with_clang);
+        passed_all &= pp_test_semantic_pragmas(directory, with_clang);
         passed_all &= pp_test_timestamps(directory, with_clang);
         passed_all &= pp_test_implemented_features(directory);
         passed_all &= predefines_test_target();
         passed_all &= predefines_test_refused();
         passed_all &= pp_test_history(directory, with_clang);
+        passed_all &= pp_test_pragma_origins(directory, with_clang);
         passed_all &= pp_test_embed_text(fuzz.seed);
         passed_all &= pp_test_embed_lookups(directory, with_clang);
         passed_all &= pp_test_lookup_accounting(directory);

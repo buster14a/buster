@@ -397,6 +397,27 @@ static void check_builtin_bit_cast_test_types(CheckBuiltinBitCastTest* test, Typ
     check_builtin_bit_cast_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE, "array element tag uses source completion history");
 }
 
+static void check_builtin_bit_cast_test_complex(CheckBuiltinBitCastTest* test, TypeTable* table)
+{
+    CheckValue source = { .type = type_complex(table, BUSTER_TYPE_FLOAT), .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_COMPLEX };
+    const uint8_t poison[sizeof(long double)] = { 1, 0, 0, 0, 0, 0, 0, 0x80, 0xff, 0x7f };
+    memcpy((uint8_t*)&source + offsetof(CheckValue, floating), poison, sizeof(poison));
+    memcpy((uint8_t*)&source + offsetof(CheckValue, imaginary), poison, sizeof(poison));
+    uint8_t saved[sizeof(source)];
+    memcpy(saved, &source, sizeof(saved));
+    CheckBuiltinBitCastAction action = check_builtin_bit_cast_test_action(BUSTER_TYPE_ULONG, &source);
+    action.source_proof = CHECK_BUILTIN_BIT_CAST_PROOF_CONSTANT;
+    const CheckBuiltinBitCastResult result = check_builtin_bit_cast_test_apply(table, action);
+    check_builtin_bit_cast_test_expect(test, source.type != 0 && result.action.diagnostic == CHECK_DIAG_NONE &&
+        result.source_type == source.type && result.action.value.type == BUSTER_TYPE_ULONG && result.byte_count == 8 &&
+        result.evaluated_operands == 1 && result.unsupported == BUSTER_CHECK_BUILTIN_BIT_CAST_REPRESENTATION &&
+        result.runtime_required && !result.folded && !result.representation_known && result.payload_count == 0,
+        "known complex operands remain semantically valid with an explicit representation gap");
+    check_builtin_bit_cast_test_expect(test, memcmp(saved, &source, sizeof(saved)) == 0 &&
+        result.action.value.constant_kind == CHECK_CONSTANT_NONE && check_builtin_bit_cast_test_no_conversions(&result),
+        "complex compatibility never reads or changes either raw floating payload");
+}
+
 static void check_builtin_bit_cast_test_invalid(CheckBuiltinBitCastTest* test, TypeTable* table)
 {
     CheckValue source = check_test_integer(BUSTER_TYPE_UINT, 7);
@@ -713,6 +734,7 @@ static void check_builtin_bit_cast_test_clang(CheckBuiltinBitCastTest* test, con
         { "struct S { unsigned x; }; unsigned f(struct S s) { return __builtin_bit_cast(unsigned,s); }\nstruct S g(unsigned x) { return __builtin_bit_cast(struct S,x); }\n", false },
         { "unsigned long f(int* p) { return __builtin_bit_cast(unsigned long,p); }\nint* g(unsigned long x) { return __builtin_bit_cast(int*,x); }\n", false },
         { "typedef unsigned V __attribute__((vector_size(4))); unsigned f(V x) { return __builtin_bit_cast(unsigned,x); }\n", false },
+        { "unsigned long f(void) { return __builtin_bit_cast(unsigned long, (1.0f+2.0fi)); }\n", false },
         { "_Static_assert(__builtin_bit_cast(unsigned char,(_Bool)1)==1, \"bool source\");\n_Static_assert(__builtin_bit_cast(_Bool,(unsigned char)1), \"bool destination\");\n", false },
         { "_Atomic(int) f(unsigned x) { return __builtin_bit_cast(_Atomic(int),x); }\n", false },
         { "unsigned f(_Atomic(int)* p) { return __builtin_bit_cast(unsigned,*p); }\n", true },
@@ -796,6 +818,7 @@ static int run_check_builtin_bit_cast_tests(int argc, char** argv)
             check_builtin_bit_cast_test_floating(&test, &types.table);
             check_builtin_bit_cast_test_effects(&test, &types.table);
             check_builtin_bit_cast_test_types(&test, &types.table);
+            check_builtin_bit_cast_test_complex(&test, &types.table);
             check_builtin_bit_cast_test_invalid(&test, &types.table);
             check_builtin_bit_cast_test_environment(&test, &types.table);
             check_builtin_bit_cast_test_pages(&test, &types.table);

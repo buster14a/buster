@@ -3,10 +3,13 @@
 `c_checker.c` implements the expression graph and two schedules for
 [#133](https://github.com/buster14a/buster/issues/133). `c_check_actions.c`
 supplies their shared C semantic actions; `c_check_input.c` is the current
-parser and declaration adapter. The explicit command is:
+parser and declaration adapter. The default C command and explicit checker share
+the semantic driver:
 
 ```sh
 ./build/compiler check [--scalar] [--dump-typed] [--dump-static] [preprocessor options] file.c
+./build/compiler [--scalar] -fsyntax-only [preprocessor options] file.c
+./build/compiler [--scalar] -c [-o file.o] [preprocessor options] file.c
 ```
 
 It preprocesses, parses, resolves supported declarations, checks expressions,
@@ -14,16 +17,31 @@ and reports errors with the preprocessor's source locations. A successful check
 returns zero. `--scalar` selects both the scalar parser and the postorder checker
 schedule and the independent scalar binding-event resolver. `--dump-typed`
 prints the node types, categories, constants, faults and operand/store
-conversion metadata. `--dump-static` materializes the supported static scalar
+conversion metadata. `--dump-static` materializes supported static
 definitions as real `Link` atoms and prints their bytes and symbolic fixups.
 Preprocessor options include the
 existing language, include-path and macro-definition options.
 
-This is a bounded source path, not completion of #133. Unsupported syntax is an
-error. The normal `compiler file.c` syntax driver remains the parser's driver
-until semantic checking has the necessary language and corpus coverage. No
-machine code or object file is emitted by this command; `--dump-static` exposes
-the data/relocation handoff without claiming a completed code generator.
+Every body is parsed and checked by default. `-flazy-system-headers` optionally
+skips semantic checking of provably unreferenced static and nonemitting inline
+bodies defined in system headers, identified by `-isystem` or system-header
+pragmas. Declarations, ordinary-source bodies, referenced bodies and all syntax
+are still checked. This mode intentionally accepts a system header whose only
+semantic error is in a deferred body; it departs from standard C diagnostics
+and from Clang's default behavior, as authorized in
+[#155](https://github.com/buster14a/buster/issues/155).
+`-fno-lazy-system-headers` restores the default, and the last option wins.
+Both modes use the same checked-reference selection for object publication;
+tests require equal objects for valid inputs. Performance comparisons use the
+default mode, with any lazy-mode measurements reported separately.
+
+Unsupported source constructs produce an explicit diagnostic. `-c` also
+requires the checked program to be representable by the current backend; a
+successful syntax check alone does not establish executable support for every
+type or operation. The explicit `parse` command retains the parser-only path.
+The combined `-c --dump-static` command validates the object and renders the
+same resolved `Link` before publishing the object file. Its data relocations
+therefore share the actual emitted functions' symbols.
 
 Semantic checking currently uses one C LP64 target model: signed plain `char`,
 32-bit `wchar_t`, 80-bit x87 `long double` stored in 16 bytes, and floating
@@ -38,20 +56,23 @@ plain-char semantics.
 
 ## Implementation boundary
 
-The source adapter handles builtin scalar types; nested pointer, array and
-function declarators; prototype scopes and parameter adjustments; typedefs and
-local scopes; scalar initializers, calls, casts, arithmetic/pointer expressions
-and `sizeof`; named records/unions, member access, bit-fields and flexible-array
-constraints; and ordinary int-valued enumerations. Declaration bounds support
-integer/enum arithmetic and logical operators. Increment/decrement and all
-compound assignments retain the single destination expression and an explicit
-store conversion. `if`, `while`, `do`, `for`, `break`, `continue`, returns and
-static assertions receive semantic checks.
+The source adapter handles nested pointer, array and function declarators;
+prototype scopes and parameter adjustments; typedefs and local scopes;
+arithmetic, pointers, calls and casts; records/unions, anonymous members,
+bit-fields and flexible arrays; enumerations and source-point completion.
+It retains initializer lists, designators and ranges, strings and predefined
+function-name arrays, compound literals, GNU statement expressions, generic
+selection, `typeof`, and runtime array bounds. Increment/decrement and compound
+assignments retain one destination evaluation and an explicit store conversion.
+`if`, loops, `switch`/cases, labels/goto, break/continue, returns and static
+assertions receive semantic checks. Assembly operands/constraints and source
+attribute applicability have separate bounded consumers.
 
 Declaration specifiers and comma-separated declarators are elaborated in source
-order, including the scope of a name in its own initializer. The adapter emits
-declare/use/restore events for the production batch resolver in
-`c_check_binding.c`; `--scalar` uses the independent scalar event oracle. Every
+order, including the scope of a name in its own initializer. The adapter consumes
+#128's parser declaration-resolution column and retains declare/use/restore
+history for source-dependent semantic environments. `c_check_binding.c`
+validates this handoff; `--scalar` uses its independent scalar oracle. Every
 ordinary use retains its exact declaration identity. It also retains the
 composite declaration types, canonical object identities, linkage, storage
 duration, actual and tentative definitions, and each selected initializer node.
@@ -59,28 +80,36 @@ Linked declarations also retain translation-unit identity across closed blocks.
 An out-of-scope prototype constrains later declarations of the same entity but
 does not silently change the type visible to an unprototyped call.
 
-String objects, aggregate initializer lists, compound literals, `switch`/`case`,
-labels and `goto`, inline assembly and attributes still need source elaboration.
-VLA evaluation, `sizeof`/casts/conditional expressions inside declaration ICEs,
-anonymous members, parameter-scope tag definitions, wide or fixed-base enums,
-generic selections, atomic semantics, extension-specific builtins and the full
-C23 surface also require integration. Retained pragmas and block-scope `extern`
-declarations are rejected. Expression uses of incomplete tags, including through
-pointers, are conservatively unsupported. This includes tags that stay opaque
-and avoids retroactive completion of an earlier semantic context.
-An unsupported declaration or unresolved identifier never acquires a guessed
-`int` type.
+Overloadable declarations retain source-position candidate sets. A call selects
+its candidate from the checked argument types; a function address selects from
+the destination function-pointer type. Initializers, casts, assignments,
+callbacks and returns retain that selected object and conversion on the use
+edge, without rewriting a shared identifier leaf. Candidate availability is
+checked at the use's source position. Function calling conventions participate
+in canonical type identity and compatibility; checking their types does not
+claim backend support for emitting each convention.
 
-The checker currently keeps strict integer-constant-expression rules even in
-GNU language modes. GNU folded-constant extensions such as
-`_Static_assert(1 || f(), "unevaluated call")` remain rejected although Clang
-can accept them with a warning. Full dialect parity, including extension
-handling for returns from `void` functions, remains part of the source
-integration work; this implementation does not establish #125 mode parity.
-Discarded indirection through a `void *` is another explicitly tested GNU
-extension rejection. The standard `&*p` cancellation is supported, including
-`void *` and absolute-address constants, because it does not access a void
-object's value.
+Source-point type history prevents a later tag definition or declaration from
+retroactively changing an earlier expression. Runtime VLA bounds have stable
+extent identities and explicit captures; an unevaluated operand suppresses
+runtime work except where the language requires VLA evaluation. Builtin calls
+retain their exact formal conversions, evaluated-operand masks and runtime
+requirements. An unsupported declaration or unresolved identifier never
+acquires a guessed `int` type. Full-corpus and target qualification are tracked
+separately from the existence of these interfaces.
+
+Direct semantic actions keep strict integer folding unless the caller selects
+`BUSTER_CHECK_EXTENSION_GNU_CONSTANT`. GNU source enables that explicit policy:
+wrapped overflow and Clang-compatible shift extensions retain a warning witness
+and clear strict ICE eligibility. Lexical ICE-form provenance remains distinct
+from an arbitrary folded value, so `__builtin_choose_expr` does not accidentally
+admit comma expressions or computed floating casts. Declaration-time warnings
+are retained by token and merged with graph warnings before rendering. Warning
+identity and default severity remain separate: an enum's GNU folding extension
+is normally quiet, while the corresponding folded file-scope array bound warns.
+Immutable source-position diagnostic pragmas apply push/pop and exact warning
+group policy to these witnesses. Promoted warnings participate in first-error
+ordering and prevent object publication; `-w` suppresses them as Clang does.
 
 The action layer is broader than that adapter. It can check enum promotions,
 bit-field restrictions, compatible record assignment, nested const members,
@@ -89,30 +118,13 @@ Anonymous member lookup and aggregate
 modifiability use bounded iterative walks, including inherited qualification
 on anonymous members.
 
-The source binding handoff is one bounded integration slice of
-[#128](https://github.com/buster14a/buster/issues/128); declaration-time typedef
-resolution still has ordered work. `CheckStream` is expression output, not a
-typed entry for every parser node: executable control-flow bracketing and
-per-body references from [#129](https://github.com/buster14a/buster/issues/129)
-are still missing. The expression scheduler's vector path does not establish
-completion of either surrounding stage.
-
-The remaining acceptance work is substantive:
-
-- Complete declaration, statement and initializer elaboration and language-mode
-  handling, then run the required valid and invalid source corpora through the
-  production driver and an independent compiler oracle, including the SQLite
-  corpus. No SQLite semantic-corpus acceptance is claimed here.
-- Complete literal/aggregate objects and their data initialization. The scalar
-  static-data path now reaches `Link` and is checked through the actual ELF
-  writer, including symbolic address addends; it does not yet cover strings,
-  aggregate initializers or TLS.
-- Connect typed expressions and explicit conversions to a reviewed backend
-  lowering boundary, with generated-program tests for the accepted language.
-- Measure producer, handoff and consumer together on representative small and
-  large inputs on the protected 9700X, including single-core and multicore
-  behavior and the two vector power states. Synthetic cloud timings do not
-  satisfy that requirement. The 9700X cycles-per-node acceptance gate is pending.
+`CheckStream` holds expression results. `CheckProgram` adds checked control
+bracketing, body references and shared object/function identities without
+rechecking expressions or rebinding identifiers. The source body-extraction
+benchmark verifies that an extracted body's stream equals its original slice
+before comparing scalar and vector schedules. Acceptance still requires the
+frozen #125 corpora, semantic mutants and 9700X measurements at the qualified
+revision; historical evidence below applies only to its named checkpoints.
 
 ## Entry points and storage ownership
 
@@ -199,6 +211,16 @@ already checked expressions, not syntax that the call action must reparse.
 context bits before reading child results. Empty graphs need no node columns;
 an empty action batch may use null input and output pointers.
 
+Counted auxiliary records retain builtin calls, overload candidates/selections
+and statement-expression proof regions. A region owns a contiguous bounded
+slice of `EVAL`, `BRANCH`, `CASE`, `JUMP` and `END` steps over earlier typed
+nodes. The source adapter builds these steps from the existing parser tree and
+checked expression roots. A `CASE` retains both the switch expression and case
+operand so comparison uses the promoted switch type. Validation checks node
+order, ownership, slice coverage and branch targets before interpreting a
+region. Body extraction includes these dependencies and remaps every retained
+node reference while preserving branch targets within each compacted slice.
+
 ### Typed output
 
 `CheckStream.count` matches the input graph's count. Operators, source tokens
@@ -274,6 +296,12 @@ remain necessary: scalar/vector equality alone cannot validate shared C rules.
 counts, and arena bytes. The node counts describe the path executed, not merely
 which operations could theoretically use SIMD. The schedule is currently
 single-threaded; it does not establish useful multicore scaling.
+`query_proof_nodes` counts visits across the three constant-query proof lanes;
+`query_replay_nodes` counts the subsequent graph replay. These are additional
+work, separate from the initial scalar/vector scheduling counts. Scratch bytes
+are the peak live allocation above the caller's initial arena position,
+including temporary overload, region and query allocations that are released
+before return.
 
 ## Constant evaluation
 
@@ -286,9 +314,11 @@ unsupported widths produce a defined failure rather than truncation.
 `float`, `double` and x86 `long double` folding uses those formats, including
 rounding arithmetic results to their destination precision. Converting a
 128-bit integer to `float` or `double` converts directly to that format: an
-intermediate `long double` could round twice around a midpoint. Exotic floating
-formats and complex constant folding report unsupported evaluation. This is
-not an implementation of every C floating-environment mode.
+intermediate `long double` could round twice around a midpoint. Complex
+constants retain real and imaginary components in their source format; GNU
+integer-complex values retain separately masked components. A failed component
+conversion clears the entire constant payload while preserving its fault.
+Exotic floating formats retain explicit unsupported folding requirements.
 
 Constraint diagnostics and evaluation faults are separate. An invalid operand
 type is an error even in an unselected expression. A possible divide by zero,
@@ -308,6 +338,23 @@ an ordinary floating arithmetic expression is not made an ICE merely by
 folding. Source contexts explicitly request integer constant expressions,
 static assertions or constant static initializers.
 
+Constant-query answers keep source proof, speculative proof and runtime effects
+separate. A source constant answer does not erase a floating-point exception or
+rounding dependency in an evaluated operand. Statement-expression proofs follow
+one known control path and refuse a revisited step or unsupported transfer;
+runtime effect collection visits reachable steps once and combines unknown
+branches. Both consume the existing checked values rather than interpreting a
+second variable environment. The ordinary program body remains responsible for
+runtime execution.
+
+`__builtin_bit_cast` retains its destination type and raw source operand before
+array decay or ordinary argument promotion. Type constraints, representation
+availability and a usable constant payload are separate results. A valid cast
+with unavailable representation data remains semantically valid and carries an
+explicit downstream requirement; it does not acquire invented bytes or a
+guessed result type. Floating representation transfer does not read a poisoned
+or unavailable host floating payload.
+
 Address constants retain an object identity and signed byte addend. The source
 adapter marks static-storage objects and functions. Taking the address of an
 automatic object retains identity for checking but does not create a static
@@ -325,14 +372,28 @@ reparses declarations or binds identifiers again. An actual initializer wins
 over later tentative or external declarations. Automatic objects and
 unreferenced function bodies produce no data atom.
 
-The emitter handles integer and bit-precise integer storage, binary32/binary64,
-x87 fields with deterministic zero padding, and scalar pointers. Objects use
-RODATA, DATA_RELRO, DATA or BSS as appropriate. Symbolic pointers emit ABS64
-fixups with signed byte addends; absolute pointer values remain bytes. External
-function/object targets may remain unresolved. A referenced internal function
-requires the backend's real code atom, so the source-only dump rejects that
-case rather than inventing an external definition. Strings, aggregates and TLS
-return an explicit unsupported result.
+The emitter consumes checked aggregate initializer plans, including brace
+elision, designated/range stores, bit-fields, compatible string copies and
+selected union members. It handles integer and bit-precise storage,
+binary32/binary64 and complex components, x87 components with deterministic
+padding, and pointers. Objects use RODATA, DATA_RELRO, DATA, BSS, TDATA or TBSS
+as appropriate; retained string candidates use STRINGS. Symbolic pointers emit
+ABS64 fixups with signed byte addends; absolute pointer values remain bytes.
+External targets may remain unresolved. A referenced internal function needs
+its real code atom: standalone data inspection reports that limitation, while
+combined object/data output uses the program's actual symbol space.
+Initializer plans retain the exact selected overload candidate and object.
+The standalone source bridge refuses a referenced overloadable symbol until
+its ABI symbol name is available, before publishing any Link state. An unused
+overloadable declaration needs no symbol; the lower-level emitter can consume
+an explicitly supplied object-to-symbol map.
+
+The source initializer adapter matches the selected language's warning policy
+for excess elements and compatible overlong string copies. Ignored tails are
+still expression-checked, but produce no stores, runtime evaluations or live
+data references. The direct initializer API retains its strict rejection
+contract. Diagnostic-only scans borrow complete checked roots, restore both
+arenas and never publish an initializer or a supposedly clean stream.
 
 The source bridge owns symbols, names and Link tables in `output`; `bytes`
 owns initialized contents and `scratch` is temporary. The three arenas must be
@@ -345,23 +406,42 @@ compare bytes, symbol targets and relocation addends with Clang's object files.
 
 ## Backend handoff
 
-The typed stream is not yet connected to `Tier0Function`. The contract merged
-in [PR #303](https://github.com/buster14a/buster/pull/303) uses lowered operation
-kinds, machine classes and values, plus control-flow, local, call and ABI data.
-Its scalar integer and floating classes cannot replace full `TypeId` semantics.
-The checker has not yet produced that backend's required function records.
+`c_check_program.c` consumes the typed stream, source control records, asm
+constraints and initializer references. `c_check_program_lower.c` translates
+supported operations into `Tier0Function` records with explicit conversions,
+loads/stores, scaled pointer operations, control flow, locals, calls and ABI
+classes. `c_check_program_emit.c` compiles those functions, resolves shared
+symbols and publishes code/data together. Backend machine classes never
+replace the full semantic `TypeId` in the checked stream.
 
-A real bridge must lower conversions, lvalue reads and stores, pointer element
-scales, control flow, calls and storage consistently with the backend's reviewed
-contract. It must also decide how unsupported backend types are diagnosed and
-how static object identities become data/relocation references. These are
-observable compilation semantics, not a cast between similarly named streams.
+Builtin module results retain exact argument conversions, runtime operation
+identities and effect requirements. Native helpers are ordinary calls with real
+symbols and fixups. Missing backend representations or runtime requirements
+produce an explicit emission diagnostic. Independently compiled native fixtures
+check the supported bridge; source acceptance is a separate gate.
+
+`FENV_ACCESS` preserves source constant-expression proof separately from runtime
+dependence on rounding and exceptions. Runtime operations carrying that dependence
+cannot be folded away or discarded solely because their source operands are
+constant. The fourteen F32/F64 math helpers exchange raw floating-point bits,
+including NaN payload and sign. Square root calls the target's real
+`int *__errno_location(void)` accessor when errno storage is needed; an existing
+compatible declaration is reused and a conflicting declaration is diagnosed.
+
+Diagnostics distinguish a source location from when a complete constraint is
+available. Duplicate switch/default checks run after the original switch has
+closed, in Clang's constraint order. Earlier complete initializer/asm/control
+errors can be reported even when a later declaration or parser error prevents
+full checking. Recovery only supplies diagnostic fragments; the original
+rejection remains final and cannot emit an object.
 
 ## Correctness tests
 
 ```sh
 ./build/compiler test-checker --seed 133 --clang clang
 ./build/compiler test-checker --seed 1 --clang clang
+./build/compiler test-checker-driver --clang clang --executable ./build/compiler
+./build/compiler test-checker-asm --clang clang
 ./build.sh check-call-graph
 ```
 
@@ -385,9 +465,8 @@ The test command fails if the oracle cannot run. It covers:
   Generated unsigned arithmetic assertions are checked independently; mutations
   of their expected values must be rejected. Explicitly unsupported valid C
   fixtures require an unsupported report rather than claimed Clang parity.
-  Known GNU folded-constant and void-indirection extensions have separate
-  explicit rejection fixtures, with Clang's differing acceptance recorded
-  deliberately.
+  GNU folding has separate strict-action and source-extension fixtures,
+  including warning provenance and forms that remain ineligible for an ICE.
 - Independent declaration identities across nested/prototype scopes, source
   event batch/scalar equality, fallback and exhaustion, complex declarators,
   record/enum constraints, loop controls and update/store metadata.

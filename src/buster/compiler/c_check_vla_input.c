@@ -1,0 +1,506 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// Variable array dimensions retain their source expression and one stable extent identity. A declaration
+// captures each evaluated bound once; later sizeof operations read those captured extents. Prototype bounds
+// remain typed, unevaluated metadata. All type walks follow a bounded derivation chain, without recursion.
+
+static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c);
+
+static bool check_input_vla_modified(const TypeTable* types, TypeId type)
+{
+    return type != 0 && (type_inherited_flags(types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0;
+}
+
+static bool check_input_vla_runtime_size(const TypeTable* types, TypeId type)
+{
+    bool runtime = false;
+    for (uint32_t depth = 0; type != 0 && depth < types->types.count; depth += 1)
+    {
+        type = type_strip_aligned(types, type);
+        const uint8_t kind = type_kind(types, type);
+        if (!type_kind_is_array(kind))
+        {
+            break;
+        }
+        runtime |= kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY;
+        type = type_element(types, type);
+    }
+    return runtime;
+}
+
+// A known non-ICE value still denotes a VLA in block/prototype/type-name contexts. File declarations and
+// record members instead use Clang's constant-array folding extension, with its default-on context warning.
+static bool check_input_vla_force_constant(const CheckInputReader* reader, uint32_t open, bool parameter)
+{
+    const Parser* parser = reader->parser;
+    bool force = !parameter && reader->function_body == BUSTER_CHECK_NONE;
+    for (uint32_t token = open, steps = 0; !parameter && token < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[token];
+        if (role == PARSE_ROLE_CLOSE_STRUCT)
+        {
+            force = true;
+            break;
+        }
+        if (role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_KEYWORD)
+        {
+            force = false;
+            break;
+        }
+        if (role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK)
+        {
+            break;
+        }
+        token = parser->tree.parents[token];
+    }
+    return force;
+}
+
+static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint32_t first, uint32_t end, bool parameter, bool star, uint8_t* kind, uint64_t* extent)
+{
+    const Parser* parser = reader->parser;
+    bool valid = open < first && first <= end && end < parser->tokens.count;
+    *kind = BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+    *extent = 0;
+    if (valid && first != end && !star)
+    {
+        CheckValue value = { 0 };
+        TypeId unused = 0;
+        uint32_t failed = BUSTER_CHECK_NONE;
+        const bool cached = reader->bindings.count != 0 && reader->bindings.point[reader->bindings.count - 1] >= first;
+        valid = check_input_constant_read(reader, first, end, false, cached, &value, &unused, &failed) &&
+                check_action_is_integer(reader->types, value.type);
+        const bool folded = check_input_integer_constant(reader, &value) && (value.flags & BUSTER_CHECK_GNU_DIVISION) == 0 &&
+                            (check_input_integer_ice(reader, &value) || check_input_vla_force_constant(reader, open, parameter));
+        if (valid && (folded || (value.flags & BUSTER_CHECK_ICE) != 0))
+        {
+            int64_t number = 0;
+            valid = check_action_i64(reader->types, &value, &number) && number >= 0 && (number != 0 || parser->language.gnu);
+            *kind = BUSTER_TYPE_KIND_ARRAY;
+            *extent = (uint64_t)number;
+            if (valid)
+            {
+                check_input_constant_bound_warning(reader, first, end, &value);
+            }
+        }
+        else if (valid)
+        {
+            *kind = BUSTER_TYPE_KIND_VARIABLE_ARRAY;
+            *extent = (uint64_t)first + 1;
+        }
+        if (!valid && !reader->output->resource && reader->output->report_count == 0)
+        {
+            const uint32_t token = failed < parser->tokens.count ? failed : first;
+            const bool missing = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->output->declarations[token] == BUSTER_CHECK_NONE;
+            check_input_report(reader, token, missing ? CHECK_INPUT_UNDECLARED : CHECK_INPUT_DECLARATION);
+        }
+    }
+    else if (valid && star)
+    {
+        valid = parameter;
+        *kind = BUSTER_TYPE_KIND_VARIABLE_ARRAY;
+    }
+    if (valid && *kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY)
+    {
+        valid = parameter || reader->function_body != BUSTER_CHECK_NONE;
+        CheckInput* output = reader->output;
+        const bool room = output->vla_count < output->vla_capacity;
+        output->resource |= valid && !room;
+        valid &= room;
+        if (valid)
+        {
+            const uint32_t index = output->vla_count++;
+            output->vlas[index] = (CheckInputVla)
+            {
+                .declaration = BUSTER_CHECK_NONE,
+                .bound_begin = first,
+                .bound_end = end,
+                .bound_node = BUSTER_CHECK_NONE,
+                .body = parameter ? BUSTER_CHECK_NONE : reader->function_body,
+                .scope_begin = open,
+                .scope_end = reader->scope_count != 0 ? reader->scope_ends[reader->scope_count - 1] : end,
+                .evaluated = !parameter && !star,
+            };
+            // The opener identifies declarator construction; the first bound token identifies type extents.
+            // A C bound cannot begin with an array declarator opener, so these two sparse keys never collide.
+            reader->vla_bounds[open] = index + 1;
+            reader->vla_bounds[first] = index + 1;
+            reader->vla_ends[end] = index + 1;
+        }
+    }
+    if (valid)
+    {
+        if (*kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && !star)
+        {
+            memset(reader->ignored + open, 1, first - open);
+            reader->ignored[end] = true;
+        }
+        else
+        {
+            memset(reader->ignored + open, 1, end - open + 1);
+        }
+    }
+    return valid;
+}
+
+static TypeId check_input_vla_type(CheckInputReader* reader, uint32_t open, TypeId element, uint32_t declaration, bool parameter, uint8_t kind, uint64_t extent)
+{
+    TypeId type = check_input_type_result(reader, kind == BUSTER_TYPE_KIND_ARRAY ? type_array(reader->types, element, extent) :
+                 kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? type_variable_array(reader->types, element, (uint32_t)extent) :
+                                                         type_incomplete_array(reader->types, element));
+    if (type != 0 && kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY)
+    {
+        const uint32_t identity = reader->vla_bounds[open];
+        if (identity == 0 || identity > reader->output->vla_count)
+        {
+            type = 0;
+        }
+        else
+        {
+            CheckInputVla* vla = &reader->output->vlas[identity - 1];
+            vla->type = type;
+            vla->declaration = declaration;
+            vla->evaluated &= !parameter;
+        }
+    }
+    return type;
+}
+
+// A declaration-time type query has already checked its bounds with the constant/type evaluator. Retain only
+// dimensions introduced by this query; a typedef's earlier extent belongs to its original capture. This helper
+// deliberately performs no expression evaluation or name lookup, keeping the source/type call graph acyclic.
+static bool check_input_vla_query(CheckInputReader* reader, uint32_t first, uint32_t end, TypeId type)
+{
+    const Parser* parser = reader->parser;
+    bool valid = first <= end && end <= parser->tokens.count;
+    for (uint32_t depth = 0; valid && type != 0 && depth < reader->types->types.count; depth += 1)
+    {
+        type = type_strip_aligned(reader->types, type);
+        const uint8_t kind = type_kind(reader->types, type);
+        if (kind != BUSTER_TYPE_KIND_POINTER && kind != BUSTER_TYPE_KIND_ATOMIC && !type_kind_is_array(kind))
+        {
+            break;
+        }
+        if (kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY)
+        {
+            const uint64_t extent = reader->types->types.extent[type_index(type)];
+            if (extent >= (uint64_t)first + 2 && extent <= end)
+            {
+                const uint32_t begin = (uint32_t)extent - 1;
+                const uint32_t open = begin - 1;
+                const uint32_t close = parser->tree.parents[open];
+                valid = parser->tokens.kinds[open] == PARSE_KIND_L_SQUARE && close > begin && close < end;
+                if (valid && reader->vla_bounds[begin] == 0)
+                {
+                    CheckInput* output = reader->output;
+                    valid = output->vla_count < output->vla_capacity;
+                    output->resource |= !valid;
+                    if (valid)
+                    {
+                        const uint32_t identity = output->vla_count++;
+                        output->vlas[identity] = (CheckInputVla){
+                            .declaration = BUSTER_CHECK_NONE,
+                            .type = type,
+                            .bound_begin = begin,
+                            .bound_end = close,
+                            .bound_node = BUSTER_CHECK_NONE,
+                            .body = reader->function_body,
+                            .scope_begin = open,
+                            .scope_end = reader->scope_count != 0 ? reader->scope_ends[reader->scope_count - 1] : end,
+                            .evaluated = reader->function_body != BUSTER_CHECK_NONE,
+                        };
+                        reader->vla_bounds[open] = identity + 1;
+                        reader->vla_bounds[begin] = identity + 1;
+                        reader->vla_ends[close] = identity + 1;
+                    }
+                }
+                if (valid)
+                {
+                    memset(reader->ignored + begin, 0, close - begin);
+                    reader->ignored[open] = true;
+                    reader->ignored[close] = true;
+                }
+            }
+        }
+        type = type_element(reader->types, type);
+    }
+    return valid;
+}
+
+static bool check_input_vla_declaration(CheckInputReader* reader, uint32_t first, uint32_t declaration, TypeId type, uint32_t point, uint32_t storage, bool is_typedef, bool initialized, bool thread_local)
+{
+    bool valid = true;
+    if (check_input_vla_modified(reader->types, type))
+    {
+        const bool array = check_input_vla_runtime_size(reader->types, type);
+        const Parser* parser = reader->parser;
+        const bool empty = initialized && point + 2 < parser->tokens.count && parser->tokens.kinds[point + 1] == PARSE_KIND_L_BRACE &&
+                           parser->tree.parents[point + 1] == point + 2;
+        valid = reader->function_body != BUSTER_CHECK_NONE && storage != C_NAME_EXTERN &&
+                (is_typedef || !array || (storage != C_NAME_STATIC && !thread_local && (!initialized || empty)));
+        if (valid)
+        {
+            reader->vla_scope_ends[declaration] = reader->scope_count != 0 ? reader->scope_ends[reader->scope_count - 1] + 1 : point + 1;
+            for (uint32_t i = 0; i < reader->output->vla_count; i += 1)
+            {
+                CheckInputVla* vla = &reader->output->vlas[i];
+                if (vla->declaration == BUSTER_CHECK_NONE && vla->bound_begin >= first && vla->bound_end < declaration)
+                {
+                    vla->declaration = declaration;
+                }
+                if (vla->declaration == declaration)
+                {
+                    vla->body = reader->function_body;
+                    vla->scope_begin = point;
+                    vla->scope_end = reader->vla_scope_ends[declaration] - 1;
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+static void check_input_vla_parameters(CheckInputReader* reader, uint32_t body)
+{
+    for (uint32_t i = 0; i < reader->output->vla_count; i += 1)
+    {
+        CheckInputVla* vla = &reader->output->vlas[i];
+        const uint32_t declaration = vla->declaration;
+        if (declaration < reader->parser->tokens.count && reader->output->declaration_bodies[declaration] == body)
+        {
+            vla->body = body;
+            vla->scope_begin = body;
+            vla->scope_end = reader->function_end;
+            vla->evaluated = reader->types->types.extent[type_index(vla->type)] != 0;
+        }
+    }
+}
+
+static uint32_t check_input_vla_root(const CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    uint32_t root = BUSTER_CHECK_NONE;
+    uint32_t roots = 0;
+    for (uint32_t token = first; token < end; token += 1)
+    {
+        const uint32_t parent = reader->parser->tree.parents[token];
+        if (parent < first || parent >= end)
+        {
+            root = token;
+            roots += 1;
+        }
+    }
+    return roots == 1 ? root : BUSTER_CHECK_NONE;
+}
+
+static uint32_t check_input_vla_capture(CheckInputReader* reader, uint32_t closing)
+{
+    const uint32_t identity = reader->vla_ends[closing];
+    uint32_t result = BUSTER_CHECK_NONE;
+    if (identity != 0 && identity <= reader->output->vla_count)
+    {
+        CheckInputVla* vla = &reader->output->vlas[identity - 1];
+        const bool star = reader->types->types.extent[type_index(vla->type)] == 0;
+        const uint32_t root = star ? BUSTER_CHECK_NONE : check_input_vla_root(reader, vla->bound_begin, vla->bound_end);
+        const uint32_t operand = root < reader->parser->tokens.count ? reader->output->token_nodes[root] : BUSTER_CHECK_NONE;
+        if (operand != BUSTER_CHECK_NONE)
+        {
+            const uint32_t node = check_input_add(reader, CHECK_OP_VLA_BOUND, closing, operand, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            if (node != BUSTER_CHECK_NONE)
+            {
+                reader->output->graph.members[node] = identity;
+                vla->bound_node = node;
+                result = vla->declaration == BUSTER_CHECK_NONE && vla->evaluated ? node : BUSTER_CHECK_NONE;
+            }
+        }
+        else if (!star)
+        {
+            check_input_report(reader, closing, CHECK_INPUT_DECLARATION);
+        }
+    }
+    return result;
+}
+
+static uint32_t check_input_vla_scale(CheckInputReader* reader, uint32_t token, uint32_t node, uint64_t factor)
+{
+    CheckGraph* graph = &reader->output->graph;
+    if (node == BUSTER_CHECK_NONE || factor != 1)
+    {
+        const uint32_t constant = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        if (constant != BUSTER_CHECK_NONE)
+        {
+            graph->leaves[constant] = (CheckValue)
+            {
+                .type = BUSTER_TYPE_ULONG,
+                .category = CHECK_RVALUE,
+                .flags = BUSTER_CHECK_ICE,
+                .constant_kind = CHECK_CONSTANT_INTEGER,
+                .integer = factor,
+            };
+        }
+        node = node == BUSTER_CHECK_NONE ? constant : constant != BUSTER_CHECK_NONE ?
+               check_input_add(reader, CHECK_OP_MULTIPLY, token, node, constant, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
+    }
+    return node;
+}
+
+typedef struct CheckVlaSizePart CheckVlaSizePart;
+struct CheckVlaSizePart
+{
+    uint64_t factor;
+    uint32_t identity;
+    bool inline_bound;
+};
+
+static uint32_t check_input_vla_size(CheckInputReader* reader, uint32_t token, TypeId requested, uint32_t operand)
+{
+    CheckGraph* graph = &reader->output->graph;
+    const uint64_t mark = reader->scratch->length;
+    uint32_t dimensions = 0;
+    for (TypeId type = requested; dimensions < reader->types->types.count &&
+         type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, type))); type = type_element(reader->types, type_strip_aligned(reader->types, type)))
+    {
+        dimensions += 1;
+    }
+    CheckVlaSizePart* parts = arena_push_array(reader->scratch, dimensions, sizeof(CheckVlaSizePart), 8);
+    reader->output->resource |= parts == 0;
+    TypeId type = requested;
+    uint32_t result = BUSTER_CHECK_NONE;
+    uint64_t fixed = 1;
+    uint32_t count = 0;
+    bool valid = parts != 0 && check_input_vla_runtime_size(reader->types, type);
+    for (uint32_t depth = 0; valid && type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, type))) &&
+         depth < reader->types->types.count; depth += 1)
+    {
+        type = type_strip_aligned(reader->types, type);
+        const uint64_t extent = reader->types->types.extent[type_index(type)];
+        if (type_kind(reader->types, type) == BUSTER_TYPE_KIND_VARIABLE_ARRAY)
+        {
+            const uint32_t identity = extent != 0 && extent <= reader->parser->tokens.count ? reader->vla_bounds[extent - 1] : 0;
+            valid = identity != 0 && identity <= reader->output->vla_count;
+            if (valid)
+            {
+                const CheckInputVla* vla = &reader->output->vlas[identity - 1];
+                const bool inline_bound = vla->declaration == BUSTER_CHECK_NONE && vla->bound_begin > token && vla->bound_end <= reader->ends[token];
+                if (!inline_bound && reader->vla_sizes[identity - 1] != BUSTER_CHECK_NONE)
+                {
+                    result = reader->vla_sizes[identity - 1];
+                    break;
+                }
+                parts[count++] = (CheckVlaSizePart)
+                {
+                    .factor = fixed,
+                    .identity = identity,
+                    .inline_bound = inline_bound,
+                };
+                fixed = 1;
+            }
+        }
+        else
+        {
+            valid = extent == 0 || fixed <= UINT64_MAX / extent;
+            fixed = valid ? fixed * extent : 0;
+        }
+        type = type_element(reader->types, type);
+    }
+    const uint64_t size = result == BUSTER_CHECK_NONE ? type_size(reader->types, type) : 1;
+    valid &= size == 0 || fixed <= UINT64_MAX / size;
+    if (valid)
+    {
+        result = check_input_vla_scale(reader, token, result, fixed * size);
+        valid = result != BUSTER_CHECK_NONE;
+        while (valid && count != 0)
+        {
+            const CheckVlaSizePart part = parts[--count];
+            const uint32_t value = part.inline_bound ? reader->output->vlas[part.identity - 1].bound_node :
+                                   check_input_add(reader, CHECK_OP_VLA_EXTENT, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            if (value != BUSTER_CHECK_NONE)
+            {
+                graph->members[value] = part.identity;
+                result = check_input_add(reader, CHECK_OP_MULTIPLY, token, value, result, BUSTER_CHECK_NONE);
+            }
+            valid = value != BUSTER_CHECK_NONE && result != BUSTER_CHECK_NONE;
+            if (valid)
+            {
+                if (!part.inline_bound)
+                {
+                    reader->vla_sizes[part.identity - 1] = result;
+                }
+                result = check_input_vla_scale(reader, token, result, part.factor);
+                valid = result != BUSTER_CHECK_NONE;
+            }
+        }
+        if (valid && operand != BUSTER_CHECK_NONE)
+        {
+            result = check_input_add(reader, CHECK_OP_COMMA, token, operand, result, BUSTER_CHECK_NONE);
+            valid = result != BUSTER_CHECK_NONE;
+        }
+        if (valid)
+        {
+            result = check_input_add(reader, CHECK_OP_SIZEOF_VLA, token, result, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            valid = result != BUSTER_CHECK_NONE;
+            if (valid)
+            {
+                graph->types[result] = requested;
+            }
+        }
+    }
+    if (!valid || result == BUSTER_CHECK_NONE)
+    {
+        check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+    }
+    arena_pop_to(reader->scratch, mark);
+    return valid ? result : BUSTER_CHECK_NONE;
+}
+
+static void check_input_vla_finish(CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    for (uint32_t i = 0; i < reader->output->vla_count; i += 1)
+    {
+        const CheckInputVla* vla = &reader->output->vlas[i];
+        if (vla->evaluated && vla->bound_node == BUSTER_CHECK_NONE)
+        {
+            check_input_report(reader, vla->bound_begin, CHECK_INPUT_DECLARATION);
+        }
+    }
+    // Lexical VM lifetimes are nested intervals. Their most recent active declaration implies every enclosing
+    // lifetime, so one stack scan gives every transfer target its complete entry constraint in constant space
+    // per token. Binding replay is finished; its scope scratch columns are available for this temporary map.
+    uint32_t depth = 0;
+    for (uint32_t token = 0; token < parser->tokens.count; token += 1)
+    {
+        while (depth != 0 && reader->vla_scope_ends[reader->scope_ends[depth - 1]] <= token)
+        {
+            depth -= 1;
+        }
+        if (reader->vla_scope_ends[token] != 0)
+        {
+            reader->scope_ends[depth++] = token;
+        }
+        reader->scope_marks[token] = depth != 0 ? reader->scope_ends[depth - 1] + 1 : 0;
+    }
+    for (uint32_t token = 0; token < parser->tokens.count; token += 1)
+    {
+        uint32_t source = token;
+        uint32_t target = BUSTER_CHECK_NONE;
+        if (parser->tokens.kinds[token] == PARSE_KIND_GOTO)
+        {
+            target = reader->output->label_targets[token];
+        }
+        else if (parser->tree.roles[token] == PARSE_ROLE_OPEN_CASE)
+        {
+            const uint32_t owner = reader->output->control_owners[token];
+            source = owner < parser->tokens.count ? reader->first_child[owner] : BUSTER_CHECK_NONE;
+            target = token;
+        }
+        if (target < parser->tokens.count && reader->scope_marks[target] != 0)
+        {
+            const uint32_t declaration = reader->scope_marks[target] - 1;
+            if (source < declaration || source >= reader->vla_scope_ends[declaration])
+            {
+                check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+            }
+        }
+    }
+}

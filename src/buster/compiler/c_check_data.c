@@ -1,28 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Checked scalar static objects to the existing Link representation. Include after c_checker.c and link.c.
+// Checked static objects to the existing Link representation. Include after c_check_initializer.c and link.c.
 // check_data_emit consumes a batch of selected definitions, not raw declarations: the source adapter/driver owns
 // redeclaration merging, tentative-definition selection and name/linkage resolution. Each object has one existing,
-// undefined OBJECT symbol (source NONE or PROGRAM) in object_symbols; address constants use that same opaque map. Symbols
+// undefined OBJECT/TLS symbol (source NONE or PROGRAM) in object_symbols; address constants use that same opaque map. Symbols
 // for external references and functions may already exist too. This stage never invents object identity or performs
-// a missing initializer conversion. Aggregates, strings, atomic objects, TLS and unsupported formats fail explicitly.
+// a missing initializer conversion. Checked subobject plans describe aggregates, bit-fields, zero filling and
+// string copies. Literal records become STRINGS for byte characters and RODATA for wide characters; TLS symbols
+// select TDATA/TBSS. Unsupported scalar formats and address constants referring to TLS fail explicitly.
 //
 // All inputs are immutable bounded arrays with their natural alignment and no readable padding. objects has count
 // records; object_symbols has object_count entries, with zero meaning unmapped. stream values/diagnostics have count
 // entries of their own. Link tables must be initialized and exclusively owned. Its existing unrelated records are
 // the caller's responsibility; link_check validates the complete unit after its other producers finish.
 //
-// bytes and scratch are distinct, disjoint caller-owned arenas, also disjoint from the inputs and Link tables.
-// The byte arena owns published atom bytes and must outlive Link consumers. Scratch holds one compact plan per
-// object and a symbol bitset; its length is always restored. All type, constant, symbol, duplicate, binding and
+// bytes and scratch are distinct, disjoint caller-owned arenas. Their newly allocated suffixes must not overlap
+// inputs or Link tables; live input prefixes in either stable-address arena are permitted.
+// The byte arena owns published atom bytes and must outlive Link consumers. Scratch holds object bytes, sorted
+// final relocations and a symbol bitset; its length is always restored. All type, constant, symbol, duplicate, binding and
 // capacity checks precede publication. A failed call leaves Link (including its error), symbols and byte length
 // unchanged. Empty batches accept null input arrays. Records may be partitioned into batches only when local
 // forward-reference definitions remain in the same batch or were published earlier.
 //
 // The batch boundary preserves independent object work and avoids reparsing, interning or name lookup. Planning
-// encodes each scalar once, counts variable output and packs bytes directly; publication uses existing Link adds.
-// This initial scalar consumer has no measured SIMD or multicore throughput claim; target-host measurement of the
+// encodes each subobject once, applies source-order replacements and counts final output; publication uses existing
+// Link adds. This consumer has no measured SIMD or multicore throughput claim; target-host measurement of the
 // source producer, plan and object-writer consumer remains required before choosing a vector specialization.
 #ifndef BUSTER_C_CHECK_DATA_INCLUDED
 #define BUSTER_C_CHECK_DATA_INCLUDED
@@ -39,6 +42,12 @@ struct CheckDataObject
     // Final checked INITIALIZE result, or BUSTER_CHECK_NONE for an implicit zero initializer.
     uint32_t initializer;
     uint32_t token;
+    const CheckInitializer* initializer_plan;
+    const uint8_t* literal_bytes;
+    uint64_t literal_size;
+    bool string_pool;
+    // Declaration alignment is separate from the ordinary compatible type. Zero keeps its natural alignment.
+    uint8_t alignment_log2;
 };
 
 typedef enum CheckDataStatus
@@ -67,14 +76,35 @@ struct CheckDataResult
     uint64_t byte_count;
 };
 
+typedef struct CheckDataScalar CheckDataScalar;
+struct CheckDataScalar
+{
+    uint8_t bytes[32];
+    SymbolId symbol;
+    uint32_t object;
+    int64_t addend;
+    uint8_t size;
+    uint8_t alignment_log2;
+    uint8_t class;
+};
+
+typedef struct CheckDataFixup CheckDataFixup;
+struct CheckDataFixup
+{
+    uint32_t offset;
+    uint32_t object;
+    SymbolId target;
+    int64_t addend;
+};
+
 typedef struct CheckDataPlan CheckDataPlan;
 struct CheckDataPlan
 {
-    uint8_t bytes[16];
+    uint8_t* bytes;
+    uint64_t size;
+    CheckDataFixup* fixups;
+    uint32_t fixup_count;
     SymbolId symbol;
-    SymbolId target;
-    int64_t addend;
-    uint8_t size;
     uint8_t alignment_log2;
     uint8_t class;
 };
@@ -83,78 +113,12 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
                             const SymbolId* object_symbols, uint32_t object_count, Link* link, uint32_t unit,
                             Arena* bytes, Arena* scratch, CheckDataResult* result);
 
-static void check_data_integer_bytes(uint8_t* bytes, unsigned __int128 value, uint32_t size)
-{
-    for (uint32_t i = 0; i < size; i += 1)
-    {
-        bytes[i] = (uint8_t)(value >> (i * 8));
-    }
-}
+#include "c_check_constant_bytes.c"
 
-// The checker uses Linux/x86-64 binary32, binary64 and x87 extended values. The two IEEE encodings are copied into
-// integer values, then serialized explicitly little-endian. x87 is built from numeric fields, never host padding.
-// CheckValue does not retain NaN payload provenance; all NaNs get a deterministic quiet payload and their sign.
-static void check_data_float_bytes(uint8_t bytes[16], TypeId type, long double value)
+static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const CheckStream* stream, const CheckDataObject* object,
+                                             const SymbolId* object_symbols, uint32_t object_count, const Link* link, CheckDataScalar* plan)
 {
-    _Static_assert(CHAR_BIT == 8 && sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128, "checker target requires binary32");
-    _Static_assert(sizeof(double) == 8 && DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024, "checker target requires binary64");
-    _Static_assert(LDBL_MANT_DIG == 64 && LDBL_MAX_EXP == 16384 && LDBL_MIN_EXP == -16381, "checker target requires x87 extended");
-    const bool negative = signbit(value) != 0;
-    if (type == BUSTER_TYPE_FLOAT)
-    {
-        const float rounded = (float)value;
-        uint32_t bits = 0;
-        memcpy(&bits, &rounded, sizeof(bits));
-        if (isnan(value))
-        {
-            bits = UINT32_C(0x7fc00000) | ((uint32_t)negative << 31);
-        }
-        check_data_integer_bytes(bytes, bits, 4);
-    }
-    else if (type == BUSTER_TYPE_DOUBLE)
-    {
-        const double rounded = (double)value;
-        uint64_t bits = 0;
-        memcpy(&bits, &rounded, sizeof(bits));
-        if (isnan(value))
-        {
-            bits = UINT64_C(0x7ff8000000000000) | ((uint64_t)negative << 63);
-        }
-        check_data_integer_bytes(bytes, bits, 8);
-    }
-    else
-    {
-        uint64_t significand = 0;
-        uint32_t exponent = 0;
-        if (isnan(value) || isinf(value))
-        {
-            exponent = 0x7fff;
-            significand = isnan(value) ? UINT64_C(0xc000000000000000) : UINT64_C(0x8000000000000000);
-        }
-        else if (value != 0)
-        {
-            const long double magnitude = fabsl(value);
-            if (magnitude < 0x1p-16382L)
-            {
-                significand = (uint64_t)ldexpl(magnitude, 16445);
-            }
-            else
-            {
-                int binary_exponent = 0;
-                const long double fraction = frexpl(magnitude, &binary_exponent);
-                significand = (uint64_t)ldexpl(fraction, 64);
-                exponent = (uint32_t)(binary_exponent + 16382);
-            }
-        }
-        check_data_integer_bytes(bytes, significand, 8);
-        check_data_integer_bytes(bytes + 8, exponent | ((uint32_t)negative << 15), 2);
-    }
-}
-
-static CheckDataStatus check_data_plan_object(const TypeTable* types, const CheckStream* stream, const CheckDataObject* object,
-                                             const SymbolId* object_symbols, uint32_t object_count, const Link* link, CheckDataPlan* plan)
-{
-    *plan = (CheckDataPlan){ 0 };
+    *plan = (CheckDataScalar){ 0 };
     CheckDataStatus status = CHECK_DATA_OK;
     if (!type_is_valid(types, object->type) || !type_is_complete(types, object->type))
     {
@@ -165,6 +129,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
     bool is_signed = false;
     bool integer = false;
     bool floating = false;
+    bool complex = false;
     bool pointer = false;
     bool readonly = false;
     if (status == CHECK_DATA_OK)
@@ -175,13 +140,15 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         const uint8_t kind = type_kind(types, base);
         integer = check_action_integer_type(types, base, &width, &is_signed);
         floating = base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE;
+        complex = kind == BUSTER_TYPE_KIND_COMPLEX;
         pointer = kind == BUSTER_TYPE_KIND_POINTER;
         readonly = (qualifiers & BUSTER_TYPE_CONST) != 0;
         const uint64_t size = type_size(types, object->type);
-        const uint32_t alignment = type_alignment_log2(types, object->type);
+        const uint32_t natural = type_alignment_log2(types, object->type);
+        const uint32_t alignment = object->alignment_log2 > natural ? object->alignment_log2 : natural;
         const uint64_t scalar_size = type_size(types, base);
         const bool shape = size != 0 && size <= sizeof(plan->bytes) && size == scalar_size && alignment <= BUSTER_LINK_MAX_ALIGNMENT_LOG2;
-        if ((!integer && !floating && !pointer) || !shape || (pointer && size != 8) || (integer && width > size * 8))
+        if ((!integer && !floating && !complex && !pointer) || !shape || (pointer && size != 8) || (integer && width > size * 8))
         {
             status = CHECK_DATA_UNSUPPORTED;
         }
@@ -201,11 +168,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         {
             plan->symbol = object_symbols[object->object];
             const uint8_t symbol_type = link->symbols.flags[plan->symbol] & BUSTER_LINK_SYMBOL_TYPE;
-            if (symbol_type == BUSTER_LINK_SYMBOL_TLS)
-            {
-                status = CHECK_DATA_UNSUPPORTED;
-            }
-            else if (symbol_type != BUSTER_LINK_SYMBOL_OBJECT ||
+            if ((symbol_type != BUSTER_LINK_SYMBOL_OBJECT && symbol_type != BUSTER_LINK_SYMBOL_TLS) ||
                      (link->symbols.source[plan->symbol] != BUSTER_LINK_SOURCE_PROGRAM && link->symbols.source[plan->symbol] != BUSTER_LINK_SOURCE_NONE) ||
                      link->symbols.atom[plan->symbol] != 0)
             {
@@ -274,7 +237,53 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
                     check_data_float_bytes(plan->bytes, base, value->floating);
                 }
             }
-            else if (pointer && value->constant_kind == CHECK_CONSTANT_ADDRESS)
+            else if (complex && value->constant_kind == CHECK_CONSTANT_COMPLEX)
+            {
+                const TypeId element = type_element(types, base);
+                const uint32_t component_size = (uint32_t)type_size(types, element);
+                uint32_t component_width = 0;
+                bool component_signed = false;
+                if (component_size == 0 || (uint64_t)component_size * 2 != plan->size)
+                {
+                    status = CHECK_DATA_UNSUPPORTED;
+                }
+                else if (check_action_float_supported(types, element))
+                {
+                    const long double real = check_action_round_float(element, value->floating);
+                    const long double imaginary = check_action_round_float(element, value->imaginary);
+                    const bool real_valid = isnan(value->floating) || (real == value->floating && signbit(real) == signbit(value->floating));
+                    const bool imaginary_valid = isnan(value->imaginary) || (imaginary == value->imaginary && signbit(imaginary) == signbit(value->imaginary));
+                    if (!real_valid || !imaginary_valid)
+                    {
+                        status = CHECK_DATA_INVALID;
+                    }
+                    else
+                    {
+                        check_data_float_bytes(plan->bytes, element, value->floating);
+                        check_data_float_bytes(plan->bytes + component_size, element, value->imaginary);
+                    }
+                }
+                else if (check_action_integer_type(types, element, &component_width, &component_signed) && component_width <= 64)
+                {
+                    const unsigned __int128 mask = check_action_mask(component_width);
+                    const unsigned __int128 real = value->integer & UINT64_MAX;
+                    const unsigned __int128 imaginary = value->integer >> 64;
+                    if ((real & ~mask) != 0 || (imaginary & ~mask) != 0)
+                    {
+                        status = CHECK_DATA_INVALID;
+                    }
+                    else
+                    {
+                        check_data_integer_bytes(plan->bytes, real, component_size);
+                        check_data_integer_bytes(plan->bytes + component_size, imaginary, component_size);
+                    }
+                }
+                else
+                {
+                    status = CHECK_DATA_UNSUPPORTED;
+                }
+            }
+            else if ((pointer || (integer && width == 64 && plan->size == 8)) && value->constant_kind == CHECK_CONSTANT_ADDRESS)
             {
                 if (value->object == 0)
                 {
@@ -284,18 +293,14 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
                 {
                     status = CHECK_DATA_NON_CONSTANT;
                 }
-                else if (value->object >= object_count || object_symbols[value->object] == 0 || object_symbols[value->object] >= link->symbols.count)
+                else if (value->object >= object_count)
                 {
                     status = CHECK_DATA_SYMBOL;
                 }
                 else
                 {
-                    plan->target = object_symbols[value->object];
+                    plan->object = value->object;
                     plan->addend = value->offset;
-                    if ((link->symbols.flags[plan->target] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS)
-                    {
-                        status = CHECK_DATA_UNSUPPORTED;
-                    }
                 }
             }
             else
@@ -311,8 +316,327 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         {
             nonzero |= plan->bytes[byte];
         }
-        plan->class = readonly ? (plan->target != 0 ? BUSTER_LINK_CLASS_DATA_RELRO : BUSTER_LINK_CLASS_RODATA) :
-                      (nonzero != 0 || plan->target != 0 ? BUSTER_LINK_CLASS_DATA : BUSTER_LINK_CLASS_BSS);
+        plan->class = readonly ? (plan->object != 0 ? BUSTER_LINK_CLASS_DATA_RELRO : BUSTER_LINK_CLASS_RODATA) :
+                      (nonzero != 0 || plan->object != 0 ? BUSTER_LINK_CLASS_DATA : BUSTER_LINK_CLASS_BSS);
+    }
+    return status;
+}
+
+static bool check_data_sort_fixups(CheckDataPlan* plan, Arena* scratch)
+{
+    CheckDataFixup* temporary = plan->fixup_count > 1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDataFixup, plan->fixup_count) : 0;
+    const bool valid = plan->fixup_count <= 1 || temporary != 0;
+    CheckDataFixup* references = plan->fixups;
+    for (uint32_t shift = 0; valid && plan->fixup_count > 1 && shift < 32; shift += 8)
+    {
+        uint32_t counts[256] = { 0 };
+        for (uint32_t i = 0; i < plan->fixup_count; i += 1)
+        {
+            counts[(references[i].offset >> shift) & 255] += 1;
+        }
+        uint32_t total = 0;
+        for (uint32_t bucket = 0; bucket < 256; bucket += 1)
+        {
+            const uint32_t count = counts[bucket];
+            counts[bucket] = total;
+            total += count;
+        }
+        for (uint32_t i = 0; i < plan->fixup_count; i += 1)
+        {
+            const uint32_t bucket = (references[i].offset >> shift) & 255;
+            temporary[counts[bucket]] = references[i];
+            counts[bucket] += 1;
+        }
+        CheckDataFixup* swap = references;
+        references = temporary;
+        temporary = swap;
+    }
+    return valid;
+}
+
+static CheckDataStatus check_data_plan_object(const TypeTable* types, const CheckStream* stream, const CheckDataObject* object,
+                                             const SymbolId* object_symbols, uint32_t object_count, const Link* link,
+                                             Arena* scratch, CheckDataPlan* plan)
+{
+    *plan = (CheckDataPlan){ 0 };
+    CheckDataStatus status = CHECK_DATA_OK;
+    if (!type_is_valid(types, object->type) || !type_is_complete(types, object->type))
+    {
+        status = CHECK_DATA_INVALID;
+    }
+    const TypeId base = status == CHECK_DATA_OK ? type_strip_aligned(types, object->type) : 0;
+    const uint8_t kind = status == CHECK_DATA_OK ? type_kind(types, base) : 0;
+    const bool aggregate = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ||
+                           kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+    if (status == CHECK_DATA_OK)
+    {
+        const uint32_t natural = type_alignment_log2(types, object->type);
+        const uint32_t alignment = object->alignment_log2 > natural ? object->alignment_log2 : natural;
+        plan->size = type_size(types, object->type);
+        if (object->initializer_plan != 0 && object->initializer_plan->object_size != 0)
+        {
+            if (object->initializer_plan->object_size < plan->size)
+            {
+                status = CHECK_DATA_INVALID;
+            }
+            else
+            {
+                plan->size = object->initializer_plan->object_size;
+            }
+        }
+        if (alignment > BUSTER_LINK_MAX_ALIGNMENT_LOG2 || plan->size > UINT64_MAX / 8)
+        {
+            status = CHECK_DATA_UNSUPPORTED;
+        }
+        else
+        {
+            plan->alignment_log2 = (uint8_t)alignment;
+        }
+    }
+    if (status == CHECK_DATA_OK)
+    {
+        if (object->object == 0 || object->object >= object_count || object_symbols[object->object] == 0 || object_symbols[object->object] >= link->symbols.count)
+        {
+            status = CHECK_DATA_SYMBOL;
+        }
+        else
+        {
+            plan->symbol = object_symbols[object->object];
+            const uint8_t symbol_type = link->symbols.flags[plan->symbol] & BUSTER_LINK_SYMBOL_TYPE;
+            if ((symbol_type != BUSTER_LINK_SYMBOL_OBJECT && symbol_type != BUSTER_LINK_SYMBOL_TLS) ||
+                (link->symbols.source[plan->symbol] != BUSTER_LINK_SOURCE_PROGRAM && link->symbols.source[plan->symbol] != BUSTER_LINK_SOURCE_NONE) ||
+                link->symbols.atom[plan->symbol] != 0)
+            {
+                status = CHECK_DATA_SYMBOL;
+            }
+        }
+    }
+    const CheckInitializer* initializer = object->initializer_plan;
+    uint8_t* live_parts = 0;
+    uint32_t live_count = 0;
+    if (status == CHECK_DATA_OK && initializer != 0)
+    {
+        const TypeAnswer compatible = type_compatible(types, type_unqualified(object->type), type_unqualified(initializer->type));
+        if (initializer->status != CHECK_INIT_OK || (initializer->count != 0 && initializer->parts == 0))
+        {
+            status = CHECK_DATA_CHECK_FAILED;
+        }
+        else if (compatible != TYPE_ANSWER_YES)
+        {
+            status = compatible == TYPE_ANSWER_FULL ? CHECK_DATA_RESOURCE : CHECK_DATA_INVALID;
+        }
+        else if (initializer->count != 0)
+        {
+            const CheckInitStatus references = check_initializer_live(types, initializer, scratch, &live_parts, &live_count);
+            status = references == CHECK_INIT_OK ? CHECK_DATA_OK : references == CHECK_INIT_RESOURCE ? CHECK_DATA_RESOURCE : CHECK_DATA_INVALID;
+            plan->fixups = status == CHECK_DATA_OK && live_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDataFixup, live_count) : 0;
+            plan->bytes = arena_push(scratch, plan->size, 1);
+            if ((live_count != 0 && plan->fixups == 0) || (plan->size != 0 && plan->bytes == 0))
+            {
+                status = CHECK_DATA_RESOURCE;
+            }
+            else if (plan->size != 0)
+            {
+                memset(plan->bytes, 0, plan->size);
+            }
+        }
+    }
+    if (status == CHECK_DATA_OK && object->string_pool)
+    {
+        const uint8_t symbol_type = link->symbols.flags[plan->symbol] & BUSTER_LINK_SYMBOL_TYPE;
+        if (initializer != 0 || object->literal_size != plan->size || (plan->size != 0 && object->literal_bytes == 0) ||
+            kind != BUSTER_TYPE_KIND_ARRAY || symbol_type != BUSTER_LINK_SYMBOL_OBJECT)
+        {
+            status = CHECK_DATA_INVALID;
+        }
+        else if (plan->size != 0)
+        {
+            plan->bytes = arena_push(scratch, plan->size, 1);
+            if (plan->bytes == 0)
+            {
+                status = CHECK_DATA_RESOURCE;
+            }
+            else
+            {
+                memcpy(plan->bytes, object->literal_bytes, plan->size);
+            }
+        }
+    }
+    else if (status == CHECK_DATA_OK && initializer == 0 && (!aggregate || object->initializer != BUSTER_CHECK_NONE))
+    {
+        CheckDataScalar scalar = { 0 };
+        status = check_data_plan_scalar(types, stream, object, object_symbols, object_count, link, &scalar);
+        if (status == CHECK_DATA_OK)
+        {
+            plan->bytes = arena_push(scratch, plan->size, 1);
+            if (plan->bytes == 0)
+            {
+                status = CHECK_DATA_RESOURCE;
+            }
+            else
+            {
+                memcpy(plan->bytes, scalar.bytes, plan->size);
+            }
+            if (status == CHECK_DATA_OK && scalar.object != 0)
+            {
+                plan->fixups = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDataFixup, 1);
+                if (plan->fixups == 0)
+                {
+                    status = CHECK_DATA_RESOURCE;
+                }
+                else
+                {
+                    plan->fixups[0] = (CheckDataFixup){
+                        .object = scalar.object,
+                        .addend = scalar.addend,
+                    };
+                    plan->fixup_count = 1;
+                }
+            }
+        }
+    }
+    for (uint32_t i = 0; status == CHECK_DATA_OK && initializer != 0 && i < initializer->count; i += 1)
+    {
+        const CheckInitPart* part = &initializer->parts[i];
+        const uint64_t offset = part->bit_offset / 8;
+        const uint32_t shift = (uint32_t)(part->bit_offset % 8);
+        const bool valid_type = type_is_valid(types, part->type);
+        uint64_t size = part->kind == CHECK_INIT_VALUE && valid_type ? type_size(types, part->type) : part->byte_count;
+        if (part->bit_width != 0)
+        {
+            size = ((uint64_t)shift + part->bit_width + 7) / 8;
+        }
+        if (!valid_type || offset > plan->size || size > plan->size - offset ||
+            (part->bit_width == 0 && shift != 0) || (part->kind == CHECK_INIT_BYTES && part->bit_width != 0))
+        {
+            status = CHECK_DATA_INVALID;
+        }
+        else if (part->kind == CHECK_INIT_CLEAR || part->kind == CHECK_INIT_BYTES)
+        {
+            if (part->kind == CHECK_INIT_BYTES && size != 0 && part->bytes == 0)
+            {
+                status = CHECK_DATA_INVALID;
+            }
+            else if (size != 0)
+            {
+                if (part->kind == CHECK_INIT_CLEAR && part->bit_width != 0)
+                {
+                    for (uint32_t bit = 0; bit < part->bit_width; bit += 1)
+                    {
+                        const uint64_t destination = part->bit_offset + bit;
+                        plan->bytes[destination / 8] &= (uint8_t)~(1u << (destination % 8));
+                    }
+                }
+                else if (part->kind == CHECK_INIT_CLEAR)
+                {
+                    memset(plan->bytes + offset, 0, size);
+                }
+                else
+                {
+                    memcpy(plan->bytes + offset, part->bytes, size);
+                }
+            }
+        }
+        else if (part->kind == CHECK_INIT_VALUE)
+        {
+            CheckDiagnostic diagnostic = CHECK_DIAG_NONE;
+            CheckValue value = part->value;
+            const CheckStream scalar_stream = {
+                .values = &value,
+                .diagnostics = &diagnostic,
+                .count = 1,
+            };
+            const CheckDataObject scalar_object = {
+                .type = part->type,
+                .object = object->object,
+                .initializer = 0,
+                .token = part->token,
+            };
+            CheckDataScalar scalar = { 0 };
+            status = check_data_plan_scalar(types, &scalar_stream, &scalar_object, object_symbols, object_count, link, &scalar);
+            if (status == CHECK_DATA_OK && part->bit_width != 0)
+            {
+                uint32_t width = 0;
+                bool is_signed = false;
+                if (scalar.object != 0 || !check_action_integer_type(types, part->type, &width, &is_signed) || part->bit_width > width || part->bit_width > 128)
+                {
+                    status = CHECK_DATA_INVALID;
+                }
+                else
+                {
+                    for (uint32_t bit = 0; bit < part->bit_width; bit += 1)
+                    {
+                        const uint64_t destination = part->bit_offset + bit;
+                        const uint8_t mask = (uint8_t)(1u << (destination % 8));
+                        const uint8_t value_bit = (uint8_t)((scalar.bytes[bit / 8] >> (bit % 8)) & 1);
+                        plan->bytes[destination / 8] = (uint8_t)((plan->bytes[destination / 8] & ~mask) | (value_bit != 0 ? mask : 0));
+                    }
+                }
+            }
+            else if (status == CHECK_DATA_OK)
+            {
+                memcpy(plan->bytes + offset, scalar.bytes, size);
+                if (scalar.object != 0 && live_parts[i])
+                {
+                    if (offset > UINT32_MAX)
+                    {
+                        status = CHECK_DATA_UNSUPPORTED;
+                    }
+                    else
+                    {
+                        plan->fixups[plan->fixup_count] = (CheckDataFixup){
+                            .offset = (uint32_t)offset,
+                            .object = scalar.object,
+                            .addend = scalar.addend,
+                        };
+                        plan->fixup_count += 1;
+                    }
+                }
+            }
+        }
+        else
+        {
+            status = CHECK_DATA_INVALID;
+        }
+    }
+    if (status == CHECK_DATA_OK && !check_data_sort_fixups(plan, scratch))
+    {
+        status = CHECK_DATA_RESOURCE;
+    }
+    for (uint32_t i = 0; status == CHECK_DATA_OK && i < plan->fixup_count; i += 1)
+    {
+        CheckDataFixup* reference = &plan->fixups[i];
+        const SymbolId target = object_symbols[reference->object];
+        if (target == 0 || target >= link->symbols.count)
+        {
+            status = CHECK_DATA_SYMBOL;
+        }
+        else if ((link->symbols.flags[target] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS)
+        {
+            status = CHECK_DATA_UNSUPPORTED;
+        }
+        else
+        {
+            reference->target = target;
+        }
+    }
+    if (status == CHECK_DATA_OK)
+    {
+        uint8_t nonzero = 0;
+        for (uint64_t byte = 0; plan->bytes != 0 && byte < plan->size; byte += 1)
+        {
+            nonzero |= plan->bytes[byte];
+        }
+        const bool initialized = nonzero != 0 || plan->fixup_count != 0;
+        const bool tls = (link->symbols.flags[plan->symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
+        const bool readonly = (type_qualifiers(base) & BUSTER_TYPE_CONST) != 0;
+        plan->class = tls ? (initialized ? BUSTER_LINK_CLASS_TDATA : BUSTER_LINK_CLASS_TBSS) :
+                      readonly ? (plan->fixup_count != 0 ? BUSTER_LINK_CLASS_DATA_RELRO : BUSTER_LINK_CLASS_RODATA) :
+                      initialized ? BUSTER_LINK_CLASS_DATA : BUSTER_LINK_CLASS_BSS;
+        if (object->string_pool)
+        {
+            plan->class = type_size(types, type_element(types, base)) == 1 ? BUSTER_LINK_CLASS_STRINGS : BUSTER_LINK_CLASS_RODATA;
+        }
     }
     return status;
 }
@@ -361,7 +685,7 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
     for (uint32_t i = 0; result->status == CHECK_DATA_OK && i < count; i += 1)
     {
         CheckDataPlan* plan = &plans[i];
-        result->status = check_data_plan_object(types, stream, &objects[i], object_symbols, object_count, link, plan);
+        result->status = check_data_plan_object(types, stream, &objects[i], object_symbols, object_count, link, scratch, plan);
         if (result->status == CHECK_DATA_OK)
         {
             const uint64_t bit = UINT64_C(1) << (plan->symbol % 64);
@@ -372,9 +696,20 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
             else
             {
                 definitions[plan->symbol / 64] |= bit;
-                byte_count += plan->class != BUSTER_LINK_CLASS_BSS ? plan->size : 0;
-                fixup_count += plan->target != 0;
-                wide_count += plan->target != 0 && (plan->addend < INT32_MIN || plan->addend > INT32_MAX);
+                const uint64_t payload = !link_class_is_zero_fill(plan->class) ? plan->size : 0;
+                if (payload > UINT64_MAX - byte_count || plan->fixup_count > UINT32_MAX - fixup_count)
+                {
+                    result->status = CHECK_DATA_RESOURCE;
+                }
+                else
+                {
+                    byte_count += payload;
+                    fixup_count += plan->fixup_count;
+                    for (uint32_t fixup = 0; fixup < plan->fixup_count; fixup += 1)
+                    {
+                        wide_count += plan->fixups[fixup].addend < INT32_MIN || plan->fixups[fixup].addend > INT32_MAX;
+                    }
+                }
             }
         }
         if (result->status != CHECK_DATA_OK)
@@ -385,17 +720,20 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
     }
     for (uint32_t i = 0; result->status == CHECK_DATA_OK && i < count; i += 1)
     {
-        const SymbolId target = plans[i].target;
-        if (target != 0 && (link->symbols.flags[target] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL && link->symbols.source[target] != BUSTER_LINK_SOURCE_ABSOLUTE)
+        for (uint32_t fixup = 0; result->status == CHECK_DATA_OK && fixup < plans[i].fixup_count; fixup += 1)
         {
-            const AtomId atom = link->symbols.atom[target];
-            const bool defined_here = (definitions[target / 64] & (UINT64_C(1) << (target % 64))) != 0;
-            const bool same_unit = atom != 0 && atom < link->atoms.count && link->atoms.unit[atom] == unit;
-            if (!defined_here && !same_unit)
+            const SymbolId target = plans[i].fixups[fixup].target;
+            if ((link->symbols.flags[target] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL && link->symbols.source[target] != BUSTER_LINK_SOURCE_ABSOLUTE)
             {
-                result->status = CHECK_DATA_SYMBOL;
-                result->failed_record = i;
-                result->failed_token = objects[i].token;
+                const AtomId atom = link->symbols.atom[target];
+                const bool defined_here = (definitions[target / 64] & (UINT64_C(1) << (target % 64))) != 0;
+                const bool same_unit = atom != 0 && atom < link->atoms.count && link->atoms.unit[atom] == unit;
+                if (!defined_here && !same_unit)
+                {
+                    result->status = CHECK_DATA_SYMBOL;
+                    result->failed_record = i;
+                    result->failed_token = objects[i].token;
+                }
             }
         }
     }
@@ -430,19 +768,27 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
         {
             const CheckDataPlan* plan = &plans[i];
             uint8_t* atom_bytes = 0;
-            if (plan->class != BUSTER_LINK_CLASS_BSS)
+            if (!link_class_is_zero_fill(plan->class) && plan->size != 0)
             {
                 atom_bytes = storage + offset;
-                memcpy(atom_bytes, plan->bytes, plan->size);
+                if (plan->bytes != 0)
+                {
+                    memcpy(atom_bytes, plan->bytes, plan->size);
+                }
+                else
+                {
+                    memset(atom_bytes, 0, plan->size);
+                }
                 offset += plan->size;
             }
             const AtomId atom = link_add_atom(link, plan->class, plan->alignment_log2, plan->size, atom_bytes, unit);
             const bool defined = link_define_symbol(link, plan->symbol, atom, 0, plan->size);
             assert(atom != 0 && defined);
             link->symbols.source[plan->symbol] = BUSTER_LINK_SOURCE_PROGRAM;
-            if (plan->target != 0)
+            for (uint32_t i_fixup = 0; i_fixup < plan->fixup_count; i_fixup += 1)
             {
-                const FixupId fixup = link_add_fixup(link, atom, 0, BUSTER_LINK_FIXUP_ABS64, plan->target, plan->addend);
+                const CheckDataFixup* reference = &plan->fixups[i_fixup];
+                const FixupId fixup = link_add_fixup(link, atom, reference->offset, BUSTER_LINK_FIXUP_ABS64, reference->target, reference->addend);
                 assert(fixup != 0);
             }
         }
