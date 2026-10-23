@@ -330,6 +330,8 @@ jobs:
           ./build/compiler test-ssa
           == Test shared IR local promotion and typed-stream semantics
           ./build/compiler test-ssa-ir
+          == Test dominators, frontiers and natural loops
+          ./build/compiler test-dominators
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS
