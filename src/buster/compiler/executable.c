@@ -2818,6 +2818,15 @@ struct ExecutableDynamicTotals
 // What the lanes share, which lane 0 allocates from its scratch arena and broadcasts. Each lane writes its own row of
 // the per-lane arrays, and its own range of the others.
 typedef struct ExecutableShared ExecutableShared;
+typedef struct ExecutableSymbolCounts ExecutableSymbolCounts;
+struct ExecutableSymbolCounts
+{
+    uint64_t name_bytes;
+    uint32_t locals;
+    uint32_t tls_classes;
+    uint64_t padding[6];
+};
+
 struct ExecutableShared
 {
     ExecutableCounts* counts;
@@ -2905,9 +2914,7 @@ struct ExecutableShared
     uint32_t* orders;
     // Whether the output is written in order, which lane 0 does at the end, rather than chunk by chunk.
     bool sequential;
-    uint64_t symbol_name_bytes;
-    uint32_t symbol_local_count;
-    uint32_t symbol_tls_classes;
+    ExecutableSymbolCounts* symbol_counts;
     ExecutableHeaders headers;
 };
 
@@ -5624,6 +5631,11 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
         fits = shared->counts != 0 && shared->errors != 0 && shared->got_marks != 0 && shared->relax_marks != 0 && shared->relaxable_bits != 0 && shared->got_counts != 0 &&
                shared->addend_magnitudes != 0 && shared->absolute_bounds != 0 && shared->pieces != 0;
     }
+    if (fits && (options->symbols != 0 || options->debug != 0))
+    {
+        shared->symbol_counts = arena_push_array(arena, lanes, sizeof(ExecutableSymbolCounts), BUSTER_LANE_CACHE_LINE_BYTES);
+        fits = shared->symbol_counts != 0;
+    }
     if (fits && (dynamic != 0 || shared->runtime))
     {
         shared->filters = arena_push_array(arena, (uint64_t)lanes * shared->filter_words, sizeof(uint32_t), 64);
@@ -6040,18 +6052,47 @@ static ExecutableSymbols executable_symbol_list(const ExecutableOptions* options
     return result;
 }
 
-// One optional pass on lane zero validates names and counts storage; layout reuses these published counts.
-static bool executable_symbols_valid(const Link* link, const ExecutableSymbols* symbols, bool ordered, ExecutableShared* shared)
+static Range64 executable_symbol_range(uint32_t count, bool exact)
+{
+    const Range64 result = exact ? (Range64){ .begin = lane_index() == 0 ? 0 : count, .end = count } : lane_range(count);
+    return result;
+}
+
+// The vector path checks IDs sixteen at a time before dereferencing any column. Every load stays within this
+// descriptor's logical length; a lane's first ID also compares with the preceding lane's final ID.
+static bool executable_symbol_ids_valid(const ExecutableSymbols* symbols, uint32_t limit, Range64 range, bool ordered)
+{
+    bool valid = true;
+    for (uint64_t first = range.begin; valid && first < range.end; first += 16)
+    {
+        const uint32_t count = range.end - first < 16 ? (uint32_t)(range.end - first) : 16;
+        const __mmask16 active = (__mmask16)((1u << count) - 1);
+        const __m512i ids = _mm512_maskz_loadu_epi32(active, symbols->ids + first);
+        const __m512i previous = first != 0 ? _mm512_maskz_loadu_epi32(active, symbols->ids + first - 1) :
+                                _mm512_maskz_permutexvar_epi32(active & 0xfffeu, _mm512_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14), ids);
+        const __mmask16 nonzero = _mm512_cmpneq_epi32_mask(ids, _mm512_setzero_si512());
+        const __mmask16 bounded = _mm512_cmplt_epu32_mask(ids, _mm512_set1_epi32((int)limit));
+        const __mmask16 increasing = ordered ? _mm512_cmpgt_epu32_mask(ids, previous) : active;
+        valid = (active & nonzero & bounded & increasing) == active;
+    }
+    return valid;
+}
+
+// Validate/count disjoint selections once; layout and emission consume each lane's published counts. The exact
+// twin retains the scalar lane-zero baseline, including arbitrary debug-function order when no explicit list exists.
+static bool executable_symbols_valid(const Link* link, const ExecutableSymbols* symbols, bool ordered, ExecutableShared* shared, uint32_t lane)
 {
     bool valid = symbols->count == 0 || symbols->ids != 0;
-    uint64_t names = 1;
+    const Range64 range = executable_symbol_range(symbols->count, shared->exact);
+    valid = valid && (shared->exact || executable_symbol_ids_valid(symbols, link->symbols.count, range, ordered));
+    uint64_t names = 0;
     uint32_t locals = 0;
     uint32_t tls_classes = 0;
-    SymbolId previous = 0;
-    for (uint32_t i = 0; valid && i < symbols->count; i += 1)
+    SymbolId previous = range.begin != 0 && valid ? symbols->ids[range.begin - 1] : 0;
+    for (uint64_t i = range.begin; valid && i < range.end; i += 1)
     {
         const SymbolId symbol = symbols->ids[i];
-        valid = symbol != 0 && symbol < link->symbols.count && (!ordered || symbol > previous);
+        valid = !shared->exact || (symbol != 0 && symbol < link->symbols.count && (!ordered || symbol > previous));
         if (valid)
         {
             const NameId name = link->symbols.name[symbol];
@@ -6074,9 +6115,11 @@ static bool executable_symbols_valid(const Link* link, const ExecutableSymbols* 
     }
     if (valid)
     {
-        shared->symbol_name_bytes = names;
-        shared->symbol_local_count = locals;
-        shared->symbol_tls_classes = tls_classes;
+        shared->symbol_counts[lane] = (ExecutableSymbolCounts){
+            .name_bytes = names,
+            .locals = locals,
+            .tls_classes = tls_classes,
+        };
     }
     return valid;
 }
@@ -6106,16 +6149,27 @@ static uint16_t executable_boundary_section(const ExecutableLayout* layout, uint
     return result;
 }
 
-static void executable_symbol_sections(const Link* link, const ExecutableLayout* layout, ExecutableShared* shared, const ExecutableSymbols* selected)
+static void executable_symbol_sections(const Link* link, const ExecutableLayout* layout, ExecutableShared* shared, const ExecutableSymbols* selected, uint32_t lane)
 {
     Elf64_Sym* symbols = (Elf64_Sym*)shared->section_bytes[EXECUTABLE_SECTION_SYMTAB];
     uint8_t* strings = shared->section_bytes[EXECUTABLE_SECTION_STRTAB];
-    memset(symbols, 0, sizeof(*symbols));
-    strings[0] = 0;
+    if (lane == 0)
+    {
+        memset(symbols, 0, sizeof(*symbols));
+        strings[0] = 0;
+    }
+    const Range64 range = executable_symbol_range(selected->count, shared->exact);
     uint32_t name_offset = 1;
     uint32_t local = 1;
-    uint32_t global = 1 + layout->symbol_local_count;
-    for (uint32_t i = 0; i < selected->count; i += 1)
+    uint32_t before_locals = 0;
+    for (uint32_t other = 0; other < lane; other += 1)
+    {
+        name_offset += (uint32_t)shared->symbol_counts[other].name_bytes;
+        before_locals += shared->symbol_counts[other].locals;
+    }
+    local += before_locals;
+    uint32_t global = 1 + layout->symbol_local_count + (uint32_t)range.begin - before_locals;
+    for (uint64_t i = range.begin; i < range.end; i += 1)
     {
         const SymbolId symbol = selected->ids[i];
         const NameId name = link->symbols.name[symbol];
@@ -6256,7 +6310,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0, 0, 0);
     }
-    if (ok && lane == 0 && symbols && !executable_symbols_valid(link, &selected, options->symbols != 0, shared))
+    if (ok && symbols && !executable_symbols_valid(link, &selected, options->symbols != 0, shared, lane))
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0, 0, 0);
     }
@@ -6359,22 +6413,36 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         totals.linker_bytes[EXECUTABLE_SECTION_DEBUG_INFO + section] = options->debug->sections[section].length;
     }
+    uint64_t symbol_names = 1;
+    uint32_t symbol_locals = 0;
+    uint32_t symbol_tls_classes = 0;
+    for (uint32_t other = 0; ok && symbols && other < lanes; other += 1)
+    {
+        symbol_names += shared->symbol_counts[other].name_bytes;
+        symbol_locals += shared->symbol_counts[other].locals;
+        symbol_tls_classes |= shared->symbol_counts[other].tls_classes;
+    }
+    if (ok && symbols && symbol_names > UINT32_MAX)
+    {
+        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0, 0, 0);
+        ok = false;
+    }
     if (ok && symbols)
     {
         totals.linker_bytes[EXECUTABLE_SECTION_SYMTAB] = (1 + (uint64_t)selected.count) * sizeof(Elf64_Sym);
-        totals.linker_bytes[EXECUTABLE_SECTION_STRTAB] = shared->symbol_name_bytes;
+        totals.linker_bytes[EXECUTABLE_SECTION_STRTAB] = symbol_names;
     }
     const bool laid_out =
         ok && executable_lay_out(layout, shared->counts, lanes, got_slots + (runtime ? totals.stubs : 0), dynamic, dynamic || runtime, runtime, totals.linker_bytes);
     if (laid_out)
     {
         layout->stub_slot = runtime ? got_slots + 1 : 0;
-        layout->symbol_local_count = shared->symbol_local_count;
+        layout->symbol_local_count = symbol_locals;
         // A zero-sized TLS definition needs an actual TLS section index. Until empty sections are retained, refuse
         // this optional attachment before publication instead of assigning a TLS offset to an ordinary section.
-        const bool missing_tdata = (shared->symbol_tls_classes & (1u << BUSTER_LINK_CLASS_TDATA)) != 0 &&
+        const bool missing_tdata = (symbol_tls_classes & (1u << BUSTER_LINK_CLASS_TDATA)) != 0 &&
                                    layout->section_index[EXECUTABLE_SECTION_TDATA] == 0;
-        const bool missing_tbss = (shared->symbol_tls_classes & (1u << BUSTER_LINK_CLASS_TBSS)) != 0 &&
+        const bool missing_tbss = (symbol_tls_classes & (1u << BUSTER_LINK_CLASS_TBSS)) != 0 &&
                                   layout->section_index[EXECUTABLE_SECTION_TBSS] == 0;
         if (lane == 0 && (missing_tdata || missing_tbss))
         {
@@ -6462,9 +6530,9 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         executable_debug_sections(link, layout, shared, options->debug);
     }
-    if (ok && symbols && lane == 0)
+    if (ok && symbols)
     {
-        executable_symbol_sections(link, layout, shared, &selected);
+        executable_symbol_sections(link, layout, shared, &selected, lane);
     }
     if (dynamic || indexed || runtime || options->debug != 0 || symbols)
     {

@@ -11,6 +11,52 @@ static SymbolId executable_symbols_test_add(Link* link, const char* name, AtomId
     return id != 0 ? link_add_symbol(link, id, atom, value, size, flags, source) : 0;
 }
 
+static bool executable_symbols_test_ids(ExecutableTestTally* tally)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* memory = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool mapped = memory != MAP_FAILED && mprotect(memory + page, page, PROT_NONE) == 0;
+    executable_test_expect(tally, mapped, "guarded symbol ID input", 0);
+    for (uint32_t count = 0; mapped && count <= 33; count += 1)
+    {
+        SymbolId* ids = (SymbolId*)(memory + page) - count;
+        for (uint32_t changed = 0; changed < (count == 0 ? 1 : 4); changed += 1)
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                ids[i] = i + 1;
+            }
+            if (changed != 0)
+            {
+                ids[count / 2] = changed == 1 ? 0 : changed == 2 ? count + 2 : count / 2;
+            }
+            const ExecutableSymbols selected = {
+                .ids = ids,
+                .count = count,
+            };
+            for (uint32_t begin = 0; begin <= count; begin += 1)
+            {
+                bool expected = true;
+                for (uint32_t i = begin; i < count; i += 1)
+                {
+                    expected &= ids[i] != 0 && ids[i] < count + 1 && (i == 0 || ids[i] > ids[i - 1]);
+                }
+                const Range64 range = {
+                    .begin = begin,
+                    .end = count,
+                };
+                executable_test_expect(tally, executable_symbol_ids_valid(&selected, count + 1, range, true) == expected,
+                                       "guarded vector IDs match independent scalar ordering", count * 1000 + changed * 100 + begin);
+            }
+        }
+    }
+    if (memory != MAP_FAILED)
+    {
+        munmap(memory, 2 * page);
+    }
+    return mapped;
+}
+
 static bool executable_symbols_test_table(String8 file, const ExecutableTestImage* image, const ExecutableResult* result)
 {
     const Elf64_Shdr* table = image->valid ? executable_test_section(image, ".symtab") : 0;
@@ -89,7 +135,7 @@ static bool executable_test_symbols(const ExecutableTestDirectory* directory)
 {
     ExecutableTestTally tally = { .check = "regular symbol output" };
     ExecutableTestLink test = { 0 };
-    bool valid = executable_test_link_begin(&test, 4096);
+    bool valid = executable_symbols_test_ids(&tally) && executable_test_link_begin(&test, 4096);
     Link* link = &test.link;
     uint8_t code[32] = { 0x31, 0xff, 0xb8, 60, 0, 0, 0, 0x0f, 0x05 };
     code[16] = 0x31;

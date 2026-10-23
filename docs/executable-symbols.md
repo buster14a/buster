@@ -18,7 +18,12 @@ and emits just the null symbol and empty string. The caller owns selection,
 including omission of discarded or unwanted local symbols.
 
 The writer validates bounded names and the total string-table capacity before
-opening the destination. It emits local symbols before globals, retaining ID
+opening the destination. The vector path checks sixteen IDs per batch using
+masked loads, including ordering across lane boundaries. Each lane validates
+and counts a disjoint contiguous selection, publishing one cache line of
+counts through the existing count-phase barrier. Emission uses the prefix of
+those counts for disjoint name and local/global symbol ranges. It emits local
+symbols before globals, retaining ID
 order within each group, with the declared name, size, type, binding and
 visibility. String bytes remain in the selection's original order. Definitions
 use final atom placement: ordinary symbols have image addresses, TLS symbols
@@ -44,18 +49,20 @@ table and ordering. With neither attachment there is no symbol-table scan.
 
 `test-executable` includes independent ELF expectations for local ordering,
 names, sizes, visibility, TLS offsets, IFUNC definitions and linker boundaries.
-It compares complete output across exact/vector writers and 1, 2, 3 and 8
+Guarded ID inputs exercise every length through 33 and every split point,
+including duplicate, zero and out-of-range IDs. It compares complete output
+across exact/vector writers and 1, 2, 3 and 8
 lanes, recomputes the build ID, executes the original fixture, and checks that
 invalid selections and missing TLS sections preserve an existing destination.
 Existing `test-debug --cross-check` covers the debug-only attachment's consumers.
 Builds and tests run on the approved 9700X through the shared host lock.
 
-This first source snapshot supplies a correctness baseline. The optional
-symbol pass is currently scalar on lane zero; it is not a throughput result
-or an accepted exception to the data-parallel policy. A lane-partitioned
-consumer and bounded vector classification must be compared with this
-baseline, including selection construction, validation, name copies, output
-and cleanup, before making a performance claim or enabling foreign CLI output.
+The exact twin retains the scalar lane-zero baseline. The vector path's ID
+classification and lane-partitioned validation/emission must be compared with
+that baseline, including selection construction, validation, name copies,
+output and cleanup, before making a performance claim or enabling foreign CLI
+output. The variable-length name copies and individual ELF row packing remain
+scalar within each lane; their costs need the same whole-path measurements.
 Large/tiny symbol populations, mixed bindings, TLS, imports, debug coexistence
 and frozen real workloads remain qualification gates.
 
