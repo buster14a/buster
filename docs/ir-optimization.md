@@ -140,7 +140,10 @@ once per path to target 2 ms; later samples can be shorter as execution
 conditions change. Default samples alternate which path runs first. `--only`
 isolates one path, and `--after-scalar` runs lighter scalar work before every
 vector sample. The benchmark shares the original test fixture builders and
-is included after `ir_optimize_test.c`.
+is included after `ir_optimize_test.c`. The default 9700X job runs it, and
+`benchmark-ir-optimize-passes`, after the tests, pinned to one allowed CPU,
+each also with `--only vector --after-scalar 200`; like the others, their
+measurements are informational.
 
 The output reports nanoseconds, TSC ticks (not core cycles), useful input
 instructions per second, output size and retained analysis workspace. That

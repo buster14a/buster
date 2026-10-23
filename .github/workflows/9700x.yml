@@ -790,3 +790,11 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
+
+      - name: Benchmark the verified Tier 1 optimization passes
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200
