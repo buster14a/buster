@@ -338,4 +338,3 @@ many-chunks byte comparison. Its log is `test-executable-mmap-reserved.log`.
 The committed result is better measurement and reproducible evidence. It
 does not establish saturation beyond eight physical cores, universal phase
 thresholds, a production mmap policy, or post-change hosted CI success.
-
