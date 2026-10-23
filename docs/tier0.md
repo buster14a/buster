@@ -144,7 +144,10 @@ the typed-to-IR consumer must reject these roles until it supports their layout.
 variadic callees with GP/FP exhaustion, named stack arguments, real va_start /
 va_copy / va_arg recipes, intervening calls and full vector saves. It compares
 both Tier 0 paths and both encoders, guarded output edges, 24-byte list storage
-and independent ordinary-function byte fixtures. Run builds and tests only on
+and independent ordinary-function byte fixtures. Every fixture also holds an
+object aligned to 16 (#362), whose bytes must survive the lists, the save area
+and the call, at a multiple of 16, apart from the lists, the canaries and the
+save area and below the overflow area. Run builds and tests only on
 the approved 9700X, each through its own shared lock. This description records
 the test contract; qualification results are reported with the exact revision.
 
@@ -207,12 +210,16 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
    reached, nor a template's fixed registers, nor anything if the function calls.
 3. Then they take the callee-saved registers, for a local referenced at least twice (a push and a pop).
 4. Floating locals take free XMM registers.
-5. Address-taken locals and the rest get 8-byte frame slots, rsp-relative (no frame pointer). A stack parameter keeps
-   its incoming slot, unless it took a register, which the prologue loads from that slot. No home is a register a
-   parameter arrives in, so the prologue's moves and loads never overwrite one another's sources.
+5. Address-taken locals and the rest get 8-byte frame slots (a `VA_LIST` 24 bytes), rsp-relative (no frame
+   pointer), after a variadic function's 176-byte save area. A stack parameter keeps its incoming slot, unless it took a
+   register, which the prologue loads from that slot. No home is a register a parameter arrives in, so the prologue's
+   moves and loads never overwrite one another's sources.
 6. Objects come after the slots, in the locals' order:
    - each at a multiple of its alignment, taking its size rounded up to 8;
    - with an object aligned to 16, the frame keeps rsp a multiple of 16, as a function that calls does.
+
+   The stack parameters' places and the overflow area's anchor count from the frame's final size, objects included,
+   and every displacement is checked in 64 bits before it narrows to a disp32.
 
    The vector path finds the objects 16 locals at a time as a mask of nonzero sizes, as it finds the slots.
 

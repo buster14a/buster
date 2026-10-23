@@ -7,6 +7,8 @@
 // caller establishes both halves of every XMM save slot. An intervening symbolic CALL clobbers every caller-saved
 // register, and the generated callee snapshots all 176 save bytes before and after it. No host va_list is supplied
 // in place of the generated frame. The ordinary fixture uses two real 24-byte list locals without incoming metadata.
+// Every fixture also has an object aligned to 16 (Tier0Function.local_sizes), laid out after the slots, whose bytes,
+// alignment and place apart from the lists, the canaries, the save area and the overflow area are checked.
 // Scalar/vector compilation, both branch-sizing paths and both executable encoder images are checked independently.
 // Native execution stays in an alarm-bounded child. These tests establish no source-reader or Tier 1 integration.
 
@@ -31,6 +33,8 @@
 #define BUSTER_TIER0_VF_SAVE_WORDS (BUSTER_ABI_SAVE_AREA_BYTES / sizeof(uint64_t))
 #define BUSTER_TIER0_VF_RETURN UINT64_C(0xa148f00d72538496)
 #define BUSTER_TIER0_VF_CANARY UINT64_C(0xd17ac3b5896e024f)
+#define BUSTER_TIER0_VF_OBJECT_BYTES 40u
+#define BUSTER_TIER0_VF_OBJECT_WORDS (BUSTER_TIER0_VF_OBJECT_BYTES / sizeof(uint64_t))
 
 typedef struct Tier0VfTally Tier0VfTally;
 struct Tier0VfTally
@@ -52,8 +56,9 @@ struct Tier0VfOutput
     uint64_t copied[3];
     uint64_t final[3];
     uint64_t copy_final[3];
-    uint64_t addresses[7];
+    uint64_t addresses[8];
     uint64_t canaries[3];
+    uint64_t object[BUSTER_TIER0_VF_OBJECT_WORDS];
 };
 
 typedef struct Tier0VfStream Tier0VfStream;
@@ -64,6 +69,8 @@ struct Tier0VfStream
     uint64_t values[BUSTER_TIER0_VF_ENTRIES];
     uint8_t local_classes[BUSTER_TIER0_VF_LOCALS];
     uint8_t local_flags[BUSTER_TIER0_VF_LOCALS];
+    uint32_t local_sizes[BUSTER_TIER0_VF_LOCALS];
+    uint8_t local_alignments[BUSTER_TIER0_VF_LOCALS];
     AbiLocation parameters[BUSTER_TIER0_VF_PARAMETERS];
     AbiCall abi[2];
     SymbolId target;
@@ -79,6 +86,7 @@ struct Tier0VfStream
     uint32_t list_pointer[2];
     uint32_t save_pointer;
     uint32_t overflow_pointer;
+    uint32_t object;
     uint32_t kind;
 };
 
@@ -319,6 +327,10 @@ static bool tier0_vf_fixture(Tier0VfTally* tally, Tier0VfStream* stream, const T
         stream->save_anchor = tier0_vf_local(stream, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA);
         stream->overflow_anchor = tier0_vf_local(stream, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA);
     }
+    // An object aligned to 16, which takes no slot: its place comes after them all.
+    stream->object = tier0_vf_local(stream, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN);
+    stream->local_sizes[stream->object] = BUSTER_TIER0_VF_OBJECT_BYTES;
+    stream->local_alignments[stream->object] = 4;
     stream->list_pointer[0] = tier0_vf_local(stream, BUSTER_TYPED_CLASS_U64, 0);
     stream->list_pointer[1] = tier0_vf_local(stream, BUSTER_TYPED_CLASS_U64, 0);
     stream->save_pointer = tier0_vf_local(stream, BUSTER_TYPED_CLASS_U64, 0);
@@ -338,6 +350,12 @@ static bool tier0_vf_fixture(Tier0VfTally* tally, Tier0VfStream* stream, const T
     {
         tier0_vf_emit(stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VF_CANARY + canary);
         tier0_vf_emit(stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, stream->canary[canary]);
+    }
+    for (uint32_t word = 0; word < BUSTER_TIER0_VF_OBJECT_WORDS; word += 1)
+    {
+        tier0_vf_address(stream, stream->object, word * sizeof(uint64_t));
+        tier0_vf_emit(stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VF_CANARY ^ (0x100u + word));
+        tier0_vf_emit(stream, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
     }
     if (kind != 4)
     {
@@ -432,6 +450,10 @@ static bool tier0_vf_fixture(Tier0VfTally* tally, Tier0VfStream* stream, const T
         tier0_vf_emit(stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, stream->canary[canary]);
         tier0_vf_emit(stream, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
     }
+    tier0_vf_output(stream, offsetof(Tier0VfOutput, addresses) + 7 * sizeof(uint64_t));
+    tier0_vf_address(stream, stream->object, 0);
+    tier0_vf_emit(stream, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+    tier0_vf_object_output(stream, stream->object, offsetof(Tier0VfOutput, object), BUSTER_TIER0_VF_OBJECT_WORDS);
     tier0_vf_emit(stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VF_RETURN);
     tier0_vf_emit(stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
     stream->target = 1;
@@ -444,6 +466,8 @@ static bool tier0_vf_fixture(Tier0VfTally* tally, Tier0VfStream* stream, const T
         .local_classes = stream->local_classes,
         .local_flags = stream->local_flags,
         .local_count = stream->buffer.local_count,
+        .local_sizes = stream->local_sizes,
+        .local_alignments = stream->local_alignments,
         .parameter_count = parameters,
         .parameters = stream->parameters,
         .result = stream->abi[0].result,
@@ -762,6 +786,28 @@ static void tier0_vf_observe(Tier0VfTally* tally, const Tier0VfOutput* output, u
             tier0_vf_expect(tally, tier0_vf_disjoint(output->addresses[first], first < 2 ? 24 : 8, output->addresses[2], BUSTER_ABI_SAVE_AREA_BYTES),
                 "incoming save area is disjoint from every live private object", first);
         }
+    }
+    // The object: its pattern, at a multiple of 16, apart from the lists (addresses 0 and 1), the canaries (4 to 6) and,
+    // with incoming metadata, the save area (2), and below the overflow area (3), whose anchor counts the whole frame.
+    for (uint32_t word = 0; word < BUSTER_TIER0_VF_OBJECT_WORDS; word += 1)
+    {
+        tier0_vf_expect(tally, output->object[word] == (BUSTER_TIER0_VF_CANARY ^ (0x100u + word)),
+            "an object aligned to 16 keeps its bytes beside the lists, the save area and the intervening call", kind * 10 + word);
+    }
+    tier0_vf_expect(tally, (output->addresses[7] & 15) == 0, "an object aligned to 16 is at a multiple of 16 in the frame", kind);
+    for (uint32_t other = 0; other < 7; other += 1)
+    {
+        const uint64_t other_bytes = other < 2 ? 24 : other == 2 ? BUSTER_ABI_SAVE_AREA_BYTES : 8;
+        if (other != 3 && (kind != 4 || other != 2))
+        {
+            tier0_vf_expect(tally, tier0_vf_disjoint(output->addresses[7], BUSTER_TIER0_VF_OBJECT_BYTES, output->addresses[other], other_bytes),
+                "an object aligned to 16 owns its bytes apart from the lists, the canaries and the save area", kind * 10 + other);
+        }
+    }
+    if (kind != 4)
+    {
+        tier0_vf_expect(tally, output->addresses[7] + BUSTER_TIER0_VF_OBJECT_BYTES <= output->addresses[3],
+            "an object in the frame lies below the incoming overflow area", kind);
     }
     if (kind == 4)
     {
