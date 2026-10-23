@@ -136,6 +136,11 @@ classes and loses the named/variadic parameter boundary, as described below.
 `block_offsets[block_count + 1]` partitions all instructions into nonempty,
 contiguous ranges. Every range ends in exactly one terminator; phis are a prefix
 of their block. Broad rewrites rebuild these ranges. There are no linked ranges.
+Block zero is the function's entry and must contain no phis: initial entry has
+no predecessor edge selecting an incoming value. A producer introducing phis
+into an entry loop must create a real preheader with explicit initial values.
+Edges back to block zero remain valid for phi-free input; no implicit `undef`
+incoming edge or value is invented by the verifier.
 
 `ir_build_cfg` validates shape, instruction rules and terminator placement, then
 builds CSR successors/predecessors and `instruction_blocks`. Its topology build
@@ -147,8 +152,8 @@ The successor columns directly match `dataflow.c`'s existing CFG interface.
 
 Each phi names every distinct predecessor exactly once, with no extra entries.
 Its value is used at the **end of that predecessor**, so a loop backedge can
-legitimately name a later instruction. Self-referencing phis are structurally
-valid; removing trivial phis is an SSA construction/cleanup policy, not an
+legitimately name a later instruction. Self-referencing phis outside the entry
+block are structurally valid; removing trivial phis is an SSA construction/cleanup policy, not an
 assumption imposed by this representation.
 
 `ir_build_uses` fully verifies the function, then counts uses, prefix-sums the
@@ -265,3 +270,31 @@ verification. Its units are typed entries, not source tokens, and its inputs
 are generated programs, not SQLite. Target conclusions require the optimized
 repository build on the approved 9700X, pinned to one CPU and under the shared
 lock; cloud correctness runs do not establish Zen 5 throughput.
+
+### Initial 9700X qualification
+
+[Protected run 39934441798](https://github.com/buster14a/buster/actions/runs/39934441798)
+passed the production build, complete tests and benchmarks for head
+`7a6ed05745a6b522209005d2423103caedb6c99a` against main `635434f`, with
+Clang 23.1.1 on the Ryzen 7 9700X. The workflow held the shared host lock and
+pinned each benchmark to one allowed CPU. Each row below is a 21-pass median;
+the after-scalar command runs 200 ms of untimed scalar work before every vector
+sample in a separate process.
+
+| Workload | Unit | Scalar | Vector | Vector after scalar |
+| --- | --- | ---: | ---: | ---: |
+| Core verifier, 32 instructions | ns/IR instruction | 9.029 | 5.718 | 5.744 |
+| Core verifier, 262,144 instructions | ns/IR instruction | 8.726 | 5.539 | 5.550 |
+| Lowering, 4 functions / 136 typed entries | ns/typed entry | 32.084 | 28.151 | 28.260 |
+| Lowering, 64 functions / 20,617 typed entries | ns/typed entry | 84.115 | 75.861 | 76.660 |
+
+The large core fixture used 4,227,137 bytes for its function (16.125 bytes per
+instruction including side metadata and arena alignment), 1,179,772 bytes for
+the CFG and 4,653,116 bytes for uses. The larger lowering corpus produced 47,783
+IR instructions and charged 944,733 core bytes in total (45.823 per typed entry),
+with a maximum function allocation of 43,779 bytes.
+
+These are observations from one controlled CI run on generated inputs. They do
+not establish source-corpus throughput, multi-process reproducibility or SQLite
+bytes per source token. This recorded revision precedes the entry-phi rejection
+regression; its timings are not relabeled as measurements of later revisions.
