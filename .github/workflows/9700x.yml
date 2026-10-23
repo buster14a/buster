@@ -358,6 +358,8 @@ jobs:
           ./build/compiler test-check-builtins-atomic
           ./build/compiler test-check-builtins-typed-overflow
           ./build/compiler test-check-builtins-rounds
+          ./build/compiler test-check-builtins-math
+          ./build/compiler test-builtin-math-helpers
           ./build/compiler test-builtin-rounds-helper
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
