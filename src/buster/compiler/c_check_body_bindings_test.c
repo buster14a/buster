@@ -87,9 +87,9 @@ static void check_test_body_binding_failures(CheckTest* test, const CheckEnviron
 static void check_test_body_binding_guards(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    uint8_t* mapping = mmap(0, page * 14, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* mapping = mmap(0, page * 16, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     bool mapped = mapping != MAP_FAILED;
-    for (uint32_t field = 0; mapped && field < 7; field += 1)
+    for (uint32_t field = 0; mapped && field < 8; field += 1)
     {
         mapped = mprotect(mapping + field * page * 2, page, PROT_READ | PROT_WRITE) == 0;
     }
@@ -178,6 +178,27 @@ static void check_test_body_binding_guards(CheckTest* test)
                 check_test_expect(test, planned == (count >= 4), "guarded body plan accepted/rejected the wrong trace");
                 if (planned)
                 {
+                    // The two materialized columns end exactly at the eighth writable page's boundary too.
+                    // This catches an unmasked final store as well as the guarded source loads above.
+                    Arena bounded =
+                    {
+                        .base = mapping + page * 14,
+                        .capacity = page,
+                        .length = page - (uint64_t)(span.end - span.begin) * 8,
+                    };
+                    CBindings view;
+                    const bool translated = c_body_bindings_view(&view, &guarded, &span, &bounded, mode == 0);
+                    check_test_expect(test, translated && bounded.length == page, "guarded body view output tail");
+                    for (uint32_t event = 0; translated && event < view.count; event += 1)
+                    {
+                        const uint32_t original = span.begin + event;
+                        const uint8_t operation = guarded.operation[original];
+                        const uint32_t declaration = guarded.declaration[original];
+                        const uint32_t end = operation == C_BINDING_DECLARE ? guarded.end[original] : BUSTER_C_BINDING_NONE;
+                        check_test_expect(test, view.declaration[event] == (operation == C_BINDING_RESTORE ? declaration - span.base : declaration) &&
+                                               view.end[event] == (end == BUSTER_C_BINDING_NONE ? end : end - span.begin),
+                                          "guarded body view translation fields");
+                    }
                     CBindingReplay replay;
                     const bool initialized = c_bindings_replay_initialize(&replay, &scratch, 4, count);
                     check_test_expect(test, initialized, "guarded private replay setup");
@@ -215,7 +236,7 @@ static void check_test_body_binding_guards(CheckTest* test)
     arena_release(&storage);
     if (mapping != MAP_FAILED)
     {
-        munmap(mapping, page * 14);
+        munmap(mapping, page * 16);
     }
 }
 
