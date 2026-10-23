@@ -120,14 +120,20 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
         graph->vector_member_capacity = source->vector_member_count;
         graph->x86_calls = source->x86_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckX86Call, source->x86_count) : NULL;
         graph->x86_capacity = source->x86_count;
+        graph->overload_candidates = source->overload_candidates;
+        graph->overload_candidate_count = source->overload_candidate_count;
+        graph->overload_calls = source->overload_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadCall, source->overload_count) : NULL;
+        graph->overload_capacity = source->overload_count;
         valid = (source->varargs_count == 0 || graph->varargs_calls != 0) && (source->builtin_count == 0 || graph->builtin_calls != 0) &&
                 (source->fp_environments == NULL || graph->fp_environments != NULL) &&
                 (source->warning_suppressed == NULL || graph->warning_suppressed != NULL) &&
-                (source->vector_member_count == 0 || graph->vector_members != NULL) && (source->x86_count == 0 || graph->x86_calls != NULL);
+                (source->vector_member_count == 0 || graph->vector_members != NULL) && (source->x86_count == 0 || graph->x86_calls != NULL) &&
+                (source->overload_count == 0 || graph->overload_calls != NULL);
     }
     uint32_t builtin = 0;
     uint32_t vector = 0;
     uint32_t x86 = 0;
+    uint32_t overload = 0;
     for (uint32_t node = 0; valid && node < source->count; node += 1)
     {
         if (selected[node])
@@ -201,6 +207,16 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
                 {
                     CheckX86Call* call = graph->x86_calls + graph->x86_count++;
                     *call = source->x86_calls[x86++];
+                    call->node = added;
+                }
+                while (overload < source->overload_count && source->overload_calls[overload].node < node)
+                {
+                    overload += 1;
+                }
+                if (overload < source->overload_count && source->overload_calls[overload].node == node)
+                {
+                    CheckOverloadCall* call = graph->overload_calls + graph->overload_count++;
+                    *call = source->overload_calls[overload++];
                     call->node = added;
                 }
             }
@@ -337,6 +353,10 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
             {
                 expected.runtime_value.fault_node = mapping[expected.runtime_value.fault_node];
             }
+            if (expected.runtime_effects.fault != CHECK_FAULT_NONE && expected.runtime_effects.fault_node != BUSTER_CHECK_NONE && expected.runtime_effects.fault_node < source_graph->count)
+            {
+                expected.runtime_effects.fault_node = mapping[expected.runtime_effects.fault_node];
+            }
             equal = selected_query < stream->query_count && check_builtin_query_effect_equal(&expected, stream->queries + selected_query++, check_test_value_equal);
         }
     }
@@ -413,6 +433,18 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
         }
     }
     equal = equal && selected_x86 == stream->x86_count;
+    uint32_t selected_overloads = 0;
+    for (uint32_t effect = 0; equal && effect < source->overload_count; effect += 1)
+    {
+        CheckOverloadEffect expected = source->overloads[effect];
+        equal = expected.node < source_graph->count;
+        if (equal && mapping[expected.node] != BUSTER_CHECK_NONE)
+        {
+            expected.node = mapping[expected.node];
+            equal = selected_overloads < stream->overload_count && check_overload_effect_equal(&expected, stream->overloads + selected_overloads++);
+        }
+    }
+    equal = equal && selected_overloads == stream->overload_count;
     return equal;
 }
 

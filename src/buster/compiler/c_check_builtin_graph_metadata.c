@@ -9,10 +9,15 @@ static __attribute__((unused)) bool check_builtin_call_equal(const CheckBuiltinC
     bool equal = a->node == b->node && a->nan_payload_length == b->nan_payload_length && a->nan_payload_known == b->nan_payload_known &&
                  a->string_literal_start == b->string_literal_start && a->absolute_address_constant == b->absolute_address_constant &&
                  a->complex_constant == b->complex_constant && a->constant_p_side_effects == b->constant_p_side_effects &&
-                 a->minimum_alignment == b->minimum_alignment && a->alignment_known == b->alignment_known;
+                 a->minimum_alignment == b->minimum_alignment && a->alignment_known == b->alignment_known &&
+                 a->shuffle_index_ice_count == b->shuffle_index_ice_count && (a->shuffle_index_ice == NULL) == (b->shuffle_index_ice == NULL);
     if (equal && a->nan_payload_known && a->nan_payload_length != 0)
     {
         equal = a->nan_payload == NULL ? b->nan_payload == NULL : b->nan_payload != NULL && memcmp(a->nan_payload, b->nan_payload, a->nan_payload_length) == 0;
+    }
+    if (equal && a->shuffle_index_ice_count != 0)
+    {
+        equal = memcmp(a->shuffle_index_ice, b->shuffle_index_ice, a->shuffle_index_ice_count) == 0;
     }
     for (uint32_t i = 0; equal && i < 4; i += 1)
     {
@@ -85,7 +90,12 @@ static __attribute__((unused)) bool check_builtin_query_effect_equal(const Check
 {
     return a->node == b->node && value_equal(&a->runtime_value, &b->runtime_value) &&
            a->evaluated_operands == b->evaluated_operands && a->warnings == b->warnings &&
-           a->warning_operands == b->warning_operands && a->mode == b->mode && a->known == b->known && a->constraint == b->constraint;
+           a->warning_operands == b->warning_operands && a->mode == b->mode && a->known == b->known && a->constraint == b->constraint &&
+           a->source_proof == b->source_proof && a->runtime_plan == b->runtime_plan && a->unsupported == b->unsupported &&
+           a->runtime_effects.flags == b->runtime_effects.flags && a->runtime_effects.fault == b->runtime_effects.fault &&
+           a->runtime_effects.fault_node == b->runtime_effects.fault_node &&
+           a->runtime_effects.reads_fp_environment == b->runtime_effects.reads_fp_environment &&
+           a->runtime_effects.may_raise_fp_exceptions == b->runtime_effects.may_raise_fp_exceptions;
 }
 
 static __attribute__((unused)) bool check_builtin_atomic_effect_equal(const CheckBuiltinAtomicEffect* a, const CheckBuiltinAtomicEffect* b,
@@ -118,6 +128,13 @@ static __attribute__((unused)) bool check_builtin_vector_effect_equal(const Chec
     return equal;
 }
 
+static __attribute__((unused)) bool check_overload_effect_equal(const CheckOverloadEffect* a, const CheckOverloadEffect* b)
+{
+    return a->node == b->node && a->selected.status == b->selected.status && a->selected.candidate == b->selected.candidate &&
+           a->selected.declaration == b->selected.declaration && a->selected.canonical == b->selected.canonical &&
+           a->selected.object == b->selected.object && a->selected.type == b->selected.type && a->selected.flags == b->selected.flags;
+}
+
 static __attribute__((unused)) bool check_builtin_stream_metadata_equal(const CheckStream* a, const CheckStream* b,
                                                                       bool (*value_equal)(const CheckValue*, const CheckValue*))
 {
@@ -146,6 +163,11 @@ static __attribute__((unused)) bool check_builtin_stream_metadata_equal(const Ch
     for (uint32_t i = 0; equal && i < a->x86_count; i += 1)
     {
         equal = check_builtin_x86_effect_equal(a->x86 + i, b->x86 + i, value_equal);
+    }
+    equal = equal && a->overload_count == b->overload_count;
+    for (uint32_t i = 0; equal && i < a->overload_count; i += 1)
+    {
+        equal = check_overload_effect_equal(a->overloads + i, b->overloads + i);
     }
     return equal;
 }

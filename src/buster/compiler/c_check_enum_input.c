@@ -86,7 +86,8 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
         for (uint32_t a = 0; valid && attributes != 0 && a < attributes->count; a += 1)
         {
             CheckInputAttribute* attribute = attributes->records + a;
-            valid = attribute->kind != CHECK_ATTRIBUTE_MODE && attribute->kind != CHECK_ATTRIBUTE_FALLTHROUGH && attribute->kind != CHECK_ATTRIBUTE_ALIGNAS;
+            valid = attribute->kind != CHECK_ATTRIBUTE_MODE && attribute->kind != CHECK_ATTRIBUTE_FALLTHROUGH &&
+                    attribute->kind != CHECK_ATTRIBUTE_ALIGNAS && attribute->kind != CHECK_ATTRIBUTE_OVERLOADABLE;
             if (!valid)
             {
                 check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_SUBJECT);

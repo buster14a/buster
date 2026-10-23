@@ -39,16 +39,22 @@ struct BuiltinIntrinsicInfo
     bool constant_evaluable_attribute;
 };
 
-static const BuiltinIntrinsicInfo builtin_intrinsic_infos[] =
-{
 #define BUSTER_BUILTIN_METADATA(n, t, a, f, h, l, s, line, ordinal, custom, evaluable, kind, constraints) \
     { n, t, a, f, h, l, s, kind, sizeof(n) - 1, sizeof(t) - 1, sizeof(a) - 1, sizeof(f) - 1, line, ordinal, custom, evaluable },
+static const BuiltinIntrinsicInfo builtin_intrinsic_infos[] =
+{
 #include "generated/clang_builtin_metadata_23_1_1.inc"
-#undef BUSTER_BUILTIN_METADATA
 };
+static const BuiltinIntrinsicInfo builtin_intrinsic_own_main_infos[] =
+{
+#include "generated/clang_builtin_own_main_23_1_1.inc"
+};
+#undef BUSTER_BUILTIN_METADATA
 
 #define BUSTER_BUILTIN_INTRINSIC_COUNT ((uint32_t)(sizeof(builtin_intrinsic_infos) / sizeof(builtin_intrinsic_infos[0])))
+#define BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT ((uint32_t)(sizeof(builtin_intrinsic_own_main_infos) / sizeof(builtin_intrinsic_own_main_infos[0])))
 _Static_assert(BUSTER_BUILTIN_INTRINSIC_COUNT > 0 && BUSTER_BUILTIN_INTRINSIC_COUNT < INT32_MAX, "bounded search indices");
+_Static_assert(BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT > 0 && BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT < INT32_MAX, "bounded scope search indices");
 
 typedef struct BuiltinIntrinsicName BuiltinIntrinsicName;
 struct BuiltinIntrinsicName
@@ -74,16 +80,16 @@ static __attribute__((unused)) const BuiltinIntrinsicInfo* builtin_intrinsic_at(
     return result;
 }
 
-static __attribute__((unused)) const BuiltinIntrinsicInfo* builtin_intrinsic_lookup(const char* name, uint32_t length)
+static const BuiltinIntrinsicInfo* builtin_intrinsic_lookup_in(const BuiltinIntrinsicInfo* infos, uint32_t count, const char* name, uint32_t length)
 {
     const BuiltinIntrinsicInfo* result = 0;
     uint32_t lower = 0;
-    uint32_t upper = name != 0 && length != 0 ? BUSTER_BUILTIN_INTRINSIC_COUNT : 0;
+    uint32_t upper = name != 0 && length != 0 ? count : 0;
     const BuiltinIntrinsicName input = { name, length };
     while (lower < upper)
     {
         const uint32_t middle = lower + (upper - lower) / 2;
-        const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + middle;
+        const BuiltinIntrinsicInfo* info = infos + middle;
         const int order = builtin_intrinsic_compare(&input, info);
         if (order == 0)
         {
@@ -99,6 +105,27 @@ static __attribute__((unused)) const BuiltinIntrinsicInfo* builtin_intrinsic_loo
             lower = middle + 1;
         }
     }
+    return result;
+}
+
+static __attribute__((unused)) const BuiltinIntrinsicInfo* builtin_intrinsic_lookup(const char* name, uint32_t length)
+{
+    const BuiltinIntrinsicInfo* result = builtin_intrinsic_lookup_in(builtin_intrinsic_infos, BUSTER_BUILTIN_INTRINSIC_COUNT, name, length);
+    return result;
+}
+
+// Exact frozen workload membership is narrower than the complete installed catalogue. The two parser/type gap
+// records retain their explicit non-prototype kinds here. Membership does not attest successful call checking.
+static __attribute__((unused)) const BuiltinIntrinsicInfo* builtin_intrinsic_own_main_lookup(const char* name, uint32_t length)
+{
+    const BuiltinIntrinsicInfo* result = builtin_intrinsic_lookup_in(builtin_intrinsic_own_main_infos, BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT, name, length);
+    return result;
+}
+
+static __attribute__((unused)) bool builtin_intrinsic_own_main_x86_in_scope(const char* name, uint32_t length)
+{
+    const BuiltinIntrinsicInfo* info = builtin_intrinsic_own_main_lookup(name, length);
+    const bool result = info != 0 && (strcmp(info->shard, "x86") == 0 || strcmp(info->shard, "x86_64") == 0);
     return result;
 }
 

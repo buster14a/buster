@@ -22,14 +22,16 @@ static void check_test_diagnostic_replay(CheckTest* test)
         "-Wshift-overflow",
         "-Wexcess-initializers",
         "-Wunknown-pragmas",
+        "-Wignored-attributes",
         "-Wincompatible-pointer-types",
         "-Wgnu",
         "-Wpedantic",
         "-Weverything",
         "-Wpragmas",
+        "-Wattributes",
     };
-    // Independently stated membership: each exact option owns one bit, followed by the five group masks.
-    static const uint16_t groups[] = { 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1, 2, 2, 1023, 512 };
+    // Independently stated membership: each exact option owns one bit, followed by the six group masks.
+    static const uint16_t groups[] = { 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 1, 2, 2, 2047, 512, 1024 };
     CheckInputDiagnosticPragma records[384] = { 0 };
     CheckInputDiagnosticPragmas history =
     {
@@ -37,9 +39,9 @@ static void check_test_diagnostic_replay(CheckTest* test)
         .final_state = BUSTER_CHECK_NONE,
     };
     CheckInput input = { .diagnostic_pragmas = &history };
-    int8_t expected[129][10];
-    int8_t current[10];
-    int8_t stack[384][10];
+    int8_t expected[129][11];
+    int8_t current[11];
+    int8_t stack[384][11];
     uint32_t saved_states[384];
     uint32_t saved_records[384];
     uint32_t random = 133;

@@ -129,7 +129,7 @@ static void check_test_driver_diagnostic_capacity(CheckTest* test)
         for (uint32_t phase = 0; phase < 2; phase += 1)
         {
             scratch.capacity = mark + phase * 2 * sizeof(uint64_t);
-            const bool ready = check_driver_reports(&parser, &pp, &input, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
+            const bool ready = check_driver_reports(&parser, &pp, &input, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
             check_test_expect(test, !ready && scratch.length == mark && *sentinel == UINT64_C(0x73516A93) && pp.errors == 0,
                               "diagnostic allocation failure restores scratch and publishes no partial diagnostics");
         }
@@ -490,6 +490,79 @@ static int run_checker_driver_tests(int argc, char** argv)
             "earlier policy suppresses unknown pragma warnings",
             "#pragma clang diagnostic ignored \"-Wunknown-pragmas\"\n#pragma STDC FENV_ACCESS MAYBE\nint value;\n",
             false,
+        },
+        {
+            "original pragma in an unfinished expression precedes its syntax failure",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint f(void)\n{\nint value=\n#pragma STDC FENV_ACCESS MAYBE\n;\n}\n",
+            true,
+        },
+        {
+            "original pragma precedes a backwards-pointing missing semicolon diagnostic",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint f(void)\n{\nreturn 0\n#pragma STDC FENV_ACCESS MAYBE\n}\n",
+            true,
+        },
+        {
+            "original pragma is diagnosed without a repairable declaration",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint value=\n#pragma STDC CX_LIMITED_RANGE MAYBE\n;\n",
+            true,
+        },
+        {
+            "macro body pragma warning retains its invocation source",
+            "#define CHECK_PRAGMA _Pragma(\"STDC FENV_ACCESS MAYBE\")\n"
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint value=\nCHECK_PRAGMA\n;\n",
+            true,
+        },
+        {
+            "direct pragma operator warning retains its invocation source",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint value=\n_Pragma(\"STDC CX_LIMITED_RANGE MAYBE\")\n;\n",
+            true,
+        },
+        {
+            "forwarded pragma operator warning retains its invocation source",
+            "#define CHECK_PRAGMA _Pragma(\"STDC FENV_ACCESS MAYBE\")\n#define FORWARD(x) x\n"
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint value=\nFORWARD(CHECK_PRAGMA)\n;\n",
+            true,
+        },
+        {
+            "physical pragma warning retains its remapped source",
+            "#line 71 \"original-pragma.c\"\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\n"
+            "int value=\n#pragma STDC FENV_ACCESS MAYBE\n;\n",
+            true,
+        },
+        {
+            "original pragma after the syntax lookahead cannot precede it",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint value=;\n#pragma STDC FENV_ACCESS MAYBE\n",
+            true,
+        },
+        {
+            "ignored unfinished-expression pragma leaves the original syntax location",
+            "#pragma clang diagnostic ignored \"-Wunknown-pragmas\"\nint f(void)\n{\nint value=\n#pragma STDC FENV_ACCESS MAYBE\n;\n}\n",
+            true,
+        },
+        {
+            .name = "recognized pragma cannot interrupt an initializer expression",
+            .source = "int f(void)\n{\nint value=\n#pragma STDC FENV_ACCESS ON\n;\n}\n",
+            .rejected = true,
+        },
+        {
+            .name = "quiet warnings retain recognized pragma syntax constraints",
+            .source = "int value=\n#pragma STDC CX_LIMITED_RANGE DEFAULT\n;\n",
+            .rejected = true,
+            .quiet = true,
+        },
+        {
+            .name = "late assembler label retains its ignored attribute warning",
+            .source = "int object=1;\nextern int object asm(\"renamed\");\n",
+            .warnings = 1,
+        },
+        {
+            .name = "late assembler label respects promoted attribute group",
+            .source = "#pragma clang diagnostic error \"-Wattributes\"\nint object=1;\nextern int object asm(\"renamed\");\n",
+            .rejected = true,
+        },
+        {
+            .name = "late assembler label respects ignored attribute policy",
+            .source = "#pragma clang diagnostic ignored \"-Wignored-attributes\"\nint object=1;\nextern int object asm(\"renamed\");\n",
         },
     };
     char directory[] = "/tmp/buster-checker-driver-XXXXXX";

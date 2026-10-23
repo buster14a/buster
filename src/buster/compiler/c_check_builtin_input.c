@@ -136,3 +136,37 @@ static void check_input_vararg_type(CheckInputReader* reader, uint32_t token)
         }
     }
 }
+
+static void check_input_shuffle_evidence(CheckInputReader* reader, uint32_t keyword, uint32_t closing, uint32_t argument_count, CheckBuiltinCall* evidence)
+{
+    const uint32_t count = argument_count > 2 ? argument_count - 2 : 0;
+    if (count != 0)
+    {
+        uint8_t* indices = arena_push_array(reader->arena, count, sizeof(uint8_t), 1);
+        reader->output->resource |= indices == 0;
+        if (indices != 0)
+        {
+            memset(indices, CHECK_BUILTIN_VECTOR_INDEX_ICE_NONE, count);
+            uint32_t first = keyword + 2;
+            for (uint32_t argument = 0; first < closing && argument < argument_count; argument += 1)
+            {
+                const uint32_t end = check_constant_punctuation(reader->parser, first, closing, PARSE_KIND_COMMA);
+                if (argument >= 2)
+                {
+                    CheckValue value = { 0 };
+                    const bool evaluated = check_input_evaluate_cached(reader, first, end, &value);
+                    if (evaluated && value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE &&
+                        (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0)
+                    {
+                        indices[argument - 2] = (value.flags & BUSTER_CHECK_ICE) != 0 ? CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT :
+                                                (value.flags & BUSTER_CHECK_GNU_ICE_FORM) != 0 ? CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU :
+                                                CHECK_BUILTIN_VECTOR_INDEX_ICE_NONE;
+                    }
+                }
+                first = end + 1;
+            }
+            evidence->shuffle_index_ice = indices;
+            evidence->shuffle_index_ice_count = count;
+        }
+    }
+}

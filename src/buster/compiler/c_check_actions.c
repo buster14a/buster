@@ -75,6 +75,8 @@ struct CheckValue
     // integer's low/high 64-bit halves, each masked to the component type's width.
     long double imaginary;
     uint32_t object;
+    // An immutable overload-set head plus one. It must obtain a contextual function identity before ordinary use.
+    uint32_t overload_head;
     int64_t offset;
     uint32_t bit_width;
     CheckFault fault;
@@ -1688,7 +1690,9 @@ static void check_action_assignment(TypeTable* table, const CheckAction* action,
     if (type_is_valid(table, target))
     {
         target = type_conversion_operand(table, target);
-        if (!check_action_assignable(table, target, &source, action, result))
+        const bool void_return = action->op == CHECK_OP_CONVERT && (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 &&
+                                 check_action_kind(table, target) == BUSTER_TYPE_KIND_VOID && check_action_kind(table, source.type) == BUSTER_TYPE_KIND_VOID;
+        if (!void_return && !check_action_assignable(table, target, &source, action, result))
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, slot);
         }
@@ -2173,7 +2177,18 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
         {
             check_action_diagnose(result, CHECK_DIAG_INVALID_TYPE, i);
         }
+        if (action->operands[i].overload_head != 0 && action->op != CHECK_OP_VALUE && action->op != CHECK_OP_SELECT && action->op != CHECK_OP_ADDRESS)
+        {
+            check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, i);
+        }
         result->conversions[i].type = action->operands[i].type;
+    }
+    for (uint32_t i = 0; action->arguments != 0 && i < action->argument_count; i += 1)
+    {
+        if (action->arguments[i].overload_head != 0)
+        {
+            check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, i + 1);
+        }
     }
     if ((action->op == CHECK_OP_CAST || action->op == CHECK_OP_INITIALIZE || action->op == CHECK_OP_CONVERT || action->op == CHECK_OP_SIZEOF_VLA || ((action->op == CHECK_OP_SIZEOF || action->op == CHECK_OP_ALIGNOF) && action->type != 0)) && !type_is_valid(table, action->type))
     {

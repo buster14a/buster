@@ -48,6 +48,10 @@ static void check_test_constant_sources(CheckTest* test, const char* clang)
     snprintf(raw_shuffle + length, sizeof(raw_shuffle) - length, ")))]]; _Static_assert(_Alignof(T)==2048, \"raw long shuffle operand slice\");\n");
     const CheckSourceFixture fixtures[] =
     {
+        { .name = "half storage type in declaration query", .source = "enum { N=sizeof(__fp16) }; _Static_assert(N==2,\"half storage\"); typedef int T [[gnu::aligned(sizeof(__fp16))]]; _Static_assert(_Alignof(T)==2,\"raw half\");\n" },
+        { .name = "earlier incomplete query precedes later missing name", .source = "struct S { char bytes[sizeof(struct Missing) -\nsizeof(missing)]; };\n", .rejected = true },
+        { .name = "earlier missing name precedes later incomplete query", .source = "struct S { char bytes[sizeof(missing) -\nsizeof(struct Missing)]; };\n", .rejected = true },
+        { .name = "raw earlier incomplete query precedes later missing name", .source = "typedef int T [[gnu::aligned(sizeof(struct Missing) +\nsizeof(missing))]];\n", .rejected = true },
         {
             .name = "declaration vector builtin exact type queries",
             .source = "typedef int I4 __attribute__((vector_size(16))); typedef float F4 __attribute__((vector_size(16))); I4 a; __typeof__(__builtin_convertvector(a,F4)) b; enum { N=sizeof(__builtin_elementwise_abs(a)), R=sizeof(__builtin_reduce_add(a)), C=sizeof(__builtin_convertvector(a,F4)) }; _Static_assert(N==16 && R==4 && C==16 && __builtin_types_compatible_p(__typeof__(b),F4), \"vector builtin types\");\n",
@@ -63,6 +67,10 @@ static void check_test_constant_sources(CheckTest* test, const char* clang)
         {
             .name = "declaration vector builtin arbitrary argument slice",
             .source = long_shuffle,
+        },
+        {
+            .name = "declaration vector shuffle GNU lexical index",
+            .source = "typedef int V __attribute__((vector_size(16))); V a; enum { N=sizeof(__builtin_shufflevector(a,a,(2147483647+1)<0,1,2,3)) }; typedef int T [[gnu::aligned(sizeof(__builtin_shufflevector(a,a,(2147483647+1)<0,1,2,3)))]]; _Static_assert(N==16 && _Alignof(T)==16,\"GNU lexical shuffle index\");\n",
         },
         {
             .name = "raw attribute vector builtin arbitrary argument slice",

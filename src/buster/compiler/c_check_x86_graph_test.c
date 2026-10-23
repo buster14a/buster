@@ -7,7 +7,7 @@
 static void check_test_x86_graph_oracles(CheckTest* test, const char* clang)
 {
     const char* sources[] = {
-        "void f(void){__builtin_ia32_clui();__builtin_ia32_pause();}unsigned long long g(void){return __builtin_ia32_rdtsc();}\n",
+        "void f(void){__builtin_ia32_clui();__builtin_ia32_stui();}unsigned long long g(void){return __builtin_ia32_rdfsbase64();}\n",
         "void f(void){__builtin_ia32_clui(1);}\n",
         "typedef int V __attribute__((vector_size(64)));V f(V x){return __builtin_ia32_pshufd512(x,255);}\n",
         "typedef int V __attribute__((vector_size(64)));V f(V x){return __builtin_ia32_pshufd512(x,256);}\n",
@@ -19,27 +19,37 @@ static void check_test_x86_graph_oracles(CheckTest* test, const char* clang)
     char directory[] = "/tmp/buster-check-x86-graph-XXXXXX";
     bool ready = mkdtemp(directory) != NULL;
     char paths[BUSTER_ARRAY_LENGTH(sources)][160];
-    char* pointers[BUSTER_ARRAY_LENGTH(sources)];
-    ParseTestClang outcomes[BUSTER_ARRAY_LENGTH(sources)];
+    bool outcomes[BUSTER_ARRAY_LENGTH(sources)] = { 0 };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
     {
         snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        pointers[i] = paths[i];
         ready = ready && parse_test_write(paths[i], sources[i], strlen(sources[i]));
     }
-    const char* mode = "-std=gnu17";
-    const bool checked = ready && parse_test_clang(clang, &mode, 1, pointers, BUSTER_ARRAY_LENGTH(sources), outcomes);
+    char output_path[160];
+    char error_path[160];
+    snprintf(output_path, sizeof(output_path), "%s/out", directory);
+    snprintf(error_path, sizeof(error_path), "%s/err", directory);
+    bool checked = ready;
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(sources); i += 1)
+    {
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", paths[i], NULL };
+        const int status = object_test_run(arguments, output_path, error_path);
+        checked &= status == 0 || status == 1;
+        outcomes[i] = status != 0;
+    }
     check_test_expect(test, checked, "independent exact-prototype and immediate x86 oracle runs");
     for (uint32_t i = 0; checked && i < BUSTER_ARRAY_LENGTH(sources); i += 1)
     {
         char description[96];
         snprintf(description, sizeof(description), "x86 prototype or immediate mutation %u agrees with Clang", i);
-        check_test_expect(test, outcomes[i].rejected == rejected[i], description);
+        check_test_expect(test, outcomes[i] == rejected[i], description);
     }
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
     {
         unlink(paths[i]);
     }
+    unlink(output_path);
+    unlink(error_path);
     rmdir(directory);
 }
 
@@ -51,7 +61,7 @@ static void check_test_x86_graph(CheckTest* test, TypeTable* table, const char* 
     CheckGraph graph;
     const bool ready = check_graph_initialize(&graph, &storage, 64, 32);
     check_test_expect(test, ready, "compact x86 graph fixture storage");
-    const char* names[] = { "__builtin_ia32_clui", "__builtin_ia32_pause", "__builtin_ia32_rdtsc", "__builtin_ia32_pshufd512", "__builtin_ia32_rndscaleps_mask" };
+    const char* names[] = { "__builtin_ia32_clui", "__builtin_ia32_stui", "__builtin_ia32_rdfsbase64", "__builtin_ia32_pshufd512", "__builtin_ia32_rndscaleps_mask" };
     CheckX86Call calls[BUSTER_ARRAY_LENGTH(names)];
     uint32_t nodes[BUSTER_ARRAY_LENGTH(names)] = { 0 };
     const TypeId expected[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_ULLONG,

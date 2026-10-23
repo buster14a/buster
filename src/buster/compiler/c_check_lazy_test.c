@@ -86,6 +86,7 @@ static void check_test_lazy_fixture(CheckTest* test, const CheckLazyFixture* fix
     check_test_expect(test, ready, description);
     for (uint32_t path = 0; ready && path < 2; path += 1)
     {
+        parser.options.scalar = path == 0;
         const bool planned = check_lazy_plan(&plans[path], &parser, &pp, &output[path], &scratch, path == 0);
         snprintf(description, sizeof(description), "%s: %s demand plan", fixture->name, path == 0 ? "scalar" : "vector");
         check_test_expect(test, planned && plans[path].status == CHECK_LAZY_OK && plans[path].body_count == fixture->bodies && scratch.length == 0,
@@ -184,6 +185,64 @@ static void check_test_lazy_fixture(CheckTest* test, const CheckLazyFixture* fix
     arena_release(output);
 }
 
+static void check_test_lazy_frontier(CheckTest* test)
+{
+    static char source[32768];
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    uint32_t length = (uint32_t)snprintf(source, sizeof(source), "# 1 \"frontier.h\" 1 3\n");
+    for (uint32_t i = 0; i < 137; i += 1)
+    {
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "static int f%u(void);", i);
+    }
+    for (uint32_t i = 0; i < 137; i += 1)
+    {
+        if (i == 70)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "static int f%u(void){return 7;}", i);
+        }
+        else
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "static int f%u(void){return f%u();}", i, i == 136 ? 71 : i + 1);
+        }
+    }
+    length += (uint32_t)snprintf(source + length, sizeof(source) - length, "\n# 1 \"frontier.c\" 2\nint entry(void){return f0();}\n");
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const ParseOptions parse_options = { .extension_metadata = true };
+    Arena outputs[2] = { arena_reserve(1u << 24), arena_reserve(1u << 24) };
+    Arena scratch = arena_reserve(1u << 24);
+    CheckLazy plans[2] = { 0 };
+    const bool ready = length < sizeof(source) && outputs[0].base != 0 && outputs[1].base != 0 && scratch.base != 0 &&
+                       intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                       parse_initialize(&parser, &parse_options, options.language) && pp_run_source(&pp, "frontier.c", (const uint8_t*)source, length) &&
+                       parse_translation_unit(&parser, &pp);
+    check_test_expect(test, ready, "original 138-body demand graph parses");
+    for (uint32_t path = 0; ready && path < 2; path += 1)
+    {
+        const bool planned = check_lazy_plan(plans + path, &parser, &pp, outputs + path, &scratch, path == 0);
+        check_test_expect(test, planned && plans[path].body_count == 138 && plans[path].selected_count == 72 && plans[path].deferred_count == 66,
+                          "demand crossing two bitset words retains 71-function chain and ordinary entry");
+        for (uint32_t body = 0; planned && body < plans[path].body_count; body += 1)
+        {
+            check_test_expect(test, plans[path].bodies[body].selected == (body < 71 || body == 137),
+                              "unrooted cycle and partial tail remain deferred in original body order");
+        }
+        check_test_expect(test, scratch.length == 0, "large demand traversal releases scratch");
+    }
+    if (plans[0].status == CHECK_LAZY_OK && plans[1].status == CHECK_LAZY_OK)
+    {
+        check_test_expect(test, memcmp(plans[0].deferred_tokens, plans[1].deferred_tokens, (uint64_t)parser.tokens.count + 1) == 0,
+                          "scalar and vector demand frontiers match every token beyond bitset word boundaries");
+    }
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&identifiers);
+    arena_release(&scratch);
+    arena_release(outputs + 1);
+    arena_release(outputs);
+}
+
 static void check_test_lazy(CheckTest* test)
 {
     static const CheckLazyFixture fixtures[] =
@@ -210,11 +269,14 @@ static void check_test_lazy(CheckTest* test)
         { "uninvolved ordinary static body stays checked", "# 1 \"header.h\" 1 3\nstatic int dead(void){return 0;}\n# 1 \"user.c\" 2\nstatic int local(void){return missing;}\n", 1, 2, false, false },
         { "inactive duplicate switch does not reach program", "# 1 \"header.h\" 1 3\nstatic int dead(int n){switch(n){case 1:return 1;case 1:return 2;}return 0;}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, false, true },
         { "inactive statement expression region", "# 1 \"header.h\" 1 3\nstatic int dead(int n){return ({int x=n; x+1;});}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, true, true },
+        { "inactive invalid initializer", "# 1 \"header.h\" 1 3\nstatic int dead(void){static int*p=3;return 0;}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, false, true },
+        { "inactive invalid FENV placement", "# 1 \"header.h\" 1 3\nstatic int dead(void){int x=1;\n#pragma STDC FENV_ACCESS ON\nreturn x;}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, false, true },
     };
     for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
     {
         check_test_lazy_fixture(test, fixtures + fixture, fixture == 1);
     }
+    check_test_lazy_frontier(test);
 }
 
 #endif

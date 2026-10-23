@@ -4,7 +4,8 @@
 // Original end-to-end demand fixtures. Default/lazy checking and scalar/vector schedules must emit byte-identical
 // ELF objects after semantic selection. The fixture counts are stated independently of the reachability solver.
 
-static void check_test_program_selection_case(CheckTest* test, const char* source, const char* name, uint32_t functions, uint32_t objects, const char* clang)
+static void check_test_program_selection_run(CheckTest* test, const char* source, const char* name, uint32_t functions, uint32_t objects,
+                                             CheckProgramStatus emission_status, const char* clang)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -22,6 +23,7 @@ static void check_test_program_selection_case(CheckTest* test, const char* sourc
     check_test_expect(test, parsed && expected_storage.base != 0, description);
     for (uint32_t path = 0; parsed && path < 2; path += 1)
     {
+        parser.options.scalar = path == 0;
         for (uint32_t mode = 0; mode < 2; mode += 1)
         {
             CheckTestTypes types = { 0 };
@@ -85,9 +87,11 @@ static void check_test_program_selection_case(CheckTest* test, const char* sourc
             bool emitted = ready && check_program_emit(&code, program, &parser, &identifiers, selection.data.capacity, path == 0, &output, &bytes, &scratch) &&
                            check_data_publish(&selection.data, &types.table, &stream, program->object_symbols, program->object_count, &code.link, 0,
                                               &bytes, &scratch, &emitted_data) && link_check(&code.link) == LINK_ERROR_NONE;
-            snprintf(description, sizeof(description), "%s: selected code/data actually reach the object consumer", name);
-            check_test_expect(test, emitted, description);
-            if (ready && !emitted)
+            snprintf(description, sizeof(description), "%s: selected publication matches its supported object obligations", name);
+            const bool publication = emission_status == CHECK_PROGRAM_OK ? emitted : ready && !emitted && code.status == emission_status &&
+                                  code.link.symbols.count == 0 && code.lowered.functions == 0 && output.length == 0 && bytes.length == 0 && scratch.length == 0;
+            check_test_expect(test, publication, description);
+            if (ready && !publication)
             {
                 fprintf(stderr, "selection emission=%u token=%u backend=%u data=%u\n", code.status, code.token, code.backend_error, emitted_data.status);
             }
@@ -105,6 +109,27 @@ static void check_test_program_selection_case(CheckTest* test, const char* sourc
                         check_test_expect(test, code.link.names.length[renamed] == attribute->text.length &&
                                                memcmp(code.link.names.bytes[renamed], attribute->text.pointer, attribute->text.length) == 0,
                                           "decoded asm label survives canonical redeclarations into the actual object symbol");
+                    }
+                    else if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->ignored && !input.registers[token])
+                    {
+                        bool explicit_name = false;
+                        for (uint32_t other = 0; other < input.token_count; other += 1)
+                        {
+                            const CheckInputAttributes* retained = input.attributes[other];
+                            for (uint32_t j = 0; input.objects[other] == object && retained != 0 && j < retained->count; j += 1)
+                            {
+                                explicit_name |= retained->records[j].kind == CHECK_ATTRIBUTE_ASM_LABEL && !retained->records[j].ignored && !input.registers[other];
+                            }
+                        }
+                        if (!explicit_name)
+                        {
+                            const uint32_t declaration = program->object_declarations[object];
+                            const IdentId original = parser.tokens.names[declaration];
+                            const NameId published = code.link.symbols.name[symbol];
+                            check_test_expect(test, code.link.names.length[published] == intern_length(&identifiers, original) &&
+                                                   memcmp(code.link.names.bytes[published], intern_bytes(&identifiers, original), code.link.names.length[published]) == 0,
+                                              "ignored late asm label preserves the independently stated original C symbol spelling");
+                        }
                     }
                 }
             }
@@ -151,8 +176,24 @@ static void check_test_program_selection_case(CheckTest* test, const char* sourc
     intern_release(&identifiers);
 }
 
+static void check_test_program_selection_case(CheckTest* test, const char* source, const char* name, uint32_t functions, uint32_t objects, const char* clang)
+{
+    check_test_program_selection_run(test, source, name, functions, objects, CHECK_PROGRAM_OK, clang);
+}
+
 static void check_test_program_selection(CheckTest* test, const char* clang)
 {
+    check_test_program_selection_case(test, "", "empty-selected-unit", 0, 0, 0);
+    check_test_program_selection_case(test, "static int dead=3;int kept=9;", "selected-data-only-unit", 0, 1, 0);
+    check_test_program_selection_case(test,
+        "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));int tested(int n){return pick(n);}",
+        "selected-unmarked-overload-identity-excludes-lexical-placeholder", 2, 0, clang);
+    check_test_program_selection_case(test,
+        "static int dead(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
+        "dropped-overload-definition-needs-no-mangled-publication", 1, 0, clang);
+    check_test_program_selection_run(test,
+        "int pick(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
+        "active-overload-definition-requires-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0);
     check_test_program_selection_case(test,
         "# 1 \"selection-header.h\" 1 3\n"
         "static int leaf(int n){return n+3;}static int middle(int n){return leaf(n);}"
@@ -187,4 +228,39 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "# 1 \"selection-user.c\" 2\n"
         "int tested(int n){return leaf(n);}\n",
         "canonical-function-and-local-static-asm-labels", 2, 1, clang);
+    check_test_program_selection_case(test,
+        "int x=1;extern int x __asm__(\"late_x\");static int leaf(int n){return n+x;}"
+        "static int leaf(int) __asm__(\"late_leaf\");int tested(int n){return leaf(n);}",
+        "ignored-late-object-and-function-asm-labels", 2, 1, clang);
+    check_test_program_selection_case(test,
+        "# 1 \"selection-header.h\" 1 3\nstatic int dead(void){\n#pragma pack(push,1)\nreturn 99;}\n"
+        "struct S{char c;int x;};\n#pragma pack(pop)\n# 1 \"selection-user.c\" 2\nint tested(int n){return n+sizeof(struct S);}\n",
+        "deferred-body-retains-later-packing-history", 1, 0, clang);
+    check_test_program_selection_case(test,
+        "extern int unused(int) __attribute__((weak));int tested(int n){return n+sizeof(&unused);}",
+        "unevaluated-weak-reference-has-no-publication-obligation", 1, 0, clang);
+    check_test_program_selection_case(test,
+        "static int dropped __attribute__((section(\".dropped\")))=3;int tested(int n){return n;}",
+        "dropped-private-section-has-no-publication-obligation", 1, 0, clang);
+    check_test_program_selection_case(test,
+        "int kept __attribute__((nocommon));int tested(int n) __attribute__((visibility(\"default\")));int tested(int n){return n+kept;}",
+        "default-visibility-and-nocommon-publication", 1, 1, clang);
+    check_test_program_selection_run(test,
+        "extern int other(int) __attribute__((weak));int tested(int n){return other?other(n):7;}",
+        "active-weak-function-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0);
+    check_test_program_selection_run(test,
+        "extern int other __attribute__((weak));int tested(int n){return &other?n:7;}",
+        "active-weak-object-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0);
+    check_test_program_selection_run(test,
+        "static int kept __attribute__((retain))=3;int tested(int n){return n;}",
+        "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0);
+    check_test_program_selection_run(test,
+        "int tested(int n) __attribute__((visibility(\"hidden\")));int tested(int n){return n;}",
+        "hidden-symbol-requires-visibility-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0);
+    check_test_program_selection_run(test,
+        "int kept __attribute__((common));int tested(int n){return n;}",
+        "explicit-common-requires-common-symbol-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0);
+    check_test_program_selection_run(test,
+        "static int kept __attribute__((section(\".kept\")))=3;int tested(int n){return n+kept;}",
+        "active-section-requires-named-section-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0);
 }

@@ -690,10 +690,142 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
     arena_pop_to(reader->scratch, scratch_mark);
 }
 
+// Clang's declaration-use rule is lexical, not the backend's evaluated-reference graph. An ordinary reference
+// in an unchosen conditional, generic association or choose_expr still prevents a later first asm label. The
+// controlling generic expression and non-VLA sizeof/typeof operands are genuinely unevaluated contexts.
+static bool check_input_asm_label_use(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const CheckInput* input = reader->output;
+    bool evaluated = true;
+    bool variable_bound = false;
+    for (uint32_t ancestor = token, steps = 0; evaluated && ancestor < input->token_count && steps < input->token_count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[ancestor];
+        const uint32_t bound = reader->vla_ends[ancestor];
+        if (bound != 0 && bound <= input->vla_count)
+        {
+            variable_bound |= input->vlas[bound - 1].evaluated;
+        }
+        if (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[ancestor] == PARSE_KIND_SIZEOF)
+        {
+            const uint32_t node = input->token_nodes[ancestor];
+            evaluated = node < input->graph.count && input->graph.ops[node] == CHECK_OP_SIZEOF_VLA;
+        }
+        if (role == PARSE_ROLE_CLOSE_SPECIFIER)
+        {
+            const uint32_t keyword = reader->first_child[ancestor];
+            if (keyword < input->token_count && parser->tokens.kinds[keyword] == PARSE_KIND_TYPEOF)
+            {
+                const CheckInputSpecifierJob* job = reader->specifier_finishes[ancestor];
+                evaluated = variable_bound || (job != NULL && check_input_vla_modified(reader->types, job->result));
+            }
+        }
+        if (role == PARSE_ROLE_CLOSE_KEYWORD)
+        {
+            const uint32_t keyword = reader->first_child[ancestor];
+            if (keyword < input->token_count && parser->tokens.names[keyword] == C_NAME_GENERIC)
+            {
+                const uint32_t separator = check_constant_punctuation(parser, keyword + 2, ancestor, PARSE_KIND_COMMA);
+                evaluated = token >= separator;
+            }
+        }
+        ancestor = parser->tree.parents[ancestor];
+    }
+    return evaluated;
+}
+
+static void check_input_asm_labels(CheckInputReader* reader)
+{
+    CheckInput* input = reader->output;
+    const uint64_t mark = reader->scratch->length;
+    const uint64_t slots = (uint64_t)input->token_count + 1;
+    bool present = false;
+    for (uint32_t token = 0; !present && input->asm_capacity != 0 && token < reader->expression_limit; token += 1)
+    {
+        const CheckInputAttributes* attributes = !input->registers[token] ? input->attributes[token] : NULL;
+        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+        {
+            present |= attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && attributes->records[i].end <= reader->expression_limit;
+        }
+    }
+    const CheckInputAttribute** labels = present ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, const CheckInputAttribute*, slots) : NULL;
+    uint8_t* states = labels != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, slots) : NULL;
+    input->resource |= present && states == NULL;
+    if (states != NULL)
+    {
+        memset(labels, 0, slots * sizeof(*labels));
+        memset(states, 0, slots);
+        // Bit 0 marks only canonical objects with labels, bit 1 a preceding use and bit 2 a real definition.
+        // Tentative definitions deliberately do not make a later first label an ignored attribute.
+        for (uint32_t token = 0; token < reader->expression_limit; token += 1)
+        {
+            const CheckInputAttributes* attributes = !input->registers[token] ? input->attributes[token] : NULL;
+            const uint32_t object = input->objects[token];
+            for (uint32_t i = 0; object != 0 && object < slots && attributes != NULL && i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = attributes->records + i;
+                if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->end <= reader->expression_limit)
+                {
+                    states[object] |= 1;
+                }
+            }
+        }
+        for (uint32_t token = 0; token < reader->expression_limit && !input->resource; token += 1)
+        {
+            const uint32_t declaration = input->declarations[token];
+            const uint32_t object = declaration < input->token_count ? input->objects[declaration] : 0;
+            if (object != 0 && object < slots && (states[object] & 1) != 0)
+            {
+                if (declaration == token)
+                {
+                    CheckInputAttributes* attributes = !input->registers[token] ? input->attributes[token] : NULL;
+                    for (uint32_t i = 0; attributes != NULL && i < attributes->count && !input->resource; i += 1)
+                    {
+                        CheckInputAttribute* attribute = attributes->records + i;
+                        if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored && attribute->end <= reader->expression_limit)
+                        {
+                            const CheckInputAttribute* previous = labels[object];
+                            if (attribute->text.length == 0)
+                            {
+                                check_input_report(reader, attribute->argument_first, CHECK_INPUT_DECLARATION);
+                            }
+                            else if (previous != NULL && (previous->text.length != attribute->text.length ||
+                                     memcmp(previous->text.pointer, attribute->text.pointer, attribute->text.length) != 0))
+                            {
+                                check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                            }
+                            else if (previous == NULL && (states[object] & 2) != 0)
+                            {
+                                check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                            }
+                            else if (previous == NULL && (states[object] & 4) != 0)
+                            {
+                                attribute->ignored = true;
+                            }
+                            else
+                            {
+                                labels[object] = attribute;
+                            }
+                        }
+                    }
+                    states[object] |= input->defined[token] ? 4 : 0;
+                }
+                else if (reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND && check_input_asm_label_use(reader, token))
+                {
+                    states[object] |= 2;
+                }
+            }
+        }
+    }
+    arena_pop_to(reader->scratch, mark);
+}
+
 static void check_input_asm_finish(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
+    check_input_asm_labels(reader);
     for (uint32_t token = 0; input->asm_capacity != 0 && token < reader->expression_limit && !input->resource; token += 1)
     {
         const CheckInputAttributes* attributes = input->registers[token] ? input->attributes[token] : NULL;

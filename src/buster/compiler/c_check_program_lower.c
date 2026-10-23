@@ -557,7 +557,16 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     const CheckStream* stream = writer->program->stream;
     const TypeTable* types = writer->program->types;
     const uint32_t callee = graph->operand0[node];
-    const CheckValue value = stream->values[callee];
+    CheckValue value = stream->values[callee];
+    const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
+    bool mangled = false;
+    if (overload != BUSTER_CHECK_NONE)
+    {
+        const CheckOverloadResult* selected = &stream->overloads[overload].selected;
+        value = (CheckValue){ .type = selected->type, .category = CHECK_FUNCTION, .constant_kind = CHECK_CONSTANT_ADDRESS,
+                              .object = selected->object, .flags = BUSTER_CHECK_STATIC_OBJECT };
+        mangled = (selected->flags & BUSTER_CHECK_OVERLOADABLE) != 0;
+    }
     const uint32_t count = graph->argument_counts[node];
     const uint32_t first = graph->argument_offsets[node];
     TypeId type = type_strip_aligned(types, value.type);
@@ -579,7 +588,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     {
         scalar_parameters &= (stream->argument_conversions[first + a].flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) == 0;
     }
-    if (!scalar_parameters || value.category == CHECK_LVALUE || value.constant_kind != CHECK_CONSTANT_ADDRESS || value.object == 0 || value.offset != 0 ||
+    if (mangled || !scalar_parameters || value.category == CHECK_LVALUE || value.constant_kind != CHECK_CONSTANT_ADDRESS || value.object == 0 || value.offset != 0 ||
         value.object >= writer->program->object_count || writer->program->object_symbols[value.object] == 0 ||
         (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0 || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS)
     {
@@ -1340,7 +1349,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     {
         check_lower_region(writer, task);
     }
-    else if (constant && op != CHECK_OP_INITIALIZE &&
+    else if (constant && op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY &&
              ((value.category == CHECK_RVALUE && !task.address) || ((task.address || address_value) && value.constant_kind == CHECK_CONSTANT_ADDRESS)))
     {
         check_lower_constant(writer, &value);
@@ -1486,8 +1495,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
         {
             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
         }
-        else if (stream->queries[selected].runtime_value.constant_kind == CHECK_CONSTANT_NONE ||
-                 stream->queries[selected].runtime_value.fault != CHECK_FAULT_NONE)
+        else if (!check_program_query_known(program, node, stream->queries + selected))
         {
             check_lower_fail(writer, CHECK_PROGRAM_UNSUPPORTED);
         }
@@ -1497,7 +1505,9 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
             const uint32_t first = graph->argument_offsets[node];
             const uint32_t evaluated = stream->queries[selected].evaluated_operands;
             const uint32_t mask = count < 32 ? (UINT32_C(1) << count) - 1 : UINT32_MAX;
-            if ((evaluated & ~mask) != 0)
+            const bool constant_query = graph->members[node] == CBUILTIN_CONSTANT_P;
+            const bool evaluate = stream->queries[selected].runtime_plan == CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN;
+            if ((evaluated & ~mask) != 0 || (constant_query && (count != 1 || evaluated != (uint32_t)evaluate)))
             {
                 check_lower_fail(writer, CHECK_PROGRAM_INVALID);
             }
@@ -1585,7 +1595,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
                 check_lower_truth(writer, type_b, false);
                 check_lower_expression(writer, b, false, type_b);
             }
-            if ((!reuse || !truth) && (stream->values[a].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0)
+            if ((!reuse || !truth) && check_program_runtime_effects(program, a))
             {
                 check_lower_expression(writer, a, false, BUSTER_TYPE_VOID);
             }
@@ -1900,12 +1910,41 @@ static uint32_t check_lower_runtime_symbols(CheckProgramLowered* lowered, const 
     const CheckStream* stream = program->stream;
     uint32_t calls = 0;
     uint32_t floating = 0;
+    uint32_t query = 0;
     for (uint32_t i = 0; i < program->builtin_count && lowered->status == CHECK_PROGRAM_OK; i += 1)
     {
         const uint32_t node = program->builtin_nodes[i];
         while (floating < stream->floating_count && stream->floating[floating].node < node)
         {
             floating += 1;
+        }
+        while (query < stream->query_count && stream->queries[query].node < node)
+        {
+            query += 1;
+        }
+        if (input->graph.ops[node] == CHECK_OP_BUILTIN_QUERY)
+        {
+            const CheckBuiltinQueryEffect* effect = query < stream->query_count && stream->queries[query].node == node ? stream->queries + query : NULL;
+            const uint32_t arguments = input->graph.argument_counts[node];
+            const uint32_t mask = arguments < 32 ? (UINT32_C(1) << arguments) - 1 : UINT32_MAX;
+            const bool constant = input->graph.members[node] == CBUILTIN_CONSTANT_P;
+            if (effect == NULL)
+            {
+                lowered->status = CHECK_PROGRAM_INVALID;
+            }
+            else if (!check_program_query_known(program, node, effect))
+            {
+                lowered->status = CHECK_PROGRAM_UNSUPPORTED;
+            }
+            else if ((effect->evaluated_operands & ~mask) != 0 ||
+                     (constant && (arguments != 1 || effect->evaluated_operands != (uint32_t)(effect->runtime_plan == CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN))))
+            {
+                lowered->status = CHECK_PROGRAM_INVALID;
+            }
+            if (lowered->status != CHECK_PROGRAM_OK)
+            {
+                lowered->token = input->graph.tokens[node];
+            }
         }
         if (floating < stream->floating_count && stream->floating[floating].node == node && stream->floating[floating].may_set_errno)
         {

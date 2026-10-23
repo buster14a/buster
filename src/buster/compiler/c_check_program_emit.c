@@ -47,16 +47,40 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             result->backend_node = result->lowered.backend_node;
         }
     }
+    for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
+    {
+        const CheckOverloadCandidate* candidate = program->input->graph.overload_candidates + i;
+        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && candidate->object != 0 && candidate->object < program->object_count &&
+            program->object_symbols[candidate->object] != 0)
+        {
+            // A typed overload selection does not supply the required ABI symbol mangling.
+            result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->token = candidate->declaration;
+            valid = false;
+        }
+    }
     const uint32_t count = program->body_count;
     Tier0Code* codes = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, Tier0Code, count) : 0;
     uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
+    uint8_t* retained_objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
-    valid = valid && alignments != 0 && symbol_names != 0 && (count == 0 || (codes != 0 && result->function_atoms != 0));
+    valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && (count == 0 || (codes != 0 && result->function_atoms != 0));
     if (valid)
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
+        memset(retained_objects, 0, program->object_count);
+        for (uint32_t token = 0; token < program->input->token_count; token += 1)
+        {
+            const uint32_t object = program->input->objects[token];
+            if (program->input->declarations[token] == token && object != 0 && object < program->object_count)
+            {
+                bool gnu_inline = false;
+                retained_objects[object] |= check_program_attribute_roots(program->input->attributes[token],
+                    program->input->declaration_kinds[token] == C_BINDING_FUNCTION, &gnu_inline) != 0;
+            }
+        }
         for (uint32_t token = 0; valid && token < program->input->token_count; token += 1)
         {
             const CheckInputAttributes* attributes = program->input->attributes[token];
@@ -83,11 +107,18 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                             result->token = attribute->name_token;
                         }
                     }
-                    if (!attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_ALIAS || attribute->kind == CHECK_ATTRIBUTE_IFUNC ||
-                        (symbol != 0 && (attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR || attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR))))
+                    const CheckInputAttributeKind kind = attribute->kind;
+                    const bool alias = kind == CHECK_ATTRIBUTE_ALIAS || kind == CHECK_ATTRIBUTE_IFUNC;
+                    const bool visible_alias = alias && (symbol != 0 || program->input->linkage[token] == 2 || retained_objects[object]);
+                    const bool unpublished = kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
+                                             kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN ||
+                                             kind == CHECK_ATTRIBUTE_SECTION || kind == CHECK_ATTRIBUTE_COMMON ||
+                                             (kind == CHECK_ATTRIBUTE_VISIBILITY && !check_input_attribute_equal(attribute->text, "default"));
+                    if (!attribute->ignored && (visible_alias || (symbol != 0 && unpublished)))
                     {
                         // The typed source contract retains these obligations. Until symbol aliases and startup
-                        // lists are published, refusing code emission is required to preserve program behavior.
+                        // lists, section properties and weak/visibility semantics are published, refusing code
+                        // emission is required. A dropped definition has no object-format obligation of its own.
                         result->status = CHECK_PROGRAM_UNSUPPORTED;
                         result->token = attribute->name_token;
                         valid = false;

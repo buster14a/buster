@@ -265,17 +265,48 @@ static uint32_t check_program_argument_mask(CheckProgram* program, uint32_t node
     return mask;
 }
 
+static bool check_program_query_known(const CheckProgram* program, uint32_t node, const CheckBuiltinQueryEffect* effect)
+{
+    const bool constant = program->input->graph.members[node] == CBUILTIN_CONSTANT_P;
+    const bool plan = !constant || effect->runtime_plan == CHECK_BUILTIN_QUERY_RUNTIME_SKIP ||
+                      effect->runtime_plan == CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN;
+    // Query `known` describes the source proof or object bound. Runtime sentinels and strict constant_p plans
+    // have their own value, even when the source proof differs or the selected object bound is unknown.
+    const bool known = effect->unsupported == 0 && plan && effect->runtime_value.constant_kind != CHECK_CONSTANT_NONE &&
+                       effect->runtime_value.fault == CHECK_FAULT_NONE;
+    return known;
+}
+
+static bool check_program_runtime_effects(const CheckProgram* program, uint32_t node)
+{
+    const CheckStream* stream = program->stream;
+    bool effects = (stream->values[node].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0;
+    if (program->input->graph.ops[node] == CHECK_OP_BUILTIN_QUERY)
+    {
+        const uint32_t selected = check_program_builtin_index(stream->queries, stream->query_count, sizeof(CheckBuiltinQueryEffect), node);
+        if (selected != BUSTER_CHECK_NONE)
+        {
+            const CheckBuiltinQueryEffect* effect = stream->queries + selected;
+            effects |= effect->evaluated_operands != 0 || effect->runtime_effects.flags != 0 ||
+                       effect->runtime_effects.reads_fp_environment || effect->runtime_effects.may_raise_fp_exceptions;
+        }
+    }
+    return effects;
+}
+
 static bool check_program_runtime_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckValue* value = program->stream->values + condition;
     const bool environment = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
     bool runtime = false;
+    bool available = true;
     if (graph->ops[condition] == CHECK_OP_BUILTIN_QUERY)
     {
         const CheckStream* stream = program->stream;
         const uint32_t selected = check_program_builtin_index(stream->queries, stream->query_count, sizeof(CheckBuiltinQueryEffect), condition);
-        if (selected != BUSTER_CHECK_NONE)
+        available = selected != BUSTER_CHECK_NONE && check_program_query_known(program, condition, stream->queries + selected);
+        if (available)
         {
             value = &stream->queries[selected].runtime_value;
             runtime = true;
@@ -283,7 +314,7 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
     }
     // A source constant proves a translation-time value. Runtime floating truth conversions can still observe
     // the environment or raise an exception, including a signaling NaN whose bits are known here.
-    const bool known = (runtime || ((value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
+    const bool known = available && (runtime || ((value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
                                    !(environment && check_action_floating_type(program->types, value->type)))) &&
                        value->fault == CHECK_FAULT_NONE &&
                        check_action_truth(program->types, value, truth);
@@ -1058,6 +1089,29 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 graph->operand1[node],
                 graph->operand2[node],
             };
+            if (op == CHECK_OP_CALL)
+            {
+                const CheckStream* stream = program->stream;
+                const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
+                if (overload != BUSTER_CHECK_NONE)
+                {
+                    const CheckOverloadResult* selected = &stream->overloads[overload].selected;
+                    const uint32_t object = selected->object;
+                    if (selected->status != CHECK_OVERLOAD_OK || object == 0 || object >= program->object_count ||
+                        type_kind(program->types, type_strip_aligned(program->types, selected->type)) != BUSTER_TYPE_KIND_FUNCTION)
+                    {
+                        check_program_fail(program, CHECK_PROGRAM_INVALID, graph->tokens[node]);
+                    }
+                    else if (seen[object] != epoch)
+                    {
+                        seen[object] = epoch;
+                        needed[object] = 1;
+                        references[reference_count++] = (uint64_t)object << 32;
+                    }
+                    // This edge names the source overload set; the checked selection above is the callee.
+                    operands[0] = BUSTER_CHECK_NONE;
+                }
+            }
             if (op == CHECK_OP_VARARGS)
             {
                 const uint32_t effect = graph->argument_offsets[node];

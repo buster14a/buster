@@ -558,6 +558,31 @@ static void check_test_attributes(CheckTest* test, const char* clang)
             .rejected = true,
         },
         {
+            .name = "overloadable prefix metadata",
+            .source = "__attribute__((overloadable)) int f(int);\n",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_OVERLOADABLE,
+        },
+        {
+            .name = "overloadable suffix metadata",
+            .source = "int f(int) __attribute__((__overloadable__));\n",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_OVERLOADABLE,
+        },
+        {
+            .name = "overloadable rejects arguments",
+            .source = "int f(int) __attribute__((overloadable(1)));\n",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "overloadable",
+            .rejected = true,
+        },
+        {
+            .name = "scoped overloadable metadata",
+            .source = "[[clang::overloadable]] int f(int);\n",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_OVERLOADABLE,
+        },
+        {
             .name = "cdecl keyword",
             .source = "void __cdecl f(void);\n",
             .count = 1,

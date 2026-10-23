@@ -167,7 +167,68 @@ static TypeId check_input_vla_type(CheckInputReader* reader, uint32_t open, Type
     return type;
 }
 
-static bool check_input_vla_declaration(CheckInputReader* reader, uint32_t declaration, TypeId type, uint32_t point, uint32_t storage, bool is_typedef, bool initialized, bool thread_local)
+// A declaration-time type query has already checked its bounds with the constant/type evaluator. Retain only
+// dimensions introduced by this query; a typedef's earlier extent belongs to its original capture. This helper
+// deliberately performs no expression evaluation or name lookup, keeping the source/type call graph acyclic.
+static bool check_input_vla_query(CheckInputReader* reader, uint32_t first, uint32_t end, TypeId type)
+{
+    const Parser* parser = reader->parser;
+    bool valid = first <= end && end <= parser->tokens.count;
+    for (uint32_t depth = 0; valid && type != 0 && depth < reader->types->types.count; depth += 1)
+    {
+        type = type_strip_aligned(reader->types, type);
+        const uint8_t kind = type_kind(reader->types, type);
+        if (kind != BUSTER_TYPE_KIND_POINTER && kind != BUSTER_TYPE_KIND_ATOMIC && !type_kind_is_array(kind))
+        {
+            break;
+        }
+        if (kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY)
+        {
+            const uint64_t extent = reader->types->types.extent[type_index(type)];
+            if (extent >= (uint64_t)first + 2 && extent <= end)
+            {
+                const uint32_t begin = (uint32_t)extent - 1;
+                const uint32_t open = begin - 1;
+                const uint32_t close = parser->tree.parents[open];
+                valid = parser->tokens.kinds[open] == PARSE_KIND_L_SQUARE && close > begin && close < end;
+                if (valid && reader->vla_bounds[begin] == 0)
+                {
+                    CheckInput* output = reader->output;
+                    valid = output->vla_count < output->vla_capacity;
+                    output->resource |= !valid;
+                    if (valid)
+                    {
+                        const uint32_t identity = output->vla_count++;
+                        output->vlas[identity] = (CheckInputVla){
+                            .declaration = BUSTER_CHECK_NONE,
+                            .type = type,
+                            .bound_begin = begin,
+                            .bound_end = close,
+                            .bound_node = BUSTER_CHECK_NONE,
+                            .body = reader->function_body,
+                            .scope_begin = open,
+                            .scope_end = reader->scope_count != 0 ? reader->scope_ends[reader->scope_count - 1] : end,
+                            .evaluated = reader->function_body != BUSTER_CHECK_NONE,
+                        };
+                        reader->vla_bounds[open] = identity + 1;
+                        reader->vla_bounds[begin] = identity + 1;
+                        reader->vla_ends[close] = identity + 1;
+                    }
+                }
+                if (valid)
+                {
+                    memset(reader->ignored + begin, 0, close - begin);
+                    reader->ignored[open] = true;
+                    reader->ignored[close] = true;
+                }
+            }
+        }
+        type = type_element(reader->types, type);
+    }
+    return valid;
+}
+
+static bool check_input_vla_declaration(CheckInputReader* reader, uint32_t first, uint32_t declaration, TypeId type, uint32_t point, uint32_t storage, bool is_typedef, bool initialized, bool thread_local)
 {
     bool valid = true;
     if (check_input_vla_modified(reader->types, type))
@@ -184,6 +245,10 @@ static bool check_input_vla_declaration(CheckInputReader* reader, uint32_t decla
             for (uint32_t i = 0; i < reader->output->vla_count; i += 1)
             {
                 CheckInputVla* vla = &reader->output->vlas[i];
+                if (vla->declaration == BUSTER_CHECK_NONE && vla->bound_begin >= first && vla->bound_end < declaration)
+                {
+                    vla->declaration = declaration;
+                }
                 if (vla->declaration == declaration)
                 {
                     vla->body = reader->function_body;

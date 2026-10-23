@@ -7,6 +7,7 @@
 
 #define CHECK_WARNING_EXCESS_INITIALIZERS 0x100u
 #define CHECK_WARNING_UNKNOWN_PRAGMA 0x200u
+#define CHECK_WARNING_IGNORED_ATTRIBUTES 0x400u
 
 typedef enum CheckWarningSeverity
 {
@@ -36,6 +37,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wshift-overflow", NULL, "left shift exceeds the range of the type" },
     { "-Wexcess-initializers", NULL, "excess elements in initializer" },
     { "-Wunknown-pragmas", "-Wpragmas", "expected 'ON' or 'OFF' or 'DEFAULT' in pragma" },
+    { "-Wignored-attributes", "-Wattributes", "attribute declaration must precede definition" },
 };
 
 static bool check_diagnostic_option(String8 option, const char* expected)
@@ -110,10 +112,33 @@ static CheckWarningSeverity check_diagnostic_severity(const CheckInput* input, u
     return severity;
 }
 
+static uint32_t check_diagnostic_attribute_warnings(const CheckInput* input, uint32_t token)
+{
+    const CheckInputAttributes* attributes = input->attributes != NULL && token < input->token_count ? input->attributes[token] : NULL;
+    uint32_t warnings = 0;
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->ignored)
+        {
+            warnings |= CHECK_WARNING_IGNORED_ATTRIBUTES;
+        }
+    }
+    return warnings;
+}
+
 static bool check_diagnostic_first_error(const CheckInput* input, const CheckStream* stream, uint32_t* token)
 {
     uint32_t first = BUSTER_CHECK_NONE;
     const bool policies = input->diagnostic_pragmas != NULL && input->diagnostic_pragmas->count != 0;
+    for (uint32_t at = 0; policies && input->attributes != NULL && at < input->token_count && at < first; at += 1)
+    {
+        const uint32_t warnings = check_diagnostic_attribute_warnings(input, at);
+        if (warnings != 0 && check_diagnostic_severity(input, at, warnings) >= CHECK_WARNING_ERROR)
+        {
+            first = at;
+        }
+    }
     for (uint32_t at = 0; policies && input->constant_warnings != NULL && at < input->token_count; at += 1)
     {
         uint32_t warnings = input->constant_warnings[at];
@@ -150,21 +175,117 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
 
 // A retained pragma has its own source point even when no ordinary token lies before the following policy.
 // Keep that point separate from its adjacent token, including directives at the end of a translation unit.
-static bool check_diagnostic_first_pragma_error(const CheckInput* input, uint32_t before_token, uint32_t* token, uint32_t* source)
+static uint32_t check_diagnostic_pragma_source(const CheckInputFpPragma* record)
+{
+    // The canonical header's '#' and 'pragma' are synthetic. The original state operand, or the setting name
+    // when no state was supplied, retains _Pragma's expansion history and therefore its invocation location.
+    const uint32_t offset = record->source_end - record->source_begin > 5 ? 4 : 3;
+    const uint32_t source = record->source_begin + offset;
+    return source;
+}
+
+static bool check_diagnostic_first_pragma_error_mode(const CheckInput* input, uint32_t before_token, uint32_t* token, uint32_t* source, bool quiet)
 {
     uint32_t first = BUSTER_CHECK_NONE;
     uint32_t origin = BUSTER_CHECK_NONE;
     for (uint32_t i = 0; i < input->fp_pragma_count; i += 1)
     {
         const CheckInputFpPragma* record = input->fp_pragmas + i;
-        if (record->token < before_token && record->token < first && (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0 &&
-            check_diagnostic_severity_at(input, record->token, record->source_begin, CHECK_WARNING_UNKNOWN_PRAGMA, false) >= CHECK_WARNING_ERROR)
+        const bool invalid = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0;
+        const bool promoted = !quiet && (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0 &&
+                              check_diagnostic_severity_at(input, record->token, record->source_begin, CHECK_WARNING_UNKNOWN_PRAGMA, false) >= CHECK_WARNING_ERROR;
+        if (record->token < before_token && record->token < first && (invalid || promoted))
         {
             first = record->token;
-            origin = record->source_begin;
+            origin = check_diagnostic_pragma_source(record);
         }
     }
     *token = first;
     *source = origin;
     return first != BUSTER_CHECK_NONE;
+}
+
+static bool check_diagnostic_first_pragma_error(const CheckInput* input, uint32_t before_token, uint32_t* token, uint32_t* source)
+{
+    const bool result = check_diagnostic_first_pragma_error_mode(input, before_token, token, source, false);
+    return result;
+}
+
+// A malformed declaration may have consumed a directive before the token which exposes its syntax error. Its
+// diagnostic location can point backwards (for a missing semicolon), but directive order follows the lookahead.
+static uint32_t check_diagnostic_parse_end(const Parser* parser)
+{
+    uint32_t end = parser->tokens.count + 1;
+    for (uint32_t i = 0; i < parser->diagnostic_count; i += 1)
+    {
+        const ParseDiagnostic* diagnostic = parser->diagnostics + i;
+        if (diagnostic->error && diagnostic->token < end)
+        {
+            end = diagnostic->token + 1;
+        }
+    }
+    return end;
+}
+
+// Unknown STDC states have no semantic effect and need no valid tree. Retain their original insertion points,
+// independently of the completed expression prefix used for semantic diagnostics. Recognized states also reject
+// insertion inside an unfinished expression. This syntax-only boundary proof never approves a setting's placement
+// or changes floating policy; those remain owned by the ordinary floating-environment reader.
+static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* parser, Preprocessor* pp,
+                                              uint32_t before_token, Arena* arena, Arena* scratch)
+{
+    *result = (CheckInput){ 0 };
+    const uint64_t retained = arena->length;
+    const uint64_t temporary = scratch->length;
+    const uint32_t count = parser->tokens.pragma_count;
+    bool valid = arena != scratch && (count == 0 || (parser->tokens.pragma_sources != NULL && parser->tokens.pragma_positions != NULL));
+    uint8_t* handled = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    CheckInputFpPragma* records = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckInputFpPragma, count) : NULL;
+    valid &= count == 0 || (handled != NULL && records != NULL);
+    CheckInputReader reader = { .output = result, .parser = parser, .pp = pp, .arena = arena, .scratch = scratch };
+    if (valid && count != 0)
+    {
+        memset(handled, 0, count);
+        valid = check_input_diagnostic_pragmas(&reader, handled);
+    }
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        const uint32_t source = parser->tokens.pragma_sources[i];
+        const uint32_t token = parser->tokens.pragma_positions[i];
+        uint32_t end = source;
+        const bool complex = check_input_fp_name(&reader, source + 3, "CX_LIMITED_RANGE");
+        if (token < before_token && check_input_fp_name(&reader, source + 2, "STDC") &&
+            (complex || check_input_fp_name(&reader, source + 3, "FENV_ACCESS")) && parse_pragma_at(&pp->output, source, &end))
+        {
+            const bool recognized = check_input_fp_name(&reader, source + 4, "ON") || check_input_fp_name(&reader, source + 4, "OFF") ||
+                                    check_input_fp_name(&reader, source + 4, "DEFAULT");
+            const uint8_t previous = token != 0 && token <= parser->tokens.count ? parser->tokens.kinds[token - 1] : 0;
+            const bool impossible = recognized && token != 0 && previous != PARSE_KIND_L_BRACE && previous != PARSE_KIND_R_BRACE &&
+                                    previous != PARSE_KIND_SEMI;
+            if (!recognized || impossible)
+            {
+                records[result->fp_pragma_count++] = (CheckInputFpPragma)
+                {
+                    .pragma = i,
+                    .source_begin = source,
+                    .source_end = end + 1,
+                    .token = token,
+                    .kind = complex ? CHECK_FP_PRAGMA_CX_LIMITED_RANGE : CHECK_FP_PRAGMA_FENV_ACCESS,
+                    .warnings = impossible ? CHECK_FP_PRAGMA_INVALID_PLACEMENT : CHECK_FP_PRAGMA_UNKNOWN_STATE,
+                };
+            }
+        }
+    }
+    if (valid)
+    {
+        result->fp_pragmas = records;
+        result->token_count = parser->tokens.count;
+    }
+    else
+    {
+        arena_pop_to(arena, retained);
+        *result = (CheckInput){ .resource = true };
+    }
+    arena_pop_to(scratch, temporary);
+    return valid;
 }

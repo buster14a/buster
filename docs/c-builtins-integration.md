@@ -170,21 +170,42 @@ in this adapter. Terminal helpers require a separate terminal source-graph
 path. Byte loops are the scalar memory fallback allowed by the issue; this
 adapter makes no memory-throughput claim.
 
-## Unevaluated queries
+## Constant and object-bound queries
 
-`c_check_builtin_query.c` returns an empty runtime evaluated-operand mask.
-Speculative operand faults and volatile reads do not become query effects.
-Source constraints still diagnose. For
-`constant_p`, explicit `string_literal_start` and
-`absolute_address_constant` witnesses retain source provenance that a generic
+`c_check_builtin_query.c` separates source constant proof from the runtime
+evaluation plan. For `constant_p`, source proof is independently INFER, ZERO,
+ONE or DEFERRED. The runtime plan independently skips the operand, evaluates
+it before a known result, defers the compiler's constantness test, or remains
+unresolved. A known source answer does not establish runtime deadness.
+Strict floating-point evaluation and nested queries can preserve runtime
+effects even when the final answer is known. Conversely, a source-constant
+answer of one can coexist with a skipped runtime answer of zero.
+
+The producer supplies context-pruned runtime effects, including potential
+faults, floating-environment reads and possible exceptions. SKIP suppresses
+operand effects; EVALUATE retains them in `runtime_value`, without ICE flags,
+even for a known zero or one. `action.value` remains the separate clean source
+proof. A successful speculative fold precedes syntactic side-effect fallback;
+an unchosen call or increment cannot veto an independently proved fold.
+Context-sensitive inputs missing either explicit proof or plan remain
+unresolved. All-zero INFER preserves the original context-independent
+contract. Deferred constantness testing requires an actual compiler consumer;
+it is an explicit unsupported requirement, never a fabricated CPU test.
+
+The context-independent `constant_p` path retains explicit `string_literal_start` and
+`absolute_address_constant` witnesses for source provenance that a generic
 pointer-to-integer conversion can otherwise discard. They certify the actual
 final expression, not an object-ID convention or an unknown value's default
 fields. Interior string pointers have no first-character witness.
 The separate `complex_constant` witness certifies foldability of the complete
 complex expression, with the same fault/effect guards and an actual complex
 type. Complex type alone or one constant component cannot establish this proof.
+The separate context-aware certificates do not depend on these legacy value
+witnesses. Malformed certificates diagnose; impossible fold domains cannot
+acquire a source-one certificate.
 
-For `object_size`, the producer supplies four independent known-bound flags
+`object_size` always leaves its runtime operand unevaluated and ignores the
+constant-query-only certificates. Its producer supplies four independent known-bound flags
 and values: whole-object maximum, subobject maximum, whole-object minimum and
 subobject minimum. This action does not infer object bounds from pointee size.
 The separate per-mode `object_size_source_constant` flags certify that the

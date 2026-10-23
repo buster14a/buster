@@ -186,6 +186,7 @@ static bool check_program_select(CheckProgramSelection* result, const CheckProgr
         }
         const CLoweringInput graph = { .definition_count = definitions, .reference_count = edges, .definition_flags = definition_flags,
                                       .reference_source = sources, .reference_target = targets, .reference_kind = kinds };
+        candidate.status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
         valid = valid && c_lowering_prepare(scratch, graph, &plan) == C_LOWERING_OK;
         valid = valid && (scalar ? c_lowering_scalar(&plan, C_LOWERING_REACHABLE) : c_lowering_vector(&plan, C_LOWERING_REACHABLE)) == C_LOWERING_OK;
         if (valid)

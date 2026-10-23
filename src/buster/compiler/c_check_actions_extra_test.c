@@ -865,8 +865,24 @@ static void check_test_vla_actions(CheckTest* test, TypeTable* table)
                       "GNU fixed zero-length arrays keep their genuine zero-byte pointer stride");
 }
 
+static void check_test_void_return_conversion(CheckTest* test, TypeTable* table)
+{
+    CheckAction action = { .op = CHECK_OP_CONVERT, .type = BUSTER_TYPE_VOID,
+                           .operands = { { .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_SIDE_EFFECT } } };
+    const CheckActionResult strict = check_test_action(test, table, action);
+    action.extensions = BUSTER_CHECK_EXTENSION_GNU;
+    const CheckActionResult accepted = check_test_action(test, table, action);
+    action.operands[0] = check_test_integer(BUSTER_TYPE_INT, 1);
+    const CheckActionResult integer = check_test_action(test, table, action);
+    check_test_expect(test, strict.diagnostic == CHECK_DIAG_INCOMPATIBLE && accepted.diagnostic == CHECK_DIAG_NONE &&
+                           accepted.value.type == BUSTER_TYPE_VOID && (accepted.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
+                           integer.diagnostic == CHECK_DIAG_INCOMPATIBLE,
+                      "GNU return conversion accepts exact void expressions while preserving effects and rejecting integer returns");
+}
+
 static void check_test_actions_extra(CheckTest* test, TypeTable* table, const char* clang)
 {
+    check_test_void_return_conversion(test, table);
     check_test_string_literals(test, clang);
     check_test_static_selection(test, table);
     check_test_record_casts(test, table);

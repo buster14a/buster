@@ -84,7 +84,8 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     }
     else if (family == CHECK_OP_BUILTIN_VECTOR)
     {
-        const CheckBuiltinVectorAction action =
+        const uint64_t mark = reader->scratch->length;
+        CheckBuiltinVectorAction action =
         {
             .id = builtin,
             .arguments = arguments,
@@ -95,11 +96,38 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .tag_completion_count = reader->types->tags.capacity,
             .source_position = closing + 1,
             .extensions = extensions,
+            .allow_gnu_index_ice = reader->parser->language.gnu,
         };
-        CheckBuiltinVectorResult checked;
-        check_builtin_vector(reader->types, &action, &checked, 1);
-        result = checked.action;
-        result.warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_VECTOR_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
+        if (builtin == CBUILTIN_SHUFFLEVECTOR && count > 2)
+        {
+            uint8_t* ice = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count - 2);
+            if (ice == 0)
+            {
+                check_action_diagnose(&result, CHECK_DIAG_RESOURCE, 0);
+            }
+            else
+            {
+                for (uint32_t i = 2; i < count; i += 1)
+                {
+                    const CheckValue* index = arguments + i;
+                    const bool eligible = type_is_valid(reader->types, index->type) && check_action_is_integer(reader->types, index->type) &&
+                                          index->constant_kind == CHECK_CONSTANT_INTEGER &&
+                                          index->fault == CHECK_FAULT_NONE && (index->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+                    ice[i - 2] = !eligible ? CHECK_BUILTIN_VECTOR_INDEX_ICE_NONE : (index->flags & BUSTER_CHECK_ICE) != 0 ? CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT :
+                                 (index->flags & BUSTER_CHECK_GNU_ICE_FORM) != 0 ? CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU : CHECK_BUILTIN_VECTOR_INDEX_ICE_NONE;
+                }
+                action.shuffle_index_ice = ice;
+                action.shuffle_index_ice_count = count - 2;
+            }
+        }
+        if (result.diagnostic == CHECK_DIAG_NONE)
+        {
+            CheckBuiltinVectorResult checked;
+            check_builtin_vector(reader->types, &action, &checked, 1);
+            result = checked.action;
+            result.warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_VECTOR_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
+        }
+        arena_pop_to(reader->scratch, mark);
     }
     else if (family == CHECK_OP_BUILTIN_ATOMIC)
     {

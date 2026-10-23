@@ -153,7 +153,9 @@ static TypeAnswer type_transparent_query(TypeTransparentSearch* search, const Ty
                     const uint32_t count = table->tags.member_count[tag];
                     for (uint32_t member = 0; !search->full && member < count; member += 1)
                     {
-                        const TypeId type = table->members.type[begin + member];
+                        // Function-parameter matching discards the field's top qualifiers, but keeps atomic and
+                        // array identity. In particular an array field does not acquire parameter decay here.
+                        const TypeId type = type_unqualified(table->members.type[begin + member]);
                         type_transparent_edge(search, old_count, index, side == 0 ? type : current.pair.left,
                                               side == 0 ? current.pair.right : type, false);
                     }

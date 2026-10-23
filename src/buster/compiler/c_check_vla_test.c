@@ -9,7 +9,8 @@ static void check_test_vla_metadata(CheckTest* test)
 {
     static const char source[] =
         "void proto(int n,int a[n]); unsigned long f(int n,int parameter[n]) { int a[n++][n+1]; typedef int Row[n+2]; Row b; int (*p)[n+3]; "
-        "return sizeof a + sizeof b + sizeof *p + sizeof(int[n+4]); }\n";
+        "typedef __typeof__(int[n+5]) Query; Query q; __typeof__(int[n+6])*r; "
+        "return sizeof a + sizeof b + sizeof *p + sizeof(int[n+4]) + sizeof q + sizeof *r; }\n";
     for (uint32_t scalar = 0; scalar < 2; scalar += 1)
     {
         static InternTable identifiers;
@@ -40,7 +41,7 @@ static void check_test_vla_metadata(CheckTest* test)
         check_test_expect(test, ready, "VLA metadata source adaptation");
         if (ready)
         {
-            check_test_expect(test, input.vla_count == 7, "one VLA identity per dynamic dimension without repeated typedef bounds");
+            check_test_expect(test, input.vla_count == 9, "one VLA identity per dynamic dimension without repeated typedef bounds");
             uint32_t inline_bounds = 0;
             uint32_t unevaluated = 0;
             uint32_t reads = 0;
@@ -63,7 +64,7 @@ static void check_test_vla_metadata(CheckTest* test)
                 sizes += input.graph.ops[node] == CHECK_OP_SIZEOF_VLA;
             }
             check_test_expect(test, unevaluated == 1, "prototype bounds are unevaluated and definition parameter bounds are activated");
-            check_test_expect(test, inline_bounds == 1 && reads == 4 && sizes == 4, "sizeof reuses saved declaration extents and evaluates only its new inline bound");
+            check_test_expect(test, inline_bounds == 1 && reads == 6 && sizes == 6, "sizeof reuses saved declaration and typeof extents and evaluates only its new inline bound");
         }
         check_test_types_close(&types);
         arena_release(&storage);
@@ -101,6 +102,28 @@ static void check_test_vla_sources(CheckTest* test, const char* clang)
         {
             .name = "variable array runtime sizeof",
             .source = "unsigned long f(int n) { int a[n]; return sizeof a; }\n",
+        },
+        {
+            .name = "typeof variable array runtime sizeof",
+            .source = "unsigned long f(int n) { __typeof__(int[n++]) a; return sizeof a; }\n",
+        },
+        {
+            .name = "typeof pointer to variable array runtime sizeof",
+            .source = "unsigned long f(int n) { __typeof__(int[n++])*p; return sizeof *p; }\n",
+        },
+        {
+            .name = "typeof variable typedef retains original extent",
+            .source = "unsigned long f(int n) { typedef int A[n++]; __typeof__(A) a; __typeof__(int[n++]) b; return sizeof a+sizeof b; }\n",
+        },
+        {
+            .name = "typeof variable type preserves later asm diagnostic",
+            .source = "int x;\nint f(void){__typeof__(int[x]) a;return sizeof(a);}\nextern int x asm(\"b\");\n",
+            .rejected = true,
+        },
+        {
+            .name = "goto into typeof variable scope rejected",
+            .source = "void f(int n) { goto target; __typeof__(int[n]) a; target:; }\n",
+            .rejected = true,
         },
         {
             .name = "multidimensional runtime sizeof",

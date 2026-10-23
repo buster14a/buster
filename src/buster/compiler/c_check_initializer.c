@@ -985,15 +985,6 @@ static uint32_t check_init_compound(CheckInitWalker* walker, const CheckInitSele
             check_init_fail(walker, checked.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, begin);
         }
     }
-    if (!walker->infer && walker->graph != NULL && node < walker->stream->count && check_vector_type(walker->types, selected->type))
-    {
-        const CheckGraph* graph = walker->graph;
-        while (node < graph->count && (graph->ops[node] == CHECK_OP_CAST || graph->ops[node] == CHECK_OP_CONVERT || graph->ops[node] == CHECK_OP_POSITIVE || graph->ops[node] == CHECK_OP_SELECT) &&
-               graph->operand0[node] < node && check_vector_type(walker->types, walker->stream->values[graph->operand0[node]].type))
-        {
-            node = graph->operand0[node];
-        }
-    }
     if (walker->result->status == CHECK_INIT_OK && !walker->infer && walker->constants == NULL && walker->static_storage && record && node != BUSTER_CHECK_NONE &&
         walker->stream->values[node].category == CHECK_LVALUE && (walker->stream->values[node].flags & BUSTER_CHECK_STATIC_OBJECT) != 0)
     {

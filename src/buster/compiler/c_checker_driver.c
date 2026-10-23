@@ -121,8 +121,27 @@ struct CheckDriverWarning
     uint16_t enabled;
 };
 
+static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input, const CheckInputFpPragma* record, bool quiet)
+{
+    if ((record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0)
+    {
+        pp_diagnose_output(pp, PP_SEVERITY_ERROR, check_diagnostic_pragma_source(record), "floating-point pragma is not permitted within an expression");
+    }
+    else if (!quiet && (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0)
+    {
+        const CheckWarningSeverity severity = check_diagnostic_severity_at(input, record->token, record->source_begin,
+                                                                           CHECK_WARNING_UNKNOWN_PRAGMA, false);
+        if (severity != CHECK_WARNING_IGNORE)
+        {
+            const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                           severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+            pp_diagnose_output(pp, pp_severity, check_diagnostic_pragma_source(record), "%s", check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA));
+        }
+    }
+}
+
 static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                  const CheckRepair* repair, const CheckDriverDiagnostic* extra, uint32_t extra_count,
+                                  const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                   const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
@@ -141,12 +160,18 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
         if (show_warnings)
         {
             memset(warnings, 0, ((uint64_t)count + 1) * sizeof(*warnings));
+            for (uint32_t token = 0; token < count && token < input->token_count; token += 1)
+            {
+                const uint32_t flags = check_diagnostic_attribute_warnings(input, token);
+                warnings[token].flags = flags;
+                warnings[token].enabled = flags;
+            }
             for (uint32_t token = 0; input->constant_warnings != NULL && token < count && token < input->token_count; token += 1)
             {
                 const uint8_t flags = input->constant_warnings[token];
                 const uint8_t ignored = input->constant_warning_ignored != NULL ? input->constant_warning_ignored[token] : 0;
-                warnings[token].flags = flags;
-                warnings[token].enabled = flags & ~ignored;
+                warnings[token].flags |= flags;
+                warnings[token].enabled |= flags & ~ignored;
             }
             for (uint32_t node = 0; stream != NULL && node < stream->count; node += 1)
             {
@@ -192,22 +217,17 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 first[token] = (UINT64_C(2) << 32) | i;
             }
         }
+        const CheckInput* pragma_input = original_pragmas != NULL ? original_pragmas : input;
         uint32_t pragma = 0;
         for (uint32_t token = 0; !pp->fatal && token <= count; token += 1)
         {
-            while (!pp->fatal && pragma < input->fp_pragma_count && input->fp_pragmas[pragma].token == token)
+            while (!pp->fatal && pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token)
             {
-                const CheckInputFpPragma* record = input->fp_pragmas + pragma;
-                const bool retained = repair == NULL || token < repair->record_begin;
-                if (show_warnings && retained && (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0)
+                const CheckInputFpPragma* record = pragma_input->fp_pragmas + pragma;
+                const bool retained = original_pragmas != NULL || repair == NULL || token < check_repair_pragma_end(repair);
+                if (retained)
                 {
-                    const CheckWarningSeverity severity = check_diagnostic_severity_at(input, token, record->source_begin, CHECK_WARNING_UNKNOWN_PRAGMA, false);
-                    if (severity != CHECK_WARNING_IGNORE)
-                    {
-                        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
-                                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
-                        pp_diagnose_output(pp, pp_severity, record->source_begin, "%s", check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA));
-                    }
+                    check_driver_pragma_report(pp, pragma_input, record, quiet);
                 }
                 pragma += 1;
             }
@@ -242,6 +262,12 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                     check_driver_diagnose(parser, pp, phase == 2 ? extra[index].token : token, message);
                 }
             }
+        }
+        // A directive in an unfinished expression can lie beyond every safely checked prefix. Its original
+        // source spelling and warning policy are independent of that expression and precede the parser failure.
+        for (; !pp->fatal && original_pragmas != NULL && pragma < pragma_input->fp_pragma_count; pragma += 1)
+        {
+            check_driver_pragma_report(pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
         }
     }
     arena_pop_to(scratch, mark);
@@ -514,6 +540,9 @@ static int run_check_command(int count, char** arguments)
             bool prefix_only = false;
             bool repairing = false;
             bool parse_failed = false;
+            CheckInput original_pragmas = { 0 };
+            bool original_pragmas_ready = false;
+            bool original_pragmas_printed = false;
             ready = pp_run(&pp, path);
             if (ready)
             {
@@ -540,6 +569,16 @@ static int run_check_command(int count, char** arguments)
                     checking = &prefix.parser;
                     prefix_only = true;
                     ready = true;
+                }
+            }
+            if (parse_failed)
+            {
+                original_pragmas_ready = check_diagnostic_original_pragmas(&original_pragmas, &parser, &pp,
+                                                                           check_diagnostic_parse_end(&parser), &arena, &scratch);
+                if (!original_pragmas_ready)
+                {
+                    fprintf(stderr, "fatal error: original pragma diagnostic capacity exhausted\n");
+                    ready = false;
                 }
             }
             const uint32_t tokens = checking->tokens.count;
@@ -654,8 +693,9 @@ static int run_check_command(int count, char** arguments)
                         uint32_t promoted_token = BUSTER_CHECK_NONE;
                         bool promoted = !quiet && check_diagnostic_first_error(&input, &stream, &promoted_token);
                         uint32_t promoted_source = BUSTER_CHECK_NONE;
-                        promoted |= !quiet && check_diagnostic_first_pragma_error(&input, repairing ? repair.record_begin : BUSTER_CHECK_NONE,
-                                                                                &promoted_token, &promoted_source);
+                        const CheckInput* pragma_input = original_pragmas_ready ? &original_pragmas : &input;
+                        const uint32_t pragma_end = original_pragmas_ready || !repairing ? BUSTER_CHECK_NONE : check_repair_pragma_end(&repair);
+                        promoted |= check_diagnostic_first_pragma_error_mode(pragma_input, pragma_end, &promoted_token, &promoted_source, quiet);
                         for (uint32_t i = 0; !quiet && !promoted && i < excess_count; i += 1)
                         {
                             promoted = check_diagnostic_severity(&input, excess_tokens[i], CHECK_WARNING_EXCESS_INITIALIZERS) >= CHECK_WARNING_ERROR;
@@ -671,12 +711,14 @@ static int run_check_command(int count, char** arguments)
                                     control.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" : "invalid C statement or control flow", control.position };
                             }
                         }
-                        if (!check_driver_reports(checking, &pp, &input, &stream, repairing ? &repair : NULL, additional, additional_count,
+                        if (!check_driver_reports(checking, &pp, &input, &stream, repairing ? &repair : NULL,
+                                                  original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                                   excess_tokens, excess_count, quiet, &scratch))
                         {
                             fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
                             ready = false;
                         }
+                        original_pragmas_printed = true;
                         if (input_valid && dump && !prefix_only)
                         {
                             check_driver_dump(&input.graph, &stream, &types, &scratch);
@@ -729,13 +771,22 @@ static int run_check_command(int count, char** arguments)
                         fprintf(stderr, "fatal error: %s\n", stream.status == CHECK_STATUS_RESOURCE ? "checker output capacity exhausted" : "invalid checker input graph");
                     }
                 }
-                else if (!check_driver_reports(checking, &pp, &input, NULL, repairing ? &repair : NULL, NULL, 0, NULL, 0, quiet, &scratch))
+                else
                 {
-                    fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
+                    if (!check_driver_reports(checking, &pp, &input, NULL, repairing ? &repair : NULL,
+                                              original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, &scratch))
+                    {
+                        fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
+                    }
+                    original_pragmas_printed = true;
                 }
             }
             if (parse_failed)
             {
+                for (uint32_t i = 0; original_pragmas_ready && !original_pragmas_printed && !pp.fatal && i < original_pragmas.fp_pragma_count; i += 1)
+                {
+                    check_driver_pragma_report(&pp, &original_pragmas, original_pragmas.fp_pragmas + i, quiet);
+                }
                 if (!pp.fatal)
                 {
                     parse_print_diagnostics(&parser, &pp);

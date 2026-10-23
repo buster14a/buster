@@ -240,10 +240,106 @@ static void check_test_source_transparent_history(CheckTest* test)
     intern_release(&identifiers);
 }
 
+static void check_test_source_intrinsic_range(CheckTest* test)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const char* source = "typedef int V __attribute__((vector_size(64)));V f(V x){return __builtin_ia32_pshufd512(x,256);}";
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
+    ready = ready && pp_run_source(&pp, "intrinsic-range.c", (const uint8_t*)source, strlen(source));
+    check_test_expect(test, ready, "intrinsic range provenance fixture preprocesses");
+    for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena arena = arena_reserve(UINT64_C(1) << 24);
+        Arena output = arena_reserve(UINT64_C(1) << 24);
+        Arena scratch = arena_reserve(UINT64_C(1) << 24);
+        const ParseOptions parse_options = { .scalar = scalar != 0 };
+        const CheckOptions check_options = { .scalar = scalar != 0 };
+        CheckInput input = { 0 };
+        CheckStream stream = { 0 };
+        const bool parsed = check_test_types_open(&types) && arena.base != 0 && output.base != 0 && scratch.base != 0 &&
+                            parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
+        const bool adapted = parsed && check_input(&input, &parser, &pp, &types.table, &arena, &scratch);
+        const bool checked = adapted && check_graph_run(&types.table, &input.graph, &output, &scratch, &check_options, &stream);
+        check_test_expect(test, checked && !input.resource && stream.report_count == 0 && stream.x86_count == 1 && input.graph.x86_count == 1,
+                          "suppressible intrinsic range diagnostics remain retained after successful typing");
+        if (checked && stream.x86_count == 1 && input.graph.x86_count == 1)
+        {
+            const CheckBuiltinX86Effect* effect = stream.x86;
+            const CheckBuiltinX86RangeEvent* event = effect->range_events;
+            check_test_expect(test, effect->range_event_count == 1 && event->node == effect->node && event->argument == 1 &&
+                              event->low == 0 && event->high == 255 && event->value.constant_kind == CHECK_CONSTANT_INTEGER &&
+                              event->value.integer == 256 && event->default_error && event->disposition == CHECK_BUILTIN_X86_DEFERRED &&
+                              (effect->checked_ice_arguments & 2) != 0 && (input.graph.x86_calls[0].ice_arguments & 2) != 0,
+                              "intrinsic range event preserves source ICE, exact bounds and default-error policy for the diagnostic consumer");
+        }
+        parse_release(&parser);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        arena_release(&arena);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 static void check_test_source_extensions(CheckTest* test, const char* clang)
 {
     const CheckSourceFixture fixtures[] =
     {
+        {
+            "exact intrinsic prototypes preserve distinct result and argument types",
+            "void f(void){__builtin_ia32_clui();}unsigned long long g(unsigned long long a){return __builtin_ia32_urdmsr(a);}\n",
+            false,
+        },
+        {
+            "exact intrinsic prototype rejects an extra argument",
+            "void f(void){__builtin_ia32_clui(1);}\n",
+            true,
+        },
+        {
+            "intrinsic immediate boundary accepts its maximum",
+            "typedef int V __attribute__((vector_size(64)));V f(V x){return __builtin_ia32_pshufd512(x,255);}\n",
+            false,
+        },
+        {
+            "intrinsic immediate range error remains a suppressible deferred diagnostic",
+            "typedef int V __attribute__((vector_size(64)));V f(V x){return __builtin_ia32_pshufd512(x,256);}\n",
+            false,
+        },
+        {
+            "intrinsic immediate rejects a runtime integer",
+            "typedef int V __attribute__((vector_size(64)));V f(V x,int n){return __builtin_ia32_pshufd512(x,n);}\n",
+            true,
+        },
+        {
+            "intrinsic immediate retains its source constant evaluation proof",
+            "typedef int V __attribute__((vector_size(64)));int side(void);V f(V x){return __builtin_ia32_pshufd512(x,__builtin_expect(1,side()));}\n",
+            false,
+        },
+        {
+            "intrinsic rounding argument accepts its defined encoding",
+            "typedef float V __attribute__((vector_size(64)));V f(V x){return __builtin_ia32_rndscaleps_mask(x,0,x,65535,4);}\n",
+            false,
+        },
+        {
+            "intrinsic rounding argument rejects an undefined encoding",
+            "typedef float V __attribute__((vector_size(64)));V f(V x){return __builtin_ia32_rndscaleps_mask(x,0,x,65535,5);}\n",
+            true,
+        },
+        {
+            "void intrinsic result can be returned from a void function",
+            "void f(unsigned long long a,unsigned long long b){return __builtin_ia32_uwrmsr(a,b);}\n",
+            false,
+        },
+        {
+            "void function cannot return a nonvoid intrinsic result",
+            "void f(unsigned long long a){return __builtin_ia32_urdmsr(a);}\n",
+            true,
+        },
         {
             "transparent union converts scalar arguments through its first member",
             "typedef union {int i;float f;} U __attribute__((transparent_union));void take(U);void f(short x){take(x);take(1.5f);}\n",
@@ -1308,4 +1404,5 @@ static void check_test_source_extensions(CheckTest* test, const char* clang)
     check_test_source_fp_history(test, true);
     check_test_source_builtin_effects(test);
     check_test_source_transparent_history(test);
+    check_test_source_intrinsic_range(test);
 }

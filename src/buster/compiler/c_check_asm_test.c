@@ -33,6 +33,147 @@ static const CheckAsmFixture check_asm_fixtures[] =
         "extern int value asm(\"not_a_register\");int f(void){return value;}",
     },
     {
+        "symbol-object-conflict",
+        "int x asm(\"a\");\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-function-conflict",
+        "int x(void) asm(\"a\");\nint x(void) asm(\"b\");\n",
+    },
+    {
+        "symbol-identical-labels",
+        "int x asm(\"a\");\nextern int x asm(\"a\");\nint f(void) asm(\"b\");\nint f(void) asm(\"b\");\n",
+    },
+    {
+        "symbol-ignored-label-promoted",
+        "#pragma clang diagnostic error \"-Wignored-attributes\"\nint x=1;\nextern int x asm(\"other\");\n",
+    },
+    {
+        "symbol-ignored-label-before-syntax",
+        "#pragma clang diagnostic error \"-Wignored-attributes\"\nint x=1;\nextern int x asm(\"other\");\nint broken=;\n",
+    },
+    {
+        "symbol-ignored-label-policy-pop",
+        "#pragma clang diagnostic error \"-Wignored-attributes\"\n#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wignored-attributes\"\n"
+        "int x=1;\nextern int x asm(\"other\");\n#pragma clang diagnostic pop\nint f(void){return 1;}\nint f(void) asm(\"renamed\");\n",
+    },
+    {
+        "symbol-late-read",
+        "int x;\nint f(void){return x;}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-late-call",
+        "int x(void);\nint f(void){return x();}\nint x(void) asm(\"b\");\n",
+    },
+    {
+        "symbol-late-address",
+        "int x;\nint *p=&x;\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-late-function-address",
+        "int x(void);\nint (*p)(void)=x;\nint x(void) asm(\"b\");\n",
+    },
+    {
+        "symbol-late-original-name",
+        "int x;\nint f(void){return x;}\nextern int x asm(\"x\");\n",
+    },
+    {
+        "symbol-after-object-definition",
+        "int x=1;\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-after-function-definition",
+        "int x(void){return 1;}\nint x(void) asm(\"b\");\n",
+    },
+    {
+        "symbol-sizeof-is-not-use",
+        "int x;\nint f(void){return sizeof(x)+sizeof x+sizeof(&x);}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-alignof-is-not-use",
+        "int x;\nint f(void){return __alignof__(x);}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-typeof-is-not-use",
+        "int x;\n__typeof__(x) y;\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-typeof-call-is-not-use",
+        "int x(void);\n__typeof__(x()) y;\nint x(void) asm(\"b\");\n",
+    },
+    {
+        "symbol-conditional-reference-is-use",
+        "int x;\nint f(void){return 1?0:x;}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-short-circuit-reference-is-use",
+        "int x;\nint f(void){return 0&&x;}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-generic-control-is-not-use",
+        "int x;\nint f(void){return _Generic(x,int:0);}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-generic-selected-reference-is-use",
+        "int x;\nint f(void){return _Generic(0,int:x,default:0);}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-generic-unselected-reference-is-use",
+        "int x;\nint f(void){return _Generic(0,int:0,default:x);}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-choose-unselected-reference-is-use",
+        "int x;\nint f(void){return __builtin_choose_expr(1,0,x);}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-constant-query-reference-is-use",
+        "int x;\nint f(void){return __builtin_constant_p(x);}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-object-size-reference-is-use",
+        "int x;\nint f(void){return __builtin_object_size(&x,0);}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-sizeof-vla-bound-is-use",
+        "int x;\nint f(void){return sizeof(int[x]);}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-typeof-vla-bound-is-use",
+        "int x;\nint f(void){__typeof__(int[x]) a;return sizeof(a);}\nextern int x asm(\"b\");\n",
+    },
+    {
+        "symbol-linked-local-conflict",
+        "void f(void){extern int x asm(\"a\");}\nvoid g(void){extern int x asm(\"b\");}\n",
+    },
+    {
+        "symbol-local-label-after-use",
+        "int x;\nint f(void){int y=x;extern int x asm(\"b\");return y;}\n",
+    },
+    {
+        "symbol-identical-label-after-use",
+        "int x asm(\"a\");\nint f(void){return x;}\nextern int x asm(\"a\");\n",
+    },
+    {
+        "symbol-automatic-shadow-is-not-use",
+        "int x;\nint f(void){int x=1;return x;}\nextern int x asm(\"a\");\n",
+    },
+    {
+        "symbol-embedded-null-label-conflict",
+        "int x asm(\"a\\0b\");\nextern int x asm(\"a\\0c\");\n",
+    },
+    {
+        "symbol-empty-label",
+        "int x asm(\"\");\n",
+    },
+    {
+        "symbol-conflict-before-input-error",
+        "int x asm(\"a\");\nextern int x asm(\"b\");\nint f(void){return missing;}\n",
+    },
+    {
+        "symbol-conflict-before-syntax-error",
+        "int x asm(\"a\");\nextern int x asm(\"b\");\nint f(void){return ; +}\n",
+    },
+    {
         "invalid-register-before-syntax",
         "int f(void){\nregister long value\nasm(\"$4\")=1;\nasm(\"\":::MISSING);\nreturn value;\n}",
     },
@@ -436,6 +577,57 @@ static bool check_test_asm_fixture(CheckTest* test, CheckCorpusTally* tally, con
     return ready;
 }
 
+static void check_test_asm_label_metadata(CheckTest* test)
+{
+    static const char source[] =
+        "int kept asm(\"retained_name\");\nint object=1;\nextern int object asm(\"ignored_object\");\n"
+        "int function(void){return 2;}\nint function(void) asm(\"ignored_function\");\n";
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    CheckCorpusPath path = { 0 };
+    const bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                       pp_run_source(&pp, "asm-label-metadata.c", (const uint8_t*)source, sizeof(source) - 1) &&
+                       check_corpus_check(&path, &parser, &pp, false);
+    check_test_expect(test, ready, "late labels after actual definitions preserve Clang acceptance");
+    if (ready)
+    {
+        uint32_t retained = 0;
+        uint32_t ignored = 0;
+        for (uint32_t token = 0; token < path.input.token_count; token += 1)
+        {
+            const CheckInputAttributes* attributes = path.input.attributes[token];
+            for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = attributes->records + i;
+                if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL)
+                {
+                    retained += !attribute->ignored;
+                    ignored += attribute->ignored;
+                }
+            }
+        }
+        check_test_expect(test, retained == 1 && ignored == 2, "late ignored labels cannot silently rename existing definitions");
+        Arena scratch = arena_reserve(64);
+        const uint64_t capacity = scratch.capacity;
+        scratch.length = 17;
+        scratch.capacity = 17;
+        CheckInputReader reader = { .output = &path.input, .parser = &parser, .scratch = &scratch, .expression_limit = path.input.token_count };
+        const uint32_t reports = path.input.report_count;
+        check_input_asm_labels(&reader);
+        check_test_expect(test, path.input.resource && path.input.report_count == reports && scratch.length == 17,
+                          "asm-label identity-state exhaustion is a resource failure and restores scratch without semantic reports");
+        path.input.resource = false;
+        scratch.capacity = capacity;
+        arena_release(&scratch);
+    }
+    check_corpus_close(&path);
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 static int run_checker_asm_tests(int argc, char** argv)
 {
     const char* clang = argc == 2 && strcmp(argv[0], "--clang") == 0 ? argv[1] : "clang";
@@ -553,6 +745,7 @@ static int run_checker_asm_tests(int argc, char** argv)
     }
     check_test_expect(&test, ready, "assembly fixture process and source accounting");
     check_test_asm_capacity(&test);
+    check_test_asm_label_metadata(&test);
     printf("test-checker-asm: %" PRIu64 " checks, %" PRIu64 " failures; sources=%" PRIu64 " accepted=%" PRIu64 "\n",
            test.checks, test.failures, tally.files, tally.checker_accepted);
     return test.failures == 0 ? 0 : 1;

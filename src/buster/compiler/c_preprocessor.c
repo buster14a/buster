@@ -7543,7 +7543,16 @@ static bool pp_expanding_argument(const Preprocessor* pp)
 // expanded) and its ')'.
 static void pp_defer_pragma(Preprocessor* pp, uint32_t name_location, uint8_t name_flags, PPToken open, PPToken string, PPToken close)
 {
-    pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = name_flags, .value = C_NAME_PRAGMA_OPERATOR, .location = name_location });
+    // The operator will be expanded again after substitution. Preserve its incoming origin, rather than the
+    // temporary builtin expansion, so a macro-body operator still diagnoses the original argument invocation.
+    pp_emit(pp, (PPToken)
+    {
+        .kind = C_TOKEN_RAW_IDENTIFIER,
+        .flags = name_flags,
+        .value = C_NAME_PRAGMA_OPERATOR,
+        .location = name_location,
+        .origin = pp->diagnostic_origin,
+    });
     pp_emit(pp, open);
     pp_emit(pp, string);
     pp_emit(pp, close);

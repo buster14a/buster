@@ -23,6 +23,7 @@ struct CheckCorpusPath
     CheckPrefix* prefix;
     CheckRepair* repair;
     CheckCorpusPath* repaired;
+    CheckInput* original_pragmas;
     TypeTable types;
     CheckInput input;
     CheckStream stream;
@@ -41,6 +42,7 @@ struct CheckCorpusPath
     bool resource;
     bool suppress_warnings;
     uint32_t warning_token;
+    uint32_t warning_source;
     uint32_t token;
     uint32_t position;
     uint32_t pragma;
@@ -259,14 +261,19 @@ static bool check_corpus_primary_location(const Preprocessor* pp, uint32_t token
     return valid && origin == 0;
 }
 
-static void check_corpus_location(CheckCorpusPath* path, const Parser* parser, Preprocessor* pp)
+static uint32_t check_corpus_source(const CheckCorpusPath* path, const Parser* parser)
 {
     const CheckInputReport report =
     {
         .token = path->token,
         .pragma = path->pragma,
     };
-    const uint32_t source = check_input_report_source(parser, &report);
+    return path->pragma != 0 && strcmp(path->phase, "promoted-warning") == 0 ? path->warning_source : check_input_report_source(parser, &report);
+}
+
+static void check_corpus_location(CheckCorpusPath* path, const Parser* parser, Preprocessor* pp)
+{
+    const uint32_t source = check_corpus_source(path, parser);
     if (source < pp->output.count)
     {
         const uint32_t spelling_location = pp->output.locations[source];
@@ -339,6 +346,7 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
     uint32_t first = BUSTER_CHECK_NONE;
     uint32_t pragma = 0;
     uint32_t pragma_source = BUSTER_CHECK_NONE;
+    bool invalid_pragma = false;
     if (!path->suppress_warnings && !path->resource)
     {
         if (repair == NULL)
@@ -347,6 +355,10 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
         }
         else
         {
+            for (uint32_t token = 0; path->input.attributes != NULL && token < path->input.token_count; token += 1)
+            {
+                first = check_corpus_repair_warning(path, repair, token, check_diagnostic_attribute_warnings(&path->input, token), 0, first);
+            }
             for (uint32_t token = 0; path->input.constant_warnings != NULL && token < path->input.token_count; token += 1)
             {
                 const uint32_t ignored = path->input.constant_warning_ignored != NULL ? path->input.constant_warning_ignored[token] : 0;
@@ -376,31 +388,37 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
                 first = token;
             }
         }
+    }
+    if (!path->resource)
+    {
         uint32_t pragma_token = BUSTER_CHECK_NONE;
-        if (check_diagnostic_first_pragma_error(&path->input, before_token, &pragma_token, &pragma_source) && pragma_token <= first)
+        const uint32_t pragma_before = repair != NULL ? check_repair_pragma_end(repair) : before_token;
+        if (check_diagnostic_first_pragma_error_mode(&path->input, pragma_before, &pragma_token, &pragma_source, path->suppress_warnings) && pragma_token <= first)
         {
             for (uint32_t i = 0; i < path->input.fp_pragma_count && pragma == 0; i += 1)
             {
                 const CheckInputFpPragma* record = path->input.fp_pragmas + i;
-                if (record->source_begin == pragma_source)
+                if (check_diagnostic_pragma_source(record) == pragma_source)
                 {
                     pragma = record->pragma + 1;
+                    invalid_pragma = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0;
                 }
             }
             first = pragma_token;
         }
     }
-    path->warning_token = first < before_token ? first : BUSTER_CHECK_NONE;
-    const CheckInputReport previous = { .token = path->token, .pragma = path->pragma };
-    const bool earlier_pragma = pragma != 0 && path->warning_token == path->position && pragma_source < check_input_report_source(parser, &previous);
+    const uint32_t warning_before = pragma != 0 && repair != NULL ? check_repair_pragma_end(repair) : before_token;
+    path->warning_token = first < warning_before ? first : BUSTER_CHECK_NONE;
+    const bool earlier_pragma = pragma != 0 && path->warning_token == path->position && pragma_source < check_corpus_source(path, parser);
     if (path->warning_token < path->position || earlier_pragma)
     {
         path->token = path->warning_token;
         path->position = path->token;
         path->pragma = pragma;
+        path->warning_source = pragma_source;
         path->phase = "promoted-warning";
-        snprintf(path->message, sizeof(path->message), "%s", pragma != 0 ? check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA) :
-                                                                        "semantic warning promoted to an error");
+        snprintf(path->message, sizeof(path->message), "%s", invalid_pragma ? "floating-point pragma is not permitted within an expression" :
+                 pragma != 0 ? check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA) : "semantic warning promoted to an error");
     }
 }
 
@@ -468,6 +486,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
                     .phase = "declaration",
                     .suppress_warnings = path->suppress_warnings,
                     .warning_token = BUSTER_CHECK_NONE,
+                    .warning_source = BUSTER_CHECK_NONE,
                 };
             }
         }
@@ -542,6 +561,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
             path->token = result->token;
             path->position = result->position;
             path->pragma = result->pragma;
+            path->warning_token = result->warning_token;
+            path->warning_source = result->warning_source;
             path->line = result->line;
             path->column = result->column;
             path->phase = result->phase;
@@ -557,6 +578,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
 {
     path->suppress_warnings = suppress_warnings;
     path->warning_token = BUSTER_CHECK_NONE;
+    path->warning_source = BUSTER_CHECK_NONE;
     path->token = BUSTER_CHECK_NONE;
     path->position = BUSTER_CHECK_NONE;
     path->pragma = 0;
@@ -732,6 +754,42 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     {
         // Diagnostic-only recovery retains the original parse rejection and uses only whitelisted reports.
         check_corpus_repair(path, parser, pp, scalar);
+    }
+    if (ready && !path->parsed && !path->resource && parser->tokens.pragma_count != 0)
+    {
+        // Unknown-state directives do not depend on the validity of a surrounding unfinished expression.
+        // Their original insertion point can precede the parse lookahead while lying beyond every safe tree.
+        path->original_pragmas = BUSTER_ARENA_PUSH_ARRAY(&path->prefix_arena, CheckInput, 1);
+        const bool retained = path->original_pragmas != NULL &&
+                              check_diagnostic_original_pragmas(path->original_pragmas, parser, pp, check_diagnostic_parse_end(parser),
+                                                                &path->prefix_arena, &path->scratch);
+        path->resource |= !retained;
+        uint32_t token = BUSTER_CHECK_NONE;
+        uint32_t source = BUSTER_CHECK_NONE;
+        const bool promoted = retained && check_diagnostic_first_pragma_error_mode(path->original_pragmas, BUSTER_CHECK_NONE, &token, &source, suppress_warnings);
+        if (promoted && (token < path->position || (token == path->position &&
+            (strcmp(path->phase, "parse") == 0 || source < check_corpus_source(path, parser)))))
+        {
+            path->token = token;
+            path->position = token;
+            path->warning_token = token;
+            path->warning_source = source;
+            path->pragma = 0;
+            bool invalid_pragma = false;
+            for (uint32_t i = 0; i < path->original_pragmas->fp_pragma_count && path->pragma == 0; i += 1)
+            {
+                const CheckInputFpPragma* record = path->original_pragmas->fp_pragmas + i;
+                if (check_diagnostic_pragma_source(record) == source)
+                {
+                    path->pragma = record->pragma + 1;
+                    invalid_pragma = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0;
+                }
+            }
+            path->phase = "promoted-warning";
+            snprintf(path->message, sizeof(path->message), "%s", invalid_pragma ? "floating-point pragma is not permitted within an expression" :
+                     check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA));
+            check_corpus_location(path, parser, pp);
+        }
     }
     return path->parsed && path->adapted && path->programmed && path->warning_token == BUSTER_CHECK_NONE && !path->resource;
 }
@@ -1014,7 +1072,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
 {
     bool equal = a->parsed == b->parsed && a->adapted == b->adapted && a->checked == b->checked && a->initialized == b->initialized &&
                  a->programmed == b->programmed && a->resource == b->resource &&
-                 a->suppress_warnings == b->suppress_warnings && a->warning_token == b->warning_token &&
+                 a->suppress_warnings == b->suppress_warnings && a->warning_token == b->warning_token && a->warning_source == b->warning_source &&
                  a->line == b->line && a->column == b->column && a->token == b->token && a->position == b->position && a->pragma == b->pragma &&
                  x->tokens.count == y->tokens.count &&
                  x->errors == y->errors && x->fatal == y->fatal && x->diagnostic_count == y->diagnostic_count &&
@@ -1067,7 +1125,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
             left->asm_count == right->asm_count && left->binding_event_count == right->binding_event_count &&
             left->parser_binding_event_count == right->parser_binding_event_count &&
             left->intrinsic_declaration_count == right->intrinsic_declaration_count && left->intrinsic_call_count == right->intrinsic_call_count &&
-            (left->intrinsic_ids == NULL) == (right->intrinsic_ids == NULL) && (left->deferred_tokens == NULL) == (right->deferred_tokens == NULL);
+            (left->intrinsic_ids == NULL) == (right->intrinsic_ids == NULL) && (left->deferred_tokens == NULL) == (right->deferred_tokens == NULL) &&
+            (left->overload_heads == NULL) == (right->overload_heads == NULL);
     for (uint32_t report = 0; equal && report < left->report_count; report += 1)
     {
         equal = left->reports[report].token == right->reports[report].token && left->reports[report].message == right->reports[report].message &&
@@ -1095,7 +1154,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     for (uint32_t token = 0; equal && !a->resource && trees && token <= left->token_count; token += 1)
     {
         equal = (left->intrinsic_ids == NULL || left->intrinsic_ids[token] == right->intrinsic_ids[token]) &&
-                (left->deferred_tokens == NULL || left->deferred_tokens[token] == right->deferred_tokens[token]);
+                (left->deferred_tokens == NULL || left->deferred_tokens[token] == right->deferred_tokens[token]) &&
+                (left->overload_heads == NULL || left->overload_heads[token] == right->overload_heads[token]);
     }
     for (uint32_t declaration = 0; equal && !a->resource && declaration < left->intrinsic_declaration_count; declaration += 1)
     {
@@ -1187,7 +1247,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     const CheckGraph* other = &right->graph;
     equal = equal && graph->count == other->count && graph->argument_count == other->argument_count && graph->varargs_count == other->varargs_count &&
             graph->extensions == other->extensions && graph->builtin_count == other->builtin_count && graph->vector_member_count == other->vector_member_count &&
-            graph->x86_count == other->x86_count &&
+            graph->x86_count == other->x86_count && graph->overload_count == other->overload_count &&
+            graph->overload_candidate_count == other->overload_candidate_count &&
             graph->tag_completion_count == other->tag_completion_count && (graph->tag_completions == 0) == (other->tag_completions == 0) &&
             (graph->transparent_unions == NULL) == (other->transparent_unions == NULL) &&
             (graph->source_positions == 0) == (other->source_positions == 0) && (graph->fp_environments == NULL) == (other->fp_environments == NULL) &&
@@ -1240,6 +1301,17 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     {
         equal = check_x86_call_equal(graph->x86_calls + call, other->x86_calls + call);
     }
+    for (uint32_t candidate = 0; equal && !a->resource && candidate < graph->overload_candidate_count; candidate += 1)
+    {
+        const CheckOverloadCandidate* p = graph->overload_candidates + candidate;
+        const CheckOverloadCandidate* q = other->overload_candidates + candidate;
+        equal = p->type == q->type && p->declaration == q->declaration && p->canonical == q->canonical && p->object == q->object &&
+                p->previous == q->previous && p->scope == q->scope && p->position == q->position && p->flags == q->flags;
+    }
+    for (uint32_t call = 0; equal && !a->resource && call < graph->overload_count; call += 1)
+    {
+        equal = graph->overload_calls[call].node == other->overload_calls[call].node && graph->overload_calls[call].head == other->overload_calls[call].head;
+    }
     if (equal && a->checked)
     {
         equal = check_test_stream_equal(&a->stream, &b->stream, graph->argument_count);
@@ -1254,7 +1326,13 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
 static bool check_corpus_equal(const CheckCorpusPath* a, const CheckCorpusPath* b, const Parser* x, const Parser* y)
 {
     bool equal = check_corpus_view_equal(a, b, x, y) && (a->repair == NULL) == (b->repair == NULL) &&
-                 (a->repaired == NULL) == (b->repaired == NULL);
+                 (a->repaired == NULL) == (b->repaired == NULL) && (a->original_pragmas == NULL) == (b->original_pragmas == NULL);
+    if (equal && a->original_pragmas != NULL)
+    {
+        equal = a->original_pragmas->token_count == b->original_pragmas->token_count &&
+                a->original_pragmas->resource == b->original_pragmas->resource &&
+                check_corpus_pragmas_equal(a->original_pragmas, b->original_pragmas);
+    }
     if (equal && a->repair != NULL)
     {
         equal = a->repair->status == b->repair->status && a->repair->diagnostic == b->repair->diagnostic &&

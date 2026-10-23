@@ -101,7 +101,7 @@ static bool check_test_value_equal(const CheckValue* a, const CheckValue* b)
     const bool imaginary = (isnan(a->imaginary) && isnan(b->imaginary)) ||
                            (a->imaginary == b->imaginary && signbit(a->imaginary) == signbit(b->imaginary));
     return a->type == b->type && a->category == b->category && a->flags == b->flags &&
-           a->constant_kind == b->constant_kind && a->integer == b->integer && floating && imaginary && a->object == b->object &&
+           a->constant_kind == b->constant_kind && a->integer == b->integer && floating && imaginary && a->object == b->object && a->overload_head == b->overload_head &&
            a->offset == b->offset && a->bit_width == b->bit_width && a->fault == b->fault && a->fault_node == b->fault_node;
 }
 
@@ -2447,16 +2447,20 @@ static void check_test_target_options(CheckTest* test)
 #include "c_check_body_bindings_test.c"
 #include "c_check_environment_test.c"
 #include "c_check_source_test.c"
+#include "c_check_overload_test.c"
+#include "c_check_overload_address_test.c"
 #include "c_check_constant_test.c"
 #include "c_check_enum_test.c"
 #include "c_check_vla_test.c"
 #include "c_check_data_test.c"
 #include "c_check_actions_extra_test.c"
 #include "c_check_transparent_test.c"
+#include "c_check_transparent_type_test.c"
 #include "c_check_complex_test.c"
 #include "c_check_integer_extension_test.c"
 #include "c_check_integer_policy_test.c"
 #include "c_check_fp_actions_test.c"
+#include "c_check_query_runtime_test.c"
 #include "c_check_vector_test.c"
 #include "c_check_vector_graph_test.c"
 #include "c_check_function_name_test.c"
@@ -2529,6 +2533,9 @@ static int run_checker_tests(int argc, char** argv)
             arena_release(&storage);
             check_test_sources(&test, clang);
             check_test_source_extensions(&test, clang);
+            check_test_overloads(&test, clang);
+            check_test_overload_sources(&test, clang);
+            check_test_overload_addresses(&test, clang);
             check_test_constant_sources(&test, clang);
             check_test_enum_sources(&test, clang);
             check_test_vla_sources(&test, clang);
@@ -2546,10 +2553,12 @@ static int run_checker_tests(int argc, char** argv)
             check_test_data(&test, &types.table, clang);
             check_test_actions_extra(&test, &types.table, clang);
             check_test_transparent_calls(&test, &types.table, clang);
+            check_test_transparent_types(&test, clang);
             check_test_complex(&test, &types.table, clang);
             check_test_integer_extensions(&test, clang);
             check_test_integer_policy(&test, &types.table, clang);
             check_test_fp_actions(&test, &types.table);
+            check_test_query_runtime(&test, &types.table, clang);
             check_test_vectors(&test, &types.table, clang);
             check_test_vector_graph(&test, &types.table);
             check_test_function_names(&test, clang);

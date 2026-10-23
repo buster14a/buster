@@ -148,14 +148,14 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
             valid = type != 0;
             for (uint32_t prior = 0; valid && prior < seen_count; prior += 1)
             {
-                const TypeAnswer answer = type_compatible(reader->types, type, seen[prior]);
+                const TypeAnswer answer = type_compatible_at(reader->types, type, seen[prior], reader->transparent_unions, reader->types->tags.count, close + 1);
                 reader->output->resource |= answer == TYPE_ANSWER_FULL;
                 valid = answer == TYPE_ANSWER_NO;
             }
             if (valid)
             {
                 seen[seen_count++] = type;
-                const TypeAnswer answer = type_compatible(reader->types, type, control_type);
+                const TypeAnswer answer = type_compatible_at(reader->types, type, control_type, reader->transparent_unions, reader->types->tags.count, close + 1);
                 reader->output->resource |= answer == TYPE_ANSWER_FULL;
                 valid = answer != TYPE_ANSWER_FULL;
                 if (answer == TYPE_ANSWER_YES)

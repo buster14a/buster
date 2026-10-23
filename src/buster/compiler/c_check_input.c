@@ -116,6 +116,7 @@ struct CheckInput
     uint32_t intrinsic_call_count;
     uint32_t intrinsic_call_capacity;
     uint32_t* intrinsic_ids;
+    uint32_t* overload_heads;
     CheckInputReport* reports;
     uint32_t report_count;
     uint32_t report_capacity;
@@ -250,6 +251,11 @@ struct CheckInputReader
     uint32_t cached_constant_count;
     uint16_t* builtin_names;
     uint32_t* intrinsic_names;
+    CheckOverloadCandidate* overload_candidates;
+    uint32_t overload_capacity;
+    uint32_t* overload_linked_heads;
+    uint32_t* overload_linked_next;
+    bool declarator_overloadable;
     uint16_t* builtins;
     uint32_t* builtin_type_ends;
     uint8_t* builtin_syntax_effects;
@@ -298,6 +304,7 @@ struct CheckInputReader
     uint32_t* value_next;
     uint32_t* scope_marks;
     uint32_t* scope_ends;
+    uint32_t* scope_openings;
     uint32_t scope_count;
     TypeId function_result;
     uint32_t function_end;
@@ -359,6 +366,7 @@ static TypeId check_input_type_result(CheckInputReader* reader, TypeId type)
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes);
 static TypeId check_input_constant_type(CheckInputReader* reader, uint32_t first, uint32_t end);
 static bool check_input_constant(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* value);
+static bool check_input_vla_query(CheckInputReader* reader, uint32_t first, uint32_t end, TypeId type);
 
 static bool check_input_qualifier(uint32_t name, uint32_t* qualifiers)
 {
@@ -688,6 +696,10 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             {
                 reader->ignored[token] |= job == 0 || job->keyword != i || token <= i + 1 || token == close;
             }
+            if (selected != 0 && kind == PARSE_KIND_TYPEOF)
+            {
+                valid &= check_input_vla_query(reader, i + 2, close, selected);
+            }
             i = selected != 0 ? close : i;
         }
         else if (name == C_NAME_LONG)
@@ -726,6 +738,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 case C_NAME_DOUBLE: selected = BUSTER_TYPE_DOUBLE; break;
                 case C_NAME_INT128: selected = BUSTER_TYPE_INT128; break;
                 case C_NAME_FLOAT16: selected = BUSTER_TYPE_FLOAT16; break;
+                case C_NAME_FP16: selected = BUSTER_TYPE_HALF; break;
                 case C_NAME_BF16: selected = BUSTER_TYPE_BF16; break;
                 case C_NAME_FLOAT128: selected = BUSTER_TYPE_FLOAT128; break;
                 default: valid = false; break;
@@ -963,6 +976,7 @@ static CheckOp check_input_binary(uint8_t kind);
 #include "c_check_constant.c"
 #include "c_check_select.c"
 #include "c_check_vla_input.c"
+#include "c_check_overload_input.c"
 
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes)
 {
@@ -1252,7 +1266,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
             }
             else if (i < close && parser->tokens.kinds[i] == PARSE_KIND_ELLIPSIS)
             {
-                valid = (function->parameter_count != 0 || parser->language.standard >= 2023) && i + 1 == close;
+                valid = i + 1 == close;
                 function->flags |= BUSTER_TYPE_FLAG_VARIADIC;
                 reader->ignored[i] = true;
                 frame->cursor = i + 1;
@@ -1419,6 +1433,10 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                     }
                     else if (part->kind == BUSTER_TYPE_KIND_FUNCTION)
                     {
+                        const bool bare = part->parameter_count == 0 && (part->flags & BUSTER_TYPE_FLAG_VARIADIC) != 0 && parser->language.standard < 2023;
+                        const bool overloadable = reader->declarator_overloadable ||
+                                                  (check_input_overload_flags(frame->attributes) & BUSTER_CHECK_OVERLOADABLE) != 0;
+                        valid &= !bare || (!frame->parameter && p == first && overloadable);
                         const uint64_t parameter_mark = reader->scratch->length;
                         TypeId* parameter_types = arena_push_array(reader->scratch, (uint64_t)part->parameter_count + 1, sizeof(TypeId), 4);
                         reader->output->resource |= parameter_types == 0;
@@ -1427,7 +1445,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                         {
                             parameter_types[count++] = parameters[parameter].type;
                         }
-                        type = parameter_types != 0 ? check_input_type_result(reader, type_function(reader->types, type, parameter_types, count, part->flags)) : 0;
+                        type = valid && parameter_types != 0 ? check_input_type_result(reader, type_function(reader->types, type, parameter_types, count, part->flags)) : 0;
                         arena_pop_to(reader->scratch, parameter_mark);
                     }
                     else
@@ -1442,6 +1460,8 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                 valid = type != 0;
                 valid &= !frame->parameter || ((frame->common_attributes == 0 || !frame->common_attributes->has_alignas) &&
                          (frame->attributes == 0 || !frame->attributes->has_alignas));
+                valid &= !frame->parameter || ((check_input_overload_flags(frame->common_attributes) |
+                          check_input_overload_flags(frame->attributes)) & BUSTER_CHECK_OVERLOADABLE) == 0;
                 if (valid && frame->parameter)
                 {
                     CheckDeclaratorFrame* parent = &frames[depth - 2];
@@ -1622,7 +1642,8 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             reader->output->attributes[frame->token] = frame->attributes;
             for (uint32_t attribute = 0; valid && frame->attributes != 0 && attribute < frame->attributes->count; attribute += 1)
             {
-                valid = frame->attributes->records[attribute].kind != CHECK_ATTRIBUTE_FALLTHROUGH;
+                valid = frame->attributes->records[attribute].kind != CHECK_ATTRIBUTE_FALLTHROUGH &&
+                        frame->attributes->records[attribute].kind != CHECK_ATTRIBUTE_OVERLOADABLE;
             }
             if (valid && kind == BUSTER_TYPE_KIND_ENUM)
             {
@@ -1778,6 +1799,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     const TypeId type = check_input_declarator(reader, base, &i, frame->close, &name, &parameters);
                     failed_token = name != BUSTER_CHECK_NONE ? name : declarator;
                     CheckInputAttributes* attributes = check_input_merge_attributes(reader, common_attributes, reader->declarator_attributes);
+                    valid &= (check_input_overload_flags(attributes) & BUSTER_CHECK_OVERLOADABLE) == 0;
                     uint32_t width = BUSTER_TYPE_NOT_BIT_FIELD;
                     if (i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_COLON)
                     {
@@ -1975,7 +1997,9 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     {
         uint32_t name;
         uint32_t parameters = BUSTER_CHECK_NONE;
+        reader->declarator_overloadable = (check_input_overload_flags(common_attributes) & BUSTER_CHECK_OVERLOADABLE) != 0;
         TypeId type = check_input_declarator(reader, base, &i, count, &name, &parameters);
+        reader->declarator_overloadable = false;
         CheckInputAttributes* attributes = check_input_merge_attributes(reader, common_attributes, reader->declarator_attributes);
         valid &= (common_attributes == 0 && reader->declarator_attributes == 0) || attributes != 0;
         if (is_typedef && type != 0 && attributes != 0 && attributes->alignment_log2 != 0)
@@ -1986,6 +2010,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         if (valid && attributes != 0)
         {
             valid = check_input_attribute_function(reader, attributes, type);
+            valid &= (check_input_overload_flags(attributes) & BUSTER_CHECK_OVERLOADABLE) == 0 ||
+                     (!is_typedef && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION);
             valid &= !attributes->has_alignas || (!is_typedef && storage != C_NAME_REGISTER);
             valid &= attributes->required_alignment_log2 == 0 || (!is_typedef && type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION &&
                      attributes->required_alignment_log2 - 1 >= type_alignment_log2(reader->types, type));
@@ -2014,7 +2040,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid &= complete_object;
             valid &= kind == PARSE_KIND_EQUAL || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE);
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
-            valid &= check_input_vla_declaration(reader, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
+            valid &= check_input_vla_declaration(reader, first, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
             if (valid)
             {
                 check_input_schedule(reader, name, i, type, is_typedef ? C_BINDING_TYPEDEF : function ? C_BINDING_FUNCTION : C_BINDING_OBJECT);
@@ -2107,6 +2133,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     const CBindingKind kind = (CBindingKind)reader->declaration_kinds[token];
     const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
     const bool linked_visible = old != 0 && reader->linkage[old_declaration] != 0 && reader->linkage[token] != 0;
+    const bool overload = check_input_overload_active(reader, token);
     if (old == 0 && reader->scope_count == 0)
     {
         const TypeId predefined = check_input_predefined_type(reader, name);
@@ -2120,7 +2147,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
-    if (old != 0 && (reader->bindings.depth[old - 1] == reader->scope_count || linked_visible))
+    if (!overload && old != 0 && (reader->bindings.depth[old - 1] == reader->scope_count || linked_visible))
     {
         const uint32_t previous = reader->bindings.declaration[old - 1];
         const TypeAnswer compatible = kind == C_BINDING_TYPEDEF ? type_same_canonical(reader->types, reader->declared_types[previous], reader->declared_types[token]) :
@@ -2154,7 +2181,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
-    if (reader->linkage[token] != 0 && reader->output->report_count == 0)
+    if (!overload && reader->linkage[token] != 0 && reader->output->report_count == 0)
     {
         // Lexical scope restoration does not create a new externally linked entity. Keep its compatibility and
         // object identity for the translation unit, while only a visible declaration contributes to the source
@@ -2197,6 +2224,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         }
         reader->linked_types[name] = composite;
     }
+    check_input_overload_declare(reader, token, point, old, overload);
     if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, reader->scope_count) == 0)
     {
         reader->output->resource = true;
@@ -2381,6 +2409,7 @@ static void check_input_resolve(CheckInputReader* reader)
         {
             const uint32_t parent = parser->tree.parents[i];
             reader->scope_marks[reader->scope_count] = c_bindings_mark(&reader->bindings);
+            reader->scope_openings[reader->scope_count] = i;
             reader->scope_ends[reader->scope_count] = parent < parser->tokens.count ? reader->ends[parent] : parser->tokens.count;
             reader->scope_count += 1;
             if (role == PARSE_ROLE_OPEN_BODY)
@@ -2506,6 +2535,11 @@ static void check_input_resolve(CheckInputReader* reader)
         if (!reader->ignored[i] && kind == PARSE_KIND_IDENTIFIER && role != PARSE_ROLE_MEMBER && role != PARSE_ROLE_TAG && role != PARSE_ROLE_LEAF_RIGHT)
         {
             const uint32_t identifier = parser->tokens.names[i];
+            if (reader->output->overload_heads != 0)
+            {
+                const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
+                reader->output->overload_heads[i] = handle != 0 ? reader->output->overload_heads[reader->bindings.declaration[handle - 1]] : 0;
+            }
             const uint16_t builtin = check_input_builtin_id(reader, i);
             if (builtin != CBUILTIN_NONE && role == PARSE_ROLE_OPERAND && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) == 0)
             {
@@ -2865,6 +2899,7 @@ static void check_input_expressions(CheckInputReader* reader)
                         .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                         .integer = enumeration ? reader->enum_values[declaration] : 0,
                         .object = reader->objects[declaration],
+                        .overload_head = reader->output->overload_heads != 0 ? reader->output->overload_heads[token] : 0,
                     };
                 }
             }
@@ -3224,6 +3259,22 @@ static void check_input_expressions(CheckInputReader* reader)
                 }
                 if (check_graph_has_arguments(op))
                 {
+                    if (op == CHECK_OP_CALL && reader->output->overload_heads != 0 && a != BUSTER_CHECK_NONE)
+                    {
+                        const uint32_t callee = graph->tokens[a];
+                        const uint32_t head = callee < parser->tokens.count ? reader->output->overload_heads[callee] : 0;
+                        if (head != 0)
+                        {
+                            if (graph->overload_count < graph->overload_capacity)
+                            {
+                                graph->overload_calls[graph->overload_count++] = (CheckOverloadCall){ .node = node, .head = head - 1 };
+                            }
+                            else
+                            {
+                                reader->output->resource = true;
+                            }
+                        }
+                    }
                     graph->argument_offsets[node] = op == CHECK_OP_BUILTIN_X86 ? intrinsic_offset : graph->argument_count;
                     graph->argument_counts[node] = count - (op == CHECK_OP_CALL);
                     for (uint32_t argument = op == CHECK_OP_BUILTIN_X86 ? BUSTER_CHECK_NONE : op == CHECK_OP_CALL ? b : a;
@@ -3259,7 +3310,8 @@ static void check_input_expressions(CheckInputReader* reader)
                             reader->output->resource = true;
                         }
                     }
-                    if (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC)
+                    if (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
+                        (op == CHECK_OP_BUILTIN_VECTOR && reader->builtins[token] == CBUILTIN_SHUFFLEVECTOR))
                     {
                         if (graph->builtin_count < graph->builtin_capacity)
                         {
@@ -3268,7 +3320,14 @@ static void check_input_expressions(CheckInputReader* reader)
                             const uint32_t end = check_constant_punctuation(parser, begin, token, PARSE_KIND_COMMA);
                             CheckBuiltinCall* evidence = &graph->builtin_calls[graph->builtin_count++];
                             *evidence = (CheckBuiltinCall){ .node = node };
-                            check_input_builtin_evidence(reader, begin, end, evidence);
+                            if (op == CHECK_OP_BUILTIN_VECTOR)
+                            {
+                                check_input_shuffle_evidence(reader, keyword, token, count, evidence);
+                            }
+                            else
+                            {
+                                check_input_builtin_evidence(reader, begin, end, evidence);
+                            }
                             if (reader->builtins[token] == CBUILTIN_CONSTANT_P && count == 1)
                             {
                                 evidence->constant_p_side_effects = check_input_builtin_syntax_effects(reader, a);
@@ -3296,6 +3355,14 @@ static void check_input_expressions(CheckInputReader* reader)
         }
         if (node != BUSTER_CHECK_NONE)
         {
+            if (reader->output->overload_heads != 0)
+            {
+                const CheckOp actual = (CheckOp)graph->ops[node];
+                const uint32_t child = graph->operand0[node];
+                const uint32_t child_token = child != BUSTER_CHECK_NONE ? graph->tokens[child] : parser->tokens.count;
+                reader->output->overload_heads[token] = actual == CHECK_OP_VALUE ? graph->leaves[node].overload_head :
+                    (actual == CHECK_OP_ADDRESS || actual == CHECK_OP_SELECT) && child_token < parser->tokens.count ? reader->output->overload_heads[child_token] : 0;
+            }
             if (reader->constant_contexts[token] && graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_EXPECT)
             {
                 const uint32_t keyword = reader->first_child[token];
@@ -3530,6 +3597,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(last_value, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(scope_marks, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(scope_ends, uint32_t);
+    BUSTER_CHECK_INPUT_ARRAY(scope_openings, uint32_t);
 #undef BUSTER_CHECK_INPUT_ARRAY
     reader.value_next = valid ? arena_push_array(scratch, graph_capacity, sizeof(uint32_t), 64) : 0;
     valid &= reader.value_next != 0;
@@ -3761,6 +3829,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             }
         }
         valid &= check_input_intrinsic_initialize(&reader);
+        valid &= check_input_overload_initialize(&reader);
         if (!check_input_target_supported(&pp->options))
         {
             check_input_report(&reader, 0, CHECK_INPUT_TARGET);
@@ -3815,7 +3884,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 for (uint32_t token = 0; token < count; token += 1)
                 {
                     const CheckOp op = check_graph_builtin_op((CBuiltinId)reader.builtins[token]);
-                    input->graph.builtin_capacity += op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC;
+                    input->graph.builtin_capacity += op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
+                                                     (op == CHECK_OP_BUILTIN_VECTOR && reader.builtins[token] == CBUILTIN_SHUFFLEVECTOR);
                 }
                 if (input->graph.builtin_capacity != 0)
                 {

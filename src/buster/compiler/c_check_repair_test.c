@@ -18,7 +18,7 @@ struct CheckRepairFixture
 
 // Use the production renderer so macro-body, paste and forwarding diagnostics are measured at their actual
 // primary location, rather than the spelling location of the expanded token.
-static uint32_t check_test_repair_line(const Parser* parser, Preprocessor* pp, uint32_t token)
+static uint32_t check_test_repair_source_line(Preprocessor* pp, uint32_t source)
 {
     uint32_t result = 0;
     FILE* stream = tmpfile();
@@ -29,7 +29,7 @@ static uint32_t check_test_repair_line(const Parser* parser, Preprocessor* pp, u
         const uint32_t errors = pp->errors;
         pp->options.diagnostics = stream;
         pp->options.quiet = false;
-        pp_diagnose_output(pp, PP_SEVERITY_ERROR, parser->tokens.sources[token], "repair fixture");
+        pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "repair fixture");
         pp->options.diagnostics = diagnostics;
         pp->options.quiet = quiet;
         pp->errors = errors;
@@ -42,6 +42,12 @@ static uint32_t check_test_repair_line(const Parser* parser, Preprocessor* pp, u
         fclose(stream);
     }
     return result;
+}
+
+static uint32_t check_test_repair_line(const Parser* parser, Preprocessor* pp, uint32_t token)
+{
+    const uint32_t line = check_test_repair_source_line(pp, parser->tokens.sources[token]);
+    return line;
 }
 
 static void check_test_repair_faults(CheckTest* test, const Parser* parser, Preprocessor* pp)
@@ -98,6 +104,57 @@ static void check_test_repair_faults(CheckTest* test, const Parser* parser, Prep
     arena_release(&output);
 }
 
+static void check_test_repair_pragma_faults(CheckTest* test, const Parser* parser, Preprocessor* pp)
+{
+    Arena output = arena_reserve(65536);
+    Arena scratch = arena_reserve(65536);
+    const bool initialized = output.base != 0 && scratch.base != 0;
+    check_test_expect(test, initialized, "original pragma diagnostic fault storage initializes");
+    if (initialized)
+    {
+        memset(arena_push(&output, output.capacity, 1), 0xa5, output.capacity);
+        memset(arena_push(&scratch, scratch.capacity, 1), 0x5a, scratch.capacity);
+        output.length = 33;
+        scratch.length = 19;
+        CheckInput input;
+        const uint32_t before = check_diagnostic_parse_end(parser);
+        const bool ready = check_diagnostic_original_pragmas(&input, parser, pp, before, &output, &scratch);
+        check_test_expect(test, ready && !input.resource && input.fp_pragma_count != 0 && input.diagnostic_pragmas != 0 && scratch.length == 19 &&
+                               input.graph.count == 0 && input.fp_environments == 0 && input.cx_limited_ranges == 0,
+                          "original pragma scan initializes poisoned storage without publishing a semantic environment or graph");
+        const uint64_t capacity = output.capacity;
+        const uint64_t required = output.length;
+        for (uint64_t limit = 33; ready && limit < required; limit += 1)
+        {
+            output.length = 33;
+            output.capacity = limit;
+            const bool valid = check_diagnostic_original_pragmas(&input, parser, pp, before, &output, &scratch);
+            check_test_expect(test, !valid && input.resource && input.fp_pragma_count == 0 && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0 &&
+                                   output.length == 33 && scratch.length == 19, "every original pragma output exhaustion rolls back the complete result");
+        }
+        output.capacity = capacity;
+        const uint64_t scratch_capacity = scratch.capacity;
+        bool recovered = false;
+        for (uint64_t limit = 19; ready && !recovered && limit < scratch_capacity; limit += 1)
+        {
+            output.length = 33;
+            scratch.capacity = limit;
+            recovered = check_diagnostic_original_pragmas(&input, parser, pp, before, &output, &scratch);
+            check_test_expect(test, scratch.length == 19 && (recovered ? !input.resource && input.fp_pragma_count != 0 :
+                                   input.resource && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0 && output.length == 33),
+                              "every original pragma scratch exhaustion rolls back and sufficient storage recovers");
+        }
+        check_test_expect(test, recovered, "original pragma scan recovers after scratch capacity is restored");
+        scratch.capacity = scratch_capacity;
+        output.length = 33;
+        check_test_expect(test, !check_diagnostic_original_pragmas(&input, parser, pp, before, &output, &output) && input.resource &&
+                               output.length == 33 && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0,
+                          "original pragma scan rejects aliased scratch and output without changing the arena");
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+}
+
 static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture* fixture, const char* path, const ParseTestClang* oracle, bool faults)
 {
     static InternTable identifiers;
@@ -133,6 +190,7 @@ static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture*
             snprintf(description, sizeof(description), "%s: repair status %u, expected %u", fixture->name, status, fixture->status);
             check_test_expect(test, status == fixture->status, description);
             lines[path_index] = outcome.line;
+            uint32_t semantic_token = BUSTER_CHECK_NONE;
             if (status == CHECK_REPAIR_READY)
             {
                 const Parser* view = &repair.parser;
@@ -144,6 +202,15 @@ static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture*
                                        memcmp(view->tokens.sources, original.tokens.sources, (uint64_t)cut * sizeof(uint32_t)) == 0 &&
                                        memcmp(view->tokens.flags, original.tokens.flags, cut) == 0;
                 check_test_expect(test, original_tokens, "repair preserves every original token, name, source and flag before its cutoff");
+                uint32_t original_pragmas = 0;
+                while (original_pragmas < original.tokens.pragma_count && original.tokens.pragma_positions[original_pragmas] <= cut)
+                {
+                    original_pragmas += 1;
+                }
+                check_test_expect(test, view->tokens.pragma_count == original_pragmas &&
+                                       view->tokens.pragma_positions == original.tokens.pragma_positions &&
+                                       view->tokens.pragma_sources == original.tokens.pragma_sources && check_repair_pragma_end(&repair) <= count,
+                                  "repair retains exactly original directives through the insertion boundary and borrows their unchanged source positions");
                 const Preprocessor* view_pp = repair.preprocessor;
                 bool same_output = view_pp != 0 && view_pp->output.count >= pp_count &&
                                    memcmp(view_pp->output.kinds, pp.output.kinds, pp_count) == 0 &&
@@ -188,6 +255,7 @@ static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture*
                 const bool adapted = check_input_fragment(&input, view, repair.preprocessor, &types.table, &input_storage, &scratch, cut);
                 check_test_expect(test, !input.resource, "repair fragment elaboration has sufficient storage");
                 uint32_t first = BUSTER_CHECK_NONE;
+                uint32_t first_source = BUSTER_CHECK_NONE;
                 for (uint32_t i = 0; i < input.report_count; i += 1)
                 {
                     const CheckInputReport* report = input.reports + i;
@@ -233,17 +301,27 @@ static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture*
                         first = initializer.token < first ? initializer.token : first;
                     }
                     CheckProgramDiagnostic control;
-                    const bool diagnosed = checked && check_program_diagnose(&control, &input, &stream, view, &types.table, cut, &scratch);
+                    const bool diagnosed = checked && check_program_diagnose(&control, &input, &stream, view, &types.table, repair.record_begin, &scratch);
                     check_test_expect(test, diagnosed && control.status != CHECK_PROGRAM_RESOURCE, "repair control diagnostic scan has sufficient storage");
-                    if (diagnosed && control.status == CHECK_PROGRAM_INVALID && control.token < cut && control.position < cut)
+                    if (diagnosed && control.status == CHECK_PROGRAM_INVALID && control.token < repair.record_begin && control.position < repair.record_begin)
                     {
                         first = control.token < first ? control.token : first;
                     }
                 }
+                uint32_t pragma_token = BUSTER_CHECK_NONE;
+                uint32_t pragma_source = BUSTER_CHECK_NONE;
+                if (check_diagnostic_first_pragma_error(&input, check_repair_pragma_end(&repair), &pragma_token, &pragma_source) && pragma_token <= first)
+                {
+                    first = pragma_token;
+                    first_source = pragma_source;
+                }
                 if (first != BUSTER_CHECK_NONE)
                 {
-                    check_test_expect(test, first < cut, "repair selected diagnostic belongs to an original completed statement");
-                    lines[path_index] = check_test_repair_line(&original, &pp, first);
+                    semantic_token = first;
+                    check_test_expect(test, first_source != BUSTER_CHECK_NONE ? first < check_repair_pragma_end(&repair) && first_source < pp_count : first < cut,
+                                      "repair selected diagnostic belongs to original syntax or a complete original pragma");
+                    lines[path_index] = first_source != BUSTER_CHECK_NONE ? check_test_repair_source_line(&pp, first_source) :
+                                                                          check_test_repair_line(&original, &pp, first);
                 }
                 if (faults && path_index == 0)
                 {
@@ -254,6 +332,23 @@ static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture*
             {
                 check_test_expect(test, repair.parser.tokens.count == 0 && repair.preprocessor == 0 && repair.original_end == 0 &&
                                       output.length == 0 && scratch.length == 0, "unavailable repair publishes no partial tree or type and restores arenas");
+            }
+            CheckInput original_pragmas;
+            const uint32_t pragma_end = check_diagnostic_parse_end(&original);
+            const bool pragmas = check_diagnostic_original_pragmas(&original_pragmas, &original, &pp, pragma_end, &input_storage, &scratch);
+            check_test_expect(test, pragmas && !original_pragmas.resource && original_pragmas.graph.count == 0 &&
+                                   original_pragmas.fp_environments == 0 && original_pragmas.cx_limited_ranges == 0,
+                              "original failed-parse pragma warnings require no repaired syntax or semantic environment");
+            uint32_t pragma_token = BUSTER_CHECK_NONE;
+            uint32_t pragma_source = BUSTER_CHECK_NONE;
+            if (pragmas && check_diagnostic_first_pragma_error(&original_pragmas, pragma_end, &pragma_token, &pragma_source) && pragma_token <= semantic_token)
+            {
+                check_test_expect(test, pragma_token < pragma_end && pragma_source < pp_count, "raw pragma warning retains original failure-lookahead/source bounds");
+                lines[path_index] = check_test_repair_source_line(&pp, pragma_source);
+            }
+            if (path_index == 0 && strcmp(fixture->name, "promoted pragma before the first malformed declaration") == 0)
+            {
+                check_test_repair_pragma_faults(test, &original, &pp);
             }
             snprintf(description, sizeof(description), "%s: %s first line %u, Clang %u, expected %u", fixture->name,
                      path_index == 0 ? "scalar" : "vector", lines[path_index], oracle->line, fixture->line);
@@ -684,10 +779,10 @@ static void check_test_repairs(CheckTest* test, const char* clang)
             CHECK_REPAIR_READY,
         },
         {
-            "unfinished first statement cannot be fabricated",
+            "empty original body does not fabricate its unfinished first statement",
             "int f(void)\n{\n return 0\n}\n",
             3,
-            CHECK_REPAIR_UNAVAILABLE,
+            CHECK_REPAIR_READY,
         },
         {
             "unterminated typedef cannot create a fake type",
@@ -699,7 +794,91 @@ static void check_test_repairs(CheckTest* test, const char* clang)
             "initializer brace cannot become a statement block",
             "int f(void)\n{\n int a[] = {\n 1;\n };\n}\n",
             4,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "promoted pragma before the first malformed declaration",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint sample(void)\n{\n#pragma STDC FENV_ACCESS UNCERTAIN\nint unfinished=;\n}\n",
+            4,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "ignored pragma before the first malformed declaration",
+            "#pragma clang diagnostic ignored \"-Wunknown-pragmas\"\nint sample(void)\n{\n#pragma STDC FENV_ACCESS UNCERTAIN\nint unfinished=;\n}\n",
+            5,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "pragma policy changes at the empty retained block position",
+            "int sample(void)\n{\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\n#pragma STDC FENV_ACCESS UNCERTAIN\n#pragma clang diagnostic ignored \"-Wunknown-pragmas\"\nint unfinished=;\n}\n",
+            4,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "promoted pragma inside an empty nested original block",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint sample(int n)\n{\nif(n){\n#pragma STDC FENV_ACCESS UNCERTAIN\nint unfinished=;\n}\n}\n",
+            5,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "promoted pragma inside an empty original DO block",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint sample(void)\n{\ndo{\n#pragma STDC FENV_ACCESS UNCERTAIN\nint unfinished=;\n}while(0);\n}\n",
+            5,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "excluded declaration operand cannot move a pragma to the empty body",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint sample(void)\n{\nint unfinished=\n#pragma STDC FENV_ACCESS UNCERTAIN\n;\n}\n",
+            5,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "later promoted pragma cannot precede an earlier original name error",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint sample(void)\n{\nmissing;\n#pragma STDC FENV_ACCESS UNCERTAIN\nint unfinished=;\n}\n",
+            4,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "original condition is diagnosed before an empty repaired block",
+            "int sample(void)\n{\nif(*1){\nint unfinished=;\n}\n}\n",
+            3,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "original pragma warning precedes AFTER_PREVIOUS rendered error line",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint sample(void)\n{\nreturn 0\n#pragma STDC FENV_ACCESS UNCERTAIN\n}\n",
+            5,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "original pragma warning works without a repairable declaration",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint unfinished=\n#pragma STDC FENV_ACCESS UNCERTAIN\n;\n",
+            3,
             CHECK_REPAIR_UNAVAILABLE,
+        },
+        {
+            "pragma after the original failure lookahead cannot precede it",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint sample(void)\n{\nint unfinished=;\n#pragma STDC FENV_ACCESS UNCERTAIN\n}\n",
+            4,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "complex pragma state is diagnosed inside an unfinished expression",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint sample(void)\n{\nint unfinished=\n#pragma STDC CX_LIMITED_RANGE UNCERTAIN\n;\n}\n",
+            5,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "ignored raw pragma state preserves the original syntax error",
+            "#pragma clang diagnostic ignored \"-Wunknown-pragmas\"\nint sample(void)\n{\nint unfinished=\n#pragma STDC FENV_ACCESS UNCERTAIN\n;\n}\n",
+            6,
+            CHECK_REPAIR_READY,
+        },
+        {
+            "valid raw state does not invent an unknown-state warning",
+            "#pragma clang diagnostic error \"-Wunknown-pragmas\"\nint sample(void)\n{\n#pragma STDC FENV_ACCESS ON\nint unfinished=;\n}\n",
+            5,
+            CHECK_REPAIR_READY,
         },
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };

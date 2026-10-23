@@ -2,7 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Diagnostic-only recovery of completed statements in the first malformed declaration. The original parser has
-// already rejected the unit and erased that declaration's tree. Retain tokens through its last complete statement,
+// already rejected the unit and erased that declaration's tree. Retain tokens through its last complete statement
+// or proven compound opening (an empty prefix can still retain an earlier original pragma),
 // close only original compound statements/function bodies, and reparse with the existing bounded scalar parser.
 // An original `do {` additionally needs exactly `while (0);`; a private preprocessor-output view appends that integer
 // token for ordinary literal decoding. A recognized struct/union prefix can instead retain complete original
@@ -160,6 +161,10 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
             other += kind != PARSE_KIND_L_BRACE;
             unsafe += kind == PARSE_KIND_L_BRACE && !statement;
             records += record;
+            if (statement && other == 0 && unsafe == 0)
+            {
+                cut = token + 1;
+            }
         }
         else if (kind == PARSE_KIND_R_BRACE || kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE)
         {
@@ -278,7 +283,9 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
         {
             view->meanings.meanings[view->predeclared[i]] = PARSE_MEANING_TYPEDEF;
         }
-        while (view->tokens.pragma_count < original->tokens.pragma_count && original->tokens.pragma_positions[view->tokens.pragma_count] < cut)
+        // A directive between the last retained token and the first excluded token belongs to the original
+        // prefix. Its insertion position can equal cut, but its complete spelling remains in original PP output.
+        while (view->tokens.pragma_count < original->tokens.pragma_count && original->tokens.pragma_positions[view->tokens.pragma_count] <= cut)
         {
             view->tokens.pragma_count += 1;
         }
@@ -392,6 +399,16 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
 static bool check_repair_warning_token(const CheckRepair* repair, uint32_t token)
 {
     return repair->status == CHECK_REPAIR_READY && token < repair->original_end && repair->warning_complete != 0 && repair->warning_complete[token];
+}
+
+// Exclusive bound for retained pragma insertion positions only. Original directives just after a retained block
+// opening/statement can sit at original_end, where the private view's first synthetic closer will be inserted.
+// Ordinary token diagnostics keep their strict original_end/record_begin bounds; a synthetic token is never a
+// pragma source. Inside a synthetically completed record, keep the existing stricter record boundary.
+static uint32_t check_repair_pragma_end(const CheckRepair* repair)
+{
+    const uint32_t end = repair->status == CHECK_REPAIR_READY ? repair->record_begin + (repair->record_begin == repair->original_end) : 0;
+    return end;
 }
 
 static bool check_repair_input_report(const CheckRepair* repair, const CheckInputReport* report)
