@@ -170,6 +170,36 @@ designs and the compilers already built this way.
   records the API, text grammar and frontend-dependent acceptance. Run builds
   and tests through the approved 9700X's shared per-run lock.
 
+- `test-differential-harness` validates the Csmith/YARPGen harness with original
+  fixtures. `test-differential` requires explicit compiler/tier configuration
+  and preserves generators, commands, artifacts and failures. Missing tools or
+  executable source lowering return unavailable, never a campaign pass. See
+  [the differential guide](docs/differential.md). Use the shared 9700X lock per
+  run and bounded campaigns that yield to CI.
+
+- `dominators.c` analyzes borrowed CFG columns into dominance intervals,
+  optional frontier bitsets and natural loops. `test-dominators` checks both
+  paths against independent graph definitions; `benchmark-dominators` includes
+  analysis and synthetic producer/consumer measurements. [The dominator
+  guide](docs/dominators.md) records memory limits and pending corpus evidence.
+  Take the shared 9700X lock per build/test/measurement and pin timing to CPU 2.
+
+- `tier1_allocate.c` and `tier1_rematerialize.c` supply bounded interval
+  allocation, required-use reload splitting, parallel moves and baseline-x86
+  rematerialization. `test-tier1-allocation` includes native execution and
+  guarded tails; `benchmark-tier1-allocation` measures full preparation and
+  allocation. [The allocation guide](docs/tier1-allocation.md) records producer
+  constraints and pending CFG/corpus emission. Use the shared 9700X lock per
+  build/test/measurement and CPU 2 for timing.
+
+- `tier1_frame.c` provides interval slot coloring and explicit frame plans for
+  #177. `test-tier1-frame` checks independent pressure/layout/prologue oracles;
+  `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
+  `test-tier1-frame-execution` runs native prologues/epilogues, ABI preservation,
+  variadic saves and guarded page probes. [The frame guide](docs/tier1-frame.md)
+  records reservations before allocation and pending corpus evidence. Take the shared 9700X lock per
+  build/test/measurement and pin timing to CPU 2.
+
 - `tier1_schedule.c` provides an opt-in postallocation machine-record scheduler.
   `test-tier1-schedule` checks scalar/vector ordering, barriers and model coverage;
   `benchmark-tier1-schedule` measures scheduling plus encoding and a synthetic
