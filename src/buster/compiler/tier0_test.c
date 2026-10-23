@@ -891,7 +891,15 @@ static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUST
         {
             fprintf(file, "    memcpy(&c_g%u, c_s%u, sizeof c_s%u);\n    memcpy(&t0_g%u, t0_s%u, sizeof t0_s%u);\n", g, g, g, g, g, g);
         }
-        fprintf(file, "}\n\nstatic const unsigned long inputs[%u][3] = {\n", BUSTER_TIER0_TEST_INPUTS);
+        // A floating global's elements compare as their bytes, but any two NaNs are the same: C leaves a NaN's sign and
+        // payload to the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where divsd makes -NaN.
+        fprintf(file, "}\n\nstatic int same_double(const double* a, const double* b, unsigned long count)\n{\n    int same = 1;\n"
+                      "    for (unsigned long i = 0; i < count; i += 1)\n    {\n"
+                      "        same &= memcmp(&a[i], &b[i], sizeof a[i]) == 0 || (a[i] != a[i] && b[i] != b[i]);\n    }\n    return same;\n}\n\n");
+        fprintf(file, "static int same_float(const float* a, const float* b, unsigned long count)\n{\n    int same = 1;\n"
+                      "    for (unsigned long i = 0; i < count; i += 1)\n    {\n"
+                      "        same &= memcmp(&a[i], &b[i], sizeof a[i]) == 0 || (a[i] != a[i] && b[i] != b[i]);\n    }\n    return same;\n}\n");
+        fprintf(file, "\nstatic const unsigned long inputs[%u][3] = {\n", BUSTER_TIER0_TEST_INPUTS);
         for (uint32_t r = 0; r < BUSTER_TIER0_TEST_INPUTS; r += 1)
         {
             fprintf(file, "    { 0x%llxul, 0x%llxul, 0x%llxul },\n", (unsigned long long)inputs[r][0], (unsigned long long)inputs[r][1], (unsigned long long)inputs[r][2]);
@@ -908,8 +916,17 @@ static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUST
         fprintf(file, "        if (c != t)\n        {\n            printf(\"mismatch input %%d: clang %%016lx tier0 %%016lx\\n\", r, c, t);\n            failures += 1;\n        }\n");
         for (uint32_t g = 0; g < program->global_count; g += 1)
         {
-            fprintf(file, "        if (memcmp(&c_g%u, &t0_g%u, sizeof c_g%u) != 0)\n        {\n            printf(\"mismatch input %%d: global %u\\n\", r);\n"
-                          "            failures += 1;\n        }\n", g, g, g, g);
+            const uint32_t class = program->global_classes[g];
+            if (tier0_class_floating(class))
+            {
+                const char* same = class == BUSTER_TYPED_CLASS_F32 ? "same_float" : "same_double";
+                fprintf(file, "        if (!%s((const void*)&c_g%u, (const void*)&t0_g%u, sizeof c_g%u / %u))\n", same, g, g, g, tier0_class_bytes(class));
+            }
+            else
+            {
+                fprintf(file, "        if (memcmp(&c_g%u, &t0_g%u, sizeof c_g%u) != 0)\n", g, g, g);
+            }
+            fprintf(file, "        {\n            printf(\"mismatch input %%d: global %u\\n\", r);\n            failures += 1;\n        }\n", g);
         }
         fprintf(file, "    }\n    long long times[2] = { 0, 0 };\n    for (int side = 0; side < 2; side += 1)\n    {\n        long long start = now();\n");
         fprintf(file, "        for (int k = 0; k < 64; k += 1)\n        {\n            for (int r = 0; r < %u; r += 1)\n            {\n                reset();\n", BUSTER_TIER0_TEST_INPUTS);

@@ -37,7 +37,7 @@
 
 #define BUSTER_TIER0_GENERATE_MAX_FUNCTIONS 64
 #define BUSTER_TIER0_GENERATE_MAX_GLOBALS 64
-#define BUSTER_TIER0_GENERATE_MAX_PARAMETERS 10
+#define BUSTER_TIER0_GENERATE_MAX_PARAMETERS 12
 #define BUSTER_TIER0_GENERATE_MAX_LOCALS 48
 #define BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS 16
 #define BUSTER_TIER0_GENERATE_EXPRESSION_NODES 128
@@ -442,6 +442,10 @@ static void tier0_generate_expression(const Tier0Program* program, const Tier0Sc
             static const uint8_t integer_operations[] = { BUSTER_TYPED_ADD, BUSTER_TYPED_SUB, BUSTER_TYPED_MUL, BUSTER_TYPED_AND, BUSTER_TYPED_OR,
                                                           BUSTER_TYPED_XOR, BUSTER_TYPED_DIV, BUSTER_TYPED_MOD, BUSTER_TYPED_SHL, BUSTER_TYPED_SHR };
             static const uint8_t floating_operations[] = { BUSTER_TYPED_ADD, BUSTER_TYPED_SUB, BUSTER_TYPED_MUL, BUSTER_TYPED_DIV };
+            // Pointer arithmetic as a U64 value (a + b * size, modulo 2^64): element sizes for each of its forms, SIB
+            // scales, imul's imm32 and sizes past it, with an index of either signedness.
+            static const uint64_t sizes[] = { 1,          2,          3,           4,           8,           12,          24,         4096,
+                                              0x7fffffff, 0x80000000, 0xffffffff, 0x100000000, 0x100000003, 0x8000000000000000, 0xfffffffffffffff8 };
             node->kind = BUSTER_TIER0_EXPRESSION_BINARY;
             node->operation = arithmetic ? integer_operations[tier0_generate_below(state, BUSTER_ARRAY_LENGTH(integer_operations))]
                                          : floating_operations[tier0_generate_below(state, BUSTER_ARRAY_LENGTH(floating_operations))];
@@ -449,6 +453,12 @@ static void tier0_generate_expression(const Tier0Program* program, const Tier0Sc
             if (node->operation == BUSTER_TYPED_SHL || node->operation == BUSTER_TYPED_SHR)
             {
                 child_classes[1] = BUSTER_TYPED_CLASS_I32;
+            }
+            if (wanted == BUSTER_TYPED_CLASS_U64 && tier0_generate_chance(state, 25))
+            {
+                node->operation = BUSTER_TYPED_PTR_ADD;
+                node->value = sizes[tier0_generate_below(state, BUSTER_ARRAY_LENGTH(sizes))];
+                child_classes[1] = tier0_generate_chance(state, 50) ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_U64;
             }
         }
         else if (choice < 38 && (arithmetic || is_floating))
@@ -664,7 +674,8 @@ static void tier0_emit_expression(Tier0Program* program, const Tier0GeneratedFun
                     tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, tier0_class_bytes(class) * 8 - 1);
                     tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
                 }
-                tier0_emit(program, node->operation, class, 0);
+                // A pointer addition's value is its element size (0 for the other operations).
+                tier0_emit(program, node->operation, class, node->value);
                 break;
             default:
                 break;
@@ -764,9 +775,18 @@ static void tier0_print_expression(Tier0Program* program, const char* prefix, co
             const uint32_t op = node->operation;
             const bool divide = (op == BUSTER_TYPED_DIV || op == BUSTER_TYPED_MOD) && !tier0_class_floating(node->class);
             const bool shift = op == BUSTER_TYPED_SHL || op == BUSTER_TYPED_SHR;
+            const bool pointer_add = op == BUSTER_TYPED_PTR_ADD;
             if (first)
             {
                 tier0_text(program, "((%s)((", type);
+            }
+            else if (!last && pointer_add)
+            {
+                tier0_text(program, ") + (unsigned long)(");
+            }
+            else if (pointer_add)
+            {
+                tier0_text(program, ") * %#llxul))", (unsigned long long)node->value);
             }
             else if (!last && divide)
             {
@@ -1402,8 +1422,8 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
     {
         state.counters[d] = UINT32_MAX;
     }
-    // The signature.
-    const uint32_t parameters = entry ? 3 : tier0_generate_below(random, 7);
+    // The signature: up to 6 parameters mostly, and 7 to 12 one time in five, past the argument registers.
+    const uint32_t parameters = entry ? 3 : tier0_generate_chance(random, 20) ? 7 + tier0_generate_below(random, 6) : tier0_generate_below(random, 7);
     function->result_class = (uint8_t)(entry ? BUSTER_TYPED_CLASS_U64 : tier0_generate_chance(random, 15) ? BUSTER_TYPED_CLASS_VOID : tier0_generate_class(random, options->floating));
     for (uint32_t p = 0; p < parameters; p += 1)
     {

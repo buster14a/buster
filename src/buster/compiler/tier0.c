@@ -498,6 +498,7 @@ struct Tier0RecordSpec
 //   - INDEX_CONST(s), INDEX_HOME(s), OFFSET_HOME: a store's address [R2 + R1 * 2^s] (or [R1 + K]) and its value a
 //     constant (K) or a local (A).
 //   - LAST: a return that is the function's last entry, without the jump to the epilogue.
+//   - WIDE_SCALE: a pointer addition whose element size is past imul's sign-extended imm32, materialized in R0.
 #define BUSTER_TIER0_VARIANT_PLAIN 0
 #define BUSTER_TIER0_VARIANT_CONST 1
 #define BUSTER_TIER0_VARIANT_HOME 2
@@ -514,6 +515,7 @@ struct Tier0RecordSpec
 #define BUSTER_TIER0_VARIANT_INDEX_HOME(s) (25 + (s))
 #define BUSTER_TIER0_VARIANT_OFFSET_HOME 29
 #define BUSTER_TIER0_VARIANT_LAST 30
+#define BUSTER_TIER0_VARIANT_WIDE_SCALE 31
 #define BUSTER_TIER0_VARIANT_CONVERT_HOME 16
 #define BUSTER_TIER0_VARIANTS 32
 
@@ -1819,6 +1821,14 @@ static void tier0_define_templates(void)
     tier0_add(tier0_with_k(tier0_rr(X86_FORM_IMUL_R64_RM64_IMM32, BUSTER_TIER0_SOURCE_R1, BUSTER_TIER0_SOURCE_R1), 0));
     tier0_add(tier0_rr(X86_FORM_ADD_R64_RM64, BUSTER_TIER0_SOURCE_R2, BUSTER_TIER0_SOURCE_R1));
     tier0_end(BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN, 0);
+    // A size past the imm32 (which imul sign-extends): in R0, as a constant is (the choice pass shortens the mov), then
+    // the 64-bit imul.
+    tier0_begin();
+    tier0_holes_from(0, no, no);
+    tier0_add(tier0_with_k(tier0_r(X86_FORM_MOV_RM64_IMM32, BUSTER_TIER0_SOURCE_R0), 0));
+    tier0_add(tier0_rr(X86_FORM_IMUL_R64_RM64, BUSTER_TIER0_SOURCE_R1, BUSTER_TIER0_SOURCE_R0));
+    tier0_add(tier0_rr(X86_FORM_ADD_R64_RM64, BUSTER_TIER0_SOURCE_R2, BUSTER_TIER0_SOURCE_R1));
+    tier0_end(BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_WIDE_SCALE, 0);
     tier0_begin();
     tier0_holes_from(1, 0, no);
     tier0_add(tier0_with_k(tier0_r(X86_FORM_ADD_RM64_IMM32, BUSTER_TIER0_SOURCE_R1), 0));
@@ -2168,6 +2178,10 @@ static void tier0_fuse_scalar(const Tier0Function* function, const uint64_t* lab
         {
             variant = BUSTER_TIER0_VARIANT_INDEX(log2);
         }
+        else if (kind == BUSTER_TYPED_PTR_ADD && values[i] > INT32_MAX)
+        {
+            variant = BUSTER_TIER0_VARIANT_WIDE_SCALE;
+        }
         else if (kind == BUSTER_TYPED_RETURN && i + 1 == function->count)
         {
             variant = BUSTER_TIER0_VARIANT_LAST;
@@ -2397,8 +2411,9 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
 // Phase 3: each local's home, and the frame. A parameter whose register the body doesn't touch stays in it. The other
 // locals, most referenced first (by index among equals), take the free caller-saved registers, then (referenced at
 // least twice, for a push and a pop) the callee-saved ones; a floating local takes a free XMM register. The rest, and
-// every local whose address is taken, get frame slots; a parameter on the stack keeps its incoming slot. `references`
-// (local_count) holds each local's references, and `order` (local_count) is scratch.
+// every local whose address is taken, get frame slots; a parameter on the stack keeps its incoming slot, unless it takes
+// a register, which the prologue loads from that slot. `references` (local_count) holds each local's references, and
+// `order` (local_count) is scratch.
 static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, uint32_t* order)
 {
     const uint32_t locals = function->local_count;
@@ -3149,12 +3164,20 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
         const uint32_t form = frame->size <= 127 ? X86_FORM_SUB_RM64_IMM8 : X86_FORM_SUB_RM64_IMM32;
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
     }
+    // Each parameter into its home: a register's moved or stored, and a register home of one on the stack loaded from its
+    // incoming slot. No home is an arrival register (tier0_assign_homes), so the order doesn't matter.
+    const uint32_t above = 8 * frame->pushes + 8;
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
     {
         const AbiLocation location = function->parameters[p];
         const uint32_t class = function->local_classes[p];
         const bool address_taken = (function->local_flags[p] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
-        if (location.kind == BUSTER_ABI_LOCATION_REGISTERS && (references[p] != 0 || address_taken))
+        if (location.kind == BUSTER_ABI_LOCATION_STACK && homes[p].is_register)
+        {
+            const int32_t incoming = (int32_t)(frame->size + above + location.stack_offset);
+            tier0_put(writer, tier0_instruction(tier0_value_load_form(class), homes[p].reg, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, incoming, 0));
+        }
+        else if (location.kind == BUSTER_ABI_LOCATION_REGISTERS && (references[p] != 0 || address_taken))
         {
             const uint8_t arrival = location.registers[0];
             const bool floating = (arrival & BUSTER_ABI_REGISTER_VECTOR) != 0;
@@ -4367,6 +4390,7 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         variant = _mm512_mask_mov_epi8(variant, floating_zero, tier0_variant(BUSTER_TIER0_VARIANT_CONST));
         const __m512i sib_log2 = _mm512_maskz_loadu_epi8(lanes, bits->sib_log2 + first);
         variant = _mm512_mask_add_epi8(variant, pointer_add & bits->sib[block], sib_log2, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(0)));
+        variant = _mm512_mask_mov_epi8(variant, lanes & pointer_add & ~size, tier0_variant(BUSTER_TIER0_VARIANT_WIDE_SCALE));
         const uint64_t last_entry = count != 0 && count - 1 >= first && count - 1 < first + 64 ? 1ull << (count - 1 - first) : 0;
         variant = _mm512_mask_mov_epi8(variant, _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_RETURN)) & last_entry,
                                        tier0_variant(BUSTER_TIER0_VARIANT_LAST));

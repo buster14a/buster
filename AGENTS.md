@@ -3496,7 +3496,9 @@ informational.
 2.9 s with `--cross-check`) checks `tier0.c` on programs from
 `tier0_generate.c`, `--count` (300) of each of four shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
-address-taken locals); and larger. Every function must pass `tier0_validate`,
+address-taken locals); and larger. Their calls pass up to 12 arguments, past
+the argument registers, and their pointer arithmetic has element sizes for each
+of its templates, past imul's imm32 too. Every function must pass `tier0_validate`,
 both paths must compile it to the same records, branch columns and references,
 and the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`. Each program is then sized, encoded, loaded into
@@ -3508,7 +3510,8 @@ With `--cross-check`, which needs clang (`--clang PATH`) and `size`, each of
 `--cross-count` (60) programs of the larger shape, keeping to what C defines,
 is written as Tier 0's object (the link representation and the object writer)
 and as C, which clang -O0 compiles; a generated harness links both, runs them
-on the same inputs and compares the results and every global, then times both.
+on the same inputs and compares the results and every global (a floating
+one's NaNs alike whatever their bits, as C leaves them), then times both.
 It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
 run times. The files go in a directory under `$TMPDIR` (or `/tmp`), kept with
 `--keep` or on a failure. The 9700X job's test step runs it with

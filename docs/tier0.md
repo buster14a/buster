@@ -100,7 +100,7 @@ the 64-entry batches full across small functions. That is a follow-up, measured 
 **Records:**
 
 - a prologue: the callee-saved registers the homes or depths use pushed, `sub rsp`, and the parameters moved to their
-  homes;
+  homes (a stack parameter with a register home loaded from its incoming slot);
 - the body;
 - the epilogue.
 
@@ -155,14 +155,17 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
 3. Then they take the callee-saved registers, for a local referenced at least twice (a push and a pop).
 4. Floating locals take free XMM registers.
 5. Address-taken locals and the rest get 8-byte frame slots, rsp-relative (no frame pointer). A stack parameter keeps
-   its incoming slot.
+   its incoming slot, unless it took a register, which the prologue loads from that slot. No home is a register a
+   parameter arrives in, so the prologue's moves and loads never overwrite one another's sources.
 
 This is what beats clang -O0, which loads and stores every local at every use. The counting loop for `s += i` compiles
 to `xor edx, edx; xor ecx, ecx; mov eax, ecx; cmp eax, edi; jge; add edx, ecx; inc ecx; jmp`.
 
 **Templates.** A template is up to four records, one per (kind, class, variant). The variant says what the entry
-absorbed (`BUSTER_TIER0_VARIANT_*`); a home-dependent slot holds four templates, one per home case. The records'
-fields come from the entry's 32-byte hole block:
+absorbed (`BUSTER_TIER0_VARIANT_*`); a home-dependent slot holds four templates, one per home case. A pointer
+addition's element size picks its own: `lea` for 1, 2, 4 and 8, `imul r, r, imm32` up to 2^31 − 1, and past that
+(`WIDE_SCALE`) the size in the next register, as a constant is, then a 64-bit `imul`. The records' fields come from
+the entry's 32-byte hole block:
 
 - K, the constant;
 - A, the fused local's home;
@@ -249,10 +252,13 @@ of integers, integers and calls, everything, and larger, 300 each by default. Ea
 
 **The generator** (`tier0_generate.c`) writes each program both as typed streams and as C. Its programs have:
 
-- parameters and locals of every class, address-taken locals and pointers to them and to global arrays;
+- parameters and locals of every class, address-taken locals and pointers to them and to global arrays; one function
+  in five has 7 to 12 parameters, past the argument registers;
 - assignments, compound assignments through pointers and array elements, increments, calls;
 - if and else, counted while, for and do loops with break and continue, early returns;
-- expressions of every operation over every class, with conversions, `?:`, `&&` and `||` as values, and compares.
+- expressions of every operation over every class, with conversions, `?:`, `&&` and `||` as values, and compares;
+- pointer arithmetic as a U64 value, with element sizes for each of its templates: 1 to 8, imul's imm32, and sizes past
+  it to 2^64 − 8.
 
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
@@ -261,11 +267,15 @@ printed by walks with explicit stacks. Their expressions stay within 12 stack sl
 link representation and the object writer. clang -O0 compiles the same program as C, and a generated harness links
 both, runs them on the same inputs and compares the results and every global. These programs keep to what C defines:
 clang folds an out-of-range floating conversion of a constant its own way, so a floating value converts to an integer
-only from a short's value.
+only from a short's value. A floating global's elements compare as their bytes, but any two NaNs are the same: C leaves
+a NaN's sign and payload to the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN.
 
 **Robustness:**
 
-- 16,000 programs over four seeds, 752,016 checks, passed.
+- 19,200 programs over six seeds, 902,424 checks, passed.
+- #303's review found two bugs the generator missed: a stack parameter's register home never loaded, and an element
+  size past imul's imm32 truncated. Its programs now have both (stack parameters, and pointer arithmetic of every
+  size), and before the fixes they failed dozens of runs against the interpreter.
 - Mutations, all caught:
   - the vector fusion without x = x op v: 160 failed checks, on 50 programs per shape;
   - and on the passes after fusion, 200 programs per shape: emission's second blocks read as the first, 800;
@@ -278,7 +288,8 @@ only from a short's value.
 
 The 9700X, CPU 2, `benchmark-backend`: generated programs' 2,216 functions, 262,894 typed entries, 292,738 records
 (1.11 per entry) and 1,107,677 bytes. 3.7% of entries are deferred, most of them calls. Medians of 21 passes, with
-the builds before and after vectorizing the passes after fusion run in turn, twice each:
+the builds before and after vectorizing the passes after fusion run in turn, twice each (the generator's programs
+before it gained stack parameters and pointer arithmetic):
 
 | Variant | ns per entry | Cycles per entry | Instructions per entry | Cycles per record | IPC |
 | --- | --- | --- | --- | --- | --- |
