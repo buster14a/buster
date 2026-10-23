@@ -12,7 +12,7 @@ must exactly match that 220-entry C manifest: no missing files, extra source
 inputs or headers. A zero-file or reduced-input run is not acceptance. The
 parser's original-file count must be 220, and the preprocessor TSV must list
 those same 220 paths exactly once. Corpus hashes and enumeration were checked
-against the retained manifest before evaluating results.
+against the retained manifest before and after the runs.
 
 The compiler source revision is `5a9e05048c7c4494491bf2eb62d9f326cf940218`.
 Its approved-host executable has SHA-256
