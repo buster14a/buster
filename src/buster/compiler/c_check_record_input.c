@@ -4,13 +4,14 @@
 // Anonymous members introduce their named members into the containing record's namespace. Validate that expanded
 // namespace with an explicit stack and a bounded hash table before layout; named aggregate fields do not expand.
 
-static bool check_input_record_names(CheckInputReader* reader, const TypeMember* members, uint32_t count, uint32_t bound, uint32_t* names)
+static bool check_input_record_names(CheckInputReader* reader, const TypeMember* members, uint32_t count, uint32_t bound, uint32_t* names, uint32_t* failed_member)
 {
     typedef struct CheckRecordNameFrame CheckRecordNameFrame;
     struct CheckRecordNameFrame
     {
         uint32_t next;
         uint32_t end;
+        uint32_t root_member;
         bool root;
     };
     const uint64_t mark = reader->scratch->length;
@@ -24,6 +25,7 @@ static bool check_input_record_names(CheckInputReader* reader, const TypeMember*
     bool valid = identifiers != 0 && stack != 0;
     reader->output->resource |= !valid;
     *names = 0;
+    *failed_member = BUSTER_CHECK_NONE;
     if (valid)
     {
         memset(identifiers, 0, capacity * sizeof(uint32_t));
@@ -39,6 +41,7 @@ static bool check_input_record_names(CheckInputReader* reader, const TypeMember*
             else
             {
                 const uint32_t index = frame->next++;
+                const uint32_t root_member = frame->root ? index : frame->root_member;
                 const uint32_t name = frame->root ? members[index].name : reader->types->members.name[index];
                 const TypeId type = frame->root ? members[index].type : reader->types->members.type[index];
                 const bool bit_field = frame->root ? members[index].bit_width != BUSTER_TYPE_NOT_BIT_FIELD :
@@ -63,8 +66,12 @@ static bool check_input_record_names(CheckInputReader* reader, const TypeMember*
                     {
                         const uint32_t tag = reader->types->types.index[type_index(record)];
                         const uint32_t first = reader->types->tags.member_begin[tag];
-                        stack[depth++] = (CheckRecordNameFrame){ .next = first, .end = first + reader->types->tags.member_count[tag] };
+                        stack[depth++] = (CheckRecordNameFrame){ .next = first, .end = first + reader->types->tags.member_count[tag], .root_member = root_member };
                     }
+                }
+                if (!valid)
+                {
+                    *failed_member = root_member;
                 }
             }
         }

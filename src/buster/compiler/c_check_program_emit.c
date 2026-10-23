@@ -2,7 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The real consumer of CheckProgram: lower, validate, compile, size branches, encode, and publish code atoms and
-// their symbolic fixups in the Link shared with static data. Symbol IDs are assigned once by check_program.
+// their symbolic fixups in the Link shared with static data. check_program assigns source object symbols;
+// lowering appends helper and explicit target-runtime symbols before any atom/fixup publication.
 // data_capacity reserves the data consumer's atoms/fixups; that consumer defines its already-created symbols.
 // The caller performs final link_check after both publications. Output tables/names and byte arenas are distinct
 // from scratch; all three roll back on failure. Backend template initialization precedes concurrent workers.
@@ -85,14 +86,22 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             result->token = program->bodies[b].declaration;
         }
     }
-    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count;
+    const CheckProgramHelpers* helpers = &result->lowered.helpers;
+    for (uint32_t h = 0; valid && h < helpers->count; h += 1)
+    {
+        references += helpers->items[h].code.reference_count;
+        result->records += helpers->items[h].code.count;
+        result->deferred += helpers->items[h].code.deferred;
+    }
+    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references;
-    valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX;
+    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count;
+    valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX;
     const LinkCapacity capacity = {
-        .names = program->symbol_count,
+        .names = valid ? (uint32_t)symbol_count : 0,
         .atoms = valid ? (uint32_t)atom_count : 0,
-        .symbols = program->symbol_count,
+        .symbols = valid ? (uint32_t)symbol_count : 0,
         .fixups = valid ? (uint32_t)fixup_count : 0,
         .wide_addends = valid ? (uint32_t)wide_count : 0,
         .priorities = data_capacity.priorities,
@@ -134,9 +143,28 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         }
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, flags, BUSTER_LINK_SOURCE_NONE) == s + 1;
     }
-    for (uint32_t b = 0; valid && b < count; b += 1)
+    for (uint32_t h = 0; valid && h < helpers->count; h += 1)
     {
-        const Tier0Code* code = &codes[b];
+        const CheckProgramHelper* helper = helpers->items + h;
+        char spelling[64];
+        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_builtin_%u_%u", helper->id, helper->bytes);
+        const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION,
+                                            BUSTER_LINK_SOURCE_NONE) == helper->symbol;
+    }
+    if (valid && result->lowered.runtime_symbol_count != 0)
+    {
+        const NameId name = link_add_name(&result->link, (const uint8_t*)"__errno_location", sizeof("__errno_location") - 1);
+        valid = name != 0 && result->lowered.runtime_symbol_count == 1 &&
+                link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION,
+                                BUSTER_LINK_SOURCE_NONE) == result->lowered.errno_symbol;
+    }
+    for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
+    {
+        const bool source_body = b < count;
+        const Tier0Code* code = source_body ? &codes[b] : &helpers->items[b - count].code;
+        const SymbolId symbol = source_body ? program->object_symbols[program->bodies[b].object] : helpers->items[b - count].symbol;
+        const uint8_t alignment = source_body && alignments[symbol] > 5 ? alignments[symbol] - 1 : 4;
         const uint64_t work_mark = scratch->length;
         uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1);
         uint32_t* fixup_ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(code->reference_count));
@@ -148,14 +176,14 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         {
             const BranchSizingCheck shape = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
             const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
-            const int64_t length = sizing.error == BRANCH_SIZING_OK ? x86_encode(code->records, code->count, encoded, byte_capacity, 0, fixup_ends) : -1;
+            const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
+                                   scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, fixup_ends) :
+                                            x86_encode(code->records, code->count, encoded, byte_capacity, 0, fixup_ends);
             valid = length >= 0;
             if (valid)
             {
                 const uint64_t end = (uint64_t)(encoded - bytes->base) + (uint64_t)length;
                 arena_pop_to(bytes, end > before ? end : before);
-                const SymbolId symbol = program->object_symbols[program->bodies[b].object];
-                const uint8_t alignment = alignments[symbol] > 5 ? alignments[symbol] - 1 : 4;
                 const AtomId atom = link_add_atom(&result->link, BUSTER_LINK_CLASS_TEXT, alignment, (uint64_t)length, encoded, 0);
                 valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, 0, (uint64_t)length) &&
                         link_add_code_fixups(&result->link, atom, code->records, code->count, fixup_ends, code->reference_count, code->references, code->reference_count);
@@ -163,13 +191,16 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                 {
                     result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
                 }
-                result->function_atoms[b] = atom;
+                if (source_body)
+                {
+                    result->function_atoms[b] = atom;
+                }
                 result->code_bytes += (uint64_t)length;
             }
             else
             {
                 result->status = CHECK_PROGRAM_BACKEND;
-                result->token = program->bodies[b].declaration;
+                result->token = source_body ? program->bodies[b].declaration : BUSTER_CHECK_NONE;
             }
         }
         arena_pop_to(scratch, work_mark);

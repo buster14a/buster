@@ -22,6 +22,11 @@ Paths below are relative to the repository root. "Default" means
 
 | Paths or portions | Origin and disposition |
 | --- | --- |
+| `src/buster/compiler/generated/clang_builtin_metadata_23_1_1.inc`, `docs/builtin-metadata/own-main.tsv`, `docs/builtin-metadata/own-main.names.txt` | Derived LLVM Project builtin metadata and identifier facts, `Apache-2.0 WITH LLVM-exception`, not first-party declarations or implementation. Extracted from the approved host's signed `clang 23.1.1-1` package using the original C tool below. Exact inputs, installed package provenance, source reference, tool/output digests and commands are retained in `docs/builtin-metadata/clang-23.1.1-inputs.json`; existing `LICENSES/LLVM.txt` is byte-identical to the referenced 23.1.1 license. |
+| `tools/clang_builtin_metadata.c`, `src/buster/compiler/c_builtin_intrinsic_catalog.c`, `src/buster/compiler/c_builtin_intrinsic_catalog_test.c`, `src/buster/compiler/c_builtin_intrinsic_inventory_test.c` | Original bounded data extractor, exact-name scalar/SIMD lookup, inventory/decoder interoperability and independent guarded fixtures; Default. No LLVM implementation is copied. The included generated metadata retains its separate LLVM provenance and license above. |
+| `src/buster/compiler/c_check_builtin_vector.c`, `src/buster/compiler/c_check_builtin_vector_test.c`, `src/buster/compiler/c_check_builtin_x86.c`, `src/buster/compiler/c_check_builtin_x86_test.c` | Original generic vector builtin relations, context-sensitive x86 operand constraints and independent fixtures; Default. Exact LLVM `llvmorg-23.1.1` Sema and AST definitions supply behavioral facts, names and operand bounds. The 185 x86 rule facts retain their source locations; no LLVM implementation or fixtures are copied. External Clang calls are behavior/diagnostic oracles. |
+| `src/buster/compiler/c_builtin_intrinsic_types.c`, `src/buster/compiler/c_builtin_intrinsic_types_test.c`, `src/buster/compiler/c_builtin_intrinsic_features.c`, `src/buster/compiler/c_builtin_intrinsic_features_test.c` | Original bounded Clang descriptor decoding, target-feature expression evaluation and independent guarded/type/capacity fixtures; Default. Exact LLVM `llvmorg-23.1.1` behavior definitions supply grammar and target-model facts; no LLVM implementation or fixtures are copied. Successful decoding/evaluation grants no source or runtime capability. |
+| `src/buster/compiler/c_check_builtin_math.c`, `src/buster/compiler/c_check_builtin_math_test.c`, `src/buster/compiler/c_builtin_math_helpers.c`, `src/buster/compiler/c_builtin_math_helpers_test.c` | Original typed F32/F64 math checking, baseline runtime recipes and independent Clang/native fixtures; Default. LLVM23.1.1 builtin definitions, constant evaluation and IR semantics, plus Intel instruction/FP-environment descriptions, are behavior references linked in the files. No upstream implementation was copied. |
 | `src/buster/compiler/differential.c`, `src/buster/compiler/differential_test.c`, `tests/differential/tool.c`, `tests/differential/interesting.c`, `docs/differential.md` | Original external-generator compiler comparison harness, fake protocol fixtures, reducer adapter and documentation; Default. Csmith and YARPGen run externally under their retained upstream terms; no generator implementation, runtime or generated corpus is imported. Generated artifacts stay outside the repository and require their own provenance/license review before retention. |
 | `src/buster/compiler/dominators.c`, `src/buster/compiler/dominators_test.c`, `src/buster/compiler/dominators_benchmark.c`, `docs/dominators.md` | Original entry-rooted dominance, frontier and natural-loop analyses, independent graph oracles, synthetic fixtures, measurement helpers and documentation; Default. Cooper, Harvey and Kennedy's paper and the linked Cornell and LLVM descriptions supply algorithm definitions, not copied code or fixtures. No external implementation or generated dataset is imported. |
 | `src/buster/compiler/tier1_allocate.c`, `src/buster/compiler/tier1_rematerialize.c`, `src/buster/compiler/tier1_allocate_test.c`, `src/buster/compiler/tier1_allocate_benchmark.c`, `docs/tier1-allocation.md` | Original interval allocation/coloring, reload splitting, parallel move resolution, rematerialization, native fixtures and measurement helpers; Default. Uses the existing encoder and arena interfaces; no other compiler implementation, benchmark corpus or generated dataset is imported. |
@@ -309,6 +314,24 @@ inputs and queries are described in `docs/preprocessor-oracle.md`; the entry
 retains the existing LLVM terms. The pragma-printer correction follows
 observable Clang 23.1.1 behavior, with its source references recorded there;
 no Clang or corpus implementation is copied.
+
+## C semantic compatibility references
+
+The original GNU integer folding helper in `c_check_integer_extension.c`
+and its independent generated fixtures use observed Clang 23.1.1 and
+23.1.3 behavior. The rules were checked against
+`clang/lib/AST/ExprConstant.cpp` at LLVM tags `llvmorg-23.1.1` and
+`llvmorg-23.1.3`. Switch constraint diagnostic ordering was checked against
+`clang/lib/Sema/SemaStmt.cpp` and original compiled probes. These files
+were read as behavior references; no LLVM implementation was copied.
+
+Wide-enum completion follows observed Clang behavior and the rules in
+`clang/lib/Sema/SemaDecl.cpp` at `llvmorg-23.1.1`. Diagnostic warning-group
+relationships were checked against that tag's
+`clang/include/clang/Basic/DiagnosticGroups.td`, with original pragma fixtures.
+The original `c_builtin_intrinsic_types.c` decoder and tests use the same tag's
+`ASTContext.cpp`, `Basic/Targets/X86.h` and `BuiltinsBase.td` as descriptor-format
+references. These modules contain no copied LLVM implementation or fixtures.
 
 ## Review limits and distribution
 

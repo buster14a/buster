@@ -150,7 +150,7 @@ static void check_input_controls(CheckInputReader* reader)
                     labels[slot] = token + 1;
                 }
             }
-            else if (kind == PARSE_KIND_GOTO)
+            else if (kind == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0)
             {
                 reader->output->declaration_bodies[token] = body;
             }
@@ -180,7 +180,7 @@ static void check_input_controls(CheckInputReader* reader)
         }
         for (uint32_t token = 0; token < count; token += 1)
         {
-            if (parser->tokens.kinds[token] == PARSE_KIND_GOTO)
+            if (parser->tokens.kinds[token] == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0)
             {
                 const uint32_t body = reader->output->declaration_bodies[token];
                 const uint32_t operand = reader->first_child[token];

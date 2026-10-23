@@ -87,6 +87,59 @@ static void check_test_builtin_graph_values(CheckTest* test, TypeTable* table, A
     arena_pop_to(storage, storage_mark);
 }
 
+static void check_test_builtin_graph_typed(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
+{
+    const uint64_t storage_mark = storage->length;
+    const uint64_t output_mark = output->length;
+    CheckGraph graph;
+    const bool ready = check_graph_initialize(&graph, storage, 10, 0);
+    check_test_expect(test, ready, "typed overflow graph fixture allocation");
+    if (ready)
+    {
+        const uint32_t wide = check_test_leaf(&graph, 1, check_test_integer(BUSTER_TYPE_UINT128, ((unsigned __int128)1 << 100) | 3));
+        const uint32_t real = check_test_leaf(&graph, 2, (CheckValue){ .type = BUSTER_TYPE_DOUBLE, .constant_kind = CHECK_CONSTANT_FLOATING, .floating = 4 });
+        const uint32_t pointer = check_test_leaf(&graph, 3, (CheckValue){ .type = type_pointer(table, BUSTER_TYPE_ULONG), .object = 133901 });
+        const uint32_t alias = check_test_builtin_node(&graph, CHECK_OP_BUILTIN_OVERFLOW, CBUILTIN_UMULL_OVERFLOW, wide, real, pointer);
+        const uint32_t maximum = check_test_leaf(&graph, 5, check_test_integer(BUSTER_TYPE_ULONG, UINT64_MAX));
+        const uint32_t two = check_test_leaf(&graph, 6, check_test_integer(BUSTER_TYPE_INT, 2));
+        const uint32_t overflow = check_test_builtin_node(&graph, CHECK_OP_BUILTIN_OVERFLOW, CBUILTIN_UMULL_OVERFLOW, maximum, two, pointer);
+        const uint32_t qualified = check_test_leaf(&graph, 8, (CheckValue){ .type = type_pointer(table, BUSTER_TYPE_ULONG | BUSTER_TYPE_CONST), .object = 133902 });
+        const uint32_t warning = check_test_builtin_node(&graph, CHECK_OP_BUILTIN_OVERFLOW, CBUILTIN_UMULL_OVERFLOW, two, two, qualified);
+        const CheckOptions scalar = { .scalar = true };
+        CheckStream expected;
+        const bool checked = check_graph_run(table, &graph, output, scratch, &scalar, &expected);
+        check_test_expect(test, checked && expected.report_count == 0 && expected.effect_count == 3,
+                          "typed overflow accepts ordinary prototype conversions and qualified destination warnings");
+        if (checked && expected.effect_count == 3)
+        {
+            check_test_expect(test, expected.values[alias].integer == 0 && expected.effects[0].value.integer == 12 &&
+                                   expected.values[overflow].integer == 1 && expected.effects[1].value.integer == UINT64_MAX - 1 &&
+                                   expected.effects[0].value.type == BUSTER_TYPE_ULONG && expected.effects[0].runtime_builtin == CBUILTIN_MUL_OVERFLOW &&
+                                   expected.effects[0].evaluated_operands == 7 && expected.effects[0].unsupported == 0 &&
+                                   expected.conversions[alias].operands[0].type == BUSTER_TYPE_ULONG &&
+                                   expected.conversions[alias].operands[1].type == BUSTER_TYPE_ULONG,
+                              "typed ULONG multiply truncates before arithmetic and retains normalized runtime and store metadata");
+            check_test_expect(test, expected.effects[2].node == warning && expected.effects[2].warnings == BUSTER_CHECK_BUILTIN_TYPED_OVERFLOW_WARN_QUALIFIERS &&
+                                   expected.effects[2].warning_operands == 4 && expected.effects[2].value.integer == 4 &&
+                                   expected.warnings[warning] == CHECK_WARNING_DISCARDED_QUALIFIERS &&
+                                   expected.effects[2].destination.type == type_pointer(table, BUSTER_TYPE_ULONG),
+                              "typed overflow qualifier warnings stay distinct from errors and from its converted store destination");
+            const uint64_t mark = output->length;
+            for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
+            {
+                const CheckOptions options = { .batch_size = batch };
+                CheckStream actual;
+                check_test_expect(test, check_graph_run(table, &graph, output, scratch, &options, &actual) &&
+                                       check_test_stream_equal(&expected, &actual, graph.argument_count),
+                                  "typed overflow normalization and all compact metadata survive every graph partition");
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    arena_pop_to(output, output_mark);
+    arena_pop_to(storage, storage_mark);
+}
+
 static void check_test_builtin_graph_bounds(CheckTest* test, TypeTable* table, Arena* storage)
 {
     const uint64_t storage_mark = storage->length;
@@ -252,8 +305,11 @@ static void check_test_builtin_graph_oracle(CheckTest* test, const char* clang)
         "const int destination=0;int f(void){return __builtin_add_overflow(1,2,&destination);}\n",
         "int destination;int f(void){return __builtin_add_overflow(1.5,2,&destination);}\n",
         "_Static_assert(__builtin_clz(0),\"undefined count\");\n",
+        "unsigned long destination;int f(void){return __builtin_umull_overflow(((unsigned __int128)1<<100)|3,4.0,&destination);}\n",
+        "const unsigned long destination=0;int f(void){return __builtin_umull_overflow(2,2,&destination);}\n",
+        "unsigned int destination;int f(void){return __builtin_umull_overflow(2,2,&destination);}\n",
     };
-    const bool rejected[] = { false, true, false, false, true, true, true, true };
+    const bool rejected[] = { false, true, false, false, true, true, true, true, false, false, true };
     char directory[] = "/tmp/buster-check-builtin-graph-XXXXXX";
     bool ready = mkdtemp(directory) != NULL;
     char paths[BUSTER_ARRAY_LENGTH(sources)][160];
@@ -273,6 +329,13 @@ static void check_test_builtin_graph_oracle(CheckTest* test, const char* clang)
         for (uint32_t i = 0; checked && i < BUSTER_ARRAY_LENGTH(sources); i += 1)
         {
             check_test_expect(test, outcomes[i].rejected == rejected[i], "Clang confirms builtin value/effect/constraint semantic mutations");
+            if (mode == 0)
+            {
+                char name[80];
+                snprintf(name, sizeof(name), "builtin graph source integration %u", i);
+                const CheckSourceFixture fixture = { .name = name, .source = sources[i], .rejected = rejected[i] };
+                check_test_source(test, &fixture, paths[i], outcomes + i);
+            }
         }
     }
     check_test_expect(test, ready, "builtin graph oracle source creation");
@@ -293,6 +356,7 @@ static void check_test_builtin_graph(CheckTest* test, TypeTable* table, const ch
     if (ready)
     {
         check_test_builtin_graph_values(test, table, &storage, &output, &scratch);
+        check_test_builtin_graph_typed(test, table, &storage, &output, &scratch);
         check_test_builtin_graph_bounds(test, table, &storage);
         check_test_builtin_graph_histories(test, table, &storage, &output, &scratch);
         check_test_builtin_graph_guards(test, table, &storage, &output, &scratch);

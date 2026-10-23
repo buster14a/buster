@@ -91,11 +91,11 @@ static void cbuiltin_float_lower_test_emit(CBuiltinFloatLowerTestStream* stream,
     stream->buffer.count += 1;
 }
 
-static __attribute__((noinline)) uint32_t cbuiltin_float_lower_test_oracle32(CBuiltinId id, uint32_t bits)
+static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_oracle32(CBuiltinId id, uint32_t bits)
 {
     float value;
     memcpy(&value, &bits, sizeof(value));
-    uint32_t result = 0;
+    int32_t result = 0;
     switch (id)
     {
     case CBUILTIN_ISNAN: result = __builtin_isnan(value) != 0; break;
@@ -103,16 +103,17 @@ static __attribute__((noinline)) uint32_t cbuiltin_float_lower_test_oracle32(CBu
     case CBUILTIN_ISFINITE: result = __builtin_isfinite(value) != 0; break;
     case CBUILTIN_SIGNBIT: result = __builtin_signbit(value) != 0; break;
     case CBUILTIN_FPCLASSIFY: result = __builtin_fpclassify(0, 1, 2, 3, 4, value); break;
+    case CBUILTIN_ISINF_SIGN: result = __builtin_isinf_sign(value); break;
     default: break;
     }
-    return result;
+    return (uint64_t)(int64_t)result;
 }
 
-static __attribute__((noinline)) uint32_t cbuiltin_float_lower_test_oracle64(CBuiltinId id, uint64_t bits)
+static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_oracle64(CBuiltinId id, uint64_t bits)
 {
     double value;
     memcpy(&value, &bits, sizeof(value));
-    uint32_t result = 0;
+    int32_t result = 0;
     switch (id)
     {
     case CBUILTIN_ISNAN: result = __builtin_isnan(value) != 0; break;
@@ -120,7 +121,31 @@ static __attribute__((noinline)) uint32_t cbuiltin_float_lower_test_oracle64(CBu
     case CBUILTIN_ISFINITE: result = __builtin_isfinite(value) != 0; break;
     case CBUILTIN_SIGNBIT: result = __builtin_signbit(value) != 0; break;
     case CBUILTIN_FPCLASSIFY: result = __builtin_fpclassify(0, 1, 2, 3, 4, value); break;
+    case CBUILTIN_ISINF_SIGN: result = __builtin_isinf_sign(value); break;
     default: break;
+    }
+    return (uint64_t)(int64_t)result;
+}
+
+static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_absolute(uint32_t class, uint64_t bits)
+{
+    uint64_t result = 0;
+    if (class == BUSTER_TYPED_CLASS_F32)
+    {
+        const uint32_t input = (uint32_t)bits;
+        float value;
+        memcpy(&value, &input, sizeof(value));
+        const float absolute = __builtin_fabsf(value);
+        uint32_t output;
+        memcpy(&output, &absolute, sizeof(output));
+        result = output;
+    }
+    else
+    {
+        double value;
+        memcpy(&value, &bits, sizeof(value));
+        const double absolute = __builtin_fabs(value);
+        memcpy(&result, &absolute, sizeof(result));
     }
     return result;
 }
@@ -230,8 +255,10 @@ static uint64_t cbuiltin_float_lower_test_input(uint32_t index, uint32_t class, 
 
 static bool cbuiltin_float_lower_test_programs(CBuiltinFloatLowerTestTally* tally, Arena* arena, const CBuiltinFloatLowerCall* call, CBuiltinFloatLowerTestProgram programs[2])
 {
-    const bool classification = call->id >= CBUILTIN_ISNAN && call->id <= CBUILTIN_FPCLASSIFY;
-    const uint32_t class = classification ? call->argument_class : call->constant_class;
+    const bool classification = call->id >= CBUILTIN_ISNAN && call->id <= CBUILTIN_ISINF_SIGN;
+    const bool absolute = call->id == CBUILTIN_FABS || call->id == CBUILTIN_FABSF;
+    const bool argument = classification || absolute;
+    const uint32_t class = argument ? call->argument_class : call->constant_class;
     CBuiltinFloatLowerTestStream streams[2];
     CBuiltinLowerResult lowered[2] = { 0 };
     bool result = true;
@@ -247,7 +274,7 @@ static bool cbuiltin_float_lower_test_programs(CBuiltinFloatLowerTestTally* tall
         lowered[path] = path == 0 ? cbuiltin_float_lower_scalar(&stream->buffer, call) : cbuiltin_float_lower(&stream->buffer, call);
         result &= cbuiltin_float_lower_test_expect(tally, lowered[path].error == CBUILTIN_LOWER_OK && lowered[path].first == 1 &&
             lowered[path].result_class == (classification ? BUSTER_TYPED_CLASS_I32 : class), "append after live prefix", call->id, path);
-        if (classification)
+        if (argument)
         {
             result &= cbuiltin_float_lower_test_expect(tally, lowered[path].temporary_count >= 2 && stream->local_classes[1] == class &&
                 stream->local_flags[1] == BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, "actual floating temporary", call->id, path);
@@ -255,6 +282,9 @@ static bool cbuiltin_float_lower_test_programs(CBuiltinFloatLowerTestTally* tall
         else
         {
             result &= cbuiltin_float_lower_test_expect(tally, lowered[path].temporary_count == 0 && lowered[path].count == 1, "exact floating constant", call->id, path);
+        }
+        if (!classification)
+        {
             cbuiltin_float_lower_test_emit(stream, BUSTER_TYPED_SET_LOCAL, class, 0);
             cbuiltin_float_lower_test_emit(stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
             cbuiltin_float_lower_test_emit(stream, BUSTER_TYPED_LOAD, class == BUSTER_TYPED_CLASS_F32 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64, 0);
@@ -291,7 +321,7 @@ static bool cbuiltin_float_lower_test_programs(CBuiltinFloatLowerTestTally* tall
             .local_classes = buffer->local_classes,
             .local_flags = buffer->local_flags,
             .local_count = buffer->local_count,
-            .parameter_count = classification ? 1 : 0,
+            .parameter_count = argument ? 1 : 0,
             .parameters = &parameter,
             .result =
             {
@@ -336,15 +366,17 @@ static void cbuiltin_float_lower_test_case(CBuiltinFloatLowerTestTally* tally, A
 {
     CBuiltinFloatLowerTestProgram programs[2] = { 0 };
     bool ok = cbuiltin_float_lower_test_programs(tally, arena, call, programs);
-    const bool classification = call->id >= CBUILTIN_ISNAN && call->id <= CBUILTIN_FPCLASSIFY;
-    const uint32_t count = classification ? BUSTER_CBUILTIN_FLOAT_TEST_INPUTS : 1;
+    const bool classification = call->id >= CBUILTIN_ISNAN && call->id <= CBUILTIN_ISINF_SIGN;
+    const bool absolute = call->id == CBUILTIN_FABS || call->id == CBUILTIN_FABSF;
+    const bool argument = classification || absolute;
+    const uint32_t count = argument ? BUSTER_CBUILTIN_FLOAT_TEST_INPUTS : 1;
     uint64_t inputs[BUSTER_CBUILTIN_FLOAT_TEST_INPUTS];
     uint64_t expected[BUSTER_CBUILTIN_FLOAT_TEST_INPUTS];
     for (uint32_t i = 0; i < count; i += 1)
     {
-        inputs[i] = classification ? cbuiltin_float_lower_test_input(i, call->argument_class, state) : 0;
+        inputs[i] = argument ? cbuiltin_float_lower_test_input(i, call->argument_class, state) : 0;
         const uint64_t value = classification ? (call->argument_class == BUSTER_TYPED_CLASS_F32 ? cbuiltin_float_lower_test_oracle32(call->id, (uint32_t)inputs[i]) :
-            cbuiltin_float_lower_test_oracle64(call->id, inputs[i])) : call->constant_bits;
+            cbuiltin_float_lower_test_oracle64(call->id, inputs[i])) : absolute ? cbuiltin_float_lower_test_absolute(call->argument_class, inputs[i]) : call->constant_bits;
         expected[i] = value ^ BUSTER_CBUILTIN_FLOAT_TEST_PREFIX;
     }
     uint64_t* native = mmap(0, count * sizeof(uint64_t) * 2, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -360,7 +392,7 @@ static void cbuiltin_float_lower_test_case(CBuiltinFloatLowerTestTally* tally, A
                 for (uint32_t i = 0; i < count; i += 1)
                 {
                     uint64_t result;
-                    if (!classification)
+                    if (!argument)
                     {
                         uint64_t (*entry)(void) = (uint64_t (*)(void))(void*)programs[path].bytes;
                         result = entry();
@@ -424,13 +456,13 @@ static void cbuiltin_float_lower_test_guards(CBuiltinFloatLowerTestTally* tally)
     }
     if (cbuiltin_float_lower_test_expect(tally, mapped, "guard mappings", 0, 0))
     {
-        for (uint32_t shape = 0; shape < 3; shape += 1)
+        for (uint32_t shape = 0; shape < 6; shape += 1)
         {
             const CBuiltinFloatLowerCall original =
             {
-                .id = shape == 2 ? CBUILTIN_NANF : CBUILTIN_FPCLASSIFY,
+                .id = shape == 2 ? CBUILTIN_NANF : shape == 3 ? CBUILTIN_FABSF : shape == 4 ? CBUILTIN_FABS : shape == 5 ? CBUILTIN_ISINF_SIGN : CBUILTIN_FPCLASSIFY,
                 .argument_local = 0,
-                .argument_class = shape == 1 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32,
+                .argument_class = shape == 1 || shape == 4 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32,
                 .folded = true,
                 .constant_class = BUSTER_TYPED_CLASS_F32,
                 .constant_bits = UINT64_C(0x7fc12345),
@@ -523,7 +555,7 @@ static void cbuiltin_float_lower_test_guards(CBuiltinFloatLowerTestTally* tally)
 
 static void cbuiltin_float_lower_test_refusals(CBuiltinFloatLowerTestTally* tally)
 {
-    for (uint32_t variant = 0; variant < 12; variant += 1)
+    for (uint32_t variant = 0; variant < 16; variant += 1)
     {
         CBuiltinFloatLowerTestStream stream;
         cbuiltin_float_lower_test_stream(&stream, BUSTER_TYPED_CLASS_F32);
@@ -549,6 +581,10 @@ static void cbuiltin_float_lower_test_refusals(CBuiltinFloatLowerTestTally* tall
         case 9: call.id = CBUILTIN_ISNAN; call.argument_class = BUSTER_TYPED_CLASS_U64; error = CBUILTIN_LOWER_UNSUPPORTED; break;
         case 10: call.id = CBUILTIN_ISNAN; call.argument_class = BUSTER_TYPED_CLASS_F32; call.argument_local = 1; break;
         case 11: call.id = CBUILTIN_ISNAN; call.argument_class = BUSTER_TYPED_CLASS_F64; break;
+        case 12: call.id = CBUILTIN_FABSL; error = CBUILTIN_LOWER_UNSUPPORTED; break;
+        case 13: call.id = CBUILTIN_FABS; call.argument_class = BUSTER_TYPED_CLASS_F32; break;
+        case 14: call.id = CBUILTIN_FABSF; call.argument_class = BUSTER_TYPED_CLASS_F64; break;
+        case 15: call.id = CBUILTIN_ISINF_SIGN; call.argument_class = BUSTER_TYPED_CLASS_F32; call.argument_local = 1; break;
         }
         CBuiltinFloatLowerTestStream before = stream;
         const CBuiltinLowerResult lowered = cbuiltin_float_lower(&stream.buffer, &call);
@@ -591,7 +627,7 @@ static int run_builtin_float_lower_tests(int argc, char** argv)
         cbuiltin_float_lower_test_refusals(&tally);
         for (uint32_t class = BUSTER_TYPED_CLASS_F32; class <= BUSTER_TYPED_CLASS_F64; class += 1)
         {
-            for (uint32_t id = CBUILTIN_ISNAN; id <= CBUILTIN_FPCLASSIFY; id += 1)
+            for (uint32_t id = CBUILTIN_ISNAN; id <= CBUILTIN_ISINF_SIGN; id += 1)
             {
                 const CBuiltinFloatLowerCall call =
                 {
@@ -601,6 +637,13 @@ static int run_builtin_float_lower_tests(int argc, char** argv)
                 };
                 cbuiltin_float_lower_test_case(&tally, &arena, &call, &state);
             }
+            const CBuiltinFloatLowerCall call =
+            {
+                .id = class == BUSTER_TYPED_CLASS_F32 ? CBUILTIN_FABSF : CBUILTIN_FABS,
+                .argument_local = 0,
+                .argument_class = class,
+            };
+            cbuiltin_float_lower_test_case(&tally, &arena, &call, &state);
         }
         const CBuiltinId constants[6] =
         {

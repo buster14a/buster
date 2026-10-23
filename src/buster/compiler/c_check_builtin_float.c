@@ -16,6 +16,8 @@
 // NORMAL2/SUBNORMAL3. A runtime consumer must retain that control flow; it cannot flatten the possible-operand
 // mask into eager argument evaluation. Unsupported real floating formats remain typed runtime actions and are
 // never approximated through host long double. These actions grant no source/selector capability by themselves.
+// FABS/FABSF/FABSL use their declared FP prototype conversion before clearing the sign. Unlike the integer
+// classifiers, a folded floating call is neither an ICE nor a floating literal, including in an unevaluated arm.
 #ifndef BUSTER_C_CHECK_BUILTIN_FLOAT_INCLUDED
 #define BUSTER_C_CHECK_BUILTIN_FLOAT_INCLUDED
 
@@ -25,8 +27,10 @@
 #define BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_COMPLEX_SELECTOR 0x02u
 #define BUSTER_CHECK_BUILTIN_FLOAT_UNKNOWN_PAYLOAD 0x04u
 #define BUSTER_CHECK_BUILTIN_FLOAT_INVALID_PAYLOAD 0x08u
+#define BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_CONVERSION 0x10u
 #define BUSTER_CHECK_BUILTIN_FLOAT_WARN_QUALIFIERS 0x01u
 #define BUSTER_CHECK_BUILTIN_FLOAT_WARN_POINTER_SIGN 0x02u
+#define BUSTER_CHECK_BUILTIN_FLOAT_WARN_ABSOLUTE_VALUE 0x04u
 #define BUSTER_CHECK_BUILTIN_FLOAT_NO_SELECTOR UINT32_MAX
 
 typedef enum CheckBuiltinFloatEvaluation
@@ -221,6 +225,54 @@ static uint32_t check_builtin_float_class(TypeId type, long double value)
     return result;
 }
 
+static bool check_builtin_float_absolute_warning(const TypeTable* table, TypeId source, TypeId parameter)
+{
+    const TypeId plain = type_unqualified(type_strip_aligned(table, source));
+    const uint8_t kind = type_kind(table, plain);
+    bool warning = false;
+    if (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT)
+    {
+        uint64_t rank = 0;
+        uint64_t width = 0;
+        bool is_signed = false;
+        type_integer_properties(table, plain, &rank, &width, &is_signed);
+        warning = !is_signed || type_size(table, plain) <= type_size(table, BUSTER_TYPE_LLONG);
+    }
+    else if (kind == BUSTER_TYPE_KIND_ENUM)
+    {
+        const TypeId underlying = type_unqualified(type_strip_aligned(table, table->types.base[type_index(plain)]));
+        uint64_t rank = 0;
+        uint64_t width = 0;
+        bool is_signed = false;
+        type_integer_properties(table, underlying, &rank, &width, &is_signed);
+        warning = !is_signed || type_size(table, plain) <= type_size(table, BUSTER_TYPE_LLONG);
+    }
+    else if (kind == BUSTER_TYPE_KIND_FLOATING)
+    {
+        warning = type_size(table, plain) > type_size(table, parameter);
+    }
+    else if (kind == BUSTER_TYPE_KIND_COMPLEX)
+    {
+        // Clang warns only when one of its cabs variants has enough source storage, up through complex long double.
+        warning = type_size(table, plain) <= 2 * type_size(table, BUSTER_TYPE_LONG_DOUBLE);
+    }
+    else if (kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind))
+    {
+        warning = true;
+    }
+    return warning;
+}
+
+static void check_builtin_float_absolute_bits(const long double* value, long double* output)
+{
+    // CheckValue's supported FP formats are represented in host x87 extended precision. Clearing the sign alone
+    // preserves quiet/signaling state and payload; a numeric operation must not turn an sNaN into a qNaN here.
+    uint8_t bytes[16];
+    memcpy(bytes, value, sizeof(bytes));
+    bytes[9] &= 0x7f;
+    memcpy(output, bytes, sizeof(bytes));
+}
+
 static void check_builtin_float_inherit(CheckBuiltinFloatResult* output, const CheckValue* values, uint32_t possible, uint32_t definite, uint32_t count)
 {
     output->evaluated_operands = possible;
@@ -298,10 +350,11 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
     };
     const bool special = input->id >= CBUILTIN_HUGE_VAL && input->id <= CBUILTIN_INFL;
     const bool nan = input->id >= CBUILTIN_NAN && input->id <= CBUILTIN_NANL;
-    const bool classify = input->id >= CBUILTIN_ISNAN && input->id <= CBUILTIN_FPCLASSIFY;
+    const bool classify = input->id >= CBUILTIN_ISNAN && input->id <= CBUILTIN_ISINF_SIGN;
+    const bool absolute = input->id == CBUILTIN_FABS || input->id == CBUILTIN_FABSF || input->id == CBUILTIN_FABSL;
     const bool selectors = input->id == CBUILTIN_FPCLASSIFY;
     const uint32_t count = special ? 0 : selectors ? 6 : 1;
-    if (!special && !nan && !classify)
+    if (!special && !nan && !classify && !absolute)
     {
         check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, 0);
     }
@@ -316,11 +369,11 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
     if (output->action.diagnostic == CHECK_DIAG_NONE)
     {
         TypeId result_type = BUSTER_TYPE_DOUBLE;
-        if (input->id == CBUILTIN_HUGE_VALF || input->id == CBUILTIN_INFF || input->id == CBUILTIN_NANF)
+        if (input->id == CBUILTIN_HUGE_VALF || input->id == CBUILTIN_INFF || input->id == CBUILTIN_NANF || input->id == CBUILTIN_FABSF)
         {
             result_type = BUSTER_TYPE_FLOAT;
         }
-        else if (input->id == CBUILTIN_HUGE_VALL || input->id == CBUILTIN_INFL || input->id == CBUILTIN_NANL)
+        else if (input->id == CBUILTIN_HUGE_VALL || input->id == CBUILTIN_INFL || input->id == CBUILTIN_NANL || input->id == CBUILTIN_FABSL)
         {
             result_type = BUSTER_TYPE_LONG_DOUBLE;
         }
@@ -366,6 +419,49 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
                 output->reads_memory = !output->folded;
             }
         }
+        else if (absolute && output->action.diagnostic == CHECK_DIAG_NONE)
+        {
+            if (check_builtin_float_absolute_warning(table, input->arguments[0].type, result_type))
+            {
+                output->warnings |= BUSTER_CHECK_BUILTIN_FLOAT_WARN_ABSOLUTE_VALUE;
+            }
+            if (!check_action_is_arithmetic(table, values[0].type))
+            {
+                check_action_diagnose(&output->action, CHECK_DIAG_ARITHMETIC_REQUIRED, 0);
+            }
+            else
+            {
+                const uint8_t kind = check_action_kind(table, values[0].type);
+                uint32_t width = 0;
+                bool is_signed = false;
+                const bool wide_integer = check_action_is_integer(table, values[0].type) && !check_action_integer_type(table, values[0].type, &width, &is_signed);
+                if (kind == BUSTER_TYPE_KIND_COMPLEX || (kind == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, values[0].type)) || wide_integer)
+                {
+                    output->unsupported |= BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_CONVERSION;
+                    values[0].constant_kind = CHECK_CONSTANT_NONE;
+                }
+                if (type_unqualified(type_strip_aligned(table, values[0].type)) == result_type)
+                {
+                    // A same-format prototype conversion is an identity. Do not round through host FP arithmetic,
+                    // which can quiet a signaling NaN even though fabs itself only clears the sign bit.
+                    output->argument_conversions[0].type = result_type;
+                    output->argument_conversions[0].flags |= BUSTER_CHECK_CONVERT_ASSIGNMENT;
+                    values[0].type = result_type;
+                }
+                else
+                {
+                    check_action_conversion(table, &values[0], result_type, BUSTER_CHECK_CONVERT_ASSIGNMENT, &output->argument_conversions[0], input->node);
+                }
+                output->floating_type = result_type;
+                check_builtin_float_inherit(output, values, 1, 1, count);
+                if (values[0].constant_kind == CHECK_CONSTANT_FLOATING && output->action.value.fault == CHECK_FAULT_NONE)
+                {
+                    output->action.value.constant_kind = CHECK_CONSTANT_FLOATING;
+                    check_builtin_float_absolute_bits(&values[0].floating, &output->action.value.floating);
+                    output->folded = (output->action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+                }
+            }
+        }
         else if (classify && output->action.diagnostic == CHECK_DIAG_NONE)
         {
             const uint32_t fp = selectors ? 5 : 0;
@@ -406,7 +502,8 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
                 if (known)
                 {
                     const uint64_t answer = input->id == CBUILTIN_ISNAN ? category == 0 : input->id == CBUILTIN_ISINF ? category == 1 :
-                                            input->id == CBUILTIN_ISFINITE ? category != 0 && category != 1 : !!signbit(values[0].floating);
+                                            input->id == CBUILTIN_ISFINITE ? category != 0 && category != 1 : input->id == CBUILTIN_ISINF_SIGN ?
+                                            (category == 1 ? (signbit(values[0].floating) ? UINT32_MAX : 1) : 0) : !!signbit(values[0].floating);
                     output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
                     output->action.value.integer = answer;
                     output->folded = (output->action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;

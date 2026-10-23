@@ -320,7 +320,19 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int x = sizeof(int) + _Alignof(int) + __builtin_offsetof(struct { int a; }, a);\n", "", 0 },
     { "int x = _Generic(1, int: 2, default: 3);\n", "", 0 },
     { "static_assert(1); auto x = 1; constexpr int y = 2; bool b = true; void *p = nullptr;\n", "", "c23" },
+    // An unnamed bit-field starts with ':', including after a comma on the preceding line.
+    { "struct S { unsigned char :1,\n :1,x:1,y:5; };\n", "", 0 },
+    { "struct S { unsigned x:1,\n :1,y:1; };\n", "", 0 },
+    { "union U { unsigned x,\n :3; };\n", "", 0 },
+    { "typedef unsigned T; struct S { T :2,\n :3,x:1; };\n", "", 0 },
+    { "struct S { unsigned :1,\n :1 ? 2 : 3,x:4; };\n", "", 0 },
     // Invalid code, with clang 23's first error.
+    { "struct S { unsigned :1,\n :; };\n", "2:3: expected expression", 0 },
+    { "int x,\n:1;\n", "1:6: expected ';' at end of declaration", 0 },
+    { "struct S {\n  int x;\n  int broken =\n};\n", "3:13: expected ';' at end of declaration list", 0 },
+    { "struct T { int member = 1; };\n", "1:22: expected ';' at end of declaration list", 0 },
+    { "union U { int (*callback)(void) = 0; };\n", "1:32: expected ';' at end of declaration list", 0 },
+    { "struct V { int x:3 = 1; };\n", "1:19: expected ';' at end of declaration list", 0 },
     { "int x y;\n", "1:6: expected ';' after top level declarator", 0 },
     { "void f(int a) { a + ; }\n", "1:21: expected expression", 0 },
     { "int f(void) { return 1 }\n", "1:23: expected ';' after return statement", 0 },
@@ -501,6 +513,15 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "(x);\n", "", "c89" },
     { "(\"x\");\n", "1:2: expected identifier or '('", 0 },
     { "static (x);\n", "1:9: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    // Clang finishes the declarator before diagnosing its missing return/type specifier.
+    { "f(A,\n12);\n", "2:1: expected identifier", 0 },
+    { "typedef BOOLEAN\n(NTAPI *Fn)(int);\n", "2:2: unknown type name 'NTAPI'", 0, true },
+    { "f(a)\nextern int x;\n", "2:1: invalid storage class specifier in function declarator", 0 },
+    { "f(void);\n", "1:1: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "f(a) int a; {return a;}\n", "1:1: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    // The primary diagnostic belongs to the invocation; macro spelling remains available as an expansion note.
+    { "#define TYPE Missing\nTYPE x;\n", "2:1: unknown type name 'Missing'", 0, true },
+    { "#define TYPE Missing\n#define OUTER TYPE\nOUTER x;\n", "3:1: unknown type name 'Missing'", 0, true },
     // A _Static_assert's message is string literals.
     { "_Static_assert(1, \"x\" \"y\" \"z\");\n", "", 0 },
     { "_Static_assert(1, \"x\" + 1);\n", "1:23: expected ')'", 0 },

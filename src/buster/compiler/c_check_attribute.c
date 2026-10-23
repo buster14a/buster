@@ -39,6 +39,7 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_NOCOMMON,
     CHECK_ATTRIBUTE_TLS_MODEL,
     CHECK_ATTRIBUTE_ASM_LABEL,
+    CHECK_ATTRIBUTE_EXPORT_NAME,
     CHECK_ATTRIBUTE_CALLING_CONVENTION,
     CHECK_ATTRIBUTE_NORETURN,
     CHECK_ATTRIBUTE_RETURNS_TWICE,
@@ -65,6 +66,7 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_NOINLINE,
     CHECK_ATTRIBUTE_GNU_INLINE,
     CHECK_ATTRIBUTE_ARTIFICIAL,
+    CHECK_ATTRIBUTE_NODEBUG,
     CHECK_ATTRIBUTE_FLATTEN,
     CHECK_ATTRIBUTE_LEAF,
     CHECK_ATTRIBUTE_USED,
@@ -217,6 +219,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "alias", CHECK_ATTRIBUTE_ALIAS, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "ifunc", CHECK_ATTRIBUTE_IFUNC, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "section", CHECK_ATTRIBUTE_SECTION, CHECK_ATTRIBUTE_STRING, 1, 1 },
+    { "export_name", CHECK_ATTRIBUTE_EXPORT_NAME, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "weak", CHECK_ATTRIBUTE_WEAK, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "weakref", CHECK_ATTRIBUTE_WEAKREF, CHECK_ATTRIBUTE_STRING, 0, 1 },
     { "common", CHECK_ATTRIBUTE_COMMON, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -262,6 +265,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "noinline", CHECK_ATTRIBUTE_NOINLINE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "gnu_inline", CHECK_ATTRIBUTE_GNU_INLINE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "artificial", CHECK_ATTRIBUTE_ARTIFICIAL, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "nodebug", CHECK_ATTRIBUTE_NODEBUG, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "flatten", CHECK_ATTRIBUTE_FLATTEN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "leaf", CHECK_ATTRIBUTE_LEAF, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "used", CHECK_ATTRIBUTE_USED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -709,6 +713,12 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         valid = check_input_attribute_equal(attribute->text, "global-dynamic") || check_input_attribute_equal(attribute->text, "local-dynamic") ||
                 check_input_attribute_equal(attribute->text, "initial-exec") || check_input_attribute_equal(attribute->text, "local-exec");
         error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+    }
+    if (valid && attribute->kind == CHECK_ATTRIBUTE_EXPORT_NAME)
+    {
+        // export_name selects a WebAssembly export. The supported x86-64 output has no such namespace; retain
+        // the decoded name and its source range, with the same deliberate no-effect disposition as native Clang.
+        attribute->ignored = true;
     }
     if (!valid)
     {

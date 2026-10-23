@@ -5,8 +5,9 @@
 // Direct expected types/effects are independent of the action implementation. Separate C sources use the existing
 // Clang subprocess oracle for constraints, result types and invalid-order warning classification. This is no atomic
 // runtime/concurrency acceptance. Every build/test invocation uses the approved 9700X and its normal exclusive lock.
-// Primary behavior references: llvmorg-23-init clang Basic/Builtins.td, Sema/SemaChecking.cpp (BuildAtomicExpr),
-// and CodeGen/CGBuiltin.cpp (fence evaluation): https://github.com/llvm/llvm-project/tree/llvmorg-23-init/clang
+// Primary behavior references: llvmorg-23.1.1 clang Basic/Builtins.td, Sema/SemaChecking.cpp (BuildAtomicExpr),
+// Sema/SemaExpr.cpp (pointer-sign conversion) and CodeGen/CGBuiltin.cpp (fence evaluation):
+// https://github.com/llvm/llvm-project/tree/llvmorg-23.1.1/clang
 
 typedef struct CheckBuiltinAtomicTest CheckBuiltinAtomicTest;
 struct CheckBuiltinAtomicTest
@@ -107,6 +108,52 @@ static void check_builtin_atomic_test_values(CheckBuiltinAtomicTest* test, TypeT
                                         "store converts its value to unqualified pointee type and preserves the volatile write");
     }
 
+    const TypeId floating_types[] = { BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE };
+    const uint64_t floating_sizes[] = { 4, 8 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(floating_types); i += 1)
+    {
+        CheckValue values[3] = {
+            check_builtin_atomic_test_pointer(type_pointer(table, type_qualify(table, floating_types[i], BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)), 46, 0),
+            check_test_integer(BUSTER_TYPE_INT, 0),
+            check_test_integer(BUSTER_TYPE_INT, 0),
+        };
+        CheckBuiltinAtomicResult floating_result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_LOAD_N, values, 2);
+        check_builtin_atomic_test_expect(test, floating_result.action.diagnostic == CHECK_DIAG_NONE && floating_result.unsupported == 0 &&
+                                        floating_result.action.value.type == floating_types[i] && floating_result.value_type == floating_types[i] &&
+                                        floating_result.object_size == floating_sizes[i] && floating_result.volatile_access && floating_result.reads_memory &&
+                                        floating_result.action.value.constant_kind == CHECK_CONSTANT_NONE,
+                                        "Clang 23.1.1 real floating loads retain their exact F32/F64 source type and raw storage shape");
+        values[0].type = type_pointer(table, type_qualify(table, floating_types[i], BUSTER_TYPE_VOLATILE));
+        values[1] = check_test_float(BUSTER_TYPE_DOUBLE, 1.25L);
+        floating_result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_STORE_N, values, 3);
+        check_builtin_atomic_test_expect(test, floating_result.action.diagnostic == CHECK_DIAG_NONE && floating_result.unsupported == 0 &&
+                                        floating_result.writes_memory && floating_result.store_value.type == floating_types[i] &&
+                                        floating_result.store_value.constant_kind == CHECK_CONSTANT_FLOATING && floating_result.store_value.floating == 1.25L &&
+                                        floating_result.argument_conversions[1].type == floating_types[i],
+                                        "real floating store converts its value numerically before the producer transfers representation bits to the helper");
+    }
+    const TypeId other_floating_types[] = { BUSTER_TYPE_BF16, BUSTER_TYPE_FLOAT16, BUSTER_TYPE_HALF, BUSTER_TYPE_FLOAT128,
+                                           type_complex(table, BUSTER_TYPE_FLOAT), type_complex(table, BUSTER_TYPE_DOUBLE), type_complex(table, BUSTER_TYPE_LONG_DOUBLE) };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(other_floating_types); i += 1)
+    {
+        CheckValue values[3] = {
+            check_builtin_atomic_test_pointer(type_pointer(table, other_floating_types[i]), 47, 0),
+            check_test_integer(BUSTER_TYPE_INT, 0),
+            check_test_integer(BUSTER_TYPE_INT, 0),
+        };
+        CheckBuiltinAtomicResult floating_result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_LOAD_N, values, 2);
+        check_builtin_atomic_test_expect(test, floating_result.action.diagnostic == CHECK_DIAG_NONE && floating_result.value_type == other_floating_types[i] &&
+                                        (floating_result.unsupported & BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_FLOAT_FORMAT) != 0 &&
+                                        floating_result.action.value.constant_kind == CHECK_CONSTANT_NONE,
+                                        "valid extended/complex floating load is typed and explicitly unsupported instead of receiving a false source error");
+        floating_result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_STORE_N, values, 3);
+        check_builtin_atomic_test_expect(test, floating_result.action.diagnostic == CHECK_DIAG_NONE && floating_result.store_value.type == other_floating_types[i] &&
+                                        floating_result.argument_conversions[1].type == other_floating_types[i] && floating_result.store_value.constant_kind == CHECK_CONSTANT_NONE &&
+                                        (floating_result.unsupported & (BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_FLOAT_FORMAT | BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_CONVERSION)) ==
+                                            (BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_FLOAT_FORMAT | BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_CONVERSION),
+                                        "valid unsupported floating store publishes exact conversion intent without fabricating a payload");
+    }
+
     const TypeId enumeration = type_tag(table, BUSTER_TYPE_KIND_ENUM, 148040);
     const bool completed = type_enum_complete(table, enumeration, BUSTER_TYPE_UINT, 0);
     check_builtin_atomic_test_expect(test, completed, "atomic enum fixture construction");
@@ -141,6 +188,32 @@ static void check_builtin_atomic_test_values(CheckBuiltinAtomicTest* test, TypeT
     check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.store_value.type == pointer_value &&
                                     (result.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_WARN_QUALIFIERS) != 0 && result.warning_operands == 2,
                                     "pointer-value store retains ordinary parameter qualifier-loss warnings");
+    const TypeId signed_pointees[] = { BUSTER_TYPE_CHAR, BUSTER_TYPE_SCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_INT,
+                                       BUSTER_TYPE_LONG, BUSTER_TYPE_LLONG, BUSTER_TYPE_INT128 };
+    const TypeId unsigned_pointees[] = { BUSTER_TYPE_UCHAR, BUSTER_TYPE_UCHAR, BUSTER_TYPE_USHORT, BUSTER_TYPE_UINT,
+                                         BUSTER_TYPE_ULONG, BUSTER_TYPE_ULLONG, BUSTER_TYPE_UINT128 };
+    for (uint32_t pair = 0; pair < BUSTER_ARRAY_LENGTH(signed_pointees); pair += 1)
+    {
+        for (uint32_t reverse = 0; reverse < 2; reverse += 1)
+        {
+            const TypeId to = type_pointer(table, reverse != 0 ? unsigned_pointees[pair] : signed_pointees[pair]);
+            const TypeId from = type_pointer(table, reverse != 0 ? signed_pointees[pair] : unsigned_pointees[pair]);
+            arguments[0].type = type_pointer(table, to);
+            arguments[1] = check_builtin_atomic_test_pointer(from, 43, 9);
+            result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_STORE_N, arguments, 3);
+            check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.unsupported == 0 &&
+                                            result.warnings == BUSTER_CHECK_BUILTIN_ATOMIC_WARN_POINTER_SIGN && result.warning_operands == 2 &&
+                                            result.store_value.type == to && result.store_value.object == 43 && result.store_value.offset == 9 &&
+                                            result.argument_conversions[1].type == to && result.object_size == 8,
+                                            "pointer-valued store accepts corresponding integer signedness with a warning and exact pointer conversion");
+        }
+    }
+    arguments[0].type = type_pointer(table, pointer_value);
+    arguments[1] = check_builtin_atomic_test_pointer(type_pointer(table, type_qualify(table, BUSTER_TYPE_UINT, BUSTER_TYPE_CONST)), 44, 0);
+    result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_STORE_N, arguments, 3);
+    check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE &&
+                                    result.warnings == BUSTER_CHECK_BUILTIN_ATOMIC_WARN_POINTER_SIGN && result.warning_operands == 2,
+                                    "corresponding signedness selects pointer-sign after ordinary C qualifier loss remains compatible");
     const TypeId restricted = type_qualify(table, pointer_value, BUSTER_TYPE_RESTRICT);
     arguments[0].type = type_pointer(table, type_qualify(table, restricted, BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE));
     arguments[1] = check_test_integer(BUSTER_TYPE_INT, 0);
@@ -171,6 +244,100 @@ static void check_builtin_atomic_test_values(CheckBuiltinAtomicTest* test, TypeT
     check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.evaluated_operands == 7 && result.known_orders == 0 &&
                                     (result.argument_conversions[2].flags & BUSTER_CHECK_CONVERT_LVALUE) != 0,
                                     "volatile dynamic order is evaluated even when a stronger helper ignores its numeric value");
+}
+
+static void check_builtin_atomic_test_enum_pointers(CheckBuiltinAtomicTest* test, TypeTable* table)
+{
+    const TypeId signed_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 148042);
+    const TypeId other_signed_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 148043);
+    const TypeId unsigned_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 148044);
+    const TypeId incomplete_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 148045);
+    const bool ready = type_enum_complete(table, signed_enum, BUSTER_TYPE_INT, 0) &&
+                       type_enum_complete(table, other_signed_enum, BUSTER_TYPE_INT, 0) &&
+                       type_enum_complete(table, unsigned_enum, BUSTER_TYPE_UINT, 0);
+    check_builtin_atomic_test_expect(test, ready, "signed/unsigned enum pointer fixtures constructed");
+    if (ready)
+    {
+        uint32_t completions[512] = { 0 };
+        completions[table->types.index[type_index(signed_enum)]] = 20;
+        completions[table->types.index[type_index(other_signed_enum)]] = 30;
+        completions[table->types.index[type_index(unsigned_enum)]] = 40;
+        const TypeId enum_parameter[] = { signed_enum };
+        const TypeId int_parameter[] = { BUSTER_TYPE_INT };
+        const TypeId enum_function = type_function(table, BUSTER_TYPE_INT, enum_parameter, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
+        const TypeId int_function = type_function(table, BUSTER_TYPE_INT, int_parameter, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
+        const TypeId old_function = type_function(table, BUSTER_TYPE_INT, NULL, 0, 0);
+        const struct
+        {
+            TypeId to;
+            TypeId from;
+            uint32_t source_position;
+            CheckDiagnostic diagnostic;
+            uint32_t warnings;
+        } cases[] =
+        {
+            { signed_enum, BUSTER_TYPE_INT, 20, CHECK_DIAG_NONE, 0 },
+            { BUSTER_TYPE_INT, signed_enum, 20, CHECK_DIAG_NONE, 0 },
+            { signed_enum, BUSTER_TYPE_UINT, 20, CHECK_DIAG_NONE, BUSTER_CHECK_BUILTIN_ATOMIC_WARN_POINTER_SIGN },
+            { BUSTER_TYPE_UINT, signed_enum, 20, CHECK_DIAG_NONE, BUSTER_CHECK_BUILTIN_ATOMIC_WARN_POINTER_SIGN },
+            { unsigned_enum, BUSTER_TYPE_UINT, 40, CHECK_DIAG_NONE, 0 },
+            { BUSTER_TYPE_UINT, unsigned_enum, 40, CHECK_DIAG_NONE, 0 },
+            { unsigned_enum, BUSTER_TYPE_INT, 40, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { BUSTER_TYPE_INT, unsigned_enum, 40, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { signed_enum, other_signed_enum, 30, CHECK_DIAG_NONE, BUSTER_CHECK_BUILTIN_ATOMIC_WARN_POINTER_SIGN },
+            { other_signed_enum, signed_enum, 30, CHECK_DIAG_NONE, BUSTER_CHECK_BUILTIN_ATOMIC_WARN_POINTER_SIGN },
+            { signed_enum, BUSTER_TYPE_INT, 19, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { BUSTER_TYPE_INT, signed_enum, 19, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { signed_enum, BUSTER_TYPE_UINT, 19, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { BUSTER_TYPE_UINT, signed_enum, 19, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { unsigned_enum, BUSTER_TYPE_UINT, 39, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { BUSTER_TYPE_UINT, unsigned_enum, 39, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { signed_enum, other_signed_enum, 29, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { signed_enum, signed_enum, 19, CHECK_DIAG_NONE, 0 },
+            { signed_enum, BUSTER_TYPE_VOID, 19, CHECK_DIAG_NONE, 0 },
+            { BUSTER_TYPE_VOID, signed_enum, 19, CHECK_DIAG_NONE, 0 },
+            { incomplete_enum, incomplete_enum, 0, CHECK_DIAG_NONE, 0 },
+            { incomplete_enum, BUSTER_TYPE_VOID, 0, CHECK_DIAG_NONE, 0 },
+            { BUSTER_TYPE_VOID, incomplete_enum, 0, CHECK_DIAG_NONE, 0 },
+            { incomplete_enum, BUSTER_TYPE_INT, UINT32_MAX, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { type_pointer(table, signed_enum), type_pointer(table, BUSTER_TYPE_INT), 19, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { type_pointer(table, signed_enum), type_pointer(table, BUSTER_TYPE_INT), 20, CHECK_DIAG_NONE, 0 },
+            { enum_function, int_function, 19, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { enum_function, int_function, 20, CHECK_DIAG_NONE, 0 },
+            { enum_function, old_function, 19, CHECK_DIAG_INCOMPATIBLE, 0 },
+            { enum_function, old_function, 20, CHECK_DIAG_NONE, 0 },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+        {
+            const TypeId stored_type = type_pointer(table, cases[i].to);
+            const CheckValue arguments[] = {
+                check_builtin_atomic_test_pointer(type_pointer(table, stored_type), i + 60, 0),
+                check_builtin_atomic_test_pointer(type_pointer(table, cases[i].from), i + 100, 0),
+                check_test_integer(BUSTER_TYPE_INT, 0),
+            };
+            const CheckBuiltinAtomicAction action = {
+                .id = CBUILTIN_ATOMIC_STORE_N,
+                .arguments = arguments,
+                .argument_count = BUSTER_ARRAY_LENGTH(arguments),
+                .node = 9999,
+                .tag_completions = completions,
+                .tag_completion_count = BUSTER_ARRAY_LENGTH(completions),
+                .source_position = cases[i].source_position,
+                .minimum_alignment = 8,
+                .alignment_known = true,
+            };
+            CheckBuiltinAtomicResult result;
+            check_builtin_atomic_one(table, &action, &result);
+            check_builtin_atomic_test_expect(test, result.action.diagnostic == cases[i].diagnostic && result.warnings == cases[i].warnings &&
+                                            result.warning_operands == (cases[i].warnings != 0 ? 2u : 0u) && result.unsupported == 0,
+                                            "enum pointer conversion follows ordinary compatibility, signed-only mapping and source-time visibility");
+            if (cases[i].diagnostic == CHECK_DIAG_NONE)
+            {
+                check_builtin_atomic_test_expect(test, result.store_value.type == stored_type && result.argument_conversions[1].type == stored_type,
+                                                "accepted enum pointer conversion retains the exact destination pointer type");
+            }
+        }
+    }
 }
 
 static void check_builtin_atomic_test_orders(CheckBuiltinAtomicTest* test, TypeTable* table)
@@ -269,13 +436,13 @@ static void check_builtin_atomic_test_constraints(CheckBuiltinAtomicTest* test, 
     arguments[0] = check_test_integer(BUSTER_TYPE_INT, 0);
     result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_LOAD_N, arguments, 2);
     check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_POINTER_REQUIRED, "integer zero is not a deduced atomic pointer");
-    const TypeId invalid[] = { BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, type_atomic(table, BUSTER_TYPE_INT), type_bit_int(table, 8, true) };
+    const TypeId invalid[] = { BUSTER_TYPE_LONG_DOUBLE, type_atomic(table, BUSTER_TYPE_INT), type_bit_int(table, 8, true), type_complex(table, BUSTER_TYPE_INT) };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid); i += 1)
     {
         arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, invalid[i]), 2, 0);
         result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_LOAD_N, arguments, 2);
         check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE,
-                                        "GNU _n rejects floating, _Atomic and _BitInt object types");
+                                        "GNU _n rejects direct x87 long double, _Atomic, _BitInt and complex integer object types");
     }
     arguments[0].type = type_pointer(table, type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_CONST));
     result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_STORE_N, arguments, 3);
@@ -289,7 +456,19 @@ static void check_builtin_atomic_test_constraints(CheckBuiltinAtomicTest* test, 
     result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_STORE_N, arguments, 3);
     check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.action.diagnostic_operand == 1,
                                     "stored pointer cannot silently become an integer value");
+    const TypeId unrelated_to[] = { BUSTER_TYPE_INT, BUSTER_TYPE_LONG, type_pointer(table, BUSTER_TYPE_INT) };
+    const TypeId unrelated_from[] = { BUSTER_TYPE_FLOAT, BUSTER_TYPE_LLONG, type_pointer(table, BUSTER_TYPE_UINT) };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unrelated_to); i += 1)
+    {
+        arguments[0].type = type_pointer(table, type_pointer(table, unrelated_to[i]));
+        arguments[1] = check_builtin_atomic_test_pointer(type_pointer(table, unrelated_from[i]), 45, 0);
+        result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_STORE_N, arguments, 3);
+        check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.action.diagnostic_operand == 1 &&
+                                        (result.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_WARN_POINTER_SIGN) == 0,
+                                        "unrelated equal-width and nested pointer types never become warning-compatible signedness pairs");
+    }
 
+    arguments[0].type = type_pointer(table, BUSTER_TYPE_INT);
     arguments[1] = check_test_integer(BUSTER_TYPE_INT, 0);
     CheckBuiltinAtomicAction action = {
         .id = CBUILTIN_ATOMIC_LOAD_N,
@@ -442,11 +621,11 @@ static void check_builtin_atomic_test_pages(CheckBuiltinAtomicTest* test, TypeTa
     }
 }
 
-static bool check_builtin_atomic_test_warning_oracle(const char* clang, const char* path, bool* rejected)
+static bool check_builtin_atomic_test_warning_oracle(const char* clang, const char* path, const char* warning, bool* rejected)
 {
     // parse_test_clang deliberately passes -w. Clang suppresses warnings even after -Werror there, so use a
     // separate direct syntax-only child for this diagnostic check rather than report a falsely passing oracle.
-    char* arguments[] = { (char*)clang, "-fsyntax-only", "-std=gnu17", "-Werror=atomic-memory-ordering", (char*)path, NULL };
+    char* arguments[] = { (char*)clang, "-fsyntax-only", "-std=gnu17", (char*)warning, (char*)path, NULL };
     posix_spawn_file_actions_t actions;
     bool ready = posix_spawn_file_actions_init(&actions) == 0;
     if (ready)
@@ -512,7 +691,18 @@ static void check_builtin_atomic_test_oracle(CheckBuiltinAtomicTest* test, const
         { "void f(void) { __atomic_thread_fence(); }\n", true, false },
         { "void f(void) { __atomic_signal_fence(0,0); }\n", true, false },
         { "int f(void) { return __atomic_load_n(0,0); }\n", true, false },
-        { "float f(float*p) { return __atomic_load_n(p,0); }\n", true, false },
+        { "float f(const volatile float*p) { return __atomic_load_n(p,0); } void g(volatile float*p,double v) { __atomic_store_n(p,v,0); }\n", false, false },
+        { "double f(const volatile double*p) { return __atomic_load_n(p,0); } void g(volatile double*p,int v) { __atomic_store_n(p,v,0); }\n", false, false },
+        { "void f(_Float16*p) { (void)__atomic_load_n(p,0); __atomic_store_n(p,1,0); }\n", false, false },
+        { "void f(__fp16*p) { (void)__atomic_load_n(p,0); __atomic_store_n(p,1,0); }\n", false, false },
+        { "void f(__bf16*p) { (void)__atomic_load_n(p,0); __atomic_store_n(p,1,0); }\n", false, false },
+        { "void f(__float128*p) { (void)__atomic_load_n(p,0); __atomic_store_n(p,1,0); }\n", false, false },
+        { "void f(float _Complex*p) { (void)__atomic_load_n(p,0); __atomic_store_n(p,1,0); }\n", false, false },
+        { "void f(double _Complex*p) { (void)__atomic_load_n(p,0); __atomic_store_n(p,1,0); }\n", false, false },
+        { "void f(long double _Complex*p) { (void)__atomic_load_n(p,0); __atomic_store_n(p,1,0); }\n", false, false },
+        { "long double f(long double*p) { return __atomic_load_n(p,0); }\n", true, false },
+        { "void f(long double*p) { __atomic_store_n(p,1,0); }\n", true, false },
+        { "void f(int _Complex*p) { (void)__atomic_load_n(p,0); }\n", true, false },
         { "struct S { int x; }; struct S f(struct S*p) { return __atomic_load_n(p,0); }\n", true, false },
         { "int f(_Atomic(int)*p) { return __atomic_load_n(p,0); }\n", true, false },
         { "unsigned _BitInt(8) f(unsigned _BitInt(8)*p) { return __atomic_load_n(p,0); }\n", true, false },
@@ -542,10 +732,77 @@ static void check_builtin_atomic_test_oracle(CheckBuiltinAtomicTest* test, const
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
         bool rejected = false;
-        ready = check_builtin_atomic_test_warning_oracle(clang, paths[i], &rejected);
+        ready = check_builtin_atomic_test_warning_oracle(clang, paths[i], "-Werror=atomic-memory-ordering", &rejected);
         check_builtin_atomic_test_expect(test, ready, "independent Clang atomic order-warning oracle ran");
         check_builtin_atomic_test_expect(test, !ready || rejected == (cases[i].rejected || cases[i].order_error),
                                         "Clang disagrees with invalid-order warning classification");
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
+        unlink(paths[i]);
+    }
+    rmdir(directory);
+}
+
+static void check_builtin_atomic_test_pointer_oracle(CheckBuiltinAtomicTest* test, const char* clang)
+{
+    static const struct
+    {
+        const char* source;
+        bool rejected;
+        bool sign_warning;
+    } cases[] =
+    {
+        { "void f(char**p,unsigned char*q,unsigned char**r,signed char*s) { __atomic_store_n(p,q,0); __atomic_store_n(r,s,0); }\n", false, true },
+        { "void f(short**p,unsigned short*q,unsigned short**r,short*s) { __atomic_store_n(p,q,0); __atomic_store_n(r,s,0); }\n", false, true },
+        { "void f(int**p,unsigned int*q,unsigned int**r,int*s) { __atomic_store_n(p,q,0); __atomic_store_n(r,s,0); }\n", false, true },
+        { "void f(long**p,unsigned long*q,unsigned long**r,long*s) { __atomic_store_n(p,q,0); __atomic_store_n(r,s,0); }\n", false, true },
+        { "void f(long long**p,unsigned long long*q,unsigned long long**r,long long*s) { __atomic_store_n(p,q,0); __atomic_store_n(r,s,0); }\n", false, true },
+        { "void f(__int128**p,unsigned __int128*q,unsigned __int128**r,__int128*s) { __atomic_store_n(p,q,0); __atomic_store_n(r,s,0); }\n", false, true },
+        { "void f(int**p,const unsigned int*q) { __atomic_store_n(p,q,0); }\n", false, true },
+        { "void f(int**p,const int*q) { __atomic_store_n(p,q,0); }\n", false, false },
+        { "void f(int**p,float*q) { __atomic_store_n(p,q,0); }\n", true, false },
+        { "void f(long**p,long long*q) { __atomic_store_n(p,q,0); }\n", true, false },
+        { "void f(int***p,unsigned int**q) { __atomic_store_n(p,q,0); }\n", true, false },
+        { "enum E:int { A }; void f(enum E**p,int*q,int**r,enum E*s) { __atomic_store_n(p,q,0); __atomic_store_n(r,s,0); }\n", false, false },
+        { "enum E:int { A }; void f(enum E**p,unsigned int*q,unsigned int**r,enum E*s) { __atomic_store_n(p,q,0); __atomic_store_n(r,s,0); }\n", false, true },
+        { "enum E:unsigned int { A }; void f(enum E**p,int*q) { __atomic_store_n(p,q,0); }\n", true, false },
+        { "enum E:unsigned int { A }; void f(enum E**p,unsigned int*q) { __atomic_store_n(p,q,0); }\n", false, false },
+        { "enum E:int { A }; enum F:int { B }; void f(enum E**p,enum F*q) { __atomic_store_n(p,q,0); }\n", false, true },
+        { "enum E:unsigned int { A }; enum F:unsigned int { B }; void f(enum E**p,enum F*q) { __atomic_store_n(p,q,0); }\n", true, false },
+        { "enum E; void f(enum E**p,int*q) { __atomic_store_n(p,q,0); } enum E { A=-1 };\n", true, false },
+        { "enum E; void f(enum E**p,unsigned int*q) { __atomic_store_n(p,q,0); } enum E { A=-1 };\n", true, false },
+        { "enum E; void f(enum E**p,enum E*q) { __atomic_store_n(p,q,0); } enum E { A=-1 };\n", false, false },
+        { "enum E; void f(enum E**p,void*q) { __atomic_store_n(p,q,0); } enum E { A=-1 };\n", false, false },
+        { "enum E; void f(enum E***p,int**q) { __atomic_store_n(p,q,0); } enum E { A=-1 };\n", true, false },
+        { "enum E { A=-1 }; void f(enum E***p,int**q) { __atomic_store_n(p,q,0); }\n", false, false },
+        { "enum E; typedef int F(enum E); typedef int G(int); void f(F**p,G*q) { __atomic_store_n(p,q,0); } enum E { A=-1 };\n", true, false },
+        { "enum E { A=-1 }; typedef int F(enum E); typedef int G(int); void f(F**p,G*q) { __atomic_store_n(p,q,0); }\n", false, false },
+    };
+    char directory[] = "/tmp/buster-check-builtin-atomic-pointer-XXXXXX";
+    bool ready = mkdtemp(directory) != NULL;
+    char paths[BUSTER_ARRAY_LENGTH(cases)][160];
+    char* pointers[BUSTER_ARRAY_LENGTH(cases)];
+    ParseTestClang results[BUSTER_ARRAY_LENGTH(cases)];
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
+        pointers[i] = paths[i];
+        ready = parse_test_write(paths[i], cases[i].source, strlen(cases[i].source));
+    }
+    const char* arguments[] = { "-std=gnu17" };
+    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, BUSTER_ARRAY_LENGTH(cases), results);
+    check_builtin_atomic_test_expect(test, ready, "independent Clang atomic pointer conversion oracle ran");
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        check_builtin_atomic_test_expect(test, results[i].rejected == cases[i].rejected,
+                                        "Clang disagrees with corresponding-signedness versus unrelated-pointer store fixture");
+        bool rejected = false;
+        ready = check_builtin_atomic_test_warning_oracle(clang, paths[i], "-Werror=pointer-sign", &rejected);
+        check_builtin_atomic_test_expect(test, ready, "independent Clang atomic pointer-sign warning oracle ran");
+        check_builtin_atomic_test_expect(test, !ready || rejected == (cases[i].rejected || cases[i].sign_warning),
+                                        "Clang disagrees with atomic pointer-sign diagnostic classification");
     }
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
@@ -581,12 +838,14 @@ static __attribute__((unused)) int run_check_builtin_atomic_tests(int argc, char
         if (initialized)
         {
             check_builtin_atomic_test_values(&test, &types.table);
+            check_builtin_atomic_test_enum_pointers(&test, &types.table);
             check_builtin_atomic_test_orders(&test, &types.table);
             check_builtin_atomic_test_constraints(&test, &types.table);
             check_builtin_atomic_test_pages(&test, &types.table);
         }
         check_test_types_close(&types);
         check_builtin_atomic_test_oracle(&test, clang);
+        check_builtin_atomic_test_pointer_oracle(&test, clang);
     }
     printf("test-check-builtins-atomic: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     return test.failures != 0;

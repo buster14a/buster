@@ -116,6 +116,56 @@ static void check_test_prefix_faults(CheckTest* test, Parser* parser)
     arena_release(&output);
 }
 
+// The parser oracle deliberately supplies -w. Warning-promotion controls need an unsuppressed invocation of the
+// same installed compiler. These original fixtures are standalone and header-free; every error must name path.
+static bool check_test_prefix_clang_warnings(const char* clang, const char* path, ParseTestClang* outcome)
+{
+    *outcome = (ParseTestClang){ 0 };
+    int descriptors[2];
+    bool valid = pipe(descriptors) == 0;
+    pid_t child = -1;
+    if (valid)
+    {
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-nostdinc", "-fno-color-diagnostics",
+                              "-fno-caret-diagnostics", "-ferror-limit=1", (char*)path, 0 };
+        posix_spawn_file_actions_t actions;
+        posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, descriptors[1], 2);
+        posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0);
+        posix_spawn_file_actions_addclose(&actions, descriptors[0]);
+        posix_spawn_file_actions_addclose(&actions, descriptors[1]);
+        valid = posix_spawnp(&child, clang, &actions, 0, arguments, environ) == 0;
+        posix_spawn_file_actions_destroy(&actions);
+        close(descriptors[1]);
+        FILE* stream = valid ? fdopen(descriptors[0], "r") : 0;
+        valid &= stream != 0;
+        if (stream != 0)
+        {
+            char line[4096];
+            const size_t length = strlen(path);
+            while (fgets(line, sizeof(line), stream) != 0)
+            {
+                if (!outcome->rejected && strncmp(line, path, length) == 0 && strstr(line, ": error: ") != 0)
+                {
+                    outcome->rejected = sscanf(line + length, ":%u:%u:", &outcome->line, &outcome->column) == 2;
+                }
+            }
+            fclose(stream);
+        }
+        else
+        {
+            close(descriptors[0]);
+        }
+        int status = 0;
+        if (child >= 0)
+        {
+            valid &= waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+                     (outcome->rejected ? WEXITSTATUS(status) == 1 : WEXITSTATUS(status) == 0);
+        }
+    }
+    return valid;
+}
+
 static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture* fixture, const char* source, const char* path,
                                       const ParseTestClang* oracle, bool faults)
 {
@@ -220,6 +270,19 @@ static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture*
                     for (uint32_t i = 0; checked && i < stream.report_count; i += 1)
                     {
                         first = stream.reports[i].token < first ? stream.reports[i].token : first;
+                    }
+                    CheckInitDiagnostic initializer;
+                    const bool diagnosed = checked && check_initializers_diagnose(&initializer, &input, &stream, view, &types.table,
+                                                                                   BUSTER_CHECK_NONE, &output, &scratch);
+                    check_test_expect(test, diagnosed && initializer.status != CHECK_INIT_RESOURCE, "prefix initializer diagnostic scan completes");
+                    if (diagnosed && initializer.status != CHECK_INIT_OK)
+                    {
+                        first = initializer.token < first ? initializer.token : first;
+                    }
+                    uint32_t promoted = BUSTER_CHECK_NONE;
+                    if (checked && check_diagnostic_first_error(&input, &stream, &promoted))
+                    {
+                        first = promoted < first ? promoted : first;
                     }
                 }
                 if (first != BUSTER_CHECK_NONE)
@@ -376,6 +439,24 @@ static void check_test_prefixes(CheckTest* test, const char* clang)
             1,
         },
         {
+            "earlier static initializer is not constant",
+            "int get(void);\nstatic int value=get();\n",
+            "int later = ;\n",
+            2,
+        },
+        {
+            "earlier static initializer precedes binding and syntax errors",
+            "int get(void);\nstatic int value=get();\nint missing_use=missing;\n",
+            "int later = ;\n",
+            2,
+        },
+        {
+            "promoted original enum warning precedes malformed first body",
+            "#pragma clang diagnostic error \"-Winteger-overflow\"\nenum { N=2147483647+1 };\n",
+            "int f(void){\nint broken=;\n}\n",
+            2,
+        },
+        {
             "valid prefix leaves original parse diagnostic first",
             "typedef int I;\nstruct S { I value; };\nint first(struct S s) { return s.value; }\n",
             "int later = ;\n",
@@ -455,7 +536,13 @@ static void check_test_prefixes(CheckTest* test, const char* clang)
     check_test_expect(test, ready, "prefix first-error Clang oracle runs");
     for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
     {
-        check_test_prefix_fixture(test, fixtures + i, sources[i], paths[i], outcomes + i, i == 0);
+        const bool warnings = strstr(sources[i], "#pragma clang diagnostic") != 0;
+        const bool oracle = !warnings || check_test_prefix_clang_warnings(clang, paths[i], outcomes + i);
+        check_test_expect(test, oracle, "prefix warning-promotion Clang oracle runs without suppression");
+        if (oracle)
+        {
+            check_test_prefix_fixture(test, fixtures + i, sources[i], paths[i], outcomes + i, i == 0);
+        }
     }
     check_test_prefix_lost_body(test);
     for (uint32_t i = 0; i < FILE_COUNT; i += 1)

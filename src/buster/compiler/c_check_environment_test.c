@@ -212,22 +212,44 @@ static void check_test_environment_failures(CheckTest* test, const CheckEnvironm
     check_test_expect(test, !check_environment_publish(&copy, parser, source->bindings, source->declaration_types, types, source->tag_completions, &output, &exhausted) &&
                            !copy.valid && output.length == 0, "late index scratch failure published partial source history");
     arena_release(&output);
-    CheckTestTypes limited_types = { 0 };
-    const bool initialized = check_test_types_open(&limited_types);
-    Arena limited = arena_reserve(input_bytes - 1);
-    check_test_expect(test, initialized && limited.base != 0, "late source-publication failure setup");
+    // ParseBindings temporarily needs more output space than this small fixture finally retains. Seed unrelated
+    // tag history so the final immutable publication, rather than that earlier temporary replay, is the peak.
+    // A successful control measures the exact boundary; the second run must finish the same graph and bindings.
+    CheckTestTypes publication_types[2] = { 0 };
+    const TypeCapacity type_capacity = { .types = 8192, .parameters = 8192, .tags = 8192, .members = 4096 };
+    bool initialized = true;
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        publication_types[path].arena = arena_reserve(type_capacity_bytes(type_capacity));
+        publication_types[path].index = arena_reserve(type_index_capacity_bytes(type_capacity));
+        initialized &= type_initialize(&publication_types[path].table, &publication_types[path].arena, &publication_types[path].index, type_capacity);
+        for (uint32_t tag = 0; initialized && tag < 4096; tag += 1)
+        {
+            initialized &= type_tag(&publication_types[path].table, BUSTER_TYPE_KIND_STRUCT, 0) != 0;
+        }
+    }
+    Arena control = arena_reserve(input_bytes + (1u << 20));
+    CheckInput completed = { 0 };
+    initialized = initialized && control.base != 0 && check_input(&completed, parser, pp, &publication_types[0].table, &control, scratch);
+    input_bytes = control.length;
+    Arena limited = initialized ? arena_reserve(input_bytes - 1) : (Arena){ 0 };
+    check_test_expect(test, initialized && completed.environment.valid && limited.base != 0, "late source-publication failure setup");
     if (initialized && limited.base != 0)
     {
         CheckInput failed;
-        const bool adapted = check_input(&failed, parser, pp, &limited_types.table, &limited, scratch);
+        const bool adapted = check_input(&failed, parser, pp, &publication_types[1].table, &limited, scratch);
         check_test_expect(test, !adapted && failed.resource && failed.report_count == 0 && !failed.environment.valid && failed.environment.bindings == 0 &&
-                               limited.length == input_bytes - source->retained_bytes && scratch->length == mark,
+                               failed.graph.count == completed.graph.count && failed.parser_binding_event_count == completed.parser_binding_event_count &&
+                               failed.binding_event_count == completed.binding_event_count &&
+                               limited.length == input_bytes - completed.environment.retained_bytes && scratch->length == mark,
                           "late history publication failure did not propagate through the sequential checker");
-        check_test_expect(test, !check_input(&failed, parser, pp, &limited_types.table, scratch, scratch) && failed.resource &&
+        check_test_expect(test, !check_input(&failed, parser, pp, &publication_types[1].table, scratch, scratch) && failed.resource &&
                                !failed.environment.valid && scratch->length == mark, "source reader accepted aliased retained/transient arenas");
     }
     arena_release(&limited);
-    check_test_types_close(&limited_types);
+    arena_release(&control);
+    check_test_types_close(&publication_types[1]);
+    check_test_types_close(&publication_types[0]);
 }
 
 static void check_test_environment_source(CheckTest* test, const CheckEnvironmentFixture* fixture, bool failures)

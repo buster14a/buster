@@ -4878,55 +4878,314 @@ static bool pp_test_number(const char* text, uint64_t* value)
     return result;
 }
 
-// Outside the oracle's mode, the feature queries answer what buster implements (pp_implemented_*): of builtins only the
-// preprocessor's __is_target_*, and no attribute, feature, extension or constexpr builtin; __has_warning answers as
-// clang does in both modes, and so do the queries that aren't about the compiler (__has_include, __is_identifier,
-// __is_target_*). With --clang-features, the same lines give clang's answers. Neither expands __has_constexpr_builtin's
-// name, a macro's or not.
+// The default capability inventory requires source checking and both required consumers; action folding alone
+// remains private to its action API. Clang's oracle mode retains its independent frozen tables and raw operands.
 static bool pp_test_implemented_features(const char* directory)
 {
     static const char source[] =
         "A __has_builtin(__builtin_expect) __has_constexpr_builtin(__builtin_clz) __has_feature(c_static_assert) __has_extension(c_atomic) "
         "__has_attribute(packed) __has_attribute(__packed__) __has_c_attribute(gnu::packed) __has_warning(\"-Wreserved-identifier\") "
         "__is_identifier(int) __is_target_arch(x86_64)\n"
-        "#define CLZ __builtin_clz\n#define __builtin_clz 0\nB __has_constexpr_builtin(CLZ) __has_constexpr_builtin(__builtin_clz)\n";
-    static const char* const expected[2] = { "A 0 0 0 0 0 0 0 1 0 1 B 0 0\n", "A 1 1 1 1 1 1 1 1 0 1 B 0 1\n" };
+        "#define CLZ __builtin_clz\n#define __builtin_clz 0\nB __has_constexpr_builtin(CLZ) __has_constexpr_builtin(__builtin_clz)\n"
+        "#define OWN_BUILTIN __is_target_arch\nC __has_builtin(OWN_BUILTIN) __has_builtin(__is_target_arch)\n"
+        "#define __builtin_expect 0\nD __has_builtin(__builtin_expect) __has_builtin(__builtin_expect_typo)\n";
+    static const char* const expected[2] =
+    {
+        "A 0 0 0 0 0 0 0 1 0 1 B 0 0 C 0 1 D 0 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0\n",
+    };
+    static const uint32_t standards[] =
+    {
+        2017,
+        2023,
+    };
     char path[4200];
     snprintf(path, sizeof(path), "%s/case.c", directory);
     pp_test_write_file(path, source);
     bool result = true;
-    for (uint32_t clang = 0; clang < 2; clang += 1)
+    for (uint32_t mode = 0; mode < BUSTER_ARRAY_LENGTH(standards); mode += 1)
     {
-        char* arguments[2] = { path, 0 };
-        Arena arena = arena_reserve(1ull << 20);
-        PPOptions options;
-        const char* input;
-        const char* output;
-        bool markers;
-        bool passed = pp_parse_options(1, arguments, &options, &arena, &input, &output, &markers);
-        options.clang_features = clang == 1;
-        static InternTable table;
-        static Preprocessor pp;
-        PPSpellings ours = { 0 };
-        PPSpellings wanted = { 0 };
-        passed = passed && pp_test_run(&pp, &table, &options, path) && pp_stream_spellings(&pp, &ours) &&
-                 pp_text_spellings((const uint8_t*)expected[clang], strlen(expected[clang]), pp.split_kinds, pp_test_lex_flags(&pp), &wanted) &&
-                 pp_compare_spellings(&pp, &ours, &wanted, clang == 1 ? "clang's feature answers" : "implemented feature answers", "wanted");
-        pp_release(&pp);
-        intern_release(&table);
-        arena_release(&ours.arena);
-        arena_release(&wanted.arena);
-        arena_release(&arena);
-        result &= passed;
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            for (uint32_t clang = 0; clang < 2; clang += 1)
+            {
+                char* arguments[2] = { path, 0 };
+                Arena arena = arena_reserve(1ull << 20);
+                PPOptions options;
+                const char* input;
+                const char* output;
+                bool markers;
+                bool passed = pp_parse_options(1, arguments, &options, &arena, &input, &output, &markers);
+                options.language.standard = standards[mode];
+                options.scalar = scalar != 0;
+                options.clang_features = clang != 0;
+                static InternTable table;
+                static Preprocessor pp;
+                PPSpellings ours = { 0 };
+                PPSpellings wanted = { 0 };
+                passed = passed && pp_test_run(&pp, &table, &options, path) && pp_stream_spellings(&pp, &ours) &&
+                         pp_text_spellings((const uint8_t*)expected[clang], strlen(expected[clang]), pp.split_kinds, pp_test_lex_flags(&pp), &wanted) &&
+                         pp_compare_spellings(&pp, &ours, &wanted, clang != 0 ? "clang's feature answers" : "implemented feature answers", "wanted");
+                pp_release(&pp);
+                intern_release(&table);
+                arena_release(&ours.arena);
+                arena_release(&wanted.arena);
+                arena_release(&arena);
+                result &= passed;
+            }
+        }
     }
-    // The preprocessor's own builtins are what __has_builtin answers 1 for by default.
-    static const char* const own[] = { "__is_target_arch", "__is_target_vendor", "__is_target_os", "__is_target_environment" };
+    // This explicit acceptance inventory is independent of the catalog's generation macros. Recognized special
+    // identities have no source capability; only the existing integer actions have standalone folding capability.
+    static const struct
+    {
+        CBuiltinId id;
+        const char* name;
+        bool fold;
+    } inventory[] =
+    {
+        { CBUILTIN_BSWAP16, "__builtin_bswap16", true },
+        { CBUILTIN_BSWAP32, "__builtin_bswap32", true },
+        { CBUILTIN_BSWAP64, "__builtin_bswap64", true },
+        { CBUILTIN_CLZ, "__builtin_clz", true },
+        { CBUILTIN_CLZL, "__builtin_clzl", true },
+        { CBUILTIN_CLZLL, "__builtin_clzll", true },
+        { CBUILTIN_CTZ, "__builtin_ctz", true },
+        { CBUILTIN_CTZL, "__builtin_ctzl", true },
+        { CBUILTIN_CTZLL, "__builtin_ctzll", true },
+        { CBUILTIN_POPCOUNT, "__builtin_popcount", true },
+        { CBUILTIN_POPCOUNTL, "__builtin_popcountl", true },
+        { CBUILTIN_POPCOUNTLL, "__builtin_popcountll", true },
+        { CBUILTIN_PARITY, "__builtin_parity", true },
+        { CBUILTIN_PARITYL, "__builtin_parityl", true },
+        { CBUILTIN_PARITYLL, "__builtin_parityll", true },
+        { CBUILTIN_FFS, "__builtin_ffs", true },
+        { CBUILTIN_FFSL, "__builtin_ffsl", true },
+        { CBUILTIN_FFSLL, "__builtin_ffsll", true },
+        { CBUILTIN_ADD_OVERFLOW, "__builtin_add_overflow", true },
+        { CBUILTIN_SUB_OVERFLOW, "__builtin_sub_overflow", true },
+        { CBUILTIN_MUL_OVERFLOW, "__builtin_mul_overflow", true },
+        { CBUILTIN_VA_START, "__builtin_va_start", false },
+        { CBUILTIN_C23_VA_START, "__builtin_c23_va_start", false },
+        { CBUILTIN_VA_ARG, "__builtin_va_arg", false },
+        { CBUILTIN_VA_COPY, "__builtin_va_copy", false },
+        { CBUILTIN_VA_END, "__builtin_va_end", false },
+        { CBUILTIN_OFFSETOF, "__builtin_offsetof", false },
+        { CBUILTIN_EXPECT, "__builtin_expect", false },
+        { CBUILTIN_UNREACHABLE, "__builtin_unreachable", false },
+        { CBUILTIN_TRAP, "__builtin_trap", false },
+        { CBUILTIN_ASSUME_ALIGNED, "__builtin_assume_aligned", false },
+        { CBUILTIN_PREFETCH, "__builtin_prefetch", false },
+        { CBUILTIN_CONSTANT_P, "__builtin_constant_p", false },
+        { CBUILTIN_TYPES_COMPATIBLE_P, "__builtin_types_compatible_p", false },
+        { CBUILTIN_CHOOSE_EXPR, "__builtin_choose_expr", false },
+        { CBUILTIN_OBJECT_SIZE, "__builtin_object_size", false },
+        { CBUILTIN_HUGE_VAL, "__builtin_huge_val", false },
+        { CBUILTIN_HUGE_VALF, "__builtin_huge_valf", false },
+        { CBUILTIN_HUGE_VALL, "__builtin_huge_vall", false },
+        { CBUILTIN_INF, "__builtin_inf", false },
+        { CBUILTIN_INFF, "__builtin_inff", false },
+        { CBUILTIN_INFL, "__builtin_infl", false },
+        { CBUILTIN_NAN, "__builtin_nan", false },
+        { CBUILTIN_NANF, "__builtin_nanf", false },
+        { CBUILTIN_NANL, "__builtin_nanl", false },
+        { CBUILTIN_ISNAN, "__builtin_isnan", false },
+        { CBUILTIN_ISINF, "__builtin_isinf", false },
+        { CBUILTIN_ISFINITE, "__builtin_isfinite", false },
+        { CBUILTIN_SIGNBIT, "__builtin_signbit", false },
+        { CBUILTIN_FPCLASSIFY, "__builtin_fpclassify", false },
+        { CBUILTIN_ISINF_SIGN, "__builtin_isinf_sign", false },
+        { CBUILTIN_FABS, "__builtin_fabs", false },
+        { CBUILTIN_FABSF, "__builtin_fabsf", false },
+        { CBUILTIN_FABSL, "__builtin_fabsl", false },
+        { CBUILTIN_FLT_ROUNDS, "__builtin_flt_rounds", false },
+        { CBUILTIN_CREAL, "__builtin_creal", false },
+        { CBUILTIN_CREALF, "__builtin_crealf", false },
+        { CBUILTIN_CREALL, "__builtin_creall", false },
+        { CBUILTIN_CIMAG, "__builtin_cimag", false },
+        { CBUILTIN_CIMAGF, "__builtin_cimagf", false },
+        { CBUILTIN_CIMAGL, "__builtin_cimagl", false },
+        { CBUILTIN_SQRT, "__builtin_sqrt", false },
+        { CBUILTIN_SQRTF, "__builtin_sqrtf", false },
+        { CBUILTIN_COPYSIGN, "__builtin_copysign", false },
+        { CBUILTIN_COPYSIGNF, "__builtin_copysignf", false },
+        { CBUILTIN_CEIL, "__builtin_ceil", false },
+        { CBUILTIN_CEILF, "__builtin_ceilf", false },
+        { CBUILTIN_FLOOR, "__builtin_floor", false },
+        { CBUILTIN_FLOORF, "__builtin_floorf", false },
+        { CBUILTIN_TRUNC, "__builtin_trunc", false },
+        { CBUILTIN_TRUNCF, "__builtin_truncf", false },
+        { CBUILTIN_NEARBYINT, "__builtin_nearbyint", false },
+        { CBUILTIN_NEARBYINTF, "__builtin_nearbyintf", false },
+        { CBUILTIN_RINT, "__builtin_rint", false },
+        { CBUILTIN_RINTF, "__builtin_rintf", false },
+        { CBUILTIN_MEMCPY, "__builtin_memcpy", false },
+        { CBUILTIN_MEMSET, "__builtin_memset", false },
+        { CBUILTIN_MEMMOVE, "__builtin_memmove", false },
+        { CBUILTIN_MEMCMP, "__builtin_memcmp", false },
+        { CBUILTIN_STRLEN, "__builtin_strlen", false },
+        { CBUILTIN_ALLOCA, "__builtin_alloca", false },
+        { CBUILTIN_UMULL_OVERFLOW, "__builtin_umull_overflow", false },
+        { CBUILTIN_ATOMIC_LOAD, "__atomic_load", false },
+        { CBUILTIN_ATOMIC_LOAD_N, "__atomic_load_n", false },
+        { CBUILTIN_ATOMIC_STORE, "__atomic_store", false },
+        { CBUILTIN_ATOMIC_STORE_N, "__atomic_store_n", false },
+        { CBUILTIN_ATOMIC_EXCHANGE, "__atomic_exchange", false },
+        { CBUILTIN_ATOMIC_EXCHANGE_N, "__atomic_exchange_n", false },
+        { CBUILTIN_ATOMIC_COMPARE_EXCHANGE, "__atomic_compare_exchange", false },
+        { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, "__atomic_compare_exchange_n", false },
+        { CBUILTIN_ATOMIC_FETCH_ADD, "__atomic_fetch_add", false },
+        { CBUILTIN_ATOMIC_FETCH_SUB, "__atomic_fetch_sub", false },
+        { CBUILTIN_ATOMIC_FETCH_AND, "__atomic_fetch_and", false },
+        { CBUILTIN_ATOMIC_FETCH_XOR, "__atomic_fetch_xor", false },
+        { CBUILTIN_ATOMIC_FETCH_OR, "__atomic_fetch_or", false },
+        { CBUILTIN_ATOMIC_FETCH_NAND, "__atomic_fetch_nand", false },
+        { CBUILTIN_ATOMIC_ADD_FETCH, "__atomic_add_fetch", false },
+        { CBUILTIN_ATOMIC_SUB_FETCH, "__atomic_sub_fetch", false },
+        { CBUILTIN_ATOMIC_AND_FETCH, "__atomic_and_fetch", false },
+        { CBUILTIN_ATOMIC_XOR_FETCH, "__atomic_xor_fetch", false },
+        { CBUILTIN_ATOMIC_OR_FETCH, "__atomic_or_fetch", false },
+        { CBUILTIN_ATOMIC_NAND_FETCH, "__atomic_nand_fetch", false },
+        { CBUILTIN_ATOMIC_TEST_AND_SET, "__atomic_test_and_set", false },
+        { CBUILTIN_ATOMIC_CLEAR, "__atomic_clear", false },
+        { CBUILTIN_ATOMIC_THREAD_FENCE, "__atomic_thread_fence", false },
+        { CBUILTIN_ATOMIC_SIGNAL_FENCE, "__atomic_signal_fence", false },
+        { CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE, "__atomic_always_lock_free", false },
+        { CBUILTIN_ATOMIC_IS_LOCK_FREE, "__atomic_is_lock_free", false },
+        { CBUILTIN_SYNC_FETCH_AND_ADD, "__sync_fetch_and_add", false },
+        { CBUILTIN_SYNC_FETCH_AND_SUB, "__sync_fetch_and_sub", false },
+        { CBUILTIN_SYNC_FETCH_AND_OR, "__sync_fetch_and_or", false },
+        { CBUILTIN_SYNC_FETCH_AND_AND, "__sync_fetch_and_and", false },
+        { CBUILTIN_SYNC_FETCH_AND_XOR, "__sync_fetch_and_xor", false },
+        { CBUILTIN_SYNC_FETCH_AND_NAND, "__sync_fetch_and_nand", false },
+        { CBUILTIN_SYNC_ADD_AND_FETCH, "__sync_add_and_fetch", false },
+        { CBUILTIN_SYNC_SUB_AND_FETCH, "__sync_sub_and_fetch", false },
+        { CBUILTIN_SYNC_OR_AND_FETCH, "__sync_or_and_fetch", false },
+        { CBUILTIN_SYNC_AND_AND_FETCH, "__sync_and_and_fetch", false },
+        { CBUILTIN_SYNC_XOR_AND_FETCH, "__sync_xor_and_fetch", false },
+        { CBUILTIN_SYNC_NAND_AND_FETCH, "__sync_nand_and_fetch", false },
+        { CBUILTIN_SYNC_BOOL_COMPARE_AND_SWAP, "__sync_bool_compare_and_swap", false },
+        { CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP, "__sync_val_compare_and_swap", false },
+        { CBUILTIN_SYNC_SYNCHRONIZE, "__sync_synchronize", false },
+        { CBUILTIN_SYNC_LOCK_TEST_AND_SET, "__sync_lock_test_and_set", false },
+        { CBUILTIN_SYNC_LOCK_RELEASE, "__sync_lock_release", false },
+        { CBUILTIN_FRAME_ADDRESS, "__builtin_frame_address", false },
+        { CBUILTIN_RETURN_ADDRESS, "__builtin_return_address", false },
+        { CBUILTIN_EXTRACT_RETURN_ADDR, "__builtin_extract_return_addr", false },
+        { CBUILTIN_FROB_RETURN_ADDR, "__builtin_frob_return_addr", false },
+    };
+    result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
+    const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |
+                                          BUSTER_CBUILTIN_CAP_CHECKER | BUSTER_CBUILTIN_CAP_TIER0 | BUSTER_CBUILTIN_CAP_TIER1;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cbuiltin_catalog); i += 1)
+    {
+        result &= (cbuiltin_catalog[i].capabilities & compile_capabilities) == 0;
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(inventory); i += 1)
+    {
+        const char* name = inventory[i].name;
+        const uint32_t length = (uint32_t)strlen(name);
+        result &= cbuiltin_resolve(name, length) == inventory[i].id;
+        result &= cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_FOLD) == inventory[i].fold;
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_SOURCE);
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, compile_capabilities);
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_FOLD | BUSTER_CBUILTIN_CAP_SOURCE);
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, 0);
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, 0x80);
+        for (uint32_t previous = 0; previous < i; previous += 1)
+        {
+            result &= inventory[previous].id != inventory[i].id && strcmp(inventory[previous].name, name) != 0;
+        }
+        for (uint32_t mode = 0; mode < BUSTER_ARRAY_LENGTH(standards); mode += 1)
+        {
+            const PPOptions defaults = { .language = { .standard = standards[mode], .gnu = true } };
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == 0;
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == 0;
+        }
+    }
+    static const char* const own[] =
+    {
+        "__is_target_arch",
+        "__is_target_vendor",
+        "__is_target_os",
+        "__is_target_environment",
+    };
     const PPOptions defaults = { .language = { .standard = 2017, .gnu = true } };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(own); i += 1)
     {
-        result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)own[i], (uint32_t)strlen(own[i])) == 1;
+        const uint32_t length = (uint32_t)strlen(own[i]);
+        result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)own[i], length) == 1;
+        result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)own[i], length) == 0;
+        result &= cbuiltin_resolve(own[i], length) == CBUILTIN_NONE;
     }
-    printf("feature answers: %s (what buster implements by default, clang's with --clang-features)\n", result ? "as expected" : "WRONG");
+    static const char* const unknown[] =
+    {
+        "",
+        "__builtin_",
+        "__builtin_cl",
+        "__builtin_clz_",
+        "__builtin_clzllx",
+        "_builtin_clz",
+        "__BUILTIN_clz",
+        "__builtin_va_start ",
+        "__builtin_c23_va_startx",
+        "__atomic_load_nn",
+        "__sync_synchroniz",
+        "__is_target_arch_",
+        "__is_target_osx",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unknown); i += 1)
+    {
+        const uint32_t length = (uint32_t)strlen(unknown[i]);
+        result &= cbuiltin_resolve(unknown[i], length) == CBUILTIN_NONE;
+        result &= !cbuiltin_has_capability((const uint8_t*)unknown[i], length, BUSTER_CBUILTIN_CAP_FOLD);
+        result &= !cbuiltin_has_capability((const uint8_t*)unknown[i], length, BUSTER_CBUILTIN_CAP_SOURCE);
+        result &= !cbuiltin_has_capability((const uint8_t*)unknown[i], length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
+        result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)unknown[i], length) == 0;
+        result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)unknown[i], length) == 0;
+    }
+    // Every name ends immediately before an unreadable page, with no terminator or padding. Zero/oversized
+    // lengths at the unreadable boundary must return without inspecting it.
+    const long page_size = sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = page_size > 0 ? mmap(0, (size_t)page_size * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+    if (mapping == MAP_FAILED)
+    {
+        result = false;
+    }
+    else
+    {
+        uint8_t* end = mapping + page_size;
+        const bool guarded = mprotect(end, (size_t)page_size, PROT_NONE) == 0;
+        result &= guarded;
+        if (guarded)
+        {
+            result &= cbuiltin_resolve((const char*)end, 0) == CBUILTIN_NONE;
+            result &= cbuiltin_resolve((const char*)end, UINT32_MAX) == CBUILTIN_NONE;
+            result &= cbuiltin_resolve(0, 1) == CBUILTIN_NONE;
+            result &= !cbuiltin_has_capability(end, 0, BUSTER_CBUILTIN_CAP_FOLD);
+            result &= !cbuiltin_has_capability(end, UINT32_MAX, BUSTER_CBUILTIN_CAP_FOLD);
+            result &= !cbuiltin_has_capability(0, 1, BUSTER_CBUILTIN_CAP_SOURCE);
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(inventory); i += 1)
+            {
+                const uint32_t length = (uint32_t)strlen(inventory[i].name);
+                uint8_t* name = end - length;
+                memcpy(name, inventory[i].name, length);
+                result &= cbuiltin_resolve((const char*)name, length) == inventory[i].id;
+                result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_FOLD) == inventory[i].fold;
+                result &= !cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE);
+                result &= !cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == 0;
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == 0;
+                name[0] = '!';
+                result &= cbuiltin_resolve((const char*)name, length) == CBUILTIN_NONE;
+                result &= !cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_FOLD);
+            }
+        }
+        munmap(mapping, (size_t)page_size * 2);
+    }
+    printf("feature answers and %zu catalog names: %s (source acceptance by default, clang's independent oracle mode)\n",
+           BUSTER_ARRAY_LENGTH(inventory), result ? "as expected" : "WRONG");
     return result;
 }
 

@@ -3,10 +3,364 @@
 // Original declaration/statement fixtures run through both production parser/checker schedules and external Clang.
 // Include after check_test_source; no Clang implementation or external fixture is incorporated.
 
+static void check_test_source_fp_history(CheckTest* test, bool complex)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const char* source = complex ?
+        "#pragma STDC CX_LIMITED_RANGE ON\ndouble file_on;double f(void){\n"
+        "#pragma STDC CX_LIMITED_RANGE OFF\ndouble local_off=0;{\n"
+        "#pragma STDC CX_LIMITED_RANGE ON\ndouble inner_on=0;}double restored_off=0;return 0;}double restored_on;\n"
+        "#pragma STDC CX_LIMITED_RANGE DEFAULT\ndouble file_default;\n" :
+        "#pragma STDC FENV_ACCESS ON\ndouble file_on;double f(void){\n"
+        "#pragma STDC FENV_ACCESS OFF\ndouble local_off=0;{\n"
+        "#pragma STDC FENV_ACCESS ON\ndouble inner_on=0;}double restored_off=0;return 0;}double restored_on;\n"
+        "#pragma STDC FENV_ACCESS DEFAULT\ndouble file_default;\n";
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
+    ready = ready && pp_run_source(&pp, "fp-history.c", (const uint8_t*)source, strlen(source));
+    Arena arena = arena_reserve(UINT64_C(1) << 16);
+    Arena scratch = arena_reserve(UINT64_C(1) << 16);
+    ready = ready && arena.base != 0 && scratch.base != 0;
+    check_test_expect(test, ready, "floating environment history fixture setup");
+    for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
+    {
+        const ParseOptions parser_options = { .scalar = scalar != 0 };
+        ready = parse_initialize(&parser, &parser_options, options.language) && parse_translation_unit(&parser, &pp);
+        check_test_expect(test, ready && parser.tokens.pragma_count == 4, "floating environment history fixture parses");
+        const uint64_t arena_capacity = arena.capacity;
+        const uint64_t scratch_capacity = scratch.capacity;
+        uint64_t required = 0;
+        if (ready)
+        {
+            arena.length = 0;
+            memset(arena_push(&arena, arena.capacity, 1), 0xa5, arena.capacity);
+            scratch.length = 0;
+            memset(arena_push(&scratch, scratch.capacity, 1), 0x5a, scratch.capacity);
+        }
+        for (uint32_t pass = 0; ready && pass < 3; pass += 1)
+        {
+            const uint64_t attempts = pass == 1 ? required - 31 : 1;
+            for (uint64_t limit = 0; limit < attempts; limit += 1)
+            {
+                arena.length = 31;
+                arena.capacity = pass == 1 ? 31 + limit : arena_capacity;
+                scratch.length = 29;
+                scratch.capacity = pass == 2 ? 29 : scratch_capacity;
+                uint8_t handled[4] = { 0 };
+                CheckInput input = { .graph = { .capacity = parser.tokens.count * 2 } };
+                CheckInputReader reader = { .output = &input, .parser = &parser, .pp = &pp, .arena = &arena, .scratch = &scratch };
+                const bool valid = check_input_fp_pragmas(&reader, handled);
+                if (pass == 0)
+                {
+                    required = arena.length;
+                    check_test_expect(test, valid && !input.resource && input.fp_pragma_count == 4 &&
+                                      input.fp_pragmas != 0 && input.fp_environments != 0 && input.cx_limited_ranges != 0 && input.graph.fp_environments != 0 &&
+                                      handled[0] == 2 && handled[1] == 2 && handled[2] == 2 && handled[3] == 2 && scratch.length == 29,
+                                      "floating environment history publishes initialized retained columns");
+                    const char* names[] = { "file_on", "local_off", "inner_on", "restored_off", "restored_on", "file_default" };
+                    const uint8_t expected[] = { 1, 0, 1, 0, 1, 0 };
+                    uint32_t found = 0;
+                    for (uint32_t token = 0; valid && token < parser.tokens.count; token += 1)
+                    {
+                        const uint32_t name = parser.tokens.names[token];
+                        for (uint32_t item = 0; name != 0 && item < BUSTER_ARRAY_LENGTH(names); item += 1)
+                        {
+                            if (intern_length(&identifiers, name) == strlen(names[item]) && memcmp(intern_bytes(&identifiers, name), names[item], strlen(names[item])) == 0)
+                            {
+                                found += 1;
+                                check_test_expect(test, input.fp_environments[token] == (complex ? 0 : expected[item]) &&
+                                                  input.cx_limited_ranges[token] == (complex ? expected[item] : 0),
+                                                  "floating policy restores its enclosing scope without changing the other policy");
+                            }
+                        }
+                    }
+                    check_test_expect(test, found == BUSTER_ARRAY_LENGTH(names), "floating environment metadata fixture visits every marker");
+                    for (uint32_t pragma = 0; valid && pragma < input.fp_pragma_count; pragma += 1)
+                    {
+                        check_test_expect(test, input.fp_pragmas[pragma].kind == (complex ? CHECK_FP_PRAGMA_CX_LIMITED_RANGE : CHECK_FP_PRAGMA_FENV_ACCESS) &&
+                                          input.fp_pragmas[pragma].warnings == 0 && input.fp_pragmas[pragma].valid,
+                                          "floating policy records retain the exact directive kind");
+                    }
+                    ready = valid && required > 31;
+                }
+                else
+                {
+                    check_test_expect(test, !valid && input.resource && input.fp_pragmas == 0 && input.fp_environments == 0 &&
+                                      input.cx_limited_ranges == 0 && input.graph.fp_environments == 0 && input.fp_pragma_count == 0 && arena.length == 31 && scratch.length == 29 &&
+                                      handled[0] == 0 && handled[1] == 0 && handled[2] == 0 && handled[3] == 0,
+                                      "floating environment exhaustion rolls back columns and handled state");
+                }
+            }
+        }
+        arena.capacity = arena_capacity;
+        scratch.capacity = scratch_capacity;
+        parse_release(&parser);
+    }
+    arena_release(&scratch);
+    arena_release(&arena);
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 static void check_test_source_extensions(CheckTest* test, const char* clang)
 {
     const CheckSourceFixture fixtures[] =
     {
+        {
+            "complex range permission restores lexical state",
+            "#pragma STDC CX_LIMITED_RANGE ON\n_Complex double f(_Complex double z){\n#pragma STDC CX_LIMITED_RANGE OFF\n{\n#pragma STDC CX_LIMITED_RANGE ON\nz=z*z;}return z;}\n#pragma STDC CX_LIMITED_RANGE DEFAULT\n",
+            false,
+        },
+        {
+            "unknown floating pragma states warn and leave the setting unchanged",
+            "#pragma STDC FENV_ACCESS UNKNOWN\n#pragma STDC CX_LIMITED_RANGE UNKNOWN\nint f(void){int x=1;\n#pragma STDC FENV_ACCESS BAD\n#pragma STDC CX_LIMITED_RANGE BAD\nreturn x;}\n",
+            false,
+        },
+        {
+            "complex range late block setting is rejected",
+            "int f(void){int x=0;\n#pragma STDC CX_LIMITED_RANGE ON\nreturn x;}\n",
+            true,
+        },
+        {
+            "complex range setting cannot split a declaration",
+            "int\n#pragma STDC CX_LIMITED_RANGE ON\nx;\n",
+            true,
+        },
+        {
+            "recognized floating setting with trailing token is rejected",
+            "#pragma STDC FENV_ACCESS ON extra\nint x;\n",
+            true,
+        },
+        {
+            "recognized complex range setting with trailing token is rejected",
+            "#pragma STDC CX_LIMITED_RANGE ON extra\nint x;\n",
+            true,
+        },
+        {
+            "typedef redefinition requires identical enum type",
+            "typedef enum { X } E;\ntypedef unsigned E;\n",
+            true,
+        },
+        {
+            "typedef pointer redefinition keeps enum identity",
+            "typedef enum { X } E;typedef E *P;\ntypedef unsigned *P;\n",
+            true,
+        },
+        {
+            "typedef array redefinition cannot supply a different bound",
+            "typedef int A[];\ntypedef int A[3];\n",
+            true,
+        },
+        {
+            "typedef function redefinition cannot add a prototype",
+            "typedef int F();\ntypedef int F(int);\n",
+            true,
+        },
+        {
+            "typedef canonical identity ignores nested alignment attributes",
+            "typedef int I __attribute__((aligned(8)));typedef int I;typedef I *P;typedef int *P;P p;\n",
+            false,
+        },
+        {
+            "floating environment lexical scopes",
+            "#pragma STDC FENV_ACCESS ON\nfloat x=1.0f/3.0f;float f(float a){\n#pragma STDC FENV_ACCESS OFF\n{\n#pragma STDC FENV_ACCESS ON\na+=1.0f/3.0f;}return a+1.0f/3.0f;}\n#pragma STDC FENV_ACCESS DEFAULT\nfloat g(void){return 1.0f/3.0f;}\n",
+            false,
+            false
+        },
+        {
+            "floating environment pragma requires compound beginning",
+            "int f(void){int x=0;_Pragma(\"STDC FENV_ACCESS ON\")return x;}\n",
+            true,
+            false
+        },
+        {
+            "floating environment pragma cannot split file declaration",
+            "int\n#pragma STDC FENV_ACCESS ON\nx;\n",
+            true,
+            false
+        },
+        {
+            "floating environment pragma cannot split file initializer",
+            "double x=\n#pragma STDC FENV_ACCESS ON\n1.0;\n",
+            true,
+            false
+        },
+        {
+            "floating environment pragma cannot split parameter declaration",
+            "int f(int\n#pragma STDC FENV_ACCESS ON\nx);\n",
+            true,
+            false
+        },
+        {
+            "empty record member declarations retain layout",
+            "struct S{;char a[63];;unsigned long n;;;};_Static_assert(sizeof(struct S)==72,\"layout\");\n",
+            false,
+            false
+        },
+        {
+            "incomplete record member reports its own declaration",
+            "struct S {\nint a;\nstruct Missing m;\n};\n",
+            true,
+            false
+        },
+        {
+            "invalid bit-field width reports its own declaration",
+            "struct S {\nint a;\nint v:99;\n};\n",
+            true,
+            false
+        },
+        {
+            "nonfinal flexible member reports its own declaration",
+            "struct S {\nint a[];\nint b;\n};\n",
+            true,
+            false
+        },
+        {
+            "expanded anonymous member collision reports the later member",
+            "struct S {\nstruct {int x;};\nstruct {int x;};\n};\n",
+            true,
+            false
+        },
+        {
+            "duplicate declaration modifiers retain warning-only semantics",
+            "typedef typedef unsigned unsigned I; extern extern signed signed int x; static static short short y; _Thread_local _Thread_local int z; _Complex _Complex double c; _Atomic _Atomic int a; I f(I n){return n+(unsigned unsigned)3+y;}\n",
+            false,
+            false
+        },
+        {
+            "conflicting sign specifiers remain invalid",
+            "signed unsigned int x;\n",
+            true,
+            false
+        },
+        {
+            "invalid third long reports its specifier line",
+            "long long long\nf(void){return 0;}\n",
+            true,
+            false
+        },
+        {
+            "incompatible floating specifier reports its own line",
+            "unsigned float\nf(void){return 0;}\n",
+            true,
+            false
+        },
+        {
+            "GNU extension prefix preserves operand category",
+            "_Static_assert(__extension__ 3==3,\"value\"); int f(int x){(__extension__ x)=3;return __extension__ ({int y=x;y+1;});}\n",
+            false,
+            false
+        },
+        {
+            "predefined function names retain static array types",
+            "_Static_assert(sizeof __func__==1,\"file\"); _Static_assert(sizeof __PRETTY_FUNCTION__==10,\"top level\"); int long_name(int n){_Static_assert(sizeof __func__==10,\"name\");static const char *p=__func__;return p[n]+__FUNCTION__[0]+__PRETTY_FUNCTION__[0];}\n",
+            false,
+            false
+        },
+        {
+            "predefined function names are const arrays",
+            "int f(void){__func__[0]='x';return 0;}\n",
+            true,
+            false
+        },
+        {
+            "predefined function name is not an array initializer literal",
+            "int f(void){char name[]=__func__;return sizeof name;}\n",
+            true,
+            false
+        },
+        {
+            "typeof statement expression local declarations",
+            "int f(int n){__typeof__(({int x=n; x;})) t=1; return t;} int g(int n){const __typeof__(({long x=n; __typeof__(({short y=2;y;})) z=3; x+z;})) t=1; return t;}\n",
+            false,
+            false
+        },
+        {
+            "typeof statement expression retains scope",
+            "int f(int n){__typeof__(({int x=n; x;})) t=1; return x+t;}\n",
+            true,
+            false
+        },
+        {
+            "typeof statement expression final declaration is void",
+            "int f(void){__typeof__(({int x=1;})) t;return 0;}\n",
+            true,
+            false
+        },
+        {
+            "string subobject bounds are source constants",
+            "_Static_assert(__builtin_object_size(\"abc\",1)==4,\"max\"); _Static_assert(__builtin_object_size(\"abc\",3)==4,\"min\"); _Static_assert(!__builtin_constant_p(__builtin_object_size(\"abc\",0)),\"deferred\"); _Static_assert(__builtin_constant_p(1.0+2.0i),\"complex\");\n",
+            false,
+            false
+        },
+        {
+            "string whole object maximum is not a source constant",
+            "_Static_assert(__builtin_object_size(\"abc\",0)==4,\"whole\");\n",
+            true,
+            false
+        },
+        {
+            "string whole object minimum is not a source constant",
+            "_Static_assert(__builtin_object_size(\"abc\",2)==4,\"whole\");\n",
+            true,
+            false
+        },
+        {
+            "builtin expect source constant evaluation",
+            "int side(void); enum { N=__builtin_expect(3,side())+2 }; int a[N]; _Static_assert(N==5,\"enum\"); _Static_assert(__builtin_expect(3,side())+2==5,\"assert\"); static long x=__builtin_expect(7,side())+1; static int b[]={__builtin_expect(9,side())}; long f(long n){return __builtin_expect(n,side());}\n",
+            false,
+            false
+        },
+        {
+            "builtin string and object witnesses",
+            "int a[7]; _Static_assert(__builtin_constant_p(\"abc\"),\"literal\"); _Static_assert(__builtin_constant_p((unsigned long)\"abc\"),\"cast\"); _Static_assert(!__builtin_constant_p(\"abc\"+1),\"interior\"); _Static_assert(!__builtin_constant_p(&a),\"object\"); _Static_assert(__builtin_object_size(a,0)==sizeof a,\"whole max\"); _Static_assert(__builtin_object_size(a,1)==sizeof a,\"sub max\"); _Static_assert(__builtin_object_size(a,2)==sizeof a,\"whole min\"); _Static_assert(__builtin_object_size(a,3)==sizeof a,\"sub min\"); unsigned long f(void){return __builtin_object_size(\"abc\",0);}\n",
+            false,
+            false
+        },
+        {
+            "floating builtin constants and classify",
+            "static double inf=__builtin_huge_val(); static float nan=__builtin_nanf(\"0x123\"); _Static_assert(__builtin_isinf(__builtin_inf()),\"inf\"); _Static_assert(__builtin_isnan(__builtin_nan(\"\")),\"nan\"); _Static_assert(__builtin_fpclassify(1,2,3,4,5,0.0)==5,\"zero\");\n",
+            false,
+            false
+        },
+        {
+            "builtin expect rejects wrong arity",
+            "long f(void){return __builtin_expect(1);}\n",
+            true,
+            false
+        },
+        {
+            "builtin expect still checks discarded constant argument type",
+            "struct S{int x;}; _Static_assert(__builtin_expect(1,(struct S){0}),\"type\");\n",
+            true,
+            false
+        },
+        {
+            "object size rejects invalid mode",
+            "int a[4]; unsigned long n=__builtin_object_size(a,4);\n",
+            true,
+            false
+        },
+        {
+            "pointer array strings infer object count",
+            "const char *items[]={\"label\",\"x\"}; _Static_assert(sizeof items==2*sizeof(char*),\"count\");\n",
+            false,
+            false
+        },
+        {
+            "calling convention between pointer and name",
+            "void *__cdecl f(void *p){return p;} int (__cdecl *callback)(int);\n",
+            false,
+            false
+        },
+        {
+            "conditional middle operand comma",
+            "int put(int*,int); int f(int *p,int n){return (unsigned char)((n<128)?(*p=n),1:put(p,n));}\n",
+            false,
+            false
+        },
         {
             "goto cannot enter statement expression",
             "int f(void){goto entered;return ({entered: 3;});}\n",
@@ -684,10 +1038,28 @@ static void check_test_source_extensions(CheckTest* test, const char* clang)
             false
         },
         {
-            "retained packing pragma is unsupported",
-            "#pragma pack(1)\nstruct S { char c; int x; };\n",
+            "earlier binding error survives a later retained pragma",
+            "int f(void){return missing;}\n#pragma pack(1)\nstruct S{char c;int x;};\n",
             true,
-            true
+            false
+        },
+        {
+            "retained pragma follows prepared attributed declarations",
+            "int f(int *) __attribute__((__nonnull__(1)));\nint g(int *p){return f(p);}\n#pragma pack(1)\nstruct S{char c;int x;};\n_Static_assert(sizeof(struct S)==5,\"\");\n",
+            false,
+            false
+        },
+        {
+            "record captures packing at its opening brace",
+            "struct S{char c;\n#pragma pack(1)\nint x;};\nstruct T{char c;int x;};\n_Static_assert(sizeof(struct S)==8,\"\");\n_Static_assert(sizeof(struct T)==5,\"\");\n",
+            false,
+            false
+        },
+        {
+            "retained packing pragma changes record layout",
+            "#pragma pack(1)\nstruct S { char c; int x; };\n_Static_assert(sizeof(struct S)==5,\"\");\n",
+            false,
+            false
         },
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
@@ -721,4 +1093,6 @@ static void check_test_source_extensions(CheckTest* test, const char* clang)
     {
         rmdir(directory);
     }
+    check_test_source_fp_history(test, false);
+    check_test_source_fp_history(test, true);
 }

@@ -122,6 +122,7 @@ int run_refinement_benchmark(int argc, char** argv);
 // test-preprocessor commands.
 #include "buster/compiler/c_predefines.c"
 #include "buster/compiler/c_preprocessor.c"
+#include "buster/compiler/c_builtin_catalog.c"
 #include "buster/compiler/c_preprocessor_test.c"
 #include "buster/compiler/c_predefines_test.c"
 #include "buster/compiler/c_preprocessor_fuzz.c"
@@ -235,6 +236,9 @@ int run_tier1_schedule_benchmark(int argc, char** argv);
 // The C type table (TypeIds, hash-consing, layout, conversions, compatibility and printing) and its tests, for the
 // test-types command. Its benchmark is another translation unit.
 #include "buster/compiler/c_types.c"
+#include "buster/compiler/c_builtin_intrinsic_types.c"
+#include "buster/compiler/c_builtin_intrinsic_features.c"
+#include "buster/compiler/c_builtin_intrinsic_catalog.c"
 #include "buster/compiler/c_types_test.c"
 int run_type_benchmark(int argc, char** argv);
 
@@ -247,17 +251,23 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_builtin_test.c"
 #include "buster/compiler/c_check_actions.c"
+#include "buster/compiler/c_check_builtin_x86.c"
 #include "buster/compiler/c_check_builtin.c"
 #include "buster/compiler/c_check_varargs.c"
 #include "buster/compiler/c_check_builtin_misc.c"
 #include "buster/compiler/c_check_builtin_query.c"
 #include "buster/compiler/c_check_builtin_float.c"
+#include "buster/compiler/c_check_builtin_math.c"
 #include "buster/compiler/c_check_builtin_atomic.c"
+#include "buster/compiler/c_check_builtin_vector.c"
+#include "buster/compiler/c_check_builtin_typed_overflow.c"
+#include "buster/compiler/c_check_builtin_rounds.c"
 #include "buster/compiler/c_checker.c"
 #include "buster/compiler/c_check_literals.c"
 #include "buster/compiler/c_check_initializer.c"
 #include "buster/compiler/c_check_data.c"
 #include "buster/compiler/c_check_input.c"
+#include "buster/compiler/c_check_diagnostic.c"
 #include "buster/compiler/c_check_initializer_input.c"
 #include "buster/compiler/c_check_data_input.c"
 int run_checker_benchmark(int argc, char** argv);
@@ -294,21 +304,37 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_builtin_terminal_helpers_test.c"
 #include "buster/compiler/c_builtin_atomic_helpers.c"
 #include "buster/compiler/c_builtin_atomic_helpers_test.c"
+#include "buster/compiler/c_builtin_rounds_helper.c"
+#include "buster/compiler/c_builtin_rounds_helper_test.c"
+#include "buster/compiler/c_builtin_math_helpers.c"
+#include "buster/compiler/c_builtin_math_helpers_test.c"
 int run_backend_benchmark(int argc, char** argv);
 
 // Source checking's program consumer shares the ABI and Tier 0 interfaces. Keep the source driver and its
 // integration tests after those consumers so one checked unit can retain both executable bodies and static data.
 #include "buster/compiler/c_check_program.c"
 #include "buster/compiler/c_check_prefix.c"
+#include "buster/compiler/c_check_repair.c"
 #include "buster/compiler/c_checker_driver.c"
 #include "buster/compiler/c_checker_test.c"
+#include "buster/compiler/c_builtin_intrinsic_types_test.c"
+#include "buster/compiler/c_builtin_intrinsic_features_test.c"
+#include "buster/compiler/c_builtin_intrinsic_catalog_test.c"
+#include "buster/compiler/c_builtin_intrinsic_inventory_test.c"
+#include "buster/compiler/c_check_builtin_x86_test.c"
+#include "buster/compiler/c_check_builtin_vector_test.c"
 #include "buster/compiler/c_check_builtin_test.c"
 #include "buster/compiler/c_check_varargs_test.c"
 #include "buster/compiler/c_check_builtin_misc_test.c"
 #include "buster/compiler/c_check_builtin_query_test.c"
 #include "buster/compiler/c_check_builtin_float_test.c"
+#include "buster/compiler/c_check_builtin_math_test.c"
 #include "buster/compiler/c_check_builtin_atomic_test.c"
+#include "buster/compiler/c_check_builtin_typed_overflow_test.c"
+#include "buster/compiler/c_check_builtin_rounds_test.c"
 #include "buster/compiler/c_check_corpus.c"
+#include "buster/compiler/c_checker_driver_test.c"
+#include "buster/compiler/c_check_asm_test.c"
 #include "buster/compiler/c_check_source_benchmark.c"
 
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
@@ -638,9 +664,21 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_check_command(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
+    {
+        result = run_parse_command(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
     {
         result = run_checker_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-checker-asm") == 0)
+    {
+        result = run_checker_asm_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-checker-driver") == 0)
+    {
+        result = run_checker_driver_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins") == 0)
     {
@@ -662,9 +700,45 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_check_builtin_float_tests(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-types") == 0)
+    {
+        result = run_builtin_intrinsic_type_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-features") == 0)
+    {
+        result = run_builtin_intrinsic_features_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-x86") == 0)
+    {
+        result = run_check_builtin_x86_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-inventory") == 0)
+    {
+        result = run_builtin_intrinsic_inventory_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-catalog") == 0)
+    {
+        result = test_builtin_intrinsic_catalog(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-vector") == 0)
+    {
+        result = run_check_builtin_vector_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-math") == 0)
+    {
+        result = run_check_builtin_math_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-atomic") == 0)
     {
         result = run_check_builtin_atomic_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-typed-overflow") == 0)
+    {
+        result = run_check_builtin_typed_overflow_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-rounds") == 0)
+    {
+        result = run_check_builtin_rounds_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-lower") == 0)
     {
@@ -689,6 +763,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-atomic-helpers") == 0)
     {
         result = run_builtin_atomic_helper_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-rounds-helper") == 0)
+    {
+        result = run_builtin_rounds_helper_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-math-helpers") == 0)
+    {
+        result = run_builtin_math_helper_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-environments") == 0)
     {

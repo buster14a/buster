@@ -109,13 +109,21 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
         graph->extensions = source->extensions;
         graph->tag_completions = source->tag_completions;
         graph->tag_completion_count = source->tag_completion_count;
+        graph->fp_environments = source->fp_environments != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, source->count) : NULL;
+        graph->warning_suppressed = source->warning_suppressed != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, source->count) : NULL;
         graph->varargs_calls = source->varargs_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckVarargsCall, source->varargs_count) : 0;
         graph->varargs_capacity = source->varargs_count;
         graph->builtin_calls = source->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinCall, source->builtin_count) : 0;
         graph->builtin_capacity = source->builtin_count;
-        valid = (source->varargs_count == 0 || graph->varargs_calls != 0) && (source->builtin_count == 0 || graph->builtin_calls != 0);
+        graph->vector_members = source->vector_member_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckVectorCall, source->vector_member_count) : NULL;
+        graph->vector_member_capacity = source->vector_member_count;
+        valid = (source->varargs_count == 0 || graph->varargs_calls != 0) && (source->builtin_count == 0 || graph->builtin_calls != 0) &&
+                (source->fp_environments == NULL || graph->fp_environments != NULL) &&
+                (source->warning_suppressed == NULL || graph->warning_suppressed != NULL) &&
+                (source->vector_member_count == 0 || graph->vector_members != NULL);
     }
     uint32_t builtin = 0;
+    uint32_t vector = 0;
     for (uint32_t node = 0; valid && node < source->count; node += 1)
     {
         if (selected[node])
@@ -136,6 +144,14 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
                 graph->members[added] = source->members[node];
                 graph->contexts[added] = source->contexts[node];
                 graph->source_positions[added] = source->source_positions != 0 ? source->source_positions[node] : BUSTER_CHECK_NONE;
+                if (source->fp_environments != NULL)
+                {
+                    graph->fp_environments[added] = source->fp_environments[node];
+                }
+                if (source->warning_suppressed != NULL)
+                {
+                    graph->warning_suppressed[added] = source->warning_suppressed[node];
+                }
                 if (source->ops[node] == CHECK_OP_VARARGS)
                 {
                     graph->argument_offsets[added] = graph->varargs_count;
@@ -163,6 +179,16 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
                     *call = source->builtin_calls[builtin++];
                     call->node = added;
                 }
+                while (vector < source->vector_member_count && source->vector_members[vector].node < node)
+                {
+                    vector += 1;
+                }
+                if (vector < source->vector_member_count && source->vector_members[vector].node == node)
+                {
+                    CheckVectorCall* call = graph->vector_members + graph->vector_member_count++;
+                    *call = source->vector_members[vector++];
+                    call->node = added;
+                }
             }
         }
     }
@@ -185,7 +211,7 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
                 expected.fault_node = mapping[expected.fault_node];
             }
             equal = check_test_value_equal(&expected, stream->values + selected) && source->diagnostics[node] == stream->diagnostics[selected] &&
-                    source->warnings[node] == stream->warnings[selected];
+                    source->warnings[node] == stream->warnings[selected] && source->warning_ignored[node] == stream->warning_ignored[selected];
             const CheckNodeConversions* a = source->conversions + node;
             const CheckNodeConversions* b = stream->conversions + selected;
             for (uint32_t operand = 0; equal && operand < 3; operand += 1)
@@ -212,18 +238,17 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
             if (equal)
             {
                 const CheckStoreEffect* actual = stream->effects + selected_effects;
-                CheckValue value = expected->value;
-                CheckValue destination = expected->destination;
-                if (value.fault != CHECK_FAULT_NONE && value.fault_node != BUSTER_CHECK_NONE && value.fault_node < source_graph->count)
+                CheckStoreEffect remapped = *expected;
+                remapped.node = mapping[expected->node];
+                if (remapped.value.fault != CHECK_FAULT_NONE && remapped.value.fault_node != BUSTER_CHECK_NONE && remapped.value.fault_node < source_graph->count)
                 {
-                    value.fault_node = mapping[value.fault_node];
+                    remapped.value.fault_node = mapping[remapped.value.fault_node];
                 }
-                if (destination.fault != CHECK_FAULT_NONE && destination.fault_node != BUSTER_CHECK_NONE && destination.fault_node < source_graph->count)
+                if (remapped.destination.fault != CHECK_FAULT_NONE && remapped.destination.fault_node != BUSTER_CHECK_NONE && remapped.destination.fault_node < source_graph->count)
                 {
-                    destination.fault_node = mapping[destination.fault_node];
+                    remapped.destination.fault_node = mapping[remapped.destination.fault_node];
                 }
-                equal = actual->node == mapping[expected->node] && check_test_value_equal(&value, &actual->value) &&
-                        check_test_value_equal(&destination, &actual->destination);
+                equal = check_store_effect_equal(&remapped, actual, check_test_value_equal);
                 selected_effects += 1;
             }
         }
@@ -273,7 +298,16 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
         if (equal && mapping[expected.node] != BUSTER_CHECK_NONE)
         {
             expected.node = mapping[expected.node];
-            equal = selected_float < stream->floating_count && check_builtin_float_effect_equal(&expected, stream->floating + selected_float++);
+            for (uint32_t argument = 0; argument < BUSTER_ARRAY_LENGTH(expected.converted_arguments); argument += 1)
+            {
+                CheckValue* value = expected.converted_arguments + argument;
+                if (value->fault != CHECK_FAULT_NONE && value->fault_node != BUSTER_CHECK_NONE && value->fault_node < source_graph->count)
+                {
+                    value->fault_node = mapping[value->fault_node];
+                }
+            }
+            equal = selected_float < stream->floating_count &&
+                    check_builtin_float_effect_equal(&expected, stream->floating + selected_float++, check_test_value_equal);
         }
     }
     equal = equal && selected_float == stream->floating_count;
@@ -285,7 +319,11 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
         if (equal && mapping[expected.node] != BUSTER_CHECK_NONE)
         {
             expected.node = mapping[expected.node];
-            equal = selected_query < stream->query_count && check_builtin_query_effect_equal(&expected, stream->queries + selected_query++);
+            if (expected.runtime_value.fault != CHECK_FAULT_NONE && expected.runtime_value.fault_node != BUSTER_CHECK_NONE && expected.runtime_value.fault_node < source_graph->count)
+            {
+                expected.runtime_value.fault_node = mapping[expected.runtime_value.fault_node];
+            }
+            equal = selected_query < stream->query_count && check_builtin_query_effect_equal(&expected, stream->queries + selected_query++, check_test_value_equal);
         }
     }
     equal = equal && selected_query == stream->query_count;
@@ -380,7 +418,7 @@ static int run_checker_source_benchmark(int count, char** arguments)
     for (uint32_t path = 0; valid && path < 2; path += 1)
     {
         const uint64_t begin = check_source_time();
-        valid = check_corpus_check(paths + path, parsers + path, &pp, path == 0);
+        valid = check_corpus_check_policy(paths + path, parsers + path, &pp, path == 0, pp_options.quiet);
         validation[path] = check_source_time() - begin;
         if (!valid)
         {
@@ -473,9 +511,9 @@ static int run_checker_source_benchmark(int count, char** arguments)
                file, bodies, body != 0 ? body : "all", parsers[0].tokens.count, paths[0].input.graph.count, graph.count,
                paths[0].stream.effect_count, reference.effect_count, passes, iterations, after);
         printf("preparation: scalar_validation_ns=%" PRIu64 " vector_validation_ns=%" PRIu64 " extraction_ns=%" PRIu64
-               " graph_bytes=%" PRIu64 " binding_walked_uses=%" PRIu64 " binding_fallback_uses=%" PRIu64 "\n",
-               validation[0], validation[1], selection_ns, graph_arena.length, paths[1].input.binding_statistics.walked_uses,
-               paths[1].input.binding_statistics.fallback_uses);
+               " graph_bytes=%" PRIu64 " binding_events=%u binding_walked_uses=%" PRIu64 " binding_fallback_uses=%" PRIu64 "\n",
+               validation[0], validation[1], selection_ns, graph_arena.length, paths[1].input.parser_binding_event_count,
+               paths[1].input.parser_binding_statistics.walked_uses, paths[1].input.parser_binding_statistics.fallback_uses);
         for (uint32_t path = 0; path < 2; path += 1)
         {
             if (only == 2 || only == path)

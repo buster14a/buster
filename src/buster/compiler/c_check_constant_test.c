@@ -77,10 +77,12 @@ static void check_test_constant_sources(CheckTest* test, const char* clang)
             .source = "enum { N=(int)3.75 }; int a[N]; _Static_assert(sizeof a==12, \"real cast\");\n",
         },
         {
-            .name = "real expression is not ICE",
+            .name = "constant type names retain repeated modifier semantics",
+            .source = "enum { A=(unsigned unsigned)3, B=sizeof(short short), C=sizeof(_Complex _Complex double), D=sizeof(_Atomic _Atomic int) }; _Static_assert(A==3 && B==2 && C==16 && D==4, \"duplicate modifiers\");\n",
+        },
+        {
+            .name = "GNU real expression folds in integer constant context",
             .source = "enum { N=(int)(1.5+2.5) };\n",
-            .rejected = true,
-            .extension = true,
         },
         {
             .name = "declaration conditional",
@@ -183,6 +185,70 @@ static void check_test_constant_sources(CheckTest* test, const char* clang)
             .source = "int a[3]; enum { N=sizeof(__typeof__(a)) }; _Static_assert(N==12, \"typeof array\");\n",
         },
         {
+            .name = "typeof statement expression effects are unevaluated",
+            .source = "int f(int n) { int x=0; __typeof__(({x+=50;n;})) t=1; _Static_assert(sizeof t==sizeof n, \"statement result\"); return x+t; }\n",
+        },
+        {
+            .name = "nested statement expression type query",
+            .source = "int f(int n) { __typeof__(({({n;});})) t=1; _Static_assert(sizeof t==sizeof n, \"nested statement result\"); return t; }\n",
+        },
+        {
+            .name = "statement expression local declaration type query",
+            .source = "int f(int n) { __typeof__(({int x=n; x;})) t=1; _Static_assert(sizeof t==sizeof n, \"local result\"); return t; }\n",
+        },
+        {
+            .name = "statement expression multiple declarator type query",
+            .source = "int f(int n) { __typeof__(({int x=n,y=x+1; y;})) t=1; return t; }\n",
+        },
+        {
+            .name = "statement expression nested declaration type query",
+            .source = "int f(int n) { __typeof__(({int x=n; __typeof__(({long y=x; y;})) z=1; z;})) t=1; _Static_assert(sizeof t==sizeof(long), \"nested local result\"); return t; }\n",
+        },
+        {
+            .name = "statement expression aggregate declaration type query",
+            .source = "int f(int n) { __typeof__(({int x[2]={n,n+1}; x[0];})) t=1; return t; }\n",
+        },
+        {
+            .name = "statement expression control type query",
+            .source = "int f(int n) { __typeof__(({int x=n; if(x){x++;} else x--; while(x)x--; x;})) t=1; return t; }\n",
+        },
+        {
+            .name = "statement expression loop type query",
+            .source = "int f(int n) { __typeof__(({int x=n; for(int i=0;i<2;i++)x++; do { x--; } while(x); x;})) t=1; return t; }\n",
+        },
+        {
+            .name = "statement expression nested block type query",
+            .source = "int f(int n) { __typeof__(({int x=n; {int y=x; x=y;} x;})) t=1; return t; }\n",
+        },
+        {
+            .name = "statement expression control constraints remain checked",
+            .source = "struct S{int x;}; int f(void) { __typeof__(({struct S s; if(s){} 1;})) t=1; return t; }\n",
+            .rejected = true,
+        },
+        {
+            .name = "statement expression final declaration has void type",
+            .source = "int f(int n) { __typeof__(({int x=n;})) t; return 0; }\n",
+            .rejected = true,
+        },
+        {
+            .name = "statement expression initializer constraints remain checked",
+            .source = "int f(void) { __typeof__(({int *x=1; x;})) t=0; return 0; }\n",
+            .rejected = true,
+        },
+        {
+            .name = "statement expression initializer reports its actual line",
+            .source = "int f(void) {\n __typeof__(({\n int *x=1;\n x;\n })) t=0;\n return 0;\n}\n",
+            .rejected = true,
+        },
+        {
+            .name = "statement expression size is constant",
+            .source = "void f(int n) { enum { N=sizeof(({n++;n;})) }; _Static_assert(N==sizeof n, \"unevaluated statement size\"); }\n",
+        },
+        {
+            .name = "GNU statement expression folds in integer constant context",
+            .source = "void f(void) { enum { N=({3;}) }; }\n",
+        },
+        {
             .name = "declaration atomic type names",
             .source = "enum { A=sizeof(_Atomic(int)), B=sizeof(_Atomic int), C=sizeof(const _Atomic(int)), D=sizeof(int * _Atomic) }; _Static_assert(A==4 && B==4 && C==4 && D==8, \"atomic\");\n",
         },
@@ -239,6 +305,23 @@ static void check_test_constant_sources(CheckTest* test, const char* clang)
             .source = "enum { N=1 }; struct S { int a[3]; }; int f(void) { enum { N=2 }; return __builtin_offsetof(struct S,a[N]); } _Static_assert(__builtin_offsetof(struct S,a[N])==4, \"outer enum\");\n",
         },
         {
+            .name = "source anonymous record offset retains member typedef identity",
+            .source = "typedef long Time; int f(int select) { return select ? sizeof(Time) : __builtin_offsetof(struct { char c; Time value; },value); } _Static_assert(__builtin_offsetof(struct {char c; Time value;},value)==8, \"anonymous offset\");\n",
+        },
+        {
+            .name = "source anonymous record offset retains nested layout",
+            .source = "typedef short Element; enum { N=3 }; _Static_assert(__builtin_offsetof(struct {char c; struct {Element a[N]; long x;} inner;},inner.x)==16, \"nested offset\");\n",
+        },
+        {
+            .name = "initializer designator bindings remain source ordered",
+            .source = "enum { A=1, B=3, V=7 }; int values[]={[A]=V,[B]=V+1}; _Static_assert(sizeof values==16, \"inferred after initializer\"); int f(void){enum {A=2,B=4}; int local[]={[A]=V,[B]=V}; return sizeof local==20;}\n",
+        },
+        {
+            .name = "incomplete array remains incomplete inside its own initializer",
+            .source = "int values[]={1,\nsizeof values};\n",
+            .rejected = true,
+        },
+        {
             .name = "declaration iterative nested type queries",
             .source = nested_source,
         },
@@ -274,6 +357,25 @@ static void check_test_constant_sources(CheckTest* test, const char* clang)
         {
             .name = "declaration GNU choose expression",
             .source = "enum { N=__builtin_choose_expr(1,7,1/0) }; _Static_assert(N==7, \"choose\");\n",
+        },
+        {
+            .name = "declaration GNU choose retains wrapped ICE form",
+            .source = "enum { A=__builtin_choose_expr(1<<32,7,0), B=__builtin_choose_expr(1<<-1,0,7), C=__builtin_choose_expr(2147483647+1,7,0) }; _Static_assert(A==7 && B==7 && C==7, \"wrapped ICE\");\n",
+        },
+        {
+            .name = "declaration GNU choose rejects computed floating cast",
+            .source = "enum { N=__builtin_choose_expr((int)(1.5+2.5),7,0) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration GNU choose rejects comma with wrapped integer",
+            .source = "enum { N=__builtin_choose_expr((0,1<<32),7,0) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration GNU choose rejects statement with wrapped integer",
+            .source = "void f(void) { enum { N=__builtin_choose_expr(({1<<32;}),7,0) }; }\n",
+            .rejected = true,
         },
         {
             .name = "declaration GNU choose wide integer condition",

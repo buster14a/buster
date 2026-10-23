@@ -6,6 +6,8 @@
 // floating class. A fresh address-taken local of that same class preserves its representation; integer LOAD reads
 // its bits. No floating comparison, arithmetic or numeric floating-to-integer conversion occurs. The recipe leaves
 // one I32 value and preserves the preceding stack. Both publication paths emit baseline x86-64 operations.
+// ISINF_SIGN leaves -1/0/+1 in I32. FABS/FABSF require an already prototype-converted F64/F32 argument local,
+// clear only its sign representation bit and leave that FP class. A same-format signaling NaN is never quieted.
 //
 // FPCLASSIFY returns 0 NaN, 1 infinity, 2 normal, 3 subnormal or 4 zero. Its five source selector expressions are NOT
 // inputs here: the source producer must implement their checked conditional evaluation schedule. In particular,
@@ -65,22 +67,47 @@ static void cbuiltin_float_lower_equal(CBuiltinLowerRecipe* recipe, uint32_t out
     cbuiltin_lower_set(recipe, output);
 }
 
-static void cbuiltin_float_lower_classify(CBuiltinLowerRecipe* recipe, const CBuiltinFloatLowerCall* call)
+static uint32_t cbuiltin_float_lower_bits(CBuiltinLowerRecipe* recipe, const CBuiltinFloatLowerCall* call, uint32_t* floating)
 {
     const bool narrow = call->argument_class == BUSTER_TYPED_CLASS_F32;
-    const uint64_t exponent_mask = narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
-    const uint64_t fraction_mask = narrow ? UINT64_C(0x007fffff) : UINT64_C(0x000fffffffffffff);
-    const uint32_t floating = cbuiltin_lower_temporary(recipe);
+    *floating = cbuiltin_lower_temporary(recipe);
     const uint32_t bits = cbuiltin_lower_temporary(recipe);
     cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOCAL, call->argument_class, call->argument_local);
-    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET_LOCAL, call->argument_class, floating);
-    cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, floating);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET_LOCAL, call->argument_class, *floating);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, *floating);
     cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, narrow ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64, 0);
     if (narrow)
     {
         cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
     }
     cbuiltin_lower_set(recipe, bits);
+    return bits;
+}
+
+static void cbuiltin_float_lower_absolute(CBuiltinLowerRecipe* recipe, const CBuiltinFloatLowerCall* call)
+{
+    const bool narrow = call->argument_class == BUSTER_TYPED_CLASS_F32;
+    uint32_t floating = 0;
+    const uint32_t bits = cbuiltin_float_lower_bits(recipe, call, &floating);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, floating);
+    cbuiltin_lower_local(recipe, bits);
+    cbuiltin_lower_constant(recipe, narrow ? UINT64_C(0x7fffffff) : UINT64_C(0x7fffffffffffffff));
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
+    if (narrow)
+    {
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
+    }
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, narrow ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64, 0);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOCAL, call->argument_class, floating);
+}
+
+static void cbuiltin_float_lower_classify(CBuiltinLowerRecipe* recipe, const CBuiltinFloatLowerCall* call)
+{
+    const bool narrow = call->argument_class == BUSTER_TYPED_CLASS_F32;
+    const uint64_t exponent_mask = narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+    const uint64_t fraction_mask = narrow ? UINT64_C(0x007fffff) : UINT64_C(0x000fffffffffffff);
+    uint32_t floating = 0;
+    const uint32_t bits = cbuiltin_float_lower_bits(recipe, call, &floating);
     if (call->id == CBUILTIN_SIGNBIT)
     {
         cbuiltin_lower_local(recipe, bits);
@@ -138,6 +165,18 @@ static void cbuiltin_float_lower_classify(CBuiltinLowerRecipe* recipe, const CBu
                     cbuiltin_lower_local(recipe, fraction_zero);
                 }
                 cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
+                if (call->id == CBUILTIN_ISINF_SIGN)
+                {
+                    // infinity * (1 - 2 * sign), calculated modulo 2^64 before conversion to the declared I32.
+                    cbuiltin_lower_constant(recipe, 1);
+                    cbuiltin_lower_local(recipe, bits);
+                    cbuiltin_lower_constant(recipe, narrow ? 31 : 63);
+                    cbuiltin_lower_operation(recipe, BUSTER_TYPED_SHR);
+                    cbuiltin_lower_constant(recipe, 2);
+                    cbuiltin_lower_operation(recipe, BUSTER_TYPED_MUL);
+                    cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+                    cbuiltin_lower_operation(recipe, BUSTER_TYPED_MUL);
+                }
             }
         }
     }
@@ -148,7 +187,9 @@ static CBuiltinLowerResult cbuiltin_float_lower_append(CBuiltinLowerBuffer* buff
 {
     CBuiltinLowerResult result = { 0 };
     CBuiltinLowerRecipe recipe = { 0 };
-    const bool classification = call != 0 && call->id >= CBUILTIN_ISNAN && call->id <= CBUILTIN_FPCLASSIFY;
+    const bool classification = call != 0 && call->id >= CBUILTIN_ISNAN && call->id <= CBUILTIN_ISINF_SIGN;
+    const bool absolute = call != 0 && (call->id == CBUILTIN_FABS || call->id == CBUILTIN_FABSF);
+    const bool argument = classification || absolute;
     const uint32_t constant_class = call != 0 ? cbuiltin_float_lower_constant_class(call->id) : BUSTER_TYPED_CLASS_VOID;
     if (buffer == 0 || call == 0 || buffer->count > buffer->capacity || buffer->local_count > buffer->local_capacity ||
         buffer->capacity > BUSTER_TIER0_MAX_ENTRIES || buffer->local_capacity > BUSTER_TIER0_MAX_LOCALS || buffer->kinds == 0 ||
@@ -156,23 +197,27 @@ static CBuiltinLowerResult cbuiltin_float_lower_append(CBuiltinLowerBuffer* buff
     {
         result.error = CBUILTIN_LOWER_ARGUMENT;
     }
-    else if (!classification && constant_class == BUSTER_TYPED_CLASS_VOID)
+    else if (!argument && constant_class == BUSTER_TYPED_CLASS_VOID)
     {
         result.error = CBUILTIN_LOWER_UNSUPPORTED;
     }
-    else if (classification && call->argument_class != BUSTER_TYPED_CLASS_F32 && call->argument_class != BUSTER_TYPED_CLASS_F64)
+    else if (argument && call->argument_class != BUSTER_TYPED_CLASS_F32 && call->argument_class != BUSTER_TYPED_CLASS_F64)
     {
         result.error = CBUILTIN_LOWER_UNSUPPORTED;
     }
-    else if (classification && (call->argument_local >= buffer->local_count || buffer->local_classes[call->argument_local] != call->argument_class))
+    else if (absolute && call->argument_class != (call->id == CBUILTIN_FABSF ? BUSTER_TYPED_CLASS_F32 : BUSTER_TYPED_CLASS_F64))
     {
         result.error = CBUILTIN_LOWER_ARGUMENT;
     }
-    else if (!classification && !call->folded)
+    else if (argument && (call->argument_local >= buffer->local_count || buffer->local_classes[call->argument_local] != call->argument_class))
+    {
+        result.error = CBUILTIN_LOWER_ARGUMENT;
+    }
+    else if (!argument && !call->folded)
     {
         result.error = CBUILTIN_LOWER_UNSUPPORTED;
     }
-    else if (!classification && (call->constant_class != constant_class || !cbuiltin_float_lower_constant_valid(call)))
+    else if (!argument && (call->constant_class != constant_class || !cbuiltin_float_lower_constant_valid(call)))
     {
         result.error = CBUILTIN_LOWER_ARGUMENT;
     }
@@ -182,6 +227,10 @@ static CBuiltinLowerResult cbuiltin_float_lower_append(CBuiltinLowerBuffer* buff
         if (classification)
         {
             cbuiltin_float_lower_classify(&recipe, call);
+        }
+        else if (absolute)
+        {
+            cbuiltin_float_lower_absolute(&recipe, call);
         }
         else
         {
@@ -195,7 +244,7 @@ static CBuiltinLowerResult cbuiltin_float_lower_append(CBuiltinLowerBuffer* buff
         {
             result.first = buffer->count;
             result.count = recipe.count;
-            result.result_class = classification ? BUSTER_TYPED_CLASS_I32 : constant_class;
+            result.result_class = classification ? BUSTER_TYPED_CLASS_I32 : absolute ? call->argument_class : constant_class;
             result.temporary_first = buffer->local_count;
             result.temporary_count = recipe.temporary_count;
             if (vector)
@@ -225,7 +274,7 @@ static CBuiltinLowerResult cbuiltin_float_lower_append(CBuiltinLowerBuffer* buff
             }
             memset(buffer->local_classes + buffer->local_count, BUSTER_TYPED_CLASS_U64, recipe.temporary_count);
             memset(buffer->local_flags + buffer->local_count, 0, recipe.temporary_count);
-            if (classification)
+            if (argument)
             {
                 buffer->local_classes[buffer->local_count] = (uint8_t)call->argument_class;
                 buffer->local_flags[buffer->local_count] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;

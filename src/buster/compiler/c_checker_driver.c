@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Source checking and object emission share one typed stream. Unsupported constructs are errors, never silently
-// accepted. Diagnostics retain the preprocessor's source/macro history and are emitted in token order.
+// accepted. Diagnostics retain source/macro history and are ordered by the point their constraint is known.
 
 static const char* check_driver_action_message(CheckDiagnostic diagnostic)
 {
@@ -59,6 +59,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_REDECLARATION: result = "conflicting declaration"; break;
         case CHECK_INPUT_RETURN: result = "return does not match the function result type"; break;
         case CHECK_INPUT_TARGET: result = "unsupported checker language or target model"; break;
+        case CHECK_INPUT_INCOMPLETE_MEMBER: result = "record member has incomplete type"; break;
+        case CHECK_INPUT_INCOMPLETE_OBJECT: result = "object has incomplete type"; break;
     }
     return result;
 }
@@ -104,22 +106,72 @@ static void check_driver_diagnose(const Parser* parser, Preprocessor* pp, uint32
     }
 }
 
-static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, Arena* scratch)
+typedef struct CheckDriverDiagnostic CheckDriverDiagnostic;
+struct CheckDriverDiagnostic
+{
+    uint32_t token;
+    const char* message;
+    uint32_t position;
+};
+
+typedef struct CheckDriverWarning CheckDriverWarning;
+struct CheckDriverWarning
+{
+    uint16_t flags;
+    uint16_t enabled;
+};
+
+static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                  const CheckRepair* repair, const CheckDriverDiagnostic* extra, uint32_t extra_count,
+                                  const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const uint32_t count = parser->tokens.count;
-    uint64_t* first = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1);
-    const bool ready = first != 0;
+    const bool reports = input->report_count != 0 || (stream != 0 && stream->report_count != 0) || extra_count != 0;
+    uint64_t* first = reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : NULL;
+    const bool show_warnings = !quiet;
+    CheckDriverWarning* warnings = show_warnings ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDriverWarning, (uint64_t)count + 1) : NULL;
+    const bool ready = (!reports || first != NULL) && (!show_warnings || warnings != NULL);
     if (ready)
     {
-        for (uint32_t token = 0; token <= count; token += 1)
+        for (uint32_t token = 0; reports && token <= count; token += 1)
         {
             first[token] = UINT64_MAX;
+        }
+        if (show_warnings)
+        {
+            memset(warnings, 0, ((uint64_t)count + 1) * sizeof(*warnings));
+            for (uint32_t token = 0; input->constant_warnings != NULL && token < count && token < input->token_count; token += 1)
+            {
+                const uint8_t flags = input->constant_warnings[token];
+                const uint8_t ignored = input->constant_warning_ignored != NULL ? input->constant_warning_ignored[token] : 0;
+                warnings[token].flags = flags;
+                warnings[token].enabled = flags & ~ignored;
+            }
+            for (uint32_t node = 0; stream != NULL && node < stream->count; node += 1)
+            {
+                const uint32_t token = input->graph.tokens[node];
+                if (token < count)
+                {
+                    const uint32_t flags = stream->warnings[node];
+                    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
+                    warnings[token].flags |= flags;
+                    warnings[token].enabled |= flags & ~ignored;
+                }
+            }
+            for (uint32_t i = 0; i < excess_count; i += 1)
+            {
+                if (excess_tokens[i] < count)
+                {
+                    warnings[excess_tokens[i]].flags |= CHECK_WARNING_EXCESS_INITIALIZERS;
+                    warnings[excess_tokens[i]].enabled |= CHECK_WARNING_EXCESS_INITIALIZERS;
+                }
+            }
         }
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
             const uint32_t token = input->reports[i].token < count ? input->reports[i].token : count;
-            if (first[token] == UINT64_MAX)
+            if (first[token] == UINT64_MAX && (repair == NULL || check_repair_input_report(repair, input->reports + i)))
             {
                 first[token] = i;
             }
@@ -127,19 +179,51 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
         for (uint32_t i = 0; stream != 0 && i < stream->report_count; i += 1)
         {
             const uint32_t token = stream->reports[i].token < count ? stream->reports[i].token : count;
-            if (first[token] == UINT64_MAX)
+            if (first[token] == UINT64_MAX && (repair == NULL || check_repair_graph_report(repair, &input->graph, stream->reports + i)))
             {
                 first[token] = (UINT64_C(1) << 32) | i;
             }
         }
-        for (uint32_t token = 0; token <= count; token += 1)
+        for (uint32_t i = 0; i < extra_count; i += 1)
         {
-            if (first[token] != UINT64_MAX)
+            const uint32_t token = extra[i].position < count ? extra[i].position : count;
+            if (first[token] == UINT64_MAX)
+            {
+                first[token] = (UINT64_C(2) << 32) | i;
+            }
+        }
+        for (uint32_t token = 0; !pp->fatal && token <= count; token += 1)
+        {
+            uint32_t flags = show_warnings && (repair == NULL || check_repair_warning_token(repair, token)) ?
+                             warnings[token].flags : 0;
+            while (!pp->fatal && flags != 0)
+            {
+                const uint32_t warning = flags & (0u - flags);
+                const bool ignored = (warnings[token].enabled & warning) == 0;
+                const CheckWarningSeverity severity = check_diagnostic_severity_default(input, token, warning, ignored);
+                if (severity != CHECK_WARNING_IGNORE)
+                {
+                    const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                                   severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                    pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s", check_diagnostic_message(warning));
+                }
+                flags &= flags - 1;
+            }
+            if (!pp->fatal && reports && first[token] != UINT64_MAX)
             {
                 const uint32_t index = (uint32_t)first[token];
-                const char* message = first[token] >> 32 ? check_driver_report_message(stream->reports + index) :
-                                                          check_driver_input_message(input->reports[index].message);
-                check_driver_diagnose(parser, pp, token, message);
+                const uint32_t phase = (uint32_t)(first[token] >> 32);
+                const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
+                                                                                     check_driver_input_message(input->reports[index].message);
+                const uint32_t source = phase == 0 ? check_input_report_source(parser, input->reports + index) : BUSTER_CHECK_NONE;
+                if (source != BUSTER_CHECK_NONE)
+                {
+                    pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "%s", message);
+                }
+                else
+                {
+                    check_driver_diagnose(parser, pp, phase == 2 ? extra[index].token : token, message);
+                }
             }
         }
     }
@@ -166,6 +250,11 @@ static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream
         {
             printf(" floating=%La", value->floating);
         }
+        else if (value->constant_kind == CHECK_CONSTANT_COMPLEX)
+        {
+            printf(" complex=(floating:%La,imaginary:%La,integer:0x%016llx%016llx)", value->floating, value->imaginary,
+                   (unsigned long long)(value->integer >> 64), (unsigned long long)value->integer);
+        }
         else if (value->constant_kind == CHECK_CONSTANT_ADDRESS)
         {
             printf(" address=%u%+lld", value->object, (long long)value->offset);
@@ -187,7 +276,9 @@ static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream
         if (effect < stream->effect_count && stream->effects[effect].node == node)
         {
             const CheckStoreEffect* write = stream->effects + effect++;
-            printf(" effect=(store-type:%u,destination-type:%u,value-kind:%u)", write->value.type, write->destination.type, write->value.constant_kind);
+            printf(" effect=(store-type:%u,destination-type:%u,value-kind:%u,runtime-builtin:%u,evaluated:0x%x,warnings:0x%x,warning-operands:0x%x,unsupported:0x%x)",
+                   write->value.type, write->destination.type, write->value.constant_kind, write->runtime_builtin, write->evaluated_operands,
+                   write->warnings, write->warning_operands, write->unsupported);
         }
         if (varargs < stream->varargs_count && stream->varargs[varargs].node == node)
         {
@@ -200,13 +291,50 @@ static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream
     }
 }
 
+static bool check_driver_dump_link(const Link* link, const CheckDataResult* emission)
+{
+    printf("static-data: %u objects, %u fixups\n", emission->atom_count, emission->fixup_count);
+    for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+    {
+        const AtomId atom = link->symbols.atom[symbol];
+        if (atom != 0 && link->atoms.class[atom] != BUSTER_LINK_CLASS_TEXT)
+        {
+            const NameId name = link->symbols.name[symbol];
+            printf("object=%u name=%.*s class=%u align=%" PRIu64 " size=%" PRIu64 " bytes=", symbol,
+                   (int)link->names.length[name], link->names.bytes[name], link->atoms.class[atom],
+                   UINT64_C(1) << link->atoms.alignment_log2[atom], link->atoms.size[atom]);
+            if (link->atoms.bytes[atom] == 0)
+            {
+                printf("zero");
+            }
+            else
+            {
+                for (uint64_t byte = 0; byte < link->atoms.size[atom]; byte += 1)
+                {
+                    printf("%02x", link->atoms.bytes[atom][byte]);
+                }
+            }
+            for (uint32_t i = 0; i < link->atoms.fixup_count[atom]; i += 1)
+            {
+                const FixupId fixup = link->atoms.fixup_begin[atom] + i;
+                const SymbolId target = link->fixups.target[fixup];
+                const NameId target_name = link->symbols.name[target];
+                printf(" fixup=(offset:%u,target:%.*s,addend:%" PRId64 ")", link->fixups.offset[fixup],
+                       (int)link->names.length[target_name], link->names.bytes[target_name], link_fixup_addend(link, fixup));
+            }
+            putchar('\n');
+        }
+    }
+    return ferror(stdout) == 0;
+}
+
 static bool check_driver_dump_static(const CheckInput* input, const CheckStream* stream, const CheckInitializers* initializers, const Parser* parser,
                                       Preprocessor* pp, TypeTable* types, Arena* scratch)
 {
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
     CheckDataInput data = { .token = BUSTER_CHECK_NONE, .status = CHECK_DATA_INPUT_RESOURCE };
-    const bool valid = output.base != 0 && bytes.base != 0 && check_data_input_prepared(&data, input, stream, initializers, parser, pp->table, types, &output, &bytes, scratch);
+    bool valid = output.base != 0 && bytes.base != 0 && check_data_input_prepared(&data, input, stream, initializers, parser, pp->table, types, &output, &bytes, scratch);
     if (!valid)
     {
         const char* message = data.status == CHECK_DATA_INPUT_RESOURCE ? "static-data output capacity exhausted" :
@@ -215,39 +343,7 @@ static bool check_driver_dump_static(const CheckInput* input, const CheckStream*
     }
     else
     {
-        const Link* link = &data.link;
-        printf("static-data: %u objects, %u fixups\n", data.emission.atom_count, data.emission.fixup_count);
-        for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
-        {
-            const AtomId atom = link->symbols.atom[symbol];
-            if (atom != 0)
-            {
-                const NameId name = link->symbols.name[symbol];
-                printf("object=%u name=%.*s class=%u align=%" PRIu64 " size=%" PRIu64 " bytes=", symbol,
-                       (int)link->names.length[name], link->names.bytes[name], link->atoms.class[atom],
-                       UINT64_C(1) << link->atoms.alignment_log2[atom], link->atoms.size[atom]);
-                if (link->atoms.bytes[atom] == 0)
-                {
-                    printf("zero");
-                }
-                else
-                {
-                    for (uint64_t byte = 0; byte < link->atoms.size[atom]; byte += 1)
-                    {
-                        printf("%02x", link->atoms.bytes[atom][byte]);
-                    }
-                }
-                for (uint32_t i = 0; i < link->atoms.fixup_count[atom]; i += 1)
-                {
-                    const FixupId fixup = link->atoms.fixup_begin[atom] + i;
-                    const SymbolId target = link->fixups.target[fixup];
-                    const NameId target_name = link->symbols.name[target];
-                    printf(" fixup=(offset:%u,target:%.*s,addend:%" PRId64 ")", link->fixups.offset[fixup],
-                           (int)link->names.length[target_name], link->names.bytes[target_name], link_fixup_addend(link, fixup));
-                }
-                putchar('\n');
-            }
-        }
+        valid = check_driver_dump_link(&data.link, &data.emission);
     }
     arena_release(&bytes);
     arena_release(&output);
@@ -256,7 +352,7 @@ static bool check_driver_dump_static(const CheckInput* input, const CheckStream*
 
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
-                                 bool scalar, Arena* scratch)
+                                 bool scalar, bool dump_static, Arena* scratch)
 {
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
@@ -291,7 +387,10 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         {
             const String8 source = { .pointer = (char*)source_path, .length = strlen(source_path) };
             const Object object = object_build(&code.link, &units, &symbols, 0, (ObjectOptions){ 0 }, source, scratch);
-            valid = object.error == OBJECT_ERROR_NONE && object_write_file(output_path, object.bytes, object.size) == OBJECT_ERROR_NONE;
+            // The optional dump consumes the same resolved Link as the object writer. Validate and render it
+            // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.
+            valid = object.error == OBJECT_ERROR_NONE && (!dump_static || check_driver_dump_link(&code.link, &emission)) &&
+                    object_write_file(output_path, object.bytes, object.size) == OBJECT_ERROR_NONE;
         }
         if (!valid)
         {
@@ -382,8 +481,11 @@ static int run_check_command(int count, char** arguments)
         else
         {
             CheckPrefix prefix = { 0 };
+            CheckRepair repair = { 0 };
             const Parser* checking = &parser;
+            Preprocessor* checking_pp = &pp;
             bool prefix_only = false;
+            bool repairing = false;
             bool parse_failed = false;
             ready = pp_run(&pp, path);
             if (ready)
@@ -393,6 +495,16 @@ static int run_check_command(int count, char** arguments)
                 if (ready)
                 {
                     parse_print_diagnostics(&parser, &pp);
+                }
+                else if (check_repair_make(&repair, &parser, &pp, &arena, &scratch) == CHECK_REPAIR_READY)
+                {
+                    // Only completed original expressions can contribute diagnostics. The synthetic closure
+                    // belongs to a private checking view and can never produce a successful source result.
+                    checking = &repair.parser;
+                    checking_pp = repair.preprocessor;
+                    prefix_only = true;
+                    repairing = true;
+                    ready = true;
                 }
                 else if (check_prefix_make(&prefix, &parser, &arena, &scratch) == CHECK_PREFIX_READY)
                 {
@@ -424,8 +536,9 @@ static int run_check_command(int count, char** arguments)
             if (ready)
             {
                 CheckInput input;
-                const bool input_valid = prefix_only ? check_input_prefix(&input, checking, &pp, &types, &arena, &scratch) :
-                                                       check_input(&input, checking, &pp, &types, &arena, &scratch);
+                const bool input_valid = repairing ? check_input_fragment(&input, checking, checking_pp, &types, &arena, &scratch, repair.original_end) :
+                                         prefix_only ? check_input_prefix(&input, checking, checking_pp, &types, &arena, &scratch) :
+                                                       check_input(&input, checking, checking_pp, &types, &arena, &scratch);
                 if (input.resource)
                 {
                     fprintf(stderr, "fatal error: checker input capacity exhausted\n");
@@ -439,14 +552,87 @@ static int run_check_command(int count, char** arguments)
                     ready = check_graph_run(&types, &input.graph, &output_arena, &scratch, &check_options, &stream);
                     if (ready)
                     {
-                        for (uint32_t node = 0; !quiet && node < stream.count; node += 1)
+                        CheckDriverDiagnostic additional[3] = { 0 };
+                        uint32_t additional_count = 0;
+                        const uint32_t* excess_tokens = NULL;
+                        uint32_t excess_count = 0;
+                        CheckAsms asms = { 0 };
+                        CheckInitializers initializers = { 0 };
+                        const bool expression_valid = input_valid && stream.report_count == 0;
+                        if (expression_valid && !repairing)
                         {
-                            if ((stream.warnings[node] & CHECK_WARNING_DISCARDED_QUALIFIERS) != 0 && input.graph.tokens[node] < checking->tokens.count)
+                            if (!check_asms_run(&asms, &input, &stream, &types, &output_arena, &scratch))
                             {
-                                pp_diagnose_output(&pp, PP_SEVERITY_WARNING, checking->tokens.sources[input.graph.tokens[node]], "conversion discards pointer qualifiers");
+                                additional[additional_count++] = (CheckDriverDiagnostic){ asms.token,
+                                    asms.status == CHECK_ASM_RESOURCE ? "assembly operand checking capacity exhausted" : "invalid assembly operand or constraint", asms.token };
+                            }
+                            if (check_initializers_run(&initializers, &input, &stream, checking, &types, &output_arena, &scratch))
+                            {
+                                excess_tokens = initializers.warning_tokens;
+                                excess_count = initializers.warning_count;
                             }
                         }
-                        if (!check_driver_reports(checking, &pp, &input, &stream, &scratch))
+                        if (!expression_valid || repairing || initializers.status != CHECK_INIT_OK)
+                        {
+                            CheckInitDiagnostic earlier = { 0 };
+                            const uint32_t before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
+                            CheckInitWarningSink warnings = { .capacity = !quiet ? tokens : 0 };
+                            warnings.tokens = warnings.capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(&output_arena, uint32_t, warnings.capacity) : NULL;
+                            const bool storage = warnings.capacity == 0 || warnings.tokens != NULL;
+                            const bool diagnosed = storage && initializers.status != CHECK_INIT_RESOURCE &&
+                                                   check_initializers_diagnose_warnings(&earlier, &input, &stream, checking, &types, before,
+                                                                                         &output_arena, &scratch, !quiet ? &warnings : NULL);
+                            if (!storage || initializers.status == CHECK_INIT_RESOURCE)
+                            {
+                                earlier.status = CHECK_INIT_RESOURCE;
+                                earlier.token = initializers.token < tokens ? initializers.token : 0;
+                            }
+                            else if (!diagnosed && initializers.status != CHECK_INIT_OK)
+                            {
+                                earlier.status = initializers.status;
+                                earlier.token = initializers.token;
+                            }
+                            if ((diagnosed && earlier.status != CHECK_INIT_OK) || earlier.status == CHECK_INIT_RESOURCE ||
+                                (!diagnosed && initializers.status != CHECK_INIT_OK))
+                            {
+                                additional[additional_count++] = (CheckDriverDiagnostic){ earlier.token, check_driver_initializer_message(earlier.status), earlier.token };
+                            }
+                            if (diagnosed)
+                            {
+                                excess_tokens = warnings.tokens;
+                                excess_count = warnings.count;
+                            }
+                        }
+                        if (!expression_valid || repairing)
+                        {
+                            CheckAsmDiagnostic assembly = { 0 };
+                            const uint32_t before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
+                            const bool asm_diagnosed = check_asms_diagnose(&assembly, &input, &stream, &types, before, &scratch);
+                            if ((asm_diagnosed && assembly.status != CHECK_ASM_OK) || assembly.status == CHECK_ASM_RESOURCE)
+                            {
+                                additional[additional_count++] = (CheckDriverDiagnostic){ assembly.token,
+                                    assembly.status == CHECK_ASM_RESOURCE ? "assembly operand checking capacity exhausted" : "invalid assembly operand or constraint", assembly.token };
+                            }
+                        }
+                        uint32_t promoted_token = BUSTER_CHECK_NONE;
+                        bool promoted = !quiet && check_diagnostic_first_error(&input, &stream, &promoted_token);
+                        for (uint32_t i = 0; !quiet && !promoted && i < excess_count; i += 1)
+                        {
+                            promoted = check_diagnostic_severity(&input, excess_tokens[i], CHECK_WARNING_EXCESS_INITIALIZERS) >= CHECK_WARNING_ERROR;
+                        }
+                        if (!expression_valid || repairing || additional_count != 0 || promoted)
+                        {
+                            CheckProgramDiagnostic control = { 0 };
+                            const uint32_t control_before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
+                            const bool control_diagnosed = check_program_diagnose(&control, &input, &stream, checking, &types, control_before, &scratch);
+                            if ((control_diagnosed && control.status != CHECK_PROGRAM_OK) || control.status == CHECK_PROGRAM_RESOURCE)
+                            {
+                                additional[additional_count++] = (CheckDriverDiagnostic){ control.token,
+                                    control.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" : "invalid C statement or control flow", control.position };
+                            }
+                        }
+                        if (!check_driver_reports(checking, &pp, &input, &stream, repairing ? &repair : NULL, additional, additional_count,
+                                                  excess_tokens, excess_count, quiet, &scratch))
                         {
                             fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
                             ready = false;
@@ -455,13 +641,7 @@ static int run_check_command(int count, char** arguments)
                         {
                             check_driver_dump(&input.graph, &stream, &types, &scratch);
                         }
-                        result = ready && input_valid && stream.report_count == 0 ? 0 : 1;
-                        CheckInitializers initializers;
-                        if (result == 0 && !check_initializers_run(&initializers, &input, &stream, checking, &types, &output_arena, &scratch))
-                        {
-                            check_driver_diagnose(checking, &pp, initializers.token, check_driver_initializer_message(initializers.status));
-                            result = 1;
-                        }
+                        result = ready && expression_valid && additional_count == 0 && !repairing && pp.errors == 0 ? 0 : 1;
                         CheckProgram program;
                         CheckDataPrepared data = { 0 };
                         if (result == 0 && emit_object && !prefix_only && !check_data_prepare(&data, &input, &stream, &initializers, &types, &output_arena, &scratch))
@@ -471,6 +651,7 @@ static int run_check_command(int count, char** arguments)
                         }
                         const CheckProgramOptions program_options = {
                             .initializers = &initializers,
+                            .asms = &asms,
                             .identifiers = pp.table,
                             .initializer_references = data.references,
                             .initializer_reference_count = data.reference_count,
@@ -486,9 +667,9 @@ static int run_check_command(int count, char** arguments)
                         if (result == 0 && emit_object && !prefix_only)
                         {
                             const char* object_path = output != 0 ? output : check_driver_object_name(&arena, path);
-                            result = object_path != 0 && check_driver_object(&program, &data, checking, &pp, &types, path, object_path, scalar, &scratch) ? 0 : 1;
+                            result = object_path != 0 && check_driver_object(&program, &data, checking, &pp, &types, path, object_path, scalar, dump_static, &scratch) ? 0 : 1;
                         }
-                        if (result == 0 && dump_static && !prefix_only)
+                        if (result == 0 && dump_static && !emit_object && !prefix_only)
                         {
                             result = check_driver_dump_static(&input, &stream, &initializers, checking, &pp, &types, &scratch) ? 0 : 1;
                         }
@@ -498,14 +679,17 @@ static int run_check_command(int count, char** arguments)
                         fprintf(stderr, "fatal error: %s\n", stream.status == CHECK_STATUS_RESOURCE ? "checker output capacity exhausted" : "invalid checker input graph");
                     }
                 }
-                else if (!check_driver_reports(checking, &pp, &input, NULL, &scratch))
+                else if (!check_driver_reports(checking, &pp, &input, NULL, repairing ? &repair : NULL, NULL, 0, NULL, 0, quiet, &scratch))
                 {
                     fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
                 }
             }
             if (parse_failed)
             {
-                parse_print_diagnostics(&parser, &pp);
+                if (!pp.fatal)
+                {
+                    parse_print_diagnostics(&parser, &pp);
+                }
                 result = 1;
             }
         }

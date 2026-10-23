@@ -75,12 +75,38 @@
     X(ISFINITE, 0x14bu, "__builtin_isfinite") \
     X(SIGNBIT, 0x14cu, "__builtin_signbit") \
     X(FPCLASSIFY, 0x14du, "__builtin_fpclassify") \
+    X(ISINF_SIGN, 0x14eu, "__builtin_isinf_sign") \
+    X(FABS, 0x14fu, "__builtin_fabs") \
+    X(FABSF, 0x150u, "__builtin_fabsf") \
+    X(FABSL, 0x151u, "__builtin_fabsl") \
+    X(FLT_ROUNDS, 0x152u, "__builtin_flt_rounds") \
+    X(CREAL, 0x153u, "__builtin_creal") \
+    X(CREALF, 0x154u, "__builtin_crealf") \
+    X(CREALL, 0x155u, "__builtin_creall") \
+    X(CIMAG, 0x156u, "__builtin_cimag") \
+    X(CIMAGF, 0x157u, "__builtin_cimagf") \
+    X(CIMAGL, 0x158u, "__builtin_cimagl") \
+    X(SQRT, 0x200u, "__builtin_sqrt") \
+    X(SQRTF, 0x201u, "__builtin_sqrtf") \
+    X(COPYSIGN, 0x202u, "__builtin_copysign") \
+    X(COPYSIGNF, 0x203u, "__builtin_copysignf") \
+    X(CEIL, 0x204u, "__builtin_ceil") \
+    X(CEILF, 0x205u, "__builtin_ceilf") \
+    X(FLOOR, 0x206u, "__builtin_floor") \
+    X(FLOORF, 0x207u, "__builtin_floorf") \
+    X(TRUNC, 0x208u, "__builtin_trunc") \
+    X(TRUNCF, 0x209u, "__builtin_truncf") \
+    X(NEARBYINT, 0x20au, "__builtin_nearbyint") \
+    X(NEARBYINTF, 0x20bu, "__builtin_nearbyintf") \
+    X(RINT, 0x20cu, "__builtin_rint") \
+    X(RINTF, 0x20du, "__builtin_rintf") \
     X(MEMCPY, 0x160u, "__builtin_memcpy") \
     X(MEMSET, 0x161u, "__builtin_memset") \
     X(MEMMOVE, 0x162u, "__builtin_memmove") \
     X(MEMCMP, 0x163u, "__builtin_memcmp") \
     X(STRLEN, 0x164u, "__builtin_strlen") \
     X(ALLOCA, 0x165u, "__builtin_alloca") \
+    X(UMULL_OVERFLOW, 0x170u, "__builtin_umull_overflow") \
     X(ATOMIC_LOAD, 0x180u, "__atomic_load") \
     X(ATOMIC_LOAD_N, 0x181u, "__atomic_load_n") \
     X(ATOMIC_STORE, 0x182u, "__atomic_store") \
@@ -127,7 +153,30 @@
     X(FRAME_ADDRESS, 0x1f0u, "__builtin_frame_address") \
     X(RETURN_ADDRESS, 0x1f1u, "__builtin_return_address") \
     X(EXTRACT_RETURN_ADDR, 0x1f2u, "__builtin_extract_return_addr") \
-    X(FROB_RETURN_ADDR, 0x1f3u, "__builtin_frob_return_addr")
+    X(FROB_RETURN_ADDR, 0x1f3u, "__builtin_frob_return_addr") \
+    X(ELEMENTWISE_ABS, 0x300u, "__builtin_elementwise_abs") \
+    X(ELEMENTWISE_ADD_SAT, 0x301u, "__builtin_elementwise_add_sat") \
+    X(ELEMENTWISE_BITREVERSE, 0x302u, "__builtin_elementwise_bitreverse") \
+    X(ELEMENTWISE_CLZG, 0x303u, "__builtin_elementwise_clzg") \
+    X(ELEMENTWISE_FMA, 0x304u, "__builtin_elementwise_fma") \
+    X(ELEMENTWISE_FSHL, 0x305u, "__builtin_elementwise_fshl") \
+    X(ELEMENTWISE_FSHR, 0x306u, "__builtin_elementwise_fshr") \
+    X(ELEMENTWISE_MAX, 0x307u, "__builtin_elementwise_max") \
+    X(ELEMENTWISE_MIN, 0x308u, "__builtin_elementwise_min") \
+    X(ELEMENTWISE_POPCOUNT, 0x309u, "__builtin_elementwise_popcount") \
+    X(ELEMENTWISE_SQRT, 0x30au, "__builtin_elementwise_sqrt") \
+    X(ELEMENTWISE_SUB_SAT, 0x30bu, "__builtin_elementwise_sub_sat") \
+    X(REDUCE_ADD, 0x30cu, "__builtin_reduce_add") \
+    X(REDUCE_AND, 0x30du, "__builtin_reduce_and") \
+    X(REDUCE_MAX, 0x30eu, "__builtin_reduce_max") \
+    X(REDUCE_MIN, 0x30fu, "__builtin_reduce_min") \
+    X(REDUCE_MUL, 0x310u, "__builtin_reduce_mul") \
+    X(REDUCE_OR, 0x311u, "__builtin_reduce_or") \
+    X(SHUFFLEVECTOR, 0x312u, "__builtin_shufflevector") \
+    X(CONVERTVECTOR, 0x313u, "__builtin_convertvector") \
+    X(NONDETERMINISTIC_VALUE, 0x314u, "__builtin_nondeterministic_value") \
+    X(NONTEMPORAL_LOAD, 0x315u, "__builtin_nontemporal_load") \
+    X(NONTEMPORAL_STORE, 0x316u, "__builtin_nontemporal_store")
 
 typedef enum CBuiltinId
 {

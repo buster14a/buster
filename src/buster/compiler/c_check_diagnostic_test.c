@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// Original diagnostic policy oracle. Replay decoded directives into a dense severity table independently of
+// the production predecessor chains, then compare source positions and default-ignored warning queries.
+// Include after c_checker_test.c and c_check_diagnostic.c.
+
+#ifndef BUSTER_CHECK_DIAGNOSTIC_TEST_IMPLEMENTATION
+#define BUSTER_CHECK_DIAGNOSTIC_TEST_IMPLEMENTATION 1
+
+static void check_test_diagnostic_replay(CheckTest* test)
+{
+    static const char* const options[] =
+    {
+        "-Wincompatible-pointer-types-discards-qualifiers",
+        "-Wgnu-folding-constant",
+        "-Wenum-too-large",
+        "-Winteger-overflow",
+        "-Wshift-count-negative",
+        "-Wshift-count-overflow",
+        "-Wshift-negative-value",
+        "-Wshift-overflow",
+        "-Wexcess-initializers",
+        "-Wincompatible-pointer-types",
+        "-Wgnu",
+        "-Wpedantic",
+        "-Weverything",
+    };
+    // Independently stated membership: each exact option owns one bit, followed by the four group masks.
+    static const uint16_t groups[] = { 1, 2, 4, 8, 16, 32, 64, 128, 256, 1, 2, 2, 511 };
+    CheckInputDiagnosticPragma records[384] = { 0 };
+    CheckInputDiagnosticPragmas history =
+    {
+        .records = records,
+        .final_state = BUSTER_CHECK_NONE,
+    };
+    CheckInput input = { .diagnostic_pragmas = &history };
+    int8_t expected[129][9];
+    int8_t current[9];
+    int8_t stack[384][9];
+    uint32_t saved_states[384];
+    uint32_t saved_records[384];
+    uint32_t random = 133;
+    memset(current, -1, sizeof(current));
+    memcpy(expected[0], current, sizeof(current));
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(records); i += 1)
+    {
+        random = random * 1664525u + 1013904223u;
+        CheckInputDiagnosticPragma* record = records + i;
+        *record = (CheckInputDiagnosticPragma)
+        {
+            .token = i / 3 + 1,
+            .state_before = history.final_state,
+            .matching_push = BUSTER_CHECK_NONE,
+        };
+        const uint32_t kind = (random >> 12) % 6;
+        if (kind == 0)
+        {
+            record->operation = CHECK_DIAGNOSTIC_PUSH;
+            const uint32_t depth = history.unmatched_pushes;
+            memcpy(stack[depth], current, sizeof(current));
+            saved_states[depth] = history.final_state;
+            saved_records[depth] = i;
+            history.unmatched_pushes += 1;
+            history.maximum_depth = history.unmatched_pushes > history.maximum_depth ? history.unmatched_pushes : history.maximum_depth;
+        }
+        else if (kind == 1)
+        {
+            record->operation = CHECK_DIAGNOSTIC_POP;
+            if (history.unmatched_pushes != 0)
+            {
+                history.unmatched_pushes -= 1;
+                const uint32_t depth = history.unmatched_pushes;
+                history.final_state = saved_states[depth];
+                record->matching_push = saved_records[depth];
+                memcpy(current, stack[depth], sizeof(current));
+            }
+            else
+            {
+                history.unmatched_pops += 1;
+            }
+        }
+        else
+        {
+            const uint32_t group = (random >> 20) % BUSTER_ARRAY_LENGTH(options);
+            const uint32_t severity = (random >> 4) % 4;
+            record->operation = (uint8_t)(CHECK_DIAGNOSTIC_IGNORED + severity);
+            record->option = (String8)
+            {
+                .pointer = (char*)options[group],
+                .length = strlen(options[group]),
+            };
+            for (uint32_t bit = 0; bit < BUSTER_ARRAY_LENGTH(current); bit += 1)
+            {
+                if ((groups[group] & (1u << bit)) != 0)
+                {
+                    current[bit] = (int8_t)severity;
+                }
+            }
+            history.final_state = i;
+        }
+        record->state_after = history.final_state;
+        history.count += 1;
+        memcpy(expected[record->token], current, sizeof(current));
+    }
+    for (uint32_t token = 0; token < BUSTER_ARRAY_LENGTH(expected); token += 1)
+    {
+        for (uint32_t bit = 0; bit < BUSTER_ARRAY_LENGTH(current); bit += 1)
+        {
+            for (uint32_t ignored = 0; ignored < 2; ignored += 1)
+            {
+                const CheckWarningSeverity fallback = ignored != 0 ? CHECK_WARNING_IGNORE : CHECK_WARNING_WARNING;
+                const CheckWarningSeverity wanted = expected[token][bit] < 0 ? fallback : (CheckWarningSeverity)expected[token][bit];
+                const CheckWarningSeverity actual = check_diagnostic_severity_default(&input, token, 1u << bit, ignored != 0);
+                check_test_expect(test, actual == wanted, "diagnostic policy agrees with independent dense push/pop and warning-group replay");
+            }
+        }
+    }
+}
+
+static void check_test_diagnostic_sources(CheckTest* test)
+{
+    CheckInput input = { 0 };
+    uint32_t first = 0;
+    check_test_expect(test, !check_diagnostic_first_error(&input, NULL, &first) && first == BUSTER_CHECK_NONE,
+                      "empty diagnostic input has no promoted error");
+    check_test_expect(test, check_diagnostic_severity_default(&input, 0, CHECK_WARNING_GNU_CONSTANT, true) == CHECK_WARNING_IGNORE &&
+                           check_diagnostic_severity(&input, 0, CHECK_WARNING_INTEGER_OVERFLOW) == CHECK_WARNING_WARNING,
+                      "absent policy preserves default-ignored and default-enabled warnings");
+    uint8_t source_warnings[6] = { 0 };
+    uint8_t source_ignored[6] = { 0 };
+    uint32_t tokens[] = { 5, 2, 1 };
+    uint32_t graph_warnings[] = { CHECK_WARNING_INTEGER_OVERFLOW, CHECK_WARNING_INTEGER_OVERFLOW, CHECK_WARNING_INTEGER_OVERFLOW };
+    uint32_t graph_ignored[] = { CHECK_WARNING_INTEGER_OVERFLOW, CHECK_WARNING_INTEGER_OVERFLOW, 0 };
+    source_warnings[3] = CHECK_WARNING_GNU_CONSTANT;
+    source_ignored[3] = CHECK_WARNING_GNU_CONSTANT;
+    source_warnings[4] = CHECK_WARNING_INTEGER_OVERFLOW;
+    source_ignored[4] = CHECK_WARNING_INTEGER_OVERFLOW;
+    input.constant_warnings = source_warnings;
+    input.constant_warning_ignored = source_ignored;
+    input.token_count = BUSTER_ARRAY_LENGTH(source_warnings);
+    input.graph.tokens = tokens;
+    input.graph.count = BUSTER_ARRAY_LENGTH(tokens);
+    CheckStream stream =
+    {
+        .count = BUSTER_ARRAY_LENGTH(tokens),
+        .warnings = graph_warnings,
+        .warning_ignored = graph_ignored,
+    };
+    check_test_expect(test, !check_diagnostic_first_error(&input, &stream, &first) && first == BUSTER_CHECK_NONE,
+                      "warnings in source and graph remain warnings without explicit promotion");
+    CheckInputDiagnosticPragmas history = { 0 };
+    input.diagnostic_pragmas = &history;
+    check_test_expect(test, !check_diagnostic_first_error(&input, &stream, &first) && first == BUSTER_CHECK_NONE &&
+                           check_diagnostic_severity_default(&input, 3, CHECK_WARNING_GNU_CONSTANT, true) == CHECK_WARNING_IGNORE,
+                      "an empty decoded history has the same defaults as an absent history");
+    CheckInputDiagnosticPragma records[] =
+    {
+        {
+            .option =
+            {
+                .pointer = "-Winteger-overflow",
+                .length = sizeof("-Winteger-overflow") - 1,
+            },
+            .token = 2,
+            .state_before = BUSTER_CHECK_NONE,
+            .state_after = 0,
+            .operation = CHECK_DIAGNOSTIC_ERROR,
+        },
+        {
+            .option =
+            {
+                .pointer = "-Weverything",
+                .length = sizeof("-Weverything") - 1,
+            },
+            .token = 4,
+            .state_before = 0,
+            .state_after = 1,
+            .operation = CHECK_DIAGNOSTIC_IGNORED,
+        },
+    };
+    history.records = records;
+    history.count = 1;
+    history.final_state = 0;
+    check_test_expect(test, check_diagnostic_first_error(&input, NULL, &first) && first == 4,
+                      "explicit promotion overrides a source warning's default-ignored mask");
+    check_test_expect(test, check_diagnostic_first_error(&input, &stream, &first) && first == 2,
+                      "graph promotion selects source order independently of graph node order");
+    graph_warnings[1] = 0;
+    check_test_expect(test, check_diagnostic_first_error(&input, &stream, &first) && first == 4,
+                      "an earlier source warning wins over a later graph warning");
+    graph_warnings[1] = CHECK_WARNING_INTEGER_OVERFLOW;
+    input.constant_warning_ignored = NULL;
+    stream.warning_ignored = NULL;
+    check_test_expect(test, check_diagnostic_first_error(&input, &stream, &first) && first == 2,
+                      "optional default-ignored columns do not change explicit warning promotion");
+    history.count = 2;
+    history.final_state = 1;
+    check_test_expect(test, check_diagnostic_first_error(&input, &stream, &first) && first == 2,
+                      "later group suppression cannot erase an earlier promoted graph warning");
+    graph_warnings[1] = 0;
+    check_test_expect(test, !check_diagnostic_first_error(&input, &stream, &first) && first == BUSTER_CHECK_NONE,
+                      "later group suppression applies to both source and graph warning producers");
+    history.count = 1;
+    history.final_state = 0;
+    records[0].operation = CHECK_DIAGNOSTIC_FATAL;
+    graph_warnings[1] = CHECK_WARNING_INTEGER_OVERFLOW;
+    check_test_expect(test, check_diagnostic_first_error(&input, &stream, &first) && first == 2 &&
+                           check_diagnostic_severity(&input, 2, CHECK_WARNING_INTEGER_OVERFLOW) == CHECK_WARNING_FATAL,
+                      "fatal promotion participates in the same earliest-error selection");
+}
+
+static void check_test_diagnostic_policy(CheckTest* test)
+{
+    check_test_diagnostic_replay(test);
+    check_test_diagnostic_sources(test);
+}
+
+#endif

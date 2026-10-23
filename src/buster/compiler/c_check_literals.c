@@ -16,6 +16,7 @@ struct CheckLiteral
     uint64_t integer;
     long double floating;
     bool real;
+    bool imaginary;
     bool valid;
     bool resource;
 };
@@ -162,7 +163,7 @@ static CheckLiteral check_literal_integer(const uint8_t* bytes, uint32_t length)
     return result;
 }
 
-static CheckLiteral check_literal_number(const uint8_t* bytes, uint32_t length, Arena* scratch)
+static CheckLiteral check_literal_number_plain(const uint8_t* bytes, uint32_t length, Arena* scratch)
 {
     const bool hex = length > 2 && bytes[0] == '0' && (bytes[1] | 32u) == 'x';
     bool real = false;
@@ -241,6 +242,66 @@ static CheckLiteral check_literal_number(const uint8_t* bytes, uint32_t length, 
         arena_pop_to(scratch, mark);
     }
     return result;
+}
+
+static CheckLiteral check_literal_number(const uint8_t* bytes, uint32_t length, Arena* scratch)
+{
+    uint32_t imaginary = UINT32_MAX;
+    uint32_t suffix = length;
+    while (suffix != 0)
+    {
+        const uint8_t c = bytes[suffix - 1] | 32u;
+        if (c == 'i' || c == 'j')
+        {
+            imaginary = suffix - 1;
+            suffix -= 1;
+            break;
+        }
+        if (c != 'f' && c != 'l' && c != 'u')
+        {
+            break;
+        }
+        suffix -= 1;
+    }
+    CheckLiteral result = { 0 };
+    if (imaginary == UINT32_MAX)
+    {
+        result = check_literal_number_plain(bytes, length, scratch);
+    }
+    else if (imaginary != 0)
+    {
+        const uint64_t mark = scratch->length;
+        uint8_t* spelling = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, length);
+        result.resource = spelling == 0;
+        if (spelling != 0)
+        {
+            memcpy(spelling, bytes, imaginary);
+            memcpy(spelling + imaginary, bytes + imaginary + 1, length - imaginary - 1);
+            result = check_literal_number_plain(spelling, length - 1, scratch);
+            if (result.valid)
+            {
+                result.type = BUSTER_TYPE_COMPLEX(type_index(result.type));
+                result.imaginary = true;
+            }
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return result;
+}
+
+static CheckValue check_literal_value(CheckLiteral literal)
+{
+    const CheckValue value = {
+        .type = literal.type,
+        .category = CHECK_RVALUE,
+        .flags = literal.imaginary ? 0 : literal.real ? BUSTER_CHECK_FLOAT_LITERAL : literal.type == BUSTER_TYPE_NULLPTR ? 0 : BUSTER_CHECK_ICE,
+        .constant_kind = literal.imaginary ? CHECK_CONSTANT_COMPLEX : literal.real ? CHECK_CONSTANT_FLOATING :
+                         literal.type == BUSTER_TYPE_NULLPTR ? CHECK_CONSTANT_ADDRESS : CHECK_CONSTANT_INTEGER,
+        .integer = literal.imaginary ? (unsigned __int128)literal.integer << 64 : literal.integer,
+        .floating = literal.imaginary ? 0 : literal.floating,
+        .imaginary = literal.imaginary ? literal.floating : 0,
+    };
+    return value;
 }
 
 static bool check_literal_character_unit(const uint8_t* bytes, uint32_t end, uint32_t* position, uint32_t* value, bool c23)

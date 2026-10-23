@@ -8,6 +8,7 @@ static __attribute__((unused)) bool check_builtin_call_equal(const CheckBuiltinC
 {
     bool equal = a->node == b->node && a->nan_payload_length == b->nan_payload_length && a->nan_payload_known == b->nan_payload_known &&
                  a->string_literal_start == b->string_literal_start && a->absolute_address_constant == b->absolute_address_constant &&
+                 a->complex_constant == b->complex_constant && a->constant_p_side_effects == b->constant_p_side_effects &&
                  a->minimum_alignment == b->minimum_alignment && a->alignment_known == b->alignment_known;
     if (equal && a->nan_payload_known && a->nan_payload_length != 0)
     {
@@ -15,9 +16,18 @@ static __attribute__((unused)) bool check_builtin_call_equal(const CheckBuiltinC
     }
     for (uint32_t i = 0; equal && i < 4; i += 1)
     {
-        equal = a->object_size_known[i] == b->object_size_known[i] && a->object_sizes[i] == b->object_sizes[i];
+        equal = a->object_size_known[i] == b->object_size_known[i] &&
+                a->object_size_source_constant[i] == b->object_size_source_constant[i] && a->object_sizes[i] == b->object_sizes[i];
     }
     return equal;
+}
+
+static __attribute__((unused)) bool check_store_effect_equal(const CheckStoreEffect* a, const CheckStoreEffect* b,
+                                                           bool (*value_equal)(const CheckValue*, const CheckValue*))
+{
+    return a->node == b->node && value_equal(&a->value, &b->value) && value_equal(&a->destination, &b->destination) &&
+           a->runtime_builtin == b->runtime_builtin && a->evaluated_operands == b->evaluated_operands &&
+           a->warnings == b->warnings && a->warning_operands == b->warning_operands && a->unsupported == b->unsupported;
 }
 
 static __attribute__((unused)) bool check_builtin_misc_effect_equal(const CheckBuiltinMiscEffect* a, const CheckBuiltinMiscEffect* b,
@@ -32,17 +42,24 @@ static __attribute__((unused)) bool check_builtin_misc_effect_equal(const CheckB
            a->writes_memory == b->writes_memory && a->allocates_stack == b->allocates_stack && a->alignment_offset_known == b->alignment_offset_known;
 }
 
-static __attribute__((unused)) bool check_builtin_float_effect_equal(const CheckBuiltinFloatEffect* a, const CheckBuiltinFloatEffect* b)
+static __attribute__((unused)) bool check_builtin_float_effect_equal(const CheckBuiltinFloatEffect* a, const CheckBuiltinFloatEffect* b,
+                                                                   bool (*value_equal)(const CheckValue*, const CheckValue*))
 {
-    return a->node == b->node && a->floating_type == b->floating_type && a->evaluated_operands == b->evaluated_operands &&
+    return a->node == b->node && a->math_kind == b->math_kind && a->errno_pointer_type == b->errno_pointer_type &&
+           value_equal(a->converted_arguments, b->converted_arguments) && value_equal(a->converted_arguments + 1, b->converted_arguments + 1) &&
+           a->floating_type == b->floating_type && a->evaluated_operands == b->evaluated_operands &&
            a->definite_operands == b->definite_operands && a->selected_selector == b->selected_selector && a->unsupported == b->unsupported &&
            a->warnings == b->warnings && a->runtime_builtin == b->runtime_builtin && a->evaluation == b->evaluation &&
-           a->folded == b->folded && a->reads_memory == b->reads_memory;
+           a->folded == b->folded && a->reads_memory == b->reads_memory &&
+           a->compiler_barrier == b->compiler_barrier && a->reads_fp_environment == b->reads_fp_environment &&
+           a->may_raise_fp_exceptions == b->may_raise_fp_exceptions && a->may_raise_inexact == b->may_raise_inexact && a->may_set_errno == b->may_set_errno;
 }
 
-static __attribute__((unused)) bool check_builtin_query_effect_equal(const CheckBuiltinQueryEffect* a, const CheckBuiltinQueryEffect* b)
+static __attribute__((unused)) bool check_builtin_query_effect_equal(const CheckBuiltinQueryEffect* a, const CheckBuiltinQueryEffect* b,
+                                                                   bool (*value_equal)(const CheckValue*, const CheckValue*))
 {
-    return a->node == b->node && a->evaluated_operands == b->evaluated_operands && a->warnings == b->warnings &&
+    return a->node == b->node && value_equal(&a->runtime_value, &b->runtime_value) &&
+           a->evaluated_operands == b->evaluated_operands && a->warnings == b->warnings &&
            a->warning_operands == b->warning_operands && a->mode == b->mode && a->known == b->known && a->constraint == b->constraint;
 }
 
@@ -69,11 +86,11 @@ static __attribute__((unused)) bool check_builtin_stream_metadata_equal(const Ch
     }
     for (uint32_t i = 0; equal && i < a->floating_count; i += 1)
     {
-        equal = check_builtin_float_effect_equal(a->floating + i, b->floating + i);
+        equal = check_builtin_float_effect_equal(a->floating + i, b->floating + i, value_equal);
     }
     for (uint32_t i = 0; equal && i < a->query_count; i += 1)
     {
-        equal = check_builtin_query_effect_equal(a->queries + i, b->queries + i);
+        equal = check_builtin_query_effect_equal(a->queries + i, b->queries + i, value_equal);
     }
     for (uint32_t i = 0; equal && i < a->atomic_count; i += 1)
     {

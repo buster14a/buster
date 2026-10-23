@@ -36,13 +36,23 @@ struct CheckBuiltinCall
     bool nan_payload_known;
     bool string_literal_start;
     bool absolute_address_constant;
+    bool complex_constant;
+    bool constant_p_side_effects;
     bool object_size_known[4];
+    bool object_size_source_constant[4];
     uint64_t object_sizes[4];
     uint64_t minimum_alignment;
     bool alignment_known;
 };
 
 typedef struct CheckGraph CheckGraph;
+typedef struct CheckVectorCall CheckVectorCall;
+struct CheckVectorCall
+{
+    uint32_t node;
+    CheckVectorMember member;
+};
+
 struct CheckGraph
 {
     // Every column has count logical entries. Operands are earlier nodes or BUSTER_CHECK_NONE. Arrays are not
@@ -56,6 +66,12 @@ struct CheckGraph
     TypeId* types;
     uint32_t* members;
     uint8_t* contexts;
+    // Optional lexical FENV_ACCESS state. Zero/null means the translation environment; source constants remain
+    // separate from the runtime dependence carried by BUSTER_CHECK_FP_ENVIRONMENT on checked values.
+    uint8_t* fp_environments;
+    // Runtime arithmetic warning suppression for semantically checked source branches disconnected by SELECT.
+    // Only integer overflow, shift counts and negative shifted values may be suppressed; constraints survive.
+    uint8_t* warning_suppressed;
     // Optional source-time tag history. Each node's cutoff is the exclusive end of its operand/type-name,
     // not the prefix operator token. A missing history preserves the direct action API's current-type view.
     const uint32_t* tag_completions;
@@ -81,6 +97,9 @@ struct CheckGraph
     CheckBuiltinCall* builtin_calls;
     uint32_t builtin_count;
     uint32_t builtin_capacity;
+    CheckVectorCall* vector_members;
+    uint32_t vector_member_count;
+    uint32_t vector_member_capacity;
 };
 
 typedef enum CheckStatus
@@ -135,6 +154,11 @@ struct CheckStoreEffect
     uint32_t node;
     CheckValue value;
     CheckValue destination;
+    CBuiltinId runtime_builtin;
+    uint32_t evaluated_operands;
+    uint32_t warnings;
+    uint32_t warning_operands;
+    uint32_t unsupported;
 };
 
 typedef struct CheckVarargsEffect CheckVarargsEffect;
@@ -175,6 +199,9 @@ typedef struct CheckBuiltinFloatEffect CheckBuiltinFloatEffect;
 struct CheckBuiltinFloatEffect
 {
     uint32_t node;
+    CheckValue converted_arguments[2];
+    CheckBuiltinMathKind math_kind;
+    TypeId errno_pointer_type;
     TypeId floating_type;
     uint32_t evaluated_operands;
     uint32_t definite_operands;
@@ -185,12 +212,18 @@ struct CheckBuiltinFloatEffect
     CheckBuiltinFloatEvaluation evaluation;
     bool folded;
     bool reads_memory;
+    bool compiler_barrier;
+    bool reads_fp_environment;
+    bool may_raise_fp_exceptions;
+    bool may_raise_inexact;
+    bool may_set_errno;
 };
 
 typedef struct CheckBuiltinQueryEffect CheckBuiltinQueryEffect;
 struct CheckBuiltinQueryEffect
 {
     uint32_t node;
+    CheckValue runtime_value;
     uint32_t evaluated_operands;
     uint32_t warnings;
     uint32_t warning_operands;
@@ -236,6 +269,8 @@ struct CheckStream
     CheckConversion* argument_conversions;
     CheckDiagnostic* diagnostics;
     uint32_t* warnings;
+    // Warning kinds whose default severity is ignored; an explicit source policy may enable them.
+    uint32_t* warning_ignored;
     CheckReport* reports;
     // Valid overflow stores in increasing graph-node order. This is a semantic descriptor stream: consumers
     // execute only effects belonging to reached expression nodes, never stores in an unselected branch.
@@ -326,6 +361,14 @@ static uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, u
         graph->types[node] = 0;
         graph->members[node] = 0;
         graph->contexts[node] = 0;
+        if (graph->fp_environments != NULL)
+        {
+            graph->fp_environments[node] = 0;
+        }
+        if (graph->warning_suppressed != NULL)
+        {
+            graph->warning_suppressed[node] = 0;
+        }
         if (graph->source_positions != 0)
         {
             graph->source_positions[node] = BUSTER_CHECK_NONE;
@@ -351,7 +394,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
-    else if (id >= CBUILTIN_HUGE_VAL && id <= CBUILTIN_FPCLASSIFY)
+    else if ((id >= CBUILTIN_HUGE_VAL && id <= CBUILTIN_FLT_ROUNDS) || check_builtin_math_kind(id) != CHECK_BUILTIN_MATH_NONE)
     {
         op = CHECK_OP_BUILTIN_FLOAT;
     }
@@ -363,6 +406,10 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
              id == CBUILTIN_ATOMIC_THREAD_FENCE || id == CBUILTIN_ATOMIC_SIGNAL_FENCE)
     {
         op = CHECK_OP_BUILTIN_ATOMIC;
+    }
+    else if (id == CBUILTIN_UMULL_OVERFLOW)
+    {
+        op = CHECK_OP_BUILTIN_OVERFLOW;
     }
     return op;
 }
@@ -436,8 +483,10 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
              (graph->varargs_count == 0 || graph->varargs_calls != NULL);
     result = result && graph->builtin_count <= graph->builtin_capacity && graph->builtin_count <= graph->count &&
              (graph->builtin_count == 0 || graph->builtin_calls != NULL);
+    result = result && graph->vector_member_count <= graph->vector_member_capacity && graph->vector_member_count <= graph->count &&
+             (graph->vector_member_count == 0 || graph->vector_members != NULL);
     result = result && (graph->tag_completions != 0 ? graph->source_positions != 0 : graph->tag_completion_count == 0);
-    result = result && (graph->extensions & ~BUSTER_CHECK_EXTENSION_GNU) == 0;
+    result = result && (graph->extensions & ~(BUSTER_CHECK_EXTENSION_GNU | BUSTER_CHECK_EXTENSION_GNU_CONSTANT)) == 0;
     *maximum_arguments = 0;
     *maximum_effects = 0;
     memset(builtins, 0, 4 * sizeof(*builtins));
@@ -445,6 +494,7 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
     uint32_t consumed_arguments = 0;
     uint32_t consumed_varargs = 0;
     uint32_t consumed_builtins = 0;
+    uint32_t consumed_vectors = 0;
     if (graph->count != 0)
     {
         result = result && graph->ops != 0 && graph->operand0 != 0 && graph->operand1 != 0 && graph->operand2 != 0;
@@ -478,6 +528,10 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
         result = result && (op != CHECK_OP_STATEMENT_VALUE || graph->members == 0 || (graph->members[node] & ~BUSTER_CHECK_SIDE_EFFECT) == 0);
         result = result && ((op != CHECK_OP_VLA_BOUND && op != CHECK_OP_VLA_EXTENT) || (graph->members != NULL && graph->members[node] != 0));
         result = result && (graph->contexts == 0 || (graph->contexts[node] & ~(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_GNU_CONSTANT)) == 0);
+        result = result && (graph->fp_environments == NULL || (graph->fp_environments[node] & ~BUSTER_CHECK_FP_ENV_ACCESS) == 0);
+        result = result && (graph->warning_suppressed == NULL ||
+                            (graph->warning_suppressed[node] & ~(CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE |
+                                                               CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE)) == 0);
         if (varargs)
         {
             result = result && graph->argument_offsets != NULL && graph->argument_counts != NULL && graph->members != NULL &&
@@ -498,6 +552,13 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
                      (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC);
             consumed_builtins += 1;
         }
+        if (result && consumed_vectors < graph->vector_member_count && graph->vector_members[consumed_vectors].node <= node)
+        {
+            const CheckVectorCall* vector = graph->vector_members + consumed_vectors;
+            result = vector->node == node && op == CHECK_OP_MEMBER && vector->member.kind <= CHECK_VECTOR_MEMBER_ODD &&
+                     vector->member.count <= (1u << 30) && (vector->member.count == 0 || vector->member.lanes != NULL);
+            consumed_vectors += 1;
+        }
         if (result)
         {
             pure[node] = (uint8_t)check_graph_pure(graph, node, pure);
@@ -515,7 +576,8 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
             *failed = node;
         }
     }
-    result = result && consumed_arguments == graph->argument_count && consumed_varargs == graph->varargs_count && consumed_builtins == graph->builtin_count;
+    result = result && consumed_arguments == graph->argument_count && consumed_varargs == graph->varargs_count &&
+             consumed_builtins == graph->builtin_count && consumed_vectors == graph->vector_member_count;
     return result;
 }
 
@@ -530,7 +592,29 @@ static void check_graph_action(const CheckGraph* graph, const CheckStream* strea
         .tag_completion_count = graph->tag_completion_count,
         .source_position = graph->source_positions != 0 ? graph->source_positions[node] : BUSTER_CHECK_NONE,
         .extensions = graph->extensions,
+        .fp_environment = graph->fp_environments != NULL ? graph->fp_environments[node] : 0,
     };
+    if (action->op == CHECK_OP_MEMBER && graph->vector_member_count != 0)
+    {
+        uint32_t first = 0;
+        uint32_t last = graph->vector_member_count;
+        while (first < last)
+        {
+            const uint32_t middle = first + (last - first) / 2;
+            if (graph->vector_members[middle].node < node)
+            {
+                first = middle + 1;
+            }
+            else
+            {
+                last = middle;
+            }
+        }
+        if (first < graph->vector_member_count && graph->vector_members[first].node == node)
+        {
+            action->vector_member = &graph->vector_members[first].member;
+        }
+    }
     const uint32_t operands[] =
     {
         graph->operand0[node],
@@ -608,6 +692,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
         CheckBuiltinMiscResult checked;
         check_builtin_misc(types, &input, &checked, 1);
         *result = checked.action;
+        result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_MISC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
         for (uint32_t i = 0; i < action->argument_count && i < 3; i += 1)
         {
             action->argument_conversions[i] = checked.argument_conversions[i];
@@ -636,39 +721,114 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
     }
     else if (action->op == CHECK_OP_BUILTIN_FLOAT)
     {
-        const CheckBuiltinFloatAction input = {
-            .id = (CBuiltinId)action->member,
-            .arguments = action->arguments,
-            .argument_count = action->argument_count,
-            .node = node,
-            .tag_completions = action->tag_completions,
-            .tag_completion_count = action->tag_completion_count,
-            .source_position = action->source_position,
-            .extensions = action->extensions,
-            .nan_payload = witness != NULL ? witness->nan_payload : NULL,
-            .nan_payload_length = witness != NULL ? witness->nan_payload_length : 0,
-            .nan_payload_known = witness != NULL && witness->nan_payload_known,
-        };
-        CheckBuiltinFloatResult checked;
-        check_builtin_float(types, &input, &checked, 1);
-        *result = checked.action;
-        for (uint32_t i = 0; i < action->argument_count && i < 6; i += 1)
+        const CheckBuiltinMathKind math_kind = check_builtin_math_kind((CBuiltinId)action->member);
+        if (math_kind != CHECK_BUILTIN_MATH_NONE)
         {
-            action->argument_conversions[i] = checked.argument_conversions[i];
+            const CheckBuiltinMathAction input = {
+                .id = (CBuiltinId)action->member,
+                .arguments = action->arguments,
+                .argument_count = action->argument_count,
+                .node = node,
+                .tag_completions = action->tag_completions,
+                .tag_completion_count = action->tag_completion_count,
+                .source_position = action->source_position,
+                .extensions = action->extensions,
+            };
+            CheckBuiltinMathResult checked;
+            check_builtin_math(types, &input, &checked, 1);
+            *result = checked.action;
+            const TypeId errno_pointer = checked.may_set_errno && result->diagnostic == CHECK_DIAG_NONE ? type_pointer(types, BUSTER_TYPE_INT) : 0;
+            if (checked.may_set_errno && result->diagnostic == CHECK_DIAG_NONE && errno_pointer == 0)
+            {
+                check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+            }
+            bool fp_conversion = false;
+            for (uint32_t i = 0; i < action->argument_count && i < 2; i += 1)
+            {
+                action->argument_conversions[i] = checked.argument_conversions[i];
+                fp_conversion |= (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
+                                 check_action_fp_conversion(types, action->arguments[i].type, checked.argument_conversions[i].type);
+            }
+            if (fp_conversion)
+            {
+                result->value.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
+            }
+            const bool dynamic = (result->value.flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0;
+            stream->floating[stream->floating_count++] = (CheckBuiltinFloatEffect){
+                .node = node,
+                .converted_arguments = { checked.converted_arguments[0], checked.converted_arguments[1] },
+                .math_kind = math_kind,
+                .errno_pointer_type = errno_pointer,
+                .floating_type = checked.floating_type,
+                .evaluated_operands = checked.evaluated_operands,
+                .definite_operands = checked.evaluated_operands,
+                .unsupported = checked.unsupported,
+                .runtime_builtin = dynamic ? input.id : checked.runtime_builtin,
+                .folded = checked.folded && !dynamic,
+                .compiler_barrier = checked.compiler_barrier || fp_conversion,
+                .reads_fp_environment = checked.reads_fp_environment || fp_conversion,
+                .may_raise_fp_exceptions = checked.may_raise_fp_exceptions || fp_conversion,
+                .may_raise_inexact = checked.may_raise_inexact || fp_conversion,
+                .may_set_errno = checked.may_set_errno,
+            };
         }
-        stream->floating[stream->floating_count++] = (CheckBuiltinFloatEffect){
-            .node = node,
-            .floating_type = checked.floating_type,
-            .evaluated_operands = checked.evaluated_operands,
-            .definite_operands = checked.definite_operands,
-            .selected_selector = checked.selected_selector,
-            .unsupported = checked.unsupported,
-            .warnings = checked.warnings,
-            .runtime_builtin = checked.runtime_builtin,
-            .evaluation = checked.evaluation,
-            .folded = checked.folded,
-            .reads_memory = checked.reads_memory,
-        };
+        else if (action->member == CBUILTIN_FLT_ROUNDS)
+        {
+            const CheckBuiltinRoundsAction input = {
+                .id = (CBuiltinId)action->member,
+                .arguments = action->arguments,
+                .argument_count = action->argument_count,
+                .node = node,
+            };
+            CheckBuiltinRoundsResult checked;
+            check_builtin_rounds(&input, &checked, 1);
+            *result = checked.action;
+            stream->floating[stream->floating_count++] = (CheckBuiltinFloatEffect){
+                .node = node,
+                .evaluated_operands = checked.evaluated_operands,
+                .definite_operands = checked.evaluated_operands,
+                .runtime_builtin = checked.runtime_builtin,
+                .compiler_barrier = checked.compiler_barrier,
+                .reads_fp_environment = checked.reads_fp_environment,
+            };
+        }
+        else
+        {
+            const CheckBuiltinFloatAction input = {
+                .id = (CBuiltinId)action->member,
+                .arguments = action->arguments,
+                .argument_count = action->argument_count,
+                .node = node,
+                .tag_completions = action->tag_completions,
+                .tag_completion_count = action->tag_completion_count,
+                .source_position = action->source_position,
+                .extensions = action->extensions,
+                .nan_payload = witness != NULL ? witness->nan_payload : NULL,
+                .nan_payload_length = witness != NULL ? witness->nan_payload_length : 0,
+                .nan_payload_known = witness != NULL && witness->nan_payload_known,
+            };
+            CheckBuiltinFloatResult checked;
+            check_builtin_float(types, &input, &checked, 1);
+            *result = checked.action;
+            result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_FLOAT_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
+            for (uint32_t i = 0; i < action->argument_count && i < 6; i += 1)
+            {
+                action->argument_conversions[i] = checked.argument_conversions[i];
+            }
+            stream->floating[stream->floating_count++] = (CheckBuiltinFloatEffect){
+                .node = node,
+                .floating_type = checked.floating_type,
+                .evaluated_operands = checked.evaluated_operands,
+                .definite_operands = checked.definite_operands,
+                .selected_selector = checked.selected_selector,
+                .unsupported = checked.unsupported,
+                .warnings = checked.warnings,
+                .runtime_builtin = checked.runtime_builtin,
+                .evaluation = checked.evaluation,
+                .folded = checked.folded,
+                .reads_memory = checked.reads_memory,
+            };
+        }
     }
     else if (action->op == CHECK_OP_BUILTIN_ATOMIC)
     {
@@ -687,6 +847,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
         CheckBuiltinAtomicResult checked;
         check_builtin_atomic(types, &input, &checked, 1);
         *result = checked.action;
+        result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
         for (uint32_t i = 0; i < action->argument_count && i < 6; i += 1)
         {
             action->argument_conversions[i] = checked.argument_conversions[i];
@@ -730,21 +891,31 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .extensions = action->extensions,
             .string_literal_start = witness != NULL && witness->string_literal_start,
             .absolute_address_constant = witness != NULL && witness->absolute_address_constant,
+            .complex_constant = witness != NULL && witness->complex_constant,
         };
+        if (action->argument_count != 0)
+        {
+            const CheckValue* value = action->arguments;
+            input.complex_constant |= value->category == CHECK_RVALUE && value->constant_kind == CHECK_CONSTANT_COMPLEX &&
+                                      value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+        }
         if (witness != NULL)
         {
             memcpy(input.object_size_known, witness->object_size_known, sizeof(input.object_size_known));
+            memcpy(input.object_size_source_constant, witness->object_size_source_constant, sizeof(input.object_size_source_constant));
             memcpy(input.object_sizes, witness->object_sizes, sizeof(input.object_sizes));
         }
         CheckBuiltinQueryResult checked;
         check_builtin_query(types, &input, &checked, 1);
         *result = checked.action;
+        result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_MISC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
         for (uint32_t i = 0; i < action->argument_count && i < 2; i += 1)
         {
             action->argument_conversions[i] = checked.argument_conversions[i];
         }
         stream->queries[stream->query_count++] = (CheckBuiltinQueryEffect){
             .node = node,
+            .runtime_value = checked.runtime_value,
             .evaluated_operands = checked.evaluated_operands,
             .warnings = checked.warnings,
             .warning_operands = checked.warning_operands,
@@ -752,6 +923,64 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .known = checked.known,
             .constraint = checked.constraint,
         };
+    }
+    if (result->diagnostic == CHECK_DIAG_NONE)
+    {
+        uint32_t evaluated = action->op == CHECK_OP_BUILTIN_MISC ? stream->misc[stream->misc_count - 1].evaluated_operands :
+                             action->op == CHECK_OP_BUILTIN_FLOAT ? stream->floating[stream->floating_count - 1].evaluated_operands :
+                             action->op == CHECK_OP_BUILTIN_ATOMIC ? stream->atomics[stream->atomic_count - 1].evaluated_operands :
+                             stream->queries[stream->query_count - 1].evaluated_operands;
+        const bool strict_comparison = action->op == CHECK_OP_BUILTIN_FLOAT &&
+                                       (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
+                                       (action->member == CBUILTIN_FPCLASSIFY || action->member == CBUILTIN_ISINF_SIGN);
+        if (strict_comparison)
+        {
+            result->value.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
+            stream->floating[stream->floating_count - 1].may_raise_fp_exceptions = true;
+        }
+        if (action->op == CHECK_OP_BUILTIN_FLOAT && action->member == CBUILTIN_FPCLASSIFY && action->argument_count == 6 &&
+            (strict_comparison || (action->arguments[5].flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0))
+        {
+            CheckBuiltinFloatEffect* effect = stream->floating + stream->floating_count - 1;
+            effect->selected_selector = BUSTER_CHECK_BUILTIN_FLOAT_NO_SELECTOR;
+            effect->evaluation = CHECK_BUILTIN_FLOAT_EVALUATION_FPCLASSIFY_RUNTIME;
+            effect->evaluated_operands = 63;
+            effect->definite_operands = 48;
+            evaluated = 63;
+        }
+        if (action->op == CHECK_OP_BUILTIN_QUERY && action->member == CBUILTIN_CONSTANT_P && action->argument_count == 1 &&
+            result->value.constant_kind == CHECK_CONSTANT_INTEGER && result->value.integer != 0 &&
+            (action->arguments[0].flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0)
+        {
+            // Clang's source evaluator proves the default-environment constant, while its executable form
+            // retains the strict FP operation and returns false for a runtime-dependent value.
+            CheckBuiltinQueryEffect* effect = stream->queries + stream->query_count - 1;
+            effect->runtime_value.integer = 0;
+            effect->runtime_value.flags = 0;
+            effect->evaluated_operands = 1;
+            evaluated = 1;
+        }
+        bool fp_conversion = false;
+        for (uint32_t i = 0; i < action->argument_count && i < 32; i += 1)
+        {
+            if ((evaluated & (1u << i)) != 0)
+            {
+                result->value.flags |= action->arguments[i].flags & BUSTER_CHECK_FP_ENVIRONMENT;
+                fp_conversion |= (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
+                                 check_action_fp_conversion(types, action->arguments[i].type, action->argument_conversions[i].type);
+            }
+        }
+        result->value.flags |= fp_conversion ? BUSTER_CHECK_FP_ENVIRONMENT : 0;
+        if (action->op == CHECK_OP_BUILTIN_FLOAT && (result->value.flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0)
+        {
+            CheckBuiltinFloatEffect* effect = stream->floating + stream->floating_count - 1;
+            effect->folded = false;
+            effect->runtime_builtin = (CBuiltinId)action->member;
+            effect->compiler_barrier = true;
+            effect->reads_fp_environment = true;
+            effect->may_raise_fp_exceptions |= fp_conversion;
+            effect->may_raise_inexact |= fp_conversion;
+        }
     }
 }
 
@@ -774,14 +1003,30 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
             .extensions = action.extensions,
         };
         CheckBuiltinResult checked;
-        check_builtins(types, &builtin, &checked, 1, true);
+        CheckBuiltinTypedOverflowResult typed = { 0 };
+        if (builtin.id == CBUILTIN_UMULL_OVERFLOW)
+        {
+            check_builtin_typed_overflow(types, &builtin, &typed, 1, true);
+            checked = typed.builtin;
+        }
+        else
+        {
+            check_builtins(types, &builtin, &checked, 1, true);
+        }
         result = checked.action;
+        check_action_fp_environment(types, &action, &result);
+        result.warnings |= (typed.warnings & BUSTER_CHECK_BUILTIN_TYPED_OVERFLOW_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
         if (checked.store && result.diagnostic == CHECK_DIAG_NONE)
         {
             stream->effects[stream->effect_count++] = (CheckStoreEffect){
                 .node = node,
                 .value = checked.store_value,
                 .destination = checked.store_destination,
+                .runtime_builtin = builtin.id == CBUILTIN_UMULL_OVERFLOW ? typed.runtime_builtin : builtin.id,
+                .evaluated_operands = builtin.id == CBUILTIN_UMULL_OVERFLOW ? typed.evaluated_operands : 7,
+                .warnings = typed.warnings,
+                .warning_operands = typed.warning_operands,
+                .unsupported = typed.unsupported,
             };
         }
     }
@@ -941,14 +1186,101 @@ static bool check_graph_inherited_error(const CheckGraph* graph, const CheckStre
     return result;
 }
 
+static void check_graph_warning_contexts(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states)
+{
+    bool needed = false;
+    for (uint32_t node = 0; !needed && node < graph->count; node += 1)
+    {
+        const uint32_t context = graph->contexts != NULL ? graph->contexts[node] : 0;
+        needed = stream->warnings[node] != 0 ||
+                 ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 &&
+                  (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 && (stream->values[node].flags & BUSTER_CHECK_ICE) == 0 &&
+                  check_action_integer_constant(stream->values + node, BUSTER_CHECK_EXTENSION_GNU_CONSTANT));
+    }
+    if (!needed)
+    {
+        return;
+    }
+    // The scheduler's byte scratch is dead here. Reuse it for referenced/evaluated/required-ICE bits, so a
+    // reverse postorder pass can distinguish contextual GNU folding from warnings in evaluated operations.
+    memset(states, 0, graph->count);
+    for (uint32_t node = 0; node < graph->count; node += 1)
+    {
+        const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            if (operands[i] != BUSTER_CHECK_NONE)
+            {
+                states[operands[i]] |= 1;
+            }
+        }
+        if (check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != NULL)
+        {
+            const uint32_t first = graph->argument_offsets != NULL ? graph->argument_offsets[node] : 0;
+            for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+            {
+                states[graph->argument_nodes[first + i]] |= 1;
+            }
+        }
+    }
+    for (uint32_t node = graph->count; node-- > 0;)
+    {
+        const uint32_t context = graph->contexts != NULL ? graph->contexts[node] : 0;
+        states[node] |= (states[node] & 1) == 0 ? 2 : 0;
+        states[node] |= (context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 ? 4 : 0;
+        const uint32_t unevaluated = CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE |
+                                     CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE;
+        const uint32_t required = CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE;
+        stream->warnings[node] &= ~((states[node] & 2) == 0 ? unevaluated : (states[node] & 4) != 0 ? required : 0);
+        stream->warnings[node] &= ~(graph->warning_suppressed != NULL ? graph->warning_suppressed[node] : 0);
+        const CheckValue* value = stream->values + node;
+        if ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 &&
+            (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 && (value->flags & BUSTER_CHECK_ICE) == 0 &&
+            check_action_integer_constant(value, BUSTER_CHECK_EXTENSION_GNU_CONSTANT))
+        {
+            stream->warnings[node] |= CHECK_WARNING_GNU_CONSTANT;
+            stream->warning_ignored[node] |= CHECK_WARNING_GNU_CONSTANT;
+        }
+        const CheckOp op = graph->ops[node];
+        uint32_t mask = UINT32_MAX;
+        bool truth = false;
+        if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
+        {
+            mask = 0;
+        }
+        else if ((op == CHECK_OP_CONDITIONAL || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR) &&
+                 check_action_truth(types, stream->values + graph->operand0[node], &truth))
+        {
+            mask = op == CHECK_OP_CONDITIONAL ? (truth ? 3 : 5) :
+                   ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth)) ? 1 : 3;
+        }
+        const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            if (operands[i] != BUSTER_CHECK_NONE)
+            {
+                states[operands[i]] |= (states[node] & 4) | ((mask & (1u << i)) != 0 ? states[node] & 2 : 0);
+            }
+        }
+        if (check_graph_has_arguments(op) && graph->argument_counts != NULL)
+        {
+            const uint32_t first = graph->argument_offsets != NULL ? graph->argument_offsets[node] : 0;
+            for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+            {
+                states[graph->argument_nodes[first + i]] |= (states[node] & 4) | ((i >= 32 || (mask & (1u << i)) != 0) ? states[node] & 2 : 0);
+            }
+        }
+    }
+}
+
 static void check_graph_reports(const CheckGraph* graph, CheckStream* stream, CheckReport* temporary)
 {
     for (uint32_t node = 0; node < graph->count; node += 1)
     {
         const CheckValue* value = stream->values + node;
         const uint8_t context = graph->contexts != 0 ? graph->contexts[node] : 0;
-        const bool folded_integer = (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 &&
-                                    value->constant_kind == CHECK_CONSTANT_INTEGER && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+        const uint32_t extensions = (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 ? BUSTER_CHECK_EXTENSION_GNU_CONSTANT : 0;
+        const bool folded_integer = check_action_integer_constant(value, extensions);
         if (stream->diagnostics[node] != CHECK_DIAG_NONE)
         {
             // Poisoned operands already have a primary error. Reporting their parents' invalid-type cascades
@@ -965,7 +1297,7 @@ static void check_graph_reports(const CheckGraph* graph, CheckStream* stream, Ch
                 const uint32_t source = value->fault_node < graph->count ? value->fault_node : node;
                 check_graph_report(graph, stream, source, CHECK_MESSAGE_CONSTANT, CHECK_DIAG_NONE, value->fault);
             }
-            else if ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 && !folded_integer && ((value->flags & BUSTER_CHECK_ICE) == 0 || value->constant_kind != CHECK_CONSTANT_INTEGER))
+            else if ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 && !folded_integer)
             {
                 check_graph_report(graph, stream, node, CHECK_MESSAGE_ICE, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
             }
@@ -1044,6 +1376,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->conversions = BUSTER_ARENA_PUSH_ARRAY(output, CheckNodeConversions, count);
         stream->diagnostics = BUSTER_ARENA_PUSH_ARRAY(output, CheckDiagnostic, count);
         stream->warnings = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+        stream->warning_ignored = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->reports = BUSTER_ARENA_PUSH_ARRAY(output, CheckReport, count);
         stream->argument_conversions = graph->argument_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckConversion, graph->argument_count) : 0;
         stream->effects = maximum_effects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckStoreEffect, maximum_effects) : 0;
@@ -1052,7 +1385,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->floating = maximum_builtins[1] != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinFloatEffect, maximum_builtins[1]) : 0;
         stream->queries = maximum_builtins[2] != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinQueryEffect, maximum_builtins[2]) : 0;
         stream->atomics = maximum_builtins[3] != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinAtomicEffect, maximum_builtins[3]) : 0;
-        result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->warnings != 0 && stream->reports != 0 &&
+        result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->warnings != 0 && stream->warning_ignored != 0 && stream->reports != 0 &&
                  (maximum_arguments == 0 || arguments != 0) && (graph->argument_count == 0 || stream->argument_conversions != 0) &&
                  (maximum_effects == 0 || stream->effects != 0) && (graph->varargs_count == 0 || stream->varargs != 0) &&
                  (maximum_builtins[0] == 0 || stream->misc != 0) && (maximum_builtins[1] == 0 || stream->floating != 0) &&
@@ -1065,6 +1398,10 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->statistics.nodes = count;
         stream->statistics.output_bytes = output->length - output_start;
         stream->statistics.scratch_bytes = scratch->length - scratch_start;
+        if (count != 0)
+        {
+            memset(stream->warning_ignored, 0, (size_t)count * sizeof(*stream->warning_ignored));
+        }
         if (stream->argument_conversions != 0)
         {
             memset(stream->argument_conversions, 0, (size_t)graph->argument_count * sizeof(*stream->argument_conversions));
@@ -1098,6 +1435,10 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         }
         if (result)
         {
+            if (count != 0)
+            {
+                check_graph_warning_contexts(types, graph, stream, pure);
+            }
             check_graph_reports(graph, stream, reports);
         }
     }

@@ -1139,12 +1139,172 @@ static void check_data_test_address_bit_fields(CheckTest* test, TypeTable* types
     }
 }
 
+static void check_data_test_complex(CheckTest* test, TypeTable* types)
+{
+    const TypeId complex_float = type_complex(types, BUSTER_TYPE_FLOAT);
+    const TypeId complex_double = type_complex(types, BUSTER_TYPE_DOUBLE);
+    const TypeId complex_long = type_complex(types, BUSTER_TYPE_LONG_DOUBLE);
+    const TypeId complex_int = type_complex(types, BUSTER_TYPE_INT);
+    for (uint32_t failure = 0; failure < 15; failure += 1)
+    {
+        CheckDataTestLink fixture;
+        const bool initialized = check_data_test_open(&fixture, 2);
+        check_test_expect(test, initialized, "complex static-data refusal fixture initializes");
+        if (initialized)
+        {
+            SymbolId map[3] = { 0 };
+            map[1] = check_data_test_symbol(&fixture.link, "before_complex", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            map[2] = check_data_test_symbol(&fixture.link, "bad_complex", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            CheckValue values[2] = {
+                check_test_integer(BUSTER_TYPE_INT, 71),
+                {
+                    .type = complex_float,
+                    .category = CHECK_RVALUE,
+                    .constant_kind = CHECK_CONSTANT_COMPLEX,
+                    .floating = 1.5L,
+                    .imaginary = -2.0L,
+                },
+            };
+            CheckDiagnostic diagnostics[2] = { 0 };
+            CheckStream stream = {
+                .values = values,
+                .diagnostics = diagnostics,
+                .count = 2,
+            };
+            CheckDataObject objects[2] = {
+                {
+                    .type = BUSTER_TYPE_INT,
+                    .object = 1,
+                    .initializer = 0,
+                    .token = 101,
+                },
+                {
+                    .type = complex_float,
+                    .object = 2,
+                    .initializer = 1,
+                    .token = 202,
+                },
+            };
+            CheckDataStatus expected = CHECK_DATA_INVALID;
+            switch (failure)
+            {
+                case 0: values[1].floating = 1.0L + 0x1p-25L; break;
+                case 1: values[1].imaginary = 1.0L + 0x1p-25L; break;
+                case 2:
+                    values[1].type = objects[1].type = complex_double;
+                    values[1].imaginary = 1.0L + 0x1p-60L;
+                    break;
+                case 3:
+                case 4:
+                    values[1].type = objects[1].type = complex_int;
+                    values[1].integer = (unsigned __int128)1 << (failure == 3 ? 32 : 96);
+                    break;
+                case 5:
+                    values[1].constant_kind = CHECK_CONSTANT_FLOATING;
+                    expected = CHECK_DATA_NON_CONSTANT;
+                    break;
+                case 6: values[1].type = BUSTER_TYPE_FLOAT; break;
+                case 7: values[1].category = CHECK_LVALUE; break;
+                case 8:
+                    values[1].flags = BUSTER_CHECK_SIDE_EFFECT;
+                    expected = CHECK_DATA_NON_CONSTANT;
+                    break;
+                case 9:
+                    values[1].fault = CHECK_FAULT_DIVIDE_BY_ZERO;
+                    expected = CHECK_DATA_NON_CONSTANT;
+                    break;
+                case 10:
+                    values[1].type = objects[1].type = type_complex(types, BUSTER_TYPE_FLOAT128);
+                    expected = CHECK_DATA_UNSUPPORTED;
+                    break;
+                case 11:
+                    values[1].type = objects[1].type = type_complex(types, BUSTER_TYPE_INT128);
+                    expected = CHECK_DATA_UNSUPPORTED;
+                    break;
+                case 12:
+                    values[1].type = objects[1].type = complex_long;
+                    fixture.bytes.capacity = 35;
+                    expected = CHECK_DATA_RESOURCE;
+                    break;
+                case 13:
+                    diagnostics[1] = CHECK_DIAG_INVALID_TYPE;
+                    expected = CHECK_DATA_CHECK_FAILED;
+                    break;
+                case 14:
+                    stream.status = CHECK_STATUS_INVALID_GRAPH;
+                    expected = CHECK_DATA_CHECK_FAILED;
+                    break;
+            }
+            uint8_t tables[4096];
+            const bool fits = fixture.tables.length <= sizeof(tables);
+            check_test_expect(test, fits, "complex refusal table snapshot fits");
+            if (fits)
+            {
+                memcpy(tables, fixture.tables.base, fixture.tables.length);
+                const Link before = fixture.link;
+                CheckDataResult result = { 0 };
+                const bool emitted = check_data_emit(types, &stream, objects, BUSTER_ARRAY_LENGTH(objects), map, BUSTER_ARRAY_LENGTH(map),
+                                                     &fixture.link, 0, &fixture.bytes, &fixture.scratch, &result);
+                check_test_expect(test, !emitted && result.status == expected && memcmp(&before, &fixture.link, sizeof(before)) == 0 &&
+                                       memcmp(tables, fixture.tables.base, fixture.tables.length) == 0 && fixture.bytes.length == 0 && fixture.scratch.length == 0,
+                                  "invalid complex values and exhausted output leave the entire static batch unpublished");
+            }
+        }
+        fixture.bytes.capacity = 16384;
+        check_data_test_close(&fixture);
+    }
+    CheckDataTestLink fixture;
+    const bool initialized = check_data_test_open(&fixture, 1);
+    check_test_expect(test, initialized, "complex host-padding fixture initializes");
+    if (initialized)
+    {
+        SymbolId map[2] = { 0 };
+        map[1] = check_data_test_symbol(&fixture.link, "complex_padding", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        CheckValue value;
+        memset(&value, 0xa5, sizeof(value));
+        value.type = complex_long;
+        value.category = CHECK_RVALUE;
+        value.constant_kind = CHECK_CONSTANT_COMPLEX;
+        value.flags = 0;
+        value.fault = CHECK_FAULT_NONE;
+        value.floating = 1.5L;
+        value.imaginary = -2.0L;
+        CheckDiagnostic diagnostic = CHECK_DIAG_NONE;
+        const CheckStream stream = {
+            .values = &value,
+            .diagnostics = &diagnostic,
+            .count = 1,
+        };
+        const CheckDataObject object = {
+            .type = complex_long,
+            .object = 1,
+            .initializer = 0,
+        };
+        CheckDataResult result = { 0 };
+        static const uint8_t expected[32] = {
+            [7] = 0xc0,
+            [8] = 0xff,
+            [9] = 0x3f,
+            [23] = 0x80,
+            [25] = 0xc0,
+        };
+        const bool emitted = check_data_emit(types, &stream, &object, 1, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                             &fixture.bytes, &fixture.scratch, &result);
+        const AtomId atom = fixture.link.symbols.atom[map[1]];
+        check_test_expect(test, emitted && atom != 0 && fixture.link.atoms.size[atom] == 32 &&
+                               memcmp(fixture.link.atoms.bytes[atom], expected, sizeof(expected)) == 0 && link_check(&fixture.link) == LINK_ERROR_NONE,
+                          "both x87 complex components serialize ten meaningful bytes and six zero padding bytes despite poisoned host storage");
+    }
+    check_data_test_close(&fixture);
+}
+
 static void check_test_data(CheckTest* test, TypeTable* types, const char* clang)
 {
     check_data_test_objects(test, types, clang);
     check_data_test_aggregate_transaction(test, types);
     check_data_test_many_fixups(test, types);
     check_data_test_address_bit_fields(test, types);
+    check_data_test_complex(test, types);
     check_data_test_limits(test, types);
     check_data_test_floating(test);
     check_data_test_composite(test, types);

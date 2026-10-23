@@ -15,7 +15,7 @@ static bool check_input_builtin_constant_prepare(CheckInputReader* reader, uint3
     CheckValue value = { 0 };
     const bool valid = (name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || name == C_NAME_BUILTIN_OFFSETOF) &&
                        open < close && close < parser->tokens.count && parser->tree.roles[open] == PARSE_ROLE_OPEN_KEYWORD &&
-                       check_input_evaluate(reader, keyword, close + 1, &value) && (value.flags & BUSTER_CHECK_ICE) != 0;
+                       check_input_evaluate(reader, keyword, close + 1, &value) && check_input_integer_constant(reader, &value);
     if (valid)
     {
         const uint32_t index = reader->cached_constant_count++;
@@ -172,6 +172,17 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
     if (valid)
     {
         reader->selected_tokens[close] = chosen;
+        association = separator + 1;
+        while (association < close)
+        {
+            const uint32_t colon = check_constant_punctuation(parser, association, close, PARSE_KIND_COLON);
+            const uint32_t after = check_constant_punctuation(parser, colon + 1, close, PARSE_KIND_COMMA);
+            if (chosen < colon + 1 || chosen >= after)
+            {
+                check_input_warning_suppress(reader, colon + 1, after, CHECK_WARNING_INTEGER_OVERFLOW);
+            }
+            association = after + 1;
+        }
     }
     arena_pop_to(reader->scratch, mark);
     return valid;
@@ -196,17 +207,20 @@ static bool check_input_selections(CheckInputReader* reader)
             if (selected && name == C_NAME_GENERIC)
             {
                 selected = check_input_selection_generic(reader, separator, close, &control);
+                check_input_warning_suppress(reader, first, separator, check_constant_unevaluated_warnings());
             }
             else if (selected)
             {
                 const uint32_t next = check_constant_punctuation(parser, separator + 1, close, PARSE_KIND_COMMA);
                 bool condition = false;
-                selected = next < close && (control.flags & BUSTER_CHECK_ICE) != 0 && check_action_truth(reader->types, &control, &condition);
+                selected = next < close && check_input_integer_ice(reader, &control) && check_action_truth(reader->types, &control, &condition);
                 const uint32_t root = selected ? check_input_selection_root(parser, condition ? separator + 1 : next + 1, condition ? next : close) : BUSTER_CHECK_NONE;
                 selected &= root != BUSTER_CHECK_NONE;
                 if (selected)
                 {
                     reader->selected_tokens[close] = root;
+                    check_input_constant_fold_warning(reader, first, separator, &control, true);
+                    check_input_warning_suppress(reader, condition ? next + 1 : separator + 1, condition ? close : next, CHECK_WARNING_INTEGER_OVERFLOW);
                 }
             }
             if (!selected)

@@ -2,8 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Initializer syntax stays separate from expression actions. Resolve designator ICEs after the declaration's
-// activation point, retain their value for the final initializer planner, and infer an outer array before a later
-// expression can observe its type. The token scan skips expression groups and uses no recursive descent.
+// activation point, retain their value for the final initializer planner, and finish an outer array at the end of
+// its initializer. Structural preparation emits no future binding events; the source pass executes each bound
+// job at its actual opener. The token scan skips expression groups and uses no recursive descent.
 
 static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment)
 {
@@ -50,21 +51,12 @@ static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t a
                     at = parser->tree.parents[at];
                 }
             }
-            int64_t index = 0;
-            int64_t high = 0;
-            valid = close > token && close < end && check_input_constant(reader, token + 1, range, &index) && index >= 0;
-            valid &= range == close || (parser->language.gnu && check_input_constant(reader, range + 1, close, &high) && high >= index);
+            valid = close > token && close < end && (range == close || parser->language.gnu);
             if (valid)
             {
-                reader->designator_indices[token] = (uint64_t)index;
-                reader->designator_valid[token] = true;
-                reader->designator_tokens[range] = token + 1;
-                if (range != close)
-                {
-                    reader->designator_indices[range] = (uint64_t)high;
-                    reader->designator_valid[range] = true;
-                    reader->designator_tokens[close] = range + 1;
-                }
+                reader->designator_indices[token] = close;
+                reader->designator_valid[token] = 2;
+                reader->designator_ranges[token] = range;
                 memset(reader->ignored + token, 1, close - token + 1);
                 token = close + 1;
             }
@@ -96,6 +88,55 @@ static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t a
     }
     if (valid && type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
     {
+        reader->incomplete_array_types[declaration] = type;
+        reader->initializer_finish_next[declaration] = reader->initializer_finish_heads[end];
+        reader->initializer_finish_heads[end] = declaration;
+        reader->inference_end = end > reader->inference_end ? end : reader->inference_end;
+    }
+    if (!valid)
+    {
+        check_input_report(reader, assignment, CHECK_INPUT_DECLARATION);
+    }
+    return valid;
+}
+
+static bool check_input_initializer_designator(CheckInputReader* reader, uint32_t token)
+{
+    const uint32_t close = (uint32_t)reader->designator_indices[token];
+    const uint32_t range = reader->designator_ranges[token];
+    int64_t index = 0;
+    int64_t high = 0;
+    bool valid = check_input_constant(reader, token + 1, range, &index) && index >= 0;
+    valid = valid && (range == close || (check_input_constant(reader, range + 1, close, &high) && high >= index));
+    if (valid)
+    {
+        reader->designator_indices[token] = (uint64_t)index;
+        reader->designator_valid[token] = 1;
+        reader->designator_tokens[range] = token + 1;
+        if (range != close)
+        {
+            reader->designator_indices[range] = (uint64_t)high;
+            reader->designator_valid[range] = 1;
+            reader->designator_tokens[close] = range + 1;
+        }
+    }
+    else
+    {
+        check_input_report(reader, token + 1, CHECK_INPUT_DECLARATION);
+    }
+    return valid;
+}
+
+static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t declaration)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t begin = reader->output->initializer_begins[declaration];
+    const uint32_t end = reader->output->initializer_ends[declaration];
+    const uint32_t assignment = reader->output->compound_objects[declaration] ? declaration : begin - 1;
+    TypeId type = reader->declared_types[declaration];
+    bool valid = begin < end && end <= parser->tokens.count;
+    if (valid && type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+    {
         uint32_t string_token = begin;
         string_token += parser->tree.roles[begin] == PARSE_ROLE_OPEN_INITIALIZER || parser->tree.roles[begin] == PARSE_ROLE_OPEN_COMPOUND_BODY;
         const TypeId element = type_unqualified(type_strip_aligned(reader->types, type_element(reader->types, type)));
@@ -115,6 +156,10 @@ static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t a
             valid = check_initializer_infer_array(reader->types, parser, type, begin, end, reader->designator_indices, reader->designator_valid,
                                                   reader->declared_types, reader->scratch, &type, &failed, &status);
             reader->output->resource |= status == CHECK_INIT_RESOURCE;
+            if (!valid)
+            {
+                check_input_report(reader, failed, CHECK_INPUT_DECLARATION);
+            }
         }
         if (valid)
         {
@@ -127,7 +172,7 @@ static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t a
             }
         }
     }
-    if (!valid)
+    if (!valid && reader->output->report_count == 0)
     {
         check_input_report(reader, assignment, CHECK_INPUT_DECLARATION);
     }

@@ -172,7 +172,8 @@ static void cbuiltin_misc_lower_length(CBuiltinLowerRecipe* recipe, const CBuilt
     const uint32_t head = first + recipe->count;
     cbuiltin_misc_lower_address(recipe, call->arguments[0], index);
     cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U8, 0);
-    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U8, 0);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+    cbuiltin_lower_constant(recipe, 0);
     cbuiltin_lower_operation(recipe, BUSTER_TYPED_EQ);
     const uint32_t end = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_TRUE);
     cbuiltin_lower_immediate(recipe, index, BUSTER_TYPED_ADD, index, 1);

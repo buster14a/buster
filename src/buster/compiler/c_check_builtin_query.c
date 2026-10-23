@@ -14,21 +14,30 @@
 // cast whose CheckValue representation was lost. The producer must prove the full expression has no faults/effects;
 // neither witness may be inferred from a nonconstant value's default object-zero fields. The action also checks
 // the operand's effect/fault columns before using either witness.
+// complex_constant certifies speculative foldability of the actual final complex operand. It carries no numeric
+// payload and is used only for complex types, with the same fault/effect guards. The producer must establish this
+// proof from the expression, never from its complex type alone or a discarded component.
 //
 // object_size_known[m] / object_sizes[m] are the producer's independently computed bound for mode m: whole-object
 // maximum, subobject maximum, whole-object minimum, subobject minimum. No pointee sizeof, allocation extent or
-// symbolic-object origin is inferred here. Side-effectful or faulting pointer operands select the unknown result.
-// Unknown modes 0/1 produce ULONG_MAX, and modes 2/3 zero. A known zero remains distinguishable from an unknown zero.
+// symbolic-object origin is inferred here. object_size_source_constant[m] separately certifies that the selected
+// bound is available to Clang-compatible source constant evaluation. A runtime-known bound is insufficient:
+// a string literal can have a runtime whole-object bound while only its subobject bound is source-constant.
+// The producer may establish a source bound while ignoring operand effects. Unknown modes 0/1 use
+// ULONG_MAX and modes 2/3 zero as lowering fallbacks. A known zero remains distinct from an unknown zero.
 //
-// Results are clean INT/ULONG integer constants, with evaluated_operands always zero. Source argument conversions
+// constant_p, source-proven bounds and unknown effectful pointers yield clean source integer constants. Other
+// object_size results are deferred by Clang's source evaluator: action.value is nonconstant and permits
+// an unevaluated ICE arm, while runtime_value retains the bound or conservative sentinel for lowering. Neither path
+// executes query operands. Source argument conversions
 // remain available for diagnostics/graph bookkeeping; they do not authorize runtime evaluation. Actions/results and
 // argument/tag slices must be disjoint from each other and mutable type storage, with ordinary C alignment and no
 // padding. The ordered bounded batch may intern decay/pointer types. Zero count permits null slices. This module
 // alone establishes no source-dispatch/catalog capability or object-bound analysis acceptance.
 //
 // Rules were checked against Clang's original sources, without importing implementation:
-// https://github.com/llvm/llvm-project/blob/llvmorg-23-init/clang/lib/AST/ExprConstant.cpp
-// https://github.com/llvm/llvm-project/blob/llvmorg-23-init/clang/lib/Sema/SemaChecking.cpp
+// https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/AST/ExprConstant.cpp
+// https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaChecking.cpp
 // https://clang.llvm.org/docs/LanguageExtensions.html#evaluating-object-size
 #ifndef BUSTER_C_CHECK_BUILTIN_QUERY_INCLUDED
 #define BUSTER_C_CHECK_BUILTIN_QUERY_INCLUDED
@@ -46,7 +55,9 @@ struct CheckBuiltinQueryAction
     uint32_t extensions;
     bool string_literal_start;
     bool absolute_address_constant;
+    bool complex_constant;
     bool object_size_known[4];
+    bool object_size_source_constant[4];
     uint64_t object_sizes[4];
 };
 
@@ -54,6 +65,8 @@ typedef struct CheckBuiltinQueryResult CheckBuiltinQueryResult;
 struct CheckBuiltinQueryResult
 {
     CheckActionResult action;
+    // Lowering fallback, kept separate so a runtime sentinel never becomes a source initializer/ICE.
+    CheckValue runtime_value;
     CheckConversion argument_conversions[2];
     uint32_t evaluated_operands;
     uint32_t warnings;
@@ -77,6 +90,10 @@ static bool check_builtin_query_constant(const TypeTable* table, const CheckBuil
             result = true;
         }
         else if (kind == BUSTER_TYPE_KIND_FLOATING && value->constant_kind == CHECK_CONSTANT_FLOATING)
+        {
+            result = true;
+        }
+        else if (kind == BUSTER_TYPE_KIND_COMPLEX && input->complex_constant)
         {
             result = true;
         }
@@ -137,6 +154,7 @@ static __attribute__((unused)) void check_builtin_query_one(TypeTable* table, co
         }
         uint64_t value = 0;
         bool known = false;
+        bool deferred = false;
         if (checked.action.diagnostic == CHECK_DIAG_NONE && constant)
         {
             value = check_builtin_query_constant(table, input, values);
@@ -165,8 +183,16 @@ static __attribute__((unused)) void check_builtin_query_one(TypeTable* table, co
                 else
                 {
                     output->mode = (uint32_t)mode;
-                    known = input->object_size_known[output->mode] && values[0].fault == CHECK_FAULT_NONE && (values[0].flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+                    known = input->object_size_known[output->mode];
+                    const bool source_constant = known && input->object_size_source_constant[output->mode];
+                    const bool effects = (values[0].flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
+                    if (!source_constant && effects)
+                    {
+                        // A runtime-only bound cannot bypass the source evaluator's effectful-pointer fallback.
+                        known = false;
+                    }
                     value = known ? input->object_sizes[output->mode] : output->mode < 2 ? UINT64_MAX : 0;
+                    deferred = !source_constant && !effects;
                 }
             }
         }
@@ -190,6 +216,14 @@ static __attribute__((unused)) void check_builtin_query_one(TypeTable* table, co
                 .integer = value,
             };
             output->known = known;
+            output->runtime_value = output->action.value;
+            if (deferred)
+            {
+                output->action.value.constant_kind = CHECK_CONSTANT_NONE;
+                output->action.value.integer = 0;
+                output->action.value.flags = BUSTER_CHECK_ICE_UNEVALUATED;
+                output->runtime_value.flags = 0;
+            }
         }
     }
 }

@@ -747,6 +747,10 @@ static void check_test_extra_semantic_oracles(CheckTest* test, const char* clang
         "void f(int n){(n?1:(void)0);(n?(void)0:1);}\n",
         "void f(int n){int x=(n?1:(void)0);}\n",
         "struct S{int x;};void f(int n,struct S s){(n?s:(void)0);}\n",
+        "void f(int n){int a[n];_Static_assert(sizeof a>0,\"runtime size\");}\n",
+        "void f(int n){int(*a[3])[n];_Static_assert(sizeof a==24,\"fixed pointer array\");}\n",
+        "void f(int n){int(*a[3])[n];_Static_assert(sizeof a==12,\"mutated pointer array\");}\n",
+        "void f(int n){int a[3][n];_Static_assert(sizeof a==0,\"nested runtime size\");}\n",
     };
     const bool rejected[] = {
         false, false, false, false, false, true, true, true, true,
@@ -756,6 +760,7 @@ static void check_test_extra_semantic_oracles(CheckTest* test, const char* clang
         true, true, false, true, false,
         false, false, true, true, true,
         false, true, false,
+        true, false, true, true,
     };
     char directory[] = "/tmp/buster-checker-extra-XXXXXX";
     bool ready = mkdtemp(directory) != NULL;
@@ -788,6 +793,78 @@ static void check_test_extra_semantic_oracles(CheckTest* test, const char* clang
     rmdir(directory);
 }
 
+static void check_test_vla_actions(CheckTest* test, TypeTable* table)
+{
+    const TypeId variable = type_variable_array(table, BUSTER_TYPE_INT, 133801);
+    const TypeId nested = type_array(table, variable, 3);
+    const TypeId pointer = type_pointer(table, variable);
+    const TypeId pointer_array = type_array(table, pointer, 3);
+    const TypeId zero = type_array(table, BUSTER_TYPE_INT, 0);
+    check_test_expect(test, variable != 0 && nested != 0 && pointer != 0 && pointer_array != 0 && zero != 0,
+                      "VLA action test type construction");
+    const TypeId dynamic[] = { variable, nested };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(dynamic); i += 1)
+    {
+        const CheckAction size = { .op = CHECK_OP_SIZEOF, .type = dynamic[i] };
+        const CheckActionResult unsupported = check_test_action(test, table, size);
+        check_test_expect(test, unsupported.diagnostic == CHECK_DIAG_UNSUPPORTED && unsupported.value.constant_kind == CHECK_CONSTANT_NONE,
+                          "ordinary sizeof cannot invent zero for a runtime-sized array chain");
+        const CheckAction runtime = {
+            .op = CHECK_OP_SIZEOF_VLA,
+            .type = dynamic[i],
+            .operands = { { .type = BUSTER_TYPE_ULONG, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 12,
+                            .flags = BUSTER_CHECK_ICE | BUSTER_CHECK_SIDE_EFFECT } },
+        };
+        const CheckActionResult sized = check_test_action(test, table, runtime);
+        check_test_expect(test, sized.diagnostic == CHECK_DIAG_NONE && sized.value.type == BUSTER_TYPE_ULONG &&
+                               sized.value.constant_kind == CHECK_CONSTANT_NONE && (sized.value.flags & BUSTER_CHECK_ICE) == 0 &&
+                               (sized.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0,
+                          "explicit VLA size retains runtime evaluation and cannot become an integer constant expression");
+        const CheckAction offset = {
+            .op = CHECK_OP_ADD,
+            .operands = { { .type = type_pointer(table, dynamic[i]), .constant_kind = CHECK_CONSTANT_ADDRESS,
+                            .flags = BUSTER_CHECK_STATIC_OBJECT, .object = 133802, .offset = 8 },
+                          check_test_integer(BUSTER_TYPE_INT, 1) },
+        };
+        const CheckActionResult moved = check_test_action(test, table, offset);
+        check_test_expect(test, moved.diagnostic == CHECK_DIAG_NONE && moved.value.type == offset.operands[0].type &&
+                               moved.value.constant_kind == CHECK_CONSTANT_NONE,
+                          "pointer arithmetic with a VLA stride remains runtime instead of folding a zero-byte step");
+    }
+    const CheckAction saved = { .op = CHECK_OP_VLA_EXTENT, .member = 1 };
+    const CheckActionResult extent = check_test_action(test, table, saved);
+    check_test_expect(test, extent.diagnostic == CHECK_DIAG_NONE && extent.value.type == BUSTER_TYPE_ULONG &&
+                           extent.value.constant_kind == CHECK_CONSTANT_NONE && extent.value.flags == 0,
+                      "saved VLA extent reads are nonconstant and do not repeat the original bound effects");
+    const CheckAction captured = {
+        .op = CHECK_OP_VLA_BOUND,
+        .member = 1,
+        .operands = { { .type = BUSTER_TYPE_INT, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 3,
+                        .flags = BUSTER_CHECK_ICE | BUSTER_CHECK_SIDE_EFFECT } },
+    };
+    const CheckActionResult bound = check_test_action(test, table, captured);
+    check_test_expect(test, bound.diagnostic == CHECK_DIAG_NONE && bound.value.type == BUSTER_TYPE_ULONG &&
+                           bound.value.constant_kind == CHECK_CONSTANT_NONE && (bound.value.flags & BUSTER_CHECK_ICE) == 0 &&
+                           (bound.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 && bound.conversions[0].type == BUSTER_TYPE_ULONG,
+                      "VLA bound capture converts once while retaining source effects");
+    const CheckAction static_size = { .op = CHECK_OP_SIZEOF, .type = pointer_array };
+    const CheckActionResult fixed = check_test_action(test, table, static_size);
+    check_test_expect(test, fixed.diagnostic == CHECK_DIAG_NONE && fixed.value.constant_kind == CHECK_CONSTANT_INTEGER &&
+                           fixed.value.integer == 24 && (fixed.value.flags & BUSTER_CHECK_ICE) != 0,
+                      "an array of pointers to VLA still has a fixed pointer-sized layout");
+    const CheckAction zero_offset = {
+        .op = CHECK_OP_ADD,
+        .operands = { { .type = type_pointer(table, zero), .constant_kind = CHECK_CONSTANT_ADDRESS,
+                        .flags = BUSTER_CHECK_STATIC_OBJECT, .object = 133803, .offset = 8 },
+                      check_test_integer(BUSTER_TYPE_INT, 1) },
+        .extensions = BUSTER_CHECK_EXTENSION_GNU,
+    };
+    const CheckActionResult unchanged = check_test_action(test, table, zero_offset);
+    check_test_expect(test, unchanged.diagnostic == CHECK_DIAG_NONE && unchanged.value.constant_kind == CHECK_CONSTANT_ADDRESS &&
+                           unchanged.value.object == 133803 && unchanged.value.offset == 8,
+                      "GNU fixed zero-length arrays keep their genuine zero-byte pointer stride");
+}
+
 static void check_test_actions_extra(CheckTest* test, TypeTable* table, const char* clang)
 {
     check_test_string_literals(test, clang);
@@ -799,6 +876,7 @@ static void check_test_actions_extra(CheckTest* test, TypeTable* table, const ch
     check_test_gnu_actions(test, table);
     check_test_pointer_integer_casts(test, table, clang);
     check_test_qualifier_warnings(test, table);
+    check_test_vla_actions(test, table);
     check_test_extra_semantic_oracles(test, clang);
 }
 

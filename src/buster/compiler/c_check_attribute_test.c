@@ -491,6 +491,22 @@ static void check_test_attributes(CheckTest* test, const char* clang)
             .text = "target",
         },
         {
+            .name = "WebAssembly export spelling retained without native symbol renaming",
+            .source = "__attribute__((export_name(\"entry_point\"))) void entry(void) {}\n",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_EXPORT_NAME,
+            .text = "entry_point",
+            .ignored = true,
+        },
+        {
+            .name = "scoped WebAssembly export spelling retained on native output",
+            .source = "[[clang::export_name(\"entry_point\")]] void entry(void) {}\n",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_EXPORT_NAME,
+            .text = "entry_point",
+            .ignored = true,
+        },
+        {
             .name = "section metadata",
             .source = "int x __attribute__((section(\".data.private\"), used, retain));\n",
             .count = 3,
@@ -527,6 +543,19 @@ static void check_test_attributes(CheckTest* test, const char* clang)
             .source = "_Noreturn void f(void);\n",
             .count = 1,
             .last_kind = CHECK_ATTRIBUTE_NORETURN,
+        },
+        {
+            .name = "intrinsic nodebug metadata",
+            .source = "static inline void f(void) __attribute__((__nodebug__));\n",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_NODEBUG,
+        },
+        {
+            .name = "nodebug rejects arguments",
+            .source = "void f(void) __attribute__((nodebug(1)));\n",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "nodebug",
+            .rejected = true,
         },
         {
             .name = "cdecl keyword",

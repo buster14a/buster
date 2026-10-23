@@ -108,6 +108,18 @@ static void check_init_test_objects(CheckTest* test, Link* link, const CheckInit
     {
         check_test_expect(test, strings == 2, "only the two addressed byte string literals enter STRINGS");
     }
+    if (check_init_test_symbol(link, "names") != 0)
+    {
+        const AtomId names = link->symbols.atom[check_init_test_symbol(link, "names")];
+        const AtomId sized = link->symbols.atom[check_init_test_symbol(link, "sized")];
+        check_test_expect(test, strings == 4 && link->atoms.fixup_count[names] == 2 && link->atoms.fixup_count[sized] == 2,
+                          "pointer arrays retain their four string references without pooling the copied character array");
+    }
+    if (check_init_test_symbol(link, "excess_scalar") != 0)
+    {
+        check_test_expect(test, strings == 0 && check_init_test_symbol(link, "ignored_target") == 0 && check_init_test_symbol(link, "ignored_call") == 0,
+                          "ignored excess expressions retain no string atoms or external references");
+    }
     const SymbolId switched = check_init_test_symbol(link, "switched");
     if (switched != 0)
     {
@@ -152,6 +164,21 @@ static void check_init_test_objects(CheckTest* test, Link* link, const CheckInit
     {
         check_test_expect(test, check_init_test_elf_reference(&ours, "compound_reference", 0, "compound_target", 4),
                           "compound subobject copy translates its live pointer field and preserves the addend");
+    }
+    if (built && check_init_test_symbol(link, "flexible_refs") != 0)
+    {
+        const AtomId atom = link->symbols.atom[check_init_test_symbol(link, "flexible_refs")];
+        check_test_expect(test, check_init_test_symbol(link, "discarded") == 0 && link->atoms.fixup_count[atom] == 1 &&
+                               check_init_test_elf_reference(&ours, "flexible_refs", 8, "flexible_target", 4),
+                          "flexible tail replacement removes discarded references and preserves its final ABS64 addend");
+    }
+    if (built && check_init_test_symbol(link, "complex_values") != 0)
+    {
+        check_test_expect(test, check_init_test_elf_reference(&ours, "complex_real", 0, "complex_values", 16) &&
+                               check_init_test_elf_reference(&ours, "complex_imag", 0, "complex_values", 24) &&
+                               check_init_test_elf_reference(&ours, "complex_long_part", 0, "complex_l", 16) &&
+                               check_init_test_elf_reference(&ours, "complex_bits", 0, "complex_values", 43),
+                          "complex component addresses preserve array offsets, component widths and symbolic integer addends");
     }
     char directory[] = "/tmp/buster-initializer-XXXXXX";
     const bool directory_ready = clang != 0 && mkdtemp(directory) != 0;
@@ -209,6 +236,19 @@ static void check_init_test_objects(CheckTest* test, Link* link, const CheckInit
         check_test_expect(test, check_init_test_elf_reference(&theirs, "compound_reference", 0, "compound_target", 4),
                           "Clang confirms the relocated field copied from a compound subobject");
     }
+    if (oracle && check_init_test_symbol(link, "flexible_refs") != 0)
+    {
+        check_test_expect(test, check_init_test_elf_reference(&theirs, "flexible_refs", 8, "flexible_target", 4),
+                          "Clang confirms the surviving flexible-array pointer relocation");
+    }
+    if (oracle && check_init_test_symbol(link, "complex_values") != 0)
+    {
+        check_test_expect(test, check_init_test_elf_reference(&theirs, "complex_real", 0, "complex_values", 16) &&
+                               check_init_test_elf_reference(&theirs, "complex_imag", 0, "complex_values", 24) &&
+                               check_init_test_elf_reference(&theirs, "complex_long_part", 0, "complex_l", 16) &&
+                               check_init_test_elf_reference(&theirs, "complex_bits", 0, "complex_values", 43),
+                          "Clang confirms all complex component address relocations and addends");
+    }
     if (directory_ready)
     {
         unlink(source_path);
@@ -220,17 +260,14 @@ static void check_init_test_objects(CheckTest* test, Link* link, const CheckInit
     arena_release(&arena);
 }
 
-static void check_init_test_source(CheckTest* test, const char* source, const CheckInitExpected* expected, uint32_t count,
-                                   bool accept, bool emit, const char* clang)
+static void check_init_test_source_language(CheckTest* test, const char* source, const CheckInitExpected* expected, uint32_t count,
+                                            bool accept, bool emit, const char* clang, CLanguage language)
 {
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
     const PPOptions pp_options = {
-        .language = {
-            .standard = 2017,
-            .gnu = true,
-        },
+        .language = language,
         .no_standard_includes = true,
     };
     bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers);
@@ -264,6 +301,21 @@ static void check_init_test_source(CheckTest* test, const char* source, const Ch
         {
             for (uint32_t i = 0; i < initializers.count; i += 1)
             {
+                if (initializers.plans[i].warning_count != 0)
+                {
+                    const uint32_t declaration = initializers.declaration_tokens[i];
+                    CheckInitializer strict = { 0 };
+                    const bool accepted = check_initializer_run(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count,
+                                                                 input.declared_types[declaration], input.initializer_begins[declaration], input.initializer_ends[declaration],
+                                                                 input.static_objects[declaration] != 0, &output, &scratch, &strict);
+                    check_test_expect(test, !accepted && strict.status == CHECK_INIT_INVALID && strict.parts == 0 && strict.count == 0 && output.length == 0 && scratch.length == 0,
+                                      "direct strict planner still rejects source-compatible excess elements transactionally");
+                    check_test_expect(test, initializers.warning_count != 0 && initializers.plans[i].warning_token < input.initializer_ends[declaration],
+                                      "source excess elements retain warning positions separately from successful plans");
+                }
+            }
+            for (uint32_t i = 0; i < initializers.count; i += 1)
+            {
                 const uint32_t declaration = initializers.declaration_tokens[i];
                 const uint32_t name = parser.tokens.names[declaration];
                 if (intern_length(&identifiers, name) == 10 && memcmp(intern_bytes(&identifiers, name), "range_once", 10) == 0)
@@ -286,9 +338,9 @@ static void check_init_test_source(CheckTest* test, const char* source, const Ch
                     Arena tiny = output;
                     tiny.capacity = sizeof(CheckInitPart);
                     CheckInitializer rejected = { 0 };
-                    const bool partial = check_initializer_run(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count,
+                    const bool partial = check_initializer_plan(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count,
                                                                 input.declared_types[declaration], input.initializer_begins[declaration], input.initializer_ends[declaration],
-                                                                input.static_objects[declaration] != 0, &tiny, &scratch, &rejected);
+                                                                input.static_objects[declaration] != 0, false, false, &tiny, &scratch, &rejected, &input.graph);
                     check_test_expect(test, !partial && rejected.status == CHECK_INIT_RESOURCE && rejected.parts == 0 && rejected.count == 0 && tiny.length == 0 && scratch.length == 0,
                                       "partially planned source initializer rolls back all parts on output exhaustion");
                     break;
@@ -318,6 +370,16 @@ static void check_init_test_source(CheckTest* test, const char* source, const Ch
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+static void check_init_test_source(CheckTest* test, const char* source, const CheckInitExpected* expected, uint32_t count,
+                                   bool accept, bool emit, const char* clang)
+{
+    const CLanguage language = {
+        .standard = 2017,
+        .gnu = true,
+    };
+    check_init_test_source_language(test, source, expected, count, accept, emit, clang, language);
 }
 
 static void check_init_test_ranges(CheckTest* test, const char* clang)
@@ -480,9 +542,534 @@ static void check_init_test_ranges(CheckTest* test, const char* clang)
     }
 }
 
+static void check_init_test_flexible(CheckTest* test, const char* clang)
+{
+    static const char source[] =
+        "struct F{int n;int v[];} flexible={1,{2,3}},over={.v={1,2,3},.v={4}},sparse_tail={.v={[3]=7}},empty_tail={1,{}};\n"
+        "struct F bare={1,2,3},reset_empty={.v={1,2,3},.v={}};struct Empty{struct F f;} empty_nested={{1,{}}};\n"
+        "struct C{int n;char v[];} tail_text={3,\"ab\"},shorter={.v=\"hello\",.v=\"x\"};int type_size=sizeof flexible;\n"
+        "struct Pad{long n;char c;char v[];} short_tail={1,2,\"a\"},long_tail={1,2,\"abcdefghij\"};\n"
+        "struct S{unsigned char a,b,c[2];};struct T{unsigned char s[16],a;};struct V{struct S s;struct T t;unsigned char a;};\n"
+        "struct W{struct V t;struct S s[];} nested_tail={{1,2,3,4},{1,2,3,4,5}};\n"
+        "extern int discarded;int flexible_target=9;struct R{int n;int *v[];} flexible_refs={.v={&discarded,&discarded},.v={&flexible_target+1}};\n";
+    static const CheckInitExpected expected[] = {
+        {
+            .name = "flexible",
+            .bytes = {
+                [0] = 1,
+                [4] = 2,
+                [8] = 3,
+            },
+            .size = 12,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "over",
+            .bytes = {
+                [4] = 4,
+            },
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "bare",
+            .bytes = {
+                [0] = 1,
+                [4] = 2,
+                [8] = 3,
+            },
+            .size = 12,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "reset_empty",
+            .size = 4,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "empty_nested",
+            .bytes = {
+                1,
+            },
+            .size = 4,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "sparse_tail",
+            .bytes = {
+                [16] = 7,
+            },
+            .size = 20,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "empty_tail",
+            .bytes = {
+                1,
+            },
+            .size = 4,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "tail_text",
+            .bytes = {
+                [0] = 3,
+                [4] = 'a',
+                [5] = 'b',
+            },
+            .size = 7,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "shorter",
+            .bytes = {
+                [4] = 'x',
+            },
+            .size = 6,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "type_size",
+            .bytes = {
+                4,
+            },
+            .size = 4,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "short_tail",
+            .bytes = {
+                [0] = 1,
+                [8] = 2,
+                [9] = 'a',
+            },
+            .size = 16,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "long_tail",
+            .bytes = {
+                [0] = 1,
+                [8] = 2,
+                [9] = 'a',
+                [10] = 'b',
+                [11] = 'c',
+                [12] = 'd',
+                [13] = 'e',
+                [14] = 'f',
+                [15] = 'g',
+                [16] = 'h',
+                [17] = 'i',
+                [18] = 'j',
+            },
+            .size = 20,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "nested_tail",
+            .bytes = {
+                [0] = 1,
+                [1] = 2,
+                [2] = 3,
+                [3] = 4,
+                [22] = 1,
+                [23] = 2,
+                [24] = 3,
+                [25] = 4,
+                [26] = 5,
+            },
+            .size = 30,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "flexible_target",
+            .bytes = {
+                9,
+            },
+            .size = 4,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "flexible_refs",
+            .size = 16,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+    };
+    check_init_test_source(test, source, expected, BUSTER_ARRAY_LENGTH(expected), true, true, clang);
+    static const char strings[] =
+        "const char *names[]={\"label\",\"Infinity\",0};int names_size=sizeof names;\n"
+        "const char *sized[2]={\"hello\",\"world\"};char copied[]=\"copy\";\n";
+    static const CheckInitExpected string_expected[] = {
+        {
+            .name = "names",
+            .size = 24,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "names_size",
+            .bytes = {
+                24,
+            },
+            .size = 4,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "sized",
+            .size = 16,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "copied",
+            .bytes = {
+                'c',
+                'o',
+                'p',
+                'y',
+                0,
+            },
+            .size = 5,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+    };
+    check_init_test_source(test, strings, string_expected, BUSTER_ARRAY_LENGTH(string_expected), true, true, clang);
+    check_init_test_source(test, "void f(void){struct F{int n;int v[];} empty={1,{}};}", 0, 0, true, false, clang);
+    static const char* invalid[] = {
+        "void f(void){struct F{int n;int v[];} local={1,{2,3}};}",
+        "struct F{int n;int v[];};struct O{struct F f;} nested={{1,{2,3}}};",
+        "struct F{int n;int v[];} *p=&(struct F){1,{2,3}};",
+        "void f(void){struct F{int n;int v[];} local={.v[1]=3};}",
+        "struct F{int n;int v[];} direct={.v[3]=7};",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid); i += 1)
+    {
+        check_init_test_source(test, invalid[i], 0, 0, false, false, clang);
+    }
+}
+
+static void check_init_test_complex(CheckTest* test, const char* clang)
+{
+    static const char source[] =
+        "float _Complex complex_f=1.5f+2.25fi;double _Complex complex_d=-3.0+4.5i;\n"
+        "long double _Complex complex_l=1.5L-2.0Li;float _Complex imaginary_f=0x1.8p+1fi;\n"
+        "double _Complex imaginary_d=5j;long double _Complex imaginary_l=0x1.8p+2Li;\n"
+        "__complex__ int complex_int=3+4i;__complex__ short complex_short=-2-3i;\n"
+        "double _Complex complex_zero,negative_zero=-0.0i;const float _Complex complex_const=1.0f-2.0fi;\n"
+        "_Thread_local long double _Complex complex_tls=2.0L+3.0Li;\n"
+        "double complex_component=__imag__ (3.0+4.0i);double _Complex complex_values[3];\n"
+        "double *complex_real=&__real__ complex_values[1],*complex_imag=&__imag__ complex_values[1];\n"
+        "long double *complex_long_part=&__imag__ complex_l;unsigned long complex_bits=(unsigned long)&__imag__ complex_values[2]+3;\n";
+    static const CheckInitExpected expected[] = {
+        {
+            .name = "complex_f",
+            .bytes = {
+                [2] = 0xc0,
+                [3] = 0x3f,
+                [6] = 0x10,
+                [7] = 0x40,
+            },
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "complex_d",
+            .bytes = {
+                [6] = 0x08,
+                [7] = 0xc0,
+                [14] = 0x12,
+                [15] = 0x40,
+            },
+            .size = 16,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "complex_l",
+            .bytes = {
+                [7] = 0xc0,
+                [8] = 0xff,
+                [9] = 0x3f,
+                [23] = 0x80,
+                [25] = 0xc0,
+            },
+            .size = 32,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "imaginary_f",
+            .bytes = {
+                [6] = 0x40,
+                [7] = 0x40,
+            },
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "imaginary_d",
+            .bytes = {
+                [14] = 0x14,
+                [15] = 0x40,
+            },
+            .size = 16,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "imaginary_l",
+            .bytes = {
+                [23] = 0xc0,
+                [24] = 0x01,
+                [25] = 0x40,
+            },
+            .size = 32,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "complex_int",
+            .bytes = {
+                [0] = 3,
+                [4] = 4,
+            },
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "complex_short",
+            .bytes = {
+                0xfe,
+                0xff,
+                0xfd,
+                0xff,
+            },
+            .size = 4,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "complex_zero",
+            .size = 16,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "negative_zero",
+            .bytes = {
+                [7] = 0x80,
+                [15] = 0x80,
+            },
+            .size = 16,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "complex_const",
+            .bytes = {
+                [2] = 0x80,
+                [3] = 0x3f,
+                [7] = 0xc0,
+            },
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_RODATA,
+        },
+        {
+            .name = "complex_tls",
+            .bytes = {
+                [7] = 0x80,
+                [9] = 0x40,
+                [23] = 0xc0,
+                [25] = 0x40,
+            },
+            .size = 32,
+            .class = BUSTER_LINK_CLASS_TDATA,
+        },
+        {
+            .name = "complex_component",
+            .bytes = {
+                [6] = 0x10,
+                [7] = 0x40,
+            },
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "complex_values",
+            .size = 48,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "complex_real",
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "complex_imag",
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "complex_long_part",
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "complex_bits",
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+    };
+    check_init_test_source(test, source, expected, BUSTER_ARRAY_LENGTH(expected), true, true, clang);
+    check_init_test_source(test, "double _Complex z=1+2i;double x=__real__ z;", 0, 0, false, false, clang);
+}
+
+#include "c_check_initializer_diagnostic_test.c"
+#include "c_check_initializer_excess_test.c"
+
+static void check_init_test_vector_constants(CheckTest* test, const char* clang)
+{
+    static const char source[] =
+        "typedef signed char V __attribute__((vector_size(8)));typedef unsigned char W __attribute__((vector_size(8)));"
+        "typedef int I __attribute__((vector_size(16)));typedef unsigned U __attribute__((vector_size(16)));"
+        "typedef int E __attribute__((ext_vector_type(4)));typedef int E2 __attribute__((ext_vector_type(2)));"
+        "typedef float F __attribute__((vector_size(16)));typedef float EF __attribute__((ext_vector_type(4)));"
+        "typedef _Bool B __attribute__((ext_vector_type(4)));typedef unsigned __int128 Q __attribute__((vector_size(32)));\n"
+        "V vector_arith=((V){1,2,3,4,5,6,7,8}+(V){8,7,6,5,4,3,2,1})*2;\n"
+        "I vector_chain=((I){1,2,3,4}+5)*(I){2,3,4,5}-(I){1,2,3,4};\n"
+        "V vector_negative=-(V){1,-2,127,-128,0,3,-4,5};V vector_complement=~(V){0,1,2,3,4,5,6,7};\n"
+        "V vector_bits=((V){-16,-86,85,0,-16,51,112,-128}&(V){15,-1,15,-1,-16,-16,15,-1})^(V){1,2,3,4,5,6,7,8};\n"
+        "V vector_divide=(V){-127,-8,9,15,32,7,1,-1}/(V){-1,2,2,4,-8,3,1,1};\n"
+        "V vector_remainder=(V){-127,-8,9,15,32,7,1,-1}%(V){-1,2,2,4,-8,3,1,1};\n"
+        "V vector_shift=(V){1,-2,3,-4,5,-6,7,-8}<<(V){0,1,2,3,4,5,6,7};\n"
+        "V vector_reverse=(V){2,4,8,16,-2,-4,-8,-16}<<-1;\n"
+        "V vector_overflow=(V){127,-128,-1,0,1,2,3,4}+1;\n"
+        "I vector_overshift=(I){1,-1,7,-8}<<32;I vector_signed_div=(I){(-2147483647-1),1,2,3}/(I){-1,1,1,1};\n"
+        "I vector_compare=(I){-1,0,3,4}<(I){0,0,4,3};V vector_unsigned=(W){255,0,128,127,1,2,3,0}>0;\n"
+        "F vector_float_arith=(F){1,2,3,4}*2+1;F vector_float_negative=-(F){1,-0.0f,2,-4};\n"
+        "I vector_float_compare=(F){1,2,3,4}==(F){1,0,3,5};\n"
+        "E vector_swizzle=(+(E){1,2,3,4}).yxwz;E vector_swizzle_chain=((+(E){1,2,3,4}).wzyx+10).yxwz;\n"
+        "E2 vector_half=(+(E){1,2,3,4}).hi;E2 vector_odd=(+(E){1,2,3,4}).odd;\n"
+        "B vector_bool_logic=(!(B){1,0,1,0})&(B){1,1,0,1};\n"
+        "E vector_logic=(E){1,0,3,4}&&(E){1,1,2,0};\n"
+        "E vector_selected=1?(E){5,6,7,8}:(E){1,2,3,4};\n"
+        "EF vector_payload=((EF)(U){0x7fc12345,0x80000000,0x3f800000,0}).yxwz;\n"
+        "Q vector_wide=((Q){((unsigned __int128)1<<100),3}>>1)+1;\n"
+        "int vector_index=((I){11,22,33,44})[2];int vector_member=((E){5,6,7,8}).y;\n"
+        "int vector_index_math=2*((I){1,2,3,4})[1]+1;E vector_index_splat=(E)(((I){1,2,3,4})[1]);\n"
+        "E vector_not=!(E){1,0,-1,0};E vector_or=(E){1,0,-1,0}||(E){0,0,0,4};\n";
+    static const CheckInitExpected expected[] = {
+        { .name = "vector_arith", .bytes = { 18,18,18,18,18,18,18,18 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_chain", .bytes = { [0] = 11, [4] = 19, [8] = 29, [12] = 41 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_negative", .bytes = { 255,2,129,128,0,253,4,251 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_complement", .bytes = { 255,254,253,252,251,250,249,248 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_bits", .bytes = { 1,168,6,4,245,54,7,136 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_divide", .bytes = { 127,252,4,3,252,2,1,255 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_remainder", .bytes = { 0,0,1,3,0,1,0,0 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_shift", .bytes = { 1,252,12,224,80,64,192,0 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_reverse", .bytes = { 1,2,4,8,255,254,252,248 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_overflow", .bytes = { 128,129,0,1,2,3,4,5 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_overshift", .bytes = { [3] = 128, [7] = 128, [11] = 128 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_signed_div", .bytes = { [3] = 128, [4] = 1, [8] = 2, [12] = 3 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_compare", .bytes = { 255,255,255,255,0,0,0,0,255,255,255,255 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_unsigned", .bytes = { 255,0,255,255,255,255,255,0 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_float_arith", .bytes = { [2] = 0x40, [3] = 0x40, [6] = 0xa0, [7] = 0x40, [10] = 0xe0, [11] = 0x40, [14] = 0x10, [15] = 0x41 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_float_negative", .bytes = { [2] = 0x80, [3] = 0xbf, [11] = 0xc0, [14] = 0x80, [15] = 0x40 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_float_compare", .bytes = { 255,255,255,255,0,0,0,0,255,255,255,255 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_swizzle", .bytes = { [0] = 2, [4] = 1, [8] = 4, [12] = 3 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_swizzle_chain", .bytes = { [0] = 13, [4] = 14, [8] = 11, [12] = 12 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_half", .bytes = { [0] = 3, [4] = 4 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_odd", .bytes = { [0] = 2, [4] = 4 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_bool_logic", .bytes = { 10 }, .size = 1, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_logic", .bytes = { [0] = 1, [8] = 1 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_selected", .bytes = { [0] = 5, [4] = 6, [8] = 7, [12] = 8 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_payload", .bytes = { [3] = 0x80, [4] = 0x45, [5] = 0x23, [6] = 0xc1, [7] = 0x7f, [14] = 0x80, [15] = 0x3f }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_wide", .bytes = { [0] = 1, [12] = 8, [16] = 2 }, .size = 32, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_index", .bytes = { 33 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_member", .bytes = { 6 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_index_math", .bytes = { 5 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_index_splat", .bytes = { [0] = 2, [4] = 2, [8] = 2, [12] = 2 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_not", .bytes = { 0,0,0,0,255,255,255,255,0,0,0,0,255,255,255,255 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_or", .bytes = { [0] = 1, [8] = 1, [12] = 1 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+    };
+    check_init_test_source(test, source, expected, BUSTER_ARRAY_LENGTH(expected), true, true, clang);
+    static const char* rejected[] = {
+        "typedef int I __attribute__((vector_size(16)));I x;I y=x+(I){1,2,3,4};",
+        "typedef int I __attribute__((vector_size(16)));int f(void);I y=(I){1,2,3,4}+f();",
+        "typedef int I __attribute__((vector_size(16)));I y=(I){1,2,3,4}/(I){0,1,1,1};",
+        "typedef int E __attribute__((ext_vector_type(4)));E y=(E){1,0,1,0}?(E){1,2,3,4}:(E){5,6,7,8};",
+        "typedef int I __attribute__((vector_size(16)));unsigned __int128 y=(unsigned __int128)((I){1,2,3,4});",
+        "typedef int I __attribute__((vector_size(16)));int y=((I){1,2,3,4}+1)[2];",
+        "typedef int E __attribute__((ext_vector_type(4)));int y=((E){1,2,3,4}).yx.x;",
+        "typedef int E __attribute__((ext_vector_type(4)));E y=((E){1,2,3,4}).yxwz;",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
+    {
+        check_init_test_source(test, rejected[i], NULL, 0, false, false, NULL);
+    }
+}
+
+static void check_init_test_vectors(CheckTest* test, const char* clang)
+{
+    check_init_test_vector_constants(test, clang);
+    static const char source[] =
+        "typedef int I __attribute__((vector_size(16)));typedef int E __attribute__((ext_vector_type(4)));"
+        "typedef int E3 __attribute__((ext_vector_type(3)));typedef float F __attribute__((vector_size(16)));"
+        "typedef _Bool B __attribute__((ext_vector_type(4)));\n"
+        "I vector_lanes={1,2,3,4};I vector_partial={5};const I vector_const={6,7};I vector_zero;\n"
+        "E vector_splat=8;E vector_cast=(E)9;E vector_braced={10};E3 vector_three={11,12,13};\n"
+        "I vector_copy=(I){14,15};I vector_bitcast=(I)(__int128)0x1234;\n"
+        "I vector_float_bits=(I)(F){1.0f,-0.0f,2.0f,0.5f};\n"
+        "B vector_bool={1,0,2,0};B vector_bool_splat=1;\n"
+        "I vector_rows[][4]={{ {1,2,3,4} }};\n"
+        "E vector_array[]={1,2};I vector_elision[]={1,2,3,4,5};\n"
+        "_Thread_local I vector_tls={17};_Thread_local E vector_tls_zero;\n";
+    static const CheckInitExpected expected[] = {
+        { .name = "vector_lanes", .bytes = { [0] = 1, [4] = 2, [8] = 3, [12] = 4 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_partial", .bytes = { 5 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_const", .bytes = { [0] = 6, [4] = 7 }, .size = 16, .class = BUSTER_LINK_CLASS_RODATA, .alignment_log2 = 4 },
+        { .name = "vector_zero", .size = 16, .class = BUSTER_LINK_CLASS_BSS, .alignment_log2 = 4 },
+        { .name = "vector_splat", .bytes = { [0] = 8, [4] = 8, [8] = 8, [12] = 8 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_cast", .bytes = { [0] = 9, [4] = 9, [8] = 9, [12] = 9 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_braced", .bytes = { 10 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_three", .bytes = { [0] = 11, [4] = 12, [8] = 13 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_copy", .bytes = { [0] = 14, [4] = 15 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_bitcast", .bytes = { 0x34, 0x12 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_float_bits", .bytes = { [2] = 0x80, [3] = 0x3f, [7] = 0x80, [11] = 0x40, [15] = 0x3f }, .size = 16, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_bool", .bytes = { 5 }, .size = 1, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_bool_splat", .bytes = { 15 }, .size = 1, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "vector_rows", .bytes = { [0] = 1, [4] = 2, [8] = 3, [12] = 4 }, .size = 64, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_array", .bytes = { [0] = 1, [4] = 1, [8] = 1, [12] = 1, [16] = 2, [20] = 2, [24] = 2, [28] = 2 }, .size = 32, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_elision", .bytes = { [0] = 1, [4] = 2, [8] = 3, [12] = 4, [16] = 5 }, .size = 32, .class = BUSTER_LINK_CLASS_DATA, .alignment_log2 = 4 },
+        { .name = "vector_tls", .bytes = { 17 }, .size = 16, .class = BUSTER_LINK_CLASS_TDATA, .alignment_log2 = 4 },
+        { .name = "vector_tls_zero", .size = 16, .class = BUSTER_LINK_CLASS_TBSS, .alignment_log2 = 4 },
+    };
+    check_init_test_source(test, source, expected, BUSTER_ARRAY_LENGTH(expected), true, true, clang);
+    static const char* accepted[] = {
+        "typedef int I __attribute__((vector_size(16)));int f(int x){I a={x,2,3,4};return a[0];}",
+        "typedef int E __attribute__((ext_vector_type(4)));E f(int x){E a=x;return a;}",
+        "typedef int I __attribute__((vector_size(16)));I f(I x){I a={x};return a;}",
+        "typedef int I __attribute__((vector_size(16)));I f(I x){I a={x,1};return a;}",
+        "typedef int I __attribute__((vector_size(16)));I a={1,2,3,4,5};",
+        "typedef int I __attribute__((vector_size(16)));I a={{1,2},3};",
+    };
+    static const char* rejected[] = {
+        "typedef int I __attribute__((vector_size(16)));I a=1;",
+        "typedef int I __attribute__((vector_size(16)));I a={[1]=2};",
+        "typedef int E __attribute__((ext_vector_type(4)));E a={.x=1};",
+        "typedef int E __attribute__((ext_vector_type(4)));typedef int E2 __attribute__((ext_vector_type(2)));E a={(E2){1,2},(E2){3,4}};",
+        "typedef int I __attribute__((vector_size(16)));typedef int E3 __attribute__((ext_vector_type(3)));E3 a=(I){1,2,3,4};",
+        "typedef int I __attribute__((vector_size(16)));int f(void);I a={1,f()};",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
+    {
+        check_init_test_source(test, accepted[i], NULL, 0, true, false, NULL);
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
+    {
+        check_init_test_source(test, rejected[i], NULL, 0, false, false, NULL);
+    }
+}
+
 static void check_test_initializers(CheckTest* test, const char* clang)
 {
+    check_init_test_vectors(test, clang);
     check_init_test_ranges(test, clang);
+    check_init_test_flexible(test, clang);
+    check_init_test_complex(test, clang);
+    check_init_test_diagnostics(test, clang);
+    check_init_test_excess(test, clang);
     static const char source[] =
         "int target=17; int grid[][2]={1,2,3,4}; int extent=sizeof grid;\n"
         "int sparse[5]={[3]=7,[1]=9,4};\n"
@@ -885,16 +1472,13 @@ static void check_test_initializers(CheckTest* test, const char* clang)
     static const char automatic[] = "int f(int x){struct S{int a,b;};struct S s={x,x+1};int a[2]={x,3};return s.a+a[0];}";
     check_init_test_source(test, automatic, 0, 0, true, false, clang);
     static const char* invalid[] = {
-        "int a[2]={1,2,3};",
         "struct S{int a;} s={.missing=1};",
         "int a[2]={[-1]=3};",
         "int a[2]={[2]=3};",
         "struct S{int *p;} s={3};",
-        "char a[2]=\"long\";",
         "char a[3]=\"abc\"+1;",
         "char a[3]={[0]=\"ab\"};",
         "int x;struct S{int a;} s={x};",
-        "int f(int x){int a[2]={1,2,3};return x;}",
         "struct S{int x,y;} value=((struct S[2]){{1,2},{3,4}})[1];",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid); i += 1)

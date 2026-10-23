@@ -30,7 +30,7 @@ static void check_builtin_query_test_expect(CheckBuiltinQueryTest* test, bool co
 
 static bool check_builtin_query_test_equal(const CheckBuiltinQueryResult* a, const CheckBuiltinQueryResult* b)
 {
-    bool equal = check_test_action_equal(&a->action, &b->action) && a->evaluated_operands == b->evaluated_operands &&
+    bool equal = check_test_action_equal(&a->action, &b->action) && check_test_value_equal(&a->runtime_value, &b->runtime_value) && a->evaluated_operands == b->evaluated_operands &&
         a->warnings == b->warnings && a->warning_operands == b->warning_operands && a->mode == b->mode && a->known == b->known && a->constraint == b->constraint;
     for (uint32_t i = 0; i < 2; i += 1)
     {
@@ -45,6 +45,17 @@ static bool check_builtin_query_test_constant(const CheckBuiltinQueryResult* res
     const bool equal = result->action.diagnostic == CHECK_DIAG_NONE && value.type == type && value.category == CHECK_RVALUE &&
         value.constant_kind == CHECK_CONSTANT_INTEGER && value.integer == expected && (value.flags & BUSTER_CHECK_ICE) != 0 &&
         (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && value.fault == CHECK_FAULT_NONE && value.fault_node == 0 && result->evaluated_operands == 0;
+    return equal;
+}
+
+static bool check_builtin_query_test_deferred(const CheckBuiltinQueryResult* result, uint64_t expected)
+{
+    const CheckValue value = result->action.value;
+    const CheckValue runtime = result->runtime_value;
+    const bool equal = result->action.diagnostic == CHECK_DIAG_NONE && value.type == BUSTER_TYPE_ULONG && value.category == CHECK_RVALUE &&
+        value.constant_kind == CHECK_CONSTANT_NONE && value.flags == BUSTER_CHECK_ICE_UNEVALUATED && value.fault == CHECK_FAULT_NONE &&
+        runtime.type == BUSTER_TYPE_ULONG && runtime.category == CHECK_RVALUE && runtime.constant_kind == CHECK_CONSTANT_INTEGER &&
+        runtime.integer == expected && runtime.flags == 0 && runtime.fault == CHECK_FAULT_NONE && result->evaluated_operands == 0;
     return equal;
 }
 
@@ -87,6 +98,33 @@ static void check_builtin_query_test_values(CheckBuiltinQueryTest* test, TypeTab
     argument = check_test_float(BUSTER_TYPE_DOUBLE, 1.25L);
     result = check_builtin_query_test_action(table, CBUILTIN_CONSTANT_P, &argument, 1);
     check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_INT, 1), "constant_p floating constant");
+    const TypeId complex_type = type_complex(table, BUSTER_TYPE_DOUBLE);
+    argument = (CheckValue){ .type = complex_type, .category = CHECK_RVALUE };
+    CheckBuiltinQueryAction complex_query =
+    {
+        .id = CBUILTIN_CONSTANT_P,
+        .arguments = &argument,
+        .argument_count = 1,
+        .node = 148,
+        .source_position = UINT32_MAX,
+    };
+    check_builtin_query_one(table, &complex_query, &result);
+    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_INT, 0), "complex value without producer folding proof stays unknown");
+    complex_query.complex_constant = true;
+    check_builtin_query_one(table, &complex_query, &result);
+    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_INT, 1) && result.known, "producer proves a folded complex constant without fabricating scalar payload");
+    argument.type = BUSTER_TYPE_DOUBLE;
+    check_builtin_query_one(table, &complex_query, &result);
+    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_INT, 0), "complex witness is restricted to an actual complex operand type");
+    argument.type = complex_type;
+    argument.flags = BUSTER_CHECK_SIDE_EFFECT;
+    check_builtin_query_one(table, &complex_query, &result);
+    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_INT, 0), "complex witness does not bypass side-effect exclusion");
+    argument.flags = 0;
+    argument.fault = CHECK_FAULT_DIVIDE_BY_ZERO;
+    argument.fault_node = 75;
+    check_builtin_query_one(table, &complex_query, &result);
+    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_INT, 0), "complex witness does not bypass fault exclusion");
     const TypeId pointer = type_pointer(table, BUSTER_TYPE_INT);
     const int64_t absolute_offsets[] = { 0, 17, -1 };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(absolute_offsets); i += 1)
@@ -194,6 +232,7 @@ static void check_builtin_query_test_values(CheckBuiltinQueryTest* test, TypeTab
         .node = 148,
         .source_position = UINT32_MAX,
         .object_size_known = { true, true, true, true },
+        .object_size_source_constant = { true, true, true, true },
         .object_sizes = { 64, 8, 32, 4 },
     };
     for (uint32_t mode = 0; mode < 4; mode += 1)
@@ -204,8 +243,8 @@ static void check_builtin_query_test_values(CheckBuiltinQueryTest* test, TypeTab
             result.argument_conversions[1].type == BUSTER_TYPE_INT, "object_size selects independent complete/subobject max/min metadata");
         input.object_size_known[mode] = false;
         check_builtin_query_one(table, &input, &result);
-        check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, mode < 2 ? UINT64_MAX : 0) && !result.known && result.mode == mode,
-            "unknown object size uses mode-specific sentinel");
+        check_builtin_query_test_expect(test, check_builtin_query_test_deferred(&result, mode < 2 ? UINT64_MAX : 0) && !result.known && result.mode == mode,
+            "unknown bound keeps runtime sentinel separate from source constant evaluation");
         input.object_size_known[mode] = true;
     }
     arguments[1] = check_test_integer(BUSTER_TYPE_INT, 0);
@@ -216,24 +255,42 @@ static void check_builtin_query_test_values(CheckBuiltinQueryTest* test, TypeTab
     check_builtin_query_one(table, &input, &result);
     check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX) && result.known, "known sentinel-sized bound retains its known flag");
     input.object_sizes[0] = 64;
+    input.object_size_source_constant[0] = false;
+    check_builtin_query_one(table, &input, &result);
+    check_builtin_query_test_expect(test, check_builtin_query_test_deferred(&result, 64) && result.known,
+        "runtime-known whole-object bound need not be source-constant");
     arguments[0].flags = BUSTER_CHECK_SIDE_EFFECT;
     check_builtin_query_one(table, &input, &result);
-    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX) && !result.known, "effectful pointer suppresses producer bound and remains unevaluated");
-    arguments[1] = check_test_integer(BUSTER_TYPE_INT, 3);
+    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX) && !result.known,
+        "runtime-only bound cannot override effectful pointer source fallback");
+    input.object_size_source_constant[0] = true;
     check_builtin_query_one(table, &input, &result);
-    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, 0) && !result.known, "effectful pointer uses minimum-mode unknown zero");
+    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, 64) && result.known,
+        "source-proven bound survives ignored pointer effects");
+    input.object_size_known[0] = false;
+    check_builtin_query_one(table, &input, &result);
+    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX) && !result.known,
+        "unknown effectful pointer has a source-constant sentinel without executing effects");
+    arguments[1] = check_test_integer(BUSTER_TYPE_INT, 3);
+    input.object_size_known[3] = false;
+    check_builtin_query_one(table, &input, &result);
+    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, 0) && !result.known,
+        "unknown effectful pointer has minimum-mode source-constant zero");
     arguments[1] = check_test_integer(BUSTER_TYPE_INT, 0);
     arguments[0].flags = 0;
     arguments[0].fault = CHECK_FAULT_DIVIDE_BY_ZERO;
     arguments[0].fault_node = 73;
     check_builtin_query_one(table, &input, &result);
-    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX) && !result.known, "faulting pointer suppresses producer bound without leaking fault");
+    check_builtin_query_test_expect(test, check_builtin_query_test_deferred(&result, UINT64_MAX) && !result.known,
+        "faulting unknown pointer is deferred without leaking the fault");
     arguments[0] = (CheckValue){ .type = type_qualify(table, pointer, BUSTER_TYPE_VOLATILE), .category = CHECK_LVALUE };
     check_builtin_query_one(table, &input, &result);
-    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX) && !result.known, "volatile pointer read also suppresses object bound");
+    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX) && !result.known,
+        "unknown volatile pointer read is unevaluated and has a source-constant sentinel");
     arguments[0] = check_builtin_query_test_pointer(pointer, 31, 0);
     result = check_builtin_query_test_action(table, CBUILTIN_OBJECT_SIZE, arguments, 2);
-    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX) && !result.known, "pointee size is never substituted for object extent");
+    check_builtin_query_test_expect(test, check_builtin_query_test_deferred(&result, UINT64_MAX) && !result.known,
+        "pointee size is never substituted for unknown object extent");
 }
 
 static void check_builtin_query_test_constraints(CheckBuiltinQueryTest* test, TypeTable* table)
@@ -254,7 +311,7 @@ static void check_builtin_query_test_constraints(CheckBuiltinQueryTest* test, Ty
     check_builtin_query_test_expect(test, result.action.diagnostic != CHECK_DIAG_NONE && result.action.diagnostic_operand == 0, "object_size rejects nonpointer floating argument");
     arguments[0] = check_test_integer(BUSTER_TYPE_INT, 0);
     result = check_builtin_query_test_action(table, CBUILTIN_OBJECT_SIZE, arguments, 2);
-    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX), "ordinary null pointer conversion is accepted");
+    check_builtin_query_test_expect(test, check_builtin_query_test_deferred(&result, UINT64_MAX), "ordinary null pointer conversion is accepted");
     arguments[0] = check_builtin_query_test_pointer(type_pointer(table, BUSTER_TYPE_INT), 1, 0);
     const int64_t invalid_modes[] = { -1, 4 };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid_modes); i += 1)
@@ -274,15 +331,15 @@ static void check_builtin_query_test_constraints(CheckBuiltinQueryTest* test, Ty
         "implicit floating conversion does not manufacture an original mode ICE");
     arguments[1] = check_test_integer(BUSTER_TYPE_INT, 1);
     result = check_builtin_query_test_action(table, CBUILTIN_OBJECT_SIZE, arguments, 2);
-    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX) && result.mode == 1,
+    check_builtin_query_test_expect(test, check_builtin_query_test_deferred(&result, UINT64_MAX) && result.mode == 1,
         "explicit integer-cast floating literal arrives as an integer ICE");
     arguments[1] = check_test_integer(BUSTER_TYPE_ULLONG, UINT64_C(1) << 32);
     result = check_builtin_query_test_action(table, CBUILTIN_OBJECT_SIZE, arguments, 2);
-    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX) && result.mode == 0 && result.argument_conversions[1].type == BUSTER_TYPE_INT,
+    check_builtin_query_test_expect(test, check_builtin_query_test_deferred(&result, UINT64_MAX) && result.mode == 0 && result.argument_conversions[1].type == BUSTER_TYPE_INT,
         "mode converts to int before checking zero through three");
     arguments[1] = check_test_integer(BUSTER_TYPE_UINT128, ((unsigned __int128)1 << 96) | 3);
     result = check_builtin_query_test_action(table, CBUILTIN_OBJECT_SIZE, arguments, 2);
-    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, 0) && result.mode == 3,
+    check_builtin_query_test_expect(test, check_builtin_query_test_deferred(&result, 0) && result.mode == 3,
         "wide integer ICE mode retains the int parameter's low bits");
     arguments[1] = check_test_integer(BUSTER_TYPE_INT, 1);
     arguments[1].flags = 0;
@@ -316,7 +373,7 @@ static void check_builtin_query_test_constraints(CheckBuiltinQueryTest* test, Ty
         arguments[0] = check_builtin_query_test_pointer(type_pointer(table, type_tag(table, BUSTER_TYPE_KIND_STRUCT, 148)), 1, 0);
         arguments[1] = check_test_integer(BUSTER_TYPE_INT, 0);
         result = check_builtin_query_test_action(table, CBUILTIN_OBJECT_SIZE, arguments, 2);
-        check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_ULONG, UINT64_MAX), "pointer to incomplete object does not require sizeof its pointee");
+        check_builtin_query_test_expect(test, check_builtin_query_test_deferred(&result, UINT64_MAX), "pointer to incomplete object does not require sizeof its pointee");
     }
 }
 
@@ -366,6 +423,7 @@ static void check_builtin_query_test_pages(CheckBuiltinQueryTest* test, TypeTabl
                 .node = i,
                 .source_position = UINT32_MAX,
                 .object_size_known = { true, true, true, true },
+                .object_size_source_constant = { true, true, true, true },
                 .object_sizes = { 64, 8, 32, 4 },
             };
             check_builtin_query_one(table, actions + i, expected + i);
@@ -430,11 +488,14 @@ static void check_builtin_query_test_clang(CheckBuiltinQueryTest* test, const ch
         { "_Static_assert(__builtin_constant_p(\"abc\")==1, \"string\");\n_Static_assert(__builtin_constant_p(\"abc\"+1)==0, \"interior\");\n_Static_assert(__builtin_constant_p((unsigned long)\"abc\")==1, \"string cast\");\n", false },
         { "int x; _Static_assert(__builtin_constant_p(x++)==0, \"effect\");\n_Static_assert(__builtin_constant_p((x++,3))==0, \"comma effect\");\n_Static_assert(__builtin_constant_p(1/0)==0, \"fault\");\n", false },
         { "volatile int x; _Static_assert(__builtin_constant_p(x)==0, \"volatile\");\n", false },
+        { "_Static_assert(__builtin_constant_p(1.0+2.0i)==1, \"complex literal\");\n", false },
+        { "extern double _Complex z; _Static_assert(__builtin_constant_p(z)==0, \"nonconstant complex\");\n", false },
+        { "int x; _Static_assert(__builtin_constant_p((x++,1.0+2.0i))==0, \"effectful complex\");\n", false },
         { "int f(void) { return __builtin_constant_p(); }\n", true },
         { "int f(void) { return __builtin_constant_p(1,2); }\n", true },
-        { "_Static_assert(_Generic(__builtin_object_size(\"abc\",0), unsigned long:1, default:0), \"size_t\");\n_Static_assert(__builtin_object_size(\"abc\",0)==4, \"string extent\");\n", false },
+        { "_Static_assert(_Generic(__builtin_object_size(\"abc\",0), unsigned long:1, default:0), \"size_t\");\n_Static_assert(__builtin_object_size(\"abc\",1)==4, \"string extent\");\n", false },
         { "struct S { char a[4]; char b[8]; }; struct S s;\n_Static_assert(__builtin_object_size(s.a+1,0)==11, \"whole max\");\n_Static_assert(__builtin_object_size(s.a+1,1)==3, \"member max\");\n_Static_assert(__builtin_object_size(s.a+1,2)==11, \"whole min\");\n_Static_assert(__builtin_object_size(s.a+1,3)==3, \"member min\");\n", false },
-        { "extern char* p;\n_Static_assert(__builtin_object_size(p,0)==(__SIZE_TYPE__)-1, \"unknown max\");\n_Static_assert(__builtin_object_size(p,1)==(__SIZE_TYPE__)-1, \"unknown member max\");\n_Static_assert(__builtin_object_size(p,2)==0, \"unknown min\");\n_Static_assert(__builtin_object_size(p,3)==0, \"unknown member min\");\n", false },
+        { "extern char* p;\n_Static_assert(__builtin_object_size(p,0)==(__SIZE_TYPE__)-1, \"unknown max\");\n_Static_assert(__builtin_object_size(p,1)==(__SIZE_TYPE__)-1, \"unknown member max\");\n_Static_assert(__builtin_object_size(p,2)==0, \"unknown min\");\n_Static_assert(__builtin_object_size(p,3)==0, \"unknown member min\");\n", true },
         { "char* p; _Static_assert(__builtin_object_size(p++,0)==(__SIZE_TYPE__)-1, \"effect unknown\");\n", false },
         { "__SIZE_TYPE__ f(char* p) { return __builtin_object_size(p,0x100000000ULL); }\n", false },
         { "__SIZE_TYPE__ f(char* p) { return __builtin_object_size(p,(int)1.0); }\n", false },
@@ -443,6 +504,12 @@ static void check_builtin_query_test_clang(CheckBuiltinQueryTest* test, const ch
         { "__SIZE_TYPE__ f(char* p) { return __builtin_object_size(p,4); }\n", true },
         { "__SIZE_TYPE__ f(char* p,int mode) { return __builtin_object_size(p,mode); }\n", true },
         { "__SIZE_TYPE__ f(void) { return __builtin_object_size(1.0,0); }\n", true },
+        { "_Static_assert(__builtin_object_size(\"abc\",0)==4, \"runtime only\");\n", true },
+        { "_Static_assert(__builtin_constant_p(__builtin_object_size(\"abc\",0))==0, \"deferred literal\");\n", false },
+        { "extern char* p; __SIZE_TYPE__ n = __builtin_object_size(p,0);\n", true },
+        { "extern char* p; _Static_assert(1 ? 1 : __builtin_object_size(p,0), \"unevaluated\");\n", false },
+        { "__SIZE_TYPE__ f(char* p) { return __builtin_object_size(p,0); }\n", false },
+        { "char a[4]; int i; _Static_assert(__builtin_object_size((i++,a),0)==4, \"known despite effects\");\n", false },
         { "__SIZE_TYPE__ f(char* p) { return __builtin_object_size(p); }\n", true },
         { "__SIZE_TYPE__ f(char* p) { return __builtin_object_size(p,0,1); }\n", true },
     };
@@ -462,6 +529,12 @@ static void check_builtin_query_test_clang(CheckBuiltinQueryTest* test, const ch
     check_builtin_query_test_expect(test, ready, "independent Clang query source assertions and constraints ran");
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
+        if (results[i].rejected != cases[i].rejected)
+        {
+            fprintf(stderr, "test-check-builtins-query: fixture %u expected %s, got %s at %u:%u: %s\n", i,
+                    cases[i].rejected ? "rejection" : "acceptance", results[i].rejected ? "rejection" : "acceptance",
+                    results[i].line, results[i].column, results[i].message);
+        }
         check_builtin_query_test_expect(test, results[i].rejected == cases[i].rejected, "Clang agrees with original query source fixture");
     }
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)

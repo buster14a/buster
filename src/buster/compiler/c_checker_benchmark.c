@@ -37,7 +37,10 @@ struct String8
 #include "buster/compiler/c_check_builtin_misc.c"
 #include "buster/compiler/c_check_builtin_query.c"
 #include "buster/compiler/c_check_builtin_float.c"
+#include "buster/compiler/c_check_builtin_math.c"
 #include "buster/compiler/c_check_builtin_atomic.c"
+#include "buster/compiler/c_check_builtin_typed_overflow.c"
+#include "buster/compiler/c_check_builtin_rounds.c"
 #include "buster/compiler/c_checker.c"
 
 #define BUSTER_CHECK_BENCHMARK_PASSES 21u
@@ -92,8 +95,10 @@ static bool check_benchmark_value_equal(const CheckValue* x, const CheckValue* y
 {
     const bool floating = (isnan(x->floating) && isnan(y->floating)) ||
                           (x->floating == y->floating && signbit(x->floating) == signbit(y->floating));
+    const bool imaginary = (isnan(x->imaginary) && isnan(y->imaginary)) ||
+                           (x->imaginary == y->imaginary && signbit(x->imaginary) == signbit(y->imaginary));
     const bool equal = x->type == y->type && x->category == y->category && x->flags == y->flags && x->constant_kind == y->constant_kind &&
-                       x->integer == y->integer && floating && x->object == y->object && x->offset == y->offset &&
+                       x->integer == y->integer && floating && imaginary && x->object == y->object && x->offset == y->offset &&
                        x->bit_width == y->bit_width && x->fault == y->fault && x->fault_node == y->fault_node;
     return equal;
 }
@@ -104,7 +109,8 @@ static bool check_benchmark_equal(const CheckStream* a, const CheckStream* b, ui
                  a->varargs_count == b->varargs_count && check_builtin_stream_metadata_equal(a, b, check_benchmark_value_equal);
     for (uint32_t i = 0; equal && i < a->count; i += 1)
     {
-        equal = check_benchmark_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] && a->warnings[i] == b->warnings[i];
+        equal = check_benchmark_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] &&
+                a->warnings[i] == b->warnings[i] && a->warning_ignored[i] == b->warning_ignored[i];
         equal = equal && a->conversions[i].store.type == b->conversions[i].store.type && a->conversions[i].store.flags == b->conversions[i].store.flags;
         for (uint32_t j = 0; equal && j < 3; j += 1)
         {
@@ -124,8 +130,7 @@ static bool check_benchmark_equal(const CheckStream* a, const CheckStream* b, ui
     }
     for (uint32_t i = 0; equal && i < a->effect_count; i += 1)
     {
-        equal = a->effects[i].node == b->effects[i].node && check_benchmark_value_equal(&a->effects[i].value, &b->effects[i].value) &&
-                check_benchmark_value_equal(&a->effects[i].destination, &b->effects[i].destination);
+        equal = check_store_effect_equal(a->effects + i, b->effects + i, check_benchmark_value_equal);
     }
     for (uint32_t i = 0; equal && i < a->varargs_count; i += 1)
     {

@@ -30,6 +30,7 @@
 #define BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_ALIGNMENT 0x04u
 #define BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_UNKNOWN_ALIGNMENT 0x08u
 #define BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_CONVERSION 0x10u
+#define BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_FLOAT_FORMAT 0x20u
 #define BUSTER_CHECK_BUILTIN_ATOMIC_KNOWN_SUCCESS_ORDER 0x01u
 
 typedef enum CheckBuiltinAtomicFenceScope
@@ -138,18 +139,110 @@ static CheckValue check_builtin_atomic_argument(TypeTable* table, const CheckBui
     return value;
 }
 
+static bool check_builtin_atomic_pointer_comparison_visible(const TypeTable* table, TypeId left, TypeId right, const CheckBuiltinAtomicAction* input, CheckActionResult* result, uint32_t operand)
+{
+    // Same identities need no enum definition. A cross-type comparison must not discover a future definition
+    // through type_compatible, including inside pointer chains, array elements or function signatures. Walk the
+    // same bounded inner-pair protocol as compatibility; enum visibility is checked before its shallow query.
+    bool visible = true;
+    if (input->tag_completions != NULL && left != right)
+    {
+        const Scratch scratch = scratch_begin(0);
+        void* stack = NULL;
+        uint64_t capacity = 0;
+        uint64_t depth = 0;
+        TypePairMemo met = {
+            .arena = scratch.arena,
+        };
+        bool fits = type_grow_stack(scratch.arena, &stack, &capacity, 1, sizeof(TypePair));
+        if (fits)
+        {
+            ((TypePair*)stack)[0] = (TypePair){ .left = left, .right = right };
+            depth = 1;
+        }
+        while (visible && fits && depth != 0)
+        {
+            depth -= 1;
+            const TypePair pair = ((TypePair*)stack)[depth];
+            const TypeId l = type_strip_aligned(table, pair.left);
+            const TypeId r = type_strip_aligned(table, pair.right);
+            const uint8_t left_kind = type_kind(table, l);
+            const uint8_t right_kind = type_kind(table, r);
+            visible = l == r || ((left_kind != BUSTER_TYPE_KIND_ENUM || check_builtin_atomic_source_complete(table, l, input)) &&
+                                 (right_kind != BUSTER_TYPE_KIND_ENUM || check_builtin_atomic_source_complete(table, r, input)));
+            if (visible && l != r && left_kind == BUSTER_TYPE_KIND_FUNCTION && right_kind == BUSTER_TYPE_KIND_FUNCTION &&
+                ((table->types.flags[type_index(l)] ^ table->types.flags[type_index(r)]) & BUSTER_TYPE_FLAG_PROTOTYPE) != 0)
+            {
+                // The prototype-versus-old-style shallow rule examines enum parameter promotions itself.
+                const TypeId prototype = (table->types.flags[type_index(l)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 ? l : r;
+                uint32_t count = 0;
+                const TypeId* parameters = type_parameters(table, prototype, &count);
+                for (uint32_t i = 0; visible && i < count; i += 1)
+                {
+                    const TypeId parameter = type_unqualified(type_strip_aligned(table, parameters[i]));
+                    visible = type_kind(table, parameter) != BUSTER_TYPE_KIND_ENUM || check_builtin_atomic_source_complete(table, parameter, input);
+                }
+            }
+            bool leaf = true;
+            if (visible && type_merge_shallow(table, pair.left, pair.right, &leaf) && !leaf)
+            {
+                fits = type_grow_stack(scratch.arena, &stack, &capacity, depth + type_merge_inner_count(table, pair.left), sizeof(TypePair));
+                if (fits)
+                {
+                    TypePair* pairs = (TypePair*)stack + depth;
+                    const uint32_t kept = type_pairs_unmet(&met, pairs, type_merge_inner(table, pair.left, pair.right, pairs));
+                    fits = kept != UINT32_MAX;
+                    depth += fits ? kept : 0;
+                }
+            }
+        }
+        if (!fits)
+        {
+            check_action_diagnose(result, CHECK_DIAG_RESOURCE, operand);
+            visible = false;
+        }
+        scratch_end(scratch);
+    }
+    return visible;
+}
+
+static TypeId check_builtin_atomic_pointer_sign_type(const TypeTable* table, TypeId type, const CheckBuiltinAtomicAction* input)
+{
+    // Corresponding identities, not storage width: long and long long remain distinct on LP64.
+    TypeId result = type;
+    if (type_kind(table, type) == BUSTER_TYPE_KIND_ENUM && check_builtin_atomic_source_complete(table, type, input))
+    {
+        uint32_t width = 0;
+        bool is_signed = false;
+        if (check_action_integer_type(table, type, &width, &is_signed) && is_signed)
+        {
+            // Clang changes a signed enum through its underlying integer type. Unsigned enums retain identity.
+            result = type_unqualified(type_strip_aligned(table, table->types.base[type_index(type)]));
+        }
+    }
+    switch (result)
+    {
+        case BUSTER_TYPE_CHAR:
+        case BUSTER_TYPE_SCHAR: result = BUSTER_TYPE_UCHAR; break;
+        case BUSTER_TYPE_SHORT: result = BUSTER_TYPE_USHORT; break;
+        case BUSTER_TYPE_INT: result = BUSTER_TYPE_UINT; break;
+        case BUSTER_TYPE_LONG: result = BUSTER_TYPE_ULONG; break;
+        case BUSTER_TYPE_LLONG: result = BUSTER_TYPE_ULLONG; break;
+        case BUSTER_TYPE_INT128: result = BUSTER_TYPE_UINT128; break;
+        default: break;
+    }
+    return result;
+}
+
 static void check_builtin_atomic_convert(TypeTable* table, const CheckBuiltinAtomicAction* input, CheckBuiltinAtomicResult* output, CheckValue* value, uint32_t index, TypeId destination)
 {
     bool accepted = output->action.diagnostic == CHECK_DIAG_NONE;
     const uint8_t source_kind = check_action_kind(table, value->type);
-    if (accepted && (source_kind == BUSTER_TYPE_KIND_COMPLEX ||
-                     (source_kind == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, value->type))))
-    {
-        output->unsupported |= BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_CONVERSION;
-        check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, index);
-        accepted = false;
-    }
-    else if (accepted && check_action_kind(table, destination) == BUSTER_TYPE_KIND_POINTER && source_kind == BUSTER_TYPE_KIND_POINTER)
+    const uint8_t destination_kind = check_action_kind(table, destination);
+    const bool unsupported_conversion = source_kind == BUSTER_TYPE_KIND_COMPLEX || destination_kind == BUSTER_TYPE_KIND_COMPLEX ||
+                                        (source_kind == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, value->type)) ||
+                                        (destination_kind == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, destination));
+    if (accepted && destination_kind == BUSTER_TYPE_KIND_POINTER && source_kind == BUSTER_TYPE_KIND_POINTER)
     {
         const TypeId to = type_element(table, type_strip_aligned(table, destination));
         const TypeId from = type_element(table, type_strip_aligned(table, value->type));
@@ -159,15 +252,21 @@ static void check_builtin_atomic_convert(TypeTable* table, const CheckBuiltinAto
         const uint8_t from_kind = check_action_kind(table, from);
         const bool void_pointer = to_kind == BUSTER_TYPE_KIND_VOID || from_kind == BUSTER_TYPE_KIND_VOID;
         const bool function_pointer = to_kind == BUSTER_TYPE_KIND_FUNCTION || from_kind == BUSTER_TYPE_KIND_FUNCTION;
-        const bool char_pair = (to_base == BUSTER_TYPE_CHAR || to_base == BUSTER_TYPE_SCHAR || to_base == BUSTER_TYPE_UCHAR) &&
-                               (from_base == BUSTER_TYPE_CHAR || from_base == BUSTER_TYPE_SCHAR || from_base == BUSTER_TYPE_UCHAR);
-        accepted = void_pointer || char_pair || check_action_compatible(table, to_base, from_base, &output->action);
+        const bool visible = void_pointer || to_base == from_base || check_builtin_atomic_pointer_comparison_visible(table, to_base, from_base, input, &output->action, index);
+        const bool compatible = void_pointer || to_base == from_base || (visible && check_action_compatible(table, to_base, from_base, &output->action));
+        const bool sign_pair = !compatible && visible && output->action.diagnostic == CHECK_DIAG_NONE &&
+                               check_builtin_atomic_pointer_sign_type(table, to_base, input) == check_builtin_atomic_pointer_sign_type(table, from_base, input);
+        const bool loses_qualifiers = (type_qualifiers(from) & ~type_qualifiers(to)) != 0;
+        accepted = output->action.diagnostic == CHECK_DIAG_NONE && (compatible || sign_pair);
         if (accepted)
         {
-            output->warnings |= (type_qualifiers(from) & ~type_qualifiers(to)) != 0 ? BUSTER_CHECK_BUILTIN_ATOMIC_WARN_QUALIFIERS : 0;
+            output->warnings |= loses_qualifiers && !sign_pair ? BUSTER_CHECK_BUILTIN_ATOMIC_WARN_QUALIFIERS : 0;
             output->warnings |= void_pointer && function_pointer ? BUSTER_CHECK_BUILTIN_ATOMIC_WARN_FUNCTION_POINTER : 0;
-            output->warnings |= !void_pointer && char_pair && to_base != from_base ? BUSTER_CHECK_BUILTIN_ATOMIC_WARN_POINTER_SIGN : 0;
-            if ((type_qualifiers(from) & ~type_qualifiers(to)) != 0 || (void_pointer && function_pointer) || (!void_pointer && char_pair && to_base != from_base))
+            // Ordinary C qualifier loss remains compatible in Clang's IsAssignConvertCompatible; a corresponding
+            // signedness pair therefore selects its pointer-sign diagnostic. Fatal address-space/lifetime cases
+            // in Clang's preceding qualification check are not represented by this type table.
+            output->warnings |= !void_pointer && sign_pair ? BUSTER_CHECK_BUILTIN_ATOMIC_WARN_POINTER_SIGN : 0;
+            if (loses_qualifiers || (void_pointer && function_pointer) || (!void_pointer && sign_pair))
             {
                 output->warning_operands |= UINT32_C(1) << index;
             }
@@ -186,7 +285,23 @@ static void check_builtin_atomic_convert(TypeTable* table, const CheckBuiltinAto
     }
     if (accepted)
     {
-        check_action_conversion(table, value, destination, BUSTER_CHECK_CONVERT_ASSIGNMENT, output->argument_conversions + index, input->node);
+        if (unsupported_conversion)
+        {
+            // Source constraints are satisfied, but CheckValue has no exact complex/extended-format payload.
+            // Publish the requested conversion without approximating it through host long double or reporting a
+            // source constraint error solely because the checked runtime producer cannot yet emit the conversion.
+            output->unsupported |= BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_CONVERSION;
+            output->argument_conversions[index].type = destination;
+            output->argument_conversions[index].flags |= BUSTER_CHECK_CONVERT_ASSIGNMENT;
+            value->type = destination;
+            value->category = CHECK_RVALUE;
+            value->constant_kind = CHECK_CONSTANT_NONE;
+            value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_NULL_POINTER);
+        }
+        else
+        {
+            check_action_conversion(table, value, destination, BUSTER_CHECK_CONVERT_ASSIGNMENT, output->argument_conversions + index, input->node);
+        }
     }
     else if (output->action.diagnostic == CHECK_DIAG_NONE)
     {
@@ -205,6 +320,8 @@ static void check_builtin_atomic_object(TypeTable* table, const CheckBuiltinAtom
         const TypeId object = type_element(table, type_strip_aligned(table, pointer->type));
         const TypeId plain = type_strip_aligned(table, object);
         const uint8_t kind = type_kind(table, plain);
+        const bool floating = kind == BUSTER_TYPE_KIND_FLOATING ||
+                              (kind == BUSTER_TYPE_KIND_COMPLEX && check_action_kind(table, type_element(table, plain)) == BUSTER_TYPE_KIND_FLOATING);
         output->object_type = object;
         // Clang removes the inferred object's local const/volatile, preserving pointer restrict qualification.
         output->value_type = plain & ~(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
@@ -214,10 +331,11 @@ static void check_builtin_atomic_object(TypeTable* table, const CheckBuiltinAtom
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPLETE, 0);
         }
-        else if ((!check_action_is_integer(table, plain) && kind != BUSTER_TYPE_KIND_POINTER) || kind == BUSTER_TYPE_KIND_BIT_INT)
+        else if ((!check_action_is_integer(table, plain) && kind != BUSTER_TYPE_KIND_POINTER && !floating) ||
+                 kind == BUSTER_TYPE_KIND_BIT_INT || type_unqualified(plain) == BUSTER_TYPE_LONG_DOUBLE)
         {
-            // GNU _n builtins use ordinary integer/pointer objects, not _Atomic(T), floating or record objects.
-            // Clang additionally prohibits _BitInt even when its representation would fit a native helper.
+            // Clang 23.1.1 allows ordinary integer/pointer/floating objects, including floating complex types.
+            // GNU _Atomic(T), records, _BitInt and direct x87 long double remain source constraint errors.
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
         }
         else if (input->id == CBUILTIN_ATOMIC_STORE_N && (type_qualifiers(plain) & BUSTER_TYPE_CONST) != 0)
@@ -230,6 +348,10 @@ static void check_builtin_atomic_object(TypeTable* table, const CheckBuiltinAtom
             output->required_alignment = output->object_size;
             output->alignment_known = input->alignment_known;
             output->minimum_alignment = input->alignment_known ? input->minimum_alignment : 0;
+            if (floating && output->value_type != BUSTER_TYPE_FLOAT && output->value_type != BUSTER_TYPE_DOUBLE)
+            {
+                output->unsupported |= BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_FLOAT_FORMAT;
+            }
             if (output->object_size != 1 && output->object_size != 2 && output->object_size != 4 && output->object_size != 8)
             {
                 output->unsupported |= BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_WIDTH;
