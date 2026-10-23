@@ -110,7 +110,7 @@ static bool check_test_data_source_cleared(const CheckDataInput* data)
     return data->object_symbols == 0 && data->object_count == 0 && data->link.names.count == 0 && data->link.atoms.count == 0 && data->link.symbols.count == 0 && data->link.fixups.count == 0 && data->emission.atom_begin == 0;
 }
 
-static void check_test_data_source_capacities(CheckTest* test, const CheckInput* input, const CheckStream* stream, const Parser* parser, const InternTable* identifiers, const TypeTable* types)
+static void check_test_data_source_capacities(CheckTest* test, const CheckInput* input, const CheckStream* stream, const Parser* parser, const InternTable* identifiers, TypeTable* types)
 {
     Arena backing[3] = {
         arena_reserve(UINT64_C(1) << 16),
@@ -191,6 +191,7 @@ static void check_test_data_source(CheckTest* test, const CheckDataSourceFixture
         Arena scratch = arena_reserve(UINT64_C(1) << 24);
         const ParseOptions parse_options = {
             .scalar = path == 0,
+            .extension_metadata = true,
         };
         bool ready = check_test_types_open(&types) && parse_initialize(&parser, &parse_options, pp_options.language) && input_arena.base != 0 && stream_arena.base != 0 && output.base != 0 && bytes.base != 0 && scratch.base != 0;
         ready = ready && parse_translation_unit(&parser, &pp) && parser.errors == 0 && parser.fatal == PARSE_MESSAGE_NONE;
@@ -456,6 +457,24 @@ static void check_test_data_sources(CheckTest* test)
             .target = 4,
         },
     };
+    const CheckDataSourceSymbol array[] = {
+        {
+            .name = "array",
+            .flags = BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL,
+            .class = BUSTER_LINK_CLASS_BSS,
+            .alignment = 2,
+            .size = 8,
+        },
+    };
+    const CheckDataSourceSymbol record[] = {
+        {
+            .name = "record",
+            .flags = BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL,
+            .class = BUSTER_LINK_CLASS_BSS,
+            .alignment = 2,
+            .size = 4,
+        },
+    };
     const CheckDataSourceFixture fixtures[] = {
         {
             .name = "static-scalars.c",
@@ -493,22 +512,32 @@ static void check_test_data_sources(CheckTest* test)
             .source = "extern int unused; static int f(void){return 0;}",
         },
         {
-            .name = "static-array-rejected.c",
+            .name = "static-array-zero.c",
             .source = "int array[2];",
-            .status = CHECK_DATA_INPUT_UNSUPPORTED,
-            .failed_name = "array",
+            .symbols = array,
+            .symbol_count = BUSTER_ARRAY_LENGTH(array),
         },
         {
-            .name = "static-record-rejected.c",
+            .name = "static-record-zero.c",
             .source = "struct R { int value; }; struct R record;",
-            .status = CHECK_DATA_INPUT_UNSUPPORTED,
-            .failed_name = "record",
+            .symbols = record,
+            .symbol_count = BUSTER_ARRAY_LENGTH(record),
         },
         {
             .name = "static-internal-function.c",
             .source = "static int f(void){return 0;} int (*p)(void)=f;",
             .status = CHECK_DATA_INPUT_UNSUPPORTED,
             .failed_name = "f",
+        },
+        {
+            .name = "static-overload-needs-symbol-mangling.c",
+            .source = "int f(void) __attribute__((overloadable)); int (*p)(void)=f;",
+            .status = CHECK_DATA_INPUT_UNSUPPORTED,
+            .failed_name = "f",
+        },
+        {
+            .name = "static-unused-overload-needs-no-symbol.c",
+            .source = "int f(void) __attribute__((overloadable));",
         },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)

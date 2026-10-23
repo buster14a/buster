@@ -28,6 +28,7 @@ typedef enum CheckConstantKind
     CHECK_CONSTANT_INTEGER,
     CHECK_CONSTANT_FLOATING,
     CHECK_CONSTANT_ADDRESS,
+    CHECK_CONSTANT_COMPLEX,
 } CheckConstantKind;
 
 typedef enum CheckFault
@@ -49,6 +50,17 @@ typedef enum CheckFault
 #define BUSTER_CHECK_ICE_UNEVALUATED 0x20u
 #define BUSTER_CHECK_NULL_POINTER 0x40u
 #define BUSTER_CHECK_STATIC_OBJECT 0x80u
+#define BUSTER_CHECK_VOLATILE_PART 0x100u
+#define BUSTER_CHECK_GNU_CONSTANT 0x200u
+#define BUSTER_CHECK_GNU_ICE_FORM 0x400u
+#define BUSTER_CHECK_FP_ENVIRONMENT 0x800u
+#define BUSTER_CHECK_VECTOR_ELEMENT 0x1000u
+#define BUSTER_CHECK_VECTOR_DUPLICATE 0x2000u
+#define BUSTER_CHECK_GNU_DIVISION 0x4000u
+
+#define BUSTER_CHECK_EXTENSION_GNU 0x01u
+#define BUSTER_CHECK_EXTENSION_GNU_CONSTANT 0x02u
+#define BUSTER_CHECK_FP_ENV_ACCESS 0x01u
 
 typedef struct CheckValue CheckValue;
 struct CheckValue
@@ -59,7 +71,12 @@ struct CheckValue
     CheckConstantKind constant_kind;
     unsigned __int128 integer;
     long double floating;
+    // Floating complex constants retain both source-format components. GNU integer-complex constants use
+    // integer's low/high 64-bit halves, each masked to the component type's width.
+    long double imaginary;
     uint32_t object;
+    // An immutable overload-set head plus one. It must obtain a contextual function identity before ordinary use.
+    uint32_t overload_head;
     int64_t offset;
     uint32_t bit_width;
     CheckFault fault;
@@ -120,6 +137,30 @@ typedef enum CheckOp
     CHECK_OP_BIT_AND_ASSIGN,
     CHECK_OP_BIT_OR_ASSIGN,
     CHECK_OP_BIT_XOR_ASSIGN,
+    // Static selection (_Generic and __builtin_choose_expr) preserves the chosen expression without conversion.
+    CHECK_OP_SELECT,
+    // Builtin graph actions use member as CBuiltinId and are dispatched after the shared builtin module is included.
+    CHECK_OP_BUILTIN_UNARY,
+    CHECK_OP_BUILTIN_OVERFLOW,
+    // GNU statement-expression final value; member carries the preceding region's SIDE_EFFECT summary.
+    CHECK_OP_STATEMENT_VALUE,
+    // SysV varargs has a dedicated graph context and an optional type-name operand, never a guessed prototype.
+    CHECK_OP_VARARGS,
+    // Capture a runtime array bound once, or read its retained value. member is the dense extent identity + 1.
+    CHECK_OP_VLA_BOUND,
+    CHECK_OP_VLA_EXTENT,
+    // Runtime byte-size operand built from retained extent values; type is the queried variable-size array.
+    CHECK_OP_SIZEOF_VLA,
+    // Bounded argument-slice builtins are dispatched by the graph after their semantic modules are included.
+    CHECK_OP_BUILTIN_MISC,
+    CHECK_OP_BUILTIN_FLOAT,
+    CHECK_OP_BUILTIN_QUERY,
+    CHECK_OP_BUILTIN_ATOMIC,
+    CHECK_OP_REAL,
+    CHECK_OP_IMAGINARY,
+    CHECK_OP_BUILTIN_VECTOR,
+    CHECK_OP_BUILTIN_X86,
+    CHECK_OP_BUILTIN_BIT_CAST,
     CHECK_OP_COUNT,
 } CheckOp;
 
@@ -152,6 +193,16 @@ typedef enum CheckDiagnostic
 #define BUSTER_CHECK_CONVERT_ASSIGNMENT 0x20u
 #define BUSTER_CHECK_CONVERT_CAST 0x40u
 #define BUSTER_CHECK_CONVERT_NULL 0x80u
+#define BUSTER_CHECK_CONVERT_TRANSPARENT_UNION 0x100u
+
+#define CHECK_WARNING_DISCARDED_QUALIFIERS 0x01u
+#define CHECK_WARNING_GNU_CONSTANT 0x02u
+#define CHECK_WARNING_ENUM_TOO_LARGE 0x04u
+#define CHECK_WARNING_INTEGER_OVERFLOW 0x08u
+#define CHECK_WARNING_SHIFT_COUNT_NEGATIVE 0x10u
+#define CHECK_WARNING_SHIFT_COUNT_OVERFLOW 0x20u
+#define CHECK_WARNING_SHIFT_NEGATIVE_VALUE 0x40u
+#define CHECK_WARNING_SHIFT_OVERFLOW 0x80u
 
 typedef struct CheckConversion CheckConversion;
 struct CheckConversion
@@ -161,6 +212,7 @@ struct CheckConversion
 };
 
 typedef struct CheckAction CheckAction;
+typedef struct CheckVectorMember CheckVectorMember;
 struct CheckAction
 {
     CheckOp op;
@@ -174,6 +226,17 @@ struct CheckAction
     uint32_t argument_count;
     // Optional argument-conversion output with argument_count writable records. Required for CALL with arguments.
     CheckConversion* argument_conversions;
+    // Optional immutable source history. Positions are exclusive expression/type-name ends, independently of
+    // diagnostic node identity. A null history uses the caller's current type table, as the direct action API does.
+    const uint32_t* tag_completions;
+    // Optional activation positions for nominal transparent-union attributes, indexed by the same tag table.
+    const uint32_t* transparent_unions;
+    uint32_t tag_completion_count;
+    uint32_t source_position;
+    uint32_t extensions;
+    // Runtime floating environment, independent of source constant-expression evaluation.
+    uint32_t fp_environment;
+    const CheckVectorMember* vector_member;
 };
 
 typedef struct CheckActionResult CheckActionResult;
@@ -185,11 +248,20 @@ struct CheckActionResult
     CheckConversion store_conversion;
     CheckDiagnostic diagnostic;
     uint32_t diagnostic_operand;
+    uint32_t warnings;
 };
 
 static void check_action_scalar(TypeTable* table, const CheckAction* action, CheckActionResult* result);
 static void check_actions(TypeTable* table, const CheckAction* actions, CheckActionResult* results, uint32_t count);
 static bool check_action_vector_eligible(const TypeTable* table, const CheckAction* action);
+static void check_complex_convert(const TypeTable* table, CheckValue* value, TypeId destination, uint32_t node);
+static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const CheckValue* left, const CheckValue* right, CheckValue* value, uint32_t node, uint32_t extensions);
+static void check_complex_part(TypeTable* table, const CheckAction* action, CheckActionResult* result);
+static void check_complex_conjugate(TypeTable* table, const CheckAction* action, CheckActionResult* result);
+static bool check_vector_type(const TypeTable* table, TypeId type);
+static bool check_vector_assignable(const TypeTable* table, TypeId destination, const CheckValue* source, CheckActionResult* result);
+static void check_vector_convert(CheckValue* value, TypeId destination);
+static bool check_vector_action(TypeTable* table, const CheckAction* action, CheckActionResult* result);
 
 static unsigned __int128 check_action_mask(uint32_t width)
 {
@@ -199,6 +271,38 @@ static unsigned __int128 check_action_mask(uint32_t width)
 static uint8_t check_action_kind(const TypeTable* table, TypeId type)
 {
     return type_kind(table, type_strip_aligned(table, type));
+}
+
+static bool check_action_runtime_size(const TypeTable* table, TypeId type)
+{
+    TypeId base = type_strip_aligned(table, type);
+    bool runtime = false;
+    while (!runtime && type_kind_is_array(type_kind(table, base)))
+    {
+        runtime = type_kind(table, base) == BUSTER_TYPE_KIND_VARIABLE_ARRAY;
+        base = type_strip_aligned(table, type_element(table, base));
+    }
+    return runtime;
+}
+
+static bool check_action_source_complete(const TypeTable* table, TypeId type, const CheckAction* action)
+{
+    bool complete = type_is_complete(table, type);
+    if (complete && action->tag_completions != NULL)
+    {
+        TypeId base = type_strip_aligned(table, type);
+        while (type_kind_is_array(type_kind(table, base)))
+        {
+            base = type_strip_aligned(table, type_element(table, base));
+        }
+        const uint8_t kind = type_kind(table, base);
+        if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM)
+        {
+            const uint32_t tag = table->types.index[type_index(base)];
+            complete = tag < action->tag_completion_count && action->tag_completions[tag] <= action->source_position;
+        }
+    }
+    return complete;
 }
 
 static bool check_action_integer_type(const TypeTable* table, TypeId type, uint32_t* width, bool* is_signed)
@@ -260,16 +364,24 @@ static void check_action_set_fault(CheckValue* value, CheckFault fault, uint32_t
     value->constant_kind = CHECK_CONSTANT_NONE;
     value->integer = 0;
     value->floating = 0;
+    value->imaginary = 0;
 }
 
 static void check_action_inherit(CheckValue* value, const CheckValue* operand)
 {
-    value->flags |= operand->flags & BUSTER_CHECK_SIDE_EFFECT;
+    value->flags |= operand->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_GNU_DIVISION);
     if (value->fault == CHECK_FAULT_NONE && operand->fault != CHECK_FAULT_NONE)
     {
         value->fault = operand->fault;
         value->fault_node = operand->fault_node;
     }
+}
+
+static bool check_action_integer_constant(const CheckValue* value, uint32_t extensions)
+{
+    return value->fault == CHECK_FAULT_NONE && value->constant_kind == CHECK_CONSTANT_INTEGER &&
+           (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+           ((value->flags & BUSTER_CHECK_ICE) != 0 || (extensions & BUSTER_CHECK_EXTENSION_GNU_CONSTANT) != 0);
 }
 
 static bool check_action_truth(const TypeTable* table, const CheckValue* value, bool* truth)
@@ -287,6 +399,11 @@ static bool check_action_truth(const TypeTable* table, const CheckValue* value, 
     {
         *truth = value->floating != 0;
     }
+    else if (value->constant_kind == CHECK_CONSTANT_COMPLEX)
+    {
+        const TypeId element = type_element(table, type_strip_aligned(table, value->type));
+        *truth = check_action_is_integer(table, element) ? value->integer != 0 : value->floating != 0 || value->imaginary != 0;
+    }
     else if (value->constant_kind == CHECK_CONSTANT_ADDRESS)
     {
         // Absolute addresses, including null, are independent of final placement and weak symbol resolution.
@@ -301,10 +418,11 @@ static bool check_action_truth(const TypeTable* table, const CheckValue* value, 
     return known;
 }
 
-static bool check_action_null(const TypeTable* table, const CheckValue* value)
+static bool check_action_null(const TypeTable* table, const CheckValue* value, uint32_t extensions)
 {
     bool truth = false;
-    const bool zero_integer = (value->flags & BUSTER_CHECK_ICE) != 0 && value->constant_kind == CHECK_CONSTANT_INTEGER && check_action_truth(table, value, &truth) && !truth;
+    const uint32_t forms = BUSTER_CHECK_ICE | ((extensions & BUSTER_CHECK_EXTENSION_GNU_CONSTANT) != 0 ? BUSTER_CHECK_GNU_ICE_FORM : 0);
+    const bool zero_integer = (value->flags & forms) != 0 && value->constant_kind == CHECK_CONSTANT_INTEGER && check_action_truth(table, value, &truth) && !truth;
     return check_action_kind(table, value->type) == BUSTER_TYPE_KIND_NULLPTR || (value->flags & BUSTER_CHECK_NULL_POINTER) != 0 || zero_integer;
 }
 
@@ -330,7 +448,7 @@ static long double check_action_round_float(TypeId type, long double value)
 
 // Convert a constant's representation after type checking has authorized the conversion. Every integer operation
 // uses unsigned bits, and every floating-to-integer cast is range checked before host C is allowed to evaluate it.
-static void check_action_convert_value(const TypeTable* table, CheckValue* value, TypeId destination, uint32_t node)
+static void check_action_convert_plain(const TypeTable* table, CheckValue* value, TypeId destination, uint32_t node)
 {
     const TypeId source = value->type;
     const uint8_t target_kind = check_action_kind(table, destination);
@@ -376,6 +494,21 @@ static void check_action_convert_value(const TypeTable* table, CheckValue* value
             value->constant_kind = CHECK_CONSTANT_INTEGER;
         }
     }
+    else if (target_integer && value->constant_kind == CHECK_CONSTANT_ADDRESS)
+    {
+        const bool pointer = check_action_kind(table, source) == BUSTER_TYPE_KIND_POINTER;
+        if (value->object == 0 && pointer)
+        {
+            value->integer = (unsigned __int128)(uint64_t)value->offset & check_action_mask(target_width);
+            value->constant_kind = CHECK_CONSTANT_INTEGER;
+        }
+        else if (target_width != 64 || (!pointer && (!source_integer || source_width != 64)) || (value->flags & BUSTER_CHECK_STATIC_OBJECT) == 0)
+        {
+            // The current relocation representation is ABS64. Narrowing or widening a symbolic address cannot
+            // be expressed by changing the addend; leave those cases nonconstant for the consumer to reject.
+            value->constant_kind = CHECK_CONSTANT_NONE;
+        }
+    }
     else if (target_kind == BUSTER_TYPE_KIND_FLOATING && (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING))
     {
         if (!check_action_float_supported(table, destination) || (value->constant_kind == CHECK_CONSTANT_INTEGER && !source_integer))
@@ -412,13 +545,13 @@ static void check_action_convert_value(const TypeTable* table, CheckValue* value
             value->constant_kind = CHECK_CONSTANT_FLOATING;
         }
     }
-    else if (target_kind == BUSTER_TYPE_KIND_POINTER && check_action_null(table, value))
+    else if (target_kind == BUSTER_TYPE_KIND_POINTER && check_action_null(table, value, BUSTER_CHECK_EXTENSION_GNU_CONSTANT))
     {
         value->constant_kind = CHECK_CONSTANT_ADDRESS;
         value->object = 0;
         value->offset = 0;
     }
-    else if (target_kind == BUSTER_TYPE_KIND_POINTER && source_integer && value->constant_kind == CHECK_CONSTANT_INTEGER && (value->flags & BUSTER_CHECK_ICE) != 0)
+    else if (target_kind == BUSTER_TYPE_KIND_POINTER && source_integer && value->constant_kind == CHECK_CONSTANT_INTEGER)
     {
         const unsigned __int128 mask = check_action_mask(source_width);
         unsigned __int128 bits = value->integer & mask;
@@ -445,7 +578,23 @@ static void check_action_convert_value(const TypeTable* table, CheckValue* value
     value->flags &= ~(BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_NULL_POINTER);
     if (!target_integer)
     {
-        value->flags &= ~BUSTER_CHECK_ICE;
+        value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM);
+    }
+}
+
+static void check_action_convert_value(const TypeTable* table, CheckValue* value, TypeId destination, uint32_t node)
+{
+    if (check_vector_type(table, value->type) || check_vector_type(table, destination))
+    {
+        check_vector_convert(value, destination);
+    }
+    else if (check_action_kind(table, value->type) == BUSTER_TYPE_KIND_COMPLEX || check_action_kind(table, destination) == BUSTER_TYPE_KIND_COMPLEX)
+    {
+        check_complex_convert(table, value, destination, node);
+    }
+    else
+    {
+        check_action_convert_plain(table, value, destination, node);
     }
 }
 
@@ -478,7 +627,7 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
         {
             value.type = pointer;
             value.category = CHECK_RVALUE;
-            value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER);
+            value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER);
             if ((value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && value.constant_kind == CHECK_CONSTANT_ADDRESS)
             {
                 value.constant_kind = CHECK_CONSTANT_NONE;
@@ -498,14 +647,14 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
         {
             value.type = pointer;
             value.category = CHECK_RVALUE;
-            value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL);
+            value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL);
             conversion->type = pointer;
             conversion->flags |= BUSTER_CHECK_CONVERT_FUNCTION;
         }
     }
     else if (value.category == CHECK_LVALUE)
     {
-        if (!type_is_complete(table, value.type))
+        if (!check_action_source_complete(table, value.type, action) && !((action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 && kind == BUSTER_TYPE_KIND_VOID))
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, index);
         }
@@ -513,14 +662,14 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
         {
             value.constant_kind = CHECK_CONSTANT_NONE;
         }
-        if ((type_qualifiers(value.type) & BUSTER_TYPE_VOLATILE) != 0 || kind == BUSTER_TYPE_KIND_ATOMIC)
+        if ((type_qualifiers(value.type) & BUSTER_TYPE_VOLATILE) != 0 || (value.flags & BUSTER_CHECK_VOLATILE_PART) != 0 || kind == BUSTER_TYPE_KIND_ATOMIC)
         {
             value.flags |= BUSTER_CHECK_SIDE_EFFECT;
             value.constant_kind = CHECK_CONSTANT_NONE;
         }
         value.type = type_conversion_operand(table, value.type);
         value.category = CHECK_RVALUE;
-        value.flags &= ~BUSTER_CHECK_REGISTER;
+        value.flags &= ~(BUSTER_CHECK_REGISTER | BUSTER_CHECK_VOLATILE_PART);
         conversion->type = value.type;
         conversion->flags |= BUSTER_CHECK_CONVERT_LVALUE;
     }
@@ -546,16 +695,31 @@ static bool check_action_compatible(const TypeTable* table, TypeId left, TypeId 
     return answer == TYPE_ANSWER_YES;
 }
 
+static bool check_action_compatible_at(const TypeTable* table, TypeId left, TypeId right, const CheckAction* action, CheckActionResult* result)
+{
+    const TypeAnswer answer = left == right ? TYPE_ANSWER_YES :
+                              type_compatible_at(table, left, right, action->transparent_unions, action->tag_completion_count, action->source_position);
+    if (answer == TYPE_ANSWER_FULL)
+    {
+        check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+    }
+    return answer == TYPE_ANSWER_YES;
+}
+
 // Pointer assignment is directional: only the immediately pointed-to qualifiers may be added. In particular,
 // int ** to const int ** is not accepted by recursively dropping qualifiers.
-static bool check_action_assignable(const TypeTable* table, TypeId destination, const CheckValue* source, CheckActionResult* result)
+static bool check_action_assignable(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result)
 {
     const TypeId target = type_unqualified(type_strip_aligned(table, destination));
     const TypeId input = type_unqualified(type_strip_aligned(table, source->type));
     const uint8_t target_kind = type_kind(table, target);
     const uint8_t input_kind = type_kind(table, input);
     bool accepted = false;
-    if (check_action_is_arithmetic(table, target) && check_action_is_arithmetic(table, input))
+    if (check_vector_type(table, target) || check_vector_type(table, input))
+    {
+        accepted = check_vector_assignable(table, target, source, result);
+    }
+    else if (check_action_is_arithmetic(table, target) && check_action_is_arithmetic(table, input))
     {
         accepted = true;
     }
@@ -563,7 +727,7 @@ static bool check_action_assignable(const TypeTable* table, TypeId destination, 
     {
         accepted = true;
     }
-    else if (target_kind == BUSTER_TYPE_KIND_POINTER && check_action_null(table, source))
+    else if (target_kind == BUSTER_TYPE_KIND_POINTER && check_action_null(table, source, action->extensions))
     {
         accepted = true;
     }
@@ -574,12 +738,17 @@ static bool check_action_assignable(const TypeTable* table, TypeId destination, 
         const uint8_t tk = check_action_kind(table, to);
         const uint8_t fk = check_action_kind(table, from);
         const bool qualifiers = (type_qualifiers(from) & ~type_qualifiers(to)) == 0;
-        const bool void_object = (tk == BUSTER_TYPE_KIND_VOID && fk != BUSTER_TYPE_KIND_FUNCTION) || (fk == BUSTER_TYPE_KIND_VOID && tk != BUSTER_TYPE_KIND_FUNCTION);
-        accepted = qualifiers && (void_object || check_action_compatible(table, type_unqualified(to), type_unqualified(from), result));
+        const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0;
+        const bool void_object = (tk == BUSTER_TYPE_KIND_VOID && (gnu || fk != BUSTER_TYPE_KIND_FUNCTION)) || (fk == BUSTER_TYPE_KIND_VOID && (gnu || tk != BUSTER_TYPE_KIND_FUNCTION));
+        accepted = (qualifiers || gnu) && (void_object || check_action_compatible_at(table, type_unqualified(to), type_unqualified(from), action, result));
+        if (accepted && !qualifiers)
+        {
+            result->warnings |= CHECK_WARNING_DISCARDED_QUALIFIERS;
+        }
     }
     else if ((target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION || target_kind == BUSTER_TYPE_KIND_NULLPTR) && target_kind == input_kind)
     {
-        accepted = check_action_compatible(table, target, input, result);
+        accepted = check_action_compatible_at(table, target, input, action, result);
     }
     return accepted;
 }
@@ -596,9 +765,63 @@ struct CheckIntegerFold
     bool is_signed;
     bool right_signed;
     uint32_t node;
+    uint32_t extensions;
 };
 
-static void check_action_fold_integer(CheckIntegerFold fold, CheckValue* value)
+#include "c_check_integer_extension.c"
+
+static uint32_t check_action_integer_warning(CheckIntegerFold fold, CheckFault fault)
+{
+    uint32_t warning = 0;
+    if (fault == CHECK_FAULT_SIGNED_OVERFLOW &&
+        (fold.op == CHECK_OP_NEGATIVE || fold.op == CHECK_OP_ADD || fold.op == CHECK_OP_SUBTRACT || fold.op == CHECK_OP_MULTIPLY))
+    {
+        warning = CHECK_WARNING_INTEGER_OVERFLOW;
+    }
+    else if (fault == CHECK_FAULT_SHIFT_COUNT)
+    {
+        const bool negative = fold.right_signed && ((fold.right >> (fold.right_width - 1)) & 1) != 0;
+        warning = negative ? CHECK_WARNING_SHIFT_COUNT_NEGATIVE : CHECK_WARNING_SHIFT_COUNT_OVERFLOW;
+    }
+    else if (fault == CHECK_FAULT_SHIFT_VALUE)
+    {
+        const bool negative = fold.is_signed && ((fold.left >> (fold.width - 1)) & 1) != 0;
+        warning = negative ? CHECK_WARNING_SHIFT_NEGATIVE_VALUE : CHECK_WARNING_SHIFT_OVERFLOW;
+    }
+    return warning;
+}
+
+static uint32_t check_action_fold_integer_result(CheckIntegerFold fold, CheckValue* value, unsigned __int128 answer, CheckFault fault)
+{
+    CheckIntegerExtension extension = { 0 };
+    if (fault != CHECK_FAULT_NONE && (fold.extensions & BUSTER_CHECK_EXTENSION_GNU_CONSTANT) != 0)
+    {
+        extension = check_integer_extension(fold, fault);
+    }
+    if (extension.applied)
+    {
+        const bool ice_form = (value->flags & (BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM)) != 0;
+        value->flags &= ~BUSTER_CHECK_ICE;
+        value->flags |= BUSTER_CHECK_GNU_CONSTANT | (ice_form ? BUSTER_CHECK_GNU_ICE_FORM : 0);
+        value->flags |= fold.op == CHECK_OP_DIVIDE || fold.op == CHECK_OP_REMAINDER ? BUSTER_CHECK_GNU_DIVISION : 0;
+        value->constant_kind = CHECK_CONSTANT_INTEGER;
+        value->integer = extension.integer;
+    }
+    else if (fault != CHECK_FAULT_NONE)
+    {
+        check_action_set_fault(value, fault, fold.node);
+    }
+    else
+    {
+        value->constant_kind = CHECK_CONSTANT_INTEGER;
+        value->integer = answer;
+    }
+    // The arithmetic warning belongs to this operation. A GNU folding diagnostic belongs to the required
+    // constant context, which can have a different default severity and must be attached by its source reader.
+    return extension.applied ? check_action_integer_warning(fold, fault) : 0;
+}
+
+static uint32_t check_action_fold_integer(CheckIntegerFold fold, CheckValue* value)
 {
     const unsigned __int128 mask = check_action_mask(fold.width);
     const unsigned __int128 a = fold.left & mask;
@@ -691,15 +914,7 @@ static void check_action_fold_integer(CheckIntegerFold fold, CheckValue* value)
         case CHECK_OP_BIT_XOR: answer = a ^ b; break;
         default: fault = CHECK_FAULT_UNSUPPORTED_CONSTANT; break;
     }
-    if (fault != CHECK_FAULT_NONE)
-    {
-        check_action_set_fault(value, fault, fold.node);
-    }
-    else
-    {
-        value->constant_kind = CHECK_CONSTANT_INTEGER;
-        value->integer = answer;
-    }
+    return check_action_fold_integer_result(fold, value, answer, fault);
 }
 
 static void check_action_fold_floating(CheckOp op, const CheckValue* a, const CheckValue* b, CheckValue* value, uint32_t node)
@@ -769,6 +984,33 @@ static bool check_action_foldable(const CheckValue* value)
     return value->fault == CHECK_FAULT_NONE && value->constant_kind != CHECK_CONSTANT_NONE;
 }
 
+static bool check_action_fold_symbolic(const TypeTable* table, CheckOp op, const CheckValue* left, const CheckValue* right, CheckValue* result)
+{
+    const bool reverse = op == CHECK_OP_ADD && right->constant_kind == CHECK_CONSTANT_ADDRESS;
+    const CheckValue* address = reverse ? right : left;
+    const CheckValue* delta = reverse ? left : right;
+    const bool identity = op == CHECK_OP_POSITIVE;
+    uint32_t width = 0;
+    bool sign = false;
+    const bool valid = check_action_integer_type(table, result->type, &width, &sign) && width == 64 &&
+                       address->constant_kind == CHECK_CONSTANT_ADDRESS && address->object != 0 &&
+                       (address->flags & BUSTER_CHECK_STATIC_OBJECT) != 0 &&
+                       (identity || ((op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT) && delta->constant_kind == CHECK_CONSTANT_INTEGER));
+    if (valid)
+    {
+        // A 64-bit integer relocation retains an object coefficient of one. Addends are target address bits;
+        // unsigned host arithmetic preserves modulo-64 behavior without overflowing a signed host expression.
+        const uint64_t amount = identity ? 0 : (uint64_t)delta->integer;
+        const uint64_t offset = (uint64_t)address->offset;
+        result->constant_kind = CHECK_CONSTANT_ADDRESS;
+        result->object = address->object;
+        result->offset = (int64_t)(op == CHECK_OP_SUBTRACT ? offset - amount : offset + amount);
+        result->flags |= BUSTER_CHECK_STATIC_OBJECT;
+        result->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM);
+    }
+    return valid;
+}
+
 static void check_action_arithmetic(TypeTable* table, const CheckAction* action, CheckActionResult* result, TypeId common_hint, CheckIntegerFold* pending)
 {
     const CheckOp op = action->op;
@@ -827,6 +1069,9 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
             }
             const bool ice = (left.flags & BUSTER_CHECK_ICE) != 0 && (unary || (right.flags & BUSTER_CHECK_ICE) != 0);
             result->value.flags |= ice && check_action_is_integer(table, result->value.type) ? BUSTER_CHECK_ICE : 0;
+            const uint32_t ice_forms = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM;
+            const bool gnu_ice = !ice && (left.flags & ice_forms) != 0 && (unary || (right.flags & ice_forms) != 0);
+            result->value.flags |= gnu_ice && check_action_is_integer(table, result->value.type) ? BUSTER_CHECK_GNU_ICE_FORM : 0;
             if (result->diagnostic == CHECK_DIAG_NONE && check_action_foldable(&left) && (unary || check_action_foldable(&right)))
             {
                 uint32_t width = 0;
@@ -846,6 +1091,7 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
                         .is_signed = is_signed,
                         .right_signed = right_signed,
                         .node = action->node,
+                        .extensions = action->extensions,
                     };
                     if (pending != NULL && width <= 64 && right_width <= 64 && op != CHECK_OP_DIVIDE && op != CHECK_OP_REMAINDER && op != CHECK_OP_MULTIPLY)
                     {
@@ -853,14 +1099,18 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
                     }
                     else
                     {
-                        check_action_fold_integer(fold, &result->value);
+                        result->warnings |= check_action_fold_integer(fold, &result->value);
                     }
                 }
                 else if (left.constant_kind == CHECK_CONSTANT_FLOATING && (unary || right.constant_kind == CHECK_CONSTANT_FLOATING))
                 {
                     check_action_fold_floating(op, &left, &right, &result->value, action->node);
                 }
-                else
+                else if (left.constant_kind == CHECK_CONSTANT_COMPLEX && (unary || right.constant_kind == CHECK_CONSTANT_COMPLEX))
+                {
+                    result->warnings |= check_complex_fold(table, op, &left, &right, &result->value, action->node, action->extensions);
+                }
+                else if (!check_action_fold_symbolic(table, op, &left, &right, &result->value))
                 {
                     check_action_set_fault(&result->value, CHECK_FAULT_UNSUPPORTED_CONSTANT, action->node);
                 }
@@ -889,8 +1139,12 @@ static void check_action_logic(TypeTable* table, const CheckAction* action, Chec
     {
         check_action_inherit(&result->value, &right);
     }
-    const bool right_ice = unary || (right.flags & BUSTER_CHECK_ICE) != 0 || (skips_right && (right.flags & BUSTER_CHECK_ICE_UNEVALUATED) != 0);
-    result->value.flags |= (left.flags & BUSTER_CHECK_ICE) != 0 && right_ice ? BUSTER_CHECK_ICE : 0;
+    const bool right_ice = unary || (right.flags & BUSTER_CHECK_ICE) != 0 ||
+                           (skips_right && (right.flags & (BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_GNU_ICE_FORM)) != 0);
+    const bool ice = (left.flags & BUSTER_CHECK_ICE) != 0 && right_ice;
+    const uint32_t forms = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM;
+    const bool right_form = unary || (right.flags & forms) != 0 || (skips_right && (right.flags & BUSTER_CHECK_ICE_UNEVALUATED) != 0);
+    result->value.flags |= ice ? BUSTER_CHECK_ICE : ((left.flags & forms) != 0 && right_form ? BUSTER_CHECK_GNU_ICE_FORM : 0);
     if (left_known && (unary || skips_right || right_known) && result->diagnostic == CHECK_DIAG_NONE)
     {
         result->value.constant_kind = CHECK_CONSTANT_INTEGER;
@@ -898,16 +1152,16 @@ static void check_action_logic(TypeTable* table, const CheckAction* action, Chec
     }
 }
 
-static TypeId check_action_pointer_common(TypeTable* table, const CheckValue* left, const CheckValue* right, CheckActionResult* result)
+static TypeId check_action_pointer_common(TypeTable* table, const CheckValue* left, const CheckValue* right, const CheckAction* action, CheckActionResult* result)
 {
     TypeId common = 0;
     const bool lp = check_action_kind(table, left->type) == BUSTER_TYPE_KIND_POINTER;
     const bool rp = check_action_kind(table, right->type) == BUSTER_TYPE_KIND_POINTER;
-    if (lp && check_action_null(table, right))
+    if (lp && check_action_null(table, right, action->extensions))
     {
         common = left->type;
     }
-    else if (rp && check_action_null(table, left))
+    else if (rp && check_action_null(table, left, action->extensions))
     {
         common = right->type;
     }
@@ -919,13 +1173,14 @@ static TypeId check_action_pointer_common(TypeTable* table, const CheckValue* le
         const uint8_t rk = check_action_kind(table, r);
         const uint32_t qualifiers = type_qualifiers(l) | type_qualifiers(r);
         TypeId pointee = 0;
-        if ((lk == BUSTER_TYPE_KIND_VOID && rk != BUSTER_TYPE_KIND_FUNCTION) || (rk == BUSTER_TYPE_KIND_VOID && lk != BUSTER_TYPE_KIND_FUNCTION))
+        const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0;
+        if ((lk == BUSTER_TYPE_KIND_VOID && (gnu || rk != BUSTER_TYPE_KIND_FUNCTION)) || (rk == BUSTER_TYPE_KIND_VOID && (gnu || lk != BUSTER_TYPE_KIND_FUNCTION)))
         {
             pointee = BUSTER_TYPE_VOID;
         }
-        else if (check_action_compatible(table, type_unqualified(l), type_unqualified(r), result))
+        else if (check_action_compatible_at(table, type_unqualified(l), type_unqualified(r), action, result))
         {
-            pointee = type_composite(table, type_unqualified(l), type_unqualified(r));
+            pointee = type_composite_at(table, type_unqualified(l), type_unqualified(r), action->transparent_unions, action->tag_completion_count, action->source_position);
             if (pointee == 0 && table->last_error == TYPE_ERROR_FULL)
             {
                 check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
@@ -959,17 +1214,19 @@ static void check_action_conditional(TypeTable* table, const CheckAction* action
         check_action_promote(table, &right, &result->conversions[2], action->node);
         common = type_usual_arithmetic(table, left.type, right.type);
     }
-    else if (check_action_kind(table, left.type) == BUSTER_TYPE_KIND_VOID && check_action_kind(table, right.type) == BUSTER_TYPE_KIND_VOID)
+    else if ((check_action_kind(table, left.type) == BUSTER_TYPE_KIND_VOID && check_action_kind(table, right.type) == BUSTER_TYPE_KIND_VOID) ||
+             ((action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 &&
+              (check_action_kind(table, left.type) == BUSTER_TYPE_KIND_VOID || check_action_kind(table, right.type) == BUSTER_TYPE_KIND_VOID)))
     {
         common = BUSTER_TYPE_VOID;
     }
-    else if ((check_action_kind(table, left.type) == BUSTER_TYPE_KIND_STRUCT || check_action_kind(table, left.type) == BUSTER_TYPE_KIND_UNION || check_action_kind(table, left.type) == BUSTER_TYPE_KIND_NULLPTR) && check_action_compatible(table, left.type, right.type, result))
+    else if ((check_action_kind(table, left.type) == BUSTER_TYPE_KIND_STRUCT || check_action_kind(table, left.type) == BUSTER_TYPE_KIND_UNION || check_action_kind(table, left.type) == BUSTER_TYPE_KIND_NULLPTR) && check_action_compatible_at(table, left.type, right.type, action, result))
     {
         common = left.type;
     }
     else
     {
-        common = check_action_pointer_common(table, &left, &right, result);
+        common = check_action_pointer_common(table, &left, &right, action, result);
     }
     if (common == 0)
     {
@@ -992,22 +1249,30 @@ static void check_action_conditional(TypeTable* table, const CheckAction* action
             check_action_inherit(&result->value, &right);
         }
         result->value.category = CHECK_RVALUE;
-        result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER);
-        const bool left_ice = (left.flags & BUSTER_CHECK_ICE) != 0 || (known && !truth && (left.flags & BUSTER_CHECK_ICE_UNEVALUATED) != 0);
-        const bool right_ice = (right.flags & BUSTER_CHECK_ICE) != 0 || (known && truth && (right.flags & BUSTER_CHECK_ICE_UNEVALUATED) != 0);
-        result->value.flags |= (condition.flags & BUSTER_CHECK_ICE) != 0 && left_ice && right_ice && check_action_is_integer(table, common) ? BUSTER_CHECK_ICE : 0;
+        result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER);
+        const bool left_ice = (left.flags & BUSTER_CHECK_ICE) != 0 ||
+                              (known && !truth && (left.flags & (BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_GNU_ICE_FORM)) != 0);
+        const bool right_ice = (right.flags & BUSTER_CHECK_ICE) != 0 ||
+                               (known && truth && (right.flags & (BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_GNU_ICE_FORM)) != 0);
+        const bool ice = (condition.flags & BUSTER_CHECK_ICE) != 0 && left_ice && right_ice;
+        const uint32_t forms = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM;
+        const bool left_form = (left.flags & forms) != 0 || (known && !truth && (left.flags & BUSTER_CHECK_ICE_UNEVALUATED) != 0);
+        const bool right_form = (right.flags & forms) != 0 || (known && truth && (right.flags & BUSTER_CHECK_ICE_UNEVALUATED) != 0);
+        const bool gnu_ice = (condition.flags & forms) != 0 && left_form && right_form;
+        result->value.flags |= check_action_is_integer(table, common) ? (ice ? BUSTER_CHECK_ICE : (gnu_ice ? BUSTER_CHECK_GNU_ICE_FORM : 0)) : 0;
         check_action_inherit(&result->value, &condition);
     }
 }
 
-static bool check_action_object_pointer(const TypeTable* table, TypeId pointer, CheckActionResult* result)
+static bool check_action_object_pointer(const TypeTable* table, TypeId pointer, const CheckAction* action, CheckActionResult* result)
 {
     bool valid = check_action_kind(table, pointer) == BUSTER_TYPE_KIND_POINTER;
     if (valid)
     {
         const TypeId element = type_element(table, type_strip_aligned(table, pointer));
         const uint8_t kind = check_action_kind(table, element);
-        valid = kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && type_is_complete(table, element);
+        const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 && (kind == BUSTER_TYPE_KIND_VOID || (kind == BUSTER_TYPE_KIND_FUNCTION && action->op != CHECK_OP_SUBSCRIPT));
+        valid = gnu || (kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && check_action_source_complete(table, element, action));
         if (!valid)
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, 0);
@@ -1018,6 +1283,14 @@ static bool check_action_object_pointer(const TypeTable* table, TypeId pointer, 
         check_action_diagnose(result, CHECK_DIAG_POINTER_REQUIRED, 0);
     }
     return valid;
+}
+
+static uint64_t check_action_pointer_stride(const TypeTable* table, TypeId pointer, const CheckAction* action)
+{
+    const TypeId element = type_element(table, type_strip_aligned(table, pointer));
+    const uint8_t kind = check_action_kind(table, element);
+    const bool gnu_byte = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 && (kind == BUSTER_TYPE_KIND_VOID || kind == BUSTER_TYPE_KIND_FUNCTION);
+    return gnu_byte ? 1 : type_size(table, element);
 }
 
 static bool check_action_i64(const TypeTable* table, const CheckValue* value, int64_t* number)
@@ -1053,15 +1326,15 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
     {
         const TypeId le = type_element(table, left.type);
         const TypeId re = type_element(table, right.type);
-        const bool complete = check_action_object_pointer(table, left.type, result) && check_action_object_pointer(table, right.type, result);
-        if (!check_action_compatible(table, type_unqualified(le), type_unqualified(re), result))
+        const bool complete = check_action_object_pointer(table, left.type, action, result) && check_action_object_pointer(table, right.type, action, result);
+        if (!check_action_compatible_at(table, type_unqualified(le), type_unqualified(re), action, result))
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, 1);
         }
         result->value.type = BUSTER_TYPE_LONG;
         if (complete && result->diagnostic == CHECK_DIAG_NONE && check_action_foldable(&left) && check_action_foldable(&right) && left.constant_kind == CHECK_CONSTANT_ADDRESS && right.constant_kind == CHECK_CONSTANT_ADDRESS && left.object != 0 && left.object == right.object)
         {
-            const uint64_t stride = type_size(table, le);
+            const uint64_t stride = check_action_pointer_stride(table, left.type, action);
             int64_t difference = 0;
             if (stride != 0 && stride <= INT64_MAX && !__builtin_sub_overflow(left.offset, right.offset, &difference) && difference % (int64_t)stride == 0)
             {
@@ -1080,17 +1353,19 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
         {
             check_action_diagnose(result, CHECK_DIAG_INTEGER_REQUIRED, index_slot);
         }
-        if (check_action_object_pointer(table, pointer.type, result) && result->diagnostic == CHECK_DIAG_NONE)
+        if (check_action_object_pointer(table, pointer.type, action, result) && result->diagnostic == CHECK_DIAG_NONE)
         {
             check_action_promote(table, &index, &result->conversions[index_slot], action->node);
             result->value.type = action->op == CHECK_OP_SUBSCRIPT ? type_element(table, pointer.type) : pointer.type;
             result->value.category = action->op == CHECK_OP_SUBSCRIPT ? CHECK_LVALUE : CHECK_RVALUE;
             result->value.flags |= pointer.flags & BUSTER_CHECK_STATIC_OBJECT;
             int64_t number = 0;
-            const uint64_t stride = type_size(table, type_element(table, pointer.type));
+            const uint64_t stride = check_action_pointer_stride(table, pointer.type, action);
             int64_t delta = 0;
             int64_t addend = 0;
-            if (pointer.constant_kind == CHECK_CONSTANT_ADDRESS && pointer.fault == CHECK_FAULT_NONE && stride <= INT64_MAX && check_action_i64(table, &index, &number) && !__builtin_mul_overflow(number, (int64_t)stride, &delta))
+            if (!check_action_runtime_size(table, type_element(table, pointer.type)) && pointer.constant_kind == CHECK_CONSTANT_ADDRESS &&
+                pointer.fault == CHECK_FAULT_NONE && stride <= INT64_MAX && check_action_i64(table, &index, &number) &&
+                !__builtin_mul_overflow(number, (int64_t)stride, &delta))
             {
                 const bool fits = action->op == CHECK_OP_SUBTRACT ? !__builtin_sub_overflow(pointer.offset, delta, &addend) : !__builtin_add_overflow(pointer.offset, delta, &addend);
                 if (fits)
@@ -1112,7 +1387,7 @@ static void check_action_pointer_compare(TypeTable* table, const CheckAction* ac
     TypeId common = 0;
     if (equality)
     {
-        common = check_action_pointer_common(table, &left, &right, result);
+        common = check_action_pointer_common(table, &left, &right, action, result);
         if (check_action_kind(table, left.type) == BUSTER_TYPE_KIND_NULLPTR && check_action_kind(table, right.type) == BUSTER_TYPE_KIND_NULLPTR)
         {
             common = BUSTER_TYPE_NULLPTR;
@@ -1122,7 +1397,8 @@ static void check_action_pointer_compare(TypeTable* table, const CheckAction* ac
     {
         const TypeId le = type_element(table, left.type);
         const TypeId re = type_element(table, right.type);
-        if (check_action_kind(table, le) != BUSTER_TYPE_KIND_FUNCTION && check_action_kind(table, le) != BUSTER_TYPE_KIND_VOID && check_action_compatible(table, type_unqualified(le), type_unqualified(re), result))
+        const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0;
+        if ((gnu || (check_action_kind(table, le) != BUSTER_TYPE_KIND_FUNCTION && check_action_kind(table, le) != BUSTER_TYPE_KIND_VOID)) && check_action_compatible_at(table, type_unqualified(le), type_unqualified(re), action, result))
         {
             common = left.type;
         }
@@ -1254,7 +1530,7 @@ static void check_action_member(TypeTable* table, const CheckAction* action, Che
     {
         check_action_diagnose(result, CHECK_DIAG_MEMBER, 0);
     }
-    else if (result->diagnostic == CHECK_DIAG_NONE && !type_is_complete(table, record))
+    else if (result->diagnostic == CHECK_DIAG_NONE && !check_action_source_complete(table, record, action))
     {
         check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, 0);
     }
@@ -1273,7 +1549,7 @@ static void check_action_member(TypeTable* table, const CheckAction* action, Che
             result->value.category = arrow || base.category == CHECK_LVALUE ? CHECK_LVALUE : CHECK_RVALUE;
             check_action_inherit(&result->value, &base);
             result->value.flags |= base.flags & BUSTER_CHECK_STATIC_OBJECT;
-            if (table->members.bit_width[member] != BUSTER_TYPE_NOT_BIT_FIELD)
+            if ((table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0)
             {
                 result->value.flags |= BUSTER_CHECK_BIT_FIELD;
                 result->value.bit_width = table->members.bit_width[member];
@@ -1361,7 +1637,7 @@ static bool check_action_record_modifiable(const TypeTable* table, TypeId record
     return valid;
 }
 
-static bool check_action_modifiable(const TypeTable* table, const CheckValue* value, CheckActionResult* result)
+static bool check_action_modifiable(const TypeTable* table, const CheckValue* value, const CheckAction* action, CheckActionResult* result)
 {
     const uint8_t kind = check_action_kind(table, value->type);
     bool valid = value->category == CHECK_LVALUE;
@@ -1369,7 +1645,7 @@ static bool check_action_modifiable(const TypeTable* table, const CheckValue* va
     {
         check_action_diagnose(result, CHECK_DIAG_LVALUE_REQUIRED, 0);
     }
-    else if ((type_qualifiers(value->type) & BUSTER_TYPE_CONST) != 0 || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_VOID || !type_is_complete(table, value->type))
+    else if ((value->flags & BUSTER_CHECK_VECTOR_DUPLICATE) != 0 || (type_qualifiers(value->type) & BUSTER_TYPE_CONST) != 0 || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_VOID || !check_action_source_complete(table, value->type, action))
     {
         valid = false;
         check_action_diagnose(result, CHECK_DIAG_MODIFIABLE_REQUIRED, 0);
@@ -1410,25 +1686,27 @@ static void check_action_assignment(TypeTable* table, const CheckAction* action,
     TypeId target = store ? action->operands[0].type : action->type;
     if (store)
     {
-        check_action_modifiable(table, &action->operands[0], result);
+        check_action_modifiable(table, &action->operands[0], action, result);
     }
     if (type_is_valid(table, target))
     {
         target = type_conversion_operand(table, target);
-        if (!check_action_assignable(table, target, &source, result))
+        const bool void_return = action->op == CHECK_OP_CONVERT && (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 &&
+                                 check_action_kind(table, target) == BUSTER_TYPE_KIND_VOID && check_action_kind(table, source.type) == BUSTER_TYPE_KIND_VOID;
+        if (!void_return && !check_action_assignable(table, target, &source, action, result))
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, slot);
         }
         else
         {
-            const uint32_t conversion = BUSTER_CHECK_CONVERT_ASSIGNMENT | (check_action_kind(table, target) == BUSTER_TYPE_KIND_POINTER && check_action_null(table, &source) ? BUSTER_CHECK_CONVERT_NULL : 0);
+            const uint32_t conversion = BUSTER_CHECK_CONVERT_ASSIGNMENT | (check_action_kind(table, target) == BUSTER_TYPE_KIND_POINTER && check_action_null(table, &source, action->extensions) ? BUSTER_CHECK_CONVERT_NULL : 0);
             check_action_conversion(table, &source, target, conversion, &result->conversions[slot], action->node);
             result->value = source;
             result->value.category = CHECK_RVALUE;
             if (store)
             {
                 check_action_bit_field_store(table, &action->operands[0], &result->value);
-                result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
+                result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
                 result->value.flags |= BUSTER_CHECK_SIDE_EFFECT;
                 check_action_inherit(&result->value, &action->operands[0]);
             }
@@ -1446,7 +1724,7 @@ static void check_action_update(TypeTable* table, const CheckAction* action, Che
     const bool increment = action->op >= CHECK_OP_PRE_INCREMENT && action->op <= CHECK_OP_POST_DECREMENT;
     const bool postfix = action->op == CHECK_OP_POST_INCREMENT || action->op == CHECK_OP_POST_DECREMENT;
     const uint8_t kind = check_action_kind(table, type_conversion_operand(table, target.type));
-    if (check_action_modifiable(table, &target, result))
+    if (check_action_modifiable(table, &target, action, result))
     {
         if (increment && kind == BUSTER_TYPE_KIND_COMPLEX)
         {
@@ -1515,7 +1793,7 @@ static void check_action_update(TypeTable* table, const CheckAction* action, Che
                     result->value = before;
                 }
                 result->value.category = CHECK_RVALUE;
-                result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_REGISTER);
+                result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_REGISTER);
                 result->value.flags |= BUSTER_CHECK_SIDE_EFFECT;
                 if (result->value.fault != CHECK_FAULT_NONE)
                 {
@@ -1536,7 +1814,14 @@ static void check_action_cast(TypeTable* table, const CheckAction* action, Check
     const bool source_pointer = input_kind == BUSTER_TYPE_KIND_POINTER;
     const bool pointer_float = (target_pointer && !check_action_is_integer(table, source.type) && !source_pointer && input_kind != BUSTER_TYPE_KIND_NULLPTR) || (source_pointer && !target_pointer && !check_action_is_integer(table, target));
     const bool scalar = check_action_is_scalar(table, target) && check_action_is_scalar(table, source.type) && !pointer_float;
-    if (target_kind != BUSTER_TYPE_KIND_VOID && !scalar)
+    const bool record = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 &&
+                        (target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION) &&
+                        target_kind == input_kind && check_action_compatible_at(table, target, type_unqualified(source.type), action, result);
+    if ((target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION) && !check_action_source_complete(table, target, action))
+    {
+        check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, 0);
+    }
+    else if (target_kind != BUSTER_TYPE_KIND_VOID && !scalar && !record)
     {
         check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, 0);
     }
@@ -1544,14 +1829,19 @@ static void check_action_cast(TypeTable* table, const CheckAction* action, Check
     {
         check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, 0);
     }
+    else if (input_kind == BUSTER_TYPE_KIND_NULLPTR && !target_pointer && target_kind != BUSTER_TYPE_KIND_NULLPTR && target_kind != BUSTER_TYPE_KIND_VOID && target != BUSTER_TYPE_BOOL)
+    {
+        check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, 0);
+    }
     else
     {
         const bool ice = check_action_is_integer(table, target) && ((source.flags & BUSTER_CHECK_ICE) != 0 || (source.flags & BUSTER_CHECK_FLOAT_LITERAL) != 0);
-        const bool null = target_pointer && check_action_kind(table, type_element(table, target)) == BUSTER_TYPE_KIND_VOID && check_action_null(table, &source);
+        const bool gnu_ice = check_action_is_integer(table, target) && (source.flags & BUSTER_CHECK_GNU_ICE_FORM) != 0;
+        const bool null = target_pointer && check_action_kind(table, type_element(table, target)) == BUSTER_TYPE_KIND_VOID && check_action_null(table, &source, action->extensions);
         check_action_conversion(table, &source, target, BUSTER_CHECK_CONVERT_CAST, &result->conversions[0], action->node);
         result->value = source;
-        result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
-        result->value.flags |= (ice ? BUSTER_CHECK_ICE : 0) | (null ? BUSTER_CHECK_NULL_POINTER : 0);
+        result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
+        result->value.flags |= (ice ? BUSTER_CHECK_ICE : (gnu_ice ? BUSTER_CHECK_GNU_ICE_FORM : 0)) | (null ? BUSTER_CHECK_NULL_POINTER : 0);
         if (target_kind == BUSTER_TYPE_KIND_VOID)
         {
             result->value.constant_kind = CHECK_CONSTANT_NONE;
@@ -1564,11 +1854,12 @@ static void check_action_query(TypeTable* table, const CheckAction* action, Chec
     const TypeId target = action->type != 0 ? action->type : action->operands[0].type;
     const uint8_t kind = check_action_kind(table, target);
     const bool bit_field = action->type == 0 && action->operands[0].category == CHECK_LVALUE && (action->operands[0].flags & BUSTER_CHECK_BIT_FIELD) != 0;
-    if (bit_field || kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_VOID || !type_is_complete(table, target))
+    const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 && (kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_VOID);
+    if (bit_field || (!gnu && (kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_VOID || !check_action_source_complete(table, target, action))))
     {
         check_action_diagnose(result, bit_field ? CHECK_DIAG_BIT_FIELD : CHECK_DIAG_INCOMPLETE, 0);
     }
-    else if (kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && action->op == CHECK_OP_SIZEOF)
+    else if (check_action_runtime_size(table, target) && action->op == CHECK_OP_SIZEOF)
     {
         check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0);
     }
@@ -1578,8 +1869,86 @@ static void check_action_query(TypeTable* table, const CheckAction* action, Chec
         result->value.category = CHECK_RVALUE;
         result->value.flags = BUSTER_CHECK_ICE;
         result->value.constant_kind = CHECK_CONSTANT_INTEGER;
-        result->value.integer = action->op == CHECK_OP_SIZEOF ? type_size(table, target) : type_alignment(table, target);
+        const uint64_t alignment = type_alignment(table, target);
+        const uint64_t gnu_alignment = kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 1;
+        result->value.integer = action->op == CHECK_OP_SIZEOF ? (gnu ? 1 : type_size(table, target)) : gnu && alignment < gnu_alignment ? gnu_alignment : alignment;
     }
+}
+
+static void check_action_vla(TypeTable* table, const CheckAction* action, CheckActionResult* result)
+{
+    if (action->op == CHECK_OP_VLA_EXTENT)
+    {
+        result->value.type = BUSTER_TYPE_ULONG;
+        if (action->member == 0)
+        {
+            check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0);
+        }
+    }
+    else
+    {
+        CheckValue size = check_action_operand(table, action, result, 0);
+        if (!check_action_is_integer(table, size.type))
+        {
+            check_action_diagnose(result, CHECK_DIAG_INTEGER_REQUIRED, 0);
+        }
+        else if (action->op == CHECK_OP_VLA_BOUND && action->member == 0)
+        {
+            check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0);
+        }
+        else if (action->op == CHECK_OP_SIZEOF_VLA && !check_action_source_complete(table, action->type, action))
+        {
+            check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, 0);
+        }
+        else if (action->op == CHECK_OP_SIZEOF_VLA && !check_action_runtime_size(table, action->type))
+        {
+            check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else
+        {
+            check_action_conversion(table, &size, BUSTER_TYPE_ULONG, BUSTER_CHECK_CONVERT_ARITHMETIC, &result->conversions[0], action->node);
+            result->value = size;
+            result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
+            result->value.constant_kind = CHECK_CONSTANT_NONE;
+        }
+    }
+}
+
+static TypeId check_action_transparent_parameter(const TypeTable* table, TypeId destination, const CheckValue* source,
+                                                const CheckAction* action, CheckActionResult* result)
+{
+    TypeId selected = 0;
+    if (type_is_transparent_union(table, destination))
+    {
+        const uint32_t index = type_index(type_strip_aligned(table, destination));
+        const uint32_t tag = table->types.index[index];
+        const bool active = action->transparent_unions == NULL ||
+                            (tag < action->tag_completion_count && action->transparent_unions[tag] != 0 &&
+                             action->transparent_unions[tag] <= action->source_position);
+        if (active && check_action_source_complete(table, destination, action))
+        {
+            const uint32_t first = table->tags.member_begin[tag];
+            const uint32_t count = table->tags.member_count[tag];
+            CheckAction strict = *action;
+            // Transparent-union selection requires an actual assignment-compatible member. The ordinary GNU
+            // qualifier-discard and object/function-pointer extensions do not create a matching alternative.
+            strict.extensions &= ~BUSTER_CHECK_EXTENSION_GNU;
+            for (uint32_t i = 0; selected == 0 && result->diagnostic == CHECK_DIAG_NONE && i < count; i += 1)
+            {
+                CheckActionResult candidate = { 0 };
+                const TypeId member = type_conversion_operand(table, table->members.type[first + i]);
+                if (check_action_assignable(table, member, source, &strict, &candidate))
+                {
+                    selected = member;
+                }
+                else if (candidate.diagnostic == CHECK_DIAG_RESOURCE)
+                {
+                    check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+                }
+            }
+        }
+    }
+    return selected;
 }
 
 static void check_action_call(TypeTable* table, const CheckAction* action, CheckActionResult* result)
@@ -1612,7 +1981,7 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
         result->value.type = type_return(table, function);
         result->value.flags = BUSTER_CHECK_SIDE_EFFECT;
         check_action_inherit(&result->value, &callee);
-        if (check_action_kind(table, result->value.type) != BUSTER_TYPE_KIND_VOID && !type_is_complete(table, result->value.type))
+        if (check_action_kind(table, result->value.type) != BUSTER_TYPE_KIND_VOID && !check_action_source_complete(table, result->value.type, action))
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, 0);
         }
@@ -1621,6 +1990,10 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
             CheckAction argument = { 0 };
             argument.operands[0] = action->arguments[i];
             argument.node = action->node;
+            argument.tag_completions = action->tag_completions;
+            argument.tag_completion_count = action->tag_completion_count;
+            argument.source_position = action->source_position;
+            argument.extensions = action->extensions;
             CheckActionResult converted = { 0 };
             if (!type_is_valid(table, argument.operands[0].type))
             {
@@ -1635,20 +2008,34 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
                 {
                     check_action_promote(table, &value, &converted.conversions[0], action->node);
                 }
-                const TypeId destination = parameter ? parameters[i] : type_default_argument_promote(table, value.type);
-                if (!check_action_assignable(table, destination, &value, &converted))
+                TypeId destination = parameter ? parameters[i] : type_default_argument_promote(table, value.type);
+                bool assignable = check_action_assignable(table, destination, &value, action, &converted);
+                bool transparent = false;
+                if (!assignable && parameter && converted.diagnostic == CHECK_DIAG_NONE)
                 {
-                    check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, i + 1);
+                    const TypeId member = check_action_transparent_parameter(table, destination, &value, action, &converted);
+                    if (member != 0)
+                    {
+                        destination = member;
+                        assignable = true;
+                        transparent = true;
+                    }
+                }
+                if (!assignable)
+                {
+                    check_action_diagnose(result, converted.diagnostic != CHECK_DIAG_NONE ? converted.diagnostic : CHECK_DIAG_INCOMPATIBLE, i + 1);
                 }
                 else
                 {
-                    const uint32_t conversion = parameter ? BUSTER_CHECK_CONVERT_ASSIGNMENT : destination != value.type ? BUSTER_CHECK_CONVERT_PROMOTION : 0;
+                    const uint32_t conversion = (parameter ? BUSTER_CHECK_CONVERT_ASSIGNMENT : destination != value.type ? BUSTER_CHECK_CONVERT_PROMOTION : 0) |
+                                                (transparent ? BUSTER_CHECK_CONVERT_TRANSPARENT_UNION : 0);
                     check_action_conversion(table, &value, destination, conversion, &converted.conversions[0], action->node);
                 }
                 if (converted.diagnostic != CHECK_DIAG_NONE)
                 {
                     check_action_diagnose(result, converted.diagnostic, i + 1);
                 }
+                result->warnings |= converted.warnings;
                 action->argument_conversions[i] = converted.conversions[0];
                 check_action_inherit(&result->value, &value);
             }
@@ -1656,16 +2043,29 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
     }
 }
 
+#include "c_check_complex.c"
+#include "c_check_vector.c"
+
 static uint32_t check_action_operand_count(const CheckAction* action)
 {
     uint32_t count = 2;
     switch (action->op)
     {
+        case CHECK_OP_VLA_EXTENT:
+        case CHECK_OP_BUILTIN_MISC:
+        case CHECK_OP_BUILTIN_FLOAT:
+        case CHECK_OP_BUILTIN_QUERY:
+        case CHECK_OP_BUILTIN_ATOMIC:
+        case CHECK_OP_BUILTIN_VECTOR:
+        case CHECK_OP_BUILTIN_X86:
+        case CHECK_OP_BUILTIN_BIT_CAST: count = 0; break;
         case CHECK_OP_VALUE:
         case CHECK_OP_POSITIVE:
         case CHECK_OP_NEGATIVE:
         case CHECK_OP_NOT:
         case CHECK_OP_BIT_NOT:
+        case CHECK_OP_REAL:
+        case CHECK_OP_IMAGINARY:
         case CHECK_OP_CAST:
         case CHECK_OP_ADDRESS:
         case CHECK_OP_DEREFERENCE:
@@ -1678,13 +2078,87 @@ static uint32_t check_action_operand_count(const CheckAction* action)
         case CHECK_OP_PRE_INCREMENT:
         case CHECK_OP_PRE_DECREMENT:
         case CHECK_OP_POST_INCREMENT:
-        case CHECK_OP_POST_DECREMENT: count = 1; break;
+        case CHECK_OP_POST_DECREMENT:
+        case CHECK_OP_SELECT:
+        case CHECK_OP_BUILTIN_UNARY:
+        case CHECK_OP_STATEMENT_VALUE:
+        case CHECK_OP_VLA_BOUND:
+        case CHECK_OP_SIZEOF_VLA: count = 1; break;
         case CHECK_OP_SIZEOF:
         case CHECK_OP_ALIGNOF: count = action->type == 0 ? 1 : 0; break;
-        case CHECK_OP_CONDITIONAL: count = 3; break;
+        case CHECK_OP_CONDITIONAL:
+        case CHECK_OP_BUILTIN_OVERFLOW: count = 3; break;
         default: break;
     }
     return count;
+}
+
+static bool check_action_floating_type(const TypeTable* table, TypeId type)
+{
+    TypeId base = type_strip_aligned(table, type);
+    if (type_kind(table, base) == BUSTER_TYPE_KIND_COMPLEX || check_vector_type(table, base))
+    {
+        base = type_element(table, base);
+    }
+    return type_kind(table, base) == BUSTER_TYPE_KIND_FLOATING;
+}
+
+static bool check_action_fp_conversion(const TypeTable* table, TypeId source, TypeId destination)
+{
+    const TypeId from = type_unqualified(type_strip_aligned(table, source));
+    const TypeId to = type_unqualified(type_strip_aligned(table, destination));
+    return from != to && to != BUSTER_TYPE_VOID &&
+           (check_action_floating_type(table, from) || check_action_floating_type(table, to));
+}
+
+static void check_action_fp_environment(const TypeTable* table, const CheckAction* action, CheckActionResult* result)
+{
+    if ((action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 && result->diagnostic == CHECK_DIAG_NONE)
+    {
+        bool floating = false;
+        bool sensitive = false;
+        const uint32_t count = check_action_operand_count(action);
+        uint32_t evaluated = (1u << count) - 1;
+        bool truth = false;
+        const bool fixed_condition = count != 0 && (action->operands[0].flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
+                                     !check_action_floating_type(table, action->operands[0].type) &&
+                                     check_action_truth(table, &action->operands[0], &truth);
+        if (fixed_condition && ((action->op == CHECK_OP_LOGICAL_AND && !truth) || (action->op == CHECK_OP_LOGICAL_OR && truth)))
+        {
+            evaluated = 1;
+        }
+        else if (fixed_condition && action->op == CHECK_OP_CONDITIONAL)
+        {
+            evaluated = truth ? 3 : 5;
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            if ((evaluated & (1u << i)) != 0)
+            {
+                floating |= check_action_floating_type(table, action->operands[i].type);
+                sensitive |= result->conversions[i].type != 0 &&
+                             check_action_fp_conversion(table, action->operands[i].type, result->conversions[i].type);
+            }
+        }
+        if (action->op == CHECK_OP_CALL && action->argument_conversions != NULL)
+        {
+            for (uint32_t i = 0; i < action->argument_count; i += 1)
+            {
+                sensitive |= check_action_fp_conversion(table, action->arguments[i].type, action->argument_conversions[i].type);
+            }
+        }
+        // Source constants still describe translation-time evaluation. This separate flag prevents runtime
+        // consumers from discarding exceptions, assuming nearest rounding, or pruning environment-dependent branches.
+        const bool arithmetic = action->op == CHECK_OP_POSITIVE || action->op == CHECK_OP_NEGATIVE || action->op == CHECK_OP_NOT ||
+                                (action->op >= CHECK_OP_ADD && action->op <= CHECK_OP_LOGICAL_OR) || action->op == CHECK_OP_CONDITION ||
+                                (action->op >= CHECK_OP_PRE_INCREMENT && action->op <= CHECK_OP_BIT_XOR_ASSIGN);
+        sensitive |= floating && arithmetic;
+        sensitive |= action->op == CHECK_OP_CONDITIONAL && check_action_floating_type(table, action->operands[0].type);
+        if (sensitive)
+        {
+            result->value.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
+        }
+    }
 }
 
 static void check_action_compute(TypeTable* table, const CheckAction* action, CheckActionResult* result, TypeId common_hint, CheckIntegerFold* pending)
@@ -1705,23 +2179,48 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
         {
             check_action_diagnose(result, CHECK_DIAG_INVALID_TYPE, i);
         }
+        if (action->operands[i].overload_head != 0 && action->op != CHECK_OP_VALUE && action->op != CHECK_OP_SELECT && action->op != CHECK_OP_ADDRESS)
+        {
+            check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, i);
+        }
         result->conversions[i].type = action->operands[i].type;
     }
-    if ((action->op == CHECK_OP_CAST || action->op == CHECK_OP_INITIALIZE || action->op == CHECK_OP_CONVERT || ((action->op == CHECK_OP_SIZEOF || action->op == CHECK_OP_ALIGNOF) && action->type != 0)) && !type_is_valid(table, action->type))
+    for (uint32_t i = 0; action->arguments != 0 && i < action->argument_count; i += 1)
+    {
+        if (action->arguments[i].overload_head != 0)
+        {
+            check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, i + 1);
+        }
+    }
+    if ((action->op == CHECK_OP_CAST || action->op == CHECK_OP_INITIALIZE || action->op == CHECK_OP_CONVERT || action->op == CHECK_OP_SIZEOF_VLA || ((action->op == CHECK_OP_SIZEOF || action->op == CHECK_OP_ALIGNOF) && action->type != 0)) && !type_is_valid(table, action->type))
     {
         check_action_diagnose(result, CHECK_DIAG_INVALID_TYPE, 0);
     }
-    if (result->diagnostic == CHECK_DIAG_NONE)
+    if (result->diagnostic == CHECK_DIAG_NONE && !check_vector_action(table, action, result))
     {
         const uint8_t left_kind = count != 0 ? check_action_kind(table, action->operands[0].type) : BUSTER_TYPE_KIND_NONE;
         const uint8_t right_kind = count >= 2 ? check_action_kind(table, action->operands[1].type) : BUSTER_TYPE_KIND_NONE;
         const bool pointer_pair = left_kind == BUSTER_TYPE_KIND_POINTER || right_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(left_kind) || type_kind_is_array(right_kind) || left_kind == BUSTER_TYPE_KIND_FUNCTION || right_kind == BUSTER_TYPE_KIND_FUNCTION || left_kind == BUSTER_TYPE_KIND_NULLPTR || right_kind == BUSTER_TYPE_KIND_NULLPTR;
         switch (action->op)
         {
-            case CHECK_OP_VALUE: result->value = action->operands[0]; break;
+            case CHECK_OP_VALUE:
+            case CHECK_OP_SELECT: result->value = action->operands[0]; break;
+            case CHECK_OP_VLA_BOUND:
+            case CHECK_OP_VLA_EXTENT:
+            case CHECK_OP_SIZEOF_VLA: check_action_vla(table, action, result); break;
+            case CHECK_OP_STATEMENT_VALUE:
+            {
+                result->value = check_action_operand(table, action, result, 0);
+                result->value.category = CHECK_RVALUE;
+                result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
+                result->value.flags |= action->member & BUSTER_CHECK_SIDE_EFFECT;
+                if ((action->member & ~BUSTER_CHECK_SIDE_EFFECT) != 0)
+                {
+                    check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0);
+                }
+            } break;
             case CHECK_OP_POSITIVE:
             case CHECK_OP_NEGATIVE:
-            case CHECK_OP_BIT_NOT:
             case CHECK_OP_MULTIPLY:
             case CHECK_OP_DIVIDE:
             case CHECK_OP_REMAINDER:
@@ -1730,6 +2229,19 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
             case CHECK_OP_BIT_AND:
             case CHECK_OP_BIT_OR:
             case CHECK_OP_BIT_XOR: check_action_arithmetic(table, action, result, common_hint, pending); break;
+            case CHECK_OP_BIT_NOT:
+            {
+                if (left_kind == BUSTER_TYPE_KIND_COMPLEX)
+                {
+                    check_complex_conjugate(table, action, result);
+                }
+                else
+                {
+                    check_action_arithmetic(table, action, result, common_hint, pending);
+                }
+            } break;
+            case CHECK_OP_REAL:
+            case CHECK_OP_IMAGINARY: check_complex_part(table, action, result); break;
             case CHECK_OP_ADD:
             case CHECK_OP_SUBTRACT:
             {
@@ -1787,8 +2299,8 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
                 const CheckValue right = check_action_operand(table, action, result, 1);
                 result->value = right;
                 result->value.category = CHECK_RVALUE;
-                result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
-                const uint32_t allowed = BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED;
+                result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
+                const uint32_t allowed = BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_GNU_ICE_FORM;
                 result->value.flags |= (left.flags & allowed) != 0 && (right.flags & allowed) != 0 ? BUSTER_CHECK_ICE_UNEVALUATED : 0;
                 if (left.fault != CHECK_FAULT_NONE)
                 {
@@ -1800,7 +2312,11 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
             case CHECK_OP_ADDRESS:
             {
                 const CheckValue operand = action->operands[0];
-                if ((operand.flags & BUSTER_CHECK_BIT_FIELD) != 0)
+                if ((operand.flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0)
+                {
+                    check_action_diagnose(result, CHECK_DIAG_LVALUE_REQUIRED, 0);
+                }
+                else if ((operand.flags & BUSTER_CHECK_BIT_FIELD) != 0)
                 {
                     check_action_diagnose(result, CHECK_DIAG_BIT_FIELD, 0);
                 }
@@ -1817,7 +2333,7 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
                     result->value = operand;
                     result->value.type = type_pointer(table, operand.type);
                     result->value.category = CHECK_RVALUE;
-                    result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER);
+                    result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_VOLATILE_PART);
                     if ((operand.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && result->value.constant_kind == CHECK_CONSTANT_ADDRESS && result->value.object != 0)
                     {
                         result->value.constant_kind = CHECK_CONSTANT_NONE;
@@ -1840,7 +2356,7 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
                     result->value = pointer;
                     result->value.type = type_element(table, type_strip_aligned(table, pointer.type));
                     result->value.category = check_action_kind(table, result->value.type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
-                    result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
+                    result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
                     // Keep an incomplete designator until its context is known: &*p is valid even for void*.
                     // An ordinary value context rejects the incomplete type in check_action_operand.
                 }
@@ -1851,13 +2367,24 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
             case CHECK_OP_MEMBER:
             case CHECK_OP_ARROW: check_action_member(table, action, result); break;
             case CHECK_OP_CALL: check_action_call(table, action, result); break;
+            case CHECK_OP_BUILTIN_UNARY:
+            case CHECK_OP_BUILTIN_OVERFLOW:
+            case CHECK_OP_VARARGS:
+            case CHECK_OP_BUILTIN_MISC:
+            case CHECK_OP_BUILTIN_FLOAT:
+            case CHECK_OP_BUILTIN_QUERY:
+            case CHECK_OP_BUILTIN_ATOMIC:
+            case CHECK_OP_BUILTIN_VECTOR:
+            case CHECK_OP_BUILTIN_X86:
+            case CHECK_OP_BUILTIN_BIT_CAST: check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0); break;
             default: check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0); break;
         }
     }
+    check_action_fp_environment(table, action, result);
     if (result->diagnostic != CHECK_DIAG_NONE)
     {
         result->value.constant_kind = CHECK_CONSTANT_NONE;
-        result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED);
+        result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_ICE_UNEVALUATED);
         if (pending != NULL)
         {
             pending->active = false;
@@ -1984,15 +2511,7 @@ static void check_action_fold_vector(const CheckIntegerFold* folds, CheckActionR
         {
             const uint32_t bit = 1u << i;
             const CheckFault fault = (overflow & bit) != 0 ? CHECK_FAULT_SIGNED_OVERFLOW : ((bad_shift & bit) != 0 ? CHECK_FAULT_SHIFT_COUNT : ((bad_value & bit) != 0 ? CHECK_FAULT_SHIFT_VALUE : CHECK_FAULT_NONE));
-            if (fault != CHECK_FAULT_NONE)
-            {
-                check_action_set_fault(&results[i].value, fault, folds[i].node);
-            }
-            else
-            {
-                results[i].value.constant_kind = CHECK_CONSTANT_INTEGER;
-                results[i].value.integer = values[i];
-            }
+            results[i].warnings |= check_action_fold_integer_result(folds[i], &results[i].value, values[i], fault);
         }
     }
 }

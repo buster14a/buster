@@ -123,6 +123,10 @@ static CheckValue check_builtin_atomic_argument(TypeTable* table, const CheckBui
             const CheckAction action = {
                 .operands = { value },
                 .node = input->node,
+                .tag_completions = input->tag_completions,
+                .tag_completion_count = input->tag_completion_count,
+                .source_position = input->source_position,
+                .extensions = input->extensions,
             };
             value = check_action_operand(table, &action, &converted, 0);
             if (converted.diagnostic != CHECK_DIAG_NONE)
@@ -270,7 +274,14 @@ static void check_builtin_atomic_convert(TypeTable* table, const CheckBuiltinAto
     }
     else if (accepted)
     {
-        accepted = check_action_assignable(table, destination, value, &output->action);
+        const CheckAction context = {
+            .node = input->node,
+            .tag_completions = input->tag_completions,
+            .tag_completion_count = input->tag_completion_count,
+            .source_position = input->source_position,
+            .extensions = input->extensions,
+        };
+        accepted = check_action_assignable(table, destination, value, &context, &output->action);
     }
     if (accepted)
     {

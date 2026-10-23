@@ -38,6 +38,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/tier0_variadic_frame_test.c` and the optional incoming-frame additions to `src/buster/compiler/tier0.c` | Original bounded SysV variadic-frame layout, prologue and address-only local roles, with native ABI consumers, guarded fixtures and independent ordinary-code byte oracles; Default. System V AMD64 ABI and x86 instruction descriptions supply layout and instruction facts, not copied implementation. Existing project ABI, builtin recipes, branch sizing and encoder interfaces are reused. Clang compiles the original native callers externally as the approved host compiler. No external implementation or fixture corpus is imported. |
 | `src/buster/compiler/c_check_builtin_bit_cast.c`, `src/buster/compiler/c_check_builtin_bit_cast_test.c` | Original bounded type-first bit-cast constraints, exact representation metadata and independent source/guarded/partition fixtures; Default. Exact Clang/LLVM 23.1.1 semantic-cast, expression/type and constant-evaluation sources supply behavior facts. Clang runs externally as an oracle; no external implementation, generated table or fixture corpus is copied. Existing type/checker interfaces retain their project provenance. |
 | `src/buster/compiler/c_check_builtin_query.c`, `src/buster/compiler/c_check_builtin_query_test.c` | Original bounded source-proof/runtime-effect query actions and independent source, guarded and partition fixtures; Default. Exact Clang/LLVM 23.1.1 `ExprConstant.cpp` and `CGBuiltin.cpp` supply behavior facts for speculative evaluation, constant-context answers and emitted operand effects. Original approved-host floating-environment observations distinguish source proof from runtime evaluation. No external implementation or fixture corpus is copied. |
+| `src/buster/compiler/c_lowering.c`, `src/buster/compiler/c_lowering_test.c`, `src/buster/compiler/c_lowering_benchmark.c` | Original selective-emission planner and independent graph/Clang fixtures from this repository's #325 at `5e8d24cc717ac405323c635978e5dbae2009373a`; Default. Imported unchanged for #133's semantic source and program consumers. Its original benchmark references are recorded in the source; no external implementation is incorporated. |
 | `src/buster/compiler/c_check_builtin_atomic_rmw.c`, `src/buster/compiler/c_check_builtin_atomic_rmw_test.c`, `src/buster/compiler/c_builtin_atomic_rmw_helpers.c`, `src/buster/compiler/c_builtin_atomic_rmw_helpers_test.c` | Original scalar GNU/legacy atomic read/modify/write checking, baseline SysV helper records, bounded source/native/guarded fixtures and threaded consumer tests; Default. Exact Clang/LLVM 23.1.1 checking and code-generation sources, LLVM's atomic ordering description, System V ABI and x86 instruction facts guide behavior. Clang builtins serve as independent external and compiler-host oracles. Existing project type, checker, ABI, branch-sizing and encoder interfaces are reused. No external implementation, generated table or fixture corpus is imported or copied. Sources and support boundaries are recorded in `docs/c-builtins-integration.md`. |
 | `src/buster/compiler/generated/clang_builtin_metadata_23_1_1.inc`, `src/buster/compiler/generated/clang_builtin_own_main_23_1_1.inc`, `docs/builtin-metadata/own-main.tsv`, `docs/builtin-metadata/own-main.names.txt` | Derived LLVM Project builtin metadata and identifier facts, `Apache-2.0 WITH LLVM-exception`, not first-party declarations or implementation. Extracted from the approved host's signed `clang 23.1.1-1` package using the original C tool below. Exact inputs, installed package provenance, source reference, tool/output digests and commands are retained in `docs/builtin-metadata/clang-23.1.1-inputs.json`; existing `LICENSES/LLVM.txt` is byte-identical to the referenced 23.1.1 license. |
 | `tools/clang_builtin_metadata.c`, `src/buster/compiler/c_builtin_intrinsic_catalog.c`, `src/buster/compiler/c_builtin_intrinsic_catalog_test.c`, `src/buster/compiler/c_builtin_intrinsic_inventory_test.c` | Original bounded data extractor, exact-name scalar/SIMD lookup, inventory/decoder interoperability and independent guarded fixtures; Default. No LLVM implementation is copied. The included generated metadata retains its separate LLVM provenance and license above. |
@@ -349,6 +350,24 @@ inputs and queries are described in `docs/preprocessor-oracle.md`; the entry
 retains the existing LLVM terms. The pragma-printer correction follows
 observable Clang 23.1.1 behavior, with its source references recorded there;
 no Clang or corpus implementation is copied.
+
+## C semantic compatibility references
+
+The original GNU integer folding helper in `c_check_integer_extension.c`
+and its independent generated fixtures use observed Clang 23.1.1 and
+23.1.3 behavior. The rules were checked against
+`clang/lib/AST/ExprConstant.cpp` at LLVM tags `llvmorg-23.1.1` and
+`llvmorg-23.1.3`. Switch constraint diagnostic ordering was checked against
+`clang/lib/Sema/SemaStmt.cpp` and original compiled probes. These files
+were read as behavior references; no LLVM implementation was copied.
+
+Wide-enum completion follows observed Clang behavior and the rules in
+`clang/lib/Sema/SemaDecl.cpp` at `llvmorg-23.1.1`. Diagnostic warning-group
+relationships were checked against that tag's
+`clang/include/clang/Basic/DiagnosticGroups.td`, with original pragma fixtures.
+The original `c_builtin_intrinsic_types.c` decoder and tests use the same tag's
+`ASTContext.cpp`, `Basic/Targets/X86.h` and `BuiltinsBase.td` as descriptor-format
+references. These modules contain no copied LLVM implementation or fixtures.
 
 ## Review limits and distribution
 
