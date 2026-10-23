@@ -1,0 +1,70 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T11:45:48+00:00 CI job of buster14a/buster (run 39948312157, worker 1607223)
+  title: 9700X test / test: #319: Add source-position environments for deferred bodies (#113)
+  link: https://github.com/buster14a/buster/actions/runs/39948312157/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/319
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T11:48:37+00:00 CI job of buster14a/buster (run 39948336232, worker 1641475)
+  title: 9700X test / test: Merge pull request #333 from buster14a/codex/140-allocation
+  link: https://github.com/buster14a/buster/actions/runs/39948336232/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T11:54:41+00:00 CI job of buster14a/buster (run 39948420657, worker 1698330)
+  title: 9700X test / test: #337: Add verified SSA optimization passes and bounded inlining
+  link: https://github.com/buster14a/buster/actions/runs/39948420657/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/337
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T11:58:43+00:00 CI job of buster14a/buster (run 39948449143, worker 1734623)
+  title: 9700X test / test: #338: Connect Tier 1 selection, liveness and native spill emission
+  link: https://github.com/buster14a/buster/actions/runs/39948449143/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/338
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T12:02:47+00:00 CI job of buster14a/buster (run 39949184060, worker 1771255)
+  title: 9700X test / test: #322: Add arena-backed IR, verifier twins and typed-stream lowering (#131)
+  link: https://github.com/buster14a/buster/actions/runs/39949184060/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/322
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T12:05:46+00:00 CI job of buster14a/buster (run 39950181432, worker 1807813)
+  title: 9700X test / test: #329: Attach DWARF 5 at final addresses and preserve perf load mapping bases
+  link: https://github.com/buster14a/buster/actions/runs/39950181432/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/329
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T12:08:22+00:00 CI job of buster14a/buster (run 39948397303, worker 1845089)
+  title: 9700X test / test: Merge pull request #331 from buster14a/codex/142-differential
+  link: https://github.com/buster14a/buster/actions/runs/39948397303/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T12:14:26+00:00 CI job of buster14a/buster (run 39951239490, worker 1903432)
+  title: 9700X test / test: #340: Add text IR parsing and typed/shared-IR execution oracles (#175, #176)
+  link: https://github.com/buster14a/buster/actions/runs/39951239490/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/340
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T12:17:26+00:00 CI job of buster14a/buster (run 39950101933, worker 1940128)
+  title: 9700X test / test: #334: Qualify refinement budget candidates on the 9700X
+  link: https://github.com/buster14a/buster/actions/runs/39950101933/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/334
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T12:22:37+00:00 CI job of buster14a/buster (run 39950700393, worker 1977194)
+  title: 9700X test / test: #339: Add typed integer builtin checks and portable runtime lowering
+  link: https://github.com/buster14a/buster/actions/runs/39950700393/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/339
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T12:25:14+00:00 CI job of buster14a/buster (run 39951194657, worker 2015491)
+  title: 9700X test / test: #324: Add GNU attribute handoff, parser fixes, and machine-mode types
+  link: https://github.com/buster14a/buster/actions/runs/39951194657/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/324
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T12:27:51+00:00 CI job of buster14a/buster (run 39949746949, worker 2051795)
+  title: 9700X test / test: Merge pull request #332 from buster14a/codex/linker-discarded-references-86
+  link: https://github.com/buster14a/buster/actions/runs/39949746949/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 
+1 workers, bound against the shared library's runtime and written as a shared library: 93 atoms, 117 fixups, 795 bytes of code, 12 dynamic symbols, 14 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 2 stubs, a 7016-byte file in 1 chunks, 1 lane:
+  replace          7.7 us ( 0.91 GB/s): count 1.0 layout 0.8 symbols 0.4 dynamic 0.3 open 1.5 chunks 2.0 finish 1.7
+  new file         7.4 us ( 0.95 GB/s): count 1.0 layout 0.8 symbols 0.4 dynamic 0.3 open 1.7 chunks 2.0 finish 1.1
+  in place         0.7 us (10.61 GB/s): the floor, one pwrite
+  new file         1.7 us ( 4.22 GB/s): the floor, one pwrite
+64 workers, bound against the shared library's runtime and written as a shared library: 156 atoms, 936 fixups, 12066 bytes of code, 75 dynamic symbols, 138 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 42 stubs, a 28872-byte file in 1 chunks, 1 lane:
+  replace         13.0 us ( 2.22 GB/s): count 2.1 layout 0.9 symbols 0.6 dynamic 0.9 open 1.5 chunks 4.6 finish 2.3
+  new file        12.0 us ( 2.41 GB/s): count 2.1 layout 0.9 symbols 0.6 dynamic 0.9 open 1.6 chunks 4.6 finish 1.1
+  in place         1.1 us (25.73 GB/s): the floor, one pwrite
+  new file         2.8 us (10.25 GB/s): the floor, one pwrite
+2000 workers, bound against the shared library's runtime and written as a shared library: 2112 atoms, 26105 fixups, 360079 bytes of code, 2011 dynamic symbols, 3745 relocations in .rela.dyn (0 relative) and 45 in 14 words of .relr.dyn, 1273 stubs, a 701776-byte file in 3 chunks, 1 lane:
+  replace        179.1 us ( 3.92 GB/s): count 42.0 layout 6.3 symbols 5.3 dynamic 17.5 open 2.4 chunks 88.6 finish 16.7
+  new file       164.4 us ( 4.27 GB/s): count 42.0 layout 6.3 symbols 5.3 dynamic 17.6 open 2.5 chunks 88.8 finish 1.7
+  in place        18.5 us (37.97 GB/s): the floor, one pwrite
+  new file        43.0 us (16.33 GB/s): the floor, one pwrite
+180000 workers, bound against the shared library's runtime and written as a shared library: 185452 atoms, 2342790 fixups, 32370098 bytes of code, 180011 dynamic symbols, 335635 relocations in .rela.dyn (0 relative) and 2730 in 57 words of .relr.dyn, 113884 stubs, a 63181112-byte file in 242 chunks, 1 lane:
+  replace      21607.4 us ( 2.92 GB/s): count 4265.6 layout 729.5 symbols 634.7 dynamic 2176.4 open 69.3 chunks 12016.3 finish 1683.8
+  new file     19562.7 us ( 3.23 GB/s): count 4269.1 layout 730.5 symbols 639.5 dynamic 2182.6 open 70.4 chunks 11680.3 finish 12.5
+  in place      4488.8 us (14.08 GB/s): the floor, one pwrite
+  new file      8073.8 us ( 7.83 GB/s): the floor, one pwrite
+peak_rss_kib 255384
+user_seconds 0.444269
+system_seconds 0.394609

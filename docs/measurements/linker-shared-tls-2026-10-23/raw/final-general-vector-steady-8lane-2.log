@@ -1,0 +1,21 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T16:12:45+00:00 CI job of buster14a/buster (run 39984806162, worker 4004124)
+  title: 9700X test / test: #347: Add exact Clang intrinsic metadata and operand checking
+  link: https://github.com/buster14a/buster/actions/runs/39984806162/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/347
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by: 
+64 workers, bound against the shared library's runtime and written as a shared library: 284 atoms, 1064 fixups, 13858 bytes of code, 172 dynamic symbols, 235 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 43 stubs, a 39928-byte file in 1 chunks, 8 lanes:
+  replace         23.4 us ( 1.71 GB/s): count 2.2 layout 2.0 symbols 0.4 dynamic 2.0 open 1.7 chunks 11.6 finish 2.6
+  new file        19.6 us ( 2.04 GB/s): count 2.2 layout 1.9 symbols 0.4 dynamic 2.0 open 1.6 chunks 9.8 finish 1.2
+  general-dynamic TLS: 64 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place         1.3 us (30.90 GB/s): the floor, one pwrite
+  new file         3.3 us (12.19 GB/s): the floor, one pwrite
+180000 workers, bound against the shared library's runtime and written as a shared library: 365516 atoms, 2702790 fixups, 37410098 bytes of code, 450012 dynamic symbols, 605636 relocations in .rela.dyn (0 relative) and 2730 in 57 words of .relr.dyn, 113885 stubs, a 93509416-byte file in 357 chunks, 8 lanes:
+  replace      26019.8 us ( 3.59 GB/s): count 2496.5 layout 1510.3 symbols 530.0 dynamic 2707.1 open 73.4 chunks 15050.5 finish 3681.6
+  new file     22795.2 us ( 4.10 GB/s): count 2533.2 layout 1516.1 symbols 526.7 dynamic 2704.6 open 73.5 chunks 15339.2 finish 14.2
+  general-dynamic TLS: 180000 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place      6847.5 us (13.66 GB/s): the floor, one pwrite
+  new file     11901.7 us ( 7.86 GB/s): the floor, one pwrite
+peak_rss_kib 381184
+user_seconds 2.123529
+system_seconds 2.945339

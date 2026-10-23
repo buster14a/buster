@@ -7,6 +7,7 @@
 //
 // Usage: build/compiler benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N]
 //                                            [--only kernels|hash|links|dynamic|static|static-pie|shared]
+//                                            [--tls general|local (with --only shared)] [--exact] [--after-scalar MS]
 //
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...), or with --lanes N to N CPUs, one per core
 // (taskset -c 0-7 for 8), since the lanes' threads keep the affinity they start with. Each figure is a median:
@@ -45,6 +46,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <dlfcn.h>
 
 typedef struct String8 String8;
 struct String8
@@ -74,6 +76,7 @@ struct String8
 // Binding's arrays, for a program that calls libc.
 #define BUSTER_EXECUTABLE_BENCHMARK_BIND_BYTES (1ull << 30)
 #define BUSTER_EXECUTABLE_BENCHMARK_MAX_PROGRAMS 16
+#define BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS 64
 // The kernels' and the hash's figures are medians of this many runs.
 #define BUSTER_EXECUTABLE_BENCHMARK_RUNS 11
 // The links': this many runs after a warm-up, or BUSTER_EXECUTABLE_BENCHMARK_LARGE_RUNS for outputs past
@@ -607,11 +610,34 @@ struct ExecutableBenchmarkWrite
     // How many writes to time after a warm-up, and whether each goes over the last one's file or makes a new one.
     uint32_t runs;
     bool in_place;
+    // Before each timed write, classify this lane's fixup kinds with a scalar scan for this many nanoseconds.
+    uint64_t after_scalar;
     ExecutableResult result;
     uint64_t totals[BUSTER_EXECUTABLE_BENCHMARK_MAX_RUNS];
     uint64_t phases[EXECUTABLE_PHASES][BUSTER_EXECUTABLE_BENCHMARK_MAX_RUNS];
     bool succeeded;
 };
+
+// The scalar twin of fixup-kind classification is representative lighter work before the complete writer. Keep
+// every lane busy over its own bounded input slice; the scan is outside the timed interval and doesn't change it.
+__attribute__((noinline)) static void executable_benchmark_after_scalar(const Link* link, uint64_t nanoseconds)
+{
+    const uint64_t count = link->fixups.count - 1;
+    const FixupId begin = 1 + (FixupId)(count * lane_index() / lane_count());
+    const FixupId end = 1 + (FixupId)(count * (lane_index() + 1) / lane_count());
+    const uint64_t until = executable_now() + nanoseconds;
+    while (executable_now() < until)
+    {
+        uint64_t found = 0;
+        #pragma clang loop vectorize(disable) interleave(disable)
+        for (FixupId i = begin; i < end; i += 1)
+        {
+            const uint8_t kind = link->fixups.kind[i];
+            found += kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD;
+        }
+        __asm__ volatile("" : : "r"(found) : "memory");
+    }
+}
 
 // The lanes' entry point: the warm-up and the timed writes, all in one group, as a compiler runs its phases. Lane 0
 // removes the output before a new file's write, outside the time, and times each write from its start to its return.
@@ -625,6 +651,10 @@ static void executable_benchmark_lane_main(void* argument)
         if (first && !write->in_place)
         {
             unlink(write->path);
+        }
+        if (run > 0 && write->after_scalar != 0)
+        {
+            executable_benchmark_after_scalar(write->link, write->after_scalar);
         }
         lane_sync();
         const uint64_t begin = executable_now();
@@ -697,14 +727,152 @@ static const char* const executable_benchmark_phase_names[EXECUTABLE_PHASES] = {
 // The soname of the benchmark's shared libraries.
 #define BUSTER_EXECUTABLE_BENCHMARK_SONAME "libbuster-benchmark.so"
 
+// Extra original ABI probes for --tls: one function and one distinct TLS symbol per worker. Their names are
+// present before bind_begin, their bytes before bind_end. Each probe returns its TLS value through a real
+// __tls_get_addr call. Half of GD's definitions are preemptible; LD's are hidden module-relative definitions.
+static SymbolId executable_benchmark_tls_symbols(LinkProgram* program, uint32_t count, bool local)
+{
+    Link* link = &program->link;
+    const SymbolId first = link_program_symbol(link, "__tls_get_addr", 0, false, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_RUNTIME_SHARED);
+    for (uint32_t i = 0; first != 0 && i < count; i += 1)
+    {
+        link_program_symbol(link, "buster_tls_probe_", i, true, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM);
+        const uint8_t hidden = local || i % 2 == 0 ? BUSTER_LINK_SYMBOL_HIDDEN : 0;
+        link_program_symbol(link, "buster_tls_value_", i, true, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_TLS | hidden, BUSTER_LINK_SOURCE_PROGRAM);
+    }
+    return link->error == LINK_ERROR_NONE ? first : 0;
+}
+
+static bool executable_benchmark_tls_atoms(LinkProgram* program, SymbolId first, uint32_t count, bool local)
+{
+    // sub rsp,8; TLSGD lea and prefixed PLT call, or TLSLD lea/call and DTPOFF32 lea; load; add rsp,8; ret.
+    static const uint8_t gd[] = {
+        0x48,
+        0x83,
+        0xec,
+        8,
+        0x66,
+        0x48,
+        0x8d,
+        0x3d,
+        0,
+        0,
+        0,
+        0,
+        0x66,
+        0x66,
+        0x48,
+        0xe8,
+        0,
+        0,
+        0,
+        0,
+        0x48,
+        0x8b,
+        0,
+        0x48,
+        0x83,
+        0xc4,
+        8,
+        0xc3,
+    };
+    static const uint8_t ld[] = {
+        0x48,
+        0x83,
+        0xec,
+        8,
+        0x48,
+        0x8d,
+        0x3d,
+        0,
+        0,
+        0,
+        0,
+        0xe8,
+        0,
+        0,
+        0,
+        0,
+        0x48,
+        0x8d,
+        0x80,
+        0,
+        0,
+        0,
+        0,
+        0x48,
+        0x8b,
+        0,
+        0x48,
+        0x83,
+        0xc4,
+        8,
+        0xc3,
+    };
+    const uint64_t size = local ? sizeof(ld) : sizeof(gd);
+    Link* link = &program->link;
+    // The original workload uses initial-exec too, requiring the whole module to fit dlopen's static TLS reserve.
+    // Keep 64 backing objects and cycle the distinct symbols over them: GD still allocates one pair per symbol,
+    // and every probe's ABI result is checked without requiring a non-default loader tunable for large workloads.
+    AtomId data_atoms[BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS] = { 0 };
+    bool result = first != 0;
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        const SymbolId function = first + 1 + 2 * i;
+        const SymbolId target = function + 1;
+        uint8_t* code = BUSTER_ARENA_PUSH_ARRAY(&program->bytes, uint8_t, size);
+        uint64_t* value = i < BUSTER_ARRAY_LENGTH(data_atoms) ? BUSTER_ARENA_PUSH_ARRAY(&program->bytes, uint64_t, 1) : 0;
+        result = code != 0 && (i >= BUSTER_ARRAY_LENGTH(data_atoms) || value != 0);
+        if (result)
+        {
+            memcpy(code, local ? ld : gd, size);
+            if (value != 0)
+            {
+                *value = (uint64_t)i + 1;
+            }
+            const AtomId text = link_add_atom(link, BUSTER_LINK_CLASS_TEXT, 4, size, code, i % program->options.units);
+            result = text != 0 && link_define_symbol(link, function, text, 0, size) &&
+                     link_add_fixup(link, text, local ? 7 : 8, local ? BUSTER_LINK_FIXUP_TLSLD : BUSTER_LINK_FIXUP_TLSGD, target, -4) != 0 &&
+                     link_add_fixup(link, text, local ? 12 : 16, BUSTER_LINK_FIXUP_CALL, first, -4) != 0;
+            result = result && (!local || link_add_fixup(link, text, 19, BUSTER_LINK_FIXUP_DTPOFF32, target, 0) != 0);
+            if (result && value != 0)
+            {
+                data_atoms[i] = link_add_atom(link, BUSTER_LINK_CLASS_TDATA, 3, 8, (uint8_t*)value, i % program->options.units);
+            }
+            const AtomId data = data_atoms[i % BUSTER_ARRAY_LENGTH(data_atoms)];
+            result = result && data != 0 && link_define_symbol(link, target, data, 0, 8);
+            program->code_bytes += size;
+        }
+    }
+    return result;
+}
+
+static bool executable_benchmark_tls_runs(const char* path, uint32_t count)
+{
+    void* library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    bool result = library != 0;
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        char name[64];
+        snprintf(name, sizeof(name), "buster_tls_probe_%u", i);
+        uint64_t (*probe)(void) = (uint64_t (*)(void))dlsym(library, name);
+        result = probe != 0 && probe() == (uint64_t)(i % BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS) + 1;
+    }
+    if (library != 0)
+    {
+        dlclose(library);
+    }
+    return result;
+}
+
 // With `runtime`, the program calls libc: it is bound against the runtime (bind.c) and written as the runtime's kind
 // is for, a dynamic PIE, a static executable (runtime_import_static's), a static PIE (runtime_import_static_pie's) or a
 // shared library (runtime_import_shared's, the program generated as one), its inputs from dynamic.c; otherwise it is
 // written as a static executable without libc. A shared library replaces an existing file by rename, rather than
 // rewriting its inode. The programs that call libc
-// have no general- or local-dynamic TLS accesses, whose relaxation rewrites the atoms' bytes so that a write over them
-// again would fail.
-static bool executable_benchmark_link(const char* directory, uint32_t functions, uint32_t lanes, uint64_t seed, const Runtime* runtime)
+// have no general- or local-dynamic TLS accesses in executables, whose relaxation rewrites the atoms' bytes so that
+// a write over them again would fail. Shared libraries preserve those accesses and may add them with --tls.
+static bool executable_benchmark_link(const char* directory, uint32_t functions, uint32_t lanes, uint64_t seed, const Runtime* runtime, const char* tls, bool exact, uint64_t after_scalar)
 {
     const bool static_runtime = runtime != 0 && runtime_kind_is_static(runtime->kind);
     const bool pie = runtime != 0 && runtime->kind == RUNTIME_KIND_STATIC_PIE;
@@ -733,11 +901,24 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     {
         uint64_t name_bytes = 0;
         uint64_t atom_bytes = 0;
-        const LinkCapacity extra = bind_capacity(runtime, &name_bytes, &atom_bytes);
+        LinkCapacity extra = bind_capacity(runtime, &name_bytes, &atom_bytes);
+        if (tls != 0)
+        {
+            extra.names += 2 * functions + 1;
+            extra.symbols += 2 * functions + 1;
+            extra.atoms += 2 * functions;
+            extra.fixups += 3 * functions;
+            name_bytes += 64 * (uint64_t)functions + 32;
+            atom_bytes += 48 * (uint64_t)functions;
+        }
         bind_arena = arena_reserve(BUSTER_EXECUTABLE_BENCHMARK_BIND_BYTES);
         result = link_program_generate_begin(&program, options, extra, name_bytes, atom_bytes) && bind_arena.base != 0;
+        const bool local = tls != 0 && strcmp(tls, "local") == 0;
+        const SymbolId tls_first = result && tls != 0 ? executable_benchmark_tls_symbols(&program, functions, local) : 0;
+        result = result && (tls == 0 || tls_first != 0);
         result = result && bind_begin(&bind, &program.link, runtime, BIND_PATH_VECTOR, &program.bytes, options.units, &bind_arena);
         result = result && link_program_generate_atoms(&program);
+        result = result && (tls == 0 || executable_benchmark_tls_atoms(&program, tls_first, functions, local));
         result = result && bind_end(&bind, &program.link);
         result = result && link_program_generate_end(&program);
         result = result && link_check(&program.link) == LINK_ERROR_NONE &&
@@ -758,6 +939,7 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     ExecutableBenchmarkWrite write = {
         .link = &program.link,
         .options = {
+            .exact = exact,
             .path = {
                 .pointer = path,
                 .length = strlen(path),
@@ -767,6 +949,7 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
             .runtime = static_runtime ? &static_inputs : 0,
         },
         .path = path,
+        .after_scalar = after_scalar * 1000000ull,
     };
     // A first write, which also fills the layout columns for the kernel's run on the program.
     result = result && executable_benchmark_write(&write, lanes, 0, false);
@@ -833,6 +1016,13 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
             printf("\n");
         }
     }
+    if (result && tls != 0)
+    {
+        result = executable_benchmark_tls_runs(path, functions);
+        const uint32_t objects = functions < BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS ? functions : BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS;
+        printf("  %s-dynamic TLS: %u callable probes and distinct symbols, %u backing objects, %s path, %s\n", tls, functions, objects,
+               exact ? "exact" : "vector", result ? "all results checked" : "failed");
+    }
     // The floor, from the file just written.
     uint8_t* bytes = result ? executable_benchmark_map(size + 1) : 0;
     const int file = bytes != 0 ? open(path, O_RDONLY | O_CLOEXEC) : -1;
@@ -891,7 +1081,10 @@ int run_executable_benchmark(int argc, char** argv)
     memcpy(functions, executable_benchmark_functions, sizeof(executable_benchmark_functions));
     uint64_t lanes = 1;
     uint64_t seed = 1;
+    uint64_t after_scalar = 0;
     const char* only = 0;
+    const char* tls = 0;
+    bool exact = false;
     bool valid = true;
     for (int i = 1; i < argc; i += 1)
     {
@@ -934,11 +1127,27 @@ int run_executable_benchmark(int argc, char** argv)
                               strcmp(only, "static") == 0 || strcmp(only, "static-pie") == 0 || strcmp(only, "shared") == 0);
             i += 1;
         }
+        else if (strcmp(argv[i], "--tls") == 0 && i + 1 < argc)
+        {
+            tls = argv[i + 1];
+            valid = valid && (strcmp(tls, "general") == 0 || strcmp(tls, "local") == 0);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--exact") == 0)
+        {
+            exact = true;
+        }
+        else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
+        {
+            valid = valid && executable_benchmark_parse_u64(argv[i + 1], &after_scalar) && after_scalar <= 1000;
+            i += 1;
+        }
         else
         {
             valid = false;
         }
     }
+    valid = valid && (tls == 0 || (only != 0 && strcmp(only, "shared") == 0));
     const bool writes = only == 0 || (strcmp(only, "kernels") != 0 && strcmp(only, "hash") != 0);
     LaneTeam team = { 0 };
     const bool started = valid && writes && lane_team_start(&team, (uint32_t)lanes, 0);
@@ -946,7 +1155,7 @@ int run_executable_benchmark(int argc, char** argv)
     if (!valid)
     {
         fprintf(stderr, "usage: benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N] [--only "
-                        "kernels|hash|links|dynamic|static|static-pie|shared]\n");
+                        "kernels|hash|links|dynamic|static|static-pie|shared] [--tls general|local (with --only shared)] [--exact] [--after-scalar MS]\n");
     }
     else if (writes && !started)
     {
@@ -955,6 +1164,10 @@ int run_executable_benchmark(int argc, char** argv)
     else
     {
         bool passed = true;
+        if (after_scalar != 0)
+        {
+            printf("Each complete writer sample after %llu ms of scalar fixup classification.\n", (unsigned long long)after_scalar);
+        }
         uint64_t state = seed;
         if (writes)
         {
@@ -974,7 +1187,7 @@ int run_executable_benchmark(int argc, char** argv)
         }
         for (uint32_t i = 0; (only == 0 || strcmp(only, "links") == 0) && i < program_count; i += 1)
         {
-            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, 0) && passed;
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, 0, 0, exact, after_scalar) && passed;
         }
         // The same sizes as dynamic PIEs, against the system's runtime.
         Runtime runtime;
@@ -987,7 +1200,7 @@ int run_executable_benchmark(int argc, char** argv)
         }
         for (uint32_t i = 0; dynamic && imported == RUNTIME_ERROR_NONE && i < program_count; i += 1)
         {
-            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &runtime) && passed;
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &runtime, 0, exact, after_scalar) && passed;
         }
         if (dynamic)
         {
@@ -1008,7 +1221,7 @@ int run_executable_benchmark(int argc, char** argv)
             }
             for (uint32_t i = 0; statics && static_imported == RUNTIME_ERROR_NONE && i < program_count; i += 1)
             {
-                passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &static_runtime) && passed;
+                passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &static_runtime, 0, exact, after_scalar) && passed;
             }
             if (statics)
             {
@@ -1026,7 +1239,7 @@ int run_executable_benchmark(int argc, char** argv)
         }
         for (uint32_t i = 0; libraries && shared_imported == RUNTIME_ERROR_NONE && i < program_count; i += 1)
         {
-            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &shared_runtime) && passed;
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &shared_runtime, tls, exact, after_scalar) && passed;
         }
         if (libraries)
         {

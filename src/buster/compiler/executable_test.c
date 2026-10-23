@@ -19,7 +19,7 @@
 //     (executable_test_expected), from the atoms' addresses and the symbols' definitions, with the TLS segment and the
 //     linker's sections read back from the file's headers; the GOT, a slot for each GOT kind's target, numbered from 1
 //     in symbol order and holding its value; and the headers themselves: the segments in lld's order, 4 KB-congruent,
-//     with contiguous file offsets; and the unwind tables, .eh_frame_hdr read back as an unwinder reads it against the
+//     with one mapping base and zero-filled file gaps; and .eh_frame_hdr read back as an unwinder reads it against the
 //     test's own walk of .eh_frame (executable_test_unwind), which test-dynamic shares.
 //   - Chunks: every chunk boundary of every program, and of programs built to put 4-byte fields (a call's rel32) and
 //     8-byte fields (an ABS64 at an odd offset) across each place around a nominal boundary
@@ -564,7 +564,30 @@ static uint64_t executable_test_file_offset(const ExecutableTestImage* image, ui
     return result;
 }
 
-// The headers: PT_PHDR first and loaded; PT_LOADs in lld's order (R, RX, RW, RW), their offsets contiguous and
+// Native LOADs share one mapping base, even without intermediate segments. Gaps between their file bytes are zero.
+static bool executable_test_load_gaps(String8 file, uint64_t base)
+{
+    const ExecutableTestImage image = executable_test_image_of(file, base != 0 ? ET_EXEC : ET_DYN);
+    bool result = image.valid;
+    uint64_t previous_end = 0;
+    for (uint32_t i = 0; result && i < image.header->e_phnum; i += 1)
+    {
+        const Elf64_Phdr* segment = &image.program_headers[i];
+        if (segment->p_type == PT_LOAD)
+        {
+            result = segment->p_vaddr >= base && segment->p_vaddr - base == segment->p_offset && segment->p_offset >= previous_end &&
+                     segment->p_offset <= file.length && segment->p_filesz <= file.length - segment->p_offset;
+            for (uint64_t at = previous_end; result && at < segment->p_offset; at += 1)
+            {
+                result = file.pointer[at] == 0;
+            }
+            previous_end = segment->p_offset + segment->p_filesz;
+        }
+    }
+    return result;
+}
+
+// The headers: PT_PHDR first and loaded; PT_LOADs in lld's order (R, RX, RW, RW), their offsets nonoverlapping and
 // 4 KB-congruent with their addresses, each from a page after the last's end; PT_TLS within the RELRO segment;
 // PT_GNU_RELRO the RELRO segment to its page's end; PT_GNU_STACK not executable; and the build ID's note.
 static void executable_test_headers(ExecutableTestTally* tally, const ExecutableTestImage* image, uint64_t index)
@@ -584,9 +607,9 @@ static void executable_test_headers(ExecutableTestTally* tally, const Executable
             const Elf64_Phdr* segment = &image->program_headers[i];
             if (segment->p_type == PT_LOAD)
             {
-                // Contiguous but for the first section's alignment: no page of padding.
-                executable_test_expect(tally, loads == 0 || (segment->p_offset >= previous_file_end && segment->p_offset - previous_file_end < BUSTER_EXECUTABLE_PAGE_BYTES),
-                                       "contiguous file offsets", index);
+                executable_test_expect(tally, segment->p_offset >= previous_file_end && segment->p_vaddr >= BUSTER_EXECUTABLE_BASE &&
+                                                  segment->p_vaddr - BUSTER_EXECUTABLE_BASE == segment->p_offset,
+                                       "nonoverlapping offsets with one mapping base", index);
                 executable_test_expect(tally, segment->p_vaddr % BUSTER_EXECUTABLE_PAGE_BYTES == segment->p_offset % BUSTER_EXECUTABLE_PAGE_BYTES &&
                                                   segment->p_align == BUSTER_EXECUTABLE_PAGE_BYTES,
                                        "4 KB-congruent segments", index);
@@ -791,6 +814,7 @@ static uint64_t executable_test_fields(ExecutableTestTally* tally, const Link* l
 {
     const ExecutableTestImage image = executable_test_image(file);
     executable_test_headers(tally, &image, index);
+    executable_test_expect(tally, executable_test_load_gaps(file, BUSTER_EXECUTABLE_BASE), "zeroed gaps between LOAD segments", index);
     uint64_t mismatched = 0;
     uint64_t relaxed_count = 0;
     FixupId first = 0;
@@ -3315,6 +3339,7 @@ static bool executable_test_unwind_writes(ExecutableTestTally* tally, Link* link
             executable_test_print_failure(what, &written);
         }
         const String8 file = succeeded ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
+        executable_test_expect(tally, executable_test_load_gaps(file, BUSTER_EXECUTABLE_BASE), "one LOAD mapping base and zeroed file gaps", w);
         if (w == 0)
         {
             first = file;
@@ -3330,6 +3355,59 @@ static bool executable_test_unwind_writes(ExecutableTestTally* tally, Link* link
     executable_test_expect(tally, ran, "the program runs", 0);
     scratch_end(scratch);
     return same && failed == 0 && ran;
+}
+
+// With and without each writable segment, including RW after an absent RELRO. No debug descriptor is attached.
+static bool executable_test_load_layout(const ExecutableTestDirectory* directory)
+{
+    ExecutableTestTally tally = {
+        .check = "LOAD mapping layout",
+    };
+    Scratch scratch = scratch_begin(0);
+    char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, "load-layout", path_bytes);
+    uint64_t* boundaries = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, BUSTER_EXECUTABLE_TEST_MAX_BOUNDARIES);
+    for (uint32_t mask = 0; mask < 4; mask += 1)
+    {
+        ExecutableTestLink test;
+        bool built = executable_test_link_begin(&test, BUSTER_EXECUTABLE_PAGE_BYTES);
+        const SymbolId start = built ? executable_test_symbol(&test.link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+        ExecutableTestCode code = { 0 };
+        executable_test_exit(&code, 0);
+        built = built && start != 0 && executable_test_code(&test, 32, &code, 1, start) != 0;
+        if (built && (mask & 1) != 0)
+        {
+            built = executable_test_data(&test, BUSTER_LINK_CLASS_DATA_RELRO, 3, 8, 0, 0) != 0;
+        }
+        if (built && (mask & 2) != 0)
+        {
+            built = executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, 0) != 0;
+        }
+        ExecutableResult written = { 0 };
+        const bool wrote = built && boundaries != 0 && executable_test_write(&test.link, start, path, 1, &written, boundaries, BUSTER_EXECUTABLE_TEST_MAX_BOUNDARIES);
+        const String8 file = wrote ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
+        const ExecutableTestImage image = executable_test_image(file);
+        uint32_t writable = 0;
+        for (uint32_t i = 0; image.valid && i < image.header->e_phnum; i += 1)
+        {
+            const Elf64_Phdr* segment = &image.program_headers[i];
+            writable += segment->p_type == PT_LOAD && (segment->p_flags & PF_W) != 0;
+        }
+        const bool relro = executable_test_segment(&image, PT_GNU_RELRO) != 0;
+        executable_test_expect(&tally, image.valid && relro == ((mask & 1) != 0) && writable == (uint32_t)__builtin_popcount(mask),
+                               "requested writable segments are present and all others absent", mask);
+        executable_test_expect(&tally, wrote && executable_test_load_gaps(file, BUSTER_EXECUTABLE_BASE) &&
+                               executable_test_build_id(scratch.arena, file, boundaries, written.chunks), "mapping gaps participate in the build ID", mask);
+        executable_test_expect(&tally, built && executable_test_unwind_writes(&tally, &test.link, start, path, 0, "poisoned lane and exact identity", &written),
+                               "present and absent writable segments", mask);
+        executable_test_link_end(&test);
+    }
+    if (!directory->keep)
+    {
+        unlink(path.pointer);
+    }
+    scratch_end(scratch);
+    return executable_test_report(&tally);
 }
 
 static bool executable_test_unwind_links(const ExecutableTestDirectory* directory)
@@ -3693,6 +3771,8 @@ static bool executable_test_kernel(uint64_t seed)
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
+#include "buster/compiler/executable_symbols_test.c"
+
 static bool executable_test_parse_u64(const char* text, uint64_t* value)
 {
     char* end = 0;
@@ -3767,9 +3847,11 @@ static int run_executable_tests(int argc, char** argv)
         passed = executable_test_limits(&directory, seed) && passed;
         passed = executable_test_frames(seed) && passed;
         passed = executable_test_sort(seed) && passed;
+        passed = executable_test_load_layout(&directory) && passed;
         passed = executable_test_unwind_links(&directory) && passed;
         passed = executable_test_blocks(&directory, seed) && passed;
         passed = executable_test_kernel(seed) && passed;
+        passed = executable_test_symbols(&directory) && passed;
         result = passed ? 0 : 1;
         if (keep)
         {
