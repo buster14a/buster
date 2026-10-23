@@ -37,7 +37,8 @@ The output, in `Parser`:
   and its node depth.
 - **The postorder**, for a unit without errors: the token at each position, and
   each position's subtree size (the subtree is the `sizes[k]` positions ending
-  at `k`), what #133's single-pass type checker reads.
+  at `k`), what #133's single-pass type checker reads. `ParseOptions.tree_only`
+  leaves these two pointers null; the zero-initialized default produces them.
 - **Diagnostics**: clang's message at clang's place for the first error of
   each top-level declaration, and `fatal` for what stopped the parse where no
   diagnostic says it (out of memory, or past the parser's token limit).
@@ -313,6 +314,77 @@ file, out of memory). Every reservation that fails is reported as a fatal
 error, and the reservations stop at the first that fails and are released. The
 compiler's own sources need clang's predefines for their target options
 (`--predefines`, from `clang -dM -E -march=native ...`), as for -E.
+
+The producer `parse_translation_unit` has two output contracts. By default it
+produces the tree, diagnostics, postorder and subtree sizes described above.
+With `ParseOptions.tree_only`, it produces the same token stream, tree and
+diagnostics, and leaves `postorder` and `sizes` null. The tree has `count` byte
+roles and `count` 32-bit parents and depths, in disjoint, 64-byte-aligned
+columns with `BUSTER_PARSE_TOKEN_PADDING` entries of padding on either side.
+The parser owns the columns and diagnostics until its next parse or release;
+the full contract's traversal columns have `count` entries of `uint32_t`, with
+the same alignment and padding. Rendering diagnostics also needs the originating
+preprocessor and intern table. Empty
+units and erroneous units follow the same success and diagnostic rules in both
+modes. Each parse clears the optional output pointers before processing its
+new unit.
+
+`run_parse_command` requests the tree-only contract because its consumer,
+`parse_print_diagnostics`, uses the tokens and diagnostics. This avoids building
+two output columns and five temporary columns, about 28 bytes per token before
+padding, plus their construction and teardown. The default API and
+`benchmark-parser` still produce the traversal that #130/#133 will consume.
+Code-generation throughput awaits those consumers' integration; the available
+whole-process measurement is the current syntax-checking driver.
+
+### Driver measurements, 2026-10-23
+
+On the locked Ryzen 7 9700X, CPU 2 (performance governor, SMT sibling offline),
+Clang 23.1.1's normal `build.sh` builds of main `1f1e116` and candidate `1b9312c`
+ran in five alternating rounds. Each run measured 21 fresh compiler processes
+after one warm-up process; the figures are medians of the five run medians.
+Each run acquired and released `exclusive.sh` independently through `ab`.
+
+| Complete driver workload | Main ms | Tree-only ms | Time reduction | Units/s, main → tree-only |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, vector path | 24.465 | 21.973 | 10.18% | 40.88 → 45.51 |
+| Frozen compiler `main.c`, vector path | 64.406 | 57.149 | 11.27% | 15.53 → 17.50 |
+| `sqlite3.c`, `--scalar` | 42.520 | 40.071 | 5.76% | 23.52 → 24.96 |
+
+The five run medians ranged from 24.438–24.538 and 21.959–22.015 ms for SQLite,
+and 64.369–64.491 and 57.067–57.256 ms for the compiler unit. The improvement
+exceeds the observed process spread and remained after merging current main.
+These are startup, preprocessing, parsing and cleanup together, with
+`-fsyntax-only`; the compiler unit also used `-march=znver5 -fwrapv
+-funsigned-char` and its frozen `src` include directory. The common inputs were
+SQLite SHA-256 `b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189`
+and the source tree of `4be02a8`. Both versions read the same paths and bytes.
+
+The initial fixed-period `perf record` profiles of `4be02a8` on the 9700X, with
+source-line attribution, identified the postorder's child-index, subtree-bound
+and output passes. Local `hot-loops` inspection was diagnostic. Inlining placed their stage samples under
+`parse_benchmark_time` and their driver samples under `run_parse_command`.
+Earlier experiments fused passes, used vector pointer jumping/gather/scatter,
+or accumulated subtree sizes during a walk. None improved the whole driver;
+one fused version improved the isolated stage while slowing the driver about
+3%. A short macro-copy experiment reduced instructions without a useful time
+gain. Those implementations were discarded. The retained change omits output
+the actual driver consumer does not use.
+
+The matched candidate passed `test-parser --clang` (230 snippets, 14,720 block
+alignments, 100,000-level nesting, driver checks and allocation-failure cleanup),
+the SQLite unit (706,586 tokens), and all 733 accepted libc corpus files
+(3,867,223 tokens), with zero mismatches. Every checked unit also compared
+tree-only and full parsing through both scalar and vector paths, including all
+diagnostic fields, while the full paths retained the independent postorder and
+subtree-size oracle. The call-graph check found no unallowed cycles.
+
+Reproduction data, the fresh-process C timing helper, input manifests, profiles
+and logs are retained at `~/buster-fast-bench/codex-opt297/`. The matched builds
+are `current-base` and `current-final`; `driver-current-final.txt` records every
+sample and `ab`'s rotating order. Run the helper beside each `build/compiler`,
+and pass those helper executables as `ab`'s trees, with the common driver
+arguments and the usual per-run lock.
 
 ## Correctness
 
