@@ -1,0 +1,12 @@
+forms: every form number as a branch's: 65605 checks, 0 failed
+errors: what branch_sizing_validate refuses: 1044 checks, 0 failed
+boundaries: probes at every displacement around rel8's limits: 146881 checks, 0 failed
+random functions: 1500 functions, 5157349 records, 1254712 branches, 457460 long; 505 settled in 1 round, 411 in 2, 368 in 3 and 216 in more (66 with the worklist)
+random functions: 28500 checks, 0 failed
+chains: a round per link, then the worklist: 480 checks, 0 failed
+page edges: 2304 cases
+page edges: every column ending at a PROT_NONE page: 4609 checks, 0 failed
+memory: 448 attempts
+memory: no scratch to spare, then 64 bytes more at a time: 898 checks, 0 failed
+GNU as: 404 functions, 404 compared, 404 the same, with 98920 long branches
+GNU as: its relaxation of the functions with labels: 409 checks, 0 failed

@@ -4915,6 +4915,7 @@ static bool predefines_test_refused(void);
 #include "c_preprocessor_history_test.c"
 #include "c_preprocessor_directives_test.c"
 #include "c_preprocessor_order_test.c"
+#include "c_preprocessor_batch_test.c"
 
 static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
 {
@@ -5057,6 +5058,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         }
         printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
         passed_all = failures == 0;
+        passed_all &= pp_test_macro_batches(directory, with_clang);
         passed_all &= pp_test_timestamps(directory, with_clang);
         passed_all &= pp_test_implemented_features(directory);
         passed_all &= predefines_test_target();

@@ -44,13 +44,16 @@
 //     mold and wild, which otherwise fork to leave their teardown to a child, through the helper
 //     (link_benchmark_rusage): its page faults and its peak resident set. A program that does nothing, run the same way
 //     first, shows the least the helper can count.
+// One group of --cpus lanes runs every direct link and object write of the command. Its startup and shutdown are
+// outside their phase timings; the external linkers' wall times include starting each linker process.
 // The runs after each warm-up are the appendix's: BUSTER_LINK_BENCHMARK_RUNS with a pause of 20 ms, or for an output
 // past BUSTER_LINK_BENCHMARK_LARGE_BYTES BUSTER_LINK_BENCHMARK_LARGE_RUNS with 200 ms, and GNU ld's
 // BUSTER_LINK_BENCHMARK_SLOW_RUNS with 500 ms; --runs N sets every count. Every program written must run and print what
 // the program's model predicts; wild doesn't link the static executable or the static PIE of a program whose .tbss is
 // more aligned than its .tdata, whose TLS segment wild 0.10 may start off its alignment (link_benchmark_wild_tls).
 // --only direct and --only linkers run one side, and --keep leaves the directory. The exit status is 1 if the arguments
-// are invalid, a runtime doesn't load from its snapshot, a link fails, or a program doesn't print what it should.
+// are invalid, a runtime doesn't load from its snapshot, the lanes don't start, a link fails, or a program doesn't
+// print what it should.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -1827,6 +1830,13 @@ int run_link_benchmark(int argc, char** argv)
     {
         fprintf(stderr, "benchmark-link: the %s runtime didn't import: error %d, %s\n", link_benchmark_kind_names[failed], (int)opened[failed].error, runtimes[failed].failed_file);
     }
+    LaneTeam team = { 0 };
+    const bool started = made && result && lane_team_start(&team, settings.lanes, settings.cpus);
+    if (made && result && !started)
+    {
+        fprintf(stderr, "benchmark-link: can't start lanes on --cpus\n");
+        result = false;
+    }
     if (made && result)
     {
         printf("benchmark-link: the direct path on %u lane%s from CPU %u, the linkers on %u CPUs or CPU %u; outputs in %s; the snapshots in %s", settings.lanes,
@@ -1839,7 +1849,7 @@ int run_link_benchmark(int argc, char** argv)
                 printf(" (%s: %s)", link_benchmark_kind_names[kind], open->status == SNAPSHOT_STATUS_LOADED ? "loaded" : open->written ? "written" : "not written");
             }
         }
-        printf("\n");
+        printf("\n  one lane group for the command; startup and shutdown are outside the direct and object timings\n");
     }
     for (uint32_t l = 0; made && result && settings.linking && l < BUSTER_LINK_BENCHMARK_LINKERS; l += 1)
     {
@@ -1876,6 +1886,10 @@ int run_link_benchmark(int argc, char** argv)
                 result = result && (!settings.linking || link_benchmark_linkers_on(&settings, (RuntimeKind)kind, programs[i], expected, settings.direct, direct_total));
             }
         }
+    }
+    if (started)
+    {
+        lane_team_stop(&team);
     }
     for (uint32_t kind = 0; made && kind < RUNTIME_KINDS; kind += 1)
     {
