@@ -89,6 +89,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <immintrin.h>
+#include "c_builtin_catalog.c"
 #include "buster/compiler/x86_target.c"
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -12648,10 +12649,10 @@ static const PPFeature pp_features_constexpr_builtin[] = {
 };
 
 // What buster implements, which the feature queries answer outside the oracle's mode (#154: until everything clang
-// supports is, they say exactly what is). Only the preprocessor exists yet, so of builtins only its __is_target_*
-// (which clang's __has_builtin answers 1 for too), and no attribute, feature or extension: the parser, the checker and
-// the code generators add theirs here as they implement them (#127, #133, #147, #148). __has_warning and
-// __has_declspec_attribute answer as clang does in both modes. Sorted for binary search.
+// supports is, they say exactly what is). The preprocessor's __is_target_* are implemented here. C builtins use the
+// shared catalog's source/constant-expression acceptance, independently of recognition and standalone actions.
+// No attribute, feature or extension is advertised here yet. __has_warning and __has_declspec_attribute answer as
+// clang does in both modes. Sorted for binary search.
 static const PPFeature pp_implemented_builtin[] = {
     { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_vendor", 1 },
 };
@@ -12736,10 +12737,12 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
             break;
         case PP_BUILTIN_HAS_BUILTIN:
             result = clang ? pp_feature_lookup(pp_features_builtin, BUSTER_ARRAY_LENGTH(pp_features_builtin), name, length, standard)
-                           : pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, standard);
+                           : pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, standard) |
+                                 cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE);
             break;
         case PP_BUILTIN_HAS_CONSTEXPR_BUILTIN:
-            result = clang ? pp_feature_lookup(pp_features_constexpr_builtin, BUSTER_ARRAY_LENGTH(pp_features_constexpr_builtin), name, length, standard) : 0;
+            result = clang ? pp_feature_lookup(pp_features_constexpr_builtin, BUSTER_ARRAY_LENGTH(pp_features_constexpr_builtin), name, length, standard)
+                           : cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
             break;
         case PP_BUILTIN_HAS_FEATURE:
             result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) | sanitizer : 0;

@@ -25,9 +25,12 @@
 //     _dl_relocate_static_pie applies .relr.dyn and .rela.dyn, its IFUNCs' IRELATIVE relocations last), with the static
 //     executable's IFUNC stubs and TLS relaxation; and it needs its loads and calls through the GOT of the image's
 //     symbols relaxed, as every kind has them (executable_relax_got), since rcrt1.o's _start calls through a slot before
-//     the startup has relocated it.
+//     the startup has relocated it;
+//   - a shared library (step 6), with preemptible exports, initial-exec TLS slots, a distinct two-word TLSGD GOT
+//     pair per referenced symbol and one TLSLD module pair. The loader fills DTPMOD64 module IDs and, for preemptible
+//     TLSGD targets, DTPOFF64 offsets; a local TLSGD offset and a TLSLD access's DTPOFF32 are module-relative.
 // The linker defines __init_array_start, __init_array_end, __fini_array_start, __fini_array_end and
-// _GLOBAL_OFFSET_TABLE_ for all four, and _DYNAMIC for the PIEs.
+// _GLOBAL_OFFSET_TABLE_ for all five, and _DYNAMIC for the dynamic images.
 //
 // The image, at BUSTER_EXECUTABLE_BASE (or a PIE's at 0, which the loader places), is lld's: four PT_LOAD segments in
 // lld's order, each from the next page at its file offset's place in a page. File offsets equal virtual offsets from
@@ -677,6 +680,10 @@ struct ExecutablePatch
     const int64_t* wide_addends;
     const uint32_t* reference;
     const uint32_t* got_slots;
+    // A shared library's TLSGD pairs, indexed by symbol independently of initial-exec slots; null otherwise.
+    const uint32_t* tlsgd_slots;
+    uint64_t tlsld_slot;
+    uint64_t tls_block;
     const uint64_t* sizes;
     // The image's base address (BUSTER_EXECUTABLE_BASE, or 0 for a dynamic PIE) and the GOT's image offset.
     uint64_t base;
@@ -883,8 +890,12 @@ BUSTER_INLINE bool executable_patch_other(ExecutablePatch patch, uint8_t* bytes,
             width = 8;
             break;
         case BUSTER_LINK_FIXUP_DTPOFF32:
-            // After a local-dynamic access's relaxation, its base is the thread pointer.
-            value = (int32_t)patch.reference[target] + addend;
+            // A shared library keeps the module base; a relaxed executable uses the thread pointer.
+            value = (int32_t)patch.reference[target] + addend + (int64_t)patch.tls_block;
+            break;
+        case BUSTER_LINK_FIXUP_TLSGD:
+        case BUSTER_LINK_FIXUP_TLSLD:
+            value = patch.tlsgd_slots != 0 ? (int64_t)(patch.base + patch.got + 8 * (kind == BUSTER_LINK_FIXUP_TLSGD ? patch.tlsgd_slots[target] : patch.tlsld_slot)) + addend - place : 0;
             break;
         default:
             // No other kind fits a field: link_check refuses kinds that don't exist, and TLSGD and TLSLD, relaxed with
@@ -893,7 +904,7 @@ BUSTER_INLINE bool executable_patch_other(ExecutablePatch patch, uint8_t* bytes,
             break;
     }
     // A TLS access's relaxation, and its call, which writes nothing (the access did).
-    const bool tls_access = kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD;
+    const bool tls_access = patch.tlsgd_slots == 0 && (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD);
     const bool relaxed_call = !tls_access && patch.relaxed != 0 && target == patch.relaxed;
     width = tls_access || relaxed_call ? 0 : width;
     const bool sequence = tls_access ? executable_relax_tls(&patch, bytes, begin, end, fixup) : relaxed_call && executable_relaxed_call(&patch, begin, fixup);
@@ -1760,6 +1771,8 @@ struct ExecutableLayout
     // reach read too.
     uint64_t got_slots;
     uint64_t stub_slot;
+    uint64_t tlsgd_slot;
+    uint64_t tlsld_slot;
     // The pieces of the linker's own: the headers (piece 0), each of its sections with bytes (0 for one without), and
     // .shstrtab and the section headers (the last two).
     uint64_t section_piece[EXECUTABLE_SECTION_COUNT];
@@ -2750,6 +2763,9 @@ struct ExecutableDynamicCounts
     uint64_t relaxed_calls;
     // A shared library's initial-exec accesses (GOTTPOFF fixups), with which it needs static TLS (DF_STATIC_TLS).
     uint64_t initial_exec;
+    uint64_t tlsld_accesses;
+    uint64_t tlsgd_pairs;
+    uint64_t tlsgd_relocations;
     uint64_t got_relative;
     uint64_t got_symbolic;
     // A shared library's GOT slots of its own thread-locals, which TPOFF64 relocations without a symbol fill.
@@ -2791,6 +2807,9 @@ struct ExecutableDynamicTotals
     uint64_t got_symbolic;
     uint64_t got_tpoff;
     uint64_t abs64_relative;
+    uint64_t tlsgd_pairs;
+    uint64_t tlsgd_relocations;
+    bool tlsld;
     uint64_t abs64_symbolic;
     uint64_t relr_relocations;
     uint64_t relr_words;
@@ -2896,6 +2915,12 @@ struct ExecutableShared
     // targets of the loads and calls that may relax are each lane's bitset of candidates (relax_marks), which the
     // reduction marks but for the relaxable ones.
     uint64_t* got_marks;
+    // Shared libraries only: each lane marks TLSGD targets, then the word reduction merges row 0. The layout
+    // expands these marks into tlsgd_slots (symbols.count uint32_t values, zero for unmarked symbols). Pairs follow
+    // ordinary GOT slots in symbol order; a single TLSLD pair follows them. No fixup or symbol is reordered, each
+    // lane owns complete words, and the arrays live until executable_write returns. Masked tails use logical counts.
+    uint64_t* tlsgd_marks;
+    uint32_t* tlsgd_slots;
     uint64_t* relax_marks;
     uint64_t words_per_lane;
     uint64_t* got_counts;
@@ -3432,12 +3457,14 @@ static void executable_check_direct(const Link* link, ExecutableShared* shared, 
         const bool relative = kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64;
         const bool dynamic = executable_bit(shared->dynamic_bits, target);
         const bool absolute = link->symbols.source[target] == BUSTER_LINK_SOURCE_ABSOLUTE;
+        const bool module_offset = shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] != 0;
+        const bool missing_module_offset = shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] == 0;
         const uint64_t word = lane * shared->words_per_lane + target / 64;
         const uint64_t bit = dynamic && call ? 1ull << (target % 64) : 0;
         shared->got_marks[word] |= bit;
         shared->stub_marks[word] |= bit;
-        *refused += (dynamic && !call) || (relative && !dynamic && executable_is_absolute_zero(link, target, shared->scope)) ||
-                            (absolute && executable_refuses_absolute(kind))
+        *refused += (dynamic && !call && !module_offset) || (relative && !dynamic && executable_is_absolute_zero(link, target, shared->scope)) ||
+                            (absolute && executable_refuses_absolute(kind)) || missing_module_offset
                         ? 1
                         : 0;
     }
@@ -3780,6 +3807,11 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
     // The candidates, whose targets get slots unless they relax.
     uint64_t* candidates = shared->relax_marks + lane * shared->words_per_lane;
     memset(candidates, 0, shared->words_per_lane * sizeof(*candidates));
+    uint64_t* tlsgd_marks = shared->tlsgd_marks != 0 ? shared->tlsgd_marks + lane * shared->words_per_lane : 0;
+    if (tlsgd_marks != 0)
+    {
+        memset(tlsgd_marks, 0, shared->words_per_lane * sizeof(*tlsgd_marks));
+    }
     if (dynamic || shared->runtime)
     {
         memset(shared->stub_marks + lane * shared->words_per_lane, 0, shared->words_per_lane * sizeof(uint64_t));
@@ -3805,6 +3837,7 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
     uint64_t tls_accesses = 0;
     uint64_t relaxed_calls = 0;
     uint64_t initial_exec = 0;
+    uint64_t tlsld_accesses = 0;
     for (FixupId group = (FixupId)fixup_range.begin + 1; group < end; group += 64)
     {
         const uint64_t count = end - group;
@@ -3853,13 +3886,21 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
         }
         if (shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED)
         {
-            // A shared library's local-exec fixups and, for now, its general- and local-dynamic ones, which it refuses
-            // whatever their targets (executable_shared_refuses), counted for executable_check_relocations to find; and
-            // its initial-exec ones, with which it needs static TLS.
-            const uint64_t refused_kinds = valid & (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TPOFF32)) |
-                                                    _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSGD)) |
-                                                    _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSLD)) |
-                                                    _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_DTPOFF32)));
+            // General-dynamic accesses share a pair per symbol, independently of initial-exec's slots. All local-
+            // dynamic accesses share one module pair. Only local-exec is impossible in a shared library.
+            const uint64_t gd = valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSGD));
+            const uint64_t ld = valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSLD));
+            const uint64_t refused_kinds = valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TPOFF32));
+            for (uint64_t left = gd; left != 0; left &= left - 1)
+            {
+                const SymbolId target = fixups->target[group + (FixupId)__builtin_ctzll(left)];
+                tlsgd_marks[target / 64] |= 1ull << (target % 64);
+                // A hidden undefined weak TLS symbol has neither an image module nor a dynamic lookup. Giving it
+                // this image's module pair would turn an absent definition into an unrelated TLS address.
+                refused += link->symbols.atom[target] == 0 && !executable_bit(shared->dynamic_bits, target) ? 1 : 0;
+            }
+            tlsld_accesses += (uint64_t)__builtin_popcountll(ld);
+            pie_direct &= ~(gd | ld);
             refused += (uint64_t)__builtin_popcountll(refused_kinds);
             initial_exec += (uint64_t)__builtin_popcountll(valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_GOTTPOFF)));
         }
@@ -3929,6 +3970,7 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
         dynamic_counts->absolute32 = absolute32;
         dynamic_counts->refused = refused;
         dynamic_counts->initial_exec = initial_exec;
+        dynamic_counts->tlsld_accesses = tlsld_accesses;
     }
 }
 
@@ -3997,6 +4039,8 @@ static void executable_reduce_got(const Link* link, ExecutableShared* shared, ui
     uint64_t relative = 0;
     uint64_t symbolic = 0;
     uint64_t tpoff = 0;
+    uint64_t tlsgd_pairs = 0;
+    uint64_t tlsgd_relocations = 0;
     uint64_t relr_relocations = 0;
     uint64_t relr_words = 0;
     for (uint64_t word = words.begin; word < words.end; word += 1)
@@ -4005,12 +4049,14 @@ static void executable_reduce_got(const Link* link, ExecutableShared* shared, ui
         uint64_t stub_marks = 0;
         uint64_t candidates = 0;
         uint64_t canonical = 0;
+        uint64_t gd = 0;
         for (uint32_t other = 0; other < lanes; other += 1)
         {
             marks |= shared->got_marks[other * shared->words_per_lane + word];
             stub_marks |= stubbed ? shared->stub_marks[other * shared->words_per_lane + word] : 0;
             candidates |= shared->relax_marks[other * shared->words_per_lane + word];
             canonical |= shared->runtime ? shared->canonical_marks[other * shared->words_per_lane + word] : 0;
+            gd |= shared->tlsgd_marks != 0 ? shared->tlsgd_marks[other * shared->words_per_lane + word] : 0;
         }
         marks |= candidates != 0 ? executable_unrelaxed(link, shared, word, candidates) : 0;
         // An IFUNC whose stub only calls reach reads the stub's slot through the GOT, as lld's reads its .got.plt entry:
@@ -4023,6 +4069,13 @@ static void executable_reduce_got(const Link* link, ExecutableShared* shared, ui
             shared->stub_slot_marks[word] = stub_slots;
         }
         shared->got_marks[word] = marks;
+        if (shared->tlsgd_marks != 0)
+        {
+            shared->tlsgd_marks[word] = gd;
+            const uint64_t pairs = (uint64_t)__builtin_popcountll(gd);
+            tlsgd_pairs += pairs;
+            tlsgd_relocations += pairs + (uint64_t)__builtin_popcountll(executable_slots_of_class(link, shared, word, gd, BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC));
+        }
         count += (uint64_t)__builtin_popcountll(marks);
         if (stubbed)
         {
@@ -4051,6 +4104,8 @@ static void executable_reduce_got(const Link* link, ExecutableShared* shared, ui
         shared->dynamic_counts[lane].got_relative = relative;
         shared->dynamic_counts[lane].got_symbolic = symbolic;
         shared->dynamic_counts[lane].got_tpoff = tpoff;
+        shared->dynamic_counts[lane].tlsgd_pairs = tlsgd_pairs;
+        shared->dynamic_counts[lane].tlsgd_relocations = tlsgd_relocations;
         shared->dynamic_counts[lane].got_relr_words = relr_words;
         shared->dynamic_counts[lane].relr_relocations += relr_relocations;
         shared->dynamic_counts[lane].relr_words += relr_words;
@@ -4311,11 +4366,10 @@ static void executable_classify(const Link* link, ExecutableShared* shared, cons
 }
 
 // Whether a shared library refuses a fixup of `kind` whatever its target: a TPOFF32 (local-exec), whose offset from the
-// thread pointer a shared library can't know, as lld refuses it with -shared; and for now a general- or local-dynamic
-// TLS access (TLSGD, TLSLD and their DTPOFF32 fields), whose GOT pairs come in the next part.
+// thread pointer a shared library can't know, as lld refuses it with -shared.
 static bool executable_shared_refuses(uint8_t kind)
 {
-    return kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32;
+    return kind == BUSTER_LINK_FIXUP_TPOFF32;
 }
 
 // Whether a PIE can't relocate a fixup of `kind` to `target` in an atom of class `atom_class`: an ABS64 that
@@ -4329,11 +4383,16 @@ static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId targe
     const bool relocated = class == BUSTER_EXECUTABLE_RELOCATION_RELATIVE || class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC;
     const bool absolute32 = kind == BUSTER_LINK_FIXUP_ABS32 || kind == BUSTER_LINK_FIXUP_ABS32S;
     const bool text = kind == BUSTER_LINK_FIXUP_ABS64 && !executable_class_is_written(atom_class);
-    const bool direct = !executable_kind_reads_got(kind) && kind != BUSTER_LINK_FIXUP_ABS64 && kind != BUSTER_LINK_FIXUP_CALL;
+    const bool dynamic_tls = scope == BUSTER_EXECUTABLE_SCOPE_SHARED && (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD ||
+                                                                       (kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] != 0));
+    const bool direct = !executable_kind_reads_got(kind) && kind != BUSTER_LINK_FIXUP_ABS64 && kind != BUSTER_LINK_FIXUP_CALL && !dynamic_tls;
     const bool relative = kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64;
     const bool absolute = link->symbols.source[target] == BUSTER_LINK_SOURCE_ABSOLUTE;
+    const bool missing_tls_pair = scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_TLSGD &&
+                                  link->symbols.atom[target] == 0 && class != BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC;
     return (relocated && (text || absolute32)) || (direct && class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC) || (relative && executable_is_absolute_zero(link, target, scope)) ||
-           (absolute && executable_refuses_absolute(kind)) || (scope == BUSTER_EXECUTABLE_SCOPE_SHARED && executable_shared_refuses(kind));
+           (absolute && executable_refuses_absolute(kind)) || missing_tls_pair || (scope == BUSTER_EXECUTABLE_SCOPE_SHARED &&
+                                                               (executable_shared_refuses(kind) || (kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] == 0)));
 }
 
 // A PIE's fixups that it can't relocate (executable_is_refused), which the lanes' counts point to and lane 0
@@ -4381,7 +4440,8 @@ static uint32_t executable_dynamic_entries(const ExecutableLayout* layout, const
 {
     const ExecutableSectionLayout* sections = layout != 0 ? layout->sections : 0;
     const uint64_t base = layout != 0 ? layout->base : 0;
-    const uint64_t relocations = totals->got_relative + totals->got_symbolic + totals->got_tpoff + totals->abs64_relative + totals->abs64_symbolic + totals->irelatives;
+    const uint64_t relocations = totals->got_relative + totals->got_symbolic + totals->got_tpoff + totals->abs64_relative + totals->abs64_symbolic + totals->irelatives +
+                                 totals->tlsgd_relocations + (totals->tlsld ? 1 : 0);
     const uint64_t relative = totals->got_relative + totals->abs64_relative;
     const uint64_t rela = sections != 0 ? base + sections[EXECUTABLE_SECTION_RELA_DYN].address : 0;
     const uint64_t relr = sections != 0 ? base + sections[EXECUTABLE_SECTION_RELR_DYN].address : 0;
@@ -4560,6 +4620,9 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
         totals->got_relative += counts->got_relative;
         totals->got_symbolic += counts->got_symbolic;
         totals->got_tpoff += counts->got_tpoff;
+        totals->tlsgd_pairs += counts->tlsgd_pairs;
+        totals->tlsgd_relocations += counts->tlsgd_relocations;
+        totals->tlsld = totals->tlsld || counts->tlsld_accesses != 0;
         totals->static_tls = totals->static_tls || (dynamic->shared && counts->initial_exec != 0);
         totals->abs64_relative += counts->abs64_relative;
         totals->abs64_symbolic += counts->abs64_symbolic;
@@ -4619,7 +4682,8 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
     bytes[EXECUTABLE_SECTION_GNU_HASH] = 16 + 8 * totals->bloom_words + 4 * totals->buckets + 4 * totals->exports;
     bytes[EXECUTABLE_SECTION_DYNSTR] = totals->version_names + version_name_bytes;
     bytes[EXECUTABLE_SECTION_RELA_DYN] =
-        (totals->got_relative + totals->got_symbolic + totals->got_tpoff + totals->abs64_relative + totals->abs64_symbolic + totals->irelatives) * sizeof(Elf64_Rela);
+        (totals->got_relative + totals->got_symbolic + totals->got_tpoff + totals->abs64_relative + totals->abs64_symbolic + totals->irelatives +
+         totals->tlsgd_relocations + (totals->tlsld ? 1 : 0)) * sizeof(Elf64_Rela);
     bytes[EXECUTABLE_SECTION_RELR_DYN] = totals->relr_words * sizeof(uint64_t);
     bytes[EXECUTABLE_SECTION_PLT_GOT] = totals->stubs * BUSTER_EXECUTABLE_STUB_BYTES;
     totals->dynamic_entries = executable_dynamic_entries(0, totals, 0, 0, 0);
@@ -4766,11 +4830,13 @@ static void executable_place(Link* link, ExecutableShared* shared, const Executa
     }
 
     uint32_t slot = 1;
+    uint32_t gd_slot = (uint32_t)layout->tlsgd_slot;
     uint64_t stub = 0;
     const bool stubbed = layout->dynamic || layout->runtime;
     for (uint32_t other = 0; other < lane; other += 1)
     {
         slot += (uint32_t)shared->got_counts[other];
+        gd_slot += shared->tlsgd_slots != 0 ? 2 * (uint32_t)shared->dynamic_counts[other].tlsgd_pairs : 0;
         stub += stubbed ? shared->dynamic_counts[other].stubs : 0;
     }
     const uint64_t stubs = layout->sections[EXECUTABLE_SECTION_PLT_GOT].address;
@@ -4783,6 +4849,7 @@ static void executable_place(Link* link, ExecutableShared* shared, const Executa
         // expanded into the marked lanes. With `exact`, its twin: one symbol at a time.
         const uint64_t first = 64 * word;
         const uint64_t marks = shared->got_marks[word];
+        const uint64_t gd_marks = shared->tlsgd_marks != 0 ? shared->tlsgd_marks[word] : 0;
         for (uint32_t part = 0; !shared->exact && part < 4; part += 1)
         {
             const uint64_t from = first + 16 * part;
@@ -4791,12 +4858,25 @@ static void executable_place(Link* link, ExecutableShared* shared, const Executa
             const __m512i slots = _mm512_maskz_expand_epi32(marked, _mm512_add_epi32(_mm512_set1_epi32((int)slot), steps));
             _mm512_mask_storeu_epi32(link->symbols.got_slot + from, valid, slots);
             slot += (uint32_t)__builtin_popcount(marked);
+            if (shared->tlsgd_slots != 0)
+            {
+                const __mmask16 gd_marked = (__mmask16)(gd_marks >> (16 * part));
+                const __m512i pairs = _mm512_maskz_expand_epi32(gd_marked, _mm512_add_epi32(_mm512_set1_epi32((int)gd_slot), _mm512_slli_epi32(steps, 1)));
+                _mm512_mask_storeu_epi32(shared->tlsgd_slots + from, valid, pairs);
+                gd_slot += 2 * (uint32_t)__builtin_popcount(gd_marked);
+            }
         }
         for (uint64_t bit = 0; shared->exact && bit < 64 && first + bit < count; bit += 1)
         {
             const bool marked = (marks >> bit & 1) != 0;
             link->symbols.got_slot[first + bit] = marked ? slot : 0;
             slot += marked ? 1 : 0;
+            if (shared->tlsgd_slots != 0)
+            {
+                const bool gd_marked = (gd_marks >> bit & 1) != 0;
+                shared->tlsgd_slots[first + bit] = gd_marked ? gd_slot : 0;
+                gd_slot += gd_marked ? 2 : 0;
+            }
         }
         // The symbols that have stubs, which their stubs stand for; and with the static runtime, an IFUNC whose stub only
         // calls reach reads the stub's slot through the GOT (executable_reduce_got).
@@ -5206,6 +5286,7 @@ static void executable_dynamic_relocations(const Link* link, ExecutableShared* s
     uint64_t abs64_relative = totals->got_relative;
     uint64_t abs64_symbolic = relative_total + totals->got_symbolic;
     uint64_t got_tpoff = relative_total + totals->got_symbolic + totals->abs64_symbolic;
+    uint64_t got_tlsgd = relative_total + totals->got_symbolic + totals->abs64_symbolic + totals->got_tpoff;
     for (uint32_t other = 0; other < lane; other += 1)
     {
         got_relative += shared->dynamic_counts[other].got_relative;
@@ -5213,6 +5294,7 @@ static void executable_dynamic_relocations(const Link* link, ExecutableShared* s
         abs64_relative += shared->dynamic_counts[other].abs64_relative;
         abs64_symbolic += shared->dynamic_counts[other].abs64_symbolic;
         got_tpoff += shared->dynamic_counts[other].got_tpoff;
+        got_tlsgd += shared->dynamic_counts[other].tlsgd_relocations;
     }
     const ExecutableSectionLayout* tdata = &layout->sections[EXECUTABLE_SECTION_TDATA];
     const LinkSymbols* symbols = &link->symbols;
@@ -5254,6 +5336,42 @@ static void executable_dynamic_relocations(const Link* link, ExecutableShared* s
             };
             got_tpoff += 1;
         }
+        for (uint64_t left = shared->tlsgd_marks != 0 ? shared->tlsgd_marks[word] : 0; left != 0; left &= left - 1)
+        {
+            const SymbolId symbol = (SymbolId)(word * 64 + (uint64_t)__builtin_ctzll(left));
+            const bool symbolic = executable_bit(shared->dynamic_bits, symbol);
+            const uint64_t slot = shared->tlsgd_slots[symbol];
+            const uint32_t index = symbolic ? symbols->dynamic_index[symbol] : 0;
+            rela[got_tlsgd] = (Elf64_Rela){
+                .r_offset = got + 8 * slot,
+                .r_info = ELF64_R_INFO(index, R_X86_64_DTPMOD64),
+                .r_addend = 0,
+            };
+            got_tlsgd += 1;
+            if (symbolic)
+            {
+                rela[got_tlsgd] = (Elf64_Rela){
+                    .r_offset = got + 8 * (slot + 1),
+                    .r_info = ELF64_R_INFO(index, R_X86_64_DTPOFF64),
+                    .r_addend = 0,
+                };
+                got_tlsgd += 1;
+            }
+            else
+            {
+                const uint64_t offset = (uint64_t)((int64_t)(int32_t)symbols->reference[symbol] + (int64_t)layout->tls_block);
+                memcpy(shared->got + 8 * (slot + 1), &offset, sizeof(offset));
+            }
+        }
+    }
+    if (lane == 0 && totals->tlsld)
+    {
+        const uint64_t at = relative_total + totals->got_symbolic + totals->abs64_symbolic + totals->got_tpoff + totals->tlsgd_relocations;
+        rela[at] = (Elf64_Rela){
+            .r_offset = got + 8 * layout->tlsld_slot,
+            .r_info = ELF64_R_INFO(0, R_X86_64_DTPMOD64),
+            .r_addend = 0,
+        };
     }
     const LinkAtoms* atoms = &link->atoms;
     const LinkFixups* fixups = &link->fixups;
@@ -5679,6 +5797,12 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
                 shared->version_numbers[dynamic->versions[v].index] = 1;
             }
         }
+    }
+    if (fits && shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED)
+    {
+        shared->tlsgd_marks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, lanes * shared->words_per_lane);
+        shared->tlsgd_slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, link->symbols.count);
+        fits = shared->tlsgd_marks != 0 && shared->tlsgd_slots != 0;
     }
     if (fits && shared->runtime)
     {
@@ -6435,10 +6559,13 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         totals.linker_bytes[EXECUTABLE_SECTION_STRTAB] = symbol_names;
     }
     const bool laid_out =
-        ok && executable_lay_out(layout, shared->counts, lanes, got_slots + (runtime ? totals.stubs : 0), dynamic, dynamic || runtime, runtime, totals.linker_bytes);
+        ok && executable_lay_out(layout, shared->counts, lanes, got_slots + (runtime ? totals.stubs : 0) + 2 * totals.tlsgd_pairs + (totals.tlsld ? 2 : 0),
+                                 dynamic, dynamic || runtime, runtime, totals.linker_bytes);
     if (laid_out)
     {
         layout->stub_slot = runtime ? got_slots + 1 : 0;
+        layout->tlsgd_slot = got_slots + 1;
+        layout->tlsld_slot = totals.tlsld ? layout->tlsgd_slot + 2 * totals.tlsgd_pairs : 0;
         layout->symbol_local_count = symbol_locals;
         // A zero-sized TLS definition needs an actual TLS section index. Until empty sections are retained, refuse
         // this optional attachment before publication instead of assigning a TLS offset to an ordinary section.
@@ -6597,6 +6724,9 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         .wide_addends = link->fixups.wide_addends,
         .reference = link->symbols.reference,
         .got_slots = link->symbols.got_slot,
+        .tlsgd_slots = shared != 0 ? shared->tlsgd_slots : 0,
+        .tlsld_slot = ok ? layout->tlsld_slot : 0,
+        .tls_block = ok && totals.shared ? layout->tls_block : 0,
         .sizes = link->symbols.size,
         .base = ok ? layout->base : 0,
         .got = ok ? layout->sections[EXECUTABLE_SECTION_GOT].address : 0,
@@ -6677,7 +6807,8 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
             result->chunks = layout->chunk_count;
             result->got_slots = layout->got_slots;
             result->dynamic_symbols = totals.undefined + totals.exports;
-            result->relocations = totals.got_relative + totals.got_symbolic + totals.got_tpoff + totals.abs64_relative + totals.abs64_symbolic + totals.irelatives;
+            result->relocations = totals.got_relative + totals.got_symbolic + totals.got_tpoff + totals.abs64_relative + totals.abs64_symbolic + totals.irelatives +
+                                  totals.tlsgd_relocations + (totals.tlsld ? 1 : 0);
             result->relative_relocations = totals.got_relative + totals.abs64_relative;
             result->relr_relocations = totals.relr_relocations;
             result->relr_words = totals.relr_words;

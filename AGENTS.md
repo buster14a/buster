@@ -220,6 +220,15 @@ designs and the compilers already built this way.
   the API and the checking, C selector, feature-query and corpus integration
   still required before #148 can close.
 
+- The companion [builtin integration guide](docs/c-builtins-integration.md)
+  records the shared capability catalog, typed integer/varargs/misc actions and
+  existing-stream runtime expansion. `test-check-builtins`,
+  `test-check-varargs`, `test-check-builtins-misc`, `test-builtin-lowering` and
+  `test-builtin-varargs` distinguish semantic constraints from emitted execution.
+  Source hooks belong to the active #133 owner. Incoming variadic frame setup,
+  full Tier 1 coverage and corpus acceptance remain separate requirements.
+  Every build/test/measurement uses the approved 9700X lock per run.
+
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
   observation table and scalar/AVX-512 cost-column lookups. `test-x86-zen5`
   checks unknowns, guard-page tails and generated microbenchmark loops;
@@ -412,10 +421,15 @@ designs and the compilers already built this way.
   It also writes shared libraries (`ExecutableDynamic.shared`, with optional
   `soname`): default-visibility global and weak definitions are preemptible,
   calls use non-lazy GOT stubs, and initial-exec TLS uses TPOFF64 slots.
+  General-dynamic TLS uses a separate two-word GOT pair per symbol and
+  local-dynamic TLS one module pair, preserving `__tls_get_addr` calls;
+  DTPMOD64/DTPOFF64 relocations and module offsets are emitted as appropriate.
   Regular shared-library outputs use a new file and rename, preserving any
   old inode that a process still maps.
-  Local-exec and general/local-dynamic TLS accesses in shared libraries are
-  refused; their implementations remain a later part of #85.
+  Local-exec accesses and undefined DTPOFF32 module offsets in shared
+  libraries are refused. Distinct general-/initial-exec slot columns allow
+  both models to reference the same symbol. TLSGD target bitsets are reduced
+  by whole symbol words, then expanded into slots with an exact scalar twin.
   `dynamic.c` gives it what a PIE needs from the C runtime and from
   binding (`dynamic_inputs`), what a static executable with the C runtime
   needs (`dynamic_static_inputs`) and what a static PIE needs
@@ -487,6 +501,26 @@ designs and the compilers already built this way.
   `foreign_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-foreign` runs them) and `foreign_benchmark.c`
   provides `benchmark-foreign`.
+- `src/buster/compiler/foreign_strings.c` builds a deterministic pool and
+  original-offset map for one-, two- and four-byte `SHF_MERGE | SHF_STRINGS`
+  entries. Its bounded vector scans and hashes have exact scalar twins.
+  `foreign_strings_link.c` groups compatible foreign sections and remaps
+  symbols and supported address expressions before layout, transactionally;
+  unsupported expressions retain the original unmerged Link. The kernel,
+  consumer and executable cross-checks run under `test-foreign`. See
+  [foreign string merging](docs/foreign-string-merging.md) for the contract.
+- `src/buster/compiler/foreign_unwind.c` and `foreign_unwind_link.c` prune
+  losing COMDAT FDEs and unused CIEs before canonical foreign symbols hide
+  their original ownership. They retain matching CFI/personality/LSDA
+  records and map symbols into compact unwind bytes; compatible live-CIE
+  deduplication is separate. `test-foreign --cross-check` includes their
+  malformed/rollback tests and original C++ throw/catch/cleanup fixture.
+  `benchmark-foreign-unwind [--runs N] [--fdes N] [--profile mixed|all|none]`
+  measures full pruning with exact/vector parity and independent expected
+  bytes/maps. Run each measurement under the shared 9700X lock on CPU 2;
+  these synthetic phase results are not whole-link acceptance. The linker
+  guide's "Foreign COMDAT unwind pruning" documents the supported encodings,
+  incoming-reference restrictions and benchmark memory/timing boundaries.
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_measure`'s offsets and rounds over the branches alone
@@ -2638,10 +2672,10 @@ child that dies before its message or its exit.
 Run it under the 9700X's lock without `taskset`, and with `--directory` on each
 file system to measure. `docs/object-writer-and-linker.md` ("The floors") has
 the original numbers; [linker scaling](docs/linker-scaling.md) records the
-frozen lane sweep, independently controlled write factors, and filesystem
-limits from #87. The default 9700X job runs it after benchmark-link, where that
-runs the linkers' side (the machine's floors don't depend on a pull request
-either); like the others, its measurements are informational.
+frozen physical-core and SMT lane sweeps, independently controlled write
+factors, and filesystem limits from #87. The default 9700X job runs it after
+benchmark-link, where that runs the linkers' side (the machine's floors don't
+depend on a pull request either); like the others, its measurements are informational.
 
 ## Foreign tests
 
@@ -3516,6 +3550,17 @@ opt-in adapter, the declaration-token columns, corpus provenance and the
 explicit cost of its scalar grammar replay. The syntax-only driver does not
 request these columns.
 
+## Selective lowering
+
+`./build/compiler test-lowering --clang` compares selective function/object
+emission planning with an independent graph oracle and Clang object symbols
+on original, manually modeled C fixtures. `benchmark-lowering` measures
+synthetic graph preparation and vector/scalar selection; use the shared 9700X
+lock and pin timings to CPU 2. [The lowering guide](docs/c-lowering.md) records
+the semantic producer contract and the source/checker/backend integration
+still required for #129. These commands do not establish corpus lowering or
+whole-compiler savings.
+
 ## Type tests
 
 `./build/compiler test-types [--seed N] [--count N] [--clang PATH] [--keep]`
@@ -3730,7 +3775,11 @@ informational.
 integers; integers and calls; everything (floating values, pointers,
 address-taken locals); and larger. Their calls pass up to 12 arguments, past
 the argument registers, and their pointer arithmetic has element sizes for each
-of its templates, past imul's imm32 too. Every function must pass `tier0_validate`,
+of its templates, past imul's imm32 too. Before them it checks the call
+emitter's move resolver on 20,000 random sets of moves (paths and cycles of
+every length) run on a register file, the vector path's application of chosen
+forms against the scalar path's on random records, and that both paths refuse
+unsupported entries and expressions past the depths alike. Every function must pass `tier0_validate`,
 both paths must compile it to the same records, branch columns and references,
 and the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`. Each program is then sized, encoded, loaded into
