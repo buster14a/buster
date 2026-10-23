@@ -1493,6 +1493,41 @@ static uint32_t parse_test_compare_tokens(const ParseTokens* a, const ParseToken
     return result;
 }
 
+// Omitting the later stages' traversal must preserve every parser token, tree and diagnostic. The ordinary runs
+// above still build and independently check both traversal columns; this run also proves their arenas stay absent.
+static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const char* path)
+{
+    static Parser tree;
+    ParseOptions options = full->options;
+    options.tree_only = true;
+    bool same = parse_initialize(&tree, &options, full->language);
+    if (same)
+    {
+        const bool parsed = parse_translation_unit(&tree, pp);
+        same = parsed == (full->errors == 0) && tree.errors == full->errors && tree.fatal == full->fatal &&
+               tree.diagnostic_count == full->diagnostic_count && parse_test_compare_tokens(&tree.tokens, &full->tokens) == BUSTER_PARSE_NONE &&
+               tree.postorder == 0 && tree.sizes == 0 && tree.columns[11].base == 0 && tree.columns[12].base == 0;
+        for (uint32_t d = 0; same && d < full->diagnostic_count; d += 1)
+        {
+            const ParseDiagnostic* a = &full->diagnostics[d];
+            const ParseDiagnostic* b = &tree.diagnostics[d];
+            same = a->token == b->token && a->argument == b->argument && a->message == b->message && a->place == b->place && a->error == b->error;
+        }
+        if (same && parsed)
+        {
+            const uint64_t count = full->tokens.count;
+            same = memcmp(tree.tree.roles, full->tree.roles, count) == 0 && memcmp(tree.tree.parents, full->tree.parents, count * sizeof(uint32_t)) == 0 &&
+                   memcmp(tree.tree.depths, full->tree.depths, count * sizeof(uint32_t)) == 0;
+        }
+    }
+    parse_release(&tree);
+    if (!same)
+    {
+        parse_test_report("%s: tree-only parsing differs from the full %s parser\n", path, full->options.scalar ? "scalar" : "vector");
+    }
+    return same ? 0 : 1;
+}
+
 // One file through both paths: preprocessed once, then parsed by the vector path and by the scalar parser alone, which
 // must read the same tokens and give the same outcome, and on a valid unit the same tree, with the tree's invariants
 // and postorders; then each kernel against its twin. *outcome gets the vector path's outcome. Returns the number of
@@ -1514,6 +1549,8 @@ static uint32_t parse_test_check_file(const char* path, const PPOptions* options
         {
             parse_translation_unit(&vector, &pp);
             parse_translation_unit(&scalar, &pp);
+            failures += parse_test_tree_only(&vector, &pp, path);
+            failures += parse_test_tree_only(&scalar, &pp, path);
             *outcome = parse_test_outcome(&vector, &pp);
             const ParseTestOutcome alone = parse_test_outcome(&scalar, &pp);
             const uint32_t token = parse_test_compare_tokens(&vector.tokens, &scalar.tokens);
