@@ -340,6 +340,9 @@ jobs:
           ./build/compiler test-builtin-terminal-helpers
           ./build/compiler test-builtin-atomic-helpers
           ./build/compiler test-check-builtins-atomic
+          ./build/compiler test-check-builtins-typed-overflow
+          ./build/compiler test-check-builtins-rounds
+          ./build/compiler test-builtin-rounds-helper
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
           == Test the per-file jobs on the repository's sources, flat

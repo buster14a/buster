@@ -172,21 +172,32 @@ adapter makes no memory-throughput claim.
 
 ## Unevaluated queries
 
-`c_check_builtin_query.c` always returns a clean integer constant and an empty
-runtime evaluated-operand mask. Speculative operand faults and volatile reads
-do not become query effects. Source constraints still diagnose. For
+`c_check_builtin_query.c` returns an empty runtime evaluated-operand mask.
+Speculative operand faults and volatile reads do not become query effects.
+Source constraints still diagnose. For
 `constant_p`, explicit `string_literal_start` and
 `absolute_address_constant` witnesses retain source provenance that a generic
 pointer-to-integer conversion can otherwise discard. They certify the actual
 final expression, not an object-ID convention or an unknown value's default
 fields. Interior string pointers have no first-character witness.
+The separate `complex_constant` witness certifies foldability of the complete
+complex expression, with the same fault/effect guards and an actual complex
+type. Complex type alone or one constant component cannot establish this proof.
 
 For `object_size`, the producer supplies four independent known-bound flags
 and values: whole-object maximum, subobject maximum, whole-object minimum and
 subobject minimum. This action does not infer object bounds from pointee size.
-Unknown modes 0/1 return `ULONG_MAX`; unknown modes 2/3 return zero. A known
-zero retains its known flag. Mode conversion to `int` precedes the 0..3 range
-check, while original integer-constant-expression provenance remains required.
+The separate per-mode `object_size_source_constant` flags certify that the
+bound is available in source constant evaluation. Runtime bounds alone do not
+prove this: Clang's string-literal whole-object bound can be runtime-known
+while only its subobject bound is source-constant. A known zero retains its
+known flag. Source-proven bounds may ignore operand effects. Unknown effectful
+pointers yield a source-constant sentinel without executing those effects.
+Otherwise `action.value` has no constant payload and retains only unevaluated
+ICE eligibility; `runtime_value` separately carries the real bound or fallback
+(`ULONG_MAX` for unknown modes 0/1, zero for 2/3). A runtime fallback must not
+become a static initializer or an evaluated ICE. Mode conversion to `int`
+precedes the 0..3 range check, while original ICE provenance remains required.
 
 ## Floating checking
 
@@ -197,6 +208,13 @@ parentheses/casts, excluding only the final terminator. Embedded zero bytes
 remain part of that slice and prevent constant folding. Unknown or invalid
 payloads remain typed runtime calls; no source pointer is dereferenced.
 Unsupported real formats are never approximated through host long double.
+
+`isinf_sign` yields -1, zero or 1 for the actual real format. The `fabs`,
+`fabsf` and `fabsl` actions apply their declared floating parameter conversions,
+including the real component of a complex argument. Their floating results
+do not become integer constant expressions. Unsupported payload conversions
+retain explicit metadata. F32/F64 runtime recipes clear only the sign bit,
+preserving every remaining bit, including NaN payloads.
 
 `fpclassify` retains all five selector expressions and an explicit evaluation
 mode. Successful source constant evaluation visits the FP argument and only
@@ -260,6 +278,23 @@ ordinary-call ABI planning and fixups provide the call path; no new shared
 Tier 0 opcode is introduced. The Tier 1 direct-call follow-up belongs to the
 active #141 owner and needs its own exact-revision acceptance evidence.
 
+## Corpus-driven typed overflow and rounding
+
+`c_check_builtin_typed_overflow.c` implements `umull_overflow` through ordinary
+`unsigned long`, `unsigned long`, `unsigned long*` parameter conversions before
+the generic multiply-overflow action. Its formal destination is unqualified;
+discarded pointer qualifiers remain diagnostics. A successful action always
+retains the destination write. Wider or complex conversion payloads without a
+real implementation remain explicit unsupported cases.
+
+`c_check_builtin_rounds.c` treats `flt_rounds` as a zero-argument, nonconstant
+`int` query of the floating environment. Its helper reads x87 rounding control
+and maps the four encodings to C's 1/3/2/0 values. It preserves the controls
+and carries an environment-read/compiler-barrier requirement. The existing
+FNSTCW memory form is admitted to baseline generated-code profiles. Native
+fixtures use both encoders and real Tier 0 CALLs, including all sixteen pairs
+of deliberately divergent x87/MXCSR rounding modes against Clang's query.
+
 ## Validation commands
 
 On the approved 9700X, through a separate shared-host lock for each command:
@@ -278,6 +313,9 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-check-builtins-atomic
 ./build/compiler test-builtin-atomic-helpers
 ./build/compiler test-builtin-terminal-helpers
+./build/compiler test-check-builtins-typed-overflow
+./build/compiler test-check-builtins-rounds
+./build/compiler test-builtin-rounds-helper
 ```
 
 The tests distinguish typed constraints and fold metadata from native execution
