@@ -434,8 +434,18 @@ designs and the compilers already built this way.
   with nonallocated debug sections and a regular function symbol table.
   `test-debug --cross-check` checks original fixtures with readelf, GDB and
   perf; `benchmark-debug` measures validation through address finalization.
-  [The debug guide](docs/debug.md) records the contract and the Tier 0 frame
-  events, source-row production and streaming integration still pending.
+  [The debug guide](docs/debug.md) records the contract and the source-row
+  production and streaming integration still pending.
+- `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
+  from valid Tier 0 records after branch sizing; `unwind.c` emits original
+  CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
+  the producer unchanged and does not repeat generic instruction validation.
+  `test-unwind --cross-check` checks independent frame-state oracles, protected
+  tails and actual Tier 0 code with native GDB/perf consumers. `benchmark-unwind`
+  charges analysis/emission to the existing Tier 0, sizing and encoding chain,
+  including per-function arena cleanup. [The unwind guide](docs/unwind.md)
+  records the trusted private-slot contract, Link fixups and pending target-host
+  qualification. Use the shared 9700X lock per command and CPU 2 for timing.
 - `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
   part, and step 6's for the other kinds): what `runtime_import` (or
   `runtime_import_static`, `runtime_import_static_pie` or
@@ -2630,10 +2640,10 @@ child that dies before its message or its exit.
 Run it under the 9700X's lock without `taskset`, and with `--directory` on each
 file system to measure. `docs/object-writer-and-linker.md` ("The floors") has
 the original numbers; [linker scaling](docs/linker-scaling.md) records the
-frozen lane sweep, independently controlled write factors, and filesystem
-limits from #87. The default 9700X job runs it after benchmark-link, where that
-runs the linkers' side (the machine's floors don't depend on a pull request
-either); like the others, its measurements are informational.
+frozen physical-core and SMT lane sweeps, independently controlled write
+factors, and filesystem limits from #87. The default 9700X job runs it after
+benchmark-link, where that runs the linkers' side (the machine's floors don't
+depend on a pull request either); like the others, its measurements are informational.
 
 ## Foreign tests
 
@@ -3191,16 +3201,38 @@ changes; `docs/c-preprocessor.md` ("The predefined macros") has the procedure.
 
 ## Preprocessor benchmark
 
+The exact commands, pinned inputs and raw reports for the #117 acceptance
+refresh are in `docs/measurements/preprocessor-117-2026-10-23/README.md`.
+Its invocation scripts take a separate normal shared-host lock for each command.
+
 `./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
 [--read-limit N,...] [options] file...` preprocesses each file from nothing per
 run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
-and time (read, lex, refine, directive tables, main loop), the release after the
+and time (read, lex, refine, directive tables, main loop/setup), the release after the
 run (the files' mappings among it), `-E -P`'s throughput with its printing
 (input bytes and output tokens per second, #124) and what a run did
 (directives, runs, expansions, invocations, pastes, the `#if` lines and their
 lengths, and the inclusions skipped by guards and by `#pragma once`).
+It also reports explicit file-probe `open`/`fstat` attempts, including failed
+opens and uncached aliases, the subset made by include searches, and the
+`stat` attempts for embed lookup and search-directory setup. Repeated cached
+include hits and misses make no file-probe calls. These are the preprocessor's
+explicit calls, excluding the benchmark harness and libc's directory
+enumeration internals. Include lookup time includes path construction, cache
+lookup and first byte acquisition; embed lookup time includes its search and
+`stat` calls. Both are inclusive intervals that overlap the phase breakdown;
+never add them to it or subtract them again. Preparation and execution of the
+found header are outside include lookup. The main-loop remainder also contains
+initialization, as it did before this label made that boundary explicit.
+The final-output copy shares count file runs, buffer runs and direct
+object-like copies only when they write to the final stream; intermediate
+captures do not enter the numerator. Their denominator is the final output's
+tokens, including pragma records and one record per embed resource. The
+remaining tokens are emitted individually or lifted from captured pragmas.
+The older per-pass run totals still include intermediate captures and must
+not be divided by the final output count to claim a share of that output.
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.

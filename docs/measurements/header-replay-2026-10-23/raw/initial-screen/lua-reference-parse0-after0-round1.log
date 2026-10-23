@@ -1,0 +1,10 @@
+command /home/david/buster-fast-bench/codex-header111/measure-run env PROBE_PASSES=8 PROBE_CONDITION_MS=0 PROBE_FILES_MANIFEST=/home/david/buster-fast-bench/codex-header111/logs/lua-reference-parse0-after0-round1.files taskset -c 2 /home/david/buster-fast-bench/codex-header111/reference -std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX -- lapi.c lauxlib.c lbaselib.c lcode.c lcorolib.c lctype.c ldblib.c ldebug.c ldo.c ldump.c lfunc.c lgc.c linit.c liolib.c llex.c lmathlib.c lmem.c loadlib.c lobject.c lopcodes.c loslib.c lparser.c lstate.c lstring.c lstrlib.c ltable.c ltablib.c ltm.c lua.c luac.c lundump.c lutf8lib.c lvm.c lzio.c 
+pass 0 units 34 total_ns 29627483 prelude_ticks 4162330 main_ticks 84254728 header_ticks 64502948 headers 316 output 588066 main_ns 22215089 parse_ns 0 parse_failures 0
+pass 1 units 34 total_ns 26368129 prelude_ticks 4000830 main_ticks 71891317 header_ticks 56760752 headers 316 output 588066 main_ns 18955327 parse_ns 0 parse_failures 0
+pass 2 units 34 total_ns 26523323 prelude_ticks 3898002 main_ticks 73886775 header_ticks 58671088 headers 316 output 588066 main_ns 19481527 parse_ns 0 parse_failures 0
+pass 3 units 34 total_ns 26065850 prelude_ticks 3890972 main_ticks 72700986 header_ticks 57523146 headers 316 output 588066 main_ns 19168797 parse_ns 0 parse_failures 0
+pass 4 units 34 total_ns 25924303 prelude_ticks 3895304 main_ticks 71804823 header_ticks 56595680 headers 316 output 588066 main_ns 18932411 parse_ns 0 parse_failures 0
+pass 5 units 34 total_ns 26368243 prelude_ticks 3881662 main_ticks 72604842 header_ticks 57381292 headers 316 output 588066 main_ns 19143396 parse_ns 0 parse_failures 0
+pass 6 units 34 total_ns 26080120 prelude_ticks 3839862 main_ticks 72508397 header_ticks 57337364 headers 316 output 588066 main_ns 19117907 parse_ns 0 parse_failures 0
+pass 7 units 34 total_ns 25882337 prelude_ticks 3806612 main_ticks 72095941 header_ticks 57016150 headers 316 output 588066 main_ns 19009160 parse_ns 0 parse_failures 0
+process elapsed_ns=228231441 user_us=140826 system_us=81881 maxrss_kb=33764 minor_faults=43120 major_faults=0 result=0
