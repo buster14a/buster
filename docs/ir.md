@@ -202,7 +202,11 @@ dominator tree: #174 owns that analysis.
 `ir_lower_typed(input, result_type, symbol_count, output, scratch, result)` and
 its scalar twin accept the current `Tier0Function` contract after validating it.
 The semantic result type is explicit because the stream's `AbiReturn` describes
-locations, not its source type.
+locations, not its source type. A local flag other than `ADDRESS_TAKEN` (the
+incoming-variadic anchors and `va_list` objects of #148's Tier 0 frames) is
+refused with `IR_ERROR_METADATA`, its local in `detail`, after the count and
+column checks and before validation or allocation: the adapter would otherwise
+lower such a role as an ordinary 8-byte slot.
 
 The adapter finds block boundaries, compares incoming stack shapes exactly,
 classifies 16 entries at once (one at a time in the twin), counts output, then

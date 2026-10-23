@@ -950,6 +950,117 @@ static void ir_lower_test_failures(IrLowerTestTally* tally)
     arena_release(&scratch);
 }
 
+// Local flags past ADDRESS_TAKEN (frame roles the adapter doesn't model) are
+// refused by both paths before validation or allocation, leaving the caller's
+// result and both arenas as they were; ordinary and address-taken locals lower.
+static void ir_lower_test_local_roles(IrLowerTestTally* tally)
+{
+    Arena output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    const uint8_t kinds[] =
+    {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_RETURN
+    };
+    const uint8_t classes[] =
+    {
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64
+    };
+    const uint64_t values[] =
+    {
+        7,
+        0
+    };
+    const uint8_t local_classes[] =
+    {
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64
+    };
+    uint8_t local_flags[3] =
+    {
+        0
+    };
+    Tier0Function source =
+    {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = 2,
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 3,
+    };
+    const IrFunction preserved =
+    {
+        .instruction_count = 123,
+        .block_count = 17,
+    };
+    // Nonzero marks, so that a rollback to zero would show.
+    const bool ready = BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
+    ir_lower_test_expect(tally, ready, "local role arenas", 0, 0);
+    for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+    {
+        const uint64_t output_mark = output.length;
+        const uint64_t scratch_mark = scratch.length;
+        local_flags[1] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+        IrFunction result = preserved;
+        IrCheck check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+        ir_lower_test_expect(tally, check.error == IR_OK && scratch.length == scratch_mark, "ordinary and address-taken locals lower", 0, vector);
+        arena_pop_to(&output, output_mark);
+        // Each role bit #148's frames define, alone and with ADDRESS_TAKEN, on
+        // every local, and a bit past them.
+        const uint8_t roles[] =
+        {
+            0x02,
+            0x04,
+            0x08,
+            0x10,
+            0x80
+        };
+        for (uint32_t r = 0; r < sizeof(roles); r += 1)
+        {
+            for (uint32_t local = 0; local < 3; local += 1)
+            {
+                for (uint32_t taken = 0; taken < 2; taken += 1)
+                {
+                    local_flags[0] = 0;
+                    local_flags[1] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                    local_flags[2] = 0;
+                    local_flags[local] = (uint8_t)(roles[r] | (taken != 0 ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0));
+                    result = preserved;
+                    check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+                    ir_lower_test_expect(tally, check.error == IR_ERROR_METADATA && check.detail == local && output.length == output_mark &&
+                                                    scratch.length == scratch_mark && result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                                         "local frame role refused without allocation", r, vector * 8 + local * 2 + taken);
+                }
+            }
+        }
+        // A role on a local the stream never names is refused too, but the
+        // earlier count and pointer checks keep their precedence.
+        local_flags[0] = 0;
+        local_flags[1] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+        local_flags[2] = 0x02;
+        source.count = BUSTER_TIER0_MAX_ENTRIES + 1;
+        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+        ir_lower_test_expect(tally, check.error == IR_ERROR_LIMIT, "count limit precedes local roles", 0, vector);
+        source.count = 2;
+        source.kinds = 0;
+        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+        ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE, "missing column precedes local roles", 0, vector);
+        source.kinds = kinds;
+        source.local_count = 2;
+        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+        ir_lower_test_expect(tally, check.error == IR_OK, "flags past local_count are not read", 0, vector);
+        arena_pop_to(&output, output_mark);
+        source.local_count = 3;
+        local_flags[2] = 0;
+    }
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 static void ir_lower_test_guarded(IrLowerTestTally* tally)
 {
     const uint64_t page = 4096;
@@ -1046,6 +1157,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         };
         ir_lower_test_fixtures(&tally);
         ir_lower_test_failures(&tally);
+        ir_lower_test_local_roles(&tally);
         ir_lower_test_guarded(&tally);
         ir_lower_test_programs(&tally, seed, count);
         printf("test-ir-lowering: %" PRIu64 " checks, %" PRIu64 " failed\n", tally.checks, tally.failures);
