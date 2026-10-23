@@ -617,6 +617,13 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 
+      - name: Benchmark selective lowering on synthetic graphs
+        # Includes independent result checks. These unconditioned single-operation samples are informational;
+        # source-corpus lowering and conditioned multi-process measurements remain separate acceptance work.
+        run: |
+          cpu="$(awk '/Cpus_allowed_list/ {split($2,a,/[-,]/); print a[1]}' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-lowering
+
       - name: Benchmark the C type table
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
