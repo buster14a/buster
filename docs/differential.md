@@ -263,6 +263,8 @@ Its artifacts always state `fixture=true` and zero compiler campaign passes.
 Run it from the repository root, or supply `--fixture-source PATH`; `--clang`
 selects the fixture-building compiler. Its temporary evidence is retained and
 the command prints the directory.
+Set `TMPDIR` to on-disk workspace storage for local diagnostics; the fixture
+directory honors it and otherwise uses the system temporary directory.
 
 The pinned real generators were also invoked through the new harness with
 seed 138, producing the expected source files and recording versions/options.

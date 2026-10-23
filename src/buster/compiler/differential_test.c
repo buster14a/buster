@@ -328,11 +328,16 @@ static int run_differential_tests(int argc, char** argv)
             valid = false;
         }
     }
-    char directory[] = "/tmp/buster differential '$;-XXXXXX";
+    char directory[PATH_MAX];
+    const char* temporary = getenv("TMPDIR");
+    if (!temporary || !*temporary)
+    {
+        temporary = "/tmp";
+    }
     char compiler[PATH_MAX];
     char fixture_source[PATH_MAX];
     char fixture[PATH_MAX];
-    valid = valid && differential_resolve(clang, compiler) && realpath(source, fixture_source) != 0 && mkdtemp(directory) != 0 && differential_path(fixture, sizeof(fixture), directory, "fixture tool '$;.exe");
+    valid = valid && differential_path(directory, sizeof(directory), temporary, "buster differential '$;-XXXXXX") && differential_resolve(clang, compiler) && realpath(source, fixture_source) != 0 && mkdtemp(directory) != 0 && differential_path(fixture, sizeof(fixture), directory, "fixture tool '$;.exe");
     DifferentialTests tests = {0};
     if (valid)
     {
