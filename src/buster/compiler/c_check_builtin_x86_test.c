@@ -748,4 +748,3 @@ static int run_check_builtin_x86_tests(int argc, char** argv)
     printf("test-check-builtins-x86: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     return test.failures != 0;
 }
-

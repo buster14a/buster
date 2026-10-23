@@ -359,6 +359,11 @@ static TypeId builtin_intrinsic_type_one(BuiltinIntrinsicTypeReader* reader, boo
         {
             builtin_intrinsic_type_fail(reader, BUILTIN_INTRINSIC_TYPES_INVALID, 0, wrapper.offset);
         }
+        else if (wrapper.code == 'X' && type_unqualified(type) == BUSTER_TYPE_HALF)
+        {
+            // Clang can name complex HalfTy in a nominal descriptor; this type table cannot represent it.
+            builtin_intrinsic_type_fail(reader, BUILTIN_INTRINSIC_TYPES_UNSUPPORTED, BUSTER_INTRINSIC_TYPE_UNSUPPORTED_MODEL, wrapper.offset);
+        }
         else
         {
             type = wrapper.code == 'X' ? type_complex(reader->table, type) : type_vector(reader->table, type, wrapper.count, wrapper.code == 'E');

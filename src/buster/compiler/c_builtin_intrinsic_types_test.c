@@ -207,7 +207,7 @@ static void builtin_intrinsic_type_test_invalid(BuiltinIntrinsicTypeTest* test, 
         builtin_intrinsic_type_test_expect(test, result.status == BUILTIN_INTRINSIC_TYPES_INVALID && builtin_intrinsic_type_test_unpublished(&result),
             "malformed descriptors publish no partial type or ICE metadata");
     }
-    const char* unsupported[] = { "", "vP", "vJ", "vSJ", "vK", "vF", "vG", "vH", "vM", "vp", "vq4i", "vQa", "vm", "va", "vA", "vi&", "vi*0", "vi*4", "vh" };
+    const char* unsupported[] = { "", "vP", "vJ", "vSJ", "vK", "vF", "vG", "vH", "vM", "vp", "vq4i", "vQa", "vm", "va", "vA", "vi&", "vi*0", "vi*4", "vh", "Xh", "vXh", "V4Xh" };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unsupported); i += 1)
     {
         const BuiltinIntrinsicTypeResult result = builtin_intrinsic_type_test_decode(table, unsupported[i]);
