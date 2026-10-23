@@ -1,5 +1,9 @@
 # C builtin integer actions
 
+The [typed checking and runtime integration guide](c-builtins-integration.md)
+describes the additional typed-action and executable-stream interfaces. The
+action-level measurements below retain their original scope and revision.
+
 `c_builtin.c` is the dependency-independent integer-action part of
 [#148](https://github.com/buster14a/buster/issues/148). It recognizes 21 names
 and folds independent constant calls with AVX-512 and exact scalar paths:
@@ -43,9 +47,10 @@ Overflow rows use `a_type`, `b_type`, and `result_type`: a bit width from 1 to
 64, plus `BUSTER_CBUILTIN_SIGNED` for signed values. Signed one-bit types are
 invalid. Upper bits outside each width are ignored. A descriptor represents an
 integer's arithmetic shape, not a `TypeId`; the checker must validate actual C
-types. For example, it must reject a boolean or enum destination even if its
-width resembles an accepted integer, and can describe a boolean input as
-unsigned one-bit. Wider integers need another action and are not silently
+types. Clang accepts non-const boolean and enum destinations for its generic
+overflow builtins, unlike GCC's documented restriction; the typed adapter
+retains their actual integer shape. A boolean is unsigned one-bit. Wider
+integers need another action and are not silently
 truncated into this API.
 
 Every output row has:
