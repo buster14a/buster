@@ -69,7 +69,8 @@ and execution following lighter work. CI retains priority between runs.
 
 The implementation now consumes the shared IR and the upstream local-SSA
 adapter. The optimization slices cover SCCP/dead-code/CFG cleanup, value
-numbering, conservative loop motion and private aggregate-field splitting.
+numbering, conservative loop motion, private aggregate-field splitting and
+bounded translation-unit inlining.
 Their [optimization guide](ir-optimization.md) records unsupported forms and
 the remaining transformation and measurement scope.
 
