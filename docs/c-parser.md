@@ -9,6 +9,10 @@ didn't have, which lets the vector path take only code the scalar parser would
 accept with the same tree. `compiler file.c` runs the preprocessor and the
 parser; nothing is written yet.
 
+The test-only [expression-fragment experiment](c-parser-fragments.md) records
+the alternative representation's contracts and the semantic-consumer work
+required before the complete comparison in #107 can select a representation.
+
 On the 9700X the vector path parses `sqlite3.c` (707,153 tokens) in 3.54 ms,
 27.6 cycles a token, 2.37 times as fast as the scalar parser (65.4), and the
 libc corpus at 21.5 cycles a token, 2.37 times as fast (50.6); with the
