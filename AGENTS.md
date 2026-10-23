@@ -160,6 +160,13 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `dominators.c` analyzes borrowed CFG columns into dominance intervals,
+  optional frontier bitsets and natural loops. `test-dominators` checks both
+  paths against independent graph definitions; `benchmark-dominators` includes
+  analysis and synthetic producer/consumer measurements. [The dominator
+  guide](docs/dominators.md) records memory limits and pending corpus evidence.
+  Take the shared 9700X lock per build/test/measurement and pin timing to CPU 2.
+
 - `tier1_allocate.c` and `tier1_rematerialize.c` supply bounded interval
   allocation, required-use reload splitting, parallel moves and baseline-x86
   rematerialization. `test-tier1-allocation` includes native execution and
