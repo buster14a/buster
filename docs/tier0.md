@@ -515,10 +515,14 @@ path's 11.1.
   - the immediates' choice (`x86_choose_forms`) and applying it 11%;
   - the homes, the frame, the prologue and the per-function setup 15%.
 
-**Generated code against clang -O0** (60 cross-checked programs on the 9700X):
+**Generated code against clang -O0** (the cross-check's 60 programs for each of seeds 1, 2, 3, 5, 7 and 11, on the
+9700X, each run alone under its lock and pinned to CPU 2):
 
-- **Run time:** 0.79 of clang's (0.70 to 0.78 on the 7940HS, over 1,310 programs of six seeds).
-- **Code size:** 1.11 of clang's `.text`. These programs are full of floating constants, which Tier 0 materializes
+- **Run time:** 0.93 to 0.95 of clang's (0.86 to 0.92 on the 7940HS). The programs have had objects, indirect calls
+  and copies since #362 to #364, and every object's bytes are read into a global as each function ends. An object
+  lives in memory for both compilers, so Tier 0's register homes gain less on such code: before them, its run time
+  was 0.79 of clang's (0.70 to 0.78 on the 7940HS).
+- **Code size:** 1.10 to 1.11 of clang's `.text`. These programs are full of floating constants, which Tier 0 materializes
   through a general register (up to 15 bytes) where clang loads them from `.rodata` (not counted in its `.text`).
   They are also full of constant arithmetic, which #133 will fold before Tier 0 sees it.
 - **rsp-relative frame operands** take a SIB byte that clang's rbp-relative ones don't.
