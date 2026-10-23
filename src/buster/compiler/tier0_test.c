@@ -340,6 +340,8 @@ struct Tier0TestFrame
 #define BUSTER_TIER0_TEST_SLOTS (BUSTER_TIER0_TEST_FRAMES * BUSTER_TIER0_GENERATE_MAX_LOCALS)
 // A frame's objects' bytes, each object at a multiple of 16 (the generator's take a few hundred at most).
 #define BUSTER_TIER0_TEST_OBJECT_BYTES 2048
+// A function's address in the interpreter: its index under this tag.
+#define BUSTER_TIER0_TEST_FUNCTION_TAG 0xf0f0000000000000ull
 #define BUSTER_TIER0_TEST_STEPS 200000000ull
 
 // Runs the program's entry (its last function) on three arguments over the globals at `globals` (the data layout's),
@@ -412,7 +414,9 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             stack[top++] = tier0_test_load(class, (uint64_t)(uintptr_t)(globals + data->offsets[value - 1]));
             break;
         case BUSTER_TYPED_GLOBAL_ADDRESS:
-            stack[top++] = (uint64_t)(uintptr_t)(globals + data->offsets[value - 1]);
+            // A function's address is its index under a tag, which only an indirect call reads.
+            stack[top++] = value <= program->global_count ? (uint64_t)(uintptr_t)(globals + data->offsets[value - 1])
+                                                          : BUSTER_TIER0_TEST_FUNCTION_TAG | (value - 1 - program->global_count);
             break;
         case BUSTER_TYPED_DUP:
             stack[top] = stack[top - 1];
@@ -466,7 +470,7 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             break;
         case BUSTER_TYPED_CALL:
         {
-            const uint32_t callee = program->call_callees[program->functions[frame->function].first_call + value];
+            uint32_t callee = program->call_callees[program->functions[frame->function].first_call + value];
             const uint32_t arguments = f->call_argument_counts[value];
             if (depth >= BUSTER_TIER0_TEST_FRAMES)
             {
@@ -481,6 +485,15 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             for (uint32_t a = 0; a < arguments; a += 1)
             {
                 locals[a] = stack[top + a];
+            }
+            if (f->call_targets[value] == 0)
+            {
+                // An indirect call's callee, under its arguments: a function's tagged index, the one the generator
+                // called.
+                top -= 1;
+                const uint64_t address = stack[top];
+                *fault |= (address & ~0xffffull) != BUSTER_TIER0_TEST_FUNCTION_TAG || (address & 0xffff) != callee;
+                callee = (uint32_t)(address & 0xffff) < program->function_count ? (uint32_t)(address & 0xffff) : callee;
             }
             frames[depth] = (Tier0TestFrame){ callee, 0, locals, callee_objects, top };
             depth += 1;
@@ -1593,9 +1606,9 @@ static int run_tier0_tests(int argc, char** argv)
         {
             static const Tier0ProgramOptions shapes[4] = {
                 { .functions = 1, .statements = 6, .expression_nodes = 6, .calls = false, .loops = false, .floating = false, .pointers = false },
-                { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false },
-                { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true },
-                { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true },
+                { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true },
+                { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true },
+                { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true },
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
             {

@@ -47,6 +47,8 @@
 // is object o's element or member `part`, among the targets past the locals.
 #define BUSTER_TIER0_GENERATE_MAX_OBJECTS 3
 #define BUSTER_TIER0_GENERATE_MAX_MEMBERS 5
+// A function's locals that hold a function's address, at most.
+#define BUSTER_TIER0_GENERATE_FUNCTION_POINTERS 3
 #define BUSTER_TIER0_GENERATE_OBJECT_TARGET(o, part) (BUSTER_TIER0_GENERATE_MAX_LOCALS + (o) * 256u + (part))
 // The work a call of a function may cost, at most (statements run, as the generator counts them).
 #define BUSTER_TIER0_GENERATE_WORK 20000
@@ -69,6 +71,8 @@ struct Tier0ProgramOptions
     // and the tests' interpreter's, gives the indefinite integer).
     bool defined;
     bool objects;
+    // Calls through pointers to functions: locals that hold a function's address, and a function's address itself.
+    bool indirect;
 };
 
 typedef struct Tier0GeneratedFunction Tier0GeneratedFunction;
@@ -105,6 +109,8 @@ struct Tier0Program
     uint32_t* call_callees;
     uint32_t* call_first;
     uint32_t* call_argument_counts;
+    // Whether each call is indirect: its callee's address pushed before its arguments.
+    uint8_t* call_indirect;
     uint32_t call_count;
     uint32_t call_capacity;
     uint8_t* argument_classes;
@@ -1044,6 +1050,11 @@ struct Tier0FunctionState
     // The locals statements may assign (not the loop counters or the pointers).
     uint32_t assignable[BUSTER_TIER0_GENERATE_MAX_LOCALS];
     uint32_t assignable_count;
+    // The locals that hold an earlier function's address (U64s, apart from the scope like the pointers), each one's
+    // function.
+    uint32_t function_pointers[BUSTER_TIER0_GENERATE_FUNCTION_POINTERS];
+    uint32_t function_pointer_targets[BUSTER_TIER0_GENERATE_FUNCTION_POINTERS];
+    uint32_t function_pointer_count;
     const char* prefix;
 };
 
@@ -1330,7 +1341,8 @@ static void tier0_close(Tier0Program* program, Tier0FunctionState* state, uint64
 }
 
 // A call of a random earlier function that fits the work budget, with random arguments, its result assigned to a
-// local of its class or discarded. Returns false if no function fits.
+// local of its class or discarded; with the `indirect` option now and then through a pointer to it, a local that holds
+// its address or the address itself. Returns false if no function fits.
 static bool tier0_generate_call(Tier0Program* program, Tier0FunctionState* state, uint64_t* random, uint64_t multiplier, const Tier0ProgramOptions* options)
 {
     Tier0GeneratedFunction* function = state->function;
@@ -1342,11 +1354,18 @@ static bool tier0_generate_call(Tier0Program* program, Tier0FunctionState* state
         const uint64_t work = multiplier * (target->work + 1);
         if (function->work + work <= BUSTER_TIER0_GENERATE_WORK && program->argument_count + target->parameter_count <= program->argument_capacity)
         {
+            const bool indirect = options->indirect && tier0_generate_chance(random, 35);
+            uint32_t pointer = UINT32_MAX;
+            for (uint32_t p = 0; p < state->function_pointer_count && indirect; p += 1)
+            {
+                pointer = state->function_pointer_targets[p] == callee ? state->function_pointers[p] : pointer;
+            }
             function->work += work;
             const uint32_t call = program->call_count - function->first_call;
             program->call_callees[program->call_count] = callee;
             program->call_first[program->call_count] = program->argument_count;
             program->call_argument_counts[program->call_count] = target->parameter_count;
+            program->call_indirect[program->call_count] = indirect ? 1 : 0;
             program->call_count += 1;
             function->call_count += 1;
             const uint32_t result = target->result_class;
@@ -1371,7 +1390,21 @@ static bool tier0_generate_call(Tier0Program* program, Tier0FunctionState* state
             {
                 tier0_text(program, "v%u = ", destination);
             }
-            tier0_text(program, "%sf%u(", state->prefix, callee);
+            // An indirect call's callee, before its arguments: the local that holds its address (C calls through it),
+            // or its address (C names it; the call is the same).
+            if (pointer != UINT32_MAX)
+            {
+                tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, pointer);
+                tier0_text(program, "v%u(", pointer);
+            }
+            else
+            {
+                if (indirect)
+                {
+                    tier0_emit(program, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, program->global_count + 1 + callee);
+                }
+                tier0_text(program, "%sf%u(", state->prefix, callee);
+            }
             for (uint32_t p = 0; p < target->parameter_count; p += 1)
             {
                 const uint32_t class = program->local_classes[target->first_local + p];
@@ -1379,7 +1412,7 @@ static bool tier0_generate_call(Tier0Program* program, Tier0FunctionState* state
                 program->argument_count += 1;
                 tier0_text(program, p == 0 ? "" : ", ");
                 tier0_generate_value_of(program, function, &state->scope, random, class, 1 + tier0_generate_below(random, options->expression_nodes / 2 + 1),
-                                        options->floating, state->prefix, p);
+                                        options->floating, state->prefix, p + (indirect ? 1 : 0));
             }
             tier0_text(program, ");\n");
             tier0_emit(program, BUSTER_TYPED_CALL, result, call);
@@ -1764,6 +1797,19 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
             }
         }
     }
+    // Locals that hold an earlier function's address, for calls through them.
+    const uint32_t function_pointers = options->indirect && index != 0 ? tier0_generate_below(random, BUSTER_TIER0_GENERATE_FUNCTION_POINTERS + 1) : 0;
+    for (uint32_t k = 0; k < function_pointers; k += 1)
+    {
+        const uint32_t target = tier0_generate_below(random, index);
+        const uint32_t local = tier0_generate_local(program, &state, BUSTER_TYPED_CLASS_U64, 0);
+        if (local != UINT32_MAX)
+        {
+            state.function_pointers[state.function_pointer_count] = local;
+            state.function_pointer_targets[state.function_pointer_count] = target;
+            state.function_pointer_count += 1;
+        }
+    }
     // The header and the declarations.
     if (entry)
     {
@@ -1791,9 +1837,25 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
         {
             object = state.scope.objects[o].local == l ? o : object;
         }
+        uint32_t pointee = UINT32_MAX;
+        for (uint32_t p = 0; p < state.function_pointer_count; p += 1)
+        {
+            pointee = state.function_pointers[p] == l ? state.function_pointer_targets[p] : pointee;
+        }
         if (object != UINT32_MAX)
         {
             tier0_declare_object(program, &state.scope.objects[object]);
+        }
+        else if (pointee != UINT32_MAX)
+        {
+            // A pointer to the function's type.
+            const Tier0GeneratedFunction* target = &program->functions[pointee];
+            tier0_text(program, "    %s (*v%u)(", tier0_c_type(target->result_class), l);
+            for (uint32_t p = 0; p < target->parameter_count; p += 1)
+            {
+                tier0_text(program, "%s%s", p == 0 ? "" : ", ", tier0_c_type(program->local_classes[target->first_local + p]));
+            }
+            tier0_text(program, "%s);\n", target->parameter_count == 0 ? "void" : "");
         }
         else
         {
@@ -1808,6 +1870,10 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
         for (uint32_t p = 0; p < state.scope.pointer_count; p += 1)
         {
             pointer |= state.scope.pointers[p] == l;
+        }
+        for (uint32_t p = 0; p < state.function_pointer_count; p += 1)
+        {
+            pointer |= state.function_pointers[p] == l;
         }
         if (!pointer && class != BUSTER_TYPED_CLASS_VOID)
         {
@@ -1858,6 +1924,12 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
         }
         tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, pointer);
     }
+    for (uint32_t p = 0; p < state.function_pointer_count; p += 1)
+    {
+        tier0_emit(program, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, program->global_count + 1 + state.function_pointer_targets[p]);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, state.function_pointers[p]);
+        tier0_text(program, "    v%u = %sf%u;\n", state.function_pointers[p], prefix, state.function_pointer_targets[p]);
+    }
     (void)pointers;
     (void)array_pointers;
     // The statements.
@@ -1895,6 +1967,7 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
             program->call_callees[program->call_count] = callee;
             program->call_first[program->call_count] = program->argument_count;
             program->call_argument_counts[program->call_count] = target->parameter_count;
+            program->call_indirect[program->call_count] = 0;
             program->call_count += 1;
             function->call_count += 1;
             const uint32_t result = target->result_class;
@@ -1989,12 +2062,14 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
     program->call_callees = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, program->call_capacity);
     program->call_first = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, program->call_capacity);
     program->call_argument_counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, program->call_capacity);
+    program->call_indirect = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->call_capacity);
     program->argument_classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->argument_capacity);
     program->global_values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_TIER0_GENERATE_MAX_GLOBALS * BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS);
     program->text = BUSTER_ARENA_PUSH_ARRAY(arena, char, program->text_capacity);
     bool result = program->kinds != 0 && program->classes != 0 && program->values != 0 && program->local_classes != 0 && program->local_flags != 0 &&
                   program->local_sizes != 0 && program->local_alignments != 0 && program->call_callees != 0 && program->call_first != 0 &&
-                  program->call_argument_counts != 0 && program->argument_classes != 0 && program->global_values != 0 && program->text != 0;
+                  program->call_argument_counts != 0 && program->call_indirect != 0 && program->argument_classes != 0 && program->global_values != 0 &&
+                  program->text != 0;
     if (result)
     {
         program->text[0] = 0;
@@ -2145,7 +2220,7 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
                 types[argument] = tier0_program_class_type(program->argument_classes[program->call_first[c] + a]);
                 argument += 1;
             }
-            functions->call_targets[c] = program->global_count + 1 + program->call_callees[c];
+            functions->call_targets[c] = program->call_indirect[c] != 0 ? 0 : program->global_count + 1 + program->call_callees[c];
             functions->call_variadic[c] = 0;
         }
         const AbiSignatures batch = {

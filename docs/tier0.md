@@ -16,6 +16,7 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   - `tier0_compile`, the vector path;
   - `tier0_compile_scalar`, its twin and oracle.
 - **Objects in the frame:** local arrays, structs and unions at their alignments, to 16.
+- **Indirect calls,** through `r11`.
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -58,7 +59,8 @@ Beside them are three tables:
   A function without objects leaves both columns 0.
 - **The parameters' locations** at entry, and the result's.
 - **Calls:** each call's callee `SymbolId`, its arguments' classes and locations, whether it is variadic, and its
-  `AbiCall`.
+  `AbiCall`. A callee of 0 makes the call indirect: the stream pushes the address it calls (U64) before its
+  arguments, and the `CALL` pops it after them.
 
 The ABI's locations come from `abi_assign`, which the front end runs once per unit over every signature. Calls are
 vectorized across the unit that way, and Tier 0 needs no type table.
@@ -123,7 +125,7 @@ record index (ascending) and its target's; the function's end is the epilogue's 
 `branch_sizing_validate` accepts.
 
 **Symbolic fields** (`[rip + global]`, `call f`) are records with `BUSTER_X86_FORM_FIXUP` and a `LinkReference`:
-`PC32` or `CALL`, the target `SymbolId` and addend 0, in record order.
+`PC32` or `CALL`, the target `SymbolId` and addend 0, in record order. An indirect call is `call r11`, with none.
 
 ## The design
 
@@ -205,7 +207,8 @@ vector path's measuring counts a call's records with `tier0_count_deferred`, in 
 parallel move, without emitting it; the scalar path runs the emitter to count, which checks the count:
 
 - Calls: saves, stack arguments, the register arguments by a parallel move, al for a variadic call, the call, the
-  result moved, the restores. The moves' sources are distinct registers, as are their destinations, so they form
+  result moved, the restores. An indirect call's callee joins the parallel move, into r11, which no argument and not
+  al takes; then `call r11`. The moves' sources are distinct registers, as are their destinations, so they form
   paths and cycles, resolved on bitmasks: a move whose destination no other move still reads goes first, and what is
   left are cycles, each of n moves taking n − 1 `xchg`s. With rax first in the depth table and rdi first in the ABI's
   order, a call makes cycles of two alone; a test of the resolver's own covers every length.
@@ -322,7 +325,9 @@ Before the programs, checks of their own:
   - each object's address modulo its alignment as a value (`(unsigned long)&v & 15`), 0 wherever the object is placed
     right.
 
-  A program without objects is the one the same seed gave before they existed.
+  A program without objects is the one the same seed gave before they existed;
+- with the `indirect` option (the shapes with calls), a third of the calls indirect: through locals that hold an
+  earlier function's address (C calls through them), or through the function's address itself.
 
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
@@ -358,7 +363,14 @@ a NaN's sign and payload to the implementation, and clang folds a constant 0.0 /
     - the frame not kept a multiple of 16 for them: 697 and 2;
     - objects overlapping: the objects test, and runs that crash, loop until the alarm, or differ;
     - the vector path giving objects slots too, or the scalar path: 1,951 and 599 (the paths disagree);
-    - each rule of the validator's for objects left out: its break taken.
+    - each rule of the validator's for objects left out: its break taken;
+  - and on indirect calls:
+    - the callee's register one depth off: the paths disagree and runs crash;
+    - its move left out of the vector path's count: 767; the call's depths, the emitter's: 767;
+    - the callee left out of the effects: 713; or of the validator: 764 (valid streams refused).
+
+    Counting the callee as a live depth in selection gives a frame one slot larger, which no check sees, as it
+    changes no value.
 
 ## Measurements
 
@@ -421,7 +433,6 @@ path's 11.1.
   - `va_arg`, a variadic function's prologue, `long double` and `_Complex`;
   - variable-length arrays, inline assembly, `setjmp` and atomics;
   - `switch` (no kind yet: a compare sequence or a jump table);
-  - indirect calls;
   - globals of shared libraries through the GOT (a front end's visibility decision).
 - **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store
   per entry); the call emitter, an entry at a time; and selection's gather from a table larger than L1.

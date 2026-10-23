@@ -3770,7 +3770,8 @@ informational.
 `tier0_generate.c`, `--count` (300) of each of four shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
 address-taken locals, objects); and larger. Their calls pass up to 12
-arguments, past the argument registers, and their pointer arithmetic has
+arguments, past the argument registers, a third of them (in the shapes with
+calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
 are local arrays and structs, some `_Alignas(16)`, read, written and pointed
 into, each address's remainder by its alignment a value. Before them it checks

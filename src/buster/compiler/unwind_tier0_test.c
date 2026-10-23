@@ -3,7 +3,8 @@
 //
 // Tests of the native Tier 0 unwind proof, included after tier0_test.c. Actual typed programs exercise both producers
 // and both branch sizers before both analyzers consume their public records. Deep global expressions force every
-// nonvolatile register; generated programs add loops, alternate returns, calls, floating values and pointer stores.
+// nonvolatile register; generated programs add loops, alternate returns, calls (also through a register), floating
+// values, pointer stores and objects in the frame.
 // Original record fixtures cover all saved masks and isolate refusals, with poisoned output rollback and immutable
 // input checks. These are descriptor tests, not machine execution or an independent CFI interpreter.
 
@@ -20,6 +21,8 @@ struct UnwindTier0Test
     uint32_t loops;
     uint32_t returns;
     uint32_t pointers;
+    uint32_t indirect_calls;
+    uint32_t objects;
 };
 
 static bool unwind_tier0_test_expect(UnwindTier0Test* test, bool condition, const char* check, uint64_t id)
@@ -116,6 +119,13 @@ static bool unwind_tier0_test_function(UnwindTier0Test* test, const Tier0Functio
         test->functions += 1;
         test->generated_masks |= 1ull << reference.saved;
         test->calls += function->call_count != 0 ? 1 : 0;
+        bool indirect = false;
+        for (uint32_t c = 0; c < function->call_count; c += 1)
+        {
+            indirect |= function->call_targets[c] == 0;
+        }
+        test->indirect_calls += indirect ? 1 : 0;
+        test->objects += function->local_sizes != 0 ? 1 : 0;
         for (uint32_t branch = 0; branch < codes[0].branch_count; branch += 1)
         {
             test->loops += codes[0].targets[branch] < codes[0].branches[branch] ? 1 : 0;
@@ -173,6 +183,8 @@ static void unwind_tier0_test_generated(UnwindTier0Test* test, Arena* arena)
         { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true },
         { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true },
         { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true },
+        // Calls through pointers (`call r11`) and objects in the frame.
+        { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true },
     };
     Tier0Tables tables = { 0 };
     const bool opened = tier0_tables_open(&tables);
@@ -200,6 +212,7 @@ static void unwind_tier0_test_generated(UnwindTier0Test* test, Arena* arena)
                             "real producer covers no saves and all six saves", 0);
     unwind_tier0_test_expect(test, test->calls != 0 && test->loops != 0 && test->returns != 0 && test->pointers != 0,
                             "generated coverage includes calls, loops, alternate returns and pointer stores", 0);
+    unwind_tier0_test_expect(test, test->indirect_calls != 0 && test->objects != 0, "generated coverage includes indirect calls and objects", 0);
 }
 
 typedef struct UnwindTier0Fixture UnwindTier0Fixture;
@@ -415,7 +428,7 @@ static void unwind_tier0_test_mutations(UnwindTier0Test* test)
     if (unwind_tier0_test_expect(test, ready, "build refusal baseline with two saves and an aligned call", 0))
     {
         unwind_tier0_test_result(test, &original, UNWIND_OK, 2000);
-        for (uint32_t mutation = 0; mutation < 52; mutation += 1)
+        for (uint32_t mutation = 0; mutation < 53; mutation += 1)
         {
             UnwindTier0Fixture fixture;
             memcpy(&fixture, &original, sizeof(fixture));
@@ -478,6 +491,8 @@ static void unwind_tier0_test_mutations(UnwindTier0Test* test)
                 case 49: fixture.code.branches = 0; wanted = UNWIND_ERROR_INVALID; break;
                 case 50: fixture.code.targets = 0; wanted = UNWIND_ERROR_INVALID; break;
                 case 51: fixture.code.records = 0; wanted = UNWIND_ERROR_INVALID; break;
+                // Tier 0's indirect call, through r11, is a call like its direct one (26's through rax isn't).
+                case 52: *call = unwind_tier0_test_record(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, 0, 0, 0); measure = true; wanted = UNWIND_OK; break;
             }
             if (!measure || unwind_tier0_test_expect(test, unwind_tier0_test_measure(&fixture), "mutated instruction remains encoder-valid", mutation))
             {

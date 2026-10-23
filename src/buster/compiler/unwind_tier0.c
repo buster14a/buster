@@ -247,7 +247,9 @@ static UnwindError unwind_tier0_build(const Tier0Code* code, const uint32_t* fin
             const X86Instruction* record = &code->records[i];
             const X86Effects* effects = x86_effects(record->form);
             const uint32_t control = x86_effects_control(effects);
-            const bool call = record->form == (X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP);
+            // A call: Tier 0's marked direct one, or its indirect one through a register (r11).
+            const bool call = record->form == (X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP) ||
+                              (record->form == X86_FORM_CALL_RM64 && record->mode == BUSTER_X86_REGISTER_DIRECT && record->rm == X86_REGISTER_R11);
             const bool transfer = control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH;
             const bool listed = branch < code->branch_count && code->branches[branch] == i;
             const uint64_t forbidden = (nonvolatile & ~saved_registers) | (call ? 0 : BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RSP));
