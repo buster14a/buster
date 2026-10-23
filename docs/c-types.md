@@ -97,6 +97,22 @@ bits rounded up to a power of two, and its size that too, and the table refuses
 vectors wider than 2^31 bits, where clang's 32-bit alignment arithmetic
 overflows.
 
+### GNU machine modes
+
+`type_machine_mode(table, base, mode)` implements the target type action for
+`__attribute__((mode(...)))`. It accepts bounded plain or paired-underscore
+spellings, selects the supported scalar/complex target types and uses the
+existing vector constructor for vector modes. It replaces the declaration's
+type, stripping existing qualifiers and aligned typedef wrappers as Clang does;
+later declaration qualifiers remain the checker's responsibility. Enum typedef
+transformation leaves the original tag unchanged.
+
+Unknown modes, incompatible bases, unsupported representations and oversized
+vectors have explicit `TypeError` results. `test-types` checks types, canonical
+spellings and surrounding record layouts against Clang, plus guarded names,
+rejected cases and capacity failure. [The GNU extension guide](c-gnu-extensions.md)
+records the supported modes and the still-missing source integration.
+
 ## Hash-consing
 
 A derived type's key is its kind, its key flags (variadic, prototype,
@@ -385,3 +401,42 @@ first. The numbers above are its output on the 9700X (CPU 2, clang 23.1.1,
 2026-10-20). Each vector path runs between scalar ones, as a compiler's vector
 phases run after scalar work; #199 found that this state (the power cap's)
 slows heavy AVX-512 loops on the 9700X.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[The type-table map and ownership](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_types.c#L4)
+cover these implemented substages and shared consumers:
+
+| Producer → consumer | Reusable information and ordering |
+| --- | --- |
+| Checker declarators/actions → `type_derive` / `type_derive_batch` | Normalized kind/flags/base/extent/parameter keys; hash-consed IDs. Batch misses are inserted in request order, preserving IDs across partitions. |
+| Tag/member producer → `type_record_define` / `type_layout_records` | Member/type/attribute data and explicit completion; layout publishes offsets, size and alignment for checker, static-data and ABI readers. A dependent member must be complete before its record's layout. |
+| Type columns → arithmetic conversions / compatibility / composite walks | Fixed arithmetic codes permit byte-table vector lookup; tagged or exceptional types use exact actions. Pair memos avoid repeated traversal of shared type DAGs. |
+| Type table → ABI classification, checker/builtin adapters, diagnostic `type_print` | TypeId remains a u32 `(index << 3) | qualifiers`, zero none; IDs are table-local. The formatter is a cold reader, not a prerequisite for semantic operations. |
+
+Columns use their declared widths and conventional C strides; capacity and
+logical type/member/parameter counts differ. `type_initialize` allocates fixed
+columns in the supplied arena, with a separate growing index arena. Capacity
+or invalid derivation returns zero with `last_error`, never a truncated ID.
+Requests/results and temporary layout work must not overwrite live input keys.
+The vector batch/layout kernels bound tails; their internal eight-key and
+16-record widths do not authorize reading beyond a caller's count. The type
+table and member/parameter/name storage must survive all consumers.
+
+There is one writer. Most columns become immutable after publication, except
+completion of a tag. Parallel readers require no concurrent mutation; a cached
+ABI row or deferred body environment cannot silently observe a later completion
+as though it existed earlier. [#113](https://github.com/buster14a/buster/issues/113)/[#133](https://github.com/buster14a/buster/issues/133) own historical semantic contexts.
+
+Observed duplication candidates are dependent-type readiness scans in ABI and
+one-at-a-time type requests from source elaboration despite a batch API. A
+producer-supplied ready frontier or completion list could help, but emitting
+unused levels for every type could cost more; keep dependencies and canonical
+ID order. The existing bulk/small-batch `benchmark-types` and ABI benchmarks
+measure modules, not a source unit's whole handoff. Disposition: retain canonical
+columns and exact twins. `test-types` checks legal batch partitions, layout,
+compatibility and Clang rules; [#133](https://github.com/buster14a/buster/issues/133)/[#137](https://github.com/buster14a/buster/issues/137) require actual source request streams,
+small/large combined costs, memory and conditioned occupancy before changing
+these interfaces.

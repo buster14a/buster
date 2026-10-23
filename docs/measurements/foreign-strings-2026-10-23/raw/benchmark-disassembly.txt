@@ -1,0 +1,15 @@
+0000000000c26320 0000000000000204 t foreign_strings_benchmark_after_scalar
+000000000057ed60 0000000000000061 r foreign_strings_benchmark_code
+0000000005b74c10 0000000000000008 b foreign_strings_benchmark_scalar_sink
+0000000001478420 0000000000000040 d foreign_strings_benchmark_variants
+
+/home/david/buster-fast-bench/linker-strings86/build3/build/compiler:     file format elf64-x86-64
+
+
+Disassembly of section .plt.got:
+
+Disassembly of section .init:
+
+Disassembly of section .fini:
+
+Disassembly of section .text:

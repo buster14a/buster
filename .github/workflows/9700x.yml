@@ -159,6 +159,9 @@ jobs:
           # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
           # and runs them.
           ./build/compiler test-object-writer --cross-check
+          == Test DWARF source lines and late address finalization
+          # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
+          ./build/compiler test-debug --cross-check
           == Test the preprocessor on the repository's translation units against clang
           # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
           # tokens. -target and its triple (clang's default) go to both.
@@ -170,8 +173,21 @@ jobs:
           == Test the parser's snippets against clang
           # The snippets, each also checked against clang, the generated inputs and the driver's checks.
           ./build/compiler test-parser --clang
+          == Test GNU syntax metadata against clang
+          ./build/compiler test-gnu --clang
           == Test scoped name-resolution kernels
           ./build/compiler test-bindings
+          == Test selective lowering against its independent oracle and Clang symbols
+          ./build/compiler test-lowering --clang
+          == Test deferred-body source-position environments
+          ./build/compiler test-environments
+          == Test C-source binding identities and scope semantics
+          ./build/compiler test-parser-bindings --clang
+          == Compare source binding columns on main.c
+          ./build/compiler test-parser-bindings --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          == Compare source binding columns on the frozen SQLite input
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          ./build/compiler test-parser-bindings --clang -march=znver5 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
           == Test the static executables with libc
           # Each program bound against the system's static runtime and written as a static executable by 1, 2, 3 and 8
           # lanes and by the writer's exact twins must be the same file, run as cc -static's link of the same object
@@ -193,6 +209,14 @@ jobs:
           ./build.sh check-call-graph
           == Test the runner
           ./build/compiler test-parallel
+          == Test the IR and typed-stream lowering
+          ./build/compiler test-ir
+          ./build/compiler test-ir-lowering
+          ./build/compiler test-ir-parse
+          ./build/compiler test-interpreter
+          ./build/compiler test-interpreter-native
+          ./build/compiler test-interpreter-link
+          ./build/compiler test-ir-interpreter
           == Test the preprocessor's cases against clang
           # --clang also preprocesses each case with clang -E and compares the tokens.
           ./build/compiler test-preprocessor --clang
@@ -298,9 +322,6 @@ jobs:
           # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
           # --cross-check also runs them beside clang -O0's builds of the same programs as C.
           ./build/compiler test-tier0 --cross-check
-          == Test the IR and typed-stream lowering
-          ./build/compiler test-ir
-          ./build/compiler test-ir-lowering
           == Test verified Tier 1 optimization passes
           ./build/compiler test-ir-optimize
           ./build/compiler test-ir-gvn
@@ -314,6 +335,8 @@ jobs:
           ./build/compiler test-tier1-pipeline --cross-check
           ./build/compiler test-tier1-model
           ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
+          == Test native fixed-frame CFI and generated GDB/perf consumers
+          ./build/compiler test-unwind --cross-check
           == Test differential harness accounting, subprocesses and failure preservation
           ./build/compiler test-differential-harness
           == Test Tier 1 allocation, reload splitting and rematerialization
@@ -344,6 +367,33 @@ jobs:
           if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/no-such-input.c; then exit 1; fi
           == Test integer builtin actions against Clang
           ./build/compiler test-builtins
+          ./build/compiler test-builtin-intrinsic-types
+          ./build/compiler test-builtin-intrinsic-features
+          ./build/compiler test-check-builtins-x86
+          ./build/compiler test-check-builtins-vector
+          ./build/compiler test-builtin-intrinsic-catalog
+          ./build/compiler test-builtin-intrinsic-inventory
+          ./build/compiler test-check-builtins
+          ./build/compiler test-builtin-lowering
+          ./build/compiler test-check-varargs
+          ./build/compiler test-builtin-varargs
+          ./build/compiler test-tier0-variadic-frame
+          ./build/compiler test-check-builtins-misc
+          ./build/compiler test-check-builtins-float
+          ./build/compiler test-check-builtins-query
+          ./build/compiler test-check-builtins-bit-cast
+          ./build/compiler test-builtin-misc-lowering
+          ./build/compiler test-builtin-float-lowering
+          ./build/compiler test-builtin-terminal-helpers
+          ./build/compiler test-builtin-atomic-helpers
+          ./build/compiler test-builtin-atomic-rmw-helpers
+          ./build/compiler test-check-builtins-atomic
+          ./build/compiler test-check-builtins-atomic-rmw
+          ./build/compiler test-check-builtins-typed-overflow
+          ./build/compiler test-check-builtins-rounds
+          ./build/compiler test-check-builtins-math
+          ./build/compiler test-builtin-math-helpers
+          ./build/compiler test-builtin-rounds-helper
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
           == Test the per-file jobs on the repository's sources, flat
@@ -360,6 +410,10 @@ jobs:
           ./build/compiler test-ssa-ir
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
+          == Test fragment byte interleave and protected-page tails
+          ./build/compiler test-fragment-interleave
+          == Test the experimental scalar fragment sink
+          ./build/compiler test-fragments
           TESTS
 
       - name: Benchmark the C lexer on the repository sources
@@ -577,6 +631,11 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-object-writer
 
+      - name: Benchmark DWARF validation, sizing, emission and final addresses
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-debug
+
       - name: Benchmark the import path
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
@@ -611,6 +670,11 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-foreign
+
+      - name: Benchmark foreign string pooling through executable output
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-foreign-strings --counts 64,4096 --runs 3
 
       - name: Benchmark the whole link against GNU ld, lld, mold and wild
         # Without taskset: it pins its own lane and the linkers' runs on one thread, and the linkers' other runs need
@@ -662,10 +726,48 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 
+      - name: Benchmark selective lowering on synthetic graphs
+        # Includes independent result checks. These unconditioned single-operation samples are informational;
+        # source-corpus lowering and conditioned multi-process measurements remain separate acceptance work.
+        run: |
+          cpu="$(awk '/Cpus_allowed_list/ {split($2,a,/[-,]/); print a[1]}' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-lowering
+
+      - name: Benchmark GNU syntax metadata and parser handoff
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-gnu -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+
+      - name: Benchmark C-source binding production and resolution
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          system=(-march=znver5 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings "${system[@]}" "$corpus/sqlite/sqlite3.c"
+          # Isolate both paths and the vector work after a lighter phase; do not infer a speedup from mixed passes.
+          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only scalar "${system[@]}" "$corpus/sqlite/sqlite3.c"
+          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only batch "${system[@]}" "$corpus/sqlite/sqlite3.c"
+          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only batch --after-scalar 200 "${system[@]}" "$corpus/sqlite/sqlite3.c"
+
       - name: Benchmark the C type table
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-types
+
+      - name: Benchmark source-position environments
+        # Synthetic environment handoff only; actual deferred checker/corpus acceptance stays with #113.
+        # The runner hook already holds the 9700X lock. Isolate both vector states in independent processes.
+        # This step also checks every benchmark result against its scalar twin.
+        run: |
+          taskset -c 2 ./build/compiler benchmark-environments
+          for sample in 1 2 3; do
+            echo "Environment observation process $sample"
+            taskset -c 2 ./build/compiler benchmark-environments --only full-vector
+            taskset -c 2 ./build/compiler benchmark-environments --only full-vector --after-scalar 100
+            taskset -c 2 ./build/compiler benchmark-environments --only types-vector
+            taskset -c 2 ./build/compiler benchmark-environments --only types-vector --after-scalar 100
+          done
 
       - name: Benchmark the calling convention
         run: |
@@ -682,6 +784,7 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-backend
+          taskset -c "$cpu" ./build/compiler benchmark-unwind --functions 64
 
       - name: Benchmark the IR verifier and derived arrays
         run: |
@@ -694,3 +797,11 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
+
+      - name: Benchmark the verified Tier 1 optimization passes
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200

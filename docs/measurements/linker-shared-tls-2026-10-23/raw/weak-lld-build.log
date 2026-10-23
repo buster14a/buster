@@ -1,0 +1,8 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:41:55+00:00 codex-linker-debug88: tar -xf - -C /home/david/buster-fast-bench/codex-linker-debug88
+  title: Linker-DWARF-88-update
+  link: https://github.com/buster14a/buster/issues/88
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:42:44+00:00 CI job of buster14a/buster (run 39926530324, worker 3794692)
+  title: 9700X test / test: #303: Tier 0: typed stream to instruction records, by templates with registers from the value stack's depths (#136)
+  link: https://github.com/buster14a/buster/actions/runs/39926530324/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/303

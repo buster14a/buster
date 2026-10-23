@@ -102,8 +102,10 @@ writes only active elements. Call-order admission then enforces:
 Each call charges `max(expanded_size - 1, 0)`. Shrinking calls do not refund
 the budget. This conservative rule makes admission deterministic without
 requiring another global selection pass. Options can lower the growth and
-unit limits. Exceeding an input/representation limit is an error; reaching an
-admission budget retains that call with an explicit decision. Disabled mode
+unit limits. An input past a representation limit is an error; reaching an
+admission budget retains that call with an explicit decision. A call whose
+callee's constant or address rows would carry the caller's table past 2²⁰
+rows is also retained, as a growth decision, rather than failing the unit. Disabled mode
 still validates and clones the unit, retaining every call.
 
 ## Rewrite and consumer handoff
@@ -154,18 +156,20 @@ claiming the complete data-parallel or throughput acceptance of #139.
 ## Validation and remaining acceptance
 
 `run_ir_optimize_inline_tests(argc, argv)` takes arguments after the command
-name and currently accepts none. Its intended integrated command is
-`test-ir-inline`; the coordinator owns command registration.
+name and currently accepts none. `./build/compiler test-ir-inline` runs it,
+and the 9700X job's test step runs that command with the other optimizer tests.
 
-Local optimized and ASan/UBSan runs each pass **59,741 checks**, including
-**5,904 independent interpreter executions** before and after rewriting.
+Local optimized runs pass **92,521 checks**, including **5,904 independent
+interpreter executions** before and after rewriting (59,741 checks, with
+ASan/UBSan too, before the side-table growth case below).
 The interpreter executes calls using an explicit frame stack. Tests cover
 nested arithmetic through I128, all typed identity returns through F80 and
 pointers, empty void calls, caller diamonds/switches/loop phis, overlapping
 side-table roles, retained calls, volatile effects and fault order. Separate
 transitive-closure tests check 64 call graphs, while guarded pages cover
 empty and partial unsigned cost batches through 65 entries. Disabled mode,
-exact thresholds, growth budgets, malformed metadata and many arena-failure
+exact thresholds, growth budgets (32,769 calls whose constant rows would
+pass 2²⁰ among them), malformed metadata and many arena-failure
 capacities exercise explicit decisions and transactional rollback. Scalar
 and vector outputs must match in every retained body and audit column.
 
