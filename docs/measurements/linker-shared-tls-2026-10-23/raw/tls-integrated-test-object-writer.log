@@ -1,0 +1,60 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:49:53+00:00 codex-perf-pr302-pr304: taskset -c 2 /home/david/buster-fast-bench/perf-pr302-pr304-20261023/pr302/build/compiler benchmark-parser --only vector --passes 21 -nostdinc /home/david/buster-fast-bench/perf-pr302-pr304-20261023/inputs/parser-main.i
+  title: Measure PR 302 parser stages
+  link: https://github.com/buster14a/buster/pull/302
+  the defaults: 4 objects, 56536 bytes, 35 sections, 375 symbols, 921 relocations (30 through section symbols; 128 TPOFF32, 64 GOTTPOFF, 64 GOTPCRELX, 65 REX_GOTPCRELX, 1 GOTPCREL, 141 PLT32, 348 PC32, 105 64, 1 PC64, 1 32, 1 32S, 1 SIZE32, 1 SIZE64)
+  the defaults, function sections: 4 objects, 67272 bytes, 105 sections, 379 symbols, 921 relocations (30 through section symbols; 128 TPOFF32, 64 GOTTPOFF, 64 GOTPCRELX, 65 REX_GOTPCRELX, 1 GOTPCREL, 141 PLT32, 348 PC32, 105 64, 1 PC64, 1 32, 1 32S, 1 SIZE32, 1 SIZE64)
+  the smallest: 1 objects, 5176 bytes, 8 sections, 27 symbols, 59 relocations (11 through section symbols; 2 TPOFF32, 1 GOTTPOFF, 1 GOTPCRELX, 2 REX_GOTPCRELX, 1 GOTPCREL, 15 PLT32, 21 PC32, 11 64, 1 PC64, 1 32, 1 32S, 1 SIZE32, 1 SIZE64)
+  the smallest, function sections: 1 objects, 5800 bytes, 12 sections, 28 symbols, 59 relocations (11 through section symbols; 2 TPOFF32, 1 GOTTPOFF, 1 GOTPCRELX, 2 REX_GOTPCRELX, 1 GOTPCREL, 15 PLT32, 21 PC32, 11 64, 1 PC64, 1 32, 1 32S, 1 SIZE32, 1 SIZE64)
+  many units: 16 objects, 259520 bytes, 112 sections, 2025 symbols, 4027 relocations (67 through section symbols; 600 TPOFF32, 300 GOTTPOFF, 300 GOTPCRELX, 301 REX_GOTPCRELX, 1 GOTPCREL, 613 PLT32, 1544 PC32, 363 64, 1 PC64, 1 32, 1 32S, 1 SIZE32, 1 SIZE64)
+  many units, function sections: 16 objects, 305864 bytes, 414 sections, 2032 symbols, 4027 relocations (67 through section symbols; 600 TPOFF32, 300 GOTTPOFF, 300 GOTPCRELX, 301 REX_GOTPCRELX, 1 GOTPCREL, 613 PLT32, 1544 PC32, 363 64, 1 PC64, 1 32, 1 32S, 1 SIZE32, 1 SIZE64)
+  without absolute addresses: 4 objects, 55888 bytes, 33 sections, 376 symbols, 912 relocations (38 through section symbols; 128 TPOFF32, 64 GOTTPOFF, 64 GOTPCRELX, 65 REX_GOTPCRELX, 1 GOTPCREL, 138 PLT32, 348 PC32, 101 64, 1 PC64, 0 32, 0 32S, 1 SIZE32, 1 SIZE64)
+  without absolute addresses, function sections: 4 objects, 66616 bytes, 103 sections, 380 symbols, 912 relocations (38 through section symbols; 128 TPOFF32, 64 GOTTPOFF, 64 GOTPCRELX, 65 REX_GOTPCRELX, 1 GOTPCREL, 138 PLT32, 348 PC32, 101 64, 1 PC64, 0 32, 0 32S, 1 SIZE32, 1 SIZE64)
+  --functions workers, without sizes: 8 objects, 389304 bytes, 55 sections, 2022 symbols, 6586 relocations (43 through section symbols; 1000 TPOFF32, 500 GOTTPOFF, 500 GOTPCRELX, 501 REX_GOTPCRELX, 1 GOTPCREL, 1011 PLT32, 2528 PC32, 542 64, 1 PC64, 1 32, 1 32S, 0 SIZE32, 0 SIZE64)
+  --functions workers, without sizes, function sections: 8 objects, 466144 bytes, 557 sections, 2026 symbols, 6586 relocations (43 through section symbols; 1000 TPOFF32, 500 GOTTPOFF, 500 GOTPCRELX, 501 REX_GOTPCRELX, 1 GOTPCREL, 1011 PLT32, 2528 PC32, 542 64, 1 PC64, 1 32, 1 32S, 0 SIZE32, 0 SIZE64)
+  calling libc: 4 objects, 56224 bytes, 32 sections, 374 symbols, 920 relocations (29 through section symbols; 128 TPOFF32, 64 GOTTPOFF, 67 GOTPCRELX, 67 REX_GOTPCRELX, 1 GOTPCREL, 141 PLT32, 345 PC32, 104 64, 1 PC64, 0 32, 0 32S, 1 SIZE32, 1 SIZE64)
+  calling libc, function sections: 4 objects, 66728 bytes, 101 sections, 377 symbols, 920 relocations (29 through section symbols; 128 TPOFF32, 64 GOTTPOFF, 67 GOTPCRELX, 67 REX_GOTPCRELX, 1 GOTPCREL, 141 PLT32, 345 PC32, 104 64, 1 PC64, 0 32, 0 32S, 1 SIZE32, 1 SIZE64)
+  calling libc, many units, without sizes: 16 objects, 262864 bytes, 110 sections, 2106 symbols, 4037 relocations (47 through section symbols; 600 TPOFF32, 300 GOTTPOFF, 303 GOTPCRELX, 303 REX_GOTPCRELX, 1 GOTPCREL, 611 PLT32, 1541 PC32, 377 64, 1 PC64, 0 32, 0 32S, 0 SIZE32, 0 SIZE64)
+  calling libc, many units, without sizes, function sections: 16 objects, 308976 bytes, 411 sections, 2112 symbols, 4037 relocations (47 through section symbols; 600 TPOFF32, 300 GOTTPOFF, 303 GOTPCRELX, 303 REX_GOTPCRELX, 1 GOTPCREL, 611 PLT32, 1541 PC32, 377 64, 1 PC64, 0 32, 0 32S, 0 SIZE32, 0 SIZE64)
+  a shared library: 4 objects, 57400 bytes, 34 sections, 415 symbols, 919 relocations (96 through section symbols; 0 TPOFF32, 192 GOTTPOFF, 67 GOTPCRELX, 67 REX_GOTPCRELX, 1 GOTPCREL, 141 PLT32, 345 PC32, 103 64, 1 PC64, 0 32, 0 32S, 1 SIZE32, 1 SIZE64)
+  a shared library, function sections: 4 objects, 69488 bytes, 103 sections, 484 symbols, 919 relocations (96 through section symbols; 0 TPOFF32, 192 GOTTPOFF, 67 GOTPCRELX, 67 REX_GOTPCRELX, 1 GOTPCREL, 141 PLT32, 345 PC32, 103 64, 1 PC64, 0 32, 0 32S, 1 SIZE32, 1 SIZE64)
+  a shared library, many units, without sizes: 16 objects, 271040 bytes, 111 sections, 2364 symbols, 4032 relocations (355 through section symbols; 0 TPOFF32, 900 GOTTPOFF, 303 GOTPCRELX, 303 REX_GOTPCRELX, 1 GOTPCREL, 611 PLT32, 1541 PC32, 372 64, 1 PC64, 0 32, 0 32S, 0 SIZE32, 0 SIZE64)
+  a shared library, many units, without sizes, function sections: 16 objects, 324272 bytes, 412 sections, 2665 symbols, 4032 relocations (355 through section symbols; 0 TPOFF32, 900 GOTTPOFF, 303 GOTPCRELX, 303 REX_GOTPCRELX, 1 GOTPCREL, 611 PLT32, 1541 PC32, 372 64, 1 PC64, 0 32, 0 32S, 0 SIZE32, 0 SIZE64)
+objects: 98723 checks, 0 failed
+  33000 functions in sections of their own: 66041 sections, 33084 symbols (427 through .symtab_shndx), 429089 relocations, 23714960 bytes
+many sections: 759400 checks, 0 failed
+  25 units' objects written by groups of 1, 2, 3 and 8 lanes, the last without atoms
+lanes: 238 checks, 0 failed
+files: 11 checks, 0 failed
+  static-defaults: 4 objects (56536 bytes), listed by readelf and llvm-readobj, linked and run 3 times
+  static-defaults-sections, function sections: 4 objects (67272 bytes), listed by readelf and llvm-readobj, linked and run 3 times
+  static-defaults: 4 objects the same as GNU as's
+  static-smallest: 1 objects (5176 bytes), listed by readelf and llvm-readobj, linked and run 3 times
+  static-smallest-sections, function sections: 1 objects (5800 bytes), listed by readelf and llvm-readobj, linked and run 3 times
+  static-smallest: 1 objects the same as GNU as's
+  static-units: 16 objects (259520 bytes), listed by readelf and llvm-readobj, linked and run 3 times
+  static-units-sections, function sections: 16 objects (305864 bytes), listed by readelf and llvm-readobj, linked and run 3 times
+  static-units: 16 objects the same as GNU as's
+  static-no-absolute: 4 objects (55888 bytes), listed by readelf and llvm-readobj, linked and run 3 times
+  static-no-absolute-sections, function sections: 4 objects (66616 bytes), listed by readelf and llvm-readobj, linked and run 3 times
+  static-no-absolute: 4 objects the same as GNU as's
+  static-functions-no-sizes: 8 objects (389304 bytes), listed by readelf and llvm-readobj, linked and run 4 times
+  static-functions-no-sizes-sections, function sections: 8 objects (466144 bytes), listed by readelf and llvm-readobj, linked and run 4 times
+  static-functions-no-sizes: 8 objects the same as GNU as's
+  libc-defaults: 4 objects (56224 bytes), listed by readelf and llvm-readobj, linked and run 9 times
+  libc-defaults-sections, function sections: 4 objects (66728 bytes), listed by readelf and llvm-readobj, linked and run 9 times
+  libc-defaults: 4 objects the same as GNU as's
+  libc-units-no-sizes: 16 objects (262864 bytes), listed by readelf and llvm-readobj, linked and run 12 times
+  libc-units-no-sizes-sections, function sections: 16 objects (308976 bytes), listed by readelf and llvm-readobj, linked and run 12 times
+  libc-units-no-sizes: 16 objects the same as GNU as's
+  shared-defaults: 4 objects (57400 bytes), listed by readelf and llvm-readobj, linked and run 3 times
+  shared-defaults-sections, function sections: 4 objects (69488 bytes), listed by readelf and llvm-readobj, linked and run 3 times
+  shared-defaults: 4 objects the same as GNU as's
+  shared-units-no-sizes: 16 objects (271040 bytes), listed by readelf and llvm-readobj, linked and run 4 times
+  shared-units-no-sizes-sections, function sections: 16 objects (324272 bytes), listed by readelf and llvm-readobj, linked and run 4 times
+  shared-units-no-sizes: 16 objects the same as GNU as's
+  many-sections, function sections: 1 objects (23714832 bytes), listed by readelf and llvm-readobj, linked and run 4 times
+  by-hand: 4 objects (3912 bytes), listed by readelf and llvm-readobj
+  by-hand-sections, function sections: 4 objects (4424 bytes), listed by readelf and llvm-readobj
+  ifunc: 1 objects (1184 bytes), listed by readelf and llvm-readobj, linked and run 12 times
+  ifunc-sections, function sections: 1 objects (1400 bytes), listed by readelf and llvm-readobj, linked and run 12 times
+cross-check: 844 checks, 0 failed

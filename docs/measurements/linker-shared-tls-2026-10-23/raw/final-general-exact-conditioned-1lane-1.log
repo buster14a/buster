@@ -1,0 +1,19 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:09:45+00:00 codex-linker-foreign86: sh -c cd /home/david/buster-fast-bench/codex-linker-foreign86-stack-final && exec ./build.sh
+  title: Build isolated GNU stack branch
+  link: https://github.com/buster14a/buster/issues/86
+Each complete writer sample after 100 ms of scalar fixup classification.
+64 workers, bound against the shared library's runtime and written as a shared library: 284 atoms, 1064 fixups, 13858 bytes of code, 172 dynamic symbols, 235 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 43 stubs, a 39928-byte file in 1 chunks, 1 lane:
+  replace         25.1 us ( 1.59 GB/s): count 6.4 layout 2.0 symbols 1.2 dynamic 2.5 open 2.3 chunks 8.0 finish 2.7
+  new file        23.4 us ( 1.70 GB/s): count 6.4 layout 1.9 symbols 1.2 dynamic 2.5 open 2.2 chunks 8.0 finish 1.1
+  general-dynamic TLS: 64 callable probes and distinct symbols, 64 backing objects, exact path, all results checked
+  in place         1.3 us (30.43 GB/s): the floor, one pwrite
+  new file         3.3 us (12.11 GB/s): the floor, one pwrite
+180000 workers, bound against the shared library's runtime and written as a shared library: 365516 atoms, 2702790 fixups, 37410098 bytes of code, 450012 dynamic symbols, 605636 relocations in .rela.dyn (0 relative) and 2730 in 57 words of .relr.dyn, 113885 stubs, a 93509416-byte file in 357 chunks, 1 lane:
+  replace      52008.1 us ( 1.80 GB/s): count 12594.7 layout 2528.1 symbols 2372.7 dynamic 8551.3 open 702.7 chunks 22834.0 finish 2402.5
+  new file     49781.0 us ( 1.88 GB/s): count 12672.8 layout 2518.6 symbols 2369.5 dynamic 8521.7 open 695.7 chunks 23001.9 finish 14.3
+  general-dynamic TLS: 180000 callable probes and distinct symbols, 64 backing objects, exact path, all results checked
+  in place      7086.6 us (13.20 GB/s): the floor, one pwrite
+  new file     12445.4 us ( 7.51 GB/s): the floor, one pwrite
+peak_rss_kib 377192
+user_seconds 11.474460
+system_seconds 0.648589

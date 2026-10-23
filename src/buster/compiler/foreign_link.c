@@ -40,6 +40,7 @@ struct ForeignLinkResult
 };
 
 typedef struct ForeignLink ForeignLink;
+typedef struct ForeignLinkUnwind ForeignLinkUnwind;
 struct ForeignLink
 {
     Link link;
@@ -49,6 +50,7 @@ struct ForeignLink
     ExecutableDynamic dynamic;
     // Original library version index -> output version index, one table per ForeignLibrary; null for dropped DSOs.
     uint16_t** library_versions;
+    ForeignLinkUnwind** unwind;
 };
 
 static __attribute__((unused)) ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena);
@@ -281,9 +283,12 @@ static ImportResult foreign_link_locals(ForeignLink* output, const ForeignObject
     return result;
 }
 
+#include "buster/compiler/foreign_unwind_link.c"
+
 // A symbol table alone cannot tell whether an undefined reference survived COMDAT selection. Only the surviving
 // sections' relocations require a definition, together with explicit -u roots. The extra scan is needed only when
-// resolution left an ordinary strong name undefined; successful ordinary links avoid it entirely.
+// resolution left an ordinary strong name undefined or assigned it to an unneeded DSO; ordinary resolved links
+// avoid it entirely.
 static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign* foreign, RuntimeKind kind, Arena* arena)
 {
     uint8_t* required = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, foreign->names.count);
@@ -291,8 +296,11 @@ static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign*
     for (uint32_t name = 0; required != 0 && name < foreign->names.count; name += 1)
     {
         required[name] = 0;
+        const bool unneeded_shared = foreign->names.resolution[name] == FOREIGN_RESOLUTION_SHARED &&
+                                     !foreign->libraries[foreign->names.library[name]].needed &&
+                                     (foreign->names.flags[name] & BUSTER_FOREIGN_NAME_REFERENCED) != 0;
         unresolved = unresolved || (foreign->names.resolution[name] == FOREIGN_RESOLUTION_UNDEFINED &&
-                                    !runtime_linker_name(kind, foreign->names.bytes[name], foreign->names.length[name]));
+                                    !runtime_linker_name(kind, foreign->names.bytes[name], foreign->names.length[name])) || unneeded_shared;
     }
     for (uint32_t id = 0; required != 0 && unresolved && id < foreign->object_count; id += 1)
     {
@@ -313,7 +321,7 @@ static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign*
                 const Elf64_Shdr header = import_section_header(&input->elf, input->relocations[r]);
                 if (output->objects[id].section_atoms[header.sh_info] != 0)
                 {
-                    const String8 bytes = import_section_bytes(&input->elf, &header);
+                    const String8 bytes = foreign_link_relocation_bytes(output, input, id, &header);
                     const uint64_t count = bytes.length / sizeof(Elf64_Rela);
                     for (uint64_t first = 0; first < count; first += BUSTER_IMPORT_BATCH)
                     {
@@ -367,6 +375,7 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
         uint64_t value = 0;
         uint64_t size = 0;
         uint16_t version = 0;
+        bool discarded_shared = false;
         if (names->definitions[name] > 1)
         {
             result.error = FOREIGN_LINK_ERROR_DUPLICATE;
@@ -421,9 +430,14 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
             const ImportExports* exports = &library->library.exports;
             const uint32_t index = names->symbol[name];
             const bool strong = (names->flags[name] & BUSTER_FOREIGN_NAME_REFERENCED) != 0;
+            discarded_shared = strong && !library->needed && required[name] == 0;
             flags = (uint8_t)((strong ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_WEAK) | (exports->flags[index] & BUSTER_LINK_SYMBOL_TYPE));
             size = exports->size[index];
-            if (kind == RUNTIME_KIND_STATIC)
+            if (discarded_shared)
+            {
+                // The resolver saw the reference before COMDAT selection; no retained relocation imports it.
+            }
+            else if (kind == RUNTIME_KIND_STATIC)
             {
                 result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
             }
@@ -453,7 +467,7 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
             flags = BUSTER_LINK_SYMBOL_WEAK;
         }
         flags = (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | names->visibility[name] << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
-        const bool discarded_only = resolution == FOREIGN_RESOLUTION_UNDEFINED && source == BUSTER_LINK_SOURCE_NONE && required[name] == 0;
+        const bool discarded_only = discarded_shared || (resolution == FOREIGN_RESOLUTION_UNDEFINED && source == BUSTER_LINK_SOURCE_NONE && required[name] == 0);
         if (result.error == FOREIGN_LINK_ERROR_NONE && !discarded_only)
         {
             const NameId named = link_add_name_hashed(link, names->bytes[name], names->length[name], names->hash[name]);
@@ -470,8 +484,9 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
     return result;
 }
 
-static ImportResult foreign_link_relocations(ForeignLink* output, const ForeignObject* input, uint32_t id, ForeignPath path, Arena* arena)
+static ImportResult foreign_link_relocations(ForeignLink* output, const Foreign* foreign, uint32_t id, ForeignPath path, Arena* arena)
 {
+    const ForeignObject* input = &foreign->objects[id];
     Link* link = &output->link;
     ImportObject* object = &output->objects[id];
     ImportResult result = { 0 };
@@ -479,8 +494,20 @@ static ImportResult foreign_link_relocations(ForeignLink* output, const ForeignO
     for (uint32_t i = 0; result.error == IMPORT_ERROR_NONE && i < input->relocation_count; i += 1)
     {
         const uint32_t section = input->relocations[i];
+        const Elf64_Shdr header = import_section_header(&input->elf, section);
+        const AtomId atom = object->section_atoms[header.sh_info];
+        const String8 entries = foreign_link_relocation_bytes(output, input, id, &header);
+        result = atom != 0 ? foreign_link_unwind_references(output, foreign, id, section, entries) : (ImportResult){ 0 };
         Scratch scratch = scratch_begin(arena);
-        if (path == FOREIGN_PATH_EXACT || !import_vector_relocations(link, &input->elf, &input->symbols, section, object, kinds, scratch.arena))
+        if (result.error == IMPORT_ERROR_NONE && foreign_link_unwind(output, id, header.sh_info) != 0)
+        {
+            if (path == FOREIGN_PATH_EXACT || !import_vector_relocation_entries(link, &input->symbols, object, atom, entries, kinds, scratch.arena))
+            {
+                result = import_relocation_entries(link, &input->symbols, object, atom, entries, 0, scratch.arena);
+                result.section = result.error != IMPORT_ERROR_NONE ? section : 0;
+            }
+        }
+        else if (result.error == IMPORT_ERROR_NONE && (path == FOREIGN_PATH_EXACT || !import_vector_relocations(link, &input->elf, &input->symbols, section, object, kinds, scratch.arena)))
         {
             result = import_relocations(link, &input->elf, &input->symbols, section, object, scratch.arena);
         }
@@ -697,6 +724,10 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
+        result = foreign_link_prepare_unwind(output, foreign, arena);
+    }
+    if (result.error == FOREIGN_LINK_ERROR_NONE)
+    {
         const uint8_t* required = foreign_link_undefined(output, foreign, kind, scratch.arena);
         if (required != 0)
         {
@@ -727,7 +758,17 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
                     output->link.symbols.flags[target] |= ELF64_ST_TYPE(round->symbols.info[at]);
                 }
             }
-            result.import = foreign_link_relocations(output, input, id, foreign->path, arena);
+        }
+    }
+    if (result.error == FOREIGN_LINK_ERROR_NONE)
+    {
+        result = foreign_link_finish_unwind(output, foreign);
+    }
+    for (uint32_t id = 1; result.error == FOREIGN_LINK_ERROR_NONE && id < foreign->object_count; id += 1)
+    {
+        if (foreign->objects[id].library == 0)
+        {
+            result.import = foreign_link_relocations(output, foreign, id, foreign->path, arena);
             result.error = result.import.error != IMPORT_ERROR_NONE ? FOREIGN_LINK_ERROR_IMPORT : FOREIGN_LINK_ERROR_NONE;
             result.object = result.error != FOREIGN_LINK_ERROR_NONE ? id : 0;
         }

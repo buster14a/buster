@@ -500,3 +500,46 @@ inlined work, not individual-instruction latency measurements. Scalar operand
 selection, decimal conversion, validation, record stores and library copies
 remain costs; the final comparison measures their combined effect. Profiled
 runs are excluded from the timing tables above.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). Encoded bytes have a real side
+consumer in the [decoder](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/x86_64_disassembler.c#L4),
+[formatter](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/x86_64_disassembly.c#L4)
+and [command](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/x86_64_disassembler_cli.c#L4).
+
+Catalogue → `x86_disassembler_initialize` publishes read-only signature/index,
+validation and formatting-plan tables before workers. Counted bytes →
+`x86_disassemble`/scalar → `X86Decoded` records → `x86_disassembly_format` or
+`x86_disassembly_listing` → buffered output is implemented. A record is 24
+bytes: the 16-byte semantic instruction, u32 byte offset, u8 actual length,
+u8 address mode and u16 reserved. The byte input and record output are disjoint;
+neither requires padding. Source size is bounded by `UINT32_MAX`; capacity,
+returned record count and consumed byte count are independent.
+
+Decoding allocates nothing after initialization and publishes only complete
+records before its first error or output exhaustion. Sixty-four-byte windows
+and up to sixteen reachable starts are internal batches; arbitrary byte splits
+are not independent instruction streams. A caller resumes at `consumed`, as
+the command does with 1,024-record chunks. Unsupported can mean a valid encoding
+outside the catalogue. Actual lengths cannot be reconstructed by canonical
+re-encoding, which may choose a different displacement or prefix length.
+
+Formatting retains catalogue-only decisions and bounded register tokens instead
+of rebuilding them per instruction. Smaller output capacities use the exact
+scalar writer; insufficient room returns -1. Listing additionally borrows the
+original bytes through formatting and uses the actual length, with a rebased
+display address. Semantic assembly formatting needs only the validated record
+and live tables. The command retains source mappings through all chunks and
+checks both buffered writes and the final flush.
+
+Disposition: retain bounded records and precomputed formatting plans. A fused
+decode/format path could avoid record materialization, but must account for
+both listing and semantic-record consumers, startup, validation and output.
+The complete-path and fresh-command comparisons above already include record
+stores, formatting and their stated I/O/startup scopes on the 9700X, including
+lighter-phase controls; they are historical evidence at their recorded heads.
+`test-x86-disassembler --objdump` checks scalar/vector records, truncation,
+guarded capacities, external bytes/reassembly and command chunk boundaries.
+No new decoder optimization or wider instruction support is claimed here.
