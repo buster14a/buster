@@ -371,6 +371,16 @@ Before the programs, checks of their own:
   - a copy of 1, 3, 8, 15, 16, 40 and 256 bytes above every count of 0 to 13 integer and 0 to 16 floating values.
     Both selections must count its scratch register among the frame's clobbers, or refuse the function as too deep
     where its stack has none left, and both paths must compile it alike.
+- **variadic calls** (#363's review): two callers call a probe through a pointer, variadically, with six integers and
+  three doubles past a named first one. The probe, records of the test's own, stores what it sees: the argument
+  registers, rax, r11 and the vector registers. Its al must be 3, r11 its own address and the arguments the call's:
+  - with the callee in rax, under arguments whose moves are 2-cycles (rcx and rdi, rdx and rsi), so that al is set
+    only once the callee has gone to r11;
+  - with it in rdi, under four integers and two doubles saved around the call, so that the moves run through r11
+    (rbx to r8 to rdi to r11 to rcx) and the vector registers (xmm4 to xmm2 to xmm0). The caller returns what the
+    values below make of the result, which must come back right.
+
+  Both paths must compile each alike, and each encoder's bytes run in a child.
 
 **The generator** (`tier0_generate.c`) writes each program both as typed streams and as C. Its programs have:
 
@@ -455,6 +465,9 @@ the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` m
     - the generator's candidates of one arity but other parameters' or result's classes: 3 and 6 programs, whose
       calls the interpreter refuses. Checking the arity alone, as it did, the first passed and the second crashed
       the test.
+    - al set before the moves have put the callee in r11, or not at all for an indirect call: the variadic calls'
+      child crashes (its callee in rax overwritten), and their probe sees al 0. The programs, whose calls aren't
+      variadic, see neither.
 
     Counting the callee as a live depth in selection gives a frame one slot larger, which no check sees, as it
     changes no value.

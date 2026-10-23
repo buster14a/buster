@@ -3805,12 +3805,15 @@ of chosen forms against the scalar path's on random records, that both paths
 refuse unsupported entries and expressions past the depths alike, and the
 objects: `tier0_validate` refusing each break of their rules, and 2,000 random
 frames of objects, values and `VA_LIST`s whose places both paths must give
-alike, aligned, inside the frame and apart; and copies: their rules, and a copy
-of each size class above every count of values, whose scratch register both
-selections must count among the frame's clobbers. Every function must pass
-`tier0_validate`, both paths must compile it to the same records, branch
-columns and references, and the records must pass `x86_validate` and the branch
-columns `branch_sizing_validate`. Each program is then sized, encoded, loaded into
+alike, aligned, inside the frame and apart; copies: their rules, and a copy of
+each size class above every count of values, whose scratch register both
+selections must count among the frame's clobbers; and variadic calls through a
+pointer, run natively: a probe must see `al` 3, `r11` its own address and the
+call's arguments, after moves that are cycles and that run through `r11`, with
+values saved around the call. Every function must pass `tier0_validate`, both
+paths must compile it to the same records, branch columns and references, and
+the records must pass `x86_validate` and the branch columns
+`branch_sizing_validate`. Each program is then sized, encoded, loaded into
 fresh pages and run in a child process on eight inputs (stopped by an alarm
 after 10 s), and its result and every global's bytes must equal what the test's
 interpreter of the typed stream gives (the interpreter converts floating values
