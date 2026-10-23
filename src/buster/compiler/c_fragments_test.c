@@ -11,6 +11,8 @@
 
 #include "c_fragments_store_test.c"
 #include "c_fragments_coverage_test.c"
+#include "c_fragment_reader.c"
+#include "c_fragment_reader_test.c"
 
 typedef struct CFragmentTestFrame CFragmentTestFrame;
 struct CFragmentTestFrame
@@ -48,6 +50,7 @@ struct CFragmentTestTotals
     uint64_t syntax_backing_peak;
     uint64_t inclusive_arena_peak;
     CFragmentStatistics statistics;
+    CFragmentReaderTestStatistics readers;
 };
 
 static bool c_fragment_test_tree_initialize(CFragmentTestTree* tree, Arena* arena, uint32_t count)
@@ -253,7 +256,7 @@ static bool c_fragment_test_source(const CFragmentSink* sink, const CFragmentTes
     return result;
 }
 
-static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* sink, const CFragmentCoverage* coverage, Arena* arena, uint64_t* nodes, uint64_t* events)
+static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* sink, const CFragmentCoverage* coverage, Arena* arena, uint64_t* nodes, uint64_t* events, CFragmentReaderTestStatistics* readers)
 {
     const uint32_t count = sink->token_count;
     const uint64_t slots = 2 * (uint64_t)count + 4;
@@ -383,6 +386,7 @@ static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* si
         result &= order == tree.postorder_count;
         *nodes += order;
     }
+    result = result && c_fragment_reader_test_file(parser, sink, coverage, normalized_parents, arena, readers);
     return result;
 }
 
@@ -518,7 +522,7 @@ static uint32_t c_fragment_test_file(const char* path, const PPOptions* options,
                     good = good && sink.store.valid && !sink.syntax_error && sink.unsupported == 0;
                     good = good && c_fragment_test_coverage(&parser, &sink, &arena, &coverage);
                     good = good && c_fragment_test_coverage_fixture(&parser, &sink, fixture);
-                    good = good && c_fragment_test_oracle(&parser, &sink, &coverage, &arena, &nodes, &events);
+                    good = good && c_fragment_test_oracle(&parser, &sink, &coverage, &arena, &nodes, &events, &totals[candidate].readers);
                     if (good)
                     {
                         totals[candidate].nodes += nodes;
@@ -721,6 +725,15 @@ static void c_fragment_test_print_totals(const char* dataset, const CFragmentTes
                stats->reductions ? (double)stats->copied_bytes / stats->reductions : 0, stats->reductions ? (double)stats->linked_bytes / stats->reductions : 0,
                (unsigned long long)total->hot_peak, (unsigned long long)total->identity_peak, (unsigned long long)total->hot_backing_peak, (unsigned long long)total->identity_backing_peak,
                (unsigned long long)total->ownership_backing_peak, (unsigned long long)total->syntax_backing_peak, (unsigned long long)total->inclusive_arena_peak, (unsigned long long)stats->reused);
+        const CFragmentReaderTestStatistics* readers = &total->readers;
+        printf("fragment-readers dataset=%s payload=%u traversals=%llu events=%llu references=%llu peak_source_index=%llu peak_source_temporary=%llu peak_borrowed_syntax_sources=%llu "
+               "peak_preparation_parent_postorder_kinds=%llu peak_flat_bytes_locations=%llu peak_flat_backing=%llu peak_frames=%llu peak_frame_backing=%llu peak_visit_backing=%llu "
+               "peak_event_bytes=%llu peak_test_arena=%llu\n",
+               dataset, 16 * (k + 1), (unsigned long long)readers->traversals, (unsigned long long)readers->events, (unsigned long long)readers->references,
+               (unsigned long long)readers->source_peak, (unsigned long long)readers->temporary_peak, (unsigned long long)readers->borrowed_peak,
+               (unsigned long long)readers->preparation_input_peak, (unsigned long long)readers->flat_peak, (unsigned long long)readers->flat_backing_peak,
+               (unsigned long long)readers->frame_peak, (unsigned long long)readers->frame_backing_peak, (unsigned long long)readers->visits_backing_peak,
+               (unsigned long long)readers->event_peak, (unsigned long long)readers->test_arena_peak);
     }
 }
 
@@ -746,6 +759,7 @@ static bool c_fragment_test_add_file(const char* path, char** files, uint32_t* c
 static int run_fragment_tests(int argument_count, char** arguments)
 {
     uint32_t failures = c_fragment_store_tests();
+    failures += c_fragment_reader_tests();
     CFragmentTestTotals totals[3] = { 0 };
     CFragmentTestTotals fixture_totals[3] = { 0 };
     CFragmentTestTotals snippet_totals[3] = { 0 };
