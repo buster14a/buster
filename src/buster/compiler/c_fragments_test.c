@@ -7,7 +7,7 @@
 // A second iterative walk emits source events by fixity and compares them with sorted original token identities.
 // Grouping punctuation maps to its closer's canonical child; type syntax and statement blocks remain postorder
 // subtrees referenced by their expression node. Neither their punctuation nor declarations become arithmetic nodes.
-// Includes the parser test harness only for preprocessing options, fixtures and bounded file collection.
+// Includes the parser test harness for preprocessing options and fixtures; corpus inputs are explicit regular files.
 
 #include "c_fragments_store_test.c"
 #include "c_fragments_coverage_test.c"
