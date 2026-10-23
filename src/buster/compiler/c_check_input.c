@@ -2188,7 +2188,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
 static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, uint32_t old, bool overload)
 {
     const TypeId type = reader->declared_types[token];
-    if (reader->declaration_kinds[token] == C_BINDING_FUNCTION && reader->output->explicit_abis[token] == 0 &&
+    if (reader->declaration_kinds[token] == C_BINDING_FUNCTION && (reader->output->explicit_abis == NULL || reader->output->explicit_abis[token] == 0) &&
         type_function_abi_kind(reader->types, type) == TYPE_FUNCTION_ABI_SYSV)
     {
         const uint32_t name = reader->parser->tokens.names[token];

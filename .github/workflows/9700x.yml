@@ -361,6 +361,7 @@ jobs:
           ./build/compiler test-check-builtins-float
           ./build/compiler test-check-builtins-math
           ./build/compiler test-check-builtins-atomic
+          ./build/compiler test-check-builtins-atomic-rmw
           ./build/compiler test-check-builtins-typed-overflow
           ./build/compiler test-check-builtins-rounds
           ./build/compiler test-builtin-lower
@@ -369,6 +370,7 @@ jobs:
           ./build/compiler test-builtin-float-lower
           ./build/compiler test-builtin-terminal-helpers
           ./build/compiler test-builtin-atomic-helpers
+          ./build/compiler test-builtin-atomic-rmw-helpers
           ./build/compiler test-builtin-rounds-helper
           ./build/compiler test-builtin-math-helpers
           == Test typed postorder checking and source fixtures
