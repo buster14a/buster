@@ -688,6 +688,9 @@ static void foreign_strings_test_link(ForeignStringsTest* test)
                 {
                     // This is the final fixup, after several earlier section expressions have translated.
                     link.fixups.addend[fixups[11]] = bad == 1 ? (int32_t)sizeof(second) : -1;
+                    wanted = FOREIGN_STRINGS_ERROR_UNSUPPORTED;
+                    foreign_strings_test_expect(test, link_check(&link) == LINK_ERROR_NONE,
+                                                "one-past and before-section absolute expressions remain valid unmerged Link inputs", way * 100 + bad);
                 }
                 else if (bad == 3 || bad == 4)
                 {

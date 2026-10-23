@@ -60,7 +60,8 @@ object's extent must fit within its original entry. A named absolute or
 data-PC64 address must also remain in that entry: crossing a terminator depends on
 adjacency that interning can change. Absolute section-symbol expressions
 instead translate the original `S+A`, and recompute the addend relative to
-the remapped symbol. Size and GOT expressions retain their original
+the remapped symbol. Expressions at or outside the original section's bounds
+retain the unmerged input through unsupported-expression fallback. Size and GOT expressions retain their original
 meaning. Changed section addends use the checked 32-bit fixup representation;
 pools above `INT32_MAX` are refused by this consumer.
 

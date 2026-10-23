@@ -158,7 +158,9 @@ static ForeignStringsError foreign_strings_apply(Link* link, const ForeignString
             const bool bounded = addend >= -value && addend < (int64_t)link->atoms.size[atom] - value;
             if (!bounded || !foreign_strings_offset(strings, input - 1, (uint64_t)(value + addend), &mapped))
             {
-                error = FOREIGN_STRINGS_ERROR_INPUT;
+                // A section-relative expression may legally name its endpoint or an address outside its bytes.
+                // There is no pooled entry to translate, so retain the original link through normal fallback.
+                error = FOREIGN_STRINGS_ERROR_UNSUPPORTED;
             }
             else
             {
