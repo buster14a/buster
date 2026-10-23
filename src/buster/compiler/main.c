@@ -244,6 +244,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_misc.c"
 #include "buster/compiler/c_check_builtin_query.c"
 #include "buster/compiler/c_check_builtin_float.c"
+#include "buster/compiler/c_check_builtin_math.c"
 #include "buster/compiler/c_check_builtin_atomic.c"
 #include "buster/compiler/c_check_builtin_typed_overflow.c"
 #include "buster/compiler/c_check_builtin_rounds.c"
@@ -259,6 +260,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_misc_test.c"
 #include "buster/compiler/c_check_builtin_query_test.c"
 #include "buster/compiler/c_check_builtin_float_test.c"
+#include "buster/compiler/c_check_builtin_math_test.c"
 #include "buster/compiler/c_check_builtin_atomic_test.c"
 #include "buster/compiler/c_check_builtin_typed_overflow_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
@@ -628,6 +630,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-query") == 0)
     {
         result = run_check_builtin_query_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-math") == 0)
+    {
+        result = run_check_builtin_math_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-atomic") == 0)
     {
