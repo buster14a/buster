@@ -4,11 +4,12 @@ This records the frozen 9700X measurements for [#87](https://github.com/buster14
 taken on 2026-10-23. It adds independently controlled filesystem factors and
 bounded runs to `benchmark-floors`; it does not change the production writer.
 
-The large direct pipeline reaches a broad plateau around 3–4 lanes on this
-host. Foreign exchange stops helping earlier than resolution. Several other
-phases still improve at the eight physical cores available here, so their
-saturation beyond eight lanes is not established. Issue #87 remains open for
-those limits and a justified production write policy.
+The large direct pipeline reaches a broad plateau around 3–4 physical lanes
+on this host. Adding its available SMT siblings does not improve the total.
+Foreign exchange stops helping earlier than resolution. Some individual
+phases still improve at the maximum 15 online logical CPUs, so universal
+phase saturation is not established. Issue #87 remains open for those
+phase limits. Production retains pwrite after the filesystem comparisons below.
 
 ## Frozen inputs and host
 
@@ -23,13 +24,14 @@ those limits and a justified production write policy.
 - `david@benchpress`, Ryzen 7 9700X, Linux `6.18.50-2-lts`,
   Clang `23.1.1`. All binaries use the frozen source's `./build.sh` defaults:
   `-O3 -g -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror`.
-  CPU 2 used the performance governor; CPUs 0, 1, 3–7
-  used powersave. CPU 10, CPU 2's SMT sibling, was offline. These settings
-  were observed, not changed for the experiment.
-- Each lane count uses the prefix of CPUs `2,0,1,3,4,5,6,7`: one physical
-  core per lane, CPU 2 for one-lane timing. Other core governors and natural
-  barriers are part of this measured configuration; the numbers do not
-  describe eight cores held artificially at a fixed clock.
+- CPU 2 used the performance governor; all other online CPUs used powersave.
+  CPU 10, CPU 2's SMT sibling, was offline. These settings were observed,
+  not changed for the experiment.
+- The original 1–8 sweep uses prefixes of CPUs `2,0,1,3,4,5,6,7`: one physical
+  core per lane, CPU 2 for one-lane timing. The later logical-CPU extension
+  appends the online SMT siblings, as recorded below. Other core governors
+  and natural barriers are part of this measured configuration; the numbers
+  do not describe eight cores held artificially at a fixed clock.
 - tmpfs output: `/tmp/linker-scaling87-output`.
   btrfs output: `~/buster-fast-bench/linker-scaling87/fs-output`, under
   `/home`, mounted with
@@ -46,8 +48,9 @@ directories are `base/`, `floors/`, `mmap/`, and `mmap-reserved/`
 under the same parent. The local evidence copy is
 `/home/david/Documents/Codex/2026-10-23/ta/work/scaling87-evidence/`.
 Its `README.txt` records provenance; `phase-summary.json`,
-`floors64-summary.json`, and `floors4-summary.json` retain the parsed
-process medians. These are retained experiment artifacts, not a hosted CI
+`logical-phase-summary.json`, `floors64-summary.json`, and
+`floors4-summary.json` retain the parsed process medians. These are retained
+experiment artifacts, not a hosted CI
 result or measurements of later main revisions.
 
 ## Lane measurements
@@ -91,12 +94,22 @@ EXCLUSIVE_LINK=https://github.com/buster14a/buster/issues/87 \
 Both vector and exact paths ran for dynamic, static and archive-member input;
 one unit has no archive-member case. Logs are `foreign-sweepR.log`.
 
-### Whole-pipeline results
+### Direct linking and foreign resolution results
 
 Each cell is the median of three process medians, in microseconds, for the
 102,400-worker input. The direct total is the sum of independently measured
 part medians, as `benchmark-link` defines it, rather than a single timed
 wall-clock interval.
+
+The foreign rows measure only `foreign_run`: input opening and parsing,
+symbol resolution, archive extraction and COMDAT selection. They exclude
+`ForeignLink` conversion, relocation application and executable output
+writing. The frozen `fc45e67` baseline predates that output bridge, so these
+figures are resolution costs, not complete foreign-input-to-executable
+times. Their timer includes each sample's lane thread creation and join,
+but excludes `foreign_release`. The later persistent-worker implementation
+and `benchmark-foreign-output` have different timing scopes; neither is
+represented by these frozen measurements.
 
 | Direct kind | 1 lane | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -166,8 +179,101 @@ for dynamic input, 1571.8 / 1019.4 / 1382.4 us for static input, and
 1143.5 / 866.7 / 1292.9 us for members. Resolution scales farther: its
 corresponding times are 4935.1 / 1316.3 / 1423.4, 5184.9 / 1227.1 / 1457.6,
 and 9208.3 / 1907.2 / 1907.2 us. That is a reason to measure producer,
-exchange and consumer separately while retaining the whole-pipeline result;
+exchange and consumer separately while retaining the foreign-resolution total;
 it is not evidence that exchange can be removed.
+
+## Online SMT extension
+
+The later sweep reuses the same frozen compiler, seed, snapshot cache and
+default input shapes. It measures 8, 10, 12 and 15 lanes on prefixes of
+`2,0,1,3,4,5,6,7,8,9,11,12,13,14,15`. The first eight lanes use separate
+physical cores; the remaining lanes share cores 0, 1, 3, 4, 5, 6 and 7.
+CPU 10 remains offline, and no governors or host settings were changed.
+This tests SMT on eight physical cores, not scaling beyond eight cores.
+
+The three process-level repetition orders are `8,10,12,15`,
+`15,12,10,8`, and `12,8,15,10`, with eleven inner samples after warm-up.
+Use the direct command above with each CPU prefix, and the foreign command
+with the full CPU list and the corresponding `--lanes` order. Each direct
+invocation and each foreign sweep holds its own shared lock. The initial
+eight-lane control was submitted around 10:42 UTC and completed by 11:39;
+coordinated measurement windows and CI priority then delayed the remaining
+first-round direct commands until 12:38 and 13:56–13:58. The later direct
+rounds completed around 14:00–14:03. All controls and scheduling gaps are
+retained; no sample was discarded. Compare with this sweep's fresh
+eight-lane controls, rather than only the earlier eight-lane numbers.
+
+Logs are `logical-direct-lN-rR.log` and `logical-foreign-rR.log`.
+`logical-cpu-protocol.txt` records the plan and scheduling;
+`logical-phase-summary.json` retains every shape, kind, path and phase.
+The following cells give the median and [minimum, maximum] of the three
+process medians, in microseconds, for 102,400 workers. Timing scopes remain
+as qualified above, including the frozen foreign thread lifecycle cost.
+
+| Direct kind | 8 lanes | 10 | 12 | 15 |
+| --- | ---: | ---: | ---: | ---: |
+| dynamic PIE | 4393.5 [4323.3, 4446.5] | 4903.9 [4851.6, 5108.3] | 5289.3 [5287.9, 5471.1] | 5534.6 [5502.9, 5575.0] |
+| static executable | 5219.2 [5210.3, 5288.5] | 5752.4 [5574.2, 5761.3] | 6149.9 [6080.1, 6196.8] | 6420.3 [6330.5, 6427.5] |
+| static PIE | 5462.3 [5330.2, 5501.4] | 5751.6 [5651.0, 5791.6] | 6235.3 [6184.0, 6309.2] | 6489.4 [6449.2, 6534.8] |
+| shared library | 12187.9 [12140.8, 12660.2] | 12914.1 [12621.5, 13272.4] | 13765.4 [13422.3, 14081.2] | 14254.6 [14072.5, 14635.0] |
+
+Every large direct total is slower above eight lanes in each paired round.
+The shared-library ten-lane range overlaps the eight-lane range; all other
+extra-lane ranges lie wholly above their controls. SMT does not provide a
+total-time win in this measured configuration.
+
+| Foreign resolution | 8 lanes | 10 | 12 | 15 |
+| --- | ---: | ---: | ---: | ---: |
+| vector dynamic | 7270.2 [7225.9, 7367.2] | 8698.8 [8543.8, 8747.3] | 8966.5 [8831.9, 8990.0] | 10947.5 [10941.1, 11435.1] |
+| vector static | 7565.7 [7562.5, 7570.7] | 8615.1 [8548.3, 8699.2] | 8914.1 [8902.8, 8995.4] | 11323.5 [10995.0, 11343.1] |
+| vector members | 8663.1 [8574.5, 8761.0] | 9892.9 [9780.5, 9895.1] | 10934.4 [10702.0, 10973.0] | 12771.6 [11846.4, 12932.3] |
+| exact dynamic | 7444.4 [7391.9, 7521.9] | 8837.6 [8748.7, 9018.9] | 8968.4 [8903.8, 9557.1] | 11327.2 [11247.4, 11532.5] |
+| exact static | 7904.2 [7802.4, 7978.5] | 8999.5 [8932.8, 9115.4] | 9690.0 [9384.7, 10114.0] | 11408.5 [11070.6, 11881.7] |
+| exact members | 12109.5 [11841.0, 12916.5] | 13204.6 [13091.5, 13284.0] | 14343.6 [14172.5, 14354.6] | 15256.7 [15211.6, 15722.0] |
+
+Every large foreign-resolution total is also slower above eight lanes in
+each paired round, with all extra-lane ranges wholly above the eight-lane
+range. Header processing still improves from twelve to fifteen lanes in
+all three kinds and both paths, with separated ranges. The vector phase
+medians below show that the total hides different scaling behavior:
+
+| Foreign vector phase | 8 lanes | 12 | 15 |
+| --- | ---: | ---: | ---: |
+| dynamic headers | 92.5 | 79.2 | 65.9 |
+| static headers | 134.5 | 121.7 | 100.5 |
+| members headers | 125.9 | 106.4 | 89.3 |
+| dynamic exchange | 1219.0 | 1865.2 | 2301.9 |
+| static exchange | 1392.9 | 1984.3 | 2444.9 |
+| members exchange | 1232.3 | 2524.2 | 1959.6 |
+| dynamic resolve | 1405.9 | 911.3 | 948.1 |
+| static resolve | 1446.2 | 970.0 | 936.8 |
+| members resolve | 1920.0 | 1724.3 | 1610.7 |
+
+Dynamic resolution is fastest at twelve lanes, with its fifteen-lane range
+wholly slower, on both paths. Member resolution still improves at fifteen,
+with a range wholly faster than twelve on both paths. Static resolution's
+lowest median is at fifteen; the vector twelve/fifteen ranges overlap,
+while the exact ranges are separated. Exchange remains more expensive than
+eight lanes at every extra-lane count, even where the member case improves
+from twelve to fifteen. These phase trends differ from the total's trend.
+
+That result does not establish saturation of every phase. Shared-library
+writer symbols fall from 75.2 [74.0, 77.4] us at eight lanes to
+67.4 [66.8, 69.2] at twelve and 63.6 [61.9, 64.5] at fifteen, with separated
+ranges. Their best observed value remains at the maximum available lane
+count. No other writer phase has an extra-lane improvement with a wholly
+separated faster range; the small apparent open/finish gains overlap their
+eight-lane controls. No automatic dispatch threshold or production writer
+change follows from these measurements.
+
+All twelve direct invocations and three foreign sweeps completed successfully.
+The final foreign sweep queued around 14:11 and completed by 14:57 UTC,
+waiting mainly for CI.
+At 14:57 UTC, the compiler hash, online CPUs, governors and filesystem
+mounts still matched the initial metadata. The direct benchmark's programs ran
+against their model and repeated build IDs matched outside timing. The
+original 1/2/3/8-lane byte-identity tests remain the exact-byte evidence;
+these timing runs do not add a cross-lane byte comparison at 10/12/15 lanes.
 
 ## Filesystem floors
 
