@@ -390,7 +390,7 @@ static void c_fragment_test_failure_context(const Parser* parser, Preprocessor* 
     }
 }
 
-static uint32_t c_fragment_test_file(const char* path, const PPOptions* options, int valid_input, CFragmentTestTotals* totals, int fixture)
+static uint32_t c_fragment_test_file(const char* path, const PPOptions* options, int valid_input, CFragmentTestTotals* totals, int fixture, const char* expected_error)
 {
     uint32_t failures = 0;
     static InternTable table;
@@ -404,11 +404,26 @@ static uint32_t c_fragment_test_file(const char* path, const PPOptions* options,
         const bool parsed = parse_translation_unit(&parser, &pp);
         const uint32_t count = parser.tokens.count;
         failures += valid_input >= 0 && parsed != (valid_input != 0);
+        if (expected_error != 0)
+        {
+            const ParseTestOutcome outcome = parse_test_outcome(&parser, &pp);
+            char actual[320] = "";
+            if (outcome.errors != 0)
+            {
+                snprintf(actual, sizeof(actual), "%u:%u: %s", outcome.line, outcome.column, outcome.message);
+            }
+            if (!outcome.preprocessed || strcmp(actual, expected_error) != 0)
+            {
+                fprintf(stderr, "fragment parser expectation: %s expected \"%s\" got \"%s\"\n", path, expected_error, actual);
+                failures += 1;
+            }
+        }
+        const bool baseline_good = failures == 0;
         for (uint32_t candidate = 0; candidate < 3; candidate += 1)
         {
             Arena arena = arena_reserve(1ull << 36);
             CFragmentSink sink;
-            bool good = arena.capacity != 0 && c_fragment_sink_initialize(&sink, &arena, parser.tokens.kinds, parser.tokens.names, parser.tokens.sources, count, 16 * (candidate + 1));
+            bool good = baseline_good && arena.capacity != 0 && c_fragment_sink_initialize(&sink, &arena, parser.tokens.kinds, parser.tokens.names, parser.tokens.sources, count, 16 * (candidate + 1));
             const uint64_t slots = (uint64_t)count + 2 * BUSTER_PARSE_TOKEN_PADDING;
             uint8_t* roles = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, slots);
             uint32_t* depths = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, slots);
@@ -500,6 +515,8 @@ static uint32_t c_fragment_test_fixtures(const char* directory, CFragmentTestTot
         "struct S { int a,b; }; struct S s={.a=1,.b=2}; int t[2]={[0]=1,[1]=2,};\n",
         "int f(int a) { __asm__(\"\" : \"+r\"(a)); return a; }\n",
         "int f(int a) { int x[3]; return sizeof(a)+_Alignof(int)+_Countof(x)+__real__ a+__imag__ a; }\n",
+        "int f(int a) { return __builtin_types_compatible_p(typeof(a),int); }\n",
+        "struct S { int a[2]; }; int f(void) { return __builtin_offsetof(struct S,a[1]); }\n",
     };
     static const char* const invalid[] = {
         "int f(void) { return +; }\n",
@@ -516,7 +533,7 @@ static uint32_t c_fragment_test_fixtures(const char* directory, CFragmentTestTot
     for (uint32_t k = 0; k < sizeof(sources) / sizeof(sources[0]); k += 1)
     {
         const bool written = parse_test_write(path, sources[k], strlen(sources[k]));
-        const uint32_t failed = written ? c_fragment_test_file(path, &options, 1, totals, (int)k) : 1;
+        const uint32_t failed = written ? c_fragment_test_file(path, &options, 1, totals, (int)k, 0) : 1;
         if (failed != 0)
         {
             fprintf(stderr, "fragment fixture %u: %s", k, sources[k]);
@@ -526,7 +543,7 @@ static uint32_t c_fragment_test_fixtures(const char* directory, CFragmentTestTot
     for (uint32_t k = 0; k < sizeof(invalid) / sizeof(invalid[0]); k += 1)
     {
         const bool written = parse_test_write(path, invalid[k], strlen(invalid[k]));
-        failures += written ? c_fragment_test_file(path, &options, 0, totals, -1) : 1;
+        failures += written ? c_fragment_test_file(path, &options, 0, totals, -1, 0) : 1;
     }
     // Source depth, unary density, left association and right association are independent of fragment capacity.
     const uint32_t length = 100000;
@@ -568,7 +585,7 @@ static uint32_t c_fragment_test_fixtures(const char* directory, CFragmentTestTot
             }
             memcpy(text + at, "; }\n", 4);
             at += 4;
-            failures += parse_test_write(path, text, at) ? c_fragment_test_file(path, &options, 1, totals, -1) : 1;
+            failures += parse_test_write(path, text, at) ? c_fragment_test_file(path, &options, 1, totals, -1, 0) : 1;
         }
         free(text);
     }
@@ -576,11 +593,63 @@ static uint32_t c_fragment_test_fixtures(const char* directory, CFragmentTestTot
     return failures;
 }
 
+static uint32_t c_fragment_test_parser_snippets(const char* directory, CFragmentTestTotals* totals)
+{
+    uint32_t failures = 0;
+    uint32_t accepted = 0;
+    uint32_t rejected = 0;
+    const uint32_t count = sizeof(parse_test_snippets) / sizeof(parse_test_snippets[0]);
+    char path[4096];
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const ParseTestSnippet* snippet = &parse_test_snippets[k];
+        const PPOptions options = parse_test_snippet_options(snippet);
+        snprintf(path, sizeof(path), "%s/parser_snippet_%u.c", directory, k);
+        const bool written = parse_test_write(path, snippet->source, strlen(snippet->source));
+        const bool expected_acceptance = snippet->error[0] == 0;
+        const uint32_t failed = written ? c_fragment_test_file(path, &options, expected_acceptance, totals, -1, snippet->error) : 1;
+        if (failed != 0)
+        {
+            fprintf(stderr, "fragment parser snippet %u: %s", k, snippet->source);
+        }
+        else
+        {
+            accepted += expected_acceptance;
+            rejected += !expected_acceptance;
+        }
+        failures += failed;
+        unlink(path);
+    }
+    printf("fragment parser-snippets: requested=%u accepted=%u rejected=%u failures=%u\n", count, accepted, rejected, failures);
+    return failures;
+}
+
+static void c_fragment_test_print_totals(const char* dataset, const CFragmentTestTotals* totals)
+{
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        const CFragmentTestTotals* total = &totals[k];
+        const CFragmentStatistics* stats = &total->statistics;
+        printf("fragments dataset=%s payload=%u files=%llu tokens=%llu expressions=%llu nodes=%llu source_events=%llu fragments=%llu fragments/expression=%.6f positions=%.6f operators=%.6f "
+               "reductions=%llu operator_bytes_copied=%llu identity_bytes_copied=%llu next_field_bytes_written=%llu operator_copy/reduction=%.6f next_write/reduction=%.6f "
+               "peak_live_hot=%llu peak_live_identity=%llu peak_hot_backing=%llu peak_identity_backing=%llu peak_ownership_backing=%llu peak_syntax_backing=%llu "
+               "peak_inclusive_experiment_arena=%llu reused=%llu\n",
+               dataset, 16 * (k + 1), (unsigned long long)total->files, (unsigned long long)total->tokens, (unsigned long long)total->expressions, (unsigned long long)total->nodes,
+               (unsigned long long)total->source_events, (unsigned long long)stats->fragments, total->expressions ? (double)stats->fragments / total->expressions : 0,
+               stats->fragments ? (double)stats->positions / (64 * stats->fragments) : 0, stats->fragments ? (double)stats->operators / (16 * (k + 1) * stats->fragments) : 0,
+               (unsigned long long)stats->reductions, (unsigned long long)stats->copied_bytes, (unsigned long long)stats->identity_bytes_copied, (unsigned long long)stats->linked_bytes,
+               stats->reductions ? (double)stats->copied_bytes / stats->reductions : 0, stats->reductions ? (double)stats->linked_bytes / stats->reductions : 0,
+               (unsigned long long)total->hot_peak, (unsigned long long)total->identity_peak, (unsigned long long)total->hot_backing_peak, (unsigned long long)total->identity_backing_peak,
+               (unsigned long long)total->ownership_backing_peak, (unsigned long long)total->syntax_backing_peak, (unsigned long long)total->inclusive_arena_peak, (unsigned long long)stats->reused);
+    }
+}
+
 static int run_fragment_tests(int argument_count, char** arguments)
 {
     uint32_t failures = c_fragment_store_tests();
     CFragmentTestTotals totals[3] = { 0 };
     CFragmentTestTotals fixture_totals[3] = { 0 };
+    CFragmentTestTotals snippet_totals[3] = { 0 };
     char** options_arguments = malloc(((uint64_t)argument_count + 2) * sizeof(char*));
     char** files = malloc((1u << 20) * sizeof(char*));
     uint32_t file_count = 0;
@@ -665,10 +734,14 @@ static int run_fragment_tests(int argument_count, char** arguments)
     valid = valid && mkdtemp(directory) != 0;
     if (valid)
     {
-        failures += fixtures ? c_fragment_test_fixtures(directory, file_count == 0 ? totals : fixture_totals) : 0;
+        if (fixtures)
+        {
+            failures += c_fragment_test_fixtures(directory, fixture_totals);
+            failures += c_fragment_test_parser_snippets(directory, snippet_totals);
+        }
         for (uint32_t f = 0; f < file_count; f += 1)
         {
-            failures += c_fragment_test_file(files[f], &options, 1, totals, -1);
+            failures += c_fragment_test_file(files[f], &options, 1, totals, -1, 0);
         }
         rmdir(directory);
     }
@@ -677,21 +750,14 @@ static int run_fragment_tests(int argument_count, char** arguments)
         fprintf(stderr, "usage: test-fragments [--no-fixtures] [--files-from FILE] [-E options] [file or directory...]\n");
         failures += 1;
     }
-    for (uint32_t k = 0; k < 3; k += 1)
+    if (fixtures)
     {
-        const CFragmentTestTotals* total = &totals[k];
-        const CFragmentStatistics* stats = &total->statistics;
-        printf("fragments dataset=%s payload=%u files=%llu tokens=%llu expressions=%llu nodes=%llu source_events=%llu fragments=%llu fragments/expression=%.6f positions=%.6f operators=%.6f "
-               "reductions=%llu operator_bytes_copied=%llu identity_bytes_copied=%llu next_field_bytes_written=%llu operator_copy/reduction=%.6f next_write/reduction=%.6f "
-               "peak_live_hot=%llu peak_live_identity=%llu peak_hot_backing=%llu peak_identity_backing=%llu peak_ownership_backing=%llu peak_syntax_backing=%llu "
-               "peak_inclusive_experiment_arena=%llu reused=%llu\n",
-               file_count == 0 ? "fixtures" : "corpus", 16 * (k + 1), (unsigned long long)total->files, (unsigned long long)total->tokens, (unsigned long long)total->expressions, (unsigned long long)total->nodes,
-               (unsigned long long)total->source_events, (unsigned long long)stats->fragments, total->expressions ? (double)stats->fragments / total->expressions : 0,
-               stats->fragments ? (double)stats->positions / (64 * stats->fragments) : 0, stats->fragments ? (double)stats->operators / (16 * (k + 1) * stats->fragments) : 0,
-               (unsigned long long)stats->reductions, (unsigned long long)stats->copied_bytes, (unsigned long long)stats->identity_bytes_copied, (unsigned long long)stats->linked_bytes,
-               stats->reductions ? (double)stats->copied_bytes / stats->reductions : 0, stats->reductions ? (double)stats->linked_bytes / stats->reductions : 0,
-               (unsigned long long)total->hot_peak, (unsigned long long)total->identity_peak, (unsigned long long)total->hot_backing_peak, (unsigned long long)total->identity_backing_peak,
-               (unsigned long long)total->ownership_backing_peak, (unsigned long long)total->syntax_backing_peak, (unsigned long long)total->inclusive_arena_peak, (unsigned long long)stats->reused);
+        c_fragment_test_print_totals("fixtures", fixture_totals);
+        c_fragment_test_print_totals("parser-snippets", snippet_totals);
+    }
+    if (file_count != 0)
+    {
+        c_fragment_test_print_totals("corpus", totals);
     }
     printf("test-fragments: %u failures\n", failures);
     for (uint32_t f = 0; f < file_count; f += 1)

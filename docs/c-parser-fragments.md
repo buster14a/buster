@@ -104,6 +104,9 @@ shared host lock separately, with tests pinned to CPU 2:
 
 The default fragment command includes storage invariants, source fixtures,
 malformed input and 100,000-level grouping, unary and associative chains.
+It also runs every existing parser language snippet with its declared language
+mode, accepted/rejected expectation and exact first diagnostic. Dedicated
+fixtures, parser snippets and requested corpus inputs have separate totals.
 Every source runs with 16-, 32- and 48-byte operator payloads. Corpus inputs use
 the preprocessor's normal options; additional preprocessing flags may be
 passed on the command line. Missing input paths, empty requested file lists,
