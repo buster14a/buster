@@ -368,7 +368,7 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
         uint32_t offset = 0;
         for (uint32_t l = 0; l < function->local_count; l += 1)
         {
-            const uint32_t size = program->local_sizes[function->first_local + l];
+            const uint32_t size = program->local_sizes != 0 ? program->local_sizes[function->first_local + l] : 0;
             object_offsets[function->first_local + l] = offset;
             offset += (size + 15) & ~15u;
         }
