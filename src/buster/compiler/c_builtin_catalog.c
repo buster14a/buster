@@ -86,6 +86,20 @@
     X(CIMAG, 0x156u, "__builtin_cimag") \
     X(CIMAGF, 0x157u, "__builtin_cimagf") \
     X(CIMAGL, 0x158u, "__builtin_cimagl") \
+    X(SQRT, 0x200u, "__builtin_sqrt") \
+    X(SQRTF, 0x201u, "__builtin_sqrtf") \
+    X(COPYSIGN, 0x202u, "__builtin_copysign") \
+    X(COPYSIGNF, 0x203u, "__builtin_copysignf") \
+    X(CEIL, 0x204u, "__builtin_ceil") \
+    X(CEILF, 0x205u, "__builtin_ceilf") \
+    X(FLOOR, 0x206u, "__builtin_floor") \
+    X(FLOORF, 0x207u, "__builtin_floorf") \
+    X(TRUNC, 0x208u, "__builtin_trunc") \
+    X(TRUNCF, 0x209u, "__builtin_truncf") \
+    X(NEARBYINT, 0x20au, "__builtin_nearbyint") \
+    X(NEARBYINTF, 0x20bu, "__builtin_nearbyintf") \
+    X(RINT, 0x20cu, "__builtin_rint") \
+    X(RINTF, 0x20du, "__builtin_rintf") \
     X(MEMCPY, 0x160u, "__builtin_memcpy") \
     X(MEMSET, 0x161u, "__builtin_memset") \
     X(MEMMOVE, 0x162u, "__builtin_memmove") \
