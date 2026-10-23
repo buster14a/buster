@@ -83,10 +83,17 @@ static bool dynamic_test_libraries(const ExecutableTestDirectory* directory, con
     }
     // Invalid metadata must fail on every lane before opening an output, rather than indexing a missing library or
     // silently truncating a library/version index. Use the real writer so the broadcast and cleanup are tested too.
-    for (uint32_t bad = 0; built && bad < 5; bad += 1)
+    SymbolId imported = 0;
+    for (SymbolId symbol = 1; symbol < test->link.symbols.count && imported == 0; symbol += 1)
+    {
+        imported = test->link.symbols.source[symbol] == BUSTER_LINK_SOURCE_FOREIGN_SHARED ? symbol : 0;
+    }
+    const uint16_t saved_version = test->link.symbols.version[imported];
+    for (uint32_t bad = 0; built && bad < 9; bad += 1)
     {
         ExecutableDynamic invalid = dynamic;
         ExecutableVersion version = dynamic.versions[0];
+        ExecutableVersion pair[2] = { version, version };
         if (bad == 0)
         {
             invalid.libraries = 0;
@@ -107,9 +114,28 @@ static bool dynamic_test_libraries(const ExecutableTestDirectory* directory, con
         {
             invalid.versions = 0;
         }
-        else
+        else if (bad == 4)
         {
             invalid.library_count = UINT32_MAX;
+        }
+        else if (bad == 5 || bad == 6)
+        {
+            // Duplicate indices, then distinct indices with libraries in descending order.
+            pair[0].index = 2;
+            pair[1].index = bad == 5 ? 2 : 3;
+            pair[0].library = 259;
+            pair[1].library = bad == 5 ? 259 : 258;
+            invalid.versions = pair;
+            invalid.version_count = 2;
+        }
+        else
+        {
+            // The symbol pass must reject both a gap inside the metadata's index range and an index above it.
+            pair[0].index = 2;
+            pair[1].index = 4;
+            invalid.versions = pair;
+            invalid.version_count = 2;
+            test->link.symbols.version[imported] = bad == 7 ? 3 : UINT16_MAX;
         }
         unlink(path.pointer);
         DynamicTestWrite write = {
@@ -119,6 +145,7 @@ static bool dynamic_test_libraries(const ExecutableTestDirectory* directory, con
         const bool ran = lane_run(8, dynamic_test_lane_main, &write, 0);
         dynamic_test_expect(&tally, ran && !write.succeeded && write.result.error == EXECUTABLE_ERROR_UNSUPPORTED && access(path.pointer, F_OK) != 0,
                             "malformed metadata refused without publication", bad);
+        test->link.symbols.version[imported] = saved_version;
     }
     scratch_end(scratch);
     if (!directory->keep)
