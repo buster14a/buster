@@ -1221,10 +1221,13 @@ paths with the same harness, and include `size_encode` for the caller's
 combined cost. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/branch-sizing.md` explains the current method and labels the older
 numbers as historical;
-`docs/measurements/x86-lengths-2026-10-23/README.md` records the lengths-only
-comparison and reproduction commands. The default 9700X job runs it after the
-tests, pinned to one allowed CPU; like the others, its measurements are
-informational.
+`docs/measurements/x86-lengths-2026-10-23/refinement.md` records the current
+Clang 23 implementation, comparison protocol and initial candidate's evidence.
+The default 9700X job runs the benchmark after the tests, pinned to one allowed
+CPU. For relevant pull requests it also runs three matched process pairs using
+the same harness, including the sizing-and-encoding pipeline on one and eight
+distinct physical cores. Its measurements are informational; correctness,
+report completeness and matching workload identities are checked.
 
 ## x86 semantics tests
 

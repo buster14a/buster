@@ -5,6 +5,8 @@
 // Each worker owns an identical, independently allocated generated pool. Setup, scalar/reference checks, and five
 // warmup passes precede the start barrier. Wall time includes restoring the branches, sizing, encoding, checking lengths,
 // and sampling output; it excludes setup and teardown. This is a synthetic pipeline, not a complete compiler benchmark.
+// CPU selection uses the process's initial allowed mask. One worker prefers CPU 2; multiple workers take the first
+// allowed CPUs. The coordinator takes the first allowed CPU, which it may briefly share with a worker at the barriers.
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -222,16 +224,53 @@ int main(int argc, char** argv)
             fprintf(stderr, "scaling: encoder initialization failed\n");
         }
     }
-    // Keep the timing coordinator off the measured workers. One worker uses CPU 2; multiple workers use CPUs 1..N.
+    // Save the job's whole allowed set before pinning the coordinator: worker threads inherit its narrower affinity.
+    uint32_t worker_cpus[BUSTER_SCALING_WORKERS] = { 0 };
+    uint32_t coordinator_cpu = 0;
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
     if (valid)
     {
-        cpu_set_t cpus;
-        CPU_ZERO(&cpus);
-        CPU_SET(0, &cpus);
-        valid = pthread_setaffinity_np(pthread_self(), sizeof(cpus), &cpus) == 0;
+        valid = sched_getaffinity(0, sizeof(allowed), &allowed) == 0;
         if (!valid)
         {
-            fprintf(stderr, "scaling: coordinator CPU 0 is unavailable\n");
+            fprintf(stderr, "scaling: cannot read the allowed CPUs: %s\n", strerror(errno));
+        }
+    }
+    if (valid)
+    {
+        uint32_t available = 0;
+        for (uint32_t cpu = 0; cpu < CPU_SETSIZE; cpu += 1)
+        {
+            if (CPU_ISSET(cpu, &allowed))
+            {
+                if (available < BUSTER_SCALING_WORKERS)
+                {
+                    worker_cpus[available] = cpu;
+                }
+                available += 1;
+            }
+        }
+        valid = available >= count;
+        if (!valid)
+        {
+            fprintf(stderr, "scaling: %llu workers need distinct CPUs, but only %u are allowed\n", (unsigned long long)count, available);
+        }
+        else
+        {
+            coordinator_cpu = worker_cpus[0];
+            if (count == 1 && CPU_ISSET(2, &allowed))
+            {
+                worker_cpus[0] = 2;
+            }
+            cpu_set_t cpus;
+            CPU_ZERO(&cpus);
+            CPU_SET(coordinator_cpu, &cpus);
+            valid = pthread_setaffinity_np(pthread_self(), sizeof(cpus), &cpus) == 0;
+            if (!valid)
+            {
+                fprintf(stderr, "scaling: coordinator CPU %u is unavailable\n", coordinator_cpu);
+            }
         }
     }
     const bool barrier_created = valid && pthread_barrier_init(&run.barrier, 0, (unsigned int)count + 1) == 0;
@@ -246,7 +285,7 @@ int main(int argc, char** argv)
     while (valid && created < count)
     {
         workers[created].run = &run;
-        workers[created].cpu = count == 1 ? 2 : (uint32_t)created + 1;
+        workers[created].cpu = worker_cpus[created];
         const int error = pthread_create(&threads[created], 0, scaling_worker, &workers[created]);
         valid = error == 0;
         created += valid;
@@ -296,11 +335,17 @@ int main(int argc, char** argv)
             checksum += workers[w].checksum * (w + 1);
         }
         printf("row=%s workers=%llu passes=%llu seed=1 warmup=%u cpu_first=%u cpu_last=%u functions_per_worker=%llu records_per_worker=%llu "
-               "encoded_bytes_per_worker=%llu wall_ns=%llu records=%llu records/s=%.3f ns/record=%.6f checksum=%016llx reference=%016llx\n",
+               "encoded_bytes_per_worker=%llu wall_ns=%llu records=%llu records/s=%.3f ns/record=%.6f checksum=%016llx reference=%016llx "
+               "coordinator_cpu=%u worker_cpus=",
                row_name, (unsigned long long)count, (unsigned long long)passes, BUSTER_SCALING_WARMUP, workers[0].cpu, workers[count - 1].cpu,
                (unsigned long long)workers[0].functions, (unsigned long long)workers[0].records, (unsigned long long)workers[0].bytes,
                (unsigned long long)elapsed, (unsigned long long)records, (double)records * 1000000000.0 / (double)elapsed,
-               (double)elapsed / (double)records, (unsigned long long)checksum, (unsigned long long)workers[0].reference_checksum);
+               (double)elapsed / (double)records, (unsigned long long)checksum, (unsigned long long)workers[0].reference_checksum, coordinator_cpu);
+        for (uint64_t w = 0; w < count; w += 1)
+        {
+            printf("%s%u", w == 0 ? "" : ",", workers[w].cpu);
+        }
+        putchar('\n');
     }
     else
     {

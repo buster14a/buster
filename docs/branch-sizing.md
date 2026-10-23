@@ -53,7 +53,7 @@ The results below are from the original branch-sizing implementation, before
 measurement. They describe its encode-and-discard lengths phase and are kept
 as historical evidence. The current implementation's comparison and
 reproduction commands are in
-[the lengths-only measurement record](measurements/x86-lengths-2026-10-23/README.md).
+[the lengths-only refinement record](measurements/x86-lengths-2026-10-23/refinement.md).
 
 On the Ryzen 7 9700X, CPU 2, `benchmark-branch-sizing`'s medians, in cycles per
 record (instruction). Each row is a pool of about 262,000 records of generated

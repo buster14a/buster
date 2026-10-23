@@ -7282,15 +7282,6 @@ static const uint8_t x86_first_qword_total[64] __attribute__((aligned(64))) = {
     0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
 };
 
-// Only a template's flags affect a 64-bit-mode instruction's length. Scalar loads avoid a hardware gather and the
-// full encoder's loads of template byte and layout vectors. memcpy also preserves the byte array's type.
-BUSTER_INLINE int32_t x86_measure_flags(const X86Instruction* instruction)
-{
-    int32_t flags;
-    memcpy(&flags, x86_templates[instruction->form].template.bytes + 12, sizeof(flags));
-    return flags;
-}
-
 // Measures one full group; a partial group is copied and zero-padded by x86_measure. compute_fields shares the
 // encoder's length rules, while its unused canonical bytes, prefixes and displacement are eliminated. In 64-bit mode
 // checks and extension affect those unused fields alone. No machine-code bytes, layout vectors or fixup ends are made.
@@ -7306,16 +7297,12 @@ BUSTER_INLINE uint32_t x86_measure_group(const X86Instruction* instructions, uin
     const __m512i high23 = _mm512_unpackhi_epi32(record2, record3);
     const __m512i displacement = _mm512_unpackhi_epi64(low01, low23);
     const __m512i operands = _mm512_unpacklo_epi64(high01, high23);
-    // Keep the scalar form loads separate from the record vectors: otherwise Clang widens each to 16 bytes and
-    // extracts its form through a vector-to-integer move instead of loading the word directly.
-    const X86Instruction* forms = instructions;
-    __asm__("" : "+r"(forms));
-    // Match the transpose above: instruction 4q + j occupies lane 4j + q.
-    const __m512i flags = _mm512_setr_epi32(
-        x86_measure_flags(forms + 0), x86_measure_flags(forms + 4), x86_measure_flags(forms + 8), x86_measure_flags(forms + 12),
-        x86_measure_flags(forms + 1), x86_measure_flags(forms + 5), x86_measure_flags(forms + 9), x86_measure_flags(forms + 13),
-        x86_measure_flags(forms + 2), x86_measure_flags(forms + 6), x86_measure_flags(forms + 10), x86_measure_flags(forms + 14),
-        x86_measure_flags(forms + 3), x86_measure_flags(forms + 7), x86_measure_flags(forms + 11), x86_measure_flags(forms + 15));
+    // The forms are already in lane order in the extension's low 16 bits. Keep those bits and multiply by 16;
+    // the gather's scale of 4 then addresses each 64-byte template's flags at byte 12. One dword-index gather
+    // avoids Clang 23's reconstruction of scalar flag loads into pointer vectors and several partial gathers.
+    const __m512i extension = _mm512_unpackhi_epi64(high01, high23);
+    const __m512i form_indices = _mm512_srli_epi32(_mm512_slli_epi32(extension, 16), 12);
+    const __m512i flags = _mm512_i32gather_epi32(form_indices, (const uint8_t*)x86_templates + 12, 4);
     const __m512i zero = _mm512_setzero_si512();
     const X86Fields fields = compute_fields(operands, displacement, zero, flags, zero, X86_ENCODER_MODE_64);
     const __m128i lengths = _mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_load_si512(x86_length_bytes), fields.length));

@@ -422,7 +422,10 @@ Other invalid inputs are outside the contract, as with `x86_encode`.
 
 The vector path takes 16 records at a time. It transposes their operand and
 displacement fields as the encoder does, but loads only each template's
-32-bit flags, with scalar loads rather than a gather. `compute_fields` shares
+32-bit flags with one dword-index gather. Its indices come from the form
+fields already in the transposed vectors. This explicit gather avoids
+Clang 23 reconstructing scalar loads into pointer vectors and partial
+gathers. `compute_fields` shares
 the encoder's length rules; its unused canonical bytes, prefixes and
 displacement results are eliminated. Template byte/layout vectors, assembled
 machine code and its stores are absent. The lengths are put in instruction
@@ -448,7 +451,7 @@ its discarded-byte scratch buffer, encode chunks and offset-rebasing pass
 ([branch sizing](branch-sizing.md#lengths-and-memory)). The caller then
 encodes the sized records once. The implementation comparison, benchmark
 commands and host qualification are recorded in
-[the lengths-only measurement record](measurements/x86-lengths-2026-10-23/README.md).
+[the lengths-only refinement record](measurements/x86-lengths-2026-10-23/refinement.md).
 
 ### Fixups
 

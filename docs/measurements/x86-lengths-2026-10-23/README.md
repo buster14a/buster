@@ -1,4 +1,10 @@
-# Lengths-only SIMD for branch sizing (#305)
+# Initial lengths-only SIMD for branch sizing (#305)
+
+This record describes the first candidate, `651a539bfed65cd815391b3304e67a81c58d71c6`.
+Its first target qualification passed correctness but exposed weak target gains
+and tiny-function regressions. [The refinement record](refinement.md) documents
+the Clang 23 lowering problem, the revised implementation and matched target
+qualification. The cloud gains below are historical first-candidate evidence.
 
 This change removes an encode-and-discard pass from branch sizing. The vector
 path computes 16 instruction lengths at once, prefix-sums them, and stores
@@ -18,8 +24,8 @@ the PR, with links to the exact run. No agent work ran on that physical host.
 
 - Baseline: `fc45e674d13d9257d66c02b05d78adf85ddae7ea` in
   [buster14a/buster](https://github.com/buster14a/buster/commit/fc45e674d13d9257d66c02b05d78adf85ddae7ea).
-- Candidate: the source hashes in [source-and-binary.sha256](source-and-binary.sha256).
-  The source changes are in the commit containing this record.
+- Initial candidate: `651a539bfed65cd815391b3304e67a81c58d71c6`, with the source
+  hashes in [source-and-binary.sha256](source-and-binary.sha256).
 - Cloud CPU: AMD EPYC 9V74, family 25/model 17, KVM. Nine visible vCPUs;
   cgroup CPU quota is eight CPU equivalents. Single-worker timing uses CPU 2.
   These vCPU identifiers do not establish physical-core topology.
@@ -94,7 +100,9 @@ The incomplete pair list is [incomplete-pairs.json](incomplete-pairs.json).
 
 ## Aggregate worker throughput
 
-[scaling.c](scaling.c) compiles unchanged against both source trees.
+[scaling-cloud.c](scaling-cloud.c) is the original fixture compiled unchanged
+against both source trees. The current `scaling.c` extends CPU-affinity selection
+for the target qualification; these cloud numbers use the retained original.
 Each worker pins itself before first touch and owns an independent arena and
 generated pool: 262,219 records in 2,883 functions, seed 1, 1,064,719 encoded
 bytes per pass. Before timing it checks all sizing outputs and compares every
@@ -250,15 +258,17 @@ context, not identical to the isolated cloud timing method.
 
 ## Reproduction
 
-Use separate checkouts at the baseline SHA and the candidate. The following
+Use separate checkouts at the baseline SHA and initial candidate `651a539`,
+and the retained evidence files from the current checkout. The original
+scaling fixture is now named `scaling-cloud.c` (`scaling.c` at `651a539`). The following
 commands are shell orchestration; all workload and measurement code is C.
 Run CPU-consuming commands under the host's shared lock and use an allowed
 CPU. Substitute paths for the local checkouts.
 
 ```sh
 base=/path/to/buster-base
-candidate=/path/to/buster-candidate
-evidence="$candidate/docs/measurements/x86-lengths-2026-10-23"
+candidate=/path/to/initial-candidate-651a539
+evidence=/path/to/current-checkout/docs/measurements/x86-lengths-2026-10-23
 
 # Apply only the old internal helper signature to the enhanced harness.
 sed 's/branch_sizing_lengths(records, count, offsets, vector)/branch_sizing_lengths(records, count, offsets, columns.encoded, vector)/' \
@@ -275,9 +285,9 @@ taskset -c 2 /tmp/bench-after --only tier0-mix --measure size_encode --samples 2
 taskset -c 2 /tmp/bench-after --only tier0-mix --measure size_encode --samples 11 --seed 1 --after-scalar 100
 
 clang-19 -O3 -march=native -mmwaitx -fwrapv -funsigned-char -fno-strict-aliasing \
-    -Wall -Werror -Wno-bitwise-instead-of-logical -pthread -I"$base/src" "$evidence/scaling.c" -o /tmp/scaling-before
+    -Wall -Werror -Wno-bitwise-instead-of-logical -pthread -I"$base/src" "$evidence/scaling-cloud.c" -o /tmp/scaling-before
 clang-19 -O3 -march=native -mmwaitx -fwrapv -funsigned-char -fno-strict-aliasing \
-    -Wall -Werror -Wno-bitwise-instead-of-logical -pthread -I"$candidate/src" "$evidence/scaling.c" -o /tmp/scaling-after
+    -Wall -Werror -Wno-bitwise-instead-of-logical -pthread -I"$candidate/src" "$evidence/scaling-cloud.c" -o /tmp/scaling-after
 /tmp/scaling-before 8 200 tier0-mix
 /tmp/scaling-after 8 200 tier0-mix
 ```
