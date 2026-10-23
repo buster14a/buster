@@ -23,6 +23,7 @@ static const ForeignLinkTestSource foreign_link_test_sources[] = {
             ".text\n.globl _start\n.type _start,@function\n_start:\n"
             "call winner\ncmp $11,%eax\njne .Lfail\n"
             "call chosen\ncmp $23,%eax\njne .Lfail\n"
+            "call loser_live\ncmp $31,%eax\njne .Lfail\n"
             "call archived\ncmp $7,%eax\njne .Lfail\n"
             "mov local_value(%rip),%eax\ncmp $1,%eax\njne .Lfail\n"
             "mov local_pointer(%rip),%rdx\nlea local_value(%rip),%rcx\ncmp %rcx,%rdx\njne .Lfail\n"
@@ -60,9 +61,9 @@ static const ForeignLinkTestSource foreign_link_test_sources[] = {
     {
         .name = "fl_first",
         .text =
-            ".text\n.globl winner\n.type winner,@function\nwinner:\nmov $11,%eax\nret\n.size winner,.-winner\n"
+            ".text\n.globl winner\n.type winner,@function\nwinner:\n.cfi_startproc\nmov $11,%eax\nret\n.cfi_endproc\n.size winner,.-winner\n"
             ".section .text.chosen,\"axG\",@progbits,chosen,comdat\n.weak chosen\n.type chosen,@function\n"
-            "chosen:\nmov $23,%eax\nret\n.size chosen,.-chosen\n"
+            "chosen:\n.cfi_startproc\nmov $23,%eax\nret\n.cfi_endproc\n.size chosen,.-chosen\n"
             ".comm shared_common,8,64\n.globl magic_value\n.set magic_value,5\n"
             ".data\n.globl replaced_common\n.type replaced_common,@object\nreplaced_common:\n.long 9\n.size replaced_common,4\n"
             ".balign 8\n.irp N," BUSTER_FOREIGN_LINK_TEST_BATCH_IDS "\n"
@@ -73,7 +74,8 @@ static const ForeignLinkTestSource foreign_link_test_sources[] = {
         .name = "fl_loser",
         .text =
             ".section .text.chosen,\"axG\",@progbits,chosen,comdat\n.weak chosen\n.type chosen,@function\n"
-            "chosen:\ncall discarded_only_missing\nmov $99,%eax\nret\n.size chosen,.-chosen\n"
+            "chosen:\n.cfi_startproc\ncall discarded_only_missing\nmov $99,%eax\nret\n.cfi_endproc\n.size chosen,.-chosen\n"
+            ".text\n.globl loser_live\n.type loser_live,@function\nloser_live:\n.cfi_startproc\nmov $31,%eax\nret\n.cfi_endproc\n.size loser_live,.-loser_live\n"
             ".section .rodata\n.type local_value,@object\nlocal_value:\n.long 200\n.size local_value,4\n"
             ".data\n.balign 8\n.globl loser_pointer\n.type loser_pointer,@object\nloser_pointer:\n.quad chosen\n.size loser_pointer,8\n"
             ".globl loser_local_pointer\n.type loser_local_pointer,@object\nloser_local_pointer:\n.quad local_value\n.size loser_local_pointer,8\n"
@@ -120,6 +122,7 @@ static bool foreign_link_test_compile(const char* directory, ForeignTestTally* t
         char* arguments[] = {
             (char*)"cc",
             (char*)"-c",
+            (char*)"-Wa,-L",
             source,
             (char*)"-o",
             object,
@@ -171,6 +174,8 @@ static void foreign_link_test_structure(ForeignTestTally* tally, const Foreign* 
                                   link->atoms.class[link->symbols.atom[replaced]] == BUSTER_LINK_CLASS_DATA,
                         "strong data replaces common", 0);
     uint32_t discarded = 0;
+    uint32_t frames = 0;
+    uint32_t pruned = 0;
     for (uint32_t id = 1; id < foreign->object_count; id += 1)
     {
         const ForeignObject* object = &foreign->objects[id];
@@ -193,9 +198,23 @@ static void foreign_link_test_structure(ForeignTestTally* tally, const Foreign* 
                 discarded += 1;
                 foreign_test_expect(tally, section < imported->section_count && imported->section_atoms[section] == 0, "discarded COMDAT has no output atom", 0);
             }
+            const AtomId atom = imported->section_atoms[section];
+            if (atom != 0 && link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME)
+            {
+                frames += executable_eh_frame_walk(link, atom, 0, 0, 0);
+                const ForeignLinkUnwind* frame = foreign_link_unwind(converted, id, section);
+                if (frame != 0 && frame->plan.bytes.length < frame->plan.old_length)
+                {
+                    pruned += 1;
+                    const Elf64_Shdr original = import_section_header(&object->elf, section);
+                    foreign_test_expect(tally, original.sh_size == frame->plan.old_length && frame->plan.fde_count == 1,
+                                        "COMDAT pruning keeps the surviving FDE and original input size", 0);
+                }
+            }
         }
     }
     foreign_test_expect(tally, discarded != 0, "fixture contains a discarded COMDAT section", 0);
+    foreign_test_expect(tally, pruned == 1 && frames == 3, "discarded COMDAT loses only its matching FDE", 0);
 }
 
 static void foreign_link_test_oracles(ForeignTestTally* tally, const char* directory, char** inputs, uint32_t count)
@@ -303,6 +322,8 @@ static void foreign_link_test_program(ForeignTestTally* tally, const char* direc
                 };
                 foreign_test_expect(tally, emitted && object_test_run(run, output, errors) == 42, "execute converted relocations and winners", detail);
                 String8 bytes = emitted ? foreign_test_read(arena, destination) : (String8){ 0 };
+                const char* unwind = emitted && bytes.pointer != 0 ? executable_test_unwind(&converted.link, bytes, BUSTER_EXECUTABLE_BASE, foreign.object_count, &written) : "no output";
+                foreign_test_expect(tally, unwind == 0, "independent walk and lookup validate retained unwind ranges", unwind);
                 if (!first)
                 {
                     const bool same = reference.pointer != 0 && bytes.pointer != 0 && reference.length == bytes.length && memcmp(reference.pointer, bytes.pointer, bytes.length) == 0;
