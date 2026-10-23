@@ -224,6 +224,13 @@ and known/dynamic order metadata. Orders do not generally require ICE. Invalid
 known load/store orders carry warnings; fence handling retains its own rules.
 GNU `_Atomic` wrappers and unsupported families are not treated as ordinary
 integer objects. Other recognized atomic/sync IDs remain explicit refusals.
+The source-domain rules follow the approved Clang 23.1.1 release: real and
+floating-complex `_n` objects are valid, while direct x87 long double and
+`_BitInt` objects are rejected. F32/F64 retain exact source conversions;
+extended/complex runtime formats and unavailable payload conversions carry
+unsupported metadata. A raw helper's U64 bit ABI requires representation
+loads/stores for FP values, never numeric FP/integer conversion. Corresponding
+signed/unsigned pointer-valued stores retain Clang's pointer-sign warning.
 
 `c_builtin_atomic_helpers.c` emits original baseline SysV leaf bodies with
 explicit parameter/result classes. Naturally aligned 1/2/4/8-byte loads
