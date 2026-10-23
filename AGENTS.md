@@ -2632,10 +2632,10 @@ child that dies before its message or its exit.
 Run it under the 9700X's lock without `taskset`, and with `--directory` on each
 file system to measure. `docs/object-writer-and-linker.md` ("The floors") has
 the original numbers; [linker scaling](docs/linker-scaling.md) records the
-frozen lane sweep, independently controlled write factors, and filesystem
-limits from #87. The default 9700X job runs it after benchmark-link, where that
-runs the linkers' side (the machine's floors don't depend on a pull request
-either); like the others, its measurements are informational.
+frozen physical-core and SMT lane sweeps, independently controlled write
+factors, and filesystem limits from #87. The default 9700X job runs it after
+benchmark-link, where that runs the linkers' side (the machine's floors don't
+depend on a pull request either); like the others, its measurements are informational.
 
 ## Foreign tests
 
