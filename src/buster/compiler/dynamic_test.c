@@ -3815,6 +3815,8 @@ static void dynamic_test_report_import(RuntimeError error, const Runtime* runtim
     }
 }
 
+#include "buster/compiler/dynamic_libraries_test.c"
+
 static int run_dynamic_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -3889,6 +3891,7 @@ static int run_dynamic_tests(int argc, char** argv)
         passed = dynamic_test_cases(&directory, &runtime, cross_check) && passed;
         passed = dynamic_test_exports(&directory, &runtime, cross_check) && passed;
         passed = dynamic_test_imports(&directory, &runtime, cross_check) && passed;
+        passed = dynamic_test_libraries(&directory, &runtime) && passed;
         passed = dynamic_test_smalls(&directory, &runtime) && passed;
         Runtime shared_runtime;
         const RuntimeError shared_imported = runtime_import_shared(&shared_runtime);

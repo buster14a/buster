@@ -373,6 +373,14 @@ designs and the compilers already built this way.
   `static_test.c` those with libc and the static PIEs' (`./build/compiler
   test-static`); `main.c` includes all three, and `executable_benchmark.c`
   provides `benchmark-executable`.
+  `ExecutableDynamic` borrows counted library/version arrays, so foreign
+  producers can supply selected dependencies in input order. A version's
+  library is a 32-bit array index; version indices are unique 2..0x7fff and
+  grouped by library. Required libraries include unversioned dependencies;
+  optional ones are selected by used versions. `dynamic_libraries_test.c`,
+  included by `dynamic_test.c`, checks high library indices, foreign imports,
+  malformed metadata and exact/vector identity at 1/2/3/8 lanes. Missing import
+  version definitions are refused in the existing symbol pass before output.
 - `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
   part, and step 6's for the other kinds): what `runtime_import` (or
   `runtime_import_static`, `runtime_import_static_pie` or

@@ -1831,6 +1831,48 @@ and `_fini`, and the exports. The link is the program's bound by `bind.c`
 programs run under the system's loader without stand-ins, and `test-dynamic`
 compares each with lld's link of the same objects.
 
+The writer also accepts foreign shared-library imports: `ExecutableDynamic`
+borrows counted `ExecutableLibrary` and `ExecutableVersion` arrays until the
+write returns. Library order is `DT_NEEDED` order. A required library is
+already selected by the producer, including an unversioned dependency;
+otherwise a used version selects it. Version descriptors are grouped by
+library, have unique indices from 2 through 0x7fff, and use a 32-bit library
+index. The runtime adapter keeps libc required and its loader conditional.
+This removes the former two-library limit without putting name resolution
+in the writer. Both `RUNTIME_SHARED` and `FOREIGN_SHARED` sources enter the
+same exact and vector classification paths.
+
+Library/version descriptors are validated before allocation. The existing
+parallel symbol pass checks that every imported version above 1 has a
+descriptor, using the output version-number array as a presence table until
+the count barrier; no extra symbol pass or persistent column is needed.
+Malformed arrays, names, duplicate version indices, unordered library groups, and missing
+import versions fail before opening the output. Each lane uses two temporary
+64-bit columns per library for needed-name offsets and version counts.
+`test-dynamic` exercises three loaded dependencies across a 260-entry input,
+including an unversioned library and versioned libraries above index 255,
+with poisoned scratch, permuted names and exact/vector identity at 1/2/3/8
+lanes. Actual foreign resolution and its handoff are a separate #86 slice.
+
+On 23 October 2026, five alternating locked runs on the 9700X compared
+`fc45e674d13d9257d66c02b05d78adf85ddae7ea` with the counted-input implementation
+`41b2b9a05d1d95bfc20490386208b23e5823fa51` (before the additional malformed-version
+checks), CPU 2, clang 23.1.1, frozen generated dynamic PIEs, tmpfs output.
+The command was `ab --rounds 5 --cpu 2 --lock ~/buster-fast-bench/exclusive.sh
+./baseline-compiler ./build/compiler -- benchmark-executable --only dynamic
+--functions 1,2000,180000`. Medians of the five runs, in microseconds:
+
+| Workers | Baseline in place / new | Counted inputs in place / new |
+| ---: | ---: | ---: |
+| 1 | 4.9 / 5.9 | 5.1 / 6.1 |
+| 2,000 | 77.5 / 95.8 | 77.6 / 95.7 |
+| 180,000 | 9,641.1 / 11,235.5 | 9,603.5 / 11,177.1 |
+
+The small case adds about 0.2 microseconds of fixed validation/allocation
+cost. Medium and large intervals overlap; these measurements establish the
+cost of the feature, not a throughput improvement. Raw logs remain at
+`~/buster-fast-bench/linker-libraries86/libraries-ab.log` on the approved host.
+
 - **The file** is step 4's laid out at base 0 (`ET_DYN`, `DF_1_PIE`), with
   lld's sections and program headers besides. R gets `.interp`, the ABI note
   (one `PT_NOTE` with the build ID), `.dynsym`, `.gnu.version`,
