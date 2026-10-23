@@ -292,13 +292,24 @@ static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* si
         {
             uint32_t parent = parser->tree.parents[token];
             uint32_t depth = 0;
-            while (parent < count && sink->syntax[parent].transparent && normalized_parents[parent] == BUSTER_C_FRAGMENT_NONE)
+            while (parent < count && (sink->syntax[parent].transparent || sink->syntax[parent].bridge))
             {
+                // An omitted-'=' designator's index is a separate expression. Only its later RHS child bypasses
+                // the raw closer, which forwards that handle at the live reduction. This is source-side specific.
+                if (sink->syntax[parent].bridge && token < parent)
+                {
+                    parent = count;
+                    break;
+                }
+                if (normalized_parents[parent] != BUSTER_C_FRAGMENT_NONE)
+                {
+                    parent = normalized_parents[parent];
+                    break;
+                }
                 work[depth] = parent;
                 depth += 1;
                 parent = parser->tree.parents[parent];
             }
-            parent = parent < count && sink->syntax[parent].transparent ? normalized_parents[parent] : parent;
             if (parent < count && sink->syntax[parent].emitted)
             {
                 // An opaque zero-arity reference keeps its full raw subtree for the consumer. Expressions inside
@@ -558,6 +569,13 @@ static uint32_t c_fragment_test_fixtures(const char* directory, CFragmentTestTot
         "struct S { int a[2]; }; int f(void) { return __builtin_offsetof(struct S,a[1]); }\n",
         "enum E { A=1, B, C=2 };\n",
         "void f(int n,int a[static const n]) { (void)a; }\n",
+        "int f(int x,int y) { int a[]={ [0] x+y }; return a[0]; }\n",
+        "int g(int); int f(int x) { int a[]={ [0] g(x), [1] x++ }; return a[0]; }\n",
+        "int f(int x) { int a[]={ [0] -x, [1] (int)x }; return a[0]; }\n",
+        "int f(int x) { int a[][2]={ [0] {x,2} }; int b[4]={ [1 ... 3] +x }; return a[0][0]+b[1]; }\n",
+        "int f(int x) { int a[]={ [0] (int){x} }; return a[0]; }\n",
+        "const char *a[]={ [0] \"a\" \"b\" \"c\" };\n",
+        "int f(int x,int y) { int a[]={ [(((0)))] (((x+y))) }; return a[0]; }\n",
     };
     static const char* const invalid[] = {
         "int f(void) { return +; }\n",

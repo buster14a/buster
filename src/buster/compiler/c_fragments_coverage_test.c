@@ -30,6 +30,7 @@ struct CFragmentCoverageNode
     uint32_t last;
     uint32_t next;
     uint32_t opener;
+    uint32_t enclosing;
     uint32_t keyword;
     uint32_t source;
     uint32_t auxiliary;
@@ -38,6 +39,7 @@ struct CFragmentCoverageNode
     uint8_t context;
     uint8_t kind;
     bool transparent;
+    bool bridge;
     bool visited;
 };
 
@@ -115,6 +117,7 @@ static uint8_t c_fragment_coverage_operator(uint8_t role, uint8_t kind, IdentId 
             case PARSE_KIND_PERIOD: result = C_FRAGMENT_MEMBER; break;
             case PARSE_KIND_ARROW: result = C_FRAGMENT_POINTER_MEMBER; break;
             case PARSE_KIND_COMMA: result = C_FRAGMENT_COMMA; break;
+            case PARSE_KIND_COLON: result = role == PARSE_ROLE_ASSIGN ? C_FRAGMENT_FIELD_INITIALIZER : C_FRAGMENT_KIND_COUNT; break;
             case PARSE_KIND_ELLIPSIS: result = C_FRAGMENT_RANGE; break;
             default: break;
         }
@@ -138,6 +141,7 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
                 .last = BUSTER_C_FRAGMENT_NONE,
                 .next = BUSTER_C_FRAGMENT_NONE,
                 .opener = BUSTER_C_FRAGMENT_NONE,
+                .enclosing = count,
                 .keyword = BUSTER_C_FRAGMENT_NONE,
                 .source = k,
                 .auxiliary = BUSTER_C_FRAGMENT_NONE,
@@ -180,6 +184,57 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
                 reason = "ordinary tree";
             }
         }
+    }
+    // Identify GNU's single array designator from ordinary grammar alone. Its '[' starts an initializer item,
+    // and a value starts immediately after its matching ']'. A chained designator or an explicit '=' keeps its
+    // ordinary expression node. This source-order group stack is independent of the sink's live hook/flags.
+    uint32_t enclosing = count;
+    for (uint32_t token = 0; result && token < count; token += 1)
+    {
+        const uint8_t role = parser->tree.roles[token];
+        const bool opening = role >= PARSE_ROLE_OPEN_GROUP && role <= PARSE_ROLE_OPEN_CASE;
+        const bool closing = role >= PARSE_ROLE_CLOSE_GROUP && role <= PARSE_ROLE_CLOSE_CASE;
+        if (closing)
+        {
+            const uint32_t opener = nodes[token].opener;
+            result = enclosing < count && opener == enclosing;
+            if (result)
+            {
+                enclosing = nodes[opener].enclosing;
+                const bool initializer = enclosing < count && (parser->tree.roles[enclosing] == PARSE_ROLE_OPEN_INITIALIZER ||
+                                         parser->tree.roles[enclosing] == PARSE_ROLE_OPEN_COMPOUND_BODY);
+                const bool first = opener == enclosing + 1 || (opener != 0 && nodes[opener - 1].enclosing == enclosing &&
+                                   parser->tree.roles[opener - 1] == PARSE_ROLE_SEPARATOR);
+                if (role == PARSE_ROLE_CLOSE_SUBSCRIPT && initializer && first)
+                {
+                    const uint8_t after = token + 1 < count ? parser->tokens.kinds[token + 1] : PARSE_KIND_COUNT;
+                    if (after != PARSE_KIND_EQUAL && after != PARSE_KIND_PERIOD && after != PARSE_KIND_L_SQUARE)
+                    {
+                        const uint8_t next_role = token + 1 < count ? parser->tree.roles[token + 1] : PARSE_ROLE_NONE;
+                        result = next_role == PARSE_ROLE_OPERAND || next_role == PARSE_ROLE_PREFIX || next_role == PARSE_ROLE_OPEN_GROUP ||
+                                 next_role == PARSE_ROLE_OPEN_CAST || next_role == PARSE_ROLE_OPEN_COMPOUND || next_role == PARSE_ROLE_OPEN_INITIALIZER ||
+                                 (next_role == PARSE_ROLE_LEAF_RIGHT && (after == PARSE_KIND_GENERIC || after == PARSE_KIND_TYPE_ARGUMENT));
+                        nodes[token].bridge = result;
+                    }
+                }
+            }
+        }
+        nodes[token].enclosing = enclosing;
+        if (opening)
+        {
+            enclosing = token;
+        }
+        if (!result)
+        {
+            failed = token;
+            reason = "ordinary initializer group";
+        }
+    }
+    if (result && enclosing != count)
+    {
+        result = false;
+        failed = enclosing;
+        reason = "unclosed ordinary group";
     }
     // Reverse postorder visits every parent before its children. Context comes solely from that parent and from
     // source positions relative to its opener/operator, not from the recognizer's transient mode or sink metadata.
@@ -382,6 +437,11 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
                 left_end = right_begin = token;
                 right = C_FRAGMENT_COVER_EXPRESSION;
             }
+            else if (node->bridge)
+            {
+                result = role == PARSE_ROLE_CLOSE_SUBSCRIPT && context == C_FRAGMENT_COVER_EXPRESSION;
+                left = middle = right = C_FRAGMENT_COVER_EXPRESSION;
+            }
             else if (role == PARSE_ROLE_CLOSE_SUBSCRIPT && (context == C_FRAGMENT_COVER_DECLARATION || context == C_FRAGMENT_COVER_DESIGNATOR))
             {
                 middle = context == C_FRAGMENT_COVER_DECLARATION ? C_FRAGMENT_COVER_ARRAY_BOUND : C_FRAGMENT_COVER_ITEM;
@@ -494,11 +554,21 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
         const uint32_t token = parser->postorder[position];
         CFragmentCoverageNode* node = &nodes[token];
         uint32_t children = 0;
+        uint32_t indices = 0;
         for (uint32_t child = node->first; child != BUSTER_C_FRAGMENT_NONE; child = nodes[child].next)
         {
-            const uint32_t add = nodes[child].kind != C_FRAGMENT_KIND_COUNT ? 1 : nodes[child].transparent ? nodes[child].children : 0;
-            result &= children <= count - add;
-            children += add;
+            const uint32_t add = nodes[child].kind != C_FRAGMENT_KIND_COUNT ? 1 :
+                                 nodes[child].transparent || nodes[child].bridge ? nodes[child].children : 0;
+            if (node->bridge && child < token)
+            {
+                result &= indices <= count - add;
+                indices += add;
+            }
+            else
+            {
+                result &= children <= count - add;
+                children += add;
+            }
         }
         node->children = children;
         if (node->kind == C_FRAGMENT_STRING && children != 0)
@@ -519,7 +589,8 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
         }
         const CFragmentSyntax* actual = &sink->syntax[token];
         const bool emitted = node->kind != C_FRAGMENT_KIND_COUNT;
-        result &= node->visited && (!node->transparent || children == 1) && actual->emitted == emitted && actual->transparent == node->transparent;
+        result &= node->visited && (!node->transparent || children == 1) && (!node->bridge || (indices == 1 && children <= 1)) &&
+                  actual->emitted == emitted && actual->transparent == node->transparent && actual->bridge == node->bridge;
         if (result && emitted)
         {
             result = sink->kinds[token] == node->kind && actual->source == node->source && actual->auxiliary == node->auxiliary && actual->type_root == node->type_root &&
@@ -529,8 +600,8 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
         {
             failed = token;
             reason = "required kind, identity, reference or transparency";
-            fprintf(stderr, "fragment coverage token=%u expected_kind=%u actual_kind=%u expected_emitted=%u actual_emitted=%u expected_transparent=%u actual_transparent=%u\n",
-                    token, node->kind, sink->kinds[token], emitted, actual->emitted, node->transparent, actual->transparent);
+            fprintf(stderr, "fragment coverage token=%u expected_kind=%u actual_kind=%u expected_emitted=%u actual_emitted=%u expected_transparent=%u actual_transparent=%u expected_bridge=%u actual_bridge=%u\n",
+                    token, node->kind, sink->kinds[token], emitted, actual->emitted, node->transparent, actual->transparent, node->bridge, actual->bridge);
         }
     }
     if (!result)
@@ -557,7 +628,7 @@ struct CFragmentCoverageFixtureNode
 #define BUSTER_FRAGMENT_EXPECT_TERNARY(token, kind, source) { token, C_FRAGMENT_##kind, source, UINT8_MAX, token }
 
 // These are hand-specified token positions in the literal fixtures in c_fragments_test.c, relative to the return
-// operand except fixtures 14, 21 and 23 (whole file). They do not query parser roles to decide what should be emitted.
+// operand except fixtures 14, 21 and 23 onward (whole file). They do not query parser roles to decide what should be emitted.
 // Full required-node counts exclude declarations and parentheses, so extra output cannot compensate for omissions.
 static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_0[] = {
     BUSTER_FRAGMENT_EXPECT(0, IDENTIFIER),
@@ -742,6 +813,19 @@ static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_23[] = {
     BUSTER_FRAGMENT_EXPECT_TYPE(17, CAST, 15, 16),
     BUSTER_FRAGMENT_EXPECT(18, IDENTIFIER),
 };
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_26[] = {
+    BUSTER_FRAGMENT_EXPECT(14, NUMBER),
+    BUSTER_FRAGMENT_EXPECT(16, NEGATIVE),
+    BUSTER_FRAGMENT_EXPECT(17, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(18, SEPARATOR),
+    BUSTER_FRAGMENT_EXPECT(20, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_TYPE(24, CAST, 22, 23),
+    BUSTER_FRAGMENT_EXPECT(25, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(26, INITIALIZER, 12),
+    BUSTER_FRAGMENT_EXPECT(29, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(31, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(32, SUBSCRIPT, 30),
+};
 
 #undef BUSTER_FRAGMENT_EXPECT
 #undef BUSTER_FRAGMENT_EXPECT_GROUP
@@ -806,12 +890,15 @@ static bool c_fragment_test_coverage_fixture(const Parser* parser, const CFragme
         BUSTER_FRAGMENT_FIXTURE(21),
         { 0, 0 },
         BUSTER_FRAGMENT_FIXTURE(23),
+        { 0, 0 },
+        { 0, 0 },
+        BUSTER_FRAGMENT_FIXTURE(26),
 #undef BUSTER_FRAGMENT_FIXTURE
     };
     bool result = true;
     if (fixture >= 0 && (uint32_t)fixture < sizeof(fixtures) / sizeof(fixtures[0]) && fixtures[fixture].count != 0)
     {
-        const bool whole_file = fixture == 14 || fixture == 21 || fixture == 23;
+        const bool whole_file = fixture == 14 || fixture == 21 || fixture >= 23;
         uint32_t base = whole_file ? 0 : BUSTER_C_FRAGMENT_NONE;
         for (uint32_t k = 0; !whole_file && k < parser->tokens.count; k += 1)
         {

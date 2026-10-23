@@ -3626,6 +3626,9 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
     else if (array_designator && parse_kind_starts_initializer_value(kind))
     {
         // GNU omits '=' after one `[index]`. Chained `[index].member` and `[index][index]` still require it.
+#if BUSTER_PARSE_FRAGMENT_SINK
+        c_fragment_sink_implicit_initializer(parser->fragments, i - 1);
+#endif
         frame->mode = PARSE_MODE_INITIALIZER;
         frame->statement = PARSE_ITEM_EXPRESSION;
         step->again = true;
@@ -3986,7 +3989,8 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
         const bool keyword_boundary = frame->role == PARSE_ROLE_OPEN_KEYWORD && (frame->keyword == PARSE_KIND_GENERIC || frame->keyword == PARSE_KIND_TYPE_ARGUMENT) &&
                                       (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_COLON);
         const bool initializer_item = (frame->role == PARSE_ROLE_OPEN_INITIALIZER || frame->role == PARSE_ROLE_OPEN_COMPOUND_BODY) &&
-                                      (kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_L_SQUARE);
+                                      (kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_L_SQUARE ||
+                                       (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON));
         const bool unspecified_array = (frame->flags & BUSTER_PARSE_FRAME_ARRAY_DECLARATOR) && kind == PARSE_KIND_STAR && parser->kinds[i + 1] == PARSE_KIND_R_SQUARE;
         const bool declaration_comma = kind == PARSE_KIND_COMMA && ((frame->flags & BUSTER_PARSE_FRAME_DECLARATION) || frame->role == PARSE_ROLE_OPEN_ENUM) && !keyword_boundary;
         const bool assertion_comma = kind == PARSE_KIND_COMMA && frame->role == PARSE_ROLE_OPEN_KEYWORD && frame->keyword == PARSE_KIND_STATIC_ASSERT;

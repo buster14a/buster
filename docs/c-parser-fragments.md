@@ -60,6 +60,16 @@ statement-expression syntax remains available through parser-subtree handles.
 The test representation retains cold syntax metadata so that stripping or
 mapping punctuation can be checked exactly.
 
+GNU `member: value` has a distinct field-initializer kind, retaining the member
+name and colon identities. For accepted `[index] value` syntax with an omitted
+`=`, the designator syntax stays in postorder. At the grammar's value-start
+transition, the completed index or range becomes its own expression root.
+The closing bracket then forwards at most one pending value subtree to the
+normal reduction parent, without becoming a value operand. This preserves
+unary, cast, binary, call and braced values. The independent tree normalization
+cuts the index's designator edge and bypasses the value's edge through that
+bracket; explicit `=` initializers retain their existing representation.
+
 Each fragment has a 16-byte header and 16, 32 or 48 operator bytes. Both the
 64-position limit and the selected operator-payload limit apply. Virtual
 single leaves allocate no fragment until a mutation needs one. Joining consumes
@@ -115,9 +125,14 @@ overlong list lines and exhausted input capacity fail the command.
 
 The fragment run compares the instrumented scalar parser's roles, depths,
 parents and diagnostics with the ordinary parser's output. The decoded
-fragment tree and source identities are separate checks. Accepted file and
-token counts must match the frozen corpus manifest before corpus acceptance
-is reported.
+fragment tree and source identities are separate checks. Required expression
+nodes come from an independent walk of the ordinary parse tree, rather than
+the sink's emitted-node flags. Structural checks compare exact membership,
+parents and postorder within each normalized expression root, preserving
+sibling order. An expression inside a retained type-name subtree can finish
+before the enclosing fragment, so root publication order is not semantic
+execution order. Accepted file and token counts must match the frozen corpus
+manifest before corpus acceptance is reported.
 
 ## Interleave memory contract
 

@@ -170,10 +170,6 @@ jobs:
           == Test the parser's snippets against clang
           # The snippets, each also checked against clang, the generated inputs and the driver's checks.
           ./build/compiler test-parser --clang
-          == Test fragment byte interleave and protected-page tails
-          ./build/compiler test-fragment-interleave
-          == Test the experimental scalar fragment sink
-          ./build/compiler test-fragments
           == Test scoped name-resolution kernels
           ./build/compiler test-bindings
           == Test the static executables with libc
@@ -329,6 +325,10 @@ jobs:
           ./build/compiler test-dataflow
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
+          == Test fragment byte interleave and protected-page tails
+          ./build/compiler test-fragment-interleave
+          == Test the experimental scalar fragment sink
+          ./build/compiler test-fragments
           TESTS
 
       - name: Benchmark the C lexer on the repository sources

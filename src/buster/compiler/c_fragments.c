@@ -88,6 +88,7 @@
     X(COMMA, 2, 2) \
     X(SEPARATOR, 2, 2) \
     X(TRAILING_SEPARATOR, 1, 3) \
+    X(FIELD_INITIALIZER, 2, 2) \
     X(FIELD_DESIGNATOR, 1, 1) \
     X(INDEX_DESIGNATOR, 1, 1) \
     X(RANGE, 2, 2) \
@@ -565,6 +566,7 @@ struct CFragmentSyntax
     uint8_t context_role;
     bool expression;
     bool transparent;
+    bool bridge;
     bool emitted;
     bool reduced;
     bool type_group;
@@ -746,7 +748,7 @@ static void c_fragment_sink_token(CFragmentSink* sink, uint32_t token, uint8_t r
             }
             else if (role >= PARSE_ROLE_MEMBER_OPERATOR && role <= PARSE_ROLE_COMMA)
             {
-                kind = c_fragment_binary_kind(input);
+                kind = role == PARSE_ROLE_ASSIGN && input == PARSE_KIND_COLON ? C_FRAGMENT_FIELD_INITIALIZER : c_fragment_binary_kind(input);
             }
             else if (role == PARSE_ROLE_SEPARATOR)
             {
@@ -835,6 +837,45 @@ static void c_fragment_sink_publish(CFragmentSink* sink, uint32_t root, CFragmen
     }
 }
 
+// GNU's single array designator without '=' is declaration syntax in the retained postorder tree. Its complete
+// index is already attached when the grammar recognizes the first value token. Publish that index once; thereafter
+// the raw ']' node forwards only a possible RHS child, rather than making the designator a unary/call operand.
+static void c_fragment_sink_implicit_initializer(CFragmentSink* sink, uint32_t token)
+{
+    if (sink != 0 && !sink->syntax_error && sink->store.valid)
+    {
+        bool valid = token < sink->token_count;
+        if (valid)
+        {
+            CFragmentSyntax* node = &sink->syntax[token];
+            valid = !node->reduced && !node->bridge && node->group < token && node->role == PARSE_ROLE_CLOSE_SUBSCRIPT &&
+                    node->child_count == 1 && node->children.positions != 0;
+            uint32_t root = node->children.leaf;
+            if (valid && node->children.head != BUSTER_C_FRAGMENT_NONE)
+            {
+                valid = c_fragment_record_valid(&sink->store, node->children.head);
+                root = valid ? c_fragment_identities(&sink->store, node->children.head)[0] : BUSTER_C_FRAGMENT_NONE;
+            }
+            valid &= root > node->group && root < token;
+            if (valid)
+            {
+                c_fragment_sink_publish(sink, root, &node->children);
+                node->child_count = 0;
+                node->first = token;
+                node->last = token;
+                node->bridge = true;
+                sink->kinds[token] = C_FRAGMENT_KIND_COUNT;
+            }
+        }
+        if (!valid)
+        {
+            sink->unsupported += 1;
+            sink->first_unsupported = sink->first_unsupported == BUSTER_C_FRAGMENT_NONE ? token : sink->first_unsupported;
+            sink->store.valid = false;
+        }
+    }
+}
+
 // Both sides are contiguous source subtrees. The parser may resolve a call's arguments before its callee, so a
 // transfer can extend either boundary. Interleaving ranges indicate a broken reduction contract, not a slow path.
 static void c_fragment_sink_attach(CFragmentSink* sink, uint32_t child, uint32_t parent, CFragmentHandle* handle)
@@ -875,7 +916,7 @@ static void c_fragment_sink_reduce(CFragmentSink* sink, uint32_t token, uint32_t
     {
         CFragmentSyntax* node = &sink->syntax[token];
         uint8_t kind = sink->kinds[token];
-        if (parent < sink->token_count && sink->kinds[parent] == C_FRAGMENT_CAST && kind == C_FRAGMENT_KIND_COUNT && node->role != PARSE_ROLE_LEAF_RIGHT &&
+        if (parent < sink->token_count && sink->kinds[parent] == C_FRAGMENT_CAST && kind == C_FRAGMENT_KIND_COUNT && !node->bridge && node->role != PARSE_ROLE_LEAF_RIGHT &&
             !(node->role >= PARSE_ROLE_OPEN_GROUP && node->role <= PARSE_ROLE_OPEN_CASE))
         {
             // CLOSE_CAST also owns the operand to its right. Retain the actual type child's postorder subtree,
@@ -890,7 +931,7 @@ static void c_fragment_sink_reduce(CFragmentSink* sink, uint32_t token, uint32_t
                                      context->context == sink->syntax[parent].context && sink->syntax[parent].expression;
         const bool keyword_boundary = parent < sink->token_count && (sink->syntax[parent].role == PARSE_ROLE_SEPARATOR ||
                                       sink->syntax[parent].role == PARSE_ROLE_ASSOCIATION || sink->syntax[parent].role == PARSE_ROLE_CLOSE_KEYWORD);
-        if (kind == C_FRAGMENT_KIND_COUNT && !node->transparent && keyword_context && keyword_boundary &&
+        if (kind == C_FRAGMENT_KIND_COUNT && !node->transparent && !node->bridge && keyword_context && keyword_boundary &&
             node->role != PARSE_ROLE_LEAF_RIGHT && node->role != PARSE_ROLE_OPEN_KEYWORD)
         {
             kind = sink->input_kinds[token] == PARSE_KIND_DEFAULT ? C_FRAGMENT_TYPE_DEFAULT :
@@ -951,9 +992,9 @@ static void c_fragment_sink_reduce(CFragmentSink* sink, uint32_t token, uint32_t
             node->last = node->last > token ? node->last : token;
             sink->store.statistics.reductions += 1;
         }
-        else if (node->transparent)
+        else if (node->transparent || node->bridge)
         {
-            if (node->child_count != 1)
+            if (node->bridge ? node->child_count > 1 : node->child_count != 1)
             {
                 sink->unsupported += 1;
                 sink->first_unsupported = sink->first_unsupported == BUSTER_C_FRAGMENT_NONE ? token : sink->first_unsupported;
@@ -969,7 +1010,7 @@ static void c_fragment_sink_reduce(CFragmentSink* sink, uint32_t token, uint32_t
         if (handle.positions != 0 && sink->store.valid)
         {
             const bool receiver = parent < sink->token_count &&
-                                  (sink->kinds[parent] < C_FRAGMENT_KIND_COUNT || sink->syntax[parent].transparent);
+                                  (sink->kinds[parent] < C_FRAGMENT_KIND_COUNT || sink->syntax[parent].transparent || sink->syntax[parent].bridge);
             if (receiver)
             {
                 c_fragment_sink_attach(sink, token, parent, &handle);
