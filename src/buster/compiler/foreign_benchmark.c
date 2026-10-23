@@ -18,6 +18,8 @@
 // CPUs of --cpus in order. Each figure is the median of --runs runs (21) after a warm-up: the whole resolution from
 // foreign_run's call to its return, and each phase's time (ForeignLane.nanoseconds): with several lanes, the slowest
 // lane's. Then what the resolution did: its inputs, the objects it loaded, its rounds, symbols, groups and names.
+// The command creates its lane team once before the program loop. Whole-resolution samples include dispatch and
+// completion on those existing threads, but exclude the command's one-time thread startup and shutdown.
 // With --linkers, mold (--perf) and wild (--time) link the same command line on one thread, 11 times after a warm-up,
 // and the medians of the phases that do the same work are printed: mold's read_input_files and resolve_symbols, wild's
 // Open input files, Load inputs into symbol DB, Resolve symbols, Resolve alternative symbol definitions and Section
@@ -379,12 +381,12 @@ static bool foreign_benchmark_resolve(const ForeignCommand* command, ForeignPath
 
 // What a resolution did, once: its inputs, the objects it loaded (members among them), its rounds, records, names, and
 // whether both paths make the same names and loads.
-static bool foreign_benchmark_describe(const ForeignCommand* command)
+static bool foreign_benchmark_describe(const ForeignCommand* command, const uint32_t* cpus)
 {
     Foreign vector;
     Foreign exact;
-    const ForeignFailure vector_failure = foreign_run(&vector, command, FOREIGN_PATH_VECTOR, 1, 0);
-    const ForeignFailure exact_failure = foreign_run(&exact, command, FOREIGN_PATH_EXACT, 1, 0);
+    const ForeignFailure vector_failure = foreign_run(&vector, command, FOREIGN_PATH_VECTOR, 1, cpus);
+    const ForeignFailure exact_failure = foreign_run(&exact, command, FOREIGN_PATH_EXACT, 1, cpus);
     bool result = vector_failure.error == FOREIGN_ERROR_NONE && exact_failure.error == FOREIGN_ERROR_NONE && vector.object_count == exact.object_count &&
                   vector.names.count == exact.names.count && vector.round_count == exact.round_count;
     for (uint32_t n = 0; result && n < vector.names.count; n += 1)
@@ -649,9 +651,11 @@ int run_foreign_benchmark(int argc, char** argv)
             valid = false;
         }
     }
+    uint32_t capacity = 1;
     for (uint32_t l = 0; valid && l < lane_count_count; l += 1)
     {
         valid = lane_counts[l] >= 1 && lane_counts[l] <= BUSTER_LANE_MAX_COUNT && (cpu_count == 0 || lane_counts[l] <= cpu_count);
+        capacity = lane_counts[l] > capacity ? lane_counts[l] : capacity;
     }
     Arena arena = arena_reserve(BUSTER_FOREIGN_BENCHMARK_ARENA_BYTES);
     char work[BUSTER_FOREIGN_BENCHMARK_PATH_BYTES];
@@ -666,6 +670,19 @@ int run_foreign_benchmark(int argc, char** argv)
     {
         printf("benchmark-foreign: no arena, no work directory, or no C runtime where GCC's driver finds it\n");
         result = false;
+    }
+    LaneTeam team = { 0 };
+    if (result)
+    {
+        result = lane_team_start(&team, capacity, cpu_count != 0 ? cpus : 0);
+        if (!result)
+        {
+            fprintf(stderr, "benchmark-foreign: can't start or pin the command's %u lanes\n", capacity);
+        }
+        else
+        {
+            printf("benchmark-foreign: one command team of %u lanes; whole times include dispatch, excluding thread startup and shutdown\n", capacity);
+        }
     }
     char output[BUSTER_FOREIGN_BENCHMARK_PATH_BYTES];
     char archive[BUSTER_FOREIGN_BENCHMARK_PATH_BYTES];
@@ -745,7 +762,7 @@ int run_foreign_benchmark(int argc, char** argv)
             if (result)
             {
                 printf(" %s:\n", foreign_benchmark_kind_names[k]);
-                result = foreign_benchmark_describe(&command);
+                result = foreign_benchmark_describe(&command, cpu_count != 0 ? cpus : 0);
             }
             for (uint32_t l = 0; result && l < lane_count_count; l += 1)
             {
@@ -761,6 +778,7 @@ int run_foreign_benchmark(int argc, char** argv)
         }
         arena_pop_to(&arena, mark);
     }
+    lane_team_stop(&team);
     if (valid && !keep && work[0] != 0)
     {
         char* remove[] = {

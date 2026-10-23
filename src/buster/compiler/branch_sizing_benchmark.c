@@ -3,7 +3,7 @@
 //
 // The branch sizing benchmark, for the benchmark-branch-sizing command:
 //
-//   build/compiler benchmark-branch-sizing [--seed N] [--rounds N] [--only ROW] [--measure NAME [--samples N]]
+//   build/compiler benchmark-branch-sizing [--seed N] [--rounds N] [--only ROW] [--measure NAME] [--samples N] [--after-scalar MS]
 //
 // It sizes pools of generated functions (branch_sizing_generate.c), one row of branch_sizing_benchmark_rows at a time
 // (--only ROW picks one): compiler-like functions of 40, 250, 2,000 and 10,000 records whose branches follow the
@@ -14,13 +14,15 @@
 // turns, of:
 //   - x86_encode of each function with its offsets, as the caller encodes it after sizing: the reference;
 //   - size_branches and size_branches_scalar, whole (with --rounds N, branch_sizing_run with that round limit);
+//   - size_encode: sizing followed immediately by the final x86_encode, in the same timed interval;
 //   - each path's phases: the difference between a run that stops after the phase and one that stops before it
 //     (branch_sizing_benchmark_through, which runs branch_sizing_run's phases in its order), and the whole run. Lengths
 //     includes the scratch memory's columns, and rounds the worklist. The paths are the vector one, the scalar one, and
 //     the vector one with each alternative to its gathers measured against it (BranchSizingBenchmarkPath).
-// in cycles per branch and per record, with instructions per cycle. --measure NAME times only one of them, --samples
-// times (for perf): an entry point's name ("x86_encode", "size_branches" or "size_branches_scalar"), or a path's run
-// through a phase, as "vector-setup" or "window-write".
+// in nanoseconds and cycles per record, with instructions per cycle. --measure NAME times only one of them, --samples
+// times (for perf): an entry point's name ("x86_encode", "size_branches", "size_branches_scalar" or "size_encode"), or
+// a path's run through a phase, as "vector-setup" or "window-write". --after-scalar MS requires an isolated vector
+// measurement and runs its scalar twin for at least MS milliseconds before each sample, outside the timed interval.
 //
 // A sample sizes the whole pool once, a group of functions of at least BUSTER_BRANCH_SIZING_BENCHMARK_GROUP_RECORDS
 // records at a time. Before each group, outside the time, it puts the branches' records back as they were generated
@@ -61,6 +63,7 @@
 #define BUSTER_BRANCH_SIZING_BENCHMARK_PASSES 21
 // The most samples --samples takes.
 #define BUSTER_BRANCH_SIZING_BENCHMARK_MAX_SAMPLES 100000
+#define BUSTER_BRANCH_SIZING_BENCHMARK_AFTER_SCALAR_MAX_MS 1000
 // The records of a row's pool, and of a group timed at once.
 #define BUSTER_BRANCH_SIZING_BENCHMARK_POOL_RECORDS 262144
 #define BUSTER_BRANCH_SIZING_BENCHMARK_GROUP_RECORDS 2048
@@ -313,7 +316,7 @@ static uint32_t branch_sizing_benchmark_prepare(BranchSizingBenchmarkPool* pool,
 
 typedef enum BranchSizingBenchmarkStop
 {
-    // The scratch memory's columns and x86_encode's offsets.
+    // The scratch memory's columns and the lengths-only encoder's offsets.
     BRANCH_SIZING_BENCHMARK_LENGTHS,
     BRANCH_SIZING_BENCHMARK_SETUP,
     BRANCH_SIZING_BENCHMARK_RANKS,
@@ -540,7 +543,7 @@ static __attribute__((noinline)) BranchSizing branch_sizing_benchmark_through(X8
     }
     else
     {
-        length = branch_sizing_lengths(records, count, offsets, columns.encoded, vector);
+        length = branch_sizing_lengths(records, count, offsets, vector);
         result.error = branch_sizing_too_large(length, branch_count) ? BRANCH_SIZING_ERROR_TOO_LARGE : BRANCH_SIZING_OK;
     }
     bool changed = false;
@@ -769,6 +772,7 @@ struct BranchSizingBenchmarkCounters
 typedef struct BranchSizingBenchmarkCount BranchSizingBenchmarkCount;
 struct BranchSizingBenchmarkCount
 {
+    uint64_t nanoseconds;
     uint64_t cycles;
     uint64_t instructions;
     // In a sample, the lengths its functions came to, which the warm-up checks.
@@ -840,9 +844,17 @@ static uint64_t branch_sizing_benchmark_read_counter(const BranchSizingBenchmark
     return result;
 }
 
+static uint64_t branch_sizing_benchmark_time(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &now);
+    return (uint64_t)now.tv_sec * 1000000000 + (uint64_t)now.tv_nsec;
+}
+
 static BranchSizingBenchmarkCount branch_sizing_benchmark_count(const BranchSizingBenchmarkCounters* counters)
 {
     BranchSizingBenchmarkCount result = {
+        .nanoseconds = branch_sizing_benchmark_time(),
         .cycles = branch_sizing_benchmark_read_counter(counters, 0),
         .instructions = branch_sizing_benchmark_read_counter(counters, 1),
     };
@@ -852,12 +864,13 @@ static BranchSizingBenchmarkCount branch_sizing_benchmark_count(const BranchSizi
 // ---------------------------------------------------------------------------------------------------------------------
 // Timing
 
-// What a sample measures: x86_encode of every function (the reference), an entry point, or a phase-by-phase run on a
-// path that stops after a phase.
+// What a sample measures: x86_encode of every function (the reference), an entry point, sizing followed by the final
+// encoding, or a phase-by-phase run on a path that stops after a phase.
 typedef enum BranchSizingBenchmarkWork
 {
     BRANCH_SIZING_BENCHMARK_ENCODE,
     BRANCH_SIZING_BENCHMARK_ENTRY,
+    BRANCH_SIZING_BENCHMARK_PIPELINE,
     BRANCH_SIZING_BENCHMARK_THROUGH,
 } BranchSizingBenchmarkWork;
 
@@ -870,21 +883,23 @@ struct BranchSizingBenchmarkMeasurement
     uint32_t stop;
 };
 
-// The reference, the two entry points, and each path's runs through each phase.
-#define BUSTER_BRANCH_SIZING_BENCHMARK_ENTRIES 3
+// The reference, the two entry points, sizing plus final encoding, and each path's runs through each phase.
+#define BUSTER_BRANCH_SIZING_BENCHMARK_ENTRIES 4
 #define BUSTER_BRANCH_SIZING_BENCHMARK_MEASUREMENTS (BUSTER_BRANCH_SIZING_BENCHMARK_ENTRIES + BRANCH_SIZING_BENCHMARK_PATHS * BRANCH_SIZING_BENCHMARK_STOPS)
 
 static const char* const branch_sizing_benchmark_entry_names[BUSTER_BRANCH_SIZING_BENCHMARK_ENTRIES] = {
     "x86_encode",
     "size_branches",
     "size_branches_scalar",
+    "size_encode",
 };
 
 static BranchSizingBenchmarkMeasurement branch_sizing_benchmark_measurement(uint32_t index, uint32_t round_limit)
 {
     const uint32_t through = index >= BUSTER_BRANCH_SIZING_BENCHMARK_ENTRIES ? index - BUSTER_BRANCH_SIZING_BENCHMARK_ENTRIES : 0;
     BranchSizingBenchmarkMeasurement result = {
-        .work = index == 0 ? BRANCH_SIZING_BENCHMARK_ENCODE : index < BUSTER_BRANCH_SIZING_BENCHMARK_ENTRIES ? BRANCH_SIZING_BENCHMARK_ENTRY : BRANCH_SIZING_BENCHMARK_THROUGH,
+        .work = index == 0 ? BRANCH_SIZING_BENCHMARK_ENCODE : index < 3 ? BRANCH_SIZING_BENCHMARK_ENTRY
+                                                                    : index == 3 ? BRANCH_SIZING_BENCHMARK_PIPELINE : BRANCH_SIZING_BENCHMARK_THROUGH,
         .path = index == 2 ? BRANCH_SIZING_BENCHMARK_SCALAR : index < BUSTER_BRANCH_SIZING_BENCHMARK_ENTRIES ? BRANCH_SIZING_BENCHMARK_VECTOR
                                                                                                           : (BranchSizingBenchmarkPath)(through / BRANCH_SIZING_BENCHMARK_STOPS),
         .round_limit = round_limit,
@@ -921,9 +936,10 @@ static uint32_t branch_sizing_benchmark_find_measurement(const char* name)
 static __attribute__((noinline)) uint64_t branch_sizing_benchmark_group(BranchSizingBenchmarkPool* pool, uint64_t group, BranchSizingBenchmarkMeasurement measurement)
 {
     uint64_t result = 0;
+    bool valid = true;
     const bool production = measurement.round_limit == BUSTER_BRANCH_SIZING_ROUNDS;
     const bool vector = measurement.path == BRANCH_SIZING_BENCHMARK_VECTOR;
-    for (uint64_t f = pool->group_starts[group]; f < pool->group_starts[group + 1]; f += 1)
+    for (uint64_t f = pool->group_starts[group]; valid && f < pool->group_starts[group + 1]; f += 1)
     {
         X86Instruction* records = pool->records + pool->record_starts[f];
         const uint64_t count = pool->record_starts[f + 1] - pool->record_starts[f];
@@ -932,28 +948,64 @@ static __attribute__((noinline)) uint64_t branch_sizing_benchmark_group(BranchSi
         const uint64_t branch_count = pool->branch_starts[f + 1] - pool->branch_starts[f];
         if (measurement.work == BRANCH_SIZING_BENCHMARK_ENCODE)
         {
-            result += (uint64_t)x86_encode(records, count, pool->encoded, BUSTER_X86_ENCODER_CAPACITY(count), pool->offsets, 0);
+            const int64_t length = vector ? x86_encode(records, count, pool->encoded, BUSTER_X86_ENCODER_CAPACITY(count), pool->offsets, 0)
+                                         : x86_encode_scalar(records, count, pool->encoded, BUSTER_X86_ENCODER_CAPACITY(count), pool->offsets, 0);
+            valid = length >= 0;
+            result += (uint64_t)length;
         }
-        else if (measurement.work == BRANCH_SIZING_BENCHMARK_ENTRY && production && vector)
-        {
-            result += size_branches(records, count, branches, targets, branch_count, pool->offsets).length;
-        }
-        else if (measurement.work == BRANCH_SIZING_BENCHMARK_ENTRY && production)
-        {
-            result += size_branches_scalar(records, count, branches, targets, branch_count, pool->offsets).length;
-        }
-        else if (measurement.work == BRANCH_SIZING_BENCHMARK_ENTRY)
-        {
-            result += branch_sizing_run(records, count, branches, targets, branch_count, pool->offsets, vector, measurement.round_limit).length;
-        }
-        else
+        else if (measurement.work == BRANCH_SIZING_BENCHMARK_THROUGH)
         {
             const BranchSizing sized = branch_sizing_benchmark_through(records, count, branches, targets, branch_count, pool->offsets, measurement.path,
                                                                        measurement.round_limit, measurement.stop);
+            valid = sized.error == BRANCH_SIZING_OK;
+            result += sized.length;
+        }
+        else
+        {
+            BranchSizing sized;
+            if (production && vector)
+            {
+                sized = size_branches(records, count, branches, targets, branch_count, pool->offsets);
+            }
+            else if (production)
+            {
+                sized = size_branches_scalar(records, count, branches, targets, branch_count, pool->offsets);
+            }
+            else
+            {
+                sized = branch_sizing_run(records, count, branches, targets, branch_count, pool->offsets, vector, measurement.round_limit);
+            }
+            valid = sized.error == BRANCH_SIZING_OK;
+            if (valid && measurement.work == BRANCH_SIZING_BENCHMARK_PIPELINE)
+            {
+                const int64_t length = vector ? x86_encode(records, count, pool->encoded, BUSTER_X86_ENCODER_CAPACITY(count), pool->offsets, 0)
+                                             : x86_encode_scalar(records, count, pool->encoded, BUSTER_X86_ENCODER_CAPACITY(count), pool->offsets, 0);
+                valid = length >= 0 && (uint64_t)length == sized.length;
+            }
             result += sized.length;
         }
     }
-    return result;
+    return valid ? result : UINT64_MAX;
+}
+
+// Runs the same work through its scalar twin for a warm lighter phase. Each group starts from the same generated
+// branches (or the sized ones for encode), as a timed sample does. The next sample restores its groups again.
+static bool branch_sizing_benchmark_condition(BranchSizingBenchmarkPool* pool, BranchSizingBenchmarkMeasurement measurement, uint64_t milliseconds)
+{
+    measurement.path = BRANCH_SIZING_BENCHMARK_SCALAR;
+    const uint64_t end = branch_sizing_benchmark_time() + milliseconds * 1000000;
+    uint64_t group = 0;
+    bool valid = true;
+    do
+    {
+        const uint32_t read = branch_sizing_benchmark_prepare(pool, group, measurement.work == BRANCH_SIZING_BENCHMARK_ENCODE);
+        __asm__ volatile("" : : "r"(read) : "memory");
+        const uint64_t length = branch_sizing_benchmark_group(pool, group, measurement);
+        __asm__ volatile("" : : "r"(length) : "memory");
+        valid = length != UINT64_MAX;
+        group = group + 1 < pool->groups ? group + 1 : 0;
+    } while (valid && branch_sizing_benchmark_time() < end);
+    return valid;
 }
 
 // A sample: every group of the pool, each prepared outside the time, counted less the counters' own cost.
@@ -961,7 +1013,7 @@ static BranchSizingBenchmarkCount branch_sizing_benchmark_sample(BranchSizingBen
                                                                  const BranchSizingBenchmarkCounters* counters, BranchSizingBenchmarkCount overhead)
 {
     BranchSizingBenchmarkCount result = { 0 };
-    for (uint64_t group = 0; group < pool->groups; group += 1)
+    for (uint64_t group = 0; group < pool->groups && result.bytes != UINT64_MAX; group += 1)
     {
         const uint32_t read = branch_sizing_benchmark_prepare(pool, group, measurement.work == BRANCH_SIZING_BENCHMARK_ENCODE);
         __asm__ volatile("" : : "r"(read) : "memory");
@@ -969,9 +1021,13 @@ static BranchSizingBenchmarkCount branch_sizing_benchmark_sample(BranchSizingBen
         const uint64_t length = branch_sizing_benchmark_group(pool, group, measurement);
         const BranchSizingBenchmarkCount end = branch_sizing_benchmark_count(counters);
         __asm__ volatile("" : : "r"(length) : "memory");
-        result.cycles += end.cycles - begin.cycles - overhead.cycles;
-        result.instructions += end.instructions - begin.instructions - overhead.instructions;
-        result.bytes += length;
+        const uint64_t nanoseconds = end.nanoseconds - begin.nanoseconds;
+        const uint64_t cycles = end.cycles - begin.cycles;
+        const uint64_t instructions = end.instructions - begin.instructions;
+        result.nanoseconds += nanoseconds > overhead.nanoseconds ? nanoseconds - overhead.nanoseconds : 0;
+        result.cycles += cycles > overhead.cycles ? cycles - overhead.cycles : 0;
+        result.instructions += instructions > overhead.instructions ? instructions - overhead.instructions : 0;
+        result.bytes = length == UINT64_MAX ? UINT64_MAX : result.bytes + length;
     }
     return result;
 }
@@ -998,19 +1054,22 @@ static uint64_t branch_sizing_benchmark_median(const uint64_t* values, uint64_t 
 static BranchSizingBenchmarkCount branch_sizing_benchmark_overhead(Arena* arena, const BranchSizingBenchmarkCounters* counters)
 {
     const uint64_t mark = arena->length;
+    uint64_t* nanoseconds = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_BRANCH_SIZING_BENCHMARK_OVERHEAD_SAMPLES);
     uint64_t* cycles = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_BRANCH_SIZING_BENCHMARK_OVERHEAD_SAMPLES);
     uint64_t* instructions = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_BRANCH_SIZING_BENCHMARK_OVERHEAD_SAMPLES);
     uint64_t* sorted = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_BRANCH_SIZING_BENCHMARK_OVERHEAD_SAMPLES);
     BranchSizingBenchmarkCount result = { 0 };
-    if (cycles != 0 && instructions != 0 && sorted != 0)
+    if (nanoseconds != 0 && cycles != 0 && instructions != 0 && sorted != 0)
     {
         for (uint64_t i = 0; i < BUSTER_BRANCH_SIZING_BENCHMARK_OVERHEAD_SAMPLES; i += 1)
         {
             const BranchSizingBenchmarkCount begin = branch_sizing_benchmark_count(counters);
             const BranchSizingBenchmarkCount end = branch_sizing_benchmark_count(counters);
+            nanoseconds[i] = end.nanoseconds - begin.nanoseconds;
             cycles[i] = end.cycles - begin.cycles;
             instructions[i] = end.instructions - begin.instructions;
         }
+        result.nanoseconds = branch_sizing_benchmark_median(nanoseconds, BUSTER_BRANCH_SIZING_BENCHMARK_OVERHEAD_SAMPLES, sorted);
         result.cycles = branch_sizing_benchmark_median(cycles, BUSTER_BRANCH_SIZING_BENCHMARK_OVERHEAD_SAMPLES, sorted);
         result.instructions = branch_sizing_benchmark_median(instructions, BUSTER_BRANCH_SIZING_BENCHMARK_OVERHEAD_SAMPLES, sorted);
     }
@@ -1025,6 +1084,7 @@ struct BranchSizingBenchmarkPlan
     uint32_t round_limit;
     uint32_t measure;
     uint64_t samples;
+    uint64_t after_scalar;
 };
 
 // One row: the pool, its checks and statistics, then the samples and the report.
@@ -1034,10 +1094,11 @@ static bool branch_sizing_benchmark_row(Arena* arena, const BranchSizingBenchmar
     const uint64_t mark = arena->length;
     BranchSizingBenchmarkPool pool = branch_sizing_benchmark_pool(arena, row, seed);
     BranchSizingBenchmarkStatistics statistics = { 0 };
+    uint64_t* nanoseconds = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_BRANCH_SIZING_BENCHMARK_MEASUREMENTS * plan.samples);
     uint64_t* cycles = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_BRANCH_SIZING_BENCHMARK_MEASUREMENTS * plan.samples);
     uint64_t* instructions = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_BRANCH_SIZING_BENCHMARK_MEASUREMENTS * plan.samples);
     uint64_t* sorted = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, plan.samples);
-    bool result = pool.valid && cycles != 0 && instructions != 0 && sorted != 0;
+    bool result = pool.valid && nanoseconds != 0 && cycles != 0 && instructions != 0 && sorted != 0;
     if (!result)
     {
         fprintf(stderr, "benchmark-branch-sizing: no memory for %s's pool\n", row->name);
@@ -1063,16 +1124,35 @@ static bool branch_sizing_benchmark_row(Arena* arena, const BranchSizingBenchmar
     }
     if (result)
     {
-        for (uint64_t pass = 0; pass < plan.samples; pass += 1)
+        for (uint64_t pass = 0; result && pass < plan.samples; pass += 1)
         {
-            for (uint32_t turn = 0; turn < measured; turn += 1)
+            for (uint32_t turn = 0; result && turn < measured; turn += 1)
             {
                 const uint32_t m = first + (uint32_t)((pass + turn) % measured);
-                const BranchSizingBenchmarkCount sample = branch_sizing_benchmark_sample(&pool, branch_sizing_benchmark_measurement(m, plan.round_limit), counters, overhead);
-                cycles[m * plan.samples + pass] = sample.cycles;
-                instructions[m * plan.samples + pass] = sample.instructions;
+                const BranchSizingBenchmarkMeasurement measurement = branch_sizing_benchmark_measurement(m, plan.round_limit);
+                if (plan.after_scalar != 0)
+                {
+                    result = branch_sizing_benchmark_condition(&pool, measurement, plan.after_scalar);
+                }
+                if (result)
+                {
+                    const BranchSizingBenchmarkCount sample = branch_sizing_benchmark_sample(&pool, measurement, counters, overhead);
+                    const bool whole = measurement.work != BRANCH_SIZING_BENCHMARK_THROUGH || measurement.stop == BRANCH_SIZING_BENCHMARK_WRITE;
+                    result = sample.bytes != UINT64_MAX && (!whole || sample.bytes == statistics.bytes);
+                    nanoseconds[m * plan.samples + pass] = sample.nanoseconds;
+                    cycles[m * plan.samples + pass] = sample.cycles;
+                    instructions[m * plan.samples + pass] = sample.instructions;
+                }
+                if (!result)
+                {
+                    fprintf(stderr, "benchmark-branch-sizing: %s's measurement %u failed in sample %llu or its scalar conditioning\n", row->name, m,
+                            (unsigned long long)pass);
+                }
             }
         }
+    }
+    if (result)
+    {
         const double branch_count = (double)(pool.branches_total != 0 ? pool.branches_total : 1);
         const double record_count = (double)pool.records_total;
         printf("%s: %llu functions in %llu groups, %llu records, %llu branches (a branch per %.2f records), %.2f bytes per record; %.1f%% of the branches "
@@ -1085,16 +1165,20 @@ static bool branch_sizing_benchmark_row(Arena* arena, const BranchSizingBenchmar
         {
             const double c = (double)branch_sizing_benchmark_median(cycles + m * plan.samples, plan.samples, sorted);
             const double n = (double)branch_sizing_benchmark_median(instructions + m * plan.samples, plan.samples, sorted);
+            const double ns = (double)branch_sizing_benchmark_median(nanoseconds + m * plan.samples, plan.samples, sorted);
+            const double low = (double)sorted[(plan.samples - 1) / 10] / record_count;
+            const double high = (double)sorted[(plan.samples - 1) * 9 / 10] / record_count;
             if (m < BUSTER_BRANCH_SIZING_BENCHMARK_ENTRIES)
             {
-                printf("  %-20s %8.2f cycles per branch %7.3f per record %5.2f IPC\n", branch_sizing_benchmark_entry_names[m], c / branch_count, c / record_count,
-                       c != 0 ? n / c : 0);
+                printf("  %-20s %8.2f cycles per branch %7.3f per record %5.2f IPC; %7.3f ns per record [%.3f, %.3f]\n", branch_sizing_benchmark_entry_names[m],
+                       c / branch_count, c / record_count, c != 0 ? n / c : 0, ns / record_count, low, high);
             }
             else if (!every)
             {
                 const BranchSizingBenchmarkMeasurement measurement = branch_sizing_benchmark_measurement(m, plan.round_limit);
-                printf("  %s through %s: %8.2f cycles per branch %7.3f per record %5.2f IPC\n", branch_sizing_benchmark_path_names[measurement.path],
-                       branch_sizing_benchmark_stop_names[measurement.stop], c / branch_count, c / record_count, c != 0 ? n / c : 0);
+                printf("  %s through %s: %8.2f cycles per branch %7.3f per record %5.2f IPC; %7.3f ns per record [%.3f, %.3f]\n",
+                       branch_sizing_benchmark_path_names[measurement.path], branch_sizing_benchmark_stop_names[measurement.stop], c / branch_count,
+                       c / record_count, c != 0 ? n / c : 0, ns / record_count, low, high);
             }
         }
         for (uint32_t path = 0; every && path < BRANCH_SIZING_BENCHMARK_PATHS; path += 1)
@@ -1109,6 +1193,16 @@ static bool branch_sizing_benchmark_row(Arena* arena, const BranchSizingBenchmar
                 before = c;
             }
             printf(" (cycles per branch); whole %.3f per record\n", before / record_count);
+            printf("  %-20s", branch_sizing_benchmark_path_names[path]);
+            before = 0;
+            for (uint32_t stop = 0; stop < BRANCH_SIZING_BENCHMARK_STOPS; stop += 1)
+            {
+                const uint32_t m = BUSTER_BRANCH_SIZING_BENCHMARK_ENTRIES + path * BRANCH_SIZING_BENCHMARK_STOPS + stop;
+                const double ns = (double)branch_sizing_benchmark_median(nanoseconds + m * plan.samples, plan.samples, sorted);
+                printf(" %s %.2f", branch_sizing_benchmark_stop_names[stop], (ns - before) / branch_count);
+                before = ns;
+            }
+            printf(" (ns per branch); whole %.3f per record\n", before / record_count);
         }
     }
     arena_pop_to(arena, mark);
@@ -1132,6 +1226,7 @@ int run_branch_sizing_benchmark(int argc, char** argv)
     uint64_t seed = 1;
     uint64_t rounds = BUSTER_BRANCH_SIZING_ROUNDS;
     uint64_t samples = BUSTER_BRANCH_SIZING_BENCHMARK_PASSES;
+    uint64_t after_scalar = 0;
     uint32_t measure = BUSTER_BRANCH_SIZING_BENCHMARK_MEASUREMENTS;
     const char* only = 0;
     bool valid = true;
@@ -1152,6 +1247,11 @@ int run_branch_sizing_benchmark(int argc, char** argv)
             valid = valid && branch_sizing_benchmark_parse_u64(argv[i + 1], &samples) && samples >= 1 && samples <= BUSTER_BRANCH_SIZING_BENCHMARK_MAX_SAMPLES;
             i += 1;
         }
+        else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
+        {
+            valid = valid && branch_sizing_benchmark_parse_u64(argv[i + 1], &after_scalar) && after_scalar <= BUSTER_BRANCH_SIZING_BENCHMARK_AFTER_SCALAR_MAX_MS;
+            i += 1;
+        }
         else if (strcmp(argv[i], "--measure") == 0 && i + 1 < argc)
         {
             measure = branch_sizing_benchmark_find_measurement(argv[i + 1]);
@@ -1168,6 +1268,10 @@ int run_branch_sizing_benchmark(int argc, char** argv)
             valid = false;
         }
     }
+    // Conditioning has a precise meaning only for one isolated vector measurement. Its counterpart is the scalar
+    // path through the same phase, or scalar sizing and encoding for size_encode.
+    valid = valid && (after_scalar == 0 || (measure != BUSTER_BRANCH_SIZING_BENCHMARK_MEASUREMENTS &&
+                     branch_sizing_benchmark_measurement(measure, (uint32_t)rounds).path != BRANCH_SIZING_BENCHMARK_SCALAR));
     bool known = only == 0;
     for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(branch_sizing_benchmark_rows); r += 1)
     {
@@ -1177,7 +1281,10 @@ int run_branch_sizing_benchmark(int argc, char** argv)
     bool passed = false;
     if (!valid || !known)
     {
-        fprintf(stderr, "usage: benchmark-branch-sizing [--seed N] [--rounds N] [--only ROW] [--measure NAME [--samples N]]\n");
+        fprintf(stderr, "usage: benchmark-branch-sizing [--seed N] [--rounds N] [--only ROW] [--measure NAME] [--samples N] [--after-scalar MS]\n"
+                        "  NAME: x86_encode, size_branches, size_branches_scalar, size_encode, or PATH-PHASE (such as vector-lengths).\n"
+                        "  --after-scalar requires one vector --measure; MS is at most %u. --only selects the workload row.\n",
+                        BUSTER_BRANCH_SIZING_BENCHMARK_AFTER_SCALAR_MAX_MS);
     }
     else if (arena.base == 0)
     {
@@ -1195,14 +1302,15 @@ int run_branch_sizing_benchmark(int argc, char** argv)
             fprintf(stderr, "perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0\n");
         }
         const BranchSizingBenchmarkCount overhead = branch_sizing_benchmark_overhead(&arena, &counters);
-        printf("benchmark-branch-sizing: seed %llu, medians of %llu samples, round limit %llu, BUSTER_BRANCH_SIZING_CHUNK %u; reading the counters costs %llu "
-               "cycles and %llu instructions\n",
-               (unsigned long long)seed, (unsigned long long)samples, (unsigned long long)rounds, BUSTER_BRANCH_SIZING_CHUNK, (unsigned long long)overhead.cycles,
-               (unsigned long long)overhead.instructions);
+        printf("benchmark-branch-sizing: seed %llu, medians of %llu samples [p10, p90], round limit %llu, after-scalar %llu ms; reading the clock and counters "
+               "costs %llu ns, %llu cycles and %llu instructions\n",
+               (unsigned long long)seed, (unsigned long long)samples, (unsigned long long)rounds, (unsigned long long)after_scalar,
+               (unsigned long long)overhead.nanoseconds, (unsigned long long)overhead.cycles, (unsigned long long)overhead.instructions);
         const BranchSizingBenchmarkPlan plan = {
             .round_limit = (uint32_t)rounds,
             .measure = measure,
             .samples = samples,
+            .after_scalar = after_scalar,
         };
         passed = true;
         for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(branch_sizing_benchmark_rows); r += 1)
