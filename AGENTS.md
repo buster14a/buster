@@ -3644,5 +3644,6 @@ the complete available typed-stream-to-verified-IR path on generated mixed
 programs. Both require optimized builds, calibrate samples to at least 2 ms,
 rotate variant order and report 21-pass medians by default. TSC ticks are
 labeled separately from core cycles. The 9700X workflow runs the tests and
-pins each benchmark to one allowed CPU. [The guide](docs/ir.md) records
+pins each benchmark to one allowed CPU, both normally and after 200 ms of
+scalar work before each vector sample. [The guide](docs/ir.md) records
 interfaces, measurement scope and outstanding source-corpus acceptance.

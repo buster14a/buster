@@ -97,8 +97,12 @@ static void ir_test_printer(IrTestTally* tally, const IrFunction* function, Aren
         ok = ir_print(function, scratch, first) == IR_OK;
         ir_test_expect(tally, scratch->length == scratch_mark, "printer retained scratch");
         const uint64_t mark = memory->length;
-        IrCfg cfg = { 0 };
-        IrUses uses = { 0 };
+        IrCfg cfg = {
+            0
+        };
+        IrUses uses = {
+            0
+        };
         ok = ir_build_cfg(function, memory, scratch, &cfg) == IR_OK && ok;
         ok = ir_build_uses(function, memory, scratch, &uses) == IR_OK && ok;
         ok = ir_print(function, scratch, second) == IR_OK && ok;
@@ -132,14 +136,20 @@ static void ir_test_printer(IrTestTally* tally, const IrFunction* function, Aren
 static void ir_test_basic(IrTestTally* tally, Arena* memory, Arena* scratch)
 {
     const uint64_t mark = memory->length;
-    IrFunction function = { 0 };
+    IrFunction function = {
+        0
+    };
     const bool created = ir_test_simple(memory, &function);
     ir_test_expect(tally, created, "simple fixture allocation failed");
     if (created)
     {
         ir_test_pair(tally, &function, scratch, 0, true, "simple arithmetic function rejected");
-        IrCfg cfg = { 0 };
-        IrUses uses = { 0 };
+        IrCfg cfg = {
+            0
+        };
+        IrUses uses = {
+            0
+        };
         const uint64_t scratch_mark = scratch->length;
         const bool cfg_ok = ir_build_cfg(&function, memory, scratch, &cfg) == IR_OK;
         const bool uses_ok = ir_build_uses(&function, memory, scratch, &uses) == IR_OK;
@@ -151,11 +161,25 @@ static void ir_test_basic(IrTestTally* tally, Arena* memory, Arena* scratch)
         }
         if (uses_ok)
         {
-            const uint32_t offsets[] = { 0, 2, 3, 3 };
+            const uint32_t offsets[] = {
+                0,
+                2,
+                3,
+                3
+            };
             const IrUse expected[] = {
-                { .instruction = 1, .operand = 0 },
-                { .instruction = 1, .operand = 1 },
-                { .instruction = 2, .operand = 0 },
+                {
+                    .instruction = 1,
+                    .operand = 0
+                },
+                {
+                    .instruction = 1,
+                    .operand = 1
+                },
+                {
+                    .instruction = 2,
+                    .operand = 0
+                },
             };
             ir_test_expect(tally, uses.value_count == 3 && uses.use_count == 3 && memcmp(uses.offsets, offsets, sizeof(offsets)) == 0 && memcmp(uses.uses, expected, sizeof(expected)) == 0, "use lists lost duplicate uses or included a constant index");
         }
@@ -180,7 +204,12 @@ static void ir_test_basic(IrTestTally* tally, Arena* memory, Arena* scratch)
         }
         ir_test_expect(tally, ir_print(&function, scratch, 0) == IR_ERROR_IO, "printer accepted a null output stream");
 
-        const uint32_t invalid_ids[] = { 3, 0x7fffffffu, 0x80000000u, UINT32_MAX };
+        const uint32_t invalid_ids[] = {
+            3,
+            0x7fffffffu,
+            0x80000000u,
+            UINT32_MAX
+        };
         for (uint32_t index = 0; index < sizeof(invalid_ids) / sizeof(invalid_ids[0]); index += 1)
         {
             function.a[1] = invalid_ids[index];
@@ -229,13 +258,26 @@ static void ir_test_phi(IrTestTally* tally, Arena* memory, Arena* scratch)
         .constant_count = 2,
         .parameter_count = 1,
     };
-    IrFunction function = { 0 };
+    IrFunction function = {
+        0
+    };
     const bool created = ir_create(memory, &sizes, &function) == IR_OK;
     ir_test_expect(tally, created, "diamond fixture allocation failed");
     if (created)
     {
-        const uint32_t offsets[] = { 0, 2, 4, 6, 8 };
-        const uint32_t extra[] = { 1, 2, 2, 4 };
+        const uint32_t offsets[] = {
+            0,
+            2,
+            4,
+            6,
+            8
+        };
+        const uint32_t extra[] = {
+            1,
+            2,
+            2,
+            4
+        };
         memcpy(function.block_offsets, offsets, sizeof(offsets));
         memcpy(function.extra, extra, sizeof(extra));
         function.parameter_types[0] = IR_I1;
@@ -250,8 +292,18 @@ static void ir_test_phi(IrTestTally* tally, Arena* memory, Arena* scratch)
         ir_test_instruction(&function, 5, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_instruction(&function, 6, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
         ir_test_instruction(&function, 7, IR_RET, IR_VOID, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        const uint32_t enter[] = { 0, 1, 2, 3 };
-        const uint32_t leave[] = { 4, 2, 3, 4 };
+        const uint32_t enter[] = {
+            0,
+            1,
+            2,
+            3
+        };
+        const uint32_t leave[] = {
+            4,
+            2,
+            3,
+            4
+        };
         const IrDominance dominance = {
             .enter = enter,
             .leave = leave,
@@ -259,28 +311,76 @@ static void ir_test_phi(IrTestTally* tally, Arena* memory, Arena* scratch)
         };
         ir_test_pair(tally, &function, scratch, 0, true, "valid diamond phi rejected");
         ir_test_pair(tally, &function, scratch, &dominance, true, "valid diamond dominance rejected");
-        IrCfg cfg = { 0 };
+        IrCfg cfg = {
+            0
+        };
         if (ir_build_cfg(&function, memory, scratch, &cfg) == IR_OK)
         {
-            const uint32_t successor_offsets[] = { 0, 2, 3, 4, 4 };
-            const uint32_t successors[] = { 1, 2, 3, 3 };
-            const uint32_t predecessor_offsets[] = { 0, 0, 1, 2, 4 };
-            const uint32_t predecessors[] = { 0, 0, 1, 2 };
+            const uint32_t successor_offsets[] = {
+                0,
+                2,
+                3,
+                4,
+                4
+            };
+            const uint32_t successors[] = {
+                1,
+                2,
+                3,
+                3
+            };
+            const uint32_t predecessor_offsets[] = {
+                0,
+                0,
+                1,
+                2,
+                4
+            };
+            const uint32_t predecessors[] = {
+                0,
+                0,
+                1,
+                2
+            };
             ir_test_expect(tally, cfg.edge_count == 4 && memcmp(cfg.successor_offsets, successor_offsets, sizeof(successor_offsets)) == 0 && memcmp(cfg.successors, successors, sizeof(successors)) == 0 && memcmp(cfg.predecessor_offsets, predecessor_offsets, sizeof(predecessor_offsets)) == 0 && memcmp(cfg.predecessors, predecessors, sizeof(predecessors)) == 0, "diamond CFG is not the independently expected graph");
         }
         else
         {
             ir_test_expect(tally, false, "diamond CFG build failed");
         }
-        IrUses uses = { 0 };
+        IrUses uses = {
+            0
+        };
         if (ir_build_uses(&function, memory, scratch, &uses) == IR_OK)
         {
-            const uint32_t use_offsets[] = { 0, 1, 1, 2, 2, 3, 3, 4, 4 };
+            const uint32_t use_offsets[] = {
+                0,
+                1,
+                1,
+                2,
+                2,
+                3,
+                3,
+                4,
+                4
+            };
             const IrUse expected[] = {
-                { .instruction = 1, .operand = 0 },
-                { .instruction = 6, .operand = 3 },
-                { .instruction = 6, .operand = 4 },
-                { .instruction = 7, .operand = 0 },
+                {
+                    .instruction = 1,
+                    .operand = 0
+                },
+                {
+                    .instruction = 6,
+                    .operand = 3
+                },
+                {
+                    .instruction = 6,
+                    .operand = 4
+                },
+                {
+                    .instruction = 7,
+                    .operand = 0
+                },
             };
             ir_test_expect(tally, uses.use_count == 4 && memcmp(uses.offsets, use_offsets, sizeof(use_offsets)) == 0 && memcmp(uses.uses, expected, sizeof(expected)) == 0, "phi use lists included predecessor IDs or lost incoming values");
         }
@@ -327,8 +427,18 @@ static void ir_test_phi(IrTestTally* tally, Arena* memory, Arena* scratch)
     ir_test_expect(tally, loop_created, "loop fixture allocation failed");
     if (loop_created)
     {
-        const uint32_t offsets[] = { 0, 3, 6, 7 };
-        const uint32_t extra[] = { 0, 0, 1, 4 };
+        const uint32_t offsets[] = {
+            0,
+            3,
+            6,
+            7
+        };
+        const uint32_t extra[] = {
+            0,
+            0,
+            1,
+            4
+        };
         memcpy(function.block_offsets, offsets, sizeof(offsets));
         memcpy(function.extra, extra, sizeof(extra));
         function.parameter_types[0] = IR_I1;
@@ -341,8 +451,16 @@ static void ir_test_phi(IrTestTally* tally, Arena* memory, Arena* scratch)
         ir_test_instruction(&function, 4, IR_ADD, IR_I64, 3, 0, BUSTER_IR_NONE);
         ir_test_instruction(&function, 5, IR_CBR, IR_VOID, 1, 1, 2);
         ir_test_instruction(&function, 6, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        const uint32_t enter[] = { 0, 1, 2 };
-        const uint32_t leave[] = { 3, 3, 3 };
+        const uint32_t enter[] = {
+            0,
+            1,
+            2
+        };
+        const uint32_t leave[] = {
+            3,
+            3,
+            3
+        };
         const IrDominance dominance = {
             .enter = enter,
             .leave = leave,
@@ -367,13 +485,29 @@ static void ir_test_switch(IrTestTally* tally, Arena* memory, Arena* scratch)
         .constant_count = 3,
         .parameter_count = 1,
     };
-    IrFunction function = { 0 };
+    IrFunction function = {
+        0
+    };
     const bool created = ir_create(memory, &sizes, &function) == IR_OK;
     ir_test_expect(tally, created, "switch fixture allocation failed");
     if (created)
     {
-        const uint32_t offsets[] = { 0, 2, 3, 4, 5 };
-        const uint32_t extra[] = { 3, 0, 1, 1, 1, 2, 2 };
+        const uint32_t offsets[] = {
+            0,
+            2,
+            3,
+            4,
+            5
+        };
+        const uint32_t extra[] = {
+            3,
+            0,
+            1,
+            1,
+            1,
+            2,
+            2
+        };
         memcpy(function.block_offsets, offsets, sizeof(offsets));
         memcpy(function.extra, extra, sizeof(extra));
         function.parameter_types[0] = IR_I64;
@@ -388,15 +522,37 @@ static void ir_test_switch(IrTestTally* tally, Arena* memory, Arena* scratch)
             ir_test_instruction(&function, i, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
         ir_test_pair(tally, &function, scratch, 0, true, "valid switch with shared destinations rejected");
-        IrCfg cfg = { 0 };
+        IrCfg cfg = {
+            0
+        };
         const bool cfg_ok = ir_build_cfg(&function, memory, scratch, &cfg) == IR_OK;
         ir_test_expect(tally, cfg_ok, "switch CFG build failed");
         if (cfg_ok)
         {
-            const uint32_t successor_offsets[] = { 0, 3, 3, 3, 3 };
-            const uint32_t successors[] = { 3, 1, 2 };
-            const uint32_t predecessor_offsets[] = { 0, 0, 1, 2, 3 };
-            const uint32_t predecessors[] = { 0, 0, 0 };
+            const uint32_t successor_offsets[] = {
+                0,
+                3,
+                3,
+                3,
+                3
+            };
+            const uint32_t successors[] = {
+                3,
+                1,
+                2
+            };
+            const uint32_t predecessor_offsets[] = {
+                0,
+                0,
+                1,
+                2,
+                3
+            };
+            const uint32_t predecessors[] = {
+                0,
+                0,
+                0
+            };
             ir_test_expect(tally, cfg.edge_count == 3 && memcmp(cfg.successor_offsets, successor_offsets, sizeof(successor_offsets)) == 0 && memcmp(cfg.successors, successors, sizeof(successors)) == 0 && memcmp(cfg.predecessor_offsets, predecessor_offsets, sizeof(predecessor_offsets)) == 0 && memcmp(cfg.predecessors, predecessors, sizeof(predecessors)) == 0, "switch CFG failed to deduplicate destinations in first-appearance order");
         }
         function.constants[1].low = 0;
@@ -430,7 +586,9 @@ static void ir_test_calls_memory(IrTestTally* tally, Arena* memory, Arena* scrat
         .call_type_count = 3,
         .parameter_count = 1,
     };
-    IrFunction function = { 0 };
+    IrFunction function = {
+        0
+    };
     const bool created = ir_create(memory, &sizes, &function) == IR_OK;
     ir_test_expect(tally, created, "call/memory fixture allocation failed");
     if (created)
@@ -463,7 +621,11 @@ static void ir_test_calls_memory(IrTestTally* tally, Arena* memory, Arena* scrat
             .parameter_count = 1,
             .result_type = IR_I64,
         };
-        const uint32_t extra[] = { 3, 5, 6 };
+        const uint32_t extra[] = {
+            3,
+            5,
+            6
+        };
         memcpy(function.extra, extra, sizeof(extra));
         function.call_types[0] = IR_I64;
         function.call_types[1] = IR_PTR;
@@ -482,23 +644,66 @@ static void ir_test_calls_memory(IrTestTally* tally, Arena* memory, Arena* scrat
         ir_test_instruction(&function, 7, IR_CALL_INDIRECT, IR_I64, 4, 1, BUSTER_IR_NONE);
         ir_test_instruction(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_pair(tally, &function, scratch, 0, true, "valid calls, volatile memory and scaled address rejected");
-        IrUses uses = { 0 };
+        IrUses uses = {
+            0
+        };
         const bool uses_ok = ir_build_uses(&function, memory, scratch, &uses) == IR_OK;
         ir_test_expect(tally, uses_ok, "call/memory use-list build failed");
         if (uses_ok)
         {
-            const uint32_t offsets[] = { 0, 2, 4, 4, 5, 7, 8, 9, 10, 10 };
+            const uint32_t offsets[] = {
+                0,
+                2,
+                4,
+                4,
+                5,
+                7,
+                8,
+                9,
+                10,
+                10
+            };
             const IrUse expected[] = {
-                { .instruction = 2, .operand = 1 },
-                { .instruction = 5, .operand = 1 },
-                { .instruction = 2, .operand = 0 },
-                { .instruction = 3, .operand = 0 },
-                { .instruction = 6, .operand = 3 },
-                { .instruction = 5, .operand = 0 },
-                { .instruction = 7, .operand = 0 },
-                { .instruction = 6, .operand = 4 },
-                { .instruction = 7, .operand = 3 },
-                { .instruction = 8, .operand = 0 },
+                {
+                    .instruction = 2,
+                    .operand = 1
+                },
+                {
+                    .instruction = 5,
+                    .operand = 1
+                },
+                {
+                    .instruction = 2,
+                    .operand = 0
+                },
+                {
+                    .instruction = 3,
+                    .operand = 0
+                },
+                {
+                    .instruction = 6,
+                    .operand = 3
+                },
+                {
+                    .instruction = 5,
+                    .operand = 0
+                },
+                {
+                    .instruction = 7,
+                    .operand = 0
+                },
+                {
+                    .instruction = 6,
+                    .operand = 4
+                },
+                {
+                    .instruction = 7,
+                    .operand = 3
+                },
+                {
+                    .instruction = 8,
+                    .operand = 0
+                },
             };
             ir_test_expect(tally, uses.use_count == 10 && memcmp(uses.offsets, offsets, sizeof(offsets)) == 0 && memcmp(uses.uses, expected, sizeof(expected)) == 0, "call/memory use lists confused values with symbols, slots or descriptors");
         }
@@ -549,22 +754,51 @@ static void ir_test_types(IrTestTally* tally, Arena* memory, Arena* scratch)
         .block_count = 1,
         .constant_count = 8,
     };
-    IrFunction function = { 0 };
+    IrFunction function = {
+        0
+    };
     const bool created = ir_create(memory, &sizes, &function) == IR_OK;
     ir_test_expect(tally, created, "conversion fixture allocation failed");
     if (created)
     {
         function.block_offsets[1] = 30;
-        const IrType types[] = { IR_I1, IR_I8, IR_I32, IR_I64, IR_I128, IR_F32, IR_F64, IR_F80 };
+        const IrType types[] = {
+            IR_I1,
+            IR_I8,
+            IR_I32,
+            IR_I64,
+            IR_I128,
+            IR_F32,
+            IR_F64,
+            IR_F80
+        };
         const IrConstant constants[] = {
-            { .low = 1 },
-            { .low = 0xfe },
-            { .low = 32 },
-            { .low = 64 },
-            { .low = UINT64_MAX, .high = UINT64_MAX },
-            { .low = UINT64_C(0x80000000) },
-            { .low = UINT64_C(0x7ff8000000000001) },
-            { .low = UINT64_C(0x8000000000000000), .high = 0x3fff },
+            {
+                .low = 1
+            },
+            {
+                .low = 0xfe
+            },
+            {
+                .low = 32
+            },
+            {
+                .low = 64
+            },
+            {
+                .low = UINT64_MAX,
+                .high = UINT64_MAX
+            },
+            {
+                .low = UINT64_C(0x80000000)
+            },
+            {
+                .low = UINT64_C(0x7ff8000000000001)
+            },
+            {
+                .low = UINT64_C(0x8000000000000000),
+                .high = 0x3fff
+            },
         };
         memcpy(function.constants, constants, sizeof(constants));
         for (uint32_t i = 0; i < 8; i += 1)
@@ -673,7 +907,9 @@ static void ir_test_allocations(IrTestTally* tally, Arena* memory, Arena* scratc
     ir_test_expect(tally, failures != 0 && successes != 0, "allocation capacity sweep missed an outcome");
     for (uint32_t column = 0; column < 9; column += 1)
     {
-        IrSizes limit = { 0 };
+        IrSizes limit = {
+            0
+        };
         const uint64_t overflow = (uint64_t)UINT32_MAX + 1;
         switch (column)
         {
@@ -687,15 +923,21 @@ static void ir_test_allocations(IrTestTally* tally, Arena* memory, Arena* scratc
             case 7: limit.call_type_count = overflow; break;
             case 8: limit.parameter_count = overflow; break;
         }
-        Arena empty = { 0 };
-        IrFunction function = { .instruction_count = 19 };
+        Arena empty = {
+            0
+        };
+        IrFunction function = {
+            .instruction_count = 19
+        };
         uint8_t saved[sizeof(function)];
         memcpy(saved, &function, sizeof(saved));
         ir_test_expect(tally, ir_create(&empty, &limit, &function) == IR_ERROR_LIMIT && empty.length == 0 && memcmp(saved, &function, sizeof(saved)) == 0, "u32 count overflow was truncated or modified output");
     }
 
     const uint64_t mark = memory->length;
-    IrFunction function = { 0 };
+    IrFunction function = {
+        0
+    };
     const bool created = ir_test_simple(memory, &function);
     ir_test_expect(tally, created, "allocation-rollback fixture failed");
     if (created)
@@ -748,7 +990,9 @@ static void ir_test_guards(IrTestTally* tally, Arena* memory, Arena* scratch)
                 .instruction_count = count,
                 .block_count = count != 0,
             };
-            IrFunction function = { 0 };
+            IrFunction function = {
+                0
+            };
             bool ok = ir_create(memory, &sizes, &function) == IR_OK;
             void* mappings[8];
             for (uint32_t column = 0; column < 8; column += 1)
@@ -802,8 +1046,12 @@ static void ir_test_guards(IrTestTally* tally, Arena* memory, Arena* scratch)
             if (ok)
             {
                 ir_test_pair(tally, &function, scratch, 0, true, "valid guarded IR tail rejected");
-                IrCfg cfg = { 0 };
-                IrUses uses = { 0 };
+                IrCfg cfg = {
+                    0
+                };
+                IrUses uses = {
+                    0
+                };
                 ir_test_expect(tally, ir_build_cfg(&function, memory, scratch, &cfg) == IR_OK && ir_build_uses(&function, memory, scratch, &uses) == IR_OK, "derived arrays failed on guarded tails");
                 if (count >= 3)
                 {
@@ -836,7 +1084,9 @@ static void ir_test_dominance_tails(IrTestTally* tally, Arena* memory, Arena* sc
             .block_count = 3,
             .constant_count = 1,
         };
-        IrFunction function = { 0 };
+        IrFunction function = {
+            0
+        };
         const bool created = ir_create(memory, &sizes, &function) == IR_OK;
         ir_test_expect(tally, created, "dominance tail fixture allocation failed");
         if (created)
@@ -856,8 +1106,16 @@ static void ir_test_dominance_tails(IrTestTally* tally, Arena* memory, Arena* sc
             }
             ir_test_instruction(&function, count + 4, IR_RET, IR_VOID, count + 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
             // Block 1 is a disconnected region: its local uses are well formed, but its definitions cannot reach b2.
-            const uint32_t enter[] = { 0, 0, 1 };
-            const uint32_t leave[] = { 2, 0, 2 };
+            const uint32_t enter[] = {
+                0,
+                0,
+                1
+            };
+            const uint32_t leave[] = {
+                2,
+                0,
+                2
+            };
             const IrDominance dominance = {
                 .enter = enter,
                 .leave = leave,
@@ -875,7 +1133,14 @@ static void ir_test_dominance_tails(IrTestTally* tally, Arena* memory, Arena* sc
 static void ir_test_generated(IrTestTally* tally, Arena* memory, Arena* scratch, uint64_t count)
 {
     uint64_t state = tally->seed != 0 ? tally->seed : 1;
-    const IrOp operations[] = { IR_ADD, IR_SUB, IR_MUL, IR_AND, IR_OR, IR_XOR };
+    const IrOp operations[] = {
+        IR_ADD,
+        IR_SUB,
+        IR_MUL,
+        IR_AND,
+        IR_OR,
+        IR_XOR
+    };
     for (uint64_t sample = 0; sample < count; sample += 1)
     {
         const uint64_t mark = memory->length;
@@ -884,7 +1149,9 @@ static void ir_test_generated(IrTestTally* tally, Arena* memory, Arena* scratch,
             .instruction_count = instructions,
             .block_count = 1,
         };
-        IrFunction function = { 0 };
+        IrFunction function = {
+            0
+        };
         const bool created = ir_create(memory, &sizes, &function) == IR_OK;
         ir_test_expect(tally, created, "generated IR allocation failed");
         if (created)
@@ -905,7 +1172,15 @@ static void ir_test_generated(IrTestTally* tally, Arena* memory, Arena* scratch,
             const uint8_t op = function.op[id];
             const uint32_t a = function.a[id];
             const uint32_t b = function.b[id];
-            const uint8_t invalid_ops[] = { IR_INVALID, IR_OP_COUNT, 63, 64, 127, 128, 255 };
+            const uint8_t invalid_ops[] = {
+                IR_INVALID,
+                IR_OP_COUNT,
+                63,
+                64,
+                127,
+                128,
+                255
+            };
             for (uint32_t mutation = 0; mutation < sizeof(invalid_ops); mutation += 1)
             {
                 function.op[id] = invalid_ops[mutation];
@@ -960,7 +1235,9 @@ static void ir_test_switch_collision_family(IrTestTally* tally, Arena* memory, A
         .constant_count = count,
         .parameter_count = 1,
     };
-    IrFunction function = { 0 };
+    IrFunction function = {
+        0
+    };
     const bool created = ir_create(memory, &sizes, &function) == IR_OK;
     ir_test_expect(tally, created, "large i128 switch fixture allocation");
     if (created)

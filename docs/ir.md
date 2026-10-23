@@ -228,6 +228,7 @@ and vector classification produce identical columns, side arrays and block range
 ./build/compiler benchmark-ir
 ./build/compiler benchmark-ir --only vector --after-scalar 200
 ./build/compiler benchmark-ir-lowering
+./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
 ```
 
 `test-ir` has independently expected CFG/use lists and rejection fixtures,
