@@ -730,6 +730,98 @@ static void interpreter_test_mappings(InterpreterTestTally* tally, Arena* scratc
     interpreter_test_expect(tally, !interpreter_mappings_valid((const void*)(uintptr_t)(UINT64_MAX - 3), 1, sizeof(SymbolId), 0, 0, 0, 0), "function-symbol address overflow");
 }
 
+static void interpreter_test_function_addresses(InterpreterTestTally* tally, Arena* scratch)
+{
+    uint8_t kinds[] = {
+        BUSTER_TYPED_GLOBAL_ADDRESS,
+        BUSTER_TYPED_RETURN,
+        BUSTER_TYPED_EQ,
+        BUSTER_TYPED_RETURN,
+    };
+    uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+    };
+    uint64_t values[] = {
+        2,
+        0,
+        0,
+        0,
+    };
+    Tier0Function functions[] = {
+        {
+            .kinds = kinds,
+            .classes = classes,
+            .values = values,
+            .count = 2,
+        },
+        { 0 },
+    };
+    const SymbolId symbols[] = {
+        1,
+        2,
+    };
+    const InterpreterNativeBinding native = {
+        .symbol = 3,
+        .address = (void*)interpreter_test_native_mixed,
+    };
+    uint64_t bytes = 7;
+    const InterpreterBinding binding = {
+        .symbol = 4,
+        .bytes = (uint8_t*)&bytes,
+        .size = sizeof(bytes),
+        .writable = true,
+    };
+    const InterpreterProgram program = {
+        .functions = functions,
+        .function_symbols = symbols,
+        .function_count = BUSTER_ARRAY_LENGTH(functions),
+        .bindings = &binding,
+        .binding_count = 1,
+        .natives = &native,
+        .native_count = 1,
+    };
+    const uint64_t addresses[] = {
+        (uint64_t)(uintptr_t)&functions[1],
+        (uint64_t)(uintptr_t)native.address,
+        (uint64_t)(uintptr_t)binding.bytes,
+    };
+    InterpreterResult result;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(addresses); i += 1)
+    {
+        values[0] = i + 2;
+        const bool ok = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+        interpreter_test_expect(tally, ok && result.value.low == addresses[i] && result.value.high == 0, "function native and data addresses retain identity on return");
+    }
+    functions[0].count = 4;
+    kinds[1] = BUSTER_TYPED_GLOBAL_ADDRESS;
+    for (uint32_t symbol = 2; symbol <= 3; symbol += 1)
+    {
+        values[0] = symbol;
+        values[1] = symbol;
+        const bool ok = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+        interpreter_test_expect(tally, ok && result.value.low == 1, "repeated function address compares equal");
+    }
+    values[0] = 2;
+    values[1] = 3;
+    bool ok = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+    interpreter_test_expect(tally, ok && result.value.low == 0, "internal and native function addresses differ");
+    functions[0].count = 2;
+    kinds[1] = BUSTER_TYPED_RETURN;
+    values[0] = 99;
+    ok = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+    interpreter_test_expect(tally, !ok && result.status == INTERPRETER_SYMBOL, "unknown address symbol");
+    kinds[0] = BUSTER_TYPED_GLOBAL;
+    for (uint32_t symbol = 2; symbol <= 3; symbol += 1)
+    {
+        values[0] = symbol;
+        ok = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+        interpreter_test_expect(tally, !ok && result.status == INTERPRETER_SYMBOL, "function identity does not grant global data access");
+    }
+}
+
 static void interpreter_test_guarded(InterpreterTestTally* tally, Arena* scratch)
 {
     const uint32_t counts[] = {
@@ -1062,6 +1154,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_native(&tally, &scratch);
         interpreter_test_heap(&tally, &scratch);
         interpreter_test_mappings(&tally, &scratch);
+        interpreter_test_function_addresses(&tally, &scratch);
         interpreter_test_guarded(&tally, &scratch);
         interpreter_test_text_native(&tally, &scratch);
         interpreter_test_programs(&tally, &scratch, seed, count);

@@ -575,6 +575,36 @@ static const InterpreterBinding* interpreter_typed_find_binding(const Interprete
     return result;
 }
 
+// Interpreted function addresses are opaque tokens naming stable caller-owned function rows. Native functions
+// retain their host address. Neither kind is registered as readable data, and GLOBAL/STORE still require data.
+static bool interpreter_typed_symbol_address(const InterpreterProgram* program, SymbolId symbol, uint64_t* address)
+{
+    const uint32_t function = interpreter_typed_find_function(program, symbol);
+    bool found = function != UINT32_MAX;
+    if (found)
+    {
+        *address = (uint64_t)(uintptr_t)&program->functions[function];
+    }
+    for (uint32_t n = 0; !found && n < program->native_count; n += 1)
+    {
+        if (program->natives[n].symbol == symbol)
+        {
+            *address = (uint64_t)(uintptr_t)program->natives[n].address;
+            found = program->natives[n].address != 0;
+        }
+    }
+    if (!found)
+    {
+        const InterpreterBinding* binding = interpreter_typed_find_binding(program, symbol);
+        if (binding != 0)
+        {
+            *address = (uint64_t)(uintptr_t)binding->bytes;
+            found = true;
+        }
+    }
+    return found;
+}
+
 static bool interpreter_typed_function_valid(const Tier0Function* function)
 {
     bool result = function->count <= BUSTER_TIER0_MAX_ENTRIES && function->local_count <= BUSTER_TIER0_MAX_LOCALS && function->parameter_count <= function->local_count;
@@ -800,7 +830,15 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             read = kind == BUSTER_TYPED_LOCAL;
             write = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
         }
-        else if (kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL)
+        else if (kind == BUSTER_TYPED_GLOBAL_ADDRESS)
+        {
+            if (value > UINT32_MAX || !interpreter_typed_symbol_address(program, (SymbolId)value, &address))
+            {
+                result->status = INTERPRETER_SYMBOL;
+                break;
+            }
+        }
+        else if (kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL)
         {
             const InterpreterBinding* binding = value <= UINT32_MAX ? interpreter_typed_find_binding(program, (SymbolId)value) : 0;
             if (binding == 0)
