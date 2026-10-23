@@ -43,5 +43,21 @@ The sanitizer compile used Clang 23.1.1 with `-O1 -g -march=native -fwrapv
 included `lane.c`, `c_lowering.c`, `c_lowering_test.c` and
 `c_lowering_benchmark.c` and called `run_c_lowering_tests(argc - 1, argv + 1)`.
 
+The exact [focused entry point](sanitizer-main.c) is retained here. On the
+approved host, from `/home/david/buster-fast-bench/codex-lowering-129`, the
+frozen checkout was `tree/` and this entry point was `lowering-main.c`.
+The sanitizer commands were:
+
+```sh
+EXCLUSIVE_OWNER=codex-126-lowering \
+  ~/buster-fast-bench/exclusive.sh \
+  clang -O1 -g -march=native -Itree/src -fwrapv -funsigned-char \
+  -fno-strict-aliasing -Wall -Werror -Wno-unused-function \
+  -fsanitize=address,undefined -fno-omit-frame-pointer -pthread \
+  lowering-main.c -o lowering-sanitize
+EXCLUSIVE_OWNER=codex-126-lowering \
+  ~/buster-fast-bench/exclusive.sh ./lowering-sanitize --clang
+```
+
 The semantic handoff and outstanding source/corpus acceptance are described
 in [the lowering guide](../../c-lowering.md).

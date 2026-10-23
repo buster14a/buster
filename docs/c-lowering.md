@@ -35,8 +35,8 @@ References record dependencies of emitted bodies and initializers. Local
 evaluated references can reach another definition; unevaluated references and
 references resolved to an external symbol do not. A blanket rule that drops
 everything written inside `sizeof` would be wrong: evaluated variable-length
-array bounds still contribute dependencies. The checker also selects
-`_Generic` associations, handles constant-folded expressions, and resolves
+array bounds still contribute dependencies. The semantic producer must select
+`_Generic` associations, handle constant-folded expressions, and resolve
 calls and addresses before producing these columns. Static objects reachable
 only from an unreferenced function remain unselected.
 
@@ -44,12 +44,15 @@ The output is a reached bitset and a compact array of selected definition
 IDs in source order. A downstream function producer maps those IDs to checked
 bodies for Tier 0 or IR lowering; an object producer maps them to checked
 initializers and link definitions. Discovery order never becomes emission
-order. Diagnostic checking is independent: default compilation still checks
-every body, as #155 requires.
+order. Diagnostic checking is independent: integration must preserve the
+requirement to check every body by default, as #155 requires.
+
 Checked inline-only bodies must also remain available to a future Tier 1
-inliner. If inlining introduces local emission dependencies, that producer
-must publish them; this out-of-line selection is not a list of checked bodies
-that may be discarded.
+inliner. Attribute any emission dependencies introduced by inlining to the
+emitted caller, then prepare and compute reachability before emission. A changed
+inline plan requires recomputing that closure; edges whose source is an
+inline-only body are deliberately discarded during preparation. This out-of-line
+selection is not a list of checked bodies that may be discarded.
 
 ## Graph preparation and traversal
 
@@ -68,10 +71,12 @@ columns may be null. Preparation copies the retained information, so the
 producer can release its input columns after success. Failure preserves both
 the arena length and the previous result.
 
-The prepared `CLowering` owns a flags column, `definition_count + 1` adjacency
-offsets, retained targets, a queue, a scalar visited column, the reached bitset
-and selected IDs. Each solver reuses these buffers without allocating. The
-bitset has `ceil(definition_count / 64)` words, with high unused bits zero;
+For a nonempty input, the prepared `CLowering` owns a flags column,
+`definition_count + 1` adjacency offsets, retained targets, a queue, a scalar
+visited column, the reached bitset
+and selected IDs. An empty plan has null buffers, including adjacency offsets.
+Each solver reuses these buffers without allocating. The bitset has
+`ceil(definition_count / 64)` words, with high unused bits zero;
 only the first `selected_count` output IDs are valid. A workspace belongs to
 one worker and must outlive every consumer of its selected IDs. The reported
 `workspace_bytes` includes both paths' reusable storage and alignment;
