@@ -221,7 +221,7 @@ pinned to CPU 2 under the runner's shared lock.
 The environment suite passed **420,202 checks, zero failures**. All existing
 test commands and the call-graph gate passed too: 32 translation units,
 16,644 functions, zero unapproved cycles and three allowed components.
-Separate sanitizer validation remains pending.
+Separate sanitizer results for the production handoff appear below.
 
 The subsequent [combined-checker CI run
 39942018790](https://github.com/buster14a/buster/actions/runs/39942018790)
@@ -230,7 +230,17 @@ also passed for head `6a2b4837e72b0f50ba998573d2fc32e8da3a9550`. It tested merge
 `5d78cc2b1e6b608c6ce04b6147ef0ba7f3f86d4f`: 420,202 environment checks,
 67,719 checker checks, and the 34-unit / 18,102-function call-graph gate with
 zero unapproved cycles. The production publication code described above was
-added afterward and needs separate qualification.
+added afterward and qualified by the following run.
+
+Production-history head `f8817417e8a8130051f7287ee05ae13ad4bb662d` passed
+[CI 39948312157](https://github.com/buster14a/buster/actions/runs/39948312157):
+420,202 environment checks, 69,425 checker checks, 35 translation units,
+18,266 functions and zero unapproved cycles. The tested merge
+`7def9e067107765003918286bdf99f63b4f53894` combines main `4263011` with that
+head and has the exact head tree `87a62ff7a55beb386b9ffafa835a93ccb6331b8d`.
+The standalone harness fix in `65b3951` changes no compiler implementation.
+That snapshot also passed 420,202 environment and 69,425 checker checks on the
+locked 9700X under ASan, UBSan and leak detection, with no findings.
 
 The first benchmark process interleaved all paths over 16,380 declarations,
 4,096 names and 65,536 queries, with a warmup and 21 measured passes:
@@ -272,12 +282,15 @@ Its fallback covered 58 top-level declarations and 33,911 tokens (1.480%).
 The environment numbers above are synthetic per-query costs. The additional
 [source measurement harness](measurements/c-environments-2026-10-23/README.md)
 includes parsing, the production reader, publication and expression checking.
-Its source-pipeline measurements remain pending.
+Its controlled small/large measurements are now recorded with frozen inputs,
+matching output fingerprints and three independent processes per configuration.
+On the large input, vector pipeline medians were 57.597 ns/token before
+publication and 59.635 afterward (3.5% higher); observed ranges and cycles are
+in that measurement guide. This is the cost of the available sequential reader
+plus retained history, separate from an actual deferred semantic checker.
 
 ## Remaining acceptance for #113
 
-- Qualify the new production history handoff on the locked 9700X, separately
-  from the earlier kernel-only CI and measurements above.
 - Check every top-level initializer and its scope effects before deferring
   bodies; keep body-local type construction private.
 - Implement source-ordered linkage/composite-type effects and connect actual
