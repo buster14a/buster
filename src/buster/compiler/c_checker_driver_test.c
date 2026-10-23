@@ -15,7 +15,7 @@ struct CheckDriverFixture
     bool quiet;
 };
 
-static bool check_test_driver_run(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet,
+static bool check_test_driver_run(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet, bool lazy,
                                   CheckCorpusOracle* outcome, uint32_t* warnings)
 {
     *outcome = (CheckCorpusOracle){ 0 };
@@ -52,6 +52,10 @@ static bool check_test_driver_run(const char* executable, const char* source, co
             if (quiet)
             {
                 arguments[count++] = "-w";
+            }
+            if (lazy)
+            {
+                arguments[count++] = "-flazy-system-headers";
             }
             arguments[count++] = "-std=gnu17";
             arguments[count++] = "-c";
@@ -134,11 +138,137 @@ static void check_test_driver_diagnostic_capacity(CheckTest* test)
     arena_release(&scratch);
 }
 
+static bool check_test_driver_files_equal(const char* first, const char* second)
+{
+    FILE* a = fopen(first, "rb");
+    FILE* b = fopen(second, "rb");
+    bool equal = a != NULL && b != NULL;
+    bool complete = false;
+    while (equal && !complete)
+    {
+        unsigned char left[4096];
+        unsigned char right[4096];
+        const size_t count_a = fread(left, 1, sizeof(left), a);
+        const size_t count_b = fread(right, 1, sizeof(right), b);
+        equal = count_a == count_b && memcmp(left, right, count_a) == 0 && !ferror(a) && !ferror(b);
+        complete = count_a < sizeof(left);
+    }
+    if (a != NULL)
+    {
+        equal = fclose(a) == 0 && equal;
+    }
+    if (b != NULL)
+    {
+        equal = fclose(b) == 0 && equal;
+    }
+    return equal;
+}
+
+static void check_test_driver_lazy(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    const struct
+    {
+        const char* name;
+        const char* header;
+        const char* source;
+        bool rejected;
+        bool lazy_rejected;
+    } fixtures[] =
+    {
+        {
+            "unused system static semantic error is deferred only when requested",
+            "#pragma GCC system_header\nstatic int unused(void){return missing;}\n",
+            "#include \"lazy.h\"\nint f(void){return 3;}\n",
+            true,
+            false,
+        },
+        {
+            "referenced system static semantic error is always checked",
+            "#pragma GCC system_header\nstatic int used(void){return missing;}\n",
+            "#include \"lazy.h\"\nint f(void){return used();}\n",
+            true,
+            true,
+        },
+        {
+            "ordinary unused static semantic error is always checked",
+            "static int unused(void){return missing;}\n",
+            "#include \"lazy.h\"\nint f(void){return 3;}\n",
+            true,
+            true,
+        },
+        {
+            "unused system static syntax error is always parsed",
+            "#pragma GCC system_header\nstatic int unused(void){int x=; return 1;}\n",
+            "#include \"lazy.h\"\nint f(void){return 3;}\n",
+            true,
+            true,
+        },
+        {
+            "valid referenced and unreferenced header functions have equal objects",
+            "#pragma GCC system_header\nstatic int unused(void){return 99;}\nstatic int used(void){return 7;}\n",
+            "#include \"lazy.h\"\nint f(void){return used();}\n",
+            false,
+            false,
+        },
+        {
+            "a file-scope address retains a system body in both modes",
+            "#pragma GCC system_header\nstatic int used(void){return 7;}\nstatic int unused(void){return 99;}\n",
+            "#include \"lazy.h\"\nint (*pointer)(void)=used; int f(void){return 3;}\n",
+            false,
+            false,
+        },
+    };
+    char header[192];
+    char source[192];
+    char objects[2][192];
+    snprintf(header, sizeof(header), "%s/lazy.h", directory);
+    snprintf(source, sizeof(source), "%s/lazy.c", directory);
+    snprintf(objects[0], sizeof(objects[0]), "%s/eager.o", directory);
+    snprintf(objects[1], sizeof(objects[1]), "%s/lazy.o", directory);
+    const char* arguments[] = { "-std=gnu17" };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
+    {
+        CheckCorpusOracle oracle = { 0 };
+        const bool ready = parse_test_write(header, fixtures[fixture].header, strlen(fixtures[fixture].header)) &&
+                           parse_test_write(source, fixtures[fixture].source, strlen(fixtures[fixture].source)) &&
+                           check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), source, &oracle);
+        check_test_expect(test, ready && oracle.rejected == fixtures[fixture].rejected, fixtures[fixture].name);
+        const uint32_t routes = executable != NULL ? 4 : 2;
+        for (uint32_t route = 0; ready && route < routes; route += 1)
+        {
+            bool accepted[2] = { false, false };
+            for (uint32_t mode = 0; mode < 2; mode += 1)
+            {
+                unlink(objects[mode]);
+                CheckCorpusOracle checked = { 0 };
+                uint32_t warnings = 0;
+                const bool ran = check_test_driver_run(route >= 2 ? executable : NULL, source, objects[mode], (route & 1) != 0,
+                                                       false, false, mode != 0, &checked, &warnings);
+                const bool rejected = mode == 0 ? fixtures[fixture].rejected : fixtures[fixture].lazy_rejected;
+                check_test_expect(test, ran && checked.rejected == rejected, fixtures[fixture].name);
+                check_test_expect(test, rejected || access(objects[mode], R_OK) == 0, "accepted lazy-policy source publishes its object");
+                check_test_expect(test, !rejected || access(objects[mode], F_OK) != 0, "rejected lazy-policy source publishes no object");
+                accepted[mode] = ran && !checked.rejected;
+            }
+            if (!fixtures[fixture].rejected)
+            {
+                check_test_expect(test, accepted[0] && accepted[1] && check_test_driver_files_equal(objects[0], objects[1]),
+                                  "eager and lazy modes produce byte-identical valid objects");
+            }
+        }
+    }
+    unlink(objects[0]);
+    unlink(objects[1]);
+    unlink(source);
+    unlink(header);
+}
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     CheckTest test = { 0 };
     const char* clang = "clang";
     const char* executable = NULL;
+    bool lazy = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -149,6 +279,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--executable") == 0 && i + 1 < argc)
         {
             executable = argv[++i];
+        }
+        else if (strcmp(argv[i], "--lazy-system-headers") == 0)
+        {
+            lazy = true;
         }
         else
         {
@@ -335,6 +469,28 @@ static int run_checker_driver_tests(int argc, char** argv)
             "int f(void){int broken=;}\n",
             true,
         },
+        {
+            "unknown floating pragma state retains its warning",
+            "#pragma STDC FENV_ACCESS MAYBE\nint value;\n",
+            false,
+            1,
+        },
+        {
+            "unknown complex pragma state can be promoted at end of file",
+            "int value;\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\n#pragma STDC CX_LIMITED_RANGE MAYBE\n",
+            true,
+        },
+        {
+            "later colocated pragma cannot change an earlier pragma warning",
+            "#pragma STDC FENV_ACCESS MAYBE\n#pragma clang diagnostic ignored \"-Wunknown-pragmas\"\nint value;\n",
+            false,
+            1,
+        },
+        {
+            "earlier policy suppresses unknown pragma warnings",
+            "#pragma clang diagnostic ignored \"-Wunknown-pragmas\"\n#pragma STDC FENV_ACCESS MAYBE\nint value;\n",
+            false,
+        },
     };
     char directory[] = "/tmp/buster-checker-driver-XXXXXX";
     const bool temporary = options && mkdtemp(directory) != NULL;
@@ -361,7 +517,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             const bool external = route % schedules >= 2;
             const bool dump_static = route >= schedules;
             const bool ready = check_test_driver_run(external ? executable : NULL, source, object, (route & 1) != 0, dump_static,
-                                                     fixtures[i].quiet, &checked, &warnings);
+                                                     fixtures[i].quiet, lazy, &checked, &warnings);
             snprintf(description, sizeof(description), "%s, %s %s%s: error line %u, Clang %u", fixtures[i].name,
                      external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", checked.line, oracle.line);
             check_test_expect(&test, ready && checked.rejected == oracle.rejected && checked.line == oracle.line, description);
@@ -379,7 +535,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 static const char preserved[] = "existing output remains intact";
                 const bool written = parse_test_write(object, preserved, sizeof(preserved));
-                const bool rejected = written && check_test_driver_run(NULL, source, object, false, false, fixtures[i].quiet, &checked, &warnings) && checked.rejected;
+                const bool rejected = written && check_test_driver_run(NULL, source, object, false, false, fixtures[i].quiet, lazy, &checked, &warnings) && checked.rejected;
                 FILE* prior = fopen(object, "rb");
                 char bytes[sizeof(preserved) + 1] = { 0 };
                 const size_t length = prior != NULL ? fread(bytes, 1, sizeof(bytes), prior) : 0;
@@ -396,6 +552,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_driver_lazy(&test, clang, executable, directory);
         rmdir(directory);
     }
     printf("checker-driver: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);

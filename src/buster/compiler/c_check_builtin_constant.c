@@ -6,7 +6,7 @@
 // argument evaluations while its constant evaluator returns only the converted first argument.
 
 static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uint32_t closing, CBuiltinId builtin,
-                                const CheckValue* arguments, uint32_t count, CheckValue* value)
+                                TypeId destination_type, const CheckValue* arguments, uint32_t count, CheckValue* value)
 {
     CheckInputReader* reader = input->reader;
     const uint32_t extensions = check_input_expression_extensions(reader->parser);
@@ -82,6 +82,25 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         check_builtin_query(reader->types, &action, &checked, 1);
         result = checked.action;
     }
+    else if (family == CHECK_OP_BUILTIN_VECTOR)
+    {
+        const CheckBuiltinVectorAction action =
+        {
+            .id = builtin,
+            .arguments = arguments,
+            .argument_count = count,
+            .destination_type = destination_type,
+            .node = closing,
+            .tag_completions = reader->tag_completions,
+            .tag_completion_count = reader->types->tags.capacity,
+            .source_position = closing + 1,
+            .extensions = extensions,
+        };
+        CheckBuiltinVectorResult checked;
+        check_builtin_vector(reader->types, &action, &checked, 1);
+        result = checked.action;
+        result.warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_VECTOR_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
+    }
     else if (family == CHECK_OP_BUILTIN_ATOMIC)
     {
         const CheckBuiltinAtomicAction action =
@@ -110,6 +129,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
                 .operands = { arguments[0] },
                 .node = closing,
                 .tag_completions = reader->tag_completions,
+                .transparent_unions = reader->transparent_unions,
                 .tag_completion_count = reader->types->tags.capacity,
                 .source_position = closing + 1,
                 .extensions = extensions,
@@ -150,6 +170,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         }
     }
     reader->output->resource |= result.diagnostic == CHECK_DIAG_RESOURCE;
+    reader->output->constant_warnings[closing] |= (uint8_t)result.warnings;
     *value = result.value;
     return result.diagnostic == CHECK_DIAG_NONE;
 }

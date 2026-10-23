@@ -260,6 +260,10 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_environment_benchmark.c"
 #include "buster/compiler/c_check_environment.c"
 #include "buster/compiler/c_check_body_bindings.c"
+#include "buster/compiler/c_lowering.c"
+#include "buster/compiler/c_lowering_test.c"
+#include "buster/compiler/c_lowering_benchmark.c"
+#include "buster/compiler/c_check_lazy.c"
 
 #include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_builtin_test.c"
@@ -498,13 +502,13 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_c_bindings_benchmark(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-environments") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-lowering") == 0)
     {
-        result = run_c_environment_tests(argc - 2, argv + 2);
+        result = run_c_lowering_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-environments") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-lowering") == 0)
     {
-        result = run_c_environment_benchmark(argc - 2, argv + 2);
+        result = run_c_lowering_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-parser-bindings") == 0)
     {

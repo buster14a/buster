@@ -145,6 +145,7 @@ struct CheckInitRepeat
 
 typedef struct CheckInitWalker CheckInitWalker;
 typedef struct CheckInitConstants CheckInitConstants;
+typedef struct CheckInitObjects CheckInitObjects;
 typedef struct CheckInitWarningSink CheckInitWarningSink;
 struct CheckInitWarningSink
 {
@@ -169,6 +170,7 @@ struct CheckInitWalker
     const CheckStream* stream;
     const CheckGraph* graph;
     const CheckInitConstants* constants;
+    const CheckInitObjects* objects;
     CheckInitWarningCollector* warnings;
     const CheckInitString* strings;
     uint32_t string_count;
@@ -1159,8 +1161,6 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
     return whole;
 }
 
-static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin, uint32_t end);
-
 #include "c_check_initializer_vector.c"
 
 static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t node)
@@ -1266,7 +1266,8 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
     const CheckInitConstants* previous_constants = walker->constants;
     CheckInitConstants constants = { 0 };
     if (!walker->infer && walker->static_storage && node < walker->stream->count && walker->graph != NULL && walker->constants == NULL &&
-        walker->stream->values[node].constant_kind == CHECK_CONSTANT_NONE)
+        (walker->stream->values[node].constant_kind == CHECK_CONSTANT_NONE ||
+         (check_vector_type(walker->types, walker->stream->values[node].type) && check_init_constant_bytes(walker, node) == NULL)))
     {
         check_init_constants(walker, token, end, node, &constants);
         walker->constants = &constants;
@@ -1638,7 +1639,8 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
 static bool check_initializer_plan_warnings(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
                                    const CheckStream* stream, const CheckInitString* strings, uint32_t string_count,
                                    TypeId type, uint32_t begin, uint32_t end, bool static_storage, bool diagnostic_only, bool ignore_excess,
-                                   Arena* output, Arena* scratch, CheckInitializer* result, const CheckGraph* graph, CheckInitWarningCollector* warnings)
+                                   Arena* output, Arena* scratch, CheckInitializer* result, const CheckGraph* graph,
+                                   CheckInitWarningCollector* warnings, const CheckInitObjects* objects)
 {
     *result = (CheckInitializer){
         .type = type,
@@ -1666,6 +1668,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
             .token_nodes = token_nodes,
             .stream = stream,
             .graph = graph,
+            .objects = objects,
             .warnings = warnings,
             .strings = strings,
             .string_count = string_count,
@@ -1699,7 +1702,7 @@ static bool check_initializer_plan(TypeTable* types, const Parser* parser, const
                                    Arena* output, Arena* scratch, CheckInitializer* result, const CheckGraph* graph)
 {
     return check_initializer_plan_warnings(types, parser, token_nodes, stream, strings, string_count, type, begin, end,
-                                           static_storage, diagnostic_only, ignore_excess, output, scratch, result, graph, NULL);
+                                           static_storage, diagnostic_only, ignore_excess, output, scratch, result, graph, NULL, NULL);
 }
 
 static bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,

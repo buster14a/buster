@@ -96,6 +96,7 @@ struct CheckConstantAttributes
 {
     CheckInputAttributes parsed;
     uint32_t owner;
+    uint32_t end;
     bool publish;
 };
 
@@ -103,8 +104,12 @@ typedef struct CheckConstantInput CheckConstantInput;
 struct CheckConstantInput
 {
     CheckInputReader* reader;
+    uint64_t mark;
     uint32_t first;
     uint32_t end;
+    uint32_t bind_cursor;
+    uint32_t pending_tag;
+    uint32_t failure;
     CheckValue* values;
     uint8_t* present;
     uint8_t* syntax;
@@ -123,6 +128,7 @@ struct CheckConstantInput
     uint32_t* failed_token;
     bool raw;
     bool cached;
+    bool deferred_tags;
 };
 
 static uint32_t check_constant_unevaluated_warnings(void)
@@ -256,7 +262,11 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
         const uint32_t name = parser->tokens.names[i];
         const uint8_t kind = parser->tokens.kinds[i];
         bool consumed = true;
-        if (check_input_qualifier(name, &qualifiers))
+        if (input->attribute_starts[i - input->first] != 0)
+        {
+            i = input->attribute_starts[i - input->first]->end - 1;
+        }
+        else if (check_input_qualifier(name, &qualifiers))
         {
         }
         else if (kind == PARSE_KIND_STORAGE)
@@ -398,6 +408,31 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
     if (valid && atomic)
     {
         base = check_input_type_result(reader, type_atomic(reader->types, base));
+    }
+    // Only attributes belonging to this specifier sequence affect its base. Attribute groups inside a tag or
+    // nested typeof already belong to those independently completed type jobs.
+    for (uint32_t token = *cursor; valid && token < i;)
+    {
+        CheckConstantAttributes* attributes = input->attribute_starts[token - input->first];
+        const uint8_t kind = parser->tokens.kinds[token];
+        if (attributes != 0)
+        {
+            base = check_input_attribute_type(reader, &attributes->parsed, base, false);
+            valid = base != 0;
+            token = attributes->end;
+        }
+        else if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
+        {
+            token = reader->tag_ends[token] > token ? reader->tag_ends[token] : token + 1;
+        }
+        else if (kind == PARSE_KIND_L_PAREN && parser->tree.parents[token] > token && parser->tree.parents[token] < i)
+        {
+            token = parser->tree.parents[token] + 1;
+        }
+        else
+        {
+            token += 1;
+        }
     }
     *cursor = i;
     return valid ? check_input_type_result(reader, type_qualify(reader->types, base, qualifiers)) : 0;
@@ -783,6 +818,26 @@ static bool check_constant_type_start(const Parser* parser, uint32_t token)
 static bool check_constant_raw_type_start(CheckConstantInput* input, uint32_t token);
 static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t first, uint32_t end);
 
+// convertvector has two source operands but only one value operand. Keep the destination as a type job so
+// nested typeof/attribute queries finish before the call, without entering the source declaration reader.
+static bool check_constant_convert_prepare(CheckConstantInput* input, uint32_t opening)
+{
+    CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    const uint32_t closing = parser->tree.parents[opening];
+    const uint32_t separator = closing < input->end ? check_constant_punctuation(parser, opening + 1, closing, PARSE_KIND_COMMA) : closing;
+    const bool valid = opening + 1 < separator && separator + 1 < closing && closing < input->end &&
+                       check_constant_punctuation(parser, separator + 1, closing, PARSE_KIND_COMMA) == closing;
+    if (valid)
+    {
+        input->syntax[opening - 1 - input->first] = true;
+        input->type_begin[closing - input->first] = separator + 1;
+        check_constant_mark_type(input, separator + 1, closing);
+        reader->builtins[closing] = CBUILTIN_CONVERTVECTOR;
+    }
+    return valid;
+}
+
 // Attribute syntax is scanned once, without evaluating its operands. Each group is an explicit dependency job:
 // normal expressions complete it at the group's postorder close; raw attribute tokens complete it inside out.
 static bool check_constant_attribute_prepare(CheckConstantInput* input, uint32_t owner, uint32_t* cursor)
@@ -806,6 +861,7 @@ static bool check_constant_attribute_prepare(CheckConstantInput* input, uint32_t
         }
         if (valid)
         {
+            job->end = *cursor;
             input->attribute_starts[first - input->first] = job;
             input->attribute_ends[*cursor - 1 - input->first] = job;
             memset(input->attribute_syntax + first - input->first, 1, *cursor - first);
@@ -891,7 +947,13 @@ static bool check_constant_tag_finish(CheckConstantInput* input, uint32_t positi
     for (uint32_t next = input->tag_finishes[position - input->first]; valid && next != 0;)
     {
         const uint32_t token = next - 1;
-        valid = (input->cached ? input->reader->tag_types[token] : check_input_tag_identity(input->reader, token, input->end, false)) != 0;
+        const bool definition = input->deferred_tags && position < input->end &&
+                                input->reader->parser->tokens.kinds[position] == PARSE_KIND_L_BRACE;
+        valid = (input->cached ? input->reader->tag_types[token] : check_input_tag_identity(input->reader, token, input->end, definition)) != 0;
+        if (valid && definition)
+        {
+            input->pending_tag = token;
+        }
         next = input->tag_next[token - input->first];
     }
     return valid;
@@ -947,6 +1009,7 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
             CheckInputAttributes* previous = reader->output->attributes[job->owner];
             valid = check_input_attribute_merge(reader, previous != 0 ? previous : &empty, &job->parsed, combined);
             reader->output->attributes[job->owner] = valid ? combined : previous;
+            job->publish = !valid;
         }
     }
     return valid;
@@ -1026,13 +1089,18 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
     {
         check_constant_mark_type(input, input->first, input->end);
     }
-    for (uint32_t token = input->first; valid && token < input->end; token += 1)
+    for (uint32_t token = input->bind_cursor; valid && token < input->end; token += 1)
     {
         const uint32_t index = token - input->first;
         valid = check_constant_tag_finish(input, token);
         if (!valid && input->failed_token != 0)
         {
             *input->failed_token = token;
+        }
+        if (input->pending_tag != BUSTER_CHECK_NONE)
+        {
+            input->bind_cursor = token;
+            break;
         }
         if (!valid || input->attribute_syntax[index] || (input->statement_syntax[index] & 1) != 0)
         {
@@ -1041,6 +1109,15 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
         const uint8_t role = parser->tree.roles[token];
         const uint8_t kind = parser->tokens.kinds[token];
         const uint32_t name = parser->tokens.names[token];
+        if (input->syntax[index] && check_input_attribute_starts(parser, token, input->end))
+        {
+            uint32_t after = token;
+            valid = check_constant_attribute_prepare(input, token, &after);
+            if (valid)
+            {
+                input->attribute_starts[index]->publish = false;
+            }
+        }
         const uint32_t completed = check_constant_completed_tag(input, token);
         if (completed != token)
         {
@@ -1114,6 +1191,10 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                     }
                 }
             }
+            else if (valid && keyword == C_NAME_BUILTIN_CONVERTVECTOR)
+            {
+                valid = check_constant_convert_prepare(input, token);
+            }
         }
         if (valid && input->syntax[index] && (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM))
         {
@@ -1163,7 +1244,12 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             *input->failed_token = token;
         }
     }
-    return valid && check_constant_tag_finish(input, input->end);
+    if (valid && input->pending_tag == BUSTER_CHECK_NONE)
+    {
+        input->bind_cursor = input->end;
+        valid = check_constant_tag_finish(input, input->end);
+    }
+    return valid;
 }
 
 static TypeId check_constant_control_type(CheckInputReader* reader, const CheckValue* value)
@@ -1314,6 +1400,7 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
                     .member = parser->tokens.names[i],
                     .node = i,
                     .tag_completions = reader->tag_completions,
+                    .transparent_unions = reader->transparent_unions,
                     .tag_completion_count = reader->types->tags.capacity,
                     .source_position = token + 1,
                     .extensions = check_input_expression_extensions(parser),
@@ -1512,6 +1599,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             .op = CHECK_OP_COUNT,
             .node = token,
             .tag_completions = reader->tag_completions,
+            .transparent_unions = reader->transparent_unions,
             .tag_completion_count = reader->types->tags.capacity,
             .source_position = reader->ends[token] + 1,
             .extensions = check_input_expression_extensions(parser),
@@ -1792,7 +1880,17 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         }
         else if (role == PARSE_ROLE_CLOSE_KEYWORD)
         {
-            valid = check_constant_builtin(input, token, &input->values[index]);
+            if (reader->builtins[token] == CBUILTIN_CONVERTVECTOR)
+            {
+                const uint32_t type_first = input->type_begin[index];
+                const TypeId type = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, token) : 0;
+                valid = count == 1 && type != 0 && check_constant_call(input, reader->first_child[token], token, CBUILTIN_CONVERTVECTOR,
+                                                                     type, action.operands, count, &input->values[index]);
+            }
+            else
+            {
+                valid = check_constant_builtin(input, token, &input->values[index]);
+            }
             produced = true;
         }
         else if (role == PARSE_ROLE_SEPARATOR)
@@ -1816,13 +1914,18 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             const uint16_t builtin = reader->builtins[token];
             if (builtin != CBUILTIN_NONE && (builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT))
             {
-                CheckValue arguments[6] = { 0 };
+                const uint64_t mark = reader->scratch->length;
+                CheckValue* arguments = count != 0 ? arena_push_array(reader->scratch, count, sizeof(CheckValue), _Alignof(CheckValue)) : 0;
+                valid = count == 0 || arguments != 0;
+                reader->output->resource |= !valid;
                 uint32_t argument = 0;
-                for (uint32_t child = first; child != BUSTER_CHECK_NONE && argument < BUSTER_ARRAY_LENGTH(arguments); child = input->next_value[child - input->first])
+                for (uint32_t child = first; valid && child != BUSTER_CHECK_NONE && argument < count; child = input->next_value[child - input->first])
                 {
                     arguments[argument++] = input->values[child - input->first];
                 }
-                valid = check_constant_call(input, reader->first_child[token], token, (CBuiltinId)builtin, arguments, count, &input->values[index]);
+                valid = valid && argument == count && check_constant_call(input, reader->first_child[token], token, (CBuiltinId)builtin,
+                                                                          0, arguments, count, &input->values[index]);
+                arena_pop_to(reader->scratch, mark);
                 produced = true;
             }
             else
@@ -1912,8 +2015,8 @@ struct CheckConstantOperator
     CheckOp op;
     TypeId type;
     uint32_t token;
+    uint32_t arity;
     uint8_t precedence;
-    uint8_t arity;
     uint8_t marker;
     uint16_t builtin;
 };
@@ -1966,6 +2069,7 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 .type = operation.type,
                 .node = operation.token,
                 .tag_completions = reader->tag_completions,
+                .transparent_unions = reader->transparent_unions,
                 .tag_completion_count = reader->types->tags.capacity,
                 .source_position = input->end,
                 .extensions = check_input_expression_extensions(reader->parser),
@@ -2000,7 +2104,7 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 const uint32_t close = reader->parser->tree.parents[operation.token + 1];
                 checked = (CheckActionResult){ 0 };
                 valid &= check_constant_call(input, operation.token, close, (CBuiltinId)operation.builtin,
-                                              values + *value_count, operation.arity, &checked.value);
+                                              operation.type, values + *value_count, operation.arity, &checked.value);
             }
             else
             {
@@ -2060,7 +2164,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             operand = false;
             token += 1;
         }
-        else if (operand && kind == PARSE_KIND_IDENTIFIER && input->syntax[token - input->first])
+        else if (operand && (kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_TYPE_ARGUMENT) && input->syntax[token - input->first])
         {
             const uint32_t open = token + 1;
             const uint32_t close = open < end ? parser->tree.parents[open] : end;
@@ -2071,19 +2175,27 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                 arguments += 1;
                 first_argument = check_constant_punctuation(parser, first_argument, close, PARSE_KIND_COMMA) + 1;
             }
-            valid = builtin != CBUILTIN_NONE && (builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT) && arguments <= 6;
+            valid = builtin != CBUILTIN_NONE && (builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT);
+            const TypeId destination = builtin == CBUILTIN_CONVERTVECTOR ? input->queries[close - input->first] : 0;
+            if (builtin == CBUILTIN_CONVERTVECTOR)
+            {
+                valid &= arguments == 2 && destination != 0;
+                arguments = 1;
+            }
             if (valid)
             {
                 operators[operator_count++] = (CheckConstantOperator)
                 {
                     .op = CHECK_OP_BUILTIN_UNARY,
+                    .type = destination,
                     .token = token,
                     .precedence = 15,
-                    .arity = (uint8_t)arguments,
+                    .arity = arguments,
                     .builtin = builtin,
                 };
+                operators[operator_count++] = (CheckConstantOperator){ .token = open, .marker = 3 };
             }
-            token += 1;
+            token = open + 1;
         }
         else if (operand && kind == PARSE_KIND_IDENTIFIER)
         {
@@ -2200,8 +2312,9 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             {
                 valid = check_constant_raw_reduce(input, operators, &operator_count, values, ranges, &value_count);
             }
-            operand = true;
-            token += 1;
+            const bool destination = operator_count >= 2 && operators[operator_count - 2].builtin == CBUILTIN_CONVERTVECTOR;
+            operand = !destination;
+            token = destination ? parser->tree.parents[operators[operator_count - 1].token] : token + 1;
         }
         else if (!operand && kind == PARSE_KIND_QUESTION)
         {
@@ -2331,11 +2444,16 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
     {
         check_constant_mark_type(input, input->first, input->end);
     }
-    for (uint32_t token = input->first; valid && token < input->end; token += 1)
+    for (uint32_t token = input->bind_cursor; valid && token < input->end; token += 1)
     {
         const uint8_t kind = parser->tokens.kinds[token];
         const uint32_t index = token - input->first;
         valid = check_constant_tag_finish(input, token);
+        if (input->pending_tag != BUSTER_CHECK_NONE)
+        {
+            input->bind_cursor = token;
+            break;
+        }
         if (!valid || input->attribute_syntax[index])
         {
             continue;
@@ -2346,11 +2464,24 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
             token = completed - 1;
             continue;
         }
+        if (input->syntax[index] && check_input_attribute_starts(parser, token, input->end))
+        {
+            uint32_t after = token;
+            valid = check_constant_attribute_prepare(input, token, &after);
+            if (valid)
+            {
+                input->attribute_starts[index]->publish = false;
+            }
+        }
         if (kind == PARSE_KIND_L_PAREN)
         {
             const uint32_t close = parser->tree.parents[token];
             valid = close > token && close < input->end;
-            if (valid && token + 1 < close && check_constant_raw_type_start(input, token + 1))
+            if (valid && token > input->first && parser->tokens.names[token - 1] == C_NAME_BUILTIN_CONVERTVECTOR)
+            {
+                valid = check_constant_convert_prepare(input, token);
+            }
+            else if (valid && token + 1 < close && check_constant_raw_type_start(input, token + 1))
             {
                 input->type_begin[close - input->first] = token + 1;
                 check_constant_mark_type(input, token + 1, close);
@@ -2392,7 +2523,12 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
             }
         }
     }
-    return valid && check_constant_tag_finish(input, input->end);
+    if (valid && input->pending_tag == BUSTER_CHECK_NONE)
+    {
+        input->bind_cursor = input->end;
+        valid = check_constant_tag_finish(input, input->end);
+    }
+    return valid;
 }
 
 static bool check_constant_raw_prepare(CheckConstantInput* input)
@@ -2477,18 +2613,38 @@ static bool check_constant_raw_prepare(CheckConstantInput* input)
     return valid;
 }
 
-static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached,
-                                      CheckValue* value, TypeId* type, uint32_t* failed_token)
+static void check_constant_values_reset(CheckConstantInput* input)
 {
-    const uint64_t mark = reader->scratch->length;
+    const uint32_t count = input->end - input->first;
+    memset(input->present, 0, count);
+    memset(input->first_value, 0xff, (uint64_t)count * sizeof(uint32_t));
+    memset(input->last_value, 0xff, (uint64_t)count * sizeof(uint32_t));
+    memset(input->next_value, 0xff, (uint64_t)count * sizeof(uint32_t));
+    memset(input->warning_begin, 0xff, (uint64_t)count * sizeof(uint32_t));
+    memset(input->queries, 0, (uint64_t)count * sizeof(TypeId));
+}
+
+static bool check_constant_input_initialize(CheckConstantInput* input, CheckInputReader* reader, uint32_t first, uint32_t end, bool cached, uint32_t* failed_token)
+{
     const uint32_t count = end >= first ? end - first : 0;
-    CheckConstantInput input = { .reader = reader, .first = first, .end = end, .cached = cached, .failed_token = failed_token };
+    *input = (CheckConstantInput)
+    {
+        .reader = reader,
+        .mark = reader->scratch->length,
+        .first = first,
+        .end = end,
+        .bind_cursor = first,
+        .pending_tag = BUSTER_CHECK_NONE,
+        .failure = BUSTER_CHECK_NONE,
+        .cached = cached,
+        .failed_token = failed_token,
+    };
     if (failed_token != 0)
     {
         *failed_token = BUSTER_CHECK_NONE;
     }
     bool valid = count != 0 && end <= reader->parser->tokens.count;
-#define BUSTER_CHECK_CONSTANT_ARRAY(field, element) input.field = valid ? arena_push_array(reader->scratch, count, sizeof(element), 16) : 0; valid &= input.field != 0
+#define BUSTER_CHECK_CONSTANT_ARRAY(field, element) input->field = valid ? arena_push_array(reader->scratch, count, sizeof(element), 16) : 0; valid &= input->field != 0
     BUSTER_CHECK_CONSTANT_ARRAY(values, CheckValue);
     BUSTER_CHECK_CONSTANT_ARRAY(present, uint8_t);
     BUSTER_CHECK_CONSTANT_ARRAY(syntax, uint8_t);
@@ -2503,31 +2659,124 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
     BUSTER_CHECK_CONSTANT_ARRAY(attribute_starts, CheckConstantAttributes*);
     BUSTER_CHECK_CONSTANT_ARRAY(attribute_ends, CheckConstantAttributes*);
     BUSTER_CHECK_CONSTANT_ARRAY(tag_next, uint32_t);
-    input.tag_finishes = valid ? arena_push_array(reader->scratch, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
-    valid &= input.tag_finishes != 0;
+    input->tag_finishes = valid ? arena_push_array(reader->scratch, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
+    valid &= input->tag_finishes != 0;
 #undef BUSTER_CHECK_CONSTANT_ARRAY
     reader->output->resource |= count != 0 && end <= reader->parser->tokens.count && !valid;
     if (valid)
     {
-        memset(input.present, 0, count);
-        memset(input.syntax, 0, count);
-        memset(input.statement_syntax, 0, count);
-        memset(input.first_value, 0xff, (uint64_t)count * sizeof(uint32_t));
-        memset(input.last_value, 0xff, (uint64_t)count * sizeof(uint32_t));
-        memset(input.next_value, 0xff, (uint64_t)count * sizeof(uint32_t));
-        memset(input.type_begin, 0xff, (uint64_t)count * sizeof(uint32_t));
-        memset(input.warning_begin, 0xff, (uint64_t)count * sizeof(uint32_t));
-        memset(input.queries, 0, (uint64_t)count * sizeof(TypeId));
-        memset(input.attribute_syntax, 0, count);
-        memset(input.attribute_starts, 0, (uint64_t)count * sizeof(CheckConstantAttributes*));
-        memset(input.attribute_ends, 0, (uint64_t)count * sizeof(CheckConstantAttributes*));
-        memset(input.tag_finishes, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        check_constant_values_reset(input);
+        memset(input->syntax, 0, count);
+        memset(input->statement_syntax, 0, count);
+        memset(input->type_begin, 0xff, (uint64_t)count * sizeof(uint32_t));
+        memset(input->attribute_syntax, 0, count);
+        memset(input->attribute_starts, 0, (uint64_t)count * sizeof(CheckConstantAttributes*));
+        memset(input->attribute_ends, 0, (uint64_t)count * sizeof(CheckConstantAttributes*));
+        memset(input->tag_finishes, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         for (uint32_t token = first; token < end; token += 1)
         {
             const uint8_t kind = reader->parser->tokens.kinds[token];
-            input.raw |= reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND && kind != PARSE_KIND_NUMBER && kind != PARSE_KIND_CHARACTER &&
+            input->raw |= reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND && kind != PARSE_KIND_NUMBER && kind != PARSE_KIND_CHARACTER &&
                          kind != PARSE_KIND_STRING && kind != PARSE_KIND_IDENTIFIER && kind != PARSE_KIND_DEFAULT;
         }
+    }
+    return valid;
+}
+
+// The source tag work stack owns these jobs. Binding yields after the tag's header, before any body token;
+// completing that body and resuming this same input preserves all earlier expression identities and events.
+static CheckConstantInput* check_input_constant_job(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const uint64_t mark = reader->scratch->length;
+    CheckConstantInput* input = arena_push(reader->scratch, sizeof(CheckConstantInput), _Alignof(CheckConstantInput));
+    reader->output->resource |= input == 0;
+    const bool valid = input != 0 && check_constant_input_initialize(input, reader, first, end, false, &input->failure);
+    if (valid)
+    {
+        input->mark = mark;
+        input->deferred_tags = true;
+        if (!input->raw)
+        {
+            check_constant_source_regions(input);
+        }
+    }
+    else
+    {
+        arena_pop_to(reader->scratch, mark);
+        input = 0;
+    }
+    return input;
+}
+
+static bool check_constant_job_header(CheckConstantInput* input, uint32_t token)
+{
+    const uint32_t first = token + 1;
+    const uint32_t end = input->bind_cursor;
+    bool valid = first <= end && end < input->end;
+    if (valid && first != end)
+    {
+        CheckConstantInput header = *input;
+        const uint32_t offset = first - input->first;
+        header.first = first;
+        header.end = end;
+#define BUSTER_CHECK_CONSTANT_SLICE(field) header.field += offset
+        BUSTER_CHECK_CONSTANT_SLICE(values);
+        BUSTER_CHECK_CONSTANT_SLICE(present);
+        BUSTER_CHECK_CONSTANT_SLICE(syntax);
+        BUSTER_CHECK_CONSTANT_SLICE(statement_syntax);
+        BUSTER_CHECK_CONSTANT_SLICE(first_value);
+        BUSTER_CHECK_CONSTANT_SLICE(last_value);
+        BUSTER_CHECK_CONSTANT_SLICE(next_value);
+        BUSTER_CHECK_CONSTANT_SLICE(type_begin);
+        BUSTER_CHECK_CONSTANT_SLICE(warning_begin);
+        BUSTER_CHECK_CONSTANT_SLICE(queries);
+        BUSTER_CHECK_CONSTANT_SLICE(attribute_syntax);
+        BUSTER_CHECK_CONSTANT_SLICE(attribute_starts);
+        BUSTER_CHECK_CONSTANT_SLICE(attribute_ends);
+        BUSTER_CHECK_CONSTANT_SLICE(tag_finishes);
+        BUSTER_CHECK_CONSTANT_SLICE(tag_next);
+#undef BUSTER_CHECK_CONSTANT_SLICE
+        check_constant_values_reset(&header);
+        valid = header.raw ? check_constant_raw_prepare(&header) : check_constant_evaluate(&header);
+    }
+    return valid;
+}
+
+static bool check_input_constant_job_step(CheckConstantInput* input, CheckValue* value, uint32_t* nested_tag)
+{
+    bool valid = true;
+    *nested_tag = BUSTER_CHECK_NONE;
+    if (input->pending_tag != BUSTER_CHECK_NONE)
+    {
+        const uint32_t after = check_constant_completed_tag(input, input->pending_tag);
+        valid = after > input->pending_tag;
+        input->bind_cursor = after;
+        input->pending_tag = BUSTER_CHECK_NONE;
+    }
+    valid = valid && (input->raw ? check_constant_raw_bind(input, false) : check_constant_bind(input, false));
+    if (valid && input->pending_tag != BUSTER_CHECK_NONE)
+    {
+        valid = check_constant_job_header(input, input->pending_tag);
+        *nested_tag = valid ? input->pending_tag : BUSTER_CHECK_NONE;
+    }
+    else if (valid)
+    {
+        check_constant_values_reset(input);
+        valid = input->raw ? check_constant_raw_prepare(input) && check_constant_raw_expression(input, input->first, input->end) :
+                            check_constant_evaluate(input);
+        valid = valid && check_constant_range_value(input, input->first, input->end, value);
+    }
+    return valid;
+}
+
+static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached,
+                                      CheckValue* value, TypeId* type, uint32_t* failed_token)
+{
+    const uint64_t mark = reader->scratch->length;
+    CheckConstantInput input;
+    bool valid = check_constant_input_initialize(&input, reader, first, end, cached, failed_token);
+    if (valid)
+    {
         if (input.raw)
         {
             valid = check_constant_raw_bind(&input, type_name) && check_constant_raw_prepare(&input) &&

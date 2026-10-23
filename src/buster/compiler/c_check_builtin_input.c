@@ -9,6 +9,40 @@ static bool check_input_vararg_id(uint16_t builtin)
     return builtin >= CBUILTIN_VA_START && builtin <= CBUILTIN_VA_END;
 }
 
+static bool check_input_builtin_type_prepare(CheckInputReader* reader, uint32_t keyword, uint16_t builtin)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t opening = keyword + 1;
+    const uint32_t closing = opening < parser->tokens.count ? parser->tree.parents[opening] : parser->tokens.count;
+    bool valid = opening < closing && closing < parser->tokens.count && parser->tree.roles[opening] == PARSE_ROLE_OPEN_KEYWORD;
+    const uint32_t separator = valid ? check_constant_punctuation(parser, opening + 1, closing, PARSE_KIND_COMMA) : closing;
+    valid &= opening + 1 < separator && separator + 1 < closing &&
+             check_constant_punctuation(parser, separator + 1, closing, PARSE_KIND_COMMA) == closing;
+    if (valid)
+    {
+        reader->builtins[closing] = builtin;
+        reader->builtin_type_ends[separator + 1] = closing;
+        reader->ignored[keyword] = true;
+        memset(reader->ignored + separator + 1, 1, closing - separator - 1);
+    }
+    else
+    {
+        check_input_report(reader, keyword, CHECK_INPUT_DECLARATION);
+    }
+    return valid;
+}
+
+static void check_input_builtin_type(CheckInputReader* reader, uint32_t first)
+{
+    const uint32_t closing = reader->builtin_type_ends[first];
+    const TypeId type = check_input_constant_type(reader, first, closing);
+    reader->query_types[closing] = type;
+    if (type == 0)
+    {
+        check_input_report(reader, first, CHECK_INPUT_DECLARATION);
+    }
+}
+
 static uint16_t check_input_builtin_id(CheckInputReader* reader, uint32_t token)
 {
     const uint32_t identifier = reader->parser->tokens.names[token];

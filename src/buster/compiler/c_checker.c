@@ -46,6 +46,18 @@ struct CheckBuiltinCall
 };
 
 typedef struct CheckGraph CheckGraph;
+typedef struct CheckX86Call CheckX86Call;
+struct CheckX86Call
+{
+    uint32_t node;
+    const BuiltinIntrinsicInfo* info;
+    uint64_t required_ice_arguments;
+    uint64_t ice_arguments;
+    CheckBuiltinX86Reachability reachability;
+    bool constant_evaluated_context;
+    bool runtime_diagnostic_suppressed;
+};
+
 typedef struct CheckVectorCall CheckVectorCall;
 struct CheckVectorCall
 {
@@ -75,6 +87,7 @@ struct CheckGraph
     // Optional source-time tag history. Each node's cutoff is the exclusive end of its operand/type-name,
     // not the prefix operator token. A missing history preserves the direct action API's current-type view.
     const uint32_t* tag_completions;
+    const uint32_t* transparent_unions;
     uint32_t tag_completion_count;
     uint32_t* source_positions;
     uint32_t extensions;
@@ -100,6 +113,9 @@ struct CheckGraph
     CheckVectorCall* vector_members;
     uint32_t vector_member_count;
     uint32_t vector_member_capacity;
+    CheckX86Call* x86_calls;
+    uint32_t x86_count;
+    uint32_t x86_capacity;
 };
 
 typedef enum CheckStatus
@@ -261,6 +277,44 @@ struct CheckBuiltinAtomicEffect
 };
 
 typedef struct CheckStream CheckStream;
+typedef struct CheckBuiltinVectorEffect CheckBuiltinVectorEffect;
+struct CheckBuiltinVectorEffect
+{
+    uint32_t node;
+    CheckValue converted_arguments[3];
+    TypeId element_type;
+    TypeId memory_type;
+    uint32_t lane_count;
+    uint32_t evaluated_argument_count;
+    uint32_t warnings;
+    uint32_t warning_operands;
+    uint32_t unsupported;
+    CBuiltinId runtime_builtin;
+    CheckBuiltinVectorConstraint constraint;
+    CheckBuiltinVectorStoreConversion store_conversion;
+    bool reads_memory;
+    bool writes_memory;
+    bool nondeterministic;
+    bool constant_evaluation_unmodeled;
+    bool reads_fp_environment;
+    bool may_raise_fp_exceptions;
+    bool bool_splat_signed_true;
+};
+
+typedef struct CheckBuiltinX86Effect CheckBuiltinX86Effect;
+struct CheckBuiltinX86Effect
+{
+    uint32_t node;
+    const BuiltinIntrinsicInfo* info;
+    CheckBuiltinX86Status status;
+    CheckBuiltinX86Constraint constraint;
+    uint64_t checked_ice_arguments;
+    uint32_t matched_rules;
+    uint32_t unsupported;
+    uint32_t range_event_count;
+    CheckBuiltinX86RangeEvent range_events[BUSTER_CHECK_BUILTIN_X86_EVENTS];
+};
+
 struct CheckStream
 {
     // Node-indexed typed postorder output. The graph supplies operator, operand and source identity.
@@ -280,6 +334,8 @@ struct CheckStream
     CheckBuiltinFloatEffect* floating;
     CheckBuiltinQueryEffect* queries;
     CheckBuiltinAtomicEffect* atomics;
+    CheckBuiltinVectorEffect* vectors;
+    CheckBuiltinX86Effect* x86;
     uint32_t count;
     uint32_t report_count;
     uint32_t effect_count;
@@ -288,6 +344,8 @@ struct CheckStream
     uint32_t floating_count;
     uint32_t query_count;
     uint32_t atomic_count;
+    uint32_t vector_count;
+    uint32_t x86_count;
     CheckStatus status;
     uint32_t failed_node;
     CheckStatistics statistics;
@@ -383,7 +441,37 @@ static uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, u
 
 static bool check_graph_has_arguments(CheckOp op)
 {
-    return op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC;
+    return op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY ||
+           op == CHECK_OP_BUILTIN_ATOMIC || op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86;
+}
+
+static __attribute__((unused)) uint64_t check_graph_x86_ice_mask(const BuiltinIntrinsicInfo* info, bool constant_evaluated_context)
+{
+    uint64_t mask = 0;
+    uint32_t first = 0;
+    uint32_t end = BUSTER_ARRAY_LENGTH(check_builtin_x86_rules);
+    while (info != NULL && first < end)
+    {
+        const uint32_t middle = first + (end - first) / 2;
+        if (check_builtin_x86_compare(info->name, info->name_length, check_builtin_x86_rules + middle) > 0)
+        {
+            first = middle + 1;
+        }
+        else
+        {
+            end = middle;
+        }
+    }
+    for (uint32_t i = first; info != NULL && i < BUSTER_ARRAY_LENGTH(check_builtin_x86_rules) &&
+                             check_builtin_x86_compare(info->name, info->name_length, check_builtin_x86_rules + i) == 0; i += 1)
+    {
+        const CheckBuiltinX86Rule* rule = check_builtin_x86_rules + i;
+        if (rule->kind != CHECK_BUILTIN_X86_CONSTRAINT_RANGE || !constant_evaluated_context)
+        {
+            mask |= UINT64_C(1) << rule->argument;
+        }
+    }
+    return mask;
 }
 
 static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
@@ -410,6 +498,10 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     else if (id == CBUILTIN_UMULL_OVERFLOW)
     {
         op = CHECK_OP_BUILTIN_OVERFLOW;
+    }
+    else if (id >= CBUILTIN_ELEMENTWISE_ABS && id <= CBUILTIN_NONTEMPORAL_STORE)
+    {
+        op = CHECK_OP_BUILTIN_VECTOR;
     }
     return op;
 }
@@ -476,7 +568,7 @@ static bool check_graph_pure(const CheckGraph* graph, uint32_t node, const uint8
     return result;
 }
 
-static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_t* maximum_arguments, uint32_t* maximum_effects, uint32_t builtins[4], uint32_t* failed)
+static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_t* maximum_arguments, uint32_t* maximum_effects, uint32_t builtins[5], uint32_t* failed)
 {
     bool result = graph->count <= graph->capacity && graph->count <= (1u << 30) && graph->argument_count <= graph->argument_capacity && graph->argument_count <= (1u << 30);
     result = result && graph->varargs_count <= graph->varargs_capacity && graph->varargs_count <= graph->count &&
@@ -485,16 +577,20 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
              (graph->builtin_count == 0 || graph->builtin_calls != NULL);
     result = result && graph->vector_member_count <= graph->vector_member_capacity && graph->vector_member_count <= graph->count &&
              (graph->vector_member_count == 0 || graph->vector_members != NULL);
+    result = result && graph->x86_count <= graph->x86_capacity && graph->x86_count <= graph->count &&
+             (graph->x86_count == 0 || graph->x86_calls != NULL);
     result = result && (graph->tag_completions != 0 ? graph->source_positions != 0 : graph->tag_completion_count == 0);
+    result = result && (graph->transparent_unions == NULL || graph->tag_completions != NULL);
     result = result && (graph->extensions & ~(BUSTER_CHECK_EXTENSION_GNU | BUSTER_CHECK_EXTENSION_GNU_CONSTANT)) == 0;
     *maximum_arguments = 0;
     *maximum_effects = 0;
-    memset(builtins, 0, 4 * sizeof(*builtins));
+    memset(builtins, 0, 5 * sizeof(*builtins));
     *failed = BUSTER_CHECK_NONE;
     uint32_t consumed_arguments = 0;
     uint32_t consumed_varargs = 0;
     uint32_t consumed_builtins = 0;
     uint32_t consumed_vectors = 0;
+    uint32_t consumed_x86 = 0;
     if (graph->count != 0)
     {
         result = result && graph->ops != 0 && graph->operand0 != 0 && graph->operand1 != 0 && graph->operand2 != 0;
@@ -559,6 +655,12 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
                      vector->member.count <= (1u << 30) && (vector->member.count == 0 || vector->member.lanes != NULL);
             consumed_vectors += 1;
         }
+        if (result && op == CHECK_OP_BUILTIN_X86)
+        {
+            result = consumed_x86 < graph->x86_count && graph->x86_calls[consumed_x86].node == node &&
+                     graph->x86_calls[consumed_x86].info != NULL && graph->types != NULL;
+            consumed_x86 += result;
+        }
         if (result)
         {
             pure[node] = (uint8_t)check_graph_pure(graph, node, pure);
@@ -570,6 +672,7 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
             builtins[1] += op == CHECK_OP_BUILTIN_FLOAT;
             builtins[2] += op == CHECK_OP_BUILTIN_QUERY;
             builtins[3] += op == CHECK_OP_BUILTIN_ATOMIC;
+            builtins[4] += op == CHECK_OP_BUILTIN_VECTOR;
         }
         else
         {
@@ -577,7 +680,7 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
         }
     }
     result = result && consumed_arguments == graph->argument_count && consumed_varargs == graph->varargs_count &&
-             consumed_builtins == graph->builtin_count && consumed_vectors == graph->vector_member_count;
+             consumed_builtins == graph->builtin_count && consumed_vectors == graph->vector_member_count && consumed_x86 == graph->x86_count;
     return result;
 }
 
@@ -589,6 +692,7 @@ static void check_graph_action(const CheckGraph* graph, const CheckStream* strea
         .member = graph->members != 0 ? graph->members[node] : 0,
         .node = node,
         .tag_completions = graph->tag_completions,
+        .transparent_unions = graph->transparent_unions,
         .tag_completion_count = graph->tag_completion_count,
         .source_position = graph->source_positions != 0 ? graph->source_positions[node] : BUSTER_CHECK_NONE,
         .extensions = graph->extensions,
@@ -671,6 +775,70 @@ static const CheckBuiltinCall* check_graph_builtin_call(const CheckGraph* graph,
         }
     }
     return first < graph->builtin_count && graph->builtin_calls[first].node == node ? graph->builtin_calls + first : NULL;
+}
+
+static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, const CheckAction* action, CheckActionResult* result)
+{
+    const uint32_t node = action->node;
+    const CheckX86Call* call = graph->x86_calls + stream->x86_count;
+    CheckAction ordinary = *action;
+    ordinary.op = CHECK_OP_CALL;
+    ordinary.operands[0] = (CheckValue){ .type = action->type, .category = CHECK_FUNCTION };
+    *result = (CheckActionResult){ 0 };
+    if (!type_is_valid(types, action->type) || check_action_kind(types, action->type) != BUSTER_TYPE_KIND_FUNCTION)
+    {
+        check_action_diagnose(result, CHECK_DIAG_INVALID_TYPE, 0);
+    }
+    else
+    {
+        check_action_call(types, &ordinary, result);
+        result->conversions[0] = (CheckConversion){ 0 };
+    }
+    CheckValue converted[BUSTER_CHECK_BUILTIN_X86_ARGUMENTS];
+    for (uint32_t i = 0; result->diagnostic == CHECK_DIAG_NONE && i < action->argument_count &&
+                         i < BUSTER_CHECK_BUILTIN_X86_ARGUMENTS; i += 1)
+    {
+        CheckAction operand = *action;
+        operand.operands[0] = action->arguments[i];
+        CheckActionResult temporary = { 0 };
+        converted[i] = check_action_operand(types, &operand, &temporary, 0);
+        check_action_conversion(types, converted + i, action->argument_conversions[i].type, 0,
+                                temporary.conversions, action->node);
+        if (temporary.diagnostic != CHECK_DIAG_NONE)
+        {
+            check_action_diagnose(result, temporary.diagnostic, i);
+        }
+    }
+    const CheckBuiltinX86Action input = {
+        .name = call->info->name,
+        .name_bytes = call->info->name_length,
+        .arguments = converted,
+        .argument_count = action->argument_count,
+        .required_ice_arguments = call->required_ice_arguments,
+        .ice_arguments = call->ice_arguments,
+        .node = node,
+        .typed_call = *result,
+        .reachability = call->reachability,
+        // Exact constraint-scope attestation is supplied by the frozen catalogue adapter below.
+        .name_in_scope = false,
+        .constant_evaluated_context = call->constant_evaluated_context,
+        .runtime_diagnostic_suppressed = call->runtime_diagnostic_suppressed,
+    };
+    CheckBuiltinX86Result checked;
+    check_builtin_x86(types, &input, &checked, 1);
+    *result = checked.action;
+    CheckBuiltinX86Effect* effect = stream->x86 + stream->x86_count++;
+    *effect = (CheckBuiltinX86Effect){
+        .node = node,
+        .info = call->info,
+        .status = checked.status,
+        .constraint = checked.constraint,
+        .checked_ice_arguments = checked.checked_ice_arguments,
+        .matched_rules = checked.matched_rules,
+        .unsupported = checked.unsupported,
+        .range_event_count = checked.range_event_count,
+    };
+    memcpy(effect->range_events, checked.range_events, sizeof(effect->range_events));
 }
 
 static void check_graph_special_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, const CheckAction* action, CheckActionResult* result)
@@ -878,6 +1046,58 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .compiler_barrier = checked.compiler_barrier,
         };
     }
+    else if (action->op == CHECK_OP_BUILTIN_VECTOR)
+    {
+        const CheckBuiltinVectorAction input = {
+            .id = (CBuiltinId)action->member,
+            .arguments = action->arguments,
+            .argument_count = action->argument_count,
+            .destination_type = action->type,
+            .node = node,
+            .tag_completions = action->tag_completions,
+            .tag_completion_count = action->tag_completion_count,
+            .source_position = action->source_position,
+            .extensions = action->extensions,
+        };
+        CheckBuiltinVectorResult checked;
+        check_builtin_vector(types, &input, &checked, 1);
+        *result = checked.action;
+        result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_VECTOR_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
+        for (uint32_t i = 0; i < action->argument_count && i < 3; i += 1)
+        {
+            action->argument_conversions[i] = checked.argument_conversions[i];
+        }
+        CheckBuiltinVectorEffect* effect = stream->vectors + stream->vector_count++;
+        *effect = (CheckBuiltinVectorEffect){
+            .node = node,
+            .element_type = checked.element_type,
+            .memory_type = checked.memory_type,
+            .lane_count = checked.lane_count,
+            .evaluated_argument_count = checked.evaluated_argument_count,
+            .warnings = checked.warnings,
+            .warning_operands = checked.warning_operands,
+            .unsupported = checked.unsupported,
+            .runtime_builtin = checked.runtime_builtin,
+            .constraint = checked.constraint,
+            .store_conversion = checked.store_conversion,
+            .reads_memory = checked.reads_memory,
+            .writes_memory = checked.writes_memory,
+            .nondeterministic = checked.nondeterministic,
+            .constant_evaluation_unmodeled = checked.constant_evaluation_unmodeled,
+            .reads_fp_environment = checked.reads_fp_environment,
+            .may_raise_fp_exceptions = checked.may_raise_fp_exceptions,
+            .bool_splat_signed_true = checked.bool_splat_signed_true,
+        };
+        memcpy(effect->converted_arguments, checked.converted_arguments, sizeof(effect->converted_arguments));
+        if (checked.reads_fp_environment || checked.may_raise_fp_exceptions)
+        {
+            result->value.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
+        }
+    }
+    else if (action->op == CHECK_OP_BUILTIN_X86)
+    {
+        check_graph_x86_action(types, graph, stream, action, result);
+    }
     else
     {
         CheckBuiltinQueryAction input = {
@@ -929,6 +1149,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
         uint32_t evaluated = action->op == CHECK_OP_BUILTIN_MISC ? stream->misc[stream->misc_count - 1].evaluated_operands :
                              action->op == CHECK_OP_BUILTIN_FLOAT ? stream->floating[stream->floating_count - 1].evaluated_operands :
                              action->op == CHECK_OP_BUILTIN_ATOMIC ? stream->atomics[stream->atomic_count - 1].evaluated_operands :
+                             action->op == CHECK_OP_BUILTIN_VECTOR ? (1u << stream->vectors[stream->vector_count - 1].evaluated_argument_count) - 1 :
+                             action->op == CHECK_OP_BUILTIN_X86 ? UINT32_MAX :
                              stream->queries[stream->query_count - 1].evaluated_operands;
         const bool strict_comparison = action->op == CHECK_OP_BUILTIN_FLOAT &&
                                        (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
@@ -961,9 +1183,9 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             evaluated = 1;
         }
         bool fp_conversion = false;
-        for (uint32_t i = 0; i < action->argument_count && i < 32; i += 1)
+        for (uint32_t i = 0; i < action->argument_count; i += 1)
         {
-            if ((evaluated & (1u << i)) != 0)
+            if (action->op == CHECK_OP_BUILTIN_X86 || (i < 32 && (evaluated & (1u << i)) != 0))
             {
                 result->value.flags |= action->arguments[i].flags & BUSTER_CHECK_FP_ENVIRONMENT;
                 fp_conversion |= (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
@@ -1363,7 +1585,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     }
     uint32_t maximum_arguments = 0;
     uint32_t maximum_effects = 0;
-    uint32_t maximum_builtins[4];
+    uint32_t maximum_builtins[5];
     if (result)
     {
         result = check_graph_validate(graph, pure, &maximum_arguments, &maximum_effects, maximum_builtins, &stream->failed_node);
@@ -1385,11 +1607,14 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->floating = maximum_builtins[1] != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinFloatEffect, maximum_builtins[1]) : 0;
         stream->queries = maximum_builtins[2] != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinQueryEffect, maximum_builtins[2]) : 0;
         stream->atomics = maximum_builtins[3] != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinAtomicEffect, maximum_builtins[3]) : 0;
+        stream->vectors = maximum_builtins[4] != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinVectorEffect, maximum_builtins[4]) : 0;
+        stream->x86 = graph->x86_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinX86Effect, graph->x86_count) : 0;
         result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->warnings != 0 && stream->warning_ignored != 0 && stream->reports != 0 &&
                  (maximum_arguments == 0 || arguments != 0) && (graph->argument_count == 0 || stream->argument_conversions != 0) &&
                  (maximum_effects == 0 || stream->effects != 0) && (graph->varargs_count == 0 || stream->varargs != 0) &&
                  (maximum_builtins[0] == 0 || stream->misc != 0) && (maximum_builtins[1] == 0 || stream->floating != 0) &&
-                 (maximum_builtins[2] == 0 || stream->queries != 0) && (maximum_builtins[3] == 0 || stream->atomics != 0);
+                 (maximum_builtins[2] == 0 || stream->queries != 0) && (maximum_builtins[3] == 0 || stream->atomics != 0) &&
+                 (maximum_builtins[4] == 0 || stream->vectors != 0) && (graph->x86_count == 0 || stream->x86 != NULL);
         stream->status = result ? CHECK_STATUS_OK : CHECK_STATUS_RESOURCE;
     }
     if (result)

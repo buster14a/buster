@@ -109,6 +109,7 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
         graph->extensions = source->extensions;
         graph->tag_completions = source->tag_completions;
         graph->tag_completion_count = source->tag_completion_count;
+        graph->transparent_unions = source->transparent_unions;
         graph->fp_environments = source->fp_environments != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, source->count) : NULL;
         graph->warning_suppressed = source->warning_suppressed != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, source->count) : NULL;
         graph->varargs_calls = source->varargs_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckVarargsCall, source->varargs_count) : 0;
@@ -117,13 +118,16 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
         graph->builtin_capacity = source->builtin_count;
         graph->vector_members = source->vector_member_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckVectorCall, source->vector_member_count) : NULL;
         graph->vector_member_capacity = source->vector_member_count;
+        graph->x86_calls = source->x86_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckX86Call, source->x86_count) : NULL;
+        graph->x86_capacity = source->x86_count;
         valid = (source->varargs_count == 0 || graph->varargs_calls != 0) && (source->builtin_count == 0 || graph->builtin_calls != 0) &&
                 (source->fp_environments == NULL || graph->fp_environments != NULL) &&
                 (source->warning_suppressed == NULL || graph->warning_suppressed != NULL) &&
-                (source->vector_member_count == 0 || graph->vector_members != NULL);
+                (source->vector_member_count == 0 || graph->vector_members != NULL) && (source->x86_count == 0 || graph->x86_calls != NULL);
     }
     uint32_t builtin = 0;
     uint32_t vector = 0;
+    uint32_t x86 = 0;
     for (uint32_t node = 0; valid && node < source->count; node += 1)
     {
         if (selected[node])
@@ -187,6 +191,16 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
                 {
                     CheckVectorCall* call = graph->vector_members + graph->vector_member_count++;
                     *call = source->vector_members[vector++];
+                    call->node = added;
+                }
+                while (x86 < source->x86_count && source->x86_calls[x86].node < node)
+                {
+                    x86 += 1;
+                }
+                if (x86 < source->x86_count && source->x86_calls[x86].node == node)
+                {
+                    CheckX86Call* call = graph->x86_calls + graph->x86_count++;
+                    *call = source->x86_calls[x86++];
                     call->node = added;
                 }
             }
@@ -352,6 +366,53 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
         }
     }
     equal = equal && selected_atomic == stream->atomic_count;
+    uint32_t selected_vector = 0;
+    for (uint32_t effect = 0; equal && effect < source->vector_count; effect += 1)
+    {
+        CheckBuiltinVectorEffect expected = source->vectors[effect];
+        equal = expected.node < source_graph->count;
+        if (equal && mapping[expected.node] != BUSTER_CHECK_NONE)
+        {
+            expected.node = mapping[expected.node];
+            for (uint32_t argument = 0; argument < BUSTER_ARRAY_LENGTH(expected.converted_arguments); argument += 1)
+            {
+                CheckValue* value = expected.converted_arguments + argument;
+                if (value->fault != CHECK_FAULT_NONE && value->fault_node != BUSTER_CHECK_NONE && value->fault_node < source_graph->count)
+                {
+                    value->fault_node = mapping[value->fault_node];
+                }
+            }
+            equal = selected_vector < stream->vector_count &&
+                    check_builtin_vector_effect_equal(&expected, stream->vectors + selected_vector++, check_test_value_equal);
+        }
+    }
+    equal = equal && selected_vector == stream->vector_count;
+    uint32_t selected_x86 = 0;
+    for (uint32_t effect = 0; equal && effect < source->x86_count; effect += 1)
+    {
+        CheckBuiltinX86Effect expected = source->x86[effect];
+        equal = expected.node < source_graph->count;
+        if (equal && mapping[expected.node] != BUSTER_CHECK_NONE)
+        {
+            expected.node = mapping[expected.node];
+            for (uint32_t range = 0; range < expected.range_event_count; range += 1)
+            {
+                CheckBuiltinX86RangeEvent* event = expected.range_events + range;
+                if (event->node < source_graph->count)
+                {
+                    event->node = mapping[event->node];
+                }
+                CheckValue* value = &event->value;
+                if (value->fault != CHECK_FAULT_NONE && value->fault_node != BUSTER_CHECK_NONE && value->fault_node < source_graph->count)
+                {
+                    value->fault_node = mapping[value->fault_node];
+                }
+            }
+            equal = selected_x86 < stream->x86_count &&
+                    check_builtin_x86_effect_equal(&expected, stream->x86 + selected_x86++, check_test_value_equal);
+        }
+    }
+    equal = equal && selected_x86 == stream->x86_count;
     return equal;
 }
 
@@ -414,6 +475,7 @@ static int run_checker_source_benchmark(int count, char** arguments)
     static Parser parsers[2];
     CheckCorpusPath paths[2] = { 0 };
     uint64_t validation[2] = { 0 };
+    pp_options.semantic_pragmas = true;
     valid = valid && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) && pp_run(&pp, file);
     for (uint32_t path = 0; valid && path < 2; path += 1)
     {

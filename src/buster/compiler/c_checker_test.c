@@ -1774,7 +1774,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             .standard = 2017,
             .gnu = true
         },
-        .no_standard_includes = true
+        .no_standard_includes = true,
+        .semantic_pragmas = true,
     };
     const ParseOptions parser_options[2] = {
         {
@@ -2440,6 +2441,8 @@ static void check_test_target_options(CheckTest* test)
 #include "c_check_builtin_graph_test.c"
 #include "c_check_varargs_graph_test.c"
 #include "c_check_special_graph_test.c"
+#include "c_check_builtin_vector_graph_test.c"
+#include "c_check_x86_graph_test.c"
 #include "c_check_binding_test.c"
 #include "c_check_body_bindings_test.c"
 #include "c_check_environment_test.c"
@@ -2449,6 +2452,7 @@ static void check_test_target_options(CheckTest* test)
 #include "c_check_vla_test.c"
 #include "c_check_data_test.c"
 #include "c_check_actions_extra_test.c"
+#include "c_check_transparent_test.c"
 #include "c_check_complex_test.c"
 #include "c_check_integer_extension_test.c"
 #include "c_check_integer_policy_test.c"
@@ -2458,6 +2462,8 @@ static void check_test_target_options(CheckTest* test)
 #include "c_check_function_name_test.c"
 #include "c_check_pragma_test.c"
 #include "c_check_diagnostic_test.c"
+#include "c_check_lazy_test.c"
+#include "c_check_intrinsic_input_test.c"
 #include "c_check_initializer_test.c"
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
@@ -2532,11 +2538,14 @@ static int run_checker_tests(int argc, char** argv)
             check_test_builtin_graph(&test, &types.table, clang);
             check_test_varargs_graph(&test, &types.table);
             check_test_special_graph(&test, &types.table, clang);
+            check_test_builtin_vector_graph(&test, &types.table, clang);
+            check_test_x86_graph(&test, &types.table, clang);
             check_test_environments(&test);
             check_test_body_binding_guards(&test);
             check_test_body_binding_exit_points(&test);
             check_test_data(&test, &types.table, clang);
             check_test_actions_extra(&test, &types.table, clang);
+            check_test_transparent_calls(&test, &types.table, clang);
             check_test_complex(&test, &types.table, clang);
             check_test_integer_extensions(&test, clang);
             check_test_integer_policy(&test, &types.table, clang);
@@ -2546,6 +2555,8 @@ static int run_checker_tests(int argc, char** argv)
             check_test_function_names(&test, clang);
             check_test_pragmas(&test, clang);
             check_test_diagnostic_policy(&test);
+            check_test_lazy(&test);
+            check_test_intrinsic_inputs(&test, clang);
             check_test_initializers(&test, clang);
             check_test_data_sources(&test);
             check_test_attributes(&test, clang);

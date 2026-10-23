@@ -244,6 +244,20 @@ static uint32_t check_program_argument_mask(CheckProgram* program, uint32_t node
         index = check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node);
         mask = index != BUSTER_CHECK_NONE ? stream->atomics[index].evaluated_operands : 0;
     }
+    else if (op == CHECK_OP_BUILTIN_VECTOR)
+    {
+        index = check_program_builtin_index(stream->vectors, stream->vector_count, sizeof(CheckBuiltinVectorEffect), node);
+        const uint32_t count = index != BUSTER_CHECK_NONE ? stream->vectors[index].evaluated_argument_count : 0;
+        if (count > 3 || count > program->input->graph.argument_counts[node])
+        {
+            check_program_fail(program, CHECK_PROGRAM_INVALID, program->input->graph.tokens[node]);
+        }
+        mask = count <= 3 ? (1u << count) - 1 : 0;
+    }
+    else if (op == CHECK_OP_BUILTIN_X86)
+    {
+        index = check_program_builtin_index(stream->x86, stream->x86_count, sizeof(CheckBuiltinX86Effect), node);
+    }
     if (op != CHECK_OP_CALL && index == BUSTER_CHECK_NONE)
     {
         check_program_fail(program, CHECK_PROGRAM_INVALID, program->input->graph.tokens[node]);
@@ -334,7 +348,7 @@ static void check_program_cases(CheckProgram* program, const Parser* parser, uin
     uint32_t count = 0;
     for (uint32_t token = 0; token < tokens; token += 1)
     {
-        count += parser->tree.roles[token] == PARSE_ROLE_CLOSE_CASE;
+        count += parser->tree.roles[token] == PARSE_ROLE_CLOSE_CASE && (input->deferred_tokens == 0 || input->deferred_tokens[token] == 0);
     }
     program->cases = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramCase, count) : 0;
     if (count != 0 && program->cases == 0)
@@ -345,6 +359,10 @@ static void check_program_cases(CheckProgram* program, const Parser* parser, uin
     memset(map, 0xff, ((uint64_t)tokens + 1) * sizeof(uint32_t));
     for (uint32_t token = 0; token < tokens && program->status != CHECK_PROGRAM_RESOURCE; token += 1)
     {
+        if (input->deferred_tokens != 0 && input->deferred_tokens[token] != 0)
+        {
+            continue;
+        }
         const uint32_t owner = parser->tree.parents[token];
         if (parser->tokens.kinds[token] == PARSE_KIND_SWITCH && owner < tokens && parser->tree.roles[owner] == PARSE_ROLE_CLOSE_CONDITION)
         {
@@ -1084,7 +1102,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
                 {
                     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                    if ((op == CHECK_OP_CALL || (a < 32 && (mask & (1u << a)) != 0)) && nodes[argument] != epoch)
+                    if ((op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0)) && nodes[argument] != epoch)
                     {
                         nodes[argument] = epoch;
                         stack[depth++] = argument;
@@ -1207,7 +1225,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 }
                 last[parent] = token;
             }
-            body_count += input->body_declarations[token] != BUSTER_CHECK_NONE;
+            body_count += input->body_declarations[token] != BUSTER_CHECK_NONE && (input->deferred_tokens == 0 || input->deferred_tokens[token] == 0);
             if (input->initializer_nodes[token] < node_count)
             {
                 initializers[input->initializer_nodes[token]] = token;
@@ -1333,7 +1351,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     for (uint32_t token = 0; valid && token < count && program->status == CHECK_PROGRAM_OK; token += 1)
     {
         const uint32_t declaration = input->body_declarations[token];
-        if (declaration != BUSTER_CHECK_NONE)
+        if (declaration != BUSTER_CHECK_NONE && (input->deferred_tokens == 0 || input->deferred_tokens[token] == 0))
         {
             const uint32_t start = writer.count;
             check_control_build(&writer, token);
@@ -1393,7 +1411,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     {
         const CheckOp op = input->graph.ops[node];
         program->builtin_count += nodes[node] != 0 && (op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW ||
-                                  op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC);
+                                  op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
+                                  op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86);
     }
     program->builtin_nodes = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->builtin_count) : 0;
     valid = valid && (program->builtin_count == 0 || program->builtin_nodes != 0);
@@ -1402,7 +1421,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     {
         const CheckOp op = input->graph.ops[node];
         if (nodes[node] != 0 && (op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW ||
-            op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC))
+            op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
+            op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86))
         {
             program->builtin_nodes[builtin++] = node;
         }
@@ -1475,6 +1495,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     return valid;
 }
 
+#include "c_check_program_select.c"
 #include "c_check_program_helpers.c"
 #include "c_check_program_lower.c"
 #include "c_check_program_emit.c"

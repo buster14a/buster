@@ -2,9 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Constant vector expressions retain target bytes independently of scalar CheckValue payloads. The enclosing
-// initializer's graph slice is visited once in postorder. Compound bodies use the existing iterative planner
-// with this already-computed cache; that mode never starts another evaluator. Both traversals are bounded by
-// source/graph records and caller arenas. Unsupported or unevaluated nodes have no cached value.
+// initializer's graph slice is visited once in postorder. A vector compound body's scalar lanes read this
+// already-computed cache through a separate iterative cursor. It never calls the general initializer walker,
+// keeping the complete call graph acyclic. Source records and caller arenas bound all retained values.
 #ifndef BUSTER_C_CHECK_INITIALIZER_VECTOR_INCLUDED
 #define BUSTER_C_CHECK_INITIALIZER_VECTOR_INCLUDED
 
@@ -25,6 +25,42 @@ struct CheckInitConstants
     uint32_t count;
 };
 
+typedef struct CheckInitObject CheckInitObject;
+struct CheckInitObject
+{
+    uint32_t object;
+    uint32_t end;
+    TypeId type;
+    const uint8_t* bytes;
+};
+
+// Only earlier explicitly initialized, nonvolatile const vectors enter this sparse table. The source phase
+// owns its scratch lifetime; expression evaluation never resolves or recursively plans another declaration.
+struct CheckInitObjects
+{
+    CheckInitObject* entries;
+    uint32_t capacity;
+};
+
+static uint32_t check_init_object_slot(const CheckInitObjects* objects, uint32_t object)
+{
+    uint32_t slot = BUSTER_CHECK_NONE;
+    if (objects != NULL && objects->capacity != 0 && object != 0)
+    {
+        uint32_t at = (object * UINT32_C(2654435761)) & (objects->capacity - 1);
+        for (uint32_t probe = 0; slot == BUSTER_CHECK_NONE && probe < objects->capacity; probe += 1)
+        {
+            const uint32_t key = objects->entries[at].object;
+            if (key == 0 || key == object)
+            {
+                slot = at;
+            }
+            at = (at + 1) & (objects->capacity - 1);
+        }
+    }
+    return slot;
+}
+
 static const CheckInitConstant* check_init_constant(const CheckInitWalker* walker, uint32_t node)
 {
     const CheckInitConstants* cache = walker->constants;
@@ -39,7 +75,24 @@ static const CheckInitConstant* check_init_constant(const CheckInitWalker* walke
 static const uint8_t* check_init_constant_bytes(const CheckInitWalker* walker, uint32_t node)
 {
     const CheckInitConstant* entry = check_init_constant(walker, node);
-    return entry != NULL ? entry->bytes : NULL;
+    const uint8_t* result = entry != NULL ? entry->bytes : NULL;
+    if (result == NULL && walker->graph != NULL && node < walker->stream->count)
+    {
+        const CheckValue value = walker->stream->values[node];
+        const TypeId type = type_strip_aligned(walker->types, value.type);
+        const uint32_t slot = check_init_object_slot(walker->objects, value.object);
+        if (slot != BUSTER_CHECK_NONE && value.offset == 0 && check_vector_type(walker->types, type) &&
+            (type_qualifiers(type) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) == BUSTER_TYPE_CONST)
+        {
+            const CheckInitObject* object = walker->objects->entries + slot;
+            if (object->object == value.object && object->end <= walker->graph->tokens[node] &&
+                object->type == type_unqualified(type) && value.fault == CHECK_FAULT_NONE && (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0)
+            {
+                result = object->bytes;
+            }
+        }
+    }
+    return result;
 }
 
 static CheckValue check_init_constant_value(const CheckInitWalker* walker, uint32_t node)
@@ -191,7 +244,10 @@ static const uint8_t* check_init_vector_operand(CheckInitWalker* walker, uint32_
     const uint64_t size = type_size(walker->types, target);
     if (check_vector_type(walker->types, original.type))
     {
-        if (check_vector_bits(walker->types, original.type) == check_vector_bits(walker->types, target))
+        const bool volatile_read = original.category == CHECK_LVALUE &&
+                                   ((type_qualifiers(type_strip_aligned(walker->types, original.type)) & BUSTER_TYPE_VOLATILE) != 0 ||
+                                    (original.flags & BUSTER_CHECK_VOLATILE_PART) != 0);
+        if (!volatile_read && check_vector_bits(walker->types, original.type) == check_vector_bits(walker->types, target))
         {
             result = check_init_constant_bytes(walker, node);
         }
@@ -230,67 +286,78 @@ static const uint8_t* check_init_vector_operand(CheckInitWalker* walker, uint32_
     return result;
 }
 
-static bool check_init_vector_plan_bytes(CheckInitWalker* walker, const CheckInitializer* plan, uint8_t* bytes, uint64_t size)
-{
-    bool valid = size <= UINT64_MAX / 8;
-    memset(bytes, 0, size);
-    for (uint32_t i = 0; valid && i < plan->count; i += 1)
-    {
-        const CheckInitPart* part = plan->parts + i;
-        uint64_t bits = 0;
-        uint8_t scalar[16] = { 0 };
-        const uint8_t* source = scalar;
-        valid = check_initializer_part_bits(walker->types, part, &bits) == CHECK_INIT_OK &&
-                part->bit_offset <= size * 8 && bits <= size * 8 - part->bit_offset;
-        if (valid && part->kind == CHECK_INIT_BYTES)
-        {
-            source = part->bytes;
-            valid = bits == 0 || source != NULL;
-        }
-        else if (valid && part->kind == CHECK_INIT_VALUE)
-        {
-            valid = bits <= sizeof(scalar) * 8 && check_init_scalar_bytes(walker->types, &part->value, scalar);
-        }
-        for (uint64_t bit = 0; valid && bit < bits; bit += 1)
-        {
-            const uint64_t offset = part->bit_offset + bit;
-            const uint8_t mask = (uint8_t)(1u << (offset % 8));
-            const bool set = part->kind != CHECK_INIT_CLEAR && ((source[bit / 8] >> (bit % 8)) & 1) != 0;
-            bytes[offset / 8] = (uint8_t)((bytes[offset / 8] & ~mask) | (set ? mask : 0));
-        }
-    }
-    return valid;
-}
-
 static bool check_init_vector_literal(CheckInitWalker* walker, uint32_t node, uint32_t opener, uint8_t* bytes, uint64_t size)
 {
-    const uint64_t output_mark = walker->output->length;
-    CheckInitializer plan = { .type = walker->stream->values[node].type, .failed_token = BUSTER_CHECK_NONE, .warning_token = BUSTER_CHECK_NONE };
-    CheckInitWalker child = {
-        .types = walker->types,
-        .parser = walker->parser,
-        .token_nodes = walker->token_nodes,
-        .stream = walker->stream,
-        .graph = walker->graph,
-        .constants = walker->constants,
-        .strings = walker->strings,
-        .string_count = walker->string_count,
-        .static_storage = true,
-        .ignore_excess = walker->ignore_excess,
-        .output = walker->output,
-        .scratch = walker->scratch,
-        .result = &plan,
-    };
-    bool valid = check_init_walk(&child, plan.type, opener, walker->parser->tree.parents[opener] + 1);
-    if (valid)
+    const Parser* parser = walker->parser;
+    const TypeId type = walker->stream->values[node].type;
+    const TypeId element = check_vector_element(walker->types, type);
+    const uint32_t count = check_vector_count(walker->types, type);
+    const uint32_t end = parser->tree.parents[opener];
+    uint32_t token = opener + 1;
+    uint32_t lane = 0;
+    bool valid = token <= end && end < parser->tokens.count && parser->tokens.kinds[end] == PARSE_KIND_R_BRACE;
+    while (valid && token < end && lane < count)
     {
-        valid = check_init_vector_plan_bytes(walker, &plan, bytes, size);
+        const uint32_t stop = check_init_expression_end(parser, token, end);
+        uint32_t first = token;
+        uint32_t last = stop;
+        bool wrapped = false;
+        valid = first < last && parser->tokens.kinds[first] != PARSE_KIND_PERIOD && parser->tokens.kinds[first] != PARSE_KIND_L_SQUARE;
+        while (valid && first < last && parser->tokens.kinds[first] == PARSE_KIND_L_BRACE)
+        {
+            wrapped = true;
+            const uint32_t close = check_init_excess_end(parser, first + 1, last);
+            valid = close < last && close + 1 == last;
+            first += 1;
+            last = valid ? check_init_expression_end(parser, first, close) : first;
+            const bool trailing = last < close && parser->tokens.kinds[last] == PARSE_KIND_COMMA && last + 1 == close;
+            valid = valid && (walker->ignore_excess || last == close || trailing);
+        }
+        const uint32_t value_node = valid && first < last ? check_init_node(walker, first, last) : BUSTER_CHECK_NONE;
+        CheckValue value = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER };
+        if (valid && first < last)
+        {
+            valid = value_node < node;
+            if (valid)
+            {
+                value = check_init_constant_value(walker, value_node);
+            }
+        }
+        if (valid && !wrapped && lane == 0 && check_vector_type(walker->types, value.type))
+        {
+            CheckActionResult assignment = { 0 };
+            valid = check_vector_assignable(walker->types, type, &value, &assignment);
+            const uint8_t* whole = valid ? check_init_constant_bytes(walker, value_node) : NULL;
+            valid = whole != NULL;
+            if (valid)
+            {
+                memcpy(bytes, whole, size);
+                lane = count;
+            }
+        }
+        else if (valid)
+        {
+            const CheckAction action = {
+                .op = CHECK_OP_INITIALIZE, .operands = { value }, .type = element,
+                .node = value_node, .extensions = check_init_extensions(walker),
+            };
+            CheckActionResult converted = { 0 };
+            check_action_scalar(walker->types, &action, &converted);
+            valid = converted.diagnostic == CHECK_DIAG_NONE && check_init_vector_store(walker->types, type, bytes, lane, converted.value);
+            if (converted.diagnostic == CHECK_DIAG_RESOURCE)
+            {
+                check_init_fail(walker, CHECK_INIT_RESOURCE, first);
+            }
+            lane += 1;
+        }
+        token = stop;
+        if (valid && token < end)
+        {
+            valid = parser->tokens.kinds[token] == PARSE_KIND_COMMA;
+            token += 1;
+        }
     }
-    if (plan.status == CHECK_INIT_RESOURCE)
-    {
-        check_init_fail(walker, CHECK_INIT_RESOURCE, plan.failed_token);
-    }
-    arena_pop_to(walker->output, output_mark);
+    valid = valid && (token == end || walker->ignore_excess);
     return valid;
 }
 
@@ -394,7 +461,9 @@ static bool check_init_vector_select(CheckInitWalker* walker, uint32_t node, uin
     const TypeId target = walker->stream->values[node].type;
     const bool vector = check_vector_type(walker->types, target);
     const uint32_t count = vector ? check_vector_count(walker->types, target) : 1;
-    bool valid = check_vector_type(walker->types, base_type) && base != NULL;
+    bool valid = check_vector_type(walker->types, base_type) && base != NULL &&
+                 (type_qualifiers(type_strip_aligned(walker->types, base_type)) & BUSTER_TYPE_VOLATILE) == 0 &&
+                 (walker->stream->values[base_node].flags & BUSTER_CHECK_VOLATILE_PART) == 0;
     CheckAction action = { 0 };
     if (valid)
     {
@@ -491,13 +560,15 @@ static void check_init_constants(CheckInitWalker* walker, uint32_t begin, uint32
         CheckInitConstant* entry = cache->entries + node - first;
         const CheckOp op = graph->ops[node];
         const bool vector = check_vector_type(walker->types, checked.type);
-        const bool leaf = op == CHECK_OP_VALUE && entry->opener != BUSTER_CHECK_NONE && (checked.flags & BUSTER_CHECK_STATIC_OBJECT) != 0;
+        const bool leaf = vector && op == CHECK_OP_VALUE && entry->opener != BUSTER_CHECK_NONE;
         const bool unary = op >= CHECK_OP_POSITIVE && op <= CHECK_OP_BIT_NOT;
         const bool binary = op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_OR;
         const bool convert = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_INITIALIZE || op == CHECK_OP_SELECT;
         const bool select = op == CHECK_OP_MEMBER || op == CHECK_OP_SUBSCRIPT;
-        const bool clean = walker->stream->diagnostics[node] == CHECK_DIAG_NONE && checked.fault == CHECK_FAULT_NONE &&
-                           (checked.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+        // Automatic compound leaves carry their runtime materialization effect, inherited by enclosing
+        // operations. Prove their value from the actual constant lanes instead of erasing graph flags or
+        // rejecting that marker wholesale. Calls, updates and runtime scalar operands cannot fill this cache.
+        const bool clean = walker->stream->diagnostics[node] == CHECK_DIAG_NONE && checked.fault == CHECK_FAULT_NONE;
         if (clean && (vector || leaf || ((unary || binary || convert || select) && checked.constant_kind == CHECK_CONSTANT_NONE)))
         {
             const uint64_t allocation = walker->scratch->length;
@@ -533,15 +604,32 @@ static void check_init_constants(CheckInitWalker* walker, uint32_t begin, uint32
                 {
                     valid = source < node && (!binary || graph->operand1[node] < node) && check_init_vector_fold(walker, node, bytes);
                 }
-                else if (vector && (convert || op == CHECK_OP_CONDITIONAL))
+                else if (vector && (convert || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA))
                 {
                     uint32_t selected = source;
                     if (op == CHECK_OP_CONDITIONAL)
                     {
                         bool truth = false;
                         const CheckValue condition = source < node ? check_init_constant_value(walker, source) : (CheckValue){ 0 };
-                        valid = source < node && check_action_truth(walker->types, &condition, &truth);
+                        valid = source < node && condition.fault == CHECK_FAULT_NONE && (condition.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                                check_action_truth(walker->types, &condition, &truth);
                         selected = truth ? graph->operand1[node] : graph->operand2[node];
+                    }
+                    else if (op == CHECK_OP_COMMA)
+                    {
+                        CheckAction action = { 0 };
+                        CheckActionResult converted = { 0 };
+                        check_graph_action(graph, walker->stream, node, NULL, &action);
+                        if (source < node)
+                        {
+                            action.operands[0] = check_init_constant_value(walker, source);
+                        }
+                        const CheckValue left = check_action_operand(walker->types, &action, &converted, 0);
+                        valid = source < node && converted.diagnostic == CHECK_DIAG_NONE &&
+                                (check_init_constant_known(&left) || check_init_constant_bytes(walker, source) != NULL ||
+                                 (left.constant_kind == CHECK_CONSTANT_ADDRESS &&
+                                  (left.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_SIDE_EFFECT)) == BUSTER_CHECK_STATIC_OBJECT));
+                        selected = graph->operand1[node];
                     }
                     const bool bitcast = op == CHECK_OP_CAST && check_action_kind(walker->types, checked.type) == BUSTER_TYPE_KIND_VECTOR;
                     const uint8_t* converted = valid && selected < node ? check_init_vector_operand(walker, selected, checked.type, bitcast) : NULL;

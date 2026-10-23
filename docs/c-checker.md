@@ -22,6 +22,19 @@ definitions as real `Link` atoms and prints their bytes and symbolic fixups.
 Preprocessor options include the
 existing language, include-path and macro-definition options.
 
+Every body is parsed and checked by default. `-flazy-system-headers` optionally
+skips semantic checking of provably unreferenced static and nonemitting inline
+bodies defined in system headers, identified by `-isystem` or system-header
+pragmas. Declarations, ordinary-source bodies, referenced bodies and all syntax
+are still checked. This mode intentionally accepts a system header whose only
+semantic error is in a deferred body; it departs from standard C diagnostics
+and from Clang's default behavior, as authorized in
+[#155](https://github.com/buster14a/buster/issues/155).
+`-fno-lazy-system-headers` restores the default, and the last option wins.
+Both modes use the same checked-reference selection for object publication;
+tests require equal objects for valid inputs. Performance comparisons use the
+default mode, with any lazy-mode measurements reported separately.
+
 Unsupported source constructs produce an explicit diagnostic. `-c` also
 requires the checked program to be representable by the current backend; a
 successful syntax check alone does not establish executable support for every

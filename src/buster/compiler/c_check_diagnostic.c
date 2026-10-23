@@ -6,6 +6,7 @@
 // implementation is imported. Include after c_check_input.c, whose immutable history owns the decoded strings.
 
 #define CHECK_WARNING_EXCESS_INITIALIZERS 0x100u
+#define CHECK_WARNING_UNKNOWN_PRAGMA 0x200u
 
 typedef enum CheckWarningSeverity
 {
@@ -34,6 +35,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wshift-negative-value", NULL, "left shift of a negative value" },
     { "-Wshift-overflow", NULL, "left shift exceeds the range of the type" },
     { "-Wexcess-initializers", NULL, "excess elements in initializer" },
+    { "-Wunknown-pragmas", "-Wpragmas", "expected 'ON' or 'OFF' or 'DEFAULT' in pragma" },
 };
 
 static bool check_diagnostic_option(String8 option, const char* expected)
@@ -55,7 +57,7 @@ static const char* check_diagnostic_message(uint32_t warning)
     return result;
 }
 
-static CheckWarningSeverity check_diagnostic_severity_default(const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored)
+static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, bool default_ignored)
 {
     const uint32_t index = check_diagnostic_warning_index(warning);
     CheckWarningSeverity severity = default_ignored ? CHECK_WARNING_IGNORE : CHECK_WARNING_WARNING;
@@ -67,7 +69,8 @@ static CheckWarningSeverity check_diagnostic_severity_default(const CheckInput* 
         while (low < high)
         {
             const uint32_t middle = low + (high - low) / 2;
-            if (history->records[middle].token <= token)
+            const CheckInputDiagnosticPragma* record = history->records + middle;
+            if (record->token < token || (record->token == token && record->source_begin < source))
             {
                 low = middle + 1;
             }
@@ -94,6 +97,11 @@ static CheckWarningSeverity check_diagnostic_severity_default(const CheckInput* 
         }
     }
     return severity;
+}
+
+static CheckWarningSeverity check_diagnostic_severity_default(const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored)
+{
+    return check_diagnostic_severity_at(input, token, BUSTER_CHECK_NONE, warning, default_ignored);
 }
 
 static CheckWarningSeverity check_diagnostic_severity(const CheckInput* input, uint32_t token, uint32_t warning)
@@ -138,4 +146,25 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
     *token = first;
     const bool result = first != BUSTER_CHECK_NONE;
     return result;
+}
+
+// A retained pragma has its own source point even when no ordinary token lies before the following policy.
+// Keep that point separate from its adjacent token, including directives at the end of a translation unit.
+static bool check_diagnostic_first_pragma_error(const CheckInput* input, uint32_t before_token, uint32_t* token, uint32_t* source)
+{
+    uint32_t first = BUSTER_CHECK_NONE;
+    uint32_t origin = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; i < input->fp_pragma_count; i += 1)
+    {
+        const CheckInputFpPragma* record = input->fp_pragmas + i;
+        if (record->token < before_token && record->token < first && (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0 &&
+            check_diagnostic_severity_at(input, record->token, record->source_begin, CHECK_WARNING_UNKNOWN_PRAGMA, false) >= CHECK_WARNING_ERROR)
+        {
+            first = record->token;
+            origin = record->source_begin;
+        }
+    }
+    *token = first;
+    *source = origin;
+    return first != BUSTER_CHECK_NONE;
 }

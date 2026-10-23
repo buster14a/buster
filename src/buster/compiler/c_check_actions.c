@@ -156,6 +156,8 @@ typedef enum CheckOp
     CHECK_OP_BUILTIN_ATOMIC,
     CHECK_OP_REAL,
     CHECK_OP_IMAGINARY,
+    CHECK_OP_BUILTIN_VECTOR,
+    CHECK_OP_BUILTIN_X86,
     CHECK_OP_COUNT,
 } CheckOp;
 
@@ -188,6 +190,7 @@ typedef enum CheckDiagnostic
 #define BUSTER_CHECK_CONVERT_ASSIGNMENT 0x20u
 #define BUSTER_CHECK_CONVERT_CAST 0x40u
 #define BUSTER_CHECK_CONVERT_NULL 0x80u
+#define BUSTER_CHECK_CONVERT_TRANSPARENT_UNION 0x100u
 
 #define CHECK_WARNING_DISCARDED_QUALIFIERS 0x01u
 #define CHECK_WARNING_GNU_CONSTANT 0x02u
@@ -223,6 +226,8 @@ struct CheckAction
     // Optional immutable source history. Positions are exclusive expression/type-name ends, independently of
     // diagnostic node identity. A null history uses the caller's current type table, as the direct action API does.
     const uint32_t* tag_completions;
+    // Optional activation positions for nominal transparent-union attributes, indexed by the same tag table.
+    const uint32_t* transparent_unions;
     uint32_t tag_completion_count;
     uint32_t source_position;
     uint32_t extensions;
@@ -687,6 +692,17 @@ static bool check_action_compatible(const TypeTable* table, TypeId left, TypeId 
     return answer == TYPE_ANSWER_YES;
 }
 
+static bool check_action_compatible_at(const TypeTable* table, TypeId left, TypeId right, const CheckAction* action, CheckActionResult* result)
+{
+    const TypeAnswer answer = left == right ? TYPE_ANSWER_YES :
+                              type_compatible_at(table, left, right, action->transparent_unions, action->tag_completion_count, action->source_position);
+    if (answer == TYPE_ANSWER_FULL)
+    {
+        check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+    }
+    return answer == TYPE_ANSWER_YES;
+}
+
 // Pointer assignment is directional: only the immediately pointed-to qualifiers may be added. In particular,
 // int ** to const int ** is not accepted by recursively dropping qualifiers.
 static bool check_action_assignable(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result)
@@ -721,7 +737,7 @@ static bool check_action_assignable(const TypeTable* table, TypeId destination, 
         const bool qualifiers = (type_qualifiers(from) & ~type_qualifiers(to)) == 0;
         const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0;
         const bool void_object = (tk == BUSTER_TYPE_KIND_VOID && (gnu || fk != BUSTER_TYPE_KIND_FUNCTION)) || (fk == BUSTER_TYPE_KIND_VOID && (gnu || tk != BUSTER_TYPE_KIND_FUNCTION));
-        accepted = (qualifiers || gnu) && (void_object || check_action_compatible(table, type_unqualified(to), type_unqualified(from), result));
+        accepted = (qualifiers || gnu) && (void_object || check_action_compatible_at(table, type_unqualified(to), type_unqualified(from), action, result));
         if (accepted && !qualifiers)
         {
             result->warnings |= CHECK_WARNING_DISCARDED_QUALIFIERS;
@@ -729,7 +745,7 @@ static bool check_action_assignable(const TypeTable* table, TypeId destination, 
     }
     else if ((target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION || target_kind == BUSTER_TYPE_KIND_NULLPTR) && target_kind == input_kind)
     {
-        accepted = check_action_compatible(table, target, input, result);
+        accepted = check_action_compatible_at(table, target, input, action, result);
     }
     return accepted;
 }
@@ -1159,9 +1175,9 @@ static TypeId check_action_pointer_common(TypeTable* table, const CheckValue* le
         {
             pointee = BUSTER_TYPE_VOID;
         }
-        else if (check_action_compatible(table, type_unqualified(l), type_unqualified(r), result))
+        else if (check_action_compatible_at(table, type_unqualified(l), type_unqualified(r), action, result))
         {
-            pointee = type_composite(table, type_unqualified(l), type_unqualified(r));
+            pointee = type_composite_at(table, type_unqualified(l), type_unqualified(r), action->transparent_unions, action->tag_completion_count, action->source_position);
             if (pointee == 0 && table->last_error == TYPE_ERROR_FULL)
             {
                 check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
@@ -1201,7 +1217,7 @@ static void check_action_conditional(TypeTable* table, const CheckAction* action
     {
         common = BUSTER_TYPE_VOID;
     }
-    else if ((check_action_kind(table, left.type) == BUSTER_TYPE_KIND_STRUCT || check_action_kind(table, left.type) == BUSTER_TYPE_KIND_UNION || check_action_kind(table, left.type) == BUSTER_TYPE_KIND_NULLPTR) && check_action_compatible(table, left.type, right.type, result))
+    else if ((check_action_kind(table, left.type) == BUSTER_TYPE_KIND_STRUCT || check_action_kind(table, left.type) == BUSTER_TYPE_KIND_UNION || check_action_kind(table, left.type) == BUSTER_TYPE_KIND_NULLPTR) && check_action_compatible_at(table, left.type, right.type, action, result))
     {
         common = left.type;
     }
@@ -1308,7 +1324,7 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
         const TypeId le = type_element(table, left.type);
         const TypeId re = type_element(table, right.type);
         const bool complete = check_action_object_pointer(table, left.type, action, result) && check_action_object_pointer(table, right.type, action, result);
-        if (!check_action_compatible(table, type_unqualified(le), type_unqualified(re), result))
+        if (!check_action_compatible_at(table, type_unqualified(le), type_unqualified(re), action, result))
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, 1);
         }
@@ -1379,7 +1395,7 @@ static void check_action_pointer_compare(TypeTable* table, const CheckAction* ac
         const TypeId le = type_element(table, left.type);
         const TypeId re = type_element(table, right.type);
         const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0;
-        if ((gnu || (check_action_kind(table, le) != BUSTER_TYPE_KIND_FUNCTION && check_action_kind(table, le) != BUSTER_TYPE_KIND_VOID)) && check_action_compatible(table, type_unqualified(le), type_unqualified(re), result))
+        if ((gnu || (check_action_kind(table, le) != BUSTER_TYPE_KIND_FUNCTION && check_action_kind(table, le) != BUSTER_TYPE_KIND_VOID)) && check_action_compatible_at(table, type_unqualified(le), type_unqualified(re), action, result))
         {
             common = left.type;
         }
@@ -1795,7 +1811,7 @@ static void check_action_cast(TypeTable* table, const CheckAction* action, Check
     const bool scalar = check_action_is_scalar(table, target) && check_action_is_scalar(table, source.type) && !pointer_float;
     const bool record = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 &&
                         (target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION) &&
-                        target_kind == input_kind && check_action_compatible(table, target, type_unqualified(source.type), result);
+                        target_kind == input_kind && check_action_compatible_at(table, target, type_unqualified(source.type), action, result);
     if ((target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION) && !check_action_source_complete(table, target, action))
     {
         check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, 0);
@@ -1893,6 +1909,43 @@ static void check_action_vla(TypeTable* table, const CheckAction* action, CheckA
     }
 }
 
+static TypeId check_action_transparent_parameter(const TypeTable* table, TypeId destination, const CheckValue* source,
+                                                const CheckAction* action, CheckActionResult* result)
+{
+    TypeId selected = 0;
+    if (type_is_transparent_union(table, destination))
+    {
+        const uint32_t index = type_index(type_strip_aligned(table, destination));
+        const uint32_t tag = table->types.index[index];
+        const bool active = action->transparent_unions == NULL ||
+                            (tag < action->tag_completion_count && action->transparent_unions[tag] != 0 &&
+                             action->transparent_unions[tag] <= action->source_position);
+        if (active && check_action_source_complete(table, destination, action))
+        {
+            const uint32_t first = table->tags.member_begin[tag];
+            const uint32_t count = table->tags.member_count[tag];
+            CheckAction strict = *action;
+            // Transparent-union selection requires an actual assignment-compatible member. The ordinary GNU
+            // qualifier-discard and object/function-pointer extensions do not create a matching alternative.
+            strict.extensions &= ~BUSTER_CHECK_EXTENSION_GNU;
+            for (uint32_t i = 0; selected == 0 && result->diagnostic == CHECK_DIAG_NONE && i < count; i += 1)
+            {
+                CheckActionResult candidate = { 0 };
+                const TypeId member = type_conversion_operand(table, table->members.type[first + i]);
+                if (check_action_assignable(table, member, source, &strict, &candidate))
+                {
+                    selected = member;
+                }
+                else if (candidate.diagnostic == CHECK_DIAG_RESOURCE)
+                {
+                    check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+                }
+            }
+        }
+    }
+    return selected;
+}
+
 static void check_action_call(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     const CheckValue callee = check_action_operand(table, action, result, 0);
@@ -1950,14 +2003,27 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
                 {
                     check_action_promote(table, &value, &converted.conversions[0], action->node);
                 }
-                const TypeId destination = parameter ? parameters[i] : type_default_argument_promote(table, value.type);
-                if (!check_action_assignable(table, destination, &value, action, &converted))
+                TypeId destination = parameter ? parameters[i] : type_default_argument_promote(table, value.type);
+                bool assignable = check_action_assignable(table, destination, &value, action, &converted);
+                bool transparent = false;
+                if (!assignable && parameter && converted.diagnostic == CHECK_DIAG_NONE)
                 {
-                    check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, i + 1);
+                    const TypeId member = check_action_transparent_parameter(table, destination, &value, action, &converted);
+                    if (member != 0)
+                    {
+                        destination = member;
+                        assignable = true;
+                        transparent = true;
+                    }
+                }
+                if (!assignable)
+                {
+                    check_action_diagnose(result, converted.diagnostic != CHECK_DIAG_NONE ? converted.diagnostic : CHECK_DIAG_INCOMPATIBLE, i + 1);
                 }
                 else
                 {
-                    const uint32_t conversion = parameter ? BUSTER_CHECK_CONVERT_ASSIGNMENT : destination != value.type ? BUSTER_CHECK_CONVERT_PROMOTION : 0;
+                    const uint32_t conversion = (parameter ? BUSTER_CHECK_CONVERT_ASSIGNMENT : destination != value.type ? BUSTER_CHECK_CONVERT_PROMOTION : 0) |
+                                                (transparent ? BUSTER_CHECK_CONVERT_TRANSPARENT_UNION : 0);
                     check_action_conversion(table, &value, destination, conversion, &converted.conversions[0], action->node);
                 }
                 if (converted.diagnostic != CHECK_DIAG_NONE)
@@ -1984,7 +2050,9 @@ static uint32_t check_action_operand_count(const CheckAction* action)
         case CHECK_OP_BUILTIN_MISC:
         case CHECK_OP_BUILTIN_FLOAT:
         case CHECK_OP_BUILTIN_QUERY:
-        case CHECK_OP_BUILTIN_ATOMIC: count = 0; break;
+        case CHECK_OP_BUILTIN_ATOMIC:
+        case CHECK_OP_BUILTIN_VECTOR:
+        case CHECK_OP_BUILTIN_X86: count = 0; break;
         case CHECK_OP_VALUE:
         case CHECK_OP_POSITIVE:
         case CHECK_OP_NEGATIVE:
@@ -2288,7 +2356,9 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
             case CHECK_OP_BUILTIN_MISC:
             case CHECK_OP_BUILTIN_FLOAT:
             case CHECK_OP_BUILTIN_QUERY:
-            case CHECK_OP_BUILTIN_ATOMIC: check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0); break;
+            case CHECK_OP_BUILTIN_ATOMIC:
+            case CHECK_OP_BUILTIN_VECTOR:
+            case CHECK_OP_BUILTIN_X86: check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0); break;
             default: check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0); break;
         }
     }

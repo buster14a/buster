@@ -113,6 +113,10 @@ static void check_input_controls(CheckInputReader* reader)
         uint32_t close = 0;
         for (uint32_t token = 0; token < count; token += 1)
         {
+            if (reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[token] != 0)
+            {
+                continue;
+            }
             const uint8_t role = parser->tree.roles[token];
             const uint8_t kind = parser->tokens.kinds[token];
             if (token > close)
@@ -180,6 +184,10 @@ static void check_input_controls(CheckInputReader* reader)
         }
         for (uint32_t token = 0; token < count; token += 1)
         {
+            if (reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[token] != 0)
+            {
+                continue;
+            }
             if (parser->tokens.kinds[token] == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0)
             {
                 const uint32_t body = reader->output->declaration_bodies[token];

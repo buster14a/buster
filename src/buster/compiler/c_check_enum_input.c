@@ -68,7 +68,7 @@ static bool check_input_enum_successor(CheckInputReader* reader, const CheckTagF
     return valid;
 }
 
-static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame, CheckTagMember* members, uint32_t* member_count)
+static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame, CheckTagMember* members, uint32_t* member_count, uint32_t* nested_tag)
 {
     const Parser* parser = reader->parser;
     const uint32_t name = frame->cursor;
@@ -77,47 +77,68 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     uint32_t i = name + 1;
     bool valid = name < frame->close && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER;
     CheckValue value = { 0 };
-    CheckInputAttributes* attributes = 0;
-    valid = valid && check_input_read_attributes(reader, &i, frame->close, &attributes);
-    for (uint32_t a = 0; valid && attributes != 0 && a < attributes->count; a += 1)
+    CheckInputAttributes* attributes = frame->enumerator_attributes;
+    *nested_tag = BUSTER_CHECK_NONE;
+    const bool resumed = frame->enum_job != 0;
+    if (!resumed)
     {
-        CheckInputAttribute* attribute = attributes->records + a;
-        valid = attribute->kind != CHECK_ATTRIBUTE_MODE && attribute->kind != CHECK_ATTRIBUTE_FALLTHROUGH && attribute->kind != CHECK_ATTRIBUTE_ALIGNAS;
-        if (!valid)
+        valid = valid && check_input_read_attributes(reader, &i, frame->close, &attributes);
+        for (uint32_t a = 0; valid && attributes != 0 && a < attributes->count; a += 1)
         {
-            check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_SUBJECT);
-        }
-        attribute->ignored |= attribute->kind == CHECK_ATTRIBUTE_PACKED || attribute->kind == CHECK_ATTRIBUTE_NORETURN ||
-                              attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE;
-    }
-    if (valid && i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_EQUAL)
-    {
-        const uint32_t first = ++i;
-        while (i < frame->close && parser->tokens.kinds[i] != PARSE_KIND_COMMA)
-        {
-            const uint8_t kind = parser->tokens.kinds[i];
-            if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+            CheckInputAttribute* attribute = attributes->records + a;
+            valid = attribute->kind != CHECK_ATTRIBUTE_MODE && attribute->kind != CHECK_ATTRIBUTE_FALLTHROUGH && attribute->kind != CHECK_ATTRIBUTE_ALIGNAS;
+            if (!valid)
             {
-                const uint32_t close = parser->tree.parents[i];
-                if (close <= i || close >= frame->close)
-                {
-                    valid = false;
-                    break;
-                }
-                i = close;
+                check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_SUBJECT);
             }
-            i += 1;
+            attribute->ignored |= attribute->kind == CHECK_ATTRIBUTE_PACKED || attribute->kind == CHECK_ATTRIBUTE_NORETURN ||
+                                  attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE;
         }
-        uint32_t expression_failure = BUSTER_CHECK_NONE;
-        TypeId unused = 0;
-        valid = valid && check_input_constant_read(reader, first, i, false, false, &value, &unused, &expression_failure);
-        failed_token = expression_failure != BUSTER_CHECK_NONE ? expression_failure : first;
-        valid = valid && check_input_integer_constant(reader, &value);
-        if (valid)
+    }
+    if (valid && (resumed || (i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_EQUAL)))
+    {
+        if (!resumed)
         {
-            check_input_constant_warning(reader, first, i, &value, true);
+            const uint32_t first = ++i;
+            while (i < frame->close && parser->tokens.kinds[i] != PARSE_KIND_COMMA)
+            {
+                const uint8_t kind = parser->tokens.kinds[i];
+                if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+                {
+                    const uint32_t close = parser->tree.parents[i];
+                    if (close <= i || close >= frame->close)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    i = close;
+                }
+                i += 1;
+            }
+            frame->enum_job = valid ? check_input_constant_job(reader, first, i) : 0;
+            frame->enumerator_attributes = attributes;
+            failed_token = first;
         }
-        if (valid && check_input_enum_fits_int(reader->types, &value))
+        CheckConstantInput* job = frame->enum_job;
+        valid = job != 0 && check_input_constant_job_step(job, &value, nested_tag);
+        if (job != 0)
+        {
+            i = job->end;
+            failed_token = job->failure != BUSTER_CHECK_NONE ? job->failure : job->first;
+            if (*nested_tag == BUSTER_CHECK_NONE)
+            {
+                valid = valid && check_input_integer_constant(reader, &value);
+                if (valid)
+                {
+                    check_input_constant_warning(reader, job->first, i, &value, true);
+                }
+                const uint64_t mark = job->mark;
+                frame->enum_job = 0;
+                frame->enumerator_attributes = 0;
+                arena_pop_to(reader->scratch, mark);
+            }
+        }
+        if (valid && *nested_tag == BUSTER_CHECK_NONE && check_input_enum_fits_int(reader->types, &value))
         {
             check_action_convert_plain(reader->types, &value, BUSTER_TYPE_INT, name);
         }
@@ -126,71 +147,74 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     {
         valid = check_input_enum_successor(reader, frame, &value);
     }
-    uint32_t width = 0;
-    bool sign = false;
-    valid = valid && check_action_integer_type(reader->types, value.type, &width, &sign);
-    if (valid)
+    if (*nested_tag == BUSTER_CHECK_NONE)
     {
-        const uint32_t identifier = parser->tokens.names[name];
-        const uint32_t old = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
-        valid = old == 0 || reader->bindings.depth[old - 1] != reader->scope_count;
-        if (!valid)
+        uint32_t width = 0;
+        bool sign = false;
+        valid = valid && check_action_integer_type(reader->types, value.type, &width, &sign);
+        if (valid)
         {
-            check_input_report(reader, name, CHECK_INPUT_REDECLARATION);
+            const uint32_t identifier = parser->tokens.names[name];
+            const uint32_t old = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
+            valid = old == 0 || reader->bindings.depth[old - 1] != reader->scope_count;
+            if (!valid)
+            {
+                check_input_report(reader, name, CHECK_INPUT_REDECLARATION);
+            }
+            else
+            {
+                const unsigned __int128 mask = check_action_mask(width);
+                const unsigned __int128 bits = value.integer & mask;
+                const bool negative = sign && (bits >> (width - 1)) != 0;
+                const uint32_t active = check_input_enum_active_bits(negative ? ~bits & mask : bits);
+                const uint32_t required = negative ? active + 1 : active != 0 ? active : 1;
+                frame->negative_bits = negative && required > frame->negative_bits ? required : frame->negative_bits;
+                frame->positive_bits = !negative && required > frame->positive_bits ? required : frame->positive_bits;
+                frame->wide_enumerators |= !check_input_enum_fits_int(reader->types, &value);
+                reader->declared_types[name] = value.type;
+                reader->declaration_kinds[name] = C_BINDING_ENUMERATOR;
+                reader->enum_values[name] = bits;
+                reader->output->declarations[name] = name;
+                reader->output->attributes[name] = attributes;
+                valid = c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, identifier, C_BINDING_ENUMERATOR, name, i, reader->scope_count) != 0;
+                reader->output->resource |= !valid;
+                if (valid)
+                {
+                    const uint32_t member = (*member_count)++;
+                    members[member] = (CheckTagMember)
+                    {
+                        .member = { .name = name, .type = value.type },
+                        .next = BUSTER_CHECK_NONE,
+                    };
+                    if (frame->last != BUSTER_CHECK_NONE)
+                    {
+                        members[frame->last].next = member;
+                    }
+                    else
+                    {
+                        frame->first = member;
+                    }
+                    frame->last = member;
+                    frame->enumerator = bits;
+                    frame->enumerator_type = value.type;
+                    frame->count += 1;
+                }
+            }
+        }
+        for (uint32_t ignored = name; ignored < i; ignored += 1)
+        {
+            reader->ignored[ignored] = true;
+        }
+        if (i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_COMMA)
+        {
+            reader->ignored[i++] = true;
         }
         else
         {
-            const unsigned __int128 mask = check_action_mask(width);
-            const unsigned __int128 bits = value.integer & mask;
-            const bool negative = sign && (bits >> (width - 1)) != 0;
-            const uint32_t active = check_input_enum_active_bits(negative ? ~bits & mask : bits);
-            const uint32_t required = negative ? active + 1 : active != 0 ? active : 1;
-            frame->negative_bits = negative && required > frame->negative_bits ? required : frame->negative_bits;
-            frame->positive_bits = !negative && required > frame->positive_bits ? required : frame->positive_bits;
-            frame->wide_enumerators |= !check_input_enum_fits_int(reader->types, &value);
-            reader->declared_types[name] = value.type;
-            reader->declaration_kinds[name] = C_BINDING_ENUMERATOR;
-            reader->enum_values[name] = bits;
-            reader->output->declarations[name] = name;
-            reader->output->attributes[name] = attributes;
-            valid = c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, identifier, C_BINDING_ENUMERATOR, name, i, reader->scope_count) != 0;
-            reader->output->resource |= !valid;
-            if (valid)
-            {
-                const uint32_t member = (*member_count)++;
-                members[member] = (CheckTagMember)
-                {
-                    .member = { .name = name, .type = value.type },
-                    .next = BUSTER_CHECK_NONE,
-                };
-                if (frame->last != BUSTER_CHECK_NONE)
-                {
-                    members[frame->last].next = member;
-                }
-                else
-                {
-                    frame->first = member;
-                }
-                frame->last = member;
-                frame->enumerator = bits;
-                frame->enumerator_type = value.type;
-                frame->count += 1;
-            }
+            valid &= i == frame->close;
         }
+        frame->cursor = i;
     }
-    for (uint32_t ignored = name; ignored < i; ignored += 1)
-    {
-        reader->ignored[ignored] = true;
-    }
-    if (i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_COMMA)
-    {
-        reader->ignored[i++] = true;
-    }
-    else
-    {
-        valid &= i == frame->close;
-    }
-    frame->cursor = i;
     if (!valid && reader->output->report_count == report_count)
     {
         check_input_report(reader, failed_token, CHECK_INPUT_DECLARATION);

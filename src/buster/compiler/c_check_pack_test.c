@@ -92,6 +92,7 @@ static void check_test_pack_history(CheckTest* test, const CheckPackFixture* fix
         {
             .language = { .standard = 2017, .gnu = true },
             .no_standard_includes = true,
+            .semantic_pragmas = true,
         };
         const ParseOptions parse_options = { .scalar = variant == 0 };
         bool ready = arena.base != 0 && scratch.base != 0 && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
@@ -236,6 +237,49 @@ static void check_test_pack_pragmas(CheckTest* test, const char* clang)
             .name = "pragma operator packing retains expansion coordinates",
             .source = "#define PACK _Pragma(\"pack(push,1)\")\nPACK\nstruct S{char c;int x;};_Static_assert(sizeof(struct S)==5,\"packed\");\n_Pragma(\"pack(pop)\")\n",
             .records = 2,
+        },
+        {
+            .name = "pack macros expand actions labels and alignment at the original source point",
+            .source = "#define ACT push\n#define LABEL outer\n#define N 1\n#pragma pack(ACT,LABEL,N)\n#undef N\n#define N 2\n"
+                      "struct A{char c;int x;};_Static_assert(sizeof(struct A)==5,\"first source state\");\n#pragma pack(N)\n"
+                      "struct B{char c;int x;};_Static_assert(sizeof(struct B)==6,\"redefined state\");\n#undef ACT\n#define ACT pop\n"
+                      "#pragma pack(ACT,LABEL)\nstruct C{char c;int x;};_Static_assert(sizeof(struct C)==8,\"named restoration\");\n",
+            .records = 3,
+        },
+        {
+            .name = "frozen CRT packing spelling receives its source-time macro value",
+            .source = "#define _CRT_PACKING 1\n#pragma pack(push,_CRT_PACKING)\n#undef _CRT_PACKING\n#define _CRT_PACKING 2\n"
+                      "struct A{char c;int x;};_Static_assert(sizeof(struct A)==5,\"original CRT value\");\n#pragma pack(pop)\n"
+                      "#pragma pack(push,_CRT_PACKING)\nstruct B{char c;int x;};_Static_assert(sizeof(struct B)==6,\"new CRT value\");\n"
+                      "#pragma pack(pop)\nstruct C{char c;int x;};_Static_assert(sizeof(struct C)==8,\"default\");\n",
+            .records = 4,
+        },
+        {
+            .name = "pragma operator stringization preserves macro packing history",
+            .source = "#define STRING_(x) #x\n#define STRING(x) STRING_(x)\n#define PACK(...) _Pragma(STRING(pack(__VA_ARGS__)))\n"
+                      "#define N 1\nPACK(push,slot,N)\nstruct A{char c;int x;};_Static_assert(sizeof(struct A)==5,\"operator push\");\n"
+                      "#undef N\n#define N 2\nPACK(N)\nstruct B{char c;int x;};_Static_assert(sizeof(struct B)==6,\"operator set\");\n"
+                      "PACK(pop,slot)\nstruct C{char c;int x;};_Static_assert(sizeof(struct C)==8,\"operator pop\");\n",
+            .records = 3,
+        },
+        {
+            .name = "function-like action and alignment macros normalize before pack grammar",
+            .source = "#define ACT() push\n#define ALIGN() 2\n#define LABEL() selected\n#pragma pack(ACT(),LABEL(),ALIGN())\n"
+                      "struct A{char c;int x;};_Static_assert(sizeof(struct A)==6,\"function macros\");\n#pragma pack(pop,LABEL())\n",
+            .records = 2,
+        },
+        {
+            .name = "macro replacement may supply the complete pack argument list",
+            .source = "#define ARGUMENTS push,slot,1\n#pragma pack(ARGUMENTS)\n"
+                      "struct A{char c;int x;};_Static_assert(sizeof(struct A)==5,\"expanded commas\");\n"
+                      "#undef ARGUMENTS\n#define ARGUMENTS pop,slot\n#pragma pack(ARGUMENTS)\n",
+            .records = 2,
+        },
+        {
+            .name = "invalid expanded pack alignment remains a warning-only no-op",
+            .source = "#pragma pack(1)\n#define N 3\n#pragma pack(N)\nstruct A{char c;int x;};_Static_assert(sizeof(struct A)==5,\"invalid expanded value\");\n",
+            .records = 2,
+            .final_log2 = 1,
         },
         {
             .name = "integer bases and suffixes are literal pack operands",

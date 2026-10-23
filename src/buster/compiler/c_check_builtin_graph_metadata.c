@@ -30,6 +30,31 @@ static __attribute__((unused)) bool check_store_effect_equal(const CheckStoreEff
            a->warnings == b->warnings && a->warning_operands == b->warning_operands && a->unsupported == b->unsupported;
 }
 
+static __attribute__((unused)) bool check_x86_call_equal(const CheckX86Call* a, const CheckX86Call* b)
+{
+    return a->node == b->node && a->info == b->info && a->required_ice_arguments == b->required_ice_arguments &&
+           a->ice_arguments == b->ice_arguments && a->reachability == b->reachability &&
+           a->constant_evaluated_context == b->constant_evaluated_context &&
+           a->runtime_diagnostic_suppressed == b->runtime_diagnostic_suppressed;
+}
+
+static __attribute__((unused)) bool check_builtin_x86_effect_equal(const CheckBuiltinX86Effect* a, const CheckBuiltinX86Effect* b,
+                                                                 bool (*value_equal)(const CheckValue*, const CheckValue*))
+{
+    bool equal = a->node == b->node && a->info == b->info && a->status == b->status && a->constraint == b->constraint &&
+                 a->checked_ice_arguments == b->checked_ice_arguments && a->matched_rules == b->matched_rules &&
+                 a->unsupported == b->unsupported && a->range_event_count == b->range_event_count;
+    for (uint32_t i = 0; equal && i < a->range_event_count; i += 1)
+    {
+        const CheckBuiltinX86RangeEvent* x = a->range_events + i;
+        const CheckBuiltinX86RangeEvent* y = b->range_events + i;
+        equal = x->node == y->node && x->argument == y->argument && x->low == y->low && x->high == y->high &&
+                x->source_line == y->source_line && value_equal(&x->value, &y->value) && x->disposition == y->disposition &&
+                x->default_error == y->default_error;
+    }
+    return equal;
+}
+
 static __attribute__((unused)) bool check_builtin_misc_effect_equal(const CheckBuiltinMiscEffect* a, const CheckBuiltinMiscEffect* b,
                                                                   bool (*value_equal)(const CheckValue*, const CheckValue*))
 {
@@ -76,10 +101,28 @@ static __attribute__((unused)) bool check_builtin_atomic_effect_equal(const Chec
            a->writes_memory == b->writes_memory && a->rmw == b->rmw && a->compiler_barrier == b->compiler_barrier;
 }
 
+static __attribute__((unused)) bool check_builtin_vector_effect_equal(const CheckBuiltinVectorEffect* a, const CheckBuiltinVectorEffect* b,
+                                                                    bool (*value_equal)(const CheckValue*, const CheckValue*))
+{
+    bool equal = a->node == b->node && a->element_type == b->element_type && a->memory_type == b->memory_type &&
+                 a->lane_count == b->lane_count && a->evaluated_argument_count == b->evaluated_argument_count &&
+                 a->warnings == b->warnings && a->warning_operands == b->warning_operands && a->unsupported == b->unsupported &&
+                 a->runtime_builtin == b->runtime_builtin && a->constraint == b->constraint && a->store_conversion == b->store_conversion &&
+                 a->reads_memory == b->reads_memory && a->writes_memory == b->writes_memory && a->nondeterministic == b->nondeterministic &&
+                 a->constant_evaluation_unmodeled == b->constant_evaluation_unmodeled && a->reads_fp_environment == b->reads_fp_environment &&
+                 a->may_raise_fp_exceptions == b->may_raise_fp_exceptions && a->bool_splat_signed_true == b->bool_splat_signed_true;
+    for (uint32_t i = 0; equal && i < 3; i += 1)
+    {
+        equal = value_equal(a->converted_arguments + i, b->converted_arguments + i);
+    }
+    return equal;
+}
+
 static __attribute__((unused)) bool check_builtin_stream_metadata_equal(const CheckStream* a, const CheckStream* b,
                                                                       bool (*value_equal)(const CheckValue*, const CheckValue*))
 {
-    bool equal = a->misc_count == b->misc_count && a->floating_count == b->floating_count && a->query_count == b->query_count && a->atomic_count == b->atomic_count;
+    bool equal = a->misc_count == b->misc_count && a->floating_count == b->floating_count && a->query_count == b->query_count &&
+                 a->atomic_count == b->atomic_count && a->vector_count == b->vector_count && a->x86_count == b->x86_count;
     for (uint32_t i = 0; equal && i < a->misc_count; i += 1)
     {
         equal = check_builtin_misc_effect_equal(a->misc + i, b->misc + i, value_equal);
@@ -95,6 +138,14 @@ static __attribute__((unused)) bool check_builtin_stream_metadata_equal(const Ch
     for (uint32_t i = 0; equal && i < a->atomic_count; i += 1)
     {
         equal = check_builtin_atomic_effect_equal(a->atomics + i, b->atomics + i, value_equal);
+    }
+    for (uint32_t i = 0; equal && i < a->vector_count; i += 1)
+    {
+        equal = check_builtin_vector_effect_equal(a->vectors + i, b->vectors + i, value_equal);
+    }
+    for (uint32_t i = 0; equal && i < a->x86_count; i += 1)
+    {
+        equal = check_builtin_x86_effect_equal(a->x86 + i, b->x86 + i, value_equal);
     }
     return equal;
 }

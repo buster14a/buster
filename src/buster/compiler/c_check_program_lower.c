@@ -566,11 +566,20 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         type = type_strip_aligned(types, type_element(types, type));
     }
     uint32_t parameters = 0;
-    type_parameters(types, type, &parameters);
+    const TypeId* parameter_types = type_parameters(types, type, &parameters);
     const uint8_t flags = types->types.flags[type_index(type)];
     const bool variadic = (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0 || (flags & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
     CheckLowerAbi* abi = writer->abi;
-    if (value.constant_kind != CHECK_CONSTANT_ADDRESS || value.object == 0 || value.offset != 0 ||
+    bool scalar_parameters = true;
+    for (uint32_t a = 0; a < parameters; a += 1)
+    {
+        scalar_parameters &= check_lower_class(types, parameter_types[a]) != UINT8_MAX;
+    }
+    for (uint32_t a = 0; a < count; a += 1)
+    {
+        scalar_parameters &= (stream->argument_conversions[first + a].flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) == 0;
+    }
+    if (!scalar_parameters || value.category == CHECK_LVALUE || value.constant_kind != CHECK_CONSTANT_ADDRESS || value.object == 0 || value.offset != 0 ||
         value.object >= writer->program->object_count || writer->program->object_symbols[value.object] == 0 ||
         (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0 || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS)
     {
@@ -1448,6 +1457,10 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     else if (op == CHECK_OP_BUILTIN_ATOMIC)
     {
         check_lower_helper(writer, node);
+    }
+    else if (op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_UNSUPPORTED);
     }
     else if (op == CHECK_OP_BUILTIN_FLOAT)
     {

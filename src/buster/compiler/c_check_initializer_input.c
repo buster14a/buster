@@ -24,6 +24,135 @@ struct CheckInitializers
     uint32_t token;
 };
 
+static bool check_init_object_candidate(const CheckInput* input, const TypeTable* types, uint32_t token)
+{
+    const bool initialized = input->objects != NULL && input->objects[token] != 0 &&
+                             input->initializer_begins[token] < input->initializer_ends[token] && type_is_valid(types, input->declared_types[token]);
+    const TypeId type = initialized ? type_strip_aligned(types, input->declared_types[token]) : 0;
+    return initialized && check_vector_type(types, type) &&
+           (type_qualifiers(type) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) == BUSTER_TYPE_CONST;
+}
+
+static bool check_init_objects_open(CheckInitObjects* objects, const CheckInput* input, const TypeTable* types, uint32_t cutoff, Arena* scratch)
+{
+    *objects = (CheckInitObjects){ 0 };
+    uint32_t count = 0;
+    for (uint32_t token = 0; token < cutoff; token += 1)
+    {
+        count += check_init_object_candidate(input, types, token) && input->initializer_ends[token] <= cutoff;
+    }
+    uint64_t capacity = count != 0 ? 1 : 0;
+    while (capacity < (uint64_t)count * 2)
+    {
+        capacity *= 2;
+    }
+    bool valid = capacity <= UINT32_MAX;
+    if (valid && capacity != 0)
+    {
+        objects->entries = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInitObject, capacity);
+        valid = objects->entries != NULL;
+        if (valid)
+        {
+            memset(objects->entries, 0, capacity * sizeof(CheckInitObject));
+            objects->capacity = (uint32_t)capacity;
+        }
+    }
+    return valid;
+}
+
+// This reader only consumes a completed plan. It cannot invoke expression evaluation or follow an object
+// reference, so source-ordered constant-object retention adds no recursive dependency traversal.
+static bool check_init_object_bytes(const TypeTable* types, const CheckInitializer* plan, uint8_t* bytes, uint64_t size)
+{
+    bool valid = size <= UINT64_MAX / 8 && size == plan->object_size && plan->status == CHECK_INIT_OK;
+    if (valid)
+    {
+        memset(bytes, 0, size);
+    }
+    for (uint32_t i = 0; valid && i < plan->count; i += 1)
+    {
+        const CheckInitPart* part = plan->parts + i;
+        uint64_t bits = 0;
+        uint8_t scalar[16] = { 0 };
+        const uint8_t* source = part->bytes;
+        valid = check_initializer_part_bits(types, part, &bits) == CHECK_INIT_OK && part->bit_offset <= size * 8 && bits <= size * 8 - part->bit_offset;
+        if (valid && part->kind == CHECK_INIT_VALUE)
+        {
+            valid = bits <= sizeof(scalar) * 8 && check_init_scalar_bytes(types, &part->value, scalar);
+            source = scalar;
+        }
+        if (valid && part->kind != CHECK_INIT_CLEAR)
+        {
+            valid = bits == 0 || source != NULL;
+        }
+        if (valid && (part->bit_offset % 8) == 0 && (bits % 8) == 0)
+        {
+            if (part->kind == CHECK_INIT_CLEAR)
+            {
+                memset(bytes + part->bit_offset / 8, 0, bits / 8);
+            }
+            else if (bits != 0)
+            {
+                memcpy(bytes + part->bit_offset / 8, source, bits / 8);
+            }
+        }
+        else if (valid)
+        {
+            for (uint64_t bit = 0; bit < bits; bit += 1)
+            {
+                const uint64_t destination = part->bit_offset + bit;
+                const uint8_t mask = (uint8_t)(1u << (destination % 8));
+                const bool set = part->kind != CHECK_INIT_CLEAR && ((source[bit / 8] >> (bit % 8)) & 1) != 0;
+                bytes[destination / 8] = (uint8_t)((bytes[destination / 8] & ~mask) | (set ? mask : 0));
+            }
+        }
+    }
+    return valid;
+}
+
+static bool check_init_object_retain(CheckInitObjects* objects, const CheckInput* input, const CheckStream* stream,
+                                      const Parser* parser, TypeTable* types, uint32_t token, const CheckInitializer* plan,
+                                      bool diagnostic_only, Arena* output, Arena* scratch)
+{
+    bool valid = true;
+    if (check_init_object_candidate(input, types, token))
+    {
+        const uint32_t slot = check_init_object_slot(objects, input->objects[token]);
+        const uint64_t mark = scratch->length;
+        const uint64_t size = type_size(types, input->declared_types[token]);
+        uint8_t* bytes = size != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, size) : NULL;
+        valid = slot != BUSTER_CHECK_NONE && bytes != NULL;
+        bool known = valid && check_init_object_bytes(types, plan, bytes, size);
+        if (valid && !known && !input->static_objects[token])
+        {
+            // Automatic const vectors may have runtime initializers. A bounded static-mode attempt reuses
+            // earlier retained bytes; an ordinary nonconstant result does not reject the automatic object.
+            const uint64_t output_mark = output->length;
+            CheckInitializer constant = { 0 };
+            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
+                                       input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
+                                       true, diagnostic_only, true, output, scratch, &constant, &input->graph, NULL, objects);
+            valid = accepted || constant.status != CHECK_INIT_RESOURCE;
+            known = accepted && check_init_object_bytes(types, &constant, bytes, size);
+            arena_pop_to(output, output_mark);
+        }
+        if (known)
+        {
+            objects->entries[slot] = (CheckInitObject){
+                .object = input->objects[token],
+                .end = input->initializer_ends[token],
+                .type = type_unqualified(type_strip_aligned(types, input->declared_types[token])),
+                .bytes = bytes,
+            };
+        }
+        else
+        {
+            arena_pop_to(scratch, mark);
+        }
+    }
+    return valid;
+}
+
 static bool check_init_warning_collector(CheckInitWarningCollector* collector, CheckInitWarningSink* sink, uint32_t token_count, Arena* scratch)
 {
     *collector = (CheckInitWarningCollector){ .sink = sink, .token_count = token_count };
@@ -166,6 +295,12 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         valid = false;
         result->status = CHECK_INIT_RESOURCE;
     }
+    CheckInitObjects objects = { 0 };
+    if (valid && !check_init_objects_open(&objects, input, types, cutoff, scratch))
+    {
+        valid = false;
+        result->status = CHECK_INIT_RESOURCE;
+    }
     for (uint32_t declaration = 0; valid && declaration < cutoff; declaration += 1)
     {
         const uint32_t begin = input->initializer_begins[declaration];
@@ -181,17 +316,18 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
             CheckInitializer plan = { 0 };
             const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
                                                          input->declared_types[declaration], begin, end, input->static_objects[declaration] != 0,
-                                                         true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL);
+                                                         true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL, &objects);
+            const bool retained = !accepted || check_init_object_retain(&objects, input, stream, parser, types, declaration, &plan, true, output, scratch);
             if (plan.warning_count != 0)
             {
                 result->warning_count += 1;
                 result->warning_token = plan.warning_token < result->warning_token ? plan.warning_token : result->warning_token;
             }
-            if (!accepted && plan.status == CHECK_INIT_RESOURCE)
+            if (!retained || (!accepted && plan.status == CHECK_INIT_RESOURCE))
             {
                 valid = false;
                 result->status = CHECK_INIT_RESOURCE;
-                result->token = plan.failed_token;
+                result->token = retained ? plan.failed_token : begin;
             }
             else if (!accepted && plan.status != CHECK_INIT_CHECK_FAILED && plan.failed_token < result->token)
             {
@@ -287,6 +423,12 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
         valid = false;
         result->status = CHECK_INIT_RESOURCE;
     }
+    CheckInitObjects objects = { 0 };
+    if (valid && !check_init_objects_open(&objects, input, types, tokens, scratch))
+    {
+        valid = false;
+        result->status = CHECK_INIT_RESOURCE;
+    }
     uint32_t at = 0;
     for (uint32_t token = 0; valid && token < tokens; token += 1)
     {
@@ -295,7 +437,13 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
             CheckInitializer* plan = result->plans + at;
             valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
                                           input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
-                                          input->static_objects[token] != 0, false, true, output, scratch, plan, &input->graph, &collector);
+                                          input->static_objects[token] != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
+            if (valid && !check_init_object_retain(&objects, input, stream, parser, types, token, plan, false, output, scratch))
+            {
+                valid = false;
+                plan->status = CHECK_INIT_RESOURCE;
+                plan->failed_token = input->initializer_begins[token];
+            }
             if (valid)
             {
                 result->declaration_tokens[at] = token;

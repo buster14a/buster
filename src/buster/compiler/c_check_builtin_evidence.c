@@ -16,6 +16,60 @@ static TypeId check_input_complex_format(CBuiltinId builtin)
     return format == 1 ? BUSTER_TYPE_FLOAT : format == 2 ? BUSTER_TYPE_LONG_DOUBLE : BUSTER_TYPE_DOUBLE;
 }
 
+// The graph is appended in postorder, so every syntactic effect summary is computed once. Unlike ordinary
+// constant folding, conditional and logical nodes retain effects from every source arm. Typed volatile reads
+// are added by the checker after conversions; this producer witness describes explicit source effects only.
+static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_t root)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    if (root < graph->count && reader->builtin_syntax_effects == 0)
+    {
+        reader->builtin_syntax_effects = arena_push_array(reader->scratch, graph->capacity, sizeof(uint8_t), 1);
+        reader->output->resource |= reader->builtin_syntax_effects == 0;
+    }
+    while (!reader->output->resource && root < graph->count && reader->builtin_syntax_count <= root)
+    {
+        const uint32_t node = reader->builtin_syntax_count++;
+        const CheckOp op = (CheckOp)graph->ops[node];
+        const CBuiltinId builtin = (CBuiltinId)graph->members[node];
+        bool effects = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_ASSIGN || op == CHECK_OP_BUILTIN_OVERFLOW || op == CHECK_OP_VARARGS ||
+                       op == CHECK_OP_BUILTIN_ATOMIC || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
+        effects |= op == CHECK_OP_VALUE && (graph->leaves[node].flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
+        effects |= op == CHECK_OP_STATEMENT_VALUE && (graph->members[node] & BUSTER_CHECK_SIDE_EFFECT) != 0;
+        effects |= op == CHECK_OP_BUILTIN_MISC && (builtin == CBUILTIN_UNREACHABLE || builtin == CBUILTIN_TRAP ||
+                   builtin == CBUILTIN_PREFETCH || builtin == CBUILTIN_MEMCPY || builtin == CBUILTIN_MEMSET ||
+                   builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA);
+        effects |= op == CHECK_OP_BUILTIN_VECTOR && builtin == CBUILTIN_NONTEMPORAL_STORE;
+        const bool unevaluated = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_BUILTIN_QUERY ||
+                                 (op == CHECK_OP_BUILTIN_FLOAT && builtin >= CBUILTIN_NAN && builtin <= CBUILTIN_NANL) ||
+                                 (op == CHECK_OP_BUILTIN_VECTOR && builtin == CBUILTIN_NONDETERMINISTIC_VALUE);
+        if (!unevaluated)
+        {
+            const uint32_t operands[3] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            for (uint32_t operand = 0; operand < BUSTER_ARRAY_LENGTH(operands); operand += 1)
+            {
+                const uint32_t child = operands[operand];
+                effects |= child < node && reader->builtin_syntax_effects[child] != 0;
+            }
+            if (check_graph_has_arguments(op))
+            {
+                uint32_t count = graph->argument_counts[node];
+                if (op == CHECK_OP_BUILTIN_VECTOR && builtin == CBUILTIN_SHUFFLEVECTOR && count > 2)
+                {
+                    count = 2;
+                }
+                for (uint32_t argument = 0; argument < count; argument += 1)
+                {
+                    const uint32_t child = graph->argument_nodes[graph->argument_offsets[node] + argument];
+                    effects |= child < node && reader->builtin_syntax_effects[child] != 0;
+                }
+            }
+        }
+        reader->builtin_syntax_effects[node] = effects;
+    }
+    return !reader->output->resource && root < reader->builtin_syntax_count && reader->builtin_syntax_effects[root] != 0;
+}
+
 static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t first, uint32_t end, CheckBuiltinCall* evidence)
 {
     const Parser* parser = reader->parser;

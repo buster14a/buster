@@ -10,6 +10,7 @@ typedef struct CheckInitExpected CheckInitExpected;
 struct CheckInitExpected
 {
     const char* name;
+    const char* clang_name;
     uint8_t bytes[64];
     uint32_t size;
     uint8_t class;
@@ -215,7 +216,9 @@ static void check_init_test_objects(CheckTest* test, Link* link, const CheckInit
     {
         char description[192];
         snprintf(description, sizeof(description), "Clang confirms initializer bytes and section for %s", expected[i].name);
-        check_test_expect(test, check_init_test_elf_bytes(&theirs, expected + i), description);
+        CheckInitExpected reference = expected[i];
+        reference.name = reference.clang_name != NULL ? reference.clang_name : reference.name;
+        check_test_expect(test, check_init_test_elf_bytes(&theirs, &reference), description);
     }
     if (oracle && check_init_test_symbol(link, "pointers") != 0)
     {
@@ -918,6 +921,42 @@ static void check_init_test_complex(CheckTest* test, const char* clang)
 #include "c_check_initializer_diagnostic_test.c"
 #include "c_check_initializer_excess_test.c"
 
+static void check_init_test_vector_objects(CheckTest* test, const char* clang)
+{
+    static const char source[] =
+        "typedef int I __attribute__((vector_size(16)));typedef int E __attribute__((ext_vector_type(4)));"
+        "typedef _Bool B __attribute__((ext_vector_type(4)));typedef float F __attribute__((vector_size(16)));\n"
+        "const I named_first={1,2,3,4};const I named_second=named_first+1;\n"
+        "I named_copy=named_second;I named_chain=named_second*2;int named_index=named_first[2];\n"
+        "const E named_extended={5,6,7,8};E named_swizzle=(+named_extended).wzyx;\n"
+        "const B named_bits={1,0,1,0};B named_bit_copy=named_bits;\n"
+        "_Thread_local const I named_tls={9};I named_tls_copy=named_tls+1;\n"
+        "I named_comma=(1,named_first);const F named_float={1.0f,-0.0f,2.0f,4.0f};F named_float_copy=named_float;\n"
+        "I *local_vectors(void){const I a=(I){2,4,6,8};const I b=a+1;static I named_local=b*2;return &named_local;}\n";
+    static const CheckInitExpected expected[] = {
+        { .name = "named_first", .bytes = { [0] = 1, [4] = 2, [8] = 3, [12] = 4 }, .size = 16, .class = BUSTER_LINK_CLASS_RODATA },
+        { .name = "named_second", .bytes = { [0] = 2, [4] = 3, [8] = 4, [12] = 5 }, .size = 16, .class = BUSTER_LINK_CLASS_RODATA },
+        { .name = "named_copy", .bytes = { [0] = 2, [4] = 3, [8] = 4, [12] = 5 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "named_chain", .bytes = { [0] = 4, [4] = 6, [8] = 8, [12] = 10 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "named_index", .bytes = { 3 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "named_extended", .bytes = { [0] = 5, [4] = 6, [8] = 7, [12] = 8 }, .size = 16, .class = BUSTER_LINK_CLASS_RODATA },
+        { .name = "named_swizzle", .bytes = { [0] = 8, [4] = 7, [8] = 6, [12] = 5 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "named_bits", .bytes = { 5 }, .size = 1, .class = BUSTER_LINK_CLASS_RODATA },
+        { .name = "named_bit_copy", .bytes = { 5 }, .size = 1, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "named_tls", .bytes = { 9 }, .size = 16, .class = BUSTER_LINK_CLASS_TDATA },
+        { .name = "named_tls_copy", .bytes = { [0] = 10, [4] = 1, [8] = 1, [12] = 1 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "named_comma", .bytes = { [0] = 1, [4] = 2, [8] = 3, [12] = 4 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "named_float", .bytes = { [2] = 0x80, [3] = 0x3f, [7] = 0x80, [11] = 0x40, [14] = 0x80, [15] = 0x40 }, .size = 16, .class = BUSTER_LINK_CLASS_RODATA },
+        { .name = "named_float_copy", .bytes = { [2] = 0x80, [3] = 0x3f, [7] = 0x80, [11] = 0x40, [14] = 0x80, [15] = 0x40 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "named_local", .clang_name = "local_vectors.named_local", .bytes = { [0] = 6, [4] = 10, [8] = 14, [12] = 18 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+    };
+    check_init_test_source(test, source, expected, BUSTER_ARRAY_LENGTH(expected), true, true, clang);
+    check_init_test_diagnostic_source(test, "typedef int I __attribute__((vector_size(16)));const I a={1,2,3,4};I b=a+1;\nint f(void){return missing;}\n",
+                                      BUSTER_CHECK_NONE, true, 0);
+    check_init_test_diagnostic_source(test, "typedef int I __attribute__((vector_size(16)));const I a={1,2,3,4};I b=a+1;\nint f(void){return *1;}\n",
+                                      BUSTER_CHECK_NONE, false, 0);
+}
+
 static void check_init_test_vector_constants(CheckTest* test, const char* clang)
 {
     static const char source[] =
@@ -1002,6 +1041,7 @@ static void check_init_test_vector_constants(CheckTest* test, const char* clang)
 
 static void check_init_test_vectors(CheckTest* test, const char* clang)
 {
+    check_init_test_vector_objects(test, clang);
     check_init_test_vector_constants(test, clang);
     static const char source[] =
         "typedef int I __attribute__((vector_size(16)));typedef int E __attribute__((ext_vector_type(4)));"

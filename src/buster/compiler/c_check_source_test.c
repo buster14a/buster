@@ -104,10 +104,221 @@ static void check_test_source_fp_history(CheckTest* test, bool complex)
     intern_release(&identifiers);
 }
 
+static void check_test_source_builtin_effects(CheckTest* test)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const char* source =
+        "int side(void);int f(int x){return __builtin_constant_p(1?1.0/3.0:side())+"
+        "__builtin_constant_p(0&&side())+__builtin_constant_p(sizeof(side()))+"
+        "__builtin_constant_p(_Generic(side(),int:1.0/3.0))+"
+        "__builtin_constant_p(__builtin_choose_expr(1,1.0/3.0,side()))+"
+        "__builtin_constant_p(__builtin_constant_p(side()))+__builtin_constant_p(x++ + 1.0/3.0);}";
+    const bool expected[] = { true, true, false, false, false, true, false, true };
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
+    ready = ready && pp_run_source(&pp, "constant-p-syntax.c", (const uint8_t*)source, strlen(source));
+    check_test_expect(test, ready, "builtin syntax-effect fixture preprocessing");
+    for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena arena = arena_reserve(UINT64_C(1) << 24);
+        Arena scratch = arena_reserve(UINT64_C(1) << 24);
+        const ParseOptions parse_options = { .scalar = scalar != 0 };
+        CheckInput input = { 0 };
+        const bool parsed = check_test_types_open(&types) && arena.base != 0 && scratch.base != 0 &&
+                            parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
+        const bool adapted = parsed && check_input(&input, &parser, &pp, &types.table, &arena, &scratch);
+        check_test_expect(test, adapted && !input.resource, "builtin syntax-effect source adaptation");
+        uint32_t found = 0;
+        uint32_t first = BUSTER_CHECK_NONE;
+        for (uint32_t call = 0; adapted && call < input.graph.builtin_count; call += 1)
+        {
+            const CheckBuiltinCall* evidence = input.graph.builtin_calls + call;
+            const uint32_t node = evidence->node;
+            if (input.graph.ops[node] == CHECK_OP_BUILTIN_QUERY && input.graph.members[node] == CBUILTIN_CONSTANT_P)
+            {
+                check_test_expect(test, found < BUSTER_ARRAY_LENGTH(expected) && evidence->constant_p_side_effects == expected[found],
+                                  "constant_p syntax keeps conditional calls but ignores truly unevaluated operands");
+                first = first == BUSTER_CHECK_NONE ? input.graph.argument_nodes[input.graph.argument_offsets[node]] : first;
+                found += 1;
+            }
+        }
+        check_test_expect(test, found == BUSTER_ARRAY_LENGTH(expected), "builtin syntax-effect fixture visits all nested calls");
+        if (adapted && first != BUSTER_CHECK_NONE)
+        {
+            CheckInput limited = { .graph = input.graph };
+            CheckInputReader reader = { .output = &limited, .scratch = &scratch };
+            const uint64_t capacity = scratch.capacity;
+            scratch.capacity = scratch.length;
+            const bool effects = check_input_builtin_syntax_effects(&reader, first);
+            check_test_expect(test, !effects && limited.resource && reader.builtin_syntax_count == 0 && reader.builtin_syntax_effects == 0,
+                              "builtin syntax-effect exhaustion cannot fabricate a pure-argument witness");
+            scratch.capacity = capacity;
+        }
+        parse_release(&parser);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&arena);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
+static void check_test_source_transparent_history(CheckTest* test)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const char* source = "union U{int i;unsigned u;};void take(union U);void before(void){take(1);}"
+                         "typedef union U T __attribute__((transparent_union));void after(void){take(1);}";
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
+    ready = ready && pp_run_source(&pp, "transparent-history.c", (const uint8_t*)source, strlen(source));
+    check_test_expect(test, ready, "transparent union history fixture preprocessing");
+    for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena arena = arena_reserve(UINT64_C(1) << 24);
+        Arena output = arena_reserve(UINT64_C(1) << 24);
+        Arena scratch = arena_reserve(UINT64_C(1) << 24);
+        const ParseOptions parse_options = { .scalar = scalar != 0 };
+        CheckInput input = { 0 };
+        const bool parsed = check_test_types_open(&types) && arena.base != 0 && output.base != 0 && scratch.base != 0 &&
+                            parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
+        const bool adapted = parsed && check_input(&input, &parser, &pp, &types.table, &arena, &scratch);
+        const uint32_t name = intern_find(&identifiers, (const uint8_t*)"T", 1);
+        uint32_t tag = BUSTER_CHECK_NONE;
+        for (uint32_t token = 0; adapted && token < parser.tokens.count; token += 1)
+        {
+            if (parser.tokens.names[token] == name && input.declaration_kinds[token] == C_BINDING_TYPEDEF)
+            {
+                tag = types.table.types.index[type_index(input.declared_types[token])];
+            }
+        }
+        check_test_expect(test, adapted && !input.resource && input.graph.transparent_unions != 0 && tag < input.graph.tag_completion_count,
+                          "transparent union history retains the exact typedef's nominal tag");
+        uint32_t calls[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        uint32_t found = 0;
+        for (uint32_t node = 0; adapted && node < input.graph.count; node += 1)
+        {
+            if (input.graph.ops[node] == CHECK_OP_CALL)
+            {
+                if (found < BUSTER_ARRAY_LENGTH(calls))
+                {
+                    calls[found] = node;
+                }
+                found += 1;
+            }
+        }
+        if (adapted && found == BUSTER_ARRAY_LENGTH(calls) && input.graph.transparent_unions != 0 && tag < input.graph.tag_completion_count)
+        {
+            const uint32_t activation = input.graph.transparent_unions[tag];
+            check_test_expect(test, input.graph.tag_completions[tag] < activation && input.graph.source_positions[calls[0]] < activation &&
+                              activation <= input.graph.source_positions[calls[1]],
+                              "transparent attribute activation is distinct from the earlier record completion");
+            memset(scratch.base + scratch.length, 0xa5, scratch.capacity - scratch.length);
+            CheckStream stream = { 0 };
+            const CheckOptions check_options = { .scalar = scalar != 0 };
+            const bool checked = check_graph_run(&types.table, &input.graph, &output, &scratch, &check_options, &stream);
+            check_test_expect(test, checked && stream.report_count == 1 && stream.reports[0].node == calls[0] &&
+                              input.graph.transparent_unions[tag] == activation,
+                              "recycled scratch cannot retroactively allow the call before the transparent attribute");
+        }
+        else
+        {
+            check_test_expect(test, false, "transparent union fixture retains both original call nodes");
+        }
+        parse_release(&parser);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        arena_release(&arena);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 static void check_test_source_extensions(CheckTest* test, const char* clang)
 {
     const CheckSourceFixture fixtures[] =
     {
+        {
+            "transparent union converts scalar arguments through its first member",
+            "typedef union {int i;float f;} U __attribute__((transparent_union));void take(U);void f(short x){take(x);take(1.5f);}\n",
+            false,
+        },
+        {
+            "record transparent union annotation accepts each compatible pointer member",
+            "union __attribute__((transparent_union)) U{int *i;double *d;};void take(union U);void f(int *i,double *d){take(i);take(d);take(0);}\n",
+            false,
+        },
+        {
+            "transparent union remains a distinct ordinary type",
+            "typedef union {int *i;double *d;} U __attribute__((transparent_union));_Static_assert(!__builtin_types_compatible_p(U,int*),\"\");_Static_assert(__builtin_types_compatible_p(void(*)(U),void(*)(int*)),\"\");_Static_assert(__builtin_types_compatible_p(void(*)(double*),void(*)(U)),\"\");\n",
+            false,
+        },
+        {
+            "transparent union composite declaration preserves the visible pointer parameter",
+            "typedef union {int *i;double *d;} U __attribute__((transparent_union));void take(U);void take(int*);void f(int *p){take(p);}\n",
+            false,
+        },
+        {
+            "transparent union composite in reverse order preserves the visible pointer parameter",
+            "typedef union {int *i;double *d;} U __attribute__((transparent_union));void take(int*);void take(U);void f(int *p){take(p);}\n",
+            false,
+        },
+        {
+            "transparent union definition retains its written local parameter type",
+            "typedef union {int *i;double *d;} U __attribute__((transparent_union));int take(int*);int take(U x){return *x.i;}\n",
+            false,
+        },
+        {
+            "transparent union composite narrows subsequent calls",
+            "typedef union {int *i;double *d;} U __attribute__((transparent_union));void take(U);void take(int*);\nvoid f(double *p){take(p);}\n",
+            true,
+        },
+        {
+            "transparent union pointer selection does not discard qualifiers",
+            "typedef union {void *v;int *i;} U __attribute__((transparent_union));void take(U);\nvoid f(const int *p){take(p);}\n",
+            true,
+        },
+        {
+            "later transparent union attribute does not change an earlier call",
+            "union U{int i;unsigned u;};void take(union U);\nvoid before(void){take(1);}\ntypedef union U T __attribute__((transparent_union));\nvoid after(void){take(1);}\n",
+            true,
+        },
+        {
+            "completed typedef transparent union attribute permits later calls",
+            "union U{int i;unsigned u;};void take(union U);typedef union U T __attribute__((transparent_union));void after(void){take(1);}\n",
+            false,
+        },
+        {
+            "later transparent union attribute does not change an earlier function pointer initializer",
+            "union U{int *i;double *d;};void take(union U);\nvoid(*before)(int*)=take;\ntypedef union U T __attribute__((transparent_union));\n",
+            true,
+        },
+        {
+            "transparent union history permits a later compatible function pointer initializer",
+            "union U{int *i;double *d;};void take(union U);typedef union U T __attribute__((transparent_union));void(*after)(int*)=take;\n",
+            false,
+        },
+        {
+            "incomplete transparent union attribute remains ignored after completion",
+            "typedef union U U __attribute__((transparent_union));union U{int i;unsigned u;};void take(U);\nvoid f(void){take(1);}\n",
+            true,
+        },
+        {
+            "floating first member prevents transparent union argument conversion",
+            "typedef union {float f;int i;} U __attribute__((transparent_union));void take(U);\nvoid f(void){take(1);}\n",
+            true,
+        },
+        {
+            "unequal member layout prevents transparent union argument conversion",
+            "typedef union {int *p;int i;} U __attribute__((transparent_union));void take(U);\nvoid f(int *p){take(p);}\n",
+            true,
+        },
         {
             "complex range permission restores lexical state",
             "#pragma STDC CX_LIMITED_RANGE ON\n_Complex double f(_Complex double z){\n#pragma STDC CX_LIMITED_RANGE OFF\n{\n#pragma STDC CX_LIMITED_RANGE ON\nz=z*z;}return z;}\n#pragma STDC CX_LIMITED_RANGE DEFAULT\n",
@@ -1095,4 +1306,6 @@ static void check_test_source_extensions(CheckTest* test, const char* clang)
     }
     check_test_source_fp_history(test, false);
     check_test_source_fp_history(test, true);
+    check_test_source_builtin_effects(test);
+    check_test_source_transparent_history(test);
 }

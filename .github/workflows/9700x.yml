@@ -180,6 +180,7 @@ jobs:
           ./build/compiler test-bindings
           == Test deferred-body source-position environments
           ./build/compiler test-environments
+          ./build/compiler test-lowering --clang clang
           == Test C-source binding identities and scope semantics
           ./build/compiler test-parser-bindings --clang
           == Compare source binding columns on main.c
@@ -372,6 +373,7 @@ jobs:
           ./build/compiler test-checker --seed 133
           ./build/compiler test-checker-asm
           ./build/compiler test-checker-driver --executable ./build/compiler
+          ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
           == Check the frozen SQLite source against Clang
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400

@@ -334,9 +334,11 @@ static uint32_t check_corpus_repair_warning(const CheckCorpusPath* path, const C
     return first;
 }
 
-static void check_corpus_warning_diagnostics(CheckCorpusPath* path, uint32_t before_token, const CheckRepair* repair)
+static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser* parser, uint32_t before_token, const CheckRepair* repair)
 {
     uint32_t first = BUSTER_CHECK_NONE;
+    uint32_t pragma = 0;
+    uint32_t pragma_source = BUSTER_CHECK_NONE;
     if (!path->suppress_warnings && !path->resource)
     {
         if (repair == NULL)
@@ -374,15 +376,31 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, uint32_t bef
                 first = token;
             }
         }
+        uint32_t pragma_token = BUSTER_CHECK_NONE;
+        if (check_diagnostic_first_pragma_error(&path->input, before_token, &pragma_token, &pragma_source) && pragma_token <= first)
+        {
+            for (uint32_t i = 0; i < path->input.fp_pragma_count && pragma == 0; i += 1)
+            {
+                const CheckInputFpPragma* record = path->input.fp_pragmas + i;
+                if (record->source_begin == pragma_source)
+                {
+                    pragma = record->pragma + 1;
+                }
+            }
+            first = pragma_token;
+        }
     }
     path->warning_token = first < before_token ? first : BUSTER_CHECK_NONE;
-    if (path->warning_token < path->position)
+    const CheckInputReport previous = { .token = path->token, .pragma = path->pragma };
+    const bool earlier_pragma = pragma != 0 && path->warning_token == path->position && pragma_source < check_input_report_source(parser, &previous);
+    if (path->warning_token < path->position || earlier_pragma)
     {
         path->token = path->warning_token;
         path->position = path->token;
-        path->pragma = 0;
+        path->pragma = pragma;
         path->phase = "promoted-warning";
-        snprintf(path->message, sizeof(path->message), "%s", "semantic warning promoted to an error");
+        snprintf(path->message, sizeof(path->message), "%s", pragma != 0 ? check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA) :
+                                                                        "semantic warning promoted to an error");
     }
 }
 
@@ -514,7 +532,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
                     check_corpus_late_diagnostics(result, &repair->parser, repair->record_begin);
                 }
             }
-            check_corpus_warning_diagnostics(result, repair->record_begin, repair);
+            check_corpus_warning_diagnostics(result, &repair->parser, repair->record_begin, repair);
             check_corpus_location(result, &repair->parser, repair->preprocessor);
         }
         result->resource |= !ready;
@@ -681,7 +699,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     {
         check_corpus_late_diagnostics(path, view, path->position);
     }
-    check_corpus_warning_diagnostics(path, BUSTER_CHECK_NONE, NULL);
+    check_corpus_warning_diagnostics(path, view, BUSTER_CHECK_NONE, NULL);
     if (!path->parsed && path->token == BUSTER_CHECK_NONE)
     {
         // A clean semantic prefix never accepts the failed original parse or turns its cutoff into TU end.
@@ -1047,7 +1065,9 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     equal = equal && left->diagnostic_graph == right->diagnostic_graph && left->report_count == right->report_count && left->token_count == right->token_count &&
             left->string_count == right->string_count && left->region_count == right->region_count && left->vla_count == right->vla_count &&
             left->asm_count == right->asm_count && left->binding_event_count == right->binding_event_count &&
-            left->parser_binding_event_count == right->parser_binding_event_count;
+            left->parser_binding_event_count == right->parser_binding_event_count &&
+            left->intrinsic_declaration_count == right->intrinsic_declaration_count && left->intrinsic_call_count == right->intrinsic_call_count &&
+            (left->intrinsic_ids == NULL) == (right->intrinsic_ids == NULL) && (left->deferred_tokens == NULL) == (right->deferred_tokens == NULL);
     for (uint32_t report = 0; equal && report < left->report_count; report += 1)
     {
         equal = left->reports[report].token == right->reports[report].token && left->reports[report].message == right->reports[report].message &&
@@ -1056,7 +1076,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     for (uint32_t token = 0; equal && !a->resource && trees && left->declarations != 0 && right->declarations != 0 && token < left_parser->tokens.count; token += 1)
     {
         equal = left->declarations[token] == right->declarations[token] && left->declared_types[token] == right->declared_types[token] &&
-                left->declaration_kinds[token] == right->declaration_kinds[token] && left->objects[token] == right->objects[token] &&
+                left->declaration_kinds[token] == right->declaration_kinds[token] && left->function_flags[token] == right->function_flags[token] &&
+                left->objects[token] == right->objects[token] &&
                 left->static_objects[token] == right->static_objects[token] && left->registers[token] == right->registers[token] &&
                 left->thread_local[token] == right->thread_local[token] && left->compound_objects[token] == right->compound_objects[token] &&
                 check_corpus_attributes_equal(left->attributes[token], right->attributes[token]) &&
@@ -1070,6 +1091,37 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 left->expression_regions[token] == right->expression_regions[token] && left->asm_ids[token] == right->asm_ids[token] &&
                 left->constant_warnings[token] == right->constant_warnings[token] &&
                 left->constant_warning_ignored[token] == right->constant_warning_ignored[token];
+    }
+    for (uint32_t token = 0; equal && !a->resource && trees && token <= left->token_count; token += 1)
+    {
+        equal = (left->intrinsic_ids == NULL || left->intrinsic_ids[token] == right->intrinsic_ids[token]) &&
+                (left->deferred_tokens == NULL || left->deferred_tokens[token] == right->deferred_tokens[token]);
+    }
+    for (uint32_t declaration = 0; equal && !a->resource && declaration < left->intrinsic_declaration_count; declaration += 1)
+    {
+        const CheckInputIntrinsicDeclaration* x = left->intrinsic_declarations + declaration;
+        const CheckInputIntrinsicDeclaration* y = right->intrinsic_declarations + declaration;
+        const BuiltinIntrinsicTypeResult* p = &x->types;
+        const BuiltinIntrinsicTypeResult* q = &y->types;
+        equal = x->info == y->info && p->status == q->status && p->function_type == q->function_type && p->result_type == q->result_type &&
+                p->parameter_count == q->parameter_count && p->ice_parameters == q->ice_parameters && p->unsupported == q->unsupported &&
+                p->error_offset == q->error_offset && p->type_error == q->type_error && p->variadic == q->variadic &&
+                p->prototype == q->prototype && p->signature_ignored == q->signature_ignored;
+        for (uint32_t parameter = 0; equal && parameter < BUSTER_INTRINSIC_TYPE_MAX_PARAMETERS; parameter += 1)
+        {
+            equal = p->parameters[parameter] == q->parameters[parameter];
+        }
+    }
+    for (uint32_t call = 0; equal && !a->resource && call < left->intrinsic_call_count; call += 1)
+    {
+        const CheckInputIntrinsicCall* x = left->intrinsic_calls + call;
+        const CheckInputIntrinsicCall* y = right->intrinsic_calls + call;
+        equal = x->declaration == y->declaration && x->keyword == y->keyword && x->opening == y->opening && x->closing == y->closing &&
+                x->function_body == y->function_body && x->argument_count == y->argument_count;
+        for (uint32_t argument = 0; equal && argument < x->argument_count; argument += 1)
+        {
+            equal = x->arguments[argument].first == y->arguments[argument].first && x->arguments[argument].end == y->arguments[argument].end;
+        }
     }
     for (uint32_t region = 0; equal && region < left->region_count; region += 1)
     {
@@ -1135,12 +1187,15 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     const CheckGraph* other = &right->graph;
     equal = equal && graph->count == other->count && graph->argument_count == other->argument_count && graph->varargs_count == other->varargs_count &&
             graph->extensions == other->extensions && graph->builtin_count == other->builtin_count && graph->vector_member_count == other->vector_member_count &&
+            graph->x86_count == other->x86_count &&
             graph->tag_completion_count == other->tag_completion_count && (graph->tag_completions == 0) == (other->tag_completions == 0) &&
+            (graph->transparent_unions == NULL) == (other->transparent_unions == NULL) &&
             (graph->source_positions == 0) == (other->source_positions == 0) && (graph->fp_environments == NULL) == (other->fp_environments == NULL) &&
             (graph->warning_suppressed == NULL) == (other->warning_suppressed == NULL);
     for (uint32_t tag = 0; equal && tag < graph->tag_completion_count; tag += 1)
     {
         equal = graph->tag_completions != 0 && graph->tag_completions[tag] == other->tag_completions[tag];
+        equal = equal && (graph->transparent_unions == NULL || graph->transparent_unions[tag] == other->transparent_unions[tag]);
     }
     for (uint32_t node = 0; equal && !a->resource && node < graph->count; node += 1)
     {
@@ -1180,6 +1235,10 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         const CheckVectorCall* q = other->vector_members + call;
         equal = p->node == q->node && p->member.count == q->member.count && p->member.kind == q->member.kind &&
                 (p->member.count == 0 || memcmp(p->member.lanes, q->member.lanes, p->member.count) == 0);
+    }
+    for (uint32_t call = 0; equal && !a->resource && call < graph->x86_count; call += 1)
+    {
+        equal = check_x86_call_equal(graph->x86_calls + call, other->x86_calls + call);
     }
     if (equal && a->checked)
     {
@@ -2011,6 +2070,7 @@ static int run_checker_corpus(int count, char** arguments)
         clang_arguments[clang_count++] = standard;
         options.quiet = true;
         options.clang_features = true;
+        options.semantic_pragmas = true;
         for (uint32_t i = 0; valid && i < input_count; i += 1)
         {
             const uint32_t before = file_count;

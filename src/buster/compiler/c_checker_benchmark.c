@@ -30,8 +30,10 @@ struct String8
 
 #include "buster/compiler/lane.c"
 #include "buster/compiler/c_types.c"
+#include "buster/compiler/c_builtin_intrinsic_catalog.c"
 #include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_check_actions.c"
+#include "buster/compiler/c_check_builtin_x86.c"
 #include "buster/compiler/c_check_builtin.c"
 #include "buster/compiler/c_check_varargs.c"
 #include "buster/compiler/c_check_builtin_misc.c"
@@ -39,6 +41,7 @@ struct String8
 #include "buster/compiler/c_check_builtin_float.c"
 #include "buster/compiler/c_check_builtin_math.c"
 #include "buster/compiler/c_check_builtin_atomic.c"
+#include "buster/compiler/c_check_builtin_vector.c"
 #include "buster/compiler/c_check_builtin_typed_overflow.c"
 #include "buster/compiler/c_check_builtin_rounds.c"
 #include "buster/compiler/c_checker.c"

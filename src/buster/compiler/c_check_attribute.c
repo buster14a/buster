@@ -987,7 +987,7 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
     bool valid = base != 0 && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE;
     for (uint32_t i = 0; valid && i < attributes->count; i += 1)
     {
-        const CheckInputAttribute* attribute = &attributes->records[i];
+        CheckInputAttribute* attribute = &attributes->records[i];
         CheckInputAttributeError error = CHECK_ATTRIBUTE_ERROR_SUBJECT;
         if (attribute->kind == CHECK_ATTRIBUTE_MODE)
         {
@@ -1014,7 +1014,10 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION)
         {
-            valid = type_kind(reader->types, result) == BUSTER_TYPE_KIND_UNION;
+            // Subject/layout validation and nominal activation belong to the source completion point. Prefix
+            // attributes can reach this helper while their record is incomplete; do not mark them prematurely.
+            // Clang ignores this attribute on a non-union type with a warning instead of rejecting the declaration.
+            attribute->ignored |= type_kind(reader->types, type_strip_aligned(reader->types, result)) != BUSTER_TYPE_KIND_UNION;
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_FALLTHROUGH)
         {

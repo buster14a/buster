@@ -192,8 +192,25 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 first[token] = (UINT64_C(2) << 32) | i;
             }
         }
+        uint32_t pragma = 0;
         for (uint32_t token = 0; !pp->fatal && token <= count; token += 1)
         {
+            while (!pp->fatal && pragma < input->fp_pragma_count && input->fp_pragmas[pragma].token == token)
+            {
+                const CheckInputFpPragma* record = input->fp_pragmas + pragma;
+                const bool retained = repair == NULL || token < repair->record_begin;
+                if (show_warnings && retained && (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0)
+                {
+                    const CheckWarningSeverity severity = check_diagnostic_severity_at(input, token, record->source_begin, CHECK_WARNING_UNKNOWN_PRAGMA, false);
+                    if (severity != CHECK_WARNING_IGNORE)
+                    {
+                        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                        pp_diagnose_output(pp, pp_severity, record->source_begin, "%s", check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA));
+                    }
+                }
+                pragma += 1;
+            }
             uint32_t flags = show_warnings && (repair == NULL || check_repair_warning_token(repair, token)) ?
                              warnings[token].flags : 0;
             while (!pp->fatal && flags != 0)
@@ -433,11 +450,20 @@ static int run_check_command(int count, char** arguments)
     bool dump_static = false;
     bool emit_object = false;
     bool quiet = false;
+    bool lazy_system_headers = false;
     for (int i = 0; filtered != 0 && i < count; i += 1)
     {
         scalar |= strcmp(arguments[i], "--scalar") == 0;
         quiet |= strcmp(arguments[i], "-w") == 0;
-        if (strcmp(arguments[i], "-c") == 0)
+        if (strcmp(arguments[i], "-flazy-system-headers") == 0)
+        {
+            lazy_system_headers = true;
+        }
+        else if (strcmp(arguments[i], "-fno-lazy-system-headers") == 0)
+        {
+            lazy_system_headers = false;
+        }
+        else if (strcmp(arguments[i], "-c") == 0)
         {
             emit_object = true;
         }
@@ -459,9 +485,10 @@ static int run_check_command(int count, char** arguments)
     const char* output = 0;
     bool markers = false;
     const bool parsed = filtered != 0 && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    options.semantic_pragmas = true;
     if (!parsed)
     {
-        fprintf(stderr, "usage: compiler check [--scalar] [--dump-typed] [--dump-static] [-c [-o file.o]] [preprocessor options] file.c\n");
+        fprintf(stderr, "usage: compiler check [--scalar] [--dump-typed] [--dump-static] [-flazy-system-headers] [-c [-o file.o]] [preprocessor options] file.c\n");
     }
     else if (!check_input_target_supported(&options))
     {
@@ -533,11 +560,21 @@ static int run_check_command(int count, char** arguments)
                     fprintf(stderr, "fatal error: can't reserve type table\n");
                 }
             }
+            CheckLazy lazy = { 0 };
+            if (ready && lazy_system_headers && !prefix_only)
+            {
+                ready = check_lazy_plan(&lazy, checking, checking_pp, &arena, &scratch, scalar);
+                if (!ready)
+                {
+                    fprintf(stderr, "fatal error: system-header checking selection failed\n");
+                }
+            }
             if (ready)
             {
                 CheckInput input;
                 const bool input_valid = repairing ? check_input_fragment(&input, checking, checking_pp, &types, &arena, &scratch, repair.original_end) :
                                          prefix_only ? check_input_prefix(&input, checking, checking_pp, &types, &arena, &scratch) :
+                                         lazy_system_headers ? check_input_selected(&input, checking, checking_pp, &types, &arena, &scratch, lazy.deferred_tokens) :
                                                        check_input(&input, checking, checking_pp, &types, &arena, &scratch);
                 if (input.resource)
                 {
@@ -616,6 +653,9 @@ static int run_check_command(int count, char** arguments)
                         }
                         uint32_t promoted_token = BUSTER_CHECK_NONE;
                         bool promoted = !quiet && check_diagnostic_first_error(&input, &stream, &promoted_token);
+                        uint32_t promoted_source = BUSTER_CHECK_NONE;
+                        promoted |= !quiet && check_diagnostic_first_pragma_error(&input, repairing ? repair.record_begin : BUSTER_CHECK_NONE,
+                                                                                &promoted_token, &promoted_source);
                         for (uint32_t i = 0; !quiet && !promoted && i < excess_count; i += 1)
                         {
                             promoted = check_diagnostic_severity(&input, excess_tokens[i], CHECK_WARNING_EXCESS_INITIALIZERS) >= CHECK_WARNING_ERROR;
@@ -666,8 +706,18 @@ static int run_check_command(int count, char** arguments)
                         }
                         if (result == 0 && emit_object && !prefix_only)
                         {
-                            const char* object_path = output != 0 ? output : check_driver_object_name(&arena, path);
-                            result = object_path != 0 && check_driver_object(&program, &data, checking, &pp, &types, path, object_path, scalar, dump_static, &scratch) ? 0 : 1;
+                            CheckProgramSelection selected;
+                            if (check_program_select(&selected, &program, &data, scalar, &output_arena, &scratch))
+                            {
+                                const char* object_path = output != 0 ? output : check_driver_object_name(&arena, path);
+                                result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, &pp, &types, path,
+                                                                               object_path, scalar, dump_static, &scratch) ? 0 : 1;
+                            }
+                            else
+                            {
+                                check_driver_diagnose(checking, &pp, selected.token, "checked definition selection failed");
+                                result = 1;
+                            }
                         }
                         if (result == 0 && dump_static && !emit_object && !prefix_only)
                         {

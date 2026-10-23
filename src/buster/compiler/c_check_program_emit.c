@@ -50,12 +50,14 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     const uint32_t count = program->body_count;
     Tier0Code* codes = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, Tier0Code, count) : 0;
     uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
+    String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
-    valid = valid && alignments != 0 && (count == 0 || (codes != 0 && result->function_atoms != 0));
+    valid = valid && alignments != 0 && symbol_names != 0 && (count == 0 || (codes != 0 && result->function_atoms != 0));
     if (valid)
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
-        for (uint32_t token = 0; token < program->input->token_count; token += 1)
+        memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
+        for (uint32_t token = 0; valid && token < program->input->token_count; token += 1)
         {
             const CheckInputAttributes* attributes = program->input->attributes[token];
             const uint32_t object = program->input->objects[token];
@@ -63,6 +65,34 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             {
                 const SymbolId symbol = program->object_symbols[object];
                 alignments[symbol] = attributes->alignment_log2 > alignments[symbol] ? attributes->alignment_log2 : alignments[symbol];
+                for (uint32_t i = 0; valid && i < attributes->count; i += 1)
+                {
+                    const CheckInputAttribute* attribute = attributes->records + i;
+                    if (symbol != 0 && !attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !program->input->registers[token])
+                    {
+                        const String8 previous = symbol_names[symbol];
+                        valid = previous.length == 0 || (previous.length == attribute->text.length &&
+                                memcmp(previous.pointer, attribute->text.pointer, previous.length) == 0);
+                        if (valid)
+                        {
+                            symbol_names[symbol] = attribute->text;
+                        }
+                        else
+                        {
+                            result->status = CHECK_PROGRAM_INVALID;
+                            result->token = attribute->name_token;
+                        }
+                    }
+                    if (!attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_ALIAS || attribute->kind == CHECK_ATTRIBUTE_IFUNC ||
+                        (symbol != 0 && (attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR || attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR))))
+                    {
+                        // The typed source contract retains these obligations. Until symbol aliases and startup
+                        // lists are published, refusing code emission is required to preserve program behavior.
+                        result->status = CHECK_PROGRAM_UNSUPPORTED;
+                        result->token = attribute->name_token;
+                        valid = false;
+                    }
+                }
             }
         }
     }
@@ -124,7 +154,9 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             }
             else
             {
-                name = link_add_name(&result->link, intern_bytes(identifiers, identifier), intern_length(identifiers, identifier));
+                const String8 renamed = symbol_names[s + 1];
+                name = renamed.length != 0 ? link_add_name(&result->link, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
+                                             link_add_name(&result->link, intern_bytes(identifiers, identifier), intern_length(identifiers, identifier));
             }
             const uint8_t kind = program->input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
                                  program->input->thread_local[declaration] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;

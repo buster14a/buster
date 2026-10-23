@@ -32,8 +32,74 @@ static void check_test_constant_sources(CheckTest* test, const char* clang)
         length += (uint32_t)snprintf(nested_attributes + length, sizeof(nested_attributes) - length, "))) S)");
     }
     snprintf(nested_attributes + length, sizeof(nested_attributes) - length, " }; _Static_assert(N==8, \"nested tag attribute jobs\");\n");
+    char long_shuffle[4096];
+    length = (uint32_t)snprintf(long_shuffle, sizeof(long_shuffle), "typedef int V __attribute__((vector_size(16))); V a; enum { N=sizeof(__builtin_shufflevector(a,a");
+    for (uint32_t i = 0; i < 512; i += 1)
+    {
+        length += (uint32_t)snprintf(long_shuffle + length, sizeof(long_shuffle) - length, ",%u", i % 8);
+    }
+    snprintf(long_shuffle + length, sizeof(long_shuffle) - length, ")) }; _Static_assert(N==2048, \"long shuffle operand slice\");\n");
+    char raw_shuffle[4096];
+    length = (uint32_t)snprintf(raw_shuffle, sizeof(raw_shuffle), "typedef int V __attribute__((vector_size(16))); V a; typedef int T [[gnu::aligned(sizeof(__builtin_shufflevector(a,a");
+    for (uint32_t i = 0; i < 512; i += 1)
+    {
+        length += (uint32_t)snprintf(raw_shuffle + length, sizeof(raw_shuffle) - length, ",%u", i % 8);
+    }
+    snprintf(raw_shuffle + length, sizeof(raw_shuffle) - length, ")))]]; _Static_assert(_Alignof(T)==2048, \"raw long shuffle operand slice\");\n");
     const CheckSourceFixture fixtures[] =
     {
+        {
+            .name = "declaration vector builtin exact type queries",
+            .source = "typedef int I4 __attribute__((vector_size(16))); typedef float F4 __attribute__((vector_size(16))); I4 a; __typeof__(__builtin_convertvector(a,F4)) b; enum { N=sizeof(__builtin_elementwise_abs(a)), R=sizeof(__builtin_reduce_add(a)), C=sizeof(__builtin_convertvector(a,F4)) }; _Static_assert(N==16 && R==4 && C==16 && __builtin_types_compatible_p(__typeof__(b),F4), \"vector builtin types\");\n",
+        },
+        {
+            .name = "declaration vector conversion nested destination query",
+            .source = "typedef int I4 __attribute__((vector_size(16))); typedef float F4 __attribute__((vector_size(16))); I4 a; enum { N=sizeof(__builtin_convertvector(a,__typeof__(__builtin_convertvector(a,F4)))) }; _Static_assert(N==16, \"nested destination type job\");\n",
+        },
+        {
+            .name = "declaration vector conversion attributed abstract destination",
+            .source = "typedef int V __attribute__((vector_size(16))); V a; enum { N=sizeof(__builtin_convertvector(a,float __attribute__((vector_size(16))))) }; typedef int T [[gnu::aligned(sizeof(__builtin_convertvector(a,float __attribute__((vector_size(16))))))]]; _Static_assert(N==16 && _Alignof(T)==16, \"abstract vector destination\");\n",
+        },
+        {
+            .name = "declaration vector builtin arbitrary argument slice",
+            .source = long_shuffle,
+        },
+        {
+            .name = "raw attribute vector builtin arbitrary argument slice",
+            .source = raw_shuffle,
+        },
+        {
+            .name = "raw attribute vector builtin destination type",
+            .source = "typedef int I4 __attribute__((vector_size(16))); typedef float F4 __attribute__((vector_size(16))); I4 a; typedef int T [[gnu::aligned(sizeof(__builtin_convertvector(a,F4)))]]; _Static_assert(_Alignof(T)==16, \"raw convert destination\");\n",
+        },
+        {
+            .name = "raw attribute nested vector builtin destination type",
+            .source = "typedef int I4 __attribute__((vector_size(16))); typedef float F4 __attribute__((vector_size(16))); I4 a; typedef int T [[gnu::aligned(sizeof(__builtin_convertvector(a,__typeof__(__builtin_convertvector(a,F4)))))]]; _Static_assert(_Alignof(T)==16, \"raw nested destination\");\n",
+        },
+        {
+            .name = "declaration vector memory builtin type query",
+            .source = "typedef int V __attribute__((vector_size(16))); V a; int n; enum { A=sizeof(__builtin_nontemporal_load(&a)), B=sizeof(__builtin_nontemporal_store(a,&a)), C=sizeof(__builtin_nondeterministic_value(++n)) }; _Static_assert(A==16 && B==1 && C==4, \"vector memory types\");\n",
+        },
+        {
+            .name = "declaration vector conversion rejects lane count mismatch",
+            .source = "typedef int V __attribute__((vector_size(16))); typedef double D __attribute__((vector_size(16))); V a; enum { N=sizeof(__builtin_convertvector(a,D)) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration vector conversion rejects scalar destination",
+            .source = "typedef int V __attribute__((vector_size(16))); V a; enum { N=sizeof(__builtin_convertvector(a,int)) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration vector shuffle rejects out of range lane",
+            .source = "typedef int V __attribute__((vector_size(16))); V a; enum { N=sizeof(__builtin_shufflevector(a,a,0,1,2,8)) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration vector shuffle rejects nonconstant lane",
+            .source = "typedef int V __attribute__((vector_size(16))); V a; int i; enum { N=sizeof(__builtin_shufflevector(a,a,0,1,2,i)) };\n",
+            .rejected = true,
+        },
         {
             .name = "declaration sizeof arithmetic",
             .source = "struct Buffer { char spare[12 * sizeof(int) - 5 * sizeof(void *)]; }; _Static_assert(sizeof(struct Buffer)==8, \"bound\");\n",

@@ -12036,13 +12036,86 @@ static uint32_t parse_primary_location(const Preprocessor* pp, uint32_t source)
     return location;
 }
 
+// A missing separator after an expanded token belongs after the invocation, including its closing parenthesis.
+// The spelling helper stays separate: diagnostic arguments still quote the token's actual source bytes.
+static uint32_t parse_expansion_context(const Preprocessor* pp, uint32_t source)
+{
+    uint32_t result = 0;
+    uint32_t origin = pp_history_at(pp, source);
+    const uint64_t maximum = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
+    for (uint64_t step = 0; origin != 0 && step < maximum; step += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        if (kind == BUSTER_PP_ORIGIN_ARGUMENT && index < pp->substitution_count)
+        {
+            origin = pp->substitutions[index].expansion;
+        }
+        else if (kind == BUSTER_PP_ORIGIN_GENERATED && index < pp->generated_count)
+        {
+            origin = pp->generated[index].expansion;
+        }
+        else if (kind == 0 && index < pp->history_count)
+        {
+            result = index + 1;
+            origin = pp->history[index].parent;
+        }
+        else
+        {
+            origin = 0;
+        }
+    }
+    return result;
+}
+
+static uint32_t parse_primary_end(const Parser* parser, const Preprocessor* pp, uint32_t token)
+{
+    const uint32_t source = parser->tokens.sources[token];
+    uint32_t result = parse_token_end(parser, pp, token);
+    uint32_t origin = pp_history_at(pp, source);
+    uint32_t location = BUSTER_PP_NONE;
+    const uint64_t maximum = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
+    for (uint64_t step = 0; origin != 0 && step < maximum; step += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        if (kind == BUSTER_PP_ORIGIN_ARGUMENT && index < pp->substitution_count)
+        {
+            origin = pp->substitutions[index].expansion;
+        }
+        else if (kind == BUSTER_PP_ORIGIN_GENERATED && index < pp->generated_count)
+        {
+            origin = pp->generated[index].expansion;
+        }
+        else if (kind == 0 && index < pp->history_count)
+        {
+            location = pp->history[index].end;
+            origin = pp->history[index].end_origin;
+        }
+        else
+        {
+            origin = 0;
+        }
+    }
+    const uint32_t range = location != BUSTER_PP_NONE ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    if (range != BUSTER_PP_NONE)
+    {
+        const PPRange* bytes = &pp->ranges[range];
+        const uint32_t offset = location - bytes->base;
+        result = bytes->bytes[offset] == ')' ? location + 1 : bytes->base + pp_identifier_end(pp, bytes->bytes, bytes->length, offset);
+    }
+    return result;
+}
+
 static uint32_t parse_diagnostic_location(const Parser* parser, const Preprocessor* pp, const ParseDiagnostic* diagnostic)
 {
     const uint32_t t = diagnostic->token;
     uint32_t result;
     if (diagnostic->place == BUSTER_PARSE_AFTER_PREVIOUS && t > 0 && t - 1 < parser->tokens.count)
     {
-        result = parse_token_end(parser, pp, t - 1);
+        const uint32_t previous = parse_expansion_context(pp, parser->tokens.sources[t - 1]);
+        const bool inside = previous != 0 && t < parser->tokens.count && previous == parse_expansion_context(pp, parser->tokens.sources[t]);
+        result = inside ? parse_primary_location(pp, parser->tokens.sources[t]) : parse_primary_end(parser, pp, t - 1);
     }
     else if (t < parser->tokens.count)
     {

@@ -198,6 +198,9 @@ typedef uint32_t TypeId;
 #define BUSTER_TYPE_FLAG_DEFINED 0x20
 // A struct or union whose last member is a flexible array member.
 #define BUSTER_TYPE_FLAG_FLEXIBLE 0x40
+// A validated GNU transparent union. This nominal-record property does not make the union itself compatible with
+// its members. The source owner retains activation history when an attribute is added after earlier uses.
+#define BUSTER_TYPE_FLAG_TRANSPARENT_UNION 0x80
 
 // A member's flags.
 #define BUSTER_TYPE_MEMBER_PACKED 0x01
@@ -407,6 +410,26 @@ struct TypeRecordAttributes
     uint8_t alignment_log2;
 };
 
+typedef enum TypeTransparentUnionStatus
+{
+    TYPE_TRANSPARENT_UNION_APPLIED,
+    TYPE_TRANSPARENT_UNION_NOT_UNION,
+    TYPE_TRANSPARENT_UNION_INCOMPLETE,
+    TYPE_TRANSPARENT_UNION_EMPTY,
+    TYPE_TRANSPARENT_UNION_FIRST_FLOAT,
+    TYPE_TRANSPARENT_UNION_FIRST_VECTOR,
+    TYPE_TRANSPARENT_UNION_SIZE,
+    TYPE_TRANSPARENT_UNION_ALIGNMENT,
+} TypeTransparentUnionStatus;
+
+typedef struct TypeTransparentUnionResult TypeTransparentUnionResult;
+struct TypeTransparentUnionResult
+{
+    TypeTransparentUnionStatus status;
+    // Zero-based field index for a first-field/size/alignment failure; UINT32_MAX for a subject failure.
+    uint32_t member;
+};
+
 // type_derive_batch's requests, as columns: request i asks for kinds[i] of bases[i] with extents[i] and flags[i], as
 // the one-at-a-time constructors take them (type_pointer's kind POINTER, type_array's ARRAY with the length, and so
 // on). Every kind but FUNCTION and the tags.
@@ -505,6 +528,12 @@ static __attribute__((unused)) bool type_record_layout(TypeTable* table, TypeId 
 // fails; the others are still laid out.
 static __attribute__((unused)) bool type_layout_records(TypeTable* table, const TypeId* records, uint32_t count);
 static __attribute__((unused)) bool type_complete_record(TypeTable* table, TypeId record, const TypeMember* members, uint32_t count, TypeRecordAttributes attributes);
+// A complete union with at least one member can be transparent when its first member is neither a floating or
+// complex-floating type nor a vector, and every member type has that first type's size and alignment. Member-level
+// packed/aligned/bit-field placement does not change this check. Invalid requests leave the record and last_error
+// unchanged: the source attribute consumer retains Clang's warning/ignored disposition and exact failing field.
+static __attribute__((unused)) TypeTransparentUnionResult type_mark_transparent_union(TypeTable* table, TypeId record);
+static __attribute__((unused)) bool type_is_transparent_union(const TypeTable* table, TypeId type);
 // Completes an enum with its underlying type (fixed, or from type_enum_underlying) and its aligned attribute (log2 + 1,
 // or 0), which may lower its alignment as clang's does.
 static __attribute__((unused)) bool type_enum_complete(TypeTable* table, TypeId enumeration, TypeId underlying, uint8_t alignment_log2);
@@ -551,6 +580,11 @@ typedef enum TypeAnswer
 // the scratch memory is full.
 static __attribute__((unused)) TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId right);
 static __attribute__((unused)) TypeId type_composite(TypeTable* table, TypeId left, TypeId right);
+// History-aware variants of the same relation. Optional tag-indexed activation positions are exclusive source
+// ends; zero and UINT32_MAX are inactive. A non-NULL history hides later transparent-union attributes. NULL asks
+// for final TypeTable semantics. The other nominal/type properties keep the same contracts as the ordinary APIs.
+static __attribute__((unused)) TypeAnswer type_compatible_at(const TypeTable* table, TypeId left, TypeId right, const uint32_t* activations, uint32_t activation_count, uint32_t source_position);
+static __attribute__((unused)) TypeId type_composite_at(TypeTable* table, TypeId left, TypeId right, const uint32_t* activations, uint32_t activation_count, uint32_t source_position);
 // Whether two types have one canonical type (clang's, which has no typedefs): the same TypeId, or the same structure
 // once every ALIGNED is looked through.
 static __attribute__((unused)) TypeAnswer type_same_canonical(const TypeTable* table, TypeId left, TypeId right);
@@ -2785,6 +2819,64 @@ static bool type_complete_record(TypeTable* table, TypeId record, const TypeMemb
     return type_record_define(table, record, members, count, attributes) && type_record_layout(table, record);
 }
 
+static bool type_is_transparent_union(const TypeTable* table, TypeId type)
+{
+    bool transparent = false;
+    if (type_is_valid(table, type))
+    {
+        const TypeId stripped = type_strip_aligned(table, type);
+        transparent = type_kind(table, stripped) == BUSTER_TYPE_KIND_UNION &&
+                      (table->types.flags[type_index(stripped)] & BUSTER_TYPE_FLAG_TRANSPARENT_UNION) != 0;
+    }
+    return transparent;
+}
+
+static TypeTransparentUnionResult type_mark_transparent_union(TypeTable* table, TypeId record)
+{
+    TypeTransparentUnionResult result = { .status = TYPE_TRANSPARENT_UNION_NOT_UNION, .member = UINT32_MAX };
+    if (type_is_valid(table, record))
+    {
+        record = type_strip_aligned(table, record);
+        if (type_kind(table, record) == BUSTER_TYPE_KIND_UNION)
+        {
+            const uint32_t tag = table->types.index[type_index(record)];
+            const uint32_t begin = table->tags.member_begin[tag];
+            const uint32_t count = table->tags.member_count[tag];
+            result.status = !type_is_complete(table, record) ? TYPE_TRANSPARENT_UNION_INCOMPLETE :
+                            count == 0 ? TYPE_TRANSPARENT_UNION_EMPTY : TYPE_TRANSPARENT_UNION_APPLIED;
+            if (result.status == TYPE_TRANSPARENT_UNION_APPLIED)
+            {
+                const TypeId first = table->members.type[begin];
+                const TypeId stripped = type_strip_aligned(table, first);
+                const uint8_t kind = type_kind(table, stripped);
+                const bool floating = kind == BUSTER_TYPE_KIND_FLOATING ||
+                                      (kind == BUSTER_TYPE_KIND_COMPLEX && type_kind(table, type_element(table, stripped)) == BUSTER_TYPE_KIND_FLOATING);
+                if (floating || kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
+                {
+                    result.status = floating ? TYPE_TRANSPARENT_UNION_FIRST_FLOAT : TYPE_TRANSPARENT_UNION_FIRST_VECTOR;
+                    result.member = 0;
+                }
+                const uint64_t size = type_size(table, first);
+                const uint32_t alignment = type_alignment_log2(table, first);
+                for (uint32_t member = 1; result.status == TYPE_TRANSPARENT_UNION_APPLIED && member < count; member += 1)
+                {
+                    const TypeId type = table->members.type[begin + member];
+                    if (type_size(table, type) != size || type_alignment_log2(table, type) != alignment)
+                    {
+                        result.status = type_size(table, type) != size ? TYPE_TRANSPARENT_UNION_SIZE : TYPE_TRANSPARENT_UNION_ALIGNMENT;
+                        result.member = member;
+                    }
+                }
+            }
+            if (result.status == TYPE_TRANSPARENT_UNION_APPLIED)
+            {
+                table->types.flags[type_index(record)] |= BUSTER_TYPE_FLAG_TRANSPARENT_UNION;
+            }
+        }
+    }
+    return result;
+}
+
 // The vector layout: 16 records at once, one per 32-bit lane, a member of each per step, with masks for the lanes whose
 // records have no more members. First a scalar pass reads each member's type's size and alignment (pointer chasing:
 // a gather is 64 µops on Zen 5) into scratch columns, in the batch's order. Then each group of 16 records, grouped by
@@ -4031,9 +4123,11 @@ static uint64_t type_merge_inner_count(const TypeTable* table, TypeId left)
     return kind == BUSTER_TYPE_KIND_FUNCTION ? 1 + table->types.extent[type_index(l)] : 1;
 }
 
+#include "c_types_transparent.c"
+
 // A worklist of the pairs still to compare, each of which must be compatible, and each pushed once: no composite is
 // made. Invalid operands are incompatible.
-static TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId right)
+static TypeAnswer type_compatible_at(const TypeTable* table, TypeId left, TypeId right, const uint32_t* activations, uint32_t activation_count, uint32_t source_position)
 {
     Scratch scratch = scratch_begin(0);
     void* stack = 0;
@@ -4044,6 +4138,13 @@ static TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId ri
     };
     bool compatible = type_is_valid(table, left) && type_is_valid(table, right);
     bool fits = !compatible || type_grow_stack(scratch.arena, &stack, &capacity, 1, sizeof(TypePair));
+    TypeTransparentSearch transparent =
+    {
+        .arena = scratch.arena,
+        .activations = activations,
+        .activation_count = activation_count,
+        .source_position = source_position,
+    };
     if (compatible && fits)
     {
         ((TypePair*)stack)[0] = (TypePair){
@@ -4058,7 +4159,16 @@ static TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId ri
         const TypePair pair = ((TypePair*)stack)[depth];
         bool leaf = true;
         compatible = type_merge_shallow(table, pair.left, pair.right, &leaf);
-        if (compatible && !leaf)
+        if (compatible && !leaf && type_has_transparent_parameters(table, pair.left, pair.right))
+        {
+            // The ordinary worklist contains only conjunctions. Once a transparent parameter introduces choices,
+            // solve the original relation once with the memoized AND/OR graph, retaining the same source history.
+            const TypeAnswer answer = type_transparent_query(&transparent, table, left, right, false, 0);
+            compatible = answer == TYPE_ANSWER_YES;
+            fits = answer != TYPE_ANSWER_FULL;
+            depth = 0;
+        }
+        else if (compatible && !leaf)
         {
             fits = type_grow_stack(scratch.arena, &stack, &capacity, depth + type_merge_inner_count(table, pair.left), sizeof(TypePair));
             if (fits)
@@ -4073,6 +4183,11 @@ static TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId ri
     const TypeAnswer result = !fits ? TYPE_ANSWER_FULL : compatible ? TYPE_ANSWER_YES : TYPE_ANSWER_NO;
     scratch_end(scratch);
     return result;
+}
+
+static TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId right)
+{
+    return type_compatible_at(table, left, right, 0, 0, 0);
 }
 
 // The frames of the canonical comparison's and the composite's walks: a pair, and where its inner pairs' results start
@@ -4391,7 +4506,7 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
 // and finishes once they are merged, into the memo. So each pair is expanded once, however many types it is inside. A
 // failure anywhere fails the whole; one of scratch memory, or a comparison that couldn't answer, with last_error
 // TYPE_ERROR_FULL.
-static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
+static TypeId type_composite_at(TypeTable* table, TypeId left, TypeId right, const uint32_t* activations, uint32_t activation_count, uint32_t source_position)
 {
     Scratch frames_scratch = scratch_begin(0);
     Scratch results_scratch = scratch_begin(frames_scratch.arena);
@@ -4406,6 +4521,13 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
     };
     TypePairMemo canonical = {
         .arena = results_scratch.arena,
+    };
+    TypeTransparentSearch transparent =
+    {
+        .arena = results_scratch.arena,
+        .activations = activations,
+        .activation_count = activation_count,
+        .source_position = source_position,
     };
     bool valid = type_is_valid(table, left) && type_is_valid(table, right);
     bool full = valid && !type_grow_stack(frames_scratch.arena, &frames, &frame_capacity, 1, sizeof(TypeMergeFrame));
@@ -4463,6 +4585,19 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
                     frame = (TypeMergeFrame*)frames + depth - 1;
                     TypePair* pairs = (TypePair*)((TypeMergeFrame*)frames + depth + inner);
                     const uint32_t written = type_merge_inner(table, frame->left, frame->right, pairs);
+                    if (type_has_transparent_parameters(table, frame->left, frame->right))
+                    {
+                        for (uint32_t i = 1; valid && !full && i < written; i += 1)
+                        {
+                            if (pairs[i].left != pairs[i].right &&
+                                (type_is_transparent_union(table, pairs[i].left) || type_is_transparent_union(table, pairs[i].right)))
+                            {
+                                const TypeAnswer answer = type_transparent_query(&transparent, table, pairs[i].left, pairs[i].right, true, &pairs[i]);
+                                valid = answer == TYPE_ANSWER_YES;
+                                full = answer == TYPE_ANSWER_FULL;
+                            }
+                        }
+                    }
                     frame->entered = true;
                     frame->results = result_count;
                     for (uint32_t i = 0; i < written; i += 1)
@@ -4510,6 +4645,11 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
     scratch_end(results_scratch);
     scratch_end(frames_scratch);
     return result;
+}
+
+static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
+{
+    return type_composite_at(table, left, right, 0, 0, 0);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

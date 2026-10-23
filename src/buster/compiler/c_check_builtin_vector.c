@@ -11,6 +11,11 @@
 // convertvector has ONE value argument plus destination_type as its separately parsed TYPE operand. The parser
 // must enforce its two syntax operands. Shuffle accepts two vectors with a vector mask, or two matching vectors
 // followed by ICE indices. Its arbitrary-length index slice is checked directly, never copied into a fixed array.
+// shuffle_index_ice optionally supplies one source-ICE witness byte per scalar index, excluding the first two
+// vectors. NULL/zero retains the local BUSTER_CHECK_ICE fallback. A supplied slice must match the full index count;
+// STRICT attests source ICE independently of local flags, GNU additionally requires allow_gnu_index_ice, and NONE
+// rejects the source index. Witnesses never bypass integer payload, type, side-effect, fault or range checks.
+// The source producer owns GNU-extension diagnostics; witness storage is borrowed, immutable and unpadded.
 // evaluated_argument_count describes a prefix: two shuffle vectors, one convert operand, ordinary arity otherwise.
 // nondeterministic_value uses its operand TYPE only, so its prefix is zero and no operand effects/faults survive.
 //
@@ -51,6 +56,13 @@ typedef enum CheckBuiltinVectorLaxConversions
     CHECK_BUILTIN_VECTOR_LAX_ALL,
 } CheckBuiltinVectorLaxConversions;
 
+typedef enum CheckBuiltinVectorIndexIce
+{
+    CHECK_BUILTIN_VECTOR_INDEX_ICE_NONE,
+    CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT,
+    CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU,
+} CheckBuiltinVectorIndexIce;
+
 typedef enum CheckBuiltinVectorStoreConversion
 {
     CHECK_BUILTIN_VECTOR_STORE_NONE,
@@ -74,7 +86,10 @@ struct CheckBuiltinVectorAction
     uint32_t extensions;
     TypeId fp_evaluation_type;
     CheckBuiltinVectorLaxConversions lax_vector_conversions;
+    const uint8_t* shuffle_index_ice;
+    uint32_t shuffle_index_ice_count;
     bool native_half;
+    bool allow_gnu_index_ice;
 };
 
 typedef struct CheckBuiltinVectorResult CheckBuiltinVectorResult;
@@ -347,11 +362,19 @@ static void check_builtin_vector_reduce(TypeTable* table, const CheckBuiltinVect
 static void check_builtin_vector_shuffle_index(const TypeTable* table, const CheckBuiltinVectorAction* input, CheckBuiltinVectorResult* output, uint32_t index, uint32_t lanes)
 {
     const CheckValue* value = input->arguments + index;
+    const uint8_t source_ice = input->shuffle_index_ice != NULL ? input->shuffle_index_ice[index - 2] :
+        (value->flags & BUSTER_CHECK_ICE) != 0 ? CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT : CHECK_BUILTIN_VECTOR_INDEX_ICE_NONE;
+    const bool accepted_ice = source_ice == CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT ||
+        (source_ice == CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU && input->allow_gnu_index_ice);
     if (!type_is_valid(table, value->type) || value->category > CHECK_FUNCTION)
     {
         check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, index);
     }
-    else if (!check_action_is_integer(table, value->type) || (value->flags & BUSTER_CHECK_ICE) == 0 ||
+    else if (source_ice > CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, index);
+    }
+    else if (!check_action_is_integer(table, value->type) || !accepted_ice ||
              (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0 ||
              (value->fault != CHECK_FAULT_NONE && value->fault != CHECK_FAULT_UNSUPPORTED_CONSTANT))
     {
@@ -489,7 +512,12 @@ static void check_builtin_vector_store(TypeTable* table, const CheckBuiltinVecto
     const bool source_vector = check_builtin_vector_is_vector(table, source);
     bool accepted = source == destination;
     output->store_conversion = CHECK_BUILTIN_VECTOR_STORE_ASSIGNMENT;
-    if (!accepted && check_action_kind(table, destination) == BUSTER_TYPE_KIND_EXT_VECTOR)
+    if (destination_vector && check_action_kind(table, source) == BUSTER_TYPE_KIND_COMPLEX)
+    {
+        // Clang's later CheckImplicitConversion rejects complex-to-vector conversion even after assignment builds a splat.
+        accepted = false;
+    }
+    else if (!accepted && check_action_kind(table, destination) == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
         if (check_action_kind(table, source) == BUSTER_TYPE_KIND_EXT_VECTOR)
         {
@@ -504,8 +532,7 @@ static void check_builtin_vector_store(TypeTable* table, const CheckBuiltinVecto
             output->store_conversion = CHECK_BUILTIN_VECTOR_STORE_SPLAT;
             output->bool_splat_signed_true = source == BUSTER_TYPE_BOOL &&
                 check_builtin_vector_plain(table, check_builtin_vector_element(table, destination)) != BUSTER_TYPE_BOOL;
-            if (check_action_kind(table, source) == BUSTER_TYPE_KIND_COMPLEX ||
-                (check_action_kind(table, source) == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, source)))
+            if (check_action_kind(table, source) == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, source))
             {
                 output->unsupported |= BUSTER_CHECK_BUILTIN_VECTOR_UNSUPPORTED_CONVERSION;
             }
@@ -666,6 +693,12 @@ static __attribute__((unused)) void check_builtin_vector_one(TypeTable* table, c
         check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, 0);
     }
     else if (!count_ok)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+    }
+    else if (input->id == CBUILTIN_SHUFFLEVECTOR &&
+             ((input->shuffle_index_ice == NULL && input->shuffle_index_ice_count != 0) ||
+              (input->shuffle_index_ice != NULL && input->shuffle_index_ice_count != input->argument_count - 2)))
     {
         check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
     }

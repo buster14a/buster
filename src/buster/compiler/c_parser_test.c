@@ -539,6 +539,22 @@ static const ParseTestSnippet parse_test_snippets[] =
     // The primary diagnostic belongs to the invocation; macro spelling remains available as an expansion note.
     { "#define TYPE Missing\nTYPE x;\n", "2:1: unknown type name 'Missing'", 0, true },
     { "#define TYPE Missing\n#define OUTER TYPE\nOUTER x;\n", "3:1: unknown type name 'Missing'", 0, true },
+    // Missing separators follow the outer invocation's physical end, including substituted arguments and splices.
+    { "#define END return 1\nint f(void){ END }\n", "2:17: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\nint f(void){ RET(2) }\n", "2:20: expected ';' after return statement", 0 },
+    { "#define ID(x) x\nint f(void){ ID(return 3) }\n", "2:26: expected ';' after return statement", 0 },
+    { "#define INNER return 4\n#define OUTER INNER\nint f(void){ OUTER }\n", "3:19: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\n#define ALIAS RET\nint f(void){ ALIAS(5) }\n", "3:22: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\n#define WRAP(x) RET(x)\nint f(void){ WRAP(6) }\n", "3:21: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\n#define ID(x) x\nint f(void){ ID(RET(7)) }\n", "3:24: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\n#define CAT(a,b) a##b\n#define VALUE8 8\nint f(void){ RET(CAT(VALUE,8)) }\n", "4:31: expected ';' after return statement", 0 },
+    { "#define END return 1\nint f(void){ EN\\\nD }\n", "3:2: expected ';' after return statement", 0 },
+    { "#define RET(x) return x\nint f(void){ RET\\\n(9) }\n", "3:4: expected ';' after return statement", 0 },
+    // Inside an unfinished expansion, the next token remains the primary location, including argument spelling.
+    { "#define M return 1 return 2;\nint f(void){ M }\n", "2:14: expected ';' after return statement", 0 },
+    { "#define D int x=1 int y=2;\nint f(void){ D return 0; }\n", "2:14: expected ';' at end of declaration", 0 },
+    { "#define E(a) a int y=2;\nint f(void){ E(int x=1) return 0; }\n", "2:14: expected ';' at end of declaration", 0 },
+    { "#define A(x) x\nint f(void){ A(return 1 return 2;) }\n", "2:25: expected ';' after return statement", 0 },
     // A _Static_assert's message is string literals.
     { "_Static_assert(1, \"x\" \"y\" \"z\");\n", "", 0 },
     { "_Static_assert(1, \"x\" + 1);\n", "1:23: expected ')'", 0 },

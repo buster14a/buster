@@ -111,8 +111,20 @@ static void check_test_enum_metadata(CheckTest* test)
 
 static void check_test_enum_sources(CheckTest* test, const char* clang)
 {
+    char nested_records[8192];
+    uint32_t length = (uint32_t)snprintf(nested_records, sizeof(nested_records), "enum { N0=sizeof(struct {");
+    for (uint32_t i = 1; i <= 48; i += 1)
+    {
+        length += (uint32_t)snprintf(nested_records + length, sizeof(nested_records) - length, "enum { N%u=sizeof(struct {", i);
+    }
+    length += (uint32_t)snprintf(nested_records + length, sizeof(nested_records) - length, "int x;");
+    for (uint32_t i = 48; i != 0; i -= 1)
+    {
+        length += (uint32_t)snprintf(nested_records + length, sizeof(nested_records) - length, "})} e%u; char p[N%u];", i, i);
+    }
+    snprintf(nested_records + length, sizeof(nested_records) - length, "})}; _Static_assert(N0==196, \"nested enum record jobs\");\n");
     char many_values[8192];
-    uint32_t length = (uint32_t)snprintf(many_values, sizeof(many_values), "enum E { E0=((unsigned __int128)1<<100)|7");
+    length = (uint32_t)snprintf(many_values, sizeof(many_values), "enum E { E0=((unsigned __int128)1<<100)|7");
     for (uint32_t i = 1; i < 512; i += 1)
     {
         length += (uint32_t)snprintf(many_values + length, sizeof(many_values) - length, ",E%u", i);
@@ -121,6 +133,39 @@ static void check_test_enum_sources(CheckTest* test, const char* clang)
              ",Proof=(E511>>100)==1 }; _Static_assert(E0==7 && E511==518 && Proof==1,\"retained wide chain\");\n");
     const CheckSourceFixture fixtures[] =
     {
+        {
+            .name = "enum expression completes anonymous record",
+            .source = "enum { N=sizeof(struct { char x; int y; }) }; _Static_assert(N==8,\"record query\");\n",
+        },
+        {
+            .name = "enum inline record keeps earlier operand event order",
+            .source = "enum { P=4, N=P+__builtin_offsetof(struct { char p[P]; int y; },y) }; _Static_assert(N==8,\"ordered enum record uses\");\n",
+        },
+        {
+            .name = "enum inline tag identity survives subsequent expression use",
+            .source = "enum { P=4, N=P+sizeof(struct S { char a[P]; })+sizeof(struct S) }; _Static_assert(N==12 && sizeof(struct S)==4,\"tag completion identity\");\n",
+        },
+        {
+            .name = "enum inline nested enumerator visible after its declaration",
+            .source = "enum { N=sizeof(struct { enum { A=3 } e; int x[A]; })+A }; _Static_assert(N==19 && A==3,\"nested ordinary declaration\");\n",
+        },
+        {
+            .name = "enum inline record resolves header attributes before body",
+            .source = "enum { A=8, N=A+sizeof(struct __attribute__((aligned(A))) S { int x; }) }; _Static_assert(N==16 && _Alignof(struct S)==8,\"header attributes\");\n",
+        },
+        {
+            .name = "enum inline record nested inside outer tag attribute",
+            .source = "enum { N=sizeof(struct __attribute__((aligned(sizeof(struct { long x; })))) S { int x; }) }; _Static_assert(N==8,\"nested header record job\");\n",
+        },
+        {
+            .name = "deep enum and record source jobs use explicit frames",
+            .source = nested_records,
+        },
+        {
+            .name = "enum inline record diagnoses missing member bound at use",
+            .source = "enum { N=sizeof(struct {\nchar a[\nMISSING];\n}) };\n",
+            .rejected = true,
+        },
         {
             .name = "long provisional enum chain retains exact high bits until completion",
             .source = many_values,

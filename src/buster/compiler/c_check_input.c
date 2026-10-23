@@ -69,6 +69,10 @@ typedef struct CheckInputDiagnosticPragmas CheckInputDiagnosticPragmas;
 typedef struct CheckInputNonnullPragmas CheckInputNonnullPragmas;
 typedef struct CheckInputFpPragma CheckInputFpPragma;
 typedef struct CheckInputPackPragmas CheckInputPackPragmas;
+typedef struct CheckInputIntrinsicDeclaration CheckInputIntrinsicDeclaration;
+typedef struct CheckInputIntrinsicCall CheckInputIntrinsicCall;
+#define CHECK_INPUT_FUNCTION_INLINE 0x01u
+#define CHECK_INPUT_FUNCTION_EXTERN 0x02u
 struct CheckInputVla
 {
     uint32_t declaration;
@@ -104,12 +108,21 @@ struct CheckInput
     uint32_t fp_pragma_count;
     uint8_t* fp_environments;
     uint8_t* cx_limited_ranges;
+    const uint8_t* deferred_tokens;
+    CheckInputIntrinsicDeclaration* intrinsic_declarations;
+    uint32_t intrinsic_declaration_count;
+    uint32_t intrinsic_declaration_capacity;
+    CheckInputIntrinsicCall* intrinsic_calls;
+    uint32_t intrinsic_call_count;
+    uint32_t intrinsic_call_capacity;
+    uint32_t* intrinsic_ids;
     CheckInputReport* reports;
     uint32_t report_count;
     uint32_t report_capacity;
     uint32_t* declarations;
     TypeId* declared_types;
     uint8_t* declaration_kinds;
+    uint8_t* function_flags;
     uint32_t* objects;
     uint8_t* static_objects;
     uint8_t* registers;
@@ -236,7 +249,11 @@ struct CheckInputReader
     uint32_t* constant_present;
     uint32_t cached_constant_count;
     uint16_t* builtin_names;
+    uint32_t* intrinsic_names;
     uint16_t* builtins;
+    uint32_t* builtin_type_ends;
+    uint8_t* builtin_syntax_effects;
+    uint32_t builtin_syntax_count;
     CheckInputVarargs* varargs;
     uint32_t* vararg_calls;
     uint32_t* vararg_types;
@@ -272,6 +289,7 @@ struct CheckInputReader
     unsigned __int128* enum_values;
     uint32_t* postorder_positions;
     uint32_t* tag_completions;
+    uint32_t* transparent_unions;
     uint32_t* ends;
     uint32_t* first_child;
     uint32_t* next_child;
@@ -1010,6 +1028,30 @@ static CheckInputAttributes* check_input_merge_attributes(CheckInputReader* read
     return result;
 }
 
+// A transparent-union annotation takes effect where its complete declaration ends. Keeping that activation
+// separate from nominal type flags prevents a later typedef attribute from changing an earlier call's rules.
+static void check_input_transparent_union(CheckInputReader* reader, TypeId type, CheckInputAttributes* attributes, uint32_t point)
+{
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+    {
+        CheckInputAttribute* attribute = attributes->records + i;
+        if (attribute->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION && !attribute->ignored)
+        {
+            const TypeTransparentUnionResult marked = type_mark_transparent_union(reader->types, type);
+            attribute->ignored = marked.status != TYPE_TRANSPARENT_UNION_APPLIED;
+            if (!attribute->ignored)
+            {
+                const uint32_t tag = reader->types->types.index[type_index(type_strip_aligned(reader->types, type))];
+                reader->output->resource |= reader->transparent_unions == 0;
+                if (reader->transparent_unions != 0 && reader->transparent_unions[tag] == 0)
+                {
+                    reader->transparent_unions[tag] = point;
+                }
+            }
+        }
+    }
+}
+
 typedef struct CheckDeclaratorPart CheckDeclaratorPart;
 struct CheckDeclaratorPart
 {
@@ -1515,6 +1557,8 @@ struct CheckTagFrame
     uint32_t positive_bits;
     uint8_t pack_log2;
     CheckInputAttributes* attributes;
+    CheckConstantInput* enum_job;
+    CheckInputAttributes* enumerator_attributes;
 };
 
 typedef struct CheckTagMember CheckTagMember;
@@ -1643,6 +1687,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             if (valid)
             {
                 reader->tag_completions[reader->types->types.index[type_index(frame->type)]] = i + 1;
+                check_input_transparent_union(reader, frame->type, frame->attributes, after);
             }
             reader->ignored[i] = true;
             reader->tag_ends[frame->token] = after;
@@ -1659,7 +1704,30 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
         }
         else if (kind == BUSTER_TYPE_KIND_ENUM)
         {
-            valid = check_input_enum_read(reader, frame, members, &member_count);
+            uint32_t nested = BUSTER_CHECK_NONE;
+            valid = check_input_enum_read(reader, frame, members, &member_count, &nested);
+            if (valid && nested != BUSTER_CHECK_NONE)
+            {
+                const uint32_t body = check_input_tag_body(parser, nested, frame->close);
+                const uint32_t nested_close = body < frame->close ? parser->tree.parents[body] : frame->close;
+                const TypeId type = reader->tag_types[nested];
+                valid = type != 0 && body < frame->close && nested_close > body && nested_close < frame->close && depth < capacity;
+                if (valid)
+                {
+                    frames[depth++] = (CheckTagFrame)
+                    {
+                        .type = type,
+                        .token = nested,
+                        .cursor = body + 1,
+                        .close = nested_close,
+                        .first = BUSTER_CHECK_NONE,
+                        .last = BUSTER_CHECK_NONE,
+                        .pack_log2 = reader->output->pack_log2 != 0 ? reader->output->pack_log2[body] : 0,
+                        .attributes = reader->output->attributes[nested],
+                    };
+                    reader->ignored[body] = true;
+                }
+            }
         }
         else
         {
@@ -1921,6 +1989,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid &= !attributes->has_alignas || (!is_typedef && storage != C_NAME_REGISTER);
             valid &= attributes->required_alignment_log2 == 0 || (!is_typedef && type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION &&
                      attributes->required_alignment_log2 - 1 >= type_alignment_log2(reader->types, type));
+            if (valid && is_typedef)
+            {
+                check_input_transparent_union(reader, type, attributes, i);
+            }
         }
         if (valid)
         {
@@ -1954,6 +2026,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 reader->registers[name] = storage == C_NAME_REGISTER;
                 reader->output->thread_local[name] = thread_local;
                 reader->output->attributes[name] = attributes;
+                reader->output->function_flags[name] = function ? (is_inline ? CHECK_INPUT_FUNCTION_INLINE : 0) |
+                                                      (storage == C_NAME_EXTERN ? CHECK_INPUT_FUNCTION_EXTERN : 0) : 0;
                 reader->linkage[name] = is_typedef || (!file && !function && storage != C_NAME_EXTERN) ? 0 : is_static ? 1 : 2;
                 if ((storage == C_NAME_EXTERN || (function && storage == 0)) && reader->linkage[name] != 0)
                 {
@@ -2132,6 +2206,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
 #include "c_check_input_initializer.c"
 #include "c_check_control_input.c"
 #include "c_check_builtin_input.c"
+#include "c_check_intrinsic_input.c"
 #include "c_check_asm_input.c"
 
 static void check_input_resolve(CheckInputReader* reader)
@@ -2171,6 +2246,17 @@ static void check_input_resolve(CheckInputReader* reader)
         if (i == parser->tokens.count)
         {
             break;
+        }
+        if (reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[i] != 0)
+        {
+            // The definition's declaration is visible at its ordinary source point. Only its selected-out
+            // body is deferred; parameters and the full function declarator were checked before this opening.
+            for (uint32_t token = reader->activate[i]; token != BUSTER_CHECK_NONE; token = reader->activation_next[token])
+            {
+                check_input_bind(reader, token, i);
+            }
+            i = parser->tree.parents[i];
+            continue;
         }
         if (reader->designator_valid[i] == 2 && !check_input_initializer_designator(reader, i))
         {
@@ -2223,6 +2309,10 @@ static void check_input_resolve(CheckInputReader* reader)
         {
             check_input_vararg_prepare(reader, i, CBUILTIN_VA_ARG);
         }
+        if (!reader->ignored[i] && parser->tokens.names[i] == C_NAME_BUILTIN_CONVERTVECTOR)
+        {
+            check_input_builtin_type_prepare(reader, i, CBUILTIN_CONVERTVECTOR);
+        }
         if (!reader->ignored[i] && (parser->tokens.names[i] == C_NAME_GENERIC || parser->tokens.names[i] == C_NAME_BUILTIN_CHOOSE_EXPR))
         {
             check_input_selection_prepare(reader, i);
@@ -2260,6 +2350,10 @@ static void check_input_resolve(CheckInputReader* reader)
         if (reader->vararg_types[i] != 0)
         {
             check_input_vararg_type(reader, i);
+        }
+        if (reader->builtin_type_ends[i] != 0)
+        {
+            check_input_builtin_type(reader, i);
         }
         if (!reader->ignored[i] && check_input_attribute_starts(parser, i, parser->tokens.count))
         {
@@ -2434,11 +2528,31 @@ static void check_input_resolve(CheckInputReader* reader)
             }
             else if (reader->output->declarations[i] == BUSTER_CHECK_NONE)
             {
-                if (c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i) == 0)
+                const CheckInputIntrinsicStatus intrinsic = check_input_intrinsic_prepare(reader, i);
+                if (intrinsic == CHECK_INPUT_INTRINSIC_PREPARED)
+                {
+                    const uint32_t close = parser->tree.parents[i];
+                    const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[close] - 1;
+                    const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + call->declaration;
+                    reader->ignored[i] = true;
+                    reader->query_types[close] = declaration->types.function_type;
+                    const uint64_t required = declaration->types.ice_parameters | check_graph_x86_ice_mask(declaration->info, false);
+                    for (uint32_t argument = 0; argument < call->argument_count && argument < 64; argument += 1)
+                    {
+                        if ((required & (UINT64_C(1) << argument)) != 0)
+                        {
+                            for (uint32_t token = call->arguments[argument].first; token < call->arguments[argument].end; token += 1)
+                            {
+                                reader->constant_contexts[token] |= 1;
+                            }
+                        }
+                    }
+                }
+                else if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i) == 0)
                 {
                     reader->output->resource = true;
                 }
-                if (reader->specifier_query_depth != 0 || i < reader->inference_end)
+                if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && (reader->specifier_query_depth != 0 || i < reader->inference_end))
                 {
                     // The suspended type query consumes this expression before the final batch replay. Capture
                     // its declaration while the source scope is active; the replay still verifies the same event.
@@ -2562,6 +2676,49 @@ static CheckOp check_input_binary(uint8_t kind)
     return result;
 }
 
+static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call,
+                                               uint32_t first, uint64_t* ice_arguments)
+{
+    CheckGraph* graph = &reader->output->graph;
+    const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + call->declaration;
+    const bool constant_context = reader->constant_contexts[call->closing] != 0;
+    const uint64_t required = declaration->types.ice_parameters | check_graph_x86_ice_mask(declaration->info, constant_context);
+    const uint32_t offset = graph->argument_count;
+    uint32_t argument = first;
+    for (uint32_t index = 0; index < call->argument_count && argument != BUSTER_CHECK_NONE; index += 1)
+    {
+        const uint32_t next = reader->value_next[argument];
+        CheckValue value = { 0 };
+        const CheckInputIntrinsicArgument span = call->arguments[index];
+        const bool ice = index < 64 && check_input_evaluate_cached(reader, span.first, span.end, &value) && check_input_integer_ice(reader, &value);
+        if (ice)
+        {
+            *ice_arguments |= UINT64_C(1) << index;
+        }
+        if (ice && (required & (UINT64_C(1) << index)) != 0)
+        {
+            // Keep the original subtree checked, but an immediate operand is the value proved in its source
+            // constant context. Runtime-only effects in discarded constant-evaluator paths are not call inputs.
+            const uint32_t proven = check_input_add(reader, CHECK_OP_VALUE, graph->tokens[argument], BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            if (proven != BUSTER_CHECK_NONE)
+            {
+                graph->leaves[proven] = value;
+                argument = proven;
+            }
+        }
+        if (graph->argument_count < graph->argument_capacity)
+        {
+            graph->argument_nodes[graph->argument_count++] = argument;
+        }
+        else
+        {
+            reader->output->resource = true;
+        }
+        argument = next;
+    }
+    return offset;
+}
+
 static void check_input_expressions(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -2569,7 +2726,8 @@ static void check_input_expressions(CheckInputReader* reader)
     for (uint32_t order = 0; order < parser->tokens.count && !reader->output->resource; order += 1)
     {
         const uint32_t token = parser->postorder[order];
-        if (check_input_expression_end(reader, token) > reader->expression_limit)
+        if (check_input_expression_end(reader, token) > reader->expression_limit ||
+            (reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[token] != 0))
         {
             continue;
         }
@@ -2835,12 +2993,13 @@ static void check_input_expressions(CheckInputReader* reader)
         else if (role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_FUNCTION)
         {
             const uint16_t builtin = reader->builtins[token];
+            const bool intrinsic = reader->output->intrinsic_ids != 0 && reader->output->intrinsic_ids[token] != 0;
             const bool overflow = builtin >= CBUILTIN_ADD_OVERFLOW && builtin <= CBUILTIN_MUL_OVERFLOW;
             const CheckOp special = check_graph_builtin_op((CBuiltinId)builtin);
             const bool component = check_input_complex_builtin((CBuiltinId)builtin);
-            supported = component ? count == 1 : special == CHECK_OP_BUILTIN_OVERFLOW ? count == 3 :
-                        builtin != 0 ? special != CHECK_OP_COUNT || (builtin < CBUILTIN_COUNT && count == (overflow ? 3 : 1)) : count != 0;
-            op = component ? (builtin >= CBUILTIN_CIMAG ? CHECK_OP_IMAGINARY : CHECK_OP_REAL) :
+            supported = intrinsic || (component ? count == 1 : special == CHECK_OP_BUILTIN_OVERFLOW ? count == 3 :
+                        builtin != 0 ? special != CHECK_OP_COUNT || (builtin < CBUILTIN_COUNT && count == (overflow ? 3 : 1)) : count != 0);
+            op = intrinsic ? CHECK_OP_BUILTIN_X86 : component ? (builtin >= CBUILTIN_CIMAG ? CHECK_OP_IMAGINARY : CHECK_OP_REAL) :
                  special != CHECK_OP_COUNT ? special : builtin != 0 ? (overflow ? CHECK_OP_BUILTIN_OVERFLOW : CHECK_OP_BUILTIN_UNARY) : CHECK_OP_CALL;
         }
         else if (role == PARSE_ROLE_RETURN)
@@ -2859,8 +3018,11 @@ static void check_input_expressions(CheckInputReader* reader)
         else if (role == PARSE_ROLE_CLOSE_KEYWORD)
         {
             const uint32_t keyword = reader->first_child[token];
-            supported = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_STATIC_ASSERT && count == 1;
-            if (supported)
+            const bool builtin = reader->builtins[token] != 0;
+            op = builtin ? check_graph_builtin_op((CBuiltinId)reader->builtins[token]) : CHECK_OP_COUNT;
+            supported = builtin ? op != CHECK_OP_COUNT :
+                        keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_STATIC_ASSERT && count == 1;
+            if (supported && !builtin)
             {
                 graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT;
                 graph->contexts[a] |= parser->language.gnu ? BUSTER_CHECK_CONTEXT_GNU_CONSTANT : 0;
@@ -3010,6 +3172,13 @@ static void check_input_expressions(CheckInputReader* reader)
             const bool one = op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT || op == CHECK_OP_CALL || op == CHECK_OP_CAST || op == CHECK_OP_CONDITION ||
                              op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW || role == PARSE_ROLE_PREFIX || role == PARSE_ROLE_POSTFIX;
             const bool omitted = op == CHECK_OP_CONDITIONAL && count == 2;
+            uint64_t intrinsic_ice = 0;
+            uint32_t intrinsic_offset = 0;
+            if (op == CHECK_OP_BUILTIN_X86)
+            {
+                const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[token] - 1;
+                intrinsic_offset = check_input_intrinsic_arguments(reader, call, a, &intrinsic_ice);
+            }
             node = check_input_add(reader, op, token, left, one || arguments ? BUSTER_CHECK_NONE : omitted ? a : b,
                                    omitted ? b : op == CHECK_OP_CONDITIONAL || op == CHECK_OP_BUILTIN_OVERFLOW ? c : BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
@@ -3055,13 +3224,35 @@ static void check_input_expressions(CheckInputReader* reader)
                 }
                 if (check_graph_has_arguments(op))
                 {
-                    graph->argument_offsets[node] = graph->argument_count;
+                    graph->argument_offsets[node] = op == CHECK_OP_BUILTIN_X86 ? intrinsic_offset : graph->argument_count;
                     graph->argument_counts[node] = count - (op == CHECK_OP_CALL);
-                    for (uint32_t argument = op == CHECK_OP_CALL ? b : a; argument != BUSTER_CHECK_NONE; argument = reader->value_next[argument])
+                    for (uint32_t argument = op == CHECK_OP_BUILTIN_X86 ? BUSTER_CHECK_NONE : op == CHECK_OP_CALL ? b : a;
+                         argument != BUSTER_CHECK_NONE; argument = reader->value_next[argument])
                     {
                         if (graph->argument_count < graph->argument_capacity)
                         {
                             graph->argument_nodes[graph->argument_count++] = argument;
+                        }
+                        else
+                        {
+                            reader->output->resource = true;
+                        }
+                    }
+                    if (op == CHECK_OP_BUILTIN_X86)
+                    {
+                        const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[token] - 1;
+                        const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + call->declaration;
+                        if (graph->x86_count < graph->x86_capacity)
+                        {
+                            graph->x86_calls[graph->x86_count++] = (CheckX86Call)
+                            {
+                                .node = node,
+                                .info = declaration->info,
+                                .required_ice_arguments = declaration->types.ice_parameters,
+                                .ice_arguments = intrinsic_ice,
+                                .reachability = CHECK_BUILTIN_X86_UNKNOWN,
+                                .constant_evaluated_context = reader->constant_contexts[token] != 0,
+                            };
                         }
                         else
                         {
@@ -3078,6 +3269,10 @@ static void check_input_expressions(CheckInputReader* reader)
                             CheckBuiltinCall* evidence = &graph->builtin_calls[graph->builtin_count++];
                             *evidence = (CheckBuiltinCall){ .node = node };
                             check_input_builtin_evidence(reader, begin, end, evidence);
+                            if (reader->builtins[token] == CBUILTIN_CONSTANT_P && count == 1)
+                            {
+                                evidence->constant_p_side_effects = check_input_builtin_syntax_effects(reader, a);
+                            }
                         }
                         else
                         {
@@ -3153,19 +3348,24 @@ static void check_input_complete_uses(CheckInputReader* reader)
 #include "c_check_binding.c"
 
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
-                            bool complete_translation_unit, uint32_t original_end)
+                            bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
 {
     *input = (CheckInput){ 0 };
     const uint32_t count = parser->tokens.count;
     input->token_count = count;
     uint32_t size_queries = 0;
     uint32_t vector_members = 0;
+    const uint32_t transparent_name = intern_find(pp->table, (const uint8_t*)"transparent_union", 17);
+    const uint32_t transparent_gnu_name = intern_find(pp->table, (const uint8_t*)"__transparent_union__", 21);
+    bool transparent_unions = false;
     for (uint32_t token = 0; token < count; token += 1)
     {
         input->vla_capacity += parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE;
         input->asm_capacity += parser->tokens.kinds[token] == PARSE_KIND_ASM;
         size_queries += parser->tokens.kinds[token] == PARSE_KIND_SIZEOF;
         vector_members += parser->tree.roles != 0 && parser->tree.roles[token] == PARSE_ROLE_MEMBER_OPERATOR && parser->tokens.kinds[token] == PARSE_KIND_PERIOD;
+        const uint32_t name = parser->tokens.names[token];
+        transparent_unions |= name != 0 && (name == transparent_name || name == transparent_gnu_name);
     }
     const uint64_t graph_capacity = (uint64_t)count + (uint64_t)input->vla_capacity * 8 + (uint64_t)size_queries * 4 + 1;
     const uint64_t mark = scratch->length;
@@ -3222,6 +3422,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     valid &= input->objects != 0;
 #define BUSTER_CHECK_OUTPUT_ARRAY(field, type) input->field = valid ? arena_push_array(arena, (uint64_t)count + 1, sizeof(type), 8) : 0; valid &= input->field != 0
     BUSTER_CHECK_OUTPUT_ARRAY(static_objects, uint8_t);
+    BUSTER_CHECK_OUTPUT_ARRAY(function_flags, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(registers, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(thread_local, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(compound_objects, uint8_t);
@@ -3247,6 +3448,16 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_OUTPUT_ARRAY(asm_ids, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(strings, CheckInitString);
 #undef BUSTER_CHECK_OUTPUT_ARRAY
+    if (valid && deferred_tokens != 0)
+    {
+        uint8_t* retained = arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 1);
+        valid = retained != 0;
+        if (valid)
+        {
+            memcpy(retained, deferred_tokens, (uint64_t)count + 1);
+            input->deferred_tokens = retained;
+        }
+    }
     reader.declared_types = input->declared_types;
     reader.declaration_kinds = input->declaration_kinds;
     reader.objects = input->objects;
@@ -3290,6 +3501,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(selection_types, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(constant_present, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(builtins, uint16_t);
+    BUSTER_CHECK_INPUT_ARRAY(builtin_type_ends, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(vararg_calls, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(vararg_types, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(vla_bounds, uint32_t);
@@ -3383,6 +3595,15 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     valid &= reader.linked_types != 0;
     reader.tag_completions = valid ? arena_push_array(scratch, types->tags.capacity, sizeof(uint32_t), 4) : 0;
     valid &= reader.tag_completions != 0;
+    if (valid && transparent_unions)
+    {
+        reader.transparent_unions = arena_push_array(scratch, types->tags.capacity, sizeof(uint32_t), 4);
+        valid = reader.transparent_unions != 0;
+        if (valid)
+        {
+            memset(reader.transparent_unions, 0, (uint64_t)types->tags.capacity * sizeof(uint32_t));
+        }
+    }
     valid &= c_bindings_initialize(&reader.bindings, scratch, pp->table->count, count * 4 + 1);
     if (valid)
     {
@@ -3402,7 +3623,14 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(input->graph.warning_suppressed, 0, graph_capacity);
         memset(input->constant_warnings, 0, (uint64_t)count + 1);
         memset(input->constant_warning_ignored, 0, (uint64_t)count + 1);
-        memset(reader.ignored, 0, (uint64_t)count + 1);
+        if (input->deferred_tokens != 0)
+        {
+            memcpy(reader.ignored, input->deferred_tokens, (uint64_t)count + 1);
+        }
+        else
+        {
+            memset(reader.ignored, 0, (uint64_t)count + 1);
+        }
         memset(reader.defined, 0, (uint64_t)count + 1);
         memset(reader.definition_seen, 0, (uint64_t)count + 1);
         memset(input->tentative, 0, (uint64_t)count + 1);
@@ -3410,6 +3638,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.registers, 0, (uint64_t)count + 1);
         memset(input->thread_local, 0, (uint64_t)count + 1);
         memset(input->compound_objects, 0, (uint64_t)count + 1);
+        memset(input->function_flags, 0, (uint64_t)count + 1);
         memset(input->expression_regions, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(input->asm_ids, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(input->attributes, 0, ((uint64_t)count + 1) * sizeof(CheckInputAttributes*));
@@ -3433,6 +3662,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.selection_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
         memset(reader.constant_present, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(reader.builtins, 0, ((uint64_t)count + 1) * sizeof(uint16_t));
+        memset(reader.builtin_type_ends, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(reader.vararg_calls, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(reader.vararg_types, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(reader.vla_bounds, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -3514,7 +3744,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     {
                         pack += 1;
                     }
-                    if (handled[pragma] == 0 || handled[pragma] == 3)
+                    const uint32_t position = parser->tokens.pragma_positions[pragma];
+                    if ((handled[pragma] == 0 || handled[pragma] == 3) &&
+                        (input->deferred_tokens == 0 || input->deferred_tokens[position] == 0))
                     {
                         reader.resolve_limit = parser->tokens.pragma_positions[pragma];
                         reader.resolve_pragma = pragma;
@@ -3528,6 +3760,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 }
             }
         }
+        valid &= check_input_intrinsic_initialize(&reader);
         if (!check_input_target_supported(&pp->options))
         {
             check_input_report(&reader, 0, CHECK_INPUT_TARGET);
@@ -3569,6 +3802,16 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     input->graph.tag_completions = completions;
                     input->graph.tag_completion_count = tags;
                 }
+                if (tags != 0 && reader.transparent_unions != 0)
+                {
+                    uint32_t* activations = arena_push_array(arena, tags, sizeof(uint32_t), 4);
+                    input->resource |= activations == 0;
+                    if (activations != 0)
+                    {
+                        memcpy(activations, reader.transparent_unions, (uint64_t)tags * sizeof(uint32_t));
+                        input->graph.transparent_unions = activations;
+                    }
+                }
                 for (uint32_t token = 0; token < count; token += 1)
                 {
                     const CheckOp op = check_graph_builtin_op((CBuiltinId)reader.builtins[token]);
@@ -3578,6 +3821,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 {
                     input->graph.builtin_calls = arena_push_array(arena, input->graph.builtin_capacity, sizeof(CheckBuiltinCall), _Alignof(CheckBuiltinCall));
                     input->resource |= input->graph.builtin_calls == 0;
+                }
+                if (input->intrinsic_call_count != 0)
+                {
+                    input->graph.x86_capacity = input->intrinsic_call_count;
+                    input->graph.x86_calls = arena_push_array(arena, input->graph.x86_capacity, sizeof(CheckX86Call), _Alignof(CheckX86Call));
+                    input->resource |= input->graph.x86_calls == 0;
                 }
                 for (uint32_t token = 0; token < count; token += 1)
                 {
@@ -3634,14 +3883,23 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 
 static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0);
+}
+
+// The selection owner validates nonoverlapping complete [OPEN_BODY, CLOSE_BODY + 1) masks. All source syntax,
+// function declarations and file-scope state still belong to this translation unit. The retained copy outlives
+// the caller's selection scratch; an absent mask takes exactly the ordinary all-body path.
+static __attribute__((unused)) bool check_input_selected(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
+                                                       Arena* arena, Arena* scratch, const uint8_t* deferred_tokens)
+{
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens);
 }
 
 // A complete syntactic prefix may still acquire later tentative definitions. This entry point is only for
 // selecting an earlier semantic diagnostic when the full parser has already rejected the translation unit.
 static bool check_input_prefix(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0);
 }
 
 // Diagnostic repairs append synthetic closing tokens. Labels may still occur after the retained fragment in
@@ -3649,5 +3907,5 @@ static bool check_input_prefix(CheckInput* input, const Parser* parser, Preproce
 static __attribute__((unused)) bool check_input_fragment(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  uint32_t original_end)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0);
 }

@@ -113,6 +113,8 @@ static void check_test_special_graph_bounds(CheckTest* test, TypeTable* table, c
                 check_test_expect(test, !accepted && stream.status == CHECK_STATUS_RESOURCE && stream.values == NULL &&
                                        stream.misc == NULL && stream.misc_count == 0 && stream.floating == NULL && stream.floating_count == 0 &&
                                        stream.queries == NULL && stream.query_count == 0 && stream.atomics == NULL && stream.atomic_count == 0 &&
+                                       stream.vectors == NULL && stream.vector_count == 0 &&
+                                       stream.x86 == NULL && stream.x86_count == 0 &&
                                        output.length == 7 && scratch.length == 13 && check_test_graph_canary(output_bytes, 0, 7) &&
                                        check_test_graph_canary(scratch_bytes, 0, 13) &&
                                        check_test_graph_canary(output_bytes, output.capacity, output.capacity + 16) &&
@@ -132,9 +134,9 @@ static void check_test_special_graph_guards(CheckTest* test, TypeTable* table, A
     const bool guarded = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0 &&
                          mprotect(mapping + page * 3, page, PROT_NONE) == 0;
     check_test_expect(test, guarded, "generic builtin argument and witness protected tails allocate");
-    const CheckOp ops[] = { CHECK_OP_BUILTIN_MISC, CHECK_OP_BUILTIN_FLOAT, CHECK_OP_BUILTIN_QUERY, CHECK_OP_BUILTIN_ATOMIC };
-    const CBuiltinId ids[] = { CBUILTIN_EXPECT, CBUILTIN_FPCLASSIFY, CBUILTIN_CONSTANT_P, CBUILTIN_ATOMIC_THREAD_FENCE };
-    const uint32_t arities[] = { 2, 6, 1, 1 };
+    const CheckOp ops[] = { CHECK_OP_BUILTIN_MISC, CHECK_OP_BUILTIN_FLOAT, CHECK_OP_BUILTIN_QUERY, CHECK_OP_BUILTIN_ATOMIC, CHECK_OP_BUILTIN_VECTOR };
+    const CBuiltinId ids[] = { CBUILTIN_EXPECT, CBUILTIN_FPCLASSIFY, CBUILTIN_CONSTANT_P, CBUILTIN_ATOMIC_THREAD_FENCE, CBUILTIN_ELEMENTWISE_ABS };
+    const uint32_t arities[] = { 2, 6, 1, 1, 1 };
     for (uint32_t family = 0; guarded && family < BUSTER_ARRAY_LENGTH(ops); family += 1)
     {
         for (uint32_t count = 0; count <= 33; count += 1)
@@ -161,7 +163,7 @@ static void check_test_special_graph_guards(CheckTest* test, TypeTable* table, A
                 CheckBuiltinCall* witness = (CheckBuiltinCall*)(mapping + page * 3 - sizeof(*witness));
                 *witness = (CheckBuiltinCall){ .node = node };
                 graph.builtin_calls = witness;
-                graph.builtin_count = family != 0;
+                graph.builtin_count = family != 0 && family != 4;
                 graph.builtin_capacity = graph.builtin_count;
                 for (uint32_t path = 0; path < 2; path += 1)
                 {

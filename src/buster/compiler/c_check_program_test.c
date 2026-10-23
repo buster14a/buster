@@ -379,8 +379,11 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
     intern_release(&identifiers);
 }
 
+#include "c_check_program_select_test.c"
+
 static void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_selection(test, clang);
     check_test_program_helpers(test);
     check_test_program_diagnostics(test, clang);
     check_test_program_source(test,
@@ -693,6 +696,20 @@ static void check_test_programs(CheckTest* test, const char* clang)
     check_test_program_boundary(test, "extern int __errno_location;int tested(int n){return n+(0&&__builtin_sqrt(-1.0));}",
                                 "inactive-math-has-no-runtime-accessor", true, true, 0, 0);
     check_test_program_boundary(test, "__int128 wide(__int128 x){return x+1;}", "wide-primary-program", true, false, 0, 0);
+    check_test_program_boundary(test, "extern int(*callback)(int);int tested(int n){return callback(n);}",
+                                "indirect-function-pointer-call-machine-boundary", true, false, 1, 0);
+    check_test_program_boundary(test,
+        "typedef union __attribute__((transparent_union)){int value;unsigned bits;} U;int consume(U);int tested(int n){return consume(n);}",
+        "transparent-union-call-machine-boundary", true, false, 1, 0);
+    check_test_program_boundary(test,
+        "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(global);}",
+        "vector-builtin-live-reference-machine-boundary", true, false, 1, 0);
+    check_test_program_boundary(test,
+        "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(__builtin_nondeterministic_value(global));}",
+        "vector-builtin-unevaluated-type-argument", true, false, 0, 0);
+    check_test_program_boundary(test,
+        "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(__builtin_shufflevector(global,global,0,1,2,3));}",
+        "vector-builtin-shuffle-prefix-reference-mask", true, false, 1, 0);
     check_test_program_boundary(test, "int tested(int n){int values[n+10];return sizeof values;}", "dynamic-frame-machine-boundary", true, false, 0, 0);
     check_test_program_boundary(test, "int extent;int tested(int n){typedef int A[extent+10];return sizeof(A);}",
                                 "vla-bound-reference", true, true, 1, 0);
