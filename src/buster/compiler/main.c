@@ -94,6 +94,12 @@ int run_dataflow_benchmark(int argc, char** argv);
 #include "buster/compiler/dominators_test.c"
 int run_dominator_benchmark(int argc, char** argv);
 
+// Local promotion over a completed CFG: vector SSA construction, its nonrecursive scalar twin and semantic tests.
+#include "buster/compiler/ssa.c"
+#include "buster/compiler/ssa_program.c"
+#include "buster/compiler/ssa_test.c"
+#include "buster/compiler/ssa_benchmark.c"
+
 #include "buster/compiler/tier1_allocate.c"
 #include "buster/compiler/tier1_rematerialize.c"
 #include "buster/compiler/tier1_allocate_test.c"
@@ -363,6 +369,7 @@ int run_backend_benchmark(int argc, char** argv);
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
 #include "buster/compiler/ir_lower.c"
+#include "buster/compiler/ssa_ir.c"
 #include "buster/compiler/ir_validate.c"
 #include "buster/compiler/interpreter.c"
 #include "buster/compiler/interpreter_native.c"
@@ -371,6 +378,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_interpreter.c"
 #include "buster/compiler/ir_test.c"
 #include "buster/compiler/ir_lower_test.c"
+#include "buster/compiler/ssa_ir_test.c"
 #include "buster/compiler/ir_parse_test.c"
 #include "buster/compiler/interpreter_test.c"
 #include "buster/compiler/interpreter_native_test.c"
@@ -413,7 +421,19 @@ static int main_command(int argc, char** argv, bool* found)
 {
     int result = 0;
     *found = true;
-    if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc == 2 && strcmp(argv[1], "test-diagnostics") == 0)
+    if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ssa") == 0)
+    {
+        result = run_ssa_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ssa") == 0)
+    {
+        result = run_ssa_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ssa-ir") == 0)
+    {
+        result = run_ssa_ir_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc == 2 && strcmp(argv[1], "test-diagnostics") == 0)
     {
         result = run_diagnostic_tests();
     }

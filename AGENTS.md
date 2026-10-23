@@ -351,6 +351,16 @@ designs and the compilers already built this way.
   `dataflow_test.c` provides `test-dataflow` and `dataflow_benchmark.c`
   provides `benchmark-dataflow`.
   `docs/dataflow.md` records the contracts and 9700X measurements.
+- `src/buster/compiler/ssa.c` promotes eligible locals over a completed CFG:
+  shared dominance/frontier analysis and segmented SIMD renaming, with a nonrecursive
+  predecessor-reading scalar twin and redundant-phi SCC cleanup. `test-ssa`
+  checks both against an all-in-memory path interpreter and the SSA verifier;
+  `benchmark-ssa [--only scalar|vector] [--after-scalar MS]` measures synthetic
+  CFGs, including analysis and allocation. `docs/ssa.md` records the view's
+  contract. `ssa_ir.c` adapts shared IR slots, rebuilds every operand form and
+  verifies the promoted IR; `test-ssa-ir` compares typed-stream, all-memory IR
+  and both promoted forms. Complete source-corpus/Tier 1 acceptance for #134
+  still needs the checker and downstream pipeline.
 - `src/buster/compiler/link.c` is the representation the object writer and the
   linker share: names, atoms, symbols and fixups in column arrays indexed by
   32-bit ids, in arenas, and `link_add_code_fixups`, which turns the encoder's
