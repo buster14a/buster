@@ -2030,12 +2030,41 @@ rejection's reason. Musl is also checked under its upstream build configuration.
 
 ## Where the time goes
 
+The benchmark reports explicit lookup work separately from its phase totals.
+`open` and `fstat` counts cover file-cache probes, including failed opens,
+aliases not yet cached and nonregular candidates; cached paths, including
+cached misses, make neither call. Include-search counts are a subset of these
+file probes. Embed lookup's `stat` attempts and search-directory setup's
+`stat` attempts are separate. These are calls made explicitly by the
+preprocessor, excluding the harness and libc's directory-enumeration calls;
+they are not process-wide syscall totals. Counts belong to the translation
+unit, including when the prepared-file cache is shared.
+
+Include lookup's inclusive interval starts before constructing candidates and
+ends after locating or acquiring the file's bytes, before preparing or
+executing its header. Embed lookup's interval covers constructing and checking
+its candidate paths, before reading a resource. Both overlap the ordinary
+phase breakdown and must not be added to it or subtracted again. The
+`main loop/setup` remainder includes initialization as well as execution.
+
+The final-output copy shares count file runs, buffer runs and direct
+object-like copies at their destination. An intermediate capture contributes
+nothing until tokens reach the final stream, where each copied token is
+counted once. The denominator includes the final stream's pragma records and
+its one record per embed resource; it does not expand an embed into bytes.
+The rest of the stream comes from individual emissions or lifted pragma
+records. The older run-work counters below include intermediate captures,
+so their sum is not a final-output share. Timing-disabled preprocessing does
+not collect the lookup intervals or final-output copy counters.
+
 The [cloud macro-batching comparison](measurements/preprocessor-cloud-2026-10-23/README.md)
 records the flat-argument shortcut and compiled literal-run metadata, including
 their construction cost, generated assembly, differential tests and complete
-paired samples. Its EPYC/Clang 18 observations support a literal-heavy workload
-gain; Ryzen 9700X/Clang 23 qualification and a general compiler-throughput gain
-remain unestablished.
+paired samples. The later [9700X/Clang 23 paired measurements](https://github.com/buster14a/buster/pull/304#issuecomment-6361692970)
+and [control reduction](https://github.com/buster14a/buster/pull/304#issuecomment-6361693442)
+support a literal-run gain, smaller flat/nested gains and a small observed
+argument-copy slowdown. They do not establish a general frontend gain:
+real-main differences are comparable to the baseline/baseline controls.
 
 The benchmark counts what a run does (`PPStatistics`). On `sqlite3.c`, four
 counts match clang's own statistics (`-Xclang -print-stats`, in #117) exactly:

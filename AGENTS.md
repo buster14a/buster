@@ -3121,6 +3121,13 @@ lookup and first byte acquisition; embed lookup time includes its search and
 never add them to it or subtract them again. Preparation and execution of the
 found header are outside include lookup. The main-loop remainder also contains
 initialization, as it did before this label made that boundary explicit.
+The final-output copy shares count file runs, buffer runs and direct
+object-like copies only when they write to the final stream; intermediate
+captures do not enter the numerator. Their denominator is the final output's
+tokens, including pragma records and one record per embed resource. The
+remaining tokens are emitted individually or lifted from captured pragmas.
+The older per-pass run totals still include intermediate captures and must
+not be divided by the final output count to claim a share of that output.
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.
