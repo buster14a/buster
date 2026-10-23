@@ -1,13 +1,14 @@
 # Scoped C binding kernels
 
 `c_bindings.c` implements the resolution kernels for
-[#128](https://github.com/buster14a/buster/issues/128). This PR's bounded scope
-is the reusable event-stream kernels, their oracle and tests, and their
-synthetic benchmark. The optional parser adapter was authorized on
-[#244](https://github.com/buster14a/buster/pull/244#issuecomment-6346496936)
-and remains a separate implementation slice under #128. The compiler's normal
-parse command does **not** yet produce resolved declaration columns from
-these kernels, and this work does not close #128.
+[#128](https://github.com/buster14a/buster/issues/128).
+`c_parser_binding_trace.c` connects the scalar grammar's declaration and scope
+transitions to those kernels; `c_parser_bindings.c` exposes the source adapter
+and declaration-token columns. K3 now classifies block-scope typedef names
+using per-identifier activation stacks. The syntax-only driver does not need
+name-resolution output and does not run the optional adapter. The checker can
+request it explicitly; the separately owned checker adapter in #312 is not
+modified by this work.
 
 ## Event contract
 
@@ -106,9 +107,9 @@ identifiers.
 - empty streams, invalid inputs, event exhaustion, intermediate allocation
   failures and insufficient scratch during the lazy fallback.
 
-These are **event-stream** tests. They do not establish that the parser emits
-correct events for C source. In particular, corpus agreement cannot be claimed
-until the adapter exists. The 9700X workflow runs `test-bindings`.
+These are **event-stream** tests. The source tests below independently check
+the adapter's grammar decisions and original declaration-token identities.
+The 9700X workflow runs both suites.
 
 `./build/compiler benchmark-bindings [--events N] [--names N]
 [--only scalar|batch|sort] [--after-scalar MS]` measures a deterministic
@@ -120,20 +121,146 @@ cycle counters are reported as unavailable. `--only` isolates a path;
 `--after-scalar 200` measures it after lighter work. Each target-host invocation
 takes `~/buster-fast-bench/exclusive.sh` separately and is pinned to CPU 2.
 
-## Remaining acceptance for #128
+## Source adapter and consumer contract
 
-- Implement the authorized optional parser declaration/use/scope output, including
-  ordinary versus member names, tag declarations versus references, parameters,
-  enumerators, labels and recovery. The authorization and exact hook sites are
-  [on #244](https://github.com/buster14a/buster/pull/244#issuecomment-6346496936).
-- Integrate scoped typedef classification into K3 with its exact parser
-  fallback, preserving the existing parser owner's changes.
-- Check `(T) * x` and the scope fixtures through the actual parser; compare
-  declaration columns for every relevant identifier in SQLite, libc and
-  c-testsuite, with exact input provenance and walk counts.
-- Measure both paths and sorting on SQLite and `main.c` on the locked 9700X.
-  The synthetic benchmark does not establish a corpus winner or compiler
-  throughput improvement.
+After a successful `parse_translation_unit`, call
+`parse_bindings_build(&bindings, &parser, &output_arena)`. It produces a
+`ParseBindings` with the reusable `CBindings` event stream and these columns:
+
+| Column | Meaning |
+| --- | --- |
+| `token_events[t]` | Activation/use event index plus one; zero for tokens outside the ordinary, tag and label namespaces. |
+| `declarations[t]` | Original parser token declaring the visible name, or `UINT32_MAX` when unresolved or declared by a builtin without a source token. |
+| `namespaces[t]` | `C_BINDING_ORDINARY`, `C_BINDING_TAG` or `C_BINDING_LABEL`; `UINT8_MAX` for a nonbinding token. |
+| `kinds[t]` | Typedef, object, function, enumerator, tag or label. A function-style parameter is an object after C's parameter adjustment. |
+
+An explicit declaration maps to its own token. Same-scope tag redeclarations
+remain separate lexical declaration records; the type checker can join their
+entities through the event's `previous` link and `depth` scope identity.
+`struct S *p` reuses a visible tag and introduces one only when none is visible.
+Member declarators/accesses/designators, attribute names and asm operand
+symbols are outside these namespaces; member lookup belongs to a containing
+type. Undefined ordinary names and labels have a nonzero use event and a
+`UINT32_MAX` declaration; diagnosing them belongs to semantic checking.
+
+`parse_bindings_resolve(&bindings, scalar, &scratch)` independently resolves
+the same stream and rewrites the declaration/kind columns. `scalar=true` uses
+the stack oracle; `false` uses the batch sort/scan and bounded fallback.
+Neither reads the producer's declaration answers. The statistics count event
+identifiers and backward candidate walks; the source benchmark uses the
+number of source tokens with nonzero `token_events` as its denominator, so
+parameter reactivation and builtin declarations do not inflate throughput.
+
+All columns have `count` logical entries. Element sizes are 4, 4, 1 and 1
+bytes respectively, with their arena alignment; consumers must use bounded
+loads and cannot assume padding. The output arena owns the stream and columns
+until it is reset. It must be distinct from `parser.scratch`, and resolution
+scratch must not alias the retained output. The parser's token/tree storage is
+borrowed during build only. Empty units are valid. Counts and capacity
+arithmetic are bounded before allocation. A failed build rolls back the
+output/scratch marks and clears `ParseBindings`; a failed resolution restores
+scratch and leaves the previous columns intact. Parser output with errors is
+rejected, including recovered partial trees.
+
+The trace has one active event per scalar undo-log entry, after the builtin
+typedef prefix. Tag and label declarations reserve a name-zero undo entry,
+which leaves ordinary-name meanings unchanged. Consequently the parser's
+existing prototype, block, selection/iteration and substatement undo marks
+restore all three namespaces at the same point. Prototype parameters, tags
+and enumerators keep their declaration identities when reactivated in a
+definition's body; they stay hidden in the rest of a return declarator. K&R
+definitions save their final typed parameter declarations before retiring the
+declaration-list scope. Record member lists are not C scopes.
+
+One linear prepass collects ordinary labels for each function, allowing
+forward `goto` and label-address uses. Dense local-label heads and block undo
+marks exclude definitions covered by a GNU `__label__` declaration from that
+function-wide list. Local label uses and definitions resolve to the
+`__label__` declaration's identifier. No tree traversal recurses.
+
+The current source adapter replays the scalar grammar once after the syntax
+parse. It is explicitly opt-in, and its full production cost is measured. It
+does not claim that batch resolution avoids that ordered grammar work, nor
+that kernel speed alone establishes compiler throughput. Fusing the recorder
+with a requesting consumer's scalar parse is a future integration choice.
+
+## Scoped typedef classification
+
+K3's vector keyword scan also records matching closers. Its sparse typedef
+records carry the name, original declarator, complete-declarator activation
+point, enclosing block's exclusive end and previous same-name record.
+Classification replays those activations into a dense head array while
+visiting identifier masks, and pops expired records lazily. Both the vector
+classifier and its scalar twin start from the same immutable records. A
+typedef's own declarator token is classified as an identifier being declared.
+
+This keeps ordinary block-scope aliases, nested/sibling aliases and chains on
+the vector path without a complete scalar preparse. An ordinary declaration
+that hides a typedef still flags its containing item for exact scalar
+handling. Unsupported typedef grammar also retains the existing fallback.
+The fallback reconstructs file-scope meanings from each record's scope,
+preserving an outer alias when an inner block reuses its spelling.
+
+## Source tests and corpus qualification
+
+`./build/compiler test-parser-bindings [--seed N] [--count N]
+[--clang [PATH]] [--keep] [preprocessor options] [file or directory...]`
+compares the direct producer, independent stack replay and batch declaration
+columns for every relevant identifier, using both parser schedules. With no
+files it checks hand-written identity/kind expectations, generates valid
+nested scope programs with a separate expected-binding stack, verifies
+failure rollback and metadata, and requires simple scoped typedefs to stay
+off the parser fallback. Fixtures cover complete-declarator timing,
+enumerators, independent tag/ordinary namespaces, tag redeclarations,
+prototype/body visibility, function-style and K&R parameters, unbraced
+selection/iteration scopes, forward/local labels, and member separation.
+Clang is the external source acceptance oracle, not the binding oracle.
+
+Cloud correctness checks on 2026-10-23 used Clang 23.1.1
+(`6dfe1677ab8dffbc6ec13d53a1e0215d75147689`) and an AVX-512 EPYC VM.
+The focused executable used `-O1 -march=native -fwrapv -funsigned-char
+-fno-strict-aliasing -Wall -Werror -Wno-unused-function`. These are correctness
+runs, not Zen 5 performance evidence. The initial complete fixture/generator
+run after review passed 975,194 checks with no failures.
+
+| External source | Input identity | Files | Source identifiers | Candidate walks |
+| --- | --- | ---: | ---: | ---: |
+| SQLite 3.53.4 amalgamation | `sqlite3.c` SHA-256 `b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189` | 1 | 141,547 | 0 |
+| Zig 0.14.1 `lib/libc` | Archive SHA-256 `f4e576ee050073f9cc42a2978994e07522701606678930b187e4d5e1334bfaf3` | 733 | 632,195 | 0 |
+| c-testsuite | Commit `5c7275656d751de0e68b2d340a95b5681858ed07`, `tests/single-exec`, GNU17 | 220 | 42,114 | 10 |
+
+Each row passed with both parser schedules and all three resolution paths.
+Counts above describe one parser schedule; the test summary counts both.
+The libc selection comprises the `.c` files accepted by Clang with
+`-std=gnu17 -fsyntax-only -ferror-limit=1 -w` and the same system headers.
+The cloud required `-isystem /usr/include/x86_64-linux-gnu`; repository-source
+checks additionally use the native predefines and explicit Clang 23 resource
+headers with `-nobuiltininc`. `main.c` also passed, including source-event
+fallback after many same-name declarations. Its changing token/identifier
+counts are reported with each run rather than treated as a frozen corpus.
+External inputs are read at test time and are not vendored.
+
+## Source benchmark
+
+`./build/compiler benchmark-parser-bindings [--passes N]
+[--only prepare|scalar|batch|sort|source-scalar|source-batch]
+[--after-scalar MS] [preprocessor options] file...` reports median
+nanoseconds and available hardware cycles per source identifier, unit time,
+arena bytes, sorting share and candidate walks. Every timed result is checked
+against the original declaration column. `prepare` includes trace storage,
+label preparation and the scalar grammar replay. `scalar` includes reusable
+stack replay and output-column mapping; `batch` includes key construction,
+sorting, scope resolution and mapping; `sort` includes key construction.
+`source-*` includes syntax parsing, event production and the chosen resolver.
+Preprocessing is outside all these measurements.
+
+The protected 9700X workflow runs the source fixtures and main/SQLite
+comparisons, then measures `main.c` and the existing frozen SQLite corpus.
+It also isolates SQLite's scalar and batch paths and runs the batch after
+200 ms of scalar work. The runner acquires the repository's shared host lock;
+manual runs must acquire it separately and pin to CPU 2. A batch path that
+loses to stacks is retained as the tested alternative, not advertised as a
+speedup. Target-host results are recorded after the exact PR head passes.
 
 The implementation, tests, generator and timing/counter code are original
 project code. No external implementation, generated table or corpus is
