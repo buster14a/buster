@@ -159,16 +159,21 @@ _Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_vector looks
 
 typedef uint32_t PPMacroId;
 
-// The phases PPOptions.timing measures (in TSC ticks), for benchmark-preprocessor: reading files, lexing, refining,
-// making directive tables; the rest of a run is the main loop with its directives.
-// What a run did, counted when PPOptions.timing is set (benchmark-preprocessor prints it).
+// What a run did, counted when PPOptions.timing is set (benchmark-preprocessor prints it). Include and embed lookup
+// ticks are inclusive intervals, separate from PPPhase: include lookup overlaps reading and the main loop, and embed
+// lookup overlaps the main loop. Neither lookup enters/prepares a file, executes it, or invokes the other lookup.
 typedef struct PPStatistics PPStatistics;
 struct PPStatistics
 {
-    uint64_t file_run_tokens; // Tokens files' runs copied to the output,
+    uint64_t file_run_tokens; // Tokens files' runs copied to the current target (including temporary captures),
     uint64_t file_runs; // in this many runs.
     uint64_t buffer_run_tokens; // Tokens buffers' runs copied,
     uint64_t buffer_runs; // in this many runs.
+    // Disjoint parts of the final output, counted only when the copy's target is Preprocessor.output. Pragma records
+    // and an #embed's single output token count as in PPTokens.count; pp_emit and lifted pragma lines are the remainder.
+    uint64_t final_file_run_tokens;
+    uint64_t final_buffer_run_tokens;
+    uint64_t final_direct_object_tokens;
     uint64_t direct_expansions; // Object-like macros copied straight out,
     uint64_t buffered_expansions; // and the ones pushed as a buffer.
     uint64_t invocations; // Function-like macros invoked,
@@ -183,8 +188,20 @@ struct PPStatistics
     uint64_t directives;
     uint64_t skipped_guards; // #include of a file whose guard is defined (clang's "multi-include optimization"),
     uint64_t skipped_once; // and of one #pragma once or #import read.
+    uint64_t include_searches; // pp_find_include calls, including __has_include and __has_include_next,
+    uint64_t include_found; // and those that found a file.
+    uint64_t include_opens; // File-probe open and fstat attempts inside those calls (a subset of Preprocessor.probes).
+    uint64_t include_fstats;
+    uint64_t include_ticks;
+    uint64_t embed_searches; // pp_find_embed calls, including __has_embed,
+    uint64_t embed_found; // and those that found a file (a device too).
+    uint64_t embed_stats; // Actual stat attempts, including failed ones; embed lookup has no path cache.
+    uint64_t embed_ticks;
+    uint64_t directory_stats; // stat attempts discovering/deduplicating the search directories during initialization.
 };
 
+// The disjoint phases PPOptions.timing measures (in TSC ticks): path-cache lookup/byte acquisition, lexing, refining,
+// making directive tables; the rest of a run includes initialization and the main loop with its directives.
 typedef enum PPPhase
 {
     PP_PHASE_READ,
@@ -267,7 +284,7 @@ struct PPOptions
     uint32_t embed_directory_count;
     // A file of #define lines that replaces the built-in predefines (test-preprocessor gives clang's own).
     const char* predefines_path;
-    // Measure the phases (PPPhase) in Preprocessor.ticks.
+    // Measure the phases (PPPhase) in Preprocessor.ticks and lookup intervals/counters in Preprocessor.statistics.
     bool timing;
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
@@ -477,12 +494,14 @@ struct PPFile
 // lanes prepare different records at once, each into arenas of its own (FileCacheArenas) and with an intern table only
 // it writes (c_files.c).
 
-// The system calls lookups made, counted for whoever made them: the opens (one per path probed, whether or not a file
-// is there), and the files mapped and the files read.
+// The system calls lookups made, counted for whoever made them: open attempts (one per uncached path, whether or not a
+// file is there), fstat attempts (one per successful open, even for a non-regular file or a failed fstat), and files
+// mapped/read (the latter counts file-read operations, not individual pread attempts). Each unit/lane owns its counts.
 typedef struct FileCacheCounts FileCacheCounts;
 struct FileCacheCounts
 {
     uint64_t opens;
+    uint64_t fstats;
     uint64_t maps;
     uint64_t reads;
 };
@@ -2787,6 +2806,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
     struct stat stats;
     const bool stated = fd >= 0 && fstat(fd, &stats) == 0;
     error = fd >= 0 && !stated ? errno : error;
+    counts->fstats += fd >= 0;
     error = stated && !S_ISREG(stats.st_mode) ? (S_ISDIR(stats.st_mode) ? EISDIR : -1) : error;
     error = stated && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK ? EFBIG : error;
     if (stated && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
@@ -3272,9 +3292,15 @@ static bool pp_include_error_absent(int error)
 // With --buster-headers, clang's resource directory after buster's (pp->fallback_directory) doesn't supply a name
 // buster's directory has (pp_buster_supplies), neither as a search directory nor as the directory of an includer of
 // clang's: a #include_next in buster's header goes on past clang's header of the same name, to the C library's.
+// The optional timing spans this whole search, including candidate construction, cached hits/misses, file probing
+// and first byte acquisition, but not header-name expansion or the later preparation/execution of the found file.
+// It overlaps PP_PHASE_READ and the main-loop remainder; it is not another additive phase. No search nests in it.
 static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t length, bool angled, bool next, uint32_t includer, uint32_t includer_search,
                                 uint32_t* found_in, uint32_t report)
 {
+    const uint64_t opens = pp->options.timing ? pp->probes.opens : 0;
+    const uint64_t fstats = pp->options.timing ? pp->probes.fstats : 0;
+    const uint64_t start = pp->options.timing ? __rdtsc() : 0;
     char path[PATH_MAX];
     const PPFile* from = includer != BUSTER_PP_NONE ? &pp->files[includer] : 0;
     PPIncluder source = { 0 };
@@ -3318,6 +3344,14 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
             pp_diagnose(pp, PP_SEVERITY_FATAL, report, "cannot open file '%.*s%s%.*s': %s", (int)prefix_length, prefix, absolute ? "" : "/", (int)length,
                         (const char*)name, strerror(error));
         }
+    }
+    if (pp->options.timing)
+    {
+        pp->statistics.include_ticks += __rdtsc() - start;
+        pp->statistics.include_searches += 1;
+        pp->statistics.include_found += result != BUSTER_PP_NONE;
+        pp->statistics.include_opens += pp->probes.opens - opens;
+        pp->statistics.include_fstats += pp->probes.fstats - fstats;
     }
     return result;
 }
@@ -6860,6 +6894,7 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
     {
         pp->statistics.direct_expansions += direct;
         pp->statistics.buffered_expansions += !direct;
+        pp->statistics.final_direct_object_tokens += direct && tokens == &pp->output ? tokens->count - begin : 0;
     }
     pp->history_current = saved_history;
 }
@@ -8099,6 +8134,7 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
         {
             pp->statistics.file_runs += 1;
             pp->statistics.file_run_tokens += stop - context->position;
+            pp->statistics.final_file_run_tokens += pp_target(pp) == &pp->output ? stop - context->position : 0;
         }
         context->position = stop;
         if (stop < run_end && !pp->fatal)
@@ -8128,6 +8164,7 @@ static void pp_step_buffer(Preprocessor* pp, PPContext* context)
     {
         pp->statistics.buffer_runs += 1;
         pp->statistics.buffer_run_tokens += stop - context->position;
+        pp->statistics.final_buffer_run_tokens += target == &pp->output ? stop - context->position : 0;
     }
     context->position = stop;
     if (stop < run_end && !pp->fatal)
@@ -11613,9 +11650,12 @@ static bool pp_embed_parameters(Preprocessor* pp, const PPTokens* tokens, uint32
 // device, which #embed refuses and __has_embed finds empty. The file is only looked at, never read: #embed reads it
 // (pp_lookup_path), and __has_embed answers from its size, as clang's EvaluateHasEmbed does (LookupEmbedFile without
 // opening it), so that a file too big or unreadable for #embed is there for it.
-static bool pp_find_embed(const Preprocessor* pp, const PPContext* context, const uint8_t* name, uint32_t length, bool angled, char* path, uint32_t* path_length,
+// Optional timing covers only this search and its stat attempts, not parameter expansion or the later resource read.
+// It is within the main-loop remainder, separate from include lookup, and is not an additive PPPhase.
+static bool pp_find_embed(Preprocessor* pp, const PPContext* context, const uint8_t* name, uint32_t length, bool angled, char* path, uint32_t* path_length,
                           uint64_t* size, bool* regular)
 {
+    const uint64_t start = pp->options.timing ? __rdtsc() : 0;
     const PPFile* from = context != 0 ? &pp->files[context->file] : 0;
     const bool absolute = length != 0 && name[0] == '/';
     const uint32_t count = absolute ? 1 : 2 + pp->options.embed_directory_count;
@@ -11644,10 +11684,21 @@ static bool pp_find_embed(const Preprocessor* pp, const PPContext* context, cons
             written = snprintf(path, PATH_MAX, "%s%s%.*s", directory, directory[0] != 0 ? "/" : "", (int)length, (const char*)name);
         }
         struct stat stats;
-        found = written > 0 && written < PATH_MAX && stat(path, &stats) == 0 && !S_ISDIR(stats.st_mode);
+        const bool fits = written > 0 && written < PATH_MAX;
+        if (pp->options.timing)
+        {
+            pp->statistics.embed_stats += fits;
+        }
+        found = fits && stat(path, &stats) == 0 && !S_ISDIR(stats.st_mode);
         *path_length = found ? (uint32_t)written : 0;
         *regular = found && S_ISREG(stats.st_mode);
         *size = *regular ? (uint64_t)stats.st_size : 0;
+    }
+    if (pp->options.timing)
+    {
+        pp->statistics.embed_ticks += __rdtsc() - start;
+        pp->statistics.embed_searches += 1;
+        pp->statistics.embed_found += found;
     }
     return found;
 }
@@ -13004,8 +13055,8 @@ static void pp_run_file(Preprocessor* pp, uint32_t file)
 }
 
 // buster's own headers' directory: src/buster/include in the tree whose build/ holds the executable (as clang finds its
-// resource directory from its executable). Returns whether it exists.
-static bool pp_buster_headers_directory(char* path, uint32_t capacity)
+// resource directory from its executable). Returns whether it exists; optionally counts its stat attempt.
+static bool pp_buster_headers_directory(char* path, uint32_t capacity, uint64_t* stat_count)
 {
     char executable[PATH_MAX];
     const ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
@@ -13025,13 +13076,18 @@ static bool pp_buster_headers_directory(char* path, uint32_t capacity)
         }
         result = result && (uint32_t)snprintf(path, capacity, "%s/src/buster/include", executable) < capacity;
         struct stat stats;
+        if (stat_count != 0)
+        {
+            *stat_count += result;
+        }
         result = result && stat(path, &stats) == 0 && S_ISDIR(stats.st_mode);
     }
     return result;
 }
 
 // The highest version's directory of clang's own headers (clang searches its resource directory first), if any.
-static bool pp_clang_resource_directory(char* path, uint32_t capacity)
+// Optionally counts its explicit stat attempt, not the directory enumeration's libc-internal system calls.
+static bool pp_clang_resource_directory(char* path, uint32_t capacity, uint64_t* stat_count)
 {
     bool result = false;
     DIR* directory = opendir("/usr/lib/clang");
@@ -13052,6 +13108,10 @@ static bool pp_clang_resource_directory(char* path, uint32_t capacity)
         {
             snprintf(path, capacity, "/usr/lib/clang/%u/include", best);
             struct stat stats;
+            if (stat_count != 0)
+            {
+                *stat_count += 1;
+            }
             result = stat(path, &stats) == 0 && S_ISDIR(stats.st_mode);
         }
     }
@@ -13094,6 +13154,10 @@ static void pp_dedupe_directories(Preprocessor* pp)
         for (uint32_t i = 0; i < count; i += 1)
         {
             struct stat stats;
+            if (pp->options.timing)
+            {
+                pp->statistics.directory_stats += 1;
+            }
             kept[i] = stat(pp->directories[i], &stats) == 0 && S_ISDIR(stats.st_mode);
             devices[i] = kept[i] ? (uint64_t)stats.st_dev : 0;
             inodes[i] = kept[i] ? (uint64_t)stats.st_ino : 0;
@@ -13269,7 +13333,8 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
             char buster[PATH_MAX];
             char resource[PATH_MAX];
             bool buster_added = false;
-            if (builtin && options->buster_headers && !pp_buster_headers_directory(buster, sizeof(buster)))
+            uint64_t* stat_count = options->timing ? &pp->statistics.directory_stats : 0;
+            if (builtin && options->buster_headers && !pp_buster_headers_directory(buster, sizeof(buster), stat_count))
             {
                 pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "--buster-headers: no src/buster/include beside the executable's build directory");
             }
@@ -13280,7 +13345,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
                 pp->buster_directory = result ? pp->directories[pp->directory_count - 1] : 0;
                 pp->buster_directory_length = result ? pp->directory_lengths[pp->directory_count - 1] : 0;
             }
-            if (result && builtin && pp_clang_resource_directory(resource, sizeof(resource)))
+            if (result && builtin && pp_clang_resource_directory(resource, sizeof(resource), stat_count))
             {
                 pp->fallback_directory = buster_added ? pp->directory_count : BUSTER_PP_NONE;
                 result = pp_add_directory(pp, resource, BUSTER_PP_SYSTEM_FILE);
@@ -15318,7 +15383,7 @@ static void pp_clang_remove_links(const char* links)
 static bool pp_clang_fallback_links(const char* ours, char* links)
 {
     char resource[PATH_MAX];
-    const bool made = pp_clang_resource_directory(resource, sizeof(resource)) && mkdtemp(links) != 0;
+    const bool made = pp_clang_resource_directory(resource, sizeof(resource), 0) && mkdtemp(links) != 0;
     DIR* directory = made ? opendir(resource) : 0;
     bool result = directory != 0;
     for (struct dirent* entry = result ? readdir(directory) : 0; result && entry != 0; entry = readdir(directory))
@@ -15379,7 +15444,7 @@ static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* option
     static Preprocessor pp;
     PPOptions quiet = *options;
     quiet.quiet = true;
-    const bool found = search && pp_buster_headers_directory(ours, PATH_MAX);
+    const bool found = search && pp_buster_headers_directory(ours, PATH_MAX, 0);
     const bool interned = found && intern_initialize(&table);
     const bool initialized = interned && pp_initialize(&pp, &quiet, &table) && !pp.fatal;
     const uint32_t directories = initialized ? pp.directory_count : 0;
