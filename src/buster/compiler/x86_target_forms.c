@@ -191,6 +191,8 @@ static const uint64_t x86_target_requirements[X86_FORM_COUNT] = {
     BUSTER_X86_TARGET_ROW(NOP_RM32)
     BUSTER_X86_TARGET_ROW(NOP_RM64)
     BUSTER_X86_TARGET_ROW(UD2)
+    // #148's flt_rounds helper reads the architectural x87 control word at the baseline target.
+    BUSTER_X86_TARGET_ROW(FNSTCW_M16)
     BUSTER_X86_TARGET_ROW(SYSCALL)
     BUSTER_X86_TARGET_ROW(CPUID)
     BUSTER_X86_TARGET_ROW(BSWAP_R32)
