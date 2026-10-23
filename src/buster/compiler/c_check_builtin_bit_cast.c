@@ -150,7 +150,7 @@ static __attribute__((unused)) void check_builtin_bit_cast_one(const TypeTable* 
         // Read only non-FP fields. In particular, do not copy an input CheckValue containing an sNaN.
         const CheckValue* source = input->arguments;
         if (!type_is_valid(table, source->type) || (unsigned)source->category > CHECK_FUNCTION ||
-            (unsigned)source->constant_kind > CHECK_CONSTANT_ADDRESS || (unsigned)source->fault > CHECK_FAULT_UNSUPPORTED_CONSTANT)
+            (unsigned)source->constant_kind > CHECK_CONSTANT_COMPLEX || (unsigned)source->fault > CHECK_FAULT_UNSUPPORTED_CONSTANT)
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
         }
