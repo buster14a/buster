@@ -553,3 +553,55 @@ preprocessor/accounting changes. It compares the fixed-hash production
 control with `lexprecise`, `precisearena` and `blockgap`, including setup,
 whole preprocessing and kernel power-state/corpus measurements. The temporary
 workflow call will be removed before merge.
+
+## Precise-splice CI screen: the budget is still unmet
+
+[Run 39990074577](https://github.com/buster14a/buster/actions/runs/39990074577),
+job 120539311747, passed at head `6fd9529cf85d932979366e5956741233ebd94529`.
+Its checkout was merge `54c62bb69b633686f891d51bf30c23c345a23c3d`.
+The [complete step output](screen-splice-ci-9700x.txt) and
+[preprocessing summary](screen-splice-ci-9700x.tsv) retain the executable and
+source hashes, input verification, 36 preprocessing processes, nine setup
+processes and 18 kernel processes. Both frozen SQLite hashes and all 169
+system-header hashes passed before and after the comparison. CPU 2 used the
+performance governor with sibling 10 offline, under the runner's shared lock.
+
+| Candidate | SQLite 3.53.4 refine min/median/max ms | Whole median ms | Current main.c whole median ms |
+| --- | --- | --- | --- |
+| Fixed-hash production | 1.720 / 1.729 / 1.731 | 11.851 | 41.728 |
+| Precise regions, space in columns | 1.468 / 1.473 / 1.485 | 11.694 | 41.489 |
+| Precise regions, space in permanent arena | 1.542 / 1.557 / 1.558 | 11.612 | 41.925 |
+| Block-level splice skip, permanent arena | 1.519 / 1.519 / 1.534 | 11.530 | 41.516 |
+
+The column-space variant still moves arena first-touch work into directives,
+so its raw sub-1.5 ms result does not establish the charged budget. The
+permanent-arena variants include the actual allocation and first writes in
+refinement, rather than adding a historical estimate. `blockgap` improves total
+preprocessing and setup, but refinement remains above 1.5 ms on both SQLite
+inputs (3.53.2: 1.524 / 1.534 / 1.535 ms).
+
+The standalone SQLite kernel improves from 1.351–1.356 to 1.294–1.308 ms,
+and after scalar conditioning from 1.385–1.397 to 1.329–1.337 ms. The libc
+kernel regresses from 28.198–28.238 to 29.084–29.214 ms. That regression
+requires repair before retaining this candidate. Removing prefetches was
+appropriate for newly produced blocks but also affected the full-file consumer.
+
+All four variants passed the target refinement suite; `blockgap` also passed
+134,784 guarded preparation cases, 1,200 explicit splice-boundary cases,
+allocation failures, shared-file checks and Clang output comparisons. The
+subsequent standard required CI suite passed. This is candidate evidence,
+not validation of a selected production implementation.
+
+The older frozen manual screen was stopped while waiting for the shared lock
+after building only `twelfth-lexprecise`; no manual timing result is claimed.
+
+The next bounded comparison isolates `coldpref` (restore column/source
+prefetching for the whole-file consumer), `directspace` (grow permanent
+leading-space storage as blocks arrive, eliminating the temporary array and
+copy), and their combination `directcold`. The permanent arena grows only as
+needed; no worst-case space reservation or unmeasured first touch is added.
+The [local refinement suite](directcold-refinement-local.txt) and
+[ASan/UBSan preparation suite](directcold-preparation-sanitizers-local.txt)
+pass. The [frozen manual script](fourteenth-run.sh) waits normally behind CI;
+the temporary CI screen applies these overlays to current sources. Their
+performance is unqualified until those measurements complete.

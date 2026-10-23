@@ -17,7 +17,7 @@ date -u
 uname -srvmo
 cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor /sys/devices/system/cpu/cpu10/online
 executables=()
-for variant in fixed lexprecise precisearena blockgap; do
+for variant in fixed coldpref directspace directcold; do
     overlay="build/refine116/$variant"
     mkdir -p "$overlay/buster/compiler"
     for component in c_lexer c_refine c_preprocessor; do
@@ -31,12 +31,12 @@ for variant in fixed lexprecise precisearena blockgap; do
         -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror "$evidence/fifth-main.c" -o "build/refine116/pp-$variant"
     taskset -c 2 "build/refine116/pp-$variant" --test --count 2000 --seed 116 src "$inputs/sqlite-3.53.4.c" "$corpus"
     executables+=("build/refine116/pp-$variant")
-    if [ "$variant" = fixed ] || [ "$variant" = blockgap ]; then
+    if [ "$variant" = fixed ] || [ "$variant" = directcold ]; then
         clang -O3 -g -march=native -I"$overlay" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
             "$evidence/refinement-main.c" -o "build/refine116/kernel-$variant"
     fi
 done
-overlay=build/refine116/blockgap
+overlay=build/refine116/directcold
 clang -O2 -g -march=native -I"$overlay" -Isrc -Isrc/buster/compiler -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
     "$evidence/chunk-prepare-boundaries.c" -o build/refine116/chunk-prepare-boundaries
 taskset -c 2 build/refine116/chunk-prepare-boundaries "$inputs/sqlite-3.53.4.c" "$inputs/sqlite-3.53.2.c" src/buster/compiler/main.c
@@ -51,9 +51,9 @@ sha256sum build/refine116/pp-* build/refine116/kernel-*
     -- --only vectorized "$inputs/sqlite-3.53.2.c" \
     -- --only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c \
     | tee build/refine116/screen.txt
-./build/compiler ab --rounds 3 --cpu 2 build/refine116/pp-{fixed,precisearena,blockgap} \
+./build/compiler ab --rounds 3 --cpu 2 build/refine116/pp-{fixed,directspace,directcold} \
     -- --setup "$inputs/sqlite-3.53.4.c" | tee build/refine116/setup.txt
-./build/compiler ab --rounds 3 --cpu 2 build/refine116/kernel-{fixed,blockgap} \
+./build/compiler ab --rounds 3 --cpu 2 build/refine116/kernel-{fixed,directcold} \
     -- --only refine_tokens_64 "$inputs/sqlite-3.53.4.c" \
     -- --only refine_tokens_64 --after-scalar 100 "$inputs/sqlite-3.53.4.c" \
     -- --only refine_tokens_64 "$corpus" \
