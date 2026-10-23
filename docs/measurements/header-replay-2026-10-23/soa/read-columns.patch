@@ -1,0 +1,131 @@
+--- a/c_preprocessor_replay.c
++++ b/c_preprocessor_replay.c
+@@ -6,6 +6,8 @@
+ // Tokens, nested file entries, scratch spellings, macro effects and provenance
+ // replay in source order. Pragmas, repaired lexical views, unsupported builtins
+ // and optional cache exhaustion fall back to normal execution. This is a probe.
++// Read names and exact keys are contiguous columns; temporary source spans
++// stay separate and are discarded after location normalization at capture.
+ 
+ #define BUSTER_REPLAY_ITEMS 32768u
+ #define BUSTER_REPLAY_TRANSCRIPTS 4096u
+@@ -21,8 +23,6 @@
+ typedef struct ReplayRead ReplayRead;
+ struct ReplayRead
+ {
+-    IdentId name;
+-    uint64_t key;
+     uint32_t base;
+     uint32_t first;
+     uint32_t last;
+@@ -122,7 +122,8 @@
+     uint32_t record;
+     uint32_t read_count;
+     uint32_t write_count;
+-    ReplayRead* reads;
++    IdentId* read_names;
++    uint64_t* read_keys;
+     ReplayWrite* writes;
+     uint32_t old_base;
+     bool guarded;
+@@ -171,6 +172,8 @@
+     uint32_t* seen;
+     uint32_t* heads;
+     ReplayRead* reads;
++    IdentId* read_names;
++    uint64_t* read_keys;
+     ReplayWrite* writes;
+     ReplayTranscript* transcripts;
+     uint32_t count;
+@@ -221,13 +224,15 @@
+     cache->seen = arena_push_array(&cache->seen_arena, BUSTER_INTERN_MAX_IDS, sizeof(uint32_t), 64);
+     cache->heads = arena_push_array(&cache->heads_arena, BUSTER_PP_MAX_FILES, sizeof(uint32_t), 64);
+     cache->reads = arena_push_array(&cache->temporary, BUSTER_REPLAY_ITEMS, sizeof(ReplayRead), 64);
++    cache->read_names = arena_push_array(&cache->temporary, BUSTER_REPLAY_ITEMS, sizeof(IdentId), 64);
++    cache->read_keys = arena_push_array(&cache->temporary, BUSTER_REPLAY_ITEMS, sizeof(uint64_t), 64);
+     cache->writes = arena_push_array(&cache->temporary, BUSTER_REPLAY_ITEMS, sizeof(ReplayWrite), 64);
+     cache->transcripts = arena_push_array(&cache->retained, BUSTER_REPLAY_TRANSCRIPTS, sizeof(ReplayTranscript), 64);
+     cache->files = arena_push_array(&cache->temporary, 4096, sizeof(ReplayFile), 64);
+     cache->scratch = arena_push_array(&cache->temporary, BUSTER_REPLAY_ITEMS, sizeof(ReplayScratch), 64);
+     cache->events = arena_push_array(&cache->temporary, BUSTER_REPLAY_ITEMS, sizeof(ReplayEvent), 64);
+     cache->file_system = arena_push_array(&cache->temporary, BUSTER_PP_MAX_FILES, sizeof(uint8_t), 64);
+-    return cache->seen != 0 && cache->heads != 0 && cache->reads != 0 && cache->writes != 0 && cache->transcripts != 0 && cache->files != 0 && cache->scratch != 0 && cache->events != 0 && cache->file_system != 0;
++    return cache->seen != 0 && cache->heads != 0 && cache->reads != 0 && cache->read_names != 0 && cache->read_keys != 0 && cache->writes != 0 && cache->transcripts != 0 && cache->files != 0 && cache->scratch != 0 && cache->events != 0 && cache->file_system != 0;
+ }
+ 
+ static void replay_release(PPReplayCache* cache)
+@@ -335,7 +340,9 @@
+         if (key != UINT64_MAX && cache->read_count < BUSTER_REPLAY_ITEMS)
+         {
+             cache->seen[name] = cache->generation;
+-            ReplayRead read = { .name = name, .key = key };
++            cache->read_names[cache->read_count] = name;
++            cache->read_keys[cache->read_count] = key;
++            ReplayRead read = { 0 };
+             const uint32_t macro = pp->macro_of[name];
+             if (macro != 0 && !(pp->macros[macro].flags & BUSTER_PP_MACRO_BUILTIN))
+             {
+@@ -478,7 +485,7 @@
+         for (uint32_t i = 0; result.source == UINT32_MAX && i < cache->read_count; i += 1)
+         {
+             const ReplayRead* read = &cache->reads[i];
+-            if (read->key != 0 && read->last >= read->first && location >= read->base && location - read->base >= read->first && location - read->base <= read->last)
++            if (cache->read_keys[i] != 0 && read->last >= read->first && location >= read->base && location - read->base >= read->first && location - read->base <= read->last)
+             {
+                 result.source = 0x80000000u | (i + 1);
+                 result.offset = location - read->base;
+@@ -717,18 +724,21 @@
+         cache->why[2] += variants >= BUSTER_REPLAY_VARIANTS;
+         cache->why[3] += pp->errors != cache->errors || pp->warnings != cache->warnings;
+         const uint64_t mark = cache->retained.length;
+-        ReplayRead* reads = safe ? arena_push_array(&cache->retained, cache->read_count, sizeof(ReplayRead), 8) : 0;
++        IdentId* names = safe ? arena_push_array(&cache->retained, cache->read_count, sizeof(IdentId), 64) : 0;
++        uint64_t* keys = safe ? arena_push_array(&cache->retained, cache->read_count, sizeof(uint64_t), 64) : 0;
+         ReplayWrite* writes = safe ? arena_push_array(&cache->retained, cache->write_count, sizeof(ReplayWrite), 8) : 0;
+-        if (safe && reads != 0 && writes != 0)
++        if (safe && names != 0 && keys != 0 && writes != 0)
+         {
+-            memcpy(reads, cache->reads, (uint64_t)cache->read_count * sizeof(ReplayRead));
++            memcpy(names, cache->read_names, (uint64_t)cache->read_count * sizeof(IdentId));
++            memcpy(keys, cache->read_keys, (uint64_t)cache->read_count * sizeof(uint64_t));
+             memcpy(writes, cache->writes, (uint64_t)cache->write_count * sizeof(ReplayWrite));
+             cache->transcripts[cache->count] = (ReplayTranscript){
+                 .next = cache->heads[record],
+                 .record = record,
+                 .read_count = cache->read_count,
+                 .write_count = cache->write_count,
+-                .reads = reads,
++                .read_names = names,
++                .read_keys = keys,
+                 .writes = writes,
+                 .old_base = pp->ranges[context->range].base,
+                 .guarded = context->guard_taken,
+@@ -762,15 +772,14 @@
+     for (uint32_t at = 0; result && at < transcript->read_count; at += 8)
+     {
+         uint64_t current[8] = { 0 };
+-        uint64_t expected[8] = { 0 };
+         const uint32_t count = transcript->read_count - at < 8 ? transcript->read_count - at : 8;
+         for (uint32_t lane = 0; lane < count; lane += 1)
+         {
+-            const ReplayRead* read = &transcript->reads[at + lane];
+-            current[lane] = replay_key(pp, read->name);
+-            expected[lane] = read->key;
++            current[lane] = replay_key(pp, transcript->read_names[at + lane]);
+         }
+-        result = _mm512_cmpeq_epi64_mask(_mm512_loadu_si512(current), _mm512_loadu_si512(expected)) == 0xff;
++        const __mmask8 valid = (__mmask8)_bzhi_u32(0xff, count);
++        const __m512i expected = _mm512_maskz_loadu_epi64(valid, transcript->read_keys + at);
++        result = _mm512_cmpeq_epi64_mask(_mm512_loadu_si512(current), expected) == 0xff;
+         cache->checks += count;
+     }
+     return result;
+@@ -797,7 +806,7 @@
+     }
+     else if ((location.source & 0x80000000u) != 0 && (location.source & 0x7fffffffu) <= transcript->read_count)
+     {
+-        const IdentId name = transcript->reads[(location.source & 0x7fffffffu) - 1].name;
++        const IdentId name = transcript->read_names[(location.source & 0x7fffffffu) - 1];
+         result = pp->macros[pp->macro_of[name]].base + location.offset;
+     }
+     return result;
