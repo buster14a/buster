@@ -81,7 +81,46 @@ preprocessor and transient storage. Input/output arena sizes are also printed;
 neither quantity is whole-process or peak-live memory. No source throughput
 improvement is claimed from the earlier isolated environment measurements.
 
-Results for this new production handoff remain pending target-host validation.
+## Controlled source observations
+
+Candidate `65b3951fc1bd1d9db30543f5bdc89b014777d995` has the same compiler
+implementation as producer head `f881741`; it only repairs the standalone
+harness's unused dispatcher declaration. On the approved Ryzen 7 9700X,
+Clang 23.1.1 and the performance governor, both snapshots used the identical
+harness (`f7330c715465edc28c36e40344c4d321ec4b26da316df8fbcfabbb0210e8baa3`)
+and original checker helper. All 36 processes completed under separate shared
+locks, pinned to CPU 2, with identical checked outputs. The
+[raw results](results.txt) retain every process median, fingerprint, byte count,
+input/harness/executable hash and revision boundary.
+
+These are ranges of three independent process medians, each over 21 passes:
+
+| Source, path/state | Baseline ns/token | Retained history ns/token | Baseline user cycles/token | Retained history user cycles/token |
+| --- | ---: | ---: | ---: | ---: |
+| small, scalar | 146.403–150.407 | 147.148–204.333 | 288.671–303.136 | 295.901–301.815 |
+| small, vector | 211.342–216.786 | 207.675–217.115 | 324.280–338.235 | 324.770–357.568 |
+| small, conditioned | 336.103–360.593 | 301.926–358.901 | 526.605–550.539 | 500.058–602.774 |
+| large, scalar | 52.572–53.741 | 53.480–53.697 | 271.800–278.781 | 277.140–278.560 |
+| large, vector | 56.600–58.099 | 58.597–60.273 | 278.463–286.907 | 288.983–298.121 |
+| large, conditioned | 61.404–62.061 | 61.715–62.834 | 299.714–303.173 | 301.496–307.551 |
+
+The large vector path's median of process medians rose from 57.597 to
+59.635 ns/token, an observed 3.5% cost. Its useful throughput ranges were
+17.21–17.67 versus 16.59–17.07 million tokens/second. Scalar medians were
+52.839 versus 53.681 ns/token, and conditioned vector medians were 61.583
+versus 62.521; their ranges overlap. The tiny input has substantial fixed
+cost and spread, so these observations establish neither a universal overhead
+nor a throughput improvement. Wall time includes arena operations; user
+cycles exclude kernel work. Conditioned means the documented full scalar
+pipeline ran for at least 100 ms before each sample.
+
+The small source has 243 tokens, 143 expression nodes, 108 binding events,
+six file activations and four bodies. History retains 7,960 bytes; input/output
+arenas retain 44,828/19,448 bytes. The large source has 237,579 tokens,
+143,363 expression nodes, 106,500 events, 4,098 file activations and 4,096
+bodies. History retains 2,447,072 bytes; input/output arenas retain
+38,321,676/19,497,368 bytes. Both contain one tag. These byte counts follow the
+exclusions above and are not peak-live or whole-process memory.
 
 `test_sanitize.c` is a narrow entry point to the same production test commands
 for separate sanitizer qualification. Build under the shared lock with the
@@ -95,3 +134,6 @@ under its own lock with leak detection and fatal sanitizer errors enabled:
 ```
 
 This does not replace the normal optimized build, full CI or call-graph gate.
+On the same locked host, `65b3951` passed 420,202 environment checks and 69,425
+checker checks with ASan, UBSan and leak detection enabled and fatal errors.
+No sanitizer findings were reported.

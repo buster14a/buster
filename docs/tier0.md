@@ -347,3 +347,51 @@ path's 11.1.
   them; c-testsuite (#145); `sqlite3.c` and `speedtest1` (#146); #144's benchmark rows for real functions; the whole
   compile against tcc.
 - **Unwind tables (#88)** for the prologue and the epilogue, which follow fixed templates.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[The implementation's five phases and contracts](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/tier0.c#L4)
+are real, but the statement that [#133](https://github.com/buster14a/buster/issues/133) produces its input describes the intended
+integration: at this pin the complete source producer does not exist. The
+actual current producer is `tier0_generate` and the tests' manually built
+`Tier0Function` fixtures. `CheckStream` is not a drop-in replacement.
+
+| Producer → consumer | Implemented or missing contract |
+| --- | --- |
+| Checked C/graph → ordered typed function/ABI metadata | Missing source bridge, [#133](https://github.com/buster14a/buster/issues/133)/[#136](https://github.com/buster14a/buster/issues/136)/[#145](https://github.com/buster14a/buster/issues/145). Must lower control flow, short-circuiting and explicit conversions and retain source identity. |
+| `Tier0Function` → fusion → stack depths → homes/frame | Implemented. Byte kind/class columns plus u64 value; local/call tables and ABI locations. Labels stop fusion; stack prefix sums describe execution order. |
+| Fusion/depth/home columns → templates/deferred sizes → record offsets | Implemented count/prefix placement. Calls/fixed-register exceptional entries compute demand before emission, so variable output has disjoint ranges. |
+| Template/hole blocks → expanded records → `x86_choose_forms` | Implemented direct 16-byte record emission. Scalar twin constructs fields independently; immediate shortening must preserve value and live flags. |
+| Final records/branch columns → `size_branches` → `x86_encode` | Implemented generated-program path. Branch indices/targets stay in record coordinates until sizing; fixup markings/references retain record order. |
+| Encoded bytes/fixup ends + `LinkReference` → `link_add_code_fixups` | Implemented object/executable test path; symbol identity/addends are carried, not rediscovered from instruction bytes. |
+
+A logical batch is one complete function; kernels classify 64 entries and
+read u64 values eight at a time with bounded masks. Input columns need natural
+alignment, no padding; caller storage remains immutable. Output arena records
+include **four extra records** for the expansion's final full store, separate
+from logical record count. Scratch is thread-local, and allocation/unsupported/
+depth failure restores its pushed storage. Do not hand padding records to a
+consumer as real instructions. Initialization of encoder/semantics/templates
+precedes use and concurrent readers.
+
+The typed producer already knows machine classes, pointer scale, explicit
+conversion, branch targets and ABI placement; omitting them would force
+reconstruction. Labels are deliberately derived from control entries and the
+last-operand class from a shifted load. Keeping an extra label column requires
+a measured benefit and a consistency rule. Small-function occupancy motivates
+a unit-batch alternative, but batching cannot fuse across function boundaries,
+mix value stacks or hide per-function setup. Whole-function validation remains
+the trusted-input prerequisite; malformed streams are not handled by hot loops.
+
+Disposition: keep direct machine-record output and explicit variable-output
+placement. `test-tier0 --cross-check` compares exact scalar/vector records,
+branch columns and references, then sizes/encodes/executes them against its
+independent interpreter and Clang-generated fixtures. This validates the
+synthetic producer/consumer path, not actual C source lowering.
+`benchmark-backend` separately times compilation, sizing and encoding; do not
+sum its rows into a claimed measured total. [#136](https://github.com/buster14a/buster/issues/136)/[#145](https://github.com/buster14a/buster/issues/145) require source-driven
+small/large full path measurements, ABI/initialization/copy/arena costs,
+partial-batch/fallback counts and generated code quality. Shared IR/SSA and
+Tier 1 remain [separately tracked branch integrations](simd-boundary-audit.md#pending-stage-integration).
