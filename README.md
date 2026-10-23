@@ -18,6 +18,10 @@ Build with Clang on the intended host:
 ```
 
 The build produces one executable, `build/compiler`, using `-march=native`.
+Its stage 1 link uses an installed Wild, then mold, then the system linker.
+Set `BUSTER_LINKER=system|wild|mold|lld|bfd` or an absolute linker path to
+choose explicitly; the build installs nothing. See the
+[stage 1 linker measurements and validation](docs/stage1-linker.md).
 See [AGENTS.md](AGENTS.md) for test commands and the shared 9700X host lock,
 [the lexer notes](docs/c-lexer.md),
 [the encoder design](docs/x86-64-encoder.md), and

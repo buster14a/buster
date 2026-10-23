@@ -1,0 +1,30 @@
+name: Stage 1 linker selection
+on:
+  pull_request:
+    paths:
+      - build.sh
+      - tools/build_linker_test.c
+      - tools/linker_measure.c
+      - .github/workflows/stage1-linker.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  selection:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check stage 1 linker selection without compiling Buster
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n build.sh
+          mkdir -p build
+          clang -O2 -Wall -Wextra -Werror tools/build_linker_test.c -o build/build-linker-test
+          build/build-linker-test "$PWD/build.sh"
+          clang -O2 -Wall -Wextra -Werror tools/linker_measure.c -o build/linker-measure
+          build/linker-measure time build/samples.csv success 3 0 true
+          build/linker-measure time build/samples.csv nonzero 3 1 false
+          if build/linker-measure time build/samples.csv failure 1 0 false; then exit 1; fi
+          if build/linker-measure time build/samples.csv invalid 0 0 true; then exit 1; fi

@@ -9,6 +9,10 @@
 # level, so it holds every body the build may inline (at -O0, clang doesn't emit an extern inline body at all). First it
 # captures src/buster/compiler/call_graph_capture the same way, whose cycle runs through such a body, and fails if the
 # check doesn't report it.
+# BUSTER_LINKER=auto (default) prefers wild, then mold, then Clang's system linker. Explicit values: system, wild,
+# mold, lld, bfd or an absolute executable path. No linker is installed by the build.
+# ./build.sh benchmark-linkers freezes one build and compares available external linkers; BUSTER_LINK_CPU pins
+# only the runtime samples. Results are under build/stage1-linker-results/. This requires a native Buster host.
 # ./build.sh lexer-variant NAME=SOURCE... builds build/compiler with other lexers in it, for benchmark-lexer to check
 # and time beside c_tokenize in one process: each SOURCE is a copy of c_lexer.c (compiled through
 # src/buster/compiler/c_lexer_variant.c into c_lexer_variant_NAME), or that file's assembly (.s), which
@@ -71,7 +75,125 @@ build_compiler()
     for i in "${!sources[@]}"; do
         cat "$object_directory/$i.json"
     done > build/compile_commands.json
-    clang "${linked[@]}" "$@" -o build/compiler
+    clang "${linker_flags[@]}" "${linked[@]}" "$@" -o build/compiler
+    if [ "${benchmark_linkers-}" = 1 ]; then
+        benchmark_stage1_linkers
+    fi
+}
+# Select only the stage 1 host executable's final link. Keep every compile/IR command unchanged.
+# Explicit requests fail closed: a linker error must never be hidden by retrying with another tool.
+select_linker()
+{
+    local requested="${BUSTER_LINKER-auto}"
+    local executable=""
+    linker_flags=()
+    case "$requested" in
+        auto)
+            executable="$(command -v wild || command -v mold || true)"
+            ;;
+        system)
+            ;;
+        mold|wild|lld|bfd)
+            local command="$requested"
+            case "$requested" in
+                lld) command=ld.lld ;;
+                bfd) command=ld.bfd ;;
+            esac
+            executable="$(command -v "$command" || true)"
+            if [ -z "$executable" ]; then
+                echo "build.sh: requested linker '$requested' is not on PATH" >&2
+                return 1
+            fi
+            ;;
+        /*)
+            if [ ! -f "$requested" ] || [ ! -x "$requested" ]; then
+                echo "build.sh: requested linker '$requested' is not an executable file" >&2
+                return 1
+            fi
+            executable="$requested"
+            ;;
+        *)
+            echo "build.sh: BUSTER_LINKER must be auto, system, mold, wild, lld, bfd or an absolute executable path" >&2
+            return 1
+            ;;
+    esac
+    if [ -n "$executable" ]; then
+        linker_flags=("--ld-path=$executable")
+        echo "build.sh: stage 1 linker: $executable" >&2
+    else
+        echo "build.sh: stage 1 linker: Clang's system default" >&2
+    fi
+}
+# Freeze one compilation, then rotate complete links and fresh-process frontend workloads.
+# This mode requires a native host that can run Buster; it never installs a linker.
+benchmark_stage1_linkers()
+{
+    local results=build/stage1-linker-results
+    local measure="$object_directory/linker-measure"
+    mkdir -p "$results"
+    clang -O2 -Wall -Wextra -Werror tools/linker_measure.c -o "$measure"
+    {
+        uname -a
+        clang --version
+        ld --version
+        head -1 /proc/version
+        sed -n '/^model name[[:space:]]*:/ {p;q;}' /proc/cpuinfo
+        head -3 /proc/meminfo
+        printf 'source revision: '
+        git rev-parse HEAD
+        printf 'BUSTER_LINKER=%s\n' "${BUSTER_LINKER-auto}"
+        printf 'link command: clang OBJECTS_IN_SOURCE_ORDER -o OUTPUT\n'
+        printf 'BUSTER_LINK_CPU=%s\n' "${BUSTER_LINK_CPU-unpinned}"
+    } > "$results/environment.txt"
+    clang -### "${linked[@]}" -o "$object_directory/provenance-output" > "$results/driver.txt" 2>&1
+    sha256sum "${linked[@]}" > "$results/objects.sha256"
+    printf 'label,round,ns,exit\n' > "$results/samples.csv"
+    local names=(system)
+    local paths=("")
+    local name executable
+    for name in wild mold lld; do
+        executable="$name"
+        if [ "$name" = lld ]; then executable=ld.lld; fi
+        if executable="$(command -v "$executable")"; then
+            names+=("$name")
+            paths+=("$executable")
+            "$executable" --version >> "$results/environment.txt"
+        fi
+    done
+    local runtime_prefix=()
+    if [ -n "${BUSTER_LINK_CPU-}" ]; then
+        runtime_prefix=(taskset -c "$BUSTER_LINK_CPU")
+    fi
+    local pass index offset output
+    local selected_flags=()
+    for pass in 0 1 2 3 4; do
+        for offset in "${!names[@]}"; do
+            index="$offset"
+            if [ "$((pass % 2))" = 1 ]; then index="$(("${#names[@]}" - 1 - offset))"; fi
+            name="${names[$index]}"
+            output="$object_directory/compiler-$name"
+            selected_flags=()
+            if [ -n "${paths[$index]}" ]; then selected_flags=("--ld-path=${paths[$index]}"); fi
+            "$measure" time "$results/samples.csv" "link-$name-p$pass" 7 0 clang "${selected_flags[@]}" "${linked[@]}" -o "$output"
+            if [ "$pass" = 0 ]; then
+                cp "$output" "$object_directory/first"
+                clang "${selected_flags[@]}" "${linked[@]}" -o "$output"
+                cmp "$object_directory/first" "$output"
+                stat -c "$name %s" "$output" >> "$results/sizes.txt"
+                readelf -W -l -d -n "$output" > "$results/elf-$name.txt"
+                for command in test-link test-object-writer test-x86-encoder test-lexer; do
+                    "$output" "$command" > "$results/$command-$name.txt"
+                done
+                # Check the complete source before timing it with diagnostics suppressed.
+                "$output" -march=native -D_GNU_SOURCE -Isrc src/buster/compiler/main.c > "$results/frontend-$name.txt" 2>&1
+            fi
+            BUSTER_MEASURE_QUIET=1 "$measure" time "$results/samples.csv" "startup-$name-p$pass" 31 1 "${runtime_prefix[@]}" "$output" -unknown
+            BUSTER_MEASURE_QUIET=1 "$measure" time "$results/samples.csv" "scalar-$name-p$pass" 11 0 "${runtime_prefix[@]}" "$output" --scalar -march=native -D_GNU_SOURCE -Isrc src/buster/compiler/main.c
+            BUSTER_MEASURE_QUIET=1 "$measure" time "$results/samples.csv" "vector-$name-p$pass" 11 0 "${runtime_prefix[@]}" "$output" -march=native -D_GNU_SOURCE -Isrc src/buster/compiler/main.c
+        done
+    done
+    sha256sum -c "$results/objects.sha256"
+    echo "Stage 1 linker samples and correctness receipts: $results"
 }
 defines=()
 if [ "$1" = check-call-graph ]; then
@@ -101,6 +223,7 @@ elif [ "$1" = lexer-variant-assembly ]; then
 elif [ "$1" = lexer-variant ]; then
     shift
     [ $# -ne 0 ] || { echo "usage: ./build.sh lexer-variant NAME=SOURCE..." >&2; exit 1; }
+    select_linker
     rm -rf build || true
     mkdir -p build
     variants=""
@@ -134,6 +257,11 @@ elif [ "$1" = lexer-variant ]; then
         rm -rf "$(dirname "$object")"
     done
 else
+    benchmark_linkers=0
+    if [ "${1-}" = benchmark-linkers ]; then
+        benchmark_linkers=1
+    fi
+    select_linker
     rm -rf build || true
     mkdir -p build
     build_compiler
