@@ -674,6 +674,23 @@ struct PPDirectiveTestStructure
     const char* standard;
 };
 
+// Original raw-string inputs; Clang is an external diagnostic/location oracle, including suppressed contexts.
+static const PPDirectiveTestStructure pp_directive_test_raw_errors[] = {
+    { "invalid delimiter character", "R\"bad space\"\n", 0, "gnu17" },
+    { "delimiter newline", "LR\"bad\n\"\n", 0, "gnu17" },
+    { "delimiter too long", "u8R\"abcdefghijklmnopq\"\n", 0, "gnu17" },
+    { "unterminated", "R\"tag(body\n", 0, "gnu17" },
+    { "spliced prefix", "L\\\nR\"bad space\"\n", 0, "gnu17" },
+    { "macro definitions diagnose once", "#define BAD R\"bad space\"\nBAD BAD\n", 0, "gnu17" },
+    { "discarded macro argument", "#define DROP(x) kept\nDROP(R\"bad space\")\n", 0, "gnu17" },
+    { "condition after expansion", "#define DROP(x) 1\n#if DROP(R\"bad space\")\nkept\n#endif\n", 0, "gnu17" },
+    { "skipped body", "#if 0\nR\"bad space\"\n#endif\n", 0, "gnu17" },
+    { "skipped elif", "#if 1\nkept\n#elif R\"bad space\"\n#endif\n", 0, "gnu17" },
+    { "opaque diagnostic", "#warning R\"bad space\"\n", 0, "gnu17" },
+    { "opaque query", "#define HI __has_include\n#if HI(<R\"bad\"x>)\n#endif\n", 0, "gnu17" },
+    { "included file", "#include \"structure.h\"\n#include \"structure.h\"\n", "R\"bad space\"\n", "gnu17" },
+};
+
 static const PPDirectiveTestStructure pp_directive_test_structures[] = {
     { "#else after #else", "#if 1\n#else\n#else\n#endif\n", 0, 0 },
     { "#elif after #else", "#if 0\n#else\n#elif 1\n#endif\n#if 1\n#else\n#elif 1\n#endif\n", 0, 0 },
@@ -921,8 +938,7 @@ static bool pp_directive_test_diagnostics(const PPDirectiveTestStructure* fixtur
 // ---------------------------------------------------------------------------------------------------------------------
 // Include guards and #pragma once (#120)
 
-// Ordinary messages don't consume recovery capacity. At the exceptional-repair boundary the whole tail survives;
-// past it the run must fail explicitly, with no spurious comment diagnostic or extra message from the failed repair.
+// Both ordinary and exceptional messages preserve the whole tail beyond the former 64-repair limit.
 static bool pp_directive_test_message_capacity(void)
 {
     uint32_t failures = 0;
@@ -944,9 +960,8 @@ static bool pp_directive_test_message_capacity(void)
             const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true, .scalar = kernel != 0 };
             const bool initialized = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
             const bool ran = initialized && pp_run_source(&pp, "message-capacity.c", (const uint8_t*)source, length);
-            const bool complete = test != 2;
-            bool same = initialized && ran == complete && pp.fatal == !complete && pp.errors == !complete && pp.warnings == (complete ? count : 64);
-            if (same && complete)
+            bool same = initialized && ran && !pp.fatal && pp.errors == 0 && pp.warnings == count;
+            if (same)
             {
                 same = pp.output.count == 1 && pp.output.kinds[0] == C_TOKEN_RAW_IDENTIFIER && intern_length(&table, pp.output.values[0]) == 4 &&
                        memcmp(intern_bytes(&table, pp.output.values[0]), "tail", 4) == 0;
@@ -1329,6 +1344,7 @@ static bool pp_test_directives(const char* directory, bool with_clang, uint64_t 
     bool result = pp_directive_test_streams(seed, count);
     result &= pp_directive_test_diagnostics(pp_directive_test_structures, BUSTER_ARRAY_LENGTH(pp_directive_test_structures), "directive structure", directory, with_clang);
     result &= pp_directive_test_diagnostics(pp_directive_test_messages, BUSTER_ARRAY_LENGTH(pp_directive_test_messages), "diagnostic text", directory, with_clang);
+    result &= pp_directive_test_diagnostics(pp_directive_test_raw_errors, BUSTER_ARRAY_LENGTH(pp_directive_test_raw_errors), "raw string diagnostics", directory, with_clang);
     result &= pp_directive_test_message_capacity();
     result &= pp_directive_test_predefines_origin(directory);
     result &= pp_directive_test_diagnostics(pp_directive_test_definitions, BUSTER_ARRAY_LENGTH(pp_directive_test_definitions), "definitions", directory, with_clang);

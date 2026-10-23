@@ -344,6 +344,11 @@ static bool files_test_same_record(const PPFileData* a, const PPFileData* b, con
         const uint32_t count = a->token_count;
         result = b->token_count == count && memcmp(a->kinds, b->kinds, count) == 0 && memcmp(a->starts, b->starts, (uint64_t)count * sizeof(uint32_t)) == 0 &&
                  files_test_same_id(x, y, opaque, a->guard, b->guard) && a->directive_count == b->directive_count;
+        result = result && a->raw_error_count == b->raw_error_count;
+        for (uint32_t e = 0; result && e < a->raw_error_count; e += 1)
+        {
+            result = a->raw_errors[e].token == b->raw_errors[e].token && a->raw_errors[e].offset == b->raw_errors[e].offset && a->raw_errors[e].kind == b->raw_errors[e].kind;
+        }
         result = result && (opaque || memcmp(a->values, b->values, (uint64_t)count * sizeof(uint32_t)) == 0);
         for (uint32_t t = 0; result && opaque && t < count; t += 1)
         {
@@ -653,7 +658,7 @@ static uint32_t files_test_unused(const FilesTestWork* work, FilesTestRun* refer
 // redefines NEXT2.
 static const char* const files_test_tree_directories[] = { "sub", "I1", "I2", "I3", "sys" };
 static const char* const files_test_tree_files[][2] = {
-    { "main1.c", "#include \"a.h\"\n#include <sys1.h>\n#include \"sub/b.h\"\n#if 0\n#include \"missing.h\"\n#include \"unused.h\"\n#endif\n#define COMPUTED \"c.h\"\n"
+    { "main1.c", "#include \"a.h\"\n#include <sys1.h>\n#include \"sub/b.h\"\n#if 0\n#include \"missing.h\"\n#include \"unused.h\"\nR\"bad space\"\n#endif\n#define COMPUTED \"c.h\"\n"
                  "#include COMPUTED\n#include \"link.h\"\n#include \"hard.h\"\n#include \"once.h\"\n#include \"once.h\"\n#include \"guarded.h\"\n#include \"guarded.h\"\n"
                  "int main1 = A + B + SYS1 + C + ONCE + GUARDED;\n" },
     { "main2.c", "#include \"sub/../a.h\"\n#include <next.h>\n#include \"sub/b.h\"\n#define NEXT2 10\nint main2 = A + B + NEXT + NEXT2;\n" },
@@ -661,7 +666,7 @@ static const char* const files_test_tree_files[][2] = {
     { "a.h", "#ifndef A_H\n#define A_H\n#define A 1\n#endif\n" },
     { "sub/b.h", "#include \"../a.h\"\n#define B 2\n#define BIG 18446744073709551615\n#define WIDE BIG\n#if WIDE\n#endif\n" },
     { "c.h", "#define C 3\n" },
-    { "unused.h", "#define UNUSED 4\n" },
+    { "unused.h", "#define UNUSED 4\nR\"bad space\"\n" },
     { "once.h", "#pragma once\n#define ONCE 5\n" },
     { "guarded.h", "#ifndef GUARDED_H\n#define GUARDED_H\n#define GUARDED 6\n#endif\n" },
     { "I1/next.h", "#include_next <next.h>\n" },

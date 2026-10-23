@@ -296,7 +296,11 @@ static bool pp_same_directive_tables(const Preprocessor* a, const Preprocessor* 
     {
         const PPFileData* x = &a->datas[f];
         const PPFileData* y = &b->datas[f];
-        result = x->prepared == y->prepared && x->directive_count == y->directive_count && x->guard == y->guard;
+        result = x->prepared == y->prepared && x->directive_count == y->directive_count && x->guard == y->guard && x->raw_error_count == y->raw_error_count;
+        for (uint32_t e = 0; result && e < x->raw_error_count; e += 1)
+        {
+            result = x->raw_errors[e].token == y->raw_errors[e].token && x->raw_errors[e].offset == y->raw_errors[e].offset && x->raw_errors[e].kind == y->raw_errors[e].kind;
+        }
         for (uint32_t d = 0; result && x->prepared && d < x->directive_count; d += 1)
         {
             result = x->directive_hash[d] == y->directive_hash[d] && x->directive_end[d] == y->directive_end[d] &&
@@ -1098,9 +1102,21 @@ static const PPTestCase pp_test_cases[] = {
     { "a raw string literal isn't an #include's header name", "#include R\"(other.h)\"\n", "x\n", "gnu17", "", true, 0, 0, 0 },
     { "raw string literals after '$' as punctuation", "#define R RR\n$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" 1$e+R\"(e)\" $u8R\"(f)\" $xR\"(g)\"\n", 0, "gnu17", "$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" 1$e+R\"(e)\" $u8R\"(f)\" $xR\"(g)\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
     { "raw string literals after '$' in assembly", "#define R RR\n$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" $xR\"(g)\"\n", 0, "gnu17", "$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" $xR\"(g)\"\n", false, 0, "-x assembler-with-cpp", 0 },
-    { "line breaks in an unknown token and in a raw string literal", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", 0, "gnu17", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\nR\"x\ny\" z\nw\nR\"(a\nb)\" c\n\nd\n" },
-    { "invalid raw delimiter keeps its line splice", "R\"a\\\nb\" c\n", 0, "gnu17", "R\"a\\\nb\" c\n", false, 0, 0, 0,
+    { "line breaks in an unknown token and in a raw string literal", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", 0, "gnu17", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", true, 0, 0, 0, "# 1 \"%d/case.c\"\nR\"x\ny\" z\nw\nR\"(a\nb)\" c\n\nd\n" },
+    { "invalid raw delimiter keeps its line splice", "R\"a\\\nb\" c\n", 0, "gnu17", "R\"a\\\nb\" c\n", true, 0, 0, 0,
       "# 1 \"%d/case.c\"\nR\"a\\\nb\" c\n" },
+    { .name = "invalid raw delimiters at active file scope", .source = "R\"bad space\" LR\"bad)\" uR\"bad\\\" UR\"abcdefghijklmnopq\" u8R\"bad\n\"\n",
+      .standard = "gnu17", .expected = "R\"bad space\" LR\"bad)\" uR\"bad\\\" UR\"abcdefghijklmnopq\" u8R\"bad\n\"\n", .fails = true, .errors = 5 },
+    { .name = "unterminated raw literal", .source = "before R\"tag(body\n", .standard = "gnu17", .expected = "before R\"tag(body\n", .fails = true, .errors = 1 },
+    { .name = "invalid raw prefix with phase two splice", .source = "L\\\nR\"bad space\"\n", .standard = "gnu17", .expected = "LR\"bad space\"\n", .fails = true, .errors = 1 },
+    { .name = "unused invalid raw macro diagnoses once", .source = "#define BAD R\"bad space\"\nBAD BAD\n", .standard = "gnu17", .expected = "R\"bad space\" R\"bad space\"\n", .fails = true, .errors = 1 },
+    { .name = "unused invalid raw macro argument diagnoses", .source = "#define DROP(x) kept\nDROP(R\"bad space\")\n", .standard = "gnu17", .expected = "kept\n", .fails = true, .errors = 1 },
+    { .name = "invalid raw in a condition diagnoses after expansion", .source = "#define DROP(x) 1\n#if DROP(R\"bad space\")\nkept\n#endif\n", .standard = "gnu17", .expected = "kept\n", .fails = true, .errors = 1 },
+    { .name = "skipped invalid raw literals suppress diagnostics", .source = "#if 0\nR\"bad space\"\n#define BAD LR\"bad)\"\n#endif\nkept\n", .standard = "gnu17", .expected = "kept\n" },
+    { .name = "invalid raw syntax is ordinary text with raw disabled", .source = "R\"bad space\"\n", .standard = "gnu17", .options = "-fno-raw-string-literals", .expected = "R \"bad space\"\n" },
+    { .name = "invalid raw syntax with forced C89 raw literals", .source = "R\"bad space\"\n", .standard = "c89", .options = "-fraw-string-literals", .expected = "R\"bad space\"\n", .fails = true, .errors = 1 },
+    { .name = "invalid raw syntax in assembly", .source = "R\"bad space\"\n", .standard = "gnu17", .options = "-x assembler-with-cpp", .expected = "R\"bad space\"\n", .fails = true, .errors = 1 },
+    { .name = "opaque raw-looking query with no lexical overlap", .source = "#define HI __has_include\n#if HI(<R\"bad\"x>)\nbad\n#endif\nafter\n", .standard = "gnu17", .expected = "after\n" },
     { "raw-looking direct angle header preserves following source", "#include <R\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
     { "raw strings resume after an opaque direct header", "#include <R\"(x> R\"(a\nb)\"\nafter\n", 0, "gnu17", "header\nafter\n", false, 1, "-I%d", pp_test_files_opaque_raw },
     { "escaped greater in a raw-looking direct header", "#include <a\\>R\"(x>\nafter\n", 0, "gnu17", "escaped_header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
@@ -3214,78 +3230,85 @@ static bool pp_test_raw_query_views(const char* directory)
     return result;
 }
 
-// Capacity is a Buster resource bound, separate from the Clang-equivalence cases. Eight confirmed repairs succeed;
-// a ninth reports the capacity and leaves the run failed/fatal, rather than returning a successful truncated stream.
-static bool pp_test_raw_query_capacity(const char* directory)
+// Cross both former repair limits and the old uint8_t counter's wrap. Definitions between repairs retain old data
+// indexes: their final expansions must still agree with Clang after every later private view has been prepared.
+static bool pp_test_raw_query_capacity(const char* directory, bool with_clang)
 {
-    char source[8192] = { 0 };
-    PPTestCase test = { .name = "raw query capacity", .source = source, .standard = "gnu17", .options = "-I%d", .files = pp_test_files_raw_query };
-    char path[4096];
-    bool result = pp_test_write_case(&test, directory, path, sizeof(path));
-    char text[16384];
-    char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
-    const int count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
-    Arena arena = arena_reserve(1ull << 20);
-    PPOptions options;
-    const char* input;
-    const char* output;
-    bool markers;
-    result = result && pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
-    static InternTable table;
-    static Preprocessor run;
+    char source[65536];
+    char expected[16384];
+    PPTestCase test = { .name = "unlimited opaque recovery", .source = source, .standard = "gnu17", .expected = expected, .options = "-I%d", .files = pp_test_files_raw_query };
+    static const uint32_t counts[] = { 8, 9, 64, 65, 257 };
+    bool result = true;
     for (uint32_t family = 0; result && family < 2; family += 1)
     {
-        const uint32_t capacity = family == 0 ? BUSTER_PP_MAX_QUERY_REPAIRS : BUSTER_PP_MAX_DIRECT_REPAIRS;
-        const uint32_t ordinary = family == 0 ? 0 : capacity + 1;
-        char message[128];
-        snprintf(message, sizeof(message), "%s recovery capacity exceeded (%u repairs per inclusion)", family == 0 ? "header query" : "opaque directive", capacity);
-        for (uint32_t repairs = capacity; result && repairs <= capacity + 1; repairs += 1)
+        for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(counts); c += 1)
         {
+            const uint32_t repairs = counts[c];
             uint32_t length = (uint32_t)snprintf(source, sizeof(source), "#define RAW_QUERY __has_include\n");
-            for (uint32_t i = 0; family != 0 && i <= capacity; i += 1)
+            uint32_t wanted = 0;
+            for (uint32_t i = 0; i < repairs; i += 1)
             {
-                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "#include <raw-plain.h>\n");
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "#define SNAP_%u %u\n", i, i);
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, family == 0 ? "#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n" : "#include <R\"(x>\n");
+                wanted += (uint32_t)snprintf(expected + wanted, sizeof(expected) - wanted, family == 0 ? "hit " : "header ");
             }
             for (uint32_t i = 0; i < repairs; i += 1)
             {
-                length += (uint32_t)snprintf(source + length, sizeof(source) - length, family == 0 ? "#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n" : "#include <R\"(x>\n");
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "SNAP_%u ", i);
+                wanted += (uint32_t)snprintf(expected + wanted, sizeof(expected) - wanted, "%u ", i);
             }
             snprintf(source + length, sizeof(source) - length, "tail\n");
-            result = pp_test_write_file(path, source);
-            for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
-            {
-                options.scalar = kernel != 0;
-                FILE* caught = 0;
-                const int saved = pp_test_catch_stderr(&caught);
-                const bool ran = saved >= 0 && pp_test_run(&run, &table, &options, path);
-                char messages[2048];
-                pp_test_release_stderr(saved, caught, messages, sizeof(messages));
-                uint32_t views = 0;
-                for (uint32_t d = 0; d < run.data_count; d += 1)
-                {
-                    views += run.datas[d].lexical_bytes != 0;
-                }
-                const bool exceeded = repairs > capacity;
-                result = saved >= 0 && ran != exceeded && run.fatal == exceeded && run.errors == (uint32_t)exceeded && views == capacity;
-                if (exceeded)
-                {
-                    result = result && strstr(messages, message) != 0;
-                }
-                else
-                {
-                    const uint32_t last = run.output.count != 0 ? run.output.count - 1 : 0;
-                    const IdentId name = run.output.count != 0 ? run.output.values[last] : 0;
-                    result = result && messages[0] == 0 && run.output.count == repairs + ordinary + 1 && run.output.kinds[last] == C_TOKEN_RAW_IDENTIFIER &&
-                             intern_length(&table, name) == 4 && memcmp(intern_bytes(&table, name), "tail", 4) == 0;
-                }
-                pp_release(&run);
-                intern_release(&table);
-            }
+            snprintf(expected + wanted, sizeof(expected) - wanted, "tail\n");
+            result = pp_test_case(&test, directory, with_clang);
         }
     }
-    arena_release(&arena);
-    pp_test_remove_case(&test, directory);
-    printf("opaque recovery capacity: %s (8/9 queries, 64/65 direct repairs, ordinary directives uncharged, both kernels)\n", result ? "pass" : "FAIL");
+    printf("opaque recovery: %s (8/9/64/65/257 queries and direct repairs, macro snapshots, both kernels)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
+// The count limit is gone, but real allocation/index exhaustion and an unchanged mask still fail closed. Restore
+// injected capacities before release; no failed repair may publish a new data index or overwrite a canonical view.
+static bool pp_test_raw_recovery_failures(void)
+{
+    static const uint8_t source[] = "#warning /*\ntail\n";
+    bool result = true;
+    for (uint32_t fault = 0; result && fault < 3; fault += 1)
+    {
+        static InternTable table;
+        static Preprocessor pp;
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true };
+        const bool initialized = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        result = initialized && pp_run_source(&pp, "recovery-failure.c", source, sizeof(source) - 1);
+        const uint32_t count = pp.data_count;
+        const uint64_t capacity = pp.arena.capacity;
+        if (result)
+        {
+            const uint32_t canonical = pp.files[pp.main_file].data;
+            const uint32_t view = count - 1;
+            uint32_t range = 0;
+            while (range < pp.range_count && pp.ranges[range].file != pp.main_file)
+            {
+                range += 1;
+            }
+            result = range < pp.range_count && pp.datas[view].lexical_bytes != 0;
+            if (result)
+            {
+                pp.context_count = 1;
+                pp.contexts[0] = (PPContext){ .kind = BUSTER_PP_CONTEXT_FILE, .file = pp.main_file, .data = fault == 0 ? canonical : view, .range = range };
+                pp.arena.capacity = fault == 0 ? pp.arena.length : capacity;
+                pp.data_count = fault == 1 ? BUSTER_PP_MAX_FILES : count;
+                const bool recovered = pp_recover_opaque_span(&pp, 0, 0, 9, 11);
+                result = !recovered && pp.fatal && pp.errors == 1 && pp.contexts[0].data == (fault == 0 ? canonical : view) &&
+                         pp.data_count == (fault == 1 ? BUSTER_PP_MAX_FILES : count) && pp.datas[canonical].lexical_bytes == 0 &&
+                         memcmp(pp.datas[canonical].bytes, source, sizeof(source) - 1) == 0;
+            }
+        }
+        pp.arena.capacity = capacity;
+        pp.data_count = count;
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    printf("opaque recovery failure guards: %s (allocation, data indexes, progress)\n", result ? "pass" : "FAIL");
     return result;
 }
 
@@ -5045,7 +5068,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);
         passed_all &= pp_test_raw_query_views(directory);
-        passed_all &= pp_test_raw_query_capacity(directory);
+        passed_all &= pp_test_raw_query_capacity(directory, with_clang);
+        passed_all &= pp_test_raw_recovery_failures();
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {

@@ -525,6 +525,18 @@ raw prefixes too, then the scalar lexer recognizes their identifier tokens.
 This bounds the extra work to chunks with possible literal prefixes and
 preserves exact scalar/vector token equality.
 
+`c_raw_string_error` is a separate diagnostic query for an `UNKNOWN` token;
+the tokenizing entry points remain diagnostic-free. It reads the prefix
+through translation phases 1/2, then checks the original delimiter bytes for
+an invalid character, newline or excess length. A valid delimiter on an
+unknown raw token means its body is unterminated. The preprocessor keeps
+only these exceptional records, and reports them when their active source
+context is known. Opaque headers/messages and skipped text suppress them;
+macro definitions diagnose once when read. Guard-page tests cover every
+truncation of the diagnostic fixtures, all raw-prefix modes and physical
+offsets after a spliced prefix. These changes leave the vector chunk loop
+and tokenizer output unchanged.
+
 `test-lexer --raw-strings` and `--raw-strings-c99` cover raw literals,
 near misses, randomized pieces and every placement around 64-byte and
 512-byte boundaries, with guarded pages. `benchmark-lexer` accepts the
