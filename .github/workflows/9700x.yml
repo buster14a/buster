@@ -336,6 +336,10 @@ jobs:
           ./build/compiler test-check-builtins-float
           ./build/compiler test-check-builtins-query
           ./build/compiler test-builtin-misc-lowering
+          ./build/compiler test-builtin-float-lowering
+          ./build/compiler test-builtin-terminal-helpers
+          ./build/compiler test-builtin-atomic-helpers
+          ./build/compiler test-check-builtins-atomic
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
           == Test the per-file jobs on the repository's sources, flat

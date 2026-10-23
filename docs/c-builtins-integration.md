@@ -206,6 +206,53 @@ both NORMAL/SUBNORMAL selectors 2/3 when finite and nonzero. A possible-operand
 mask must never be flattened into eager evaluation. The definite mask and
 fault provenance follow that schedule.
 
+`c_builtin_float_lower.c` expands F32/F64 classification using a fresh
+addressable local of the actual FP class and an exact-width integer load of
+its representation. It uses integer masks and comparisons, preserves the
+enclosing stack and leaves I32. Its `fpclassify` result is a category index
+0 NaN, 1 infinity, 2 normal, 3 subnormal, 4 zero; the source producer still
+owns conditional selector evaluation. Certified infinity/NaN constants use
+their exact raw bits. Unknown NaN calls, long double and wider runtime
+formats need another lowering path and remain explicit refusals here.
+
+## Atomic and terminal helper calls
+
+`c_check_builtin_atomic.c` checks the corpus-driven scalar `load_n`, `store_n`,
+sync fence and atomic thread/signal-fence slice. It retains actual object and
+value types, qualifiers, all argument effects, ordinary `int` order conversions,
+and known/dynamic order metadata. Orders do not generally require ICE. Invalid
+known load/store orders carry warnings; fence handling retains its own rules.
+GNU `_Atomic` wrappers and unsupported families are not treated as ordinary
+integer objects. Other recognized atomic/sync IDs remain explicit refusals.
+
+`c_builtin_atomic_helpers.c` emits original baseline SysV leaf bodies with
+explicit parameter/result classes. Naturally aligned 1/2/4/8-byte loads
+return zero-extended raw bits; width-specific stores followed by MFENCE and
+MOV loads provide conservative sequential consistency. Thread/sync fences
+use MFENCE. Signal fences require no machine instruction. Every helper CALL,
+including a signal fence, must remain an unknown-effect compiler barrier;
+a RET by itself does not constrain optimization. Each original order,
+pointer and value expression must still execute once even when the helper
+does not inspect its numeric order.
+
+The producer must establish natural alignment at least `required_alignment`.
+Unknown or insufficient alignment, packed objects, wider objects and RMW
+families need another real fallback; this module must not make unaligned
+ordinary MOV appear atomic. The semantic result retains alignment evidence
+and unsupported requirements without turning valid source into fake success.
+
+`c_builtin_terminal_helpers.c` emits one baseline UD2 record for trap and a
+conservative realization of unreachable behavior. Its source consumer must
+retain terminal control flow with no successor. An ordinary void CALL alone
+does not express that fact. The in-place miscellaneous expander continues to
+refuse these IDs so a consumer must choose the explicit terminal path.
+
+Publish helper records as per-unit local TEXT atoms and define their symbols
+before Link validation. Local symbols must share the caller's unit. Existing
+ordinary-call ABI planning and fixups provide the call path; no new shared
+Tier 0 opcode is introduced. The Tier 1 direct-call follow-up belongs to the
+active #141 owner and needs its own exact-revision acceptance evidence.
+
 ## Validation commands
 
 On the approved 9700X, through a separate shared-host lock for each command:
@@ -220,6 +267,10 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-check-builtins-query
 ./build/compiler test-check-builtins-float
 ./build/compiler test-builtin-misc-lowering
+./build/compiler test-builtin-float-lowering
+./build/compiler test-check-builtins-atomic
+./build/compiler test-builtin-atomic-helpers
+./build/compiler test-builtin-terminal-helpers
 ```
 
 The tests distinguish typed constraints and fold metadata from native execution
