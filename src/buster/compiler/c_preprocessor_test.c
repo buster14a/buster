@@ -2363,7 +2363,8 @@ static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_roo
             result = result && root != BUSTER_PP_NONE && pp->files[root].data == BUSTER_PP_NONE && pp->files[root].error == ENOENT &&
                      pp->probes.opens == expected_opens + (u == 0 ? 1u : 0u) && pp->probes.fstats == expected_fstats &&
                      pp->statistics.include_opens == expected_opens && pp->statistics.include_fstats == expected_fstats;
-            // The cached ELOOP remains fatal for #include (a query above treated it as unavailable), without new I/O.
+            // The cached ELOOP is fatal for a reported search (#include or __has_include), without new I/O. The
+            // unreported searches above deliberately treated it as unavailable.
             const uint32_t loop = pp_find_include(pp, (const uint8_t*)"loop.h", 6, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found_in, 0);
             result = result && loop == BUSTER_PP_NONE && pp->fatal && pp->errors == 1 &&
                      pp->probes.opens == expected_opens + (u == 0 ? 1u : 0u) && pp->probes.fstats == expected_fstats;
@@ -2417,7 +2418,7 @@ static bool pp_test_lookup_accounting(const char* directory)
     static const char source[] =
         "#if __has_include(<absent.h>) || __has_include(<absent.h>)\n#error unexpected header\n#endif\n"
         "#if __has_include(<value.h>)\n#include <value.h>\n#include <value.h>\n#endif\n"
-        "#if __has_include(<folder.h>) || __has_include(<loop.h>)\n#error unexpected header\n#endif\n"
+        "#if __has_include(<folder.h>) || __has_include(<other-absent.h>)\n#error unexpected header\n#endif\n"
         "#if __has_embed(<absent.bin>) || __has_embed(<absent.bin>)\n#error unexpected resource\n#endif\n"
         "#if __has_embed(<data.bin>) != 1 || __has_embed(<data.bin>) != 1\n#error missing resource\n#endif\n"
         "#embed <data.bin>\n";
@@ -2425,6 +2426,9 @@ static bool pp_test_lookup_accounting(const char* directory)
                   pp_test_write_file(path, source) && pp_test_write_file(header, "#ifndef ACCOUNTED_H\n#define ACCOUNTED_H\n#define ACCOUNTED 7\nint accounted = ACCOUNTED;\n#endif\n") &&
                   link(header, alias) == 0 && pp_test_write_file(bytes, "AB");
     result = result && pp_test_lookup_probes(&options, missing_root);
+    // The successful run needs ordinary missing candidates: a symlink loop is fatal even for __has_include, and is
+    // tested separately above. Print any unexpected diagnostic from this run rather than hiding its failure's cause.
+    options.quiet = false;
     static InternTable tables[3];
     static Preprocessor runs[3];
     for (uint32_t k = 0; result && k < 3; k += 1)
@@ -2497,7 +2501,11 @@ static bool pp_test_lookup_accounting(const char* directory)
 
 // Prescanning ID's argument and expanding #if's operand copy O's body into captures, never into the final output.
 // Of the nine final tokens, plain/ok are file runs, standalone O is a direct object copy, ID(O) is a buffer run, and
-// __LINE__ is the one individually emitted token. The second source has capture work but no output at all.
+// __LINE__ is the one individually emitted token. O expands directly three times, but only its standalone use copies
+// to the final output. The second source has one direct expansion into a capture and no output at all.
+// In both sources, pp_start_condition copies O == 3 to the arguments buffer and pp_start_capture runs that buffer.
+// After O expands, pp_step_buffer copies the two remaining tokens (== and 3) into the condition capture, which
+// pp_finish_condition discards. Thus aggregate buffer work must exceed final buffer copies by at least two tokens.
 static bool pp_test_final_copy_accounting(void)
 {
     static const char* const sources[] = {
@@ -2527,16 +2535,19 @@ static bool pp_test_final_copy_accounting(void)
                      pp_run_source(pp, "copy-accounting.c", (const uint8_t*)sources[s], (uint32_t)strlen(sources[s]));
             const PPStatistics* stats = &pp->statistics;
             const bool counted = s == 0 && options.timing;
+            const uint64_t direct_expansions = options.timing ? (s == 0 ? 3u : 1u) : 0;
+            const bool buffer_work = options.timing ? stats->buffer_run_tokens >= stats->final_buffer_run_tokens + 2 : stats->buffer_run_tokens == 0;
             const uint64_t copied = stats->final_file_run_tokens + stats->final_buffer_run_tokens + stats->final_direct_object_tokens;
             result = result && pp->output.count == (s == 0 ? 9u : 0u) && stats->final_file_run_tokens == (counted ? 2u : 0u) &&
                      stats->final_buffer_run_tokens == (counted ? 3u : 0u) && stats->final_direct_object_tokens == (counted ? 3u : 0u) &&
-                     copied <= pp->output.count && (!options.timing || stats->file_run_tokens > stats->final_file_run_tokens) &&
+                     copied <= pp->output.count && stats->direct_expansions == direct_expansions && buffer_work &&
                      (!counted || pp->output.count - copied == 1);
             if (!result)
             {
-                printf("final copy accounting: source %u run %u: output %u, file/buffer/object copies %lu/%lu/%lu, file work %lu\n", s, k, pp->output.count,
+                printf("final copy accounting: source %u run %u: output %u, file/buffer/object copies %lu/%lu/%lu, direct expansions %lu/%lu, buffer work %lu\n", s, k, pp->output.count,
                        (unsigned long)stats->final_file_run_tokens, (unsigned long)stats->final_buffer_run_tokens,
-                       (unsigned long)stats->final_direct_object_tokens, (unsigned long)stats->file_run_tokens);
+                       (unsigned long)stats->final_direct_object_tokens, (unsigned long)stats->direct_expansions, (unsigned long)direct_expansions,
+                       (unsigned long)stats->buffer_run_tokens);
             }
             if (result && k != 0)
             {
