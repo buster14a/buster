@@ -148,6 +148,61 @@ in those timings. Use the 9700X shared lock for each build/test/measurement
 separately, and pin measurements to CPU 2. Run isolated vector measurements
 both sustained and following lighter work across independent processes.
 
+## 9700X observations, October 23, 2026
+
+[CI run 39933440023](https://github.com/buster14a/buster/actions/runs/39933440023)
+passed for PR head `b43576c127a2b9fd41421d5b6b274c341e4f8ea7`. The actual
+tested synthetic merge was `09cb0021ddc5bc290a20d0f05effccf74c3e01c0`, combining
+that head with main `635434f2a4d153c6de1dd2f1149055c4507c6f46`. This is hosted
+CI evidence, not a merge of the PR. The approved physical Ryzen 7 9700X ran
+Clang 23.1.1 with the performance governor; the environment measurements were
+pinned to CPU 2 under the runner's shared lock.
+
+The environment suite passed **420,202 checks, zero failures**. All existing
+test commands and the call-graph gate passed too: 32 translation units,
+16,644 functions, zero unapproved cycles and three allowed components.
+Separate sanitizer validation remains pending.
+
+The first benchmark process interleaved all paths over 16,380 declarations,
+4,096 names and 65,536 queries, with a warmup and 21 measured passes:
+
+| Path | ns/item | hardware cycles/item | Item |
+| --- | ---: | ---: | --- |
+| Index construction | 1.715 | 9.522 | declaration |
+| Scalar lookup | 8.164 | 45.247 | query |
+| Vector lookup | 5.371 | 29.709 | query |
+| Index plus scalar lookup | 8.693 | 48.207 | query |
+| Index plus vector lookup | 5.804 | 32.180 | query |
+| Scalar completeness | 1.058 | 5.864 | query |
+| Vector completeness | 0.998 | 5.531 | query |
+
+The retained index used 163,892 bytes. Construction required 32,768 scratch
+bytes plus alignment; query scratch is bounded on the stack. Source event
+extraction and type construction were outside the timing.
+
+Three further independent processes per path/state gave these ranges of
+process medians. Each process used the same generated inputs and 21 passes;
+the conditioned state ran scalar lookups for 100 ms before every sample:
+
+| Vector path/state | ns/query range | cycles/query range |
+| --- | ---: | ---: |
+| Index plus lookup, sustained | 5.166–5.387 | 28.631–29.865 |
+| Index plus lookup, after scalar | 5.701–6.182 | 31.598–34.279 |
+| Completeness, sustained | 0.985–0.997 | 5.465–5.531 |
+| Completeness, after scalar | 0.998–0.999 | 5.534–5.540 |
+
+These ranges describe observed process medians, not confidence intervals.
+Every measured result matched the scalar reference. Source-corpus and
+whole-compiler performance acceptance remain separate requirements.
+
+The same CI run's `main.c` parser measurement covered 2,291,368 tokens in
+21 interleaved passes. The scalar parser reported 24.958 ms, 10.892 ns/token,
+60.001 cycles/token and 295.241 instructions/token; the vector path reported
+13.391 ms, 5.844 ns/token, 32.329 cycles/token and 60.913 instructions/token.
+Its fallback covered 58 top-level declarations and 33,911 tokens (1.480%).
+The environment numbers above are synthetic per-query costs. Measuring their
+added cost in the source parser/checker pipeline requires the adapter below.
+
 ## Remaining acceptance for #113
 
 - Connect the #128/#133 source adapter to the immutable file environment,
