@@ -186,9 +186,11 @@ an exact scalar twin (the twins together are `parse_twins`):
    A unit whose brackets don't balance goes to the scalar parser.
 2. **K3, type names.** A scalar pass in source order over the typedef
    declarations alone, found by a vector search for the keyword, then every
-   identifier classified against the set of names they declare, with mask
-   loops. A typedef name used before its first declarator, or declared in a
-   block, is flagged.
+   identifier classified with mask loops and dense per-name heads. Sparse
+   activation records distinguish names before, inside and after each block,
+   with visibility beginning after the complete declarator. Nested and sibling
+   aliases restore their previous heads. An ordinary name hiding a typedef
+   still goes to the exact scalar fallback when K2 finds its declarator.
 3. **K2, roles.** Each token's role from its kind, its neighbors' kinds, the
    role before it and its group's role, in rounds to a fixpoint from refined
    guesses (at most 8; the block loop runs one), with what the kinds decide
@@ -586,8 +588,8 @@ isolate the parser change over the same frozen source as the kernel runs.
 - The parser's diagnostics don't show the preprocessor's expansion notes yet
   ("expanded from macro"): #229's `pp_diagnose_output` renders them for an
   output token, which each diagnostic's token gives.
-- Block-scope typedef names, which K3 flags: exact per-identifier binding
-  stacks in K3 (#128) would keep those declarations on the vector path.
+- Ordinary declarations that shadow typedef names still use the scalar
+  fallback; K3 now handles unshadowed block-scope aliases directly (#128).
 - Multicore (#149, #151): top-level declarations start with empty stacks at
   depth 0, so a unit splits there, with only the typedef pass ordered.
 - `test-parser` builds a fresh intern table, preprocessor and parser for every
