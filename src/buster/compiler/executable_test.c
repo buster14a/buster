@@ -19,7 +19,7 @@
 //     (executable_test_expected), from the atoms' addresses and the symbols' definitions, with the TLS segment and the
 //     linker's sections read back from the file's headers; the GOT, a slot for each GOT kind's target, numbered from 1
 //     in symbol order and holding its value; and the headers themselves: the segments in lld's order, 4 KB-congruent,
-//     with contiguous file offsets; and the unwind tables, .eh_frame_hdr read back as an unwinder reads it against the
+//     with one mapping base and zero-filled file gaps; and .eh_frame_hdr read back as an unwinder reads it against the
 //     test's own walk of .eh_frame (executable_test_unwind), which test-dynamic shares.
 //   - Chunks: every chunk boundary of every program, and of programs built to put 4-byte fields (a call's rel32) and
 //     8-byte fields (an ABS64 at an odd offset) across each place around a nominal boundary
