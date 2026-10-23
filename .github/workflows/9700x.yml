@@ -174,6 +174,13 @@ jobs:
           ./build/compiler test-gnu --clang
           == Test scoped name-resolution kernels
           ./build/compiler test-bindings
+          == Test C-source binding identities and scope semantics
+          ./build/compiler test-parser-bindings --clang
+          == Compare source binding columns on main.c
+          ./build/compiler test-parser-bindings --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          == Compare source binding columns on the frozen SQLite input
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          ./build/compiler test-parser-bindings --clang -march=znver5 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
           == Test the static executables with libc
           # Each program bound against the system's static runtime and written as a static executable by 1, 2, 3 and 8
           # lanes and by the writer's exact twins must be the same file, run as cc -static's link of the same object
@@ -636,6 +643,18 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-gnu -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+
+      - name: Benchmark C-source binding production and resolution
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          system=(-march=znver5 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings "${system[@]}" "$corpus/sqlite/sqlite3.c"
+          # Isolate both paths and the vector work after a lighter phase; do not infer a speedup from mixed passes.
+          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only scalar "${system[@]}" "$corpus/sqlite/sqlite3.c"
+          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only batch "${system[@]}" "$corpus/sqlite/sqlite3.c"
+          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only batch --after-scalar 200 "${system[@]}" "$corpus/sqlite/sqlite3.c"
 
       - name: Benchmark the C type table
         run: |

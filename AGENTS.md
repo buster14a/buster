@@ -3418,8 +3418,18 @@ binding kernels: stack replay and the vector batch against an independent
 scope oracle, 100,000-level nesting, protected-page tails and allocation
 failure. `benchmark-bindings [--events N] [--names N] [--only scalar|batch|sort]
 [--after-scalar MS]` measures synthetic events under the 9700X lock, pinned to
-CPU 2. The parser adapter and corpus acceptance for #128 remain pending;
-[docs/c-bindings.md](docs/c-bindings.md) describes the contract and boundaries.
+CPU 2. `test-parser-bindings [--clang [PATH]] [--seed N] [--count N]
+[preprocessor options] [file or directory...]` checks real-source declaration
+identities, both parser schedules and both resolvers. Without files it runs
+scope fixtures, generated programs, K3 fallback checks and allocation failure
+tests. `benchmark-parser-bindings [--passes N] [--only
+prepare|scalar|batch|sort|source-scalar|source-batch] [--after-scalar MS]
+[preprocessor options] file...` measures source-event production, resolution
+and the combined parser/adapter/consumer path. Run benchmarks on the locked
+9700X, pinned to CPU 2. [docs/c-bindings.md](docs/c-bindings.md) describes the
+opt-in adapter, the declaration-token columns, corpus provenance and the
+explicit cost of its scalar grammar replay. The syntax-only driver does not
+request these columns.
 
 ## Type tests
 
