@@ -213,6 +213,7 @@ static ImportResult foreign_link_sections(ForeignLink* output, const ForeignObje
     ImportResult result = { 0 };
     object->section_count = input->elf.section_count;
     object->symbol_count = input->symbols.count;
+    object->executable_stack_section = 0;
     object->section_atoms = BUSTER_ARENA_PUSH_ARRAY(arena, AtomId, object->section_count);
     object->symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, object->symbol_count);
     if (object->section_atoms == 0 || object->symbols == 0)
@@ -239,6 +240,7 @@ static ImportResult foreign_link_sections(ForeignLink* output, const ForeignObje
             {
                 link->atoms.count = first_atom;
                 link->priorities.count = first_priority;
+                object->executable_stack_section = 0;
                 memset(object->section_atoms, 0, (uint64_t)object->section_count * sizeof(AtomId));
             }
         }
@@ -697,6 +699,17 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
         if (id != 0 && input->library == 0)
         {
             result.import = foreign_link_sections(output, input, id, foreign->path, arena);
+            const uint32_t stack_section = output->objects[id].executable_stack_section;
+            if (result.import.error == IMPORT_ERROR_NONE && stack_section != 0)
+            {
+                // The writer always emits an NX stack. A selected object's explicit request survives removal of
+                // its code. Conservatively include a marker itself discarded by COMDAT or SHF_EXCLUDE as well;
+                // that edge is our refusal policy, not a claim that every other linker makes the same choice.
+                const Elf64_Shdr header = import_section_header(&input->elf, stack_section);
+                result.import = import_fail(IMPORT_ERROR_UNSUPPORTED, input->elf.section_offset + (uint64_t)stack_section * sizeof(Elf64_Shdr));
+                result.import.section = stack_section;
+                result.import.type = header.sh_type;
+            }
             if (result.import.error == IMPORT_ERROR_NONE)
             {
                 result.import = foreign_link_locals(output, input, id, foreign->path, arena);
