@@ -5508,6 +5508,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_NONDETERMINISTIC_VALUE, "__builtin_nondeterministic_value", false },
         { CBUILTIN_NONTEMPORAL_LOAD, "__builtin_nontemporal_load", false },
         { CBUILTIN_NONTEMPORAL_STORE, "__builtin_nontemporal_store", false },
+        { CBUILTIN_BIT_CAST, "__builtin_bit_cast", false },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |

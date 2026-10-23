@@ -357,6 +357,7 @@ jobs:
           ./build/compiler test-check-varargs
           ./build/compiler test-check-builtins-misc
           ./build/compiler test-check-builtins-query
+          ./build/compiler test-check-builtins-bit-cast
           ./build/compiler test-check-builtins-float
           ./build/compiler test-check-builtins-math
           ./build/compiler test-check-builtins-atomic
