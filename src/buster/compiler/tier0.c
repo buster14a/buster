@@ -185,10 +185,13 @@
 #define BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA 0x08
 #define BUSTER_TYPED_LOCAL_ADDRESS_ONLY (BUSTER_TYPED_LOCAL_VA_LIST | BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA | BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA)
 
-// The most a function may have of each (the columns' indices are 32-bit).
+// The most a function may have of each (the columns' indices are 32-bit), and of its objects' bytes, each object's
+// size rounded up to 16, so that every frame displacement fits a disp32.
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
 #define BUSTER_TIER0_MAX_LOCALS (1u << 16)
 #define BUSTER_TIER0_MAX_CALL_ARGUMENTS 64
+#define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
+#define BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 4
 
 // A function, as the front end hands it to Tier 0: the body's columns, the locals (parameters first, in order) with
 // their classes and flags, the parameters' locations at entry and the result's (abi_assign of the function's own type),
@@ -196,6 +199,13 @@
 // `argument_locations` and `argument_classes`, call_argument_counts[c] of them), whether it is variadic (al counts its
 // vector registers), and its totals (AbiCall), from abi_assign of the call's signature. The ABI's work is the front
 // end's, in one batch per unit (abi_assign is vectorized across calls), so Tier 0 needs no type table.
+//
+// The locals that are objects in the frame (arrays, structs and unions: anything that isn't one value of a class) are
+// optional columns, 0 for a function without objects: local_sizes[l] is local l's size in bytes, nonzero for an
+// object and 0 for a value, and local_alignments[l] its alignment's log2, at most 4 (16 bytes). An object's class is
+// VOID, its flags have BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, it isn't a parameter, and only LOCAL_ADDRESS refers to it: its
+// bytes are loaded and stored through that address (PTR_ADD, LOAD, SET). Its first contents are the front end's to
+// write. The objects take at most BUSTER_TIER0_MAX_OBJECT_BYTES in all.
 typedef struct Tier0Function Tier0Function;
 struct Tier0Function
 {
@@ -218,11 +228,19 @@ struct Tier0Function
     const uint8_t* argument_classes;
     uint32_t call_count;
     uint32_t argument_count;
+    const uint32_t* local_sizes;
+    const uint8_t* local_alignments;
     // NULL preserves the ordinary frame. Otherwise abi_assign's named-only own signature, with variadic=true:
     // count == named_count, GP count includes a hidden result pointer, stack_bytes is the end of the named stack
     // slots (not a frame/outgoing-area rounding). The producer retains this borrowed metadata through compilation.
     const AbiCall* incoming_variadic;
 };
+
+// Whether local `local` is an object in the frame (Tier0Function.local_sizes).
+static bool tier0_is_object(const Tier0Function* function, uint64_t local)
+{
+    return function->local_sizes != 0 && function->local_sizes[local] != 0;
+}
 
 // The optional frame descriptors are checked even when unused. The typed stream itself retains tier0_validate's
 // valid-input precondition; these checks also let both compile paths refuse malformed optional frame metadata.
@@ -2382,10 +2400,11 @@ _Static_assert(sizeof(Tier0Home) == 8, "a home is a hole block's eight bytes");
 
 // The frame below the saved registers, from rsp up: the outgoing stack arguments, the call save area (the depths below
 // a call's arguments, saved around it), two slots for the deferred division and shifts, the optional incoming
-// variadic register-save area, then the locals' slots. Incoming saves never share outgoing call-preservation storage.
-// `size` is what the prologue subtracts from rsp (with the pushes and the return address, a multiple of 16 when the
-// function calls); `saved` has a bit per tier0_callee_saved register the prologue pushes. `clobbers` is the register set
-// the body touches (BUSTER_TIER0_XMM's layout), and `integer_top` and `floating_top` the highest depth registers in it.
+// variadic register-save area, the locals' slots, then the objects. Incoming saves never share outgoing
+// call-preservation storage. `size` is what the prologue subtracts from rsp (with the pushes and the return address, a
+// multiple of 16 when the function calls or has an object aligned to 16); `saved` has a bit per tier0_callee_saved
+// register the prologue pushes. `clobbers` is the register set the body touches (BUSTER_TIER0_XMM's layout), and
+// `integer_top` and `floating_top` the highest depth registers in it.
 typedef struct Tier0Frame Tier0Frame;
 struct Tier0Frame
 {
@@ -2684,15 +2703,17 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
 }
 
 // The frame's offsets and size, and the memory homes' displacements: the outgoing arguments at rsp, then the call
-// save area, the fixed slots, the optional incoming variadic saves and each memory local (8 bytes, or exactly 24 for
-// an address-only VA_LIST). Anchor descriptors alias their frame/incoming addresses without owning another slot.
-// A parameter that arrives on the stack keeps its incoming slot, above the return address. Check every displacement
-// in 64 bits before narrowing; an unrepresentable frame is refused before any records or output are published.
+// save area, the fixed slots, the optional incoming variadic saves, each memory local (8 bytes, or exactly 24 for an
+// address-only VA_LIST), and the objects, each at a multiple of its alignment and taking its size rounded up to 8, in
+// the locals' order. Anchor descriptors alias their frame/incoming addresses without owning another slot. A parameter
+// that arrives on the stack keeps its incoming slot, above the return address. Check every displacement in 64 bits
+// before narrowing; an unrepresentable frame is refused before any records or output are published.
 // tier0_layout_frame's slots for the vector path, 16 locals at a time: the mask of those that need one (not in a
-// register, referenced or address-taken, not a parameter on the stack, not an anchor) from the homes, the references
-// and the flags, then a slot for each set bit, in order. Returns the offset past them; offsets past INT32_MAX narrow
-// to garbage, which the caller's check of the final, larger offset refuses.
-static uint64_t tier0_frame_slots_vector(const Tier0Function* function, Tier0Home* homes, const uint32_t* references, uint64_t offset)
+// register, referenced or address-taken, not a parameter on the stack, not an anchor, not an object) from the homes,
+// the references, the flags and the sizes, then a slot for each set bit, in order. Returns the offset past them, and
+// in *objects_seen whether there are objects; offsets past INT32_MAX narrow to garbage, which the caller's check of
+// the final, larger offset refuses.
+static uint64_t tier0_frame_slots_vector(const Tier0Function* function, Tier0Home* homes, const uint32_t* references, uint64_t offset, bool* objects_seen)
 {
     const uint32_t locals = function->local_count;
     const __m512i is_register = _mm512_set1_epi64((int64_t)(0xffull << (8 * offsetof(Tier0Home, is_register))));
@@ -2707,6 +2728,9 @@ static uint64_t tier0_frame_slots_vector(const Tier0Function* function, Tier0Hom
         const __m128i flags = _mm_maskz_loadu_epi8(lanes, function->local_flags + first);
         const __m128i role = _mm_and_si128(flags, roles);
         const __mmask16 needed = _mm512_test_epi32_mask(counts, counts) | _mm_test_epi8_mask(flags, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_ADDRESS_TAKEN));
+        const __m512i sizes = function->local_sizes != 0 ? _mm512_maskz_loadu_epi32(lanes, function->local_sizes + first) : _mm512_setzero_si512();
+        const __mmask16 objects = _mm512_test_epi32_mask(sizes, sizes);
+        *objects_seen |= objects != 0;
         const __mmask16 anchor = _mm_cmpeq_epi8_mask(role, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA)) |
                                  _mm_cmpeq_epi8_mask(role, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA));
         const uint32_t va_list = _mm_cmpeq_epi8_mask(role, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_VA_LIST));
@@ -2715,7 +2739,7 @@ static uint64_t tier0_frame_slots_vector(const Tier0Function* function, Tier0Hom
         {
             on_stack |= function->parameters[p].kind == BUSTER_ABI_LOCATION_STACK ? 1u << (p - first) : 0;
         }
-        uint32_t slots = lanes & needed & ~in_register & ~on_stack & ~anchor;
+        uint32_t slots = lanes & needed & ~in_register & ~on_stack & ~anchor & ~objects;
         while (slots != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(slots);
@@ -2725,6 +2749,33 @@ static uint64_t tier0_frame_slots_vector(const Tier0Function* function, Tier0Hom
             homes[local].reg = X86_REGISTER_RSP;
             homes[local].mode = BUSTER_X86_MEMORY_BASE;
             offset += (va_list >> lane & 1) != 0 ? sizeof(AbiVaList) : BUSTER_ABI_SLOT_BYTES;
+        }
+    }
+    return offset;
+}
+
+// The objects' places for the vector path, past the slots: the mask of the objects 16 locals at a time, then each set
+// bit's object at its alignment. Returns the offset past them, and in *aligned whether one is aligned to 16; offsets
+// past INT32_MAX narrow to garbage, as the slots' do, which the caller's check of the final offset refuses.
+static uint64_t tier0_frame_objects_vector(const Tier0Function* function, Tier0Home* homes, uint64_t offset, bool* aligned)
+{
+    const uint32_t locals = function->local_count;
+    for (uint32_t first = 0; first < locals && function->local_sizes != 0; first += 16)
+    {
+        const __mmask16 lanes = (__mmask16)tier0_lanes(first, locals);
+        const __m512i sizes = _mm512_maskz_loadu_epi32(lanes, function->local_sizes + first);
+        uint32_t objects = _mm512_test_epi32_mask(sizes, sizes);
+        while (objects != 0)
+        {
+            const uint32_t local = first + (uint32_t)__builtin_ctz(objects);
+            objects &= objects - 1;
+            const uint64_t alignment = 1ull << function->local_alignments[local];
+            offset = (offset + alignment - 1) & ~(alignment - 1);
+            homes[local].displacement = (int32_t)(uint32_t)offset;
+            homes[local].reg = X86_REGISTER_RSP;
+            homes[local].mode = BUSTER_X86_MEMORY_BASE;
+            offset += ((uint64_t)function->local_sizes[local] + 7) & ~UINT64_C(7);
+            *aligned |= alignment == 16;
         }
     }
     return offset;
@@ -2756,7 +2807,7 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         const uint32_t role = function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY;
         const bool anchor = role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA || role == BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA;
         const bool on_stack = l < function->parameter_count && function->parameters[l].kind == BUSTER_ABI_LOCATION_STACK;
-        if (!homes[l].is_register && (references[l] != 0 || address_taken) && !on_stack && !anchor)
+        if (!homes[l].is_register && (references[l] != 0 || address_taken) && !on_stack && !anchor && !tier0_is_object(function, l))
         {
             valid = valid && offset <= INT32_MAX;
             homes[l].displacement = valid ? (int32_t)offset : 0;
@@ -2765,10 +2816,27 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
             offset += role == BUSTER_TYPED_LOCAL_VA_LIST ? sizeof(AbiVaList) : BUSTER_ABI_SLOT_BYTES;
         }
     }
-    offset = vector ? tier0_frame_slots_vector(function, homes, references, offset) : offset;
-    // With the pushes and the return address, a multiple of 16 at every call.
+    bool aligned = false;
+    for (uint32_t l = 0; l < function->local_count && !vector; l += 1)
+    {
+        if (tier0_is_object(function, l))
+        {
+            const uint64_t alignment = 1ull << function->local_alignments[l];
+            offset = (offset + alignment - 1) & ~(alignment - 1);
+            valid = valid && offset <= INT32_MAX;
+            homes[l].displacement = valid ? (int32_t)offset : 0;
+            homes[l].reg = X86_REGISTER_RSP;
+            homes[l].mode = BUSTER_X86_MEMORY_BASE;
+            offset += ((uint64_t)function->local_sizes[l] + 7) & ~UINT64_C(7);
+            aligned |= alignment == 16;
+        }
+    }
+    bool objects = false;
+    offset = vector ? tier0_frame_slots_vector(function, homes, references, offset, &objects) : offset;
+    offset = vector && objects ? tier0_frame_objects_vector(function, homes, offset, &aligned) : offset;
+    // With the pushes and the return address, a multiple of 16 at every call, and for an object aligned to 16.
     const uint64_t above = 8 * frame->pushes + 8;
-    if (frame->calls)
+    if (frame->calls || aligned)
     {
         offset = (offset + above + 15) / 16 * 16 - above;
     }
@@ -4093,12 +4161,30 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 }
             }
         }
-        for (uint32_t l = 0; l < function->local_count; l += 1)
+        if (function->local_sizes != 0 && function->local_alignments == 0)
         {
-            if (function->local_classes[l] == BUSTER_TYPED_CLASS_VOID || function->local_classes[l] >= BUSTER_TYPED_CLASSES)
+            tier0_reject(&validator, 0, "the objects' sizes without their alignments");
+        }
+        uint64_t object_bytes = 0;
+        for (uint32_t l = 0; l < function->local_count && validator.check.error == TIER0_OK; l += 1)
+        {
+            if (tier0_is_object(function, l))
+            {
+                if (function->local_classes[l] != BUSTER_TYPED_CLASS_VOID || (function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0 ||
+                    l < function->parameter_count || function->local_alignments[l] > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
+                {
+                    tier0_reject(&validator, 0, "an object that isn't an address-taken local of class VOID, or a parameter, or aligned past 16");
+                }
+                object_bytes += ((uint64_t)function->local_sizes[l] + 15) & ~15ull;
+            }
+            else if (function->local_classes[l] == BUSTER_TYPED_CLASS_VOID || function->local_classes[l] >= BUSTER_TYPED_CLASSES)
             {
                 tier0_reject(&validator, 0, "a local without a class");
             }
+        }
+        if (object_bytes > BUSTER_TIER0_MAX_OBJECT_BYTES)
+        {
+            tier0_reject(&validator, 0, "objects past BUSTER_TIER0_MAX_OBJECT_BYTES");
         }
         for (uint32_t p = 0; p < function->parameter_count; p += 1)
         {
@@ -4162,8 +4248,9 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 break;
             case BUSTER_TYPED_LOCAL:
             case BUSTER_TYPED_LOCAL_ADDRESS:
-                if (value >= function->local_count || (kind == BUSTER_TYPED_LOCAL && function->local_classes[value] != class) ||
-                    (kind == BUSTER_TYPED_LOCAL && (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0) ||
+                if (value >= function->local_count ||
+                    (kind == BUSTER_TYPED_LOCAL && (function->local_classes[value] != class || tier0_is_object(function, value) ||
+                                                    (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0)) ||
                     (kind == BUSTER_TYPED_LOCAL_ADDRESS && (class != BUSTER_TYPED_CLASS_U64 || (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0)))
                 {
                     tier0_reject(&validator, i, "a local reference that doesn't match its local");
@@ -4238,8 +4325,9 @@ static Tier0Check tier0_validate(const Tier0Function* function)
             case BUSTER_TYPED_SET_GLOBAL:
             {
                 const bool local = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
-                const bool bad_target = local ? value >= function->local_count || function->local_classes[value] != class ||
-                    (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0 : value == 0 || value > UINT32_MAX;
+                const bool bad_target = local ? value >= function->local_count || function->local_classes[value] != class || tier0_is_object(function, value) ||
+                                                    (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0
+                                              : value == 0 || value > UINT32_MAX;
                 if (tier0_pop(&validator, i) != class || bad_target)
                 {
                     tier0_reject(&validator, i, "a store to a local or a global that doesn't match");
