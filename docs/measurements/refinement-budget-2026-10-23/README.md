@@ -225,3 +225,127 @@ Clang comparison of main.c and SQLite agrees on all 3,217,305 output tokens.
 Replaying the archived patches also passes the full scalar/oracle suite with
 seed 116 on 9,171 repository/SQLite/libc files (115,706,051 bytes).
 These local checks establish correctness evidence, not 9700X performance.
+
+[Run 39963776327](https://github.com/buster14a/buster/actions/runs/39963776327)
+passed the required job, testing merge `df4bbd88e784eca1c9ac19994fcebfbcbd6eed72`
+of `b1cb4be1bf7d3f41735b10a809cf221f5dde8cfa` and main
+`de751b9996157d61d3a112f91a5d7d86e056811e`. Both guarded suites, shared-file tests
+and Clang comparison passed on the target. All 54 preprocessing and 18 kernel
+processes passed. The [full comparison](screen-fourth-9700x.txt),
+[summary including lex time](screen-fourth-9700x.tsv),
+[kernel comparison](kernels-fourth-9700x.txt) and
+[separate cycle profiles](profile-fourth-9700x.txt) are retained.
+
+| SQLite 3.53.4 | Refine range, ms | Lex median, ms | Whole-run range, ms |
+| --- | ---: | ---: | ---: |
+| Original hash/refinement | 1.707–1.719 | 2.436 | 11.823–11.949 |
+| ahead2 | 1.644–1.666 | 2.428 | 11.782–11.875 |
+| 16 KiB source windows | 1.596–1.605 | 2.632 | 11.936–11.967 |
+| 64 KiB | 1.585–1.591 | 2.450 | 11.720–11.770 |
+| 256 KiB | 1.581–1.590 | 2.391 | 11.682–11.787 |
+| 1,024 KiB | 1.629–1.648 | 2.410 | 11.844–11.887 |
+
+The 256 KiB window avoids the small-window restart cost but still misses the
+budget after charging the approximately 0.03 ms arena fault. On main.c it
+reduces refinement slightly but increases the whole-run median to 36.690 ms
+from 36.455 ms for ahead2. No production preparation change is selected.
+
+An additional local fixture run initially failed because this directory's
+small launcher did not dispatch the child test/benchmark commands used by the
+location-limit test, and was outside the usual build/source directory layout.
+The launcher now supports those commands and the Clang-oracle dispatcher.
+With the normal directory layout, all fixtures and header checks pass; the
+separate 3,000-case C17/C23 fuzz run agreed with both scalar and Clang results.
+
+The next bounded screen tests the probe mask operations and 16-byte prefixes
+without increasing the initial table allocation. It also tests 28-byte prefixes
+in the original 16,384 buckets, growing at 7/8 occupancy instead of 5/8; this
+trades more collision work for avoiding the extra huge page. The latter two
+layouts are also combined with 256 KiB source windows. Layout capacity, growth,
+shared placement and setup costs remain part of correctness and acceptance.
+
+## Fifth screen: unchanged allocation size
+
+This manual screen uses the frozen `b1cb4be1bf7d3f41735b10a809cf221f5dde8cfa`
+source archive, Clang 23.1.1, the same frozen SQLite 3.53.4 and system headers,
+CPU 2, and the ordinary exclusive wrapper for every build, test and benchmark
+process. CI retains priority. The runs span a long queue wait, recorded in the
+[raw output](screen-fifth-9700x.txt); each variant has three 21-pass processes.
+The [build log](build-fifth-9700x.txt) records binary hashes, and the
+[test log](tests-fifth-9700x.txt) records six successful seed-116 runs over all
+9,171 repository/SQLite/libc files. The [summary](screen-fifth-9700x.tsv)
+includes refinement, lexing, directive and whole-run timings.
+
+| Candidate | Refine range, ms | Whole-run range, ms |
+| --- | ---: | ---: |
+| ahead2 | 1.653–1.661 | 11.756–11.830 |
+| mask-register probe arithmetic | 1.638–1.640 | 11.687–11.803 |
+| 16-byte prefixes | 1.705–1.728 | 11.782–11.962 |
+| 28-byte prefixes, tighter table | 1.766–1.785 | 11.895–11.918 |
+| 16-byte prefixes + 256 KiB windows | 1.634–1.642 | 11.733–11.757 |
+| tighter 28-byte prefixes + windows | 1.704–1.711 | 11.762–11.875 |
+
+All 18 processes pass. None reaches 1.5 ms before adjacent/setup charges, so
+none is accepted. Avoiding the larger initial allocation loses the wider
+prefix layout's benefit to collision work. Candidate patches named
+`<variant>-c_<component>.patch` apply independently to the corresponding
+`b1cb4be` source file; all include the fixed hash by default. Combined window
+variants use `BUSTER_REFINE_SOURCE_CHUNK=262144`.
+
+Two additional exact-name prototypes passed local scalar/oracle checks but
+regressed local refinement substantially. `names` classifies sparse token
+groups in pass A; `namesdense` classifies compacted identifiers and scatters
+their results. Both use the sixteen predefined spellings in
+[keyword-table.c](keyword-table.c), whose deterministic search emits
+[refine-names.inc](refine-names.inc). This is first-party generated data, not an
+external keyword table. The generated file goes beside the patched
+`c_refine.c`. The corrected dense prototype clamps mask counts before `bzhi`;
+the first prototype attempt exposed the instruction's modulo-256 count and
+was rejected by the existing growth tests. The retained local test outputs
+are [sparse](names-local.txt) and [dense](names-dense-local.txt), with separate
+[sparse](names-local-timing.txt) and [dense](names-dense-local-timing.txt)
+diagnostic timings. These local results are not target-machine acceptance.
+
+An additional 256-slot short-identifier cache uses exact zero-padded source
+words, vector gathers and duplicate-safe scatter updates. It also passes the
+local scalar/oracle suite but regresses local refinement; its extra filter,
+compaction and result-scatter work outweighs the saved main-table operations.
+Its [patch](candidates/shortcache-c_refine.patch), [tests](shortcache-local.txt)
+and [local diagnostic timing](shortcache-local-timing.txt) are retained.
+
+## Sixth screen: hash handoff and hot-source prefetches
+
+This manual screen retains the frozen source and ordinary per-process locking.
+It compares compact four-byte hash offsets, separate prefetch consumption,
+two-group hash scheduling, vector collection of four probe IDs, and L1/L2/no
+source-column prefetches with 256 KiB source windows. All seven new variants
+pass the full target seed-116 repository/SQLite/libc refinement suite, and all
+72 preprocessing processes pass. The [raw output](screen-sixth-9700x.txt),
+[summary](screen-sixth-9700x.tsv), [earlier builds](build-sixth-9700x.txt) and
+[orchestration](sixth-run.sh) are retained. `fifth-main.c`, `screen-setup.c` and
+`fifth-build.sh` are the shared standalone driver and target build command.
+
+| SQLite 3.53.4 | Refine range, ms | Whole-run range, ms |
+| --- | ---: | ---: |
+| mask-register probe control | 1.648–1.650 | 11.709–11.778 |
+| packed offsets | 1.639–1.660 | 11.731–11.846 |
+| packed offsets, separate prefetch loop | 1.688–1.705 | 11.800–11.829 |
+| two hash groups scheduled together | 1.657–1.669 | 11.672–11.775 |
+| vector collection of four probe IDs | 1.660–1.666 | 11.875–12.007 |
+| 256 KiB windows, L1 source/column prefetch | 1.593–1.598 | 11.703–11.734 |
+| windows, no source/column prefetch | 1.540–1.547 | 11.614–11.643 |
+| windows, L2 source/column prefetch | 1.589–1.600 | 11.653–11.692 |
+
+Removing the prefetches for source and columns that were just produced improves
+the window path. Table and record prefetches remain. The same candidate takes
+1.536–1.541 ms on SQLite 3.53.2, and main.c's whole-run median is 36.298 ms
+versus 36.616 ms for the control, with some overlap in the whole-run ranges.
+It still misses 1.5 ms before the approximately 0.03 ms arena charge, so no
+production candidate is selected. Packed offsets, separated prefetches and
+vector result collection are rejected.
+
+The seventh screen varies source window size, token-block size, identifier
+batch size and prefetch distance around this improved path. It also combines
+the wider-prefix table with the hot-source path, with the extra table setup
+still charged. Production refinement and preparation remain unchanged while
+that qualification runs.

@@ -21,13 +21,14 @@ struct String8
 #include "buster/compiler/c_preprocessor_test.c"
 #include "buster/compiler/c_predefines_test.c"
 #include "buster/compiler/c_preprocessor_fuzz.c"
+#include "buster/compiler/c_preprocessor_oracle.c"
 #include "buster/compiler/c_files.c"
 #include "buster/compiler/c_files_test.c"
 
 int main(int argc, char** argv)
 {
     int result;
-    if (argc > 1 && strcmp(argv[1], "--benchmark") == 0)
+    if (argc > 1 && (strcmp(argv[1], "--benchmark") == 0 || strcmp(argv[1], "benchmark-preprocessor") == 0))
     {
         result = run_preprocessor_benchmark(argc - 1, argv + 1);
     }
@@ -35,9 +36,13 @@ int main(int argc, char** argv)
     {
         result = run_preprocessor_fuzz_benchmark(argc - 2, argv + 2);
     }
-    else if (argc > 1 && strcmp(argv[1], "--preprocessor") == 0)
+    else if (argc > 1 && (strcmp(argv[1], "--preprocessor") == 0 || strcmp(argv[1], "test-preprocessor") == 0))
     {
-        result = run_preprocessor_fixture_tests(argc - 2, argv + 2);
+        result = run_preprocessor_tests(argc - 2, argv + 2);
+    }
+    else if (argc > 1 && strcmp(argv[1], "test-files") == 0)
+    {
+        result = run_files_tests(argc - 2, argv + 2);
     }
     else
     {
