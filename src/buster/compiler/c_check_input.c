@@ -1057,17 +1057,19 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                 valid = packed != 0;
                 reader->output->resource |= !valid;
                 uint32_t written = 0;
+                uint32_t named = 0;
                 for (uint32_t member = frame->first; valid && member != BUSTER_CHECK_NONE; member = members[member].next)
                 {
                     const TypeMember value = members[member].member;
                     packed[written++] = value;
                     if (value.name != 0)
                     {
+                        named += 1;
                         reader->member_seen[value.name] = members[member].previous;
                     }
                     if (type_kind(reader->types, value.type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
                     {
-                        valid = kind == BUSTER_TYPE_KIND_STRUCT && written > 1 && written == frame->count;
+                        valid = kind == BUSTER_TYPE_KIND_STRUCT && named > 1 && written == frame->count;
                     }
                 }
                 const TypeRecordAttributes attributes = { 0 };

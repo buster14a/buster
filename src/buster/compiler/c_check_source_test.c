@@ -309,6 +309,39 @@ static void check_test_source_extensions(CheckTest* test, const char* clang)
             true
         },
         {
+            "unnamed zero-width field is not a flexible member predecessor",
+            "struct S { int :0; int data[]; };\n",
+            true,
+            false,
+            true
+        },
+        {
+            "unnamed bitfield is not a flexible member predecessor",
+            "struct S { int :1; int data[]; };\n",
+            true,
+            false,
+            true
+        },
+        {
+            "flexible member after named field and unnamed padding",
+            "struct S { int n; int :0; int data[]; }; _Static_assert(sizeof(struct S)==4, \"flexible padding\");\n",
+            false,
+            false
+        },
+        {
+            "union flexible member GNU extension rejected",
+            "union U { int n; int data[]; };\n",
+            true,
+            false,
+            true
+        },
+        {
+            "flexible member must be last",
+            "struct S { int n; int data[]; int tail; };\n",
+            true,
+            false
+        },
+        {
             "named zero-width bitfield",
             "struct S { int x:0; };\n",
             true,

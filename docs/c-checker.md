@@ -472,7 +472,7 @@ unstable wall-clock rates are deliberately omitted from this record.
 
 ### Takeover validation, 2026-10-23
 
-After integrating main through `c62cd84`, the expanded checker passed **67,677
+At checkpoint `411e413`, after integrating main through `c62cd84`, the expanded checker passed **67,677
 checks, zero failures** with local Clang 23.1.3, seed 133, ASan, UBSan and leak
 detection enabled. The source adapter's SHA-256 for this run was
 `96b93a0fcbc23dbc16b504a4ac4e4acff8c2ef3b21d12a058f39daaf81f8831c`;
@@ -480,6 +480,19 @@ the source/test files stayed unchanged across compilation and execution.
 This Ryzen 9 diagnostic run does not substitute for protected 9700X validation.
 Independent source review also compared 86 original cases with Clang on both
 schedules, finding no remaining Clang-rejected inputs accepted in that matrix.
+
+The subsequent review fix counts named record members separately when checking
+flexible-array eligibility. Its five new fixtures reject unnamed-only
+predecessors, a union member and a non-final member, and accept a named
+predecessor followed by unnamed padding. The full checker passed **67,719 checks,
+zero failures** normally and under ASan, UBSan and leak detection, with seed 133
+and the Clang oracle. The source adapter's SHA-256 was
+`81a4050407102bf4f5d7ff2482a0e8c7ad3ef63484eca3180a29e06bc9e43b94`;
+the source fixture file's was
+`22338c9a6a73d7adf434f187a206db0888ae0cdac7d8d869269ae19b90ac90f6`.
+These are also Ryzen 9 diagnostic results. Clang accepts some rejected
+flexible-array forms as GNU extensions; the fixtures record those intentional
+acceptance differences explicitly.
 
 The source producer/binding/checker measurement harness, frozen input hashes,
 and reproduction commands are retained in
