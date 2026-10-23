@@ -167,6 +167,9 @@ int run_parser_benchmark(int argc, char** argv);
 // command. Its benchmark is another translation unit.
 #include "buster/compiler/object_writer.c"
 #include "buster/compiler/object_writer_test.c"
+#include "buster/compiler/debug.c"
+#include "buster/compiler/debug_test.c"
+#include "buster/compiler/debug_benchmark.c"
 int run_object_writer_benchmark(int argc, char** argv);
 
 // The import path's readers (ELF objects, archives, shared libraries and linker scripts into the link representation),
@@ -186,6 +189,7 @@ int run_bind_benchmark(int argc, char** argv);
 // test-executable command. Its benchmark is another translation unit.
 #include "buster/compiler/executable.c"
 #include "buster/compiler/executable_test.c"
+#include "buster/compiler/debug_executable_test.c"
 int run_executable_benchmark(int argc, char** argv);
 
 // A dynamic PIE's inputs from the runtime and binding, and the dynamic PIE's tests, for the test-dynamic command.
@@ -502,6 +506,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-object-writer") == 0)
     {
         result = run_object_writer_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-debug") == 0)
+    {
+        result = run_debug_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "benchmark-debug") == 0)
+    {
+        result = run_debug_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-object-writer") == 0)
     {
