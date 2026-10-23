@@ -3546,9 +3546,26 @@ Run independently started repetitions under the shared 9700X lock on CPU 2,
 varying `--order`/`--schedule` and optionally `--after-scalar`. Phase medians
 need not add to the total median. This original single-lane static fixture
 supplies no dynamic, COMDAT, personality/LSDA, corpus or scaling performance
-claim. Production/tests passed in the composed driver snapshot; this isolated
-slice's build and runtime gates and controlled performance acceptance remain
-pending. Pooling stays opt-in.
+claim. The isolated slice passed its build, full foreign cross-check and
+call-graph gate on the locked 9700X, including 812 pooling checks, 136
+COMDAT/GC/CIE composition checks and 72 C++ unwind runtime checks. Three
+independently started CPU-2 benchmark processes each passed 1,118 pipeline
+checks. The [retained evidence and precise process-median tables](measurements/foreign-cie-2026-10-23/README.md)
+identify the frozen source/binary and timing boundaries; host input identity
+receipts remain pending.
+
+At 1,024 leaves, duplicate-CIE whole-link medians fall by 18.13% on the exact
+path and 19.14% on the vector path, while retained arena bytes increase.
+The unique-CIE control also gets faster with no records or bytes removed:
+the adapter copies the link and changes memory placement, so these figures
+do not establish a CIE-only or SIMD-only cause. Peak RSS was not measured;
+the eight-leaf changes remain limited observations at the recorded spread.
+These isolated runs use the newer writer's additional 4,096-byte file gap
+and are not mixed with earlier composed-snapshot timings. Performance
+qualification remains pending: all three processes used `--after-scalar 0`;
+bounded repeated `--after-scalar 100` processes and review of the exact
+build's emitted assembly remain before final SIMD-state acceptance. Broader
+corpus and scaling acceptance remain open. Pooling stays opt-in.
 
 #### Steps 1 to 5, as built
 
