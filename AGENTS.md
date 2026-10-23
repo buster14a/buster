@@ -160,6 +160,13 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `test-differential-harness` validates the Csmith/YARPGen harness with original
+  fixtures. `test-differential` requires explicit compiler/tier configuration
+  and preserves generators, commands, artifacts and failures. Missing tools or
+  executable source lowering return unavailable, never a campaign pass. See
+  [the differential guide](docs/differential.md). Use the shared 9700X lock per
+  run and bounded campaigns that yield to CI.
+
 - `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
   #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
   AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
