@@ -176,8 +176,14 @@
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 
-// A local's flags: its address is taken (LOCAL_ADDRESS), so it lives in the frame.
+// A local's flags: its address is taken (LOCAL_ADDRESS), so it lives in the frame. The three object roles below
+// are mutually exclusive, nonparameter U64 descriptors with ADDRESS_TAKEN, usable only through LOCAL_ADDRESS.
+// VA_LIST owns exactly sizeof(AbiVaList) bytes. The other roles alias the incoming variadic frame's two anchors.
 #define BUSTER_TYPED_LOCAL_ADDRESS_TAKEN 0x01
+#define BUSTER_TYPED_LOCAL_VA_LIST 0x02
+#define BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA 0x04
+#define BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA 0x08
+#define BUSTER_TYPED_LOCAL_ADDRESS_ONLY (BUSTER_TYPED_LOCAL_VA_LIST | BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA | BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA)
 
 // The most a function may have of each (the columns' indices are 32-bit).
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
@@ -212,7 +218,44 @@ struct Tier0Function
     const uint8_t* argument_classes;
     uint32_t call_count;
     uint32_t argument_count;
+    // NULL preserves the ordinary frame. Otherwise abi_assign's named-only own signature, with variadic=true:
+    // count == named_count, GP count includes a hidden result pointer, stack_bytes is the end of the named stack
+    // slots (not a frame/outgoing-area rounding). The producer retains this borrowed metadata through compilation.
+    const AbiCall* incoming_variadic;
 };
+
+// The optional frame descriptors are checked even when unused. The typed stream itself retains tier0_validate's
+// valid-input precondition; these checks also let both compile paths refuse malformed optional frame metadata.
+static bool tier0_frame_input_valid(const Tier0Function* function)
+{
+    bool valid = function->local_count <= BUSTER_TIER0_MAX_LOCALS && function->parameter_count <= function->local_count;
+    const AbiCall* incoming = function->incoming_variadic;
+    if (incoming != 0)
+    {
+        valid = valid && incoming->integer_registers <= BUSTER_ABI_INTEGER_ARGUMENTS && incoming->vector_registers <= BUSTER_ABI_VECTOR_ARGUMENTS &&
+            incoming->stack_alignment_log2 == BUSTER_ABI_STACK_ALIGNMENT_LOG2 && incoming->stack_bytes % BUSTER_ABI_SLOT_BYTES == 0 && incoming->stack_bytes <= INT32_MAX;
+        for (uint32_t p = 0; valid && p < function->parameter_count; p += 1)
+        {
+            const AbiLocation location = function->parameters[p];
+            if (location.kind == BUSTER_ABI_LOCATION_STACK)
+            {
+                valid = location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && (uint64_t)location.stack_offset + BUSTER_ABI_SLOT_BYTES <= incoming->stack_bytes;
+            }
+        }
+    }
+    for (uint32_t local = 0; valid && local < function->local_count; local += 1)
+    {
+        const uint32_t flags = function->local_flags[local];
+        const uint32_t role = flags & BUSTER_TYPED_LOCAL_ADDRESS_ONLY;
+        valid = (flags & ~(BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_ADDRESS_ONLY)) == 0;
+        if (role != 0)
+        {
+            valid = valid && (role & (role - 1)) == 0 && local >= function->parameter_count && function->local_classes[local] == BUSTER_TYPED_CLASS_U64 &&
+                (flags & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 && (role == BUSTER_TYPED_LOCAL_VA_LIST || incoming != 0);
+        }
+    }
+    return valid;
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The output
@@ -2338,7 +2381,8 @@ struct Tier0Home
 _Static_assert(sizeof(Tier0Home) == 8, "a home is a hole block's eight bytes");
 
 // The frame below the saved registers, from rsp up: the outgoing stack arguments, the call save area (the depths below
-// a call's arguments, saved around it), two slots for the deferred division and shifts, then the locals' slots.
+// a call's arguments, saved around it), two slots for the deferred division and shifts, the optional incoming
+// variadic register-save area, then the locals' slots. Incoming saves never share outgoing call-preservation storage.
 // `size` is what the prologue subtracts from rsp (with the pushes and the return address, a multiple of 16 when the
 // function calls); `saved` has a bit per tier0_callee_saved register the prologue pushes. `clobbers` is the register set
 // the body touches (BUSTER_TIER0_XMM's layout), and `integer_top` and `floating_top` the highest depth registers in it.
@@ -2352,6 +2396,8 @@ struct Tier0Frame
     uint32_t save_slots;
     uint32_t fixed_area;
     uint32_t fixed_slots;
+    uint32_t variadic_area;
+    uint32_t overflow_area;
     uint32_t clobbers;
     int32_t integer_top;
     int32_t floating_top;
@@ -2638,15 +2684,19 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
 }
 
 // The frame's offsets and size, and the memory homes' displacements: the outgoing arguments at rsp, then the call
-// save area, the fixed slots and a slot per local in memory (8 bytes each: every class fits). A parameter that arrives
-// on the stack keeps its incoming slot, above the return address.
+// save area, the fixed slots, the optional incoming variadic saves and each memory local (8 bytes, or exactly 24 for
+// an address-only VA_LIST). Anchor descriptors alias their frame/incoming addresses without owning another slot.
+// A parameter that arrives on the stack keeps its incoming slot, above the return address. Check every displacement
+// in 64 bits before narrowing; an unrepresentable frame is refused before any records or output are published.
 // tier0_layout_frame's slots for the vector path, 16 locals at a time: the mask of those that need one (not in a
-// register, referenced or address-taken, not a parameter on the stack) from the homes, the references and the flags,
-// then a slot for each set bit, in order. Returns the offset past them.
-static uint32_t tier0_frame_slots_vector(const Tier0Function* function, Tier0Home* homes, const uint32_t* references, uint32_t offset)
+// register, referenced or address-taken, not a parameter on the stack, not an anchor) from the homes, the references
+// and the flags, then a slot for each set bit, in order. Returns the offset past them; offsets past INT32_MAX narrow
+// to garbage, which the caller's check of the final, larger offset refuses.
+static uint64_t tier0_frame_slots_vector(const Tier0Function* function, Tier0Home* homes, const uint32_t* references, uint64_t offset)
 {
     const uint32_t locals = function->local_count;
     const __m512i is_register = _mm512_set1_epi64((int64_t)(0xffull << (8 * offsetof(Tier0Home, is_register))));
+    const __m128i roles = _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_ADDRESS_ONLY);
     for (uint32_t first = 0; first < locals; first += 16)
     {
         const __mmask16 lanes = (__mmask16)tier0_lanes(first, locals);
@@ -2655,67 +2705,106 @@ static uint32_t tier0_frame_slots_vector(const Tier0Function* function, Tier0Hom
         const __mmask16 in_register = _mm512_kunpackb(_mm512_test_epi64_mask(homes_high, is_register), _mm512_test_epi64_mask(homes_low, is_register));
         const __m512i counts = _mm512_maskz_loadu_epi32(lanes, references + first);
         const __m128i flags = _mm_maskz_loadu_epi8(lanes, function->local_flags + first);
+        const __m128i role = _mm_and_si128(flags, roles);
         const __mmask16 needed = _mm512_test_epi32_mask(counts, counts) | _mm_test_epi8_mask(flags, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_ADDRESS_TAKEN));
+        const __mmask16 anchor = _mm_cmpeq_epi8_mask(role, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA)) |
+                                 _mm_cmpeq_epi8_mask(role, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA));
+        const uint32_t va_list = _mm_cmpeq_epi8_mask(role, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_VA_LIST));
         uint32_t on_stack = 0;
         for (uint32_t p = first; p < function->parameter_count && p < first + 16; p += 1)
         {
             on_stack |= function->parameters[p].kind == BUSTER_ABI_LOCATION_STACK ? 1u << (p - first) : 0;
         }
-        uint32_t slots = lanes & needed & ~in_register & ~on_stack;
+        uint32_t slots = lanes & needed & ~in_register & ~on_stack & ~anchor;
         while (slots != 0)
         {
-            const uint32_t local = first + (uint32_t)__builtin_ctz(slots);
+            const uint32_t lane = (uint32_t)__builtin_ctz(slots);
+            const uint32_t local = first + lane;
             slots &= slots - 1;
-            homes[local].displacement = (int32_t)offset;
+            homes[local].displacement = (int32_t)(uint32_t)offset;
             homes[local].reg = X86_REGISTER_RSP;
             homes[local].mode = BUSTER_X86_MEMORY_BASE;
-            offset += 8;
+            offset += (va_list >> lane & 1) != 0 ? sizeof(AbiVaList) : BUSTER_ABI_SLOT_BYTES;
         }
     }
     return offset;
 }
 
-static void tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, bool vector)
+static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, bool vector)
 {
-    uint32_t outgoing = 0;
+    uint64_t outgoing = 0;
     for (uint32_t c = 0; c < function->call_count; c += 1)
     {
         outgoing = function->calls[c].stack_bytes > outgoing ? function->calls[c].stack_bytes : outgoing;
     }
-    uint32_t offset = (outgoing + 7) & ~7u;
-    frame->save_area = offset;
+    uint64_t offset = (outgoing + 7) & ~UINT64_C(7);
+    bool valid = offset <= INT32_MAX;
+    frame->save_area = valid ? (uint32_t)offset : 0;
     offset += 8 * frame->save_slots;
-    frame->fixed_area = offset;
+    valid = valid && offset <= INT32_MAX;
+    frame->fixed_area = valid ? (uint32_t)offset : 0;
     offset += 8 * frame->fixed_slots;
+    if (function->incoming_variadic != 0)
+    {
+        valid = valid && offset <= INT32_MAX;
+        frame->variadic_area = valid ? (uint32_t)offset : 0;
+        offset += BUSTER_ABI_SAVE_AREA_BYTES;
+    }
     for (uint32_t l = 0; l < function->local_count && !vector; l += 1)
     {
         const bool address_taken = (function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
+        const uint32_t role = function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY;
+        const bool anchor = role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA || role == BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA;
         const bool on_stack = l < function->parameter_count && function->parameters[l].kind == BUSTER_ABI_LOCATION_STACK;
-        if (!homes[l].is_register && (references[l] != 0 || address_taken) && !on_stack)
+        if (!homes[l].is_register && (references[l] != 0 || address_taken) && !on_stack && !anchor)
         {
-            homes[l].displacement = (int32_t)offset;
+            valid = valid && offset <= INT32_MAX;
+            homes[l].displacement = valid ? (int32_t)offset : 0;
             homes[l].reg = X86_REGISTER_RSP;
             homes[l].mode = BUSTER_X86_MEMORY_BASE;
-            offset += 8;
+            offset += role == BUSTER_TYPED_LOCAL_VA_LIST ? sizeof(AbiVaList) : BUSTER_ABI_SLOT_BYTES;
         }
     }
     offset = vector ? tier0_frame_slots_vector(function, homes, references, offset) : offset;
     // With the pushes and the return address, a multiple of 16 at every call.
-    const uint32_t above = 8 * frame->pushes + 8;
+    const uint64_t above = 8 * frame->pushes + 8;
     if (frame->calls)
     {
         offset = (offset + above + 15) / 16 * 16 - above;
     }
-    frame->size = offset;
-    for (uint32_t p = 0; p < function->parameter_count; p += 1)
+    valid = valid && offset <= INT32_MAX;
+    frame->size = valid ? (uint32_t)offset : 0;
+    if (function->incoming_variadic != 0)
     {
-        if (function->parameters[p].kind == BUSTER_ABI_LOCATION_STACK && !homes[p].is_register)
+        const uint64_t overflow = offset + above + function->incoming_variadic->stack_bytes;
+        valid = valid && overflow <= INT32_MAX;
+        frame->overflow_area = valid ? (uint32_t)overflow : 0;
+    }
+    for (uint32_t l = 0; l < function->local_count; l += 1)
+    {
+        const uint32_t role = function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY;
+        if (role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA || role == BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA)
         {
-            homes[p].displacement = (int32_t)(frame->size + above + function->parameters[p].stack_offset);
-            homes[p].reg = X86_REGISTER_RSP;
-            homes[p].mode = BUSTER_X86_MEMORY_BASE;
+            homes[l].displacement = (int32_t)(role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA ? frame->variadic_area : frame->overflow_area);
+            homes[l].reg = X86_REGISTER_RSP;
+            homes[l].mode = BUSTER_X86_MEMORY_BASE;
         }
     }
+    for (uint32_t p = 0; p < function->parameter_count; p += 1)
+    {
+        if (function->parameters[p].kind == BUSTER_ABI_LOCATION_STACK)
+        {
+            const uint64_t incoming = offset + above + function->parameters[p].stack_offset;
+            valid = valid && incoming <= INT32_MAX;
+            if (!homes[p].is_register)
+            {
+                homes[p].displacement = valid ? (int32_t)incoming : 0;
+                homes[p].reg = X86_REGISTER_RSP;
+                homes[p].mode = BUSTER_X86_MEMORY_BASE;
+            }
+        }
+    }
+    return valid;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3306,6 +3395,21 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
         const uint32_t form = frame->size <= 127 ? X86_FORM_SUB_RM64_IMM8 : X86_FORM_SUB_RM64_IMM32;
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
     }
+    if (function->incoming_variadic != 0)
+    {
+        // Snapshot before any parameter home move can overwrite an unnamed argument. Full unaligned baseline
+        // XMM stores preserve all 128 bits without reading AL, adding branches or touching FP status/control.
+        for (uint32_t general = 0; general < BUSTER_ABI_INTEGER_ARGUMENTS; general += 1)
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, abi_integer_arguments[general], X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE,
+                (int32_t)(frame->variadic_area + general * BUSTER_ABI_SLOT_BYTES), 0));
+        }
+        for (uint32_t vector = 0; vector < BUSTER_ABI_VECTOR_ARGUMENTS; vector += 1)
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_XM_X, vector, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE,
+                (int32_t)(frame->variadic_area + BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + vector * BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES), 0));
+        }
+    }
     // Each parameter into its home: a register's moved or stored, and a register home of one on the stack loaded from its
     // incoming slot. No home is an arrival register (tier0_assign_homes), so the order doesn't matter.
     const uint32_t above = 8 * frame->pushes + 8;
@@ -3339,10 +3443,12 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
 
 // The epilogue: the frame released, the saved registers popped, ret.
 // How many records tier0_emit_prologue writes, without writing them: the pushes, the frame's sub, and each parameter's
-// move, store or load into its home. The epilogue's are the sub's add, the pops and the ret.
+// move, store or load into its home, after the incoming variadic saves (a store per argument register) when it has them.
+// The epilogue's are the sub's add, the pops and the ret.
 static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references)
 {
     uint32_t count = frame->pushes + (frame->size != 0 ? 1 : 0);
+    count += function->incoming_variadic != 0 ? BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS : 0;
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
     {
         const AbiLocation location = function->parameters[p];
@@ -3729,8 +3835,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
 {
     Tier0Frame frame;
     memset(&frame, 0, sizeof(frame));
-    Tier0Error error = TIER0_OK;
-    const uint32_t unsupported = vector ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error);
+    Tier0Error error = tier0_frame_input_valid(function) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
+    const uint32_t unsupported = error == TIER0_OK ? (vector ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error)) : function->count;
     if (unsupported != function->count)
     {
         error = TIER0_ERROR_UNSUPPORTED;
@@ -3757,7 +3863,10 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
             tier0_count_references(function, references);
         }
         tier0_assign_homes(function, &frame, homes, references, order, vector);
-        tier0_layout_frame(function, &frame, homes, references, vector);
+        error = tier0_layout_frame(function, &frame, homes, references, vector) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
+    }
+    if (error == TIER0_OK)
+    {
         Tier0Counts counts;
         uint32_t epilogue = 0;
         if (vector)
@@ -3961,6 +4070,10 @@ static Tier0Check tier0_validate(const Tier0Function* function)
     {
         tier0_reject(&validator, 0, "more entries or locals than Tier 0 takes, or more parameters than locals");
     }
+    else if (!tier0_frame_input_valid(function))
+    {
+        tier0_reject(&validator, 0, "invalid incoming variadic metadata or address-only local role");
+    }
     else
     {
         memset(seen, 0, (uint64_t)count + 1);
@@ -4050,6 +4163,7 @@ static Tier0Check tier0_validate(const Tier0Function* function)
             case BUSTER_TYPED_LOCAL:
             case BUSTER_TYPED_LOCAL_ADDRESS:
                 if (value >= function->local_count || (kind == BUSTER_TYPED_LOCAL && function->local_classes[value] != class) ||
+                    (kind == BUSTER_TYPED_LOCAL && (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0) ||
                     (kind == BUSTER_TYPED_LOCAL_ADDRESS && (class != BUSTER_TYPED_CLASS_U64 || (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0)))
                 {
                     tier0_reject(&validator, i, "a local reference that doesn't match its local");
@@ -4124,7 +4238,8 @@ static Tier0Check tier0_validate(const Tier0Function* function)
             case BUSTER_TYPED_SET_GLOBAL:
             {
                 const bool local = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
-                const bool bad_target = local ? value >= function->local_count || function->local_classes[value] != class : value == 0 || value > UINT32_MAX;
+                const bool bad_target = local ? value >= function->local_count || function->local_classes[value] != class ||
+                    (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0 : value == 0 || value > UINT32_MAX;
                 if (tier0_pop(&validator, i) != class || bad_target)
                 {
                     tier0_reject(&validator, i, "a store to a local or a global that doesn't match");

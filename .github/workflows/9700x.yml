@@ -359,6 +359,7 @@ jobs:
           ./build/compiler test-builtin-lowering
           ./build/compiler test-check-varargs
           ./build/compiler test-builtin-varargs
+          ./build/compiler test-tier0-variadic-frame
           ./build/compiler test-check-builtins-misc
           ./build/compiler test-check-builtins-float
           ./build/compiler test-check-builtins-query

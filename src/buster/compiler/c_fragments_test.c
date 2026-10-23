@@ -728,12 +728,12 @@ static void c_fragment_test_print_totals(const char* dataset, const CFragmentTes
         const CFragmentReaderTestStatistics* readers = &total->readers;
         printf("fragment-readers dataset=%s payload=%u traversals=%llu events=%llu references=%llu peak_source_index=%llu peak_source_temporary=%llu peak_borrowed_syntax_sources=%llu "
                "peak_preparation_parent_postorder_kinds=%llu peak_flat_bytes_locations=%llu peak_flat_backing=%llu peak_frames=%llu peak_frame_backing=%llu peak_visit_backing=%llu "
-               "peak_event_bytes=%llu peak_test_arena=%llu\n",
+               "peak_event_bytes=%llu peak_cursor_bytes=%llu peak_test_arena=%llu\n",
                dataset, 16 * (k + 1), (unsigned long long)readers->traversals, (unsigned long long)readers->events, (unsigned long long)readers->references,
                (unsigned long long)readers->source_peak, (unsigned long long)readers->temporary_peak, (unsigned long long)readers->borrowed_peak,
                (unsigned long long)readers->preparation_input_peak, (unsigned long long)readers->flat_peak, (unsigned long long)readers->flat_backing_peak,
                (unsigned long long)readers->frame_peak, (unsigned long long)readers->frame_backing_peak, (unsigned long long)readers->visits_backing_peak,
-               (unsigned long long)readers->event_peak, (unsigned long long)readers->test_arena_peak);
+               (unsigned long long)readers->event_peak, (unsigned long long)readers->cursor_peak, (unsigned long long)readers->test_arena_peak);
     }
 }
 
