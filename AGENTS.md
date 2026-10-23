@@ -3871,8 +3871,9 @@ calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
 are local arrays and structs, some `_Alignas(16)`, read, written and pointed
 into, copied (twins' bytes, all or a prefix, in statements and before a call's
-arguments, its C sequenced), each address's remainder by its alignment a value, and every
-object's bits folded into a global at its function's end. Before them it checks
+arguments, its C sequenced), each address's remainder by its alignment a value,
+and every object's bits folded into a global at its function's end. Before them
+it checks
 the call emitter's move resolver on 20,000 random sets of moves (paths and
 cycles of every length) run on a register file, the vector path's application
 of chosen forms against the scalar path's on random records, that both paths
@@ -3884,7 +3885,10 @@ each size class above every count of values, whose scratch register both
 selections must count among the frame's clobbers; and variadic calls through a
 pointer, run natively: a probe must see `al` 3, `r11` its own address and the
 call's arguments, after moves that are cycles and that run through `r11`, with
-values saved around the call. Every function must pass `tier0_validate`, both
+values saved around the call; and the operands: `tier0_validate` refusing each
+stream whose entry's last operand has another class than the entry before it,
+which both paths read for it, and taking the rest (postorder, and values left
+under a store of their class). Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`. Each program is then sized, encoded, loaded into

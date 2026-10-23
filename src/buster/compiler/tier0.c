@@ -100,7 +100,9 @@
 
 // The kinds. Below, "the operand" of an entry that takes one is the entry before it (the root of its last operand, in
 // postorder), whose class is "the operand's class"; a two-operand entry's first operand comes before that one's
-// subtree. `class` is the entry's own class column; `value` its value column.
+// subtree. Both paths read the last operand's class from the entry before, so tier0_validate refuses a last operand of
+// another class; a value left under a store of its class (an increment's DUP leaves the old one under its SET) has it
+// and is compiled right. `class` is the entry's own class column; `value` its value column.
 //   - Leaves, which push one value of `class`:
 //     CONST: the value's bits (an integer sign- or zero-extended by its class to 64 bits; a float's bits, or a
 //     double's). LOCAL: local `value`'s value. LOCAL_ADDRESS: its address (class U64; the local must have
@@ -2231,6 +2233,15 @@ static void tier0_absorb(Tier0Entries* entries, uint32_t consumer, uint32_t abso
     entries->absorbed[absorbed] = 1;
 }
 
+// Whether entry i takes a last operand whose class both paths read from the entry before it (its stack in
+// tier0_raw_effects, and the entry's template key and variant): a kind whose shape has one, but RETURN of nothing. A
+// call reads its own arguments' classes.
+static bool tier0_takes_last(const Tier0Function* function, uint32_t i)
+{
+    const uint8_t kind = function->kinds[i];
+    return tier0_shapes[kind].last == BUSTER_TIER0_STACK_OPERAND && !(kind == BUSTER_TYPED_RETURN && function->classes[i] == BUSTER_TYPED_CLASS_VOID);
+}
+
 // Phase 1, an entry at a time: each consumer takes the entries its windows allow (they are all behind it, and no two
 // consumers want the same one), and gets its key. The vector path computes the same columns with masks.
 static void tier0_fuse_scalar(const Tier0Function* function, const uint64_t* labels, Tier0Entries* entries)
@@ -4328,6 +4339,14 @@ static Tier0Check tier0_validate(const Tier0Function* function)
             if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || class >= BUSTER_TYPED_CLASSES)
             {
                 tier0_reject(&validator, i, "an unknown kind or class");
+                break;
+            }
+            // The last operand's class, which both paths read from the entry before it: in postorder that entry is the
+            // operand itself, and a value left under a store of its class (an increment's DUP leaves one) has it too.
+            // At a target, every way control arrives brings the same stack (tier0_arrive), the top's class among it.
+            if (tier0_takes_last(function, i) && validator.depth != 0 && validator.stack[validator.depth - 1] != function->classes[i - 1])
+            {
+                tier0_reject(&validator, i, "a last operand of another class than the entry before it, which both paths read for it");
                 break;
             }
             const uint32_t operand = i > 0 ? function->classes[i - 1] : BUSTER_TYPED_CLASS_VOID;

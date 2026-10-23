@@ -369,6 +369,16 @@ static bool cbuiltin_atomic_rmw_test_caller(CBuiltinAtomicRmwTest* test, Arena* 
         classes[count] = BUSTER_TYPED_CLASS_U64;
         count += 1;
     }
+    else if (release && variant == 2)
+    {
+        // The prefix comes back from under the call that returns nothing as postorder has it, `prefix + (call, 0)`:
+        // a return's operand must have the class of the entry before it, which Tier 0 reads for it.
+        kinds[count] = BUSTER_TYPED_CONST;
+        classes[count] = BUSTER_TYPED_CLASS_U64;
+        kinds[count + 1] = BUSTER_TYPED_ADD;
+        classes[count + 1] = BUSTER_TYPED_CLASS_U64;
+        count += 2;
+    }
     kinds[count] = BUSTER_TYPED_RETURN;
     classes[count] = BUSTER_TYPED_CLASS_U64;
     count += 1;
