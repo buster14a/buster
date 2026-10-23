@@ -160,6 +160,13 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `tier1_schedule.c` provides an opt-in postallocation machine-record scheduler.
+  `test-tier1-schedule` checks scalar/vector ordering, barriers and model coverage;
+  `benchmark-tier1-schedule` measures scheduling plus encoding and a synthetic
+  generated loop. [The scheduling guide](docs/tier1-scheduling.md) records the
+  API and the source-corpus evidence still needed for #172/#181. Use the shared
+  9700X lock for each build/test/measurement and CPU 2 for timing.
+
 - `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
   #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
   AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
@@ -470,6 +477,24 @@ designs and the compilers already built this way.
   `./build/compiler test-types` runs them) and `c_types_benchmark.c` provides
   `benchmark-types`. `docs/c-types.md` records the design and its 9700X
   measurements.
+- `src/buster/compiler/c_check_actions.c` supplies the reader-independent
+  expression rules and constant folding for #133. `c_checker.c` checks an
+  explicit postorder operand graph either in source order or in stable
+  dependency levels, with scalar barriers for actions that intern types.
+  `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
+  `c_check_binding.c` resolves its source events through the batch or independent
+  scalar kernel. `compiler check [--scalar] [--dump-typed] [--dump-static] file.c`
+  opts into it. Unsupported
+  syntax is diagnosed. The normal syntax driver still uses the parser.
+  `test-checker [--seed N] [--clang PATH]` compares fresh scalar/vector tables,
+  protected tails and original source fixtures against Clang. `c_check_data.c`
+  and `c_check_data_input.c` turn selected static scalar definitions into real
+  Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
+  `benchmark-checker --shape wide|chain` measures synthetic graph checking,
+  including scheduling and output materialization. `docs/c-checker.md`
+  records the actual contract and the remaining declaration/initializer,
+  control-flow, corpus and downstream integration still needed
+  for #133; this module does not establish whole-compiler semantic coverage.
 - `src/buster/compiler/calling_convention.c` is the System V AMD64 calling
   convention (#137, contract 3 for #136): every `TypeId`'s classes as clang 23
   classifies them, a row of 16 offsets per type, records and arrays folded
@@ -643,6 +668,9 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler test-types
 ./build/compiler benchmark-types
+./build/compiler test-checker --seed 133
+./build/compiler benchmark-checker --shape wide
+./build/compiler benchmark-checker --shape chain --nodes 4096
 ./build/compiler test-calling-convention --cross-check
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check

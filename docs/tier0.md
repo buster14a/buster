@@ -9,7 +9,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 
 **Done:**
 
-- **The typed stream:** defined here as #133's output, since #133 hasn't started.
+- **The lowered typed stream:** the backend contract defined here. #133's
+  [semantic expression stream](c-checker.md) now exists, but the producer of
+  these machine-class and executable control-flow entries remains to be built.
 - **Both paths:**
   - `tier0_compile`, the vector path;
   - `tier0_compile_scalar`, its twin and oracle.
@@ -140,7 +142,7 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
   - a shift's count at depth 1 is cl;
   - a leaf function's parameters stay in rdi, rsi and the others while its expressions stay shallow.
 
-  Corpora must confirm it once #133 exists. The table is one array, so the other order is a one-line change to
+  Corpora must confirm it once #133 produces backend function records. The table is one array, so the other order is a one-line change to
   measure.
 - **Values live across a call** are exactly the depths below its arguments. The call saves the caller-saved ones to
   the frame's save area and restores them; depths in callee-saved registers survive it by themselves.

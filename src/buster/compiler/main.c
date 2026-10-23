@@ -211,6 +211,11 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/x86_semantics_test.c"
 int run_x86_semantics_benchmark(int argc, char** argv);
 
+// Experimental postallocation scheduling over resolved machine-record effects and measured operand costs.
+#include "buster/compiler/tier1_schedule.c"
+#include "buster/compiler/tier1_schedule_test.c"
+int run_tier1_schedule_benchmark(int argc, char** argv);
+
 // The C type table (TypeIds, hash-consing, layout, conversions, compatibility and printing) and its tests, for the
 // test-types command. Its benchmark is another translation unit.
 #include "buster/compiler/c_types.c"
@@ -224,6 +229,15 @@ int run_type_benchmark(int argc, char** argv);
 
 #include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_builtin_test.c"
+#include "buster/compiler/c_check_actions.c"
+#include "buster/compiler/c_checker.c"
+#include "buster/compiler/c_check_literals.c"
+#include "buster/compiler/c_check_data.c"
+#include "buster/compiler/c_check_input.c"
+#include "buster/compiler/c_check_data_input.c"
+#include "buster/compiler/c_checker_driver.c"
+#include "buster/compiler/c_checker_test.c"
+int run_checker_benchmark(int argc, char** argv);
 int run_builtin_benchmark(int argc, char** argv);
 
 // The System V calling convention (each type's classes, and each call's argument locations) and its tests, for the
@@ -392,6 +406,14 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_lane_benchmark(argc - 1, argv + 1);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-schedule") == 0)
+    {
+        result = run_tier1_schedule_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-schedule") == 0)
+    {
+        result = run_tier1_schedule_benchmark(argc - 1, argv + 1);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-dataflow") == 0)
     {
         result = run_dataflow_tests(argc - 2, argv + 2);
@@ -503,6 +525,18 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-files") == 0)
     {
         result = run_files_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "check") == 0)
+    {
+        result = run_check_command(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
+    {
+        result = run_checker_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-checker") == 0)
+    {
+        result = run_checker_benchmark(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-types") == 0)
     {
