@@ -215,6 +215,11 @@ int run_x86_semantics_benchmark(int argc, char** argv);
 #include "buster/compiler/c_types_test.c"
 int run_type_benchmark(int argc, char** argv);
 
+// Immutable source-position environments for deferred bodies. The checker adapter supplies the semantic events.
+#include "buster/compiler/c_environment.c"
+#include "buster/compiler/c_environment_test.c"
+#include "buster/compiler/c_environment_benchmark.c"
+
 #include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_builtin_test.c"
 int run_builtin_benchmark(int argc, char** argv);
@@ -311,6 +316,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-bindings") == 0)
     {
         result = run_c_bindings_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-environments") == 0)
+    {
+        result = run_c_environment_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-environments") == 0)
+    {
+        result = run_c_environment_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
     {

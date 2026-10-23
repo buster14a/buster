@@ -161,6 +161,8 @@ jobs:
           ./build/compiler test-parser --clang
           == Test scoped name-resolution kernels
           ./build/compiler test-bindings
+          == Test deferred-body source-position environments
+          ./build/compiler test-environments
           == Test the static executables with libc
           # Each program bound against the system's static runtime and written as a static executable by 1, 2, 3 and 8
           # lanes and by the writer's exact twins must be the same file, run as cc -static's link of the same object

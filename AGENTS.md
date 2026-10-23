@@ -3264,6 +3264,15 @@ others, its measurements are informational.
 
 ## Scoped binding kernels
 
+`test-environments [--seed N]` checks the immutable file-scope position index,
+tag-completion positions and parser-role body ranges for #113, including
+guarded tails and queries on 1, 2, 3 and 8 lanes. `benchmark-environments`
+measures the synthetic index/query handoff and completeness checks; use
+`--only full-vector [--after-scalar 100]` for its vector states, under the
+9700X's per-run lock and pinned to CPU 2. The checker source adapter, actual
+deferred body/effect checking and corpus acceptance are still pending.
+[docs/c-environments.md](docs/c-environments.md) records the API and boundaries.
+
 `./build/compiler test-bindings [--seed N]` checks the standalone scoped C
 binding kernels: stack replay and the vector batch against an independent
 scope oracle, 100,000-level nesting, protected-page tails and allocation
