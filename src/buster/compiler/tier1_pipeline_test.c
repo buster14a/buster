@@ -7,8 +7,8 @@
 // The existing typed interpreter supplies expected return bits independently of lowering, selection and allocation.
 // Optional Clang -O0/-O2 oracles compile separately written C formulas, never the emitted machine or optimized IR.
 //
-// Only defined unsigned straight-line programs execute. Unsupported branches, joins, loops, calls and floating point
-// traverse the upstream stages and must stop explicitly before native execution. These fixtures do not qualify a
+// Only defined unsigned straight-line programs and bounded direct local calls execute. Branches, joins, loops and
+// floating point traverse the upstream stages and must stop explicitly before native execution. These fixtures do not qualify a
 // source corpus. Native calls and external tools run in bounded child processes; all temporary files use TMPDIR.
 
 #include <errno.h>
@@ -24,7 +24,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BUSTER_TIER1_PIPELINE_CASES 4
+#define BUSTER_TIER1_PIPELINE_CASES 6
+#define BUSTER_TIER1_PIPELINE_CALL_CASES 2
+#define BUSTER_TIER1_PIPELINE_FUNCTIONS 2
 #define BUSTER_TIER1_PIPELINE_INPUTS 32
 #define BUSTER_TIER1_PIPELINE_ENTRIES 512
 #define BUSTER_TIER1_PIPELINE_ARENAS 8
@@ -53,7 +55,7 @@ struct Tier1PipelineFixture
     uint32_t call_callees[1];
     uint32_t call_first[1];
     uint32_t call_argument_counts[1];
-    uint8_t argument_classes[1];
+    uint8_t argument_classes[3];
 };
 
 typedef struct Tier1PipelineTest Tier1PipelineTest;
@@ -65,8 +67,11 @@ struct Tier1PipelineTest
     uint64_t stores;
     uint64_t loads;
     uint64_t rematerializations;
+    uint64_t call_stores;
+    uint64_t call_loads;
     uint32_t native_results;
     uint32_t clang_results;
+    uint32_t resolved_calls;
     uint32_t refused;
     uint32_t fixture;
     bool vector;
@@ -123,11 +128,13 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
         .call_argument_counts = fixture->call_argument_counts,
         .call_capacity = 1,
         .argument_classes = fixture->argument_classes,
-        .argument_capacity = 1,
+        .argument_capacity = BUSTER_ARRAY_LENGTH(fixture->argument_classes),
         .function_count = 1,
         .defined = true,
     };
     memset(fixture->local_classes, BUSTER_TYPED_CLASS_U64, sizeof(fixture->local_classes));
+    uint32_t entry_first = 0;
+    uint32_t entry_local_first = 0;
     if (shape == 0)
     {
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
@@ -236,7 +243,47 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
             .result_class = BUSTER_TYPED_CLASS_U64,
         };
         program->call_count = 1;
+        entry_first = program->entry_count;
         tier0_emit(program, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    else if (shape == 9)
+    {
+        // The helper receives three nonconstant arguments. Its local range is disjoint from the entry's.
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+        program->function_count = 2;
+        program->functions[0] = (Tier0GeneratedFunction){
+            .entry_count = program->entry_count,
+            .local_count = 3,
+            .parameter_count = 3,
+            .result_class = BUSTER_TYPED_CLASS_U64,
+        };
+        entry_first = program->entry_count;
+        entry_local_first = 3;
+        program->local_count = entry_local_first + 4;
+        program->call_count = 1;
+        program->argument_count = 3;
+        fixture->call_argument_counts[0] = 3;
+        memset(fixture->argument_classes, BUSTER_TYPED_CLASS_U64, sizeof(fixture->argument_classes));
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        // Reordered c,a,b arguments exercise argument moves; c and a^b must also survive the call.
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_emit(program, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
     }
     else
     {
@@ -247,11 +294,11 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
         tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
     }
     tier0_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
-    const uint32_t first = shape == 7 ? 2 : 0;
     program->functions[program->function_count - 1] = (Tier0GeneratedFunction){
-        .first_entry = first,
-        .entry_count = program->entry_count - first,
-        .local_count = program->local_count,
+        .first_entry = entry_first,
+        .entry_count = program->entry_count - entry_first,
+        .first_local = entry_local_first,
+        .local_count = program->local_count - entry_local_first,
         .parameter_count = 3,
         .call_count = program->call_count,
         .result_class = BUSTER_TYPED_CLASS_U64,
@@ -314,7 +361,7 @@ static void tier1_pipeline_mutation_regression(Tier1PipelineTest* test)
     }
 }
 
-static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program* program, Tier0Functions* functions, IrFunction* optimized, IrDominance* dominance)
+static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program* program, uint32_t function_index, Tier0Functions* functions, IrFunction* optimized, IrDominance* dominance)
 {
     Arena* scratch = &test->arenas[TIER1_PIPELINE_SCRATCH];
     bool ok = tier1_pipeline_expect(test, !program->overflow && tier0_program_functions(program, &test->tables, &test->arenas[TIER1_PIPELINE_ABI], functions), "typed producer and ABI batch succeed");
@@ -322,7 +369,7 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
     IrFunction promoted;
     if (ok)
     {
-        const Tier0Function* entry = &functions->functions[functions->count - 1];
+        const Tier0Function* entry = &functions->functions[function_index];
         const uint32_t symbols = program->global_count + program->function_count + 1;
         const IrCheck check = test->vector ? ir_lower_typed(entry, IR_I64, symbols, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered) : ir_lower_typed_scalar(entry, IR_I64, symbols, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "real typed-stream lowering succeeds");
@@ -337,7 +384,7 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "real shared-IR local promotion succeeds");
         if (ok)
         {
-            tier1_pipeline_expect(test, lowered.slot_count != 0 && promoted.slot_count == 0, "promotion eliminates the private parameter and local slots");
+            tier1_pipeline_expect(test, (program->functions[function_index].local_count == 0 || lowered.slot_count != 0) && promoted.slot_count == 0, "promotion eliminates the private parameter and local slots");
         }
     }
     if (ok)
@@ -627,30 +674,78 @@ static __attribute__((no_sanitize("function"))) uint64_t tier1_pipeline_call(con
     return function(inputs[0], inputs[1], inputs[2]);
 }
 
-static void tier1_pipeline_execute(Tier1PipelineTest* test, Tier1SelectCode* code)
+static void tier1_pipeline_execute(Tier1PipelineTest* test, const Tier0Program* program, Tier1EmitResult* emitted)
 {
-    const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
+    uint64_t capacity = 0;
+    uint64_t starts[BUSTER_TIER1_PIPELINE_FUNCTIONS] = {0};
+    uint64_t capacities[BUSTER_TIER1_PIPELINE_FUNCTIONS] = {0};
+    uint32_t maximum_records = 0;
+    uint32_t maximum_references = 0;
+    bool ok = tier1_pipeline_expect(test, program->global_count == 0 && program->function_count != 0 && program->function_count <= BUSTER_TIER1_PIPELINE_FUNCTIONS, "native fixture contains only its bounded original local functions");
+    for (uint32_t f = 0; ok && f < program->function_count; f += 1)
+    {
+        starts[f] = (capacity + 15) & ~UINT64_C(15);
+        capacities[f] = BUSTER_X86_ENCODER_CAPACITY(emitted[f].code.count);
+        capacity = starts[f] + capacities[f];
+        maximum_records = emitted[f].code.count > maximum_records ? emitted[f].code.count : maximum_records;
+        maximum_references = emitted[f].reference_count > maximum_references ? emitted[f].reference_count : maximum_references;
+    }
     const uint64_t mapped = (capacity + 4095) & ~UINT64_C(4095);
     uint8_t* machine = mmap(0, mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint8_t* scalar = malloc(capacity);
-    uint32_t* offsets = malloc((uint64_t)code->count * sizeof(uint32_t));
+    uint32_t* offsets = malloc(((uint64_t)maximum_records + 1) * sizeof(uint32_t));
+    uint32_t* ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(maximum_references) * sizeof(uint32_t));
+    uint32_t* scalar_ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(maximum_references) * sizeof(uint32_t));
     uint64_t* actual = mmap(0, sizeof(test->expected[0]), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    bool ok = tier1_pipeline_expect(test, machine != MAP_FAILED && scalar != 0 && offsets != 0 && actual != MAP_FAILED, "allocate native encoder buffers");
-    if (ok)
+    ok = tier1_pipeline_expect(test, capacity < INT32_MAX && machine != MAP_FAILED && scalar != 0 && offsets != 0 && ends != 0 && scalar_ends != 0 && actual != MAP_FAILED, "allocate native encoder and symbolic-fixup buffers") && ok;
+    for (uint32_t f = 0; ok && f < program->function_count; f += 1)
     {
+        Tier1SelectCode* code = &emitted[f].code;
         const BranchSizingCheck checked = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
         ok = tier1_pipeline_expect(test, checked.error == BRANCH_SIZING_OK, "frame and body branches validate together");
-    }
-    if (ok)
-    {
-        const BranchSizing sized = size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets);
-        ok = tier1_pipeline_expect(test, sized.error == BRANCH_SIZING_OK && x86_target_validate(test->allowed, code->records, code->count) == code->count, "complete records obey the baseline target and branch layout");
-    }
-    if (ok)
-    {
-        const int64_t vector_size = x86_encode(code->records, code->count, machine, capacity, 0, 0);
-        const int64_t scalar_size = x86_encode_scalar(code->records, code->count, scalar, capacity, 0, 0);
-        ok = tier1_pipeline_expect(test, vector_size > 0 && (uint64_t)vector_size <= capacity && vector_size == scalar_size && memcmp(machine, scalar, (uint64_t)vector_size) == 0, "scalar and vector encoders agree byte for byte");
+        if (ok)
+        {
+            const BranchSizing sized = size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets);
+            ok = tier1_pipeline_expect(test, sized.error == BRANCH_SIZING_OK && x86_target_validate(test->allowed, code->records, code->count) == code->count, "complete records obey the baseline target and branch layout");
+        }
+        uint32_t marked = 0;
+        for (uint32_t record = 0; ok && record < code->count; record += 1)
+        {
+            if ((code->records[record].form & BUSTER_X86_FORM_FIXUP) != 0)
+            {
+                const bool present = marked < emitted[f].reference_count;
+                ok = tier1_pipeline_expect(test, present && emitted[f].references[marked].instruction == record && code->records[record].form == (X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP), "each marked call record has exactly one ordered symbolic reference");
+                marked += 1;
+            }
+        }
+        ok = tier1_pipeline_expect(test, marked == emitted[f].reference_count, "symbolic reference count equals the encoded marked-record count") && ok;
+        int64_t vector_size = -1;
+        if (ok)
+        {
+            vector_size = x86_encode(code->records, code->count, machine + starts[f], capacities[f], 0, ends);
+            const int64_t scalar_size = x86_encode_scalar(code->records, code->count, scalar + starts[f], capacities[f], 0, scalar_ends);
+            ok = tier1_pipeline_expect(test, vector_size > 0 && (uint64_t)vector_size <= capacities[f] && vector_size == scalar_size && memcmp(machine + starts[f], scalar + starts[f], (uint64_t)vector_size) == 0 && memcmp(ends, scalar_ends, (uint64_t)marked * sizeof(uint32_t)) == 0, "scalar and vector encoders agree on bytes and symbolic field ends");
+        }
+        for (uint32_t reference = 0; ok && reference < marked; reference += 1)
+        {
+            const LinkReference* fixup = &emitted[f].references[reference];
+            const uint32_t end = ends[reference];
+            const uint32_t original = program->functions[f].first_call + reference;
+            ok = tier1_pipeline_expect(test, fixup->kind == BUSTER_LINK_FIXUP_CALL && fixup->field == X86_FIXUP_DISPLACEMENT && fixup->addend == 0 && fixup->target != 0 && fixup->target <= program->function_count && reference < program->functions[f].call_count && original < program->call_count && fixup->target == program->call_callees[original] + 1, "direct call keeps the original typed stream's local function symbol");
+            if (ok)
+            {
+                const uint32_t distance = x86_fixup_distance(code->records[fixup->instruction].form, fixup->field);
+                const int64_t displacement = (int64_t)starts[fixup->target - 1] - (int64_t)(starts[f] + end);
+                ok = tier1_pipeline_expect(test, distance == sizeof(int32_t) && end >= distance && end <= (uint64_t)vector_size && displacement >= INT32_MIN && displacement <= INT32_MAX, "local call has a bounded rel32 field and an in-range function target");
+                if (ok)
+                {
+                    const int32_t relative = (int32_t)displacement;
+                    memcpy(machine + starts[f] + end - distance, &relative, sizeof(relative));
+                    memcpy(scalar + starts[f] + end - distance, &relative, sizeof(relative));
+                    test->resolved_calls += 1;
+                }
+            }
+        }
     }
     if (ok)
     {
@@ -665,7 +760,7 @@ static void tier1_pipeline_execute(Tier1PipelineTest* test, Tier1SelectCode* cod
             alarm(10);
             for (uint32_t input = 0; input < BUSTER_TIER1_PIPELINE_INPUTS; input += 1)
             {
-                actual[input] = tier1_pipeline_call(machine, test->inputs[input]);
+                actual[input] = tier1_pipeline_call(machine + starts[program->function_count - 1], test->inputs[input]);
             }
             _exit(0);
         }
@@ -691,13 +786,24 @@ static void tier1_pipeline_execute(Tier1PipelineTest* test, Tier1SelectCode* cod
     }
     free(scalar);
     free(offsets);
+    free(ends);
+    free(scalar_ends);
 }
 
 static void tier1_pipeline_supported(Tier1PipelineTest* test)
 {
-    for (uint32_t shape = 0; shape < BUSTER_TIER1_PIPELINE_CASES; shape += 1)
+    const uint32_t shapes[BUSTER_TIER1_PIPELINE_CASES] = {
+        0,
+        1,
+        2,
+        3,
+        7,
+        9,
+    };
+    for (uint32_t fixture_index = 0; fixture_index < BUSTER_TIER1_PIPELINE_CASES; fixture_index += 1)
     {
-        test->fixture = shape;
+        const uint32_t shape = shapes[fixture_index];
+        test->fixture = fixture_index;
         Tier1PipelineFixture fixture;
         Tier1PipelineFixture original;
         tier1_pipeline_fixture(&fixture, shape);
@@ -706,57 +812,80 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
         for (uint32_t path = 0; frozen && path < 2; path += 1)
         {
             test->vector = path != 0;
-            tier1_pipeline_reset(test);
-            Tier0Functions functions;
-            IrFunction function;
-            IrDominance dominance;
-            bool ok = tier1_pipeline_upstream(test, &fixture.program, &functions, &function, &dominance);
-            ok = tier1_pipeline_expect(test, tier1_pipeline_unchanged(&fixture, &original), "lowering, promotion and optimization preserve the frozen typed fixture") && ok;
-            Tier1SelectPlan plan;
-            uint32_t node = BUSTER_IR_NONE;
-            if (ok)
-            {
-                const Tier1SelectError error = tier1_select_plan(&function, &dominance, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH], test->vector, &plan, &node);
-                ok = tier1_pipeline_expect(test, error == TIER1_SELECT_OK, "select the actual optimized SSA function");
-                if (!ok)
-                {
-                    fprintf(stderr, "  selection error=%u node=%u\n", error, node);
-                }
-            }
-            for (uint32_t remat = 0; ok && remat < 2; remat += 1)
+            for (uint32_t remat = 0; remat < 2; remat += 1)
             {
                 test->rematerialize = remat != 0;
-                arena_pop_to(&test->arenas[TIER1_PIPELINE_EMITTED], 0);
+                tier1_pipeline_reset(test);
                 const Tier1EmitOptions options = {
                     .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
                     .frame_flags = remat != 0 ? BUSTER_TIER1_FRAME_KEEP_POINTER | BUSTER_TIER1_FRAME_NO_RED_ZONE : 0,
                     .vector = test->vector,
                     .rematerialize = test->rematerialize,
                 };
-                Tier1EmitResult emitted;
-                const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->arenas[TIER1_PIPELINE_EMITTED], &test->arenas[TIER1_PIPELINE_SCRATCH], &emitted, &node);
-                const bool ready = tier1_pipeline_expect(test, error == TIER1_EMIT_OK, "real liveness, fragment allocation and frame emission succeed");
-                if (!ready)
+                Tier1EmitResult bodies[BUSTER_TIER1_PIPELINE_FUNCTIONS];
+                bool ok = tier1_pipeline_expect(test, fixture.program.function_count != 0 && fixture.program.function_count <= BUSTER_TIER1_PIPELINE_FUNCTIONS, "supported fixture has a bounded function table");
+                for (uint32_t f = 0; ok && f < fixture.program.function_count; f += 1)
                 {
-                    fprintf(stderr, "  emission error=%u node=%u\n", error, node);
+                    // Every helper uses the same real typed-to-native stages; its bytes are kept beside the entry.
+                    Tier0Functions functions;
+                    IrFunction function;
+                    IrDominance dominance;
+                    ok = tier1_pipeline_upstream(test, &fixture.program, f, &functions, &function, &dominance);
+                    ok = tier1_pipeline_expect(test, tier1_pipeline_unchanged(&fixture, &original), "lowering, promotion and optimization preserve the frozen typed fixture") && ok;
+                    Tier1SelectPlan plan;
+                    uint32_t node = BUSTER_IR_NONE;
+                    if (ok)
+                    {
+                        const Tier1SelectError error = tier1_select_plan(&function, &dominance, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH], test->vector, &plan, &node);
+                        ok = tier1_pipeline_expect(test, error == TIER1_SELECT_OK, "select the actual optimized SSA function");
+                        if (!ok)
+                        {
+                            fprintf(stderr, "  selection error=%u node=%u function=%u\n", error, node, f);
+                        }
+                    }
+                    Tier1EmitResult* emitted = &bodies[f];
+                    if (ok)
+                    {
+                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->arenas[TIER1_PIPELINE_EMITTED], &test->arenas[TIER1_PIPELINE_SCRATCH], emitted, &node);
+                        ok = tier1_pipeline_expect(test, error == TIER1_EMIT_OK, "real liveness, fragment allocation and frame emission succeed");
+                        if (!ok)
+                        {
+                            fprintf(stderr, "  emission error=%u node=%u function=%u\n", error, node, f);
+                        }
+                    }
+                    tier1_pipeline_expect(test, test->arenas[TIER1_PIPELINE_SCRATCH].length == 0, "fragment emission returns scratch");
+                    if (ok)
+                    {
+                        tier1_pipeline_expect(test, tier1_allocation_verify(&emitted->prepared.allocation, &emitted->allocation), "independent allocation verifier accepts actual fragments");
+                        const uint32_t call_slots = (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask);
+                        tier1_pipeline_expect(test, emitted->frame.count == emitted->allocation.spill_count + call_slots, "spill values and reserved caller-save values have complete frame rows");
+                        tier1_pipeline_expect(test, emitted->reference_count == fixture.program.functions[f].call_count, "every original direct call survives optimization and reaches a symbolic native call");
+                        if (emitted->reference_count != 0)
+                        {
+                            tier1_pipeline_expect(test, !emitted->frame.red_zone && emitted->call_stores == emitted->call_loads, "callers use a real frame and balance caller-save stores and reloads");
+                        }
+                        if (shape == 1 || (shape == 2 && !test->rematerialize))
+                        {
+                            tier1_pipeline_expect(test, emitted->spill_stores != 0 && emitted->spill_loads != 0 && emitted->frame.count != 0, "pressure reaches real spill stores, frame slots and reloads");
+                        }
+                        if (shape == 2 && test->rematerialize)
+                        {
+                            tier1_pipeline_expect(test, emitted->rematerializations != 0, "wide constant pressure reaches real rematerialization");
+                        }
+                        if (shape == 9 && f + 1 == fixture.program.function_count)
+                        {
+                            tier1_pipeline_expect(test, emitted->call_stores != 0 && emitted->call_loads != 0, "nonconstant values live across a direct call reach caller-save stores and reloads");
+                        }
+                        test->stores += emitted->spill_stores;
+                        test->loads += emitted->spill_loads;
+                        test->rematerializations += emitted->rematerializations;
+                        test->call_stores += emitted->call_stores;
+                        test->call_loads += emitted->call_loads;
+                    }
                 }
-                tier1_pipeline_expect(test, test->arenas[TIER1_PIPELINE_SCRATCH].length == 0, "fragment emission returns scratch");
-                if (ready)
+                if (ok)
                 {
-                    tier1_pipeline_expect(test, tier1_allocation_verify(&emitted.prepared.allocation, &emitted.allocation), "independent allocation verifier accepts actual fragments");
-                    tier1_pipeline_expect(test, emitted.frame.count == emitted.allocation.spill_count, "actual spill values have compact frame rows");
-                    if (shape == 1 || (shape == 2 && !test->rematerialize))
-                    {
-                        tier1_pipeline_expect(test, emitted.spill_stores != 0 && emitted.spill_loads != 0 && emitted.frame.count != 0, "pressure reaches real spill stores, frame slots and reloads");
-                    }
-                    if (shape == 2 && test->rematerialize)
-                    {
-                        tier1_pipeline_expect(test, emitted.rematerializations != 0, "wide constant pressure reaches real rematerialization");
-                    }
-                    test->stores += emitted.spill_stores;
-                    test->loads += emitted.spill_loads;
-                    test->rematerializations += emitted.rematerializations;
-                    tier1_pipeline_execute(test, &emitted.code);
+                    tier1_pipeline_execute(test, &fixture.program, bodies);
                 }
             }
             tier1_pipeline_expect(test, tier1_pipeline_unchanged(&fixture, &original), "selection and native compilation preserve the frozen typed fixture");
@@ -766,8 +895,15 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
 
 static void tier1_pipeline_refusals(Tier1PipelineTest* test)
 {
-    for (uint32_t shape = 4; shape < 9; shape += 1)
+    const uint32_t shapes[] = {
+        4,
+        5,
+        6,
+        8,
+    };
+    for (uint32_t fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(shapes); fixture_index += 1)
     {
+        const uint32_t shape = shapes[fixture_index];
         test->fixture = shape;
         Tier1PipelineFixture fixture;
         Tier1PipelineFixture original;
@@ -781,7 +917,7 @@ static void tier1_pipeline_refusals(Tier1PipelineTest* test)
             Tier0Functions functions;
             IrFunction function;
             IrDominance dominance;
-            const bool ready = tier1_pipeline_upstream(test, &fixture.program, &functions, &function, &dominance);
+            const bool ready = tier1_pipeline_upstream(test, &fixture.program, fixture.program.function_count - 1, &functions, &function, &dominance);
             if (ready)
             {
                 Arena* selected = &test->arenas[TIER1_PIPELINE_SELECTED];
@@ -815,7 +951,7 @@ static void tier1_pipeline_refusals(Tier1PipelineTest* test)
                 }
                 else
                 {
-                    const bool refused = tier1_pipeline_expect(test, selection == TIER1_SELECT_ERROR_UNSUPPORTED, "phi, call or floating point receives explicit unsupported status");
+                    const bool refused = tier1_pipeline_expect(test, selection == TIER1_SELECT_ERROR_UNSUPPORTED, "phi or floating point receives explicit unsupported status");
                     tier1_pipeline_expect(test, selected->length == 0 && scratch->length == 0 && memcmp(&plan, &prior, sizeof(plan)) == 0, "unsupported selection rolls back arenas and result");
                     test->refused += refused;
                 }
@@ -834,12 +970,16 @@ static bool tier1_pipeline_oracle_source(const Tier1PipelineTest* test, const ch
         // Separate source formulas intentionally know nothing about SSA IDs, selected patterns or allocations.
         fputs("#include <stdint.h>\n#include <stdio.h>\n#include <inttypes.h>\n"
               "static uint64_t constant(unsigned i) { return UINT64_C(0x9e3779b97f4a7c15) + (uint64_t)i * UINT64_C(0xd1b54a32d192ed03); }\n"
+              "static __attribute__((noinline)) uint64_t helper_constant(void) { return 7; }\n"
+              "static __attribute__((noinline)) uint64_t helper_arguments(uint64_t x, uint64_t y, uint64_t z) { return (x + (y << 3)) ^ z; }\n"
               "static uint64_t original(unsigned shape, uint64_t a, uint64_t b, uint64_t c)\n{\n"
               "    uint64_t result;\n"
               "    if (shape == 0) { uint64_t local = ~a; result = (local + (b << 3)) ^ c; }\n"
               "    else if (shape == 1) { uint64_t local[12]; for (unsigned i = 0; i < 12; ++i) local[i] = (a ^ constant(i)) + (b << (i % 5 + 1)); result = c; for (unsigned i = 0; i < 12; ++i) result += local[i]; }\n"
               "    else if (shape == 2) { uint64_t local[16]; for (unsigned i = 0; i < 16; ++i) local[i] = constant(i); result = (a ^ b) + c; for (unsigned i = 0; i < 16; ++i) { if (i % 2 == 0) result += local[i]; else result ^= local[i]; } }\n"
-              "    else { uint32_t local = (uint32_t)a + (uint32_t)b; result = (uint64_t)(uint32_t)((local >> 11) + (local ^ UINT32_C(0x92d68ca7))) ^ c; }\n"
+              "    else if (shape == 3) { uint32_t local = (uint32_t)a + (uint32_t)b; result = (uint64_t)(uint32_t)((local >> 11) + (local ^ UINT32_C(0x92d68ca7))) ^ c; }\n"
+              "    else if (shape == 4) { result = helper_constant(); }\n"
+              "    else { uint64_t live = a ^ b; uint64_t called = helper_arguments(c, a, b); result = (called + live) ^ c; }\n"
               "    return result;\n}\n"
               "static const uint64_t inputs[][3] = {\n", file);
         for (uint32_t input = 0; input < BUSTER_TIER1_PIPELINE_INPUTS; input += 1)
@@ -1026,13 +1166,14 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
                 tier1_pipeline_clang(&test, clang);
             }
             tier1_pipeline_expect(&test, test.native_results == BUSTER_TIER1_PIPELINE_CASES * 4 * BUSTER_TIER1_PIPELINE_INPUTS, "every supported path executes every input");
-            tier1_pipeline_expect(&test, test.refused == 10, "every unsupported shape is refused on both paths");
+            tier1_pipeline_expect(&test, test.resolved_calls == BUSTER_TIER1_PIPELINE_CALL_CASES * 4, "every supported call path resolves its original local helper symbol");
+            tier1_pipeline_expect(&test, test.refused == 8, "every remaining unsupported shape is refused on both paths");
             if (cross_check)
             {
                 tier1_pipeline_expect(&test, test.clang_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "both Clang optimization levels check every original fixture/input");
             }
         }
-        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u refused=%u stores=%" PRIu64 " reloads=%" PRIu64 " rematerializations=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.refused, test.stores, test.loads, test.rematerializations, seed);
+        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u refused=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.refused, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, seed);
         for (uint32_t a = 0; a < BUSTER_TIER1_PIPELINE_ARENAS; a += 1)
         {
             arena_release(&test.arenas[a]);

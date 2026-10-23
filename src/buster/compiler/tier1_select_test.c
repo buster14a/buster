@@ -933,6 +933,298 @@ static void tier1_select_test_guarded(Tier1SelectTest* test)
     arena_release(&input);
 }
 
+static void tier1_select_test_calls(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(8u << 20);
+    Arena scratch = arena_reserve(8u << 20);
+    const uint8_t result_types[] =
+    {
+        IR_VOID,
+        IR_I32,
+        IR_I64,
+        IR_PTR,
+    };
+    const uint8_t parameter_types[] =
+    {
+        IR_I32,
+        IR_I64,
+        IR_PTR,
+        IR_I32,
+        IR_I64,
+        IR_PTR,
+    };
+    const uint32_t ordered[] =
+    {
+        5,
+        0,
+        1,
+        1,
+        4,
+        2,
+        0,
+    };
+    for (uint32_t type = 0; type < BUSTER_ARRAY_LENGTH(result_types); type += 1)
+    {
+        for (uint32_t arguments = 0; arguments <= BUSTER_TIER1_SELECT_CALL_ARGUMENTS; arguments += 1)
+        {
+            for (uint32_t mode = 0; mode < 2; mode += 1)
+            {
+                const uint32_t calls = mode == 0 ? 1 : 17;
+                const uint32_t count = 6 + calls + 1;
+                const IrSizes sizes =
+                {
+                    .instruction_count = count,
+                    .block_count = 1,
+                    .extra_count = 7,
+                    .call_count = 1,
+                    .call_type_count = 7,
+                    .parameter_count = 6,
+                };
+                IrFunction function;
+                const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+                tier1_select_test_expect(test, created, "create direct-call selection fixture");
+                if (created)
+                {
+                    function.result_type = result_types[type];
+                    function.symbol_count = 2;
+                    function.block_offsets[1] = count;
+                    memcpy(function.parameter_types, parameter_types, sizeof(parameter_types));
+                    for (uint32_t p = 0; p < 6; p += 1)
+                    {
+                        tier1_select_test_node(&function, p, IR_PARAM, parameter_types[p], p, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    }
+                    for (uint32_t p = 0; p < 7; p += 1)
+                    {
+                        function.extra[p] = ordered[p];
+                        function.call_types[p] = parameter_types[ordered[p]];
+                    }
+                    function.calls[0] = (IrCall)
+                    {
+                        .argument_count = arguments,
+                        .parameter_count = arguments,
+                        .result_type = result_types[type],
+                    };
+                    for (uint32_t c = 0; c < calls; c += 1)
+                    {
+                        tier1_select_test_node(&function, 6 + c, IR_CALL, result_types[type], 1, 0, BUSTER_IR_NONE);
+                    }
+                    tier1_select_test_node(&function, count - 1, IR_RET, IR_VOID, result_types[type] == IR_VOID ? BUSTER_IR_NONE : count - 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    Tier1SelectPlan plans[2];
+                    bool planned = true;
+                    for (uint32_t path = 0; path < 2; path += 1)
+                    {
+                        uint32_t failed = 0;
+                        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &plans[path], &failed);
+                        tier1_select_test_expect(test, error == TIER1_SELECT_OK && failed == BUSTER_IR_NONE && scratch.length == 0, "bounded direct call selects on both paths");
+                        planned &= error == TIER1_SELECT_OK;
+                    }
+                    if (planned)
+                    {
+                        const uint32_t expected_uses = calls * arguments + (result_types[type] != IR_VOID);
+                        tier1_select_test_expect(test, plans[0].effective_use_count == expected_uses && plans[1].effective_use_count == expected_uses, "call CSR capacity covers more than three uses per instruction");
+                        tier1_select_test_expect(test, memcmp(plans[0].effective_use_offsets, plans[1].effective_use_offsets, (uint64_t)(count + 1) * 4) == 0 && (expected_uses == 0 || memcmp(plans[0].effective_use_values, plans[1].effective_use_values, (uint64_t)expected_uses * 4) == 0), "scalar/vector call use CSR agrees exactly");
+                        for (uint32_t path = 0; path < 2; path += 1)
+                        {
+                            const Tier1SelectPlan* plan = &plans[path];
+                            for (uint32_t c = 0; c < calls; c += 1)
+                            {
+                                const uint32_t node = 6 + c;
+                                const Tier1SelectPattern* pattern = &plan->patterns[node];
+                                tier1_select_test_expect(test, pattern->rule == TIER1_RULE_CALL && pattern->immediate == 1 && pattern->width == tier1_select_width(result_types[type]) && pattern->fold_count == 0 && plan->covered[node] == 0, "CALL pattern publishes symbol and result width without folding");
+                                for (uint32_t p = 0; p < 3; p += 1)
+                                {
+                                    tier1_select_test_expect(test, pattern->values[p] == BUSTER_IR_NONE, "CALL ordinary value slots remain absent");
+                                }
+                                const uint32_t first = plan->effective_use_offsets[node];
+                                tier1_select_test_expect(test, plan->effective_use_offsets[node + 1] - first == arguments, "one effective use per ordered call argument");
+                                for (uint32_t p = 0; p < arguments; p += 1)
+                                {
+                                    tier1_select_test_expect(test, plan->effective_use_values[first + p] == ordered[p], "call argument order and duplicate uses are retained");
+                                }
+                            }
+                            uint8_t registers[24];
+                            memset(registers, UINT8_MAX, sizeof(registers));
+                            Tier1SelectCode code;
+                            memset(&code, 0xa5, sizeof(code));
+                            const Tier1SelectCode before = code;
+                            const uint64_t mark = output.length;
+                            uint32_t failed = 0;
+                            const Tier1SelectError error = tier1_select_emit(plan, registers, test->allowed, &output, &code, &failed);
+                            tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED && failed == 6 && output.length == mark && memcmp(&code, &before, sizeof(code)) == 0, "legacy emitter refuses call plan transactionally before allocation checks");
+                        }
+                    }
+                    if (calls == 1 && arguments == 6 && result_types[type] == IR_I64)
+                    {
+                        for (uint32_t refusal = 0; refusal < 7; refusal += 1)
+                        {
+                            const IrCall saved = function.calls[0];
+                            if (refusal == 0)
+                            {
+                                function.calls[0].variadic = true;
+                            }
+                            else if (refusal == 1)
+                            {
+                                function.calls[0].argument_count = 7;
+                                function.calls[0].parameter_count = 7;
+                            }
+                            else if (refusal == 2)
+                            {
+                                function.op[6] = IR_CALL_INDIRECT;
+                                function.a[6] = 2;
+                            }
+                            else if (refusal == 3)
+                            {
+                                function.parameter_types[5] = IR_I1;
+                                function.type[5] = IR_I1;
+                                function.call_types[0] = IR_I1;
+                            }
+                            else if (refusal == 4)
+                            {
+                                function.result_type = IR_F64;
+                                function.type[6] = IR_F64;
+                                function.calls[0].result_type = IR_F64;
+                            }
+                            else if (refusal == 5)
+                            {
+                                function.calls[0].result_type = IR_I32;
+                            }
+                            else
+                            {
+                                function.calls[0].argument_first = function.extra_count;
+                            }
+                            for (uint32_t path = 0; path < 2; path += 1)
+                            {
+                                Tier1SelectPlan rejected;
+                                memset(&rejected, 0xa5, sizeof(rejected));
+                                const Tier1SelectPlan before = rejected;
+                                const uint64_t mark = output.length;
+                                uint32_t failed = 0;
+                                const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &rejected, &failed);
+                                const Tier1SelectError expected = refusal < 5 ? TIER1_SELECT_ERROR_UNSUPPORTED : TIER1_SELECT_ERROR_INVALID;
+                                tier1_select_test_expect(test, error == expected && (refusal >= 5 || failed == 6), "unsupported call ABI and invalid IR remain distinct");
+                                tier1_select_test_expect(test, output.length == mark && scratch.length == 0 && memcmp(&rejected, &before, sizeof(rejected)) == 0, "call refusal preserves result and arena lengths");
+                            }
+                            function.calls[0] = saved;
+                            function.op[6] = IR_CALL;
+                            function.a[6] = 1;
+                            function.parameter_types[5] = parameter_types[5];
+                            function.type[5] = parameter_types[5];
+                            function.call_types[0] = parameter_types[5];
+                            function.result_type = IR_I64;
+                            function.type[6] = IR_I64;
+                        }
+                    }
+                }
+                arena_pop_to(&input, 0);
+                arena_pop_to(&output, 0);
+            }
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
+static void tier1_select_test_call_barriers(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(8u << 20);
+    Arena scratch = arena_reserve(8u << 20);
+    for (uint32_t shape = 0; shape < 6; shape += 1)
+    {
+        const IrSizes sizes =
+        {
+            .instruction_count = shape == 3 ? 5 : 6,
+            .block_count = 1,
+            .constant_count = 1,
+            .address_count = 1,
+            .call_count = 1,
+            .parameter_count = shape == 1 || shape == 2 ? 2 : 1,
+        };
+        IrFunction function;
+        const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+        tier1_select_test_expect(test, created, "create call barrier fixture");
+        if (created)
+        {
+            function.result_type = IR_I64;
+            function.symbol_count = 2;
+            function.block_offsets[1] = function.instruction_count;
+            function.parameter_types[0] = shape == 1 || shape == 2 ? IR_PTR : IR_I64;
+            function.constants[0].low = 3;
+            function.addresses[0].scale = 1;
+            tier1_select_test_node(&function, 0, IR_PARAM, function.parameter_types[0], 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function.calls[0].result_type = IR_VOID;
+            if (shape == 0 || shape == 4)
+            {
+                const uint32_t constant = shape == 0 ? 1 : 2;
+                const uint32_t shift = shape == 0 ? 2 : 3;
+                const uint32_t call = shape == 0 ? 3 : 1;
+                tier1_select_test_node(&function, constant, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, shift, IR_SHL, IR_I64, 0, constant, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, call, IR_CALL, IR_VOID, 1, 0, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 4, IR_ADD, IR_I64, 0, shift, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            else if (shape == 1 || shape == 2)
+            {
+                function.parameter_types[1] = IR_I64;
+                tier1_select_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 2, shape == 1 ? IR_LOAD : IR_ADDRESS, shape == 1 ? IR_I64 : IR_PTR, 0, shape == 1 ? BUSTER_IR_NONE : 1, shape == 1 ? BUSTER_IR_NONE : 0);
+                tier1_select_test_node(&function, 3, IR_CALL, IR_VOID, 1, 0, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 4, shape == 1 ? IR_ADD : IR_LOAD, IR_I64, shape == 1 ? 1 : 2, shape == 1 ? 2 : BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            else if (shape == 3)
+            {
+                tier1_select_test_node(&function, 1, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 2, IR_CALL, IR_VOID, 1, 0, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 3, IR_ADD, IR_I64, 0, 1, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            else
+            {
+                tier1_select_test_node(&function, 1, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 2, IR_CALL, IR_VOID, 1, 0, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 3, IR_SHL, IR_I64, 0, 1, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 4, IR_COPY, IR_I64, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                Tier1SelectPlan plan;
+                uint32_t failed = 0;
+                const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &plan, &failed);
+                tier1_select_test_expect(test, error == TIER1_SELECT_OK, "call-separated patterns remain selectable");
+                if (error == TIER1_SELECT_OK)
+                {
+                    const uint32_t before = shape == 3 || shape == 5 ? 1 : shape == 4 ? 3 : 2;
+                    const uint32_t consumer = shape == 3 || shape == 5 ? 3 : 4;
+                    tier1_select_test_expect(test, (plan.covered[before] != 0) == (shape != 1), "calls block memory folding while preserving pure and constant folds");
+                    if (shape == 1)
+                    {
+                        bool used = false;
+                        for (uint32_t use = plan.effective_use_offsets[consumer]; use < plan.effective_use_offsets[consumer + 1]; use += 1)
+                        {
+                            used |= plan.effective_use_values[use] == before;
+                        }
+                        tier1_select_test_expect(test, used, "pre-call load remains a physical use after call");
+                    }
+                    else if (shape == 5)
+                    {
+                        tier1_select_test_expect(test, plan.patterns[3].rule == TIER1_RULE_IMMEDIATE && plan.patterns[3].immediate == 3, "constant before call still selects an immediate shift after call");
+                    }
+                }
+                arena_pop_to(&output, 0);
+            }
+        }
+        arena_pop_to(&input, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static int run_tier1_select_tests(int argc, char** argv)
 {
     int result = 1;
@@ -972,6 +1264,8 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_memory_plans(&test);
             tier1_select_test_errors(&test);
             tier1_select_test_guarded(&test);
+            tier1_select_test_calls(&test);
+            tier1_select_test_call_barriers(&test);
             if (manifest)
             {
                 printf("# tier1-manifest-end,version=1,plan=%" PRIu64 ",expansion=%" PRIu64 ",wrapper=%" PRIu64 "\n", test.emitted_records[0], test.emitted_records[1], test.emitted_records[2]);

@@ -55,7 +55,7 @@ changes to compiler options or production routing.
 ## Supported fixtures and independent oracles
 
 Each supported function takes three `uint64_t` parameters and returns a
-`uint64_t`. Four original fixtures cover:
+`uint64_t`. Six original fixtures cover:
 
 | Fixture | Handoff exercised |
 | --- | --- |
@@ -63,6 +63,8 @@ Each supported function takes three `uint64_t` parameters and returns a
 | Twelve separately defined nonconstant terms | Long live ranges after promotion, real spill stores, frame slots and reloads |
 | Sixteen separately defined wide constants | Ordinary constant spills and rematerialization after eviction |
 | `uint64_t`/`uint32_t` conversions and local arithmetic | Narrowing, unsigned wraparound, zero extension and shared local uses |
+| Direct call to a constant-returning local helper | Zero-argument calls, ordinary symbolic references and caller stack alignment |
+| Three-argument local helper with values live across the call | Argument permutation, preservation across CALL and helper/entry compilation through the complete pipeline |
 
 Every fixture runs through scalar and vector paths, with rematerialization both
 disabled and enabled. A five-register pool contains the three required System V
@@ -87,8 +89,12 @@ formulas with Clang at `-O0` and `-O2`, using `-march=x86-64`, and checks every
 fixture/input pair against the typed interpreter. It does not translate selected
 instructions or optimized IR back into C.
 
-A successful complete run reports 512 native results. A cross-check additionally
-reports 256 Clang results. The check count also includes stage validation,
+A successful complete run reports 768 native results, including eight emitted
+call sites across the scalar/vector and rematerialization combinations. A
+cross-check additionally reports 384 Clang results. Original typed symbols
+resolve to helpers compiled through the same complete pipeline; relocation
+metadata, signed rel32 range and encoder instruction ends are checked before
+execution. The check count also includes stage validation,
 allocation/frame assertions and failure contracts; it is not a corpus size.
 
 Two focused harness regressions run even without Clang. One deliberately changes
@@ -99,18 +105,18 @@ all three processes and proof that both descendant PIDs no longer exist.
 
 ## Unsupported cases and limits
 
-Five additional valid typed fixtures pass through lowering, promotion and
+Four additional valid typed fixtures pass through lowering, promotion and
 optimization on both paths. An early-return branch and an entry backedge reach
 the selected machine consumer, which must return `TIER1_EMIT_UNSUPPORTED`. A
-join requiring a phi, a call and floating-point arithmetic must return
-`TIER1_SELECT_ERROR_UNSUPPORTED`. These ten refusals must preserve the failing stage's
+join requiring a phi and floating-point arithmetic must return
+`TIER1_SELECT_ERROR_UNSUPPORTED`. These eight refusals must preserve the failing stage's
 result and restore its output and scratch arena lengths. They are never executed
 as native code.
 
 The current machine consumer supports one block or a physical straight-line
 chain whose intermediate terminators branch to the next block and whose final
 terminator returns. General control flow needs edge location reconciliation.
-Calls, phis, floating point, dynamic/variadic frames, dynamic shifts, division,
+Indirect/variadic/wide-ABI calls, phis, floating point, dynamic/variadic frames, dynamic shifts, division,
 undefined values and unsupported conversions remain outside this integration
 subset. See [selection](tier1-selection.md), [liveness](tier1-liveness.md),
 [allocation](tier1-allocation.md), and [frames](tier1-frame.md) for their contracts.

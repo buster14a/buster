@@ -66,9 +66,14 @@ in that same block. The self-loop test checks that its interval reaches the
 backedge, beyond its last local use. Other emitted definitions retain the
 ordinary kill rule.
 
-PHIs, calls and floating-point values remain unsupported by this bounded
-selector/adapter combination. There are no fabricated phi copies, edge moves,
-call clobbers or spill instructions. If allocation produces a nonuniform or
+PHIs, indirect/variadic calls and floating-point values remain unsupported by
+this bounded selector/adapter combination. Direct nonvariadic calls accept up
+to six `I32`, `I64` or pointer arguments and a void or matching scalar result.
+Their ordered effective-use slices preserve duplicate arguments. The native
+consumer handles ABI moves and preserves surviving caller registers around
+each call; the liveness adapter does not ban those registers for whole
+intervals. There are no fabricated phi copies or edge moves.
+If allocation produces a nonuniform or
 spilled value location, the current leaf emitter declines it explicitly. This
 does not claim that the general allocator lacks fragment support.
 

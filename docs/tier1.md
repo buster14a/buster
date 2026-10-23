@@ -79,23 +79,31 @@ The [selection](tier1-selection.md), [selected-use liveness](tier1-liveness.md),
 connected by a native function consumer. Its fragment path supports 32/64-bit
 scalar values in straight-line block chains, with actual spill stores,
 reloads, constant rematerialization and stack probes. General CFG fragment
-reconciliation, phis, calls and floating-point emission remain outside this
+reconciliation, phis, indirect/variadic/wide-ABI calls and floating-point emission remain outside this
 bounded consumer. The selector's uniform-register API has its own broader
 branch subset and explicitly refuses unsupported allocations.
 
-`test-tier1-pipeline --cross-check` starts with four original typed-stream
+Ordinary direct calls accept up to six register-passed `I32`, `I64` or pointer
+arguments and a void or matching scalar result. The native consumer preserves
+live caller registers, resolves argument cycles, aligns the stack and publishes
+ordinary symbolic CALL references. Independent hostile helpers test clobbers,
+return widths, memory effects and frame safety. Full builtin/source acceptance
+requires integrating the source owner's exact helper and checked-call path.
+
+`test-tier1-pipeline --cross-check` starts with six original typed-stream
 fixtures and runs ABI assignment, lowering, SSA promotion, optimization,
 selection, liveness, allocation, frame emission, branch sizing and encoding.
 It freezes interpreter expectations before compilation and also compares
-Clang-built C formulas. Local normal and sanitizer checkpoints each passed
-1,605 checks: 512 native results, 256 Clang results and ten explicit
-unsupported refusals. These are bounded integration fixtures, described in
+Clang-built C formulas. A complete cross-check expects 768 native results,
+384 Clang results, eight emitted direct calls and eight explicit unsupported
+refusals. These are bounded integration fixtures, described in
 the [pipeline guide](tier1-pipeline.md), not a source-corpus campaign.
 
 The [emitted-case harness](tier1-model-measurements.md) accepts only complete
 selector manifests, retains exact operand distinctions and refuses experiments
 it cannot represent faithfully. Its current inventory has 566 eligible cases;
 verification is construction/execution evidence, not a processor measurement.
+This frozen inventory does not include the new native-call consumer records.
 No unknown model column is filled by this integration.
 
 At the start of the October 23, 2026 takeover, main

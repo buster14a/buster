@@ -177,7 +177,45 @@ The supported control flow is a straight-line physical chain. Every block
 before the last must unconditionally branch to the immediately following block;
 the last returns. Such identity jumps emit no record. This admits the typed
 lowerer's parameter preheader followed by its body, while general joins,
-backedges and phi/call moves still need an explicit edge-location consumer.
+backedges and phi moves still need an explicit edge-location consumer.
+
+Direct nonvariadic calls support up to six `I32`, `I64` or pointer arguments
+and a void, `I32`, `I64` or pointer result. The call pattern keeps the symbol
+ID in `immediate`; its three ordinary value holes are empty. Its complete
+ordered argument list is the effective-use CSR slice, including duplicates.
+Arguments are evaluated by their existing IR definitions exactly once. Calls
+remain ordered barriers, and no load is folded across one.
+
+The native consumer captures argument locations before definition-phase
+evictions, saves surviving caller registers in dedicated fixed-frame rows,
+resolves parallel argument moves using reserved R11, and emits the call. All
+argument shuffles use full-width copies before narrowing `I32` destinations,
+so mixed-width cycles preserve their original sources. The return value moves
+from RAX before live registers are restored; `I32` returns use a 32-bit move
+even when the destination is RAX. Existing allocation keeps the result's
+destination distinct from the saved survivors. Call preservation counts are
+reported separately as `call_stores` and `call_loads`.
+
+Call-containing functions disable the red zone and use the frame planner's
+System V call alignment, including zero-argument calls. The bounded register
+save rows cannot share storage with ordinary spill homes. Leaf functions keep
+their existing frame policy. Argument moves are a dependency-constrained
+operation over at most six registers; the existing scalar/vector liveness,
+allocation and frame producers still consume the complete function.
+
+`Tier1EmitResult.references[reference_count]` contains ordinary
+`LinkReference` entries: the call instruction index, displacement field,
+`BUSTER_LINK_FIXUP_CALL`, the original symbol ID and zero source addend.
+The corresponding records carry `BUSTER_X86_FORM_FIXUP`. After branch sizing
+and encoding, publish them through `link_add_code_fixups` with the encoder's
+instruction ends. The references retain instruction indices, not guessed byte
+offsets. The older frameless `tier1_select_emit` API still rejects call plans.
+
+Indirect and variadic calls, stack arguments, floating-point and aggregate
+arguments/results, and terminal-call CFGs are outside this bounded path.
+Unsupported calls and allocation/target/capacity errors publish no partial
+result. Correct execution of these component fixtures does not establish
+atomic-builtin, full-source ABI or corpus acceptance.
 
 The complete producer/consumer sequence is:
 
