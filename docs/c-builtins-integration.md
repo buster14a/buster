@@ -241,7 +241,9 @@ value types, qualifiers, all argument effects, ordinary `int` order conversions,
 and known/dynamic order metadata. Orders do not generally require ICE. Invalid
 known load/store orders carry warnings; fence handling retains its own rules.
 GNU `_Atomic` wrappers and unsupported families are not treated as ordinary
-integer objects. Other recognized atomic/sync IDs remain explicit refusals.
+integer objects. Read/modify/write checking and runtime leaves are separate
+modules described below; other recognized atomic/sync families remain
+explicit refusals.
 The source-domain rules follow the approved Clang 23.1.1 release: real and
 floating-complex `_n` objects are valid, while direct x87 long double and
 `_BitInt` objects are rejected. F32/F64 retain exact source conversions;
@@ -261,10 +263,58 @@ pointer and value expression must still execute once even when the helper
 does not inspect its numeric order.
 
 The producer must establish natural alignment at least `required_alignment`.
-Unknown or insufficient alignment, packed objects, wider objects and RMW
-families need another real fallback; this module must not make unaligned
+Unknown or insufficient alignment, wider objects and formats outside the
+selected helper need another real fallback. A helper must not make unaligned
 ordinary MOV appear atomic. The semantic result retains alignment evidence
 and unsupported requirements without turning valid source into fake success.
+
+`c_check_builtin_atomic_rmw.c` checks 30 scalar GNU and legacy spellings:
+exchange, compare-exchange, old/new-value add/sub/AND/OR/XOR/NAND, legacy
+lock-test-and-set and lock-release. It retains actual source types, converted
+fixed operands, old/new/boolean/void result kind, conditional object/expected
+writes and explicit runtime format. Checking never reads or folds a source
+memory object. GNU pointer add/sub converts the delta to LP64 `ptrdiff_t`
+(`long`) and uses bytes without element-size scaling. Legacy pointer
+operations convert their fixed values to the pointer value type before raw
+address-bit operations. GNU `_BitInt` pointees are rejected. Legacy `_BitInt`
+accepts power-of-two bit widths; widths below eight retain a distinct
+sub-byte representation gap.
+
+GNU calls require exact arity. Every fixed operand, including dynamic weak
+and order expressions, evaluates exactly once. The source producer retains
+prior diagnostics within legacy protected-variable tails. Those tails are
+never evaluated or passed to a helper; their effects and evaluation faults
+do not propagate. Known orders remain separate from source ICE witnesses
+after ordinary conversion. Only witnessed invalid orders acquire Clang's
+order warning; dynamic orders remain valid. Clang 23.1.1 also permits failure
+orders stronger than success.
+The consumer must retain all these evaluation and warning distinctions even
+when the machine implementation strengthens the ordering.
+
+`c_builtin_atomic_rmw_helpers.c` emits naturally aligned 1/2/4/8-byte baseline
+SysV leaves, using U64 raw bits and at most six integer argument registers.
+Integer and pointer arithmetic is modular. LOCK CMPXCHG loops strengthen
+valid orders to sequential consistency, retry from the newly observed value,
+and return the successful desired register for new-value operations. Strong
+CAS implements weak requests. GNU CAS takes an expected address, reads its
+exact object width once, and stores the observed value there only on failure.
+Success permits read-only expected storage and `expected == object` without
+overwriting the desired object value. Legacy CAS instead takes an expected
+value. Legacy lock-release is a pure exact-width MOV of zero followed by
+MFENCE: it adds no object read or read/modify/write event. All calls remain
+unknown-effect compiler barriers, including release, and require proven
+natural object alignment and operation-appropriate accessibility.
+
+Source-valid operations can still require an unsupported runtime format.
+Canonical boolean exchange/CAS/AND/OR/XOR/release preserve 0/1 storage.
+Boolean add/sub/NAND may produce noncanonical bytes and remain explicit
+runtime gaps rather than being silently normalized. Floating exchange alone
+has F32/F64 raw-bit leaves; floating arithmetic, wider/complex formats,
+sub-byte integer representations, objects wider than eight bytes and absent
+or insufficient alignment proof need another consumer. Floating helper
+transport never numerically converts between FP and integer bits. No module
+grants source, constant-expression or either-tier capability merely because
+typed checking or an isolated helper succeeds.
 
 `c_builtin_terminal_helpers.c` emits one baseline UD2 record for trap and a
 conservative realization of unreachable behavior. Its source consumer must
@@ -417,6 +467,8 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-builtin-float-lowering
 ./build/compiler test-check-builtins-atomic
 ./build/compiler test-builtin-atomic-helpers
+./build/compiler test-check-builtins-atomic-rmw
+./build/compiler test-builtin-atomic-rmw-helpers
 ./build/compiler test-builtin-terminal-helpers
 ./build/compiler test-check-builtins-typed-overflow
 ./build/compiler test-check-builtins-rounds
@@ -428,10 +480,9 @@ On the approved 9700X, through a separate shared-host lock for each command:
 The tests distinguish typed constraints and fold metadata from native execution
 of the emitted recipes. Scalar/vector agreement is supplemented with Clang's
 builtin behavior, boundary inputs, real destination writes and guarded-capacity
-checks. The CI workflow registers the new suites alongside the existing
-integer-action suite. Results and full source/two-tier acceptance must be
-reported for the exact tested revision; this document makes no throughput
-claim.
+checks. Command/workflow registration, results and full source/two-tier
+acceptance must be reported for the exact tested revision; this document
+makes no throughput claim.
 
 ## Provenance
 
@@ -441,3 +492,10 @@ retains its separate LLVM provenance and terms. The existing type, checker,
 typed-stream, encoder and ABI interfaces are reused. Clang is an external
 behavior and execution oracle; no Clang implementation or external fixture
 corpus is imported.
+
+The atomic RMW modules and fixtures are original C. Exact
+[Clang 23.1.1 checking](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaChecking.cpp),
+[atomic emission rules](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/CodeGen/CGAtomic.cpp),
+[legacy builtin emission](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/CodeGen/CGBuiltin.cpp)
+and [LLVM's atomic code-generation description](https://llvm.org/docs/Atomics.html#atomics-and-codegen)
+supply behavior facts; their implementation and tests are not copied.

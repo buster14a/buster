@@ -279,6 +279,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_float.c"
 #include "buster/compiler/c_check_builtin_math.c"
 #include "buster/compiler/c_check_builtin_atomic.c"
+#include "buster/compiler/c_check_builtin_atomic_rmw.c"
 #include "buster/compiler/c_check_builtin_vector.c"
 #include "buster/compiler/c_check_builtin_typed_overflow.c"
 #include "buster/compiler/c_check_builtin_rounds.c"
@@ -301,6 +302,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_float_test.c"
 #include "buster/compiler/c_check_builtin_math_test.c"
 #include "buster/compiler/c_check_builtin_atomic_test.c"
+#include "buster/compiler/c_check_builtin_atomic_rmw_test.c"
 #include "buster/compiler/c_check_builtin_vector_test.c"
 #include "buster/compiler/c_check_builtin_typed_overflow_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
@@ -338,6 +340,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_builtin_terminal_helpers_test.c"
 #include "buster/compiler/c_builtin_atomic_helpers.c"
 #include "buster/compiler/c_builtin_atomic_helpers_test.c"
+#include "buster/compiler/c_builtin_atomic_rmw_helpers.c"
+#include "buster/compiler/c_builtin_atomic_rmw_helpers_test.c"
 #include "buster/compiler/c_builtin_rounds_helper.c"
 #include "buster/compiler/c_builtin_rounds_helper_test.c"
 #include "buster/compiler/c_builtin_math_helpers.c"
@@ -766,6 +770,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_check_builtin_atomic_tests(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-atomic-rmw") == 0)
+    {
+        result = run_check_builtin_atomic_rmw_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-typed-overflow") == 0)
     {
         result = run_check_builtin_typed_overflow_tests(argc - 2, argv + 2);
@@ -829,6 +837,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-atomic-helpers") == 0)
     {
         result = run_builtin_atomic_helper_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-atomic-rmw-helpers") == 0)
+    {
+        result = run_builtin_atomic_rmw_helper_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-rounds-helper") == 0)
     {
