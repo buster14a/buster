@@ -3355,6 +3355,17 @@ failure. `benchmark-bindings [--events N] [--names N] [--only scalar|batch|sort]
 CPU 2. The parser adapter and corpus acceptance for #128 remain pending;
 [docs/c-bindings.md](docs/c-bindings.md) describes the contract and boundaries.
 
+## Selective lowering
+
+`./build/compiler test-lowering --clang` compares selective function/object
+emission planning with an independent graph oracle and Clang object symbols
+on original, manually modeled C fixtures. `benchmark-lowering` measures
+synthetic graph preparation and vector/scalar selection; use the shared 9700X
+lock and pin timings to CPU 2. [The lowering guide](docs/c-lowering.md) records
+the semantic producer contract and the source/checker/backend integration
+still required for #129. These commands do not establish corpus lowering or
+whole-compiler savings.
+
 ## Type tests
 
 `./build/compiler test-types [--seed N] [--count N] [--clang PATH] [--keep]`
