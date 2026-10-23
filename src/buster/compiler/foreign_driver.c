@@ -413,7 +413,7 @@ static int run_foreign_link(int argc, char** argv)
     }
     if (succeeded && !driver.help && driver.kind == RUNTIME_KIND_DYNAMIC && driver.interpreter.length == 0)
     {
-        succeeded = runtime_import(&runtime) == RUNTIME_ERROR_NONE && runtime.loader_path.length != 0;
+        succeeded = runtime_discover_interpreter(&runtime) == RUNTIME_ERROR_NONE && runtime.loader_path.length != 0;
         driver.interpreter = runtime.loader_path;
         if (!succeeded)
         {

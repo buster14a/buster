@@ -1086,6 +1086,68 @@ static void foreign_driver_test_oracles(ForeignTestTally* tally, const char* dir
     }
 }
 
+static void foreign_driver_test_interpreter(ForeignTestTally* tally, const char* directory, const Runtime* imported)
+{
+    Runtime discovered;
+    const RuntimeError found = runtime_discover_interpreter(&discovered);
+    const bool same = found == RUNTIME_ERROR_NONE && discovered.loader_path.length == imported->loader_path.length &&
+                      memcmp(discovered.loader_path.pointer, imported->loader_path.pointer, imported->loader_path.length) == 0;
+    foreign_test_expect(tally, same, "path-only discovery matches the complete runtime interpreter", 0);
+    bool unloaded = discovered.tables.base == 0 && discovered.names.base == 0 && discovered.gcc_directory.length == 0 &&
+                    discovered.gcc_versions.length == 0 && discovered.libc_bytes.length == 0 && discovered.loader_bytes.length == 0 &&
+                    discovered.member_count == 0 && discovered.link.atoms.count == 0 && discovered.link.symbols.count == 0;
+    for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
+    {
+        unloaded = unloaded && discovered.object_paths[i].length == 0 && discovered.object_bytes[i].length == 0;
+    }
+    for (uint32_t i = 0; i < discovered.archive_count; i += 1)
+    {
+        unloaded = unloaded && discovered.archives[i].bytes.length == 0 && discovered.archives[i].archive.member_count == 0;
+    }
+    foreign_test_expect(tally, unloaded && discovered.probe_count != 0 && runtime_probes_current(&discovered),
+                        "discovery records paths without loading or reserving runtime symbol tables", 0);
+    runtime_release(&discovered);
+
+    char path[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    snprintf(path, sizeof(path), "%s/interpreter-script.ld", directory);
+    char text[4 * BUSTER_RUNTIME_PATH_BYTES];
+    const RuntimeError expected[] = { RUNTIME_ERROR_NONE, RUNTIME_ERROR_MISSING, RUNTIME_ERROR_MISSING, RUNTIME_ERROR_IMPORT, RUNTIME_ERROR_FILE, RUNTIME_ERROR_MEMORY };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(expected); i += 1)
+    {
+        int length = 0;
+        if (i == 0 || i == 5)
+        {
+            length = snprintf(text, sizeof(text), "GROUP ( %.*s %.*s AS_NEEDED ( %.*s ) )\n", (int)imported->libc_path.length, imported->libc_path.pointer,
+                              (int)imported->archives[0].path.length, imported->archives[0].path.pointer, (int)imported->loader_path.length, imported->loader_path.pointer);
+        }
+        else if (i == 1)
+        {
+            length = snprintf(text, sizeof(text), "GROUP ( %.*s %.*s )\n", (int)imported->libc_path.length, imported->libc_path.pointer,
+                              (int)imported->archives[0].path.length, imported->archives[0].path.pointer);
+        }
+        else if (i == 2)
+        {
+            length = snprintf(text, sizeof(text), "GROUP ( libc.so.6 libc_nonshared.a AS_NEEDED ( ld-linux-x86-64.so.2 ) )\n");
+        }
+        else
+        {
+            length = snprintf(text, sizeof(text), "GROUP (\n");
+        }
+        const bool written = length > 0 && (uint32_t)length < sizeof(text) && object_write_file(path, (const uint8_t*)text, (uint64_t)length) == OBJECT_ERROR_NONE;
+        const bool removed = i != 4 || unlink(path) == 0;
+        Runtime scripted;
+        const bool begun = runtime_begin(&scripted);
+        scripted.libc_script = begun ? runtime_copy_path(&scripted, path) : (String8){ 0 };
+        scripted.probe_count = i == 5 ? scripted.probe_capacity : scripted.probe_count;
+        const RuntimeError result = written && removed && scripted.libc_script.length != 0 ? runtime_read_interpreter(&scripted) : RUNTIME_ERROR_MEMORY;
+        const bool loader = i == 0 ? scripted.loader_path.length == imported->loader_path.length &&
+                            memcmp(scripted.loader_path.pointer, imported->loader_path.pointer, imported->loader_path.length) == 0 : scripted.loader_path.length == 0;
+        foreign_test_expect(tally, result == expected[i] && loader, "interpreter script requirements and failure do not publish a partial path", path);
+        runtime_release(&scripted);
+    }
+    unlink(path);
+}
+
 static bool foreign_driver_test(const char* directory, Arena* arena, bool cross_check, ForeignTestSystem* system)
 {
     const uint64_t saved = arena->length;
@@ -1098,6 +1160,7 @@ static bool foreign_driver_test(const char* directory, Arena* arena, bool cross_
     foreign_test_expect(&tally, found, "find system loader for raw driver tests", 0);
     if (found && foreign_driver_test_compile(&tally, directory, &files, arena))
     {
+        foreign_driver_test_interpreter(&tally, directory, &runtime);
         foreign_driver_test_paths(&tally, directory, &files, arena, runtime.loader_path);
         foreign_driver_symbols_test(&tally, directory, &files, arena, runtime.loader_path);
         foreign_driver_test_cases(&tally, directory, &files, arena);

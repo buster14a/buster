@@ -324,6 +324,9 @@ static __attribute__((unused)) RuntimeError runtime_import_static_pie(Runtime* r
 static __attribute__((unused)) RuntimeError runtime_import_shared(Runtime* runtime);
 // runtime_import, runtime_import_static, runtime_import_static_pie or runtime_import_shared, by `kind`.
 static __attribute__((unused)) RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind);
+// Finds the default interpreter through libc.so's script without importing CRT objects, archives or library symbols.
+// The path and probe records belong to runtime->files until runtime_release. This is path discovery, not ELF validation.
+static __attribute__((unused)) RuntimeError runtime_discover_interpreter(Runtime* runtime);
 static __attribute__((unused)) void runtime_release(Runtime* runtime);
 // Whether a runtime of `kind` is libc.a's, with archives and without a shared library: a static executable's or a static
 // PIE's.
@@ -802,6 +805,39 @@ static RuntimeError runtime_read_script(Runtime* runtime)
         result = RUNTIME_ERROR_MISSING;
         snprintf(runtime->failed_file, sizeof(runtime->failed_file), "libc.so.6 or libc_nonshared.a in %.*s", (int)runtime->libc_script.length,
                  runtime->libc_script.pointer);
+    }
+    return result;
+}
+
+// The script reader also serves callers that need its interpreter path alone. Keep its existing absolute-path and
+// file-presence checks, and require an as-needed loader entry without reading or importing that library's contents.
+static RuntimeError runtime_read_interpreter(Runtime* runtime)
+{
+    RuntimeError result = runtime_read_script(runtime);
+    if (result == RUNTIME_ERROR_NONE && runtime->loader_path.length == 0)
+    {
+        result = RUNTIME_ERROR_MISSING;
+        snprintf(runtime->failed_file, sizeof(runtime->failed_file), "dynamic loader in %.*s", (int)runtime->libc_script.length, runtime->libc_script.pointer);
+    }
+    result = result == RUNTIME_ERROR_NONE && runtime->probes_full ? RUNTIME_ERROR_MEMORY : result;
+    if (result != RUNTIME_ERROR_NONE)
+    {
+        runtime->loader_path = (String8){ 0 };
+    }
+    return result;
+}
+
+static RuntimeError runtime_discover_interpreter(Runtime* runtime)
+{
+    *runtime = (Runtime){ 0 };
+    runtime->files = arena_reserve(BUSTER_RUNTIME_FILES_BYTES);
+    runtime->probe_capacity = BUSTER_RUNTIME_MAX_PROBES;
+    runtime->probes = BUSTER_ARENA_PUSH_ARRAY(&runtime->files, RuntimeProbe, runtime->probe_capacity);
+    RuntimeError result = runtime->probes != 0 ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MEMORY;
+    if (result == RUNTIME_ERROR_NONE)
+    {
+        runtime->libc_script = runtime_find_file(runtime, "libc.so", false);
+        result = runtime->libc_script.length != 0 ? runtime_read_interpreter(runtime) : RUNTIME_ERROR_MISSING;
     }
     return result;
 }
