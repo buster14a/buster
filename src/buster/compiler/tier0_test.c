@@ -488,12 +488,14 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             }
             if (f->call_targets[value] == 0)
             {
-                // An indirect call's callee, under its arguments: a function's tagged index, the one the generator
-                // called.
+                // An indirect call's callee, under its arguments: a function's tagged index, the one the pointer holds
+                // when the call runs, of the type of the one the generator chose (as many parameters, at least).
                 top -= 1;
                 const uint64_t address = stack[top];
-                *fault |= (address & ~0xffffull) != BUSTER_TIER0_TEST_FUNCTION_TAG || (address & 0xffff) != callee;
-                callee = (uint32_t)(address & 0xffff) < program->function_count ? (uint32_t)(address & 0xffff) : callee;
+                const uint32_t held = (uint32_t)(address & 0xffff);
+                const bool function_held = (address & ~0xffffull) == BUSTER_TIER0_TEST_FUNCTION_TAG && held < program->function_count;
+                *fault |= !function_held || program->functions[function_held ? held : callee].parameter_count != arguments;
+                callee = function_held ? held : callee;
             }
             frames[depth] = (Tier0TestFrame){ callee, 0, locals, callee_objects, top };
             depth += 1;

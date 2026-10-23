@@ -300,7 +300,9 @@ Before the programs, checks of their own:
   `X86_FORM_NONE` (which keeps the record) and a random value.
 - **errors:** both paths must refuse the same streams alike: a conversion from U64 to a floating class at 200
   places among 64-entry blocks, before another (the first entry reported), and 14 to 17 values on the integer
-  stack at once, past the 15 depths from 17 on (the last constant is the first add's immediate).
+  stack at once, past the 15 depths from 17 on (the last constant is the first add's immediate). And both must
+  compile 40 locals set from constants their stores absorb, from INT32_MIN on: past 32 locals emission gathers the
+  homes, and an absorbed lane mustn't look its value up as a local's.
 - **objects:**
   - `tier0_validate` must refuse each break of an object's rules at its locals: a class, no `ADDRESS_TAKEN`, a
     parameter, aligned to 32, sizes without alignments, a `LOCAL` of it, and past `BUSTER_TIER0_MAX_OBJECT_BYTES`.
@@ -327,7 +329,11 @@ Before the programs, checks of their own:
 
   A program without objects is the one the same seed gave before they existed;
 - with the `indirect` option (the shapes with calls), a third of the calls indirect: through locals that hold an
-  earlier function's address (C calls through them), or through the function's address itself.
+  earlier function's address (C calls through them), or through the function's address itself:
+  - four functions in ten take an earlier function's type, so that a type has several functions;
+  - statements give a pointer one function of its type or another by a condition (`p = c ? f : g`), so that a call
+    through it reaches whichever it holds when it runs;
+  - the interpreter calls the function an address names, and a call's work budget is its costliest candidate's.
 
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
@@ -367,10 +373,13 @@ a NaN's sign and payload to the implementation, and clang folds a constant 0.0 /
   - and on indirect calls:
     - the callee's register one depth off: the paths disagree and runs crash;
     - its move left out of the vector path's count: 767; the call's depths, the emitter's: 767;
-    - the callee left out of the effects: 713; or of the validator: 764 (valid streams refused).
+    - the callee left out of the effects: 713; or of the validator: 764 (valid streams refused);
+    - the interpreter calling the generator's own choice, not the function the pointer holds: 29 programs' runs.
 
     Counting the callee as a live depth in selection gives a frame one slot larger, which no check sees, as it
     changes no value.
+  - and absorbed lanes looking their value up as a local, past 32 locals (on main): the errors check's 40 locals,
+    whose stray gather faults.
 
 ## Measurements
 
