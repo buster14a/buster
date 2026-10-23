@@ -177,8 +177,9 @@ template fixes is that byte; a hole's is its index in the hole block. Expansion 
 3. one blend by the template's mask;
 4. one 64-byte store at the entry's place, overwritten past its records by the next entry.
 
-**Deferred entries** go to `tier0_emit_deferred`, which computes their lengths before the prefix sum and writes their
-records at the places it reserved:
+**Deferred entries** go to `tier0_emit_deferred`, which writes their records at the places measuring reserved. The
+vector path's measuring counts a call's records with `tier0_count_deferred`, from its arguments' locations and the
+cycles of its parallel move, without emitting it; the scalar path runs the emitter to count, which checks the count:
 
 - Calls: saves, stack arguments, the register arguments by a parallel move (cycles broken with `xchg`), al for a
   variadic call, the call, the result moved, the restores.
@@ -201,15 +202,39 @@ records at the places it reserved:
 5. **P4:** the depths, by in-register byte prefix sums.
 
 The property tables are built from the template slots, so both paths follow one table; `tier0_initialize` refuses a
-table on which they could disagree. Positions are a vector prefix sum, and the immediates' choice is one
-`x86_choose_forms` over every request.
+table on which they could disagree.
 
-**The scalar path** (`tier0_compile_scalar`) does the same an entry at a time, with each rule in plain code. It builds
-each record field by field from the templates' specifications, not from their compiled bytes, and chooses with
+The passes after fusion work 8 entries at a time, on a 64-bit **word** per entry: everything they read of its template
+(the template's index, length, required depth and reaches, its branch, reference and choice records, the choice's
+live flags and row, and the offsets of K, its scale, A and B). A slot's word also says whether it depends on the
+homes, and whether its four cases' words differ in the template alone (uniform).
+
+1. **Selection** gathers each entry's word from its slot's (`vpgatherdq`, from the slot table's 32,768 words). The
+   depth checks are masks, the depths each stack reaches lane maxima, and only the deferred entries' touches (a call's
+   saves, division's fixed registers) are taken an entry at a time.
+2. **Homes:** the references' count takes the referring entries of 64 at a time as a mask (`vpshufbitqmb` of their
+   kinds in the four kinds' bitset), then a count per set bit, without a branch per entry. The rest works per local,
+   and both paths share it.
+3. **Measuring** resolves a home-dependent word to its homes' case. A local's home comes from four registers by
+   `vpermt2q` for up to 32 locals, or by a gather past that. A uniform slot's case is added to the template; another's
+   word is gathered. The lengths come from the words, or a deferred entry's from its count, and the positions are
+   their prefix sum in registers.
+4. **Emission** computes the hole blocks of 8 entries in vectors. K, the scale and the locals of A and B come from a
+   `vpermt2q` over this block's values and the last block's; A and B from the homes' registers; the registers around
+   each depth from two 32-entry windows by `vpermt2d`. Four `vpermt2q` interleave them into four registers of two
+   blocks each. Then every lane of the block is expanded, in order and without a branch: the template's line, 32 added
+   to its hole indices for the second block of a register, one `vpermb`, one blend and one 64-byte store. A lane of an
+   absorbed or deferred entry, or past the last, stores too; the later lanes, the deferred entries and the epilogue
+   write over it. The choice requests are compressed into their columns (`vpcompress`), their contexts read from the
+   expanded records. The branches, then the references and the deferred entries, follow in entry order by their masks'
+   bits.
+
+The immediates' choice is one `x86_choose_forms` over every request.
+
+**The scalar path** (`tier0_compile_scalar`) does the same an entry at a time, with each rule in plain code. Selection
+looks each entry's slot up, measuring counts a deferred entry's records by running its emitter, and emission builds
+each record field by field from the templates' specifications, not from their compiled bytes. It chooses with
 `x86_choose_forms_scalar`.
-
-**Shared:** both paths run the same selection (a slot lookup per entry, with the frame's touches), homes and frame,
-measuring and emission. Those passes stay scalar for now, and the measurements below show they are where the time is.
 
 ## Tests
 
@@ -240,33 +265,38 @@ only from a short's value.
 
 **Robustness:**
 
-- 24,000 programs over four seeds, 1.1 million checks, passed.
-- A mutation of the vector fusion (no x = x op v) failed 160 of 50 programs per shape's checks.
+- 16,000 programs over four seeds, 752,016 checks, passed.
+- Mutations, all caught:
+  - the vector fusion without x = x op v: 160 failed checks, on 50 programs per shape;
+  - and on the passes after fusion, 200 programs per shape: emission's second blocks read as the first, 800;
+  - a uniform case not added for half the lanes: 304;
+  - a call's count one too high past 9 records: 29;
+  - the accumulator's context inverted: 244;
+  - a local's references miscounted: 749.
 
 ## Measurements
 
 The 9700X, CPU 2, `benchmark-backend`: generated programs' 2,216 functions, 262,894 typed entries, 292,738 records
-(1.11 per entry) and 1,107,677 bytes. 3.7% of entries are deferred, most of them calls. Medians of 21 passes:
+(1.11 per entry) and 1,107,677 bytes. 3.7% of entries are deferred, most of them calls. Medians of 21 passes, with
+the builds before and after vectorizing the passes after fusion run in turn, twice each:
 
 | Variant | ns per entry | Cycles per entry | Instructions per entry | Cycles per record | IPC |
 | --- | --- | --- | --- | --- | --- |
-| Vector path | 25.7 | 142.6 | 308.6 | 128.1 | 2.16 |
-| Scalar path | 40.7 | 225.8 | 569.6 | 202.8 | 2.52 |
-| `size_branches` | | | | 6.55 | 3.08 |
-| `x86_encode` | | | | 4.29 | 3.65 |
+| Vector path | 15.5 | 85.7 | 189.4 | 77.0 | 2.21 |
+| Vector path, before | 25.7 | 142.4 | 308.6 | 127.9 | 2.17 |
+| Scalar path | 40.7 | 225.7 | 571.9 | 202.7 | 2.54 |
+| `size_branches` | | | | 7.4 | 3.0 |
+| `x86_encode` | | | | 4.9 | 3.6 |
 
-- **Across states:** the vector path runs the same back to back (141.6 cycles per entry) and after 100 ms of the scalar
-  path (143.3). Its throttle reads stay small: it is not power-capped.
+- **The passes after fusion:** vectorizing selection, measuring and emission, and counting calls without emitting
+  them, took the vector path from 142.4 to 85.7 cycles per entry (1.66 times as fast), and 2.63 times as fast as the
+  scalar path.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
-  These numbers are about five times that; the budget is not met.
-- **Where the time goes** (perf on the 7940HS, retired instructions of the vector path):
-  - selection, measuring and emission each take about 11%, roughly 30 instructions per entry each;
-  - the deferred emitter about 10%: calls, counted once to measure and run again to emit;
-  - homes 5%, hole blocks 5%, and the immediates' contexts and choice about 8%;
-  - the vector fusion and depths (P0 to P4) 9%, about 28 instructions per entry.
-
-  The next steps are to vectorize selection and measuring, and to count a call's records without emitting them; see
-  the follow-ups.
+  The vector path is still about 2.7 times that; the budget is not met.
+- **Where the time goes** (perf on the 9700X, each pass kept out of line), about, in cycles per entry:
+  - emission 15, measuring 12 (counting calls 3 of it), selection 10 (the gather 1.3);
+  - the call emitter 9, homes 9 (sorting the locals 3), applying the chosen forms 6;
+  - fusion and depths (P0 to P4) 14, the frame and the prologue 6.
 
 **Generated code against clang -O0** (60 cross-checked programs on the 9700X):
 
@@ -289,10 +319,9 @@ The 9700X, CPU 2, `benchmark-backend`: generated programs' 2,216 functions, 262,
   - `switch` (no kind yet: a compare sequence or a jump table);
   - indirect calls;
   - globals of shared libraries through the GOT (a front end's visibility decision).
-- **Vectorizing the shared passes:**
-  - selection (the slot lookup, by a register-resident table or gathers) and measuring;
-  - counting a call's records without running its emitter;
-  - the hole blocks, 8 entries at a time from the P-passes' columns.
+- **The rest of the time:** the call emitter (an entry at a time), sorting the locals by references (an insertion
+  sort that mispredicts), applying the chosen forms (`x86_choice_instruction` per request), and selection's gather
+  from a table larger than L1.
 - **Floating constants** from a per-unit pool (`GLOBAL` of a pool symbol, the front end's choice); and rbp-relative
   frame operands where they encode shorter.
 - **Real corpora:** with #133, the vector and scalar paths on every function of the corpora; contract 6 measured on

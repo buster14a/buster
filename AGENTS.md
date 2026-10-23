@@ -473,8 +473,10 @@ designs and the compilers already built this way.
   get registers or frame slots; calls, and division and shifts at depths where
   their fixed registers are taken, are emitted entry by entry. The output is
   the records with #144's branch columns and `LinkReference`s. `tier0_compile`
-  finds the fusions, effects and depths 64 entries at a time in AVX-512 and
-  expands each template with one `vpermb`; `tier0_compile_scalar` is its twin.
+  finds the fusions, effects and depths 64 entries at a time in AVX-512, then
+  selects, measures and emits 8 at a time from a 64-bit word per entry,
+  expanding each template with one `vpermb`; `tier0_compile_scalar` is its
+  twin.
   `tier0_generate.c` makes random programs as typed streams and as C,
   `tier0_test.c` holds `test-tier0` and `tier0_benchmark.c` provides
   `benchmark-backend`. `docs/tier0.md` has the contract, the design and the

@@ -607,6 +607,49 @@ struct Tier0Compiled
 };
 
 static Tier0Compiled tier0_compiled[BUSTER_TIER0_TEMPLATE_CAPACITY];
+
+// The vector path's per-entry word: everything the passes after fusion read of an entry's template, in 64 bits, so that
+// selection gathers it, 8 entries at a time, and measuring and emission read it from the entries' column rather than a
+// template's summary. A template's word is tier0_template_words'; a slot's (tier0_slot_words, by kind << 9 | class << 5
+// | variant) is its first template's, and a home-dependent slot's says so, and whether its four cases' words differ in
+// the index alone (HOME_UNIFORM: measuring adds the case to the index rather than gathering the case's word). A B from
+// the entry's own local is the B of offset 0.
+#define BUSTER_TIER0_WORD_TEMPLATE 0xfffull
+#define BUSTER_TIER0_WORD_HOME_DEPENDENT (1ull << 12)
+#define BUSTER_TIER0_WORD_DEFERRED (1ull << 13)
+#define BUSTER_TIER0_WORD_UNSUPPORTED (1ull << 14)
+#define BUSTER_TIER0_WORD_DEPTH_SHIFT 15
+#define BUSTER_TIER0_WORD_ANY_DEPTH 15ull
+#define BUSTER_TIER0_WORD_INTEGER_REACH_SHIFT 19
+#define BUSTER_TIER0_WORD_FLOATING_REACH_SHIFT 21
+#define BUSTER_TIER0_WORD_CLOBBERS_RDX (1ull << 23)
+#define BUSTER_TIER0_WORD_LENGTH_SHIFT 24
+#define BUSTER_TIER0_WORD_BRANCH (1ull << 27)
+#define BUSTER_TIER0_WORD_FIXUP (1ull << 28)
+#define BUSTER_TIER0_WORD_CHOICE (1ull << 29)
+#define BUSTER_TIER0_WORD_BRANCH_SHIFT 30
+#define BUSTER_TIER0_WORD_FIXUP_SHIFT 32
+#define BUSTER_TIER0_WORD_CHOICE_SHIFT 34
+#define BUSTER_TIER0_WORD_END (1ull << 36)
+#define BUSTER_TIER0_WORD_CHOICE_STATIC (1ull << 37)
+#define BUSTER_TIER0_WORD_LIVE_SHIFT 38
+#define BUSTER_TIER0_WORD_K_SHIFT 44
+#define BUSTER_TIER0_WORD_K_SCALE_SHIFT 47
+#define BUSTER_TIER0_WORD_A_SHIFT 50
+#define BUSTER_TIER0_WORD_B_SHIFT 53
+#define BUSTER_TIER0_WORD_NO_OFFSET 7ull
+#define BUSTER_TIER0_WORD_HOME_UNIFORM (1ull << 56)
+#define BUSTER_TIER0_WORD_ABSORBED (1ull << 57)
+#define BUSTER_TIER0_WORD_ROW_SHIFT 58
+// The fields the passes after selection read: two words equal in these give the same records but for the template.
+#define BUSTER_TIER0_WORD_EMISSION \
+    (~(BUSTER_TIER0_WORD_TEMPLATE | BUSTER_TIER0_WORD_HOME_DEPENDENT | BUSTER_TIER0_WORD_HOME_UNIFORM | 0xffull << BUSTER_TIER0_WORD_DEPTH_SHIFT | BUSTER_TIER0_WORD_CLOBBERS_RDX))
+#define BUSTER_TIER0_SLOT_WORDS (BUSTER_TYPED_KIND_LIMIT * BUSTER_TYPED_CLASS_LIMIT * BUSTER_TIER0_VARIANTS)
+
+static uint64_t tier0_slot_words[BUSTER_TIER0_SLOT_WORDS];
+static uint64_t tier0_template_words[BUSTER_TIER0_TEMPLATE_CAPACITY];
+// Per template: its compiled records' hole mask, for emission.
+static uint64_t tier0_masks[BUSTER_TIER0_TEMPLATE_CAPACITY];
 static uint16_t tier0_slot_bases[BUSTER_TYPED_KIND_LIMIT * BUSTER_TYPED_CLASS_LIMIT];
 static uint16_t tier0_slots[BUSTER_TIER0_SLOT_CAPACITY];
 static uint32_t tier0_slot_count;
@@ -624,6 +667,7 @@ static Tier0Builder tier0_builder;
 
 static void tier0_build_windows(void);
 static bool tier0_build_vector_tables(void);
+static bool tier0_build_words(void);
 
 static Tier0RecordSpec tier0_spec(uint32_t form)
 {
@@ -1865,7 +1909,7 @@ static bool tier0_initialize(void)
                 }
             }
         }
-        tier0_initialized = tier0_builder.valid && tier0_build_vector_tables();
+        tier0_initialized = tier0_builder.valid && tier0_build_vector_tables() && tier0_build_words();
     }
     return tier0_initialized;
 }
@@ -1956,6 +2000,8 @@ struct Tier0Entries
     uint16_t* templates;
     uint16_t* lengths;
     uint32_t* positions;
+    // The vector path's per-entry words (BUSTER_TIER0_WORD_*).
+    uint64_t* words;
 };
 
 static bool tier0_label(const uint64_t* labels, uint32_t entry)
@@ -2306,23 +2352,56 @@ static uint32_t tier0_depth_registers(int32_t integer_top, int32_t floating_top)
     return set;
 }
 
+// Each local's references: its LOCAL, LOCAL_ADDRESS, STORE_LOCAL and SET_LOCAL entries (`references` has local_count).
+static void tier0_count_references(const Tier0Function* function, uint32_t* references)
+{
+    const uint8_t* kinds = function->kinds;
+    const uint64_t* values = function->values;
+    memset(references, 0, function->local_count * sizeof(uint32_t));
+    for (uint32_t i = 0; i < function->count; i += 1)
+    {
+        const uint8_t kind = kinds[i];
+        if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
+        {
+            references[values[i]] += 1;
+        }
+    }
+}
+
+static __mmask64 tier0_lanes(int64_t first, uint32_t count);
+
+// tier0_count_references for the vector path: the referring entries of 64 at a time as a mask (vpshufbitqmb of their
+// kinds in the four kinds' bitset), then a count per set bit, without a branch per entry.
+static void tier0_count_references_vector(const Tier0Function* function, uint32_t* references)
+{
+    const uint8_t* kinds = function->kinds;
+    const uint64_t* values = function->values;
+    const uint32_t count = function->count;
+    memset(references, 0, function->local_count * sizeof(uint32_t));
+    const uint64_t kinds_referring = 1ull << BUSTER_TYPED_LOCAL | 1ull << BUSTER_TYPED_LOCAL_ADDRESS | 1ull << BUSTER_TYPED_STORE_LOCAL | 1ull << BUSTER_TYPED_SET_LOCAL;
+    const __m512i referring = _mm512_set1_epi64((int64_t)kinds_referring);
+    _Static_assert(BUSTER_TYPED_KIND_LIMIT == 64, "a kind is a bit of a quadword");
+    for (uint32_t first = 0; first < count; first += 64)
+    {
+        const __mmask64 lanes = tier0_lanes(first, count);
+        uint64_t bits = _mm512_mask_bitshuffle_epi64_mask(lanes, referring, _mm512_maskz_loadu_epi8(lanes, kinds + first));
+        while (bits != 0)
+        {
+            const uint32_t i = first + (uint32_t)__builtin_ctzll(bits);
+            bits &= bits - 1;
+            references[values[i]] += 1;
+        }
+    }
+}
+
 // Phase 3: each local's home, and the frame. A parameter whose register the body doesn't touch stays in it. The other
 // locals, most referenced first (by index among equals), take the free caller-saved registers, then (referenced at
 // least twice, for a push and a pop) the callee-saved ones; a floating local takes a free XMM register. The rest, and
 // every local whose address is taken, get frame slots; a parameter on the stack keeps its incoming slot. `references`
-// (local_count) and `order` (local_count) are scratch.
-static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, uint32_t* references, uint32_t* order)
+// (local_count) holds each local's references, and `order` (local_count) is scratch.
+static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, uint32_t* order)
 {
     const uint32_t locals = function->local_count;
-    memset(references, 0, locals * sizeof(uint32_t));
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        const uint8_t kind = function->kinds[i];
-        if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
-        {
-            references[function->values[i]] += 1;
-        }
-    }
     // The registers parameters arrive in: no other local takes one, so the prologue's moves never overwrite a source.
     uint32_t arrivals = 0;
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
@@ -2935,6 +3014,122 @@ static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entrie
     }
 }
 
+// How many records a deferred entry takes (and references: a call's one), counted from what its emitter decides rather
+// than by running it: the vector path's measuring. Each term mirrors its emitter's step: a call's saves and restores,
+// argument extensions, stack stores, its register moves (one per move but the last of each cycle, which the xchg
+// before it resolves), al, the call and the result's move; division's saves, moves, extension and divide; a shift's
+// swaps or its saved rcx. The scalar path counts by running the emitter, so that the twins check the count.
+static uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, uint32_t* references)
+{
+    const uint32_t kind = entries->key_kinds[i];
+    uint32_t count = 0;
+    if (kind == BUSTER_TYPED_CALL)
+    {
+        const uint32_t call = (uint32_t)function->values[i];
+        const uint32_t first = function->call_first[call];
+        const uint32_t arguments = function->call_argument_counts[call];
+        uint32_t integer_arguments = 0;
+        uint32_t floating_arguments = 0;
+        for (uint32_t a = 0; a < arguments; a += 1)
+        {
+            const bool floating = tier0_class_floating(function->argument_classes[first + a]);
+            integer_arguments += floating ? 0 : 1;
+            floating_arguments += floating ? 1 : 0;
+        }
+        const uint32_t below = entries->depths[i] - integer_arguments;
+        const uint32_t floating_below = entries->floating_depths[i] - floating_arguments;
+        const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+        count += 2 * (saved + floating_below);
+        uint8_t to[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
+        uint8_t from[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
+        uint32_t moves = 0;
+        uint32_t integer = 0;
+        uint32_t floating = 0;
+        for (uint32_t a = 0; a < arguments; a += 1)
+        {
+            const uint32_t class = function->argument_classes[first + a];
+            const AbiLocation location = function->argument_locations[first + a];
+            const bool is_floating = tier0_class_floating(class);
+            const uint32_t source = is_floating ? BUSTER_TIER0_XMM(floating_below + floating) : tier0_integer_depths[below + integer];
+            integer += is_floating ? 0 : 1;
+            floating += is_floating ? 1 : 0;
+            count += tier0_class_integer(class) && tier0_class_bytes(class) < 4 ? 1 : 0;
+            if (location.kind == BUSTER_ABI_LOCATION_STACK)
+            {
+                count += 1;
+            }
+            else
+            {
+                const uint8_t reg = location.registers[0];
+                const uint8_t destination = (uint8_t)((reg & BUSTER_ABI_REGISTER_VECTOR) != 0 ? BUSTER_TIER0_XMM(reg & 0x1f) : reg);
+                if (destination != source)
+                {
+                    to[moves] = destination;
+                    from[moves] = (uint8_t)source;
+                    moves += 1;
+                }
+            }
+        }
+        // The cycles among the moves: following each move's source to the move that writes it comes back to the move.
+        _Static_assert(BUSTER_TIER0_MAX_CALL_ARGUMENTS <= 64, "a move is a bit of the seen set");
+        uint32_t cycles = 0;
+        uint64_t seen = 0;
+        for (uint32_t k = 0; k < moves; k += 1)
+        {
+            uint32_t at = k;
+            uint32_t steps = 0;
+            bool open = (seen >> k & 1) == 0;
+            while (open && steps <= moves)
+            {
+                seen |= 1ull << at;
+                uint32_t writer = moves;
+                for (uint32_t j = 0; j < moves; j += 1)
+                {
+                    writer = to[j] == from[at] ? j : writer;
+                }
+                steps += 1;
+                if (writer == moves)
+                {
+                    open = false;
+                }
+                else if (writer == k)
+                {
+                    cycles += 1;
+                    open = false;
+                }
+                else
+                {
+                    open = (seen >> writer & 1) == 0;
+                    at = writer;
+                }
+            }
+        }
+        count += moves - cycles;
+        count += function->call_variadic[call] ? 1 : 0;
+        count += 1;
+        const uint32_t result = tier0_stack(function->classes[i]);
+        count += (result == 1 && below != 0) || (result == 2 && floating_below != 0) ? 1 : 0;
+        *references += 1;
+    }
+    else if (kind == BUSTER_TYPED_DIV || kind == BUSTER_TYPED_MOD)
+    {
+        const bool home = entries->variants[i] == BUSTER_TIER0_VARIANT_HOME;
+        const uint32_t depth = entries->depths[i];
+        const uint32_t dividend = tier0_integer_depths[depth - (home ? 1 : 2)];
+        const uint32_t result = kind == BUSTER_TYPED_MOD ? X86_REGISTER_RDX : X86_REGISTER_RAX;
+        // rax is depth 0's register and rdx depth 2's: live when the depth passes them.
+        const bool save_rax = depth > 0 && dividend != X86_REGISTER_RAX;
+        const bool save_rdx = depth > 2 && dividend != X86_REGISTER_RDX;
+        count = 2 * ((save_rax ? 1u : 0u) + (save_rdx ? 1u : 0u)) + (dividend != X86_REGISTER_RAX ? 1 : 0) + 2 + (dividend != result ? 1 : 0);
+    }
+    else
+    {
+        const uint32_t value = tier0_integer_depths[entries->depths[i] - 2];
+        count = value == X86_REGISTER_RCX ? 3 : 4;
+    }
+    return count;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The prologue and the epilogue
 
@@ -3197,13 +3392,11 @@ struct Tier0Choices
     uint32_t count;
 };
 
-// Emission, in entry order: the prologue; each entry's template expanded at its place (`vector`: the compiled bytes,
-// four records in one register with one vpermb and a blend and one 64-byte store; otherwise field by field from the
-// specifications), its choice request, branch and reference, or a deferred entry's records; then the epilogue. A
-// vector store may write past its entry's records: the later entries, deferred ones and the epilogue are written after
-// it, and the output has room for the last.
+// Emission for the scalar path, in entry order: the prologue; each entry's template expanded at its place, field by
+// field from its specifications, its choice request, branch and reference, or a deferred entry's records; then the
+// epilogue. tier0_emit_vector is its twin.
 static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
-                            Tier0Code* code, Tier0Choices* choices, bool vector)
+                            Tier0Code* code, Tier0Choices* choices)
 {
     Tier0Writer writer = { code->records, 0, code->references, 0 };
     tier0_emit_prologue(function, frame, homes, references, &writer);
@@ -3222,28 +3415,10 @@ static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* e
         {
             const Tier0TemplateInfo* info = &tier0_template_infos[entry];
             const Tier0Holes holes = tier0_holes_scalar(function, entries, homes, i, info);
-            if (vector)
+            const Tier0Template* template = &tier0_templates[entry];
+            for (uint32_t r = 0; r < info->length; r += 1)
             {
-                // The hole block in a register (from its four quadwords, without a trip through memory), the
-                // template's indices and bytes in one load.
-                uint64_t a = 0;
-                uint64_t b = 0;
-                uint64_t registers = 0;
-                memcpy(&a, &holes.a, sizeof(a));
-                memcpy(&b, &holes.b, sizeof(b));
-                memcpy(&registers, holes.registers, sizeof(registers));
-                const __m512i block = _mm512_castsi256_si512(_mm256_set_epi64x((int64_t)registers, (int64_t)b, (int64_t)a, (int64_t)holes.k));
-                const __m512i compiled = _mm512_load_si512(tier0_compiled[entry].bytes);
-                const __m512i patched = _mm512_permutexvar_epi8(compiled, block);
-                _mm512_storeu_si512(code->records + position, _mm512_mask_blend_epi8(info->mask, compiled, patched));
-            }
-            else
-            {
-                const Tier0Template* template = &tier0_templates[entry];
-                for (uint32_t r = 0; r < info->length; r += 1)
-                {
-                    code->records[position + r] = tier0_record_scalar(&template->specs[r], &holes);
-                }
+                code->records[position + r] = tier0_record_scalar(&template->specs[r], &holes);
             }
             if (info->choice != 0xff)
             {
@@ -3295,22 +3470,26 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->templates = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, padded);
     entries->lengths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, padded);
     entries->positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
-    return entries->key_kinds != 0 && entries->key_classes != 0 && entries->variants != 0 && entries->absorbed != 0 && entries->integer_effects != 0 &&
+    entries->words = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, padded);
+    return entries->words != 0 && entries->key_kinds != 0 && entries->key_classes != 0 && entries->variants != 0 && entries->absorbed != 0 && entries->integer_effects != 0 &&
            entries->floating_effects != 0 && entries->depths != 0 && entries->floating_depths != 0 && entries->templates != 0 && entries->lengths != 0 &&
            entries->positions != 0;
 }
 
-static void tier0_vector_positions(const Tier0Function* function, Tier0Entries* entries, uint32_t prologue);
+static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error);
+static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue);
+static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
+                              Tier0Code* code, Tier0Choices* choices);
 
-// What both paths share once the fusion and the depths are in the entries' columns: selection, the homes and the
-// frame, measuring, positions (the vector path's prefix sum or the scalar one), the output, emission (vector or
-// scalar expansion) and the immediates' choice (x86_choose_forms or its twin, one request at a time).
+// What both paths share once the fusion and the depths are in the entries' columns, each pass in the path's version:
+// selection, the references' count, the homes and the frame (shared), measuring and positions (the vector path's
+// measuring sums them), the output, emission and the immediates' choice (x86_choose_forms or its twin).
 static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* entries, Arena* scratch, Arena* output, Tier0Code* code, bool vector)
 {
     Tier0Frame frame;
     memset(&frame, 0, sizeof(frame));
     Tier0Error error = TIER0_OK;
-    const uint32_t unsupported = tier0_select(function, entries, &frame, &error);
+    const uint32_t unsupported = vector ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error);
     if (unsupported != function->count)
     {
         error = TIER0_ERROR_UNSUPPORTED;
@@ -3328,26 +3507,37 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     memset(&choices, 0, sizeof(choices));
     if (error == TIER0_OK)
     {
-        tier0_assign_homes(function, &frame, homes, references, order);
-        tier0_layout_frame(function, &frame, homes, references);
-        const Tier0Counts counts = tier0_measure(function, entries, &frame, homes);
-        Tier0Writer counter = { 0, 0, 0, 0 };
-        tier0_emit_prologue(function, &frame, homes, references, &counter);
         if (vector)
         {
-            tier0_vector_positions(function, entries, counter.count);
+            tier0_count_references_vector(function, references);
         }
         else
         {
-            tier0_positions_scalar(function, entries, counter.count);
+            tier0_count_references(function, references);
+        }
+        tier0_assign_homes(function, &frame, homes, references, order);
+        tier0_layout_frame(function, &frame, homes, references);
+        Tier0Writer counter = { 0, 0, 0, 0 };
+        tier0_emit_prologue(function, &frame, homes, references, &counter);
+        const uint32_t prologue = counter.count;
+        Tier0Counts counts;
+        if (vector)
+        {
+            counts = tier0_measure_vector(function, entries, homes, prologue);
+        }
+        else
+        {
+            counts = tier0_measure(function, entries, &frame, homes);
+            tier0_positions_scalar(function, entries, prologue);
         }
         counter.count = 0;
         tier0_emit_epilogue(&frame, &counter);
-        choices.records = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, counts.choices + 1);
-        choices.rows = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 1);
-        choices.values = BUSTER_ARENA_PUSH_ARRAY(scratch, int64_t, counts.choices + 1);
-        choices.contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 1);
-        choices.forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 1);
+        // The requests' columns have room for the vector path's last compressed store of 8.
+        choices.records = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, counts.choices + 8);
+        choices.rows = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
+        choices.values = BUSTER_ARENA_PUSH_ARRAY(scratch, int64_t, counts.choices + 8);
+        choices.contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
+        choices.forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         const bool room = choices.records != 0 && choices.rows != 0 && choices.values != 0 && choices.contexts != 0 && choices.forms != 0;
         if (!room || !tier0_push_output(code, output, entries->positions[function->count] + counter.count, counts))
         {
@@ -3356,13 +3546,14 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     }
     if (error == TIER0_OK)
     {
-        tier0_emit_body(function, entries, &frame, homes, references, code, &choices, vector);
         if (vector)
         {
+            tier0_emit_vector(function, entries, &frame, homes, references, code, &choices);
             x86_choose_forms(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
         }
         else
         {
+            tier0_emit_body(function, entries, &frame, homes, references, code, &choices);
             x86_choose_forms_scalar(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
         }
         for (uint32_t q = 0; q < choices.count; q += 1)
@@ -4393,25 +4584,479 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
     }
 }
 
-// Each entry's first record, after the prologue: the lengths' exclusive prefix sum, 16 at a time in 32-bit lanes.
-static void tier0_vector_positions(const Tier0Function* function, Tier0Entries* entries, uint32_t prologue)
+// A template's word (a slot's adds HOME_DEPENDENT and HOME_UNIFORM, in tier0_build_words).
+static uint64_t tier0_template_word(uint32_t index)
+{
+    const Tier0TemplateInfo* info = &tier0_template_infos[index];
+    const uint64_t depth = info->required_depth == BUSTER_TIER0_ANY_DEPTH ? BUSTER_TIER0_WORD_ANY_DEPTH : info->required_depth;
+    const uint64_t k = info->k_offset == BUSTER_TIER0_NO_OFFSET ? BUSTER_TIER0_WORD_NO_OFFSET : info->k_offset;
+    const uint64_t k_scale = info->k_scale == BUSTER_TIER0_NO_OFFSET ? BUSTER_TIER0_WORD_NO_OFFSET : info->k_scale;
+    const uint64_t a = info->a_offset == BUSTER_TIER0_NO_OFFSET ? BUSTER_TIER0_WORD_NO_OFFSET : info->a_offset;
+    const uint64_t b = info->b_offset != BUSTER_TIER0_NO_OFFSET ? info->b_offset : info->b_own != 0 ? 0 : BUSTER_TIER0_WORD_NO_OFFSET;
+    uint64_t word = index;
+    word |= depth << BUSTER_TIER0_WORD_DEPTH_SHIFT;
+    word |= (uint64_t)info->integer_reach << BUSTER_TIER0_WORD_INTEGER_REACH_SHIFT;
+    word |= (uint64_t)info->floating_reach << BUSTER_TIER0_WORD_FLOATING_REACH_SHIFT;
+    word |= info->clobbers != 0 ? BUSTER_TIER0_WORD_CLOBBERS_RDX : 0;
+    word |= (uint64_t)info->length << BUSTER_TIER0_WORD_LENGTH_SHIFT;
+    word |= info->branch != 0xff ? BUSTER_TIER0_WORD_BRANCH | (uint64_t)info->branch << BUSTER_TIER0_WORD_BRANCH_SHIFT : 0;
+    word |= info->fixup != 0xff ? BUSTER_TIER0_WORD_FIXUP | (uint64_t)info->fixup << BUSTER_TIER0_WORD_FIXUP_SHIFT : 0;
+    word |= info->choice != 0xff
+                ? BUSTER_TIER0_WORD_CHOICE | (uint64_t)info->choice << BUSTER_TIER0_WORD_CHOICE_SHIFT | (uint64_t)info->choice_row << BUSTER_TIER0_WORD_ROW_SHIFT
+                : 0;
+    word |= info->end != 0 ? BUSTER_TIER0_WORD_END : 0;
+    word |= info->choice_static != 0 ? BUSTER_TIER0_WORD_CHOICE_STATIC : 0;
+    word |= (uint64_t)info->choice_live << BUSTER_TIER0_WORD_LIVE_SHIFT;
+    word |= k << BUSTER_TIER0_WORD_K_SHIFT | k_scale << BUSTER_TIER0_WORD_K_SCALE_SHIFT | a << BUSTER_TIER0_WORD_A_SHIFT | b << BUSTER_TIER0_WORD_B_SHIFT;
+    return word;
+}
+
+// Every template's and slot's word, and the templates' masks. Returns false for a template the words can't hold: a fixed
+// register besides rdx, a static choice immediate other than 0, a choice row past 63, or past 4,096 templates.
+static bool tier0_build_words(void)
+{
+    bool valid = tier0_template_count <= BUSTER_TIER0_WORD_TEMPLATE + 1;
+    for (uint32_t t = 0; t < tier0_template_count; t += 1)
+    {
+        const Tier0TemplateInfo* info = &tier0_template_infos[t];
+        valid &= info->clobbers == 0 || info->clobbers == 1u << X86_REGISTER_RDX;
+        valid &= info->choice_static == 0 || info->choice_immediate == 0;
+        valid &= info->choice == 0xff || info->choice_row < 64;
+        tier0_masks[t] = info->mask;
+        tier0_template_words[t] = tier0_template_word(t);
+    }
+    for (uint32_t kind = 0; kind < BUSTER_TYPED_KIND_LIMIT; kind += 1)
+    {
+        for (uint32_t class = 0; class < BUSTER_TYPED_CLASS_LIMIT; class += 1)
+        {
+            for (uint32_t variant = 0; variant < BUSTER_TIER0_VARIANTS; variant += 1)
+            {
+                const uint16_t slot = tier0_slot(kind, class, variant);
+                uint64_t word = BUSTER_TIER0_WORD_UNSUPPORTED;
+                if (slot == BUSTER_TIER0_SLOT_DEFERRED)
+                {
+                    word = BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_ANY_DEPTH << BUSTER_TIER0_WORD_DEPTH_SHIFT;
+                }
+                else if (slot != BUSTER_TIER0_SLOT_UNSUPPORTED)
+                {
+                    const uint32_t index = slot & BUSTER_TIER0_SLOT_TEMPLATE;
+                    word = tier0_template_words[index];
+                    if ((slot & BUSTER_TIER0_SLOT_HOME_DEPENDENT) != 0)
+                    {
+                        bool uniform = true;
+                        for (uint32_t c = 1; c < 4; c += 1)
+                        {
+                            uniform &= ((tier0_template_words[index + c] ^ word) & BUSTER_TIER0_WORD_EMISSION) == 0;
+                        }
+                        word |= BUSTER_TIER0_WORD_HOME_DEPENDENT | (uniform ? BUSTER_TIER0_WORD_HOME_UNIFORM : 0);
+                    }
+                }
+                tier0_slot_words[kind << 9 | class << 5 | variant] = word;
+            }
+        }
+    }
+    return valid;
+}
+
+// The homes of a function's locals for the vector passes: up to 32 in four registers, where a vpermt2q looks up 8 (two
+// and a blend past 16), and gathered past 32.
+typedef struct Tier0HomeTable Tier0HomeTable;
+struct Tier0HomeTable
+{
+    __m512i homes[4];
+    const Tier0Home* all;
+    uint32_t count;
+};
+
+static Tier0HomeTable tier0_home_table(const Tier0Home* homes, uint32_t count)
+{
+    Tier0HomeTable table;
+    for (uint32_t r = 0; r < 4; r += 1)
+    {
+        table.homes[r] = _mm512_maskz_loadu_epi64((__mmask8)tier0_lanes(8 * r, count), homes + 8 * r);
+    }
+    table.all = homes;
+    table.count = count;
+    return table;
+}
+
+// The homes of each lane's local, in the lanes of `valid` (0 in the others).
+static __m512i tier0_home_lookup(const Tier0HomeTable* table, __m512i local, __mmask8 valid)
+{
+    __m512i home;
+    if (table->count <= 16)
+    {
+        home = _mm512_maskz_permutex2var_epi64(valid, table->homes[0], local, table->homes[1]);
+    }
+    else if (table->count <= 32)
+    {
+        const __m512i low = _mm512_permutex2var_epi64(table->homes[0], local, table->homes[1]);
+        const __m512i high = _mm512_permutex2var_epi64(table->homes[2], local, table->homes[3]);
+        home = _mm512_maskz_mov_epi64(valid, _mm512_mask_blend_epi64(_mm512_test_epi64_mask(local, _mm512_set1_epi64(16)), low, high));
+    }
+    else
+    {
+        home = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), valid, local, table->all, 8);
+    }
+    return home;
+}
+
+// The value of the entry `offset` back (0 to 3) for each lane of a block, from the block's values and the block's before
+// it: lane j reads lane 8 + j - offset of the pair (an offset of 7, none, reads a value no lane uses).
+static __m512i tier0_value_back(__m512i previous, __m512i current, __m512i offset)
+{
+    return _mm512_permutex2var_epi64(previous, _mm512_sub_epi64(_mm512_set_epi64(15, 14, 13, 12, 11, 10, 9, 8), offset), current);
+}
+
+// Selection for the vector path, 8 entries at a time: each entry's word gathered from its slot's (an absorbed entry's
+// ABSORBED), the depth checks (a template whose fixed registers need another depth is deferred), the depths each stack
+// reaches and the fixed clobbers, as masks and lane maxima; the deferred entries' touches an entry at a time, as
+// tier0_select's.
+static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
 {
     const uint32_t count = function->count;
-    uint32_t carry = prologue;
-    const __m512i zero = _mm512_setzero_si512();
-    for (uint32_t first = 0; first < count; first += 16)
+    const uint8_t* key_kinds = entries->key_kinds;
+    const uint8_t* key_classes = entries->key_classes;
+    const uint8_t* variants = entries->variants;
+    const uint8_t* absorbed = entries->absorbed;
+    const uint8_t* depths = entries->depths;
+    const uint8_t* floating_depths = entries->floating_depths;
+    uint64_t* words = entries->words;
+    uint32_t unsupported = count;
+    __m512i integer_top = _mm512_set1_epi64(-1);
+    __m512i floating_top = _mm512_set1_epi64(-1);
+    bool rdx = false;
+    int32_t deferred_integer_top = -1;
+    int32_t deferred_floating_top = -1;
+    uint32_t clobbers = 0;
+    uint32_t save_slots = 0;
+    bool fixed = false;
+    bool calls = false;
+    const __m512i three = _mm512_set1_epi64(3);
+    const __m512i fifteen = _mm512_set1_epi64(15);
+    const __m512i not_template = _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_UNSUPPORTED));
+    for (uint32_t first = 0; first < count; first += 8)
     {
-        const __mmask16 lanes = (__mmask16)tier0_lanes(first, count);
-        __m512i sum = _mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(lanes, entries->lengths + first));
-        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 15));
-        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 14));
-        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 12));
-        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 8));
-        const __m512i exclusive = _mm512_add_epi32(_mm512_alignr_epi32(sum, zero, 15), _mm512_set1_epi32((int32_t)carry));
-        _mm512_mask_storeu_epi32(entries->positions + first, lanes, exclusive);
-        carry += (uint32_t)_mm_extract_epi32(_mm512_extracti32x4_epi32(sum, 3), 3);
+        const __mmask8 lanes = (__mmask8)tier0_lanes(first, count);
+        const __m256i kind = _mm256_and_si256(_mm256_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, key_kinds + first)), _mm256_set1_epi32(BUSTER_TYPED_KIND_LIMIT - 1));
+        const __m256i class = _mm256_and_si256(_mm256_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, key_classes + first)), _mm256_set1_epi32(BUSTER_TYPED_CLASS_LIMIT - 1));
+        const __m256i variant = _mm256_and_si256(_mm256_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, variants + first)), _mm256_set1_epi32(BUSTER_TIER0_VARIANTS - 1));
+        const __m256i slot = _mm256_or_si256(_mm256_or_si256(_mm256_slli_epi32(kind, 9), _mm256_slli_epi32(class, 5)), variant);
+        const __m128i taken = _mm_maskz_loadu_epi8(lanes, absorbed + first);
+        const __mmask8 own = lanes & (__mmask8)_mm_testn_epi8_mask(taken, taken);
+        __m512i word = _mm512_mask_i32gather_epi64(_mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_ABSORBED), own, slot, tier0_slot_words, 8);
+        const __m512i depth = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, depths + first));
+        const __m512i floating = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, floating_depths + first));
+        const __m512i required = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_DEPTH_SHIFT), fifteen);
+        const __mmask8 template = lanes & _mm512_testn_epi64_mask(word, not_template);
+        const __mmask8 elsewhere = template & _mm512_cmpneq_epi64_mask(required, fifteen) & _mm512_cmpneq_epi64_mask(required, depth);
+        word = _mm512_mask_or_epi64(word, elsewhere, word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
+        _mm512_mask_storeu_epi64(words + first, lanes, word);
+        const __mmask8 kept = template & ~elsewhere;
+        const __m512i integer_reach = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_INTEGER_REACH_SHIFT), three);
+        const __m512i floating_reach = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_FLOATING_REACH_SHIFT), three);
+        const __mmask8 reaches = kept & _mm512_test_epi64_mask(integer_reach, integer_reach);
+        const __mmask8 floating_reaches = kept & _mm512_test_epi64_mask(floating_reach, floating_reach);
+        integer_top = _mm512_mask_max_epi64(integer_top, reaches, integer_top, _mm512_sub_epi64(_mm512_add_epi64(depth, integer_reach), three));
+        floating_top = _mm512_mask_max_epi64(floating_top, floating_reaches, floating_top, _mm512_sub_epi64(_mm512_add_epi64(floating, floating_reach), three));
+        rdx |= (kept & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_CLOBBERS_RDX))) != 0;
+        const __mmask8 bad = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_UNSUPPORTED));
+        if (bad != 0 && unsupported == count)
+        {
+            unsupported = first + (uint32_t)__builtin_ctz(bad);
+        }
+        // The deferred entries' touches, as the scalar selection has them.
+        uint32_t deferred = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
+        while (deferred != 0)
+        {
+            const uint32_t i = first + (uint32_t)__builtin_ctz(deferred);
+            deferred &= deferred - 1;
+            const int32_t entry_depth = depths[i];
+            const int32_t entry_floating = floating_depths[i];
+            if (function->kinds[i] == BUSTER_TYPED_CALL)
+            {
+                const uint32_t call = (uint32_t)function->values[i];
+                const uint32_t call_first = function->call_first[call];
+                uint32_t integer_arguments = 0;
+                uint32_t floating_arguments = 0;
+                for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
+                {
+                    const bool is_floating = tier0_class_floating(function->argument_classes[call_first + a]);
+                    integer_arguments += is_floating ? 0 : 1;
+                    floating_arguments += is_floating ? 1 : 0;
+                }
+                const int32_t below = entry_depth - (int32_t)integer_arguments;
+                const int32_t floating_below = entry_floating - (int32_t)floating_arguments;
+                const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? (uint32_t)below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+                const uint32_t slots = saved + (uint32_t)floating_below;
+                save_slots = slots > save_slots ? slots : save_slots;
+                const uint32_t result = tier0_stack(function->classes[i]);
+                deferred_integer_top = result == 1 && below > deferred_integer_top ? below : deferred_integer_top;
+                deferred_floating_top = result == 2 && floating_below > deferred_floating_top ? floating_below : deferred_floating_top;
+                clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL;
+                calls = true;
+            }
+            else
+            {
+                clobbers |= 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX;
+                fixed = true;
+            }
+        }
     }
-    entries->positions[count] = carry;
+    const int64_t vector_integer_top = _mm512_reduce_max_epi64(integer_top);
+    const int64_t vector_floating_top = _mm512_reduce_max_epi64(floating_top);
+    const int32_t integer_reached = vector_integer_top > deferred_integer_top ? (int32_t)vector_integer_top : deferred_integer_top;
+    const int32_t floating_reached = vector_floating_top > deferred_floating_top ? (int32_t)vector_floating_top : deferred_floating_top;
+    clobbers |= rdx ? 1u << X86_REGISTER_RDX : 0;
+    *error = integer_reached >= BUSTER_TIER0_INTEGER_DEPTHS || floating_reached >= BUSTER_TIER0_FLOATING_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
+    frame->integer_top = integer_reached;
+    frame->floating_top = floating_reached;
+    frame->clobbers = clobbers | tier0_depth_registers(integer_reached, floating_reached);
+    frame->save_slots = save_slots;
+    frame->fixed_slots = fixed ? 2 : 0;
+    frame->calls = calls;
+    return unsupported;
+}
+
+// Measuring for the vector path, 8 words at a time, from the prologue's length on:
+// - a home-dependent entry's word is resolved to its homes' case: for a uniform slot, the case added to the template;
+//   otherwise, the case's word gathered;
+// - each entry's length comes from its word, or for a deferred one from tier0_count_deferred (an entry at a time: they
+//   are few);
+// - the positions are the lengths' prefix sums, in registers;
+// - the branch records', references' and choice requests' counts come from popcounts.
+// The last block's words and positions are stored whole, past the entries: emission expands every lane of a block, and a
+// lane past the entries has template 0 and the end's position, which the epilogue overwrites.
+static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue)
+{
+    const uint32_t count = function->count;
+    const uint64_t* values = function->values;
+    uint64_t* words = entries->words;
+    uint32_t* positions = entries->positions;
+    const Tier0HomeTable table = tier0_home_table(homes, function->local_count);
+    Tier0Counts counts = { 0, 0, 0 };
+    const __m512i seven = _mm512_set1_epi64(7);
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i is_register = _mm512_set1_epi64((int64_t)(0xffull << (8 * offsetof(Tier0Home, is_register))));
+    __m512i carry = _mm512_set1_epi64(prologue);
+    __m512i previous = zero;
+    for (uint32_t first = 0; first < count; first += 8)
+    {
+        const __mmask8 lanes = (__mmask8)tier0_lanes(first, count);
+        const __m512i current = _mm512_maskz_loadu_epi64(lanes, values + first);
+        __m512i word = _mm512_maskz_loadu_epi64(lanes, words + first);
+        const __mmask8 dependent = _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_HOME_DEPENDENT)) &
+                                   _mm512_testn_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
+        if (dependent != 0)
+        {
+            const __m512i a_offset = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_A_SHIFT), seven);
+            const __m512i b_offset = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_B_SHIFT), seven);
+            const __mmask8 a_valid = dependent & _mm512_cmpneq_epi64_mask(a_offset, seven);
+            const __mmask8 b_valid = dependent & _mm512_cmpneq_epi64_mask(b_offset, seven);
+            const __m512i a_home = tier0_home_lookup(&table, tier0_value_back(previous, current, a_offset), a_valid);
+            const __m512i b_home = tier0_home_lookup(&table, tier0_value_back(previous, current, b_offset), b_valid);
+            __m512i cases = _mm512_maskz_mov_epi64(_mm512_test_epi64_mask(a_home, is_register), _mm512_set1_epi64(1));
+            cases = _mm512_mask_add_epi64(cases, _mm512_test_epi64_mask(b_home, is_register), cases, _mm512_set1_epi64(2));
+            const __mmask8 uniform = dependent & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_HOME_UNIFORM));
+            const __mmask8 gathered = dependent & ~uniform;
+            word = _mm512_mask_add_epi64(word, uniform, word, cases);
+            if (gathered != 0)
+            {
+                const __m512i index = _mm512_add_epi64(_mm512_and_si512(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_TEMPLATE)), cases);
+                word = _mm512_mask_i64gather_epi64(word, gathered, index, tier0_template_words, 8);
+            }
+            word = _mm512_mask_andnot_epi64(word, dependent, _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_HOME_DEPENDENT | BUSTER_TIER0_WORD_HOME_UNIFORM)), word);
+        }
+        _mm512_storeu_si512(words + first, word);
+        const __mmask8 deferred = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
+        const __mmask8 template = lanes & _mm512_testn_epi64_mask(word, _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_ABSORBED)));
+        __m512i length = _mm512_maskz_and_epi64(template, _mm512_srli_epi64(word, BUSTER_TIER0_WORD_LENGTH_SHIFT), seven);
+        uint32_t rest = deferred;
+        while (rest != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(rest);
+            rest &= rest - 1;
+            const uint32_t records = tier0_count_deferred(function, entries, first + lane, &counts.references);
+            length = _mm512_mask_set1_epi64(length, (__mmask8)(1u << lane), (int64_t)records);
+        }
+        counts.branches += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH)));
+        counts.references += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_FIXUP)));
+        counts.choices += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_CHOICE)));
+        __m512i sum = _mm512_add_epi64(length, _mm512_alignr_epi64(length, zero, 7));
+        sum = _mm512_add_epi64(sum, _mm512_alignr_epi64(sum, zero, 6));
+        sum = _mm512_add_epi64(sum, _mm512_alignr_epi64(sum, zero, 4));
+        _mm256_storeu_si256((__m256i*)(positions + first), _mm512_cvtepi64_epi32(_mm512_add_epi64(carry, _mm512_sub_epi64(sum, length))));
+        carry = _mm512_add_epi64(carry, _mm512_permutexvar_epi64(seven, sum));
+        previous = current;
+    }
+    positions[count] = (uint32_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(carry));
+    return counts;
+}
+
+// One lane of emission: entry i's template expanded from `pair` (its hole block in the low 256 bits, or in the high ones
+// for an odd lane, whose indices take 32 more), stored at its position, and its choice record's reg, rm, index and mode
+// bytes put in dword `lane` of `fields`. A lane of an absorbed or deferred entry, or past the entries, expands its word's
+// template too: the later lanes, the deferred entries and the epilogue write over whatever it stores.
+static inline __attribute__((always_inline)) __m512i tier0_expand(const uint64_t* words, const uint32_t* positions, X86Instruction* records, uint32_t i, uint32_t lane,
+                                                                 __m512i pair, __m512i choice_fields, __m512i fields)
+{
+    const uint32_t index = (uint32_t)(words[i] & BUSTER_TIER0_WORD_TEMPLATE);
+    const __m512i compiled = _mm512_load_si512(tier0_compiled[index].bytes);
+    const __m512i indices = (lane & 1) != 0 ? _mm512_or_si512(compiled, _mm512_set1_epi8(32)) : compiled;
+    const __m512i record = _mm512_mask_blend_epi8(tier0_masks[index], compiled, _mm512_permutexvar_epi8(indices, pair));
+    _mm512_storeu_si512(records + positions[i], record);
+    return _mm512_mask_permutexvar_epi32(fields, (__mmask16)(1u << lane), choice_fields, record);
+}
+
+// Emission for the vector path, 8 entries at a time:
+// - the hole blocks are computed in vectors (K from the values 0 to 3 entries back, A and B from the homes, the
+//   registers from the depths' windows) and moved by vpermt2q into four registers of two blocks each;
+// - every lane is expanded (tier0_expand), in order, so that each store writes over the ones before it that ran into its
+//   records;
+// - the choice requests are compressed into their columns, their contexts read from the expanded records;
+// - the branches, then the references and the deferred entries, are written an entry at a time in order, the deferred
+//   entries over what the lanes stored at their places.
+static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
+                              Tier0Code* code, Tier0Choices* choices)
+{
+    const uint32_t count = function->count;
+    const uint64_t* values = function->values;
+    const uint64_t* words = entries->words;
+    const uint32_t* positions = entries->positions;
+    const uint8_t* depths = entries->depths;
+    const uint8_t* floating_depths = entries->floating_depths;
+    X86Instruction* records = code->records;
+    uint32_t* branch_records = code->branches;
+    uint32_t* targets = code->targets;
+    LinkReference* links = code->references;
+    uint32_t* choice_records = choices->records;
+    uint16_t* rows = choices->rows;
+    int64_t* choice_values = choices->values;
+    uint16_t* contexts = choices->contexts;
+    const Tier0HomeTable table = tier0_home_table(homes, function->local_count);
+    Tier0Writer writer = { records, 0, links, 0 };
+    tier0_emit_prologue(function, frame, homes, references, &writer);
+    uint32_t branches = 0;
+    uint32_t requests = 0;
+    uint32_t deferred_count = 0;
+    const __m512i seven = _mm512_set1_epi64(7);
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i integer_low = _mm512_load_si512(tier0_integer_window);
+    const __m512i integer_high = _mm512_load_si512(tier0_integer_window + 16);
+    const __m512i floating_low = _mm512_load_si512(tier0_floating_window);
+    const __m512i floating_high = _mm512_load_si512(tier0_floating_window + 16);
+    const __m512i interleave_low = _mm512_set_epi64(11, 3, 10, 2, 9, 1, 8, 0);
+    const __m512i interleave_high = _mm512_set_epi64(15, 7, 14, 6, 13, 5, 12, 4);
+    const __m512i pair_low = _mm512_set_epi64(11, 10, 3, 2, 9, 8, 1, 0);
+    const __m512i pair_high = _mm512_set_epi64(15, 14, 7, 6, 13, 12, 5, 4);
+    __m512i previous = zero;
+    for (uint32_t first = 0; first < count; first += 8)
+    {
+        const __mmask8 lanes = (__mmask8)tier0_lanes(first, count);
+        const __m512i current = _mm512_maskz_loadu_epi64(lanes, values + first);
+        const __m512i word = _mm512_loadu_si512(words + first);
+        const __m512i k_offset = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_K_SHIFT), seven);
+        const __m512i k_scale = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_K_SCALE_SHIFT), seven);
+        const __m512i a_offset = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_A_SHIFT), seven);
+        const __m512i b_offset = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_B_SHIFT), seven);
+        const __m512i k_value = _mm512_maskz_mov_epi64(_mm512_cmpneq_epi64_mask(k_offset, seven), tier0_value_back(previous, current, k_offset));
+        const __m512i scale = _mm512_mask_mov_epi64(_mm512_set1_epi64(1), _mm512_cmpneq_epi64_mask(k_scale, seven), tier0_value_back(previous, current, k_scale));
+        const __m512i k = _mm512_mullo_epi64(k_value, scale);
+        const __m512i a = tier0_home_lookup(&table, tier0_value_back(previous, current, a_offset), lanes & _mm512_cmpneq_epi64_mask(a_offset, seven));
+        const __m512i b = tier0_home_lookup(&table, tier0_value_back(previous, current, b_offset), lanes & _mm512_cmpneq_epi64_mask(b_offset, seven));
+        const __m512i depth = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, depths + first));
+        const __m512i floating = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, floating_depths + first));
+        const __m512i integer_window = _mm512_permutex2var_epi32(integer_low, depth, integer_high);
+        const __m512i floating_window = _mm512_permutex2var_epi32(floating_low, floating, floating_high);
+        const __m512i registers = _mm512_or_si512(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(integer_window)),
+                                                  _mm512_slli_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(floating_window)), 24));
+        // The blocks: K and A interleaved, B and the registers interleaved, then each pair of entries' quadwords.
+        const __m512i ka_low = _mm512_permutex2var_epi64(k, interleave_low, a);
+        const __m512i ka_high = _mm512_permutex2var_epi64(k, interleave_high, a);
+        const __m512i br_low = _mm512_permutex2var_epi64(b, interleave_low, registers);
+        const __m512i br_high = _mm512_permutex2var_epi64(b, interleave_high, registers);
+        const __m512i pair0 = _mm512_permutex2var_epi64(ka_low, pair_low, br_low);
+        const __m512i pair1 = _mm512_permutex2var_epi64(ka_low, pair_high, br_low);
+        const __m512i pair2 = _mm512_permutex2var_epi64(ka_high, pair_low, br_high);
+        const __m512i pair3 = _mm512_permutex2var_epi64(ka_high, pair_high, br_high);
+        const __m512i at = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_CHOICE_SHIFT), _mm512_set1_epi64(3));
+        const __m512i choice_fields = _mm512_castsi256_si512(_mm512_cvtepi64_epi32(_mm512_add_epi64(_mm512_slli_epi64(at, 2), _mm512_set1_epi64(2))));
+        __m512i fields = zero;
+        fields = tier0_expand(words, positions, records, first + 0, 0, pair0, choice_fields, fields);
+        fields = tier0_expand(words, positions, records, first + 1, 1, pair0, choice_fields, fields);
+        fields = tier0_expand(words, positions, records, first + 2, 2, pair1, choice_fields, fields);
+        fields = tier0_expand(words, positions, records, first + 3, 3, pair1, choice_fields, fields);
+        fields = tier0_expand(words, positions, records, first + 4, 4, pair2, choice_fields, fields);
+        fields = tier0_expand(words, positions, records, first + 5, 5, pair2, choice_fields, fields);
+        fields = tier0_expand(words, positions, records, first + 6, 6, pair3, choice_fields, fields);
+        fields = tier0_expand(words, positions, records, first + 7, 7, pair3, choice_fields, fields);
+        const __mmask8 template = lanes & _mm512_testn_epi64_mask(word, _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_ABSORBED)));
+        const __mmask8 choice = template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_CHOICE));
+        if (choice != 0)
+        {
+            // The context of each request (tier0_choice_context's) from its record's rm and mode, then the four columns
+            // compressed, each stored whole (the columns have room for 8 past the last request).
+            const __m512i position = _mm512_cvtepu32_epi64(_mm256_loadu_si256((const __m256i*)(positions + first)));
+            const __m512i chosen = _mm512_cvtepu32_epi64(_mm512_castsi512_si256(fields));
+            const __m512i rm = _mm512_and_si512(_mm512_srli_epi64(chosen, 8), _mm512_set1_epi64(0xff));
+            const __m512i mode = _mm512_srli_epi64(chosen, 24);
+            const __mmask8 direct = _mm512_cmpeq_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_REGISTER_DIRECT));
+            const __mmask8 accumulator = direct & _mm512_cmpeq_epi64_mask(rm, _mm512_set1_epi64(X86_REGISTER_RAX));
+            __m512i context = _mm512_or_si512(_mm512_set1_epi64(BUSTER_X86_CONTEXT_INC_DEC), _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_LIVE_SHIFT), _mm512_set1_epi64(0x3f)));
+            context = _mm512_mask_or_epi64(context, direct, context, _mm512_set1_epi64(BUSTER_X86_CONTEXT_REGISTER));
+            context = _mm512_mask_or_epi64(context, accumulator, context, _mm512_set1_epi64(BUSTER_X86_CONTEXT_ACCUMULATOR));
+            const __mmask8 dynamic = choice & _mm512_testn_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_CHOICE_STATIC));
+            _mm256_storeu_si256((__m256i*)(choice_records + requests), _mm256_maskz_compress_epi32(choice, _mm512_cvtepi64_epi32(_mm512_add_epi64(position, at))));
+            _mm_storeu_si128((__m128i*)(rows + requests), _mm_maskz_compress_epi16(choice, _mm512_cvtepi64_epi16(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_ROW_SHIFT))));
+            _mm512_storeu_si512(choice_values + requests, _mm512_maskz_compress_epi64(choice, _mm512_maskz_mov_epi64(dynamic, k)));
+            _mm_storeu_si128((__m128i*)(contexts + requests), _mm_maskz_compress_epi16(choice, _mm512_cvtepi64_epi16(context)));
+            requests += (uint32_t)__builtin_popcount(choice);
+        }
+        uint32_t branch = template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH));
+        while (branch != 0)
+        {
+            const uint32_t i = first + (uint32_t)__builtin_ctz(branch);
+            branch &= branch - 1;
+            const uint64_t entry_word = words[i];
+            const uint32_t target = (entry_word & BUSTER_TIER0_WORD_END) != 0 ? count : (uint32_t)values[i];
+            branch_records[branches] = positions[i] + (uint32_t)(entry_word >> BUSTER_TIER0_WORD_BRANCH_SHIFT & 3);
+            targets[branches] = positions[target];
+            branches += 1;
+        }
+        // The references and the deferred entries, in entry order: a call's references come where its records do.
+        const uint32_t deferred = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
+        uint32_t rest = deferred | (template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_FIXUP)));
+        while (rest != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(rest);
+            rest &= rest - 1;
+            const uint32_t i = first + lane;
+            if ((deferred >> lane & 1) != 0)
+            {
+                writer.count = positions[i];
+                tier0_emit_deferred(function, entries, frame, homes, i, &writer);
+                deferred_count += 1;
+            }
+            else
+            {
+                links[writer.reference_count] = (LinkReference){
+                    .instruction = positions[i] + (uint32_t)(words[i] >> BUSTER_TIER0_WORD_FIXUP_SHIFT & 3),
+                    .field = X86_FIXUP_DISPLACEMENT,
+                    .kind = BUSTER_LINK_FIXUP_PC32,
+                    .target = (SymbolId)values[i],
+                    .addend = 0,
+                };
+                writer.reference_count += 1;
+            }
+        }
+        previous = current;
+    }
+    writer.count = positions[count];
+    tier0_emit_epilogue(frame, &writer);
+    code->branch_count = branches;
+    code->reference_count = writer.reference_count;
+    code->deferred += deferred_count;
+    choices->count = requests;
 }
 
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
