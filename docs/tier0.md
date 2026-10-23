@@ -97,6 +97,43 @@ arrives at a target, the stacks hold the same values; `tier0_validate` checks th
 The rest of what fusion needs is in the stream. A unit-wide API, one stream for every function of a unit, would keep
 the 64-entry batches full across small functions. That is a follow-up, measured once #133 produces real units.
 
+## Incoming variadic frames
+
+`Tier0Function.incoming_variadic` optionally borrows the `AbiCall` produced by
+`abi_assign` for the callee's named arguments only, with `count == named_count`
+and `variadic = true`. Its GP count includes a hidden result pointer where
+applicable. `stack_bytes` ends the named stack arguments, including their
+internal alignment; it is not rounded to an outgoing area's final alignment.
+A null pointer retains the ordinary frame.
+
+The optional prologue saves six GP argument registers and all 128 bits of eight
+XMM argument registers into a distinct 176-byte incoming area before moving
+parameters. Unaligned baseline SSE stores preserve the full vector slots
+without reading AL or changing floating-point status. The incoming area never
+shares the outgoing call-preservation area.
+
+Three mutually exclusive local roles require `ADDRESS_TAKEN`, class U64 and a
+nonparameter local. `VA_LIST` reserves exactly 24 bytes; `REGISTER_SAVE_AREA`
+aliases the incoming save area; `OVERFLOW_ARG_AREA` aliases entry RSP plus the
+return address and the named-only `stack_bytes`. The anchors require incoming
+metadata. These descriptors support only `LOCAL_ADDRESS`; ordinary local
+loads and stores are rejected. Existing varargs recipes receive the resulting
+pointers and apply each requested argument's own overflow alignment.
+
+Both compilation paths reject malformed role/ABI metadata and frame or
+incoming displacements outside signed 32-bit addressing. This bounded profile
+requires the ordinary 16-byte stack alignment. Shared `AbiVaList` and save-area
+constants are unchanged. Source production and Tier 1 support remain separate;
+the typed-to-IR consumer must reject these roles until it supports their layout.
+
+`test-tier0-variadic-frame` prepares actual Clang-compiled callers of generated
+variadic callees with GP/FP exhaustion, named stack arguments, real va_start /
+va_copy / va_arg recipes, intervening calls and full vector saves. It compares
+both Tier 0 paths and both encoders, guarded output edges, 24-byte list storage
+and independent ordinary-function byte fixtures. Run builds and tests only on
+the approved 9700X, each through its own shared lock. This description records
+the test contract; qualification results are reported with the exact revision.
+
 ## The output (contract 1 of #135)
 
 **Records:**
@@ -333,7 +370,7 @@ path's 11.1.
   - conversions between U64 and floating values;
   - aggregates and struct copies;
   - bit-fields;
-  - `va_arg`, a variadic function's prologue, `long double` and `_Complex`;
+  - general `va_arg` classes beyond the scalar builtin recipes, `long double` and `_Complex`;
   - variable-length arrays, inline assembly, `setjmp` and atomics;
   - `switch` (no kind yet: a compare sequence or a jump table);
   - indirect calls;
