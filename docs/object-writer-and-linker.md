@@ -2442,7 +2442,11 @@ compares GNU ld, lld, mold and wild, and runs every resulting library through
 the harness. `benchmark-executable --only shared --tls general|local`
 adds one distinct TLS symbol and a callable ABI probe per generated worker;
 the benchmark loads the resulting library and executes those probes outside
-the timed region. `--exact` selects the scalar writer twin and
+the timed region. The distinct symbols cycle over at most 64 backing TLS
+objects, keeping the existing initial-exec workload within `dlopen`'s static
+TLS reserve. This measures GOT-pair and fixup scaling, not initialization of
+a large TLS storage block. The output records both counts.
+`--exact` selects the scalar writer twin and
 `--after-scalar MS` conditions each lane with a bounded scalar kind-column
 scan before the timed write.
 

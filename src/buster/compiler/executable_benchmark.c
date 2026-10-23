@@ -75,6 +75,7 @@ struct String8
 // Binding's arrays, for a program that calls libc.
 #define BUSTER_EXECUTABLE_BENCHMARK_BIND_BYTES (1ull << 30)
 #define BUSTER_EXECUTABLE_BENCHMARK_MAX_PROGRAMS 16
+#define BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS 64
 // The kernels' and the hash's figures are medians of this many runs.
 #define BUSTER_EXECUTABLE_BENCHMARK_RUNS 11
 // The links': this many runs after a warm-up, or BUSTER_EXECUTABLE_BENCHMARK_LARGE_RUNS for outputs past
@@ -725,7 +726,7 @@ static const char* const executable_benchmark_phase_names[EXECUTABLE_PHASES] = {
 // The soname of the benchmark's shared libraries.
 #define BUSTER_EXECUTABLE_BENCHMARK_SONAME "libbuster-benchmark.so"
 
-// Extra original ABI probes for --tls: one function and one distinct thread-local per worker. Their names are
+// Extra original ABI probes for --tls: one function and one distinct TLS symbol per worker. Their names are
 // present before bind_begin, their bytes before bind_end. Each probe returns its TLS value through a real
 // __tls_get_addr call. Half of GD's definitions are preemptible; LD's are hidden module-relative definitions.
 static SymbolId executable_benchmark_tls_symbols(LinkProgram* program, uint32_t count, bool local)
@@ -809,24 +810,35 @@ static bool executable_benchmark_tls_atoms(LinkProgram* program, SymbolId first,
     };
     const uint64_t size = local ? sizeof(ld) : sizeof(gd);
     Link* link = &program->link;
+    // The original workload uses initial-exec too, requiring the whole module to fit dlopen's static TLS reserve.
+    // Keep 64 backing objects and cycle the distinct symbols over them: GD still allocates one pair per symbol,
+    // and every probe's ABI result is checked without requiring a non-default loader tunable for large workloads.
+    AtomId data_atoms[BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS] = { 0 };
     bool result = first != 0;
     for (uint32_t i = 0; result && i < count; i += 1)
     {
         const SymbolId function = first + 1 + 2 * i;
         const SymbolId target = function + 1;
         uint8_t* code = BUSTER_ARENA_PUSH_ARRAY(&program->bytes, uint8_t, size);
-        uint64_t* value = BUSTER_ARENA_PUSH_ARRAY(&program->bytes, uint64_t, 1);
-        result = code != 0 && value != 0;
+        uint64_t* value = i < BUSTER_ARRAY_LENGTH(data_atoms) ? BUSTER_ARENA_PUSH_ARRAY(&program->bytes, uint64_t, 1) : 0;
+        result = code != 0 && (i >= BUSTER_ARRAY_LENGTH(data_atoms) || value != 0);
         if (result)
         {
             memcpy(code, local ? ld : gd, size);
-            *value = (uint64_t)i + 1;
+            if (value != 0)
+            {
+                *value = (uint64_t)i + 1;
+            }
             const AtomId text = link_add_atom(link, BUSTER_LINK_CLASS_TEXT, 4, size, code, i % program->options.units);
             result = text != 0 && link_define_symbol(link, function, text, 0, size) &&
                      link_add_fixup(link, text, local ? 7 : 8, local ? BUSTER_LINK_FIXUP_TLSLD : BUSTER_LINK_FIXUP_TLSGD, target, -4) != 0 &&
                      link_add_fixup(link, text, local ? 12 : 16, BUSTER_LINK_FIXUP_CALL, first, -4) != 0;
             result = result && (!local || link_add_fixup(link, text, 19, BUSTER_LINK_FIXUP_DTPOFF32, target, 0) != 0);
-            const AtomId data = result ? link_add_atom(link, BUSTER_LINK_CLASS_TDATA, 3, 8, (uint8_t*)value, i % program->options.units) : 0;
+            if (result && value != 0)
+            {
+                data_atoms[i] = link_add_atom(link, BUSTER_LINK_CLASS_TDATA, 3, 8, (uint8_t*)value, i % program->options.units);
+            }
+            const AtomId data = data_atoms[i % BUSTER_ARRAY_LENGTH(data_atoms)];
             result = result && data != 0 && link_define_symbol(link, target, data, 0, 8);
             program->code_bytes += size;
         }
@@ -843,7 +855,7 @@ static bool executable_benchmark_tls_runs(const char* path, uint32_t count)
         char name[64];
         snprintf(name, sizeof(name), "buster_tls_probe_%u", i);
         uint64_t (*probe)(void) = (uint64_t (*)(void))dlsym(library, name);
-        result = probe != 0 && probe() == (uint64_t)i + 1;
+        result = probe != 0 && probe() == (uint64_t)(i % BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS) + 1;
     }
     if (library != 0)
     {
@@ -1006,7 +1018,9 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     if (result && tls != 0)
     {
         result = executable_benchmark_tls_runs(path, functions);
-        printf("  %s-dynamic TLS: %u callable probes, %s path, %s\n", tls, functions, exact ? "exact" : "vector", result ? "all results checked" : "failed");
+        const uint32_t objects = functions < BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS ? functions : BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS;
+        printf("  %s-dynamic TLS: %u callable probes and distinct symbols, %u backing objects, %s path, %s\n", tls, functions, objects,
+               exact ? "exact" : "vector", result ? "all results checked" : "failed");
     }
     // The floor, from the file just written.
     uint8_t* bytes = result ? executable_benchmark_map(size + 1) : 0;
