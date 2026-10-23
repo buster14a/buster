@@ -298,6 +298,8 @@ jobs:
           # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
           # --cross-check also runs them beside clang -O0's builds of the same programs as C.
           ./build/compiler test-tier0 --cross-check
+          == Test Tier 1 allocation, reload splitting and rematerialization
+          ./build/compiler test-tier1-allocation
           == Test the lanes
           ./build/compiler test-lanes
           == Test the direct path's executables

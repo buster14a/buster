@@ -160,6 +160,14 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `tier1_allocate.c` and `tier1_rematerialize.c` supply bounded interval
+  allocation, required-use reload splitting, parallel moves and baseline-x86
+  rematerialization. `test-tier1-allocation` includes native execution and
+  guarded tails; `benchmark-tier1-allocation` measures full preparation and
+  allocation. [The allocation guide](docs/tier1-allocation.md) records producer
+  constraints and pending CFG/corpus emission. Use the shared 9700X lock per
+  build/test/measurement and CPU 2 for timing.
+
 - `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
   #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
   AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
