@@ -79,6 +79,13 @@ pointee. A completed record's own completion already implies its members'
 requirements. An incomplete type or missing tag position fails closed.
 The checker still decides which operation requires a complete object type.
 
+For completeness queries, the position is where the operand/type-name has
+finished being read. For example, `sizeof(struct S { int x; })` completes `S`
+inside its operand and must succeed. Supplying the prefix `sizeof` token's
+position would incorrectly reject it. Identifier binding queries retain the
+identifier's own use position. The adapter must preserve this distinction
+rather than substitute the body's end or the end of the translation unit.
+
 The input type table must have been constructed by the validated type APIs.
 Workers may not complete or derive types in this shared table. Types created
 inside a body need private storage and stable source identities; publishing

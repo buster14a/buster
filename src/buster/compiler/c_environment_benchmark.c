@@ -110,7 +110,12 @@ static int run_c_environment_benchmark(int argc, char** argv)
     {
         TypeTable* table = &world.table;
         const TypeId record = type_tag(table, BUSTER_TYPE_KIND_STRUCT, 1);
-        const TypeMember member = { .name = 2, .type = BUSTER_TYPE_INT, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+        const TypeMember member =
+        {
+            .name = 2,
+            .type = BUSTER_TYPE_INT,
+            .bit_width = BUSTER_TYPE_NOT_BIT_FIELD,
+        };
         valid = type_complete_record(table, record, &member, 1, (TypeRecordAttributes){ 0 });
         completions[table->types.index[record >> BUSTER_TYPE_INDEX_SHIFT]] = names * history / 2;
         const TypeId array = type_array(table, record, 4);
@@ -179,7 +184,11 @@ static int run_c_environment_benchmark(int argc, char** argv)
                 }
                 if (pass != 0)
                 {
-                    samples[path][pass - 1] = (CBindingSample){ .nanoseconds = elapsed, .cycles = counts[0] };
+                    samples[path][pass - 1] = (CBindingSample)
+                    {
+                        .nanoseconds = elapsed,
+                        .cycles = counts[0],
+                    };
                 }
                 if (path == 0 && valid)
                 {

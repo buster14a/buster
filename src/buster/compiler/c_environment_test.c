@@ -314,7 +314,11 @@ static void c_environment_test_guarded(CEnvironmentTest* test, Arena* arena, Are
         }
         CBodyRange range;
         uint32_t bodies = 0;
-        const ParseTree tree = { .roles = roles, .depths = depths };
+        const ParseTree tree =
+        {
+            .roles = roles,
+            .depths = depths,
+        };
         c_environment_test_check(test, c_environment_bodies(&tree, count, &range, 1, &bodies) && bodies == (count >= 2), "guarded body roles");
         if (count >= 2)
         {
@@ -428,27 +432,38 @@ static void c_environment_test_source(CEnvironmentTest* test, Arena* arena, Aren
                         c_environment_test_check(test, c_environment_lookup(&environment, C_BINDING_ORDINARY, name, declaration + 1) == handle, "declaration not available at its point");
                     }
                 }
-                if (fixture == 1)
+                if (fixture == 1 || fixture == 2)
                 {
-                    const IdentId name = intern_find(&table, (const uint8_t*)"S", 1);
+                    const IdentId name = fixture == 1 ? intern_find(&table, (const uint8_t*)"S", 1) : 0;
                     uint32_t use = UINT32_MAX;
                     uint32_t completion = UINT32_MAX;
                     for (uint32_t i = 0; i < parser.tokens.count; i += 1)
                     {
-                        if (parser.tokens.names[i] == name && i > bodies[0].begin && i < bodies[0].end)
+                        if (fixture == 1 && parser.tokens.names[i] == name && i > bodies[0].begin && i < bodies[0].end)
                         {
                             use = i;
                         }
-                        if (parser.tree.roles[i] == PARSE_ROLE_CLOSE_STRUCT && i >= bodies[0].end)
+                        if (fixture == 1 && parser.tree.roles[i] == PARSE_ROLE_CLOSE_STRUCT && i >= bodies[0].end)
                         {
                             completion = i + 1;
+                        }
+                        if (fixture == 2 && parser.tree.roles[i] == PARSE_ROLE_CLOSE_ENUM && i < bodies[0].begin)
+                        {
+                            completion = i + 1;
+                            // sizeof(enum { A = 1 }): completeness is required after its entire operand was read.
+                            use = i + 2;
                         }
                     }
                     TypeTestTable world = { 0 };
                     bool typed = type_test_table_open(&world, 16);
-                    const TypeId record = typed ? type_tag(&world.table, BUSTER_TYPE_KIND_STRUCT, name) : 0;
-                    const TypeMember member = { .name = 2, .type = BUSTER_TYPE_INT, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
-                    typed = typed && record != 0 && type_complete_record(&world.table, record, &member, 1, (TypeRecordAttributes){ 0 });
+                    const TypeId record = typed ? type_tag(&world.table, fixture == 1 ? BUSTER_TYPE_KIND_STRUCT : BUSTER_TYPE_KIND_ENUM, name) : 0;
+                    const TypeMember member =
+                    {
+                        .name = 2,
+                        .type = BUSTER_TYPE_INT,
+                        .bit_width = BUSTER_TYPE_NOT_BIT_FIELD,
+                    };
+                    typed = typed && record != 0 && (fixture == 1 ? type_complete_record(&world.table, record, &member, 1, (TypeRecordAttributes){ 0 }) : type_enum_complete(&world.table, record, BUSTER_TYPE_INT, 0));
                     c_environment_test_check(test, typed && use != UINT32_MAX && completion != UINT32_MAX, "explicit source completion setup");
                     if (typed)
                     {
@@ -462,7 +477,7 @@ static void c_environment_test_source(CEnvironmentTest* test, Arena* arena, Aren
                         uint8_t vector_result = 1;
                         c_environment_types_scalar(&world.table, completions, 17, &record, &use, 1, &scalar_result);
                         c_environment_types(&world.table, completions, 17, &record, &use, 1, &vector_result);
-                        c_environment_test_check(test, scalar_result == 0 && vector_result == 0, "later tag completion leaked into source body");
+                        c_environment_test_check(test, scalar_result == (fixture == 2) && vector_result == (fixture == 2), "source completion point or operand cutoff");
                     }
                     type_test_table_close(&world);
                 }
